@@ -46,6 +46,8 @@ World coordinates are meters with **positive Y upward**. Rectangles are `[left, 
 
 Bodies start with 3–5 nodes and can grow. Default limits are 32 nodes/96 muscles; supported maximums are 64/256. Every body remains a connected graph. Distinct body types are identified by actual node and muscle counts, without the original modulo-10 collisions.
 
+Population cards show a creature's current trial score when available. New offspring display their parent's previous-generation result until their own trial finishes, with the card ID making it clear that they are new specimens.
+
 ## Headless experiments
 
 ```bash
@@ -56,7 +58,7 @@ cargo run --release -- headless --config presets/large-experiment.json --generat
 
 `--duration` overrides the trial duration for a new experiment. `--checkpoint PATH` changes the checkpoint destination. Ctrl+C stops after the current GPU batch and saves. A completed generation includes evaluation, ranking, selection, and reproduction. `--generations` counts additional generations when resuming.
 
-The dashboard defaults to responsive mode. Throughput mode uses larger batches and longer compute dispatches; it is intended for unattended experiments. The Rayon pool reserves two logical CPUs for the desktop.
+The dashboard defaults to responsive mode, evaluating up to 8,192 creatures per GPU batch. **Maximum throughput** raises the batch limit to 65,536, uses longer dispatches, and keeps more compute work queued; it is intended for long runs. Both modes adapt batch size to the configured GPU memory budget. The Rayon pool reserves two logical CPUs for the desktop.
 
 ## Save and resume
 
@@ -86,4 +88,3 @@ EVOLUTION_SMOKE_CAPTURE=/tmp/evolution.png EVOLUTION_SMOKE_POPULATION=1000000 ca
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) for the execution model and [`docs/validation.md`](docs/validation.md) for measured results.
-

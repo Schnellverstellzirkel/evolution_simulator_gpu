@@ -31,6 +31,7 @@ pub struct Card {
     pub index: usize,
     pub rank: usize,
     pub score: f32,
+    pub parent_score: f32,
     pub survivor: bool,
     pub creature: Creature,
 }
@@ -290,6 +291,7 @@ fn run(
                             index: i,
                             rank: r,
                             score: e.scores[i],
+                            parent_score: e.parent_scores.get(i).copied().unwrap_or(f32::NAN),
                             survivor: parent_set.contains(&i),
                             creature: e.population.creature(i),
                         }

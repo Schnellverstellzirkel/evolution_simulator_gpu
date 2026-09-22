@@ -128,7 +128,9 @@ impl Config {
         (self.duration * 120.0).round() as u32
     }
     pub fn batch_size(&self) -> usize {
-        let maximum = if self.throughput { 16384 } else { 2048 };
+        // Fewer readback fences keep the GPU busier. Responsive mode still stays
+        // small enough that pausing and editing settings never feels delayed.
+        let maximum = if self.throughput { 65536 } else { 8192 };
         // Leave space for power-of-two buffer growth and staging resources.
         let bytes_per_creature =
             self.max_nodes.next_power_of_two().max(8) * 32 + self.max_muscles * 32 + 24;

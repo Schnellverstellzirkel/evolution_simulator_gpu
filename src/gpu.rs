@@ -4,6 +4,7 @@ use crate::{
     physics::{self, Node},
 };
 use anyhow::{Context, Result, ensure};
+use std::collections::VecDeque;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -215,26 +216,39 @@ impl Gpu {
             let group: Vec<_> = indices
                 .iter()
                 .enumerate()
-                .filter(|(_, i)| pop.genomes[**i].node_count.next_power_of_two().max(8) == stride)
-                .map(|(slot, &i)| (slot, i))
+                .filter_map(|(slot, &i)| {
+                    (pop.genomes[i].node_count.next_power_of_two().max(8) == stride)
+                        .then_some((slot, i))
+                })
                 .collect();
             if group.is_empty() {
                 continue;
             }
             let mut nodes = vec![Node::default(); group.len() * stride];
-            let mut muscles = Vec::<Muscle>::new();
+            let muscle_count = group
+                .iter()
+                .map(|&(_, i)| pop.genomes[i].muscle_count)
+                .sum();
+            let mut muscles = Vec::<Muscle>::with_capacity(muscle_count);
             let mut meta = Vec::with_capacity(group.len());
             for (j, &(_, i)) in group.iter().enumerate() {
-                let c = pop.creature(i);
-                let n = physics::nodes(&c);
-                nodes[j * stride..j * stride + n.len()].copy_from_slice(&n);
+                let genome = &pop.genomes[i];
+                let genes = &pop.nodes[genome.node_start..genome.node_start + genome.node_count];
+                for (dst, gene) in nodes[j * stride..j * stride + genes.len()]
+                    .iter_mut()
+                    .zip(genes)
+                {
+                    *dst = physics::node(gene);
+                }
+                let muscle_end = genome.muscle_start + genome.muscle_count;
+                let start = muscles.len() as u32;
                 meta.push(Meta {
-                    nodes: n.len() as u32,
-                    muscles: c.muscles.len() as u32,
-                    start: muscles.len() as u32,
+                    nodes: genes.len() as u32,
+                    muscles: genome.muscle_count as u32,
+                    start,
                     pad: 0,
                 });
-                muscles.extend(c.muscles);
+                muscles.extend_from_slice(&pop.muscles[genome.muscle_start..muscle_end]);
             }
             let scores = self
                 .run(
@@ -315,8 +329,9 @@ impl Gpu {
                 .write_buffer(&b.obstacles, 0, bytemuck::cast_slice(&cfg.obstacles));
         }
         // Each bounded dispatch retains all intermediate state in GPU buffers.
-        let chunk = if cfg.throughput { 128 } else { 32 };
-        let mut previous_submission = None;
+        let chunk = if cfg.throughput { 256 } else { 64 };
+        let max_pending = if cfg.throughput { 8 } else { 2 };
+        let mut pending_submissions = VecDeque::with_capacity(max_pending);
         for tick in (0..steps).step_by(chunk) {
             let p = Params {
                 tick,
@@ -347,9 +362,11 @@ impl Gpu {
                 pass.dispatch_workgroups((meta.len() * stride).div_ceil(64) as u32, 1, 1);
             }
             let submission = self.queue.submit([encoder.finish()]);
-            // Encode/upload the next dispatch while the previous one executes, but
-            // allow no more than two compute submissions to queue ahead of rendering.
-            if let Some(previous) = previous_submission.replace(submission) {
+            pending_submissions.push_back(submission);
+            // Keep enough work queued to hide CPU command-encoding gaps. Throughput
+            // mode is intended for long runs; responsive mode yields more often.
+            if pending_submissions.len() >= max_pending {
+                let previous = pending_submissions.pop_front().unwrap();
                 self.device.poll(wgpu::PollType::Wait {
                     submission_index: Some(previous),
                     timeout: Some(std::time::Duration::from_secs(30)),

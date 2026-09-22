@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    evolution::{Creature, FAILED, Muscle},
+    evolution::{Creature, FAILED, Muscle, NodeGene},
 };
 pub const DT: f32 = 1.0 / 120.0;
 pub const SETTLE: u32 = 200;
@@ -14,18 +14,19 @@ pub struct Node {
     pub mass: f32,
     pub failed: f32,
 }
+#[inline]
+pub fn node(gene: &NodeGene) -> Node {
+    Node {
+        pos: [gene.x, gene.y],
+        vel: [0.0; 2],
+        radius: gene.diameter * 0.5,
+        friction: gene.friction,
+        mass: (0.1 * (gene.diameter / 0.08).powi(2)).clamp(0.02, 10.0),
+        failed: 0.0,
+    }
+}
 pub fn nodes(c: &Creature) -> Vec<Node> {
-    c.nodes
-        .iter()
-        .map(|n| Node {
-            pos: [n.x, n.y],
-            vel: [0.0; 2],
-            radius: n.diameter * 0.5,
-            friction: n.friction,
-            mass: (0.1 * (n.diameter / 0.08).powi(2)).clamp(0.02, 10.0),
-            failed: 0.0,
-        })
-        .collect()
+    c.nodes.iter().map(node).collect()
 }
 pub fn target(m: &Muscle, time: f32) -> f32 {
     let phase = (time / m.period + m.phase).fract();

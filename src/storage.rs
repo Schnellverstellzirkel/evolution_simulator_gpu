@@ -59,6 +59,9 @@ pub struct Experiment {
     pub generation: u32,
     pub population: Population,
     pub scores: Vec<f32>,
+    /// Parent generation results for newly created creatures; never used as current fitness.
+    #[serde(skip)]
+    pub parent_scores: Vec<f32>,
     pub evaluated: usize,
     pub stage: Stage,
     pub ranks: Vec<usize>,
@@ -71,12 +74,14 @@ impl Experiment {
         let config = config.resolved();
         let population = evolution::create(&config)?;
         let scores = vec![f32::NAN; config.population];
+        let parent_scores = vec![f32::NAN; config.population];
         Ok(Self {
             config,
             pending: None,
             generation: 0,
             population,
             scores,
+            parent_scores,
             evaluated: 0,
             stage: Stage::Ready,
             ranks: vec![],
@@ -140,6 +145,11 @@ impl Experiment {
     pub fn reproduce(&mut self) -> Result<()> {
         let cfg = self.pending.as_ref().unwrap_or(&self.config);
         let next = evolution::reproduce(&self.population, cfg, self.generation, &self.parents)?;
+        self.parent_scores = self
+            .parents
+            .iter()
+            .flat_map(|&parent| [self.scores[parent]; 2])
+            .collect();
         self.population = next;
         if let Some(c) = self.pending.take() {
             self.config = c;

@@ -13,10 +13,18 @@ use std::{
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
-const MINT: Color32 = Color32::from_rgb(100, 224, 182);
-const AMBER: Color32 = Color32::from_rgb(246, 179, 104);
-const MUTED: Color32 = Color32::from_rgb(145, 163, 177);
-const PANEL: Color32 = Color32::from_rgb(20, 29, 39);
+const MINT: Color32 = Color32::from_rgb(22, 122, 91);
+const AMBER: Color32 = Color32::from_rgb(164, 96, 24);
+const MUTED: Color32 = Color32::from_rgb(105, 121, 113);
+const INK: Color32 = Color32::from_rgb(40, 55, 48);
+const PANEL: Color32 = Color32::from_rgb(255, 255, 252);
+const CANVAS: Color32 = Color32::from_rgb(244, 247, 242);
+const VIEWPORT: Color32 = Color32::from_rgb(236, 243, 239);
+const CARD: Color32 = Color32::from_rgb(255, 255, 253);
+const CARD_HOVER: Color32 = Color32::from_rgb(238, 247, 241);
+const CARD_BORDER: Color32 = Color32::from_rgb(218, 229, 221);
+const GROUND: Color32 = Color32::from_rgb(220, 234, 222);
+const TERRAIN: Color32 = Color32::from_rgb(174, 192, 180);
 pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
     let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
     setup.instance_descriptor.backends = wgpu::Backends::VULKAN;
@@ -125,6 +133,7 @@ struct App {
     show_perf: bool,
     ui_scale: f32,
     initial: bool,
+    smoke_start_pending: bool,
     started: Instant,
     capture_requested: bool,
     capture_path: Option<String>,
@@ -134,14 +143,19 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, gpu: Gpu) -> Self {
         let ctx = &cc.egui_ctx;
-        ctx.set_theme(egui::Theme::Dark);
+        ctx.set_theme(egui::Theme::Light);
         let mut style = (*ctx.global_style()).clone();
         style.spacing.item_spacing = Vec2::new(10.0, 10.0);
         style.spacing.button_padding = Vec2::new(12.0, 8.0);
+        style.visuals = egui::Visuals::light();
+        style.visuals.override_text_color = Some(INK);
+        style.visuals.weak_text_color = Some(MUTED);
         style.visuals.panel_fill = PANEL;
         style.visuals.window_fill = PANEL;
-        style.visuals.extreme_bg_color = Color32::from_rgb(13, 21, 29);
-        style.visuals.selection.bg_fill = Color32::from_rgb(39, 91, 81);
+        style.visuals.extreme_bg_color = CANVAS;
+        style.visuals.code_bg_color = VIEWPORT;
+        style.visuals.faint_bg_color = CARD_BORDER;
+        style.visuals.selection.bg_fill = Color32::from_rgb(219, 239, 227);
         style.visuals.selection.stroke = Stroke::new(1.0, MINT);
         style.visuals.hyperlink_color = MINT;
         style
@@ -160,13 +174,8 @@ impl App {
             initial_config.random_seed = false;
             initial_config.checkpoint_interval = 0;
         }
+        let smoke_start_pending = std::env::var_os("EVOLUTION_SMOKE_POPULATION").is_some();
         worker.send(Command::New(initial_config));
-        if std::env::var_os("EVOLUTION_SMOKE_POPULATION").is_some() {
-            worker.send(Command::Run {
-                continuous: true,
-                guided: false,
-            });
-        }
         let mut percentiles = [false; 29];
         percentiles[0] = true;
         percentiles[14] = true;
@@ -206,6 +215,7 @@ impl App {
             show_perf: false,
             ui_scale: 1.0,
             initial: true,
+            smoke_start_pending,
             started: Instant::now(),
             capture_requested: false,
             capture_path: std::env::var("EVOLUTION_SMOKE_CAPTURE").ok(),
@@ -299,9 +309,9 @@ impl App {
             .add_sized(
                 [ui.available_width(), 40.],
                 egui::Button::new(RichText::new(text).strong()).fill(if running {
-                    Color32::from_rgb(88, 58, 39)
+                    Color32::from_rgb(255, 239, 216)
                 } else {
-                    Color32::from_rgb(33, 91, 76)
+                    Color32::from_rgb(222, 241, 229)
                 }),
             )
             .clicked()
@@ -628,7 +638,7 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
         }
         let painter = ui.painter_at(rect);
         // All scene primitives are tessellated into egui's batched wgpu render pass.
-        painter.rect_filled(rect, 12, Color32::from_rgb(13, 23, 34));
+        painter.rect_filled(rect, 12, VIEWPORT);
         let origin = Pos2::new(
             rect.center().x - self.camera[0] * self.zoom,
             rect.bottom() - rect.height() * 0.22 + self.camera[1] * self.zoom,
@@ -648,7 +658,7 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
                     Pos2::new(pos.x, rect.top()),
                     Pos2::new(pos.x, rect.bottom()),
                 ],
-                Stroke::new(1., Color32::from_white_alpha(8)),
+                Stroke::new(1., CARD_BORDER),
             );
             painter.text(
                 Pos2::new(pos.x + 5., origin.y + 16.),
@@ -665,19 +675,19 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
                     rect.right_bottom(),
                 ),
                 0,
-                Color32::from_rgb(27, 43, 43),
+                GROUND,
             );
             painter.line_segment(
                 [
                     Pos2::new(rect.left(), origin.y),
                     Pos2::new(rect.right(), origin.y),
                 ],
-                Stroke::new(2., Color32::from_rgb(78, 118, 103)),
+                Stroke::new(2., Color32::from_rgb(125, 159, 135)),
             );
         }
         for r in &cfg.obstacles {
             let obstacle = Rect::from_two_pos(world(r[0], r[1]), world(r[2], r[3]));
-            painter.rect_filled(obstacle, 3, Color32::from_rgb(69, 91, 91));
+            painter.rect_filled(obstacle, 3, TERRAIN);
             painter.line_segment(
                 [obstacle.left_top(), obstacle.right_top()],
                 Stroke::new(2., MINT.gamma_multiply(0.6)),
@@ -779,15 +789,15 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
                 for (ui, (name, value, color)) in cols.iter_mut().zip([
                     ("BEST", format!("{:.3} m", s.best), MINT),
                     ("MEDIAN", format!("{:.3} m", s.median), AMBER),
-                    ("POPULATION", number(s.population), Color32::WHITE),
+                    ("POPULATION", number(s.population), INK),
                     (
                         "EVALUATIONS / SEC",
                         format!("{:.0}", s.population as f64 / s.seconds.max(0.001)),
-                        Color32::WHITE,
+                        INK,
                     ),
                 ]) {
                     egui::Frame::new()
-                        .fill(Color32::from_rgb(27, 38, 48))
+                        .fill(CARD)
                         .corner_radius(8)
                         .inner_margin(12)
                         .show(ui, |ui| {
@@ -827,7 +837,7 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
                     } else if i == 14 {
                         ("Median".into(), AMBER, 2.5)
                     } else if i == 0 {
-                        ("Worst".into(), Color32::from_rgb(118, 145, 185), 1.5)
+                        ("Worst".into(), Color32::from_rgb(104, 133, 159), 1.5)
                     } else {
                         (format!("P{}", PERCENTILES[i]), species_color(i, 0), 1.)
                     };
@@ -916,11 +926,15 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
                                 paint_card(ui.painter(), card, rect, response.hovered(), snapshot.stage);
                                 if response.clicked() { selected = Some(card.index); }
                                 response.on_hover_text(format!(
-                                    "ID {}\n{} nodes / {} muscles\nMutability {:.2}\nClick to replay",
-                                    card.creature.id, card.creature.nodes.len(), card.creature.muscles.len(), card.creature.mutability
+                                    "ID {}\n{} nodes / {} muscles\nMutability {:.2}\n{}\nClick to replay",
+                                    card.creature.id,
+                                    card.creature.nodes.len(),
+                                    card.creature.muscles.len(),
+                                    card.creature.mutability,
+                                    if card.score.is_finite() { "Current trial evaluated" } else if card.parent_score.is_finite() { "Showing parent result; current trial pending" } else { "Current trial pending" }
                                 ));
                             } else {
-                                ui.painter().rect_filled(destination, 8, Color32::from_rgb(27, 38, 48));
+                                ui.painter().rect_filled(destination, 8, CARD);
                                 ui.painter().text(destination.center(), Align2::CENTER_CENTER, "Loading…", FontId::proportional(12.), MUTED);
                             }
                         }
@@ -979,7 +993,7 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
             rect.left() + rect.width() * (self.history_index as f32 + 0.5) / history.len() as f32;
         painter.line_segment(
             [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            Stroke::new(2., Color32::WHITE),
+            Stroke::new(2., INK),
         );
         if let Some(pos) = response.hover_pos() {
             let index = (((pos.x - rect.left()) / rect.width()) * history.len() as f32) as usize;
@@ -1062,8 +1076,7 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
                 ui.label(["Worst creature", "Median creature", "Best creature"][i]);
                 let (rect, response) =
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), 100.), Sense::click());
-                ui.painter()
-                    .rect_filled(rect, 8, Color32::from_rgb(27, 38, 48));
+                ui.painter().rect_filled(rect, 8, CARD);
                 thumbnail(
                     &ui.painter_at(rect),
                     &stats.representatives[i],
@@ -1099,7 +1112,7 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
                             .add_enabled(
                                 self.config.validate().is_ok(),
                                 egui::Button::new("Create population")
-                                    .fill(Color32::from_rgb(33, 91, 76)),
+                                    .fill(Color32::from_rgb(222, 241, 229)),
                             )
                             .clicked()
                         {
@@ -1185,6 +1198,13 @@ impl eframe::App for App {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
+        if self.smoke_start_pending && self.started.elapsed() >= Duration::from_millis(250) {
+            self.worker.send(Command::Run {
+                continuous: true,
+                guided: false,
+            });
+            self.smoke_start_pending = false;
+        }
         self.frame_times.push_back(dt);
         if self.frame_times.len() > 240 {
             self.frame_times.pop_front();
@@ -1269,11 +1289,7 @@ if let Some(m)=&self.message {ui.label(m);
             .frame(egui::Frame::new().fill(PANEL).inner_margin(16))
             .show(ui, |ui| self.controls(ui));
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(16, 24, 33))
-                    .inner_margin(20),
-            )
+            .frame(egui::Frame::new().fill(CANVAS).inner_margin(20))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for (tab, label) in [
@@ -1345,36 +1361,47 @@ fn paint_card(
     hovered: bool,
     stage: Stage,
 ) {
-    painter.rect_filled(
+    painter.rect_filled(rect, 8, if hovered { CARD_HOVER } else { CARD });
+    painter.rect_stroke(
         rect,
         8,
-        if hovered {
-            Color32::from_rgb(38, 57, 67)
-        } else {
-            Color32::from_rgb(27, 38, 48)
-        },
+        Stroke::new(1., CARD_BORDER),
+        egui::StrokeKind::Inside,
     );
     thumbnail(painter, &card.creature, rect.shrink2(Vec2::new(10., 23.)));
     painter.text(
         rect.left_top() + Vec2::new(9., 8.),
         Align2::LEFT_TOP,
-        format!("#{}", card.rank + 1),
+        if matches!(stage, Stage::Ranked | Stage::Selected) {
+            format!("#{}", card.rank + 1)
+        } else {
+            format!("ID {}", card.creature.id)
+        },
         FontId::proportional(11.),
         MUTED,
     );
-    let label = if card.score.is_nan() {
-        "Awaiting trial".into()
+    let (label, score_color) = if !card.score.is_finite() {
+        if card.parent_score.is_finite() && card.parent_score > FAILED {
+            (format!("Parent {:.3} m", card.parent_score), MUTED)
+        } else if card.parent_score.is_finite() {
+            ("Parent failed".into(), AMBER)
+        } else {
+            ("Trial pending".into(), MUTED)
+        }
     } else if card.score <= FAILED {
-        "Failed trial".into()
+        ("Failed trial".into(), AMBER)
     } else {
-        format!("{:.3} m", card.score)
+        (
+            format!("{:.3} m", card.score),
+            if card.survivor { MINT } else { INK },
+        )
     };
     painter.text(
         rect.left_bottom() + Vec2::new(9., -9.),
         Align2::LEFT_BOTTOM,
         label,
         FontId::proportional(12.),
-        if card.survivor { MINT } else { Color32::WHITE },
+        score_color,
     );
     if stage == Stage::Selected {
         painter.text(

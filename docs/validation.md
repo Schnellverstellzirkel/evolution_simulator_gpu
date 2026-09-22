@@ -12,11 +12,15 @@ Measurements below were captured on the local NVIDIA GeForce RTX 4060 Laptop GPU
 
 At 100,000 creatures, the CPU reference took 5.11 seconds to evaluate the same population and configuration: the observed GPU evaluation was 15× faster. CPU and GPU timings come from the same benchmark executable and machine.
 
+After increasing the batch size and removing per-creature staging allocations, a fresh release run evaluated one million creatures in 2.63 seconds (381,000 evaluations/s) and three million in 6.13 seconds (489,000 evaluations/s). During those runs, `nvidia-smi dmon` reported 82–100% SM utilization; memory-controller utilization remained low because this workload is compute-bound. The three-million run used 720 MiB of process RAM and 35 MiB of tracked GPU buffers.
+
 Ten successive one-million-creature generations completed without failed trials or accumulating memory growth. `/usr/bin/time -v` reported a peak RSS of 1,068,196 KiB (about 1.02 GiB). The three-million-creature, three-generation run peaked at 2,702,408 KiB (about 2.58 GiB).
 
 ## Interactive display
 
 The native Wayland screenshot capture rendered the dashboard during a one-million-creature run. Across 240 sampled frames, p95 frame time was 10.36 ms, below the 33 ms target. Closing the window after capture exited cleanly after the worker and GPU work shut down.
+
+The updated light-theme population view rendered during a one-million-creature evaluation at 14.92 ms p95 across 240 frames, also below the 33 ms target.
 
 ## Automated checks
 

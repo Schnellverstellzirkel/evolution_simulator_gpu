@@ -224,8 +224,9 @@ fn main() -> Result<()> {
                 for generation in 0..generations {
                     let total = Instant::now();
                     let start = Instant::now();
-                    for begin in (0..count).step_by(16384) {
-                        let end = (begin + 16384).min(count);
+                    let batch = e.config.batch_size();
+                    for begin in (0..count).step_by(batch) {
+                        let end = (begin + batch).min(count);
                         let s = gpu.evaluate(
                             &e.population,
                             &(begin..end).collect::<Vec<_>>(),
