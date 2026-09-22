@@ -1,0 +1,7 @@
+/target/
+/runs/
+*.evo
+*.evo.tmp
+*.csv
+!docs/*.csv
+

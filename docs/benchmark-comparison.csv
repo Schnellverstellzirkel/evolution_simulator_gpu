@@ -1,0 +1,3 @@
+gpu,population,generation,duration_s,creation_s,gpu_evaluation_s,cpu_evaluation_s,generation_s,evaluations_per_s,population_bytes,gpu_allocated_bytes,failed
+NVIDIA GeForce RTX 4060 Laptop GPU,1000,0,15.0,0.000193533,0.008120058,0.050430081,0.008641288999999996,123151.82970367947,251312,553008,0
+NVIDIA GeForce RTX 4060 Laptop GPU,100000,0,15.0,0.020466961,0.33981473,5.112113332,0.3677665330000002,294278.0026045369,25187136,8785968,0

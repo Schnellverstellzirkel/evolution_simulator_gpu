@@ -1,0 +1,13 @@
+{
+  "population": 1000000,
+  "seed": 38,
+  "random_seed": false,
+  "duration": 15.0,
+  "mutation": 1.0,
+  "max_nodes": 32,
+  "max_muscles": 96,
+  "gpu_budget_mib": 4096,
+  "ram_budget_mib": 16384,
+  "throughput": true,
+  "checkpoint_interval": 10
+}
