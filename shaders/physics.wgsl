@@ -60,9 +60,11 @@ fn advance(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) grou
                 n.pos-=vec2f(avg/f32(body.nodes),low);n.vel=vec2f(0.0);
             }
         }
-        workgroupBarrier();
-        positions[lane]=n.pos;velocities[lane]=n.vel;
-        workgroupBarrier();
+        if tick==200u {
+            workgroupBarrier();
+            positions[lane]=n.pos;velocities[lane]=n.vel;
+            workgroupBarrier();
+        }
         if local<body.nodes {
             let time=f32(max(tick,200u)-200u)/120.0;
             var force=vec2f(0.0);
