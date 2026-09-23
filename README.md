@@ -4,6 +4,17 @@ A local Rust evolution game for Ubuntu/Wayland. Creatures learn to move through 
 
 The original Processing sketch is preserved in [`old_code.txt`](old_code.txt). This is a modernized simulation, not a bit-for-bit reproduction of its physics or random sequence.
 
+## Original work and license
+
+This project adapts Carykh's **Evolution Simulator** by Cary Huang.
+
+- Original source: [OpenProcessing sketch](https://openprocessing.org/@carykh/205807)
+- Original license: [CC BY-SA 3.0 Unported](https://creativecommons.org/licenses/by-sa/3.0/)
+- Modified by: Amipo (Schnellverstellzirkel)
+- Changes: Rebuilt in Rust with GPU-accelerated simulation, MAP-Elites quality-diversity search, constructive morphology mutations, a light-themed interface, configurable controls, and flat-ground physics.
+
+The full license text is in [`LICENSE`](LICENSE).
+
 ## Run
 
 ```bash
