@@ -37,10 +37,16 @@ exact_cos=approx
 [[ -v EVOLUTION_EXACT_COS ]] && exact_cos=exact
 lane_mode=off
 [[ "$KERNEL" == lane ]] && lane_mode=on
-workgroup32=auto
-[[ -v EVOLUTION_WORKGROUP32 ]] && workgroup32=forced
-workgroup64=auto
-[[ -v EVOLUTION_WORKGROUP64 ]] && workgroup64=forced
+workgroup32=default
+workgroup64=off
+if [[ -v EVOLUTION_WORKGROUP64 ]]; then
+  workgroup32=off
+  workgroup64=forced
+fi
+if [[ -v EVOLUTION_WORKGROUP32 ]]; then
+  workgroup32=forced
+  workgroup64=off
+fi
 force_bucket5=off
 [[ -v EVOLUTION_FORCE_BUCKET5 ]] && force_bucket5=on
 legacy_bucket5=off

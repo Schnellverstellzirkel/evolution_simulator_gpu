@@ -763,9 +763,10 @@ impl Gpu {
             .and_then(|value| value.parse::<u32>().ok())
             .filter(|&value| value > 0)
             .unwrap_or(4096);
-        let use_32_lanes = (cfg.population <= 10_000
-            && std::env::var_os("EVOLUTION_WORKGROUP64").is_none())
-            || std::env::var_os("EVOLUTION_WORKGROUP32").is_some();
+        // Paired short GUI runs at 100k showed the 32-lane variant faster.
+        // Keep 64 lanes available for explicit comparisons.
+        let use_32_lanes = std::env::var_os("EVOLUTION_WORKGROUP32").is_some()
+            || std::env::var_os("EVOLUTION_WORKGROUP64").is_none();
         let param_count = batches.iter().map(|_| steps.div_ceil(chunk) as u64).sum();
         self.buffers(batches, param_count, cfg)?;
         let allocation_seconds = allocation_started.elapsed().as_secs_f64();

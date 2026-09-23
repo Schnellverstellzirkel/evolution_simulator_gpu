@@ -41,6 +41,17 @@ A five-generation full-GUI diagnostic at 100,000 creatures ran pinned to CPUs 4â
 
 The 4- and 8-node buckets account for about 96% of timestamped shader time. The reported 1.050 s readback duration is CPU wall time waiting for mapped results and overlaps GPU execution; do not add it to shader time. This points the next kernel experiment toward the 4- and 8-node dispatches. The short run was kept isolated because profiling drives the GPU to full utilization.
 
+### Paired workgroup-size comparison at 100,000 creatures (2026-09-24)
+
+Four five-generation full-GUI runs at revision `7798381` used default/32-lane/32-lane/default order. Each run was pinned to CPUs 4â€“15 at nice priority 10, with no timestamp instrumentation. Before the sequence, CPU pressure was 0%, load average was 0.92, and GPU desktop utilization was 19%.
+
+| Workgroup size | Run 1 generations/s / evaluation s | Run 2 generations/s / evaluation s | Mean generations/s / evaluation s |
+| --- | ---: | ---: | ---: |
+| Default (64 lanes for large populations) | 3.477 / 1.170 | 3.492 / 1.169 | 3.485 / 1.170 |
+| 32 lanes | 4.119 / 0.955 | 4.002 / 0.981 | 4.061 / 0.968 |
+
+The 32-lane variant improved this short paired sample by 16.5% in full-generation throughput and reduced evaluation time by 17.3%. A follow-up 10-generation full-GUI run with 32 lanes as the default measured 4.539 generations/s (evaluation 1.681 s, archive 0.184 s, breeding 0.336 s). This confirms the default path; longer repeats are still needed for a stable estimate. `EVOLUTION_WORKGROUP64=1` remains available for comparisons.
+
 Measurements below were captured on the local NVIDIA GeForce RTX 4060 Laptop GPU (8 GiB), Ubuntu 24.04 Wayland, with Rust release builds and the simulator's throughput mode. Each creature ran the default 15-second trial. These are workload measurements, not fixed hardware guarantees.
 
 These records predate the MAP-Elites archive and emitter loop. They document GPU simulation throughput and UI responsiveness; they are not performance measurements of the current archive insertion and offspring-generation work.
