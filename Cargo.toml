@@ -22,5 +22,5 @@ ctrlc = "3.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [profile.release]
-lto = "thin"
+lto = "fat"
 codegen-units = 1
