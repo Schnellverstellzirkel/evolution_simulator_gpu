@@ -4,10 +4,15 @@ use std::collections::{BTreeSet, HashMap};
 
 pub const EMITTER_COUNT: usize = 4;
 pub(crate) const ARCHIVE_LIMIT: usize = 192;
+pub(crate) const MORPHOLOGY_LIMIT: usize = 64;
+pub(crate) const ARCHIVE_CAPACITY: usize = ARCHIVE_LIMIT + MORPHOLOGY_LIMIT;
 pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 13_824;
 pub(crate) const CMA_LIMIT: usize = 96;
 pub const VERSION: u32 = 3;
 const LOCAL_NEIGHBORS: usize = 5;
+const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
+pub(crate) const MIN_MORPHOLOGY_DESCENDANTS: u64 = 8;
+pub(crate) const MORPHOLOGY_PARENT_FRACTION: f32 = 0.10;
 // Deliberately exploration-heavy: 70% of the initial batch uses structural,
 // novelty, or restart emitters so a stalled lineage cannot dominate for long.
 const INITIAL_EMITTER_MIX: [f64; EMITTER_COUNT] = [0.30, 0.30, 0.25, 0.15];
@@ -38,6 +43,10 @@ pub struct Descriptor {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Niche(pub [u8; 6]);
 
+pub fn is_morphology_niche(niche: &Niche) -> bool {
+    niche.0[0] == MORPHOLOGY_NICHE_MARKER
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Elite {
     pub niche: Niche,
@@ -60,6 +69,10 @@ pub struct QdArchive {
     pub qd_score: f64,
     #[serde(skip)]
     least_visited: BTreeSet<(u64, usize)>,
+    #[serde(skip)]
+    behavior_indices: Vec<usize>,
+    #[serde(skip)]
+    morphology_indices: Vec<usize>,
     #[serde(skip)]
     behavior_scores: BehaviorScores,
 }
@@ -193,11 +206,12 @@ fn behavior_distance(a: Descriptor, b: Descriptor) -> f32 {
 
 impl Topology {
     pub fn of(creature: &Creature) -> Self {
-        let edges: Vec<_> = creature
+        let mut edges: Vec<_> = creature
             .muscles
             .iter()
             .map(|m| (m.a.min(m.b), m.a.max(m.b)))
             .collect();
+        edges.sort_unstable();
         Self {
             nodes: creature.nodes.len() as u8,
             edges,
@@ -205,13 +219,59 @@ impl Topology {
     }
 }
 
+fn topology_equivalent(a: &Topology, b: &Topology) -> bool {
+    a == b
+}
+
+pub fn topology_equivalent_for_archive(a: &Topology, b: &Topology) -> bool {
+    topology_equivalent(a, b)
+}
+
+fn morphology_hash(topology: &Topology, salt: u64) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut write = |byte: u8| {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    };
+    write(topology.nodes);
+    for &(a, b) in &topology.edges {
+        for byte in a.to_le_bytes().into_iter().chain(b.to_le_bytes()) {
+            write(byte);
+        }
+    }
+    for byte in salt.to_le_bytes() {
+        write(byte);
+    }
+    hash
+}
+
+fn morphology_niche(topology: &Topology, salt: u64) -> Niche {
+    let hash = morphology_hash(topology, salt);
+    Niche([
+        MORPHOLOGY_NICHE_MARKER,
+        hash as u8,
+        (hash >> 8) as u8,
+        (hash >> 16) as u8,
+        (hash >> 24) as u8,
+        (hash >> 32) as u8,
+    ])
+}
+
 impl QdArchive {
     pub fn rebuild_indices(&mut self) {
         self.lookup.clear();
         self.least_visited.clear();
-        for (i, elite) in self.entries.iter().enumerate() {
+        self.behavior_indices.clear();
+        self.morphology_indices.clear();
+        for (i, elite) in self.entries.iter_mut().enumerate() {
+            elite.topology.edges.sort_unstable();
             self.lookup.insert(elite.niche.clone(), i);
             self.least_visited.insert((elite.visits, i));
+            if is_morphology_niche(&elite.niche) {
+                self.morphology_indices.push(i);
+            } else {
+                self.behavior_indices.push(i);
+            }
         }
         self.recompute_score();
         self.refresh_behavior_scores();
@@ -222,21 +282,33 @@ impl QdArchive {
             .map(|e| e.fitness)
             .fold(f32::NEG_INFINITY, f32::max)
     }
+    pub fn behavior_count(&self) -> usize {
+        self.behavior_indices.len()
+    }
+    pub fn morphology_count(&self) -> usize {
+        self.morphology_indices.len()
+    }
     pub fn coverage(&self) -> f32 {
-        self.entries.len() as f32 / ARCHIVE_LIMIT as f32
+        self.behavior_count() as f32 / ARCHIVE_LIMIT as f32
     }
     pub fn sample_uniform(&self, rng: &mut Rng) -> Option<usize> {
-        (!self.entries.is_empty()).then(|| rng.index(self.entries.len()))
+        (!self.behavior_indices.is_empty())
+            .then(|| self.behavior_indices[rng.index(self.behavior_indices.len())])
     }
     pub fn sample_novel(&self, rng: &mut Rng, avoid: Option<usize>) -> Option<usize> {
-        if self.entries.is_empty() {
+        if self.behavior_count() == 0 {
             return None;
         }
         let mut selected = None;
         let mut best_score = f32::NEG_INFINITY;
         let mut tied = 0usize;
-        for &(_, index) in self.least_visited.iter().take(32) {
-            if Some(index) == avoid && self.entries.len() > 1 {
+        for &(_, index) in self
+            .least_visited
+            .iter()
+            .filter(|(_, index)| !is_morphology_niche(&self.entries[*index].niche))
+            .take(32)
+        {
+            if Some(index) == avoid && self.behavior_count() > 1 {
                 continue;
             }
             let novelty = self
@@ -258,19 +330,27 @@ impl QdArchive {
                 }
             }
         }
-        selected.or_else(|| Some(rng.index(self.entries.len())))
+        selected.or_else(|| {
+            (!self.behavior_indices.is_empty())
+                .then(|| self.behavior_indices[rng.index(self.behavior_indices.len())])
+        })
     }
     pub fn sample_local_competitive(&self, rng: &mut Rng, avoid: Option<usize>) -> Option<usize> {
-        if self.entries.is_empty() {
+        let behavior = &self.behavior_indices;
+        if behavior.is_empty() {
             return None;
         }
-        let candidates = (self.entries.len().min(8)).max(1);
+        let candidates = behavior.len().min(8).max(1);
         let mut selected = None;
         let mut best_score = f32::NEG_INFINITY;
         for _ in 0..candidates {
-            let mut index = rng.index(self.entries.len());
-            if Some(index) == avoid && self.entries.len() > 1 {
-                index = (index + 1 + rng.index(self.entries.len() - 1)) % self.entries.len();
+            let mut index = behavior[rng.index(behavior.len())];
+            if Some(index) == avoid && behavior.len() > 1 {
+                let ordinal = behavior
+                    .iter()
+                    .position(|&candidate| candidate == index)
+                    .unwrap_or(0);
+                index = behavior[(ordinal + 1 + rng.index(behavior.len() - 1)) % behavior.len()];
             }
             let local = self
                 .behavior_scores
@@ -286,16 +366,37 @@ impl QdArchive {
         }
         selected
     }
+    pub fn sample_morphology(&self, rng: &mut Rng, avoid: Option<usize>) -> Option<usize> {
+        let least_visits = self
+            .morphology_indices
+            .iter()
+            .filter(|&&index| Some(index) != avoid)
+            .map(|&index| self.entries[index].visits)
+            .min()?;
+        let mut selected = None;
+        let mut tied = 0usize;
+        for &index in &self.morphology_indices {
+            if Some(index) == avoid || self.entries[index].visits != least_visits {
+                continue;
+            }
+            tied += 1;
+            if rng.index(tied) == 0 {
+                selected = Some(index);
+            }
+        }
+        selected
+    }
     pub fn refresh_behavior_scores(&mut self) {
-        let count = self.entries.len();
+        let behavior = &self.behavior_indices;
+        let count = behavior.len();
         if count == 0 {
             self.behavior_scores = BehaviorScores::default();
             return;
         }
-        let mut novelty = vec![0.0; count];
-        let mut local_competition = vec![0.5; count];
+        let mut novelty = vec![0.0; self.entries.len()];
+        let mut local_competition = vec![0.5; self.entries.len()];
         if count == 1 {
-            novelty[0] = 1.0;
+            novelty[behavior[0]] = 1.0;
             self.behavior_scores = BehaviorScores {
                 novelty,
                 local_competition,
@@ -308,24 +409,30 @@ impl QdArchive {
             for j in 0..count {
                 if i != j {
                     neighbors.push((
-                        behavior_distance(self.entries[i].descriptor, self.entries[j].descriptor),
-                        j,
+                        behavior_distance(
+                            self.entries[behavior[i]].descriptor,
+                            self.entries[behavior[j]].descriptor,
+                        ),
+                        behavior[j],
                     ));
                 }
             }
             neighbors.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
             let nearest = &neighbors[..LOCAL_NEIGHBORS.min(neighbors.len())];
-            novelty[i] =
+            novelty[behavior[i]] =
                 nearest.iter().map(|(distance, _)| *distance).sum::<f32>() / nearest.len() as f32;
-            local_competition[i] = nearest
+            local_competition[behavior[i]] = nearest
                 .iter()
-                .map(
-                    |(_, j)| match self.entries[i].fitness.total_cmp(&self.entries[*j].fitness) {
+                .map(|(_, j)| {
+                    match self.entries[behavior[i]]
+                        .fitness
+                        .total_cmp(&self.entries[*j].fitness)
+                    {
                         std::cmp::Ordering::Greater => 1.0,
                         std::cmp::Ordering::Equal => 0.5,
                         std::cmp::Ordering::Less => 0.0,
-                    },
-                )
+                    }
+                })
                 .sum::<f32>()
                 / nearest.len() as f32;
         }
@@ -378,10 +485,11 @@ impl QdArchive {
                 improved_generation: generation,
                 protected_until: protected_until.max(old_protection),
                 visits,
-                topology: candidate_topology,
+                topology: candidate_topology.clone(),
             };
             self.qd_score += fitness.max(0.0) as f64 - previous_fitness.max(0.0) as f64;
             self.behavior_scores = BehaviorScores::default();
+            self.remove_morphology_topology(&candidate_topology, fitness);
             return Offer {
                 inserted: true,
                 new_niche: false,
@@ -390,7 +498,7 @@ impl QdArchive {
                     .clamp(0.01, 1.0),
             };
         }
-        if self.entries.len() >= ARCHIVE_LIMIT {
+        if self.behavior_count() >= ARCHIVE_LIMIT {
             return Offer::default();
         }
         let local_competition = self.local_competition_for(&niche, fitness);
@@ -405,17 +513,170 @@ impl QdArchive {
             improved_generation: generation,
             protected_until,
             visits: 0,
-            topology,
+            topology: topology.clone(),
         });
         let slot = self.entries.len() - 1;
         self.lookup.insert(niche, slot);
         self.least_visited.insert((0, slot));
+        self.behavior_indices.push(slot);
         self.behavior_scores = BehaviorScores::default();
+        self.remove_morphology_topology(&topology, fitness);
         Offer {
             inserted: true,
             new_niche: true,
             reward: 0.5 + local_competition as f64 * 0.5,
         }
+    }
+    pub fn offer_morphology(
+        &mut self,
+        population: &Population,
+        index: usize,
+        descriptor: Descriptor,
+        topology: Topology,
+        fitness: f32,
+        emitter: Emitter,
+        generation: u32,
+        protected_until: u32,
+    ) -> Offer {
+        if !fitness.is_finite() || fitness <= crate::evolution::FAILED {
+            return Offer::default();
+        }
+        let behavior_best = self
+            .entries
+            .iter()
+            .filter(|elite| {
+                !is_morphology_niche(&elite.niche)
+                    && topology_equivalent(&topology, &elite.topology)
+            })
+            .map(|elite| elite.fitness)
+            .max_by(f32::total_cmp);
+        if behavior_best.is_some_and(|best| fitness <= best) {
+            return Offer::default();
+        }
+        if let Some(slot) = self.entries.iter().position(|elite| {
+            is_morphology_niche(&elite.niche) && topology_equivalent(&topology, &elite.topology)
+        }) {
+            let current = &self.entries[slot];
+            if fitness <= current.fitness {
+                return Offer::default();
+            }
+            let previous_fitness = current.fitness;
+            let visits = current.visits;
+            let niche = current.niche.clone();
+            self.entries[slot] = Elite {
+                niche,
+                descriptor,
+                creature: population.creature(index),
+                fitness,
+                emitter,
+                improved_generation: generation,
+                protected_until: protected_until.max(current.protected_until),
+                visits,
+                topology,
+            };
+            return Offer {
+                inserted: true,
+                new_niche: false,
+                reward: ((fitness - previous_fitness) as f64
+                    / (1.0 + previous_fitness.abs() as f64))
+                    .clamp(0.01, 1.0),
+            };
+        }
+
+        if self.morphology_count() >= MORPHOLOGY_LIMIT {
+            let victim = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, elite)| {
+                    is_morphology_niche(&elite.niche) && elite.visits >= MIN_MORPHOLOGY_DESCENDANTS
+                })
+                .min_by(|(_, a), (_, b)| a.fitness.total_cmp(&b.fitness));
+            let Some((slot, elite)) = victim else {
+                return Offer::default();
+            };
+            if fitness <= elite.fitness {
+                return Offer::default();
+            }
+            self.remove_entry(slot);
+        }
+        let mut salt = 0u64;
+        let niche = loop {
+            let candidate = morphology_niche(&topology, salt);
+            match self.lookup.get(&candidate).copied() {
+                None => break candidate,
+                Some(slot) if topology_equivalent(&topology, &self.entries[slot].topology) => {
+                    return Offer::default();
+                }
+                Some(_) => salt = salt.wrapping_add(1),
+            }
+        };
+        let elite = Elite {
+            niche: niche.clone(),
+            descriptor,
+            creature: population.creature(index),
+            fitness,
+            emitter,
+            improved_generation: generation,
+            protected_until,
+            visits: 0,
+            topology,
+        };
+        self.entries.push(elite);
+        let slot = self.entries.len() - 1;
+        self.lookup.insert(niche, slot);
+        self.least_visited.insert((0, slot));
+        self.morphology_indices.push(slot);
+        Offer {
+            inserted: true,
+            new_niche: true,
+            reward: 1.0,
+        }
+    }
+    fn remove_morphology_topology(&mut self, topology: &Topology, behavior_fitness: f32) {
+        if let Some(slot) = self.entries.iter().position(|elite| {
+            is_morphology_niche(&elite.niche)
+                && elite.fitness <= behavior_fitness
+                && topology_equivalent(topology, &elite.topology)
+        }) {
+            self.remove_entry(slot);
+        }
+    }
+    fn remove_entry(&mut self, slot: usize) {
+        let last = self.entries.len() - 1;
+        let removed = &self.entries[slot];
+        self.lookup.remove(&removed.niche);
+        self.least_visited.remove(&(removed.visits, slot));
+        let removed_is_morphology = is_morphology_niche(&removed.niche);
+        let indices = if removed_is_morphology {
+            &mut self.morphology_indices
+        } else {
+            &mut self.behavior_indices
+        };
+        if let Some(index) = indices.iter().position(|&entry| entry == slot) {
+            indices.swap_remove(index);
+        }
+        if slot != last {
+            let moved = &self.entries[last];
+            self.least_visited.remove(&(moved.visits, last));
+            let moved_niche = moved.niche.clone();
+            let moved_visits = moved.visits;
+            let moved_is_morphology = is_morphology_niche(&moved.niche);
+            self.entries.swap_remove(slot);
+            self.lookup.insert(moved_niche, slot);
+            self.least_visited.insert((moved_visits, slot));
+            let indices = if moved_is_morphology {
+                &mut self.morphology_indices
+            } else {
+                &mut self.behavior_indices
+            };
+            if let Some(index) = indices.iter().position(|&entry| entry == last) {
+                indices[index] = slot;
+            }
+        } else {
+            self.entries.pop();
+        }
+        self.behavior_scores = BehaviorScores::default();
     }
     fn local_competition_for(&self, niche: &Niche, fitness: f32) -> f32 {
         if self.entries.is_empty() {
@@ -461,17 +722,23 @@ impl QdArchive {
     }
 
     fn recompute_score(&mut self) {
-        self.qd_score = self.entries.iter().map(|e| e.fitness.max(0.0) as f64).sum();
+        self.qd_score = self
+            .entries
+            .iter()
+            .filter(|elite| !is_morphology_niche(&elite.niche))
+            .map(|elite| elite.fitness.max(0.0) as f64)
+            .sum();
     }
 }
 pub fn topology_of_population(population: &Population, index: usize) -> Topology {
     let genome = &population.genomes[index];
     let muscles =
         &population.muscles[genome.muscle_start..genome.muscle_start + genome.muscle_count];
-    let edges: Vec<_> = muscles
+    let mut edges: Vec<_> = muscles
         .iter()
         .map(|m| (m.a.min(m.b), m.a.max(m.b)))
         .collect();
+    edges.sort_unstable();
     Topology {
         nodes: genome.node_count as u8,
         edges,

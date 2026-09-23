@@ -37,6 +37,7 @@ pub struct Card {
     pub descriptor: Option<Descriptor>,
     pub emitter: Option<Emitter>,
     pub visits: u64,
+    pub innovation_reserve: bool,
     pub creature: Creature,
 }
 #[derive(Clone)]
@@ -56,6 +57,8 @@ pub struct Snapshot {
     pub ram_bytes: usize,
     pub elapsed: f64,
     pub archive_cells: usize,
+    pub archive_size: usize,
+    pub innovation_reserve_count: usize,
     pub qd_score: f64,
     pub emitters: [EmitterStats; 4],
     pub emitter_weights: [f64; 4],
@@ -322,6 +325,7 @@ fn run(
                                 descriptor: Some(elite.descriptor),
                                 emitter: Some(elite.emitter),
                                 visits: elite.visits,
+                                innovation_reserve: qd::is_morphology_niche(&elite.niche),
                                 creature: elite.creature.clone(),
                             }
                         })
@@ -337,6 +341,7 @@ fn run(
                             descriptor: None,
                             emitter: None,
                             visits: 0,
+                            innovation_reserve: false,
                             creature: e.population.creature(i),
                         })
                         .collect()
@@ -371,7 +376,9 @@ fn run(
                             })
                             .sum::<usize>(),
                     elapsed: e.evaluation_seconds,
-                    archive_cells: archive_count,
+                    archive_cells: e.archive.behavior_count(),
+                    archive_size: archive_count,
+                    innovation_reserve_count: e.archive.morphology_count(),
                     qd_score: e.archive.qd_score,
                     emitters: e.emitter_stats,
                     emitter_weights: qd::emitter_weights(&e.emitter_stats),
@@ -395,6 +402,8 @@ fn run(
                     ram_bytes: 0,
                     elapsed: 0.,
                     archive_cells: 0,
+                    archive_size: 0,
+                    innovation_reserve_count: 0,
                     qd_score: 0.0,
                     emitters: [EmitterStats::default(); 4],
                     emitter_weights: qd::emitter_weights(&[EmitterStats::default(); 4]),

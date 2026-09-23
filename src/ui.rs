@@ -839,9 +839,9 @@ impl App {
     }
     fn population(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("Behavior archive");
+            ui.heading("Search archive");
             ui.label(
-                RichText::new("Best creature in each behavior niche · click to replay")
+                RichText::new("Behavior niches and protected topologies · click to replay")
                     .color(MUTED),
             );
         });
@@ -850,6 +850,10 @@ impl App {
         };
         ui.horizontal(|ui| {
             ui.label(format!("{} niches", number(snapshot.archive_cells)));
+            ui.label(format!(
+                "{} topology reserves",
+                number(snapshot.innovation_reserve_count)
+            ));
             ui.label(RichText::new(format!("QD score {:.2}", snapshot.qd_score)).color(MINT));
         });
         ui.horizontal_wrapped(|ui| {
@@ -871,8 +875,8 @@ impl App {
         let progress = (self.sort_started.elapsed().as_secs_f32() * self.sort_speed / 3.).min(1.);
         let animating = snapshot.stage == Stage::Archived && progress < 1.;
         let ease = progress * progress * (3. - 2. * progress);
-        let item_count = if snapshot.archive_cells > 0 {
-            snapshot.archive_cells
+        let item_count = if snapshot.archive_size > 0 {
+            snapshot.archive_size
         } else {
             snapshot.config.population
         };
@@ -1368,6 +1372,15 @@ fn paint_card(
         FontId::proportional(11.),
         MUTED,
     );
+    if card.innovation_reserve {
+        painter.text(
+            rect.right_top() + Vec2::new(-9., 8.),
+            Align2::RIGHT_TOP,
+            "MORPH",
+            FontId::proportional(9.),
+            MINT,
+        );
+    }
     let (label, score_color) = if !card.score.is_finite() {
         if card.parent_score.is_finite() && card.parent_score > FAILED {
             (format!("Parent {:.3} m", card.parent_score), MUTED)

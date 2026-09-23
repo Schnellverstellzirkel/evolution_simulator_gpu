@@ -1,0 +1,5022 @@
+[
+  {
+    "topology": "10:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 8), (1, 3), (1, 5), (1, 6), (1, 7), (1, 9), (2, 6), (2, 7), (2, 9), (3, 8), (4, 5), (5, 8), (6, 8), (7, 8), (8, 9)]",
+    "nodes": 10,
+    "muscles": 19,
+    "evaluations": 9,
+    "viable": 9,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 3.1435854,
+    "best_offspring_distance_m": 3.8871257
+  },
+  {
+    "topology": "10:[(0, 1), (0, 2), (0, 3), (0, 5), (0, 6), (1, 2), (1, 4), (1, 7), (1, 9), (3, 4), (3, 7), (3, 9), (4, 5), (4, 6), (5, 8), (5, 9), (6, 7), (6, 9), (7, 8)]",
+    "nodes": 10,
+    "muscles": 19,
+    "evaluations": 13,
+    "viable": 13,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 40.534138,
+    "best_offspring_distance_m": 40.421173
+  },
+  {
+    "topology": "10:[(0, 1), (0, 2), (0, 4), (0, 5), (0, 8), (1, 4), (1, 6), (1, 7), (1, 9), (2, 7), (3, 5), (3, 6), (3, 9), (7, 8)]",
+    "nodes": 10,
+    "muscles": 14,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 19.521933,
+    "best_offspring_distance_m": 14.582955
+  },
+  {
+    "topology": "10:[(0, 1), (0, 2), (0, 4), (0, 5), (0, 8), (1, 4), (1, 6), (1, 7), (2, 7), (3, 5), (3, 9), (6, 9), (7, 8)]",
+    "nodes": 10,
+    "muscles": 13,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 24.056726,
+    "best_offspring_distance_m": 7.4518175
+  },
+  {
+    "topology": "10:[(0, 1), (0, 3), (0, 4), (0, 5), (0, 7), (0, 8), (0, 9), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 8), (2, 9), (6, 7)]",
+    "nodes": 10,
+    "muscles": 15,
+    "evaluations": 13,
+    "viable": 13,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 15.306086,
+    "best_offspring_distance_m": 4.286211
+  },
+  {
+    "topology": "10:[(0, 1), (0, 3), (0, 4), (0, 8), (1, 3), (1, 7), (2, 4), (2, 6), (2, 7), (5, 6), (5, 8), (6, 9), (8, 9)]",
+    "nodes": 10,
+    "muscles": 13,
+    "evaluations": 31,
+    "viable": 31,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 61.634705,
+    "best_offspring_distance_m": 57.512085
+  },
+  {
+    "topology": "10:[(0, 1), (0, 4), (0, 5), (0, 8), (1, 3), (1, 7), (2, 4), (2, 6), (2, 7), (2, 9), (3, 8), (5, 6), (5, 9)]",
+    "nodes": 10,
+    "muscles": 13,
+    "evaluations": 24,
+    "viable": 24,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 55.585155,
+    "best_offspring_distance_m": 55.585155
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (0, 9), (1, 3), (1, 6), (1, 9), (2, 4), (3, 7), (4, 5), (4, 6), (4, 8), (5, 7), (7, 8), (7, 9)]",
+    "nodes": 10,
+    "muscles": 14,
+    "evaluations": 11,
+    "viable": 11,
+    "improved_on_parent": 5,
+    "best_parent_distance_m": -1.4711863,
+    "best_offspring_distance_m": 11.256758
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (0, 9), (1, 3), (1, 7), (1, 9), (2, 4), (3, 5), (3, 8), (4, 6), (4, 7), (5, 6), (5, 9), (7, 8), (8, 9)]",
+    "nodes": 10,
+    "muscles": 15,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 32.860638,
+    "best_offspring_distance_m": 31.994457
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (3, 7), (3, 9), (4, 5), (4, 6), (4, 8), (5, 9), (6, 7), (7, 8)]",
+    "nodes": 10,
+    "muscles": 13,
+    "evaluations": 283,
+    "viable": 283,
+    "improved_on_parent": 241,
+    "best_parent_distance_m": 20.2786,
+    "best_offspring_distance_m": 52.326313
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 6), (1, 8), (2, 4), (3, 7), (3, 9), (4, 5), (4, 6), (4, 8), (5, 7), (6, 9), (8, 9)]",
+    "nodes": 10,
+    "muscles": 14,
+    "evaluations": 156,
+    "viable": 156,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 32.28952,
+    "best_offspring_distance_m": 13.632506
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (5, 7), (6, 8), (6, 9)]",
+    "nodes": 10,
+    "muscles": 13,
+    "evaluations": 28,
+    "viable": 28,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 60.252907,
+    "best_offspring_distance_m": 43.410053
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 7), (3, 8), (4, 5), (4, 6), (4, 9), (5, 7), (6, 8), (7, 9)]",
+    "nodes": 10,
+    "muscles": 13,
+    "evaluations": 26,
+    "viable": 26,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 58.899868,
+    "best_offspring_distance_m": 55.988228
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 7), (3, 8), (4, 5), (4, 6), (5, 7), (6, 9), (8, 9)]",
+    "nodes": 10,
+    "muscles": 12,
+    "evaluations": 24,
+    "viable": 24,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 57.438923,
+    "best_offspring_distance_m": 33.256996
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 7), (3, 8), (4, 5), (4, 6), (5, 9), (6, 8), (7, 9)]",
+    "nodes": 10,
+    "muscles": 12,
+    "evaluations": 56,
+    "viable": 56,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 74.186874,
+    "best_offspring_distance_m": 74.186874
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 7), (3, 8), (4, 5), (4, 9), (5, 7), (6, 8), (6, 9)]",
+    "nodes": 10,
+    "muscles": 12,
+    "evaluations": 63,
+    "viable": 63,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 77.362305,
+    "best_offspring_distance_m": 58.95221
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 7), (3, 8), (4, 6), (4, 9), (5, 7), (5, 9), (6, 8)]",
+    "nodes": 10,
+    "muscles": 12,
+    "evaluations": 24,
+    "viable": 24,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 58.291927,
+    "best_offspring_distance_m": 21.75475
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 8), (3, 9), (4, 5), (4, 6), (5, 7), (6, 8), (7, 9)]",
+    "nodes": 10,
+    "muscles": 12,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 93.14347,
+    "best_offspring_distance_m": 93.14347
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 9), (4, 5), (4, 6), (4, 8), (5, 7), (7, 8), (7, 9)]",
+    "nodes": 10,
+    "muscles": 12,
+    "evaluations": 17,
+    "viable": 17,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 49.85931,
+    "best_offspring_distance_m": 41.048065
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 7), (1, 9), (2, 4), (3, 5), (3, 8), (4, 6), (4, 7), (4, 9), (5, 6), (7, 8), (8, 9)]",
+    "nodes": 10,
+    "muscles": 14,
+    "evaluations": 17,
+    "viable": 17,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 49.336628,
+    "best_offspring_distance_m": 45.8361
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 7), (1, 9), (2, 4), (3, 5), (4, 7), (4, 8), (4, 9), (5, 6), (6, 8)]",
+    "nodes": 10,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 39.234592,
+    "best_offspring_distance_m": 23.715488
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 7), (2, 4), (3, 5), (4, 7), (4, 8), (5, 6), (5, 9), (6, 8), (8, 9)]",
+    "nodes": 10,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 39.22218,
+    "best_offspring_distance_m": 30.116323
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 7), (2, 9), (3, 5), (4, 7), (4, 8), (4, 9), (5, 6), (6, 8)]",
+    "nodes": 10,
+    "muscles": 11,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 5,
+    "best_parent_distance_m": -8.284003,
+    "best_offspring_distance_m": 9.709695
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 8), (2, 4), (3, 7), (4, 6), (4, 9), (5, 7), (5, 9), (6, 8)]",
+    "nodes": 10,
+    "muscles": 11,
+    "evaluations": 35,
+    "viable": 35,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 62.10913,
+    "best_offspring_distance_m": 80.82515
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 3), (1, 9), (2, 4), (3, 7), (3, 8), (4, 5), (4, 6), (5, 7), (6, 8), (6, 9)]",
+    "nodes": 10,
+    "muscles": 12,
+    "evaluations": 51,
+    "viable": 51,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 67.00553,
+    "best_offspring_distance_m": 67.00553
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 4), (1, 6), (1, 8), (2, 4), (2, 8), (3, 6), (3, 7), (4, 5), (5, 7), (5, 9), (8, 9)]",
+    "nodes": 10,
+    "muscles": 13,
+    "evaluations": 39,
+    "viable": 39,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 65.1404,
+    "best_offspring_distance_m": 28.15968
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 4), (1, 8), (2, 4), (2, 7), (2, 9), (3, 6), (3, 7), (3, 8), (3, 9), (4, 5), (5, 6)]",
+    "nodes": 10,
+    "muscles": 13,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 29.548237,
+    "best_offspring_distance_m": 11.726573
+  },
+  {
+    "topology": "10:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (5, 7), (6, 8)]",
+    "nodes": 10,
+    "muscles": 12,
+    "evaluations": 2339,
+    "viable": 2339,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 94.81672,
+    "best_offspring_distance_m": 91.66076
+  },
+  {
+    "topology": "11:[(0, 1), (0, 2), (0, 3), (0, 5), (0, 6), (1, 2), (1, 4), (1, 7), (1, 10), (3, 4), (3, 7), (3, 9), (4, 5), (4, 6), (5, 8), (5, 9), (6, 7), (6, 9), (7, 8), (9, 10)]",
+    "nodes": 11,
+    "muscles": 20,
+    "evaluations": 12,
+    "viable": 12,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 35.598118,
+    "best_offspring_distance_m": 23.9394
+  },
+  {
+    "topology": "11:[(0, 1), (0, 2), (0, 3), (0, 5), (0, 6), (1, 2), (1, 4), (1, 7), (1, 9), (1, 10), (3, 4), (3, 7), (3, 9), (3, 10), (4, 5), (4, 6), (5, 8), (5, 9), (6, 7), (6, 9), (6, 10), (7, 8), (8, 10)]",
+    "nodes": 11,
+    "muscles": 23,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 30.00556,
+    "best_offspring_distance_m": 30.117086
+  },
+  {
+    "topology": "11:[(0, 1), (0, 2), (0, 3), (0, 5), (0, 6), (1, 2), (1, 4), (1, 7), (1, 9), (3, 4), (3, 9), (3, 10), (4, 5), (4, 6), (5, 8), (5, 9), (6, 7), (6, 9), (7, 8), (7, 10)]",
+    "nodes": 11,
+    "muscles": 20,
+    "evaluations": 13,
+    "viable": 13,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 40.421173,
+    "best_offspring_distance_m": 39.583176
+  },
+  {
+    "topology": "11:[(0, 1), (0, 3), (0, 4), (0, 8), (1, 3), (1, 7), (1, 10), (2, 4), (2, 6), (2, 7), (2, 10), (5, 6), (5, 8), (6, 9), (8, 9)]",
+    "nodes": 11,
+    "muscles": 15,
+    "evaluations": 25,
+    "viable": 25,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 55.62446,
+    "best_offspring_distance_m": 55.330856
+  },
+  {
+    "topology": "11:[(0, 1), (0, 3), (0, 4), (0, 8), (1, 3), (1, 7), (2, 4), (2, 6), (2, 7), (5, 6), (5, 10), (6, 9), (8, 9), (8, 10)]",
+    "nodes": 11,
+    "muscles": 14,
+    "evaluations": 19,
+    "viable": 19,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 53.51054,
+    "best_offspring_distance_m": 53.51054
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (0, 10), (1, 3), (1, 7), (1, 9), (2, 4), (3, 5), (3, 8), (4, 6), (4, 7), (4, 9), (4, 10), (5, 6), (7, 8), (8, 9)]",
+    "nodes": 11,
+    "muscles": 16,
+    "evaluations": 18,
+    "viable": 18,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 22.250986,
+    "best_offspring_distance_m": 9.034819
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (0, 10), (1, 6), (1, 9), (2, 4), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (5, 7), (6, 8), (7, 10), (8, 10), (9, 10)]",
+    "nodes": 11,
+    "muscles": 16,
+    "evaluations": 24,
+    "viable": 24,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 57.317802,
+    "best_offspring_distance_m": 65.98714
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (0, 9), (0, 10), (1, 3), (1, 7), (1, 9), (1, 10), (2, 4), (3, 5), (3, 8), (4, 6), (4, 7), (5, 6), (5, 9), (5, 10), (7, 8), (8, 9), (8, 10)]",
+    "nodes": 11,
+    "muscles": 19,
+    "evaluations": 594,
+    "viable": 594,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 56.86264,
+    "best_offspring_distance_m": 56.86264
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (0, 9), (1, 3), (1, 7), (1, 9), (2, 4), (3, 5), (3, 10), (4, 6), (4, 7), (5, 6), (5, 9), (7, 8), (8, 9), (8, 10)]",
+    "nodes": 11,
+    "muscles": 16,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 16.876087,
+    "best_offspring_distance_m": 40.530205
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 7), (3, 8), (3, 10), (4, 5), (4, 9), (5, 7), (6, 8), (6, 9), (6, 10)]",
+    "nodes": 11,
+    "muscles": 14,
+    "evaluations": 405,
+    "viable": 405,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 60.76401,
+    "best_offspring_distance_m": 60.76401
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 7), (3, 8), (4, 5), (4, 6), (5, 9), (5, 10), (6, 8), (7, 9), (7, 10)]",
+    "nodes": 11,
+    "muscles": 14,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 51.165752,
+    "best_offspring_distance_m": 67.227554
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 3), (1, 8), (2, 4), (3, 7), (4, 9), (4, 10), (5, 7), (5, 9), (6, 8), (6, 10)]",
+    "nodes": 11,
+    "muscles": 12,
+    "evaluations": 39,
+    "viable": 39,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 80.82515,
+    "best_offspring_distance_m": 65.35785
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 4), (1, 10), (2, 4), (2, 7), (2, 9), (3, 6), (3, 7), (3, 8), (3, 9), (4, 5), (5, 6), (8, 10)]",
+    "nodes": 11,
+    "muscles": 14,
+    "evaluations": 34,
+    "viable": 34,
+    "improved_on_parent": 5,
+    "best_parent_distance_m": 58.05346,
+    "best_offspring_distance_m": 58.05346
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 6), (1, 10), (2, 4), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (5, 7), (6, 8), (9, 10)]",
+    "nodes": 11,
+    "muscles": 13,
+    "evaluations": 567,
+    "viable": 567,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 79.11306,
+    "best_offspring_distance_m": 22.834326
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 6), (1, 9), (1, 10), (2, 4), (3, 7), (3, 8), (3, 9), (3, 10), (4, 5), (4, 6), (5, 7), (6, 8)]",
+    "nodes": 11,
+    "muscles": 14,
+    "evaluations": 454,
+    "viable": 454,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 74.15458,
+    "best_offspring_distance_m": 61.10722
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (2, 10), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (5, 7), (5, 10), (6, 8), (6, 10)]",
+    "nodes": 11,
+    "muscles": 15,
+    "evaluations": 39,
+    "viable": 39,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 65.75751,
+    "best_offspring_distance_m": 63.184505
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (3, 7), (3, 8), (3, 10), (4, 5), (4, 6), (5, 7), (6, 8), (9, 10)]",
+    "nodes": 11,
+    "muscles": 13,
+    "evaluations": 39,
+    "viable": 39,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 80.86172,
+    "best_offspring_distance_m": 80.86172
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (3, 7), (3, 8), (3, 9), (3, 10), (4, 5), (4, 6), (5, 7), (5, 10), (6, 8)]",
+    "nodes": 11,
+    "muscles": 14,
+    "evaluations": 39,
+    "viable": 39,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 78.45691,
+    "best_offspring_distance_m": 77.704895
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (3, 7), (3, 8), (3, 9), (3, 10), (4, 5), (4, 6), (5, 7), (6, 8), (6, 10)]",
+    "nodes": 11,
+    "muscles": 14,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 72.86849,
+    "best_offspring_distance_m": 60.88539
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (4, 10), (5, 7), (6, 8), (7, 10)]",
+    "nodes": 11,
+    "muscles": 14,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 81.29529,
+    "best_offspring_distance_m": 64.11953
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (5, 10), (6, 8), (7, 10)]",
+    "nodes": 11,
+    "muscles": 13,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 71.33903,
+    "best_offspring_distance_m": 60.747692
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (5, 7), (6, 8), (6, 10), (9, 10)]",
+    "nodes": 11,
+    "muscles": 14,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 84.33181,
+    "best_offspring_distance_m": 72.33628
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (3, 7), (3, 9), (3, 10), (4, 5), (4, 6), (5, 7), (6, 8), (8, 10)]",
+    "nodes": 11,
+    "muscles": 13,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 91.66076,
+    "best_offspring_distance_m": 16.958385
+  },
+  {
+    "topology": "11:[(0, 2), (0, 3), (1, 9), (1, 10), (2, 4), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (5, 7), (6, 8), (6, 10)]",
+    "nodes": 11,
+    "muscles": 13,
+    "evaluations": 53,
+    "viable": 53,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 89.042244,
+    "best_offspring_distance_m": 74.35095
+  },
+  {
+    "topology": "11:[(0, 3), (0, 10), (1, 3), (1, 4), (2, 4), (2, 10), (3, 7), (3, 9), (4, 5), (4, 6), (4, 8), (5, 9), (6, 7), (7, 8)]",
+    "nodes": 11,
+    "muscles": 14,
+    "evaluations": 9,
+    "viable": 9,
+    "improved_on_parent": 9,
+    "best_parent_distance_m": -0.1553903,
+    "best_offspring_distance_m": 3.540853
+  },
+  {
+    "topology": "12:[(0, 1), (0, 2), (0, 3), (0, 5), (0, 6), (1, 2), (1, 4), (1, 7), (1, 10), (3, 4), (3, 7), (3, 9), (3, 11), (4, 5), (4, 6), (5, 8), (5, 9), (5, 11), (6, 7), (6, 9), (6, 11), (7, 8), (9, 10), (10, 11)]",
+    "nodes": 12,
+    "muscles": 24,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 18.867414,
+    "best_offspring_distance_m": 12.223075
+  },
+  {
+    "topology": "12:[(0, 1), (0, 2), (0, 3), (0, 5), (0, 6), (1, 4), (1, 7), (1, 9), (1, 11), (2, 11), (3, 4), (3, 9), (3, 10), (4, 5), (4, 6), (5, 8), (5, 9), (6, 7), (6, 9), (7, 8), (7, 10)]",
+    "nodes": 12,
+    "muscles": 21,
+    "evaluations": 10,
+    "viable": 10,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 30.99514,
+    "best_offspring_distance_m": 30.32652
+  },
+  {
+    "topology": "12:[(0, 2), (0, 11), (1, 6), (1, 9), (1, 10), (2, 4), (3, 7), (3, 8), (3, 9), (3, 10), (3, 11), (4, 5), (4, 6), (5, 7), (6, 8)]",
+    "nodes": 12,
+    "muscles": 15,
+    "evaluations": 30,
+    "viable": 30,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 61.10722,
+    "best_offspring_distance_m": 68.952675
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (0, 10), (1, 6), (1, 9), (1, 11), (2, 4), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (4, 11), (5, 7), (6, 8), (7, 10), (8, 10), (8, 11), (9, 10)]",
+    "nodes": 12,
+    "muscles": 19,
+    "evaluations": 39,
+    "viable": 39,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 78.10902,
+    "best_offspring_distance_m": 78.10902
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (0, 9), (0, 10), (1, 3), (1, 7), (1, 10), (1, 11), (2, 4), (3, 5), (3, 8), (4, 6), (4, 7), (5, 6), (5, 9), (5, 10), (7, 8), (8, 9), (8, 10), (9, 11)]",
+    "nodes": 12,
+    "muscles": 20,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 18.280449,
+    "best_offspring_distance_m": 18.280449
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (0, 9), (0, 10), (1, 3), (1, 7), (1, 9), (1, 10), (2, 4), (3, 5), (3, 8), (3, 11), (4, 6), (4, 7), (5, 6), (5, 9), (5, 10), (7, 8), (7, 11), (8, 9), (8, 10), (9, 11), (10, 11)]",
+    "nodes": 12,
+    "muscles": 23,
+    "evaluations": 6,
+    "viable": 6,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 25.235579,
+    "best_offspring_distance_m": 9.171616
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (0, 9), (0, 10), (1, 3), (1, 7), (1, 9), (1, 10), (2, 4), (3, 5), (3, 8), (4, 6), (4, 7), (4, 11), (5, 6), (5, 9), (5, 10), (5, 11), (7, 8), (8, 9), (8, 10)]",
+    "nodes": 12,
+    "muscles": 21,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 42.464134,
+    "best_offspring_distance_m": 15.778487
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (0, 9), (0, 10), (1, 3), (1, 7), (1, 9), (1, 10), (2, 4), (3, 5), (3, 8), (4, 6), (4, 7), (5, 6), (5, 9), (5, 10), (7, 11), (8, 9), (8, 10), (8, 11)]",
+    "nodes": 12,
+    "muscles": 20,
+    "evaluations": 21,
+    "viable": 21,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 36.582428,
+    "best_offspring_distance_m": 19.625105
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (0, 9), (0, 10), (1, 3), (1, 7), (1, 9), (1, 10), (2, 4), (3, 5), (3, 8), (4, 6), (4, 7), (5, 9), (5, 10), (5, 11), (6, 11), (7, 8), (8, 9), (8, 10)]",
+    "nodes": 12,
+    "muscles": 20,
+    "evaluations": 9,
+    "viable": 9,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 30.734398,
+    "best_offspring_distance_m": 12.744222
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (0, 9), (0, 10), (1, 3), (1, 7), (1, 9), (1, 10), (2, 4), (3, 8), (3, 11), (4, 6), (4, 7), (5, 6), (5, 9), (5, 10), (5, 11), (7, 8), (8, 9), (8, 10)]",
+    "nodes": 12,
+    "muscles": 20,
+    "evaluations": 11,
+    "viable": 11,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 34.89572,
+    "best_offspring_distance_m": 13.761938
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (0, 9), (0, 10), (1, 7), (1, 9), (1, 10), (1, 11), (2, 4), (3, 5), (3, 8), (3, 11), (4, 6), (4, 7), (5, 6), (5, 9), (5, 10), (7, 8), (8, 9), (8, 10)]",
+    "nodes": 12,
+    "muscles": 20,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 5.5162506,
+    "best_offspring_distance_m": 6.5303774
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 7), (3, 8), (4, 5), (4, 6), (5, 9), (5, 10), (5, 11), (6, 8), (7, 9), (7, 10), (7, 11)]",
+    "nodes": 12,
+    "muscles": 16,
+    "evaluations": 889,
+    "viable": 889,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 67.227554,
+    "best_offspring_distance_m": 41.77424
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (1, 6), (1, 9), (1, 11), (2, 4), (2, 10), (3, 7), (3, 8), (3, 9), (3, 11), (4, 5), (4, 6), (5, 7), (5, 10), (6, 8), (6, 10)]",
+    "nodes": 12,
+    "muscles": 17,
+    "evaluations": 35,
+    "viable": 35,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 63.184505,
+    "best_offspring_distance_m": 63.78167
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (1, 6), (1, 9), (1, 11), (2, 4), (3, 7), (3, 8), (3, 10), (4, 5), (4, 6), (4, 11), (5, 7), (6, 8), (8, 11), (9, 10)]",
+    "nodes": 12,
+    "muscles": 16,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 63.877136,
+    "best_offspring_distance_m": 58.252735
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (1, 6), (1, 9), (1, 11), (2, 4), (3, 7), (3, 8), (3, 9), (3, 10), (3, 11), (4, 5), (4, 6), (5, 7), (5, 10), (6, 8)]",
+    "nodes": 12,
+    "muscles": 16,
+    "evaluations": 169,
+    "viable": 169,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 77.88478,
+    "best_offspring_distance_m": 77.88478
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (2, 11), (3, 7), (3, 8), (3, 9), (3, 10), (4, 5), (4, 6), (5, 7), (5, 11), (6, 8), (6, 10), (6, 11)]",
+    "nodes": 12,
+    "muscles": 17,
+    "evaluations": 39,
+    "viable": 39,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 77.54414,
+    "best_offspring_distance_m": 77.54414
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (2, 11), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (5, 10), (5, 11), (6, 8), (6, 11), (7, 10)]",
+    "nodes": 12,
+    "muscles": 16,
+    "evaluations": 253,
+    "viable": 253,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 73.23323,
+    "best_offspring_distance_m": 73.23323
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (4, 10), (5, 7), (6, 8), (7, 11), (10, 11)]",
+    "nodes": 12,
+    "muscles": 15,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 73.02729,
+    "best_offspring_distance_m": 78.68192
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (5, 7), (6, 8), (6, 11), (9, 10), (10, 11)]",
+    "nodes": 12,
+    "muscles": 15,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 80.537186,
+    "best_offspring_distance_m": 80.537186
+  },
+  {
+    "topology": "12:[(0, 2), (0, 3), (1, 9), (1, 10), (2, 4), (3, 7), (3, 8), (3, 11), (4, 5), (4, 6), (5, 7), (6, 8), (6, 10), (9, 11)]",
+    "nodes": 12,
+    "muscles": 14,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 74.35095,
+    "best_offspring_distance_m": 54.71872
+  },
+  {
+    "topology": "12:[(0, 2), (0, 9), (0, 10), (0, 11), (1, 3), (1, 7), (1, 9), (1, 10), (2, 4), (3, 5), (3, 8), (3, 11), (4, 6), (4, 7), (5, 6), (5, 9), (5, 10), (7, 8), (8, 9), (8, 10)]",
+    "nodes": 12,
+    "muscles": 20,
+    "evaluations": 18,
+    "viable": 18,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 33.500183,
+    "best_offspring_distance_m": 33.500183
+  },
+  {
+    "topology": "13:[(0, 2), (0, 11), (0, 12), (1, 6), (1, 9), (1, 10), (2, 4), (3, 7), (3, 8), (3, 9), (3, 10), (3, 11), (3, 12), (4, 5), (4, 6), (5, 7), (6, 8)]",
+    "nodes": 13,
+    "muscles": 17,
+    "evaluations": 36,
+    "viable": 36,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 63.425507,
+    "best_offspring_distance_m": 63.425507
+  },
+  {
+    "topology": "13:[(0, 2), (0, 11), (1, 6), (1, 9), (1, 10), (2, 4), (3, 7), (3, 8), (3, 9), (3, 10), (3, 11), (3, 12), (4, 5), (4, 6), (5, 7), (6, 8), (6, 12)]",
+    "nodes": 13,
+    "muscles": 17,
+    "evaluations": 39,
+    "viable": 39,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 68.952675,
+    "best_offspring_distance_m": 77.041504
+  },
+  {
+    "topology": "13:[(0, 2), (0, 3), (0, 10), (1, 6), (1, 9), (1, 11), (2, 4), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (4, 11), (4, 12), (5, 7), (6, 8), (7, 10), (7, 12), (8, 10), (8, 11), (9, 10)]",
+    "nodes": 13,
+    "muscles": 21,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 68.469955,
+    "best_offspring_distance_m": 68.469955
+  },
+  {
+    "topology": "13:[(0, 2), (0, 3), (0, 12), (1, 6), (1, 9), (1, 11), (2, 4), (3, 7), (3, 8), (3, 9), (3, 10), (3, 11), (4, 5), (4, 6), (5, 7), (5, 10), (6, 8), (7, 12), (8, 12), (9, 12), (10, 12), (11, 12)]",
+    "nodes": 13,
+    "muscles": 22,
+    "evaluations": 26,
+    "viable": 26,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 58.81269,
+    "best_offspring_distance_m": 56.30783
+  },
+  {
+    "topology": "13:[(0, 2), (0, 3), (1, 6), (1, 9), (1, 11), (1, 12), (2, 4), (2, 10), (3, 7), (3, 8), (3, 9), (3, 11), (4, 5), (4, 6), (4, 12), (5, 7), (5, 10), (6, 8), (6, 10), (8, 12), (10, 12)]",
+    "nodes": 13,
+    "muscles": 21,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 63.78167,
+    "best_offspring_distance_m": 49.136322
+  },
+  {
+    "topology": "13:[(0, 2), (0, 3), (1, 6), (1, 9), (1, 12), (2, 4), (3, 7), (3, 8), (3, 9), (3, 12), (4, 5), (4, 6), (5, 7), (6, 8), (6, 11), (9, 10), (10, 11), (10, 12)]",
+    "nodes": 13,
+    "muscles": 18,
+    "evaluations": 37,
+    "viable": 37,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 63.452797,
+    "best_offspring_distance_m": 51.35227
+  },
+  {
+    "topology": "13:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (2, 11), (3, 7), (3, 8), (3, 9), (3, 10), (3, 12), (4, 5), (4, 6), (5, 7), (5, 11), (5, 12), (6, 8), (6, 10), (6, 11)]",
+    "nodes": 13,
+    "muscles": 19,
+    "evaluations": 27,
+    "viable": 27,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 60.358913,
+    "best_offspring_distance_m": 58.50337
+  },
+  {
+    "topology": "13:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (2, 11), (3, 7), (3, 8), (3, 9), (3, 10), (4, 5), (4, 6), (5, 11), (5, 12), (6, 8), (6, 10), (6, 11), (7, 12)]",
+    "nodes": 13,
+    "muscles": 18,
+    "evaluations": 32,
+    "viable": 32,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 61.787724,
+    "best_offspring_distance_m": 66.13294
+  },
+  {
+    "topology": "13:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (3, 7), (3, 8), (3, 9), (4, 5), (4, 6), (4, 10), (5, 7), (6, 8), (7, 11), (10, 12), (11, 12)]",
+    "nodes": 13,
+    "muscles": 16,
+    "evaluations": 25,
+    "viable": 25,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 57.2348,
+    "best_offspring_distance_m": 57.2348
+  },
+  {
+    "topology": "13:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (3, 8), (3, 9), (3, 12), (4, 5), (4, 6), (4, 10), (5, 7), (6, 8), (7, 11), (7, 12), (10, 11)]",
+    "nodes": 13,
+    "muscles": 16,
+    "evaluations": 84,
+    "viable": 84,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 78.68192,
+    "best_offspring_distance_m": 75.25812
+  },
+  {
+    "topology": "14:[(0, 2), (0, 11), (1, 6), (1, 9), (1, 10), (1, 13), (2, 4), (3, 7), (3, 8), (3, 9), (3, 10), (3, 11), (3, 12), (3, 13), (4, 5), (4, 6), (5, 7), (6, 8), (6, 12)]",
+    "nodes": 14,
+    "muscles": 19,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 77.041504,
+    "best_offspring_distance_m": 77.327545
+  },
+  {
+    "topology": "14:[(0, 2), (0, 3), (1, 6), (1, 13), (2, 4), (2, 11), (3, 7), (3, 8), (3, 9), (3, 10), (4, 5), (4, 6), (5, 11), (5, 12), (6, 8), (6, 10), (6, 11), (7, 12), (9, 13)]",
+    "nodes": 14,
+    "muscles": 19,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 69.10674,
+    "best_offspring_distance_m": 69.10674
+  },
+  {
+    "topology": "14:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (3, 8), (3, 9), (3, 12), (4, 5), (4, 6), (4, 10), (4, 13), (5, 7), (6, 8), (7, 11), (7, 12), (7, 13), (10, 11)]",
+    "nodes": 14,
+    "muscles": 18,
+    "evaluations": 22,
+    "viable": 22,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 54.276085,
+    "best_offspring_distance_m": 69.77944
+  },
+  {
+    "topology": "15:[(0, 2), (0, 11), (1, 6), (1, 9), (1, 10), (1, 13), (2, 4), (3, 7), (3, 8), (3, 9), (3, 10), (3, 11), (3, 12), (3, 14), (4, 5), (4, 6), (5, 7), (6, 8), (6, 12), (13, 14)]",
+    "nodes": 15,
+    "muscles": 20,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 77.327545,
+    "best_offspring_distance_m": 70.949684
+  },
+  {
+    "topology": "15:[(0, 2), (0, 3), (1, 6), (1, 9), (2, 4), (3, 8), (3, 9), (3, 12), (4, 5), (4, 6), (4, 10), (4, 13), (5, 7), (6, 8), (7, 11), (7, 12), (7, 13), (10, 14), (11, 14)]",
+    "nodes": 15,
+    "muscles": 19,
+    "evaluations": 39,
+    "viable": 39,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 69.77944,
+    "best_offspring_distance_m": 66.03786
+  },
+  {
+    "topology": "3:[(0, 1), (0, 2), (1, 2)]",
+    "nodes": 3,
+    "muscles": 3,
+    "evaluations": 50216,
+    "viable": 50216,
+    "improved_on_parent": 1873,
+    "best_parent_distance_m": 72.00386,
+    "best_offspring_distance_m": 72.00386
+  },
+  {
+    "topology": "4:[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3)]",
+    "nodes": 4,
+    "muscles": 5,
+    "evaluations": 94422,
+    "viable": 94422,
+    "improved_on_parent": 1788,
+    "best_parent_distance_m": 87.216095,
+    "best_offspring_distance_m": 87.216095
+  },
+  {
+    "topology": "4:[(0, 1), (0, 2), (0, 3), (1, 2), (2, 3)]",
+    "nodes": 4,
+    "muscles": 5,
+    "evaluations": 10899,
+    "viable": 10899,
+    "improved_on_parent": 403,
+    "best_parent_distance_m": 49.933277,
+    "best_offspring_distance_m": 49.933277
+  },
+  {
+    "topology": "4:[(0, 1), (0, 2), (1, 2), (1, 3), (2, 3)]",
+    "nodes": 4,
+    "muscles": 5,
+    "evaluations": 1574,
+    "viable": 1574,
+    "improved_on_parent": 160,
+    "best_parent_distance_m": 20.345003,
+    "best_offspring_distance_m": 19.08155
+  },
+  {
+    "topology": "4:[(0, 1), (0, 2), (1, 3), (2, 3)]",
+    "nodes": 4,
+    "muscles": 4,
+    "evaluations": 1495,
+    "viable": 1495,
+    "improved_on_parent": 70,
+    "best_parent_distance_m": 38.081547,
+    "best_offspring_distance_m": 34.00552
+  },
+  {
+    "topology": "4:[(0, 1), (0, 3), (1, 2), (1, 3), (2, 3)]",
+    "nodes": 4,
+    "muscles": 5,
+    "evaluations": 516,
+    "viable": 516,
+    "improved_on_parent": 185,
+    "best_parent_distance_m": 3.3815393,
+    "best_offspring_distance_m": 9.401909
+  },
+  {
+    "topology": "4:[(0, 1), (0, 3), (1, 2), (2, 3)]",
+    "nodes": 4,
+    "muscles": 4,
+    "evaluations": 605,
+    "viable": 605,
+    "improved_on_parent": 76,
+    "best_parent_distance_m": 17.551697,
+    "best_offspring_distance_m": 29.14649
+  },
+  {
+    "topology": "4:[(0, 2), (0, 3), (1, 2), (1, 3)]",
+    "nodes": 4,
+    "muscles": 4,
+    "evaluations": 328,
+    "viable": 328,
+    "improved_on_parent": 85,
+    "best_parent_distance_m": 20.82048,
+    "best_offspring_distance_m": 51.724392
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 4)]",
+    "nodes": 5,
+    "muscles": 7,
+    "evaluations": 9177,
+    "viable": 9177,
+    "improved_on_parent": 251,
+    "best_parent_distance_m": 72.01122,
+    "best_offspring_distance_m": 71.04537
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (2, 4), (3, 4)]",
+    "nodes": 5,
+    "muscles": 8,
+    "evaluations": 96,
+    "viable": 96,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 25.932037,
+    "best_offspring_distance_m": 21.774519
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 4), (2, 3), (3, 4)]",
+    "nodes": 5,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 10.037033,
+    "best_offspring_distance_m": 8.734058
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (2, 3), (2, 4)]",
+    "nodes": 5,
+    "muscles": 7,
+    "evaluations": 152,
+    "viable": 152,
+    "improved_on_parent": 13,
+    "best_parent_distance_m": 18.305357,
+    "best_offspring_distance_m": 20.187574
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (1, 4), (2, 4), (3, 4)]",
+    "nodes": 5,
+    "muscles": 8,
+    "evaluations": 1412,
+    "viable": 1412,
+    "improved_on_parent": 76,
+    "best_parent_distance_m": 33.410995,
+    "best_offspring_distance_m": 33.410995
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 3), (1, 2), (1, 4), (2, 3), (2, 4), (3, 4)]",
+    "nodes": 5,
+    "muscles": 8,
+    "evaluations": 651,
+    "viable": 651,
+    "improved_on_parent": 422,
+    "best_parent_distance_m": 5.14115,
+    "best_offspring_distance_m": 5.527157
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 3), (1, 2), (1, 4), (3, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 3213,
+    "viable": 3213,
+    "improved_on_parent": 70,
+    "best_parent_distance_m": 76.74414,
+    "best_offspring_distance_m": 73.68199
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 3), (1, 2), (2, 4), (3, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 16.848364,
+    "best_offspring_distance_m": 17.125029
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 3), (1, 3), (1, 4), (2, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 2084,
+    "viable": 2084,
+    "improved_on_parent": 63,
+    "best_parent_distance_m": 73.82668,
+    "best_offspring_distance_m": 55.343494
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 3), (1, 4), (2, 3), (2, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 37,
+    "viable": 37,
+    "improved_on_parent": 6,
+    "best_parent_distance_m": 19.452589,
+    "best_offspring_distance_m": 17.001816
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 4), (1, 2), (1, 3), (1, 4), (2, 3), (3, 4)]",
+    "nodes": 5,
+    "muscles": 8,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 9,
+    "best_parent_distance_m": 5.444062,
+    "best_offspring_distance_m": 7.385761
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 4), (1, 2), (1, 3), (2, 3), (3, 4)]",
+    "nodes": 5,
+    "muscles": 7,
+    "evaluations": 2,
+    "viable": 2,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": -0.06088812,
+    "best_offspring_distance_m": 0.27623206
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 4), (1, 2), (1, 3), (3, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 401,
+    "viable": 401,
+    "improved_on_parent": 10,
+    "best_parent_distance_m": 51.714577,
+    "best_offspring_distance_m": 53.766273
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 4), (1, 2), (2, 3), (2, 4), (3, 4)]",
+    "nodes": 5,
+    "muscles": 7,
+    "evaluations": 1,
+    "viable": 1,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 0.026994227,
+    "best_offspring_distance_m": -0.3151551
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 4), (1, 2), (2, 3), (3, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 48,
+    "viable": 48,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 28.80216,
+    "best_offspring_distance_m": 13.942098
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (0, 4), (1, 3), (2, 3), (3, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 230,
+    "viable": 230,
+    "improved_on_parent": 30,
+    "best_parent_distance_m": 11.877923,
+    "best_offspring_distance_m": 27.582115
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (1, 2), (1, 3), (1, 4), (2, 3), (2, 4)]",
+    "nodes": 5,
+    "muscles": 7,
+    "evaluations": 411,
+    "viable": 411,
+    "improved_on_parent": 66,
+    "best_parent_distance_m": 18.773972,
+    "best_offspring_distance_m": 15.618255
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (1, 2), (1, 3), (2, 4), (3, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 44,
+    "viable": 44,
+    "improved_on_parent": 12,
+    "best_parent_distance_m": 4.9667544,
+    "best_offspring_distance_m": 8.332557
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (1, 2), (1, 4), (2, 3), (3, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 10.714583,
+    "best_offspring_distance_m": 10.714583
+  },
+  {
+    "topology": "5:[(0, 1), (0, 2), (1, 3), (2, 4), (3, 4)]",
+    "nodes": 5,
+    "muscles": 5,
+    "evaluations": 21,
+    "viable": 21,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 7.041907,
+    "best_offspring_distance_m": 5.789003
+  },
+  {
+    "topology": "5:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 3), (1, 4), (2, 3), (2, 4)]",
+    "nodes": 5,
+    "muscles": 8,
+    "evaluations": 20,
+    "viable": 20,
+    "improved_on_parent": 11,
+    "best_parent_distance_m": 0.82290834,
+    "best_offspring_distance_m": 3.3520832
+  },
+  {
+    "topology": "5:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 3), (2, 3), (2, 4), (3, 4)]",
+    "nodes": 5,
+    "muscles": 8,
+    "evaluations": 91,
+    "viable": 91,
+    "improved_on_parent": 10,
+    "best_parent_distance_m": 9.401909,
+    "best_offspring_distance_m": 5.088785
+  },
+  {
+    "topology": "5:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 3), (2, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 2218,
+    "viable": 2218,
+    "improved_on_parent": 91,
+    "best_parent_distance_m": 55.050587,
+    "best_offspring_distance_m": 64.2233
+  },
+  {
+    "topology": "5:[(0, 1), (0, 3), (0, 4), (1, 2), (2, 3), (2, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 11.065421,
+    "best_offspring_distance_m": 7.8677607
+  },
+  {
+    "topology": "5:[(0, 1), (0, 3), (1, 2), (1, 3), (1, 4), (2, 3), (3, 4)]",
+    "nodes": 5,
+    "muscles": 7,
+    "evaluations": 64,
+    "viable": 64,
+    "improved_on_parent": 23,
+    "best_parent_distance_m": 2.8108904,
+    "best_offspring_distance_m": 6.7621255
+  },
+  {
+    "topology": "5:[(0, 1), (0, 3), (1, 2), (1, 3), (2, 4), (3, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 1.0772972,
+    "best_offspring_distance_m": 1.0772972
+  },
+  {
+    "topology": "5:[(0, 1), (0, 3), (1, 2), (1, 4), (2, 3), (3, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 19,
+    "viable": 19,
+    "improved_on_parent": 5,
+    "best_parent_distance_m": 7.4747787,
+    "best_offspring_distance_m": 4.7421236
+  },
+  {
+    "topology": "5:[(0, 1), (0, 3), (1, 2), (2, 4), (3, 4)]",
+    "nodes": 5,
+    "muscles": 5,
+    "evaluations": 579,
+    "viable": 579,
+    "improved_on_parent": 229,
+    "best_parent_distance_m": 9.638199,
+    "best_offspring_distance_m": 11.780281
+  },
+  {
+    "topology": "5:[(0, 1), (0, 3), (1, 3), (1, 4), (2, 3), (2, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 19,
+    "viable": 19,
+    "improved_on_parent": 13,
+    "best_parent_distance_m": 1.904322,
+    "best_offspring_distance_m": 3.713615
+  },
+  {
+    "topology": "5:[(0, 1), (0, 4), (1, 2), (1, 3), (2, 3), (3, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 0.8082542,
+    "best_offspring_distance_m": 0.43188244
+  },
+  {
+    "topology": "5:[(0, 1), (0, 4), (1, 2), (1, 4), (2, 3), (3, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 324,
+    "viable": 324,
+    "improved_on_parent": 82,
+    "best_parent_distance_m": 7.195649,
+    "best_offspring_distance_m": 8.422256
+  },
+  {
+    "topology": "5:[(0, 1), (0, 4), (1, 2), (2, 3), (3, 4)]",
+    "nodes": 5,
+    "muscles": 5,
+    "evaluations": 62,
+    "viable": 62,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 10.809076,
+    "best_offspring_distance_m": 8.73579
+  },
+  {
+    "topology": "5:[(0, 1), (0, 4), (1, 3), (2, 3), (2, 4)]",
+    "nodes": 5,
+    "muscles": 5,
+    "evaluations": 22,
+    "viable": 22,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 10.626332,
+    "best_offspring_distance_m": 7.4160767
+  },
+  {
+    "topology": "5:[(0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 94,
+    "viable": 94,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 26.515585,
+    "best_offspring_distance_m": 13.252853
+  },
+  {
+    "topology": "5:[(0, 2), (0, 3), (0, 4), (1, 2), (1, 4), (2, 3)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 19.279814,
+    "best_offspring_distance_m": 12.379269
+  },
+  {
+    "topology": "5:[(0, 2), (0, 3), (1, 2), (1, 3), (2, 4), (3, 4)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 35.546574,
+    "best_offspring_distance_m": 71.27882
+  },
+  {
+    "topology": "5:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4)]",
+    "nodes": 5,
+    "muscles": 5,
+    "evaluations": 2403,
+    "viable": 2403,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 59.72892,
+    "best_offspring_distance_m": 74.50813
+  },
+  {
+    "topology": "5:[(0, 2), (0, 4), (1, 2), (1, 3), (1, 4), (2, 3)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 14.641449,
+    "best_offspring_distance_m": 17.433731
+  },
+  {
+    "topology": "5:[(0, 2), (0, 4), (1, 3), (1, 4), (2, 3)]",
+    "nodes": 5,
+    "muscles": 5,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 2.851765,
+    "best_offspring_distance_m": 4.3140063
+  },
+  {
+    "topology": "5:[(0, 3), (0, 4), (1, 2), (1, 3), (1, 4), (2, 3)]",
+    "nodes": 5,
+    "muscles": 6,
+    "evaluations": 1,
+    "viable": 1,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 0.06533235,
+    "best_offspring_distance_m": 0.102533184
+  },
+  {
+    "topology": "5:[(0, 3), (0, 4), (1, 2), (1, 4), (2, 3)]",
+    "nodes": 5,
+    "muscles": 5,
+    "evaluations": 104,
+    "viable": 104,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 12.010988,
+    "best_offspring_distance_m": 17.253586
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (1, 4), (1, 5)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 2487,
+    "viable": 2487,
+    "improved_on_parent": 279,
+    "best_parent_distance_m": 62.564537,
+    "best_offspring_distance_m": 60.837048
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (1, 4), (2, 5), (3, 5), (4, 5)]",
+    "nodes": 6,
+    "muscles": 11,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 16.873693,
+    "best_offspring_distance_m": 4.9692855
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (1, 2), (2, 3), (2, 4), (2, 5)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 663,
+    "viable": 663,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 14.768702,
+    "best_offspring_distance_m": 14.502254
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 4), (1, 5), (2, 5), (3, 5), (4, 5)]",
+    "nodes": 6,
+    "muscles": 11,
+    "evaluations": 72,
+    "viable": 72,
+    "improved_on_parent": 5,
+    "best_parent_distance_m": 16.332531,
+    "best_offspring_distance_m": 27.02222
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 5), (4, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 5956,
+    "viable": 5956,
+    "improved_on_parent": 332,
+    "best_parent_distance_m": 70.74233,
+    "best_offspring_distance_m": 70.74233
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 4), (1, 5), (3, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 37,
+    "viable": 37,
+    "improved_on_parent": 4,
+    "best_parent_distance_m": 41.037186,
+    "best_offspring_distance_m": 52.19459
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 4), (2, 3), (3, 5), (4, 5)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 0.5359163,
+    "best_offspring_distance_m": 0.39451423
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (2, 3), (2, 5), (4, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 59,
+    "viable": 59,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 12.04875,
+    "best_offspring_distance_m": 12.541115
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (2, 4), (2, 5), (3, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 73,
+    "viable": 73,
+    "improved_on_parent": 10,
+    "best_parent_distance_m": 10.412525,
+    "best_offspring_distance_m": 12.929913
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 3), (1, 4), (1, 5), (2, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 45,
+    "viable": 45,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 41.667564,
+    "best_offspring_distance_m": 41.667564
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 5), (1, 2), (1, 3), (1, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 45,
+    "viable": 45,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 50.88999,
+    "best_offspring_distance_m": 50.88999
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 5), (1, 2), (1, 4), (1, 5), (3, 4)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 850,
+    "viable": 850,
+    "improved_on_parent": 155,
+    "best_parent_distance_m": 68.80084,
+    "best_offspring_distance_m": 68.80084
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 5), (1, 2), (1, 4), (2, 5), (3, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 4,
+    "viable": 4,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 33.272156,
+    "best_offspring_distance_m": 2.5182042
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 5), (1, 2), (1, 4), (3, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 40.596893,
+    "best_offspring_distance_m": 48.48915
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 5), (1, 2), (1, 5), (2, 4), (3, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 0.3077291,
+    "best_offspring_distance_m": 0.3077291
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (0, 5), (1, 3), (1, 4), (2, 4), (3, 5), (4, 5)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 20.474966,
+    "best_offspring_distance_m": 20.474966
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (1, 2), (1, 4), (1, 5), (2, 3), (2, 4), (2, 5), (3, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 11,
+    "evaluations": 1971,
+    "viable": 1971,
+    "improved_on_parent": 839,
+    "best_parent_distance_m": 3.6902606,
+    "best_offspring_distance_m": 18.96413
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (1, 2), (1, 4), (1, 5), (2, 4), (3, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 7.975164,
+    "best_offspring_distance_m": 10.382093
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (1, 2), (1, 4), (1, 5), (2, 5), (3, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 16.113304,
+    "best_offspring_distance_m": 9.8305
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (1, 2), (1, 4), (1, 5), (3, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 58,
+    "viable": 58,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 48.59887,
+    "best_offspring_distance_m": 36.410202
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (1, 2), (1, 4), (3, 5), (4, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 29.88787,
+    "best_offspring_distance_m": 34.895233
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (1, 2), (1, 5), (3, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 44.059837,
+    "best_offspring_distance_m": 26.33758
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (1, 3), (1, 4), (1, 5), (2, 4), (2, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 9,
+    "viable": 9,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 22.350607,
+    "best_offspring_distance_m": 22.350607
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (1, 4), (1, 5), (2, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 32.191666,
+    "best_offspring_distance_m": 31.060299
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (1, 4), (1, 5), (2, 5), (3, 4)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 44.256477,
+    "best_offspring_distance_m": 44.256477
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 3), (1, 5), (2, 3), (2, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 24,
+    "viable": 24,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 3.561152,
+    "best_offspring_distance_m": 2.465531
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 4), (0, 5), (1, 2), (1, 3), (1, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 844,
+    "viable": 844,
+    "improved_on_parent": 45,
+    "best_parent_distance_m": 63.313736,
+    "best_offspring_distance_m": 60.780518
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 4), (0, 5), (1, 2), (1, 3), (3, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 25.654976,
+    "best_offspring_distance_m": 17.98335
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 5), (1, 2), (1, 4), (3, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 37,
+    "viable": 37,
+    "improved_on_parent": 6,
+    "best_parent_distance_m": 37.797398,
+    "best_offspring_distance_m": 35.189453
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (0, 5), (1, 3), (1, 4), (2, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 9,
+    "viable": 9,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 29.908585,
+    "best_offspring_distance_m": 11.220362
+  },
+  {
+    "topology": "6:[(0, 1), (0, 2), (1, 2), (1, 3), (1, 5), (2, 3), (2, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 6,
+    "best_parent_distance_m": -1.5595845,
+    "best_offspring_distance_m": 2.3747308
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (1, 4), (2, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 47,
+    "viable": 47,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 64.171555,
+    "best_offspring_distance_m": 49.301254
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (1, 5), (2, 3), (2, 4), (2, 5), (3, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 6,
+    "best_parent_distance_m": -1.5520859,
+    "best_offspring_distance_m": 1.9555795
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (1, 5), (2, 4)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 160,
+    "viable": 160,
+    "improved_on_parent": 38,
+    "best_parent_distance_m": 10.246014,
+    "best_offspring_distance_m": 16.134642
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (2, 3), (2, 4), (2, 5), (3, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 11,
+    "evaluations": 19,
+    "viable": 19,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 3.7484062,
+    "best_offspring_distance_m": 4.7156887
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (2, 4), (2, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 134,
+    "viable": 134,
+    "improved_on_parent": 5,
+    "best_parent_distance_m": 57.327568,
+    "best_offspring_distance_m": 63.04641
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 3), (1, 5), (2, 3), (2, 4), (3, 4), (3, 5), (4, 5)]",
+    "nodes": 6,
+    "muscles": 11,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 3.6538856,
+    "best_offspring_distance_m": 4.2465696
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 3), (1, 5), (2, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 14.801018,
+    "best_offspring_distance_m": 6.7335825
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 3), (2, 5), (4, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 10204,
+    "viable": 10204,
+    "improved_on_parent": 87,
+    "best_parent_distance_m": 90.64413,
+    "best_offspring_distance_m": 90.64413
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 5), (2, 3), (2, 4), (3, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 2.2029529,
+    "best_offspring_distance_m": 5.7540936
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 5), (2, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 1923,
+    "viable": 1923,
+    "improved_on_parent": 4,
+    "best_parent_distance_m": 69.13469,
+    "best_offspring_distance_m": 69.13469
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 4), (1, 3), (1, 4), (1, 5), (2, 3), (2, 4), (2, 5)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 4,
+    "best_parent_distance_m": -0.106059894,
+    "best_offspring_distance_m": 0.19165523
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 4), (1, 3), (1, 5), (2, 3), (2, 4), (2, 5), (3, 4)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 1.5738577,
+    "best_offspring_distance_m": 2.0357432
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 4), (1, 3), (1, 5), (2, 4), (2, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 11,
+    "viable": 11,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 42.435036,
+    "best_offspring_distance_m": 36.73875
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 5), (1, 2), (1, 3), (2, 3), (2, 4), (3, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 2.6891994,
+    "best_offspring_distance_m": 2.6891994
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 5), (1, 2), (1, 3), (2, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 2,
+    "viable": 2,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 25.133703,
+    "best_offspring_distance_m": 0.35137248
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 5), (1, 2), (1, 4), (2, 5), (3, 4)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 22,
+    "viable": 22,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 37.415966,
+    "best_offspring_distance_m": 33.75716
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 5), (1, 2), (2, 4), (2, 5), (3, 4)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 7.1989107,
+    "best_offspring_distance_m": 5.1010036
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (0, 5), (1, 2), (2, 4), (3, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 72,
+    "viable": 72,
+    "improved_on_parent": 16,
+    "best_parent_distance_m": 0.6747854,
+    "best_offspring_distance_m": 3.7995524
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (1, 2), (1, 3), (2, 4), (2, 5), (3, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 0.08914642,
+    "best_offspring_distance_m": 0.121189155
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (1, 2), (1, 4), (1, 5), (2, 3), (3, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 2.8817496,
+    "best_offspring_distance_m": 2.8817496
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (1, 2), (2, 4), (3, 5), (4, 5)]",
+    "nodes": 6,
+    "muscles": 6,
+    "evaluations": 1531,
+    "viable": 1531,
+    "improved_on_parent": 168,
+    "best_parent_distance_m": 16.279297,
+    "best_offspring_distance_m": 17.437445
+  },
+  {
+    "topology": "6:[(0, 1), (0, 3), (1, 3), (1, 4), (2, 4), (2, 5), (3, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 0.024081152,
+    "best_offspring_distance_m": 0.07292592
+  },
+  {
+    "topology": "6:[(0, 1), (0, 4), (0, 5), (1, 2), (1, 4), (1, 5), (2, 3), (3, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 0.3667416,
+    "best_offspring_distance_m": 0.10716226
+  },
+  {
+    "topology": "6:[(0, 1), (0, 4), (1, 2), (1, 4), (1, 5), (2, 3), (3, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 1.0973287,
+    "best_offspring_distance_m": 0.8259845
+  },
+  {
+    "topology": "6:[(0, 1), (0, 4), (1, 2), (1, 4), (1, 5), (2, 3), (3, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 0.85684335,
+    "best_offspring_distance_m": 0.5849426
+  },
+  {
+    "topology": "6:[(0, 1), (0, 4), (1, 2), (1, 4), (2, 3), (2, 5), (3, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 0.0586141,
+    "best_offspring_distance_m": 0.111165866
+  },
+  {
+    "topology": "6:[(0, 1), (0, 4), (1, 2), (1, 4), (2, 3), (3, 5), (4, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 0.087960325,
+    "best_offspring_distance_m": 0.08598744
+  },
+  {
+    "topology": "6:[(0, 1), (0, 4), (1, 2), (1, 4), (2, 5), (3, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 4,
+    "best_parent_distance_m": 1.1997561,
+    "best_offspring_distance_m": 0.9034772
+  },
+  {
+    "topology": "6:[(0, 1), (0, 4), (1, 2), (1, 5), (2, 3), (3, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 8.73579,
+    "best_offspring_distance_m": 6.075971
+  },
+  {
+    "topology": "6:[(0, 1), (0, 4), (1, 2), (2, 3), (2, 5), (3, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 12,
+    "viable": 12,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 6.080081,
+    "best_offspring_distance_m": 5.573368
+  },
+  {
+    "topology": "6:[(0, 1), (0, 4), (1, 4), (1, 5), (2, 3), (2, 5), (3, 4)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 0.20823818,
+    "best_offspring_distance_m": 0.20823818
+  },
+  {
+    "topology": "6:[(0, 1), (0, 5), (1, 2), (1, 4), (2, 3), (3, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 5,
+    "best_parent_distance_m": 0.7138671,
+    "best_offspring_distance_m": 1.1795554
+  },
+  {
+    "topology": "6:[(0, 2), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (1, 4), (1, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 13.252853,
+    "best_offspring_distance_m": 9.772177
+  },
+  {
+    "topology": "6:[(0, 2), (0, 3), (0, 4), (0, 5), (1, 2), (1, 4), (2, 3), (2, 5)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 26,
+    "viable": 26,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 12.379269,
+    "best_offspring_distance_m": 13.072623
+  },
+  {
+    "topology": "6:[(0, 2), (0, 3), (0, 4), (0, 5), (1, 2), (1, 5), (2, 3), (2, 4)]",
+    "nodes": 6,
+    "muscles": 8,
+    "evaluations": 46,
+    "viable": 46,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 13.01042,
+    "best_offspring_distance_m": 13.705675
+  },
+  {
+    "topology": "6:[(0, 2), (0, 3), (0, 4), (1, 2), (1, 4), (2, 3), (2, 5), (3, 5), (4, 5)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 7.323375,
+    "best_offspring_distance_m": 3.7405405
+  },
+  {
+    "topology": "6:[(0, 2), (0, 3), (0, 4), (1, 2), (1, 5), (2, 3), (4, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 0.34401965,
+    "best_offspring_distance_m": 0.34401965
+  },
+  {
+    "topology": "6:[(0, 2), (0, 3), (0, 5), (1, 3), (1, 4), (1, 5), (2, 4)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 30.32034,
+    "best_offspring_distance_m": 15.433531
+  },
+  {
+    "topology": "6:[(0, 2), (0, 3), (1, 3), (1, 4), (1, 5), (2, 4), (2, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 44.182175,
+    "best_offspring_distance_m": 44.182175
+  },
+  {
+    "topology": "6:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (3, 5), (4, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 3568,
+    "viable": 3568,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 74.50813,
+    "best_offspring_distance_m": 73.49183
+  },
+  {
+    "topology": "6:[(0, 2), (0, 3), (1, 3), (1, 5), (2, 4), (4, 5)]",
+    "nodes": 6,
+    "muscles": 6,
+    "evaluations": 70,
+    "viable": 70,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 46.029915,
+    "best_offspring_distance_m": 9.9072485
+  },
+  {
+    "topology": "6:[(0, 2), (0, 3), (1, 4), (1, 5), (2, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 6,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 39.682613,
+    "best_offspring_distance_m": 12.969703
+  },
+  {
+    "topology": "6:[(0, 2), (0, 5), (1, 2), (1, 3), (2, 4), (3, 4), (3, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 1346,
+    "viable": 1346,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 71.27882,
+    "best_offspring_distance_m": 58.772243
+  },
+  {
+    "topology": "6:[(0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (1, 5), (2, 3), (2, 4), (3, 4)]",
+    "nodes": 6,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 5.292695,
+    "best_offspring_distance_m": 5.292695
+  },
+  {
+    "topology": "6:[(0, 3), (0, 4), (0, 5), (1, 2), (1, 4), (2, 3), (2, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 15,
+    "viable": 15,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 2.6471927,
+    "best_offspring_distance_m": 8.721114
+  },
+  {
+    "topology": "6:[(0, 3), (0, 4), (1, 2), (1, 4), (1, 5), (2, 3), (3, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 0.102533184,
+    "best_offspring_distance_m": 0.3613636
+  },
+  {
+    "topology": "6:[(0, 3), (0, 4), (1, 2), (1, 4), (2, 3), (3, 5), (4, 5)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 6,
+    "best_parent_distance_m": 7.4592943,
+    "best_offspring_distance_m": 8.968937
+  },
+  {
+    "topology": "6:[(0, 3), (0, 5), (1, 3), (1, 4), (2, 4), (2, 5)]",
+    "nodes": 6,
+    "muscles": 6,
+    "evaluations": 10,
+    "viable": 10,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 2.145805,
+    "best_offspring_distance_m": 4.0388713
+  },
+  {
+    "topology": "6:[(0, 4), (0, 5), (1, 2), (1, 4), (1, 5), (2, 3), (3, 4)]",
+    "nodes": 6,
+    "muscles": 7,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 8.422256,
+    "best_offspring_distance_m": 0.92518103
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6)]",
+    "nodes": 7,
+    "muscles": 11,
+    "evaluations": 364,
+    "viable": 364,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 55.4639,
+    "best_offspring_distance_m": 43.90083
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (1, 2), (1, 3), (1, 4), (1, 5), (2, 6), (3, 6), (4, 6), (5, 6)]",
+    "nodes": 7,
+    "muscles": 14,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 12.966086,
+    "best_offspring_distance_m": 4.458239
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (1, 2), (2, 3), (2, 4), (2, 5), (2, 6)]",
+    "nodes": 7,
+    "muscles": 11,
+    "evaluations": 647,
+    "viable": 647,
+    "improved_on_parent": 365,
+    "best_parent_distance_m": 13.83346,
+    "best_offspring_distance_m": 14.342272
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (1, 2), (1, 4), (1, 5), (1, 6), (3, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 14.522899,
+    "best_offspring_distance_m": 24.49102
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (1, 3), (1, 4), (1, 5), (1, 6), (2, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 251,
+    "viable": 251,
+    "improved_on_parent": 7,
+    "best_parent_distance_m": 8.589646,
+    "best_offspring_distance_m": 26.63235
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (1, 5), (1, 6), (4, 5)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 13,
+    "viable": 13,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 36.76983,
+    "best_offspring_distance_m": 20.883127
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (1, 5), (2, 6), (3, 6), (4, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 12.460123,
+    "best_offspring_distance_m": 11.936415
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (1, 5), (4, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 13,
+    "viable": 13,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 40.789387,
+    "best_offspring_distance_m": 14.655754
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 6), (1, 2), (1, 4), (1, 5), (3, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 52.19459,
+    "best_offspring_distance_m": 21.931934
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 6), (1, 2), (2, 3), (2, 4), (2, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 107,
+    "viable": 107,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 10.206627,
+    "best_offspring_distance_m": 7.837435
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 6), (1, 2), (2, 3), (2, 5), (4, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 58,
+    "viable": 58,
+    "improved_on_parent": 8,
+    "best_parent_distance_m": 11.816351,
+    "best_offspring_distance_m": 9.25921
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 5), (1, 6), (2, 6), (3, 6), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 11.088842,
+    "best_offspring_distance_m": 11.042164
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 5), (1, 6), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 24,
+    "viable": 24,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 57.59391,
+    "best_offspring_distance_m": 50.24187
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 5), (4, 6), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 24,
+    "viable": 24,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 48.69603,
+    "best_offspring_distance_m": 33.069294
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 6), (4, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 17,
+    "viable": 17,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 52.962257,
+    "best_offspring_distance_m": 37.95178
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 5), (1, 6), (3, 6), (4, 5)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 31,
+    "viable": 31,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 61.55131,
+    "best_offspring_distance_m": 60.499462
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 3), (1, 5), (1, 6), (2, 6), (4, 5)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 64.16566,
+    "best_offspring_distance_m": 60.05774
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 5), (0, 6), (1, 2), (1, 4), (1, 5), (1, 6), (3, 4)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 22.159761,
+    "best_offspring_distance_m": 8.416628
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 5), (0, 6), (1, 2), (1, 4), (3, 4), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 17,
+    "viable": 17,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 48.48915,
+    "best_offspring_distance_m": 31.748898
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 5), (0, 6), (1, 2), (2, 3), (2, 4), (2, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 50,
+    "viable": 50,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 13.841424,
+    "best_offspring_distance_m": 13.841424
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 5), (1, 2), (1, 3), (1, 4), (4, 6), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 13,
+    "viable": 13,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 40.978462,
+    "best_offspring_distance_m": 40.978462
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 5), (1, 2), (1, 4), (1, 5), (1, 6), (3, 4), (3, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 23,
+    "viable": 23,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 69.09866,
+    "best_offspring_distance_m": 69.09866
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 5), (1, 2), (1, 4), (1, 5), (3, 6), (4, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 44,
+    "viable": 44,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 63.143898,
+    "best_offspring_distance_m": 60.048737
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 5), (1, 2), (1, 4), (1, 6), (3, 4), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 73,
+    "viable": 73,
+    "improved_on_parent": 6,
+    "best_parent_distance_m": 67.94119,
+    "best_offspring_distance_m": 72.32473
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 5), (1, 2), (1, 4), (3, 4), (4, 6), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 22.150505,
+    "best_offspring_distance_m": 4.8052225
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 5), (1, 2), (1, 5), (1, 6), (3, 4), (4, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 39.423916,
+    "best_offspring_distance_m": 39.423916
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 6), (1, 2), (1, 3), (1, 5), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 19,
+    "viable": 19,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 53.43669,
+    "best_offspring_distance_m": 40.2228
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (0, 6), (1, 2), (1, 4), (1, 5), (3, 4), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 23,
+    "viable": 23,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 55.441643,
+    "best_offspring_distance_m": 34.23168
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (1, 2), (1, 4), (1, 5), (1, 6), (3, 4), (3, 5), (3, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 12,
+    "viable": 12,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 36.410202,
+    "best_offspring_distance_m": 26.700968
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (1, 2), (1, 4), (3, 5), (3, 6), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 34.895233,
+    "best_offspring_distance_m": 4.7599444
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 3), (1, 5), (1, 6), (2, 4), (3, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 9,
+    "viable": 9,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 31.060299,
+    "best_offspring_distance_m": 12.855378
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 4), (0, 5), (0, 6), (1, 2), (1, 3), (1, 4), (1, 5), (3, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 10.063793,
+    "best_offspring_distance_m": 14.361604
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 4), (0, 5), (0, 6), (1, 2), (1, 3), (1, 4), (1, 6), (3, 5)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 71,
+    "viable": 71,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 26.448582,
+    "best_offspring_distance_m": 40.478065
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 4), (0, 5), (0, 6), (1, 2), (1, 3), (1, 4), (2, 6), (3, 5), (3, 6), (4, 6)]",
+    "nodes": 7,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 17.212925,
+    "best_offspring_distance_m": 11.679734
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 4), (0, 5), (0, 6), (1, 2), (1, 3), (1, 4), (3, 5), (3, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 9.827063,
+    "best_offspring_distance_m": 3.4920354
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 4), (0, 5), (1, 2), (1, 3), (1, 4), (1, 6), (2, 6), (3, 5), (4, 6), (5, 6)]",
+    "nodes": 7,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 16.269575,
+    "best_offspring_distance_m": 5.0129304
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 4), (0, 5), (1, 2), (1, 3), (1, 4), (1, 6), (3, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 20.013647,
+    "best_offspring_distance_m": 27.844042
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 4), (0, 5), (1, 2), (1, 3), (1, 4), (3, 6), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 20,
+    "viable": 20,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 36.271088,
+    "best_offspring_distance_m": 30.158468
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 4), (0, 5), (1, 2), (1, 3), (1, 6), (3, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 43.62859,
+    "best_offspring_distance_m": 40.202965
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 4), (0, 5), (1, 2), (1, 4), (1, 6), (3, 5), (3, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 36.11792,
+    "best_offspring_distance_m": 40.86338
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 4), (0, 5), (1, 3), (1, 4), (1, 6), (2, 6), (3, 5)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 28.965054,
+    "best_offspring_distance_m": 32.467266
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 4), (0, 6), (1, 2), (1, 3), (1, 4), (3, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 8.583709,
+    "best_offspring_distance_m": 8.860342
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 4), (0, 6), (1, 2), (1, 3), (1, 5), (3, 6), (4, 5)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 44.860558,
+    "best_offspring_distance_m": 24.621521
+  },
+  {
+    "topology": "7:[(0, 1), (0, 2), (0, 5), (0, 6), (1, 2), (1, 3), (1, 4), (3, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 45.26141,
+    "best_offspring_distance_m": 30.850492
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (1, 4), (1, 6), (2, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 38.025677,
+    "best_offspring_distance_m": 38.025677
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (2, 4), (2, 6), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 3973,
+    "viable": 3973,
+    "improved_on_parent": 35,
+    "best_parent_distance_m": 74.02029,
+    "best_offspring_distance_m": 74.02029
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (2, 5), (2, 6), (4, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 140,
+    "viable": 140,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 56.80706,
+    "best_offspring_distance_m": 54.862907
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 4), (1, 6), (2, 5), (3, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 17,
+    "viable": 17,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 49.301254,
+    "best_offspring_distance_m": 36.134544
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 3), (1, 6), (2, 4), (2, 5), (2, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 80,
+    "viable": 80,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 47.83637,
+    "best_offspring_distance_m": 50.000294
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (1, 5), (2, 6), (4, 5)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 41,
+    "viable": 41,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 44.50622,
+    "best_offspring_distance_m": 34.76586
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (1, 6), (2, 5), (4, 5)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 296,
+    "viable": 296,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 55.35036,
+    "best_offspring_distance_m": 51.159397
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (2, 4), (2, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 35,
+    "viable": 35,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 63.04641,
+    "best_offspring_distance_m": 65.48668
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (2, 5), (2, 6), (3, 6), (4, 5)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 4,
+    "viable": 4,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 64.92468,
+    "best_offspring_distance_m": 2.2217164
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (2, 5), (4, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 1224,
+    "viable": 1224,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 73.53926,
+    "best_offspring_distance_m": 73.53926
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 5), (2, 3), (2, 4), (2, 6), (3, 4), (3, 5), (3, 6)]",
+    "nodes": 7,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 0.3036019,
+    "best_offspring_distance_m": 0.4490943
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 5), (2, 4), (2, 6), (3, 5)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 42,
+    "viable": 42,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 59.337193,
+    "best_offspring_distance_m": 52.135952
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 5), (2, 4), (3, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 28,
+    "viable": 28,
+    "improved_on_parent": 5,
+    "best_parent_distance_m": 41.275738,
+    "best_offspring_distance_m": 38.844025
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 3), (1, 6), (2, 5), (3, 6), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 12,
+    "viable": 12,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 4.880253,
+    "best_offspring_distance_m": 12.428041
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 3), (1, 6), (2, 5), (4, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 370,
+    "viable": 370,
+    "improved_on_parent": 6,
+    "best_parent_distance_m": 61.952454,
+    "best_offspring_distance_m": 61.952454
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 3), (2, 5), (2, 6), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 11,
+    "best_parent_distance_m": -1.8591957,
+    "best_offspring_distance_m": 6.1107545
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 3), (2, 5), (4, 6), (5, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 19,
+    "viable": 19,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 53.62117,
+    "best_offspring_distance_m": 52.07915
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 3), (2, 6), (4, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 328,
+    "viable": 328,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 73.705986,
+    "best_offspring_distance_m": 69.875046
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 5), (1, 6), (2, 4), (3, 5), (3, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 43,
+    "viable": 43,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 54.03774,
+    "best_offspring_distance_m": 47.7791
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 5), (2, 4), (3, 6), (5, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 119,
+    "viable": 119,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 54.141476,
+    "best_offspring_distance_m": 52.735664
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 5), (2, 6), (3, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 70,
+    "viable": 70,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 62.031567,
+    "best_offspring_distance_m": 62.031567
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 6), (2, 4), (3, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 33,
+    "viable": 33,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 56.672,
+    "best_offspring_distance_m": 56.557068
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 6), (2, 5), (3, 6), (4, 5)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 279,
+    "viable": 279,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 71.53662,
+    "best_offspring_distance_m": 49.256416
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (1, 3), (1, 4), (1, 5), (1, 6), (2, 3), (2, 4), (2, 5), (3, 6), (4, 6)]",
+    "nodes": 7,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": -0.14599535,
+    "best_offspring_distance_m": -0.044904828
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (1, 3), (1, 6), (2, 5), (2, 6), (4, 5)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 79,
+    "viable": 79,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 63.896576,
+    "best_offspring_distance_m": 61.291656
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 4), (1, 5), (1, 6), (2, 4), (2, 6), (3, 5)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 52.256477,
+    "best_offspring_distance_m": 48.45759
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 5), (0, 6), (1, 2), (1, 4), (1, 5), (2, 6), (3, 4)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 9,
+    "viable": 9,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 30.620628,
+    "best_offspring_distance_m": 26.046436
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 5), (0, 6), (1, 2), (2, 4), (3, 4), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 1.0409902,
+    "best_offspring_distance_m": 0.6236742
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 5), (1, 2), (1, 4), (1, 6), (2, 5), (3, 4), (3, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 34.048275,
+    "best_offspring_distance_m": 34.048275
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 5), (1, 2), (1, 6), (2, 4), (3, 4), (3, 6), (4, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 4,
+    "best_parent_distance_m": 0.5525506,
+    "best_offspring_distance_m": 0.8945297
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 5), (1, 2), (2, 6), (3, 4), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 1.7978398,
+    "best_offspring_distance_m": 1.7978398
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 6), (1, 2), (1, 3), (2, 5), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 71,
+    "viable": 71,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 71.8209,
+    "best_offspring_distance_m": 47.80446
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 6), (1, 2), (1, 5), (2, 4), (3, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 46.230568,
+    "best_offspring_distance_m": 46.651257
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (0, 6), (1, 2), (2, 4), (3, 5), (4, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 13.173428,
+    "best_offspring_distance_m": 7.725747
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (1, 2), (1, 4), (1, 6), (2, 3), (3, 4), (3, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 6,
+    "best_parent_distance_m": 0.020907927,
+    "best_offspring_distance_m": 0.115569256
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (1, 2), (1, 6), (2, 4), (3, 5), (3, 6), (4, 5)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 608,
+    "viable": 608,
+    "improved_on_parent": 140,
+    "best_parent_distance_m": 17.437445,
+    "best_offspring_distance_m": 17.657001
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (1, 2), (2, 4), (3, 5), (3, 6), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 7.457018,
+    "best_offspring_distance_m": 9.74402
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (1, 2), (2, 4), (3, 5), (4, 6), (5, 6)]",
+    "nodes": 7,
+    "muscles": 7,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 13.903361,
+    "best_offspring_distance_m": 11.195403
+  },
+  {
+    "topology": "7:[(0, 1), (0, 3), (1, 2), (2, 6), (3, 5), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 7,
+    "evaluations": 46,
+    "viable": 46,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 8.573809,
+    "best_offspring_distance_m": 11.439178
+  },
+  {
+    "topology": "7:[(0, 1), (0, 4), (0, 5), (0, 6), (1, 2), (1, 3), (1, 4), (2, 6), (3, 5)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 34.873573,
+    "best_offspring_distance_m": 23.108892
+  },
+  {
+    "topology": "7:[(0, 1), (0, 4), (0, 6), (1, 2), (1, 4), (1, 5), (2, 3), (3, 4), (3, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 0.103927925,
+    "best_offspring_distance_m": 0.103927925
+  },
+  {
+    "topology": "7:[(0, 1), (0, 4), (1, 2), (1, 4), (1, 5), (2, 3), (3, 5), (3, 6), (4, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 5,
+    "best_parent_distance_m": -0.0074334634,
+    "best_offspring_distance_m": 0.0747585
+  },
+  {
+    "topology": "7:[(0, 1), (0, 4), (1, 2), (1, 4), (1, 6), (2, 3), (3, 4), (4, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 0.13598746,
+    "best_offspring_distance_m": 0.13598746
+  },
+  {
+    "topology": "7:[(0, 1), (0, 4), (1, 2), (1, 4), (2, 3), (3, 6), (4, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 0.06772635,
+    "best_offspring_distance_m": 0.06772635
+  },
+  {
+    "topology": "7:[(0, 1), (0, 4), (1, 2), (1, 4), (2, 5), (2, 6), (3, 4), (3, 6), (4, 5)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 4,
+    "best_parent_distance_m": 0.060587797,
+    "best_offspring_distance_m": 0.39123204
+  },
+  {
+    "topology": "7:[(0, 1), (0, 4), (1, 2), (1, 5), (1, 6), (2, 3), (3, 4), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 4,
+    "best_parent_distance_m": 0.3631865,
+    "best_offspring_distance_m": 0.3969445
+  },
+  {
+    "topology": "7:[(0, 1), (0, 4), (1, 4), (1, 5), (1, 6), (2, 3), (2, 5), (2, 6), (3, 4)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 6,
+    "best_parent_distance_m": -0.17810757,
+    "best_offspring_distance_m": -0.030656403
+  },
+  {
+    "topology": "7:[(0, 1), (0, 5), (0, 6), (1, 2), (1, 4), (2, 6), (3, 4), (3, 5)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 20.48857,
+    "best_offspring_distance_m": 16.503765
+  },
+  {
+    "topology": "7:[(0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (1, 2), (1, 5), (2, 3), (2, 4), (2, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 878,
+    "viable": 878,
+    "improved_on_parent": 18,
+    "best_parent_distance_m": 16.933598,
+    "best_offspring_distance_m": 17.040897
+  },
+  {
+    "topology": "7:[(0, 2), (0, 3), (0, 6), (1, 2), (1, 4), (1, 5), (1, 6), (2, 3), (2, 4), (2, 5), (3, 4), (3, 5)]",
+    "nodes": 7,
+    "muscles": 12,
+    "evaluations": 1229,
+    "viable": 1229,
+    "improved_on_parent": 446,
+    "best_parent_distance_m": 1.2259775,
+    "best_offspring_distance_m": 7.167336
+  },
+  {
+    "topology": "7:[(0, 2), (0, 3), (0, 6), (1, 3), (1, 4), (1, 6), (2, 4), (3, 5), (4, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 12,
+    "viable": 12,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 40.22782,
+    "best_offspring_distance_m": 24.813152
+  },
+  {
+    "topology": "7:[(0, 2), (0, 3), (0, 6), (1, 3), (1, 4), (2, 4), (3, 5), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 61,
+    "viable": 61,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 66.97749,
+    "best_offspring_distance_m": 32.35965
+  },
+  {
+    "topology": "7:[(0, 2), (0, 3), (1, 3), (1, 4), (1, 6), (2, 4), (2, 6), (3, 5), (4, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 10,
+    "evaluations": 17,
+    "viable": 17,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 48.34946,
+    "best_offspring_distance_m": 18.644001
+  },
+  {
+    "topology": "7:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (3, 5), (3, 6), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 607,
+    "viable": 607,
+    "improved_on_parent": 7,
+    "best_parent_distance_m": 57.57029,
+    "best_offspring_distance_m": 66.97226
+  },
+  {
+    "topology": "7:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (3, 5), (4, 6), (5, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 90,
+    "viable": 90,
+    "improved_on_parent": 5,
+    "best_parent_distance_m": 62.57035,
+    "best_offspring_distance_m": 91.65495
+  },
+  {
+    "topology": "7:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (3, 6), (4, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 106,
+    "viable": 106,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 52.80442,
+    "best_offspring_distance_m": 87.42864
+  },
+  {
+    "topology": "7:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 6), (3, 5), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 282,
+    "viable": 282,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 67.65134,
+    "best_offspring_distance_m": 20.81098
+  },
+  {
+    "topology": "7:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 5), (4, 5), (4, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 75,
+    "viable": 75,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 63.723053,
+    "best_offspring_distance_m": 90.63958
+  },
+  {
+    "topology": "7:[(0, 2), (0, 3), (1, 4), (1, 6), (2, 4), (3, 5), (3, 6), (4, 5)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 327,
+    "viable": 327,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 58.178825,
+    "best_offspring_distance_m": 67.19446
+  },
+  {
+    "topology": "7:[(0, 2), (0, 4), (0, 5), (0, 6), (1, 2), (1, 3), (1, 4), (1, 6), (3, 5)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 7,
+    "best_parent_distance_m": -3.1577241,
+    "best_offspring_distance_m": 4.96417
+  },
+  {
+    "topology": "7:[(0, 2), (0, 5), (1, 2), (1, 3), (2, 4), (2, 6), (3, 4), (3, 5), (3, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 120,
+    "viable": 120,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 36.662163,
+    "best_offspring_distance_m": 60.819862
+  },
+  {
+    "topology": "7:[(0, 2), (0, 5), (1, 2), (1, 3), (2, 4), (2, 6), (3, 4), (3, 5), (5, 6)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 109,
+    "viable": 109,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 35.03898,
+    "best_offspring_distance_m": 46.672527
+  },
+  {
+    "topology": "7:[(0, 2), (0, 5), (1, 2), (1, 3), (2, 4), (3, 5), (3, 6), (4, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 32,
+    "viable": 32,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 57.182617,
+    "best_offspring_distance_m": 57.182617
+  },
+  {
+    "topology": "7:[(0, 2), (0, 5), (1, 2), (1, 6), (2, 4), (3, 4), (3, 5), (3, 6)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 25,
+    "viable": 25,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 56.667107,
+    "best_offspring_distance_m": 33.948463
+  },
+  {
+    "topology": "7:[(0, 2), (0, 6), (1, 3), (1, 4), (2, 4), (3, 5), (3, 6), (4, 5)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 187,
+    "viable": 187,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 85.83461,
+    "best_offspring_distance_m": 85.83461
+  },
+  {
+    "topology": "7:[(0, 3), (0, 4), (0, 5), (0, 6), (1, 2), (1, 3), (1, 5), (1, 6), (2, 4)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 13,
+    "viable": 13,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 13.207492,
+    "best_offspring_distance_m": 8.927812
+  },
+  {
+    "topology": "7:[(0, 3), (0, 4), (0, 6), (1, 2), (1, 5), (2, 3), (2, 6), (4, 5)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 0.29541454,
+    "best_offspring_distance_m": 0.3917489
+  },
+  {
+    "topology": "7:[(0, 4), (0, 6), (1, 2), (1, 4), (1, 5), (1, 6), (2, 3), (3, 4), (4, 5)]",
+    "nodes": 7,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 0.035556436,
+    "best_offspring_distance_m": 0.04077993
+  },
+  {
+    "topology": "7:[(0, 5), (0, 6), (1, 2), (1, 3), (2, 4), (2, 6), (3, 4), (3, 5)]",
+    "nodes": 7,
+    "muscles": 8,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 15.551596,
+    "best_offspring_distance_m": 15.551596
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (2, 7), (3, 7), (4, 7), (5, 7), (6, 7)]",
+    "nodes": 8,
+    "muscles": 17,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 37.57984,
+    "best_offspring_distance_m": 31.521376
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (1, 2), (1, 7), (2, 3), (2, 4), (2, 5), (2, 6), (3, 7), (4, 7), (5, 7), (6, 7)]",
+    "nodes": 8,
+    "muscles": 17,
+    "evaluations": 130,
+    "viable": 130,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 14.026592,
+    "best_offspring_distance_m": 9.305244
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 7), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (6, 7)]",
+    "nodes": 8,
+    "muscles": 12,
+    "evaluations": 111,
+    "viable": 111,
+    "improved_on_parent": 8,
+    "best_parent_distance_m": 44.446472,
+    "best_offspring_distance_m": 52.410408
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 6), (1, 2), (1, 4), (1, 5), (3, 7), (5, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 15,
+    "viable": 15,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 46.279556,
+    "best_offspring_distance_m": 46.279556
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 6), (1, 2), (2, 3), (2, 5), (4, 5), (5, 7), (6, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 2.6743786,
+    "best_offspring_distance_m": 2.1499076
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 6), (1, 7), (3, 6), (4, 5), (5, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 41.107628,
+    "best_offspring_distance_m": 18.300127
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 3), (0, 4), (1, 3), (1, 5), (1, 6), (1, 7), (2, 6), (2, 7), (4, 5)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 207,
+    "viable": 207,
+    "improved_on_parent": 24,
+    "best_parent_distance_m": 44.693546,
+    "best_offspring_distance_m": 44.693546
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 3), (0, 5), (0, 6), (1, 2), (1, 4), (1, 7), (3, 4), (3, 7), (4, 5), (4, 6), (5, 7), (6, 7)]",
+    "nodes": 8,
+    "muscles": 14,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 31.748898,
+    "best_offspring_distance_m": 29.580149
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 3), (0, 5), (1, 2), (1, 4), (1, 6), (1, 7), (3, 4), (3, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 35,
+    "viable": 35,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 63.018227,
+    "best_offspring_distance_m": 58.186604
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 3), (0, 6), (1, 2), (1, 3), (1, 5), (4, 5), (4, 6), (5, 7), (6, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 13,
+    "viable": 13,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 40.2228,
+    "best_offspring_distance_m": 30.95685
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 3), (0, 7), (1, 2), (1, 4), (1, 5), (1, 6), (3, 4), (3, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 10,
+    "viable": 10,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 26.963203,
+    "best_offspring_distance_m": 38.973957
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 3), (0, 7), (1, 2), (1, 4), (1, 6), (3, 4), (5, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 72.32473,
+    "best_offspring_distance_m": 67.41608
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 3), (0, 7), (1, 3), (1, 5), (1, 6), (2, 6), (4, 5), (4, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 45.537582,
+    "best_offspring_distance_m": 33.592163
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 4), (0, 5), (0, 6), (0, 7), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (3, 7)]",
+    "nodes": 8,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 5,
+    "best_parent_distance_m": 2.5992885,
+    "best_offspring_distance_m": 21.026241
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 4), (0, 5), (0, 6), (0, 7), (1, 2), (1, 3), (1, 4), (1, 6), (1, 7), (3, 5)]",
+    "nodes": 8,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 23.651005,
+    "best_offspring_distance_m": 23.480585
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 4), (0, 5), (1, 4), (1, 6), (1, 7), (2, 7), (3, 5), (3, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 17.254932,
+    "best_offspring_distance_m": 11.753872
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 5), (0, 7), (1, 2), (1, 4), (1, 6), (3, 4), (3, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 39,
+    "viable": 39,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 65.10917,
+    "best_offspring_distance_m": 65.10917
+  },
+  {
+    "topology": "8:[(0, 1), (0, 2), (0, 5), (0, 7), (1, 2), (1, 4), (1, 6), (3, 5), (3, 6), (4, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 44.55163,
+    "best_offspring_distance_m": 44.55163
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 5), (0, 7), (1, 2), (1, 3), (2, 4), (2, 6), (2, 7), (3, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 12,
+    "evaluations": 214,
+    "viable": 214,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 67.86238,
+    "best_offspring_distance_m": 63.569267
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 5), (0, 7), (1, 2), (1, 3), (2, 4), (2, 6), (2, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 24,
+    "viable": 24,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 56.674736,
+    "best_offspring_distance_m": 56.674736
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 5), (0, 7), (1, 2), (1, 3), (2, 4), (2, 6), (5, 6), (6, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 52.5347,
+    "best_offspring_distance_m": 45.805042
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (2, 4), (2, 6), (2, 7), (5, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 67.86033,
+    "best_offspring_distance_m": 67.86033
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (2, 4), (2, 6), (5, 7), (6, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 39,
+    "viable": 39,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 63.7646,
+    "best_offspring_distance_m": 67.03373
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (2, 4), (2, 7), (5, 6), (6, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 66,
+    "viable": 66,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 67.33977,
+    "best_offspring_distance_m": 66.522865
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (2, 6), (2, 7), (4, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 37,
+    "viable": 37,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 63.532536,
+    "best_offspring_distance_m": 62.96076
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 7), (2, 4), (2, 6), (3, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 166,
+    "viable": 166,
+    "improved_on_parent": 4,
+    "best_parent_distance_m": 68.69758,
+    "best_offspring_distance_m": 68.69758
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 3), (1, 7), (2, 4), (2, 5), (2, 6), (6, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 15,
+    "viable": 15,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 45.463844,
+    "best_offspring_distance_m": 41.068417
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 3), (1, 7), (2, 4), (2, 6), (2, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 404,
+    "viable": 404,
+    "improved_on_parent": 4,
+    "best_parent_distance_m": 57.83669,
+    "best_offspring_distance_m": 57.777267
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 6), (0, 7), (1, 2), (1, 3), (1, 5), (1, 7), (2, 6), (4, 5)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 26.375898,
+    "best_offspring_distance_m": 26.375898
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 6), (0, 7), (1, 2), (1, 3), (2, 4), (2, 5), (2, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 9,
+    "viable": 9,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 21.874878,
+    "best_offspring_distance_m": 7.0409045
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 6), (0, 7), (1, 2), (1, 3), (2, 5), (4, 5), (5, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 237,
+    "viable": 237,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 71.20196,
+    "best_offspring_distance_m": 71.20196
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 6), (0, 7), (1, 2), (1, 5), (2, 4), (3, 5), (5, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 11,
+    "viable": 11,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 35.365147,
+    "best_offspring_distance_m": 37.95662
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (1, 5), (1, 7), (2, 6), (4, 5), (6, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 27.358154,
+    "best_offspring_distance_m": 26.021194
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (2, 4), (2, 7), (5, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 31,
+    "viable": 31,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 51.3945,
+    "best_offspring_distance_m": 39.229385
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (2, 5), (2, 7), (4, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 80,
+    "viable": 80,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 65.48668,
+    "best_offspring_distance_m": 42.16323
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (2, 5), (4, 5), (5, 7), (6, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 24,
+    "viable": 24,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 56.979717,
+    "best_offspring_distance_m": 53.233723
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (2, 5), (4, 7), (5, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 616,
+    "viable": 616,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 53.87705,
+    "best_offspring_distance_m": 63.59953
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (2, 7), (4, 5), (5, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 19,
+    "viable": 19,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 53.188454,
+    "best_offspring_distance_m": 53.188454
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 3), (1, 5), (1, 7), (2, 6), (2, 7), (4, 5)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 18.632912,
+    "best_offspring_distance_m": 10.913297
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 5), (1, 7), (2, 4), (2, 7), (3, 5), (5, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 53,
+    "viable": 53,
+    "improved_on_parent": 11,
+    "best_parent_distance_m": 31.546509,
+    "best_offspring_distance_m": 25.239218
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 7), (1, 2), (1, 3), (2, 4), (2, 5), (5, 6), (6, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 175,
+    "viable": 175,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 68.60855,
+    "best_offspring_distance_m": 68.60855
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 7), (1, 2), (1, 3), (2, 4), (2, 6), (5, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 243,
+    "viable": 243,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 66.84229,
+    "best_offspring_distance_m": 58.114334
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 7), (1, 2), (1, 3), (2, 5), (4, 5), (5, 6), (6, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 43,
+    "viable": 43,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 47.79788,
+    "best_offspring_distance_m": 28.462654
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 7), (1, 2), (1, 6), (2, 4), (2, 7), (3, 5), (5, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 15,
+    "viable": 15,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 45.367264,
+    "best_offspring_distance_m": 28.223074
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 7), (1, 2), (1, 6), (2, 5), (3, 6), (4, 5), (5, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 262,
+    "viable": 262,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 47.339947,
+    "best_offspring_distance_m": 46.51251
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 7), (1, 2), (1, 6), (2, 5), (3, 6), (4, 5), (6, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 44,
+    "viable": 44,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 18.490831,
+    "best_offspring_distance_m": 8.335864
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (0, 7), (1, 3), (1, 6), (2, 4), (2, 5), (2, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 17,
+    "viable": 17,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 50.000294,
+    "best_offspring_distance_m": 31.164293
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 3), (2, 6), (4, 7), (5, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 4,
+    "viable": 4,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 45.096718,
+    "best_offspring_distance_m": 2.2722437
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 5), (1, 7), (2, 6), (3, 5), (3, 7), (4, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 17,
+    "viable": 17,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 53.113205,
+    "best_offspring_distance_m": 51.905937
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (1, 2), (1, 5), (2, 6), (3, 5), (4, 7), (6, 7)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 17,
+    "viable": 17,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 52.755016,
+    "best_offspring_distance_m": 47.622913
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (1, 3), (1, 6), (2, 5), (2, 6), (4, 7), (5, 7)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 15,
+    "viable": 15,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 45.490654,
+    "best_offspring_distance_m": 34.18701
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (1, 5), (1, 7), (2, 4), (2, 6), (3, 5), (6, 7)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 11,
+    "viable": 11,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 44.495274,
+    "best_offspring_distance_m": 25.588322
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (1, 6), (1, 7), (2, 4), (2, 6), (3, 5), (5, 7)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 49.597458,
+    "best_offspring_distance_m": 49.597458
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 4), (1, 6), (1, 7), (2, 5), (2, 6), (3, 7), (4, 5)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 12,
+    "viable": 12,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 28.890972,
+    "best_offspring_distance_m": 15.850171
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 5), (0, 6), (1, 2), (1, 4), (1, 5), (1, 7), (2, 6), (3, 4), (6, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 9,
+    "viable": 9,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 25.90071,
+    "best_offspring_distance_m": 0.72554064
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 5), (0, 7), (1, 2), (1, 3), (2, 4), (2, 6), (4, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 10,
+    "viable": 10,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 40.74862,
+    "best_offspring_distance_m": 40.74862
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 5), (0, 7), (1, 2), (1, 4), (1, 6), (2, 7), (3, 4), (5, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 39,
+    "viable": 39,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 77.5615,
+    "best_offspring_distance_m": 77.5615
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 6), (0, 7), (1, 2), (1, 4), (1, 5), (2, 6), (3, 4), (5, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 9,
+    "viable": 9,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 26.046436,
+    "best_offspring_distance_m": 22.834959
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (0, 6), (1, 2), (2, 7), (3, 5), (4, 5), (4, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 25,
+    "viable": 25,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 7.603886,
+    "best_offspring_distance_m": 6.2558093
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (1, 2), (1, 6), (1, 7), (2, 4), (3, 5), (3, 6), (3, 7), (4, 5)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 23,
+    "viable": 23,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 15.41834,
+    "best_offspring_distance_m": 16.341967
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (1, 2), (1, 6), (2, 4), (3, 6), (3, 7), (4, 5), (5, 7)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 103,
+    "viable": 103,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 12.106656,
+    "best_offspring_distance_m": 13.218892
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (1, 2), (1, 7), (2, 6), (3, 5), (3, 7), (4, 5), (4, 6)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 18,
+    "viable": 18,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 10.516014,
+    "best_offspring_distance_m": 9.889547
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (1, 2), (2, 6), (3, 5), (4, 5), (4, 6), (5, 7), (6, 7)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 398,
+    "viable": 398,
+    "improved_on_parent": 82,
+    "best_parent_distance_m": 6.735446,
+    "best_offspring_distance_m": 12.087198
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (1, 2), (2, 6), (3, 5), (4, 6), (4, 7), (5, 7)]",
+    "nodes": 8,
+    "muscles": 8,
+    "evaluations": 50,
+    "viable": 50,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 7.1962686,
+    "best_offspring_distance_m": 12.388324
+  },
+  {
+    "topology": "8:[(0, 1), (0, 3), (1, 6), (1, 7), (2, 4), (2, 7), (3, 5), (3, 6), (4, 5)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 9.116786,
+    "best_offspring_distance_m": 12.400868
+  },
+  {
+    "topology": "8:[(0, 1), (0, 4), (0, 5), (0, 6), (1, 2), (1, 3), (1, 4), (1, 7), (2, 6), (3, 5), (4, 7), (5, 7), (6, 7)]",
+    "nodes": 8,
+    "muscles": 13,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 21.042665,
+    "best_offspring_distance_m": 21.042665
+  },
+  {
+    "topology": "8:[(0, 1), (0, 4), (0, 5), (0, 6), (1, 2), (1, 3), (1, 4), (1, 7), (2, 6), (3, 5), (5, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 23.108892,
+    "best_offspring_distance_m": -1.8343621
+  },
+  {
+    "topology": "8:[(0, 1), (0, 4), (0, 5), (0, 7), (1, 2), (1, 3), (2, 4), (2, 6), (3, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 26.556662,
+    "best_offspring_distance_m": 24.611137
+  },
+  {
+    "topology": "8:[(0, 1), (0, 4), (0, 6), (0, 7), (1, 2), (1, 3), (1, 4), (2, 6), (3, 5), (5, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 3.2954025,
+    "best_offspring_distance_m": 24.107746
+  },
+  {
+    "topology": "8:[(0, 1), (0, 4), (0, 6), (0, 7), (1, 2), (1, 5), (2, 4), (3, 5), (3, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 34.46477,
+    "best_offspring_distance_m": 31.096931
+  },
+  {
+    "topology": "8:[(0, 1), (0, 4), (0, 6), (1, 2), (1, 4), (1, 5), (2, 3), (2, 7), (3, 4), (3, 5), (4, 7), (5, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 13,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 6,
+    "best_parent_distance_m": 0.07534227,
+    "best_offspring_distance_m": 0.64295876
+  },
+  {
+    "topology": "8:[(0, 1), (0, 4), (1, 2), (1, 4), (1, 5), (2, 3), (3, 5), (3, 7), (4, 6), (6, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 4,
+    "best_parent_distance_m": 0.0028130482,
+    "best_offspring_distance_m": 0.08943154
+  },
+  {
+    "topology": "8:[(0, 1), (0, 4), (1, 2), (1, 4), (1, 6), (2, 3), (3, 4), (4, 7), (5, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 0.019610591,
+    "best_offspring_distance_m": 0.19005214
+  },
+  {
+    "topology": "8:[(0, 1), (0, 4), (1, 4), (1, 5), (1, 6), (2, 3), (2, 5), (2, 6), (2, 7), (3, 4), (4, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 4,
+    "best_parent_distance_m": -0.043434057,
+    "best_offspring_distance_m": 0.09509436
+  },
+  {
+    "topology": "8:[(0, 1), (0, 7), (1, 2), (1, 6), (2, 4), (3, 5), (3, 6), (3, 7), (4, 5)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 11,
+    "viable": 11,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 11.764213,
+    "best_offspring_distance_m": 5.8341427
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (1, 2), (1, 5), (1, 7), (2, 3), (2, 4), (2, 6)]",
+    "nodes": 8,
+    "muscles": 12,
+    "evaluations": 231,
+    "viable": 231,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 15.352931,
+    "best_offspring_distance_m": 12.407822
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (1, 2), (1, 5), (2, 3), (2, 4), (2, 6), (2, 7)]",
+    "nodes": 8,
+    "muscles": 12,
+    "evaluations": 1354,
+    "viable": 1354,
+    "improved_on_parent": 23,
+    "best_parent_distance_m": 20.759922,
+    "best_offspring_distance_m": 20.759922
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (1, 2), (1, 5), (2, 3), (2, 6), (2, 7), (4, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 48,
+    "viable": 48,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 13.681857,
+    "best_offspring_distance_m": 13.681857
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (1, 2), (1, 5), (2, 4), (2, 6), (2, 7), (3, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 49,
+    "viable": 49,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 8.441214,
+    "best_offspring_distance_m": 7.273445
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (1, 5), (1, 7), (2, 3), (2, 4), (2, 6), (2, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 43,
+    "viable": 43,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 14.132708,
+    "best_offspring_distance_m": 5.3194413
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (0, 4), (0, 5), (0, 7), (1, 2), (1, 5), (2, 3), (2, 4), (2, 6), (6, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 9.624569,
+    "best_offspring_distance_m": 9.0433655
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (0, 5), (0, 6), (0, 7), (1, 2), (1, 5), (2, 3), (2, 4), (2, 6), (4, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 18,
+    "viable": 18,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 14.613945,
+    "best_offspring_distance_m": 14.613945
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 3), (1, 4), (1, 7), (2, 4), (2, 7), (3, 5), (3, 6), (4, 5), (4, 6), (5, 7), (6, 7)]",
+    "nodes": 8,
+    "muscles": 13,
+    "evaluations": 10,
+    "viable": 10,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 25.325287,
+    "best_offspring_distance_m": 19.081512
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 3), (1, 4), (1, 7), (2, 4), (2, 7), (3, 6), (4, 5), (5, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 10,
+    "viable": 10,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 33.774097,
+    "best_offspring_distance_m": 10.107017
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (2, 7), (3, 5), (3, 6), (3, 7), (4, 5), (4, 6)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 10,
+    "viable": 10,
+    "improved_on_parent": 9,
+    "best_parent_distance_m": -8.224803,
+    "best_offspring_distance_m": 15.810842
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (2, 7), (3, 6), (3, 7), (4, 5), (5, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 256,
+    "viable": 256,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 85.231094,
+    "best_offspring_distance_m": 85.231094
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (3, 5), (3, 6), (3, 7), (4, 5), (4, 6), (4, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 49.880318,
+    "best_offspring_distance_m": 36.49006
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (3, 5), (3, 6), (4, 5), (4, 7), (6, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 36.478233,
+    "best_offspring_distance_m": 10.538211
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (3, 5), (3, 7), (4, 5), (4, 6), (6, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 19,
+    "viable": 19,
+    "improved_on_parent": 5,
+    "best_parent_distance_m": 18.632723,
+    "best_offspring_distance_m": 41.663956
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (3, 5), (3, 7), (4, 6), (4, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 49.260895,
+    "best_offspring_distance_m": 49.260895
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (3, 5), (4, 6), (5, 7), (6, 7)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 26,
+    "viable": 26,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 21.329609,
+    "best_offspring_distance_m": 11.552963
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (3, 6), (4, 5), (4, 7), (5, 6), (6, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 10,
+    "viable": 10,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 39.067837,
+    "best_offspring_distance_m": 34.91896
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 7), (4, 5), (4, 6), (5, 7)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 674,
+    "viable": 674,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 90.63958,
+    "best_offspring_distance_m": 85.37672
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 3), (1, 7), (2, 4), (3, 5), (3, 6), (4, 5), (4, 6), (4, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 66.97226,
+    "best_offspring_distance_m": 64.08004
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 3), (1, 7), (2, 4), (3, 5), (4, 6), (4, 7), (5, 6)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 682,
+    "viable": 682,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 98.27979,
+    "best_offspring_distance_m": 98.27979
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 4), (1, 6), (1, 7), (2, 4), (2, 7), (3, 5), (3, 6), (4, 5), (5, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 15,
+    "viable": 15,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 46.32485,
+    "best_offspring_distance_m": 34.37548
+  },
+  {
+    "topology": "8:[(0, 2), (0, 3), (1, 4), (1, 6), (2, 4), (3, 6), (3, 7), (4, 5), (5, 7)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 39,
+    "viable": 39,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 67.19446,
+    "best_offspring_distance_m": 61.854595
+  },
+  {
+    "topology": "8:[(0, 2), (0, 5), (1, 2), (1, 3), (2, 7), (3, 5), (3, 6), (4, 6), (4, 7)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 1224,
+    "viable": 1224,
+    "improved_on_parent": 39,
+    "best_parent_distance_m": 19.41047,
+    "best_offspring_distance_m": 31.107262
+  },
+  {
+    "topology": "8:[(0, 2), (0, 5), (1, 2), (1, 7), (2, 4), (2, 6), (3, 4), (3, 5), (3, 6), (3, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 29,
+    "viable": 29,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 60.819862,
+    "best_offspring_distance_m": 41.450603
+  },
+  {
+    "topology": "8:[(0, 2), (0, 6), (1, 3), (1, 4), (1, 7), (2, 4), (2, 7), (3, 5), (3, 6), (4, 5), (5, 7)]",
+    "nodes": 8,
+    "muscles": 11,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 51.943474,
+    "best_offspring_distance_m": 31.225567
+  },
+  {
+    "topology": "8:[(0, 2), (0, 6), (1, 3), (1, 4), (2, 4), (3, 5), (3, 6), (3, 7), (4, 5), (4, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 13,
+    "viable": 13,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 43.732815,
+    "best_offspring_distance_m": 16.607439
+  },
+  {
+    "topology": "8:[(0, 2), (0, 6), (1, 4), (1, 7), (2, 4), (3, 5), (3, 6), (3, 7), (4, 5)]",
+    "nodes": 8,
+    "muscles": 9,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 71.24858,
+    "best_offspring_distance_m": 57.849335
+  },
+  {
+    "topology": "8:[(0, 4), (0, 6), (1, 2), (1, 4), (1, 6), (1, 7), (2, 3), (3, 4), (4, 5), (5, 7)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 6,
+    "best_parent_distance_m": -0.012826717,
+    "best_offspring_distance_m": 0.19962163
+  },
+  {
+    "topology": "8:[(0, 4), (0, 7), (1, 2), (1, 5), (1, 6), (1, 7), (2, 3), (3, 4), (4, 5), (4, 6)]",
+    "nodes": 8,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 4,
+    "best_parent_distance_m": 0.21482164,
+    "best_offspring_distance_m": 0.47437647
+  },
+  {
+    "topology": "9:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (0, 8), (1, 2), (1, 7), (2, 3), (2, 4), (2, 5), (2, 6), (2, 8), (3, 7), (4, 7), (5, 7), (6, 7), (7, 8)]",
+    "nodes": 9,
+    "muscles": 20,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 2.0027647,
+    "best_offspring_distance_m": 2.0027647
+  },
+  {
+    "topology": "9:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 7), (0, 8), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 8), (6, 7)]",
+    "nodes": 9,
+    "muscles": 14,
+    "evaluations": 24,
+    "viable": 24,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 21.586138,
+    "best_offspring_distance_m": 25.83675
+  },
+  {
+    "topology": "9:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 7), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 8), (6, 7), (7, 8)]",
+    "nodes": 9,
+    "muscles": 14,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 40.70785,
+    "best_offspring_distance_m": 40.346783
+  },
+  {
+    "topology": "9:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 7), (1, 2), (1, 3), (1, 4), (1, 5), (1, 8), (6, 7), (6, 8)]",
+    "nodes": 9,
+    "muscles": 13,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 18.965256,
+    "best_offspring_distance_m": 18.965256
+  },
+  {
+    "topology": "9:[(0, 1), (0, 2), (0, 3), (0, 4), (0, 8), (1, 3), (1, 5), (1, 6), (1, 7), (2, 6), (2, 7), (3, 8), (4, 5), (5, 8), (6, 8), (7, 8)]",
+    "nodes": 9,
+    "muscles": 16,
+    "evaluations": 9,
+    "viable": 9,
+    "improved_on_parent": 6,
+    "best_parent_distance_m": 0.20033747,
+    "best_offspring_distance_m": 3.1435854
+  },
+  {
+    "topology": "9:[(0, 1), (0, 2), (0, 3), (0, 5), (0, 6), (0, 8), (1, 2), (1, 4), (1, 7), (1, 8), (3, 4), (3, 7), (4, 5), (4, 6), (5, 7), (6, 7)]",
+    "nodes": 9,
+    "muscles": 16,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 14.179184,
+    "best_offspring_distance_m": 13.6016245
+  },
+  {
+    "topology": "9:[(0, 1), (0, 2), (0, 3), (0, 5), (0, 6), (0, 8), (1, 2), (1, 4), (1, 7), (3, 4), (3, 7), (4, 5), (4, 6), (4, 8), (5, 7), (6, 7), (7, 8)]",
+    "nodes": 9,
+    "muscles": 17,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 8.384056,
+    "best_offspring_distance_m": 8.384056
+  },
+  {
+    "topology": "9:[(0, 1), (0, 2), (0, 3), (0, 5), (0, 6), (1, 2), (1, 4), (1, 7), (3, 4), (3, 7), (4, 5), (4, 6), (5, 8), (6, 7), (7, 8)]",
+    "nodes": 9,
+    "muscles": 15,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 29.580149,
+    "best_offspring_distance_m": 40.534138
+  },
+  {
+    "topology": "9:[(0, 1), (0, 2), (0, 3), (0, 7), (1, 2), (1, 4), (1, 6), (1, 8), (3, 4), (3, 6), (5, 7), (5, 8)]",
+    "nodes": 9,
+    "muscles": 12,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 38.973957,
+    "best_offspring_distance_m": 25.678635
+  },
+  {
+    "topology": "9:[(0, 1), (0, 2), (0, 3), (0, 7), (1, 3), (1, 5), (1, 6), (1, 8), (2, 6), (4, 5), (4, 7), (4, 8)]",
+    "nodes": 9,
+    "muscles": 12,
+    "evaluations": 9,
+    "viable": 9,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 31.416239,
+    "best_offspring_distance_m": 17.85048
+  },
+  {
+    "topology": "9:[(0, 1), (0, 2), (0, 3), (0, 7), (1, 3), (1, 5), (1, 6), (2, 6), (4, 5), (4, 7), (5, 8), (7, 8)]",
+    "nodes": 9,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 30.003456,
+    "best_offspring_distance_m": 27.491125
+  },
+  {
+    "topology": "9:[(0, 1), (0, 2), (0, 4), (0, 5), (0, 6), (0, 7), (0, 8), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 8), (3, 7)]",
+    "nodes": 9,
+    "muscles": 14,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 21.026241,
+    "best_offspring_distance_m": 14.012423
+  },
+  {
+    "topology": "9:[(0, 1), (0, 2), (0, 4), (0, 5), (0, 6), (0, 7), (0, 8), (1, 2), (1, 3), (1, 4), (1, 6), (1, 7), (1, 8), (3, 5)]",
+    "nodes": 9,
+    "muscles": 14,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 23.480585,
+    "best_offspring_distance_m": 15.980935
+  },
+  {
+    "topology": "9:[(0, 1), (0, 2), (0, 4), (0, 5), (0, 8), (1, 4), (1, 6), (1, 7), (2, 7), (3, 5), (3, 6), (7, 8)]",
+    "nodes": 9,
+    "muscles": 12,
+    "evaluations": 93,
+    "viable": 93,
+    "improved_on_parent": 12,
+    "best_parent_distance_m": 11.753872,
+    "best_offspring_distance_m": 25.845661
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 5), (0, 7), (0, 8), (1, 2), (1, 3), (2, 4), (2, 6), (2, 7), (2, 8), (3, 7), (5, 6)]",
+    "nodes": 9,
+    "muscles": 14,
+    "evaluations": 27,
+    "viable": 27,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 60.1784,
+    "best_offspring_distance_m": 22.079176
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 5), (0, 7), (1, 2), (1, 3), (2, 4), (2, 6), (2, 7), (3, 8), (5, 6), (7, 8)]",
+    "nodes": 9,
+    "muscles": 13,
+    "evaluations": 32,
+    "viable": 32,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 54.26376,
+    "best_offspring_distance_m": 50.06117
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 5), (0, 7), (1, 2), (1, 3), (2, 6), (2, 7), (2, 8), (3, 7), (4, 8), (5, 6)]",
+    "nodes": 9,
+    "muscles": 13,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 63.569267,
+    "best_offspring_distance_m": 48.05787
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 5), (0, 8), (1, 2), (1, 7), (2, 4), (2, 6), (3, 7), (5, 6), (6, 8)]",
+    "nodes": 9,
+    "muscles": 12,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 11,
+    "best_parent_distance_m": -14.129146,
+    "best_offspring_distance_m": 17.698925
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 5), (0, 8), (1, 3), (1, 7), (1, 8), (2, 4), (2, 6), (2, 7), (5, 6)]",
+    "nodes": 9,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 29.970066,
+    "best_offspring_distance_m": 26.11043
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 5), (0, 8), (1, 3), (1, 7), (2, 4), (2, 6), (2, 7), (5, 6), (6, 8)]",
+    "nodes": 9,
+    "muscles": 12,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 46.56238,
+    "best_offspring_distance_m": 27.273972
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (2, 4), (2, 7), (5, 8), (6, 7), (6, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 23,
+    "viable": 23,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 62.043797,
+    "best_offspring_distance_m": 60.958164
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (2, 6), (2, 7), (4, 8), (5, 6), (7, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 23,
+    "viable": 23,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 55.08448,
+    "best_offspring_distance_m": 54.5424
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (2, 6), (2, 8), (4, 7), (5, 6), (7, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 24,
+    "viable": 24,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 56.731384,
+    "best_offspring_distance_m": 54.12319
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 3), (1, 7), (2, 4), (2, 6), (2, 7), (5, 8), (6, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 49.102577,
+    "best_offspring_distance_m": 52.022976
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 3), (1, 7), (2, 6), (2, 7), (2, 8), (4, 8), (5, 6)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 46.584183,
+    "best_offspring_distance_m": 48.392452
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 3), (1, 8), (2, 4), (2, 6), (2, 7), (5, 6), (7, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 15,
+    "viable": 15,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 51.37858,
+    "best_offspring_distance_m": 48.882977
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 5), (1, 3), (1, 8), (2, 4), (2, 7), (2, 8), (5, 6), (6, 7)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 45.337303,
+    "best_offspring_distance_m": 39.250458
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 6), (0, 7), (0, 8), (1, 2), (1, 5), (2, 4), (3, 5), (5, 6), (5, 7), (5, 8)]",
+    "nodes": 9,
+    "muscles": 13,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 37.95662,
+    "best_offspring_distance_m": 28.370798
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 6), (0, 7), (1, 2), (1, 3), (2, 5), (2, 7), (2, 8), (4, 8), (5, 6)]",
+    "nodes": 9,
+    "muscles": 12,
+    "evaluations": 10,
+    "viable": 10,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 5.2761936,
+    "best_offspring_distance_m": 6.727848
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 6), (0, 7), (1, 2), (1, 8), (2, 5), (3, 8), (4, 5), (5, 6), (5, 7)]",
+    "nodes": 9,
+    "muscles": 12,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 64.25205,
+    "best_offspring_distance_m": 64.25205
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 6), (0, 8), (1, 2), (1, 3), (1, 5), (1, 7), (1, 8), (2, 6), (4, 5), (6, 7)]",
+    "nodes": 9,
+    "muscles": 13,
+    "evaluations": 14,
+    "viable": 14,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 43.254745,
+    "best_offspring_distance_m": 43.254745
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (1, 5), (1, 7), (2, 6), (4, 5), (6, 8), (7, 8)]",
+    "nodes": 9,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 28.839033,
+    "best_offspring_distance_m": 28.839033
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 6), (1, 2), (1, 3), (1, 5), (1, 7), (2, 8), (4, 5), (6, 7), (6, 8)]",
+    "nodes": 9,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 24.878359,
+    "best_offspring_distance_m": 24.878359
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 7), (1, 2), (1, 3), (2, 4), (2, 8), (5, 6), (5, 8), (6, 7)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 24,
+    "viable": 24,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 58.538532,
+    "best_offspring_distance_m": 56.966816
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 7), (1, 2), (1, 3), (2, 5), (2, 8), (4, 8), (5, 6), (6, 7)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 31,
+    "viable": 31,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 61.904392,
+    "best_offspring_distance_m": 56.56106
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 8), (1, 2), (1, 3), (2, 4), (2, 6), (5, 7), (5, 8), (6, 7)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 20,
+    "viable": 20,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 53.264023,
+    "best_offspring_distance_m": 53.264023
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 4), (0, 8), (1, 3), (1, 7), (2, 4), (2, 6), (2, 7), (5, 6), (5, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 11,
+    "viable": 11,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 36.783985,
+    "best_offspring_distance_m": 61.634705
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 5), (0, 7), (1, 2), (1, 4), (1, 6), (2, 7), (3, 4), (5, 8), (6, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 65.9042,
+    "best_offspring_distance_m": 61.520638
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 5), (0, 7), (1, 2), (1, 4), (1, 8), (2, 7), (3, 4), (5, 6), (6, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 67.40872,
+    "best_offspring_distance_m": 66.75892
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (0, 8), (1, 2), (2, 6), (2, 8), (3, 5), (4, 5), (4, 6), (5, 7), (6, 7)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 3,
+    "viable": 3,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 7.1398163,
+    "best_offspring_distance_m": 0.19799238
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (1, 2), (2, 6), (3, 5), (4, 5), (4, 6), (5, 7), (5, 8), (6, 7), (6, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 367,
+    "viable": 367,
+    "improved_on_parent": 8,
+    "best_parent_distance_m": 9.210289,
+    "best_offspring_distance_m": 11.57269
+  },
+  {
+    "topology": "9:[(0, 1), (0, 3), (1, 2), (2, 6), (3, 5), (4, 6), (4, 7), (4, 8), (5, 7), (5, 8)]",
+    "nodes": 9,
+    "muscles": 10,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 6,
+    "best_parent_distance_m": 5.1476364,
+    "best_offspring_distance_m": 5.0462413
+  },
+  {
+    "topology": "9:[(0, 1), (0, 4), (0, 5), (0, 6), (0, 8), (1, 2), (1, 3), (1, 4), (1, 7), (2, 6), (2, 8), (3, 5), (3, 8), (4, 7), (4, 8), (5, 7), (6, 7), (7, 8)]",
+    "nodes": 9,
+    "muscles": 18,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 3,
+    "best_parent_distance_m": 6.3960457,
+    "best_offspring_distance_m": 10.519447
+  },
+  {
+    "topology": "9:[(0, 1), (0, 4), (0, 5), (0, 6), (0, 8), (1, 2), (1, 3), (1, 4), (1, 7), (2, 6), (2, 8), (3, 5), (4, 7), (5, 7), (6, 7), (7, 8)]",
+    "nodes": 9,
+    "muscles": 16,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 6,
+    "best_parent_distance_m": 3.9265115,
+    "best_offspring_distance_m": 5.331685
+  },
+  {
+    "topology": "9:[(0, 1), (0, 4), (0, 5), (0, 8), (1, 3), (1, 7), (2, 4), (2, 6), (2, 7), (3, 8), (5, 6)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 20,
+    "viable": 20,
+    "improved_on_parent": 5,
+    "best_parent_distance_m": 26.535288,
+    "best_offspring_distance_m": 54.70527
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (0, 8), (1, 2), (1, 5), (2, 3), (2, 4), (2, 6), (2, 7), (2, 8)]",
+    "nodes": 9,
+    "muscles": 14,
+    "evaluations": 34,
+    "viable": 34,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 14.81738,
+    "best_offspring_distance_m": 12.633955
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (1, 2), (1, 5), (2, 3), (2, 4), (2, 6), (2, 7), (2, 8), (5, 8)]",
+    "nodes": 9,
+    "muscles": 14,
+    "evaluations": 9,
+    "viable": 9,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 11.813578,
+    "best_offspring_distance_m": 9.099179
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (0, 4), (0, 5), (0, 7), (0, 8), (1, 2), (1, 5), (2, 3), (2, 4), (2, 6), (2, 7), (6, 8)]",
+    "nodes": 9,
+    "muscles": 13,
+    "evaluations": 35,
+    "viable": 35,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 14.253104,
+    "best_offspring_distance_m": 4.5802937
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (0, 8), (1, 3), (1, 4), (1, 8), (2, 4), (2, 7), (3, 6), (3, 7), (4, 5), (5, 6), (6, 8), (7, 8)]",
+    "nodes": 9,
+    "muscles": 14,
+    "evaluations": 9,
+    "viable": 9,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 10.445912,
+    "best_offspring_distance_m": 13.9131155
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (0, 8), (1, 3), (1, 7), (1, 8), (2, 4), (3, 5), (3, 6), (4, 5), (4, 6), (4, 7), (5, 8), (6, 8)]",
+    "nodes": 9,
+    "muscles": 14,
+    "evaluations": 44,
+    "viable": 44,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 50.42539,
+    "best_offspring_distance_m": 18.266525
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (3, 5), (3, 7), (4, 5), (4, 6), (4, 8), (6, 7), (7, 8)]",
+    "nodes": 9,
+    "muscles": 12,
+    "evaluations": 59,
+    "viable": 59,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 41.663956,
+    "best_offspring_distance_m": 34.622578
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (1, 3), (1, 4), (2, 4), (3, 5), (3, 7), (4, 5), (4, 8), (6, 7), (6, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 15,
+    "viable": 15,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 46.163364,
+    "best_offspring_distance_m": 46.163364
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (1, 3), (1, 6), (1, 8), (2, 4), (3, 7), (4, 5), (4, 6), (4, 8), (5, 7)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 136,
+    "viable": 136,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 61.986492,
+    "best_offspring_distance_m": 56.34005
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (2, 8), (3, 7), (3, 8), (4, 5), (4, 6), (5, 7)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 48.56017,
+    "best_offspring_distance_m": 17.252102
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (2, 8), (3, 7), (4, 5), (4, 6), (5, 7), (5, 8), (6, 8)]",
+    "nodes": 9,
+    "muscles": 12,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 20.16885,
+    "best_offspring_distance_m": 3.05333
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 7), (3, 8), (4, 5), (4, 6), (5, 7), (6, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 1835,
+    "viable": 1835,
+    "improved_on_parent": 15,
+    "best_parent_distance_m": 77.63987,
+    "best_offspring_distance_m": 94.81672
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (1, 3), (1, 6), (2, 4), (3, 7), (4, 5), (4, 6), (4, 8), (5, 7), (7, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 16,
+    "viable": 16,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 49.024677,
+    "best_offspring_distance_m": 49.85931
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (1, 3), (1, 7), (2, 4), (3, 5), (3, 8), (4, 6), (4, 7), (5, 6), (6, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 74.01959,
+    "best_offspring_distance_m": 63.367004
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (1, 3), (1, 7), (2, 4), (3, 5), (3, 8), (4, 6), (4, 7), (5, 6), (7, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 59,
+    "viable": 59,
+    "improved_on_parent": 2,
+    "best_parent_distance_m": 74.81335,
+    "best_offspring_distance_m": 55.03422
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (1, 3), (1, 7), (2, 4), (3, 5), (4, 7), (4, 8), (5, 6), (6, 8)]",
+    "nodes": 9,
+    "muscles": 10,
+    "evaluations": 1743,
+    "viable": 1743,
+    "improved_on_parent": 15,
+    "best_parent_distance_m": 67.116356,
+    "best_offspring_distance_m": 50.987885
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (1, 3), (1, 8), (2, 4), (3, 7), (4, 5), (4, 6), (5, 7), (6, 8)]",
+    "nodes": 9,
+    "muscles": 10,
+    "evaluations": 40,
+    "viable": 40,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 72.74341,
+    "best_offspring_distance_m": 62.10913
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (1, 4), (1, 6), (1, 8), (2, 4), (2, 8), (3, 6), (3, 7), (4, 5), (5, 7), (5, 8)]",
+    "nodes": 9,
+    "muscles": 12,
+    "evaluations": 17,
+    "viable": 17,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 51.696674,
+    "best_offspring_distance_m": 65.1404
+  },
+  {
+    "topology": "9:[(0, 2), (0, 3), (1, 4), (1, 8), (2, 4), (2, 7), (3, 6), (3, 7), (3, 8), (4, 5), (5, 6)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 24,
+    "viable": 24,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 56.728924,
+    "best_offspring_distance_m": 56.728924
+  },
+  {
+    "topology": "9:[(0, 2), (0, 8), (1, 3), (1, 7), (2, 4), (3, 5), (3, 6), (3, 8), (4, 5), (4, 6), (4, 7)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 13,
+    "viable": 13,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 43.198906,
+    "best_offspring_distance_m": 30.026676
+  },
+  {
+    "topology": "9:[(0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (0, 8), (1, 2), (1, 5), (2, 3), (2, 4), (2, 6), (2, 7), (2, 8)]",
+    "nodes": 9,
+    "muscles": 13,
+    "evaluations": 11,
+    "viable": 11,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 3.1247,
+    "best_offspring_distance_m": 2.448241
+  },
+  {
+    "topology": "9:[(0, 4), (0, 6), (1, 2), (1, 4), (1, 6), (1, 7), (2, 8), (3, 4), (3, 8), (4, 5), (5, 7)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 0,
+    "best_parent_distance_m": 0.19962163,
+    "best_offspring_distance_m": 0.13332479
+  },
+  {
+    "topology": "9:[(0, 4), (0, 8), (1, 2), (1, 5), (1, 6), (1, 7), (2, 3), (3, 4), (4, 5), (4, 6), (7, 8)]",
+    "nodes": 9,
+    "muscles": 11,
+    "evaluations": 8,
+    "viable": 8,
+    "improved_on_parent": 1,
+    "best_parent_distance_m": 0.2510984,
+    "best_offspring_distance_m": 0.43373394
+  }
+]

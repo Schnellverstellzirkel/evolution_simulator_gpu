@@ -57,6 +57,8 @@ World coordinates are meters with **positive Y upward**. New experiments run 18-
 
 Archive niches use measured ground-contact fraction, center-of-mass gait cadence, and vertical oscillation; body size and shape remain visible on specimen cards but do not determine archive cells. The 192-cell archive stores the fastest creature in each behavior niche. Novelty uses distance to nearby archived behaviors, while local competition compares speed against elites in neighboring behavior cells. CMA and structural emitters sample locally competitive parents; novelty and stalled emitters sample underexplored behaviors. Bodies start with 3–5 nodes and can grow. Structural emitters split muscles while approximately preserving their motion, duplicate mirrored nodes and their muscle groups, or shift a connected oscillator group. Fresh morphologies are protected from replacement by a different topology for three generations. Default limits are 32 nodes/96 muscles; supported maximums are 64/256. Every body remains a connected graph.
 
+Alongside the 192 behavior niches, a 64-entry topology reserve protects promising changed body graphs while they gather offspring trials. When the reserve has entries, ten percent of structural-emitter trials try a reserve parent. A reserve entry receives at least eight selected offspring before it can be evicted to make room for another topology; the behavior archive can absorb it earlier if a behavior elite matches or beats its distance. Fitness alone determines admission; triangles and other small bodies are not penalized. Reserve entries do not add to behavior coverage or QD score. The archive cards label them `MORPH` and report their count separately.
+
 Archive cards show the stored elite's fitness, descriptor, emitter source, and niche visits. The archive keeps alternatives with different body plans and gaits while each niche independently improves.
 
 ## Headless experiments
@@ -88,9 +90,14 @@ cargo test --release
 cargo test --release --test simulation gpu_matches_cpu_and_handles_partial_workgroups -- --ignored --nocapture
 cargo run --release -- benchmark --populations 1000,100000,1000000,3000000
 cargo run --release -- benchmark --populations 1000,100000 --cpu
+cargo run --release -- search-benchmark --variant behavior-only --seeds 38,39,40,41,42 --population 1000 --generations 300 --duration 18 --output-dir /tmp/search-behavior-only
+cargo run --release -- search-benchmark --variant morphology-reserve --seeds 38,39,40,41,42 --population 1000 --generations 300 --duration 18 --output-dir /tmp/search-morphology-reserve
+cargo run --release -- analyze runs/latest.evo --output /tmp/search-analysis.json --champion /tmp/champion.json
 ```
 
 `benchmark --generations N` measures successive evolving populations. CSV includes creation, GPU evaluation, optional CPU evaluation, complete generation time, population allocation, and GPU buffer allocation. GPU allocation is tracked application buffer memory, not total driver VRAM; population allocation excludes temporary evolution/checkpoint storage. Use `/usr/bin/time -v` for process peak RSS.
+
+`search-benchmark` runs fixed-seed, headless MAP-Elites experiments and writes per-generation timing, archive, emitter, morphology, lineage, milestone, and record data. `behavior-only` disables the topology reserve for a paired baseline; `morphology-reserve` is the normal search mode. See [`docs/search-benchmark.md`](docs/search-benchmark.md) for the fixed-seed results and measurement limits.
 
 Opt-in native UI smoke capture (closes its own window after capturing):
 

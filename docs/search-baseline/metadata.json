@@ -1,0 +1,39 @@
+{
+  "created_unix_seconds": 1790165157,
+  "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+  "logical_cpus": 16,
+  "seeds": [
+    38,
+    39,
+    40,
+    41,
+    42
+  ],
+  "generations": 300,
+  "evaluation_budget_per_seed": 300000,
+  "config": {
+    "population": 1000,
+    "seed": 38,
+    "random_seed": false,
+    "duration": 18.0,
+    "mutation": 1.0,
+    "gravity": 9.8,
+    "air_retention": 0.985,
+    "ground_friction": 1.5,
+    "ground": true,
+    "min_size": 0.06,
+    "max_size": 0.12,
+    "min_friction": 0.65,
+    "max_friction": 1.0,
+    "max_nodes": 32,
+    "max_muscles": 96,
+    "gpu_budget_mib": 4096,
+    "ram_budget_mib": 16384,
+    "throughput": true,
+    "checkpoint_interval": 10
+  },
+  "notes": "GPU evaluation uses throughput mode; physics and fitness are unchanged. Search wall time includes evaluation, archive insertion, and offspring creation. Benchmark wall time also includes metrics and file output.",
+  "algorithm_variant": "behavior-only",
+  "morphology_parent_fraction": 0.0,
+  "minimum_morphology_descendants_before_eviction": 0
+}

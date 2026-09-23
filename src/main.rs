@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use evolution_simulator::{
     config::Config,
     gpu::Gpu,
-    physics,
+    physics, search_benchmark,
     storage::{self, Experiment, Stage},
     ui,
 };
@@ -66,6 +66,43 @@ enum Action {
         #[arg(long, default_value = "runs/benchmark.csv")]
         output: PathBuf,
     },
+    /// Compare fixed-seed evolutionary search runs and export morphology, lineage, and timing data.
+    SearchBenchmark {
+        #[arg(long, value_delimiter = ',', default_value = "38,39,40,41,42")]
+        seeds: Vec<u64>,
+        #[arg(long, default_value_t = 1000)]
+        population: usize,
+        #[arg(long, default_value_t = 300)]
+        generations: u32,
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        duration: Option<f32>,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "1,5,10,20,50,100,150,200"
+        )]
+        milestones: Vec<f32>,
+        #[arg(long, default_value = "benchmarks/search-baseline")]
+        output_dir: PathBuf,
+        #[arg(long, value_enum, default_value_t = SearchVariant::MorphologyReserve)]
+        variant: SearchVariant,
+    },
+    /// Summarize an existing checkpoint's record curve and archive morphology.
+    Analyze {
+        checkpoint: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        champion: Option<PathBuf>,
+    },
+}
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum SearchVariant {
+    BehaviorOnly,
+    #[default]
+    MorphologyReserve,
 }
 fn main() -> Result<()> {
     // Reserve two logical CPUs for the window system and other desktop applications.
@@ -298,6 +335,44 @@ fn main() -> Result<()> {
             println!("Benchmark saved to {}", output.display());
             Ok(())
         }
+        Some(Action::SearchBenchmark {
+            seeds,
+            population,
+            generations,
+            config,
+            duration,
+            milestones,
+            output_dir,
+            variant,
+        }) => {
+            let mut cfg: Config = if let Some(path) = config {
+                serde_json::from_reader(std::fs::File::open(path)?)?
+            } else {
+                Config::default()
+            };
+            cfg.population = population;
+            if let Some(duration) = duration {
+                cfg.duration = duration;
+            }
+            search_benchmark::run(
+                &cli.gpu,
+                cfg,
+                &seeds,
+                generations,
+                &milestones,
+                &output_dir,
+                matches!(variant, SearchVariant::MorphologyReserve),
+            )
+        }
+        Some(Action::Analyze {
+            checkpoint,
+            output,
+            champion,
+        }) => search_benchmark::write_checkpoint_analysis(
+            &checkpoint,
+            output.as_deref(),
+            champion.as_deref(),
+        ),
     };
     result.context("Evolution Simulator")
 }

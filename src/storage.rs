@@ -89,6 +89,13 @@ pub struct Experiment {
     pub candidate_emitters: Vec<Emitter>,
     #[serde(default)]
     pub candidate_cma: Vec<Option<usize>>,
+    /// Parent IDs for the current batch. Kept in memory for benchmark genealogy
+    /// analysis; lineage is intentionally not part of checkpoint state.
+    #[serde(skip)]
+    pub candidate_parent_ids: Vec<Option<u64>>,
+    /// Optional per-process override used by paired benchmark runs; checkpoints keep the default.
+    #[serde(skip)]
+    pub morphology_reserve_override: Option<bool>,
     #[serde(default)]
     pub protected_until: Vec<u32>,
     #[serde(default)]
@@ -121,6 +128,8 @@ impl Experiment {
             cma_emitters: vec![],
             candidate_emitters: vec![Emitter::Restart; population_count],
             candidate_cma: vec![None; population_count],
+            candidate_parent_ids: vec![None; population_count],
+            morphology_reserve_override: None,
             protected_until: vec![0; population_count],
             trial_metrics: vec![TrialMetrics::default(); population_count],
             qd_version: qd::VERSION,
@@ -187,11 +196,31 @@ impl Experiment {
             self.trial_metrics.len() == self.config.population,
             "Invalid behavior metric count"
         );
+        let previous_parent_ids: [Option<u64>; qd::EMITTER_COUNT] = std::array::from_fn(|i| {
+            self.emitter_stats[i]
+                .last_parent
+                .and_then(|index| self.archive.entries.get(index))
+                .map(|elite| elite.creature.id)
+        });
         let mut attempts = [0u64; qd::EMITTER_COUNT];
         let mut discoveries = [0u64; qd::EMITTER_COUNT];
         let mut improvements = [0u64; qd::EMITTER_COUNT];
         let mut rewards = [0.0f64; qd::EMITTER_COUNT];
         let mut cma_samples = vec![Vec::<(usize, f32)>::new(); self.cma_emitters.len()];
+        let parent_morphologies: HashMap<_, _> = self
+            .archive
+            .entries
+            .iter()
+            .map(|elite| {
+                (
+                    elite.creature.id,
+                    (
+                        elite.topology.clone(),
+                        qd::is_morphology_niche(&elite.niche),
+                    ),
+                )
+            })
+            .collect();
         let mut failed = 0usize;
         for i in 0..self.config.population {
             let score = self.scores[i];
@@ -218,7 +247,7 @@ impl Experiment {
                 [genome.muscle_start..genome.muscle_start + genome.muscle_count];
             let descriptor = qd::descriptor(nodes, muscles, self.trial_metrics[i]);
             let protection = self.protected_until.get(i).copied().unwrap_or(0);
-            let offer = self.archive.offer(
+            let behavior_offer = self.archive.offer(
                 &self.population,
                 i,
                 descriptor,
@@ -227,6 +256,45 @@ impl Experiment {
                 self.generation,
                 protection,
             );
+            let parent = self
+                .candidate_parent_ids
+                .get(i)
+                .copied()
+                .flatten()
+                .and_then(|id| parent_morphologies.get(&id));
+            let morphology_offer = if self.morphology_reserve_override != Some(false)
+                && !behavior_offer.inserted
+                && matches!(emitter, Emitter::Structural | Emitter::Novelty)
+            {
+                let topology = qd::topology_of_population(&self.population, i);
+                let topology_changed = parent.is_some_and(|(parent_topology, _)| {
+                    !qd::topology_equivalent_for_archive(&topology, parent_topology)
+                });
+                let descended_from_reserve = parent.is_some_and(|(parent_topology, morphology)| {
+                    *morphology && qd::topology_equivalent_for_archive(&topology, parent_topology)
+                });
+                if descended_from_reserve || topology_changed {
+                    self.archive.offer_morphology(
+                        &self.population,
+                        i,
+                        descriptor,
+                        topology,
+                        score,
+                        emitter,
+                        self.generation,
+                        protection,
+                    )
+                } else {
+                    qd::Offer::default()
+                }
+            } else {
+                qd::Offer::default()
+            };
+            let offer = if behavior_offer.inserted {
+                behavior_offer
+            } else {
+                morphology_offer
+            };
             if offer.inserted {
                 rewards[emitter_index] += offer.reward;
                 if offer.new_niche {
@@ -246,15 +314,31 @@ impl Experiment {
             &improvements,
             &rewards,
         );
+        let parent_index_by_id: HashMap<_, _> = self
+            .archive
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, elite)| (elite.creature.id, index))
+            .collect();
+        for (stats, parent_id) in self.emitter_stats.iter_mut().zip(previous_parent_ids) {
+            stats.last_parent = parent_id.and_then(|id| parent_index_by_id.get(&id).copied());
+        }
         self.archive.refresh_behavior_scores();
         self.push_archive_stats(failed);
         self.stage = Stage::Archived;
         Ok(())
     }
     fn push_archive_stats(&mut self, failed: usize) {
-        let mut elites: Vec<_> = self.archive.entries.iter().collect();
+        let mut elites: Vec<_> = self
+            .archive
+            .entries
+            .iter()
+            .filter(|elite| !qd::is_morphology_niche(&elite.niche))
+            .collect();
         elites.sort_unstable_by(|a, b| b.fitness.total_cmp(&a.fitness));
         let count = elites.len();
+        let archive_best = self.archive.best_fitness();
         let quantile = |p: f32| {
             if count == 0 {
                 0.0
@@ -274,16 +358,22 @@ impl Experiment {
                 .entry((elite.creature.nodes.len(), elite.creature.muscles.len()))
                 .or_default() += 1;
         }
-        let representatives = if count == 0 {
+        let mut percentiles: Vec<_> = PERCENTILES.iter().map(|&p| quantile(p)).collect();
+        if let Some(best_percentile) = percentiles.last_mut() {
+            *best_percentile = archive_best.max(0.0);
+        }
+        let mut all_elites: Vec<_> = self.archive.entries.iter().collect();
+        all_elites.sort_unstable_by(|a, b| b.fitness.total_cmp(&a.fitness));
+        let representatives = if all_elites.is_empty() {
             [0, 0, 0].map(|i| self.population.creature(i)).to_vec()
         } else {
-            [count - 1, (count - 1) / 2, 0]
-                .map(|i| elites[i].creature.clone())
+            [all_elites.len() - 1, (all_elites.len() - 1) / 2, 0]
+                .map(|i| all_elites[i].creature.clone())
                 .to_vec()
         };
         self.history.push(Stats {
             generation: self.generation,
-            best: quantile(100.0),
+            best: archive_best.max(0.0),
             median: quantile(50.0),
             worst: quantile(0.0),
             mean: if count > 0 {
@@ -294,7 +384,7 @@ impl Experiment {
             failed,
             seconds: self.evaluation_seconds,
             population: self.config.population,
-            percentiles: PERCENTILES.iter().map(|&p| quantile(p)).collect(),
+            percentiles,
             histogram: histogram.into_iter().collect(),
             species: species.into_iter().map(|((n, m), c)| (n, m, c)).collect(),
             representatives,
@@ -329,6 +419,7 @@ impl Experiment {
         let mut plans = Vec::with_capacity(cfg.population);
         let mut emitters = Vec::with_capacity(cfg.population);
         let mut cma_indices = Vec::with_capacity(cfg.population);
+        let mut parent_ids = Vec::with_capacity(cfg.population);
         let mut protections = Vec::with_capacity(cfg.population);
         for i in 0..cfg.population {
             let mut rng = Rng::new(cfg.seed, generation, i);
@@ -340,6 +431,18 @@ impl Experiment {
             let emitter_stale = self.emitter_stats[emitter.index()].stale();
             let parent = if emitter == Emitter::Restart || self.archive.entries.is_empty() {
                 None
+            } else if self.morphology_reserve_override != Some(false)
+                && emitter == Emitter::Structural
+                && rng.unit() < qd::MORPHOLOGY_PARENT_FRACTION
+            {
+                self.archive
+                    .sample_morphology(&mut rng, self.emitter_stats[emitter.index()].last_parent)
+                    .or_else(|| {
+                        self.archive.sample_local_competitive(
+                            &mut rng,
+                            self.emitter_stats[emitter.index()].last_parent,
+                        )
+                    })
             } else if emitter == Emitter::Novelty || emitter_stale {
                 self.archive
                     .sample_novel(&mut rng, self.emitter_stats[emitter.index()].last_parent)
@@ -349,6 +452,7 @@ impl Experiment {
                     self.emitter_stats[emitter.index()].last_parent,
                 )
             };
+            parent_ids.push(parent.map(|index| self.archive.entries[index].creature.id));
             let cma_index = if emitter == Emitter::Cma {
                 if let Some(parent_index) = parent {
                     let elite = &self.archive.entries[parent_index];
@@ -440,6 +544,7 @@ impl Experiment {
         self.population = next;
         self.candidate_emitters = emitters;
         self.candidate_cma = cma_indices;
+        self.candidate_parent_ids = parent_ids;
         self.protected_until = protections;
         self.parent_scores.fill(f32::NAN);
         self.generation = generation;
@@ -594,7 +699,9 @@ impl Experiment {
         );
         ensure!(
             self.qd_version == qd::VERSION
-                && self.archive.entries.len() <= qd::ARCHIVE_LIMIT
+                && self.archive.entries.len() <= qd::ARCHIVE_CAPACITY
+                && self.archive.behavior_count() <= qd::ARCHIVE_LIMIT
+                && self.archive.morphology_count() <= qd::MORPHOLOGY_LIMIT
                 && self.cma_emitters.len() <= qd::CMA_LIMIT
                 && self
                     .archive
@@ -825,6 +932,8 @@ impl From<LegacyExperiment> for Experiment {
             cma_emitters: vec![],
             candidate_emitters: vec![Emitter::Restart; population],
             candidate_cma: vec![None; population],
+            candidate_parent_ids: vec![None; population],
+            morphology_reserve_override: None,
             protected_until: vec![0; population],
             trial_metrics: vec![TrialMetrics::default(); population],
             qd_version: 0,

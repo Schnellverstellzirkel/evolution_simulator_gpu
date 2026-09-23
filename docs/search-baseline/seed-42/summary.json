@@ -1,0 +1,190 @@
+{
+  "seed": 42,
+  "population": 1000,
+  "generations": 300,
+  "evaluations": 300000,
+  "population_creation_seconds": 0.000696947,
+  "gpu_warmup_seconds": 2.374e-6,
+  "search_wall_seconds": 11.120996399,
+  "benchmark_wall_seconds": 12.894419187,
+  "best_distance_m": 155.12279,
+  "median_elite_distance_m": 55.50076,
+  "qd_score": 10648.561164140701,
+  "archive_coverage": 0.9947917,
+  "record_count": 8,
+  "evaluations_since_last_record": 277000,
+  "time_to_milestones": {
+    "1.000": {
+      "distance_m": 1.0,
+      "generation": 1,
+      "evaluations": 2000,
+      "search_wall_seconds": 0.024579537999999998,
+      "benchmark_wall_seconds": 0.032618763
+    },
+    "10.000": {
+      "distance_m": 10.0,
+      "generation": 2,
+      "evaluations": 3000,
+      "search_wall_seconds": 0.040473958,
+      "benchmark_wall_seconds": 0.053669637
+    },
+    "100.000": {
+      "distance_m": 100.0,
+      "generation": 22,
+      "evaluations": 23000,
+      "search_wall_seconds": 0.708943108,
+      "benchmark_wall_seconds": 0.856638793
+    },
+    "150.000": {
+      "distance_m": 150.0,
+      "generation": 22,
+      "evaluations": 23000,
+      "search_wall_seconds": 0.708943108,
+      "benchmark_wall_seconds": 0.856638793
+    },
+    "20.000": {
+      "distance_m": 20.0,
+      "generation": 3,
+      "evaluations": 4000,
+      "search_wall_seconds": 0.058317927,
+      "benchmark_wall_seconds": 0.076930081
+    },
+    "200.000": null,
+    "5.000": {
+      "distance_m": 5.0,
+      "generation": 2,
+      "evaluations": 3000,
+      "search_wall_seconds": 0.040473958,
+      "benchmark_wall_seconds": 0.053669637
+    },
+    "50.000": {
+      "distance_m": 50.0,
+      "generation": 6,
+      "evaluations": 7000,
+      "search_wall_seconds": 0.122016709,
+      "benchmark_wall_seconds": 0.156435422
+    }
+  },
+  "final_archive_morphology": {
+    "count": 191,
+    "unique_topologies": 22,
+    "topology_entropy_bits": 2.2181920172241227,
+    "effective_topology_count": 4.653099434820795,
+    "triangle_like_count": 111,
+    "triangle_like_fraction": 0.581151832460733,
+    "mean_nodes": 4.172774869109948,
+    "mean_muscles": 5.104712041884817,
+    "node_counts": {
+      "10": 2,
+      "11": 1,
+      "12": 5,
+      "13": 1,
+      "3": 111,
+      "4": 44,
+      "5": 6,
+      "6": 7,
+      "7": 3,
+      "8": 8,
+      "9": 3
+    },
+    "muscle_counts": {
+      "10": 4,
+      "11": 3,
+      "12": 3,
+      "13": 4,
+      "14": 2,
+      "15": 1,
+      "19": 1,
+      "21": 1,
+      "23": 1,
+      "24": 3,
+      "25": 1,
+      "29": 1,
+      "3": 111,
+      "4": 43,
+      "5": 1,
+      "6": 9,
+      "9": 2
+    }
+  },
+  "final_population_morphology": {
+    "count": 1000,
+    "unique_topologies": 56,
+    "topology_entropy_bits": 3.5665533860942125,
+    "effective_topology_count": 11.847850087283033,
+    "triangle_like_count": 411,
+    "triangle_like_fraction": 0.411,
+    "mean_nodes": 4.372,
+    "mean_muscles": 5.414,
+    "node_counts": {
+      "10": 13,
+      "11": 6,
+      "12": 27,
+      "13": 8,
+      "3": 411,
+      "4": 348,
+      "5": 100,
+      "6": 31,
+      "7": 21,
+      "8": 25,
+      "9": 10
+    },
+    "muscle_counts": {
+      "10": 16,
+      "11": 9,
+      "12": 16,
+      "13": 15,
+      "14": 4,
+      "15": 7,
+      "19": 6,
+      "21": 6,
+      "23": 6,
+      "24": 15,
+      "25": 8,
+      "29": 6,
+      "3": 411,
+      "4": 238,
+      "5": 152,
+      "6": 67,
+      "7": 6,
+      "8": 2,
+      "9": 10
+    }
+  },
+  "structural_topology_candidates": 69010,
+  "archived_structural_innovations": 151,
+  "reintroduced_structural_lineages": 26,
+  "innovations_eligible_for_three_generations": 177,
+  "innovations_surviving_three_generations": 157,
+  "innovation_survival_fraction": 0.8870056497175142,
+  "final_emitter_statistics": {
+    "Diagonal CMA-ES": {
+      "attempts": 89469,
+      "discoveries": 112,
+      "improvements": 199,
+      "insertions": 311,
+      "insertion_rate": 0.0034760643351328395
+    },
+    "Immigrant": {
+      "attempts": 44618,
+      "discoveries": 0,
+      "improvements": 0,
+      "insertions": 0,
+      "insertion_rate": 0.0
+    },
+    "Morphology": {
+      "attempts": 89833,
+      "discoveries": 31,
+      "improvements": 1333,
+      "insertions": 1364,
+      "insertion_rate": 0.015183729809758106
+    },
+    "Novelty": {
+      "attempts": 75080,
+      "discoveries": 38,
+      "improvements": 274,
+      "insertions": 312,
+      "insertion_rate": 0.004155567394778903
+    }
+  }
+}

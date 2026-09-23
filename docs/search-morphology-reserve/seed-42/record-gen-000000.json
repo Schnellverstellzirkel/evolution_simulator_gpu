@@ -1,0 +1,97 @@
+{
+  "creature": {
+    "id": 242,
+    "muscles": [
+      {
+        "a": 0,
+        "b": 1,
+        "duty": 0.6714560985565186,
+        "long": 0.21418195962905884,
+        "period": 2.2507686614990234,
+        "phase": 0.012986600399017334,
+        "short": 0.15493559837341309,
+        "stiffness": 37.70314025878906
+      },
+      {
+        "a": 1,
+        "b": 2,
+        "duty": 0.32687675952911377,
+        "long": 0.4974643290042877,
+        "period": 1.0041286945343018,
+        "phase": 0.8123748302459717,
+        "short": 0.34043797850608826,
+        "stiffness": 55.25691604614258
+      },
+      {
+        "a": 2,
+        "b": 0,
+        "duty": 0.49163371324539185,
+        "long": 0.5332850217819214,
+        "period": 1.23549485206604,
+        "phase": 0.914359986782074,
+        "short": 0.31945955753326416,
+        "stiffness": 78.18695831298828
+      }
+    ],
+    "mutability": 1.0,
+    "nodes": [
+      {
+        "diameter": 0.0900898277759552,
+        "friction": 0.8488762378692627,
+        "x": 0.1976824253797531,
+        "y": 0.3095361292362213
+      },
+      {
+        "diameter": 0.11984145641326904,
+        "friction": 0.9516521692276001,
+        "x": 0.019363805651664734,
+        "y": 0.3472260534763336
+      },
+      {
+        "diameter": 0.07813432812690735,
+        "friction": 0.9683800935745239,
+        "x": -0.147308349609375,
+        "y": 0.0056563615798950195
+      }
+    ]
+  },
+  "distance_m": 0.5532811880111694,
+  "evaluations": 1000,
+  "generation": 0,
+  "innovation_reserve_morphology": {
+    "count": 0,
+    "effective_topology_count": 1.0,
+    "mean_muscles": 0.0,
+    "mean_nodes": 0.0,
+    "muscle_counts": {},
+    "node_counts": {},
+    "topology_entropy_bits": 0.0,
+    "triangle_like_count": 0,
+    "triangle_like_fraction": 0.0,
+    "unique_topologies": 0
+  },
+  "morphology": {
+    "count": 10,
+    "effective_topology_count": 7.192230933248643,
+    "mean_muscles": 5.2,
+    "mean_nodes": 4.1,
+    "muscle_counts": {
+      "3": 3,
+      "4": 1,
+      "5": 2,
+      "6": 1,
+      "7": 1,
+      "8": 2
+    },
+    "node_counts": {
+      "3": 3,
+      "4": 3,
+      "5": 4
+    },
+    "topology_entropy_bits": 2.8464393446710154,
+    "triangle_like_count": 3,
+    "triangle_like_fraction": 0.3,
+    "unique_topologies": 8
+  },
+  "seed": 42
+}

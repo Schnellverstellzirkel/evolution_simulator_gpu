@@ -4,5 +4,6 @@
 *.evo.tmp
 *.csv
 !docs/*.csv
+!docs/search-*/**/*.csv
 
 /presets/custom.json

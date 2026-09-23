@@ -1,0 +1,225 @@
+{
+  "seed": 42,
+  "population": 1000,
+  "generations": 300,
+  "evaluations": 300000,
+  "population_creation_seconds": 0.000248142,
+  "gpu_warmup_seconds": 1.187e-6,
+  "search_wall_seconds": 8.937114022,
+  "benchmark_wall_seconds": 9.629526879,
+  "best_distance_m": 159.20169,
+  "median_elite_distance_m": 50.199276,
+  "qd_score": 9519.964897751808,
+  "archive_coverage": 0.9947917,
+  "record_count": 15,
+  "evaluations_since_last_record": 26000,
+  "time_to_milestones": {
+    "1.000": {
+      "distance_m": 1.0,
+      "generation": 1,
+      "evaluations": 2000,
+      "search_wall_seconds": 0.018474087,
+      "benchmark_wall_seconds": 0.021336622
+    },
+    "10.000": {
+      "distance_m": 10.0,
+      "generation": 2,
+      "evaluations": 3000,
+      "search_wall_seconds": 0.033505062,
+      "benchmark_wall_seconds": 0.0379728
+    },
+    "100.000": {
+      "distance_m": 100.0,
+      "generation": 4,
+      "evaluations": 5000,
+      "search_wall_seconds": 0.079535935,
+      "benchmark_wall_seconds": 0.0883978
+    },
+    "150.000": {
+      "distance_m": 150.0,
+      "generation": 236,
+      "evaluations": 237000,
+      "search_wall_seconds": 6.973133218000001,
+      "benchmark_wall_seconds": 7.513162066
+    },
+    "20.000": {
+      "distance_m": 20.0,
+      "generation": 3,
+      "evaluations": 4000,
+      "search_wall_seconds": 0.050090186,
+      "benchmark_wall_seconds": 0.056626167
+    },
+    "200.000": null,
+    "5.000": {
+      "distance_m": 5.0,
+      "generation": 2,
+      "evaluations": 3000,
+      "search_wall_seconds": 0.033505062,
+      "benchmark_wall_seconds": 0.0379728
+    },
+    "50.000": {
+      "distance_m": 50.0,
+      "generation": 4,
+      "evaluations": 5000,
+      "search_wall_seconds": 0.079535935,
+      "benchmark_wall_seconds": 0.0883978
+    }
+  },
+  "final_archive_morphology": {
+    "count": 191,
+    "unique_topologies": 26,
+    "topology_entropy_bits": 3.6157413476477753,
+    "effective_topology_count": 12.258761682982668,
+    "triangle_like_count": 27,
+    "triangle_like_fraction": 0.14136125654450263,
+    "mean_nodes": 5.445026178010472,
+    "mean_muscles": 8.471204188481675,
+    "node_counts": {
+      "10": 1,
+      "3": 27,
+      "4": 13,
+      "5": 50,
+      "6": 69,
+      "7": 19,
+      "8": 8,
+      "9": 4
+    },
+    "muscle_counts": {
+      "11": 47,
+      "12": 7,
+      "14": 2,
+      "15": 10,
+      "16": 3,
+      "18": 6,
+      "19": 1,
+      "21": 2,
+      "3": 27,
+      "4": 13,
+      "5": 22,
+      "6": 5,
+      "7": 25,
+      "8": 15,
+      "9": 6
+    }
+  },
+  "final_innovation_reserve_morphology": {
+    "count": 64,
+    "unique_topologies": 64,
+    "topology_entropy_bits": 6.0,
+    "effective_topology_count": 64.0,
+    "triangle_like_count": 0,
+    "triangle_like_fraction": 0.0,
+    "mean_nodes": 7.03125,
+    "mean_muscles": 10.84375,
+    "node_counts": {
+      "10": 1,
+      "11": 2,
+      "12": 1,
+      "4": 4,
+      "5": 2,
+      "6": 17,
+      "7": 20,
+      "8": 15,
+      "9": 2
+    },
+    "muscle_counts": {
+      "10": 5,
+      "11": 4,
+      "12": 9,
+      "13": 4,
+      "14": 2,
+      "15": 2,
+      "16": 2,
+      "17": 2,
+      "20": 2,
+      "21": 1,
+      "23": 1,
+      "24": 1,
+      "4": 1,
+      "5": 4,
+      "6": 7,
+      "7": 2,
+      "8": 7,
+      "9": 8
+    }
+  },
+  "final_population_morphology": {
+    "count": 1000,
+    "unique_topologies": 120,
+    "topology_entropy_bits": 4.191657587532138,
+    "effective_topology_count": 18.27320243212236,
+    "triangle_like_count": 99,
+    "triangle_like_fraction": 0.099,
+    "mean_nodes": 5.659,
+    "mean_muscles": 9.185,
+    "node_counts": {
+      "10": 3,
+      "3": 99,
+      "4": 98,
+      "5": 115,
+      "6": 512,
+      "7": 118,
+      "8": 28,
+      "9": 27
+    },
+    "muscle_counts": {
+      "10": 6,
+      "11": 432,
+      "12": 58,
+      "13": 8,
+      "14": 19,
+      "15": 27,
+      "16": 12,
+      "17": 4,
+      "18": 12,
+      "19": 3,
+      "20": 3,
+      "21": 6,
+      "22": 1,
+      "24": 2,
+      "3": 99,
+      "4": 61,
+      "5": 84,
+      "6": 57,
+      "7": 59,
+      "8": 26,
+      "9": 21
+    }
+  },
+  "structural_topology_candidates": 69674,
+  "archived_structural_innovations": 462,
+  "reintroduced_structural_lineages": 105,
+  "innovations_eligible_for_three_generations": 567,
+  "innovations_surviving_three_generations": 476,
+  "innovation_survival_fraction": 0.8395061728395061,
+  "final_emitter_statistics": {
+    "Diagonal CMA-ES": {
+      "attempts": 89184,
+      "discoveries": 111,
+      "improvements": 205,
+      "insertions": 316,
+      "insertion_rate": 0.0035432364549695013
+    },
+    "Immigrant": {
+      "attempts": 44475,
+      "discoveries": 0,
+      "improvements": 1,
+      "insertions": 1,
+      "insertion_rate": 0.00002248454187745925
+    },
+    "Morphology": {
+      "attempts": 90436,
+      "discoveries": 471,
+      "improvements": 1913,
+      "insertions": 2384,
+      "insertion_rate": 0.026361183599451547
+    },
+    "Novelty": {
+      "attempts": 74905,
+      "discoveries": 70,
+      "improvements": 351,
+      "insertions": 421,
+      "insertion_rate": 0.005620452573259462
+    }
+  }
+}
