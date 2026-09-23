@@ -96,6 +96,6 @@ if [[ -f "$LOG.utilization" ]]; then
   gpu_util_min=$(sort -n "$LOG.utilization" | head -1)
   gpu_util_max=$(sort -n "$LOG.utilization" | tail -1)
 fi
-echo "RESULT pop=$POP runs=$RUNS gen_s_min=$min gen_s_median=$med all=$all load=$load clocks=$clock_min..$clock_maxMHz gpu_util=$gpu_util_min..$gpu_util_max%"
+echo "RESULT pop=$POP runs=$RUNS gen_s_min=$min gen_s_median=$med all=$all load=$load clocks=${clock_min}..${clock_max}MHz gpu_util=$gpu_util_min..$gpu_util_max%"
 echo "$(date +%s),$POP,$RUNS,$GENS,$min,$med,$all,$(median_of evals),$(median_of archives),$(median_of breeds),$(median_of shaders),$load,$clock_min,$clock_max" >>"$CSV"
 echo "log: $LOG"
