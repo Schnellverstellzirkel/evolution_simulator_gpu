@@ -27,6 +27,20 @@ Four 20-generation full-GUI runs on revision `5f0349c` used default/workgroup/wo
 
 The workgroup path delivered 1.69× the throughput of the serial path. The serial path is now opt-in with `EVOLUTION_KERNEL=serial`; the default uses workgroup physics. This reverses the recent serial-default change and retains the serial shader for further experiments.
 
+### Low-impact timestamp profile on the current default (2026-09-24)
+
+A five-generation full-GUI diagnostic at 100,000 creatures ran pinned to CPUs 4–15 at nice priority 10. Before the run, CPU pressure was 0%, load average was 1.82, and the GPU showed 18% desktop utilization. The profiled run completed in 1.44 s; these measurements are diagnostic and should not be compared with unprofiled throughput runs.
+
+| Measurement | Result |
+| --- | ---: |
+| Evaluation | 1.174 s |
+| GPU shader timestamps | 1.027 s |
+| Packing | 0.144 s |
+| Upload/encode | 0.072 s |
+| Bucket 4 / 8 / 16 shader time | 0.413 / 0.577 / 0.037 s |
+
+The 4- and 8-node buckets account for about 96% of timestamped shader time. The reported 1.050 s readback duration is CPU wall time waiting for mapped results and overlaps GPU execution; do not add it to shader time. This points the next kernel experiment toward the 4- and 8-node dispatches. The short run was kept isolated because profiling drives the GPU to full utilization.
+
 Measurements below were captured on the local NVIDIA GeForce RTX 4060 Laptop GPU (8 GiB), Ubuntu 24.04 Wayland, with Rust release builds and the simulator's throughput mode. Each creature ran the default 15-second trial. These are workload measurements, not fixed hardware guarantees.
 
 These records predate the MAP-Elites archive and emitter loop. They document GPU simulation throughput and UI responsiveness; they are not performance measurements of the current archive insertion and offspring-generation work.
