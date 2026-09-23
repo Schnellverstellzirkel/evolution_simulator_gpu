@@ -11,9 +11,12 @@ use std::collections::VecDeque;
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Meta {
     nodes: u32,
-    muscles: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct NodeAdj {
     start: u32,
-    pad: u32,
+    count: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -54,16 +57,18 @@ struct Buffers {
     nodes: wgpu::Buffer,
     muscles: wgpu::Buffer,
     meta: wgpu::Buffer,
+    node_adjacency: wgpu::Buffer,
     params: wgpu::Buffer,
     results: wgpu::Buffer,
     readback: wgpu::Buffer,
     bind: wgpu::BindGroup,
-    capacities: [u64; 3],
+    capacities: [u64; 4],
 }
 struct Batch<'a> {
     nodes: &'a [Node],
     muscles: &'a [Muscle],
     metadata: &'a [Meta],
+    node_adjacency: &'a [NodeAdj],
     stride: usize,
 }
 pub async fn adapter(name: &str) -> Result<(wgpu::Instance, wgpu::Adapter)> {
@@ -133,10 +138,16 @@ impl Gpu {
         &mut self,
         node_bytes: u64,
         muscle_bytes: u64,
+        adjacency_bytes: u64,
         count: u64,
         cfg: &Config,
     ) -> Result<()> {
-        let needed = [node_bytes.max(32), muscle_bytes.max(32), count.max(1)];
+        let needed = [
+            node_bytes.max(32),
+            muscle_bytes.max(32),
+            count.max(1),
+            adjacency_bytes.max(32),
+        ];
         if self.allocated_bytes < cfg.gpu_budget_mib as u64 * 1024 * 1024
             && self
                 .buffers
@@ -148,7 +159,10 @@ impl Gpu {
         let caps = needed.map(u64::next_power_of_two);
         let total = caps[0]
             + caps[1]
-            + caps[2] * (16 + std::mem::size_of::<GpuResult>() as u64 * 2)
+            + caps[2]
+                * (std::mem::size_of::<Meta>() as u64
+                    + std::mem::size_of::<GpuResult>() as u64 * 2)
+            + caps[3]
             + 48;
         ensure!(
             total < cfg.gpu_budget_mib as u64 * 1024 * 1024,
@@ -156,7 +170,12 @@ impl Gpu {
         );
         ensure!(
             caps[0] <= self.device.limits().max_storage_buffer_binding_size
-                && caps[1] <= self.device.limits().max_storage_buffer_binding_size,
+                && caps[1] <= self.device.limits().max_storage_buffer_binding_size
+                && caps[2] * std::mem::size_of::<Meta>() as u64
+                    <= self.device.limits().max_storage_buffer_binding_size
+                && caps[2] * std::mem::size_of::<GpuResult>() as u64
+                    <= self.device.limits().max_storage_buffer_binding_size
+                && caps[3] <= self.device.limits().max_storage_buffer_binding_size,
             "GPU batch exceeds storage binding limits"
         );
         let create = |label, size, usage| {
@@ -174,7 +193,12 @@ impl Gpu {
             storage | wgpu::BufferUsages::COPY_SRC,
         );
         let muscles = create("Muscle genomes", caps[1], storage);
-        let meta = create("Creature metadata", caps[2] * 16, storage);
+        let meta = create(
+            "Creature node counts",
+            caps[2] * std::mem::size_of::<Meta>() as u64,
+            storage,
+        );
+        let node_adjacency = create("Node muscle adjacency", caps[3], storage);
         let params = create(
             "Physics parameters",
             48,
@@ -193,7 +217,7 @@ impl Gpu {
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Physics resources"),
             layout: &self.pipeline.get_bind_group_layout(0),
-            entries: &[&nodes, &muscles, &meta, &params, &results]
+            entries: &[&nodes, &muscles, &meta, &params, &results, &node_adjacency]
                 .iter()
                 .enumerate()
                 .map(|(i, b)| wgpu::BindGroupEntry {
@@ -206,6 +230,7 @@ impl Gpu {
             nodes,
             muscles,
             meta,
+            node_adjacency,
             params,
             results,
             readback,
@@ -251,11 +276,12 @@ impl Gpu {
                 continue;
             }
             let mut nodes = vec![Node::default(); group.len() * stride];
-            let muscle_count = group
+            let muscle_count: usize = group
                 .iter()
                 .map(|&(_, i)| pop.genomes[i].muscle_count)
                 .sum();
-            let mut muscles = Vec::<Muscle>::with_capacity(muscle_count);
+            let mut muscles = Vec::<Muscle>::with_capacity(muscle_count * 2);
+            let mut node_adjacency = vec![NodeAdj::default(); group.len() * stride];
             let mut meta = Vec::with_capacity(group.len());
             for (j, &(_, i)) in group.iter().enumerate() {
                 let genome = &pop.genomes[i];
@@ -266,15 +292,16 @@ impl Gpu {
                 {
                     *dst = physics::node(gene);
                 }
-                let muscle_end = genome.muscle_start + genome.muscle_count;
-                let start = muscles.len() as u32;
                 meta.push(Meta {
                     nodes: genes.len() as u32,
-                    muscles: genome.muscle_count as u32,
-                    start,
-                    pad: 0,
                 });
-                muscles.extend_from_slice(&pop.muscles[genome.muscle_start..muscle_end]);
+                let muscle_end = genome.muscle_start + genome.muscle_count;
+                append_adjacency_muscles(
+                    &pop.muscles[genome.muscle_start..muscle_end],
+                    genes.len(),
+                    &mut node_adjacency[j * stride..(j + 1) * stride],
+                    &mut muscles,
+                );
             }
             let results = self
                 .run(
@@ -282,6 +309,7 @@ impl Gpu {
                         nodes: &nodes,
                         muscles: &muscles,
                         metadata: &meta,
+                        node_adjacency: &node_adjacency,
                         stride,
                     },
                     cfg,
@@ -325,15 +353,16 @@ impl Gpu {
         nodes[..c.nodes.len()].copy_from_slice(&physics::nodes(c));
         let meta = [Meta {
             nodes: c.nodes.len() as u32,
-            muscles: c.muscles.len() as u32,
-            start: 0,
-            pad: 0,
         }];
+        let mut node_adjacency = vec![NodeAdj::default(); stride];
+        let mut muscles = Vec::<Muscle>::with_capacity(c.muscles.len() * 2);
+        append_adjacency_muscles(&c.muscles, c.nodes.len(), &mut node_adjacency, &mut muscles);
         let (_, mut result) = self.run(
             Batch {
                 nodes: &nodes,
-                muscles: &c.muscles,
+                muscles: &muscles,
                 metadata: &meta,
+                node_adjacency: &node_adjacency,
                 stride,
             },
             cfg,
@@ -354,11 +383,13 @@ impl Gpu {
             nodes,
             muscles,
             metadata: meta,
+            node_adjacency,
             stride,
         } = batch;
         self.buffers(
             std::mem::size_of_val(nodes) as u64,
             std::mem::size_of_val(muscles) as u64,
+            std::mem::size_of_val(node_adjacency) as u64,
             meta.len() as u64,
             cfg,
         )?;
@@ -369,8 +400,10 @@ impl Gpu {
             .write_buffer(&b.muscles, 0, bytemuck::cast_slice(muscles));
         self.queue
             .write_buffer(&b.meta, 0, bytemuck::cast_slice(meta));
+        self.queue
+            .write_buffer(&b.node_adjacency, 0, bytemuck::cast_slice(node_adjacency));
         // Each bounded dispatch retains all intermediate state in GPU buffers.
-        let chunk = if cfg.throughput { 256 } else { 64 };
+        let chunk = if cfg.throughput { 1024 } else { 64 };
         let max_pending = if cfg.throughput { 8 } else { 2 };
         let mut pending_submissions = VecDeque::with_capacity(max_pending);
         for tick in (0..steps).step_by(chunk) {
@@ -435,6 +468,44 @@ impl Gpu {
             vec![]
         };
         Ok((scores, states))
+    }
+}
+fn append_adjacency_muscles(
+    source: &[Muscle],
+    node_count: usize,
+    adjacency: &mut [NodeAdj],
+    muscles: &mut Vec<Muscle>,
+) {
+    debug_assert!(node_count <= adjacency.len() && node_count <= 64);
+    let mut counts = [0u32; 64];
+    let mut cursors = [0usize; 64];
+    for muscle in source {
+        let a = muscle.a as usize;
+        let b = muscle.b as usize;
+        debug_assert!(a < node_count && b < node_count && a != b);
+        counts[a] += 1;
+        counts[b] += 1;
+    }
+
+    let mut next = muscles.len();
+    for node in 0..node_count {
+        adjacency[node] = NodeAdj {
+            start: next as u32,
+            count: counts[node],
+        };
+        cursors[node] = next;
+        next += counts[node] as usize;
+    }
+    muscles.resize(next, <Muscle as bytemuck::Zeroable>::zeroed());
+
+    // Fill each node's list in genome order, matching the original force sum order.
+    for muscle in source {
+        let a = muscle.a as usize;
+        let b = muscle.b as usize;
+        muscles[cursors[a]] = *muscle;
+        cursors[a] += 1;
+        muscles[cursors[b]] = *muscle;
+        cursors[b] += 1;
     }
 }
 fn read_buffer<T: bytemuck::Pod>(

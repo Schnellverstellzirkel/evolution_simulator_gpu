@@ -1,6 +1,7 @@
 struct Node { pos: vec2f, vel: vec2f, radius: f32, friction: f32, mass: f32, failed: f32 }
 struct Muscle { a:u32, b:u32, short:f32, long:f32, period:f32, phase:f32, duty:f32, stiffness:f32 }
-struct Meta { nodes:u32, muscles:u32, start:u32, pad:u32 }
+struct Meta { nodes:u32 }
+struct NodeAdj { start:u32, count:u32 }
 struct Params { tick:u32, steps:u32, stride:u32, count:u32, gravity:f32, air:f32, friction:f32, ground:f32, total_steps:u32, pad0:u32, pad1:u32, pad2:u32 }
 struct Result {
     fitness:f32,
@@ -18,6 +19,7 @@ struct Result {
 @group(0) @binding(2) var<storage,read> metadata: array<Meta>;
 @group(0) @binding(3) var<uniform> p: Params;
 @group(0) @binding(4) var<storage,read_write> results: array<Result>;
+@group(0) @binding(5) var<storage,read> node_adjacencies: array<NodeAdj>;
 var<workgroup> positions: array<vec2f,64>;
 var<workgroup> velocities: array<vec2f,64>;
 var<workgroup> radii: array<f32,64>;
@@ -44,7 +46,7 @@ fn collide(node:Node)->Node {
 fn advance(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) group:vec3u) {
     let creature=(group.x*64u+lane)/p.stride;
     let local=lane%p.stride;let base=lane-local;
-    var body=Meta(0u,0u,0u,0u);
+    var body=Meta(0u);
     var n=Node(vec2f(0.0),vec2f(0.0),0.0,0.0,1.0,0.0);
     if creature<p.count {body=metadata[creature];if local<body.nodes {n=nodes[creature*p.stride+local];}}
     positions[lane]=n.pos;velocities[lane]=n.vel;radii[lane]=n.radius;failures[lane]=n.failed;
@@ -64,9 +66,10 @@ fn advance(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) grou
         if local<body.nodes {
             let time=f32(max(tick,200u)-200u)/120.0;
             var force=vec2f(0.0);
-            for(var j=0u;j<body.muscles;j++) {
-                let m=muscles[body.start+j];var other:u32;
-                if m.a==local {other=m.b;} else if m.b==local {other=m.a;} else {continue;}
+            let adjacency=node_adjacencies[creature*p.stride+local];
+            for(var j=0u;j<adjacency.count;j++) {
+                let m=muscles[adjacency.start+j];
+                let other=select(m.a,m.b,m.a==local);
                 let d=positions[base+other]-n.pos;let distance=max(length(d),1e-6);let dir=d/distance;
                 let relative=dot(velocities[base+other]-n.vel,dir);
                 let f=clamp(clamp(distance-muscle_length(m,time),-0.25,0.25)*m.stiffness+relative*0.15,-30.0,30.0);
