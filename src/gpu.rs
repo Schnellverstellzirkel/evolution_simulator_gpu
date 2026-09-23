@@ -149,9 +149,11 @@ fn serial_kernels_enabled() -> bool {
     )
 }
 fn lane_kernels_enabled() -> bool {
+    // Barrier-free lane kernels register-spill on long dispatch chunks.
+    // Keep them opt-in until the shader stops thrashing.
     std::env::var_os("EVOLUTION_LANE_SHADER")
         .map(|v| v != "0")
-        .unwrap_or(!serial_kernels_enabled())
+        .unwrap_or(false)
 }
 fn exact_cos_enabled() -> bool {
     std::env::var_os("EVOLUTION_EXACT_COS").is_some()
