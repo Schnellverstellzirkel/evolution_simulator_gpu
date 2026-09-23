@@ -2,6 +2,7 @@ use crate::{
     config::Config,
     evolution::{Muscle, Population},
     physics::{self, Node},
+    qd::{EvaluationMetrics, TrialMetrics},
 };
 use anyhow::{Context, Result, ensure};
 use std::collections::VecDeque;
@@ -25,8 +26,21 @@ struct Params {
     air: f32,
     friction: f32,
     ground: f32,
-    obstacles: u32,
+    total_steps: u32,
     pad: [u32; 3],
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuResult {
+    fitness: f32,
+    ground_contact: f32,
+    // Final output is vertical range and observed cadence; simulation uses min/max scratch.
+    vertical_oscillation: f32,
+    gait_frequency: f32,
+    previous_center_y: f32,
+    vertical_extremum: f32,
+    vertical_trend: f32,
+    gait_turns: f32,
 }
 pub struct Gpu {
     pub device: wgpu::Device,
@@ -41,8 +55,7 @@ struct Buffers {
     muscles: wgpu::Buffer,
     meta: wgpu::Buffer,
     params: wgpu::Buffer,
-    obstacles: wgpu::Buffer,
-    scores: wgpu::Buffer,
+    results: wgpu::Buffer,
     readback: wgpu::Buffer,
     bind: wgpu::BindGroup,
     capacities: [u64; 3],
@@ -133,7 +146,10 @@ impl Gpu {
             return Ok(());
         }
         let caps = needed.map(u64::next_power_of_two);
-        let total = caps[0] + caps[1] + caps[2] * 24 + 4096 + 48;
+        let total = caps[0]
+            + caps[1]
+            + caps[2] * (16 + std::mem::size_of::<GpuResult>() as u64 * 2)
+            + 48;
         ensure!(
             total < cfg.gpu_budget_mib as u64 * 1024 * 1024,
             "GPU batch exceeds memory budget"
@@ -164,21 +180,20 @@ impl Gpu {
             48,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
-        let obstacles = create("Terrain", 4096, storage);
-        let scores = create(
-            "Fitness",
-            caps[2] * 4,
+        let results = create(
+            "Fitness and behavior descriptors",
+            caps[2] * std::mem::size_of::<GpuResult>() as u64,
             storage | wgpu::BufferUsages::COPY_SRC,
         );
         let readback = create(
-            "Fitness readback",
-            caps[2] * 4,
+            "Evaluation readback",
+            caps[2] * std::mem::size_of::<GpuResult>() as u64,
             wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         );
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Physics resources"),
             layout: &self.pipeline.get_bind_group_layout(0),
-            entries: &[&nodes, &muscles, &meta, &params, &obstacles, &scores]
+            entries: &[&nodes, &muscles, &meta, &params, &results]
                 .iter()
                 .enumerate()
                 .map(|(i, b)| wgpu::BindGroupEntry {
@@ -192,8 +207,7 @@ impl Gpu {
             muscles,
             meta,
             params,
-            obstacles,
-            scores,
+            results,
             readback,
             bind,
             capacities: caps,
@@ -207,11 +221,23 @@ impl Gpu {
         indices: &[usize],
         cfg: &Config,
     ) -> Result<Vec<f32>> {
+        Ok(self
+            .evaluate_with_metrics(pop, indices, cfg)?
+            .into_iter()
+            .map(|result| result.fitness)
+            .collect())
+    }
+    pub fn evaluate_with_metrics(
+        &mut self,
+        pop: &Population,
+        indices: &[usize],
+        cfg: &Config,
+    ) -> Result<Vec<EvaluationMetrics>> {
         ensure!(
             indices.iter().all(|&i| i < pop.genomes.len()),
             "Invalid creature index"
         );
-        let mut out = vec![0.0; indices.len()];
+        let mut out = vec![EvaluationMetrics::default(); indices.len()];
         for stride in [8usize, 16, 32, 64] {
             let group: Vec<_> = indices
                 .iter()
@@ -250,7 +276,7 @@ impl Gpu {
                 });
                 muscles.extend_from_slice(&pop.muscles[genome.muscle_start..muscle_end]);
             }
-            let scores = self
+            let results = self
                 .run(
                     Batch {
                         nodes: &nodes,
@@ -264,7 +290,26 @@ impl Gpu {
                 )?
                 .0;
             for (j, &(slot, _)) in group.iter().enumerate() {
-                out[slot] = scores[j];
+                let r = results[j];
+                let active_steps = cfg.steps();
+                let contact_denominator =
+                    (active_steps.max(1) * pop.genomes[group[j].1].node_count as u32) as f32;
+                out[slot] = EvaluationMetrics {
+                    fitness: r.fitness,
+                    behavior: TrialMetrics {
+                        ground_contact: (r.ground_contact / contact_denominator).clamp(0.0, 1.0),
+                        vertical_oscillation: if r.vertical_oscillation.is_finite() {
+                            r.vertical_oscillation.max(0.0)
+                        } else {
+                            0.0
+                        },
+                        gait_frequency: if r.gait_frequency.is_finite() {
+                            r.gait_frequency.max(0.0)
+                        } else {
+                            0.0
+                        },
+                    },
+                };
             }
         }
         Ok(out)
@@ -304,7 +349,7 @@ impl Gpu {
         cfg: &Config,
         steps: u32,
         read_nodes: bool,
-    ) -> Result<(Vec<f32>, Vec<Node>)> {
+    ) -> Result<(Vec<GpuResult>, Vec<Node>)> {
         let Batch {
             nodes,
             muscles,
@@ -324,10 +369,6 @@ impl Gpu {
             .write_buffer(&b.muscles, 0, bytemuck::cast_slice(muscles));
         self.queue
             .write_buffer(&b.meta, 0, bytemuck::cast_slice(meta));
-        if !cfg.obstacles.is_empty() {
-            self.queue
-                .write_buffer(&b.obstacles, 0, bytemuck::cast_slice(&cfg.obstacles));
-        }
         // Each bounded dispatch retains all intermediate state in GPU buffers.
         let chunk = if cfg.throughput { 256 } else { 64 };
         let max_pending = if cfg.throughput { 8 } else { 2 };
@@ -342,7 +383,7 @@ impl Gpu {
                 air: cfg.air_retention.sqrt(),
                 friction: cfg.ground_friction,
                 ground: if cfg.ground { 1.0 } else { 0.0 },
-                obstacles: cfg.obstacles.len() as u32,
+                total_steps: steps,
                 pad: [0; 3],
             };
             self.queue
@@ -373,11 +414,11 @@ impl Gpu {
                 })?;
             }
         }
-        let bytes = meta.len() as u64 * 4;
+        let bytes = meta.len() as u64 * std::mem::size_of::<GpuResult>() as u64;
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(&b.scores, 0, &b.readback, 0, bytes);
+        encoder.copy_buffer_to_buffer(&b.results, 0, &b.readback, 0, bytes);
         self.queue.submit([encoder.finish()]);
-        let scores = read_buffer::<f32>(&self.device, &b.readback, bytes)?;
+        let scores = read_buffer::<GpuResult>(&self.device, &b.readback, bytes)?;
         let states = if read_nodes {
             let bytes = std::mem::size_of_val(nodes) as u64;
             let staging = self.device.create_buffer(&wgpu::BufferDescriptor {

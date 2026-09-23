@@ -67,38 +67,6 @@ pub fn collide(n: &mut Node, cfg: &Config) {
     if cfg.ground && n.pos[1] < n.radius {
         contact(n, [0.0, 1.0], n.radius - n.pos[1], mu);
     }
-    for r in &cfg.obstacles {
-        let q = [n.pos[0].clamp(r[0], r[2]), n.pos[1].clamp(r[1], r[3])];
-        let d = [n.pos[0] - q[0], n.pos[1] - q[1]];
-        let distance = d[0].hypot(d[1]);
-        if distance > 1e-8 && distance < n.radius {
-            contact(
-                n,
-                [d[0] / distance, d[1] / distance],
-                n.radius - distance,
-                mu,
-            );
-        } else if distance <= 1e-8 {
-            let ds = [
-                n.pos[0] - r[0],
-                r[2] - n.pos[0],
-                n.pos[1] - r[1],
-                r[3] - n.pos[1],
-            ];
-            let mut side = 0;
-            for k in 1..4 {
-                if ds[k] < ds[side] {
-                    side = k;
-                }
-            }
-            contact(
-                n,
-                [[-1.0, 0.0], [1.0, 0.0], [0.0, -1.0], [0.0, 1.0]][side],
-                n.radius + ds[side],
-                mu,
-            );
-        }
-    }
 }
 pub fn step(nodes: &mut [Node], muscles: &[Muscle], cfg: &Config, tick: u32) {
     if tick == SETTLE {

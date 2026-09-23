@@ -1,6 +1,6 @@
 # Evolution · Creature Laboratory
 
-A local Rust evolution game for Ubuntu/Wayland. Creatures learn to walk through selection and mutation of their nodes, muscles, timing, and grip. WGSL compute shaders evaluate independent creatures on the GPU; an egui dashboard lets you watch, inspect, and tune the experiment.
+A local Rust evolution game for Ubuntu/Wayland. Creatures learn to move through quality-diversity search: a MAP-Elites archive keeps the best creature in each measured combination of contact, gait cadence, and vertical motion. WGSL compute shaders evaluate independent creatures on the GPU; an egui dashboard lets you inspect the archive and tune the experiment.
 
 The original Processing sketch is preserved in [`old_code.txt`](old_code.txt). This is a modernized simulation, not a bit-for-bit reproduction of its physics or random sequence.
 
@@ -16,37 +16,37 @@ The default adapter is this workstation's **NVIDIA RTX 4060 Laptop GPU**. To use
 cargo run --release -- --gpu Radeon
 ```
 
-Use **Evolve continuously**, **One generation**, or **Guided step**. Guided mode pauses after evaluation, sorting, selection, and reproduction. Space pauses/resumes evolution; Ctrl+S opens Save. The creature playback controls are independent of population evaluation. Drag the scene to pan, scroll to zoom, and select a population card or an archived representative to replay it.
+Use **Evolve continuously**, **One generation**, or **Guided step**. The search evaluates a batch, inserts better specimens into the behavior archive, then breeds from diverse archive entries. Guided mode pauses at evaluation, archive update, and breeding. Space pauses/resumes evolution; Ctrl+S opens Save. The creature playback controls are independent of population evaluation. Drag the scene to pan, scroll to zoom, and select an archive card to replay it.
 
 The first population has 1,000 creatures. Population presets include 100,000, one million, and three million. Increasing population requires **New experiment**. Populations must be even. No population is silently downsized to fit memory.
 
 ## Controls
 
-Main controls expose population, mutation strength, and trial duration. **Advanced controls** has a search box and all the original settings:
+Main controls expose population, mutation strength, and trial duration. The archive page shows the current next-batch allocation across local CMA search, constructive morphology, novelty search, and random immigrants. It starts at 30%, 30%, 25%, and 15%; emitter shares then adapt to discoveries and improvements. **Advanced controls** has a search box and the physics and body settings:
 
 | Original setting | New control / units |
 | --- | --- |
 | `USE_RANDOM_SEED`, `SEED` | Randomness: choose a seed automatically or supply a fixed seed; resolved seed is always saved |
 | `WINDOW_SIZE` | Resizable native window and UI scale |
 | `SORT_ANIMATION_SPEED` | Display: sorting transition speed |
-| Minimum/maximum node size | Body bounds: diameter in meters; original 0.4 world units = 0.08 m |
+| Minimum/maximum node size | Body bounds: diameter in meters; defaults vary from 0.06–0.12 m (original 0.4 world units = 0.08 m) |
 | Minimum/maximum node friction | Body bounds: node grip, 0–1 |
-| `GRAVITY` | Physics: m/s²; default 3.6 corresponds to the original 0.005 at 60 Hz |
-| `AIR_FRICTION` | Physics: velocity retention per 1/60 second; timestep independent |
-| `FRICTION` | Physics: global ground/contact friction multiplier |
-| `MUTABILITY_FACTOR` | Mutation strength; zero preserves offspring genetics |
-| `haveGround` | Physics: ground exists |
-| `RECTANGLES` | Terrain: add/remove rectangles or load flat/hurdle layouts |
+| `GRAVITY` | Physics: m/s²; new experiments default to 9.8 |
+| `AIR_FRICTION` | Physics: velocity retention per 1/60 second; default 0.985 keeps jumps lively |
+| `FRICTION` | Physics: global ground/contact friction multiplier; default 1.5 |
+| Default node friction | New bodies start with node grip between 0.65 and 1.0 |
+| `MUTABILITY_FACTOR` | Scales continuous parameter edits; structural changes and random immigrants remain available at zero |
+| `haveGround` | Physics: flat ground exists |
 | Histogram range/density | Histogram minimum/maximum and bins per meter |
 | Playback speed, camera zoom | Independent playback controls; mouse zoom and pan |
 | Step-by-step, quick, ASAP, continuous | Guided step, One generation, Evolve continuously |
 | Historical generation slider / previews | History & statistics: generation slider and worst/median/best replays |
 
-World coordinates are meters with **positive Y upward**. Rectangles are `[left, bottom, right, top]`. Genetics and physics changes are queued for the next generation; presentation changes are immediate. Genetic bounds apply to newly mutated offspring. Population/seed changes or limits below existing bodies require a new experiment. Use **Apply settings** after editing experiment settings.
+World coordinates are meters with **positive Y upward**. New experiments run 18-second trials on flat ground with high grip. Genetics and physics changes are queued for the next generation; presentation changes are immediate. Genetic bounds apply to newly mutated offspring. Population/seed changes or limits below existing bodies require a new experiment. Use **Apply settings** after editing experiment settings.
 
-Bodies start with 3–5 nodes and can grow. Default limits are 32 nodes/96 muscles; supported maximums are 64/256. Every body remains a connected graph. Distinct body types are identified by actual node and muscle counts, without the original modulo-10 collisions.
+Archive niches use measured ground-contact fraction, center-of-mass gait cadence, and vertical oscillation; body size and shape remain visible on specimen cards but do not determine archive cells. The 192-cell archive stores the fastest creature in each behavior niche. Novelty uses distance to nearby archived behaviors, while local competition compares speed against elites in neighboring behavior cells. CMA and structural emitters sample locally competitive parents; novelty and stalled emitters sample underexplored behaviors. Bodies start with 3–5 nodes and can grow. Structural emitters split muscles while approximately preserving their motion, duplicate mirrored nodes and their muscle groups, or shift a connected oscillator group. Fresh morphologies are protected from replacement by a different topology for three generations. Default limits are 32 nodes/96 muscles; supported maximums are 64/256. Every body remains a connected graph.
 
-Population cards show a creature's current trial score when available. New offspring display their parent's previous-generation result until their own trial finishes, with the card ID making it clear that they are new specimens.
+Archive cards show the stored elite's fitness, descriptor, emitter source, and niche visits. The archive keeps alternatives with different body plans and gaits while each niche independently improves.
 
 ## Headless experiments
 
@@ -56,17 +56,17 @@ cargo run --release -- headless --resume runs/latest.evo --generations 20 --thro
 cargo run --release -- headless --config presets/large-experiment.json --generations 10
 ```
 
-`--duration` overrides the trial duration for a new experiment. `--checkpoint PATH` changes the checkpoint destination. Ctrl+C stops after the current GPU batch and saves. A completed generation includes evaluation, ranking, selection, and reproduction. `--generations` counts additional generations when resuming.
+`--duration` overrides the trial duration for a new experiment. `--checkpoint PATH` changes the checkpoint destination. Ctrl+C stops after the current GPU batch and saves. A completed generation includes evaluation, archive insertion, emitter feedback, and offspring creation. `--generations` counts additional generations when resuming.
 
 The dashboard defaults to responsive mode, evaluating up to 8,192 creatures per GPU batch. **Maximum throughput** raises the batch limit to 65,536, uses longer dispatches, and keeps more compute work queued; it is intended for long runs. Both modes adapt batch size to the configured GPU memory budget. The Rayon pool reserves two logical CPUs for the desktop.
 
 ## Save and resume
 
-`.evo` checkpoints use a versioned header, a compact binary payload, and Zstandard compression. They contain current genomes, all settings, resolved seed, completed fitness results, generation stage, selected parents when applicable, and historical summaries/representative creatures. Saves happen at completed batch boundaries; resume skips completed evaluations. Temporary writes are renamed atomically after flushing.
+`.evo` checkpoints use a versioned header, a compact binary payload, and Zstandard compression. They contain current genomes, the MAP-Elites archive and visit counts, emitter feedback, CMA states, all settings, resolved seed, completed fitness and behavior metrics, generation stage, and historical summaries/representative creatures. Saves happen at completed batch boundaries; resume skips completed evaluations. Older checkpoints keep their current population and are reevaluated into a new archive. Temporary writes are renamed atomically after flushing.
 
-The dashboard automatically saves every ten generations to `runs/seed-<seed>-auto.evo`; the interval is adjustable, and 0 disables it. Manual saves can preserve partial generations. Full populations are stored in checkpoints, while the archive keeps statistics and three representatives per generation. Close the app after a requested save reports completion.
+The dashboard automatically saves every ten generations to `runs/seed-<seed>-auto.evo`; the interval is adjustable, and 0 disables it. Manual saves can preserve partial generations. Full candidate populations and archive elites are stored in checkpoints. Close the app after a requested save reports completion.
 
-Presets are editable JSON files. CSV export contains generation, population, best/median/worst/mean distance, failed count, evaluation time, and seed. Historical histograms retain centimeter bins; available display densities divide this stored resolution. Values outside the selected histogram range are reported, not silently dropped.
+Presets are editable JSON files. CSV export contains generation, population, best/median/worst/mean archive fitness, QD score, archive cells and coverage, failed count, evaluation time, and seed. Historical histograms retain centimeter bins; available display densities divide this stored resolution. Values outside the selected histogram range are reported, not silently dropped.
 
 ## Development and measurements
 

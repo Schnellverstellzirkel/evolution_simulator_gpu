@@ -1,8 +1,7 @@
 use anyhow::{Result, ensure};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub population: usize,
     pub seed: u64,
@@ -20,7 +19,6 @@ pub struct Config {
     pub max_friction: f32,
     pub max_nodes: usize,
     pub max_muscles: usize,
-    pub obstacles: Vec<[f32; 4]>,
     pub gpu_budget_mib: usize,
     pub ram_budget_mib: usize,
     pub throughput: bool,
@@ -32,19 +30,18 @@ impl Default for Config {
             population: 1000,
             seed: 38,
             random_seed: true,
-            duration: 15.0,
+            duration: 18.0,
             mutation: 1.0,
-            gravity: 3.6,
-            air_retention: 0.95,
-            ground_friction: 4.0,
+            gravity: 9.8,
+            air_retention: 0.985,
+            ground_friction: 1.5,
             ground: true,
-            min_size: 0.08,
-            max_size: 0.08,
-            min_friction: 0.0,
+            min_size: 0.06,
+            max_size: 0.12,
+            min_friction: 0.65,
             max_friction: 1.0,
             max_nodes: 32,
             max_muscles: 96,
-            obstacles: vec![],
             gpu_budget_mib: 4096,
             ram_budget_mib: 16384,
             throughput: false,
@@ -52,6 +49,216 @@ impl Default for Config {
         }
     }
 }
+
+// JSON settings no longer expose obstacles. The binary checkpoint helper keeps
+// the old field slot so existing checkpoints remain readable; its value is
+// discarded on load and always empty on save.
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+struct HumanConfig {
+    population: usize,
+    seed: u64,
+    random_seed: bool,
+    duration: f32,
+    mutation: f32,
+    gravity: f32,
+    air_retention: f32,
+    ground_friction: f32,
+    ground: bool,
+    min_size: f32,
+    max_size: f32,
+    min_friction: f32,
+    max_friction: f32,
+    max_nodes: usize,
+    max_muscles: usize,
+    gpu_budget_mib: usize,
+    ram_budget_mib: usize,
+    throughput: bool,
+    checkpoint_interval: u32,
+}
+
+impl Default for HumanConfig {
+    fn default() -> Self {
+        let c = Config::default();
+        Self {
+            population: c.population,
+            seed: c.seed,
+            random_seed: c.random_seed,
+            duration: c.duration,
+            mutation: c.mutation,
+            gravity: c.gravity,
+            air_retention: c.air_retention,
+            ground_friction: c.ground_friction,
+            ground: c.ground,
+            min_size: c.min_size,
+            max_size: c.max_size,
+            min_friction: c.min_friction,
+            max_friction: c.max_friction,
+            max_nodes: c.max_nodes,
+            max_muscles: c.max_muscles,
+            gpu_budget_mib: c.gpu_budget_mib,
+            ram_budget_mib: c.ram_budget_mib,
+            throughput: c.throughput,
+            checkpoint_interval: c.checkpoint_interval,
+        }
+    }
+}
+
+impl From<HumanConfig> for Config {
+    fn from(c: HumanConfig) -> Self {
+        Self {
+            population: c.population,
+            seed: c.seed,
+            random_seed: c.random_seed,
+            duration: c.duration,
+            mutation: c.mutation,
+            gravity: c.gravity,
+            air_retention: c.air_retention,
+            ground_friction: c.ground_friction,
+            ground: c.ground,
+            min_size: c.min_size,
+            max_size: c.max_size,
+            min_friction: c.min_friction,
+            max_friction: c.max_friction,
+            max_nodes: c.max_nodes,
+            max_muscles: c.max_muscles,
+            gpu_budget_mib: c.gpu_budget_mib,
+            ram_budget_mib: c.ram_budget_mib,
+            throughput: c.throughput,
+            checkpoint_interval: c.checkpoint_interval,
+        }
+    }
+}
+
+impl From<&Config> for HumanConfig {
+    fn from(c: &Config) -> Self {
+        Self {
+            population: c.population,
+            seed: c.seed,
+            random_seed: c.random_seed,
+            duration: c.duration,
+            mutation: c.mutation,
+            gravity: c.gravity,
+            air_retention: c.air_retention,
+            ground_friction: c.ground_friction,
+            ground: c.ground,
+            min_size: c.min_size,
+            max_size: c.max_size,
+            min_friction: c.min_friction,
+            max_friction: c.max_friction,
+            max_nodes: c.max_nodes,
+            max_muscles: c.max_muscles,
+            gpu_budget_mib: c.gpu_budget_mib,
+            ram_budget_mib: c.ram_budget_mib,
+            throughput: c.throughput,
+            checkpoint_interval: c.checkpoint_interval,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct BinaryConfig {
+    population: usize,
+    seed: u64,
+    random_seed: bool,
+    duration: f32,
+    mutation: f32,
+    gravity: f32,
+    air_retention: f32,
+    ground_friction: f32,
+    ground: bool,
+    min_size: f32,
+    max_size: f32,
+    min_friction: f32,
+    max_friction: f32,
+    max_nodes: usize,
+    max_muscles: usize,
+    obstacles: Vec<[f32; 4]>,
+    gpu_budget_mib: usize,
+    ram_budget_mib: usize,
+    throughput: bool,
+    checkpoint_interval: u32,
+}
+
+impl From<&Config> for BinaryConfig {
+    fn from(c: &Config) -> Self {
+        Self {
+            population: c.population,
+            seed: c.seed,
+            random_seed: c.random_seed,
+            duration: c.duration,
+            mutation: c.mutation,
+            gravity: c.gravity,
+            air_retention: c.air_retention,
+            ground_friction: c.ground_friction,
+            ground: c.ground,
+            min_size: c.min_size,
+            max_size: c.max_size,
+            min_friction: c.min_friction,
+            max_friction: c.max_friction,
+            max_nodes: c.max_nodes,
+            max_muscles: c.max_muscles,
+            obstacles: Vec::new(),
+            gpu_budget_mib: c.gpu_budget_mib,
+            ram_budget_mib: c.ram_budget_mib,
+            throughput: c.throughput,
+            checkpoint_interval: c.checkpoint_interval,
+        }
+    }
+}
+
+impl From<BinaryConfig> for Config {
+    fn from(c: BinaryConfig) -> Self {
+        Self {
+            population: c.population,
+            seed: c.seed,
+            random_seed: c.random_seed,
+            duration: c.duration,
+            mutation: c.mutation,
+            gravity: c.gravity,
+            air_retention: c.air_retention,
+            ground: c.ground,
+            ground_friction: c.ground_friction,
+            min_size: c.min_size,
+            max_size: c.max_size,
+            min_friction: c.min_friction,
+            max_friction: c.max_friction,
+            max_nodes: c.max_nodes,
+            max_muscles: c.max_muscles,
+            gpu_budget_mib: c.gpu_budget_mib,
+            ram_budget_mib: c.ram_budget_mib,
+            throughput: c.throughput,
+            checkpoint_interval: c.checkpoint_interval,
+        }
+    }
+}
+
+impl Serialize for Config {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            HumanConfig::from(self).serialize(serializer)
+        } else {
+            BinaryConfig::from(self).serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Config {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            HumanConfig::deserialize(deserializer).map(Into::into)
+        } else {
+            BinaryConfig::deserialize(deserializer).map(Into::into)
+        }
+    }
+}
+
 impl Config {
     pub fn validate(&self) -> Result<()> {
         ensure!(
@@ -101,16 +308,6 @@ impl Config {
             "Body limits: 3–64 nodes; at least as many muscles, up to 256"
         );
         ensure!(
-            self.obstacles.len() <= 256,
-            "At most 256 rectangular obstacles"
-        );
-        for r in &self.obstacles {
-            ensure!(
-                r.iter().all(|v| v.is_finite() && v.abs() <= 10000.0) && r[0] < r[2] && r[1] < r[3],
-                "Obstacle coordinates must be finite and ordered (left, bottom, right, top)"
-            );
-        }
-        ensure!(
             (32..=6144).contains(&self.gpu_budget_mib),
             "GPU budget must be 32–6144 MiB"
         );
@@ -133,7 +330,7 @@ impl Config {
         let maximum = if self.throughput { 65536 } else { 8192 };
         // Leave space for power-of-two buffer growth and staging resources.
         let bytes_per_creature =
-            self.max_nodes.next_power_of_two().max(8) * 32 + self.max_muscles * 32 + 24;
+            self.max_nodes.next_power_of_two().max(8) * 32 + self.max_muscles * 32 + 80;
         maximum
             .min(self.gpu_budget_mib * 1024 * 1024 / (bytes_per_creature * 4))
             .max(1)

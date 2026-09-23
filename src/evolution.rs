@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::qd::{self, CmaEmitter, Emitter, QdArchive};
 use anyhow::{Result, ensure};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -239,7 +240,10 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
     }
 }
 fn initial(cfg: &Config, index: usize) -> Creature {
-    let mut rng = Rng::new(cfg.seed, 0, index);
+    random_creature(cfg, 0, index)
+}
+fn random_creature(cfg: &Config, generation: u32, index: usize) -> Creature {
+    let mut rng = Rng::new(cfg.seed, generation, index);
     let n = (3 + rng.index(3)).min(cfg.max_nodes);
     let mut c = Creature {
         nodes: (0..n)
@@ -304,6 +308,225 @@ pub fn create(cfg: &Config) -> Result<Population> {
     cfg.validate()?;
     Ok(collect_parallel(cfg.population, |i| initial(cfg, i)))
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct CandidatePlan {
+    pub emitter: Emitter,
+    pub parent: Option<usize>,
+    pub cma: Option<usize>,
+}
+
+pub fn emit_archive_batch(
+    current: &Population,
+    archive: &QdArchive,
+    cma_emitters: &[CmaEmitter],
+    plans: &[CandidatePlan],
+    cfg: &Config,
+    generation: u32,
+) -> Result<Population> {
+    ensure_archive_batch_memory(current, archive, cfg)?;
+    ensure!(plans.len() == cfg.population, "Invalid emitter plan count");
+    Ok(collect_parallel(cfg.population, |i| {
+        let plan = plans[i];
+        let mut rng = Rng::new(cfg.seed, generation, i);
+        let mut creature = match plan.emitter {
+            Emitter::Restart => random_creature(cfg, generation, i),
+            Emitter::Cma => {
+                if let Some(cma) = plan.cma.and_then(|index| cma_emitters.get(index)) {
+                    cma.sample_scaled(&mut rng, cfg.mutation)
+                } else {
+                    let parent = &archive.entries[plan.parent.expect("CMA parent")].creature;
+                    local_mutation(parent.clone(), cfg, &mut rng, 0.12)
+                }
+            }
+            Emitter::Structural => {
+                let parent = archive.entries[plan.parent.expect("structural parent")]
+                    .creature
+                    .clone();
+                let (child, _) = structural_mutation(parent, cfg, &mut rng);
+                local_mutation(child, cfg, &mut rng, 0.035)
+            }
+            Emitter::Novelty => {
+                let parent = archive.entries[plan.parent.expect("novelty parent")]
+                    .creature
+                    .clone();
+                let mut child = local_mutation(parent, cfg, &mut rng, 0.75);
+                if rng.unit() < 0.18 {
+                    let _ = structural_mutation_in_place(&mut child, cfg, &mut rng);
+                }
+                child
+            }
+        };
+        creature.id = (generation as u64) * cfg.population as u64 + i as u64 + 1;
+        creature
+    }))
+}
+
+pub fn ensure_archive_batch_memory(
+    current: &Population,
+    archive: &QdArchive,
+    cfg: &Config,
+) -> Result<()> {
+    let archive_bytes = archive
+        .entries
+        .iter()
+        .map(|elite| {
+            elite.creature.nodes.len() * std::mem::size_of::<NodeGene>()
+                + elite.creature.muscles.len() * std::mem::size_of::<Muscle>()
+                + std::mem::size_of::<Creature>()
+        })
+        .sum::<usize>();
+    let temporary = current
+        .bytes()
+        .saturating_mul(4)
+        .saturating_add(archive_bytes.saturating_mul(3))
+        .saturating_add(cfg.population.saturating_mul(96));
+    ensure!(
+        temporary < cfg.ram_budget_mib * 1024 * 1024,
+        "Evolution would exceed the RAM budget; save and raise the budget before continuing"
+    );
+    Ok(())
+}
+
+fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f32) -> Creature {
+    let scale = scale * cfg.mutation;
+    if scale <= 0.0 {
+        return creature;
+    }
+    for node in &mut creature.nodes {
+        node.x = (node.x + qd::gaussian(rng) * 0.10 * scale).clamp(-4.0, 4.0);
+        node.y = (node.y + qd::gaussian(rng) * 0.08 * scale).clamp(0.0, 4.0);
+        node.diameter =
+            (node.diameter + qd::gaussian(rng) * 0.025 * scale).clamp(cfg.min_size, cfg.max_size);
+        node.friction = (node.friction + qd::gaussian(rng) * 0.10 * scale)
+            .clamp(cfg.min_friction, cfg.max_friction);
+    }
+    for muscle in &mut creature.muscles {
+        muscle.short = (muscle.short + qd::gaussian(rng) * 0.06 * scale).clamp(0.01, 0.8);
+        muscle.long = (muscle.long + qd::gaussian(rng) * 0.08 * scale).clamp(muscle.short, 1.0);
+        muscle.period = (muscle.period + qd::gaussian(rng) * 0.20 * scale).clamp(0.1, 10.0);
+        muscle.phase = (muscle.phase + qd::gaussian(rng) * 0.12 * scale).rem_euclid(1.0);
+        muscle.duty = (muscle.duty + qd::gaussian(rng) * 0.08 * scale).clamp(0.05, 0.95);
+        muscle.stiffness =
+            (muscle.stiffness * (qd::gaussian(rng) * 0.10 * scale).exp()).clamp(1.0, 120.0);
+    }
+    creature.mutability = (creature.mutability * (qd::gaussian(rng) * 0.05).exp()).clamp(0.05, 2.0);
+    creature
+}
+
+fn structural_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng) -> (Creature, bool) {
+    let changed = structural_mutation_in_place(&mut creature, cfg, rng);
+    (creature, changed)
+}
+
+fn structural_mutation_in_place(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
+    match rng.index(3) {
+        0 => split_muscle(creature, cfg, rng),
+        1 => duplicate_mirrored_node(creature, cfg, rng),
+        _ => phase_shift_group(creature, rng),
+    }
+}
+
+fn split_muscle(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
+    if creature.nodes.len() >= cfg.max_nodes || creature.muscles.len() >= cfg.max_muscles {
+        return false;
+    }
+    let Some(index) = (!creature.muscles.is_empty()).then(|| rng.index(creature.muscles.len()))
+    else {
+        return false;
+    };
+    let original = creature.muscles.swap_remove(index);
+    let a = original.a as usize;
+    let b = original.b as usize;
+    let middle = NodeGene {
+        x: (creature.nodes[a].x + creature.nodes[b].x) * 0.5 + rng.range(-0.015, 0.015),
+        y: (creature.nodes[a].y + creature.nodes[b].y) * 0.5 + rng.range(-0.015, 0.015),
+        diameter: (creature.nodes[a].diameter + creature.nodes[b].diameter) * 0.5,
+        friction: (creature.nodes[a].friction + creature.nodes[b].friction) * 0.5,
+    };
+    let mid = creature.nodes.len() as u32;
+    creature.nodes.push(middle);
+    let mut first = original;
+    first.b = mid;
+    first.short = (first.short * 0.5).max(0.01);
+    first.long = (first.long * 0.5).max(first.short);
+    first.stiffness = (first.stiffness * 2.0).min(120.0);
+    let mut second = original;
+    second.a = mid;
+    second.short = (second.short * 0.5).max(0.01);
+    second.long = (second.long * 0.5).max(second.short);
+    second.stiffness = (second.stiffness * 2.0).min(120.0);
+    creature.muscles.push(first);
+    creature.muscles.push(second);
+    true
+}
+
+fn duplicate_mirrored_node(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
+    if creature.nodes.len() >= cfg.max_nodes {
+        return false;
+    }
+    let degrees: Vec<usize> = (0..creature.nodes.len())
+        .map(|node| {
+            creature
+                .muscles
+                .iter()
+                .filter(|m| m.a as usize == node || m.b as usize == node)
+                .count()
+        })
+        .collect();
+    let choices: Vec<usize> = degrees
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &degree)| {
+            (degree >= 2 && creature.muscles.len() + degree <= cfg.max_muscles).then_some(i)
+        })
+        .collect();
+    if choices.is_empty() {
+        return false;
+    }
+    let source = choices[rng.index(choices.len())];
+    let center_x = creature.nodes.iter().map(|n| n.x).sum::<f32>() / creature.nodes.len() as f32;
+    let mut duplicate = creature.nodes[source];
+    duplicate.x = (2.0 * center_x - duplicate.x + rng.range(-0.03, 0.03)).clamp(-4.0, 4.0);
+    duplicate.y = (duplicate.y + rng.range(-0.03, 0.03)).clamp(0.0, 4.0);
+    let target = creature.nodes.len() as u32;
+    creature.nodes.push(duplicate);
+    let incident: Vec<Muscle> = creature
+        .muscles
+        .iter()
+        .filter(|m| m.a as usize == source || m.b as usize == source)
+        .copied()
+        .collect();
+    for mut muscle in incident {
+        if muscle.a as usize == source {
+            muscle.a = target;
+        }
+        if muscle.b as usize == source {
+            muscle.b = target;
+        }
+        muscle.phase = (muscle.phase + rng.range(-0.08, 0.08)).rem_euclid(1.0);
+        creature.muscles.push(muscle);
+    }
+    true
+}
+
+fn phase_shift_group(creature: &mut Creature, rng: &mut Rng) -> bool {
+    if creature.nodes.is_empty() || creature.muscles.is_empty() {
+        return false;
+    }
+    let node = rng.index(creature.nodes.len()) as u32;
+    let offset = rng.range(-0.25, 0.25);
+    let mut changed = false;
+    for muscle in &mut creature.muscles {
+        if muscle.a == node || muscle.b == node {
+            muscle.phase = (muscle.phase + offset).rem_euclid(1.0);
+            changed = true;
+        }
+    }
+    changed
+}
+// The original rank-and-reproduce helpers remain for legacy callers. The game
+// and CLI use emit_archive_batch and never use the exact-clone pairing rule.
 fn mutate(mut c: Creature, cfg: &Config, generation: u32, index: usize) -> Creature {
     let mut rng = Rng::new(cfg.seed, generation, index);
     let strength = cfg.mutation * c.mutability;

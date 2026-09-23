@@ -5,3 +5,4 @@
 *.csv
 !docs/*.csv
 
+/presets/custom.json

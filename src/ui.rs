@@ -24,7 +24,6 @@ const CARD: Color32 = Color32::from_rgb(255, 255, 253);
 const CARD_HOVER: Color32 = Color32::from_rgb(238, 247, 241);
 const CARD_BORDER: Color32 = Color32::from_rgb(218, 229, 221);
 const GROUND: Color32 = Color32::from_rgb(220, 234, 222);
-const TERRAIN: Color32 = Color32::from_rgb(174, 192, 180);
 pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
     let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
     setup.instance_descriptor.backends = wgpu::Backends::VULKAN;
@@ -297,7 +296,7 @@ impl App {
         ui.add_space(10.);
         ui.label(RichText::new("EXPERIMENT").small().color(MUTED));
         ui.heading("Let life find a way.");
-        ui.label(RichText::new("Small changes. Better walkers.").color(MUTED));
+        ui.label(RichText::new("More kinds of life. Better walkers.").color(MUTED));
         ui.add_space(8.);
         let running = self.active();
         let text = if running {
@@ -331,7 +330,7 @@ impl App {
             }
             if ui
                 .add_enabled(!running, egui::Button::new("Guided step"))
-                .on_hover_text("Evaluate → sort → select survivors → reproduce")
+                .on_hover_text("Evaluate → update behavior archive → breed from diverse elites")
                 .clicked()
             {
                 self.worker.pause.store(false, Ordering::Relaxed);
@@ -375,7 +374,7 @@ impl App {
         ui.label("Mutation strength");
         ui.add(egui::Slider::new(&mut self.config.mutation, 0.0..=5.0).suffix("×"))
             .on_hover_text(
-                "How much offspring differ from their parent; 0 copies genetics unchanged.",
+                "Scales continuous parameter edits. Structural edits, novelty search, and immigrant restarts still run when set to 0.",
             );
         ui.label("Trial duration");
         ui.add(egui::Slider::new(&mut self.config.duration, 1.0..=60.0).suffix(" s"));
@@ -388,7 +387,7 @@ impl App {
                     ui.add(egui::Slider::new(&mut self.config.gravity,0.0..=30.0).text("Gravity").suffix(" m/s²"));
                     ui.add(egui::Slider::new(&mut self.config.air_retention,0.0..=1.02).text("Air retention")).on_hover_text("Velocity retained per 1/60 s. 1 means no damping; above 1 adds energy.");
                     ui.add(egui::Slider::new(&mut self.config.ground_friction,0.0..=20.0).text("Ground friction"));
-ui.checkbox(&mut self.config.ground,"Ground exists");
+                    ui.checkbox(&mut self.config.ground, "Flat ground");
                 });
             }
             if matches_search(&q, "body node size friction muscle limits") {
@@ -434,51 +433,6 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
                             );
                         });
                     });
-            }
-            if matches_search(&q, "terrain rectangle obstacles hurdles") {
-                egui::CollapsingHeader::new("Terrain & obstacles").show(ui, |ui| {
-                    ui.label(
-                        RichText::new(
-                            "Meters: left, bottom, right, top. Positive height is above ground.",
-                        )
-                        .small()
-                        .color(MUTED),
-                    );
-                    ui.horizontal(|ui| {
-                        if ui.button("Flat").clicked() {
-                            self.config.obstacles.clear();
-                        }
-                        if ui.button("Hurdles").clicked() {
-                            self.config.obstacles = (0..8)
-                                .map(|i| {
-                                    [1.0 + i as f32, 0.0, 1.2 + i as f32, 0.04 + 0.02 * i as f32]
-                                })
-                                .collect();
-                        }
-                    });
-                    let mut remove = None;
-                    for (i, r) in self.config.obstacles.iter_mut().enumerate() {
-                        ui.push_id(i, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("{}", i + 1));
-                                if ui.small_button("Remove").clicked() {
-                                    remove = Some(i);
-                                }
-                            });
-                            ui.horizontal(|ui| {
-                                for v in r {
-                                    ui.add(egui::DragValue::new(v).speed(0.01).max_decimals(2));
-                                }
-                            });
-                        });
-                    }
-                    if let Some(i) = remove {
-                        self.config.obstacles.remove(i);
-                    }
-                    if self.config.obstacles.len() < 256 && ui.button("+ Rectangle").clicked() {
-                        self.config.obstacles.push([1., 0., 1.2, 0.1]);
-                    }
-                });
             }
             if matches_search(&q, "seed random reproducibility") {
                 egui::CollapsingHeader::new("Randomness").show(ui, |ui| {
@@ -685,14 +639,6 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
                 Stroke::new(2., Color32::from_rgb(125, 159, 135)),
             );
         }
-        for r in &cfg.obstacles {
-            let obstacle = Rect::from_two_pos(world(r[0], r[1]), world(r[2], r[3]));
-            painter.rect_filled(obstacle, 3, TERRAIN);
-            painter.line_segment(
-                [obstacle.left_top(), obstacle.right_top()],
-                Stroke::new(2., MINT.gamma_multiply(0.6)),
-            );
-        }
         for x in left..=right {
             let pos = world(x as f32, 0.);
             painter.line_segment([pos, pos + Vec2::new(0., 6.)], Stroke::new(1., MUTED));
@@ -788,8 +734,8 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
             ui.columns(4, |cols| {
                 for (ui, (name, value, color)) in cols.iter_mut().zip([
                     ("BEST", format!("{:.3} m", s.best), MINT),
-                    ("MEDIAN", format!("{:.3} m", s.median), AMBER),
-                    ("POPULATION", number(s.population), INK),
+                    ("QD SCORE", format!("{:.2}", s.qd_score), MINT),
+                    ("NICHES", number(s.archive_cells), INK),
                     (
                         "EVALUATIONS / SEC",
                         format!("{:.0}", s.population as f64 / s.seconds.max(0.001)),
@@ -893,29 +839,55 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
     }
     fn population(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("Population");
-            ui.label(RichText::new("Select a creature to watch its trial").color(MUTED));
+            ui.heading("Behavior archive");
+            ui.label(
+                RichText::new("Best creature in each behavior niche · click to replay")
+                    .color(MUTED),
+            );
         });
         let Some(snapshot) = &self.snapshot else {
             return;
         };
+        ui.horizontal(|ui| {
+            ui.label(format!("{} niches", number(snapshot.archive_cells)));
+            ui.label(RichText::new(format!("QD score {:.2}", snapshot.qd_score)).color(MINT));
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Next batch:").small().color(MUTED));
+            for (emitter, weight) in crate::qd::Emitter::ALL
+                .into_iter()
+                .zip(snapshot.emitter_weights)
+            {
+                ui.label(
+                    RichText::new(format!("{} {:.0}%", emitter.label(), weight * 100.0)).small(),
+                )
+                .on_hover_text(
+                    "Emitter shares adapt to recent archive discoveries and improvements.",
+                );
+            }
+        });
         let columns = (ui.available_width() / 155.).floor().max(2.) as usize;
         let width = (ui.available_width() - (columns - 1) as f32 * 10.) / columns as f32;
         let progress = (self.sort_started.elapsed().as_secs_f32() * self.sort_speed / 3.).min(1.);
-        let animating = snapshot.stage == Stage::Ranked && progress < 1.;
+        let animating = snapshot.stage == Stage::Archived && progress < 1.;
         let ease = progress * progress * (3. - 2. * progress);
+        let item_count = if snapshot.archive_cells > 0 {
+            snapshot.archive_cells
+        } else {
+            snapshot.config.population
+        };
         let mut selected = None;
         let mut requested = None;
         let mut positions = std::collections::HashMap::new();
         egui::ScrollArea::vertical().id_salt("population_grid").show_rows(
-            ui, 137., snapshot.config.population.div_ceil(columns), |ui, rows| {
+            ui, 137., item_count.div_ceil(columns), |ui, rows| {
                 let start = rows.start * columns;
                 if start != self.last_page { requested = Some(start); }
                 for row in rows {
                     ui.horizontal(|ui| {
                         for column in 0..columns {
                             let rank = row * columns + column;
-                            if rank >= snapshot.config.population { break; }
+                            if rank >= item_count { break; }
                             let (destination, response) = ui.allocate_exact_size(Vec2::new(width, 127.), Sense::click());
                             if let Some(card) = snapshot.page.iter().find(|c| c.rank == rank) {
                                 positions.insert(card.creature.id, destination.min);
@@ -926,12 +898,16 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
                                 paint_card(ui.painter(), card, rect, response.hovered(), snapshot.stage);
                                 if response.clicked() { selected = Some(card.index); }
                                 response.on_hover_text(format!(
-                                    "ID {}\n{} nodes / {} muscles\nMutability {:.2}\n{}\nClick to replay",
+                                    "ID {}\n{} nodes / {} muscles\nMutability {:.2}\n{}\n{}\nClick to replay",
                                     card.creature.id,
                                     card.creature.nodes.len(),
                                     card.creature.muscles.len(),
                                     card.creature.mutability,
-                                    if card.score.is_finite() { "Current trial evaluated" } else if card.parent_score.is_finite() { "Showing parent result; current trial pending" } else { "Current trial pending" }
+                                    card.emitter.map_or("Initial population".to_owned(), |emitter| format!("Emitter: {}", emitter.label())),
+                                    card.descriptor.map_or_else(
+                                        || if card.score.is_finite() { "Current trial evaluated".to_owned() } else { "Current trial pending".to_owned() },
+                                        |d| format!("Contact {:.0}% · observed gait {:.2} Hz · form {:.2} · bob {:.2} m · {} visits", d.ground_contact * 100.0, d.gait_frequency, d.aspect_ratio, d.vertical_oscillation, card.visits),
+                                    )
                                 ));
                             } else {
                                 ui.painter().rect_filled(destination, 8, CARD);
@@ -975,12 +951,17 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
         let stride = history.len().div_ceil(rect.width().max(1.) as usize).max(1);
         for i in (0..history.len()).step_by(stride) {
             let h = &history[i];
+            let body_count = if h.archive_cells > 0 {
+                h.archive_cells
+            } else {
+                h.population
+            };
             let x = rect.left() + rect.width() * i as f32 / history.len() as f32;
             let right = rect.left()
                 + rect.width() * (i + stride).min(history.len()) as f32 / history.len() as f32;
             let mut y = rect.bottom();
             for &(nodes, muscles, count) in &h.species {
-                let height = rect.height() * count as f32 / h.population as f32;
+                let height = rect.height() * count as f32 / body_count.max(1) as f32;
                 painter.rect_filled(
                     Rect::from_min_max(Pos2::new(x, y - height), Pos2::new(right, y)),
                     0,
@@ -1039,12 +1020,19 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
         self.trend(ui, 180.);
         self.species_history(ui);
         let stats = self.snapshot.as_ref().unwrap().history[self.history_index].clone();
+        let body_count = if stats.archive_cells > 0 {
+            stats.archive_cells
+        } else {
+            stats.population
+        };
         ui.horizontal(|ui| {
             ui.label(format!(
-                "Generation {} · seed {} · {} creatures · {} failed",
+                "Generation {} · seed {} · {} evaluated · {} niches · QD {:.2} · {} failed",
                 stats.generation,
                 stats.config.seed,
                 number(stats.population),
+                number(stats.archive_cells),
+                stats.qd_score,
                 stats.failed
             ));
         });
@@ -1063,7 +1051,7 @@ ui.checkbox(&mut self.config.ground,"Ground exists");
                             ui.label(format!(
                                 "{} · {:.1}%",
                                 number(count as usize),
-                                100. * count as f32 / stats.population as f32
+                                100. * count as f32 / body_count.max(1) as f32
                             ));
                         });
                     }
@@ -1294,7 +1282,7 @@ if let Some(m)=&self.message {ui.label(m);
                 ui.horizontal(|ui| {
                     for (tab, label) in [
                         (Tab::Overview, "Overview"),
-                        (Tab::Population, "Population"),
+                        (Tab::Population, "Behavior archive"),
                         (Tab::History, "History & statistics"),
                     ] {
                         ui.selectable_value(&mut self.tab, tab, RichText::new(label).size(15.));
@@ -1372,7 +1360,7 @@ fn paint_card(
     painter.text(
         rect.left_top() + Vec2::new(9., 8.),
         Align2::LEFT_TOP,
-        if matches!(stage, Stage::Ranked | Stage::Selected) {
+        if card.descriptor.is_some() || matches!(stage, Stage::Ranked | Stage::Selected) {
             format!("#{}", card.rank + 1)
         } else {
             format!("ID {}", card.creature.id)

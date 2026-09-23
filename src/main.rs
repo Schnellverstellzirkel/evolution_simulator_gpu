@@ -133,13 +133,16 @@ fn main() -> Result<()> {
                             let batch = e.config.batch_size();
                             let end = (e.evaluated + batch).min(e.config.population);
                             let start = Instant::now();
-                            let scores = gpu.evaluate(
+                            let metrics = gpu.evaluate_with_metrics(
                                 &e.population,
                                 &(e.evaluated..end).collect::<Vec<_>>(),
                                 &e.config,
                             )?;
                             e.evaluation_seconds += start.elapsed().as_secs_f64();
-                            e.scores[e.evaluated..end].copy_from_slice(&scores);
+                            for (offset, metric) in metrics.iter().enumerate() {
+                                e.scores[e.evaluated + offset] = metric.fitness;
+                                e.trial_metrics[e.evaluated + offset] = metric.behavior;
+                            }
                             e.evaluated = end;
                             if end == e.config.population {
                                 e.stage = Stage::Evaluated;
@@ -151,17 +154,22 @@ fn main() -> Result<()> {
                                 );
                             }
                         }
-                        Stage::Evaluated => {
-                            e.rank();
+                        Stage::Evaluated | Stage::Ranked | Stage::Selected => {
+                            e.archive_batch()?;
                             let s = e.history.last().unwrap();
                             println!(
-                                "generation={} best={:.4}m median={:.4}m failed={} evaluation={:.3}s",
-                                s.generation, s.best, s.median, s.failed, s.seconds
+                                "generation={} best={:.4}m median={:.4}m niches={} qd={:.2} failed={} evaluation={:.3}s",
+                                s.generation,
+                                s.best,
+                                s.median,
+                                s.archive_cells,
+                                s.qd_score,
+                                s.failed,
+                                s.seconds
                             );
                         }
-                        Stage::Ranked => e.select(),
-                        Stage::Selected => {
-                            e.reproduce()?;
+                        Stage::Archived => {
+                            e.prepare_next_batch()?;
                             if e.config.checkpoint_interval > 0
                                 && e.generation.is_multiple_of(e.config.checkpoint_interval)
                             {
@@ -227,12 +235,15 @@ fn main() -> Result<()> {
                     let batch = e.config.batch_size();
                     for begin in (0..count).step_by(batch) {
                         let end = (begin + batch).min(count);
-                        let s = gpu.evaluate(
+                        let metrics = gpu.evaluate_with_metrics(
                             &e.population,
                             &(begin..end).collect::<Vec<_>>(),
                             &e.config,
                         )?;
-                        e.scores[begin..end].copy_from_slice(&s);
+                        for (offset, metric) in metrics.iter().enumerate() {
+                            e.scores[begin + offset] = metric.fitness;
+                            e.trial_metrics[begin + offset] = metric.behavior;
+                        }
                     }
                     let gpu_seconds = start.elapsed().as_secs_f64();
                     e.evaluation_seconds = gpu_seconds;
@@ -248,11 +259,10 @@ fn main() -> Result<()> {
                     } else {
                         None
                     };
-                    e.rank();
+                    e.archive_batch()?;
                     let failed = e.history.last().unwrap().failed;
-                    e.select();
                     let bytes = e.population.bytes();
-                    e.reproduce()?;
+                    e.prepare_next_batch()?;
                     let generation_seconds =
                         total.elapsed().as_secs_f64() - cpu_seconds.unwrap_or(0.0);
                     csv.serialize((

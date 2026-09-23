@@ -69,7 +69,7 @@ fn mutation_keeps_valid_graphs_at_limits() {
     }
 }
 #[test]
-fn contacts_handle_ground_and_embedded_nodes() {
+fn flat_ground_contact_resolves_nodes_and_can_be_disabled() {
     let cfg = config();
     let mut node = Node {
         pos: [0., -0.1],
@@ -84,13 +84,13 @@ fn contacts_handle_ground_and_embedded_nodes() {
     assert_eq!(node.vel, [0., 0.]);
     let cfg = Config {
         ground: false,
-        obstacles: vec![[-1., -1., 1., 1.]],
         ..cfg
     };
     node.pos = [0., 0.];
+    node.vel = [1., -2.];
     physics::collide(&mut node, &cfg);
-    assert!(node.pos.iter().all(|x| x.is_finite()));
-    assert!(node.pos[0].abs() > 1. || node.pos[1].abs() > 1.);
+    assert_eq!(node.pos, [0., 0.]);
+    assert_eq!(node.vel, [1., -2.]);
 }
 #[test]
 fn muscle_cycle_is_continuous_and_periodic() {
@@ -175,7 +175,7 @@ fn invalid_settings_and_checkpoints_are_rejected() {
     cfg.population = 3;
     assert!(cfg.validate().is_err());
     cfg = config();
-    cfg.obstacles.push([1., 0., 0., 1.]);
+    cfg.gravity = f32::NAN;
     assert!(cfg.validate().is_err());
     let p = path("corrupt");
     std::fs::write(&p, b"garbage!").unwrap();
@@ -229,7 +229,6 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
     let cfg = Config {
         population: 10,
         duration: 0.5,
-        obstacles: vec![[0.1, 0., 0.2, 0.1]],
         ..config()
     };
     let pop = evolution::create(&cfg).unwrap();

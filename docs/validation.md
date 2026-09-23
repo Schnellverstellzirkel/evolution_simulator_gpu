@@ -2,9 +2,11 @@
 
 Measurements below were captured on the local NVIDIA GeForce RTX 4060 Laptop GPU (8 GiB), Ubuntu 24.04 Wayland, with Rust release builds and the simulator's throughput mode. Each creature ran the default 15-second trial. These are workload measurements, not fixed hardware guarantees.
 
+These records predate the MAP-Elites archive and emitter loop. They document GPU simulation throughput and UI responsiveness; they are not performance measurements of the current archive insertion and offspring-generation work.
+
 ## Generation throughput
 
-| Population | GPU evaluation / generation | Full generation, including ranking and reproduction | Average evaluations/s | Failed trials |
+| Population | GPU evaluation / generation | Full generation with the earlier ranking/reproduction loop | Average evaluations/s | Failed trials |
 | ---: | ---: | ---: | ---: | ---: |
 | 100,000 | 0.34 s | 0.37 s | 294,278 | 0 |
 | 1,000,000 | 2.56–2.82 s across a 10-generation run | 2.83–3.11 s | 355,000–383,000 | 0 |

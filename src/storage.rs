@@ -1,12 +1,13 @@
 use crate::{
     config::Config,
-    evolution::{self, Creature, FAILED, Population},
+    evolution::{self, CandidatePlan, Creature, FAILED, Population, Rng},
+    qd::{self, CmaEmitter, Emitter, EmitterStats, QdArchive, TrialMetrics},
 };
 use anyhow::{Context, Result, ensure};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs::File,
     io::{BufReader, BufWriter, Read, Write},
     path::Path,
@@ -19,6 +20,7 @@ pub enum Stage {
     Evaluated,
     Ranked,
     Selected,
+    Archived,
 }
 impl Stage {
     pub fn label(self) -> &'static str {
@@ -28,6 +30,7 @@ impl Stage {
             Self::Evaluated => "Evaluation complete",
             Self::Ranked => "Sorted by fitness",
             Self::Selected => "Survivors selected",
+            Self::Archived => "Archive updated",
         }
     }
 }
@@ -51,6 +54,14 @@ pub struct Stats {
     pub species: Vec<(usize, usize, u32)>,
     pub representatives: Vec<Creature>,
     pub config: Config,
+    #[serde(default)]
+    pub archive_cells: usize,
+    #[serde(default)]
+    pub qd_score: f64,
+    #[serde(default)]
+    pub archive_coverage: f32,
+    #[serde(default)]
+    pub emitters: [EmitterStats; qd::EMITTER_COUNT],
 }
 #[derive(Serialize, Deserialize)]
 pub struct Experiment {
@@ -68,13 +79,30 @@ pub struct Experiment {
     pub parents: Vec<usize>,
     pub history: Vec<Stats>,
     pub evaluation_seconds: f64,
+    #[serde(default)]
+    pub archive: QdArchive,
+    #[serde(default)]
+    pub emitter_stats: [EmitterStats; qd::EMITTER_COUNT],
+    #[serde(default)]
+    pub cma_emitters: Vec<CmaEmitter>,
+    #[serde(default)]
+    pub candidate_emitters: Vec<Emitter>,
+    #[serde(default)]
+    pub candidate_cma: Vec<Option<usize>>,
+    #[serde(default)]
+    pub protected_until: Vec<u32>,
+    #[serde(default)]
+    pub trial_metrics: Vec<TrialMetrics>,
+    #[serde(default)]
+    pub qd_version: u32,
 }
 impl Experiment {
     pub fn new(config: Config) -> Result<Self> {
         let config = config.resolved();
         let population = evolution::create(&config)?;
-        let scores = vec![f32::NAN; config.population];
-        let parent_scores = vec![f32::NAN; config.population];
+        let population_count = config.population;
+        let scores = vec![f32::NAN; population_count];
+        let parent_scores = vec![f32::NAN; population_count];
         Ok(Self {
             config,
             pending: None,
@@ -88,6 +116,14 @@ impl Experiment {
             parents: vec![],
             history: vec![],
             evaluation_seconds: 0.0,
+            archive: QdArchive::default(),
+            emitter_stats: [EmitterStats::default(); qd::EMITTER_COUNT],
+            cma_emitters: vec![],
+            candidate_emitters: vec![Emitter::Restart; population_count],
+            candidate_cma: vec![None; population_count],
+            protected_until: vec![0; population_count],
+            trial_metrics: vec![TrialMetrics::default(); population_count],
+            qd_version: qd::VERSION,
         })
     }
     pub fn rank(&mut self) {
@@ -135,8 +171,286 @@ impl Experiment {
             species: species.into_iter().map(|((n, m), c)| (n, m, c)).collect(),
             representatives,
             config: self.config.clone(),
+            archive_cells: 0,
+            qd_score: 0.0,
+            archive_coverage: 0.0,
+            emitters: self.emitter_stats,
         });
         self.stage = Stage::Ranked;
+    }
+    pub fn archive_batch(&mut self) -> Result<()> {
+        ensure!(
+            self.evaluated == self.config.population,
+            "Cannot archive an incomplete batch"
+        );
+        ensure!(
+            self.trial_metrics.len() == self.config.population,
+            "Invalid behavior metric count"
+        );
+        let mut attempts = [0u64; qd::EMITTER_COUNT];
+        let mut discoveries = [0u64; qd::EMITTER_COUNT];
+        let mut improvements = [0u64; qd::EMITTER_COUNT];
+        let mut rewards = [0.0f64; qd::EMITTER_COUNT];
+        let mut cma_samples = vec![Vec::<(usize, f32)>::new(); self.cma_emitters.len()];
+        let mut failed = 0usize;
+        for i in 0..self.config.population {
+            let score = self.scores[i];
+            if !score.is_finite() || score <= FAILED {
+                failed += 1;
+            }
+            let emitter = self
+                .candidate_emitters
+                .get(i)
+                .copied()
+                .unwrap_or(Emitter::Restart);
+            let emitter_index = emitter.index();
+            attempts[emitter_index] += 1;
+            if emitter == Emitter::Cma
+                && let Some(cma) = self.candidate_cma.get(i).copied().flatten()
+                && let Some(samples) = cma_samples.get_mut(cma)
+            {
+                samples.push((i, score));
+            }
+            let genome = &self.population.genomes[i];
+            let nodes =
+                &self.population.nodes[genome.node_start..genome.node_start + genome.node_count];
+            let muscles = &self.population.muscles
+                [genome.muscle_start..genome.muscle_start + genome.muscle_count];
+            let descriptor = qd::descriptor(nodes, muscles, self.trial_metrics[i]);
+            let protection = self.protected_until.get(i).copied().unwrap_or(0);
+            let offer = self.archive.offer(
+                &self.population,
+                i,
+                descriptor,
+                score,
+                emitter,
+                self.generation,
+                protection,
+            );
+            if offer.inserted {
+                rewards[emitter_index] += offer.reward;
+                if offer.new_niche {
+                    discoveries[emitter_index] += 1;
+                } else {
+                    improvements[emitter_index] += 1;
+                }
+            }
+        }
+        for (emitter, samples) in self.cma_emitters.iter_mut().zip(&mut cma_samples) {
+            emitter.tell(&self.population, samples);
+        }
+        qd::record_emitter_batch(
+            &mut self.emitter_stats,
+            &attempts,
+            &discoveries,
+            &improvements,
+            &rewards,
+        );
+        self.archive.refresh_behavior_scores();
+        self.push_archive_stats(failed);
+        self.stage = Stage::Archived;
+        Ok(())
+    }
+    fn push_archive_stats(&mut self, failed: usize) {
+        let mut elites: Vec<_> = self.archive.entries.iter().collect();
+        elites.sort_unstable_by(|a, b| b.fitness.total_cmp(&a.fitness));
+        let count = elites.len();
+        let quantile = |p: f32| {
+            if count == 0 {
+                0.0
+            } else {
+                elites[((1.0 - p / 100.0) * (count - 1) as f32).round() as usize].fitness
+            }
+        };
+        let mut histogram = BTreeMap::<i32, u32>::new();
+        let mut species = BTreeMap::<(usize, usize), u32>::new();
+        let mut sum = 0.0f64;
+        for elite in &elites {
+            sum += elite.fitness as f64;
+            *histogram
+                .entry((elite.fitness * 100.0).floor() as i32)
+                .or_default() += 1;
+            *species
+                .entry((elite.creature.nodes.len(), elite.creature.muscles.len()))
+                .or_default() += 1;
+        }
+        let representatives = if count == 0 {
+            [0, 0, 0].map(|i| self.population.creature(i)).to_vec()
+        } else {
+            [count - 1, (count - 1) / 2, 0]
+                .map(|i| elites[i].creature.clone())
+                .to_vec()
+        };
+        self.history.push(Stats {
+            generation: self.generation,
+            best: quantile(100.0),
+            median: quantile(50.0),
+            worst: quantile(0.0),
+            mean: if count > 0 {
+                (sum / count as f64) as f32
+            } else {
+                0.0
+            },
+            failed,
+            seconds: self.evaluation_seconds,
+            population: self.config.population,
+            percentiles: PERCENTILES.iter().map(|&p| quantile(p)).collect(),
+            histogram: histogram.into_iter().collect(),
+            species: species.into_iter().map(|((n, m), c)| (n, m, c)).collect(),
+            representatives,
+            config: self.config.clone(),
+            archive_cells: count,
+            qd_score: self.archive.qd_score,
+            archive_coverage: self.archive.coverage(),
+            emitters: self.emitter_stats,
+        });
+    }
+    pub fn prepare_next_batch(&mut self) -> Result<()> {
+        ensure!(
+            self.stage == Stage::Archived,
+            "The archive must be updated before breeding"
+        );
+        let cfg = self.pending.clone().unwrap_or_else(|| self.config.clone());
+        cfg.validate()?;
+        if fitness_context_changed(&self.config, &cfg) {
+            self.reset_search_context();
+        }
+        evolution::ensure_archive_batch_memory(&self.population, &self.archive, &cfg)?;
+        let generation = self.generation + 1;
+        let weights = qd::emitter_weights(&self.emitter_stats);
+        let mut reset_cma = HashMap::<(qd::Niche, qd::Topology), usize>::new();
+        let mut cma_lookup: HashMap<(qd::Niche, qd::Topology), usize> = self
+            .cma_emitters
+            .iter()
+            .enumerate()
+            .map(|(i, cma)| ((cma.niche.clone(), cma.topology.clone()), i))
+            .collect();
+        let mut used_cma = vec![false; self.cma_emitters.len()];
+        let mut plans = Vec::with_capacity(cfg.population);
+        let mut emitters = Vec::with_capacity(cfg.population);
+        let mut cma_indices = Vec::with_capacity(cfg.population);
+        let mut protections = Vec::with_capacity(cfg.population);
+        for i in 0..cfg.population {
+            let mut rng = Rng::new(cfg.seed, generation, i);
+            let emitter = if self.archive.entries.is_empty() {
+                Emitter::Restart
+            } else {
+                qd::choose_emitter(&mut rng, &weights)
+            };
+            let emitter_stale = self.emitter_stats[emitter.index()].stale();
+            let parent = if emitter == Emitter::Restart || self.archive.entries.is_empty() {
+                None
+            } else if emitter == Emitter::Novelty || emitter_stale {
+                self.archive
+                    .sample_novel(&mut rng, self.emitter_stats[emitter.index()].last_parent)
+            } else {
+                self.archive.sample_local_competitive(
+                    &mut rng,
+                    self.emitter_stats[emitter.index()].last_parent,
+                )
+            };
+            let cma_index = if emitter == Emitter::Cma {
+                if let Some(parent_index) = parent {
+                    let elite = &self.archive.entries[parent_index];
+                    let template = &elite.creature;
+                    let topology = &elite.topology;
+                    let niche_key = (elite.niche.clone(), topology.clone());
+                    let mut index = if emitter_stale {
+                        reset_cma.get(&niche_key).copied()
+                    } else {
+                        cma_lookup.get(&niche_key).copied()
+                    };
+                    if index.is_none() {
+                        let replacement = if self.cma_emitters.len() < qd::CMA_LIMIT {
+                            Some(self.cma_emitters.len())
+                        } else {
+                            self.cma_emitters
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, _)| !used_cma[*i])
+                                .min_by_key(|(_, cma)| cma.last_used_generation)
+                                .map(|(i, _)| i)
+                        };
+                        if let Some(slot) = replacement {
+                            let new =
+                                CmaEmitter::new(template.clone(), elite.niche.clone(), generation);
+                            let new_key = (new.niche.clone(), new.topology.clone());
+                            if slot == self.cma_emitters.len() {
+                                self.cma_emitters.push(new);
+                                used_cma.push(false);
+                            } else {
+                                let old_key = (
+                                    self.cma_emitters[slot].niche.clone(),
+                                    self.cma_emitters[slot].topology.clone(),
+                                );
+                                if cma_lookup.get(&old_key) == Some(&slot) {
+                                    cma_lookup.remove(&old_key);
+                                }
+                                reset_cma.retain(|_, index| *index != slot);
+                                self.cma_emitters[slot] = new;
+                            }
+                            cma_lookup.insert(new_key, slot);
+                            if emitter_stale {
+                                reset_cma.insert(niche_key, slot);
+                            }
+                            index = Some(slot);
+                        }
+                    }
+                    if let Some(index) = index {
+                        used_cma[index] = true;
+                        self.cma_emitters[index].last_used_generation = generation;
+                    }
+                    index
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let protection = if matches!(emitter, Emitter::Structural | Emitter::Novelty) {
+                generation.saturating_add(3)
+            } else {
+                parent
+                    .map(|index| self.archive.entries[index].protected_until)
+                    .unwrap_or(0)
+            };
+            if let Some(parent_index) = parent {
+                self.archive.visit(parent_index);
+                self.emitter_stats[emitter.index()].last_parent = Some(parent_index);
+            }
+            plans.push(CandidatePlan {
+                emitter,
+                parent,
+                cma: cma_index,
+            });
+            emitters.push(emitter);
+            cma_indices.push(cma_index);
+            protections.push(protection);
+        }
+        let next = evolution::emit_archive_batch(
+            &self.population,
+            &self.archive,
+            &self.cma_emitters,
+            &plans,
+            &cfg,
+            generation,
+        )?;
+        self.config = cfg;
+        self.pending = None;
+        self.population = next;
+        self.candidate_emitters = emitters;
+        self.candidate_cma = cma_indices;
+        self.protected_until = protections;
+        self.parent_scores.fill(f32::NAN);
+        self.generation = generation;
+        self.stage = Stage::Ready;
+        self.evaluated = 0;
+        self.scores.fill(f32::NAN);
+        self.trial_metrics.fill(TrialMetrics::default());
+        self.ranks.clear();
+        self.parents.clear();
+        self.evaluation_seconds = 0.0;
+        Ok(())
     }
     pub fn select(&mut self) {
         self.parents = evolution::survivors(&self.config, self.generation, &self.ranks);
@@ -178,19 +492,42 @@ impl Experiment {
                 .all(|g| g.node_count <= cfg.max_nodes && g.muscle_count <= cfg.max_muscles),
             "Existing bodies exceed these limits; start a new experiment"
         );
+        ensure!(
+            self.archive.entries.iter().all(|elite| {
+                elite.creature.nodes.len() <= cfg.max_nodes
+                    && elite.creature.muscles.len() <= cfg.max_muscles
+            }),
+            "Archived bodies exceed these limits; start a new experiment"
+        );
         if self.stage == Stage::Ready {
+            if fitness_context_changed(&self.config, &cfg) {
+                self.reset_search_context();
+            }
             self.config = cfg;
         } else {
             self.pending = Some(cfg);
         }
         Ok(())
     }
+    fn reset_search_context(&mut self) {
+        self.archive = QdArchive::default();
+        self.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
+        self.cma_emitters.clear();
+    }
     pub fn validate(&self) -> Result<()> {
         self.config.validate()?;
         self.population.validate(&self.config)?;
         ensure!(
-            self.scores.len() == self.config.population && self.evaluated <= self.scores.len(),
+            self.scores.len() == self.config.population
+                && self.evaluated <= self.scores.len()
+                && self.trial_metrics.len() == self.config.population,
             "Invalid evaluation progress"
+        );
+        ensure!(
+            self.candidate_emitters.len() == self.config.population
+                && self.candidate_cma.len() == self.config.population
+                && self.protected_until.len() == self.config.population,
+            "Invalid QD candidate state"
         );
         ensure!(
             self.scores[..self.evaluated].iter().all(|s| s.is_finite()),
@@ -202,7 +539,7 @@ impl Experiment {
         );
         if matches!(
             self.stage,
-            Stage::Evaluated | Stage::Ranked | Stage::Selected
+            Stage::Evaluated | Stage::Ranked | Stage::Selected | Stage::Archived
         ) {
             ensure!(
                 self.evaluated == self.scores.len(),
@@ -230,9 +567,20 @@ impl Experiment {
         if let Some(cfg) = &self.pending {
             cfg.validate()?;
             ensure!(
-                cfg.population == self.config.population && cfg.seed == self.config.seed
+                cfg.population == self.config.population
+                    && cfg.seed == self.config.seed
                     && cfg.random_seed == self.config.random_seed
-                    && self.population.genomes.iter().all(|g| g.node_count <= cfg.max_nodes && g.muscle_count <= cfg.max_muscles),
+                    && self
+                        .population
+                        .genomes
+                        .iter()
+                        .all(|g| g.node_count <= cfg.max_nodes && g.muscle_count <= cfg.max_muscles)
+                    && self
+                        .archive
+                        .entries
+                        .iter()
+                        .all(|elite| elite.creature.nodes.len() <= cfg.max_nodes
+                            && elite.creature.muscles.len() <= cfg.max_muscles),
                 "Invalid pending settings"
             );
         }
@@ -244,12 +592,28 @@ impl Experiment {
             self.history.len() <= self.generation as usize + 1,
             "Invalid history length"
         );
+        ensure!(
+            self.qd_version == qd::VERSION
+                && self.archive.entries.len() <= qd::ARCHIVE_LIMIT
+                && self.cma_emitters.len() <= qd::CMA_LIMIT
+                && self
+                    .archive
+                    .entries
+                    .iter()
+                    .all(|elite| elite.fitness.is_finite() && elite.fitness > FAILED),
+            "Invalid QD archive state"
+        );
         for (index, stats) in self.history.iter().enumerate() {
             stats.config.validate()?;
             ensure!(
                 stats.generation as usize == index
                     && stats.population == stats.config.population
-                    && stats.failed <= stats.population,
+                    && stats.failed <= stats.population
+                    && stats.archive_cells <= qd::HISTORICAL_ARCHIVE_LIMIT
+                    && stats.qd_score.is_finite()
+                    && stats.qd_score >= 0.0
+                    && stats.archive_coverage.is_finite()
+                    && (0.0..=1.0).contains(&stats.archive_coverage),
                 "Invalid historical generation"
             );
             ensure!(
@@ -266,16 +630,27 @@ impl Experiment {
                 stats.representatives.len() == 3,
                 "Missing historical representatives"
             );
-            ensure!(
-                stats.histogram.iter().map(|(_, n)| *n as u64).sum::<u64>() + stats.failed as u64
-                    == stats.population as u64,
-                "Invalid histogram totals"
-            );
-            ensure!(
-                stats.species.iter().map(|(_, _, n)| *n as u64).sum::<u64>()
-                    == stats.population as u64,
-                "Invalid body-type totals"
-            );
+            if stats.archive_cells == 0 {
+                ensure!(
+                    stats.histogram.iter().map(|(_, n)| *n as u64).sum::<u64>()
+                        + stats.failed as u64
+                        == stats.population as u64,
+                    "Invalid histogram totals"
+                );
+                ensure!(
+                    stats.species.iter().map(|(_, _, n)| *n as u64).sum::<u64>()
+                        == stats.population as u64,
+                    "Invalid body-type totals"
+                );
+            } else {
+                ensure!(
+                    stats.histogram.iter().map(|(_, n)| *n as u64).sum::<u64>()
+                        == stats.archive_cells as u64
+                        && stats.species.iter().map(|(_, _, n)| *n as u64).sum::<u64>()
+                            == stats.archive_cells as u64,
+                    "Invalid archive statistics totals"
+                );
+            }
             let mut representatives = Population::default();
             for creature in &stats.representatives {
                 representatives.push(creature.clone());
@@ -288,7 +663,15 @@ impl Experiment {
         Ok(())
     }
 }
-const MAGIC: &[u8; 8] = b"EVORUST1";
+const MAGIC: &[u8; 8] = b"EVORUST2";
+const LEGACY_MAGIC: &[u8; 8] = b"EVORUST1";
+fn fitness_context_changed(old: &Config, new: &Config) -> bool {
+    old.duration != new.duration
+        || old.gravity != new.gravity
+        || old.air_retention != new.air_retention
+        || old.ground_friction != new.ground_friction
+        || old.ground != new.ground
+}
 pub fn save(path: &Path, experiment: &Experiment) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
@@ -316,19 +699,137 @@ pub fn load(path: &Path) -> Result<Experiment> {
     let mut file = BufReader::new(File::open(path).context("Cannot open checkpoint")?);
     let mut magic = [0; 8];
     file.read_exact(&mut magic)?;
-    ensure!(&magic == MAGIC, "Unsupported checkpoint format/version");
+    ensure!(
+        &magic == MAGIC || &magic == LEGACY_MAGIC,
+        "Unsupported checkpoint format/version"
+    );
     let mut decoder = zstd::stream::read::Decoder::new(file)?;
-    let experiment: Experiment = bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_limit(24 * 1024 * 1024 * 1024)
-        .deserialize_from(&mut decoder)?;
+    let mut experiment: Experiment = if &magic == LEGACY_MAGIC {
+        let legacy: LegacyExperiment = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(24 * 1024 * 1024 * 1024)
+            .deserialize_from(&mut decoder)?;
+        legacy.into()
+    } else {
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(24 * 1024 * 1024 * 1024)
+            .deserialize_from(&mut decoder)?
+    };
     let mut trailing = [0u8; 1];
     ensure!(
         decoder.read(&mut trailing)? == 0,
         "Unexpected trailing checkpoint data"
     );
+    if experiment.qd_version < qd::VERSION {
+        // Older archives used prior descriptors or obstacle physics. Reevaluate
+        // their current populations under measured behavior on flat ground.
+        if experiment
+            .history
+            .last()
+            .is_some_and(|s| s.generation == experiment.generation)
+        {
+            experiment.history.pop();
+        }
+        experiment.qd_version = qd::VERSION;
+        experiment.archive = QdArchive::default();
+        experiment.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
+        experiment.cma_emitters.clear();
+        experiment.candidate_emitters = vec![Emitter::Restart; experiment.config.population];
+        experiment.candidate_cma = vec![None; experiment.config.population];
+        experiment.protected_until = vec![0; experiment.config.population];
+        experiment.trial_metrics = vec![TrialMetrics::default(); experiment.config.population];
+        experiment.scores.fill(f32::NAN);
+        experiment.evaluated = 0;
+        experiment.stage = Stage::Ready;
+        experiment.ranks.clear();
+        experiment.parents.clear();
+        experiment.evaluation_seconds = 0.0;
+    }
+    experiment.parent_scores = vec![f32::NAN; experiment.config.population];
+    experiment.archive.rebuild_indices();
     experiment.validate()?;
     Ok(experiment)
+}
+
+#[derive(Deserialize)]
+struct LegacyStats {
+    generation: u32,
+    best: f32,
+    median: f32,
+    worst: f32,
+    mean: f32,
+    failed: usize,
+    seconds: f64,
+    population: usize,
+    percentiles: Vec<f32>,
+    histogram: Vec<(i32, u32)>,
+    species: Vec<(usize, usize, u32)>,
+    representatives: Vec<Creature>,
+    config: Config,
+}
+#[derive(Deserialize)]
+struct LegacyExperiment {
+    config: Config,
+    pending: Option<Config>,
+    generation: u32,
+    population: Population,
+    scores: Vec<f32>,
+    evaluated: usize,
+    stage: Stage,
+    ranks: Vec<usize>,
+    parents: Vec<usize>,
+    history: Vec<LegacyStats>,
+    evaluation_seconds: f64,
+}
+impl From<LegacyExperiment> for Experiment {
+    fn from(legacy: LegacyExperiment) -> Self {
+        let population = legacy.config.population;
+        Self {
+            config: legacy.config,
+            pending: legacy.pending,
+            generation: legacy.generation,
+            population: legacy.population,
+            scores: legacy.scores,
+            parent_scores: vec![f32::NAN; population],
+            evaluated: legacy.evaluated,
+            stage: legacy.stage,
+            ranks: legacy.ranks,
+            parents: legacy.parents,
+            history: legacy
+                .history
+                .into_iter()
+                .map(|s| Stats {
+                    generation: s.generation,
+                    best: s.best,
+                    median: s.median,
+                    worst: s.worst,
+                    mean: s.mean,
+                    failed: s.failed,
+                    seconds: s.seconds,
+                    population: s.population,
+                    percentiles: s.percentiles,
+                    histogram: s.histogram,
+                    species: s.species,
+                    representatives: s.representatives,
+                    config: s.config,
+                    archive_cells: 0,
+                    qd_score: 0.0,
+                    archive_coverage: 0.0,
+                    emitters: [EmitterStats::default(); qd::EMITTER_COUNT],
+                })
+                .collect(),
+            evaluation_seconds: legacy.evaluation_seconds,
+            archive: QdArchive::default(),
+            emitter_stats: [EmitterStats::default(); qd::EMITTER_COUNT],
+            cma_emitters: vec![],
+            candidate_emitters: vec![Emitter::Restart; population],
+            candidate_cma: vec![None; population],
+            protected_until: vec![0; population],
+            trial_metrics: vec![TrialMetrics::default(); population],
+            qd_version: 0,
+        }
+    }
 }
 pub fn export_csv(path: &Path, history: &[Stats]) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -345,6 +846,9 @@ pub fn export_csv(path: &Path, history: &[Stats]) -> Result<()> {
         "failed",
         "evaluation_seconds",
         "seed",
+        "archive_cells",
+        "qd_score",
+        "archive_coverage",
     ])?;
     for s in history {
         w.serialize((
@@ -357,6 +861,9 @@ pub fn export_csv(path: &Path, history: &[Stats]) -> Result<()> {
             s.failed,
             s.seconds,
             s.config.seed,
+            s.archive_cells,
+            s.qd_score,
+            s.archive_coverage,
         ))?;
     }
     w.flush()?;

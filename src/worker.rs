@@ -2,6 +2,7 @@ use crate::{
     config::Config,
     evolution::Creature,
     gpu::Gpu,
+    qd::{self, Descriptor, Emitter, EmitterStats},
     storage::{self, Experiment, Stage, Stats},
 };
 use std::{
@@ -33,6 +34,9 @@ pub struct Card {
     pub score: f32,
     pub parent_score: f32,
     pub survivor: bool,
+    pub descriptor: Option<Descriptor>,
+    pub emitter: Option<Emitter>,
+    pub visits: u64,
     pub creature: Creature,
 }
 #[derive(Clone)]
@@ -51,6 +55,10 @@ pub struct Snapshot {
     pub gpu_bytes: u64,
     pub ram_bytes: usize,
     pub elapsed: f64,
+    pub archive_cells: usize,
+    pub qd_score: f64,
+    pub emitters: [EmitterStats; 4],
+    pub emitter_weights: [f64; 4],
     pub status: String,
     pub error: Option<String>,
 }
@@ -192,10 +200,12 @@ fn run(
                         page = start;
                     }
                     Command::Preview(i) => {
-                        if let Some(e) = &exp
-                            && i < e.config.population
-                        {
-                            preview = Some((e.population.creature(i), e.config.clone()));
+                        if let Some(e) = &exp {
+                            if let Some(elite) = e.archive.entries.get(i) {
+                                preview = Some((elite.creature.clone(), e.config.clone()));
+                            } else if e.archive.entries.is_empty() && i < e.config.population {
+                                preview = Some((e.population.creature(i), e.config.clone()));
+                            }
                         }
                     }
                 }
@@ -220,9 +230,13 @@ fn run(
                             let end = (e.evaluated + batch).min(e.config.population);
                             let indices: Vec<_> = (e.evaluated..end).collect();
                             let start = Instant::now();
-                            let scores = gpu.evaluate(&e.population, &indices, &e.config)?;
+                            let metrics =
+                                gpu.evaluate_with_metrics(&e.population, &indices, &e.config)?;
                             e.evaluation_seconds += start.elapsed().as_secs_f64();
-                            e.scores[e.evaluated..end].copy_from_slice(&scores);
+                            for (offset, metric) in metrics.iter().enumerate() {
+                                e.scores[e.evaluated + offset] = metric.fitness;
+                                e.trial_metrics[e.evaluated + offset] = metric.behavior;
+                            }
                             e.evaluated = end;
                             status = format!("Evaluating generation {}", e.generation);
                             if end == e.config.population {
@@ -232,23 +246,20 @@ fn run(
                                 }
                             }
                         }
-                        Stage::Evaluated => {
-                            e.rank();
-                            status = "Sorted by distance".into();
+                        Stage::Evaluated | Stage::Ranked | Stage::Selected => {
+                            e.archive_batch()?;
+                            status = format!(
+                                "Archive: {} niches · QD score {:.2}",
+                                e.archive.entries.len(),
+                                e.archive.qd_score
+                            );
                             if guided {
                                 running = false;
                             }
                         }
-                        Stage::Ranked => {
-                            e.select();
-                            status = "Half the population selected to survive".into();
-                            if guided {
-                                running = false;
-                            }
-                        }
-                        Stage::Selected => {
-                            e.reproduce()?;
-                            status = "New generation ready".into();
+                        Stage::Archived => {
+                            e.prepare_next_batch()?;
+                            status = "Breeding from diverse archive elites".into();
                             if e.config.checkpoint_interval > 0
                                 && e.generation.is_multiple_of(e.config.checkpoint_interval)
                             {
@@ -278,25 +289,58 @@ fn run(
                 if history.len() != e.history.len() {
                     history = Arc::new(e.history.clone());
                 }
-                let end = (page + 120).min(e.config.population);
-                let parent_set: std::collections::HashSet<_> = if e.stage == Stage::Selected {
-                    e.parents.iter().copied().collect()
+                let archive_count = e.archive.entries.len();
+                let item_count = if archive_count > 0 {
+                    archive_count
                 } else {
-                    Default::default()
+                    e.config.population
                 };
-                let cards = (page.min(end)..end)
-                    .map(|r| {
-                        let i = e.ranks.get(r).copied().unwrap_or(r);
-                        Card {
+                if page >= item_count {
+                    page = 0;
+                }
+                let end = (page + 120).min(item_count);
+                let cards = if archive_count > 0 {
+                    let mut order: Vec<_> = (0..archive_count).collect();
+                    order.sort_unstable_by(|&a, &b| {
+                        e.archive.entries[b]
+                            .fitness
+                            .total_cmp(&e.archive.entries[a].fitness)
+                    });
+                    order
+                        .into_iter()
+                        .enumerate()
+                        .skip(page)
+                        .take(end.saturating_sub(page))
+                        .map(|(rank, i)| {
+                            let elite = &e.archive.entries[i];
+                            Card {
+                                index: i,
+                                rank,
+                                score: elite.fitness,
+                                parent_score: f32::NAN,
+                                survivor: false,
+                                descriptor: Some(elite.descriptor),
+                                emitter: Some(elite.emitter),
+                                visits: elite.visits,
+                                creature: elite.creature.clone(),
+                            }
+                        })
+                        .collect()
+                } else {
+                    (page.min(end)..end)
+                        .map(|i| Card {
                             index: i,
-                            rank: r,
+                            rank: i,
                             score: e.scores[i],
                             parent_score: e.parent_scores.get(i).copied().unwrap_or(f32::NAN),
-                            survivor: parent_set.contains(&i),
+                            survivor: false,
+                            descriptor: None,
+                            emitter: None,
+                            visits: 0,
                             creature: e.population.creature(i),
-                        }
-                    })
-                    .collect();
+                        })
+                        .collect()
+                };
                 Snapshot {
                     epoch,
                     config: e.config.clone(),
@@ -312,9 +356,25 @@ fn run(
                     gpu_bytes: gpu.allocated_bytes,
                     ram_bytes: e.population.bytes()
                         + e.scores.capacity() * 4
+                        + e.trial_metrics.capacity()
+                            * std::mem::size_of::<crate::qd::TrialMetrics>()
                         + e.ranks.capacity() * 8
-                        + e.parents.capacity() * 8,
+                        + e.parents.capacity() * 8
+                        + e.archive
+                            .entries
+                            .iter()
+                            .map(|elite| {
+                                elite.creature.nodes.len()
+                                    * std::mem::size_of::<crate::evolution::NodeGene>()
+                                    + elite.creature.muscles.len()
+                                        * std::mem::size_of::<crate::evolution::Muscle>()
+                            })
+                            .sum::<usize>(),
                     elapsed: e.evaluation_seconds,
+                    archive_cells: archive_count,
+                    qd_score: e.archive.qd_score,
+                    emitters: e.emitter_stats,
+                    emitter_weights: qd::emitter_weights(&e.emitter_stats),
                     status: status.clone(),
                     error: error.clone(),
                 }
@@ -334,6 +394,10 @@ fn run(
                     gpu_bytes: gpu.allocated_bytes,
                     ram_bytes: 0,
                     elapsed: 0.,
+                    archive_cells: 0,
+                    qd_score: 0.0,
+                    emitters: [EmitterStats::default(); 4],
+                    emitter_weights: qd::emitter_weights(&[EmitterStats::default(); 4]),
                     status: status.clone(),
                     error: error.clone(),
                 }
