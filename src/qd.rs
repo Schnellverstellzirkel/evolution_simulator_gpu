@@ -285,6 +285,9 @@ impl QdArchive {
     pub fn behavior_count(&self) -> usize {
         self.behavior_indices.len()
     }
+    pub(crate) fn slot_for(&self, niche: &Niche) -> Option<usize> {
+        self.lookup.get(niche).copied()
+    }
     pub fn morphology_count(&self) -> usize {
         self.morphology_indices.len()
     }

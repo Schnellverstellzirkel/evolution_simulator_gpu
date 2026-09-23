@@ -86,8 +86,7 @@ pub struct Gpu {
     pipeline: wgpu::ComputePipeline,
     pipeline32: wgpu::ComputePipeline,
     pipeline30: wgpu::ComputePipeline,
-    serial_pipeline: wgpu::ComputePipeline,
-    subgroup_pipelines: Option<[wgpu::ComputePipeline; 3]>,
+    serial_pipeline: Option<wgpu::ComputePipeline>,
     /// Barrier-free one-creature-per-lane kernels for small strides.
     lane_pipelines: [Option<wgpu::ComputePipeline>; 6],
     buffers: Option<Buffers>,
@@ -148,6 +147,10 @@ fn serial_kernels_enabled() -> bool {
         std::env::var("EVOLUTION_KERNEL").ok().as_deref(),
         Some("serial")
     )
+}
+fn lane_kernels_enabled() -> bool {
+    std::env::var_os("EVOLUTION_LANE_SHADER").map(|v| v != "0")
+        .unwrap_or(!serial_kernels_enabled())
 }
 fn exact_cos_enabled() -> bool {
     std::env::var_os("EVOLUTION_EXACT_COS").is_some()
@@ -229,10 +232,6 @@ impl Gpu {
     }
     pub fn from_device(device: wgpu::Device, queue: wgpu::Queue, name: String) -> Result<Self> {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Muscle physics"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/physics.wgsl").into()),
-        });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Physics resources"),
             entries: &[
@@ -305,14 +304,6 @@ impl Gpu {
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Batched creature physics"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("advance"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
         let wide_source = include_str!("../shaders/physics.wgsl");
         ensure!(
             wide_source.matches("WORKGROUPX2").count() == 2
@@ -328,27 +319,72 @@ impl Gpu {
                     .replace("WORKGROUP", &lanes.to_string()),
             )
         };
-        let serial_source = apply_fast_cos(
-            include_str!("../shaders/physics_serial.wgsl").replace("MAXNODES", "8"),
-        );
-        ensure!(
-            serial_source.matches("@workgroup_size(128)").count() == 1
-                && serial_source.matches("group.x*128u").count() == 1
-                && !serial_source.contains("MAXNODES"),
-            "The serial physics source transform needs updating"
-        );
-        let serial_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Serial creature physics"),
-            source: wgpu::ShaderSource::Wgsl(serial_source.into()),
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Muscle physics"),
+            source: wgpu::ShaderSource::Wgsl(variant_source(64).into()),
         });
-        let serial_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Serial whole-body creature physics"),
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Batched creature physics"),
             layout: Some(&pipeline_layout),
-            module: &serial_shader,
+            module: &shader,
             entry_point: Some("advance"),
             compilation_options: Default::default(),
             cache: None,
         });
+        let serial_pipeline = if serial_kernels_enabled() {
+            let serial_source = apply_fast_cos(
+                include_str!("../shaders/physics_serial.wgsl").replace("MAXNODES", "8"),
+            );
+            ensure!(
+                serial_source.matches("@workgroup_size(128)").count() == 1
+                    && serial_source.matches("group.x*128u").count() == 1
+                    && !serial_source.contains("MAXNODES"),
+                "The serial physics source transform needs updating"
+            );
+            let serial_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Serial creature physics"),
+                source: wgpu::ShaderSource::Wgsl(serial_source.into()),
+            });
+            Some(device.create_compute_pipeline(
+                &wgpu::ComputePipelineDescriptor {
+                    label: Some("Serial whole-body creature physics"),
+                    layout: Some(&pipeline_layout),
+                    module: &serial_shader,
+                    entry_point: Some("advance"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            ))
+        } else {
+            None
+        };
+        let mut lane_pipelines: [Option<wgpu::ComputePipeline>; 6] = [const { None }; 6];
+        if lane_kernels_enabled() {
+            let lane_template = include_str!("../shaders/physics_lane.wgsl");
+            ensure!(
+                lane_template.matches("MAXN").count() == 11,
+                "The lane physics source transform needs updating"
+            );
+            for (bucket, maxn) in [(0usize, 4u32), (1, 5), (2, 8), (3, 16)] {
+                let lane_source =
+                    apply_fast_cos(lane_template.replace("MAXN", &maxn.to_string()));
+                ensure!(!lane_source.contains("MAXN"), "lane MAXN substitution failed");
+                let lane_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("Lane creature physics"),
+                    source: wgpu::ShaderSource::Wgsl(lane_source.into()),
+                });
+                lane_pipelines[bucket] = Some(device.create_compute_pipeline(
+                    &wgpu::ComputePipelineDescriptor {
+                        label: Some("Lane creature physics"),
+                        layout: Some(&pipeline_layout),
+                        module: &lane_shader,
+                        entry_point: Some("advance"),
+                        compilation_options: Default::default(),
+                        cache: None,
+                    },
+                ));
+            }
+        }
         let shader32 = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("32-lane muscle physics"),
             source: wgpu::ShaderSource::Wgsl(variant_source(32).into()),
@@ -408,7 +444,8 @@ impl Gpu {
             pipeline,
             pipeline32,
             pipeline30,
-            serial_pipeline: serial_kernels_enabled().then_some(serial_pipeline),
+            serial_pipeline,
+            lane_pipelines,
             buffers: None,
             allocated_bytes: 0,
             profile: profiling.then(GpuProfile::default),
@@ -719,7 +756,6 @@ impl Gpu {
             .and_then(|value| value.parse::<u32>().ok())
             .filter(|&value| value > 0)
             .unwrap_or(4096);
-        let use_serial = serial_kernels_enabled();
         let use_32_lanes = (cfg.population <= 10_000
             && std::env::var_os("EVOLUTION_WORKGROUP64").is_none())
             || std::env::var_os("EVOLUTION_WORKGROUP32").is_some();
@@ -746,10 +782,27 @@ impl Gpu {
                 bytemuck::cast_slice(&batch.node_adjacency),
             );
             let serial_bucket = self.serial_pipeline.is_some() && bucket <= 2;
+            let lane_bucket = !serial_bucket && self.lane_pipelines[bucket].is_some();
             for tick in (0..steps).step_by(chunk as usize) {
                 let offset = dispatches.len() as u64 * buffers.params_stride;
                 ensure!(offset <= u32::MAX as u64, "GPU parameter offset overflow");
                 let dynamic_offset = offset as u32;
+                let (workgroups_x, workgroups_y) = if lane_bucket {
+                    let total = batch.metadata.len().div_ceil(64) as u32;
+                    let groups_x = total.clamp(1, u16::MAX as u32);
+                    (groups_x, total.div_ceil(groups_x).max(1))
+                } else if serial_bucket {
+                    (batch.metadata.len().div_ceil(SERIAL_WORKGROUP) as u32, 1)
+                } else {
+                    let lanes = if bucket == 1 {
+                        30
+                    } else if bucket < 5 && use_32_lanes {
+                        32
+                    } else {
+                        64
+                    };
+                    ((batch.metadata.len() * batch.stride).div_ceil(lanes) as u32, 1)
+                };
                 let params = Params {
                     tick,
                     steps: (steps - tick).min(chunk),
@@ -760,23 +813,19 @@ impl Gpu {
                     friction: cfg.ground_friction,
                     ground: if cfg.ground { 1.0 } else { 0.0 },
                     total_steps: steps,
-                    groups_x: 0,
+                    groups_x: if lane_bucket { workgroups_x } else { 0 },
                     pad: [0; 2],
                 };
                 self.queue
                     .write_buffer(&buffers.params, offset, bytemuck::bytes_of(&params));
-                let workgroups = if serial_bucket {
-                    batch.metadata.len().div_ceil(SERIAL_WORKGROUP) as u32
-                } else {
-                    (batch.metadata.len() * batch.stride).div_ceil(if bucket == 1 {
-                        30
-                    } else if bucket < 5 && use_32_lanes {
-                        32
-                    } else {
-                        64
-                    }) as u32
-                };
-                dispatches.push((bucket, dynamic_offset, workgroups, serial_bucket));
+                dispatches.push((
+                    bucket,
+                    dynamic_offset,
+                    workgroups_x,
+                    workgroups_y,
+                    serial_bucket,
+                    lane_bucket,
+                ));
             }
         }
         let mut encoder = self
@@ -801,11 +850,17 @@ impl Gpu {
                 }),
             });
             let mut previous_bucket = None;
-            for (bucket, offset, workgroups, serial_bucket) in &dispatches {
+            for (bucket, offset, workgroups_x, workgroups_y, serial_bucket, lane_bucket) in
+                &dispatches
+            {
                 pass.set_pipeline(if *serial_bucket {
                     self.serial_pipeline
                         .as_ref()
                         .expect("serial dispatch without serial pipeline")
+                } else if *lane_bucket {
+                    self.lane_pipelines[*bucket]
+                        .as_ref()
+                        .expect("lane dispatch without lane pipeline")
                 } else if *bucket == 1 {
                     &self.pipeline30
                 } else if *bucket < 5 && use_32_lanes {
@@ -825,7 +880,7 @@ impl Gpu {
                 used_buckets[*bucket] = true;
                 let resources = buffers.buckets[*bucket].as_ref().unwrap();
                 pass.set_bind_group(0, &resources.bind, &[*offset]);
-                pass.dispatch_workgroups(*workgroups, 1, 1);
+                pass.dispatch_workgroups(*workgroups_x, *workgroups_y, 1);
             }
             if detailed_timestamps
                 && let (Some(timestamps), Some(previous)) = (&self.timestamps, previous_bucket)

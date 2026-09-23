@@ -5,6 +5,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use bincode::Options;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -202,7 +203,6 @@ impl Experiment {
                 .and_then(|index| self.archive.entries.get(index))
                 .map(|elite| elite.creature.id)
         });
-        let mut attempts = [0u64; qd::EMITTER_COUNT];
         let mut discoveries = [0u64; qd::EMITTER_COUNT];
         let mut improvements = [0u64; qd::EMITTER_COUNT];
         let mut rewards = [0.0f64; qd::EMITTER_COUNT];
@@ -221,72 +221,118 @@ impl Experiment {
                 )
             })
             .collect();
+        // Parallel prefilter: descriptors, behavior-offer eligibility against the
+        // start-of-batch archive, and static morphology-offer eligibility. Occupant
+        // fitness only ever rises, so a snapshot reject stays a live reject. Inserts
+        // still commit sequentially in index order so niche races resolve exactly
+        // like the old single loop.
+        struct Prep {
+            descriptor: qd::Descriptor,
+            emitter: Emitter,
+            score: f32,
+            protection: u32,
+            behavior_candidate: bool,
+            morphology_topology: Option<qd::Topology>,
+        }
+        let population_count = self.config.population;
+        let reserve_enabled = self.morphology_reserve_override != Some(false);
+        let prep: Vec<Prep> = (0..population_count)
+            .into_par_iter()
+            .map(|i| {
+                let score = self.scores[i];
+                let emitter = self
+                    .candidate_emitters
+                    .get(i)
+                    .copied()
+                    .unwrap_or(Emitter::Restart);
+                let genome = &self.population.genomes[i];
+                let nodes = &self.population.nodes
+                    [genome.node_start..genome.node_start + genome.node_count];
+                let muscles = &self.population.muscles
+                    [genome.muscle_start..genome.muscle_start + genome.muscle_count];
+                let descriptor = qd::descriptor(nodes, muscles, self.trial_metrics[i]);
+                let protection = self.protected_until.get(i).copied().unwrap_or(0);
+                let behavior_candidate = if score.is_finite() && score > FAILED {
+                    let niche = descriptor.niche();
+                    match self.archive.slot_for(&niche) {
+                        Some(slot) => score > self.archive.entries[slot].fitness,
+                        None => self.archive.behavior_count() < qd::ARCHIVE_LIMIT,
+                    }
+                } else {
+                    false
+                };
+                let morphology_topology = if reserve_enabled
+                    && matches!(emitter, Emitter::Structural | Emitter::Novelty)
+                {
+                    let topology = qd::topology_of_population(&self.population, i);
+                    let parent = self
+                        .candidate_parent_ids
+                        .get(i)
+                        .copied()
+                        .flatten()
+                        .and_then(|id| parent_morphologies.get(&id));
+                    let topology_changed = parent.is_some_and(|(parent_topology, _)| {
+                        !qd::topology_equivalent_for_archive(&topology, parent_topology)
+                    });
+                    let descended_from_reserve =
+                        parent.is_some_and(|(parent_topology, morphology)| {
+                            *morphology
+                                && qd::topology_equivalent_for_archive(&topology, parent_topology)
+                        });
+                    (descended_from_reserve || topology_changed).then_some(topology)
+                } else {
+                    None
+                };
+                Prep {
+                    descriptor,
+                    emitter,
+                    score,
+                    protection,
+                    behavior_candidate,
+                    morphology_topology,
+                }
+            })
+            .collect();
+        let mut attempts = [0u64; qd::EMITTER_COUNT];
         let mut failed = 0usize;
-        for i in 0..self.config.population {
-            let score = self.scores[i];
-            if !score.is_finite() || score <= FAILED {
+        for (i, prep) in prep.iter().enumerate() {
+            if !prep.score.is_finite() || prep.score <= FAILED {
                 failed += 1;
             }
-            let emitter = self
-                .candidate_emitters
-                .get(i)
-                .copied()
-                .unwrap_or(Emitter::Restart);
-            let emitter_index = emitter.index();
+            let emitter_index = prep.emitter.index();
             attempts[emitter_index] += 1;
-            if emitter == Emitter::Cma
+            if prep.emitter == Emitter::Cma
                 && let Some(cma) = self.candidate_cma.get(i).copied().flatten()
                 && let Some(samples) = cma_samples.get_mut(cma)
             {
-                samples.push((i, score));
+                samples.push((i, prep.score));
             }
-            let genome = &self.population.genomes[i];
-            let nodes =
-                &self.population.nodes[genome.node_start..genome.node_start + genome.node_count];
-            let muscles = &self.population.muscles
-                [genome.muscle_start..genome.muscle_start + genome.muscle_count];
-            let descriptor = qd::descriptor(nodes, muscles, self.trial_metrics[i]);
-            let protection = self.protected_until.get(i).copied().unwrap_or(0);
-            let behavior_offer = self.archive.offer(
-                &self.population,
-                i,
-                descriptor,
-                score,
-                emitter,
-                self.generation,
-                protection,
-            );
-            let parent = self
-                .candidate_parent_ids
-                .get(i)
-                .copied()
-                .flatten()
-                .and_then(|id| parent_morphologies.get(&id));
-            let morphology_offer = if self.morphology_reserve_override != Some(false)
-                && !behavior_offer.inserted
-                && matches!(emitter, Emitter::Structural | Emitter::Novelty)
+            let behavior_offer = if prep.behavior_candidate {
+                self.archive.offer(
+                    &self.population,
+                    i,
+                    prep.descriptor,
+                    prep.score,
+                    prep.emitter,
+                    self.generation,
+                    prep.protection,
+                )
+            } else {
+                qd::Offer::default()
+            };
+            let morphology_offer = if !behavior_offer.inserted
+                && let Some(topology) = prep.morphology_topology.clone()
             {
-                let topology = qd::topology_of_population(&self.population, i);
-                let topology_changed = parent.is_some_and(|(parent_topology, _)| {
-                    !qd::topology_equivalent_for_archive(&topology, parent_topology)
-                });
-                let descended_from_reserve = parent.is_some_and(|(parent_topology, morphology)| {
-                    *morphology && qd::topology_equivalent_for_archive(&topology, parent_topology)
-                });
-                if descended_from_reserve || topology_changed {
-                    self.archive.offer_morphology(
-                        &self.population,
-                        i,
-                        descriptor,
-                        topology,
-                        score,
-                        emitter,
-                        self.generation,
-                        protection,
-                    )
-                } else {
-                    qd::Offer::default()
-                }
+                self.archive.offer_morphology(
+                    &self.population,
+                    i,
+                    prep.descriptor,
+                    topology,
+                    prep.score,
+                    prep.emitter,
+                    self.generation,
+                    prep.protection,
+                )
             } else {
                 qd::Offer::default()
             };
