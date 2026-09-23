@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Min-of-N graphical-app generation benchmark, robust to a busy shared machine.
+# Min-of-N graphical-app benchmark with low-rate host and GPU telemetry.
 # Usage: noisy_bench.sh <population> [runs] [generations]
-# Env passes through to the app (e.g. EVOLUTION_SUBGROUP_SYNC=1).
+# Keep diagnostic profiling disabled for throughput runs. Other experiment
+# variables can still be passed through the environment.
 set -euo pipefail
 POP="${1:?population}"
 RUNS="${2:-5}"
@@ -22,26 +23,36 @@ clock_min=99999
 clock_max=0
 
 for ((r = 1; r <= RUNS; r++)); do
-  # Sample clocks while the run is in flight.
-  (
-    for _ in $(seq 1 200); do
-      c=$(nvidia-smi --query-gpu=clocks.current.sm --format=csv,noheader,nounits 2>/dev/null | tr -d ' ') || continue
-      [[ -n "$c" ]] || continue
-      echo "$c" >>"$LOG.clocks"
-      sleep 0.15
-    done
-  ) &
-  sampler=$!
-  out=$(env EVOLUTION_SMOKE_POPULATION="$POP" EVOLUTION_BENCH_GENERATIONS="$GENS" \
+  telemetry="$LOG.run$r.telemetry.csv"
+  host_load="$LOG.run$r.vmstat"
+  load_before=$(cut -d' ' -f1 /proc/loadavg)
+  # One persistent sampler per device at 1 Hz avoids the CPU/driver overhead
+  # of repeatedly starting nvidia-smi during a busy benchmark.
+  nvidia-smi --query-gpu=timestamp,clocks.current.sm,utilization.gpu,utilization.memory,power.draw,temperature.gpu \
+    --format=csv,noheader,nounits --loop=1 >"$telemetry" 2>&1 &
+  gpu_sampler=$!
+  vmstat -w 1 >"$host_load" 2>&1 &
+  cpu_sampler=$!
+  stop_monitors() {
+    kill "$gpu_sampler" "$cpu_sampler" 2>/dev/null || true
+    wait "$gpu_sampler" "$cpu_sampler" 2>/dev/null || true
+  }
+  out=$(env -u EVOLUTION_GPU_PROFILE -u EVOLUTION_PROFILE_BREED \
+    EVOLUTION_SMOKE_POPULATION="$POP" EVOLUTION_BENCH_GENERATIONS="$GENS" \
     taskset -c 4-15 nice -n 5 cargo run --release 2>&1) || {
     echo "$out" | tail -20
-    kill "$sampler" 2>/dev/null || true
+    stop_monitors
     exit 1
   }
-  kill "$sampler" 2>/dev/null || true
-  wait "$sampler" 2>/dev/null || true
+  stop_monitors
+  load_after=$(cut -d' ' -f1 /proc/loadavg)
+  awk -F, '{gsub(/[[:space:]]/, "", $2); if ($2 ~ /^[0-9]+$/) print $2}' "$telemetry" >>"$LOG.clocks"
+  awk -F, '{gsub(/[[:space:]%]/, "", $3); if ($3 ~ /^[0-9]+$/) print $3}' "$telemetry" >>"$LOG.utilization"
   {
     echo "===== run $r ====="
+    echo "Host load average before/after: $load_before / $load_after; logical CPUs: $(nproc)"
+    echo "Host CPU samples: $host_load"
+    echo "GPU samples: $telemetry"
     echo "$out" | grep -E "Native|stages|GPU profile|Breeding profile" | tail -5
   } >>"$LOG"
 
@@ -79,6 +90,12 @@ median_of() {
 }
 load=$(cut -d' ' -f1 /proc/loadavg)
 all=$(IFS=,; echo "${samples[*]}")
-echo "RESULT pop=$POP runs=$RUNS gen_s_min=$min gen_s_median=$med all=$all load=$load clocks=$clock_min..$clock_maxMHz"
+gpu_util_min=0
+gpu_util_max=0
+if [[ -f "$LOG.utilization" ]]; then
+  gpu_util_min=$(sort -n "$LOG.utilization" | head -1)
+  gpu_util_max=$(sort -n "$LOG.utilization" | tail -1)
+fi
+echo "RESULT pop=$POP runs=$RUNS gen_s_min=$min gen_s_median=$med all=$all load=$load clocks=$clock_min..$clock_maxMHz gpu_util=$gpu_util_min..$gpu_util_max%"
 echo "$(date +%s),$POP,$RUNS,$GENS,$min,$med,$all,$(median_of evals),$(median_of archives),$(median_of breeds),$(median_of shaders),$load,$clock_min,$clock_max" >>"$CSV"
 echo "log: $LOG"

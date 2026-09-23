@@ -149,7 +149,8 @@ fn serial_kernels_enabled() -> bool {
     )
 }
 fn lane_kernels_enabled() -> bool {
-    std::env::var_os("EVOLUTION_LANE_SHADER").map(|v| v != "0")
+    std::env::var_os("EVOLUTION_LANE_SHADER")
+        .map(|v| v != "0")
         .unwrap_or(!serial_kernels_enabled())
 }
 fn exact_cos_enabled() -> bool {
@@ -345,16 +346,16 @@ impl Gpu {
                 label: Some("Serial creature physics"),
                 source: wgpu::ShaderSource::Wgsl(serial_source.into()),
             });
-            Some(device.create_compute_pipeline(
-                &wgpu::ComputePipelineDescriptor {
+            Some(
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some("Serial whole-body creature physics"),
                     layout: Some(&pipeline_layout),
                     module: &serial_shader,
                     entry_point: Some("advance"),
                     compilation_options: Default::default(),
                     cache: None,
-                },
-            ))
+                }),
+            )
         } else {
             None
         };
@@ -366,9 +367,11 @@ impl Gpu {
                 "The lane physics source transform needs updating"
             );
             for (bucket, maxn) in [(0usize, 4u32), (1, 5), (2, 8), (3, 16)] {
-                let lane_source =
-                    apply_fast_cos(lane_template.replace("MAXN", &maxn.to_string()));
-                ensure!(!lane_source.contains("MAXN"), "lane MAXN substitution failed");
+                let lane_source = apply_fast_cos(lane_template.replace("MAXN", &maxn.to_string()));
+                ensure!(
+                    !lane_source.contains("MAXN"),
+                    "lane MAXN substitution failed"
+                );
                 let lane_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("Lane creature physics"),
                     source: wgpu::ShaderSource::Wgsl(lane_source.into()),
@@ -801,7 +804,10 @@ impl Gpu {
                     } else {
                         64
                     };
-                    ((batch.metadata.len() * batch.stride).div_ceil(lanes) as u32, 1)
+                    (
+                        (batch.metadata.len() * batch.stride).div_ceil(lanes) as u32,
+                        1,
+                    )
                 };
                 let params = Params {
                     tick,
@@ -999,11 +1005,7 @@ fn pack_batches(pop: &Population, indices: &[usize], cfg: &Config) -> Result<Vec
             // Similar muscle counts per warp keep force-loop divergence low.
             let mut group = group;
             group.sort_unstable_by_key(|&(_, i)| {
-                (
-                    pop.genomes[i].muscle_count,
-                    pop.genomes[i].node_count,
-                    i,
-                )
+                (pop.genomes[i].muscle_count, pop.genomes[i].node_count, i)
             });
             let mut nodes = vec![Node::default(); group.len() * stride];
             let muscle_count: usize = group
@@ -1058,8 +1060,8 @@ fn merge_metrics(
         for (j, &slot) in batch.slots.iter().enumerate() {
             let r = results[j];
             let active_steps = cfg.steps();
-            let contact_denominator = (active_steps.max(1)
-                * pop.genomes[batch.creatures[j]].node_count as u32) as f32;
+            let contact_denominator =
+                (active_steps.max(1) * pop.genomes[batch.creatures[j]].node_count as u32) as f32;
             out[base_slot + slot] = EvaluationMetrics {
                 fitness: r.fitness,
                 behavior: TrialMetrics {
