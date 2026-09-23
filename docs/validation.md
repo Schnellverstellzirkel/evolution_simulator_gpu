@@ -1,5 +1,21 @@
 # Validation results
 
+## Current native app measurement (2026-09-23)
+
+The graphical Wayland app was run on the NVIDIA RTX 4060 with driver 580.173.02, a fixed seed, 18-second trials, and 30 complete generations. The native benchmark includes GPU evaluation, archive insertion, breeding, worker publication, and active UI rendering. These are sequential runs on the same machine; background desktop activity and GPU clocks can affect small differences.
+
+| Population | Earlier 64-step run | Current app default | Observed speedup |
+| ---: | ---: | ---: | ---: |
+| 1,000 | 54.69 generations/s | 98.30 generations/s | 1.80× |
+| 10,000 | 14.40 generations/s | 21.04 generations/s | 1.46× |
+| 100,000 | 1.91 generations/s | 3.18 generations/s | 1.67× |
+
+The current 30-generation runs spent 0.219/0.038/0.048 seconds in evaluation/archive/breeding at 1,000 creatures; 1.023/0.165/0.236 seconds at 10,000; and 7.550/0.900/0.980 seconds at 100,000. A three-generation run at one million creatures completed at 0.435 generations/s, spending 5.270/0.455/1.177 seconds in those stages. All population sizes use 4096-step dispatches by default. Exact 4-node buckets help across population sizes, while the 5-node bucket helps only at smaller populations. The shader keeps behavior metrics in registers and precomputes muscle reciprocals while packing each GPU batch.
+
+On the one-million-creature run, parent planning took 0.151–0.184 s per generation, candidate emission took 0.182–0.222 s, and breeding finalization took about 0.019 s. GPU timestamps from a separate 10-generation run at 100,000 creatures attributed 1.719 s of 2.052 s evaluation time to shader execution: 0.656 s in the 4-node bucket, 0.966 s in the 8-node bucket, and 0.098 s in the 16-node bucket. Packing took 0.163 s. These timings identify where further work may help; profiling adds overhead.
+
+An NVIDIA Nsight guidance review highlighted group barrier stalls as a possible limiter. NVIDIA’s [shader profiler guide](https://docs.nvidia.com/nsight-graphics/UserGuide/shader-profiler.html) describes barrier stalls as warps waiting for sibling warps and recommends checking whether each group synchronization is needed. An experimental shared muscle-target table reduced duplicate cosine work but performed much worse: 0.92 generations/s at 100,000 creatures, so that variant was removed. Raising the dispatch chunk from 1024 to 4096 steps reduced native 100,000-creature generation time by about 7.5%; a repeated 30-generation run measured 3.18 generations/s, versus 2.96 with 1024-step dispatches. At one million creatures, 4096-step dispatches measured 0.435 generations/s with 100,000-creature batches, versus 0.409 with the earlier default. A 250,000-creature batch did not improve that result. The separate compute device is the graphical default; the full 10× generation-throughput goal remains open.
+
 Measurements below were captured on the local NVIDIA GeForce RTX 4060 Laptop GPU (8 GiB), Ubuntu 24.04 Wayland, with Rust release builds and the simulator's throughput mode. Each creature ran the default 15-second trial. These are workload measurements, not fixed hardware guarantees.
 
 These records predate the MAP-Elites archive and emitter loop. They document GPU simulation throughput and UI responsiveness; they are not performance measurements of the current archive insertion and offspring-generation work.
@@ -26,7 +42,7 @@ The updated light-theme population view rendered during a one-million-creature e
 
 ## Automated checks
 
-- Release test suite: 11 tests passed, including GPU and CPU trajectory agreement, partial GPU workgroups, 3/8/9/17/33/64-node GPU buckets, collider contacts, deterministic evolution, mutation limits, checkpoint resumption, corrupt-checkpoint checksums, and history validation.
+- Release test suite: 10 standard tests and the separately invoked Vulkan GPU agreement test passed, covering partial GPU workgroups, 3/5/6/8/9/17/33/64-node GPU buckets, collider contacts, deterministic evolution, mutation limits, checkpoint resumption, corrupt-checkpoint checksums, and history validation.
 - `cargo clippy --all-targets -- -D warnings`: passed.
 - `cargo fmt --all -- --check`: passed.
 - `git diff --check`: passed.

@@ -340,7 +340,7 @@ impl QdArchive {
         if behavior.is_empty() {
             return None;
         }
-        let candidates = behavior.len().min(8).max(1);
+        let candidates = behavior.len().clamp(1, 8);
         let mut selected = None;
         let mut best_score = f32::NEG_INFINITY;
         for _ in 0..candidates {
@@ -447,6 +447,7 @@ impl QdArchive {
         elite.visits += 1;
         self.least_visited.insert((elite.visits, index));
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn offer(
         &mut self,
         population: &Population,
@@ -527,6 +528,7 @@ impl QdArchive {
             reward: 0.5 + local_competition as f64 * 0.5,
         }
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn offer_morphology(
         &mut self,
         population: &Population,

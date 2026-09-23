@@ -396,6 +396,7 @@ impl Experiment {
         });
     }
     pub fn prepare_next_batch(&mut self) -> Result<()> {
+        let preparation_started = std::time::Instant::now();
         ensure!(
             self.stage == Stage::Archived,
             "The archive must be updated before breeding"
@@ -421,6 +422,8 @@ impl Experiment {
         let mut cma_indices = Vec::with_capacity(cfg.population);
         let mut parent_ids = Vec::with_capacity(cfg.population);
         let mut protections = Vec::with_capacity(cfg.population);
+        let setup_seconds = preparation_started.elapsed().as_secs_f64();
+        let plan_started = std::time::Instant::now();
         for i in 0..cfg.population {
             let mut rng = Rng::new(cfg.seed, generation, i);
             let emitter = if self.archive.entries.is_empty() {
@@ -531,6 +534,8 @@ impl Experiment {
             cma_indices.push(cma_index);
             protections.push(protection);
         }
+        let plan_seconds = plan_started.elapsed().as_secs_f64();
+        let emission_started = std::time::Instant::now();
         let next = evolution::emit_archive_batch(
             &self.population,
             &self.archive,
@@ -539,6 +544,7 @@ impl Experiment {
             &cfg,
             generation,
         )?;
+        let emission_seconds = emission_started.elapsed().as_secs_f64();
         self.config = cfg;
         self.pending = None;
         self.population = next;
@@ -555,6 +561,16 @@ impl Experiment {
         self.ranks.clear();
         self.parents.clear();
         self.evaluation_seconds = 0.0;
+        if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
+            eprintln!(
+                "Breeding profile: generation {generation}, setup {setup_seconds:.6} s, parent plans {plan_seconds:.6} s, candidate emission {emission_seconds:.6} s, finalization {:.6} s, total {:.6} s",
+                preparation_started.elapsed().as_secs_f64()
+                    - setup_seconds
+                    - plan_seconds
+                    - emission_seconds,
+                preparation_started.elapsed().as_secs_f64()
+            );
+        }
         Ok(())
     }
     pub fn select(&mut self) {

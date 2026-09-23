@@ -59,11 +59,20 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
                 .wgpu_render_state
                 .as_ref()
                 .ok_or("GPU renderer unavailable")?;
-            let gpu = Gpu::from_device(
-                render.device.clone(),
-                render.queue.clone(),
-                render.adapter.get_info().name,
-            )?;
+            let gpu = if std::env::var_os("EVOLUTION_SHARED_DEVICE").is_some() {
+                Gpu::from_device(
+                    render.device.clone(),
+                    render.queue.clone(),
+                    render.adapter.get_info().name,
+                )?
+            } else {
+                let (device, queue) = pollster::block_on(
+                    render
+                        .adapter
+                        .request_device(&gpu::descriptor(&render.adapter)),
+                )?;
+                Gpu::from_device(device, queue, render.adapter.get_info().name)?
+            };
             Ok(Box::new(App::new(cc, gpu)))
         }),
     )
@@ -172,6 +181,18 @@ impl App {
             initial_config.population = n;
             initial_config.random_seed = false;
             initial_config.checkpoint_interval = 0;
+            initial_config.throughput = n >= 100_000;
+        }
+        if let Ok(duration) = std::env::var("EVOLUTION_BENCH_DURATION")
+            && let Ok(duration) = duration.parse()
+        {
+            initial_config.duration = duration;
+        }
+        if std::env::var_os("EVOLUTION_BENCH_THROUGHPUT").is_some() {
+            initial_config.throughput = true;
+        }
+        if std::env::var_os("EVOLUTION_BENCH_RESPONSIVE").is_some() {
+            initial_config.throughput = false;
         }
         let smoke_start_pending = std::env::var_os("EVOLUTION_SMOKE_POPULATION").is_some();
         worker.send(Command::New(initial_config));
@@ -352,12 +373,17 @@ impl App {
         ui.separator();
         let before = self.config.clone();
         ui.label("Population");
-        ui.add(
-            egui::DragValue::new(&mut self.config.population)
-                .speed(100)
-                .range(2..=20_000_000),
-        )
-        .on_hover_text("Even population. Changing this starts a new experiment.");
+        let population_changed = ui
+            .add(
+                egui::DragValue::new(&mut self.config.population)
+                    .speed(100)
+                    .range(2..=20_000_000),
+            )
+            .on_hover_text("Even population. Changing this starts a new experiment.")
+            .changed();
+        if population_changed && before.population < 100_000 && self.config.population >= 100_000 {
+            self.config.throughput = true;
+        }
         ui.horizontal(|ui| {
             for (label, n) in [
                 ("1k", 1000),
@@ -367,6 +393,9 @@ impl App {
             ] {
                 if ui.small_button(label).clicked() {
                     self.config.population = n;
+                    if n >= 100_000 {
+                        self.config.throughput = true;
+                    }
                 }
             }
         });
@@ -458,7 +487,7 @@ impl App {
                 egui::CollapsingHeader::new("Performance & checkpoints").show(ui, |ui| {
                     ui.checkbox(&mut self.config.throughput, "Maximum throughput")
                         .on_hover_text(
-                            "Larger batches for unattended runs. Responsive mode is the default.",
+                            "Larger batches for long runs. Selected automatically when you choose 100k or more creatures; uncheck for shorter pauses.",
                         );
                     ui.horizontal(|ui| {
                         ui.label("GPU budget MiB");
@@ -1222,6 +1251,13 @@ impl eframe::App for App {
             }
             if let Some((c, cfg)) = next.preview.take() {
                 self.set_preview(c, cfg);
+            }
+            if std::env::var("EVOLUTION_BENCH_GENERATIONS")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .is_some_and(|target| target > 0 && next.generation >= target && !next.running)
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             self.snapshot = Some(next);
         }

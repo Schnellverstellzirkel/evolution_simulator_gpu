@@ -71,7 +71,7 @@ cargo run --release -- headless --config presets/large-experiment.json --generat
 
 `--duration` overrides the trial duration for a new experiment. `--checkpoint PATH` changes the checkpoint destination. Ctrl+C stops after the current GPU batch and saves. A completed generation includes evaluation, archive insertion, emitter feedback, and offspring creation. `--generations` counts additional generations when resuming.
 
-The dashboard defaults to responsive mode, evaluating up to 8,192 creatures per GPU batch. **Maximum throughput** raises the batch limit to 65,536, uses longer dispatches, and keeps more compute work queued; it is intended for long runs. Both modes adapt batch size to the configured GPU memory budget. The Rayon pool reserves two logical CPUs for the desktop.
+The dashboard uses responsive mode, evaluating up to 8,192 creatures per GPU batch, for populations below 100,000. Larger populations automatically start in **Maximum throughput** mode, which raises the batch limit to 100,000; the checkbox can be changed afterward. Both modes adapt batch size to the configured GPU memory budget. Compute uses a separate wgpu device so long batches do not block rendering. The Rayon pool reserves two logical CPUs for the desktop.
 
 ## Save and resume
 
@@ -104,5 +104,13 @@ Opt-in native UI smoke capture (closes its own window after capturing):
 ```bash
 EVOLUTION_SMOKE_CAPTURE=/tmp/evolution.png EVOLUTION_SMOKE_POPULATION=1000000 cargo run --release
 ```
+
+To measure **complete generations in the graphical app**, including evaluation, archive update, breeding, and rendering activity, run:
+
+```bash
+EVOLUTION_SMOKE_POPULATION=10000 EVOLUTION_BENCH_GENERATIONS=30 cargo run --release
+```
+
+The window starts evolution automatically, prints total generations/s and stage times, then closes. `EVOLUTION_BENCH_DURATION` changes the trial length. Populations of at least 100,000 start in throughput mode; `EVOLUTION_BENCH_THROUGHPUT=1` and `EVOLUTION_BENCH_RESPONSIVE=1` override that choice. `EVOLUTION_GPU_BATCH` overrides the batch limit and `EVOLUTION_GPU_CHUNK` overrides physics steps per dispatch for profiling. `EVOLUTION_GPU_PROFILE=1` adds GPU timestamps for shader time and the 4/5/8/16/32/64-node buckets; `EVOLUTION_PROFILE_BREED=1` reports parent planning and candidate emission times. `EVOLUTION_WORKGROUP64=1` selects the older 64-lane kernel for small populations; `EVOLUTION_WORKGROUP32=1` forces the 32-lane kernel for larger populations. `EVOLUTION_SHARED_DEVICE=1` restores a shared compute/render device for comparison.
 
 See [`docs/architecture.md`](docs/architecture.md) for the execution model and [`docs/validation.md`](docs/validation.md) for measured results.

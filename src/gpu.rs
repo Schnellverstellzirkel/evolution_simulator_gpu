@@ -6,6 +6,24 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use rayon::prelude::*;
+use std::time::Instant;
+
+#[derive(Default)]
+pub struct GpuProfile {
+    pub calls: u64,
+    pub packing_seconds: f64,
+    pub allocation_seconds: f64,
+    pub encoding_seconds: f64,
+    pub readback_seconds: f64,
+    pub shader_seconds: f64,
+    pub bucket_seconds: [f64; 6],
+}
+
+struct TimestampResources {
+    queries: wgpu::QuerySet,
+    resolved: wgpu::Buffer,
+    readback: wgpu::Buffer,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -20,6 +38,20 @@ struct NodeAdj {
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuMuscle {
+    a: u32,
+    b: u32,
+    short: f32,
+    long: f32,
+    inv_period: f32,
+    phase: f32,
+    duty: f32,
+    stiffness: f32,
+    inv_duty: f32,
+    inv_complement: f32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Params {
     tick: u32,
     steps: u32,
@@ -30,7 +62,9 @@ struct Params {
     friction: f32,
     ground: f32,
     total_steps: u32,
-    pad: [u32; 3],
+    /// Lane kernels store the first-dimension workgroup count here.
+    groups_x: u32,
+    pad: [u32; 2],
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -50,8 +84,16 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     pub name: String,
     pipeline: wgpu::ComputePipeline,
+    pipeline32: wgpu::ComputePipeline,
+    pipeline30: wgpu::ComputePipeline,
+    serial_pipeline: wgpu::ComputePipeline,
+    subgroup_pipelines: Option<[wgpu::ComputePipeline; 3]>,
+    /// Barrier-free one-creature-per-lane kernels for small strides.
+    lane_pipelines: [Option<wgpu::ComputePipeline>; 6],
     buffers: Option<Buffers>,
     pub allocated_bytes: u64,
+    pub profile: Option<GpuProfile>,
+    timestamps: Option<TimestampResources>,
 }
 struct BucketBuffers {
     nodes: wgpu::Buffer,
@@ -63,7 +105,7 @@ struct BucketBuffers {
     capacities: [u64; 4],
 }
 struct Buffers {
-    buckets: [Option<BucketBuffers>; 4],
+    buckets: [Option<BucketBuffers>; 6],
     params: wgpu::Buffer,
     params_stride: u64,
     params_capacity: u64,
@@ -74,19 +116,72 @@ struct Batch {
     slots: Vec<usize>,
     creatures: Vec<usize>,
     nodes: Vec<Node>,
-    muscles: Vec<Muscle>,
+    muscles: Vec<GpuMuscle>,
     metadata: Vec<Meta>,
     node_adjacency: Vec<NodeAdj>,
     stride: usize,
 }
 fn bucket_index(stride: usize) -> usize {
     match stride {
-        8 => 0,
-        16 => 1,
-        32 => 2,
-        64 => 3,
+        4 => 0,
+        5 => 1,
+        8 => 2,
+        16 => 3,
+        32 => 4,
+        64 => 5,
         _ => unreachable!("validated GPU bucket stride"),
     }
+}
+fn stride_for_nodes(count: usize, split_five: bool) -> usize {
+    if count == 5 && split_five {
+        5
+    } else {
+        count.next_power_of_two().max(4)
+    }
+}
+fn split_five_bucket(population: usize) -> bool {
+    (population <= 10_000 && std::env::var_os("EVOLUTION_LEGACY_BUCKET5").is_none())
+        || std::env::var_os("EVOLUTION_FORCE_BUCKET5").is_some()
+}
+fn serial_kernels_enabled() -> bool {
+    matches!(
+        std::env::var("EVOLUTION_KERNEL").ok().as_deref(),
+        Some("serial")
+    )
+}
+fn exact_cos_enabled() -> bool {
+    std::env::var_os("EVOLUTION_EXACT_COS").is_some()
+}
+const SERIAL_WORKGROUP: usize = 128;
+fn apply_fast_cos(source: String) -> String {
+    if exact_cos_enabled() {
+        return source;
+    }
+    let fast_cos_function = "fn fast_cos_pi(x:f32)->f32 { let y=(x-0.5)*3.14159265359; let z=y*y; var p=fma(z,-2.50521084e-8,2.75573192e-6); p=fma(z,p,-1.98412698e-4); p=fma(z,p,8.33333377e-3); p=fma(z,p,-1.66666672e-1); p=fma(z,p,1.0); return -y*p; }\n";
+    source
+        .replace(
+            "cos(3.14159265359*phase*m.inv_duty)",
+            "fast_cos_pi(phase*m.inv_duty)",
+        )
+        .replace(
+            "cos(3.14159265359*(phase-m.duty)*m.inv_complement)",
+            "fast_cos_pi((phase-m.duty)*m.inv_complement)",
+        )
+        .replace(
+            "fn muscle_length",
+            &format!("{fast_cos_function}fn muscle_length"),
+        )
+}
+fn pipeline_chunk_size(cfg: &Config) -> usize {
+    std::env::var("EVOLUTION_PIPELINE_CHUNK")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(if cfg.population >= 100_000 {
+            16_384
+        } else {
+            usize::MAX
+        })
 }
 pub async fn adapter(name: &str) -> Result<(wgpu::Instance, wgpu::Adapter)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -107,8 +202,15 @@ pub async fn adapter(name: &str) -> Result<(wgpu::Instance, wgpu::Adapter)> {
 }
 pub fn descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
     let limits = adapter.limits();
+    let timestamp_feature = if std::env::var_os("EVOLUTION_GPU_PROFILE").is_some() {
+        adapter.features()
+            & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES)
+    } else {
+        wgpu::Features::empty()
+    };
     wgpu::DeviceDescriptor {
         label: Some("Evolution GPU"),
+        required_features: timestamp_feature,
         required_limits: wgpu::Limits {
             max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size.min(1 << 30),
             max_buffer_size: limits.max_buffer_size.min(1 << 30),
@@ -211,24 +313,114 @@ impl Gpu {
             compilation_options: Default::default(),
             cache: None,
         });
+        let wide_source = include_str!("../shaders/physics.wgsl");
+        ensure!(
+            wide_source.matches("WORKGROUPX2").count() == 2
+                && wide_source.matches("@workgroup_size(WORKGROUP)").count() == 1
+                && wide_source.matches("half=WORKGROUPu").count() == 1,
+            "The workgroup physics variant needs its source transform updated"
+        );
+        let variant_source = |lanes: u32| {
+            apply_fast_cos(
+                wide_source
+                    .replace("WORKGROUPX2", &format!("{}", lanes * 2))
+                    .replace("WORKGROUPu", &format!("{lanes}u"))
+                    .replace("WORKGROUP", &lanes.to_string()),
+            )
+        };
+        let serial_source = apply_fast_cos(
+            include_str!("../shaders/physics_serial.wgsl").replace("MAXNODES", "8"),
+        );
+        ensure!(
+            serial_source.matches("@workgroup_size(128)").count() == 1
+                && serial_source.matches("group.x*128u").count() == 1
+                && !serial_source.contains("MAXNODES"),
+            "The serial physics source transform needs updating"
+        );
+        let serial_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Serial creature physics"),
+            source: wgpu::ShaderSource::Wgsl(serial_source.into()),
+        });
+        let serial_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Serial whole-body creature physics"),
+            layout: Some(&pipeline_layout),
+            module: &serial_shader,
+            entry_point: Some("advance"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let shader32 = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("32-lane muscle physics"),
+            source: wgpu::ShaderSource::Wgsl(variant_source(32).into()),
+        });
+        let pipeline32 = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("32-lane creature physics"),
+            layout: Some(&pipeline_layout),
+            module: &shader32,
+            entry_point: Some("advance"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let shader30 = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("30-lane five-node physics"),
+            source: wgpu::ShaderSource::Wgsl(variant_source(30).into()),
+        });
+        let pipeline30 = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("30-lane five-node creature physics"),
+            layout: Some(&pipeline_layout),
+            module: &shader30,
+            entry_point: Some("advance"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         if let Some(error) = pollster::block_on(scope.pop()) {
             anyhow::bail!("GPU shader initialization failed: {error}");
         }
+        let profiling = std::env::var_os("EVOLUTION_GPU_PROFILE").is_some();
+        let timestamps = if profiling && device.features().contains(wgpu::Features::TIMESTAMP_QUERY)
+        {
+            Some(TimestampResources {
+                queries: device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("Physics timestamps"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count: 12,
+                }),
+                resolved: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Physics timestamp resolve"),
+                    size: 96,
+                    usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }),
+                readback: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Physics timestamp readback"),
+                    size: 96,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+            })
+        } else {
+            None
+        };
         Ok(Self {
             device,
             queue,
             name,
             pipeline,
+            pipeline32,
+            pipeline30,
+            serial_pipeline: serial_kernels_enabled().then_some(serial_pipeline),
             buffers: None,
             allocated_bytes: 0,
+            profile: profiling.then(GpuProfile::default),
+            timestamps,
         })
     }
     fn buffers(&mut self, batches: &[Batch], param_count: u64, cfg: &Config) -> Result<()> {
-        let mut specs: [Option<([u64; 4], u64)>; 4] = [None; 4];
+        let mut specs: [Option<([u64; 4], u64)>; 6] = [None; 6];
         let mut result_count = 0u64;
         for batch in batches {
             ensure!(
-                matches!(batch.stride, 8 | 16 | 32 | 64),
+                matches!(batch.stride, 4 | 5 | 8 | 16 | 32 | 64),
                 "Unsupported GPU bucket stride"
             );
             let bucket = bucket_index(batch.stride);
@@ -323,7 +515,7 @@ impl Gpu {
             readback_capacity,
             wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         );
-        let mut bucket_buffers: [Option<BucketBuffers>; 4] = [const { None }; 4];
+        let mut bucket_buffers: [Option<BucketBuffers>; 6] = [const { None }; 6];
         for (bucket, spec) in specs.into_iter().enumerate() {
             let Some((capacities, _)) = spec else {
                 continue;
@@ -423,91 +615,65 @@ impl Gpu {
             "Invalid creature index"
         );
         let mut out = vec![EvaluationMetrics::default(); indices.len()];
-        let batches: Vec<Batch> = [8usize, 16, 32, 64]
-            .into_par_iter()
-            .filter_map(|stride| {
-                let group: Vec<_> = indices
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(slot, &i)| {
-                        (pop.genomes[i].node_count.next_power_of_two().max(8) == stride)
-                            .then_some((slot, i))
-                    })
-                    .collect();
-                if group.is_empty() {
-                    return None;
-                }
-                let mut nodes = vec![Node::default(); group.len() * stride];
-                let muscle_count: usize = group
-                    .iter()
-                    .map(|&(_, i)| pop.genomes[i].muscle_count)
-                    .sum();
-                let mut muscles = Vec::<Muscle>::with_capacity(muscle_count * 2);
-                let mut node_adjacency = vec![NodeAdj::default(); group.len() * stride];
-                let mut metadata = Vec::with_capacity(group.len());
-                for (j, &(_, i)) in group.iter().enumerate() {
-                    let genome = &pop.genomes[i];
-                    let genes =
-                        &pop.nodes[genome.node_start..genome.node_start + genome.node_count];
-                    for (dst, gene) in nodes[j * stride..j * stride + genes.len()]
-                        .iter_mut()
-                        .zip(genes)
-                    {
-                        *dst = physics::node(gene);
-                    }
-                    metadata.push(Meta {
-                        nodes: genes.len() as u32,
-                    });
-                    let muscle_end = genome.muscle_start + genome.muscle_count;
-                    append_adjacency_muscles(
-                        &pop.muscles[genome.muscle_start..muscle_end],
-                        genes.len(),
-                        &mut node_adjacency[j * stride..(j + 1) * stride],
-                        &mut muscles,
-                    );
-                }
-                Some(Batch {
-                    slots: group.iter().map(|&(slot, _)| slot).collect(),
-                    creatures: group.iter().map(|&(_, creature)| creature).collect(),
-                    nodes,
-                    muscles,
-                    metadata,
-                    node_adjacency,
-                    stride,
-                })
-            })
-            .collect();
-        if batches.is_empty() {
+        if indices.is_empty() {
             return Ok(out);
         }
-        let results = self
-            .run(&batches, cfg, physics::SETTLE + cfg.steps(), false)?
-            .0;
-        for (batch, results) in batches.iter().zip(results) {
-            for (j, &slot) in batch.slots.iter().enumerate() {
-                let r = results[j];
-                let active_steps = cfg.steps();
-                let contact_denominator = (active_steps.max(1)
-                    * pop.genomes[batch.creatures[j]].node_count as u32)
-                    as f32;
-                out[slot] = EvaluationMetrics {
-                    fitness: r.fitness,
-                    behavior: TrialMetrics {
-                        ground_contact: (r.ground_contact / contact_denominator).clamp(0.0, 1.0),
-                        vertical_oscillation: if r.vertical_oscillation.is_finite() {
-                            r.vertical_oscillation.max(0.0)
-                        } else {
-                            0.0
-                        },
-                        gait_frequency: if r.gait_frequency.is_finite() {
-                            r.gait_frequency.max(0.0)
-                        } else {
-                            0.0
-                        },
-                    },
-                };
+        let chunk_size = pipeline_chunk_size(cfg);
+        let steps = physics::SETTLE + cfg.steps();
+        if indices.len() <= chunk_size {
+            let packing_started = Instant::now();
+            let batches = pack_batches(pop, indices, cfg)?;
+            if let Some(profile) = &mut self.profile {
+                profile.packing_seconds += packing_started.elapsed().as_secs_f64();
+                profile.calls += 1;
             }
+            if batches.is_empty() {
+                return Ok(out);
+            }
+            let results = self.run(&batches, cfg, steps, false)?.0;
+            merge_metrics(pop, &batches, &results, cfg, 0, &mut out);
+            return Ok(out);
         }
+        let chunks: Vec<&[usize]> = indices.chunks(chunk_size).collect();
+        std::thread::scope(|scope| {
+            let mut pending = Some(scope.spawn(|| {
+                let started = Instant::now();
+                let batches = pack_batches(pop, chunks[0], cfg);
+                (started.elapsed().as_secs_f64(), batches)
+            }));
+            for chunk_index in 0..chunks.len() {
+                let (pack_seconds, packed) = pending
+                    .take()
+                    .expect("pipeline primed")
+                    .join()
+                    .expect("packing task");
+                if let Some(profile) = &mut self.profile {
+                    profile.packing_seconds += pack_seconds;
+                    profile.calls += 1;
+                }
+                pending = chunks.get(chunk_index + 1).map(|next| {
+                    scope.spawn(|| {
+                        let started = Instant::now();
+                        let batches = pack_batches(pop, next, cfg);
+                        (started.elapsed().as_secs_f64(), batches)
+                    })
+                });
+                let packed = packed?;
+                if packed.is_empty() {
+                    continue;
+                }
+                let results = self.run(&packed, cfg, steps, false)?.0;
+                merge_metrics(
+                    pop,
+                    &packed,
+                    &results,
+                    cfg,
+                    chunk_index * chunk_size,
+                    &mut out,
+                );
+            }
+            Ok::<(), anyhow::Error>(())
+        })?;
         Ok(out)
     }
     pub fn trajectory(
@@ -516,14 +682,14 @@ impl Gpu {
         cfg: &Config,
         steps: u32,
     ) -> Result<Vec<Node>> {
-        let stride = c.nodes.len().next_power_of_two().max(8);
+        let stride = stride_for_nodes(c.nodes.len(), split_five_bucket(cfg.population));
         let mut nodes = vec![Node::default(); stride];
         nodes[..c.nodes.len()].copy_from_slice(&physics::nodes(c));
         let metadata = vec![Meta {
             nodes: c.nodes.len() as u32,
         }];
         let mut node_adjacency = vec![NodeAdj::default(); stride];
-        let mut muscles = Vec::<Muscle>::with_capacity(c.muscles.len() * 2);
+        let mut muscles = Vec::<GpuMuscle>::with_capacity(c.muscles.len() * 2);
         append_adjacency_muscles(&c.muscles, c.nodes.len(), &mut node_adjacency, &mut muscles);
         let batch = Batch {
             slots: vec![0],
@@ -547,9 +713,20 @@ impl Gpu {
     ) -> Result<(Vec<Vec<GpuResult>>, Vec<Node>)> {
         ensure!(steps > 0, "GPU simulation requires at least one step");
         ensure!(!batches.is_empty(), "GPU simulation requires a batch");
-        let chunk = if cfg.throughput { 1024 } else { 64 };
+        let allocation_started = Instant::now();
+        let chunk = std::env::var("EVOLUTION_GPU_CHUNK")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(4096);
+        let use_serial = serial_kernels_enabled();
+        let use_32_lanes = (cfg.population <= 10_000
+            && std::env::var_os("EVOLUTION_WORKGROUP64").is_none())
+            || std::env::var_os("EVOLUTION_WORKGROUP32").is_some();
         let param_count = batches.iter().map(|_| steps.div_ceil(chunk) as u64).sum();
         self.buffers(batches, param_count, cfg)?;
+        let allocation_seconds = allocation_started.elapsed().as_secs_f64();
+        let encoding_started = Instant::now();
         let buffers = self.buffers.as_ref().unwrap();
         let mut dispatches = Vec::with_capacity(param_count as usize);
         for (bucket, batch) in batches
@@ -568,6 +745,7 @@ impl Gpu {
                 0,
                 bytemuck::cast_slice(&batch.node_adjacency),
             );
+            let serial_bucket = self.serial_pipeline.is_some() && bucket <= 2;
             for tick in (0..steps).step_by(chunk as usize) {
                 let offset = dispatches.len() as u64 * buffers.params_stride;
                 ensure!(offset <= u32::MAX as u64, "GPU parameter offset overflow");
@@ -582,15 +760,23 @@ impl Gpu {
                     friction: cfg.ground_friction,
                     ground: if cfg.ground { 1.0 } else { 0.0 },
                     total_steps: steps,
-                    pad: [0; 3],
+                    groups_x: 0,
+                    pad: [0; 2],
                 };
                 self.queue
                     .write_buffer(&buffers.params, offset, bytemuck::bytes_of(&params));
-                dispatches.push((
-                    bucket,
-                    dynamic_offset,
-                    (batch.metadata.len() * batch.stride).div_ceil(64) as u32,
-                ));
+                let workgroups = if serial_bucket {
+                    batch.metadata.len().div_ceil(SERIAL_WORKGROUP) as u32
+                } else {
+                    (batch.metadata.len() * batch.stride).div_ceil(if bucket == 1 {
+                        30
+                    } else if bucket < 5 && use_32_lanes {
+                        32
+                    } else {
+                        64
+                    }) as u32
+                };
+                dispatches.push((bucket, dynamic_offset, workgroups, serial_bucket));
             }
         }
         let mut encoder = self
@@ -598,17 +784,62 @@ impl Gpu {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Physics batches"),
             });
+        let detailed_timestamps = self
+            .device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES);
+        let mut used_buckets = [false; 6];
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Advance"),
-                timestamp_writes: None,
+                timestamp_writes: self.timestamps.as_ref().and_then(|timestamps| {
+                    (!detailed_timestamps).then_some(wgpu::ComputePassTimestampWrites {
+                        query_set: &timestamps.queries,
+                        beginning_of_pass_write_index: Some(0),
+                        end_of_pass_write_index: Some(1),
+                    })
+                }),
             });
-            pass.set_pipeline(&self.pipeline);
-            for (bucket, offset, workgroups) in &dispatches {
+            let mut previous_bucket = None;
+            for (bucket, offset, workgroups, serial_bucket) in &dispatches {
+                pass.set_pipeline(if *serial_bucket {
+                    self.serial_pipeline
+                        .as_ref()
+                        .expect("serial dispatch without serial pipeline")
+                } else if *bucket == 1 {
+                    &self.pipeline30
+                } else if *bucket < 5 && use_32_lanes {
+                    &self.pipeline32
+                } else {
+                    &self.pipeline
+                });
+                if detailed_timestamps && previous_bucket != Some(*bucket) {
+                    if let Some(timestamps) = &self.timestamps {
+                        if let Some(previous) = previous_bucket {
+                            pass.write_timestamp(&timestamps.queries, previous as u32 * 2 + 1);
+                        }
+                        pass.write_timestamp(&timestamps.queries, *bucket as u32 * 2);
+                    }
+                    previous_bucket = Some(*bucket);
+                }
+                used_buckets[*bucket] = true;
                 let resources = buffers.buckets[*bucket].as_ref().unwrap();
                 pass.set_bind_group(0, &resources.bind, &[*offset]);
                 pass.dispatch_workgroups(*workgroups, 1, 1);
             }
+            if detailed_timestamps
+                && let (Some(timestamps), Some(previous)) = (&self.timestamps, previous_bucket)
+            {
+                pass.write_timestamp(&timestamps.queries, previous as u32 * 2 + 1);
+            }
+        }
+        if let Some(timestamps) = &self.timestamps {
+            if detailed_timestamps {
+                encoder.resolve_query_set(&timestamps.queries, 0..12, &timestamps.resolved, 0);
+            } else {
+                encoder.resolve_query_set(&timestamps.queries, 0..2, &timestamps.resolved, 0);
+            }
+            encoder.copy_buffer_to_buffer(&timestamps.resolved, 0, &timestamps.readback, 0, 96);
         }
         let mut result_offset = 0u64;
         for (bucket, batch) in batches
@@ -627,7 +858,38 @@ impl Gpu {
             result_offset += bytes;
         }
         self.queue.submit([encoder.finish()]);
+        let encoding_seconds = encoding_started.elapsed().as_secs_f64();
+        let readback_started = Instant::now();
         let flat_scores = read_buffer::<GpuResult>(&self.device, &buffers.readback, result_offset)?;
+        let mut bucket_seconds = [0.0; 6];
+        let shader_seconds = if let Some(timestamps) = &self.timestamps {
+            let ticks = read_buffer::<u64>(&self.device, &timestamps.readback, 96)?;
+            let seconds_per_tick = f64::from(self.queue.get_timestamp_period()) * 1e-9;
+            if detailed_timestamps {
+                for (bucket, used) in used_buckets.iter().enumerate() {
+                    if *used {
+                        bucket_seconds[bucket] =
+                            ticks[bucket * 2 + 1].saturating_sub(ticks[bucket * 2]) as f64
+                                * seconds_per_tick;
+                    }
+                }
+                bucket_seconds.iter().sum()
+            } else {
+                ticks[1].saturating_sub(ticks[0]) as f64 * seconds_per_tick
+            }
+        } else {
+            0.0
+        };
+        let readback_seconds = readback_started.elapsed().as_secs_f64();
+        if let Some(profile) = &mut self.profile {
+            profile.allocation_seconds += allocation_seconds;
+            profile.encoding_seconds += encoding_seconds;
+            profile.readback_seconds += readback_seconds;
+            profile.shader_seconds += shader_seconds;
+            for (total, current) in profile.bucket_seconds.iter_mut().zip(bucket_seconds) {
+                *total += current;
+            }
+        }
         let mut scores = Vec::with_capacity(batches.len());
         let mut score_offset = 0;
         for batch in batches {
@@ -663,11 +925,110 @@ impl Gpu {
         Ok((scores, states))
     }
 }
+fn pack_batches(pop: &Population, indices: &[usize], cfg: &Config) -> Result<Vec<Batch>> {
+    let split_five = split_five_bucket(cfg.population);
+    let batches: Vec<Batch> = [4usize, 5, 8, 16, 32, 64]
+        .into_par_iter()
+        .filter_map(|stride| {
+            let group: Vec<_> = indices
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, &i)| {
+                    (stride_for_nodes(pop.genomes[i].node_count, split_five) == stride)
+                        .then_some((slot, i))
+                })
+                .collect();
+            if group.is_empty() {
+                return None;
+            }
+            // Similar muscle counts per warp keep force-loop divergence low.
+            let mut group = group;
+            group.sort_unstable_by_key(|&(_, i)| {
+                (
+                    pop.genomes[i].muscle_count,
+                    pop.genomes[i].node_count,
+                    i,
+                )
+            });
+            let mut nodes = vec![Node::default(); group.len() * stride];
+            let muscle_count: usize = group
+                .iter()
+                .map(|&(_, i)| pop.genomes[i].muscle_count)
+                .sum();
+            let mut muscles = Vec::<GpuMuscle>::with_capacity(muscle_count * 2);
+            let mut node_adjacency = vec![NodeAdj::default(); group.len() * stride];
+            let mut metadata = Vec::with_capacity(group.len());
+            for (j, &(_, i)) in group.iter().enumerate() {
+                let genome = &pop.genomes[i];
+                let genes = &pop.nodes[genome.node_start..genome.node_start + genome.node_count];
+                for (dst, gene) in nodes[j * stride..j * stride + genes.len()]
+                    .iter_mut()
+                    .zip(genes)
+                {
+                    *dst = physics::node(gene);
+                }
+                metadata.push(Meta {
+                    nodes: genes.len() as u32,
+                });
+                let muscle_end = genome.muscle_start + genome.muscle_count;
+                append_adjacency_muscles(
+                    &pop.muscles[genome.muscle_start..muscle_end],
+                    genes.len(),
+                    &mut node_adjacency[j * stride..(j + 1) * stride],
+                    &mut muscles,
+                );
+            }
+            Some(Batch {
+                slots: group.iter().map(|&(slot, _)| slot).collect(),
+                creatures: group.iter().map(|&(_, creature)| creature).collect(),
+                nodes,
+                muscles,
+                metadata,
+                node_adjacency,
+                stride,
+            })
+        })
+        .collect();
+    Ok(batches)
+}
+fn merge_metrics(
+    pop: &Population,
+    batches: &[Batch],
+    results: &[Vec<GpuResult>],
+    cfg: &Config,
+    base_slot: usize,
+    out: &mut [EvaluationMetrics],
+) {
+    for (batch, results) in batches.iter().zip(results) {
+        for (j, &slot) in batch.slots.iter().enumerate() {
+            let r = results[j];
+            let active_steps = cfg.steps();
+            let contact_denominator = (active_steps.max(1)
+                * pop.genomes[batch.creatures[j]].node_count as u32) as f32;
+            out[base_slot + slot] = EvaluationMetrics {
+                fitness: r.fitness,
+                behavior: TrialMetrics {
+                    ground_contact: (r.ground_contact / contact_denominator).clamp(0.0, 1.0),
+                    vertical_oscillation: if r.vertical_oscillation.is_finite() {
+                        r.vertical_oscillation.max(0.0)
+                    } else {
+                        0.0
+                    },
+                    gait_frequency: if r.gait_frequency.is_finite() {
+                        r.gait_frequency.max(0.0)
+                    } else {
+                        0.0
+                    },
+                },
+            };
+        }
+    }
+}
 fn append_adjacency_muscles(
     source: &[Muscle],
     node_count: usize,
     adjacency: &mut [NodeAdj],
-    muscles: &mut Vec<Muscle>,
+    muscles: &mut Vec<GpuMuscle>,
 ) {
     debug_assert!(node_count <= adjacency.len() && node_count <= 64);
     let mut counts = [0u32; 64];
@@ -689,15 +1050,27 @@ fn append_adjacency_muscles(
         cursors[node] = next;
         next += counts[node] as usize;
     }
-    muscles.resize(next, <Muscle as bytemuck::Zeroable>::zeroed());
+    muscles.resize(next, <GpuMuscle as bytemuck::Zeroable>::zeroed());
 
     // Fill each node's list in genome order, matching the original force sum order.
     for muscle in source {
         let a = muscle.a as usize;
         let b = muscle.b as usize;
-        muscles[cursors[a]] = *muscle;
+        let packed = GpuMuscle {
+            a: muscle.a,
+            b: muscle.b,
+            short: muscle.short,
+            long: muscle.long,
+            inv_period: 1.0 / muscle.period,
+            phase: muscle.phase,
+            duty: muscle.duty,
+            stiffness: muscle.stiffness,
+            inv_duty: 1.0 / muscle.duty,
+            inv_complement: 1.0 / (1.0 - muscle.duty),
+        };
+        muscles[cursors[a]] = packed;
         cursors[a] += 1;
-        muscles[cursors[b]] = *muscle;
+        muscles[cursors[b]] = packed;
         cursors[b] += 1;
     }
 }

@@ -265,13 +265,13 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
             .all(|s| s.is_finite() && *s > evolution::FAILED)
     );
     let cfg = Config {
-        population: 6,
+        population: 8,
         max_nodes: 64,
         max_muscles: 256,
         ..cfg
     };
     let mut mixed = evolution::Population::default();
-    for (i, count) in [3, 8, 9, 17, 33, 64].into_iter().enumerate() {
+    for (i, count) in [3, 5, 6, 8, 9, 17, 33, 64].into_iter().enumerate() {
         let nodes = (0..count)
             .map(|j| {
                 let angle = j as f32 / count as f32 * std::f32::consts::TAU;
@@ -303,14 +303,14 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
         });
     }
     mixed.validate(&cfg).unwrap();
-    let scores = gpu.evaluate(&mixed, &[5, 3, 1, 4, 0, 2], &cfg).unwrap();
-    assert_eq!(scores.len(), 6);
+    let order = [7usize, 5, 3, 1, 6, 4, 0, 2];
+    let scores = gpu.evaluate(&mixed, &order, &cfg).unwrap();
+    assert_eq!(scores.len(), 8);
     assert!(
         scores
             .iter()
             .all(|s| s.is_finite() && *s > evolution::FAILED)
     );
-    let order = [5usize, 3, 1, 4, 0, 2];
     let combined = gpu.evaluate_with_metrics(&mixed, &order, &cfg).unwrap();
     let mut separated = vec![evolution_simulator::qd::EvaluationMetrics::default(); order.len()];
     for (slot, &creature) in order.iter().enumerate() {

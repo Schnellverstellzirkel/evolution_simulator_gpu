@@ -901,6 +901,7 @@ pub fn analyze_checkpoint(path: &Path) -> Result<(CheckpointAnalysis, Option<Cre
     Ok((analysis, champion.map(|elite| elite.creature.clone())))
 }
 
+#[allow(clippy::type_complexity)]
 fn measure_candidate_morphologies(
     experiment: &Experiment,
     old_topology_by_id: &HashMap<u64, String>,
@@ -1154,10 +1155,10 @@ pub fn write_checkpoint_analysis(
     champion_output: Option<&Path>,
 ) -> Result<()> {
     let (analysis, champion) = analyze_checkpoint(checkpoint)?;
-    if let Some(path) = champion_output {
-        if let Some(creature) = champion {
-            write_json(path, &creature)?;
-        }
+    if let Some(path) = champion_output
+        && let Some(creature) = champion
+    {
+        write_json(path, &creature)?;
     }
     if let Some(path) = output {
         write_json(path, &analysis)

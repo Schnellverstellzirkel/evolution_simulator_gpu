@@ -122,6 +122,12 @@ fn run(
     let mut changed = true;
     let mut epoch = 0u64;
     let mut history = Arc::new(Vec::new());
+    let benchmark_generations = std::env::var("EVOLUTION_BENCH_GENERATIONS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|&value| value > 0);
+    let mut benchmark_start: Option<(u32, Instant)> = None;
+    let mut benchmark_stage_seconds = [0.0f64; 3];
     loop {
         let command = if running {
             rx.try_recv().ok()
@@ -156,6 +162,10 @@ fn run(
                         continuous: c,
                         guided: g,
                     } => {
+                        if benchmark_generations.is_some() {
+                            benchmark_start = exp.as_ref().map(|e| (e.generation, Instant::now()));
+                            benchmark_stage_seconds = [0.0; 3];
+                        }
                         continuous = c;
                         guided = g;
                         pause.store(false, Ordering::Relaxed);
@@ -228,6 +238,7 @@ fn run(
                 let result: anyhow::Result<()> = (|| {
                     match e.stage {
                         Stage::Ready | Stage::Evaluating => {
+                            let stage_start = Instant::now();
                             e.stage = Stage::Evaluating;
                             let batch = e.config.batch_size();
                             let end = (e.evaluated + batch).min(e.config.population);
@@ -248,9 +259,12 @@ fn run(
                                     running = false;
                                 }
                             }
+                            benchmark_stage_seconds[0] += stage_start.elapsed().as_secs_f64();
                         }
                         Stage::Evaluated | Stage::Ranked | Stage::Selected => {
+                            let stage_start = Instant::now();
                             e.archive_batch()?;
+                            benchmark_stage_seconds[1] += stage_start.elapsed().as_secs_f64();
                             status = format!(
                                 "Archive: {} niches · QD score {:.2}",
                                 e.archive.entries.len(),
@@ -261,7 +275,50 @@ fn run(
                             }
                         }
                         Stage::Archived => {
+                            let stage_start = Instant::now();
                             e.prepare_next_batch()?;
+                            benchmark_stage_seconds[2] += stage_start.elapsed().as_secs_f64();
+                            if let (Some(target), Some((first, started))) =
+                                (benchmark_generations, benchmark_start)
+                                && e.generation.saturating_sub(first) >= target
+                            {
+                                let seconds = started.elapsed().as_secs_f64();
+                                eprintln!(
+                                    "Native generation benchmark: {} generations in {:.6} s ({:.3} generations/s), population {}, duration {} s, throughput {}",
+                                    e.generation - first,
+                                    seconds,
+                                    f64::from(e.generation - first) / seconds,
+                                    e.config.population,
+                                    e.config.duration,
+                                    e.config.throughput
+                                );
+                                eprintln!(
+                                    "Native benchmark stages: evaluation {:.6} s, archive {:.6} s, breeding {:.6} s",
+                                    benchmark_stage_seconds[0],
+                                    benchmark_stage_seconds[1],
+                                    benchmark_stage_seconds[2]
+                                );
+                                if let Some(profile) = &gpu.profile {
+                                    eprintln!(
+                                        "GPU profile: {} calls, packing {:.6} s, allocation {:.6} s, upload/encode {:.6} s, readback {:.6} s, shader {:.6} s; buckets 4/5/8/16/32/64: {:.6}/{:.6}/{:.6}/{:.6}/{:.6}/{:.6} s",
+                                        profile.calls,
+                                        profile.packing_seconds,
+                                        profile.allocation_seconds,
+                                        profile.encoding_seconds,
+                                        profile.readback_seconds,
+                                        profile.shader_seconds,
+                                        profile.bucket_seconds[0],
+                                        profile.bucket_seconds[1],
+                                        profile.bucket_seconds[2],
+                                        profile.bucket_seconds[3],
+                                        profile.bucket_seconds[4],
+                                        profile.bucket_seconds[5]
+                                    );
+                                }
+                                running = false;
+                                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+                                ctx.request_repaint();
+                            }
                             status = "Breeding from diverse archive elites".into();
                             if e.config.checkpoint_interval > 0
                                 && e.generation.is_multiple_of(e.config.checkpoint_interval)
