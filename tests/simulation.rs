@@ -310,4 +310,41 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
             .iter()
             .all(|s| s.is_finite() && *s > evolution::FAILED)
     );
+    let order = [5usize, 3, 1, 4, 0, 2];
+    let combined = gpu.evaluate_with_metrics(&mixed, &order, &cfg).unwrap();
+    let mut separated = vec![evolution_simulator::qd::EvaluationMetrics::default(); order.len()];
+    for (slot, &creature) in order.iter().enumerate() {
+        let metrics = gpu
+            .evaluate_with_metrics(&mixed, &[creature], &cfg)
+            .unwrap();
+        separated[slot] = metrics[0];
+    }
+    for (combined, separated) in combined.iter().zip(&separated) {
+        assert!(
+            (combined.fitness - separated.fitness).abs() < 1e-4,
+            "combined fitness {} vs separate {}",
+            combined.fitness,
+            separated.fitness
+        );
+        assert!(
+            (combined.behavior.ground_contact - separated.behavior.ground_contact).abs() < 1e-5,
+            "combined contact {} vs separate {}",
+            combined.behavior.ground_contact,
+            separated.behavior.ground_contact
+        );
+        assert!(
+            (combined.behavior.vertical_oscillation - separated.behavior.vertical_oscillation)
+                .abs()
+                < 1e-4,
+            "combined vertical {} vs separate {}",
+            combined.behavior.vertical_oscillation,
+            separated.behavior.vertical_oscillation
+        );
+        assert!(
+            (combined.behavior.gait_frequency - separated.behavior.gait_frequency).abs() < 1e-4,
+            "combined gait {} vs separate {}",
+            combined.behavior.gait_frequency,
+            separated.behavior.gait_frequency
+        );
+    }
 }

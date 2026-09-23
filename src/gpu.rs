@@ -5,7 +5,7 @@ use crate::{
     qd::{EvaluationMetrics, TrialMetrics},
 };
 use anyhow::{Context, Result, ensure};
-use std::collections::VecDeque;
+use rayon::prelude::*;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -53,23 +53,40 @@ pub struct Gpu {
     buffers: Option<Buffers>,
     pub allocated_bytes: u64,
 }
-struct Buffers {
+struct BucketBuffers {
     nodes: wgpu::Buffer,
     muscles: wgpu::Buffer,
     meta: wgpu::Buffer,
     node_adjacency: wgpu::Buffer,
-    params: wgpu::Buffer,
     results: wgpu::Buffer,
-    readback: wgpu::Buffer,
     bind: wgpu::BindGroup,
     capacities: [u64; 4],
 }
-struct Batch<'a> {
-    nodes: &'a [Node],
-    muscles: &'a [Muscle],
-    metadata: &'a [Meta],
-    node_adjacency: &'a [NodeAdj],
+struct Buffers {
+    buckets: [Option<BucketBuffers>; 4],
+    params: wgpu::Buffer,
+    params_stride: u64,
+    params_capacity: u64,
+    readback: wgpu::Buffer,
+    readback_capacity: u64,
+}
+struct Batch {
+    slots: Vec<usize>,
+    creatures: Vec<usize>,
+    nodes: Vec<Node>,
+    muscles: Vec<Muscle>,
+    metadata: Vec<Meta>,
+    node_adjacency: Vec<NodeAdj>,
     stride: usize,
+}
+fn bucket_index(stride: usize) -> usize {
+    match stride {
+        8 => 0,
+        16 => 1,
+        32 => 2,
+        64 => 3,
+        _ => unreachable!("validated GPU bucket stride"),
+    }
 }
 pub async fn adapter(name: &str) -> Result<(wgpu::Instance, wgpu::Adapter)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -114,9 +131,81 @@ impl Gpu {
             label: Some("Muscle physics"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/physics.wgsl").into()),
         });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Physics resources"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: std::num::NonZeroU64::new(
+                            std::mem::size_of::<Params>() as u64
+                        ),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Physics pipeline"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Batched creature physics"),
-            layout: None,
+            layout: Some(&pipeline_layout),
             module: &shader,
             entry_point: Some("advance"),
             compilation_options: Default::default(),
@@ -134,49 +223,86 @@ impl Gpu {
             allocated_bytes: 0,
         })
     }
-    fn buffers(
-        &mut self,
-        node_bytes: u64,
-        muscle_bytes: u64,
-        adjacency_bytes: u64,
-        count: u64,
-        cfg: &Config,
-    ) -> Result<()> {
-        let needed = [
-            node_bytes.max(32),
-            muscle_bytes.max(32),
-            count.max(1),
-            adjacency_bytes.max(32),
-        ];
-        if self.allocated_bytes < cfg.gpu_budget_mib as u64 * 1024 * 1024
-            && self
-                .buffers
-                .as_ref()
-                .is_some_and(|b| b.capacities.iter().zip(needed).all(|(c, n)| *c >= n))
-        {
+    fn buffers(&mut self, batches: &[Batch], param_count: u64, cfg: &Config) -> Result<()> {
+        let mut specs: [Option<([u64; 4], u64)>; 4] = [None; 4];
+        let mut result_count = 0u64;
+        for batch in batches {
+            ensure!(
+                matches!(batch.stride, 8 | 16 | 32 | 64),
+                "Unsupported GPU bucket stride"
+            );
+            let bucket = bucket_index(batch.stride);
+            let count = batch.metadata.len() as u64;
+            let needed = [
+                (std::mem::size_of_val(batch.nodes.as_slice()) as u64).max(32),
+                (std::mem::size_of_val(batch.muscles.as_slice()) as u64).max(32),
+                count.max(1),
+                (std::mem::size_of_val(batch.node_adjacency.as_slice()) as u64).max(32),
+            ]
+            .map(u64::next_power_of_two);
+            ensure!(specs[bucket].is_none(), "Duplicate GPU bucket stride");
+            specs[bucket] = Some((needed, count));
+            result_count += count;
+        }
+        let params_alignment = self.device.limits().min_uniform_buffer_offset_alignment as u64;
+        let params_stride =
+            (std::mem::size_of::<Params>() as u64).next_multiple_of(params_alignment.max(1));
+        let readback_capacity =
+            (result_count.max(1) * std::mem::size_of::<GpuResult>() as u64).next_power_of_two();
+        let reusable = self.allocated_bytes < cfg.gpu_budget_mib as u64 * 1024 * 1024
+            && self.buffers.as_ref().is_some_and(|existing| {
+                existing.params_capacity >= param_count
+                    && existing.readback_capacity
+                        >= result_count * std::mem::size_of::<GpuResult>() as u64
+                    && batches.iter().all(|batch| {
+                        let bucket = bucket_index(batch.stride);
+                        existing.buckets[bucket].as_ref().is_some_and(|resources| {
+                            resources
+                                .capacities
+                                .iter()
+                                .zip(specs[bucket].unwrap().0)
+                                .all(|(capacity, needed)| *capacity >= needed)
+                        })
+                    })
+            });
+        if reusable {
             return Ok(());
         }
-        let caps = needed.map(u64::next_power_of_two);
-        let total = caps[0]
-            + caps[1]
-            + caps[2]
-                * (std::mem::size_of::<Meta>() as u64
-                    + std::mem::size_of::<GpuResult>() as u64 * 2)
-            + caps[3]
-            + 48;
+
+        let bucket_bytes: u64 = specs
+            .iter()
+            .flatten()
+            .map(|(capacities, _)| {
+                capacities[0]
+                    + capacities[1]
+                    + capacities[2]
+                        * (std::mem::size_of::<Meta>() as u64
+                            + std::mem::size_of::<GpuResult>() as u64)
+                    + capacities[3]
+            })
+            .sum();
+        let params_bytes = params_stride * param_count;
+        let total = bucket_bytes + params_bytes + readback_capacity;
         ensure!(
             total < cfg.gpu_budget_mib as u64 * 1024 * 1024,
             "GPU batch exceeds memory budget"
         );
+        let limits = self.device.limits();
         ensure!(
-            caps[0] <= self.device.limits().max_storage_buffer_binding_size
-                && caps[1] <= self.device.limits().max_storage_buffer_binding_size
-                && caps[2] * std::mem::size_of::<Meta>() as u64
-                    <= self.device.limits().max_storage_buffer_binding_size
-                && caps[2] * std::mem::size_of::<GpuResult>() as u64
-                    <= self.device.limits().max_storage_buffer_binding_size
-                && caps[3] <= self.device.limits().max_storage_buffer_binding_size,
+            specs.iter().flatten().all(|(capacities, _)| {
+                capacities[0] <= limits.max_storage_buffer_binding_size
+                    && capacities[1] <= limits.max_storage_buffer_binding_size
+                    && capacities[2] * std::mem::size_of::<Meta>() as u64
+                        <= limits.max_storage_buffer_binding_size
+                    && capacities[2] * std::mem::size_of::<GpuResult>() as u64
+                        <= limits.max_storage_buffer_binding_size
+                    && capacities[3] <= limits.max_storage_buffer_binding_size
+            }),
             "GPU batch exceeds storage binding limits"
+        );
+        ensure!(
+            params_bytes <= limits.max_buffer_size && readback_capacity <= limits.max_buffer_size,
+            "GPU batch exceeds buffer limits"
         );
         let create = |label, size, usage| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -187,55 +313,89 @@ impl Gpu {
             })
         };
         let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
-        let nodes = create(
-            "Node state",
-            caps[0],
-            storage | wgpu::BufferUsages::COPY_SRC,
-        );
-        let muscles = create("Muscle genomes", caps[1], storage);
-        let meta = create(
-            "Creature node counts",
-            caps[2] * std::mem::size_of::<Meta>() as u64,
-            storage,
-        );
-        let node_adjacency = create("Node muscle adjacency", caps[3], storage);
         let params = create(
             "Physics parameters",
-            48,
+            params_bytes,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        );
-        let results = create(
-            "Fitness and behavior descriptors",
-            caps[2] * std::mem::size_of::<GpuResult>() as u64,
-            storage | wgpu::BufferUsages::COPY_SRC,
         );
         let readback = create(
             "Evaluation readback",
-            caps[2] * std::mem::size_of::<GpuResult>() as u64,
+            readback_capacity,
             wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         );
-        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Physics resources"),
-            layout: &self.pipeline.get_bind_group_layout(0),
-            entries: &[&nodes, &muscles, &meta, &params, &results, &node_adjacency]
-                .iter()
-                .enumerate()
-                .map(|(i, b)| wgpu::BindGroupEntry {
-                    binding: i as u32,
-                    resource: b.as_entire_binding(),
-                })
-                .collect::<Vec<_>>(),
-        });
+        let mut bucket_buffers: [Option<BucketBuffers>; 4] = [const { None }; 4];
+        for (bucket, spec) in specs.into_iter().enumerate() {
+            let Some((capacities, _)) = spec else {
+                continue;
+            };
+            let nodes = create(
+                "Node state",
+                capacities[0],
+                storage | wgpu::BufferUsages::COPY_SRC,
+            );
+            let muscles = create("Muscle genomes", capacities[1], storage);
+            let meta = create(
+                "Creature node counts",
+                capacities[2] * std::mem::size_of::<Meta>() as u64,
+                storage,
+            );
+            let node_adjacency = create("Node muscle adjacency", capacities[3], storage);
+            let results = create(
+                "Fitness and behavior descriptors",
+                capacities[2] * std::mem::size_of::<GpuResult>() as u64,
+                storage | wgpu::BufferUsages::COPY_SRC,
+            );
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Physics resources"),
+                layout: &self.pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: nodes.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: muscles.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: meta.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &params,
+                            offset: 0,
+                            size: std::num::NonZeroU64::new(std::mem::size_of::<Params>() as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: results.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: node_adjacency.as_entire_binding(),
+                    },
+                ],
+            });
+            bucket_buffers[bucket] = Some(BucketBuffers {
+                nodes,
+                muscles,
+                meta,
+                node_adjacency,
+                results,
+                bind,
+                capacities,
+            });
+        }
         self.buffers = Some(Buffers {
-            nodes,
-            muscles,
-            meta,
-            node_adjacency,
+            buckets: bucket_buffers,
             params,
-            results,
+            params_stride,
+            params_capacity: param_count,
             readback,
-            bind,
-            capacities: caps,
+            readback_capacity,
         });
         self.allocated_bytes = total;
         Ok(())
@@ -263,65 +423,73 @@ impl Gpu {
             "Invalid creature index"
         );
         let mut out = vec![EvaluationMetrics::default(); indices.len()];
-        for stride in [8usize, 16, 32, 64] {
-            let group: Vec<_> = indices
-                .iter()
-                .enumerate()
-                .filter_map(|(slot, &i)| {
-                    (pop.genomes[i].node_count.next_power_of_two().max(8) == stride)
-                        .then_some((slot, i))
-                })
-                .collect();
-            if group.is_empty() {
-                continue;
-            }
-            let mut nodes = vec![Node::default(); group.len() * stride];
-            let muscle_count: usize = group
-                .iter()
-                .map(|&(_, i)| pop.genomes[i].muscle_count)
-                .sum();
-            let mut muscles = Vec::<Muscle>::with_capacity(muscle_count * 2);
-            let mut node_adjacency = vec![NodeAdj::default(); group.len() * stride];
-            let mut meta = Vec::with_capacity(group.len());
-            for (j, &(_, i)) in group.iter().enumerate() {
-                let genome = &pop.genomes[i];
-                let genes = &pop.nodes[genome.node_start..genome.node_start + genome.node_count];
-                for (dst, gene) in nodes[j * stride..j * stride + genes.len()]
-                    .iter_mut()
-                    .zip(genes)
-                {
-                    *dst = physics::node(gene);
+        let batches: Vec<Batch> = [8usize, 16, 32, 64]
+            .into_par_iter()
+            .filter_map(|stride| {
+                let group: Vec<_> = indices
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(slot, &i)| {
+                        (pop.genomes[i].node_count.next_power_of_two().max(8) == stride)
+                            .then_some((slot, i))
+                    })
+                    .collect();
+                if group.is_empty() {
+                    return None;
                 }
-                meta.push(Meta {
-                    nodes: genes.len() as u32,
-                });
-                let muscle_end = genome.muscle_start + genome.muscle_count;
-                append_adjacency_muscles(
-                    &pop.muscles[genome.muscle_start..muscle_end],
-                    genes.len(),
-                    &mut node_adjacency[j * stride..(j + 1) * stride],
-                    &mut muscles,
-                );
-            }
-            let results = self
-                .run(
-                    Batch {
-                        nodes: &nodes,
-                        muscles: &muscles,
-                        metadata: &meta,
-                        node_adjacency: &node_adjacency,
-                        stride,
-                    },
-                    cfg,
-                    physics::SETTLE + cfg.steps(),
-                    false,
-                )?
-                .0;
-            for (j, &(slot, _)) in group.iter().enumerate() {
+                let mut nodes = vec![Node::default(); group.len() * stride];
+                let muscle_count: usize = group
+                    .iter()
+                    .map(|&(_, i)| pop.genomes[i].muscle_count)
+                    .sum();
+                let mut muscles = Vec::<Muscle>::with_capacity(muscle_count * 2);
+                let mut node_adjacency = vec![NodeAdj::default(); group.len() * stride];
+                let mut metadata = Vec::with_capacity(group.len());
+                for (j, &(_, i)) in group.iter().enumerate() {
+                    let genome = &pop.genomes[i];
+                    let genes =
+                        &pop.nodes[genome.node_start..genome.node_start + genome.node_count];
+                    for (dst, gene) in nodes[j * stride..j * stride + genes.len()]
+                        .iter_mut()
+                        .zip(genes)
+                    {
+                        *dst = physics::node(gene);
+                    }
+                    metadata.push(Meta {
+                        nodes: genes.len() as u32,
+                    });
+                    let muscle_end = genome.muscle_start + genome.muscle_count;
+                    append_adjacency_muscles(
+                        &pop.muscles[genome.muscle_start..muscle_end],
+                        genes.len(),
+                        &mut node_adjacency[j * stride..(j + 1) * stride],
+                        &mut muscles,
+                    );
+                }
+                Some(Batch {
+                    slots: group.iter().map(|&(slot, _)| slot).collect(),
+                    creatures: group.iter().map(|&(_, creature)| creature).collect(),
+                    nodes,
+                    muscles,
+                    metadata,
+                    node_adjacency,
+                    stride,
+                })
+            })
+            .collect();
+        if batches.is_empty() {
+            return Ok(out);
+        }
+        let results = self
+            .run(&batches, cfg, physics::SETTLE + cfg.steps(), false)?
+            .0;
+        for (batch, results) in batches.iter().zip(results) {
+            for (j, &slot) in batch.slots.iter().enumerate() {
                 let r = results[j];
                 let active_steps = cfg.steps();
-                let contact_denominator =
-                    (active_steps.max(1) * pop.genomes[group[j].1].node_count as u32) as f32;
+                let contact_denominator = (active_steps.max(1)
+                    * pop.genomes[batch.creatures[j]].node_count as u32)
+                    as f32;
                 out[slot] = EvaluationMetrics {
                     fitness: r.fitness,
                     behavior: TrialMetrics {
@@ -351,109 +519,125 @@ impl Gpu {
         let stride = c.nodes.len().next_power_of_two().max(8);
         let mut nodes = vec![Node::default(); stride];
         nodes[..c.nodes.len()].copy_from_slice(&physics::nodes(c));
-        let meta = [Meta {
+        let metadata = vec![Meta {
             nodes: c.nodes.len() as u32,
         }];
         let mut node_adjacency = vec![NodeAdj::default(); stride];
         let mut muscles = Vec::<Muscle>::with_capacity(c.muscles.len() * 2);
         append_adjacency_muscles(&c.muscles, c.nodes.len(), &mut node_adjacency, &mut muscles);
-        let (_, mut result) = self.run(
-            Batch {
-                nodes: &nodes,
-                muscles: &muscles,
-                metadata: &meta,
-                node_adjacency: &node_adjacency,
-                stride,
-            },
-            cfg,
-            steps,
-            true,
-        )?;
+        let batch = Batch {
+            slots: vec![0],
+            creatures: vec![0],
+            nodes,
+            muscles,
+            metadata,
+            node_adjacency,
+            stride,
+        };
+        let (_, mut result) = self.run(&[batch], cfg, steps, true)?;
         result.truncate(c.nodes.len());
         Ok(result)
     }
     fn run(
         &mut self,
-        batch: Batch<'_>,
+        batches: &[Batch],
         cfg: &Config,
         steps: u32,
         read_nodes: bool,
-    ) -> Result<(Vec<GpuResult>, Vec<Node>)> {
-        let Batch {
-            nodes,
-            muscles,
-            metadata: meta,
-            node_adjacency,
-            stride,
-        } = batch;
-        self.buffers(
-            std::mem::size_of_val(nodes) as u64,
-            std::mem::size_of_val(muscles) as u64,
-            std::mem::size_of_val(node_adjacency) as u64,
-            meta.len() as u64,
-            cfg,
-        )?;
-        let b = self.buffers.as_ref().unwrap();
-        self.queue
-            .write_buffer(&b.nodes, 0, bytemuck::cast_slice(nodes));
-        self.queue
-            .write_buffer(&b.muscles, 0, bytemuck::cast_slice(muscles));
-        self.queue
-            .write_buffer(&b.meta, 0, bytemuck::cast_slice(meta));
-        self.queue
-            .write_buffer(&b.node_adjacency, 0, bytemuck::cast_slice(node_adjacency));
-        // Each bounded dispatch retains all intermediate state in GPU buffers.
+    ) -> Result<(Vec<Vec<GpuResult>>, Vec<Node>)> {
+        ensure!(steps > 0, "GPU simulation requires at least one step");
+        ensure!(!batches.is_empty(), "GPU simulation requires a batch");
         let chunk = if cfg.throughput { 1024 } else { 64 };
-        let max_pending = if cfg.throughput { 8 } else { 2 };
-        let mut pending_submissions = VecDeque::with_capacity(max_pending);
-        for tick in (0..steps).step_by(chunk) {
-            let p = Params {
-                tick,
-                steps: (steps - tick).min(chunk as u32),
-                stride: stride as u32,
-                count: meta.len() as u32,
-                gravity: cfg.gravity,
-                air: cfg.air_retention.sqrt(),
-                friction: cfg.ground_friction,
-                ground: if cfg.ground { 1.0 } else { 0.0 },
-                total_steps: steps,
-                pad: [0; 3],
-            };
+        let param_count = batches.iter().map(|_| steps.div_ceil(chunk) as u64).sum();
+        self.buffers(batches, param_count, cfg)?;
+        let buffers = self.buffers.as_ref().unwrap();
+        let mut dispatches = Vec::with_capacity(param_count as usize);
+        for (bucket, batch) in batches
+            .iter()
+            .map(|batch| (bucket_index(batch.stride), batch))
+        {
+            let resources = buffers.buckets[bucket].as_ref().unwrap();
             self.queue
-                .write_buffer(&b.params, 0, bytemuck::bytes_of(&p));
-            let mut encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Physics batch"),
-                });
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Advance"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &b.bind, &[]);
-                pass.dispatch_workgroups((meta.len() * stride).div_ceil(64) as u32, 1, 1);
-            }
-            let submission = self.queue.submit([encoder.finish()]);
-            pending_submissions.push_back(submission);
-            // Keep enough work queued to hide CPU command-encoding gaps. Throughput
-            // mode is intended for long runs; responsive mode yields more often.
-            if pending_submissions.len() >= max_pending {
-                let previous = pending_submissions.pop_front().unwrap();
-                self.device.poll(wgpu::PollType::Wait {
-                    submission_index: Some(previous),
-                    timeout: Some(std::time::Duration::from_secs(30)),
-                })?;
+                .write_buffer(&resources.nodes, 0, bytemuck::cast_slice(&batch.nodes));
+            self.queue
+                .write_buffer(&resources.muscles, 0, bytemuck::cast_slice(&batch.muscles));
+            self.queue
+                .write_buffer(&resources.meta, 0, bytemuck::cast_slice(&batch.metadata));
+            self.queue.write_buffer(
+                &resources.node_adjacency,
+                0,
+                bytemuck::cast_slice(&batch.node_adjacency),
+            );
+            for tick in (0..steps).step_by(chunk as usize) {
+                let offset = dispatches.len() as u64 * buffers.params_stride;
+                ensure!(offset <= u32::MAX as u64, "GPU parameter offset overflow");
+                let dynamic_offset = offset as u32;
+                let params = Params {
+                    tick,
+                    steps: (steps - tick).min(chunk),
+                    stride: batch.stride as u32,
+                    count: batch.metadata.len() as u32,
+                    gravity: cfg.gravity,
+                    air: cfg.air_retention.sqrt(),
+                    friction: cfg.ground_friction,
+                    ground: if cfg.ground { 1.0 } else { 0.0 },
+                    total_steps: steps,
+                    pad: [0; 3],
+                };
+                self.queue
+                    .write_buffer(&buffers.params, offset, bytemuck::bytes_of(&params));
+                dispatches.push((
+                    bucket,
+                    dynamic_offset,
+                    (batch.metadata.len() * batch.stride).div_ceil(64) as u32,
+                ));
             }
         }
-        let bytes = meta.len() as u64 * std::mem::size_of::<GpuResult>() as u64;
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(&b.results, 0, &b.readback, 0, bytes);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Physics batches"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Advance"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            for (bucket, offset, workgroups) in &dispatches {
+                let resources = buffers.buckets[*bucket].as_ref().unwrap();
+                pass.set_bind_group(0, &resources.bind, &[*offset]);
+                pass.dispatch_workgroups(*workgroups, 1, 1);
+            }
+        }
+        let mut result_offset = 0u64;
+        for (bucket, batch) in batches
+            .iter()
+            .map(|batch| (bucket_index(batch.stride), batch))
+        {
+            let resources = buffers.buckets[bucket].as_ref().unwrap();
+            let bytes = batch.metadata.len() as u64 * std::mem::size_of::<GpuResult>() as u64;
+            encoder.copy_buffer_to_buffer(
+                &resources.results,
+                0,
+                &buffers.readback,
+                result_offset,
+                bytes,
+            );
+            result_offset += bytes;
+        }
         self.queue.submit([encoder.finish()]);
-        let scores = read_buffer::<GpuResult>(&self.device, &b.readback, bytes)?;
+        let flat_scores = read_buffer::<GpuResult>(&self.device, &buffers.readback, result_offset)?;
+        let mut scores = Vec::with_capacity(batches.len());
+        let mut score_offset = 0;
+        for batch in batches {
+            let next = score_offset + batch.metadata.len();
+            scores.push(flat_scores[score_offset..next].to_vec());
+            score_offset = next;
+        }
         let states = if read_nodes {
-            let bytes = std::mem::size_of_val(nodes) as u64;
+            ensure!(batches.len() == 1, "Node readback requires one batch");
+            let bytes = std::mem::size_of_val(batches[0].nodes.as_slice()) as u64;
             let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Validation state"),
                 size: bytes,
@@ -461,7 +645,16 @@ impl Gpu {
                 mapped_at_creation: false,
             });
             let mut encoder = self.device.create_command_encoder(&Default::default());
-            encoder.copy_buffer_to_buffer(&b.nodes, 0, &staging, 0, bytes);
+            encoder.copy_buffer_to_buffer(
+                &buffers.buckets[bucket_index(batches[0].stride)]
+                    .as_ref()
+                    .unwrap()
+                    .nodes,
+                0,
+                &staging,
+                0,
+                bytes,
+            );
             self.queue.submit([encoder.finish()]);
             read_buffer::<Node>(&self.device, &staging, bytes)?
         } else {
