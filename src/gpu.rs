@@ -184,7 +184,7 @@ fn pipeline_chunk_size(cfg: &Config) -> usize {
         .unwrap_or(if cfg.population >= 100_000 {
             16_384
         } else {
-            usize::MAX
+            4_096
         })
 }
 pub async fn adapter(name: &str) -> Result<(wgpu::Instance, wgpu::Adapter)> {
@@ -988,22 +988,34 @@ impl Gpu {
 }
 fn pack_batches(pop: &Population, indices: &[usize], cfg: &Config) -> Result<Vec<Batch>> {
     let split_five = split_five_bucket(cfg.population);
-    let batches: Vec<Batch> = [4usize, 5, 8, 16, 32, 64]
+    // One pass groups indices by bucket stride instead of six full filter scans.
+    let mut buckets: [(usize, Vec<(usize, usize)>); 6] = [
+        (4, Vec::new()),
+        (5, Vec::new()),
+        (8, Vec::new()),
+        (16, Vec::new()),
+        (32, Vec::new()),
+        (64, Vec::new()),
+    ];
+    for (slot, &i) in indices.iter().enumerate() {
+        let stride = stride_for_nodes(pop.genomes[i].node_count, split_five);
+        let bucket = match stride {
+            4 => 0,
+            5 => 1,
+            8 => 2,
+            16 => 3,
+            32 => 4,
+            _ => 5,
+        };
+        buckets[bucket].1.push((slot, i));
+    }
+    let batches: Vec<Batch> = buckets
         .into_par_iter()
-        .filter_map(|stride| {
-            let group: Vec<_> = indices
-                .iter()
-                .enumerate()
-                .filter_map(|(slot, &i)| {
-                    (stride_for_nodes(pop.genomes[i].node_count, split_five) == stride)
-                        .then_some((slot, i))
-                })
-                .collect();
+        .filter_map(|(stride, mut group)| {
             if group.is_empty() {
                 return None;
             }
             // Similar muscle counts per warp keep force-loop divergence low.
-            let mut group = group;
             group.sort_unstable_by_key(|&(_, i)| {
                 (pop.genomes[i].muscle_count, pop.genomes[i].node_count, i)
             });

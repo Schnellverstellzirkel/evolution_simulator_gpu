@@ -1344,7 +1344,10 @@ if let Some(m)=&self.message {ui.label(m);
                 }
             });
         self.dialogs(&ctx);
-        if self.playing || self.active() {
+        if self.active() {
+            // Worker snapshots every 200ms already wake the UI; poll gently between them.
+            ctx.request_repaint_after(Duration::from_millis(100));
+        } else if self.playing {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
         // Explicit opt-in capture hook for repeatable native rendering/performance checks.

@@ -122,6 +122,7 @@ fn run(
     let mut changed = true;
     let mut epoch = 0u64;
     let mut history = Arc::new(Vec::new());
+    let mut checkpoint_thread: Option<std::thread::JoinHandle<()>> = None;
     let benchmark_generations = std::env::var("EVOLUTION_BENCH_GENERATIONS")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -141,6 +142,11 @@ fn run(
         if let Some(command) = command {
             if matches!(command, Command::Shutdown) {
                 break;
+            }
+            if matches!(command, Command::New(_) | Command::Load(_))
+                && let Some(handle) = checkpoint_thread.take()
+            {
+                let _ = handle.join();
             }
             changed = true;
             error = None;
@@ -322,11 +328,21 @@ fn run(
                             status = "Breeding from diverse archive elites".into();
                             if e.config.checkpoint_interval > 0
                                 && e.generation.is_multiple_of(e.config.checkpoint_interval)
+                                && checkpoint_thread
+                                    .as_ref()
+                                    .is_none_or(|handle| handle.is_finished())
                             {
-                                storage::save(
-                                    &PathBuf::from(format!("runs/seed-{}-auto.evo", e.config.seed)),
-                                    e,
-                                )?;
+                                if let Some(handle) = checkpoint_thread.take() {
+                                    let _ = handle.join();
+                                }
+                                let path =
+                                    PathBuf::from(format!("runs/seed-{}-auto.evo", e.config.seed));
+                                let snapshot = e.clone();
+                                checkpoint_thread = Some(std::thread::spawn(move || {
+                                    if let Err(err) = storage::save(&path, &snapshot) {
+                                        eprintln!("Background checkpoint failed: {err:#}");
+                                    }
+                                }));
                             }
                             if !continuous || guided {
                                 running = false;
@@ -473,5 +489,8 @@ fn run(
             changed = false;
             last_publish = Instant::now();
         }
+    }
+    if let Some(handle) = checkpoint_thread.take() {
+        let _ = handle.join();
     }
 }

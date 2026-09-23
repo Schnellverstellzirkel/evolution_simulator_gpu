@@ -58,6 +58,10 @@ fn advance(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) grou
     // whole dispatch and exchange them with global memory at chunk boundaries.
     var metrics=Result(0.0,0.0,1e20,-1e20,0.0,0.0,0.0,0.0);
     if creature<p.count && local==0u && p.tick>0u {metrics=results[creature];}
+    var adjacency=NodeAdj(0u,0u);
+    if creature<p.count && local<body.nodes {
+        adjacency=node_adjacencies[creature*p.stride+local];
+    }
     workgroupBarrier();
     for(var s=0u;s<p.steps;s++) {
         let tick=p.tick+s;
@@ -73,10 +77,9 @@ fn advance(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) grou
             positions[read_base+lane]=n.pos;velocities[read_base+lane]=n.vel;
             workgroupBarrier();
         }
-        if local<body.nodes {
+        if local<body.nodes && n.failed<0.5 {
             let time=f32(max(tick,200u)-200u)/120.0;
             var force=vec2f(0.0);
-            let adjacency=node_adjacencies[creature*p.stride+local];
             for(var j=0u;j<adjacency.count;j++) {
                 let m=muscles[adjacency.start+j];
                 let other=select(m.a,m.b,m.a==local);

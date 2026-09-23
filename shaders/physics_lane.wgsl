@@ -72,7 +72,7 @@ fn advance(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) grou
         }
         let time=f32(max(tick,200u)-200u)/120.0;
         for(var i=0u;i<MAXN;i++) {
-            if i<body_nodes {
+            if i<body_nodes && state[i].failed<0.5 {
                 var force=vec2f(0.0);
                 let adjacency_i=adjacency[i];
                 for(var j=0u;j<adjacency_i.count;j++) {
@@ -90,7 +90,7 @@ fn advance(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) grou
         }
         var gravity=0.0;if tick>=200u {gravity=p.gravity;}
         for(var i=0u;i<MAXN;i++) {
-            if i<body_nodes {
+            if i<body_nodes && state[i].failed<0.5 {
                 var n=state[i];
                 n.vel=(n.vel+(forces[i]/n.mass-vec2f(0.0,gravity))/120.0)*p.air;
                 n.pos+=n.vel/120.0;

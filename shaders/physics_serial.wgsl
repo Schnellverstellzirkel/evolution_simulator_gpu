@@ -50,9 +50,11 @@ fn advance(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) grou
     var fric:array<f32,MAXNODES>;
     var mass:array<f32,MAXNODES>;
     var failed:array<f32,MAXNODES>;
+    var adjacency:array<NodeAdj,MAXNODES>;
     for(var i=0u;i<n_nodes;i++) {
         let n=nodes[base+i];
         pos[i]=n.pos;vel[i]=n.vel;rad[i]=n.radius;fric[i]=n.friction;mass[i]=n.mass;failed[i]=n.failed;
+        adjacency[i]=node_adjacencies[base+i];
     }
     var metrics=Result(0.0,0.0,1e20,-1e20,0.0,0.0,0.0,0.0);
     if p.tick>0u {metrics=results[creature];}
@@ -71,10 +73,14 @@ fn advance(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) grou
         let time=f32(max(tick,200u)-200u)/120.0;
         var forces:array<vec2f,MAXNODES>;
         for(var i=0u;i<n_nodes;i++) {
+            if failed[i]>=0.5 {
+                forces[i]=vec2f(0.0);
+                continue;
+            }
             var force=vec2f(0.0);
-            let adjacency=node_adjacencies[base+i];
-            for(var j=0u;j<adjacency.count;j++) {
-                let m=muscles[adjacency.start+j];
+            let adjacency_i=adjacency[i];
+            for(var j=0u;j<adjacency_i.count;j++) {
+                let m=muscles[adjacency_i.start+j];
                 let other=select(m.a,m.b,m.a==i);
                 let d=pos[other]-pos[i];let distance=max(length(d),1e-6);let dir=d/distance;
                 let relative=dot(vel[other]-vel[i],dir);
@@ -85,6 +91,7 @@ fn advance(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) grou
         }
         var gravity=0.0;if tick>=200u {gravity=p.gravity;}
         for(var i=0u;i<n_nodes;i++) {
+            if failed[i]>=0.5 {continue;}
             vel[i]=(vel[i]+(forces[i]/mass[i]-vec2f(0.0,gravity))/120.0)*p.air;
             pos[i]+=vel[i]/120.0;
             if tick>=200u {

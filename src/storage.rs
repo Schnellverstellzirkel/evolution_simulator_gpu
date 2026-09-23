@@ -64,7 +64,7 @@ pub struct Stats {
     #[serde(default)]
     pub emitters: [EmitterStats; qd::EMITTER_COUNT],
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Experiment {
     pub config: Config,
     pub pending: Option<Config>,
@@ -470,38 +470,72 @@ impl Experiment {
         let mut protections = Vec::with_capacity(cfg.population);
         let setup_seconds = preparation_started.elapsed().as_secs_f64();
         let plan_started = std::time::Instant::now();
-        for i in 0..cfg.population {
-            let mut rng = Rng::new(cfg.seed, generation, i);
-            let emitter = if self.archive.entries.is_empty() {
-                Emitter::Restart
-            } else {
-                qd::choose_emitter(&mut rng, &weights)
-            };
-            let emitter_stale = self.emitter_stats[emitter.index()].stale();
-            let parent = if emitter == Emitter::Restart || self.archive.entries.is_empty() {
-                None
-            } else if self.morphology_reserve_override != Some(false)
-                && emitter == Emitter::Structural
-                && rng.unit() < qd::MORPHOLOGY_PARENT_FRACTION
-            {
-                self.archive
-                    .sample_morphology(&mut rng, self.emitter_stats[emitter.index()].last_parent)
-                    .or_else(|| {
-                        self.archive.sample_local_competitive(
-                            &mut rng,
-                            self.emitter_stats[emitter.index()].last_parent,
-                        )
-                    })
-            } else if emitter == Emitter::Novelty || emitter_stale {
-                self.archive
-                    .sample_novel(&mut rng, self.emitter_stats[emitter.index()].last_parent)
-            } else {
-                self.archive.sample_local_competitive(
-                    &mut rng,
-                    self.emitter_stats[emitter.index()].last_parent,
-                )
-            };
-            parent_ids.push(parent.map(|index| self.archive.entries[index].creature.id));
+        // Phase A: emitter choice and parent sampling against the start-of-batch
+        // archive. Each creature has its own deterministic RNG, so parallel order
+        // does not change the draws. last_parent is snapshotted instead of updating
+        // mid-loop; visit() and CMA slot allocation stay sequential below.
+        let archive_empty = self.archive.entries.is_empty();
+        let reserve_enabled = self.morphology_reserve_override != Some(false);
+        let last_parents: [Option<usize>; qd::EMITTER_COUNT] =
+            std::array::from_fn(|i| self.emitter_stats[i].last_parent);
+        struct PlanPrep {
+            emitter: Emitter,
+            parent: Option<usize>,
+            parent_id: Option<u64>,
+            protection: u32,
+            emitter_stale: bool,
+        }
+        let plan_prep: Vec<PlanPrep> = (0..cfg.population)
+            .into_par_iter()
+            .map(|i| {
+                let mut rng = Rng::new(cfg.seed, generation, i);
+                let emitter = if archive_empty {
+                    Emitter::Restart
+                } else {
+                    qd::choose_emitter(&mut rng, &weights)
+                };
+                let emitter_stale = self.emitter_stats[emitter.index()].stale();
+                let avoid = last_parents[emitter.index()];
+                let parent = if emitter == Emitter::Restart || archive_empty {
+                    None
+                } else if reserve_enabled
+                    && emitter == Emitter::Structural
+                    && rng.unit() < qd::MORPHOLOGY_PARENT_FRACTION
+                {
+                    self.archive
+                        .sample_morphology(&mut rng, avoid)
+                        .or_else(|| self.archive.sample_local_competitive(&mut rng, avoid))
+                } else if emitter == Emitter::Novelty || emitter_stale {
+                    self.archive.sample_novel(&mut rng, avoid)
+                } else {
+                    self.archive.sample_local_competitive(&mut rng, avoid)
+                };
+                let parent_id = parent.map(|index| self.archive.entries[index].creature.id);
+                let protection = if matches!(emitter, Emitter::Structural | Emitter::Novelty) {
+                    generation.saturating_add(3)
+                } else {
+                    parent
+                        .map(|index| self.archive.entries[index].protected_until)
+                        .unwrap_or(0)
+                };
+                PlanPrep {
+                    emitter,
+                    parent,
+                    parent_id,
+                    protection,
+                    emitter_stale,
+                }
+            })
+            .collect();
+        for prep in plan_prep {
+            let PlanPrep {
+                emitter,
+                parent,
+                parent_id,
+                protection,
+                emitter_stale,
+            } = prep;
+            parent_ids.push(parent_id);
             let cma_index = if emitter == Emitter::Cma {
                 if let Some(parent_index) = parent {
                     let elite = &self.archive.entries[parent_index];
@@ -559,13 +593,6 @@ impl Experiment {
                 }
             } else {
                 None
-            };
-            let protection = if matches!(emitter, Emitter::Structural | Emitter::Novelty) {
-                generation.saturating_add(3)
-            } else {
-                parent
-                    .map(|index| self.archive.entries[index].protected_until)
-                    .unwrap_or(0)
             };
             if let Some(parent_index) = parent {
                 self.archive.visit(parent_index);
