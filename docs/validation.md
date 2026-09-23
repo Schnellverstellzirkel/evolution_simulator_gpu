@@ -16,6 +16,17 @@ On the one-million-creature run, parent planning took 0.151–0.184 s per genera
 
 An NVIDIA Nsight guidance review highlighted group barrier stalls as a possible limiter. NVIDIA’s [shader profiler guide](https://docs.nvidia.com/nsight-graphics/UserGuide/shader-profiler.html) describes barrier stalls as warps waiting for sibling warps and recommends checking whether each group synchronization is needed. An experimental shared muscle-target table reduced duplicate cosine work but performed much worse: 0.92 generations/s at 100,000 creatures, so that variant was removed. Raising the dispatch chunk from 1024 to 4096 steps reduced native 100,000-creature generation time by about 7.5%; a repeated 30-generation run measured 3.18 generations/s, versus 2.96 with 1024-step dispatches. At one million creatures, 4096-step dispatches measured 0.435 generations/s with 100,000-creature batches, versus 0.409 with the earlier default. A 250,000-creature batch did not improve that result. The separate compute device is the graphical default; the full 10× generation-throughput goal remains open.
 
+### Paired kernel comparison at 100,000 creatures (2026-09-23)
+
+Four 20-generation full-GUI runs on revision `5f0349c` used default/workgroup/workgroup/default order. Host load stayed between 1.87 and 2.77 on 16 logical CPUs; CPU pressure was zero during the comparison. GNOME Shell contributed a steady desktop GPU load, and each run recorded 98–100% peak SM use.
+
+| Kernel mode | Generations/s | Evaluation seconds / 20 generations | Runs |
+| --- | ---: | ---: | ---: |
+| Default (serial private arrays for 4/5/8-node buckets) | 1.828–1.829 | 9.875–9.907 | 2 |
+| Workgroup | 3.063–3.104 | 5.449–5.477 | 2 |
+
+The workgroup path delivered 1.69× the throughput of the serial path. The serial path is now opt-in with `EVOLUTION_KERNEL=serial`; the default uses workgroup physics. This reverses the recent serial-default change and retains the serial shader for further experiments.
+
 Measurements below were captured on the local NVIDIA GeForce RTX 4060 Laptop GPU (8 GiB), Ubuntu 24.04 Wayland, with Rust release builds and the simulator's throughput mode. Each creature ran the default 15-second trial. These are workload measurements, not fixed hardware guarantees.
 
 These records predate the MAP-Elites archive and emitter loop. They document GPU simulation throughput and UI responsiveness; they are not performance measurements of the current archive insertion and offspring-generation work.

@@ -143,11 +143,11 @@ fn split_five_bucket(population: usize) -> bool {
         || std::env::var_os("EVOLUTION_FORCE_BUCKET5").is_some()
 }
 fn serial_kernels_enabled() -> bool {
-    // Default: barrier-free serial kernel for stride <= 8 buckets (4/5/8 nodes).
-    // EVOLUTION_KERNEL=workgroup|parallel|node forces the shared-memory workgroup path.
-    !matches!(
+    // Paired full-GUI 100k runs showed this private-array path 1.69x slower.
+    // Keep it available for explicit tests, but use the workgroup path by default.
+    matches!(
         std::env::var("EVOLUTION_KERNEL").ok().as_deref(),
-        Some("workgroup") | Some("parallel") | Some("node")
+        Some("serial")
     )
 }
 fn lane_kernels_enabled() -> bool {
