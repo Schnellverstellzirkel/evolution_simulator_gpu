@@ -924,6 +924,9 @@ pub fn load(path: &Path) -> Result<Experiment> {
         decoder.read(&mut trailing)? == 0,
         "Unexpected trailing checkpoint data"
     );
+    // Bone projection now walks the skeleton parent-first. Normalize trees in
+    // checkpoints written before that invariant was introduced.
+    experiment.population.canonicalize_bones()?;
     if experiment.qd_version < qd::VERSION {
         // Older archives used prior descriptors or obstacle physics. Reevaluate
         // their current populations under measured behavior on flat ground.
@@ -1381,6 +1384,62 @@ mod migration_tests {
         loaded.population.validate(&config).unwrap();
         for genome in &loaded.population.genomes {
             assert_eq!(genome.bone_count, genome.node_count - 1);
+        }
+    }
+
+    #[test]
+    fn current_checkpoint_normalizes_bone_order_and_keeps_attachments_in_place() {
+        let config = Config {
+            population: 2,
+            random_seed: false,
+            ..Config::default()
+        };
+        let mut experiment = Experiment::new(config.clone()).unwrap();
+        let genome = experiment.population.genomes[0].clone();
+        let bone_range = genome.bone_start..genome.bone_start + genome.bone_count;
+        experiment.population.bones[bone_range.clone()].reverse();
+        for bone in &mut experiment.population.bones[bone_range] {
+            std::mem::swap(&mut bone.a, &mut bone.b);
+        }
+        let old_creature = experiment.population.creature(0);
+        let point = |creature: &crate::evolution::Creature, bone_id: u32, t: f32| {
+            let bone = creature.bones[bone_id as usize];
+            let a = creature.nodes[bone.a as usize];
+            let b = creature.nodes[bone.b as usize];
+            [a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t]
+        };
+        let old_points: Vec<_> = old_creature
+            .muscles
+            .iter()
+            .map(|muscle| {
+                [
+                    point(&old_creature, muscle.bone_a, muscle.anchor_a),
+                    point(&old_creature, muscle.bone_b, muscle.anchor_b),
+                ]
+            })
+            .collect();
+        experiment.qd_version = qd::VERSION - 1;
+        let checkpoint = std::env::temp_dir().join(format!(
+            "evolution-v3-bone-order-{}.evo",
+            std::process::id()
+        ));
+        save(&checkpoint, &experiment).unwrap();
+        let loaded = load(&checkpoint).unwrap();
+        let _ = std::fs::remove_file(checkpoint);
+
+        assert_eq!(loaded.qd_version, qd::VERSION);
+        assert!(loaded.scores.iter().all(|score| score.is_nan()));
+        loaded.population.validate(&config).unwrap();
+        let new_creature = loaded.population.creature(0);
+        for (muscle, points) in new_creature.muscles.iter().zip(old_points) {
+            let actual = [
+                point(&new_creature, muscle.bone_a, muscle.anchor_a),
+                point(&new_creature, muscle.bone_b, muscle.anchor_b),
+            ];
+            for side in 0..2 {
+                assert!((actual[side][0] - points[side][0]).abs() < 1e-6);
+                assert!((actual[side][1] - points[side][1]).abs() < 1e-6);
+            }
         }
     }
 }

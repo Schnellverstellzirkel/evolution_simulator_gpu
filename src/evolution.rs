@@ -118,6 +118,8 @@ impl Population {
         }
     }
     pub fn push(&mut self, c: Creature) {
+        let mut c = c;
+        canonicalize_bone_order(&mut c);
         self.genomes.push(Genome {
             node_start: self.nodes.len(),
             node_count: c.nodes.len(),
@@ -131,6 +133,29 @@ impl Population {
         self.nodes.extend(c.nodes);
         self.bones.extend(c.bones);
         self.muscles.extend(c.muscles);
+    }
+    pub(crate) fn canonicalize_bones(&mut self) -> Result<()> {
+        for index in 0..self.genomes.len() {
+            let genome = &self.genomes[index];
+            let node_end = genome.node_start.checked_add(genome.node_count);
+            let bone_end = genome.bone_start.checked_add(genome.bone_count);
+            let muscle_end = genome.muscle_start.checked_add(genome.muscle_count);
+            ensure!(
+                node_end.is_some_and(|end| end <= self.nodes.len())
+                    && bone_end.is_some_and(|end| end <= self.bones.len())
+                    && muscle_end.is_some_and(|end| end <= self.muscles.len()),
+                "Invalid genome offset"
+            );
+            let mut creature = self.creature(index);
+            if canonicalize_bone_order(&mut creature) {
+                let genome = &self.genomes[index];
+                self.bones[genome.bone_start..genome.bone_start + genome.bone_count]
+                    .copy_from_slice(&creature.bones);
+                self.muscles[genome.muscle_start..genome.muscle_start + genome.muscle_count]
+                    .copy_from_slice(&creature.muscles);
+            }
+        }
+        Ok(())
     }
     pub fn bytes(&self) -> usize {
         self.genomes.capacity() * std::mem::size_of::<Genome>()
@@ -196,6 +221,16 @@ impl Population {
                 );
                 bone_adjacency[bone.a as usize] |= 1u64 << bone.b;
                 bone_adjacency[bone.b as usize] |= 1u64 << bone.a;
+            }
+            let mut ordered_nodes = 1u64;
+            for bone in bones {
+                let parent = 1u64 << bone.a;
+                let child = 1u64 << bone.b;
+                ensure!(
+                    ordered_nodes & parent != 0 && ordered_nodes & child == 0,
+                    "Bone constraints are not in parent-first order"
+                );
+                ordered_nodes |= child;
             }
             ensure!(
                 bone_adjacency[..g.node_count].iter().all(|n| *n != 0),
@@ -272,6 +307,95 @@ impl Population {
         Ok(())
     }
 }
+pub(crate) fn canonicalize_bone_order(creature: &mut Creature) -> bool {
+    let node_count = creature.nodes.len();
+    if !(1..=64).contains(&node_count) || creature.bones.len() != node_count - 1 {
+        return false;
+    }
+    let mut ordered_nodes = 1u64;
+    let already_ordered = creature.bones.iter().all(|bone| {
+        let parent = bone.a as usize;
+        let child = bone.b as usize;
+        if parent >= node_count || child >= node_count || parent == child {
+            return false;
+        }
+        let parent_bit = 1u64 << parent;
+        let child_bit = 1u64 << child;
+        if ordered_nodes & parent_bit == 0 || ordered_nodes & child_bit != 0 {
+            return false;
+        }
+        ordered_nodes |= child_bit;
+        true
+    });
+    if already_ordered && ordered_nodes.count_ones() as usize == node_count {
+        return true;
+    }
+    let mut adjacency = vec![Vec::<(usize, usize)>::new(); node_count];
+    for (index, bone) in creature.bones.iter().enumerate() {
+        let a = bone.a as usize;
+        let b = bone.b as usize;
+        if a >= node_count || b >= node_count || a == b {
+            return false;
+        }
+        adjacency[a].push((b, index));
+        adjacency[b].push((a, index));
+    }
+    let mut visited = [false; 64];
+    let mut queue = [0usize; 64];
+    let mut head = 0;
+    let mut tail = 1;
+    let mut ordered = Vec::with_capacity(creature.bones.len());
+    let mut remap = vec![usize::MAX; creature.bones.len()];
+    let mut reversed = vec![false; creature.bones.len()];
+    visited[0] = true;
+    while head < tail {
+        let parent = queue[head];
+        head += 1;
+        for &(child, old_index) in &adjacency[parent] {
+            if visited[child] {
+                continue;
+            }
+            visited[child] = true;
+            queue[tail] = child;
+            tail += 1;
+            let old = creature.bones[old_index];
+            remap[old_index] = ordered.len();
+            reversed[old_index] = old.a as usize != parent;
+            ordered.push(Bone {
+                a: parent as u32,
+                b: child as u32,
+                rest_length: old.rest_length,
+            });
+        }
+    }
+    if tail != node_count || ordered.len() != creature.bones.len() {
+        return false;
+    }
+    if creature.muscles.iter().any(|muscle| {
+        [muscle.bone_a, muscle.bone_b].iter().any(|bone| {
+            remap
+                .get(*bone as usize)
+                .is_none_or(|index| *index == usize::MAX)
+        })
+    }) {
+        return false;
+    }
+    for muscle in &mut creature.muscles {
+        for (bone, anchor) in [
+            (&mut muscle.bone_a, &mut muscle.anchor_a),
+            (&mut muscle.bone_b, &mut muscle.anchor_b),
+        ] {
+            let old_index = *bone as usize;
+            if reversed[old_index] {
+                *anchor = 1.0 - *anchor;
+            }
+            *bone = remap[old_index] as u32;
+        }
+    }
+    creature.bones = ordered;
+    true
+}
+
 fn bone(a: usize, b: usize, nodes: &[NodeGene]) -> Bone {
     let dx = nodes[a].x - nodes[b].x;
     let dy = nodes[a].y - nodes[b].y;
@@ -510,6 +634,7 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
             }
         }
     }
+    canonicalize_bone_order(c);
 }
 fn initial(cfg: &Config, index: usize) -> Creature {
     random_creature(cfg, 0, index)
@@ -1019,6 +1144,89 @@ mod tests {
                     assert!((actual[side][1] - points[side][1]).abs() < 1e-6);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn canonical_bone_order_preserves_attachment_positions() {
+        let mut creature = Creature {
+            nodes: (0..4)
+                .map(|i| NodeGene {
+                    x: i as f32,
+                    y: 0.0,
+                    diameter: 0.08,
+                    friction: 0.5,
+                })
+                .collect(),
+            bones: vec![
+                Bone {
+                    a: 2,
+                    b: 3,
+                    rest_length: 1.0,
+                },
+                Bone {
+                    a: 1,
+                    b: 0,
+                    rest_length: 1.0,
+                },
+                Bone {
+                    a: 2,
+                    b: 1,
+                    rest_length: 1.0,
+                },
+            ],
+            muscles: vec![Muscle {
+                bone_a: 0,
+                bone_b: 1,
+                anchor_a: 0.25,
+                anchor_b: 0.75,
+                short: 0.1,
+                long: 0.2,
+                period: 1.0,
+                phase: 0.0,
+                duty: 0.5,
+                stiffness: 40.0,
+            }],
+            id: 1,
+            mutability: 1.0,
+        };
+        let before = [
+            muscle_point(
+                &creature,
+                creature.muscles[0].bone_a,
+                creature.muscles[0].anchor_a,
+            ),
+            muscle_point(
+                &creature,
+                creature.muscles[0].bone_b,
+                creature.muscles[0].anchor_b,
+            ),
+        ];
+
+        assert!(canonicalize_bone_order(&mut creature));
+        assert_eq!(
+            creature
+                .bones
+                .iter()
+                .map(|bone| (bone.a, bone.b))
+                .collect::<Vec<_>>(),
+            vec![(0, 1), (1, 2), (2, 3)]
+        );
+        let after = [
+            muscle_point(
+                &creature,
+                creature.muscles[0].bone_a,
+                creature.muscles[0].anchor_a,
+            ),
+            muscle_point(
+                &creature,
+                creature.muscles[0].bone_b,
+                creature.muscles[0].anchor_b,
+            ),
+        ];
+        for side in 0..2 {
+            assert!((before[side][0] - after[side][0]).abs() < 1e-6);
+            assert!((before[side][1] - after[side][1]).abs() < 1e-6);
         }
     }
 }

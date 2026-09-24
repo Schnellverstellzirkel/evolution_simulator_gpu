@@ -2,6 +2,10 @@
 
 Throughput figures in the historical sections below predate rigid bones and do not describe the current physics. This change was checked with low-impact correctness tests; no throughput profile was run while the CPU/GPU were busy.
 
+## Rigid-bone correctness audit (2026-09-24)
+
+A 64-node chain with 63 muscles at maximum stiffness ran for 560 CPU steps with gravity and ground contact. The test checks every bone after every step and requires its length to stay within 0.1 mm of its rest length, with all nodes above the ground. The GPU smoke test checks the same 64-node, endpoint-anchored morphology after 1, 201, and 320 steps. The normal CPU/GPU trajectory test also compares positions and velocities through ground contact. A checkpoint migration test reverses a saved skeleton's bone order, reloads it, and verifies the normalized skeleton preserves every muscle attachment point. These checks use the parent-first exact reconstruction added after the eight mass-weighted projection passes; no throughput benchmark was run for that solver change.
+
 ## Current native app measurement (2026-09-23)
 
 The graphical Wayland app was run on the NVIDIA RTX 4060 with driver 580.173.02, a fixed seed, 18-second trials, and 30 complete generations. The native benchmark includes GPU evaluation, archive insertion, breeding, worker publication, and active UI rendering. These are sequential runs on the same machine; background desktop activity and GPU clocks can affect small differences.

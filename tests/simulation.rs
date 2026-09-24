@@ -17,6 +17,49 @@ fn config() -> Config {
 fn path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("evolution-{}-{name}.evo", std::process::id()))
 }
+fn stress_creature() -> Creature {
+    let node_count = 64;
+    let nodes: Vec<_> = (0..node_count)
+        .map(|i| NodeGene {
+            x: (i as f32 - (node_count - 1) as f32 * 0.5) * 0.12,
+            y: 0.09 + (i % 2) as f32 * 0.05,
+            diameter: 0.08,
+            friction: 0.5,
+        })
+        .collect();
+    let bones: Vec<_> = (0..node_count - 1)
+        .map(|i| {
+            let a = &nodes[i];
+            let b = &nodes[i + 1];
+            Bone {
+                a: i as u32,
+                b: (i + 1) as u32,
+                rest_length: (a.x - b.x).hypot(a.y - b.y),
+            }
+        })
+        .collect();
+    let muscles: Vec<_> = (0..bones.len())
+        .map(|i| Muscle {
+            bone_a: i as u32,
+            bone_b: ((i + 31) % bones.len()) as u32,
+            anchor_a: if i % 2 == 0 { 0.0 } else { 1.0 },
+            anchor_b: if i % 3 == 0 { 1.0 } else { 0.0 },
+            short: 0.02,
+            long: 0.24,
+            period: 0.1 + (i % 5) as f32 * 0.07,
+            phase: (i % 7) as f32 / 7.0,
+            duty: 0.5,
+            stiffness: 120.0,
+        })
+        .collect();
+    Creature {
+        nodes,
+        bones,
+        muscles,
+        id: 0,
+        mutability: 1.0,
+    }
+}
 
 #[test]
 fn seed_is_repeatable_and_selection_conserves_population() {
@@ -200,6 +243,31 @@ fn bone_lengths_hold_and_off_center_muscles_rotate_bones() {
 }
 
 #[test]
+fn bone_lengths_hold_under_sustained_muscle_and_ground_forces() {
+    let cfg = Config {
+        gravity: 30.0,
+        ground: true,
+        air_retention: 1.0,
+        ..config()
+    };
+    let creature = stress_creature();
+    let mut body = physics::nodes(&creature);
+
+    let mut max_error = 0.0f32;
+    for tick in 0..560 {
+        physics::step(&mut body, &creature.bones, &creature.muscles, &cfg, tick);
+        for bone in &creature.bones {
+            let a = body[bone.a as usize].pos;
+            let b = body[bone.b as usize].pos;
+            max_error = max_error.max((a[0] - b[0]).hypot(a[1] - b[1]) - bone.rest_length);
+            max_error = max_error.max(bone.rest_length - (a[0] - b[0]).hypot(a[1] - b[1]));
+        }
+    }
+    assert!(max_error < 0.0001, "maximum bone length error: {max_error}");
+    assert!(body.iter().all(|node| node.pos[1] >= node.radius - 1e-6));
+}
+
+#[test]
 fn overlapping_nodes_remain_finite() {
     let c = Creature {
         nodes: vec![
@@ -328,7 +396,7 @@ fn history_and_checksums_are_validated_on_load() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan GPU; one-step shader and bone-constraint smoke test"]
+#[ignore = "requires a Vulkan GPU; CPU/GPU bone and muscle smoke test"]
 fn gpu_bones_match_cpu_for_off_center_muscle() {
     let cfg = Config {
         population: 2,
@@ -451,6 +519,31 @@ fn gpu_bones_match_cpu_for_off_center_muscle() {
             }
         }
     }
+    let stress = stress_creature();
+    let stress_cfg = Config {
+        duration: 1.0,
+        gravity: 30.0,
+        ground: true,
+        air_retention: 1.0,
+        ..cfg
+    };
+    for steps in [1, 201, 320] {
+        let actual = gpu.trajectory(&stress, &stress_cfg, steps).unwrap();
+        for node in &actual {
+            assert!(
+                node.pos
+                    .iter()
+                    .chain(node.vel.iter())
+                    .all(|v| v.is_finite())
+            );
+            assert!(node.pos[1] >= node.radius - 1e-5 || steps <= physics::SETTLE);
+        }
+        for bone in &stress.bones {
+            let a = actual[bone.a as usize].pos;
+            let b = actual[bone.b as usize].pos;
+            assert!(((a[0] - b[0]).hypot(a[1] - b[1]) - bone.rest_length).abs() < 0.0001);
+        }
+    }
     let population = evolution::create(&cfg).unwrap();
     let scores = gpu.evaluate(&population, &[1, 0], &cfg).unwrap();
     assert_eq!(scores.len(), 2);
@@ -528,7 +621,7 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
                 Bone {
                     a: j as u32,
                     b: (j + 1) as u32,
-                    rest_length: (a.x - b.x).hypot(a.y - b.y),
+                    rest_length: (a.x - b.x).hypot(a.y - b.y).max(0.03),
                 }
             })
             .collect();

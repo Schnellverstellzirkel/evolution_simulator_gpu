@@ -115,6 +115,55 @@ fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool) {
             }
         }
     }
+    // A final parent-first reconstruction puts every tree edge exactly on its
+    // rest length. The iterative projections above choose a stable set of bone
+    // directions; this pass removes accumulated chain-compression error.
+    let shape = positions;
+    let mut target_center = [0.0; 2];
+    let mut mass_sum = 0.0;
+    for (i, node) in nodes.iter().enumerate() {
+        mass_sum += node.mass;
+        target_center[0] += shape[i][0] * node.mass;
+        target_center[1] += shape[i][1] * node.mass;
+    }
+    for bone in bones {
+        let a = bone.a as usize;
+        let b = bone.b as usize;
+        let delta = [shape[b][0] - shape[a][0], shape[b][1] - shape[a][1]];
+        let length = delta[0].hypot(delta[1]);
+        let direction = if length > 1.0e-6 {
+            [delta[0] / length, delta[1] / length]
+        } else {
+            [1.0, 0.0]
+        };
+        positions[b] = [
+            positions[a][0] + direction[0] * bone.rest_length,
+            positions[a][1] + direction[1] * bone.rest_length,
+        ];
+    }
+    let mut current_center = [0.0; 2];
+    for (i, node) in nodes.iter().enumerate() {
+        current_center[0] += positions[i][0] * node.mass;
+        current_center[1] += positions[i][1] * node.mass;
+    }
+    let shift = [
+        (target_center[0] - current_center[0]) / mass_sum,
+        (target_center[1] - current_center[1]) / mass_sum,
+    ];
+    for position in &mut positions[..nodes.len()] {
+        position[0] += shift[0];
+        position[1] += shift[1];
+    }
+    if ground {
+        let lift = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| node.radius - positions[i][1])
+            .fold(0.0f32, f32::max);
+        for position in &mut positions[..nodes.len()] {
+            position[1] += lift;
+        }
+    }
     for (i, node) in nodes.iter_mut().enumerate() {
         let delta = [
             positions[i][0] - original[i][0],
@@ -189,9 +238,11 @@ pub fn step(nodes: &mut [Node], bones: &[Bone], muscles: &[Muscle], cfg: &Config
     project_bones(nodes, bones, tick >= SETTLE && cfg.ground);
 }
 pub fn evaluate(c: &Creature, cfg: &Config) -> f32 {
-    let mut n = nodes(c);
+    let mut canonical = c.clone();
+    crate::evolution::canonicalize_bone_order(&mut canonical);
+    let mut n = nodes(&canonical);
     for tick in 0..SETTLE + cfg.steps() {
-        step(&mut n, &c.bones, &c.muscles, cfg, tick);
+        step(&mut n, &canonical.bones, &canonical.muscles, cfg, tick);
     }
     fitness(&n)
 }

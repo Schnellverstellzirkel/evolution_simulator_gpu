@@ -252,6 +252,52 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                     positions[index_b] = new_b;
                 }
             }
+
+            // Preserve the converged joint directions, then reconstruct the
+            // tree parent-first so every edge has its exact rest length.
+            var target_center = vec2f(0.0);
+            var mass_sum = 0.0;
+            for (var j = 0u; j < body.nodes; j++) {
+                let shape = positions[write_base + base + j];
+                velocities[read_base + base + j] = shape;
+                target_center += shape * masses[base + j];
+                mass_sum += masses[base + j];
+            }
+            for (var j = 0u; j < body.bone_count; j++) {
+                let bone = bones[body.bones_start + j];
+                let parent_index = write_base + base + bone.a;
+                let child_index = write_base + base + bone.b;
+                let shape_a = velocities[read_base + base + bone.a];
+                let shape_b = velocities[read_base + base + bone.b];
+                let delta = shape_b - shape_a;
+                let raw_distance = length(delta);
+                let direction = select(vec2f(1.0, 0.0), delta / max(raw_distance, 1e-6), raw_distance > 1e-6);
+                let old_child = positions[child_index];
+                let new_child = positions[parent_index] + direction * bone.rest_length;
+                positions[child_index] = new_child;
+                velocities[child_index] += (new_child - old_child) * 120.0;
+            }
+            var current_center = vec2f(0.0);
+            for (var j = 0u; j < body.nodes; j++) {
+                current_center += positions[write_base + base + j] * masses[base + j];
+            }
+            let center_shift = (target_center - current_center) / mass_sum;
+            var ground_lift = 0.0;
+            for (var j = 0u; j < body.nodes; j++) {
+                let node_index = write_base + base + j;
+                positions[node_index] += center_shift;
+                velocities[node_index] += center_shift * 120.0;
+                if tick >= 200u && p.ground > 0.0 {
+                    ground_lift = max(ground_lift, radii[base + j] - positions[node_index].y);
+                }
+            }
+            if tick >= 200u && p.ground > 0.0 {
+                for (var j = 0u; j < body.nodes; j++) {
+                    let node_index = write_base + base + j;
+                    positions[node_index].y += ground_lift;
+                    velocities[node_index].y += ground_lift * 120.0;
+                }
+            }
         }
         workgroupBarrier();
         if creature < p.count && local < body.nodes {

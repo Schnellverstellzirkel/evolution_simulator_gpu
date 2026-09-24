@@ -774,6 +774,9 @@ impl Gpu {
         cfg: &Config,
         steps: u32,
     ) -> Result<Vec<Node>> {
+        let mut normalized = c.clone();
+        crate::evolution::canonicalize_bone_order(&mut normalized);
+        let c = &normalized;
         let stride = stride_for_nodes(c.nodes.len(), split_five_bucket(cfg.population));
         let mut nodes = vec![Node::default(); stride];
         nodes[..c.nodes.len()].copy_from_slice(&physics::nodes(c));
