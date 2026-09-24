@@ -658,10 +658,19 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
             .iter()
             .all(|s| s.is_finite() && *s > evolution::FAILED)
     );
+    for (i, &gpu_score) in scores.iter().take(4).enumerate() {
+        let cpu_score = physics::evaluate(&pop.creature(i), &cfg);
+        assert!(
+            (gpu_score - cpu_score).abs() < 0.05,
+            "score {i}: GPU {gpu_score}, CPU {cpu_score}"
+        );
+    }
     let cfg = Config {
         population: 8,
         max_nodes: 64,
         max_muscles: 256,
+        min_size: 0.01,
+        min_friction: 0.0,
         ..cfg
     };
     let mut mixed = evolution::Population::default();

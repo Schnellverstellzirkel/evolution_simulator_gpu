@@ -201,7 +201,16 @@ fn run(
                     }
                     Command::Load(path) => {
                         let next = storage::load(&path)?;
-                        preview = Some((next.population.creature(0), next.config.clone()));
+                        let creature = next
+                            .archive
+                            .entries
+                            .iter()
+                            .max_by(|a, b| a.fitness.total_cmp(&b.fitness))
+                            .map_or_else(
+                                || next.population.creature(0),
+                                |elite| elite.creature.clone(),
+                            );
+                        preview = Some((creature, next.config.clone()));
                         exp = Some(next);
                         epoch += 1;
                         history = Arc::new(Vec::new());

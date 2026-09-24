@@ -202,7 +202,11 @@ impl App {
             initial_config.throughput = false;
         }
         let smoke_start_pending = std::env::var_os("EVOLUTION_SMOKE_POPULATION").is_some();
-        worker.send(Command::New(initial_config));
+        if let Some(path) = std::env::var_os("EVOLUTION_SMOKE_CHECKPOINT") {
+            worker.send(Command::Load(PathBuf::from(path)));
+        } else {
+            worker.send(Command::New(initial_config));
+        }
         let mut percentiles = [false; 29];
         percentiles[0] = true;
         percentiles[14] = true;
@@ -777,7 +781,7 @@ impl App {
         if let Some(s) = self.snapshot.as_ref().and_then(|s| s.history.last()) {
             ui.columns(4, |cols| {
                 for (ui, (name, value, color)) in cols.iter_mut().zip([
-                    ("BEST", format!("{:.3} m", s.best), MINT),
+                    ("BEST GAIT SCORE", format!("{:.3} m", s.best), MINT),
                     ("QD SCORE", format!("{:.2}", s.qd_score), MINT),
                     ("NICHES", number(s.archive_cells), INK),
                     (
@@ -810,7 +814,7 @@ impl App {
             .height(height)
             .legend(Legend::default())
             .x_axis_label("Generation")
-            .y_axis_label("Distance (m)")
+            .y_axis_label("Gait score (m)")
             .allow_scroll(false)
             .show(ui, |plot| {
                 for (i, &visible) in self.percentiles.iter().enumerate() {
@@ -870,7 +874,7 @@ impl App {
             .collect();
         Plot::new("histogram")
             .height(height)
-            .x_axis_label("Distance (m)")
+            .x_axis_label("Gait score (m)")
             .allow_scroll(false)
             .show(ui, |plot| {
                 plot.bar_chart(BarChart::new("Creatures", bars).color(MINT.gamma_multiply(0.65)));

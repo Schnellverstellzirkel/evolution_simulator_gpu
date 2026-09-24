@@ -57,6 +57,7 @@ struct Result {
     vertical_extremum: f32,
     vertical_trend: f32,
     gait_turns: f32,
+    height_sum: f32,
 }
 @group(0) @binding(0) var<storage, read_write> nodes: array<Node>;
 @group(0) @binding(1) var<storage, read> muscles: array<Muscle>;
@@ -76,6 +77,7 @@ var<workgroup> failures: array<f32, WORKGROUP>;
 const BONE_SOLVE_ITERATIONS: u32 = 8u;
 const VELOCITY_SOLVE_ITERATIONS: u32 = 4u;
 const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
+const MAX_MUSCLE_FORCE: f32 = 5.0;
 const MAX_NODE_SPEED: f32 = 5.0;
 const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
 const MAX_BONE_TURN_COS: f32 = 0.9921977;
@@ -145,7 +147,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
 
     // Only lane zero owns behavior metrics. Keep them in registers for the
     // whole dispatch and exchange them with global memory at chunk boundaries.
-    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0);
+    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0);
     if creature < p.count && local == 0u && p.tick > 0u {
         metrics = results[creature];
     }
@@ -214,7 +216,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let target_speed = (limited_muscle_length(m, time)
                     - limited_muscle_length(m, max(time - 1.0 / 120.0, 0.0))) * 120.0;
                 let magnitude = clamp(-target_speed * m.stiffness * 0.25
-                    + relative * 0.15, -30.0, 30.0);
+                    + relative * 0.15, -MAX_MUSCLE_FORCE, MAX_MUSCLE_FORCE);
                 var weight = 0.0;
                 if m.a0 == local { weight += 1.0 - m.anchor_a; }
                 if m.a1 == local { weight += m.anchor_a; }
@@ -370,15 +372,21 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             if tick >= 200u {
                 var center_y = 0.0;
                 var contacts = 0.0;
+                var low = 1e20;
+                var high = -1e20;
                 for (var j = 0u; j < body.nodes; j++) {
-                    center_y += positions[write_base + base + j].y;
+                    let y = positions[write_base + base + j].y;
+                    center_y += y;
+                    low = min(low, y - radii[base + j]);
+                    high = max(high, y + radii[base + j]);
                     if p.ground > 0.0
-                        && positions[write_base + base + j].y <= radii[base + j] + 0.002 {
+                        && y <= radii[base + j] + 0.002 {
                         contacts += 1.0;
                     }
                 }
                 center_y /= f32(body.nodes);
                 metrics.ground_contact += contacts;
+                metrics.height_sum += high - low;
                 metrics.vertical_oscillation = min(metrics.vertical_oscillation, center_y);
                 metrics.gait_frequency = max(metrics.gait_frequency, center_y);
                 if tick == 200u {
@@ -425,7 +433,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if failed > 0.0 {
                     metrics.fitness = -1e20;
                 } else {
-                    metrics.fitness = score / mass_sum;
+                    let timed_steps = max(p.total_steps - 200u, 1u);
+                    let mean_height = metrics.height_sum / f32(timed_steps);
+                    let contact_fraction = metrics.ground_contact
+                        / (f32(timed_steps) * f32(body.nodes));
+                    let posture = clamp((mean_height - 0.25) / 0.75, 0.0, 1.0);
+                    let stepping = clamp((0.95 - contact_fraction) / 0.20, 0.0, 1.0);
+                    metrics.fitness = score / mass_sum * posture * stepping;
                 }
                 if p.total_steps > 200u {
                     metrics.vertical_oscillation = max(

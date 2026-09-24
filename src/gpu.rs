@@ -91,6 +91,7 @@ struct GpuResult {
     vertical_extremum: f32,
     vertical_trend: f32,
     gait_turns: f32,
+    height_sum: f32,
 }
 pub struct Gpu {
     pub device: wgpu::Device,

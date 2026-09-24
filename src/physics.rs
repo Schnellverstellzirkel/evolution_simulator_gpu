@@ -7,6 +7,7 @@ pub const SETTLE: u32 = 200;
 const BONE_SOLVE_ITERATIONS: usize = 8;
 const VELOCITY_SOLVE_ITERATIONS: usize = 4;
 const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
+const MAX_MUSCLE_FORCE: f32 = 5.0;
 const MAX_NODE_SPEED: f32 = 5.0;
 const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
 const MAX_BONE_TURN_COS: f32 = 0.992_197_7;
@@ -58,7 +59,8 @@ fn motor_force(m: &Muscle, time: f32, relative: f32) -> f32 {
     let target_speed = (limited_target(m, time) - limited_target(m, (time - DT).max(0.0))) / DT;
     // A fixed target is a passive constraint, not an inexhaustible motor.
     // The actuator pulls while shortening and pushes while lengthening.
-    (-target_speed * m.stiffness * 0.25 + relative * 0.15).clamp(-30.0, 30.0)
+    (-target_speed * m.stiffness * 0.25 + relative * 0.15)
+        .clamp(-MAX_MUSCLE_FORCE, MAX_MUSCLE_FORCE)
 }
 fn limit_speed(velocity: &mut [f32; 2]) {
     let speed = velocity[0].hypot(velocity[1]);
@@ -333,10 +335,38 @@ pub fn evaluate(c: &Creature, cfg: &Config) -> f32 {
     let mut canonical = c.clone();
     crate::evolution::canonicalize_bone_order(&mut canonical);
     let mut n = nodes(&canonical);
+    let mut height_sum = 0.0;
+    let mut contacts = 0usize;
     for tick in 0..SETTLE + cfg.steps() {
         step(&mut n, &canonical.bones, &canonical.muscles, cfg, tick);
+        if tick >= SETTLE {
+            let low = n
+                .iter()
+                .map(|node| node.pos[1] - node.radius)
+                .fold(f32::INFINITY, f32::min);
+            let high = n
+                .iter()
+                .map(|node| node.pos[1] + node.radius)
+                .fold(f32::NEG_INFINITY, f32::max);
+            height_sum += high - low;
+            contacts += n
+                .iter()
+                .filter(|node| cfg.ground && node.pos[1] <= node.radius + 0.002)
+                .count();
+        }
     }
-    fitness(&n)
+    let displacement = fitness(&n);
+    if displacement <= FAILED {
+        return displacement;
+    }
+    let steps = cfg.steps().max(1) as f32;
+    let contact_fraction = contacts as f32 / (steps * n.len() as f32);
+    displacement * locomotion_factor(height_sum / steps, contact_fraction)
+}
+pub fn locomotion_factor(mean_height: f32, contact_fraction: f32) -> f32 {
+    let posture = ((mean_height - 0.25) / 0.75).clamp(0.0, 1.0);
+    let stepping = ((0.95 - contact_fraction) / 0.20).clamp(0.0, 1.0);
+    posture * stepping
 }
 pub fn fitness(n: &[Node]) -> f32 {
     if n.iter().any(|n| n.failed != 0.0) {
@@ -408,6 +438,13 @@ mod tests {
             assert_eq!(motor_force(&muscle, tick as f32 * DT, 0.0), 0.0);
         }
         assert!(motor_force(&muscle, 0.025, 0.0) == 0.0);
+    }
+
+    #[test]
+    fn flat_or_permanently_grounded_bodies_do_not_score_as_walkers() {
+        assert_eq!(locomotion_factor(0.12, 0.4), 0.0);
+        assert_eq!(locomotion_factor(1.2, 1.0), 0.0);
+        assert!(locomotion_factor(0.7, 0.8) > 0.0);
     }
 
     #[test]

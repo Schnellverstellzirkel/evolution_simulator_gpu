@@ -8,7 +8,7 @@ pub(crate) const MORPHOLOGY_LIMIT: usize = 64;
 pub(crate) const ARCHIVE_CAPACITY: usize = ARCHIVE_LIMIT + MORPHOLOGY_LIMIT;
 pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 13_824;
 pub(crate) const CMA_LIMIT: usize = 96;
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 pub(crate) const MIN_MORPHOLOGY_DESCENDANTS: u64 = 8;
@@ -1009,7 +1009,9 @@ fn parameters(creature: &Creature) -> Vec<f32> {
             m.anchor_b.clamp(0.0, 1.0),
             ((m.short - 0.01) / 0.79).clamp(0.0, 1.0),
             ((m.long - 0.01) / 0.99).clamp(0.0, 1.0),
-            ((m.period - 0.1) / 9.9).clamp(0.0, 1.0),
+            ((m.period - crate::evolution::MIN_MUSCLE_PERIOD)
+                / (10.0 - crate::evolution::MIN_MUSCLE_PERIOD))
+                .clamp(0.0, 1.0),
             m.phase.clamp(0.0, 1.0),
             ((m.duty - 0.05) / 0.90).clamp(0.0, 1.0),
             ((m.stiffness - 1.0) / 119.0).clamp(0.0, 1.0),
@@ -1044,7 +1046,9 @@ fn parameters_into(population: &Population, index: usize, output: &mut [f32]) {
             m.anchor_b.clamp(0.0, 1.0),
             ((m.short - 0.01) / 0.79).clamp(0.0, 1.0),
             ((m.long - 0.01) / 0.99).clamp(0.0, 1.0),
-            ((m.period - 0.1) / 9.9).clamp(0.0, 1.0),
+            ((m.period - crate::evolution::MIN_MUSCLE_PERIOD)
+                / (10.0 - crate::evolution::MIN_MUSCLE_PERIOD))
+                .clamp(0.0, 1.0),
             m.phase.clamp(0.0, 1.0),
             ((m.duty - 0.05) / 0.90).clamp(0.0, 1.0),
             ((m.stiffness - 1.0) / 119.0).clamp(0.0, 1.0),
@@ -1070,7 +1074,8 @@ fn apply_parameters(creature: &mut Creature, values: &[f32]) {
         m.anchor_b = values[i + 1].clamp(0.0, 1.0);
         m.short = 0.01 + values[i + 2] * 0.79;
         m.long = (0.01 + values[i + 3] * 0.99).max(m.short);
-        m.period = 0.1 + values[i + 4] * 9.9;
+        m.period = crate::evolution::MIN_MUSCLE_PERIOD
+            + values[i + 4] * (10.0 - crate::evolution::MIN_MUSCLE_PERIOD);
         m.phase = values[i + 5].fract();
         m.duty = 0.05 + values[i + 6] * 0.90;
         m.stiffness = 1.0 + values[i + 7] * 119.0;

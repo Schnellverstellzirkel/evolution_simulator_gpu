@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const FAILED: f32 = -1.0e20;
 pub const MAX_BONE_LENGTH: f32 = 2.0;
+pub const MIN_MUSCLE_PERIOD: f32 = 0.5;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct NodeGene {
@@ -181,7 +182,7 @@ impl Population {
         &self,
         cfg: &Config,
         max_bone_length: f32,
-        allow_disconnected_muscles: bool,
+        historical: bool,
     ) -> Result<()> {
         ensure!(
             self.genomes.len() == cfg.population,
@@ -216,7 +217,10 @@ impl Population {
                         .iter()
                         .all(|x| x.is_finite())
                         && (0.01..=1.0).contains(&n.diameter)
-                        && (0.0..=1.0).contains(&n.friction),
+                        && (0.0..=1.0).contains(&n.friction)
+                        && (historical || (cfg.min_size..=cfg.max_size).contains(&n.diameter))
+                        && (historical
+                            || (cfg.min_friction..=cfg.max_friction).contains(&n.friction)),
                     "Invalid node"
                 );
             }
@@ -294,7 +298,7 @@ impl Population {
                         .all(|x| x.is_finite())
                         && m.short >= 0.01
                         && m.long >= m.short
-                        && m.period >= 0.1
+                        && m.period >= if historical { 0.1 } else { MIN_MUSCLE_PERIOD }
                         && (0.05..=0.95).contains(&m.duty)
                         && (1.0..=120.0).contains(&m.stiffness),
                     "Invalid muscle attachment or parameters"
@@ -302,7 +306,7 @@ impl Population {
                 muscle_adjacency[m.bone_a as usize] |= 1u64 << m.bone_b;
                 muscle_adjacency[m.bone_b as usize] |= 1u64 << m.bone_a;
             }
-            if allow_disconnected_muscles {
+            if historical {
                 continue;
             }
             ensure!(
@@ -437,6 +441,23 @@ pub(crate) fn normalize_bone_lengths(c: &mut Creature) {
         bone.rest_length = bone.rest_length.clamp(min, max);
     }
 }
+fn align_nodes_with_bones(c: &mut Creature) {
+    let original = c.nodes.clone();
+    for bone in &c.bones {
+        let a = bone.a as usize;
+        let b = bone.b as usize;
+        let dx = original[b].x - original[a].x;
+        let dy = original[b].y - original[a].y;
+        let length = dx.hypot(dy);
+        let direction = if length > 1.0e-6 {
+            [dx / length, dy / length]
+        } else {
+            [1.0, 0.0]
+        };
+        c.nodes[b].x = c.nodes[a].x + direction[0] * bone.rest_length;
+        c.nodes[b].y = c.nodes[a].y + direction[1] * bone.rest_length;
+    }
+}
 fn bone_point(bone: Bone, nodes: &[NodeGene], t: f32) -> [f32; 2] {
     let a = nodes[bone.a as usize];
     let b = nodes[bone.b as usize];
@@ -567,6 +588,10 @@ fn bone_path_exists(bones: &[Bone], node_count: usize, start: usize, target: usi
     }
 }
 fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
+    for node in &mut c.nodes {
+        node.diameter = node.diameter.clamp(cfg.min_size, cfg.max_size);
+        node.friction = node.friction.clamp(cfg.min_friction, cfg.max_friction);
+    }
     let node_count = c.nodes.len().min(64);
     let candidates = std::mem::take(&mut c.bones);
     for b in candidates {
@@ -618,7 +643,7 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
             m.short
         };
         m.period = if m.period.is_finite() {
-            m.period.clamp(0.1, 10.0)
+            m.period.clamp(MIN_MUSCLE_PERIOD, 10.0)
         } else {
             1.0
         };
@@ -641,6 +666,8 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
     });
     if bone_count < 2 {
         normalize_bone_lengths(c);
+        canonicalize_bone_order(c);
+        align_nodes_with_bones(c);
         return;
     }
     // A motor-link ring keeps every rigid segment addressable to the actuator
@@ -669,6 +696,7 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
     }
     normalize_bone_lengths(c);
     canonicalize_bone_order(c);
+    align_nodes_with_bones(c);
 }
 fn initial(cfg: &Config, index: usize) -> Creature {
     random_creature(cfg, 0, index)
@@ -854,7 +882,8 @@ fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
         muscle.anchor_b = (muscle.anchor_b + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
         muscle.short = (muscle.short + qd::gaussian(rng) * 0.06 * scale).clamp(0.01, 0.8);
         muscle.long = (muscle.long + qd::gaussian(rng) * 0.08 * scale).clamp(muscle.short, 1.0);
-        muscle.period = (muscle.period + qd::gaussian(rng) * 0.20 * scale).clamp(0.1, 10.0);
+        muscle.period =
+            (muscle.period + qd::gaussian(rng) * 0.20 * scale).clamp(MIN_MUSCLE_PERIOD, 10.0);
         muscle.phase = (muscle.phase + qd::gaussian(rng) * 0.12 * scale).rem_euclid(1.0);
         muscle.duty = (muscle.duty + qd::gaussian(rng) * 0.08 * scale).clamp(0.05, 0.95);
         muscle.stiffness =
@@ -1010,7 +1039,7 @@ fn mutate(mut c: Creature, cfg: &Config, generation: u32, index: usize) -> Creat
         m.anchor_b = (m.anchor_b + rng.delta() * 0.15 * strength).clamp(0.0, 1.0);
         m.short = (m.short + rng.delta() * 0.1 * strength).clamp(0.02, 0.8);
         m.long = (m.long + rng.delta() * 0.1 * strength).clamp(m.short, 1.0);
-        m.period = (m.period + rng.delta() * 0.2 * strength).clamp(0.1, 10.0);
+        m.period = (m.period + rng.delta() * 0.2 * strength).clamp(MIN_MUSCLE_PERIOD, 10.0);
         m.phase = (m.phase + rng.delta() * 0.2 * strength).rem_euclid(1.0);
         m.duty = (m.duty + rng.delta() * 0.1 * strength).clamp(0.05, 0.95);
         m.stiffness = (m.stiffness * (1.0 + rng.delta() * 0.3 * strength)).clamp(1.0, 120.0);
@@ -1109,6 +1138,64 @@ mod tests {
         creature.nodes[1].x = 4.0;
         normalize_bone_lengths(&mut creature);
         assert_eq!(creature.bones[0].rest_length, MAX_BONE_LENGTH);
+    }
+
+    #[test]
+    fn repair_applies_body_bounds_and_starts_bones_at_their_rest_lengths() {
+        let cfg = Config::default();
+        let mut creature = Creature {
+            nodes: vec![
+                NodeGene {
+                    x: 0.0,
+                    y: 0.0,
+                    diameter: 0.01,
+                    friction: 0.0,
+                },
+                NodeGene {
+                    x: 7.0,
+                    y: 0.0,
+                    diameter: 0.02,
+                    friction: 0.1,
+                },
+                NodeGene {
+                    x: 4.0,
+                    y: 0.0,
+                    diameter: 0.03,
+                    friction: 0.2,
+                },
+            ],
+            bones: vec![
+                Bone {
+                    a: 0,
+                    b: 1,
+                    rest_length: 2.0,
+                },
+                Bone {
+                    a: 1,
+                    b: 2,
+                    rest_length: 2.0,
+                },
+            ],
+            muscles: vec![],
+            id: 0,
+            mutability: 1.0,
+        };
+        repair(&mut creature, &cfg, &mut Rng::new(42, 0, 0));
+        for node in &creature.nodes {
+            assert!((cfg.min_size..=cfg.max_size).contains(&node.diameter));
+            assert!((cfg.min_friction..=cfg.max_friction).contains(&node.friction));
+        }
+        for bone in &creature.bones {
+            let a = creature.nodes[bone.a as usize];
+            let b = creature.nodes[bone.b as usize];
+            assert!(((a.x - b.x).hypot(a.y - b.y) - bone.rest_length).abs() < 1e-5);
+        }
+        assert!(
+            creature
+                .muscles
+                .iter()
+                .all(|m| m.period >= MIN_MUSCLE_PERIOD)
+        );
     }
 
     fn muscle_point(creature: &Creature, bone_id: u32, t: f32) -> [f32; 2] {
