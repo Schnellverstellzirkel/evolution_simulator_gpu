@@ -928,9 +928,10 @@ pub fn load(path: &Path) -> Result<Experiment> {
     // checkpoints written before that invariant was introduced.
     experiment.population.canonicalize_bones()?;
     if experiment.qd_version < qd::VERSION {
-        // Older archives used prior descriptors, obstacle physics, or bone
-        // contact rules. Reevaluate their current populations under the current
-        // fitness criteria instead of retaining incomparable elites.
+        // Older archives used prior descriptors, obstacle physics, bone
+        // contact rules, or positional corrections as velocity. Reevaluate
+        // their current populations under the current fitness criteria
+        // instead of retaining incomparable elites.
         if experiment
             .history
             .last()

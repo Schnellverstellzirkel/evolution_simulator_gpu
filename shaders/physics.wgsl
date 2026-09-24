@@ -58,12 +58,6 @@ struct Result {
     vertical_trend: f32,
     gait_turns: f32,
 }
-struct ClosestPoints {
-    s: f32,
-    t: f32,
-    pa: vec2f,
-    pb: vec2f,
-}
 @group(0) @binding(0) var<storage, read_write> nodes: array<Node>;
 @group(0) @binding(1) var<storage, read> muscles: array<Muscle>;
 @group(0) @binding(2) var<storage, read> metadata: array<Meta>;
@@ -80,90 +74,12 @@ var<workgroup> masses: array<f32, WORKGROUP>;
 var<workgroup> failures: array<f32, WORKGROUP>;
 
 const BONE_SOLVE_ITERATIONS: u32 = 8u;
-const BONE_COLLISION_RADIUS: f32 = 0.04;
-const MAX_BONE_PROJECTION_SPEED: f32 = 10.0;
-
-fn closest_segment_points(a0: vec2f, a1: vec2f, b0: vec2f, b1: vec2f) -> ClosestPoints {
-    let u = a1 - a0;
-    let v = b1 - b0;
-    let w = a0 - b0;
-    let aa = dot(u, u);
-    let bb = dot(u, v);
-    let cc = dot(v, v);
-    let dd = dot(u, w);
-    let ee = dot(v, w);
-    var s = 0.0;
-    var t = 0.0;
-    if aa <= 1e-12 && cc <= 1e-12 {
-        s = 0.0;
-        t = 0.0;
-    } else if aa <= 1e-12 {
-        s = 0.0;
-        t = clamp(ee / cc, 0.0, 1.0);
-    } else if cc <= 1e-12 {
-        s = clamp(-dd / aa, 0.0, 1.0);
-        t = 0.0;
-    } else {
-        let denominator = aa * cc - bb * bb;
-        var s_numerator = 0.0;
-        var s_denominator = 1.0;
-        var t_numerator = 0.0;
-        var t_denominator = 1.0;
-        if denominator <= 1e-12 {
-            s_numerator = 0.0;
-            s_denominator = 1.0;
-            t_numerator = ee;
-            t_denominator = cc;
-        } else {
-            s_numerator = bb * ee - cc * dd;
-            t_numerator = aa * ee - bb * dd;
-            s_denominator = denominator;
-            t_denominator = denominator;
-        }
-        if s_numerator < 0.0 {
-            s_numerator = 0.0;
-            t_numerator = ee;
-            t_denominator = cc;
-        } else if s_numerator > s_denominator {
-            s_numerator = s_denominator;
-            t_numerator = ee + bb;
-            t_denominator = cc;
-        }
-        if t_numerator < 0.0 {
-            t_numerator = 0.0;
-            if -dd < 0.0 {
-                s_numerator = 0.0;
-                s_denominator = 1.0;
-            } else if -dd > aa {
-                s_numerator = 1.0;
-                s_denominator = 1.0;
-            } else {
-                s_numerator = -dd;
-                s_denominator = aa;
-            }
-        } else if t_numerator > t_denominator {
-            t_numerator = t_denominator;
-            let endpoint_projection = -dd + bb;
-            if endpoint_projection < 0.0 {
-                s_numerator = 0.0;
-                s_denominator = 1.0;
-            } else if endpoint_projection > aa {
-                s_numerator = 1.0;
-                s_denominator = 1.0;
-            } else {
-                s_numerator = endpoint_projection;
-                s_denominator = aa;
-            }
-        }
-        if abs(s_numerator) >= 1e-12 {
-            s = s_numerator / s_denominator;
-        }
-        if abs(t_numerator) >= 1e-12 {
-            t = t_numerator / t_denominator;
-        }
-    }
-    return ClosestPoints(s, t, a0 + u * s, b0 + v * t);
-}
+const VELOCITY_SOLVE_ITERATIONS: u32 = 4u;
+const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
+const MAX_NODE_SPEED: f32 = 5.0;
+const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
+const MAX_BONE_TURN_COS: f32 = 0.9921977;
+const MAX_BONE_TURN_TAN: f32 = 0.12565514;
 
 fn muscle_length(m: Muscle, time: f32) -> f32 {
     let phase = fract(time * m.inv_period + m.phase);
@@ -174,6 +90,22 @@ fn muscle_length(m: Muscle, time: f32) -> f32 {
         wave = 0.5 - 0.5 * cos(3.14159265359 * (phase - m.duty) * m.inv_complement);
     }
     return mix(m.short, m.long, wave);
+}
+fn limited_muscle_length(m: Muscle, time: f32) -> f32 {
+    let previous = muscle_length(m, max(time - 1.0 / 120.0, 0.0));
+    let desired = muscle_length(m, time);
+    return previous + clamp(
+        desired - previous,
+        -MAX_MUSCLE_LENGTH_SPEED / 120.0,
+        MAX_MUSCLE_LENGTH_SPEED / 120.0,
+    );
+}
+fn limit_speed(velocity: vec2f) -> vec2f {
+    let speed = length(velocity);
+    if speed > MAX_NODE_SPEED {
+        return velocity * (MAX_NODE_SPEED / speed);
+    }
+    return velocity;
 }
 fn contact(node: Node, normal: vec2f, penetration: f32) -> Node {
     var n = node;
@@ -283,7 +215,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let dir = d / distance;
                 let relative = dot(velocity_b - velocity_a, dir);
                 let magnitude = clamp(
-                    clamp(distance - muscle_length(m, time), -0.25, 0.25) * m.stiffness
+                    clamp(distance - limited_muscle_length(m, time), -0.25, 0.25) * m.stiffness
                         + relative * 0.15,
                     -30.0,
                     30.0,
@@ -298,6 +230,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             var gravity = 0.0;
             if tick >= 200u { gravity = p.gravity; }
             n.vel = (n.vel + (force / n.mass - vec2f(0.0, gravity)) / 120.0) * p.air;
+            n.vel = limit_speed(n.vel);
             n.pos += n.vel / 120.0;
             if tick >= 200u { n = collide(n); }
             if !all(abs(n.pos) < vec2f(1e6)) || !all(abs(n.vel) < vec2f(1e6)) {
@@ -315,9 +248,6 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         // This keeps the repeated constraint iterations local to one lane and
         // avoids a workgroup-wide barrier between every projection pass.
         if creature < p.count && local == 0u {
-            for (var j = 0u; j < body.nodes; j++) {
-                positions[read_base + base + j] = velocities[write_base + base + j];
-            }
             for (var iteration = 0u; iteration < BONE_SOLVE_ITERATIONS; iteration++) {
                 for (var j = 0u; j < body.bone_count; j++) {
                     let bone = bones[body.bones_start + j];
@@ -339,210 +269,8 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                         new_a.y = max(new_a.y, radii[base + bone.a]);
                         new_b.y = max(new_b.y, radii[base + bone.b]);
                     }
-                    velocities[index_a] += (new_a - old_a) * 120.0;
-                    velocities[index_b] += (new_b - old_b) * 120.0;
                     positions[index_a] = new_a;
                     positions[index_b] = new_b;
-                }
-                for (var j = 0u; j < body.bone_count; j++) {
-                    let bone_a = bones[body.bones_start + j];
-                    let a0 = bone_a.a;
-                    let a1 = bone_a.b;
-                    for (var k = j + 1u; k < body.bone_count; k++) {
-                        let bone_b = bones[body.bones_start + k];
-                        let b0 = bone_b.a;
-                        let b1 = bone_b.b;
-                        let radius_a = min(BONE_COLLISION_RADIUS, min(radii[base + a0], radii[base + a1]));
-                        let radius_b = min(BONE_COLLISION_RADIUS, min(radii[base + b0], radii[base + b1]));
-                        let separation = radius_a + radius_b;
-                        var joint_node = 0xffffffffu;
-                        if a0 == b0 || a0 == b1 {
-                            joint_node = a0;
-                        } else if a1 == b0 || a1 == b1 {
-                            joint_node = a1;
-                        }
-                        let index_a0 = write_base + base + a0;
-                        let index_a1 = write_base + base + a1;
-                        let index_b0 = write_base + base + b0;
-                        let index_b1 = write_base + base + b1;
-                        let full_a0 = positions[index_a0];
-                        let full_a1 = positions[index_a1];
-                        let full_b0 = positions[index_b0];
-                        let full_b1 = positions[index_b1];
-                        var a_start = 0.0;
-                        var a_end = 1.0;
-                        var b_start = 0.0;
-                        var b_end = 1.0;
-                        if joint_node != 0xffffffffu {
-                            let length_a = length(full_a1 - full_a0);
-                            let length_b = length(full_b1 - full_b0);
-                            let trim_a = (radii[base + joint_node] + radius_a) / max(length_a, 1e-6);
-                            let trim_b = (radii[base + joint_node] + radius_b) / max(length_b, 1e-6);
-                            if a0 == joint_node {
-                                a_start = trim_a;
-                            } else {
-                                a_end = 1.0 - trim_a;
-                            }
-                            if b0 == joint_node {
-                                b_start = trim_b;
-                            } else {
-                                b_end = 1.0 - trim_b;
-                            }
-                            if a_start >= a_end || b_start >= b_end {
-                                continue;
-                            }
-                        }
-                        let a0_pos = mix(full_a0, full_a1, a_start);
-                        let a1_pos = mix(full_a0, full_a1, a_end);
-                        let b0_pos = mix(full_b0, full_b1, b_start);
-                        let b1_pos = mix(full_b0, full_b1, b_end);
-                        if max(a0_pos.x, a1_pos.x) + separation < min(b0_pos.x, b1_pos.x)
-                            || max(b0_pos.x, b1_pos.x) + separation < min(a0_pos.x, a1_pos.x)
-                            || max(a0_pos.y, a1_pos.y) + separation < min(b0_pos.y, b1_pos.y)
-                            || max(b0_pos.y, b1_pos.y) + separation < min(a0_pos.y, a1_pos.y) {
-                            continue;
-                        }
-                        let closest = closest_segment_points(a0_pos, a1_pos, b0_pos, b1_pos);
-                        let delta = closest.pa - closest.pb;
-                        let distance = length(delta);
-                        let edge_a = full_a1 - full_a0;
-                        let edge_b = full_b1 - full_b0;
-                        let length_a = length(edge_a);
-                        let length_b = length(edge_b);
-                        if distance <= 1e-6 && joint_node == 0xffffffffu {
-                            // A crossing needs an asymmetric correction so the
-                            // exact-length reconstruction can fold it apart.
-                            var moving0 = b0;
-                            var moving1 = b1;
-                            var fixed0 = a0;
-                            var fixed_edge = edge_a;
-                            var fixed_length = length_a;
-                            if length_a < length_b {
-                                moving0 = a0;
-                                moving1 = a1;
-                                fixed0 = b0;
-                                fixed_edge = edge_b;
-                                fixed_length = length_b;
-                            }
-                            if fixed_length > 1e-6 {
-                                let line_normal = vec2f(-fixed_edge.y, fixed_edge.x) / fixed_length;
-                                let d0 = dot(positions[write_base + base + moving0]
-                                    - positions[write_base + base + fixed0], line_normal);
-                                let d1 = dot(positions[write_base + base + moving1]
-                                    - positions[write_base + base + fixed0], line_normal);
-                                if d0 * d1 < 0.0 {
-                                    var endpoint = moving0;
-                                    if masses[base + moving1] < masses[base + moving0] {
-                                        endpoint = moving1;
-                                    }
-                                    var other_distance = d1;
-                                    var current_distance = d0;
-                                    if endpoint == moving1 {
-                                        other_distance = d0;
-                                        current_distance = d1;
-                                    }
-                                    let target_distance = sign(other_distance)
-                                        * (abs(other_distance) + abs(current_distance) + separation);
-                                    let correction = (target_distance - current_distance) * line_normal;
-                                    let node_index = write_base + base + endpoint;
-                                    var new_position = positions[node_index] + correction;
-                                    if tick >= 200u && p.ground > 0.0 {
-                                        new_position.y = max(new_position.y, radii[base + endpoint]);
-                                    }
-                                    velocities[node_index] += (new_position - positions[node_index]) * 120.0;
-                                    positions[node_index] = new_position;
-                                    continue;
-                                }
-                            }
-                        }
-                        var contact_s = a_start + closest.s * (a_end - a_start);
-                        var contact_t = b_start + closest.t * (b_end - b_start);
-                        var normal = vec2f(1.0, 0.0);
-                        var penetration = separation - distance;
-                        if distance > 1e-6 {
-                            normal = delta / distance;
-                        } else {
-                            if length_a < length_b {
-                                contact_s = a_start + 0.25 * (a_end - a_start);
-                                normal = vec2f(-edge_a.y, edge_a.x) / max(length_a, 1e-6);
-                            } else {
-                                contact_t = b_start + 0.25 * (b_end - b_start);
-                                normal = vec2f(-edge_b.y, edge_b.x) / max(length_b, 1e-6);
-                            }
-                            penetration = separation;
-                        }
-                        if penetration <= 0.0 {
-                            continue;
-                        }
-                        let contact_weights = array<f32, 4>(
-                            1.0 - contact_s,
-                            contact_s,
-                            1.0 - contact_t,
-                            contact_t,
-                        );
-                        let contact_indices = array<u32, 4>(a0, a1, b0, b1);
-                        let contact_signs = array<f32, 4>(1.0, 1.0, -1.0, -1.0);
-                        var contact_gradients = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
-                        var inverse_masses = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
-                        var denominator = 0.0;
-                        for (var c = 0u; c < 4u; c++) {
-                            inverse_masses[c] = 1.0 / masses[base + contact_indices[c]];
-                            for (var d = 0u; d < 4u; d++) {
-                                if contact_indices[c] == contact_indices[d] {
-                                    contact_gradients[c] += contact_signs[d] * contact_weights[d];
-                                }
-                            }
-                            var first = true;
-                            for (var d = 0u; d < c; d++) {
-                                if contact_indices[c] == contact_indices[d] {
-                                    first = false;
-                                }
-                            }
-                            if first {
-                                denominator += inverse_masses[c] * contact_gradients[c] * contact_gradients[c];
-                            }
-                        }
-                        denominator = max(denominator, 1e-8);
-                        for (var c = 0u; c < 4u; c++) {
-                            var first = true;
-                            for (var d = 0u; d < c; d++) {
-                                if contact_indices[c] == contact_indices[d] {
-                                    first = false;
-                                }
-                            }
-                            if !first {
-                                continue;
-                            }
-                            let node_index = write_base + base + contact_indices[c];
-                            let correction = normal * penetration * inverse_masses[c]
-                                * contact_gradients[c] / denominator;
-                            var new_position = positions[node_index] + correction;
-                            if tick >= 200u && p.ground > 0.0 {
-                                new_position.y = max(new_position.y, radii[base + contact_indices[c]]);
-                            }
-                            velocities[node_index] += (new_position - positions[node_index]) * 120.0;
-                            positions[node_index] = new_position;
-                        }
-                    }
-                }
-                if iteration + 1u < BONE_SOLVE_ITERATIONS {
-                    for (var j = 0u; j < body.nodes; j++) {
-                        velocities[read_base + base + j] = positions[write_base + base + j];
-                    }
-                    for (var j = 0u; j < body.bone_count; j++) {
-                        let bone = bones[body.bones_start + j];
-                        let parent_index = write_base + base + bone.a;
-                        let child_index = write_base + base + bone.b;
-                        let shape_a = velocities[read_base + base + bone.a];
-                        let shape_b = velocities[read_base + base + bone.b];
-                        let delta = shape_b - shape_a;
-                        let raw_distance = length(delta);
-                        let direction = select(vec2f(1.0, 0.0), delta / max(raw_distance, 1e-6), raw_distance > 1e-6);
-                        let old_child = positions[child_index];
-                        let new_child = positions[parent_index] + direction * bone.rest_length;
-                        positions[child_index] = new_child;
-                        velocities[child_index] += (new_child - old_child) * 120.0;
-                    }
                 }
             }
 
@@ -564,11 +292,25 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let shape_b = velocities[read_base + base + bone.b];
                 let delta = shape_b - shape_a;
                 let raw_distance = length(delta);
-                let direction = select(vec2f(1.0, 0.0), delta / max(raw_distance, 1e-6), raw_distance > 1e-6);
-                let old_child = positions[child_index];
+                var direction = select(vec2f(1.0, 0.0), delta / max(raw_distance, 1e-6), raw_distance > 1e-6);
+                let previous_delta = positions[read_base + base + bone.b]
+                    - positions[read_base + base + bone.a];
+                let previous_length = length(previous_delta);
+                if previous_length > 1e-6 {
+                    let previous_direction = previous_delta / previous_length;
+                    if dot(previous_direction, direction) < MAX_BONE_TURN_COS {
+                        let cross = previous_direction.x * direction.y
+                            - previous_direction.y * direction.x;
+                        let turn_sign = select(1.0, -1.0, cross < 0.0);
+                        let turned = vec2f(
+                            previous_direction.x - previous_direction.y * turn_sign * MAX_BONE_TURN_TAN,
+                            previous_direction.y + previous_direction.x * turn_sign * MAX_BONE_TURN_TAN,
+                        );
+                        direction = turned / length(turned);
+                    }
+                }
                 let new_child = positions[parent_index] + direction * bone.rest_length;
                 positions[child_index] = new_child;
-                velocities[child_index] += (new_child - old_child) * 120.0;
             }
             var current_center = vec2f(0.0);
             for (var j = 0u; j < body.nodes; j++) {
@@ -579,7 +321,6 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             for (var j = 0u; j < body.nodes; j++) {
                 let node_index = write_base + base + j;
                 positions[node_index] += center_shift;
-                velocities[node_index] += center_shift * 120.0;
                 if tick >= 200u && p.ground > 0.0 {
                     ground_lift = max(ground_lift, radii[base + j] - positions[node_index].y);
                 }
@@ -588,76 +329,39 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 for (var j = 0u; j < body.nodes; j++) {
                     let node_index = write_base + base + j;
                     positions[node_index].y += ground_lift;
-                    velocities[node_index].y += ground_lift * 120.0;
                 }
             }
-            for (var j = 0u; j < body.nodes; j++) {
-                let node_index = write_base + base + j;
-                let base_velocity = positions[read_base + base + j];
-                var correction_velocity = velocities[node_index] - base_velocity;
-                let correction_speed = length(correction_velocity);
-                if correction_speed > MAX_BONE_PROJECTION_SPEED {
-                    correction_velocity *= MAX_BONE_PROJECTION_SPEED / correction_speed;
+            for (var iteration = 0u; iteration < VELOCITY_SOLVE_ITERATIONS; iteration++) {
+                for (var j = 0u; j < body.bone_count; j++) {
+                    let bone = bones[body.bones_start + j];
+                    let index_a = write_base + base + bone.a;
+                    let index_b = write_base + base + bone.b;
+                    let delta = positions[index_b] - positions[index_a];
+                    let length_bone = max(length(delta), 1e-6);
+                    let direction = delta / length_bone;
+                    let inverse_a = 1.0 / masses[base + bone.a];
+                    let inverse_b = 1.0 / masses[base + bone.b];
+                    let inverse_sum = inverse_a + inverse_b;
+                    let relative_radial = dot(velocities[index_b] - velocities[index_a], direction);
+                    let radial_impulse = relative_radial / inverse_sum;
+                    velocities[index_a] += direction * radial_impulse * inverse_a;
+                    velocities[index_b] -= direction * radial_impulse * inverse_b;
+
+                    let tangent = vec2f(-direction.y, direction.x);
+                    let relative_tangent = dot(velocities[index_b] - velocities[index_a], tangent);
+                    let max_tangent = MAX_BONE_ANGULAR_SPEED * length_bone;
+                    let limited_tangent = clamp(relative_tangent, -max_tangent, max_tangent);
+                    let angular_impulse = (relative_tangent - limited_tangent) / inverse_sum;
+                    velocities[index_a] += tangent * angular_impulse * inverse_a;
+                    velocities[index_b] -= tangent * angular_impulse * inverse_b;
                 }
-                velocities[node_index] = base_velocity + correction_velocity;
-            }
-            var overlap = false;
-            for (var j = 0u; j < body.bone_count; j++) {
-                let bone_a = bones[body.bones_start + j];
-                for (var k = j + 1u; k < body.bone_count; k++) {
-                    let bone_b = bones[body.bones_start + k];
-                    let radius_a = min(BONE_COLLISION_RADIUS, min(radii[base + bone_a.a], radii[base + bone_a.b]));
-                    let radius_b = min(BONE_COLLISION_RADIUS, min(radii[base + bone_b.a], radii[base + bone_b.b]));
-                    let minimum_distance = radius_a + radius_b - 0.001;
-                    var joint_node = 0xffffffffu;
-                    if bone_a.a == bone_b.a || bone_a.a == bone_b.b {
-                        joint_node = bone_a.a;
-                    } else if bone_a.b == bone_b.a || bone_a.b == bone_b.b {
-                        joint_node = bone_a.b;
-                    }
-                    var a_start = 0.0;
-                    var a_end = 1.0;
-                    var b_start = 0.0;
-                    var b_end = 1.0;
-                    if joint_node != 0xffffffffu {
-                        let length_a = length(positions[write_base + base + bone_a.b]
-                            - positions[write_base + base + bone_a.a]);
-                        let length_b = length(positions[write_base + base + bone_b.b]
-                            - positions[write_base + base + bone_b.a]);
-                        let trim_a = (radii[base + joint_node] + radius_a) / max(length_a, 1e-6);
-                        let trim_b = (radii[base + joint_node] + radius_b) / max(length_b, 1e-6);
-                        if bone_a.a == joint_node {
-                            a_start = trim_a;
-                        } else {
-                            a_end = 1.0 - trim_a;
-                        }
-                        if bone_b.a == joint_node {
-                            b_start = trim_b;
-                        } else {
-                            b_end = 1.0 - trim_b;
-                        }
-                        if a_start >= a_end || b_start >= b_end {
-                            continue;
-                        }
-                    }
-                    let a0 = positions[write_base + base + bone_a.a];
-                    let a1 = positions[write_base + base + bone_a.b];
-                    let b0 = positions[write_base + base + bone_b.a];
-                    let b1 = positions[write_base + base + bone_b.b];
-                    let closest = closest_segment_points(
-                        mix(a0, a1, a_start),
-                        mix(a0, a1, a_end),
-                        mix(b0, b1, b_start),
-                        mix(b0, b1, b_end),
-                    );
-                    if length(closest.pa - closest.pb) < minimum_distance {
-                        overlap = true;
-                    }
-                }
-            }
-            if overlap {
                 for (var j = 0u; j < body.nodes; j++) {
-                    failures[base + j] = 1.0;
+                    let node_index = write_base + base + j;
+                    velocities[node_index] = limit_speed(velocities[node_index]);
+                    if tick >= 200u && p.ground > 0.0
+                        && positions[node_index].y <= radii[base + j] + 1e-5 {
+                        velocities[node_index].y = max(velocities[node_index].y, 0.0);
+                    }
                 }
             }
         }
@@ -665,7 +369,6 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         if creature < p.count && local < body.nodes {
             n.pos = positions[write_base + lane];
             n.vel = velocities[write_base + lane];
-            n.failed = failures[lane];
         }
 
         if creature < p.count && local == 0u {

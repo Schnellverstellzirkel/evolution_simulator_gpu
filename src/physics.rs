@@ -5,8 +5,12 @@ use crate::{
 pub const DT: f32 = 1.0 / 120.0;
 pub const SETTLE: u32 = 200;
 const BONE_SOLVE_ITERATIONS: usize = 8;
-const BONE_COLLISION_RADIUS: f32 = 0.04;
-const MAX_BONE_PROJECTION_SPEED: f32 = 10.0;
+const VELOCITY_SOLVE_ITERATIONS: usize = 4;
+const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
+const MAX_NODE_SPEED: f32 = 5.0;
+const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
+const MAX_BONE_TURN_COS: f32 = 0.992_197_7;
+const MAX_BONE_TURN_TAN: f32 = 0.125_655_14;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Node {
@@ -39,6 +43,20 @@ pub fn target(m: &Muscle, time: f32) -> f32 {
         0.5 - 0.5 * (std::f32::consts::PI * (phase - m.duty) / (1.0 - m.duty)).cos()
     };
     m.short + (m.long - m.short) * wave
+}
+fn limited_target(m: &Muscle, time: f32) -> f32 {
+    let previous = target(m, (time - DT).max(0.0));
+    let desired = target(m, time);
+    previous
+        + (desired - previous).clamp(-MAX_MUSCLE_LENGTH_SPEED * DT, MAX_MUSCLE_LENGTH_SPEED * DT)
+}
+fn limit_speed(velocity: &mut [f32; 2]) {
+    let speed = velocity[0].hypot(velocity[1]);
+    if speed > MAX_NODE_SPEED {
+        let scale = MAX_NODE_SPEED / speed;
+        velocity[0] *= scale;
+        velocity[1] *= scale;
+    }
 }
 pub fn center(nodes: &mut [Node]) {
     let x = nodes.iter().map(|n| n.pos[0]).sum::<f32>() / nodes.len() as f32;
@@ -79,335 +97,12 @@ fn bone_point(bone: Bone, nodes: &[Node; 64], t: f32, velocity: bool) -> [f32; 2
     [av[0] + (bv[0] - av[0]) * t, av[1] + (bv[1] - av[1]) * t]
 }
 
-fn closest_segment_points(
-    a0: [f32; 2],
-    a1: [f32; 2],
-    b0: [f32; 2],
-    b1: [f32; 2],
-) -> (f32, f32, [f32; 2], [f32; 2]) {
-    let u = [a1[0] - a0[0], a1[1] - a0[1]];
-    let v = [b1[0] - b0[0], b1[1] - b0[1]];
-    let w = [a0[0] - b0[0], a0[1] - b0[1]];
-    let aa = u[0] * u[0] + u[1] * u[1];
-    let bb = u[0] * v[0] + u[1] * v[1];
-    let cc = v[0] * v[0] + v[1] * v[1];
-    let dd = u[0] * w[0] + u[1] * w[1];
-    let ee = v[0] * w[0] + v[1] * w[1];
-    let (s, t) = if aa <= 1.0e-12 && cc <= 1.0e-12 {
-        (0.0, 0.0)
-    } else if aa <= 1.0e-12 {
-        (0.0, (ee / cc).clamp(0.0, 1.0))
-    } else if cc <= 1.0e-12 {
-        ((-dd / aa).clamp(0.0, 1.0), 0.0)
-    } else {
-        let denominator = aa * cc - bb * bb;
-        let mut s_numerator;
-        let mut s_denominator;
-        let mut t_numerator;
-        let mut t_denominator;
-        if denominator <= 1.0e-12 {
-            s_numerator = 0.0;
-            s_denominator = 1.0;
-            t_numerator = ee;
-            t_denominator = cc;
-        } else {
-            s_numerator = bb * ee - cc * dd;
-            t_numerator = aa * ee - bb * dd;
-            s_denominator = denominator;
-            t_denominator = denominator;
-        }
-        if s_numerator < 0.0 {
-            s_numerator = 0.0;
-            t_numerator = ee;
-            t_denominator = cc;
-        } else if s_numerator > s_denominator {
-            s_numerator = s_denominator;
-            t_numerator = ee + bb;
-            t_denominator = cc;
-        }
-        if t_numerator < 0.0 {
-            t_numerator = 0.0;
-            if -dd < 0.0 {
-                s_numerator = 0.0;
-                s_denominator = 1.0;
-            } else if -dd > aa {
-                s_numerator = 1.0;
-                s_denominator = 1.0;
-            } else {
-                s_numerator = -dd;
-                s_denominator = aa;
-            }
-        } else if t_numerator > t_denominator {
-            t_numerator = t_denominator;
-            let endpoint_projection = -dd + bb;
-            if endpoint_projection < 0.0 {
-                s_numerator = 0.0;
-                s_denominator = 1.0;
-            } else if endpoint_projection > aa {
-                s_numerator = 1.0;
-                s_denominator = 1.0;
-            } else {
-                s_numerator = endpoint_projection;
-                s_denominator = aa;
-            }
-        }
-        (
-            if s_numerator.abs() < 1.0e-12 {
-                0.0
-            } else {
-                s_numerator / s_denominator
-            },
-            if t_numerator.abs() < 1.0e-12 {
-                0.0
-            } else {
-                t_numerator / t_denominator
-            },
-        )
-    };
-    let pa = [a0[0] + u[0] * s, a0[1] + u[1] * s];
-    let pb = [b0[0] + v[0] * t, b0[1] + v[1] * t];
-    (s, t, pa, pb)
-}
-
-fn bone_collision_radius(nodes: &[Node], bone: Bone) -> f32 {
-    BONE_COLLISION_RADIUS.min(
-        nodes[bone.a as usize]
-            .radius
-            .min(nodes[bone.b as usize].radius),
-    )
-}
-
-fn shared_bone_joint(a: Bone, b: Bone) -> Option<usize> {
-    [a.a, a.b]
-        .into_iter()
-        .find(|node| *node == b.a || *node == b.b)
-        .map(|node| node as usize)
-}
-
-#[derive(Clone, Copy)]
-struct CollisionSegment {
-    start_t: f32,
-    end_t: f32,
-    start: [f32; 2],
-    end: [f32; 2],
-    radius: f32,
-}
-
-fn collision_segment(
-    nodes: &[Node],
-    positions: &[[f32; 2]; 64],
-    bone: Bone,
-    joint: Option<usize>,
-) -> Option<CollisionSegment> {
-    let a = positions[bone.a as usize];
-    let b = positions[bone.b as usize];
-    let length = (b[0] - a[0]).hypot(b[1] - a[1]).max(1.0e-6);
-    let radius = bone_collision_radius(nodes, bone);
-    let mut start = 0.0;
-    let mut end = 1.0;
-    if let Some(joint) = joint {
-        let trim = (nodes[joint].radius + radius) / length;
-        if bone.a as usize == joint {
-            start = trim;
-        } else {
-            end = 1.0 - trim;
-        }
-    }
-    if start >= end {
-        return None;
-    }
-    let interpolate = |t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-    Some(CollisionSegment {
-        start_t: start,
-        end_t: end,
-        start: interpolate(start),
-        end: interpolate(end),
-        radius,
-    })
-}
-
-fn project_bone_collisions(
-    nodes: &[Node],
-    positions: &mut [[f32; 2]; 64],
-    bones: &[Bone],
-    ground: bool,
-) {
-    for i in 0..bones.len() {
-        let bone_a = bones[i];
-        let a0 = bone_a.a as usize;
-        let a1 = bone_a.b as usize;
-        for &bone_b in &bones[i + 1..] {
-            let b0 = bone_b.a as usize;
-            let b1 = bone_b.b as usize;
-            let joint = shared_bone_joint(bone_a, bone_b);
-            let Some(segment_a) = collision_segment(nodes, positions, bone_a, joint) else {
-                continue;
-            };
-            let Some(segment_b) = collision_segment(nodes, positions, bone_b, joint) else {
-                continue;
-            };
-            let separation = segment_a.radius + segment_b.radius;
-            if segment_a.start[0].max(segment_a.end[0]) + separation
-                < segment_b.start[0].min(segment_b.end[0])
-                || segment_b.start[0].max(segment_b.end[0]) + separation
-                    < segment_a.start[0].min(segment_a.end[0])
-                || segment_a.start[1].max(segment_a.end[1]) + separation
-                    < segment_b.start[1].min(segment_b.end[1])
-                || segment_b.start[1].max(segment_b.end[1]) + separation
-                    < segment_a.start[1].min(segment_a.end[1])
-            {
-                continue;
-            }
-            let (local_s, local_t, pa, pb) = closest_segment_points(
-                segment_a.start,
-                segment_a.end,
-                segment_b.start,
-                segment_b.end,
-            );
-            let mut s = segment_a.start_t + local_s * (segment_a.end_t - segment_a.start_t);
-            let mut t = segment_b.start_t + local_t * (segment_b.end_t - segment_b.start_t);
-            let delta = [pa[0] - pb[0], pa[1] - pb[1]];
-            let distance = delta[0].hypot(delta[1]);
-            let edge_a = [
-                positions[a1][0] - positions[a0][0],
-                positions[a1][1] - positions[a0][1],
-            ];
-            let edge_b = [
-                positions[b1][0] - positions[b0][0],
-                positions[b1][1] - positions[b0][1],
-            ];
-            let length_a = edge_a[0].hypot(edge_a[1]);
-            let length_b = edge_b[0].hypot(edge_b[1]);
-            if distance <= 1.0e-6 && joint.is_none() {
-                // A true crossing has no useful closest-point normal: midpoint
-                // corrections only translate both segments. Push one endpoint
-                // across the other segment's line to fold the skeleton apart.
-                let (moving, fixed, fixed_edge, fixed_length) = if length_a < length_b {
-                    ([a0, a1], [b0, b1], edge_b, length_b)
-                } else {
-                    ([b0, b1], [a0, a1], edge_a, length_a)
-                };
-                if fixed_length > 1.0e-6 {
-                    let line_normal = [-fixed_edge[1] / fixed_length, fixed_edge[0] / fixed_length];
-                    let d0 = (positions[moving[0]][0] - positions[fixed[0]][0]) * line_normal[0]
-                        + (positions[moving[0]][1] - positions[fixed[0]][1]) * line_normal[1];
-                    let d1 = (positions[moving[1]][0] - positions[fixed[0]][0]) * line_normal[0]
-                        + (positions[moving[1]][1] - positions[fixed[0]][1]) * line_normal[1];
-                    if d0 * d1 < 0.0 {
-                        let endpoint = if nodes[moving[0]].mass <= nodes[moving[1]].mass {
-                            moving[0]
-                        } else {
-                            moving[1]
-                        };
-                        let other_distance = if endpoint == moving[0] { d1 } else { d0 };
-                        let current_distance = if endpoint == moving[0] { d0 } else { d1 };
-                        let target_distance = other_distance.signum()
-                            * (other_distance.abs() + current_distance.abs() + separation);
-                        let correction = target_distance - current_distance;
-                        positions[endpoint][0] += line_normal[0] * correction;
-                        positions[endpoint][1] += line_normal[1] * correction;
-                        if ground {
-                            positions[endpoint][1] =
-                                positions[endpoint][1].max(nodes[endpoint].radius);
-                        }
-                        continue;
-                    }
-                }
-            }
-            let (normal, penetration) = if distance > 1.0e-6 {
-                (
-                    [delta[0] / distance, delta[1] / distance],
-                    separation - distance,
-                )
-            } else {
-                let normal = if length_a < length_b {
-                    s = segment_a.start_t + 0.25 * (segment_a.end_t - segment_a.start_t);
-                    if length_a > 1.0e-6 {
-                        [-edge_a[1] / length_a, edge_a[0] / length_a]
-                    } else {
-                        [1.0, 0.0]
-                    }
-                } else {
-                    t = segment_b.start_t + 0.25 * (segment_b.end_t - segment_b.start_t);
-                    if length_b > 1.0e-6 {
-                        [-edge_b[1] / length_b, edge_b[0] / length_b]
-                    } else {
-                        [1.0, 0.0]
-                    }
-                };
-                (normal, separation)
-            };
-            if penetration <= 0.0 {
-                continue;
-            }
-            let weights = [1.0 - s, s, 1.0 - t, t];
-            let indices = [a0, a1, b0, b1];
-            let signs = [1.0, 1.0, -1.0, -1.0];
-            let gradients = std::array::from_fn::<_, 4, _>(|j| {
-                (0..4)
-                    .filter(|&k| indices[k] == indices[j])
-                    .map(|k| signs[k] * weights[k])
-                    .sum::<f32>()
-            });
-            let mut denominator = 0.0;
-            for j in 0..4 {
-                if indices[..j].contains(&indices[j]) {
-                    continue;
-                }
-                let inverse_mass = 1.0 / nodes[indices[j]].mass;
-                denominator += inverse_mass * gradients[j] * gradients[j];
-            }
-            denominator = denominator.max(1.0e-8);
-            for j in 0..4 {
-                if indices[..j].contains(&indices[j]) {
-                    continue;
-                }
-                let index = indices[j];
-                let correction = penetration * gradients[j] / nodes[index].mass / denominator;
-                positions[index][0] += normal[0] * correction;
-                positions[index][1] += normal[1] * correction;
-                if ground {
-                    positions[index][1] = positions[index][1].max(nodes[index].radius);
-                }
-            }
-        }
-    }
-}
-
-fn has_bone_overlap(nodes: &[Node], positions: &[[f32; 2]; 64], bones: &[Bone]) -> bool {
-    for (i, bone_a) in bones.iter().enumerate() {
-        for bone_b in &bones[i + 1..] {
-            let joint = shared_bone_joint(*bone_a, *bone_b);
-            let Some(segment_a) = collision_segment(nodes, positions, *bone_a, joint) else {
-                continue;
-            };
-            let Some(segment_b) = collision_segment(nodes, positions, *bone_b, joint) else {
-                continue;
-            };
-            let (_, _, pa, pb) = closest_segment_points(
-                segment_a.start,
-                segment_a.end,
-                segment_b.start,
-                segment_b.end,
-            );
-            if (pa[0] - pb[0]).hypot(pa[1] - pb[1]) < segment_a.radius + segment_b.radius - 0.001 {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool) {
+fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool, previous: &[Node; 64]) {
     let mut positions = [[0.0; 2]; 64];
-    let mut original = [[0.0; 2]; 64];
-    let mut original_velocity = [[0.0; 2]; 64];
     for (i, node) in nodes.iter().enumerate() {
         positions[i] = node.pos;
-        original[i] = node.pos;
-        original_velocity[i] = node.vel;
     }
-    for iteration in 0..BONE_SOLVE_ITERATIONS {
+    for _ in 0..BONE_SOLVE_ITERATIONS {
         for bone in bones {
             let a = bone.a as usize;
             let b = bone.b as usize;
@@ -437,25 +132,6 @@ fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool) {
                 positions[b][1] = positions[b][1].max(nodes[b].radius);
             }
         }
-        project_bone_collisions(nodes, &mut positions, bones, ground);
-        if iteration + 1 < BONE_SOLVE_ITERATIONS {
-            let shape = positions;
-            for bone in bones {
-                let a = bone.a as usize;
-                let b = bone.b as usize;
-                let delta = [shape[b][0] - shape[a][0], shape[b][1] - shape[a][1]];
-                let length = delta[0].hypot(delta[1]);
-                let direction = if length > 1.0e-6 {
-                    [delta[0] / length, delta[1] / length]
-                } else {
-                    [1.0, 0.0]
-                };
-                positions[b] = [
-                    positions[a][0] + direction[0] * bone.rest_length,
-                    positions[a][1] + direction[1] * bone.rest_length,
-                ];
-            }
-        }
     }
     // A final parent-first reconstruction puts every tree edge exactly on its
     // rest length. The iterative projections above choose a stable set of bone
@@ -473,11 +149,34 @@ fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool) {
         let b = bone.b as usize;
         let delta = [shape[b][0] - shape[a][0], shape[b][1] - shape[a][1]];
         let length = delta[0].hypot(delta[1]);
-        let direction = if length > 1.0e-6 {
+        let mut direction = if length > 1.0e-6 {
             [delta[0] / length, delta[1] / length]
         } else {
             [1.0, 0.0]
         };
+        let previous_delta = [
+            previous[b].pos[0] - previous[a].pos[0],
+            previous[b].pos[1] - previous[a].pos[1],
+        ];
+        let previous_length = previous_delta[0].hypot(previous_delta[1]);
+        if previous_length > 1.0e-6 {
+            let previous_direction = [
+                previous_delta[0] / previous_length,
+                previous_delta[1] / previous_length,
+            ];
+            let dot = previous_direction[0] * direction[0] + previous_direction[1] * direction[1];
+            if dot < MAX_BONE_TURN_COS {
+                let cross =
+                    previous_direction[0] * direction[1] - previous_direction[1] * direction[0];
+                let turn_sign = if cross < 0.0 { -1.0 } else { 1.0 };
+                let turned = [
+                    previous_direction[0] - previous_direction[1] * turn_sign * MAX_BONE_TURN_TAN,
+                    previous_direction[1] + previous_direction[0] * turn_sign * MAX_BONE_TURN_TAN,
+                ];
+                let turn_length = turned[0].hypot(turned[1]);
+                direction = [turned[0] / turn_length, turned[1] / turn_length];
+            }
+        }
         positions[b] = [
             positions[a][0] + direction[0] * bone.rest_length,
             positions[a][1] + direction[1] * bone.rest_length,
@@ -507,26 +206,53 @@ fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool) {
         }
     }
     for (i, node) in nodes.iter_mut().enumerate() {
-        let delta = [
-            positions[i][0] - original[i][0],
-            positions[i][1] - original[i][1],
-        ];
         node.pos = positions[i];
-        let mut correction_velocity = [delta[0] / DT, delta[1] / DT];
-        let speed = correction_velocity[0].hypot(correction_velocity[1]);
-        if speed > MAX_BONE_PROJECTION_SPEED {
-            correction_velocity[0] *= MAX_BONE_PROJECTION_SPEED / speed;
-            correction_velocity[1] *= MAX_BONE_PROJECTION_SPEED / speed;
+        limit_speed(&mut node.vel);
+        if ground && node.pos[1] <= node.radius + 1e-5 {
+            node.vel[1] = node.vel[1].max(0.0);
         }
-        node.vel[0] = original_velocity[i][0] + correction_velocity[0];
-        node.vel[1] = original_velocity[i][1] + correction_velocity[1];
     }
-    if !nodes.is_empty() && has_bone_overlap(nodes, &positions, bones) {
-        // The collision solver makes a best effort to untangle initial or
-        // newly folded poses. Any residual capsule penetration is invalid for
-        // selection, so a folded specimen cannot win on its score.
-        for node in nodes {
-            node.failed = 1.0;
+    // Keep each link's rotation bounded and remove only velocity components
+    // that would stretch a bone or rotate it beyond the same angular limit.
+    for _ in 0..VELOCITY_SOLVE_ITERATIONS {
+        for bone in bones {
+            let a = bone.a as usize;
+            let b = bone.b as usize;
+            let delta = [
+                nodes[b].pos[0] - nodes[a].pos[0],
+                nodes[b].pos[1] - nodes[a].pos[1],
+            ];
+            let length = delta[0].hypot(delta[1]).max(1.0e-6);
+            let direction = [delta[0] / length, delta[1] / length];
+            let inverse_a = 1.0 / nodes[a].mass;
+            let inverse_b = 1.0 / nodes[b].mass;
+            let inverse_sum = inverse_a + inverse_b;
+            let relative = (nodes[b].vel[0] - nodes[a].vel[0]) * direction[0]
+                + (nodes[b].vel[1] - nodes[a].vel[1]) * direction[1];
+            let impulse = relative / inverse_sum;
+            nodes[a].vel[0] += direction[0] * impulse * inverse_a;
+            nodes[a].vel[1] += direction[1] * impulse * inverse_a;
+            nodes[b].vel[0] -= direction[0] * impulse * inverse_b;
+            nodes[b].vel[1] -= direction[1] * impulse * inverse_b;
+
+            let tangent = [-direction[1], direction[0]];
+            let angular_velocity = (nodes[b].vel[0] - nodes[a].vel[0]) * tangent[0]
+                + (nodes[b].vel[1] - nodes[a].vel[1]) * tangent[1];
+            let target_angular_velocity = angular_velocity.clamp(
+                -MAX_BONE_ANGULAR_SPEED * length,
+                MAX_BONE_ANGULAR_SPEED * length,
+            );
+            let impulse = (angular_velocity - target_angular_velocity) / inverse_sum;
+            nodes[a].vel[0] += tangent[0] * impulse * inverse_a;
+            nodes[a].vel[1] += tangent[1] * impulse * inverse_a;
+            nodes[b].vel[0] -= tangent[0] * impulse * inverse_b;
+            nodes[b].vel[1] -= tangent[1] * impulse * inverse_b;
+        }
+        for node in nodes.iter_mut() {
+            limit_speed(&mut node.vel);
+            if ground && node.pos[1] <= node.radius + 1e-5 {
+                node.vel[1] = node.vel[1].max(0.0);
+            }
         }
     }
 }
@@ -539,9 +265,6 @@ pub fn step(nodes: &mut [Node], bones: &[Bone], muscles: &[Muscle], cfg: &Config
     old[..nodes.len()].copy_from_slice(nodes);
     let time = tick.saturating_sub(SETTLE) as f32 * DT;
     for (i, n) in nodes.iter_mut().enumerate() {
-        if n.failed >= 0.5 {
-            continue;
-        }
         let mut f = [0.0; 2];
         for m in muscles {
             let bone_a = bones[m.bone_a as usize];
@@ -555,7 +278,7 @@ pub fn step(nodes: &mut [Node], bones: &[Bone], muscles: &[Muscle], cfg: &Config
             let velocity_b = bone_point(bone_b, &old, m.anchor_b, true);
             let relative =
                 (velocity_b[0] - velocity_a[0]) * dir[0] + (velocity_b[1] - velocity_a[1]) * dir[1];
-            let force = ((distance - target(m, time)).clamp(-0.25, 0.25) * m.stiffness
+            let force = ((distance - limited_target(m, time)).clamp(-0.25, 0.25) * m.stiffness
                 + relative * 0.15)
                 .clamp(-30.0, 30.0);
             let mut weight = 0.0;
@@ -578,6 +301,7 @@ pub fn step(nodes: &mut [Node], bones: &[Bone], muscles: &[Muscle], cfg: &Config
         n.vel[1] = (n.vel[1]
             + (f[1] / n.mass - if tick >= SETTLE { cfg.gravity } else { 0.0 }) * DT)
             * cfg.air_retention.sqrt();
+        limit_speed(&mut n.vel);
         n.pos[0] += n.vel[0] * DT;
         n.pos[1] += n.vel[1] * DT;
         if tick >= SETTLE {
@@ -594,7 +318,7 @@ pub fn step(nodes: &mut [Node], bones: &[Bone], muscles: &[Muscle], cfg: &Config
             n.vel = [0.0; 2];
         }
     }
-    project_bones(nodes, bones, tick >= SETTLE && cfg.ground);
+    project_bones(nodes, bones, tick >= SETTLE && cfg.ground, &old);
 }
 pub fn evaluate(c: &Creature, cfg: &Config) -> f32 {
     let mut canonical = c.clone();
@@ -617,142 +341,91 @@ pub fn fitness(n: &[Node]) -> f32 {
 mod tests {
     use super::*;
 
-    fn segment_distance(a: Bone, b: Bone, nodes: &[Node]) -> f32 {
-        let (_, _, pa, pb) = closest_segment_points(
-            nodes[a.a as usize].pos,
-            nodes[a.b as usize].pos,
-            nodes[b.a as usize].pos,
-            nodes[b.b as usize].pos,
-        );
-        (pa[0] - pb[0]).hypot(pa[1] - pb[1])
-    }
-
-    #[test]
-    fn crossing_nonadjacent_bones_cannot_win_and_keep_exact_lengths() {
-        let bones = [
-            Bone {
-                a: 0,
-                b: 1,
-                rest_length: 2.0,
-            },
-            Bone {
-                a: 1,
-                b: 2,
-                rest_length: 1.0,
-            },
-            Bone {
-                a: 2,
-                b: 3,
-                rest_length: 1.0,
-            },
-            Bone {
-                a: 3,
-                b: 4,
-                rest_length: 2.0,
-            },
-        ];
-        let positions = [[-1.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, -1.0]];
-        let mut nodes = positions.map(|pos| Node {
+    fn test_node(pos: [f32; 2]) -> Node {
+        Node {
             pos,
             radius: 0.03,
             mass: 1.0,
             ..Node::default()
-        });
-
-        assert!(segment_distance(bones[0], bones[3], &nodes) < 1.0e-6);
-        project_bones(&mut nodes, &bones, false);
-
-        for bone in bones {
-            let length = {
-                let a = nodes[bone.a as usize].pos;
-                let b = nodes[bone.b as usize].pos;
-                (b[0] - a[0]).hypot(b[1] - a[1])
-            };
-            assert!((length - bone.rest_length).abs() < 1.0e-5);
         }
-        assert!(nodes.iter().any(|node| node.failed != 0.0));
-        assert_eq!(fitness(&nodes), FAILED);
-        assert!(segment_distance(bones[0], bones[3], &nodes) < 2.0 * BONE_COLLISION_RADIUS);
     }
 
     #[test]
-    fn bones_may_meet_at_their_shared_joint() {
-        let bones = [
-            Bone {
-                a: 0,
-                b: 1,
-                rest_length: 1.0,
-            },
-            Bone {
-                a: 1,
-                b: 2,
-                rest_length: 1.0,
-            },
-        ];
-        let mut nodes = [
-            Node {
-                pos: [-1.0, 0.0],
-                radius: 0.04,
-                mass: 1.0,
-                ..Node::default()
-            },
-            Node {
-                pos: [0.0, 0.0],
-                radius: 0.04,
-                mass: 1.0,
-                ..Node::default()
-            },
-            Node {
-                pos: [0.0, 1.0],
-                radius: 0.04,
-                mass: 1.0,
-                ..Node::default()
-            },
-        ];
-        project_bones(&mut nodes, &bones, false);
-        assert!(nodes.iter().all(|node| node.failed == 0.0));
+    fn muscle_targets_change_at_a_bounded_rate() {
+        let muscle = Muscle {
+            bone_a: 0,
+            bone_b: 1,
+            anchor_a: 0.5,
+            anchor_b: 0.5,
+            short: 0.01,
+            long: 1.0,
+            period: 0.1,
+            phase: 0.0,
+            duty: 0.5,
+            stiffness: 20.0,
+        };
+        for time in [0.025, 0.075] {
+            assert!(
+                (limited_target(&muscle, time) - target(&muscle, (time - DT).max(0.0))).abs()
+                    <= MAX_MUSCLE_LENGTH_SPEED * DT + 1e-6
+            );
+        }
     }
 
     #[test]
-    fn adjacent_bones_unfold_when_their_segments_overlap() {
-        let bones = [
-            Bone {
-                a: 0,
-                b: 1,
-                rest_length: 1.0,
-            },
-            Bone {
-                a: 1,
-                b: 2,
-                rest_length: 1.0,
-            },
+    fn correcting_a_bone_does_not_create_velocity() {
+        let mut nodes = [test_node([0.0, 0.0]), test_node([0.2, 0.0])];
+        let mut previous = [Node::default(); 64];
+        previous[0] = nodes[0];
+        previous[1] = nodes[1];
+        let bone = Bone {
+            a: 0,
+            b: 1,
+            rest_length: 1.0,
+        };
+
+        project_bones(&mut nodes, &[bone], false, &previous);
+
+        let length = (nodes[1].pos[0] - nodes[0].pos[0]).hypot(nodes[1].pos[1] - nodes[0].pos[1]);
+        assert!((length - bone.rest_length).abs() < 1e-6);
+        assert!(nodes.iter().all(|node| node.vel == [0.0; 2]));
+    }
+
+    #[test]
+    fn bone_rotation_and_node_speed_are_bounded() {
+        let mut previous = [Node::default(); 64];
+        previous[0] = test_node([0.0, 0.0]);
+        previous[1] = test_node([0.1, 0.0]);
+        let mut nodes = [previous[0], previous[1]];
+        nodes[1].pos = [0.1, 0.1];
+        nodes[1].vel = [0.0, 100.0];
+        let bone = Bone {
+            a: 0,
+            b: 1,
+            rest_length: 0.1,
+        };
+
+        project_bones(&mut nodes, &[bone], false, &previous);
+
+        let delta = [
+            nodes[1].pos[0] - nodes[0].pos[0],
+            nodes[1].pos[1] - nodes[0].pos[1],
         ];
-        let mut nodes = [
-            Node {
-                pos: [-1.0, 0.0],
-                radius: 0.04,
-                mass: 1.0,
-                ..Node::default()
-            },
-            Node {
-                pos: [0.0, 0.0],
-                radius: 0.04,
-                mass: 1.0,
-                ..Node::default()
-            },
-            Node {
-                pos: [-1.0, 0.0],
-                radius: 0.04,
-                mass: 1.0,
-                ..Node::default()
-            },
-        ];
-        project_bones(&mut nodes, &bones, false);
-        assert!(nodes.iter().all(|node| node.failed == 0.0));
-        for bone in bones {
-            let a = nodes[bone.a as usize].pos;
-            let b = nodes[bone.b as usize].pos;
-            assert!(((b[0] - a[0]).hypot(b[1] - a[1]) - bone.rest_length).abs() < 1e-5);
-        }
+        let angle = delta[1].atan2(delta[0]).abs();
+        assert!(angle <= MAX_BONE_ANGULAR_SPEED * DT + 1e-5);
+        assert!(
+            nodes
+                .iter()
+                .all(|node| node.vel[0].hypot(node.vel[1]) <= MAX_NODE_SPEED + 1e-5)
+        );
+        let length = delta[0].hypot(delta[1]);
+        let direction = [delta[0] / length, delta[1] / length];
+        let relative_radial = (nodes[1].vel[0] - nodes[0].vel[0]) * direction[0]
+            + (nodes[1].vel[1] - nodes[0].vel[1]) * direction[1];
+        let tangent = [-direction[1], direction[0]];
+        let relative_tangent = (nodes[1].vel[0] - nodes[0].vel[0]) * tangent[0]
+            + (nodes[1].vel[1] - nodes[0].vel[1]) * tangent[1];
+        assert!(relative_radial.abs() < 1e-5);
+        assert!(relative_tangent.abs() <= MAX_BONE_ANGULAR_SPEED * length + 1e-5);
     }
 }

@@ -475,6 +475,27 @@ fn gpu_bones_match_cpu_for_off_center_muscle() {
             assert!((a.vel[component] - b.vel[component]).abs() < 0.02);
         }
     }
+    let mut collapsed = creature.clone();
+    for node in &mut collapsed.nodes {
+        node.x = 0.0;
+        node.y = 0.0;
+    }
+    collapsed.muscles[0].stiffness = 0.0;
+    let actual = gpu.trajectory(&collapsed, &cfg, 1).unwrap();
+    let mut expected = physics::nodes(&collapsed);
+    physics::step(&mut expected, &collapsed.bones, &collapsed.muscles, &cfg, 0);
+    for state in [&actual, &expected] {
+        assert!(
+            state
+                .iter()
+                .all(|node| node.vel[0].hypot(node.vel[1]) < 1e-4)
+        );
+        for bone in &collapsed.bones {
+            let a = state[bone.a as usize].pos;
+            let b = state[bone.b as usize].pos;
+            assert!(((a[0] - b[0]).hypot(a[1] - b[1]) - bone.rest_length).abs() < 1e-4);
+        }
+    }
     for count in [3, 5, 64] {
         let genes: Vec<_> = (0..count)
             .map(|index| NodeGene {
@@ -555,103 +576,6 @@ fn gpu_bones_match_cpu_for_off_center_muscle() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan GPU; verifies crossings are resolved or rejected"]
-fn gpu_resolves_or_rejects_crossing_bones() {
-    let cfg = Config {
-        population: 1,
-        duration: 0.01,
-        gravity: 0.0,
-        ground: false,
-        air_retention: 1.0,
-        ..config()
-    };
-    let crossing = Creature {
-        nodes: [[-1.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, -1.0]]
-            .into_iter()
-            .map(|[x, y]| NodeGene {
-                x,
-                y,
-                diameter: 0.08,
-                friction: 0.5,
-            })
-            .collect(),
-        bones: vec![
-            Bone {
-                a: 0,
-                b: 1,
-                rest_length: 2.0,
-            },
-            Bone {
-                a: 1,
-                b: 2,
-                rest_length: 1.0,
-            },
-            Bone {
-                a: 2,
-                b: 3,
-                rest_length: 1.0,
-            },
-            Bone {
-                a: 3,
-                b: 4,
-                rest_length: 2.0,
-            },
-        ],
-        muscles: vec![Muscle {
-            bone_a: 0,
-            bone_b: 1,
-            anchor_a: 0.5,
-            anchor_b: 0.5,
-            short: 0.1,
-            long: 0.1,
-            period: 1.0,
-            phase: 0.0,
-            duty: 0.5,
-            stiffness: 0.0,
-        }],
-        id: 2,
-        mutability: 1.0,
-    };
-    let mut gpu = Gpu::new("RTX 4060").unwrap();
-    let crossing_state = gpu.trajectory(&crossing, &cfg, 1).unwrap();
-    let mut cpu_crossing_state = physics::nodes(&crossing);
-    physics::step(
-        &mut cpu_crossing_state,
-        &crossing.bones,
-        &crossing.muscles,
-        &cfg,
-        0,
-    );
-    let gpu_failed = crossing_state.iter().any(|node| node.failed != 0.0);
-    let cpu_failed = cpu_crossing_state.iter().any(|node| node.failed != 0.0);
-    assert!(
-        crossing_state
-            .iter()
-            .all(|node| node.vel[0].hypot(node.vel[1]) <= 10.01)
-    );
-    assert!(
-        cpu_crossing_state
-            .iter()
-            .all(|node| node.vel[0].hypot(node.vel[1]) <= 10.01)
-    );
-    for bone in &crossing.bones {
-        for state in [&crossing_state, &cpu_crossing_state] {
-            let a = state[bone.a as usize].pos;
-            let b = state[bone.b as usize].pos;
-            assert!(((b[0] - a[0]).hypot(b[1] - a[1]) - bone.rest_length).abs() < 1e-4);
-        }
-    }
-    let mut crossing_population = evolution::Population::default();
-    crossing_population.push(crossing);
-    let crossing_score = gpu.evaluate(&crossing_population, &[0], &cfg).unwrap()[0];
-    assert_eq!(crossing_score == evolution::FAILED, gpu_failed);
-    assert_eq!(
-        physics::fitness(&cpu_crossing_state) == evolution::FAILED,
-        cpu_failed
-    );
-}
-
-#[test]
 #[ignore = "requires a Vulkan GPU; run explicitly on the workstation"]
 fn gpu_matches_cpu_and_handles_partial_workgroups() {
     let cfg = Config {
@@ -688,8 +612,9 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
         .unwrap();
     assert_eq!(scores.len(), 10);
     assert!(
-        scores.iter().all(|s| s.is_finite()),
-        "nonfinite GPU scores: {scores:?}"
+        scores
+            .iter()
+            .all(|s| s.is_finite() && *s > evolution::FAILED)
     );
     let cfg = Config {
         population: 8,
@@ -748,9 +673,11 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
     let order = [7usize, 5, 3, 1, 6, 4, 0, 2];
     let scores = gpu.evaluate(&mixed, &order, &cfg).unwrap();
     assert_eq!(scores.len(), 8);
-    assert!(scores.iter().all(|s| s.is_finite()));
-    assert!(scores.contains(&evolution::FAILED));
-    assert!(scores.iter().any(|s| *s > evolution::FAILED));
+    assert!(
+        scores
+            .iter()
+            .all(|s| s.is_finite() && *s > evolution::FAILED)
+    );
     let combined = gpu.evaluate_with_metrics(&mixed, &order, &cfg).unwrap();
     let mut separated = vec![evolution_simulator::qd::EvaluationMetrics::default(); order.len()];
     for (slot, &creature) in order.iter().enumerate() {
