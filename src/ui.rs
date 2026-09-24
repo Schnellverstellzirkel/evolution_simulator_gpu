@@ -24,6 +24,7 @@ const CARD: Color32 = Color32::from_rgb(255, 255, 253);
 const CARD_HOVER: Color32 = Color32::from_rgb(238, 247, 241);
 const CARD_BORDER: Color32 = Color32::from_rgb(218, 229, 221);
 const GROUND: Color32 = Color32::from_rgb(220, 234, 222);
+const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
 pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
     let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
     setup.instance_descriptor.backends = wgpu::Backends::VULKAN;
@@ -218,7 +219,7 @@ impl App {
             },
             speed: 1.0,
             playing: true,
-            zoom: 240.0,
+            zoom: DEFAULT_CAMERA_ZOOM,
             camera: [0.0, 0.0],
             follow: true,
             advanced: false,
@@ -273,6 +274,7 @@ impl App {
     fn set_preview(&mut self, c: Creature, cfg: Config) {
         self.playback = Some(Playback::new(c, cfg));
         self.follow = true;
+        self.zoom = DEFAULT_CAMERA_ZOOM;
         self.camera = [0.; 2];
     }
     fn top(&mut self, ui: &mut egui::Ui) {
@@ -606,7 +608,7 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.checkbox(&mut self.follow, "Follow");
                 if ui.small_button("Reset camera").clicked() {
-                    self.zoom = 240.;
+                    self.zoom = DEFAULT_CAMERA_ZOOM;
                     self.camera = [0.; 2];
                     self.follow = true;
                 }
