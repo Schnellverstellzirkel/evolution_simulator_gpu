@@ -851,10 +851,13 @@ impl Experiment {
             for creature in &stats.representatives {
                 representatives.push(creature.clone());
             }
-            representatives.validate(&Config {
+            let representative_config = Config {
                 population: 3,
                 ..stats.config.clone()
-            })?;
+            };
+            // Historical snapshots retain the bone-length limits in effect
+            // when they were recorded; they are never evaluated as candidates.
+            representatives.validate_with_max_bone(&representative_config, 12.0)?;
         }
         Ok(())
     }
@@ -939,6 +942,9 @@ pub fn load(path: &Path) -> Result<Experiment> {
         {
             experiment.history.pop();
         }
+        experiment
+            .population
+            .migrate_actuator_geometry(&experiment.config);
         experiment.qd_version = qd::VERSION;
         experiment.archive = QdArchive::default();
         experiment.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];

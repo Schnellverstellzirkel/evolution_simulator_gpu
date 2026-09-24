@@ -8,7 +8,7 @@ pub(crate) const MORPHOLOGY_LIMIT: usize = 64;
 pub(crate) const ARCHIVE_CAPACITY: usize = ARCHIVE_LIMIT + MORPHOLOGY_LIMIT;
 pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 13_824;
 pub(crate) const CMA_LIMIT: usize = 96;
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 pub(crate) const MIN_MORPHOLOGY_DESCENDANTS: u64 = 8;
@@ -987,7 +987,10 @@ fn parameters(creature: &Creature) -> Vec<f32> {
         ]);
     }
     for bone in &creature.bones {
-        output.push(((bone.rest_length - 0.03) / 11.97).clamp(0.0, 1.0));
+        output.push(
+            ((bone.rest_length - 0.03) / (crate::evolution::MAX_BONE_LENGTH - 0.03))
+                .clamp(0.0, 1.0),
+        );
     }
     for m in &creature.muscles {
         output.extend([
@@ -1020,7 +1023,8 @@ fn parameters_into(population: &Population, index: usize, output: &mut [f32]) {
     }
     let bones = &population.bones[genome.bone_start..genome.bone_start + genome.bone_count];
     for bone in bones {
-        output[i] = ((bone.rest_length - 0.03) / 11.97).clamp(0.0, 1.0);
+        output[i] = ((bone.rest_length - 0.03) / (crate::evolution::MAX_BONE_LENGTH - 0.03))
+            .clamp(0.0, 1.0);
         i += 1;
     }
     for m in muscles {
@@ -1047,7 +1051,7 @@ fn apply_parameters(creature: &mut Creature, values: &[f32]) {
         i += 4;
     }
     for bone in &mut creature.bones {
-        bone.rest_length = 0.03 + values[i] * 11.97;
+        bone.rest_length = 0.03 + values[i] * (crate::evolution::MAX_BONE_LENGTH - 0.03);
         i += 1;
     }
     for m in &mut creature.muscles {

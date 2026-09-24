@@ -176,6 +176,11 @@ fn apply_fast_cos(source: String) -> String {
         return source;
     }
     let fast_cos_function = "fn fast_cos_pi(x:f32)->f32 { let y=(x-0.5)*3.14159265359; let z=y*y; var p=fma(z,-2.50521084e-8,2.75573192e-6); p=fma(z,p,-1.98412698e-4); p=fma(z,p,8.33333377e-3); p=fma(z,p,-1.66666672e-1); p=fma(z,p,1.0); return -y*p; }\n";
+    let marker = if source.contains("fn limited_muscle_length") {
+        "fn limited_muscle_length"
+    } else {
+        "fn muscle_length"
+    };
     source
         .replace(
             "cos(3.14159265359 * phase * m.inv_duty)",
@@ -185,10 +190,7 @@ fn apply_fast_cos(source: String) -> String {
             "cos(3.14159265359 * (phase - m.duty) * m.inv_complement)",
             "fast_cos_pi((phase - m.duty) * m.inv_complement)",
         )
-        .replace(
-            "fn muscle_length",
-            &format!("{fast_cos_function}fn muscle_length"),
-        )
+        .replace(marker, &format!("{fast_cos_function}{marker}"))
 }
 fn pipeline_chunk_size(cfg: &Config) -> usize {
     std::env::var("EVOLUTION_PIPELINE_CHUNK")

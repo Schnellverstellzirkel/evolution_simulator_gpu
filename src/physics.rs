@@ -45,10 +45,20 @@ pub fn target(m: &Muscle, time: f32) -> f32 {
     m.short + (m.long - m.short) * wave
 }
 fn limited_target(m: &Muscle, time: f32) -> f32 {
-    let previous = target(m, (time - DT).max(0.0));
-    let desired = target(m, time);
-    previous
-        + (desired - previous).clamp(-MAX_MUSCLE_LENGTH_SPEED * DT, MAX_MUSCLE_LENGTH_SPEED * DT)
+    // Bound the slope of the entire waveform. Clamping each frame against the
+    // previous *raw* target allowed the target to jump on the next frame.
+    let amplitude = (m.long - m.short).min(
+        2.0 * MAX_MUSCLE_LENGTH_SPEED * m.period * m.duty.min(1.0 - m.duty) / std::f32::consts::PI,
+    );
+    let mut limited = *m;
+    limited.short = m.long - amplitude;
+    target(&limited, time)
+}
+fn motor_force(m: &Muscle, time: f32, relative: f32) -> f32 {
+    let target_speed = (limited_target(m, time) - limited_target(m, (time - DT).max(0.0))) / DT;
+    // A fixed target is a passive constraint, not an inexhaustible motor.
+    // The actuator pulls while shortening and pushes while lengthening.
+    (-target_speed * m.stiffness * 0.25 + relative * 0.15).clamp(-30.0, 30.0)
 }
 fn limit_speed(velocity: &mut [f32; 2]) {
     let speed = velocity[0].hypot(velocity[1]);
@@ -279,9 +289,7 @@ pub fn step(nodes: &mut [Node], bones: &[Bone], muscles: &[Muscle], cfg: &Config
             let velocity_b = bone_point(bone_b, &old, m.anchor_b, true);
             let relative =
                 (velocity_b[0] - velocity_a[0]) * dir[0] + (velocity_b[1] - velocity_a[1]) * dir[1];
-            let force = ((distance - limited_target(m, time)).clamp(-0.25, 0.25) * m.stiffness
-                + relative * 0.15)
-                .clamp(-30.0, 30.0);
+            let force = motor_force(m, time, relative);
             let mut weight = 0.0;
             if bone_a.a as usize == i {
                 weight += 1.0 - m.anchor_a;
@@ -368,10 +376,38 @@ mod tests {
         };
         for time in [0.025, 0.075] {
             assert!(
-                (limited_target(&muscle, time) - target(&muscle, (time - DT).max(0.0))).abs()
+                (limited_target(&muscle, time) - limited_target(&muscle, (time - DT).max(0.0)))
+                    .abs()
                     <= MAX_MUSCLE_LENGTH_SPEED * DT + 1e-6
             );
         }
+        for tick in 1..120 {
+            let time = tick as f32 * DT;
+            assert!(
+                (limited_target(&muscle, time) - limited_target(&muscle, time - DT)).abs()
+                    <= MAX_MUSCLE_LENGTH_SPEED * DT + 1e-6
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_target_cannot_supply_motor_force() {
+        let muscle = Muscle {
+            bone_a: 0,
+            bone_b: 1,
+            anchor_a: 0.5,
+            anchor_b: 0.5,
+            short: 0.1,
+            long: 0.1,
+            period: 0.1,
+            phase: 0.25,
+            duty: 0.5,
+            stiffness: 120.0,
+        };
+        for tick in 0..120 {
+            assert_eq!(motor_force(&muscle, tick as f32 * DT, 0.0), 0.0);
+        }
+        assert!(motor_force(&muscle, 0.025, 0.0) == 0.0);
     }
 
     #[test]

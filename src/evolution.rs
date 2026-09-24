@@ -5,6 +5,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub const FAILED: f32 = -1.0e20;
+pub const MAX_BONE_LENGTH: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct NodeGene {
@@ -157,6 +158,16 @@ impl Population {
         }
         Ok(())
     }
+    pub(crate) fn migrate_actuator_geometry(&mut self, cfg: &Config) {
+        let mut migrated = Population::default();
+        for index in 0..self.genomes.len() {
+            let mut creature = self.creature(index);
+            let mut rng = Rng::new(cfg.seed, 0, index);
+            repair(&mut creature, cfg, &mut rng);
+            migrated.push(creature);
+        }
+        *self = migrated;
+    }
     pub fn bytes(&self) -> usize {
         self.genomes.capacity() * std::mem::size_of::<Genome>()
             + self.nodes.capacity() * std::mem::size_of::<NodeGene>()
@@ -164,11 +175,14 @@ impl Population {
             + self.muscles.capacity() * std::mem::size_of::<Muscle>()
     }
     pub fn validate(&self, cfg: &Config) -> Result<()> {
+        self.validate_with_max_bone(cfg, MAX_BONE_LENGTH)
+    }
+    pub(crate) fn validate_with_max_bone(&self, cfg: &Config, max_bone_length: f32) -> Result<()> {
         ensure!(
             self.genomes.len() == cfg.population,
             "Checkpoint population does not match settings"
         );
-        for g in &self.genomes {
+        for (genome_index, g) in self.genomes.iter().enumerate() {
             ensure!(
                 (3..=cfg.max_nodes).contains(&g.node_count)
                     && g.bone_count == g.node_count - 1
@@ -209,8 +223,8 @@ impl Population {
                         && (bone.a as usize) < g.node_count
                         && (bone.b as usize) < g.node_count
                         && bone.rest_length.is_finite()
-                        && (0.03..=12.0).contains(&bone.rest_length),
-                    "Invalid bone"
+                        && (0.03..=max_bone_length).contains(&bone.rest_length),
+                    "Invalid bone in genome {genome_index}: {bone:?}"
                 );
                 ensure!(
                     !bones[..i]
@@ -402,7 +416,17 @@ fn bone(a: usize, b: usize, nodes: &[NodeGene]) -> Bone {
     Bone {
         a: a as u32,
         b: b as u32,
-        rest_length: dx.hypot(dy).clamp(0.03, 12.0),
+        rest_length: dx.hypot(dy).clamp(0.03, MAX_BONE_LENGTH),
+    }
+}
+pub(crate) fn normalize_bone_lengths(c: &mut Creature) {
+    for bone in &mut c.bones {
+        let a = c.nodes[bone.a as usize];
+        let b = c.nodes[bone.b as usize];
+        let distance = (a.x - b.x).hypot(a.y - b.y);
+        let min = (distance * 0.75).clamp(0.03, MAX_BONE_LENGTH);
+        let max = (distance * 1.25).clamp(min, MAX_BONE_LENGTH);
+        bone.rest_length = bone.rest_length.clamp(min, max);
     }
 }
 fn bone_point(bone: Bone, nodes: &[NodeGene], t: f32) -> [f32; 2] {
@@ -608,6 +632,7 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
         true
     });
     if bone_count < 2 {
+        normalize_bone_lengths(c);
         return;
     }
     // A motor-link ring keeps every rigid segment addressable to the actuator
@@ -634,6 +659,7 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
             }
         }
     }
+    normalize_bone_lengths(c);
     canonicalize_bone_order(c);
 }
 fn initial(cfg: &Config, index: usize) -> Creature {
@@ -766,6 +792,7 @@ pub fn emit_archive_batch(
             }
         };
         creature.id = (generation as u64) * cfg.population as u64 + i as u64 + 1;
+        repair(&mut creature, cfg, &mut rng);
         creature
     }))
 }
@@ -811,7 +838,8 @@ fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
             .clamp(cfg.min_friction, cfg.max_friction);
     }
     for bone in &mut creature.bones {
-        bone.rest_length = (bone.rest_length + qd::gaussian(rng) * 0.035 * scale).clamp(0.03, 12.0);
+        bone.rest_length =
+            (bone.rest_length + qd::gaussian(rng) * 0.035 * scale).clamp(0.03, MAX_BONE_LENGTH);
     }
     for muscle in &mut creature.muscles {
         muscle.anchor_a = (muscle.anchor_a + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
@@ -966,7 +994,8 @@ fn mutate(mut c: Creature, cfg: &Config, generation: u32, index: usize) -> Creat
             (n.friction + rng.delta() * 0.1 * strength).clamp(cfg.min_friction, cfg.max_friction);
     }
     for bone in &mut c.bones {
-        bone.rest_length = (bone.rest_length + rng.delta() * 0.04 * strength).clamp(0.03, 12.0);
+        bone.rest_length =
+            (bone.rest_length + rng.delta() * 0.04 * strength).clamp(0.03, MAX_BONE_LENGTH);
     }
     for m in &mut c.muscles {
         m.anchor_a = (m.anchor_a + rng.delta() * 0.15 * strength).clamp(0.0, 1.0);
@@ -1040,6 +1069,39 @@ pub fn reproduce(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bone_length_cannot_expand_far_beyond_its_starting_frame() {
+        let mut creature = Creature {
+            nodes: vec![
+                NodeGene {
+                    x: 0.0,
+                    y: 0.0,
+                    diameter: 0.08,
+                    friction: 0.5,
+                },
+                NodeGene {
+                    x: 0.5,
+                    y: 0.0,
+                    diameter: 0.08,
+                    friction: 0.5,
+                },
+            ],
+            bones: vec![Bone {
+                a: 0,
+                b: 1,
+                rest_length: 9.6,
+            }],
+            muscles: vec![],
+            id: 0,
+            mutability: 1.0,
+        };
+        normalize_bone_lengths(&mut creature);
+        assert_eq!(creature.bones[0].rest_length, 0.625);
+        creature.nodes[1].x = 4.0;
+        normalize_bone_lengths(&mut creature);
+        assert_eq!(creature.bones[0].rest_length, MAX_BONE_LENGTH);
+    }
 
     fn muscle_point(creature: &Creature, bone_id: u32, t: f32) -> [f32; 2] {
         let bone = creature.bones[bone_id as usize];

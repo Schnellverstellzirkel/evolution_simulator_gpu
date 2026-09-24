@@ -159,6 +159,24 @@ fn muscle_cycle_is_continuous_and_periodic() {
 }
 
 #[test]
+fn frozen_muscles_behave_like_unpowered_muscles() {
+    let cfg = config();
+    let mut fixed = evolution::create(&cfg).unwrap().creature(0);
+    for muscle in &mut fixed.muscles {
+        let initial = physics::target(muscle, 0.0);
+        muscle.short = initial;
+        muscle.long = initial;
+    }
+    let mut unpowered = fixed.clone();
+    for muscle in &mut unpowered.muscles {
+        muscle.stiffness = 0.0;
+    }
+    let fixed_score = physics::evaluate(&fixed, &cfg);
+    let unpowered_score = physics::evaluate(&unpowered, &cfg);
+    assert!((fixed_score - unpowered_score).abs() < 1e-5);
+}
+
+#[test]
 fn bone_lengths_hold_and_off_center_muscles_rotate_bones() {
     let cfg = Config {
         gravity: 0.0,
@@ -217,9 +235,9 @@ fn bone_lengths_hold_and_off_center_muscles_rotate_bones() {
             anchor_a: 0.25,
             anchor_b: 0.75,
             short: 0.1,
-            long: 0.1,
+            long: 0.4,
             period: 1.0,
-            phase: 0.0,
+            phase: 0.25,
             duty: 0.5,
             stiffness: 40.0,
         }],
@@ -227,7 +245,13 @@ fn bone_lengths_hold_and_off_center_muscles_rotate_bones() {
         mutability: 1.0,
     };
     let mut nodes = physics::nodes(&creature);
-    physics::step(&mut nodes, &creature.bones, &creature.muscles, &cfg, 0);
+    physics::step(
+        &mut nodes,
+        &creature.bones,
+        &creature.muscles,
+        &cfg,
+        physics::SETTLE + 1,
+    );
     for bone in &creature.bones {
         let a = nodes[bone.a as usize].pos;
         let b = nodes[bone.b as usize].pos;

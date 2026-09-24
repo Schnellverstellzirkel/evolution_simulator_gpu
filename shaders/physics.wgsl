@@ -81,7 +81,11 @@ const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
 const MAX_BONE_TURN_COS: f32 = 0.9921977;
 const MAX_BONE_TURN_TAN: f32 = 0.12565514;
 
-fn muscle_length(m: Muscle, time: f32) -> f32 {
+fn limited_muscle_length(m: Muscle, time: f32) -> f32 {
+    let amplitude = min(
+        m.long - m.short,
+        2.0 * MAX_MUSCLE_LENGTH_SPEED / m.inv_period * min(m.duty, 1.0 - m.duty) / 3.14159265359,
+    );
     let phase = fract(time * m.inv_period + m.phase);
     var wave: f32;
     if phase < m.duty {
@@ -89,16 +93,7 @@ fn muscle_length(m: Muscle, time: f32) -> f32 {
     } else {
         wave = 0.5 - 0.5 * cos(3.14159265359 * (phase - m.duty) * m.inv_complement);
     }
-    return mix(m.short, m.long, wave);
-}
-fn limited_muscle_length(m: Muscle, time: f32) -> f32 {
-    let previous = muscle_length(m, max(time - 1.0 / 120.0, 0.0));
-    let desired = muscle_length(m, time);
-    return previous + clamp(
-        desired - previous,
-        -MAX_MUSCLE_LENGTH_SPEED / 120.0,
-        MAX_MUSCLE_LENGTH_SPEED / 120.0,
-    );
+    return m.long - amplitude * (1.0 - wave);
 }
 fn limit_speed(velocity: vec2f) -> vec2f {
     let speed = length(velocity);
@@ -216,12 +211,10 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let distance = max(length(d), 1e-6);
                 let dir = d / distance;
                 let relative = dot(velocity_b - velocity_a, dir);
-                let magnitude = clamp(
-                    clamp(distance - limited_muscle_length(m, time), -0.25, 0.25) * m.stiffness
-                        + relative * 0.15,
-                    -30.0,
-                    30.0,
-                );
+                let target_speed = (limited_muscle_length(m, time)
+                    - limited_muscle_length(m, max(time - 1.0 / 120.0, 0.0))) * 120.0;
+                let magnitude = clamp(-target_speed * m.stiffness * 0.25
+                    + relative * 0.15, -30.0, 30.0);
                 var weight = 0.0;
                 if m.a0 == local { weight += 1.0 - m.anchor_a; }
                 if m.a1 == local { weight += m.anchor_a; }
