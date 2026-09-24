@@ -860,7 +860,18 @@ impl CmaEmitter {
         if samples.len() < 2 {
             return;
         }
-        samples.retain(|(_, score)| score.is_finite() && *score > crate::evolution::FAILED);
+        samples.retain(|(index, score)| {
+            if !score.is_finite() || *score <= crate::evolution::FAILED {
+                return false;
+            }
+            let Some(genome) = population.genomes.get(*index) else {
+                return false;
+            };
+            genome.node_count == self.template.nodes.len()
+                && genome.bone_count == self.template.bones.len()
+                && genome.muscle_count == self.template.muscles.len()
+                && topology_of_population(population, *index) == self.topology
+        });
         if samples.len() < 2 {
             return;
         }
@@ -1069,7 +1080,31 @@ fn apply_parameters(creature: &mut Creature, values: &[f32]) {
 
 #[cfg(test)]
 mod tests {
-    use super::is_phase_dimension;
+    use super::{CmaEmitter, Niche, is_phase_dimension};
+    use crate::{
+        config::Config,
+        evolution::{self, Population},
+    };
+
+    #[test]
+    fn cma_feedback_ignores_candidates_with_changed_topology() {
+        let config = Config {
+            population: 2,
+            random_seed: false,
+            ..Config::default()
+        };
+        let template = evolution::create(&config).unwrap().creature(0);
+        let mut cma = CmaEmitter::new(template.clone(), Niche([0; 6]), 0);
+        let original_mean = cma.mean.clone();
+        let mut population = Population::default();
+        for _ in 0..2 {
+            let mut changed = template.clone();
+            changed.muscles.push(changed.muscles[0]);
+            population.push(changed);
+        }
+        cma.tell(&population, &mut vec![(0, 2.0), (1, 1.0)]);
+        assert_eq!(cma.mean, original_mean);
+    }
 
     #[test]
     fn cma_phase_dimensions_follow_bones_and_eight_value_muscles() {

@@ -175,9 +175,14 @@ impl Population {
             + self.muscles.capacity() * std::mem::size_of::<Muscle>()
     }
     pub fn validate(&self, cfg: &Config) -> Result<()> {
-        self.validate_with_max_bone(cfg, MAX_BONE_LENGTH)
+        self.validate_with_max_bone(cfg, MAX_BONE_LENGTH, false)
     }
-    pub(crate) fn validate_with_max_bone(&self, cfg: &Config, max_bone_length: f32) -> Result<()> {
+    pub(crate) fn validate_with_max_bone(
+        &self,
+        cfg: &Config,
+        max_bone_length: f32,
+        allow_disconnected_muscles: bool,
+    ) -> Result<()> {
         ensure!(
             self.genomes.len() == cfg.population,
             "Checkpoint population does not match settings"
@@ -296,6 +301,9 @@ impl Population {
                 );
                 muscle_adjacency[m.bone_a as usize] |= 1u64 << m.bone_b;
                 muscle_adjacency[m.bone_b as usize] |= 1u64 << m.bone_a;
+            }
+            if allow_disconnected_muscles {
+                continue;
             }
             ensure!(
                 muscle_adjacency[..g.bone_count].iter().all(|n| *n != 0),

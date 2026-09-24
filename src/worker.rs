@@ -496,3 +496,38 @@ fn run(
         let _ = handle.join();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a Vulkan GPU"]
+    fn continuous_run_advances_generations() {
+        let gpu = Gpu::new("RTX 4060").unwrap();
+        let worker = Worker::spawn(gpu, eframe::egui::Context::default());
+        let cfg = Config {
+            population: 32,
+            duration: 0.1,
+            random_seed: false,
+            checkpoint_interval: 0,
+            ..Config::default()
+        };
+        worker.send(Command::New(cfg));
+        worker.send(Command::Run {
+            continuous: true,
+            guided: false,
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(snapshot) = worker.view.lock().unwrap().take() {
+                assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+                if snapshot.generation >= 2 {
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "continuous run did not advance");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}

@@ -857,7 +857,7 @@ impl Experiment {
             };
             // Historical snapshots retain the bone-length limits in effect
             // when they were recorded; they are never evaluated as candidates.
-            representatives.validate_with_max_bone(&representative_config, 12.0)?;
+            representatives.validate_with_max_bone(&representative_config, 12.0, true)?;
         }
         Ok(())
     }
@@ -1393,6 +1393,34 @@ mod migration_tests {
         for genome in &loaded.population.genomes {
             assert_eq!(genome.bone_count, genome.node_count - 1);
         }
+    }
+
+    #[test]
+    fn old_checkpoint_keeps_historical_representatives_with_missing_muscles() {
+        let config = Config {
+            population: 4,
+            random_seed: false,
+            ..Config::default()
+        };
+        let mut experiment = Experiment::new(config).unwrap();
+        experiment.scores.fill(1.0);
+        experiment.evaluated = experiment.config.population;
+        experiment.stage = Stage::Evaluated;
+        experiment.archive_batch().unwrap();
+        experiment.prepare_next_batch().unwrap();
+        experiment.history[0].representatives[0].muscles.clear();
+        experiment.qd_version = qd::VERSION - 1;
+        let checkpoint = std::env::temp_dir().join(format!(
+            "evolution-disconnected-history-{}.evo",
+            std::process::id()
+        ));
+        save(&checkpoint, &experiment).unwrap();
+        let loaded = load(&checkpoint).unwrap();
+        let _ = std::fs::remove_file(checkpoint);
+        assert_eq!(loaded.generation, 1);
+        assert_eq!(loaded.history.len(), 1);
+        assert!(loaded.history[0].representatives[0].muscles.is_empty());
+        loaded.validate().unwrap();
     }
 
     #[test]
