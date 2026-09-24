@@ -496,6 +496,24 @@ fn gpu_bones_match_cpu_for_off_center_muscle() {
             assert!(((a[0] - b[0]).hypot(a[1] - b[1]) - bone.rest_length).abs() < 1e-4);
         }
     }
+    let mut asymmetric_mass = creature.clone();
+    for (node, diameter) in asymmetric_mass
+        .nodes
+        .iter_mut()
+        .zip([0.06, 0.08, 0.12, 0.10])
+    {
+        node.diameter = diameter;
+    }
+    asymmetric_mass.muscles[0].stiffness = 0.0;
+    let mut population = evolution::Population::default();
+    population.push(asymmetric_mass.clone());
+    let gpu_fitness = gpu.evaluate(&population, &[0], &cfg).unwrap()[0];
+    let cpu_fitness = physics::evaluate(&asymmetric_mass, &cfg);
+    assert!(
+        gpu_fitness.abs() < 0.002,
+        "stationary COM moved: {gpu_fitness}"
+    );
+    assert!((gpu_fitness - cpu_fitness).abs() < 0.002);
     for count in [3, 5, 64] {
         let genes: Vec<_> = (0..count)
             .map(|index| NodeGene {

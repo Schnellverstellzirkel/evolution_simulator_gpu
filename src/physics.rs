@@ -59,7 +59,8 @@ fn limit_speed(velocity: &mut [f32; 2]) {
     }
 }
 pub fn center(nodes: &mut [Node]) {
-    let x = nodes.iter().map(|n| n.pos[0]).sum::<f32>() / nodes.len() as f32;
+    let mass_sum = nodes.iter().map(|n| n.mass).sum::<f32>();
+    let x = nodes.iter().map(|n| n.pos[0] * n.mass).sum::<f32>() / mass_sum;
     let low = nodes
         .iter()
         .map(|n| n.pos[1] - n.radius)
@@ -333,7 +334,8 @@ pub fn fitness(n: &[Node]) -> f32 {
     if n.iter().any(|n| n.failed != 0.0) {
         FAILED
     } else {
-        n.iter().map(|n| n.pos[0]).sum::<f32>() / n.len() as f32
+        let mass_sum = n.iter().map(|node| node.mass).sum::<f32>();
+        n.iter().map(|node| node.pos[0] * node.mass).sum::<f32>() / mass_sum
     }
 }
 
@@ -389,6 +391,41 @@ mod tests {
         let length = (nodes[1].pos[0] - nodes[0].pos[0]).hypot(nodes[1].pos[1] - nodes[0].pos[1]);
         assert!((length - bone.rest_length).abs() < 1e-6);
         assert!(nodes.iter().all(|node| node.vel == [0.0; 2]));
+    }
+
+    #[test]
+    fn fitness_tracks_center_of_mass_instead_of_shape_average() {
+        let before = [
+            Node {
+                pos: [-1.0, 0.0],
+                mass: 1.0,
+                ..Node::default()
+            },
+            Node {
+                pos: [1.0, 0.0],
+                mass: 3.0,
+                ..Node::default()
+            },
+        ];
+        let reshaped = [
+            Node {
+                pos: [-3.0, 0.0],
+                mass: 1.0,
+                ..Node::default()
+            },
+            Node {
+                pos: [5.0 / 3.0, 0.0],
+                mass: 3.0,
+                ..Node::default()
+            },
+        ];
+        assert!(
+            (before.iter().map(|node| node.pos[0]).sum::<f32>() / 2.0
+                - reshaped.iter().map(|node| node.pos[0]).sum::<f32>() / 2.0)
+                .abs()
+                > 0.1
+        );
+        assert!((fitness(&before) - fitness(&reshaped)).abs() < 1e-6);
     }
 
     #[test]

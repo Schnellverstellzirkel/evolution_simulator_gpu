@@ -172,12 +172,14 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         if tick == 200u {
             if local < body.nodes {
                 var avg = 0.0;
+                var mass_sum = 0.0;
                 var low = 1e20;
                 for (var j = 0u; j < body.nodes; j++) {
-                    avg += positions[read_base + base + j].x;
+                    avg += positions[read_base + base + j].x * masses[base + j];
+                    mass_sum += masses[base + j];
                     low = min(low, positions[read_base + base + j].y - radii[base + j]);
                 }
-                n.pos -= vec2f(avg / f32(body.nodes), low);
+                n.pos -= vec2f(avg / mass_sum, low);
                 n.vel = vec2f(0.0);
             }
             workgroupBarrier();
@@ -420,15 +422,17 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             }
             if tick + 1u == p.total_steps {
                 var score = 0.0;
+                var mass_sum = 0.0;
                 var failed = 0.0;
                 for (var j = 0u; j < body.nodes; j++) {
-                    score += positions[write_base + base + j].x;
+                    score += positions[write_base + base + j].x * masses[base + j];
+                    mass_sum += masses[base + j];
                     failed += failures[base + j];
                 }
                 if failed > 0.0 {
                     metrics.fitness = -1e20;
                 } else {
-                    metrics.fitness = score / f32(body.nodes);
+                    metrics.fitness = score / mass_sum;
                 }
                 if p.total_steps > 200u {
                     metrics.vertical_oscillation = max(
