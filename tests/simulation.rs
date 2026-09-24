@@ -1,6 +1,6 @@
 use evolution_simulator::{
     config::Config,
-    evolution::{self, Creature, Muscle, NodeGene},
+    evolution::{self, Bone, Creature, Muscle, NodeGene},
     gpu::Gpu,
     physics::{self, Node},
     storage::{self, Experiment, Stage},
@@ -24,6 +24,7 @@ fn seed_is_repeatable_and_selection_conserves_population() {
     let a = evolution::create(&cfg).unwrap();
     let b = evolution::create(&cfg).unwrap();
     assert_eq!(a.nodes, b.nodes);
+    assert_eq!(a.bones, b.bones);
     assert_eq!(a.muscles, b.muscles);
     let scores: Vec<_> = (0..cfg.population).map(|i| i as f32).collect();
     let ranks = evolution::ranking(&scores);
@@ -34,6 +35,7 @@ fn seed_is_repeatable_and_selection_conserves_population() {
     assert_eq!(next.genomes.len(), cfg.population);
     let again = evolution::reproduce(&a, &cfg, 0, &parents).unwrap();
     assert_eq!(next.nodes, again.nodes);
+    assert_eq!(next.bones, again.bones);
     assert_eq!(next.muscles, again.muscles);
 }
 #[test]
@@ -49,6 +51,7 @@ fn zero_mutation_copies_genetics() {
         let a = p.creature(parents[i / 2]);
         let b = next.creature(i);
         assert_eq!(a.nodes, b.nodes);
+        assert_eq!(a.bones, b.bones);
         assert_eq!(a.muscles, b.muscles);
     }
 }
@@ -95,8 +98,10 @@ fn flat_ground_contact_resolves_nodes_and_can_be_disabled() {
 #[test]
 fn muscle_cycle_is_continuous_and_periodic() {
     let m = Muscle {
-        a: 0,
-        b: 1,
+        bone_a: 0,
+        bone_b: 1,
+        anchor_a: 1.0,
+        anchor_b: 0.0,
         short: 0.1,
         long: 0.3,
         period: 2.,
@@ -109,6 +114,91 @@ fn muscle_cycle_is_continuous_and_periodic() {
     assert!((physics::target(&m, 0.79999) - physics::target(&m, 0.80001)).abs() < 1e-5);
     assert!((physics::target(&m, 0.23) - physics::target(&m, 2.23)).abs() < 1e-6);
 }
+
+#[test]
+fn bone_lengths_hold_and_off_center_muscles_rotate_bones() {
+    let cfg = Config {
+        gravity: 0.0,
+        ground: false,
+        air_retention: 1.0,
+        ..config()
+    };
+    let genes = [
+        NodeGene {
+            x: 0.0,
+            y: 0.0,
+            diameter: 0.08,
+            friction: 0.5,
+        },
+        NodeGene {
+            x: 1.0,
+            y: 0.0,
+            diameter: 0.08,
+            friction: 0.5,
+        },
+        NodeGene {
+            x: 1.0,
+            y: 1.0,
+            diameter: 0.08,
+            friction: 0.5,
+        },
+        NodeGene {
+            x: 0.0,
+            y: 1.0,
+            diameter: 0.08,
+            friction: 0.5,
+        },
+    ];
+    let creature = Creature {
+        nodes: genes.to_vec(),
+        bones: vec![
+            Bone {
+                a: 0,
+                b: 1,
+                rest_length: 1.0,
+            },
+            Bone {
+                a: 1,
+                b: 2,
+                rest_length: 1.0,
+            },
+            Bone {
+                a: 2,
+                b: 3,
+                rest_length: 1.0,
+            },
+        ],
+        muscles: vec![Muscle {
+            bone_a: 0,
+            bone_b: 2,
+            anchor_a: 0.25,
+            anchor_b: 0.75,
+            short: 0.1,
+            long: 0.1,
+            period: 1.0,
+            phase: 0.0,
+            duty: 0.5,
+            stiffness: 40.0,
+        }],
+        id: 1,
+        mutability: 1.0,
+    };
+    let mut nodes = physics::nodes(&creature);
+    physics::step(&mut nodes, &creature.bones, &creature.muscles, &cfg, 0);
+    for bone in &creature.bones {
+        let a = nodes[bone.a as usize].pos;
+        let b = nodes[bone.b as usize].pos;
+        let length = (a[0] - b[0]).hypot(a[1] - b[1]);
+        assert!(
+            (length - bone.rest_length).abs() < 0.002,
+            "{bone:?}: {length}"
+        );
+    }
+    assert!(nodes[0].vel[1] > 0.0);
+    assert!(nodes[0].vel[1] > nodes[1].vel[1]);
+    assert!(nodes[3].vel[1] < nodes[2].vel[1]);
+}
+
 #[test]
 fn overlapping_nodes_remain_finite() {
     let c = Creature {
@@ -121,9 +211,23 @@ fn overlapping_nodes_remain_finite() {
             };
             3
         ],
+        bones: vec![
+            Bone {
+                a: 0,
+                b: 1,
+                rest_length: 0.03,
+            },
+            Bone {
+                a: 1,
+                b: 2,
+                rest_length: 0.03,
+            },
+        ],
         muscles: vec![Muscle {
-            a: 0,
-            b: 1,
+            bone_a: 0,
+            bone_b: 1,
+            anchor_a: 0.5,
+            anchor_b: 0.5,
             short: 0.1,
             long: 0.2,
             period: 1.,
@@ -224,6 +328,140 @@ fn history_and_checksums_are_validated_on_load() {
 }
 
 #[test]
+#[ignore = "requires a Vulkan GPU; one-step shader and bone-constraint smoke test"]
+fn gpu_bones_match_cpu_for_off_center_muscle() {
+    let cfg = Config {
+        population: 2,
+        duration: 0.1,
+        gravity: 0.0,
+        ground: false,
+        air_retention: 1.0,
+        ..config()
+    };
+    let creature = Creature {
+        nodes: vec![
+            NodeGene {
+                x: 0.0,
+                y: 0.0,
+                diameter: 0.08,
+                friction: 0.5,
+            },
+            NodeGene {
+                x: 1.0,
+                y: 0.0,
+                diameter: 0.08,
+                friction: 0.5,
+            },
+            NodeGene {
+                x: 1.0,
+                y: 1.0,
+                diameter: 0.08,
+                friction: 0.5,
+            },
+            NodeGene {
+                x: 0.0,
+                y: 1.0,
+                diameter: 0.08,
+                friction: 0.5,
+            },
+        ],
+        bones: vec![
+            Bone {
+                a: 0,
+                b: 1,
+                rest_length: 1.0,
+            },
+            Bone {
+                a: 1,
+                b: 2,
+                rest_length: 1.0,
+            },
+            Bone {
+                a: 2,
+                b: 3,
+                rest_length: 1.0,
+            },
+        ],
+        muscles: vec![Muscle {
+            bone_a: 0,
+            bone_b: 2,
+            anchor_a: 0.25,
+            anchor_b: 0.75,
+            short: 0.1,
+            long: 0.1,
+            period: 1.0,
+            phase: 0.0,
+            duty: 0.5,
+            stiffness: 40.0,
+        }],
+        id: 1,
+        mutability: 1.0,
+    };
+    let mut gpu = Gpu::new("RTX 4060").unwrap();
+    let actual = gpu.trajectory(&creature, &cfg, 1).unwrap();
+    let mut expected = physics::nodes(&creature);
+    physics::step(&mut expected, &creature.bones, &creature.muscles, &cfg, 0);
+    for (a, b) in actual.iter().zip(&expected) {
+        for component in 0..2 {
+            assert!((a.pos[component] - b.pos[component]).abs() < 0.002);
+            assert!((a.vel[component] - b.vel[component]).abs() < 0.02);
+        }
+    }
+    for count in [3, 5, 64] {
+        let genes: Vec<_> = (0..count)
+            .map(|index| NodeGene {
+                x: index as f32 * 0.1,
+                y: 0.2,
+                diameter: 0.08,
+                friction: 0.5,
+            })
+            .collect();
+        let bones: Vec<_> = (0..count - 1)
+            .map(|index| Bone {
+                a: index as u32,
+                b: (index + 1) as u32,
+                rest_length: 0.1,
+            })
+            .collect();
+        let creature = Creature {
+            nodes: genes,
+            muscles: vec![Muscle {
+                bone_a: 0,
+                bone_b: (bones.len() - 1) as u32,
+                anchor_a: 0.25,
+                anchor_b: 0.75,
+                short: 0.1,
+                long: 0.1,
+                period: 1.0,
+                phase: 0.0,
+                duty: 0.5,
+                stiffness: 40.0,
+            }],
+            bones,
+            id: count as u64,
+            mutability: 1.0,
+        };
+        let actual = gpu.trajectory(&creature, &cfg, 1).unwrap();
+        let mut expected = physics::nodes(&creature);
+        physics::step(&mut expected, &creature.bones, &creature.muscles, &cfg, 0);
+        for (a, b) in actual.iter().zip(&expected) {
+            for component in 0..2 {
+                assert!((a.pos[component] - b.pos[component]).abs() < 0.002);
+                assert!((a.vel[component] - b.vel[component]).abs() < 0.02);
+            }
+        }
+    }
+    let population = evolution::create(&cfg).unwrap();
+    let scores = gpu.evaluate(&population, &[1, 0], &cfg).unwrap();
+    assert_eq!(scores.len(), 2);
+    assert!(
+        scores
+            .iter()
+            .all(|score| score.is_finite() && *score > evolution::FAILED)
+    );
+}
+
+#[test]
 #[ignore = "requires a Vulkan GPU; run explicitly on the workstation"]
 fn gpu_matches_cpu_and_handles_partial_workgroups() {
     let cfg = Config {
@@ -239,7 +477,7 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
             let actual = gpu.trajectory(&c, &cfg, steps).unwrap();
             let mut expected = physics::nodes(&c);
             for t in 0..steps {
-                physics::step(&mut expected, &c.muscles, &cfg, t);
+                physics::step(&mut expected, &c.bones, &c.muscles, &cfg, t);
             }
             for (a, b) in actual.iter().zip(&expected) {
                 for k in 0..2 {
@@ -272,7 +510,7 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
     };
     let mut mixed = evolution::Population::default();
     for (i, count) in [3, 5, 6, 8, 9, 17, 33, 64].into_iter().enumerate() {
-        let nodes = (0..count)
+        let nodes: Vec<_> = (0..count)
             .map(|j| {
                 let angle = j as f32 / count as f32 * std::f32::consts::TAU;
                 NodeGene {
@@ -283,10 +521,24 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
                 }
             })
             .collect();
-        let muscles = (0..count)
+        let bones: Vec<_> = (0..count - 1)
+            .map(|j| {
+                let a = &nodes[j];
+                let b = &nodes[j + 1];
+                Bone {
+                    a: j as u32,
+                    b: (j + 1) as u32,
+                    rest_length: (a.x - b.x).hypot(a.y - b.y),
+                }
+            })
+            .collect();
+        let muscle_links = if bones.len() > 2 { bones.len() } else { 1 };
+        let muscles = (0..muscle_links)
             .map(|j| Muscle {
-                a: j as u32,
-                b: ((j + 1) % count) as u32,
+                bone_a: j as u32,
+                bone_b: ((j + 1) % bones.len()) as u32,
+                anchor_a: 0.0,
+                anchor_b: 1.0,
                 short: 0.06,
                 long: 0.1,
                 period: 1.,
@@ -297,6 +549,7 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
             .collect();
         mixed.push(Creature {
             nodes,
+            bones,
             muscles,
             id: i as u64,
             mutability: 1.,

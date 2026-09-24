@@ -89,7 +89,13 @@ impl Playback {
     fn new(creature: Creature, config: Config) -> Self {
         let mut nodes = physics::nodes(&creature);
         for tick in 0..physics::SETTLE {
-            physics::step(&mut nodes, &creature.muscles, &config, tick);
+            physics::step(
+                &mut nodes,
+                &creature.bones,
+                &creature.muscles,
+                &config,
+                tick,
+            );
         }
         physics::center(&mut nodes);
         Self {
@@ -590,9 +596,10 @@ impl App {
             ui.label(RichText::new("LIVE CREATURE").small().color(MUTED));
             if let Some(p) = &self.playback {
                 ui.label(format!(
-                    "#{} · {} nodes / {} muscles",
+                    "#{} · {} nodes / {} bones / {} muscles",
                     p.creature.id,
                     p.nodes.len(),
+                    p.creature.bones.len(),
                     p.creature.muscles.len()
                 ));
             }
@@ -746,7 +753,13 @@ impl App {
             if ui.button("Single tick").clicked() {
                 self.playing = false;
                 if let Some(p) = &mut self.playback {
-                    physics::step(&mut p.nodes, &p.creature.muscles, &p.config, p.tick);
+                    physics::step(
+                        &mut p.nodes,
+                        &p.creature.bones,
+                        &p.creature.muscles,
+                        &p.config,
+                        p.tick,
+                    );
                     p.tick += 1;
                 }
             }
@@ -931,9 +944,10 @@ impl App {
                                 paint_card(ui.painter(), card, rect, response.hovered(), snapshot.stage);
                                 if response.clicked() { selected = Some(card.index); }
                                 response.on_hover_text(format!(
-                                    "ID {}\n{} nodes / {} muscles\nMutability {:.2}\n{}\n{}\nClick to replay",
+                                    "ID {}\n{} nodes / {} bones / {} muscles\nMutability {:.2}\n{}\n{}\nClick to replay",
                                     card.creature.id,
                                     card.creature.nodes.len(),
+                                    card.creature.bones.len(),
                                     card.creature.muscles.len(),
                                     card.creature.mutability,
                                     card.emitter.map_or("Initial population".to_owned(), |emitter| format!("Emitter: {}", emitter.label())),
@@ -1080,7 +1094,10 @@ impl App {
                     for &(n, m, count) in &species {
                         ui.horizontal(|ui| {
                             color_dot(ui, species_color(n, m));
-                            ui.label(format!("{n} nodes / {m} muscles"));
+                            ui.label(format!(
+                                "{n} nodes / {} bones / {m} muscles",
+                                n.saturating_sub(1)
+                            ));
                             ui.label(format!(
                                 "{} · {:.1}%",
                                 number(count as usize),
@@ -1282,7 +1299,13 @@ impl eframe::App for App {
                 if p.tick >= physics::SETTLE + p.config.steps() {
                     p.reset();
                 }
-                physics::step(&mut p.nodes, &p.creature.muscles, &p.config, p.tick);
+                physics::step(
+                    &mut p.nodes,
+                    &p.creature.bones,
+                    &p.creature.muscles,
+                    &p.config,
+                    p.tick,
+                );
                 p.tick += 1;
                 p.accumulator -= physics::DT;
             }
@@ -1500,9 +1523,30 @@ fn draw_creature(
     time: f32,
 ) {
     let position = |n: &Node| origin + Vec2::new(n.pos[0] * scale, -n.pos[1] * scale);
+    for bone in &c.bones {
+        let a = position(&nodes[bone.a as usize]);
+        let b = position(&nodes[bone.b as usize]);
+        let width = (scale * 0.032).max(3.0);
+        p.line_segment(
+            [a, b],
+            Stroke::new(width + 3.0, Color32::from_rgb(10, 15, 19)),
+        );
+        p.line_segment([a, b], Stroke::new(width, Color32::from_rgb(192, 205, 187)));
+    }
     for m in &c.muscles {
-        let a = position(&nodes[m.a as usize]);
-        let b = position(&nodes[m.b as usize]);
+        let bone_a = c.bones[m.bone_a as usize];
+        let bone_b = c.bones[m.bone_b as usize];
+        let point = |bone: crate::evolution::Bone, t: f32| {
+            let a = [nodes[bone.a as usize].pos[0], nodes[bone.a as usize].pos[1]];
+            let b = [nodes[bone.b as usize].pos[0], nodes[bone.b as usize].pos[1]];
+            origin
+                + Vec2::new(
+                    (a[0] + (b[0] - a[0]) * t) * scale,
+                    -(a[1] + (b[1] - a[1]) * t) * scale,
+                )
+        };
+        let a = point(bone_a, m.anchor_a);
+        let b = point(bone_b, m.anchor_b);
         let length = physics::target(m, time);
         let contraction = 1. - ((length - m.short) / (m.long - m.short).max(1e-5));
         let width = (scale * 0.017 * (1. + 0.45 * contraction)).max(2.);

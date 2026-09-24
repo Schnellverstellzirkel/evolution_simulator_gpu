@@ -1,5 +1,7 @@
 # Validation results
 
+Throughput figures in the historical sections below predate rigid bones and do not describe the current physics. This change was checked with low-impact correctness tests; no throughput profile was run while the CPU/GPU were busy.
+
 ## Current native app measurement (2026-09-23)
 
 The graphical Wayland app was run on the NVIDIA RTX 4060 with driver 580.173.02, a fixed seed, 18-second trials, and 30 complete generations. The native benchmark includes GPU evaluation, archive insertion, breeding, worker publication, and active UI rendering. These are sequential runs on the same machine; background desktop activity and GPU clocks can affect small differences.
@@ -25,7 +27,7 @@ Four 20-generation full-GUI runs on revision `5f0349c` used default/workgroup/wo
 | Default (serial private arrays for 4/5/8-node buckets) | 1.828–1.829 | 9.875–9.907 | 2 |
 | Workgroup | 3.063–3.104 | 5.449–5.477 | 2 |
 
-The workgroup path delivered 1.69× the throughput of the serial path. The serial path is now opt-in with `EVOLUTION_KERNEL=serial`; the default uses workgroup physics. This reverses the recent serial-default change and retains the serial shader for further experiments.
+The workgroup path delivered 1.69× the throughput of the serial path at that revision. The serial and lane shaders use the earlier node-to-node genome layout, so the bone-physics update disables both paths; the current simulator uses the workgroup shader for every body size.
 
 ### Low-impact timestamp profile on the current default (2026-09-24)
 

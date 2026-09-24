@@ -333,8 +333,11 @@ impl Config {
             .filter(|&value| value > 0)
             .unwrap_or(if self.throughput { 100_000 } else { 8192 });
         // Leave space for power-of-two buffer growth and staging resources.
+        let padded_nodes = self.max_nodes.next_power_of_two().max(8);
+        // A muscle genome is stored once, with up to four u32 node references;
+        // each padded node also owns its state and a NodeAdj range.
         let bytes_per_creature =
-            self.max_nodes.next_power_of_two().max(8) * 32 + self.max_muscles * 32 + 80;
+            padded_nodes * 40 + self.max_muscles * 72 + self.max_nodes * 12 + 80;
         maximum
             .min(self.gpu_budget_mib * 1024 * 1024 / (bytes_per_creature * 4))
             .max(1)

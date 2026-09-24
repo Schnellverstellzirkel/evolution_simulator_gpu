@@ -22,7 +22,7 @@ const EMITTERS: [Emitter; qd::EMITTER_COUNT] = Emitter::ALL;
 #[derive(Clone, Debug, Serialize)]
 pub struct MorphologySnapshot {
     pub count: usize,
-    /// Distinct node-indexed undirected graph topologies; edge order is ignored.
+    /// Distinct skeleton and actuator graph topologies; edge order is ignored.
     pub unique_topologies: usize,
     pub topology_entropy_bits: f64,
     pub effective_topology_count: f64,
@@ -1010,19 +1010,28 @@ fn topology_dimensions(key: &str) -> (usize, usize) {
     let (nodes, edges) = key.split_once(':').unwrap_or(("0", ""));
     let node_count = nodes.parse().unwrap_or(0);
     let edge_count = edges.matches('(').count();
-    (node_count, edge_count)
+    (
+        node_count,
+        edge_count.saturating_sub(node_count.saturating_sub(1)),
+    )
 }
 
 fn triangle_like(topology: &Topology) -> bool {
     if topology.nodes != 3 || topology.edges.len() != 3 {
         return false;
     }
-    let edges: BTreeSet<(u32, u32)> = topology
+    let skeleton: BTreeSet<(u32, u32)> = topology
         .edges
         .iter()
+        .filter(|(a, b)| *a < 3 && *b < 3)
         .map(|&(a, b)| (a.min(b), a.max(b)))
         .collect();
-    edges == BTreeSet::from([(0, 1), (0, 2), (1, 2)])
+    let actuators = topology
+        .edges
+        .iter()
+        .filter(|(a, b)| *a >= 3 && *b >= 3)
+        .count();
+    skeleton.len() == 2 && actuators == 1
 }
 
 fn shannon_entropy(counts: impl Iterator<Item = usize>) -> f64 {

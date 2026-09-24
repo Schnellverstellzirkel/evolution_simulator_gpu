@@ -444,6 +444,8 @@ fn run(
                             .map(|elite| {
                                 elite.creature.nodes.len()
                                     * std::mem::size_of::<crate::evolution::NodeGene>()
+                                    + elite.creature.bones.len()
+                                        * std::mem::size_of::<crate::evolution::Bone>()
                                     + elite.creature.muscles.len()
                                         * std::mem::size_of::<crate::evolution::Muscle>()
                             })

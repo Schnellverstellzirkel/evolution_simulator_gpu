@@ -8,7 +8,7 @@ pub(crate) const MORPHOLOGY_LIMIT: usize = 64;
 pub(crate) const ARCHIVE_CAPACITY: usize = ARCHIVE_LIMIT + MORPHOLOGY_LIMIT;
 pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 13_824;
 pub(crate) const CMA_LIMIT: usize = 96;
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 pub(crate) const MIN_MORPHOLOGY_DESCENDANTS: u64 = 8;
@@ -206,16 +206,27 @@ fn behavior_distance(a: Descriptor, b: Descriptor) -> f32 {
 
 impl Topology {
     pub fn of(creature: &Creature) -> Self {
-        let mut edges: Vec<_> = creature
-            .muscles
-            .iter()
-            .map(|m| (m.a.min(m.b), m.a.max(m.b)))
-            .collect();
-        edges.sort_unstable();
-        Self {
-            nodes: creature.nodes.len() as u8,
-            edges,
-        }
+        topology_from_parts(&creature.nodes, &creature.bones, &creature.muscles)
+    }
+}
+
+fn topology_from_parts(
+    nodes: &[crate::evolution::NodeGene],
+    bones: &[crate::evolution::Bone],
+    muscles: &[Muscle],
+) -> Topology {
+    let offset = nodes.len() as u32;
+    let mut edges = Vec::with_capacity(bones.len() + muscles.len());
+    edges.extend(bones.iter().map(|b| (b.a.min(b.b), b.a.max(b.b))));
+    edges.extend(muscles.iter().map(|m| {
+        let a = offset + m.bone_a;
+        let b = offset + m.bone_b;
+        (a.min(b), a.max(b))
+    }));
+    edges.sort_unstable();
+    Topology {
+        nodes: nodes.len() as u8,
+        edges,
     }
 }
 
@@ -737,17 +748,11 @@ impl QdArchive {
 }
 pub fn topology_of_population(population: &Population, index: usize) -> Topology {
     let genome = &population.genomes[index];
+    let nodes = &population.nodes[genome.node_start..genome.node_start + genome.node_count];
+    let bones = &population.bones[genome.bone_start..genome.bone_start + genome.bone_count];
     let muscles =
         &population.muscles[genome.muscle_start..genome.muscle_start + genome.muscle_count];
-    let mut edges: Vec<_> = muscles
-        .iter()
-        .map(|m| (m.a.min(m.b), m.a.max(m.b)))
-        .collect();
-    edges.sort_unstable();
-    Topology {
-        nodes: genome.node_count as u8,
-        edges,
-    }
+    topology_from_parts(nodes, bones, muscles)
 }
 
 impl EmitterStats {
@@ -832,7 +837,7 @@ impl CmaEmitter {
         self.sample_scaled(rng, 1.0)
     }
     pub fn sample_scaled(&self, rng: &mut Rng, strength: f32) -> Creature {
-        let node_dimensions = self.template.nodes.len() * 4;
+        let phase_start = self.template.nodes.len() * 4 + self.template.bones.len();
         let values: Vec<_> = self
             .mean
             .iter()
@@ -840,7 +845,7 @@ impl CmaEmitter {
             .enumerate()
             .map(|(d, (&mean, &variance))| {
                 let value = mean + self.sigma * variance.sqrt() * gaussian(rng) * strength;
-                if is_phase_dimension(d, node_dimensions) {
+                if is_phase_dimension(d, phase_start) {
                     value.rem_euclid(1.0)
                 } else {
                     value.clamp(0.0, 1.0)
@@ -878,11 +883,11 @@ impl CmaEmitter {
         let old_mean = self.mean.clone();
         let mut new_mean = vec![0.0; dimensions];
         let mut vector = vec![0.0; dimensions];
-        let node_dimensions = self.template.nodes.len() * 4;
+        let phase_start = self.template.nodes.len() * 4 + self.template.bones.len();
         for (rank, &(index, _)) in samples.iter().take(mu).enumerate() {
             parameters_into(population, index, &mut vector);
             for d in 0..dimensions {
-                if is_phase_dimension(d, node_dimensions) {
+                if is_phase_dimension(d, phase_start) {
                     new_mean[d] += weights[rank] * wrap_phase(vector[d] - old_mean[d]);
                 } else {
                     new_mean[d] += weights[rank] * vector[d];
@@ -890,7 +895,7 @@ impl CmaEmitter {
             }
         }
         for d in 0..dimensions {
-            if is_phase_dimension(d, node_dimensions) {
+            if is_phase_dimension(d, phase_start) {
                 new_mean[d] = (old_mean[d] + new_mean[d]).rem_euclid(1.0);
             }
         }
@@ -904,7 +909,7 @@ impl CmaEmitter {
             .min(1.0 - c1);
         let mut norm_sigma = 0.0;
         for d in 0..dimensions {
-            let mean_delta = if is_phase_dimension(d, node_dimensions) {
+            let mean_delta = if is_phase_dimension(d, phase_start) {
                 wrap_phase(new_mean[d] - old_mean[d])
             } else {
                 new_mean[d] - old_mean[d]
@@ -923,7 +928,7 @@ impl CmaEmitter {
         for (rank, &(index, _)) in samples.iter().take(mu).enumerate() {
             parameters_into(population, index, &mut vector);
             for d in 0..dimensions {
-                let coordinate_delta = if is_phase_dimension(d, node_dimensions) {
+                let coordinate_delta = if is_phase_dimension(d, phase_start) {
                     wrap_phase(vector[d] - old_mean[d])
                 } else {
                     vector[d] - old_mean[d]
@@ -933,7 +938,7 @@ impl CmaEmitter {
             }
         }
         for d in 0..dimensions {
-            let mean_delta = if is_phase_dimension(d, node_dimensions) {
+            let mean_delta = if is_phase_dimension(d, phase_start) {
                 wrap_phase(new_mean[d] - old_mean[d])
             } else {
                 new_mean[d] - old_mean[d]
@@ -957,8 +962,8 @@ impl CmaEmitter {
     }
 }
 
-fn is_phase_dimension(dimension: usize, node_dimensions: usize) -> bool {
-    dimension >= node_dimensions && (dimension - node_dimensions) % 6 == 3
+fn is_phase_dimension(dimension: usize, phase_start: usize) -> bool {
+    dimension >= phase_start && (dimension - phase_start) % 8 == 5
 }
 fn wrap_phase(delta: f32) -> f32 {
     (delta + 0.5).rem_euclid(1.0) - 0.5
@@ -970,7 +975,9 @@ pub(crate) fn gaussian(rng: &mut Rng) -> f32 {
     (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
 }
 fn parameters(creature: &Creature) -> Vec<f32> {
-    let mut output = Vec::with_capacity(creature.nodes.len() * 4 + creature.muscles.len() * 6);
+    let mut output = Vec::with_capacity(
+        creature.nodes.len() * 4 + creature.bones.len() + creature.muscles.len() * 8,
+    );
     for n in &creature.nodes {
         output.extend([
             ((n.x + 4.0) / 8.0).clamp(0.0, 1.0),
@@ -979,8 +986,13 @@ fn parameters(creature: &Creature) -> Vec<f32> {
             n.friction.clamp(0.0, 1.0),
         ]);
     }
+    for bone in &creature.bones {
+        output.push(((bone.rest_length - 0.03) / 11.97).clamp(0.0, 1.0));
+    }
     for m in &creature.muscles {
         output.extend([
+            m.anchor_a.clamp(0.0, 1.0),
+            m.anchor_b.clamp(0.0, 1.0),
             ((m.short - 0.01) / 0.79).clamp(0.0, 1.0),
             ((m.long - 0.01) / 0.99).clamp(0.0, 1.0),
             ((m.period - 0.1) / 9.9).clamp(0.0, 1.0),
@@ -1006,8 +1018,15 @@ fn parameters_into(population: &Population, index: usize, output: &mut [f32]) {
         ]);
         i += 4;
     }
+    let bones = &population.bones[genome.bone_start..genome.bone_start + genome.bone_count];
+    for bone in bones {
+        output[i] = ((bone.rest_length - 0.03) / 11.97).clamp(0.0, 1.0);
+        i += 1;
+    }
     for m in muscles {
-        output[i..i + 6].copy_from_slice(&[
+        output[i..i + 8].copy_from_slice(&[
+            m.anchor_a.clamp(0.0, 1.0),
+            m.anchor_b.clamp(0.0, 1.0),
             ((m.short - 0.01) / 0.79).clamp(0.0, 1.0),
             ((m.long - 0.01) / 0.99).clamp(0.0, 1.0),
             ((m.period - 0.1) / 9.9).clamp(0.0, 1.0),
@@ -1015,7 +1034,7 @@ fn parameters_into(population: &Population, index: usize, output: &mut [f32]) {
             ((m.duty - 0.05) / 0.90).clamp(0.0, 1.0),
             ((m.stiffness - 1.0) / 119.0).clamp(0.0, 1.0),
         ]);
-        i += 6;
+        i += 8;
     }
 }
 fn apply_parameters(creature: &mut Creature, values: &[f32]) {
@@ -1027,13 +1046,33 @@ fn apply_parameters(creature: &mut Creature, values: &[f32]) {
         n.friction = values[i + 3];
         i += 4;
     }
+    for bone in &mut creature.bones {
+        bone.rest_length = 0.03 + values[i] * 11.97;
+        i += 1;
+    }
     for m in &mut creature.muscles {
-        m.short = 0.01 + values[i] * 0.79;
-        m.long = (0.01 + values[i + 1] * 0.99).max(m.short);
-        m.period = 0.1 + values[i + 2] * 9.9;
-        m.phase = values[i + 3].fract();
-        m.duty = 0.05 + values[i + 4] * 0.90;
-        m.stiffness = 1.0 + values[i + 5] * 119.0;
-        i += 6;
+        m.anchor_a = values[i].clamp(0.0, 1.0);
+        m.anchor_b = values[i + 1].clamp(0.0, 1.0);
+        m.short = 0.01 + values[i + 2] * 0.79;
+        m.long = (0.01 + values[i + 3] * 0.99).max(m.short);
+        m.period = 0.1 + values[i + 4] * 9.9;
+        m.phase = values[i + 5].fract();
+        m.duty = 0.05 + values[i + 6] * 0.90;
+        m.stiffness = 1.0 + values[i + 7] * 119.0;
+        i += 8;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_phase_dimension;
+
+    #[test]
+    fn cma_phase_dimensions_follow_bones_and_eight_value_muscles() {
+        let phase_start = 5 * 4 + 4;
+        assert!(!is_phase_dimension(phase_start, phase_start));
+        assert!(is_phase_dimension(phase_start + 5, phase_start));
+        assert!(!is_phase_dimension(phase_start + 6, phase_start));
+        assert!(is_phase_dimension(phase_start + 13, phase_start));
     }
 }

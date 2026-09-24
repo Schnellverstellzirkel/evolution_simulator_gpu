@@ -1,9 +1,10 @@
 use crate::{
     config::Config,
-    evolution::{Creature, FAILED, Muscle, NodeGene},
+    evolution::{Bone, Creature, FAILED, Muscle, NodeGene},
 };
 pub const DT: f32 = 1.0 / 120.0;
 pub const SETTLE: u32 = 200;
+const BONE_SOLVE_ITERATIONS: usize = 8;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Node {
@@ -68,7 +69,64 @@ pub fn collide(n: &mut Node, cfg: &Config) {
         contact(n, [0.0, 1.0], n.radius - n.pos[1], mu);
     }
 }
-pub fn step(nodes: &mut [Node], muscles: &[Muscle], cfg: &Config, tick: u32) {
+fn bone_point(bone: Bone, nodes: &[Node; 64], t: f32, velocity: bool) -> [f32; 2] {
+    let a = &nodes[bone.a as usize];
+    let b = &nodes[bone.b as usize];
+    let av = if velocity { a.vel } else { a.pos };
+    let bv = if velocity { b.vel } else { b.pos };
+    [av[0] + (bv[0] - av[0]) * t, av[1] + (bv[1] - av[1]) * t]
+}
+
+fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool) {
+    let mut positions = [[0.0; 2]; 64];
+    let mut original = [[0.0; 2]; 64];
+    for (i, node) in nodes.iter().enumerate() {
+        positions[i] = node.pos;
+        original[i] = node.pos;
+    }
+    for _ in 0..BONE_SOLVE_ITERATIONS {
+        for bone in bones {
+            let a = bone.a as usize;
+            let b = bone.b as usize;
+            let delta = [
+                positions[b][0] - positions[a][0],
+                positions[b][1] - positions[a][1],
+            ];
+            let raw_distance = delta[0].hypot(delta[1]);
+            let distance = raw_distance.max(1.0e-6);
+            let error = distance - bone.rest_length;
+            let direction = if raw_distance > 1.0e-6 {
+                [delta[0] / distance, delta[1] / distance]
+            } else {
+                [1.0, 0.0]
+            };
+            let inverse_a = 1.0 / nodes[a].mass;
+            let inverse_b = 1.0 / nodes[b].mass;
+            let inverse_sum = inverse_a + inverse_b;
+            let share_a = inverse_a / inverse_sum;
+            let share_b = inverse_b / inverse_sum;
+            positions[a][0] += direction[0] * error * share_a;
+            positions[a][1] += direction[1] * error * share_a;
+            positions[b][0] -= direction[0] * error * share_b;
+            positions[b][1] -= direction[1] * error * share_b;
+            if ground {
+                positions[a][1] = positions[a][1].max(nodes[a].radius);
+                positions[b][1] = positions[b][1].max(nodes[b].radius);
+            }
+        }
+    }
+    for (i, node) in nodes.iter_mut().enumerate() {
+        let delta = [
+            positions[i][0] - original[i][0],
+            positions[i][1] - original[i][1],
+        ];
+        node.pos = positions[i];
+        node.vel[0] += delta[0] / DT;
+        node.vel[1] += delta[1] / DT;
+    }
+}
+
+pub fn step(nodes: &mut [Node], bones: &[Bone], muscles: &[Muscle], cfg: &Config, tick: u32) {
     if tick == SETTLE {
         center(nodes);
     }
@@ -78,26 +136,35 @@ pub fn step(nodes: &mut [Node], muscles: &[Muscle], cfg: &Config, tick: u32) {
     for (i, n) in nodes.iter_mut().enumerate() {
         let mut f = [0.0; 2];
         for m in muscles {
-            let other = if m.a as usize == i {
-                m.b as usize
-            } else if m.b as usize == i {
-                m.a as usize
-            } else {
-                continue;
-            };
-            let d = [
-                old[other].pos[0] - old[i].pos[0],
-                old[other].pos[1] - old[i].pos[1],
-            ];
+            let bone_a = bones[m.bone_a as usize];
+            let bone_b = bones[m.bone_b as usize];
+            let endpoint_a = bone_point(bone_a, &old, m.anchor_a, false);
+            let endpoint_b = bone_point(bone_b, &old, m.anchor_b, false);
+            let d = [endpoint_b[0] - endpoint_a[0], endpoint_b[1] - endpoint_a[1]];
             let distance = d[0].hypot(d[1]).max(1e-6);
             let dir = [d[0] / distance, d[1] / distance];
-            let relative = (old[other].vel[0] - old[i].vel[0]) * dir[0]
-                + (old[other].vel[1] - old[i].vel[1]) * dir[1];
+            let velocity_a = bone_point(bone_a, &old, m.anchor_a, true);
+            let velocity_b = bone_point(bone_b, &old, m.anchor_b, true);
+            let relative =
+                (velocity_b[0] - velocity_a[0]) * dir[0] + (velocity_b[1] - velocity_a[1]) * dir[1];
             let force = ((distance - target(m, time)).clamp(-0.25, 0.25) * m.stiffness
                 + relative * 0.15)
                 .clamp(-30.0, 30.0);
-            f[0] += dir[0] * force;
-            f[1] += dir[1] * force;
+            let mut weight = 0.0;
+            if bone_a.a as usize == i {
+                weight += 1.0 - m.anchor_a;
+            }
+            if bone_a.b as usize == i {
+                weight += m.anchor_a;
+            }
+            if bone_b.a as usize == i {
+                weight -= 1.0 - m.anchor_b;
+            }
+            if bone_b.b as usize == i {
+                weight -= m.anchor_b;
+            }
+            f[0] += dir[0] * force * weight;
+            f[1] += dir[1] * force * weight;
         }
         n.vel[0] = (n.vel[0] + f[0] / n.mass * DT) * cfg.air_retention.sqrt();
         n.vel[1] = (n.vel[1]
@@ -119,11 +186,12 @@ pub fn step(nodes: &mut [Node], muscles: &[Muscle], cfg: &Config, tick: u32) {
             n.vel = [0.0; 2];
         }
     }
+    project_bones(nodes, bones, tick >= SETTLE && cfg.ground);
 }
 pub fn evaluate(c: &Creature, cfg: &Config) -> f32 {
     let mut n = nodes(c);
     for tick in 0..SETTLE + cfg.steps() {
-        step(&mut n, &c.muscles, cfg, tick);
+        step(&mut n, &c.bones, &c.muscles, cfg, tick);
     }
     fitness(&n)
 }

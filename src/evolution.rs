@@ -17,7 +17,30 @@ pub struct NodeGene {
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, PartialEq, bytemuck::Pod, bytemuck::Zeroable,
 )]
+pub struct Bone {
+    pub a: u32,
+    pub b: u32,
+    pub rest_length: f32,
+}
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, PartialEq, bytemuck::Pod, bytemuck::Zeroable,
+)]
 pub struct Muscle {
+    pub bone_a: u32,
+    pub bone_b: u32,
+    /// Attachment positions measured from each bone's `a` endpoint.
+    pub anchor_a: f32,
+    pub anchor_b: f32,
+    pub short: f32,
+    pub long: f32,
+    pub period: f32,
+    pub phase: f32,
+    pub duty: f32,
+    pub stiffness: f32,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) struct LegacyMuscle {
     pub a: u32,
     pub b: u32,
     pub short: f32,
@@ -31,6 +54,8 @@ pub struct Muscle {
 pub struct Genome {
     pub node_start: usize,
     pub node_count: usize,
+    pub bone_start: usize,
+    pub bone_count: usize,
     pub muscle_start: usize,
     pub muscle_count: usize,
     pub id: u64,
@@ -39,6 +64,7 @@ pub struct Genome {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Creature {
     pub nodes: Vec<NodeGene>,
+    pub bones: Vec<Bone>,
     pub muscles: Vec<Muscle>,
     pub id: u64,
     pub mutability: f32,
@@ -47,6 +73,7 @@ pub struct Creature {
 pub struct Population {
     pub genomes: Vec<Genome>,
     pub nodes: Vec<NodeGene>,
+    pub bones: Vec<Bone>,
     pub muscles: Vec<Muscle>,
 }
 
@@ -84,6 +111,7 @@ impl Population {
         let g = &self.genomes[index];
         Creature {
             nodes: self.nodes[g.node_start..g.node_start + g.node_count].to_vec(),
+            bones: self.bones[g.bone_start..g.bone_start + g.bone_count].to_vec(),
             muscles: self.muscles[g.muscle_start..g.muscle_start + g.muscle_count].to_vec(),
             id: g.id,
             mutability: g.mutability,
@@ -93,17 +121,21 @@ impl Population {
         self.genomes.push(Genome {
             node_start: self.nodes.len(),
             node_count: c.nodes.len(),
+            bone_start: self.bones.len(),
+            bone_count: c.bones.len(),
             muscle_start: self.muscles.len(),
             muscle_count: c.muscles.len(),
             id: c.id,
             mutability: c.mutability,
         });
         self.nodes.extend(c.nodes);
+        self.bones.extend(c.bones);
         self.muscles.extend(c.muscles);
     }
     pub fn bytes(&self) -> usize {
         self.genomes.capacity() * std::mem::size_of::<Genome>()
             + self.nodes.capacity() * std::mem::size_of::<NodeGene>()
+            + self.bones.capacity() * std::mem::size_of::<Bone>()
             + self.muscles.capacity() * std::mem::size_of::<Muscle>()
     }
     pub fn validate(&self, cfg: &Config) -> Result<()> {
@@ -113,13 +145,18 @@ impl Population {
         );
         for g in &self.genomes {
             ensure!(
-                (3..=cfg.max_nodes).contains(&g.node_count) && g.muscle_count <= cfg.max_muscles,
+                (3..=cfg.max_nodes).contains(&g.node_count)
+                    && g.bone_count == g.node_count - 1
+                    && g.muscle_count <= cfg.max_muscles,
                 "Invalid body size"
             );
             ensure!(
                 g.node_start
                     .checked_add(g.node_count)
                     .is_some_and(|x| x <= self.nodes.len())
+                    && g.bone_start
+                        .checked_add(g.bone_count)
+                        .is_some_and(|x| x <= self.bones.len())
                     && g.muscle_start
                         .checked_add(g.muscle_count)
                         .is_some_and(|x| x <= self.muscles.len()),
@@ -139,42 +176,35 @@ impl Population {
                     "Invalid node"
                 );
             }
-            let edges = &self.muscles[g.muscle_start..g.muscle_start + g.muscle_count];
-            let mut adjacency = [0u64; 64];
-            for (i, m) in edges.iter().enumerate() {
+            let bones = &self.bones[g.bone_start..g.bone_start + g.bone_count];
+            let mut bone_adjacency = [0u64; 64];
+            for (i, bone) in bones.iter().enumerate() {
                 ensure!(
-                    m.a != m.b
-                        && (m.a as usize) < g.node_count
-                        && (m.b as usize) < g.node_count
-                        && [m.short, m.long, m.period, m.phase, m.duty, m.stiffness]
-                            .iter()
-                            .all(|x| x.is_finite())
-                        && m.short >= 0.01
-                        && m.long >= m.short
-                        && m.period >= 0.1
-                        && (0.05..=0.95).contains(&m.duty)
-                        && (1.0..=120.0).contains(&m.stiffness),
-                    "Invalid muscle"
+                    bone.a != bone.b
+                        && (bone.a as usize) < g.node_count
+                        && (bone.b as usize) < g.node_count
+                        && bone.rest_length.is_finite()
+                        && (0.03..=12.0).contains(&bone.rest_length),
+                    "Invalid bone"
                 );
                 ensure!(
-                    !edges[..i]
+                    !bones[..i]
                         .iter()
-                        .any(|p| (p.a == m.a && p.b == m.b) || (p.a == m.b && p.b == m.a)),
-                    "Duplicate muscle"
+                        .any(|p| (p.a == bone.a && p.b == bone.b)
+                            || (p.a == bone.b && p.b == bone.a)),
+                    "Duplicate bone"
                 );
-                adjacency[m.a as usize] |= 1u64 << m.b;
-                adjacency[m.b as usize] |= 1u64 << m.a;
+                bone_adjacency[bone.a as usize] |= 1u64 << bone.b;
+                bone_adjacency[bone.b as usize] |= 1u64 << bone.a;
             }
             ensure!(
-                adjacency[..g.node_count]
-                    .iter()
-                    .all(|n| n.count_ones() >= 2),
-                "Isolated or under-connected node"
+                bone_adjacency[..g.node_count].iter().all(|n| *n != 0),
+                "Bone skeleton has an unconnected node"
             );
             let mut reached = 1u64;
             loop {
                 let previous = reached;
-                for (i, neighbors) in adjacency[..g.node_count].iter().enumerate() {
+                for (i, neighbors) in bone_adjacency[..g.node_count].iter().enumerate() {
                     if reached & (1u64 << i) != 0 {
                         reached |= neighbors;
                     }
@@ -185,19 +215,101 @@ impl Population {
             }
             ensure!(
                 reached.count_ones() as usize == g.node_count,
-                "Disconnected creature"
+                "Disconnected bone skeleton"
+            );
+            let muscles = &self.muscles[g.muscle_start..g.muscle_start + g.muscle_count];
+            let mut muscle_adjacency = [0u64; 64];
+            for m in muscles {
+                ensure!(
+                    m.bone_a != m.bone_b
+                        && (m.bone_a as usize) < g.bone_count
+                        && (m.bone_b as usize) < g.bone_count
+                        && (0.0..=1.0).contains(&m.anchor_a)
+                        && (0.0..=1.0).contains(&m.anchor_b)
+                        && [
+                            m.anchor_a,
+                            m.anchor_b,
+                            m.short,
+                            m.long,
+                            m.period,
+                            m.phase,
+                            m.duty,
+                            m.stiffness,
+                        ]
+                        .iter()
+                        .all(|x| x.is_finite())
+                        && m.short >= 0.01
+                        && m.long >= m.short
+                        && m.period >= 0.1
+                        && (0.05..=0.95).contains(&m.duty)
+                        && (1.0..=120.0).contains(&m.stiffness),
+                    "Invalid muscle attachment or parameters"
+                );
+                muscle_adjacency[m.bone_a as usize] |= 1u64 << m.bone_b;
+                muscle_adjacency[m.bone_b as usize] |= 1u64 << m.bone_a;
+            }
+            ensure!(
+                muscle_adjacency[..g.bone_count].iter().all(|n| *n != 0),
+                "Every bone must have an attached muscle"
+            );
+            let mut reached = 1u64;
+            loop {
+                let previous = reached;
+                for (i, neighbors) in muscle_adjacency[..g.bone_count].iter().enumerate() {
+                    if reached & (1u64 << i) != 0 {
+                        reached |= neighbors;
+                    }
+                }
+                if reached == previous {
+                    break;
+                }
+            }
+            ensure!(
+                reached.count_ones() as usize == g.bone_count,
+                "Disconnected muscle network"
             );
         }
         Ok(())
     }
 }
-fn muscle(a: usize, b: usize, nodes: &[NodeGene], rng: &mut Rng) -> Muscle {
-    let length = ((nodes[a].x - nodes[b].x).powi(2) + (nodes[a].y - nodes[b].y).powi(2))
-        .sqrt()
-        .clamp(0.06, 0.6);
-    Muscle {
+fn bone(a: usize, b: usize, nodes: &[NodeGene]) -> Bone {
+    let dx = nodes[a].x - nodes[b].x;
+    let dy = nodes[a].y - nodes[b].y;
+    Bone {
         a: a as u32,
         b: b as u32,
+        rest_length: dx.hypot(dy).clamp(0.03, 12.0),
+    }
+}
+fn bone_point(bone: Bone, nodes: &[NodeGene], t: f32) -> [f32; 2] {
+    let a = nodes[bone.a as usize];
+    let b = nodes[bone.b as usize];
+    [a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t]
+}
+fn random_anchor(rng: &mut Rng) -> f32 {
+    if rng.unit() < 0.12 {
+        if rng.unit() < 0.5 { 0.0 } else { 1.0 }
+    } else {
+        rng.unit()
+    }
+}
+fn muscle(
+    bone_a: usize,
+    bone_b: usize,
+    bones: &[Bone],
+    nodes: &[NodeGene],
+    rng: &mut Rng,
+) -> Muscle {
+    let anchor_a = random_anchor(rng);
+    let anchor_b = random_anchor(rng);
+    let a = bone_point(bones[bone_a], nodes, anchor_a);
+    let b = bone_point(bones[bone_b], nodes, anchor_b);
+    let length = (a[0] - b[0]).hypot(a[1] - b[1]).clamp(0.06, 0.6);
+    Muscle {
+        bone_a: bone_a as u32,
+        bone_b: bone_b as u32,
+        anchor_a,
+        anchor_b,
         short: length * rng.range(0.65, 0.95),
         long: length * rng.range(1.05, 1.35),
         period: rng.range(0.65, 2.6),
@@ -206,36 +318,196 @@ fn muscle(a: usize, b: usize, nodes: &[NodeGene], rng: &mut Rng) -> Muscle {
         stiffness: rng.range(20.0, 80.0),
     }
 }
-fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
-    let count = c.nodes.len();
-    let mut seen = [0u64; 64];
-    c.muscles.retain(|m| {
-        let a = m.a as usize;
-        let b = m.b as usize;
-        if a >= count || b >= count || a == b || seen[a] & (1u64 << b) != 0 {
-            false
-        } else {
-            seen[a] |= 1u64 << b;
-            seen[b] |= 1u64 << a;
-            true
+
+pub(crate) fn migrate_legacy_creature(
+    nodes: Vec<NodeGene>,
+    legacy_muscles: &[LegacyMuscle],
+    id: u64,
+    mutability: f32,
+    cfg: &Config,
+) -> Creature {
+    let mut creature = Creature {
+        bones: (0..nodes.len().saturating_sub(1))
+            .map(|i| bone(i, i + 1, &nodes))
+            .collect(),
+        nodes,
+        muscles: Vec::with_capacity(legacy_muscles.len()),
+        id,
+        mutability,
+    };
+    let mut rng = Rng::new(cfg.seed, 0, id as usize);
+    for old in legacy_muscles {
+        let a = old.a as usize;
+        let b = old.b as usize;
+        if a >= creature.nodes.len() || b >= creature.nodes.len() || a == b {
+            continue;
         }
+        let mut choices = Vec::new();
+        for (bone_a, bone) in creature.bones.iter().enumerate() {
+            let anchor_a = if bone.a as usize == a {
+                Some(0.0)
+            } else if bone.b as usize == a {
+                Some(1.0)
+            } else {
+                None
+            };
+            let Some(anchor_a) = anchor_a else { continue };
+            for (bone_b, other) in creature.bones.iter().enumerate() {
+                if bone_a == bone_b {
+                    continue;
+                }
+                let anchor_b = if other.a as usize == b {
+                    Some(0.0)
+                } else if other.b as usize == b {
+                    Some(1.0)
+                } else {
+                    None
+                };
+                if let Some(anchor_b) = anchor_b {
+                    choices.push((bone_a, bone_b, anchor_a, anchor_b));
+                }
+            }
+        }
+        if choices.is_empty() {
+            continue;
+        }
+        let (bone_a, bone_b, anchor_a, anchor_b) = choices[rng.index(choices.len())];
+        creature.muscles.push(Muscle {
+            bone_a: bone_a as u32,
+            bone_b: bone_b as u32,
+            anchor_a,
+            anchor_b,
+            short: old.short,
+            long: old.long,
+            period: old.period,
+            phase: old.phase,
+            duty: old.duty,
+            stiffness: old.stiffness,
+        });
+    }
+    repair(&mut creature, cfg, &mut rng);
+    creature
+}
+
+fn bone_path_exists(bones: &[Bone], node_count: usize, start: usize, target: usize) -> bool {
+    let mut reached = 1u64 << start;
+    loop {
+        let previous = reached;
+        for bone in bones {
+            let a = bone.a as usize;
+            let b = bone.b as usize;
+            if a < node_count && b < node_count {
+                if reached & (1u64 << a) != 0 {
+                    reached |= 1u64 << b;
+                }
+                if reached & (1u64 << b) != 0 {
+                    reached |= 1u64 << a;
+                }
+            }
+        }
+        if reached == previous {
+            return reached & (1u64 << target) != 0;
+        }
+    }
+}
+fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
+    let node_count = c.nodes.len().min(64);
+    let candidates = std::mem::take(&mut c.bones);
+    for b in candidates {
+        let a = b.a as usize;
+        let end = b.b as usize;
+        if a < node_count
+            && end < node_count
+            && a != end
+            && b.rest_length.is_finite()
+            && (0.03..=12.0).contains(&b.rest_length)
+            && !bone_path_exists(&c.bones, node_count, a, end)
+        {
+            c.bones.push(b);
+        }
+    }
+    // Keep a connected, cycle-free skeleton. New links inherit their current
+    // length so repair does not teleport a mutated body before physics starts.
+    for node in 1..node_count {
+        if !bone_path_exists(&c.bones, node_count, 0, node) {
+            c.bones.push(bone(0, node, &c.nodes));
+        }
+    }
+
+    let bone_count = c.bones.len();
+    c.muscles.retain_mut(|m| {
+        let a = m.bone_a as usize;
+        let b = m.bone_b as usize;
+        if a >= bone_count || b >= bone_count || a == b {
+            return false;
+        }
+        m.anchor_a = if m.anchor_a.is_finite() {
+            m.anchor_a.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        m.anchor_b = if m.anchor_b.is_finite() {
+            m.anchor_b.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        m.short = if m.short.is_finite() {
+            m.short.clamp(0.01, 0.8)
+        } else {
+            0.1
+        };
+        m.long = if m.long.is_finite() {
+            m.long.clamp(m.short, 1.0)
+        } else {
+            m.short
+        };
+        m.period = if m.period.is_finite() {
+            m.period.clamp(0.1, 10.0)
+        } else {
+            1.0
+        };
+        m.phase = if m.phase.is_finite() {
+            m.phase.rem_euclid(1.0)
+        } else {
+            0.0
+        };
+        m.duty = if m.duty.is_finite() {
+            m.duty.clamp(0.05, 0.95)
+        } else {
+            0.5
+        };
+        m.stiffness = if m.stiffness.is_finite() {
+            m.stiffness.clamp(1.0, 120.0)
+        } else {
+            40.0
+        };
+        true
     });
-    // A ring guarantees connectivity and at least two incident muscles per node.
-    for a in 0..count {
-        let b = (a + 1) % count;
-        if seen[a] & (1u64 << b) == 0 {
+    if bone_count < 2 {
+        return;
+    }
+    // A motor-link ring keeps every rigid segment addressable to the actuator
+    // network while leaving the skeleton itself articulated at its joints.
+    for a in 0..bone_count {
+        let b = (a + 1) % bone_count;
+        if (bone_count > 2 || a < b)
+            && !c.muscles.iter().any(|m| {
+                (m.bone_a as usize == a && m.bone_b as usize == b)
+                    || (m.bone_a as usize == b && m.bone_b as usize == a)
+            })
+        {
             if c.muscles.len() >= cfg.max_muscles
                 && let Some(i) = c.muscles.iter().position(|m| {
-                    let a = m.a as usize;
-                    let b = m.b as usize;
-                    (a + 1) % count != b && (b + 1) % count != a
+                    let x = m.bone_a as usize;
+                    let y = m.bone_b as usize;
+                    !((x + 1) % bone_count == y || (y + 1) % bone_count == x)
                 })
             {
                 c.muscles.swap_remove(i);
             }
-            c.muscles.push(muscle(a, b, &c.nodes, rng));
-            seen[a] |= 1u64 << b;
-            seen[b] |= 1u64 << a;
+            if c.muscles.len() < cfg.max_muscles {
+                c.muscles.push(muscle(a, b, &c.bones, &c.nodes, rng));
+            }
         }
     }
 }
@@ -245,30 +517,37 @@ fn initial(cfg: &Config, index: usize) -> Creature {
 fn random_creature(cfg: &Config, generation: u32, index: usize) -> Creature {
     let mut rng = Rng::new(cfg.seed, generation, index);
     let n = (3 + rng.index(3)).min(cfg.max_nodes);
+    let spacing = rng.range(0.18, 0.28);
     let mut c = Creature {
         nodes: (0..n)
-            .map(|_| NodeGene {
-                x: rng.range(-0.2, 0.2),
-                y: rng.range(0.0, 0.4),
+            .map(|i| NodeGene {
+                x: (i as f32 - (n - 1) as f32 * 0.5) * spacing + rng.range(-0.025, 0.025),
+                y: 0.18 + (i % 2) as f32 * 0.18 + rng.range(-0.025, 0.025),
                 diameter: rng.range(cfg.min_size, cfg.max_size),
                 friction: rng.range(cfg.min_friction, cfg.max_friction),
             })
             .collect(),
+        bones: Vec::with_capacity(n - 1),
         muscles: vec![],
         id: index as u64 + 1,
         mutability: 1.0,
     };
+    for i in 0..n - 1 {
+        c.bones.push(bone(i, i + 1, &c.nodes));
+    }
+    for i in 0..c.bones.len() {
+        let j = (i + 1) % c.bones.len();
+        if c.bones.len() > 2 || i < j {
+            c.muscles.push(muscle(i, j, &c.bones, &c.nodes, &mut rng));
+        }
+    }
     repair(&mut c, cfg, &mut rng);
     for _ in 0..rng.index(n) {
         if c.muscles.len() < cfg.max_muscles {
-            let a = rng.index(n);
-            let b = rng.index(n);
-            if a != b
-                && !c.muscles.iter().any(|m| {
-                    (m.a == a as u32 && m.b == b as u32) || (m.b == a as u32 && m.a == b as u32)
-                })
-            {
-                c.muscles.push(muscle(a, b, &c.nodes, &mut rng));
+            let a = rng.index(c.bones.len());
+            let b = rng.index(c.bones.len());
+            if a != b {
+                c.muscles.push(muscle(a, b, &c.bones, &c.nodes, &mut rng));
             }
         }
     }
@@ -289,17 +568,21 @@ fn collect_parallel(count: usize, make: impl Fn(usize) -> Creature + Sync) -> Po
     let mut out = Population {
         genomes: Vec::with_capacity(count),
         nodes: Vec::with_capacity(chunks.iter().map(|p| p.nodes.len()).sum()),
+        bones: Vec::with_capacity(chunks.iter().map(|p| p.bones.len()).sum()),
         muscles: Vec::with_capacity(chunks.iter().map(|p| p.muscles.len()).sum()),
     };
     for mut chunk in chunks {
         let ns = out.nodes.len();
+        let bs = out.bones.len();
         let ms = out.muscles.len();
         for g in &mut chunk.genomes {
             g.node_start += ns;
+            g.bone_start += bs;
             g.muscle_start += ms;
         }
         out.genomes.extend(chunk.genomes);
         out.nodes.extend(chunk.nodes);
+        out.bones.extend(chunk.bones);
         out.muscles.extend(chunk.muscles);
     }
     out
@@ -372,6 +655,7 @@ pub fn ensure_archive_batch_memory(
         .iter()
         .map(|elite| {
             elite.creature.nodes.len() * std::mem::size_of::<NodeGene>()
+                + elite.creature.bones.len() * std::mem::size_of::<Bone>()
                 + elite.creature.muscles.len() * std::mem::size_of::<Muscle>()
                 + std::mem::size_of::<Creature>()
         })
@@ -401,7 +685,12 @@ fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
         node.friction = (node.friction + qd::gaussian(rng) * 0.10 * scale)
             .clamp(cfg.min_friction, cfg.max_friction);
     }
+    for bone in &mut creature.bones {
+        bone.rest_length = (bone.rest_length + qd::gaussian(rng) * 0.035 * scale).clamp(0.03, 12.0);
+    }
     for muscle in &mut creature.muscles {
+        muscle.anchor_a = (muscle.anchor_a + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
+        muscle.anchor_b = (muscle.anchor_b + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
         muscle.short = (muscle.short + qd::gaussian(rng) * 0.06 * scale).clamp(0.01, 0.8);
         muscle.long = (muscle.long + qd::gaussian(rng) * 0.08 * scale).clamp(muscle.short, 1.0);
         muscle.period = (muscle.period + qd::gaussian(rng) * 0.20 * scale).clamp(0.1, 10.0);
@@ -421,104 +710,115 @@ fn structural_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng) -> (
 
 fn structural_mutation_in_place(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
     match rng.index(3) {
-        0 => split_muscle(creature, cfg, rng),
+        0 => split_bone(creature, cfg, rng),
         1 => duplicate_mirrored_node(creature, cfg, rng),
         _ => phase_shift_group(creature, rng),
     }
 }
 
-fn split_muscle(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
-    if creature.nodes.len() >= cfg.max_nodes || creature.muscles.len() >= cfg.max_muscles {
+fn split_bone(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
+    if creature.nodes.len() >= cfg.max_nodes
+        || creature.bones.is_empty()
+        || creature.bones.iter().all(|bone| bone.rest_length < 0.06)
+    {
         return false;
     }
-    let Some(index) = (!creature.muscles.is_empty()).then(|| rng.index(creature.muscles.len()))
-    else {
-        return false;
-    };
-    let original = creature.muscles.swap_remove(index);
-    let a = original.a as usize;
-    let b = original.b as usize;
+    let eligible: Vec<usize> = creature
+        .bones
+        .iter()
+        .enumerate()
+        .filter_map(|(index, bone)| (bone.rest_length >= 0.06).then_some(index))
+        .collect();
+    let index = eligible[rng.index(eligible.len())];
+    let original = creature.bones[index];
+    let a = creature.nodes[original.a as usize];
+    let b = creature.nodes[original.b as usize];
     let middle = NodeGene {
-        x: (creature.nodes[a].x + creature.nodes[b].x) * 0.5 + rng.range(-0.015, 0.015),
-        y: (creature.nodes[a].y + creature.nodes[b].y) * 0.5 + rng.range(-0.015, 0.015),
-        diameter: (creature.nodes[a].diameter + creature.nodes[b].diameter) * 0.5,
-        friction: (creature.nodes[a].friction + creature.nodes[b].friction) * 0.5,
+        x: (a.x + b.x) * 0.5,
+        y: (a.y + b.y) * 0.5,
+        diameter: (a.diameter + b.diameter) * 0.5,
+        friction: (a.friction + b.friction) * 0.5,
     };
     let mid = creature.nodes.len() as u32;
     creature.nodes.push(middle);
-    let mut first = original;
-    first.b = mid;
-    first.short = (first.short * 0.5).max(0.01);
-    first.long = (first.long * 0.5).max(first.short);
-    first.stiffness = (first.stiffness * 2.0).min(120.0);
-    let mut second = original;
-    second.a = mid;
-    second.short = (second.short * 0.5).max(0.01);
-    second.long = (second.long * 0.5).max(second.short);
-    second.stiffness = (second.stiffness * 2.0).min(120.0);
-    creature.muscles.push(first);
-    creature.muscles.push(second);
+    let second_index = creature.bones.len() as u32;
+    let first_length = original.rest_length * 0.5;
+    creature.bones[index] = Bone {
+        a: original.a,
+        b: mid,
+        rest_length: first_length,
+    };
+    creature.bones.push(Bone {
+        a: mid,
+        b: original.b,
+        rest_length: original.rest_length - first_length,
+    });
+    for muscle in &mut creature.muscles {
+        if muscle.bone_a as usize == index {
+            if muscle.anchor_a <= 0.5 {
+                muscle.anchor_a *= 2.0;
+            } else {
+                muscle.bone_a = second_index;
+                muscle.anchor_a = (muscle.anchor_a - 0.5) * 2.0;
+            }
+        }
+        if muscle.bone_b as usize == index {
+            if muscle.anchor_b <= 0.5 {
+                muscle.anchor_b *= 2.0;
+            } else {
+                muscle.bone_b = second_index;
+                muscle.anchor_b = (muscle.anchor_b - 0.5) * 2.0;
+            }
+        }
+    }
     true
 }
 
 fn duplicate_mirrored_node(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
-    if creature.nodes.len() >= cfg.max_nodes {
+    if creature.nodes.len() >= cfg.max_nodes || creature.muscles.len() >= cfg.max_muscles {
         return false;
     }
-    let degrees: Vec<usize> = (0..creature.nodes.len())
-        .map(|node| {
-            creature
-                .muscles
-                .iter()
-                .filter(|m| m.a as usize == node || m.b as usize == node)
-                .count()
-        })
-        .collect();
-    let choices: Vec<usize> = degrees
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &degree)| {
-            (degree >= 2 && creature.muscles.len() + degree <= cfg.max_muscles).then_some(i)
-        })
-        .collect();
-    if choices.is_empty() {
+    if creature.bones.is_empty() || creature.bones.len() < 2 {
         return false;
     }
-    let source = choices[rng.index(choices.len())];
+    let parent_bone_index = rng.index(creature.bones.len());
+    let parent_bone = creature.bones[parent_bone_index];
+    let source = if rng.unit() < 0.5 {
+        parent_bone.a as usize
+    } else {
+        parent_bone.b as usize
+    };
     let center_x = creature.nodes.iter().map(|n| n.x).sum::<f32>() / creature.nodes.len() as f32;
     let mut duplicate = creature.nodes[source];
     duplicate.x = (2.0 * center_x - duplicate.x + rng.range(-0.03, 0.03)).clamp(-4.0, 4.0);
     duplicate.y = (duplicate.y + rng.range(-0.03, 0.03)).clamp(0.0, 4.0);
     let target = creature.nodes.len() as u32;
     creature.nodes.push(duplicate);
-    let incident: Vec<Muscle> = creature
-        .muscles
-        .iter()
-        .filter(|m| m.a as usize == source || m.b as usize == source)
-        .copied()
-        .collect();
-    for mut muscle in incident {
-        if muscle.a as usize == source {
-            muscle.a = target;
-        }
-        if muscle.b as usize == source {
-            muscle.b = target;
-        }
-        muscle.phase = (muscle.phase + rng.range(-0.08, 0.08)).rem_euclid(1.0);
-        creature.muscles.push(muscle);
-    }
+    let new_bone = creature.bones.len();
+    creature
+        .bones
+        .push(bone(source, target as usize, &creature.nodes));
+    let other_bone = rng.index(new_bone);
+    creature.muscles.push(muscle(
+        new_bone,
+        other_bone,
+        &creature.bones,
+        &creature.nodes,
+        rng,
+    ));
+    repair(creature, cfg, rng);
     true
 }
 
 fn phase_shift_group(creature: &mut Creature, rng: &mut Rng) -> bool {
-    if creature.nodes.is_empty() || creature.muscles.is_empty() {
+    if creature.bones.is_empty() || creature.muscles.is_empty() {
         return false;
     }
-    let node = rng.index(creature.nodes.len()) as u32;
+    let bone = rng.index(creature.bones.len()) as u32;
     let offset = rng.range(-0.25, 0.25);
     let mut changed = false;
     for muscle in &mut creature.muscles {
-        if muscle.a == node || muscle.b == node {
+        if muscle.bone_a == bone || muscle.bone_b == bone {
             muscle.phase = (muscle.phase + offset).rem_euclid(1.0);
             changed = true;
         }
@@ -540,50 +840,30 @@ fn mutate(mut c: Creature, cfg: &Config, generation: u32, index: usize) -> Creat
         n.friction =
             (n.friction + rng.delta() * 0.1 * strength).clamp(cfg.min_friction, cfg.max_friction);
     }
+    for bone in &mut c.bones {
+        bone.rest_length = (bone.rest_length + rng.delta() * 0.04 * strength).clamp(0.03, 12.0);
+    }
     for m in &mut c.muscles {
+        m.anchor_a = (m.anchor_a + rng.delta() * 0.15 * strength).clamp(0.0, 1.0);
+        m.anchor_b = (m.anchor_b + rng.delta() * 0.15 * strength).clamp(0.0, 1.0);
         m.short = (m.short + rng.delta() * 0.1 * strength).clamp(0.02, 0.8);
         m.long = (m.long + rng.delta() * 0.1 * strength).clamp(m.short, 1.0);
         m.period = (m.period + rng.delta() * 0.2 * strength).clamp(0.1, 10.0);
         m.phase = (m.phase + rng.delta() * 0.2 * strength).rem_euclid(1.0);
         m.duty = (m.duty + rng.delta() * 0.1 * strength).clamp(0.05, 0.95);
         m.stiffness = (m.stiffness * (1.0 + rng.delta() * 0.3 * strength)).clamp(1.0, 120.0);
-        if rng.unit() < 0.02 * strength {
-            m.a = rng.index(c.nodes.len()) as u32;
-        }
-        if rng.unit() < 0.02 * strength {
-            m.b = rng.index(c.nodes.len()) as u32;
-        }
     }
-    if rng.unit() < 0.04 * strength && c.nodes.len() < cfg.max_nodes {
-        let parent = c.nodes[rng.index(c.nodes.len())];
-        c.nodes.push(NodeGene {
-            x: parent.x + rng.range(-0.1, 0.1),
-            y: parent.y + rng.range(-0.1, 0.1),
-            diameter: rng.range(cfg.min_size, cfg.max_size),
-            friction: rng.range(cfg.min_friction, cfg.max_friction),
-        });
-    }
-    if rng.unit() < 0.04 * strength && c.nodes.len() > 3 {
-        let i = rng.index(c.nodes.len());
-        c.nodes.remove(i);
-        c.muscles.retain(|m| m.a as usize != i && m.b as usize != i);
-        for m in &mut c.muscles {
-            if m.a as usize > i {
-                m.a -= 1;
-            }
-            if m.b as usize > i {
-                m.b -= 1;
-            }
-        }
+    if rng.unit() < 0.04 * strength {
+        let _ = structural_mutation_in_place(&mut c, cfg, &mut rng);
     }
     if rng.unit() < 0.04 * strength && c.muscles.len() < cfg.max_muscles {
-        let a = rng.index(c.nodes.len());
-        let b = rng.index(c.nodes.len());
+        let a = rng.index(c.bones.len());
+        let b = rng.index(c.bones.len());
         if a != b {
-            c.muscles.push(muscle(a, b, &c.nodes, &mut rng));
+            c.muscles.push(muscle(a, b, &c.bones, &c.nodes, &mut rng));
         }
     }
-    if rng.unit() < 0.04 * strength && c.muscles.len() > 3 {
+    if rng.unit() < 0.04 * strength && c.muscles.len() > c.bones.len() {
         let i = rng.index(c.muscles.len());
         c.muscles.swap_remove(i);
     }
@@ -630,4 +910,115 @@ pub fn reproduce(
         c.id = (generation as u64 + 1) * cfg.population as u64 + i as u64 + 1;
         c
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn muscle_point(creature: &Creature, bone_id: u32, t: f32) -> [f32; 2] {
+        let bone = creature.bones[bone_id as usize];
+        let a = creature.nodes[bone.a as usize];
+        let b = creature.nodes[bone.b as usize];
+        [a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t]
+    }
+
+    #[test]
+    fn split_bone_preserves_attachments_on_both_halves() {
+        let cfg = Config {
+            max_nodes: 4,
+            ..Config::default()
+        };
+        for split_index in 0..2 {
+            let nodes = vec![
+                NodeGene {
+                    x: 0.0,
+                    y: 0.0,
+                    diameter: 0.08,
+                    friction: 0.5,
+                },
+                NodeGene {
+                    x: 1.0,
+                    y: 0.0,
+                    diameter: 0.08,
+                    friction: 0.5,
+                },
+                NodeGene {
+                    x: 1.0,
+                    y: 1.0,
+                    diameter: 0.08,
+                    friction: 0.5,
+                },
+            ];
+            let mut creature = Creature {
+                nodes,
+                bones: vec![
+                    Bone {
+                        a: 0,
+                        b: 1,
+                        rest_length: 1.0,
+                    },
+                    Bone {
+                        a: 1,
+                        b: 2,
+                        rest_length: 1.0,
+                    },
+                ],
+                muscles: vec![
+                    Muscle {
+                        bone_a: 0,
+                        bone_b: 1,
+                        anchor_a: 0.25,
+                        anchor_b: 0.25,
+                        short: 0.1,
+                        long: 0.2,
+                        period: 1.0,
+                        phase: 0.0,
+                        duty: 0.5,
+                        stiffness: 40.0,
+                    },
+                    Muscle {
+                        bone_a: 0,
+                        bone_b: 1,
+                        anchor_a: 0.75,
+                        anchor_b: 0.75,
+                        short: 0.1,
+                        long: 0.2,
+                        period: 1.0,
+                        phase: 0.5,
+                        duty: 0.5,
+                        stiffness: 40.0,
+                    },
+                ],
+                id: 1,
+                mutability: 1.0,
+            };
+            let old_points: Vec<_> = creature
+                .muscles
+                .iter()
+                .map(|muscle| {
+                    [
+                        muscle_point(&creature, muscle.bone_a, muscle.anchor_a),
+                        muscle_point(&creature, muscle.bone_b, muscle.anchor_b),
+                    ]
+                })
+                .collect();
+            let seed = (0..100)
+                .find(|&seed| Rng::new(seed, 0, 0).index(2) == split_index)
+                .unwrap();
+            assert!(split_bone(&mut creature, &cfg, &mut Rng::new(seed, 0, 0)));
+            assert_eq!(creature.nodes.len(), 4);
+            assert_eq!(creature.bones.len(), 3);
+            for (muscle, points) in creature.muscles.iter().zip(old_points) {
+                let actual = [
+                    muscle_point(&creature, muscle.bone_a, muscle.anchor_a),
+                    muscle_point(&creature, muscle.bone_b, muscle.anchor_b),
+                ];
+                for side in 0..2 {
+                    assert!((actual[side][0] - points[side][0]).abs() < 1e-6);
+                    assert!((actual[side][1] - points[side][1]).abs() < 1e-6);
+                }
+            }
+        }
+    }
 }

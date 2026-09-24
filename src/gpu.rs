@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    evolution::{Muscle, Population},
+    evolution::{Bone, Muscle, Population},
     physics::{self, Node},
     qd::{EvaluationMetrics, TrialMetrics},
 };
@@ -29,6 +29,8 @@ struct TimestampResources {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Meta {
     nodes: u32,
+    bones_start: u32,
+    bone_count: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -39,8 +41,12 @@ struct NodeAdj {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuMuscle {
-    a: u32,
-    b: u32,
+    a0: u32,
+    a1: u32,
+    b0: u32,
+    b1: u32,
+    anchor_a: f32,
+    anchor_b: f32,
     short: f32,
     long: f32,
     inv_period: f32,
@@ -49,6 +55,13 @@ struct GpuMuscle {
     stiffness: f32,
     inv_duty: f32,
     inv_complement: f32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuBone {
+    a: u32,
+    b: u32,
+    rest_length: f32,
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -97,11 +110,13 @@ pub struct Gpu {
 struct BucketBuffers {
     nodes: wgpu::Buffer,
     muscles: wgpu::Buffer,
+    muscle_indices: wgpu::Buffer,
     meta: wgpu::Buffer,
     node_adjacency: wgpu::Buffer,
+    bones: wgpu::Buffer,
     results: wgpu::Buffer,
     bind: wgpu::BindGroup,
-    capacities: [u64; 4],
+    capacities: [u64; 6],
 }
 struct Buffers {
     buckets: [Option<BucketBuffers>; 6],
@@ -116,6 +131,8 @@ struct Batch {
     creatures: Vec<usize>,
     nodes: Vec<Node>,
     muscles: Vec<GpuMuscle>,
+    muscle_indices: Vec<u32>,
+    bones: Vec<GpuBone>,
     metadata: Vec<Meta>,
     node_adjacency: Vec<NodeAdj>,
     stride: usize,
@@ -143,19 +160,12 @@ fn split_five_bucket(population: usize) -> bool {
         || std::env::var_os("EVOLUTION_FORCE_BUCKET5").is_some()
 }
 fn serial_kernels_enabled() -> bool {
-    // Paired full-GUI 100k runs showed this private-array path 1.69x slower.
-    // Keep it available for explicit tests, but use the workgroup path by default.
-    matches!(
-        std::env::var("EVOLUTION_KERNEL").ok().as_deref(),
-        Some("serial")
-    )
+    // This path still uses node-to-node muscles and has no rigid-bone solve.
+    false
 }
 fn lane_kernels_enabled() -> bool {
-    // Barrier-free lane kernels register-spill on long dispatch chunks.
-    // Keep them opt-in until the shader stops thrashing.
-    std::env::var_os("EVOLUTION_LANE_SHADER")
-        .map(|v| v != "0")
-        .unwrap_or(false)
+    // This path still uses node-to-node muscles and has no rigid-bone solve.
+    false
 }
 fn exact_cos_enabled() -> bool {
     std::env::var_os("EVOLUTION_EXACT_COS").is_some()
@@ -168,12 +178,12 @@ fn apply_fast_cos(source: String) -> String {
     let fast_cos_function = "fn fast_cos_pi(x:f32)->f32 { let y=(x-0.5)*3.14159265359; let z=y*y; var p=fma(z,-2.50521084e-8,2.75573192e-6); p=fma(z,p,-1.98412698e-4); p=fma(z,p,8.33333377e-3); p=fma(z,p,-1.66666672e-1); p=fma(z,p,1.0); return -y*p; }\n";
     source
         .replace(
-            "cos(3.14159265359*phase*m.inv_duty)",
-            "fast_cos_pi(phase*m.inv_duty)",
+            "cos(3.14159265359 * phase * m.inv_duty)",
+            "fast_cos_pi(phase * m.inv_duty)",
         )
         .replace(
-            "cos(3.14159265359*(phase-m.duty)*m.inv_complement)",
-            "fast_cos_pi((phase-m.duty)*m.inv_complement)",
+            "cos(3.14159265359 * (phase - m.duty) * m.inv_complement)",
+            "fast_cos_pi((phase - m.duty) * m.inv_complement)",
         )
         .replace(
             "fn muscle_length",
@@ -302,6 +312,26 @@ impl Gpu {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -313,7 +343,7 @@ impl Gpu {
         ensure!(
             wide_source.matches("WORKGROUPX2").count() == 2
                 && wide_source.matches("@workgroup_size(WORKGROUP)").count() == 1
-                && wide_source.matches("half=WORKGROUPu").count() == 1,
+                && wide_source.matches("let half = WORKGROUPu").count() == 1,
             "The workgroup physics variant needs its source transform updated"
         );
         let variant_source = |lanes: u32| {
@@ -460,7 +490,7 @@ impl Gpu {
         })
     }
     fn buffers(&mut self, batches: &[Batch], param_count: u64, cfg: &Config) -> Result<()> {
-        let mut specs: [Option<([u64; 4], u64)>; 6] = [None; 6];
+        let mut specs: [Option<([u64; 6], u64)>; 6] = [None; 6];
         let mut result_count = 0u64;
         for batch in batches {
             ensure!(
@@ -474,6 +504,8 @@ impl Gpu {
                 (std::mem::size_of_val(batch.muscles.as_slice()) as u64).max(32),
                 count.max(1),
                 (std::mem::size_of_val(batch.node_adjacency.as_slice()) as u64).max(32),
+                (std::mem::size_of_val(batch.bones.as_slice()) as u64).max(32),
+                (std::mem::size_of_val(batch.muscle_indices.as_slice()) as u64).max(32),
             ]
             .map(u64::next_power_of_two);
             ensure!(specs[bucket].is_none(), "Duplicate GPU bucket stride");
@@ -515,6 +547,8 @@ impl Gpu {
                         * (std::mem::size_of::<Meta>() as u64
                             + std::mem::size_of::<GpuResult>() as u64)
                     + capacities[3]
+                    + capacities[4]
+                    + capacities[5]
             })
             .sum();
         let params_bytes = params_stride * param_count;
@@ -533,6 +567,8 @@ impl Gpu {
                     && capacities[2] * std::mem::size_of::<GpuResult>() as u64
                         <= limits.max_storage_buffer_binding_size
                     && capacities[3] <= limits.max_storage_buffer_binding_size
+                    && capacities[4] <= limits.max_storage_buffer_binding_size
+                    && capacities[5] <= limits.max_storage_buffer_binding_size
             }),
             "GPU batch exceeds storage binding limits"
         );
@@ -570,12 +606,14 @@ impl Gpu {
                 storage | wgpu::BufferUsages::COPY_SRC,
             );
             let muscles = create("Muscle genomes", capacities[1], storage);
+            let muscle_indices = create("Muscle node adjacency indices", capacities[5], storage);
             let meta = create(
                 "Creature node counts",
                 capacities[2] * std::mem::size_of::<Meta>() as u64,
                 storage,
             );
             let node_adjacency = create("Node muscle adjacency", capacities[3], storage);
+            let bones = create("Bone genomes", capacities[4], storage);
             let results = create(
                 "Fitness and behavior descriptors",
                 capacities[2] * std::mem::size_of::<GpuResult>() as u64,
@@ -613,13 +651,23 @@ impl Gpu {
                         binding: 5,
                         resource: node_adjacency.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: bones.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: muscle_indices.as_entire_binding(),
+                    },
                 ],
             });
             bucket_buffers[bucket] = Some(BucketBuffers {
                 nodes,
                 muscles,
+                muscle_indices,
                 meta,
                 node_adjacency,
+                bones,
                 results,
                 bind,
                 capacities,
@@ -731,15 +779,36 @@ impl Gpu {
         nodes[..c.nodes.len()].copy_from_slice(&physics::nodes(c));
         let metadata = vec![Meta {
             nodes: c.nodes.len() as u32,
+            bones_start: 0,
+            bone_count: c.bones.len() as u32,
         }];
         let mut node_adjacency = vec![NodeAdj::default(); stride];
-        let mut muscles = Vec::<GpuMuscle>::with_capacity(c.muscles.len() * 2);
-        append_adjacency_muscles(&c.muscles, c.nodes.len(), &mut node_adjacency, &mut muscles);
+        let mut muscles = Vec::<GpuMuscle>::with_capacity(c.muscles.len());
+        let mut muscle_indices = Vec::<u32>::with_capacity(c.muscles.len() * 4);
+        append_adjacency_muscles(
+            &c.muscles,
+            &c.bones,
+            c.nodes.len(),
+            &mut node_adjacency,
+            &mut muscles,
+            &mut muscle_indices,
+        );
+        let bones = c
+            .bones
+            .iter()
+            .map(|bone| GpuBone {
+                a: bone.a,
+                b: bone.b,
+                rest_length: bone.rest_length,
+            })
+            .collect();
         let batch = Batch {
             slots: vec![0],
             creatures: vec![0],
             nodes,
             muscles,
+            muscle_indices,
+            bones,
             metadata,
             node_adjacency,
             stride,
@@ -782,6 +851,13 @@ impl Gpu {
                 .write_buffer(&resources.nodes, 0, bytemuck::cast_slice(&batch.nodes));
             self.queue
                 .write_buffer(&resources.muscles, 0, bytemuck::cast_slice(&batch.muscles));
+            self.queue.write_buffer(
+                &resources.muscle_indices,
+                0,
+                bytemuck::cast_slice(&batch.muscle_indices),
+            );
+            self.queue
+                .write_buffer(&resources.bones, 0, bytemuck::cast_slice(&batch.bones));
             self.queue
                 .write_buffer(&resources.meta, 0, bytemuck::cast_slice(&batch.metadata));
             self.queue.write_buffer(
@@ -1020,7 +1096,7 @@ fn pack_batches(pop: &Population, indices: &[usize], cfg: &Config) -> Result<Vec
             if group.is_empty() {
                 return None;
             }
-            // Similar muscle counts per warp keep force-loop divergence low.
+            // Similar body sizes and actuator counts keep force-loop divergence low.
             group.sort_unstable_by_key(|&(_, i)| {
                 (pop.genomes[i].muscle_count, pop.genomes[i].node_count, i)
             });
@@ -1029,7 +1105,10 @@ fn pack_batches(pop: &Population, indices: &[usize], cfg: &Config) -> Result<Vec
                 .iter()
                 .map(|&(_, i)| pop.genomes[i].muscle_count)
                 .sum();
-            let mut muscles = Vec::<GpuMuscle>::with_capacity(muscle_count * 2);
+            let bone_count: usize = group.iter().map(|&(_, i)| pop.genomes[i].bone_count).sum();
+            let mut muscles = Vec::<GpuMuscle>::with_capacity(muscle_count);
+            let mut muscle_indices = Vec::<u32>::with_capacity(muscle_count * 4);
+            let mut bones = Vec::<GpuBone>::with_capacity(bone_count);
             let mut node_adjacency = vec![NodeAdj::default(); group.len() * stride];
             let mut metadata = Vec::with_capacity(group.len());
             for (j, &(_, i)) in group.iter().enumerate() {
@@ -1041,15 +1120,27 @@ fn pack_batches(pop: &Population, indices: &[usize], cfg: &Config) -> Result<Vec
                 {
                     *dst = physics::node(gene);
                 }
+                let bone_start = bones.len();
+                let source_bones =
+                    &pop.bones[genome.bone_start..genome.bone_start + genome.bone_count];
+                bones.extend(source_bones.iter().map(|bone| GpuBone {
+                    a: bone.a,
+                    b: bone.b,
+                    rest_length: bone.rest_length,
+                }));
                 metadata.push(Meta {
                     nodes: genes.len() as u32,
+                    bones_start: bone_start as u32,
+                    bone_count: genome.bone_count as u32,
                 });
                 let muscle_end = genome.muscle_start + genome.muscle_count;
                 append_adjacency_muscles(
                     &pop.muscles[genome.muscle_start..muscle_end],
+                    source_bones,
                     genes.len(),
                     &mut node_adjacency[j * stride..(j + 1) * stride],
                     &mut muscles,
+                    &mut muscle_indices,
                 );
             }
             Some(Batch {
@@ -1057,6 +1148,8 @@ fn pack_batches(pop: &Population, indices: &[usize], cfg: &Config) -> Result<Vec
                 creatures: group.iter().map(|&(_, creature)| creature).collect(),
                 nodes,
                 muscles,
+                muscle_indices,
+                bones,
                 metadata,
                 node_adjacency,
                 stride,
@@ -1100,22 +1193,33 @@ fn merge_metrics(
 }
 fn append_adjacency_muscles(
     source: &[Muscle],
+    source_bones: &[Bone],
     node_count: usize,
     adjacency: &mut [NodeAdj],
     muscles: &mut Vec<GpuMuscle>,
+    muscle_indices: &mut Vec<u32>,
 ) {
     debug_assert!(node_count <= adjacency.len() && node_count <= 64);
     let mut counts = [0u32; 64];
     let mut cursors = [0usize; 64];
     for muscle in source {
-        let a = muscle.a as usize;
-        let b = muscle.b as usize;
-        debug_assert!(a < node_count && b < node_count && a != b);
-        counts[a] += 1;
-        counts[b] += 1;
+        let bone_a = source_bones[muscle.bone_a as usize];
+        let bone_b = source_bones[muscle.bone_b as usize];
+        let endpoints = [
+            bone_a.a as usize,
+            bone_a.b as usize,
+            bone_b.a as usize,
+            bone_b.b as usize,
+        ];
+        for (i, &node) in endpoints.iter().enumerate() {
+            debug_assert!(node < node_count);
+            if !endpoints[..i].contains(&node) {
+                counts[node] += 1;
+            }
+        }
     }
 
-    let mut next = muscles.len();
+    let mut next = muscle_indices.len();
     for node in 0..node_count {
         adjacency[node] = NodeAdj {
             start: next as u32,
@@ -1124,15 +1228,25 @@ fn append_adjacency_muscles(
         cursors[node] = next;
         next += counts[node] as usize;
     }
-    muscles.resize(next, <GpuMuscle as bytemuck::Zeroable>::zeroed());
+    muscle_indices.resize(next, 0);
 
     // Fill each node's list in genome order, matching the original force sum order.
     for muscle in source {
-        let a = muscle.a as usize;
-        let b = muscle.b as usize;
+        let bone_a = source_bones[muscle.bone_a as usize];
+        let bone_b = source_bones[muscle.bone_b as usize];
+        let endpoints = [
+            bone_a.a as usize,
+            bone_a.b as usize,
+            bone_b.a as usize,
+            bone_b.b as usize,
+        ];
         let packed = GpuMuscle {
-            a: muscle.a,
-            b: muscle.b,
+            a0: bone_a.a,
+            a1: bone_a.b,
+            b0: bone_b.a,
+            b1: bone_b.b,
+            anchor_a: muscle.anchor_a,
+            anchor_b: muscle.anchor_b,
             short: muscle.short,
             long: muscle.long,
             inv_period: 1.0 / muscle.period,
@@ -1142,12 +1256,17 @@ fn append_adjacency_muscles(
             inv_duty: 1.0 / muscle.duty,
             inv_complement: 1.0 / (1.0 - muscle.duty),
         };
-        muscles[cursors[a]] = packed;
-        cursors[a] += 1;
-        muscles[cursors[b]] = packed;
-        cursors[b] += 1;
+        let muscle_index = muscles.len() as u32;
+        muscles.push(packed);
+        for (i, &node) in endpoints.iter().enumerate() {
+            if !endpoints[..i].contains(&node) {
+                muscle_indices[cursors[node]] = muscle_index;
+                cursors[node] += 1;
+            }
+        }
     }
 }
+
 fn read_buffer<T: bytemuck::Pod>(
     device: &wgpu::Device,
     buffer: &wgpu::Buffer,

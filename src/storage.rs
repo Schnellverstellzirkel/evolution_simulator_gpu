@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    evolution::{self, CandidatePlan, Creature, FAILED, Population, Rng},
+    evolution::{self, CandidatePlan, Creature, FAILED, LegacyMuscle, Population, Rng},
     qd::{self, CmaEmitter, Emitter, EmitterStats, QdArchive, TrialMetrics},
 };
 use anyhow::{Context, Result, ensure};
@@ -859,7 +859,8 @@ impl Experiment {
         Ok(())
     }
 }
-const MAGIC: &[u8; 8] = b"EVORUST2";
+const MAGIC: &[u8; 8] = b"EVORUST3";
+const V2_MAGIC: &[u8; 8] = b"EVORUST2";
 const LEGACY_MAGIC: &[u8; 8] = b"EVORUST1";
 fn fitness_context_changed(old: &Config, new: &Config) -> bool {
     old.duration != new.duration
@@ -896,7 +897,7 @@ pub fn load(path: &Path) -> Result<Experiment> {
     let mut magic = [0; 8];
     file.read_exact(&mut magic)?;
     ensure!(
-        &magic == MAGIC || &magic == LEGACY_MAGIC,
+        &magic == MAGIC || &magic == V2_MAGIC || &magic == LEGACY_MAGIC,
         "Unsupported checkpoint format/version"
     );
     let mut decoder = zstd::stream::read::Decoder::new(file)?;
@@ -906,6 +907,12 @@ pub fn load(path: &Path) -> Result<Experiment> {
             .with_limit(24 * 1024 * 1024 * 1024)
             .deserialize_from(&mut decoder)?;
         legacy.into()
+    } else if &magic == V2_MAGIC {
+        let previous: V2Experiment = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(24 * 1024 * 1024 * 1024)
+            .deserialize_from(&mut decoder)?;
+        previous.into()
     } else {
         bincode::DefaultOptions::new()
             .with_fixint_encoding()
@@ -948,7 +955,104 @@ pub fn load(path: &Path) -> Result<Experiment> {
     Ok(experiment)
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
+struct V2Genome {
+    node_start: usize,
+    node_count: usize,
+    muscle_start: usize,
+    muscle_count: usize,
+    id: u64,
+    mutability: f32,
+}
+#[derive(Serialize, Deserialize)]
+struct V2Creature {
+    nodes: Vec<crate::evolution::NodeGene>,
+    muscles: Vec<LegacyMuscle>,
+    id: u64,
+    mutability: f32,
+}
+#[derive(Serialize, Deserialize)]
+struct V2Population {
+    genomes: Vec<V2Genome>,
+    nodes: Vec<crate::evolution::NodeGene>,
+    muscles: Vec<LegacyMuscle>,
+}
+#[derive(Serialize, Deserialize)]
+struct V2Stats {
+    generation: u32,
+    best: f32,
+    median: f32,
+    worst: f32,
+    mean: f32,
+    failed: usize,
+    seconds: f64,
+    population: usize,
+    percentiles: Vec<f32>,
+    histogram: Vec<(i32, u32)>,
+    species: Vec<(usize, usize, u32)>,
+    representatives: Vec<V2Creature>,
+    config: Config,
+    archive_cells: usize,
+    qd_score: f64,
+    archive_coverage: f32,
+    emitters: [EmitterStats; qd::EMITTER_COUNT],
+}
+#[allow(dead_code)]
+#[derive(Serialize, Deserialize)]
+struct V2Elite {
+    niche: qd::Niche,
+    descriptor: qd::Descriptor,
+    creature: V2Creature,
+    fitness: f32,
+    emitter: Emitter,
+    improved_generation: u32,
+    protected_until: u32,
+    visits: u64,
+    topology: qd::Topology,
+}
+#[allow(dead_code)]
+#[derive(Serialize, Deserialize)]
+struct V2QdArchive {
+    entries: Vec<V2Elite>,
+    qd_score: f64,
+}
+#[allow(dead_code)]
+#[derive(Serialize, Deserialize)]
+struct V2CmaEmitter {
+    niche: qd::Niche,
+    topology: qd::Topology,
+    template: V2Creature,
+    mean: Vec<f32>,
+    covariance: Vec<f32>,
+    path_c: Vec<f32>,
+    path_sigma: Vec<f32>,
+    sigma: f32,
+    last_used_generation: u32,
+}
+#[allow(dead_code)]
+#[derive(Serialize, Deserialize)]
+struct V2Experiment {
+    config: Config,
+    pending: Option<Config>,
+    generation: u32,
+    population: V2Population,
+    scores: Vec<f32>,
+    evaluated: usize,
+    stage: Stage,
+    ranks: Vec<usize>,
+    parents: Vec<usize>,
+    history: Vec<V2Stats>,
+    evaluation_seconds: f64,
+    archive: V2QdArchive,
+    emitter_stats: [EmitterStats; qd::EMITTER_COUNT],
+    cma_emitters: Vec<V2CmaEmitter>,
+    candidate_emitters: Vec<Emitter>,
+    candidate_cma: Vec<Option<usize>>,
+    protected_until: Vec<u32>,
+    trial_metrics: Vec<TrialMetrics>,
+    qd_version: u32,
+}
+#[derive(Serialize, Deserialize)]
 struct LegacyStats {
     generation: u32,
     best: f32,
@@ -961,15 +1065,15 @@ struct LegacyStats {
     percentiles: Vec<f32>,
     histogram: Vec<(i32, u32)>,
     species: Vec<(usize, usize, u32)>,
-    representatives: Vec<Creature>,
+    representatives: Vec<V2Creature>,
     config: Config,
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct LegacyExperiment {
     config: Config,
     pending: Option<Config>,
     generation: u32,
-    population: Population,
+    population: V2Population,
     scores: Vec<f32>,
     evaluated: usize,
     stage: Stage,
@@ -978,14 +1082,115 @@ struct LegacyExperiment {
     history: Vec<LegacyStats>,
     evaluation_seconds: f64,
 }
+fn migrate_legacy_population(old: V2Population, cfg: &Config) -> Population {
+    let mut population = Population::default();
+    for genome in old.genomes {
+        let nodes = old.nodes[genome.node_start..genome.node_start + genome.node_count].to_vec();
+        let muscles = &old.muscles[genome.muscle_start..genome.muscle_start + genome.muscle_count];
+        population.push(evolution::migrate_legacy_creature(
+            nodes,
+            muscles,
+            genome.id,
+            genome.mutability,
+            cfg,
+        ));
+    }
+    population
+}
+fn migrate_legacy_creature(old: V2Creature, cfg: &Config) -> Creature {
+    evolution::migrate_legacy_creature(old.nodes, &old.muscles, old.id, old.mutability, cfg)
+}
+fn migrate_legacy_stats(old: LegacyStats) -> Stats {
+    let cfg = old.config.clone();
+    Stats {
+        generation: old.generation,
+        best: old.best,
+        median: old.median,
+        worst: old.worst,
+        mean: old.mean,
+        failed: old.failed,
+        seconds: old.seconds,
+        population: old.population,
+        percentiles: old.percentiles,
+        histogram: old.histogram,
+        species: old.species,
+        representatives: old
+            .representatives
+            .into_iter()
+            .map(|creature| migrate_legacy_creature(creature, &cfg))
+            .collect(),
+        config: old.config,
+        archive_cells: 0,
+        qd_score: 0.0,
+        archive_coverage: 0.0,
+        emitters: [EmitterStats::default(); qd::EMITTER_COUNT],
+    }
+}
+fn migrate_v2_stats(old: V2Stats) -> Stats {
+    let cfg = old.config.clone();
+    Stats {
+        generation: old.generation,
+        best: old.best,
+        median: old.median,
+        worst: old.worst,
+        mean: old.mean,
+        failed: old.failed,
+        seconds: old.seconds,
+        population: old.population,
+        percentiles: old.percentiles,
+        histogram: old.histogram,
+        species: old.species,
+        representatives: old
+            .representatives
+            .into_iter()
+            .map(|creature| migrate_legacy_creature(creature, &cfg))
+            .collect(),
+        config: old.config,
+        archive_cells: old.archive_cells,
+        qd_score: old.qd_score,
+        archive_coverage: old.archive_coverage,
+        emitters: old.emitters,
+    }
+}
+impl From<V2Experiment> for Experiment {
+    fn from(old: V2Experiment) -> Self {
+        let population = old.config.population;
+        let config = old.config;
+        Self {
+            population: migrate_legacy_population(old.population, &config),
+            history: old.history.into_iter().map(migrate_v2_stats).collect(),
+            config,
+            pending: old.pending,
+            generation: old.generation,
+            scores: old.scores,
+            parent_scores: vec![f32::NAN; population],
+            evaluated: old.evaluated,
+            stage: old.stage,
+            ranks: old.ranks,
+            parents: old.parents,
+            evaluation_seconds: old.evaluation_seconds,
+            archive: QdArchive::default(),
+            emitter_stats: [EmitterStats::default(); qd::EMITTER_COUNT],
+            cma_emitters: vec![],
+            candidate_emitters: vec![Emitter::Restart; population],
+            candidate_cma: vec![None; population],
+            candidate_parent_ids: vec![None; population],
+            morphology_reserve_override: None,
+            protected_until: vec![0; population],
+            trial_metrics: vec![TrialMetrics::default(); population],
+            qd_version: 0,
+        }
+    }
+}
 impl From<LegacyExperiment> for Experiment {
     fn from(legacy: LegacyExperiment) -> Self {
         let population = legacy.config.population;
+        let config = legacy.config;
         Self {
-            config: legacy.config,
+            config: config.clone(),
             pending: legacy.pending,
             generation: legacy.generation,
-            population: legacy.population,
+            population: migrate_legacy_population(legacy.population, &config),
             scores: legacy.scores,
             parent_scores: vec![f32::NAN; population],
             evaluated: legacy.evaluated,
@@ -995,25 +1200,7 @@ impl From<LegacyExperiment> for Experiment {
             history: legacy
                 .history
                 .into_iter()
-                .map(|s| Stats {
-                    generation: s.generation,
-                    best: s.best,
-                    median: s.median,
-                    worst: s.worst,
-                    mean: s.mean,
-                    failed: s.failed,
-                    seconds: s.seconds,
-                    population: s.population,
-                    percentiles: s.percentiles,
-                    histogram: s.histogram,
-                    species: s.species,
-                    representatives: s.representatives,
-                    config: s.config,
-                    archive_cells: 0,
-                    qd_score: 0.0,
-                    archive_coverage: 0.0,
-                    emitters: [EmitterStats::default(); qd::EMITTER_COUNT],
-                })
+                .map(migrate_legacy_stats)
                 .collect(),
             evaluation_seconds: legacy.evaluation_seconds,
             archive: QdArchive::default(),
@@ -1066,4 +1253,134 @@ pub fn export_csv(path: &Path, history: &[Stats]) -> Result<()> {
     }
     w.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn v2_checkpoint_migrates_node_muscles_to_bones() {
+        let config = Config {
+            population: 2,
+            random_seed: false,
+            ..Config::default()
+        };
+        let nodes = vec![
+            crate::evolution::NodeGene {
+                x: 0.0,
+                y: 0.0,
+                diameter: 0.08,
+                friction: 0.5,
+            },
+            crate::evolution::NodeGene {
+                x: 0.3,
+                y: 0.0,
+                diameter: 0.08,
+                friction: 0.5,
+            },
+            crate::evolution::NodeGene {
+                x: 0.15,
+                y: 0.25,
+                diameter: 0.08,
+                friction: 0.5,
+            },
+        ];
+        let muscles = vec![
+            LegacyMuscle {
+                a: 0,
+                b: 1,
+                short: 0.1,
+                long: 0.2,
+                period: 1.0,
+                phase: 0.0,
+                duty: 0.5,
+                stiffness: 40.0,
+            },
+            LegacyMuscle {
+                a: 1,
+                b: 2,
+                short: 0.1,
+                long: 0.2,
+                period: 1.0,
+                phase: 0.2,
+                duty: 0.5,
+                stiffness: 40.0,
+            },
+            LegacyMuscle {
+                a: 2,
+                b: 0,
+                short: 0.1,
+                long: 0.2,
+                period: 1.0,
+                phase: 0.4,
+                duty: 0.5,
+                stiffness: 40.0,
+            },
+        ];
+        let mut old_population = V2Population {
+            genomes: Vec::new(),
+            nodes: Vec::new(),
+            muscles: Vec::new(),
+        };
+        for id in 1..=2 {
+            let node_start = old_population.nodes.len();
+            let muscle_start = old_population.muscles.len();
+            old_population.nodes.extend_from_slice(&nodes);
+            old_population.muscles.extend_from_slice(&muscles);
+            old_population.genomes.push(V2Genome {
+                node_start,
+                node_count: nodes.len(),
+                muscle_start,
+                muscle_count: muscles.len(),
+                id,
+                mutability: 1.0,
+            });
+        }
+        let old = V2Experiment {
+            config: config.clone(),
+            pending: None,
+            generation: 5,
+            population: old_population,
+            scores: vec![1.0, 1.0],
+            evaluated: 2,
+            stage: Stage::Evaluated,
+            ranks: vec![],
+            parents: vec![],
+            history: vec![],
+            evaluation_seconds: 1.0,
+            archive: V2QdArchive {
+                entries: vec![],
+                qd_score: 0.0,
+            },
+            emitter_stats: [EmitterStats::default(); qd::EMITTER_COUNT],
+            cma_emitters: vec![],
+            candidate_emitters: vec![Emitter::Cma; 2],
+            candidate_cma: vec![None; 2],
+            protected_until: vec![0; 2],
+            trial_metrics: vec![TrialMetrics::default(); 2],
+            qd_version: qd::VERSION - 1,
+        };
+        let payload = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .serialize(&old)
+            .unwrap();
+        let compressed = zstd::stream::encode_all(payload.as_slice(), 3).unwrap();
+        let mut bytes = V2_MAGIC.to_vec();
+        bytes.extend(compressed);
+        let checkpoint =
+            std::env::temp_dir().join(format!("evolution-v2-migration-{}.evo", std::process::id()));
+        std::fs::write(&checkpoint, bytes).unwrap();
+        let loaded = load(&checkpoint).unwrap();
+        let _ = std::fs::remove_file(checkpoint);
+
+        assert_eq!(loaded.qd_version, qd::VERSION);
+        assert_eq!(loaded.stage, Stage::Ready);
+        assert!(loaded.scores.iter().all(|score| score.is_nan()));
+        assert_eq!(loaded.population.genomes.len(), 2);
+        loaded.population.validate(&config).unwrap();
+        for genome in &loaded.population.genomes {
+            assert_eq!(genome.bone_count, genome.node_count - 1);
+        }
+    }
 }
