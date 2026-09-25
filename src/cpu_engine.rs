@@ -21,8 +21,6 @@ const ZERO: V = [0.0; L];
 const MAX_MUSCLE_FORCE: f32 = 5.0;
 const MAX_NODE_SPEED: f32 = 5.0;
 const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
-const MAX_BONE_TURN_COS: f32 = 0.992_197_7;
-const MAX_BONE_TURN_TAN: f32 = 0.125_655_14;
 const PI: f32 = 3.141_592_653_59;
 
 #[derive(Clone, Copy)]
@@ -246,8 +244,11 @@ impl Group {
     fn simulate(&self, cfg: &Config) -> Vec<GpuResult> {
         let n = self.nodes;
         let exact = std::env::var_os("EVOLUTION_EXACT_COS").is_some();
-        let total_steps = physics::SETTLE + cfg.steps();
-        let air = cfg.air_retention.sqrt();
+        let total_steps = physics::settle() + cfg.steps();
+        let air = physics::air_per_step(cfg.air_retention);
+        let settle = physics::settle();
+        let sample_interval = physics::sample_interval();
+        let (turn_cos_limit, turn_tan) = physics::turn_limits();
         let ground_friction = cfg.ground_friction;
         let ground = cfg.ground;
         let load = |v: &Vec<V>| -> Vec<F> { v.iter().map(F::load).collect() };
@@ -262,7 +263,8 @@ impl Group {
         let inv_mass: Vec<F> = mass.iter().map(|&m| F::splat(1.0) / m).collect();
         let total_mass = mass.iter().fold(F::splat(0.0), |t, &m| t + m);
         let inv_total_mass = F::splat(1.0) / total_mass;
-        let dt = 1.0f32 / 120.0;
+        let dt = physics::dt();
+        let rate = physics::rate() as f32;
         let rad_a = load(&self.rad_a);
         let rad_b = load(&self.rad_b);
         let muscles: Vec<MuscleF> = self
@@ -308,7 +310,7 @@ impl Group {
         let mut turns = [0.0f32; L];
 
         for tick in 0..total_steps {
-            if tick == physics::SETTLE {
+            if tick == settle {
                 let mut avg = zero;
                 let mut low = F::splat(1e20);
                 for j in 0..n {
@@ -328,7 +330,7 @@ impl Group {
             sx.fill(zero);
             sy.fill(zero);
 
-            let time_now = (tick.max(physics::SETTLE) - physics::SETTLE) as f32 * dt;
+            let time_now = (tick.max(settle) - settle) as f32 * dt;
             let time = F::splat(time_now);
             let previous_time = F::splat((time_now - dt).max(0.0));
             for (shape, m) in self.muscles.iter().zip(&muscles) {
@@ -350,7 +352,7 @@ impl Group {
                 let relative = (vbx - vax) * dir_x + (vby - vay) * dir_y;
                 let target_speed = (muscle_length(m, time, exact)
                     - muscle_length(m, previous_time, exact))
-                    * 120.0;
+                    * rate;
                 let magnitude = (-(target_speed * m.stiffness) * 0.25 + relative * 0.15)
                     .max(F::splat(-MAX_MUSCLE_FORCE))
                     .min(F::splat(MAX_MUSCLE_FORCE));
@@ -365,8 +367,8 @@ impl Group {
                 }
             }
 
-            let gravity = if tick >= physics::SETTLE { cfg.gravity } else { 0.0 };
-            let colliding = tick >= physics::SETTLE && ground;
+            let gravity = if tick >= settle { cfg.gravity } else { 0.0 };
+            let colliding = tick >= settle && ground;
             for j in 0..n {
                 let mut vel_x = (vx[j] + (sx[j] * inv_mass[j]) * dt) * air;
                 let mut vel_y = (vy[j] + (sy[j] * inv_mass[j] - gravity) * dt) * air;
@@ -432,7 +434,7 @@ impl Group {
                 target_x += px[j] * mass[j];
                 target_y += py[j] * mass[j];
             }
-            let turn_cos = F::splat(MAX_BONE_TURN_COS);
+            let turn_cos = F::splat(turn_cos_limit);
             for (b, &(a, c)) in self.bones.iter().enumerate() {
                 let dx = sx[c] - sx[a];
                 let dy = sy[c] - sy[a];
@@ -451,8 +453,8 @@ impl Group {
                 if turn.any() {
                     let cross = prev_x * dir_y - prev_y * dir_x;
                     let sign = F::select(cross.lt(zero), F::splat(-1.0), one);
-                    let tx = prev_x - prev_y * sign * MAX_BONE_TURN_TAN;
-                    let ty = prev_y + prev_x * sign * MAX_BONE_TURN_TAN;
+                    let tx = prev_x - prev_y * sign * turn_tan;
+                    let ty = prev_y + prev_x * sign * turn_tan;
                     let length = (tx * tx + ty * ty).sqrt();
                     dir_x = F::select(turn, tx / length, dir_x);
                     dir_y = F::select(turn, ty / length, dir_y);
@@ -512,7 +514,7 @@ impl Group {
                 }
             }
 
-            if tick >= physics::SETTLE {
+            if tick >= settle {
                 let mut center = zero;
                 let mut contacts = zero;
                 let mut low = F::splat(1e20);
@@ -531,12 +533,12 @@ impl Group {
                 height_sum += high - low;
                 low_center = low_center.min(center);
                 high_center = high_center.max(center);
-                let sample = tick == physics::SETTLE || (tick - physics::SETTLE) % 4 == 0;
+                let sample = tick == settle || (tick - settle) % sample_interval == 0;
                 if sample {
                     let c = center.to_array();
                     for l in 0..L {
                         let c = c[l];
-                        if tick == physics::SETTLE {
+                        if tick == settle {
                             previous_center[l] = c;
                             extremum[l] = c;
                             trend[l] = 0.0;
@@ -570,8 +572,8 @@ impl Group {
             }
         }
 
-        let timed_steps = total_steps.saturating_sub(physics::SETTLE).max(1) as f32;
-        let timed = total_steps > physics::SETTLE;
+        let timed_steps = total_steps.saturating_sub(settle).max(1) as f32;
+        let timed = total_steps > settle;
         let px: Vec<[f32; L]> = px.iter().map(|v| v.to_array()).collect();
         let failed: Vec<[f32; L]> = failed.iter().map(|v| v.to_array()).collect();
         let ground_contact = ground_contact.to_array();
@@ -606,7 +608,7 @@ impl Group {
                         0.0
                     },
                     gait_frequency: if timed {
-                        turns[l] * 0.5 / ((total_steps - physics::SETTLE) as f32 / 120.0)
+                        turns[l] * 0.5 / ((total_steps - settle) as f32 / rate)
                     } else {
                         0.0
                     },

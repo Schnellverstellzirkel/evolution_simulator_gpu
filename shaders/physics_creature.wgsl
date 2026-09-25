@@ -80,10 +80,13 @@ const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
 const MAX_MUSCLE_FORCE: f32 = 5.0;
 const MAX_NODE_SPEED: f32 = 5.0;
 const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
-const MAX_BONE_TURN_COS: f32 = 0.9921977;
-const MAX_BONE_TURN_TAN: f32 = 0.12565514;
+const MAX_BONE_TURN_COS: f32 = TURNCOS;
+const MAX_BONE_TURN_TAN: f32 = TURNTAN;
 
-const DT: f32 = 1.0 / 120.0;
+const RATE: f32 = PHYSICSRATE;
+const DT: f32 = 1.0 / RATE;
+const SETTLE: u32 = SETTLESTEPSu;
+const SAMPLE: u32 = SAMPLEINTERVALu;
 
 fn limited_muscle_length(m: Muscle, time: f32) -> f32 {
     let amplitude = m.amplitude;
@@ -193,7 +196,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
 
     for (var s = 0u; s < p.steps; s++) {
         let tick = p.tick + s;
-        if tick == 200u {
+        if tick == SETTLE {
             var avg = 0.0;
             var mass_sum = 0.0;
             var low = 1e20;
@@ -220,7 +223,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             scr[k] = vec2f(0.0);
         }
 
-        let time = f32(max(tick, 200u) - 200u) * DT;
+        let time = f32(max(tick, SETTLE) - SETTLE) * DT;
         for (var j = 0u; j < muscle_count; j++) {
             let field = tile.x + j * MUSCLE_FIELDS * TILE + tl;
             let packed = bitcast<u32>(muscle_data[field]);
@@ -248,7 +251,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             let dir = d * (1.0 / max(length(d), 1e-6));
             let relative = dot(velocity_b - velocity_a, dir);
             let target_speed = (limited_muscle_length(m, time)
-                - limited_muscle_length(m, max(time - DT, 0.0))) * 120.0;
+                - limited_muscle_length(m, max(time - DT, 0.0))) * RATE;
             let magnitude = clamp(-target_speed * m.stiffness * 0.25
                 + relative * 0.15, -MAX_MUSCLE_FORCE, MAX_MUSCLE_FORCE);
             let push = dir * magnitude;
@@ -273,7 +276,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         }
 
         var gravity = 0.0;
-        if tick >= 200u { gravity = p.gravity; }
+        if tick >= SETTLE { gravity = p.gravity; }
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
             let k = j * WG + lane;
@@ -283,7 +286,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 n.vel = (n.vel + (force * inv_mass[j] - vec2f(0.0, gravity)) * DT) * p.air;
                 n.vel = limit_speed(n.vel);
                 n.pos += n.vel * DT;
-                if tick >= 200u { n = collide(n); }
+                if tick >= SETTLE { n = collide(n); }
                 if !all(abs(n.pos) < vec2f(1e6)) || !all(abs(n.vel) < vec2f(1e6)) {
                     failed[j] = 1.0;
                     n.pos = vec2f(0.0);
@@ -294,7 +297,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             }
         }
 
-        let grounded = tick >= 200u && p.ground > 0.0;
+        let grounded = tick >= SETTLE && p.ground > 0.0;
         for (var iteration = 0u; iteration < BONE_SOLVE_ITERATIONS; iteration++) {
             for (var j = 0u; j < MAXB; j++) {
                 if j >= bone_count { break; }
@@ -418,7 +421,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             }
         }
 
-        if tick >= 200u {
+        if tick >= SETTLE {
             var center_y = 0.0;
             var contacts = 0.0;
             var low = 1e20;
@@ -439,12 +442,12 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             metrics.height_sum += high - low;
             metrics.vertical_oscillation = min(metrics.vertical_oscillation, center_y);
             metrics.gait_frequency = max(metrics.gait_frequency, center_y);
-            if tick == 200u {
+            if tick == SETTLE {
                 metrics.previous_center_y = center_y;
                 metrics.vertical_extremum = center_y;
                 metrics.vertical_trend = 0.0;
                 metrics.gait_turns = 0.0;
-            } else if (tick - 200u) % 4u == 0u {
+            } else if (tick - SETTLE) % SAMPLE == 0u {
                 let delta = center_y - metrics.previous_center_y;
                 if metrics.vertical_trend == 0.0 {
                     if abs(delta) > 0.0005 {
@@ -484,7 +487,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             if failures > 0.0 {
                 metrics.fitness = -1e20;
             } else {
-                let timed_steps = max(p.total_steps - 200u, 1u);
+                let timed_steps = max(p.total_steps - SETTLE, 1u);
                 let mean_height = metrics.height_sum / f32(timed_steps);
                 let contact_fraction = metrics.ground_contact
                     / (f32(timed_steps) * f32(body_nodes));
@@ -492,13 +495,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let stepping = clamp((0.95 - contact_fraction) / 0.20, 0.0, 1.0);
                 metrics.fitness = score / mass_sum * posture * stepping;
             }
-            if p.total_steps > 200u {
+            if p.total_steps > SETTLE {
                 metrics.vertical_oscillation = max(
                     metrics.gait_frequency - metrics.vertical_oscillation,
                     0.0,
                 );
                 metrics.gait_frequency = metrics.gait_turns * 0.5
-                    / (f32(p.total_steps - 200u) / 120.0);
+                    / (f32(p.total_steps - SETTLE) / RATE);
             } else {
                 metrics.vertical_oscillation = 0.0;
                 metrics.gait_frequency = 0.0;

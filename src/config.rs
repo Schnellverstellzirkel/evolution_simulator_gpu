@@ -322,7 +322,7 @@ impl Config {
         Ok(())
     }
     pub fn steps(&self) -> u32 {
-        (self.duration * 120.0).round() as u32
+        (self.duration * crate::physics::rate() as f32).round() as u32
     }
     pub fn batch_size(&self) -> usize {
         // Fewer readback fences keep the GPU busier. Responsive mode still stays

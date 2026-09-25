@@ -250,7 +250,7 @@ fn bone_lengths_hold_and_off_center_muscles_rotate_bones() {
         &creature.bones,
         &creature.muscles,
         &cfg,
-        physics::SETTLE + 1,
+        physics::settle() + 1,
     );
     for bone in &creature.bones {
         let a = nodes[bone.a as usize].pos;
@@ -599,7 +599,7 @@ fn gpu_bones_match_cpu_for_off_center_muscle() {
                     .chain(node.vel.iter())
                     .all(|v| v.is_finite())
             );
-            assert!(node.pos[1] >= node.radius - 1e-5 || steps <= physics::SETTLE);
+            assert!(node.pos[1] >= node.radius - 1e-5 || steps <= physics::settle());
         }
         for bone in &stress.bones {
             let a = actual[bone.a as usize].pos;

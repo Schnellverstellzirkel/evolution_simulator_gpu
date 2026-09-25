@@ -113,7 +113,7 @@ struct Playback {
 impl Playback {
     fn new(creature: Creature, config: Config) -> Self {
         let mut nodes = physics::nodes(&creature);
-        for tick in 0..physics::SETTLE {
+        for tick in 0..physics::settle() {
             physics::step(
                 &mut nodes,
                 &creature.bones,
@@ -127,7 +127,7 @@ impl Playback {
             creature,
             config,
             nodes,
-            tick: physics::SETTLE,
+            tick: physics::settle(),
             accumulator: 0.0,
         }
     }
@@ -739,7 +739,7 @@ impl App {
                 &p.creature,
                 origin,
                 self.zoom,
-                (p.tick - physics::SETTLE) as f32 * physics::DT,
+                (p.tick - physics::settle()) as f32 * physics::dt(),
             );
             painter.text(
                 rect.left_top() + Vec2::new(18., 16.),
@@ -753,7 +753,7 @@ impl App {
                 Align2::RIGHT_TOP,
                 format!(
                     "{:.1} / {:.0} s",
-                    (p.tick - physics::SETTLE) as f32 * physics::DT,
+                    (p.tick - physics::settle()) as f32 * physics::dt(),
                     p.config.duration
                 ),
                 FontId::proportional(14.),
@@ -1361,8 +1361,8 @@ impl eframe::App for App {
         {
             p.accumulator = (p.accumulator + dt.min(0.1) * self.speed).min(1.0);
             let start = Instant::now();
-            while p.accumulator >= physics::DT && start.elapsed() < Duration::from_millis(5) {
-                if p.tick >= physics::SETTLE + p.config.steps() {
+            while p.accumulator >= physics::dt() && start.elapsed() < Duration::from_millis(5) {
+                if p.tick >= physics::settle() + p.config.steps() {
                     p.reset();
                 }
                 physics::step(
@@ -1373,7 +1373,7 @@ impl eframe::App for App {
                     p.tick,
                 );
                 p.tick += 1;
-                p.accumulator -= physics::DT;
+                p.accumulator -= physics::dt();
             }
             if self.follow {
                 let x = p.nodes.iter().map(|n| n.pos[0]).sum::<f32>() / p.nodes.len() as f32;

@@ -554,7 +554,7 @@ impl VkEngine {
                     stride: batch.capacity as u32,
                     count: batch.info.len() as u32,
                     gravity: cfg.gravity,
-                    air: cfg.air_retention.sqrt(),
+                    air: crate::physics::air_per_step(cfg.air_retention),
                     friction: cfg.ground_friction,
                     ground: if cfg.ground { 1.0 } else { 0.0 },
                     total_steps: steps,

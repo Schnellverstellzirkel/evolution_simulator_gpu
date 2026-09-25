@@ -2,8 +2,39 @@ use crate::{
     config::Config,
     evolution::{Bone, Creature, FAILED, Muscle, NodeGene},
 };
-pub const DT: f32 = 1.0 / 120.0;
-pub const SETTLE: u32 = 200;
+/// Physics steps per second. `EVOLUTION_PHYSICS_RATE` overrides it for
+/// experiments; every engine, the replay, and trial lengths follow it.
+pub fn rate() -> u32 {
+    static RATE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *RATE.get_or_init(|| {
+        std::env::var("EVOLUTION_PHYSICS_RATE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&r: &u32| (15..=480).contains(&r))
+            .unwrap_or(120)
+    })
+}
+/// Seconds per physics step.
+pub fn dt() -> f32 {
+    1.0 / rate() as f32
+}
+/// Steps of pose settling (1.67 s) before the timed trial.
+pub fn settle() -> u32 {
+    (200 * rate()).div_ceil(120)
+}
+/// Gait sampling interval in steps (30 samples per second).
+pub fn sample_interval() -> u32 {
+    (rate() / 30).max(1)
+}
+/// Cosine and tangent of the largest bone turn allowed in one step.
+pub fn turn_limits() -> (f32, f32) {
+    let angle = MAX_BONE_ANGULAR_SPEED * dt();
+    (angle.cos(), angle.tan())
+}
+/// Velocity kept per step, from `air_retention` per 1/60 s.
+pub fn air_per_step(air_retention: f32) -> f32 {
+    air_retention.powf(60.0 / rate() as f32)
+}
 /// Position-projection and velocity-constraint passes per step. The rebuild
 /// after projection makes every bone exactly its rest length regardless.
 /// `EVOLUTION_BONE_PASSES` / `EVOLUTION_VELOCITY_PASSES` override them for
@@ -27,8 +58,6 @@ const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
 const MAX_MUSCLE_FORCE: f32 = 5.0;
 const MAX_NODE_SPEED: f32 = 5.0;
 const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
-const MAX_BONE_TURN_COS: f32 = 0.992_197_7;
-const MAX_BONE_TURN_TAN: f32 = 0.125_655_14;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Node {
@@ -73,7 +102,7 @@ fn limited_target(m: &Muscle, time: f32) -> f32 {
     target(&limited, time)
 }
 fn motor_force(m: &Muscle, time: f32, relative: f32) -> f32 {
-    let target_speed = (limited_target(m, time) - limited_target(m, (time - DT).max(0.0))) / DT;
+    let target_speed = (limited_target(m, time) - limited_target(m, (time - dt()).max(0.0))) / dt();
     // A fixed target is a passive constraint, not an inexhaustible motor.
     // The actuator pulls while shortening and pushes while lengthening.
     (-target_speed * m.stiffness * 0.25 + relative * 0.15)
@@ -195,13 +224,13 @@ fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool, previous: &[N
                 previous_delta[1] / previous_length,
             ];
             let dot = previous_direction[0] * direction[0] + previous_direction[1] * direction[1];
-            if dot < MAX_BONE_TURN_COS {
+            if dot < turn_limits().0 {
                 let cross =
                     previous_direction[0] * direction[1] - previous_direction[1] * direction[0];
                 let turn_sign = if cross < 0.0 { -1.0 } else { 1.0 };
                 let turned = [
-                    previous_direction[0] - previous_direction[1] * turn_sign * MAX_BONE_TURN_TAN,
-                    previous_direction[1] + previous_direction[0] * turn_sign * MAX_BONE_TURN_TAN,
+                    previous_direction[0] - previous_direction[1] * turn_sign * turn_limits().1,
+                    previous_direction[1] + previous_direction[0] * turn_sign * turn_limits().1,
                 ];
                 let turn_length = turned[0].hypot(turned[1]);
                 direction = [turned[0] / turn_length, turned[1] / turn_length];
@@ -288,12 +317,12 @@ fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool, previous: &[N
 }
 
 pub fn step(nodes: &mut [Node], bones: &[Bone], muscles: &[Muscle], cfg: &Config, tick: u32) {
-    if tick == SETTLE {
+    if tick == settle() {
         center(nodes);
     }
     let mut old = [Node::default(); 64];
     old[..nodes.len()].copy_from_slice(nodes);
-    let time = tick.saturating_sub(SETTLE) as f32 * DT;
+    let time = tick.saturating_sub(settle()) as f32 * dt();
     for (i, n) in nodes.iter_mut().enumerate() {
         let mut f = [0.0; 2];
         for m in muscles {
@@ -325,14 +354,14 @@ pub fn step(nodes: &mut [Node], bones: &[Bone], muscles: &[Muscle], cfg: &Config
             f[0] += dir[0] * force * weight;
             f[1] += dir[1] * force * weight;
         }
-        n.vel[0] = (n.vel[0] + f[0] / n.mass * DT) * cfg.air_retention.sqrt();
+        n.vel[0] = (n.vel[0] + f[0] / n.mass * dt()) * air_per_step(cfg.air_retention);
         n.vel[1] = (n.vel[1]
-            + (f[1] / n.mass - if tick >= SETTLE { cfg.gravity } else { 0.0 }) * DT)
-            * cfg.air_retention.sqrt();
+            + (f[1] / n.mass - if tick >= settle() { cfg.gravity } else { 0.0 }) * dt())
+            * air_per_step(cfg.air_retention);
         limit_speed(&mut n.vel);
-        n.pos[0] += n.vel[0] * DT;
-        n.pos[1] += n.vel[1] * DT;
-        if tick >= SETTLE {
+        n.pos[0] += n.vel[0] * dt();
+        n.pos[1] += n.vel[1] * dt();
+        if tick >= settle() {
             collide(n, cfg);
         }
         if !n
@@ -346,7 +375,7 @@ pub fn step(nodes: &mut [Node], bones: &[Bone], muscles: &[Muscle], cfg: &Config
             n.vel = [0.0; 2];
         }
     }
-    project_bones(nodes, bones, tick >= SETTLE && cfg.ground, &old);
+    project_bones(nodes, bones, tick >= settle() && cfg.ground, &old);
 }
 pub fn evaluate(c: &Creature, cfg: &Config) -> f32 {
     let mut canonical = c.clone();
@@ -354,9 +383,9 @@ pub fn evaluate(c: &Creature, cfg: &Config) -> f32 {
     let mut n = nodes(&canonical);
     let mut height_sum = 0.0;
     let mut contacts = 0usize;
-    for tick in 0..SETTLE + cfg.steps() {
+    for tick in 0..settle() + cfg.steps() {
         step(&mut n, &canonical.bones, &canonical.muscles, cfg, tick);
-        if tick >= SETTLE {
+        if tick >= settle() {
             let low = n
                 .iter()
                 .map(|node| node.pos[1] - node.radius)
@@ -423,16 +452,16 @@ mod tests {
         };
         for time in [0.025, 0.075] {
             assert!(
-                (limited_target(&muscle, time) - limited_target(&muscle, (time - DT).max(0.0)))
+                (limited_target(&muscle, time) - limited_target(&muscle, (time - dt()).max(0.0)))
                     .abs()
-                    <= MAX_MUSCLE_LENGTH_SPEED * DT + 1e-6
+                    <= MAX_MUSCLE_LENGTH_SPEED * dt() + 1e-6
             );
         }
         for tick in 1..120 {
-            let time = tick as f32 * DT;
+            let time = tick as f32 * dt();
             assert!(
-                (limited_target(&muscle, time) - limited_target(&muscle, time - DT)).abs()
-                    <= MAX_MUSCLE_LENGTH_SPEED * DT + 1e-6
+                (limited_target(&muscle, time) - limited_target(&muscle, time - dt())).abs()
+                    <= MAX_MUSCLE_LENGTH_SPEED * dt() + 1e-6
             );
         }
     }
@@ -452,7 +481,7 @@ mod tests {
             stiffness: 120.0,
         };
         for tick in 0..120 {
-            assert_eq!(motor_force(&muscle, tick as f32 * DT, 0.0), 0.0);
+            assert_eq!(motor_force(&muscle, tick as f32 * dt(), 0.0), 0.0);
         }
         assert!(motor_force(&muscle, 0.025, 0.0) == 0.0);
     }
@@ -539,7 +568,7 @@ mod tests {
             nodes[1].pos[1] - nodes[0].pos[1],
         ];
         let angle = delta[1].atan2(delta[0]).abs();
-        assert!(angle <= MAX_BONE_ANGULAR_SPEED * DT + 1e-5);
+        assert!(angle <= MAX_BONE_ANGULAR_SPEED * dt() + 1e-5);
         assert!(
             nodes
                 .iter()

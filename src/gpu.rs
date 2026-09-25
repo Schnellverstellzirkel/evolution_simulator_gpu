@@ -678,7 +678,7 @@ impl Gpu {
             return Ok(metrics);
         }
         let chunk_size = pipeline_chunk_size(cfg);
-        let steps = physics::SETTLE + cfg.steps();
+        let steps = physics::settle() + cfg.steps();
         if self.creature.is_some() {
             return self.evaluate_creature_lanes(pop, indices, cfg, steps, out);
         }

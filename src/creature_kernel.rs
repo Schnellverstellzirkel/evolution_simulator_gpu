@@ -237,6 +237,14 @@ pub fn shader_source(capacity: usize, workgroup: u32) -> String {
             "const VELOCITY_SOLVE_ITERATIONS: u32 = 4u;",
             &format!("const VELOCITY_SOLVE_ITERATIONS: u32 = {velocity_passes}u;"),
         )
+        .replace("PHYSICSRATE", &format!("{:.1}", crate::physics::rate() as f32))
+        .replace("SETTLESTEPSu", &format!("{}u", crate::physics::settle()))
+        .replace(
+            "SAMPLEINTERVALu",
+            &format!("{}u", crate::physics::sample_interval()),
+        )
+        .replace("TURNCOS", &format!("{:.9}", crate::physics::turn_limits().0))
+        .replace("TURNTAN", &format!("{:.9}", crate::physics::turn_limits().1))
         .replace("SHAREDLEN", &(capacity * workgroup as usize).to_string())
         .replace("WGSIZEu", &format!("{workgroup}u"))
         .replace("WGSIZE", &workgroup.to_string())
@@ -499,7 +507,7 @@ impl CreatureKernel {
                     stride: batch.capacity as u32,
                     count: batch.info.len() as u32,
                     gravity: cfg.gravity,
-                    air: cfg.air_retention.sqrt(),
+                    air: crate::physics::air_per_step(cfg.air_retention),
                     friction: cfg.ground_friction,
                     ground: if cfg.ground { 1.0 } else { 0.0 },
                     total_steps: steps,
