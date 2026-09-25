@@ -382,7 +382,7 @@ impl Population {
         Ok(())
     }
 }
-pub(crate) fn canonicalize_bone_order(creature: &mut Creature) -> bool {
+pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
     let node_count = creature.nodes.len();
     if !(1..=64).contains(&node_count) || creature.bones.len() != node_count - 1 {
         return false;

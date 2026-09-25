@@ -108,6 +108,22 @@ fn motor_force(m: &Muscle, time: f32, relative: f32) -> f32 {
     (-target_speed * m.stiffness * 0.25 + relative * 0.15)
         .clamp(-MAX_MUSCLE_FORCE, MAX_MUSCLE_FORCE)
 }
+thread_local! {
+    /// Diagnostic ledger of horizontal momentum changes by source:
+    /// [integration speed cap, ground contact, velocity-pass speed cap,
+    ///  velocity-pass constraints, projection/rebuild center-of-mass shift x mass].
+    pub static MOMENTUM_LEDGER: std::cell::Cell<[f64; 5]> = const { std::cell::Cell::new([0.0; 5]) };
+}
+fn ledger_add(slot: usize, amount: f32) {
+    MOMENTUM_LEDGER.with(|l| {
+        let mut v = l.get();
+        v[slot] += f64::from(amount);
+        l.set(v);
+    });
+}
+fn momentum_x(nodes: &[Node]) -> f32 {
+    nodes.iter().map(|n| n.vel[0] * n.mass).sum()
+}
 fn limit_speed(velocity: &mut [f32; 2]) {
     let speed = velocity[0].hypot(velocity[1]);
     if speed > MAX_NODE_SPEED {
@@ -157,6 +173,7 @@ fn bone_point(bone: Bone, nodes: &[Node; 64], t: f32, velocity: bool) -> [f32; 2
 }
 
 fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool, previous: &[Node; 64]) {
+    let com_before: f32 = nodes.iter().map(|n| n.pos[0] * n.mass).sum();
     let mut positions = [[0.0; 2]; 64];
     for (i, node) in nodes.iter().enumerate() {
         positions[i] = node.pos;
@@ -264,6 +281,9 @@ fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool, previous: &[N
             position[1] += lift;
         }
     }
+    let com_after: f32 = (0..nodes.len()).map(|i| positions[i][0] * nodes[i].mass).sum();
+    ledger_add(4, (com_after - com_before) / dt());
+    let before = momentum_x(nodes);
     for (i, node) in nodes.iter_mut().enumerate() {
         node.pos = positions[i];
         limit_speed(&mut node.vel);
@@ -271,9 +291,11 @@ fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool, previous: &[N
             node.vel[1] = node.vel[1].max(0.0);
         }
     }
+    ledger_add(2, momentum_x(nodes) - before);
     // Keep each link's rotation bounded and remove only velocity components
     // that would stretch a bone or rotate it beyond the same angular limit.
     for _ in 0..solver_passes().1 {
+        let before = momentum_x(nodes);
         for bone in bones {
             let a = bone.a as usize;
             let b = bone.b as usize;
@@ -307,12 +329,15 @@ fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool, previous: &[N
             nodes[b].vel[0] -= tangent[0] * impulse * inverse_b;
             nodes[b].vel[1] -= tangent[1] * impulse * inverse_b;
         }
+        ledger_add(3, momentum_x(nodes) - before);
+        let before = momentum_x(nodes);
         for node in nodes.iter_mut() {
             limit_speed(&mut node.vel);
             if ground && node.pos[1] <= node.radius + 1e-5 {
                 node.vel[1] = node.vel[1].max(0.0);
             }
         }
+        ledger_add(2, momentum_x(nodes) - before);
     }
 }
 
@@ -358,11 +383,15 @@ pub fn step(nodes: &mut [Node], bones: &[Bone], muscles: &[Muscle], cfg: &Config
         n.vel[1] = (n.vel[1]
             + (f[1] / n.mass - if tick >= settle() { cfg.gravity } else { 0.0 }) * dt())
             * air_per_step(cfg.air_retention);
+        let before = n.vel[0] * n.mass;
         limit_speed(&mut n.vel);
+        ledger_add(0, n.vel[0] * n.mass - before);
         n.pos[0] += n.vel[0] * dt();
         n.pos[1] += n.vel[1] * dt();
         if tick >= settle() {
+            let before = n.vel[0] * n.mass;
             collide(n, cfg);
+            ledger_add(1, n.vel[0] * n.mass - before);
         }
         if !n
             .pos

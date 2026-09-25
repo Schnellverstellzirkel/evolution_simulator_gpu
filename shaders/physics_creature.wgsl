@@ -286,18 +286,26 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 n.vel = (n.vel + (force * inv_mass[j] - vec2f(0.0, gravity)) * DT) * p.air;
                 n.vel = limit_speed(n.vel);
                 n.pos += n.vel * DT;
-                if tick >= SETTLE { n = collide(n); }
                 if !all(abs(n.pos) < vec2f(1e6)) || !all(abs(n.vel) < vec2f(1e6)) {
                     failed[j] = 1.0;
                     n.pos = vec2f(0.0);
                     n.vel = vec2f(0.0);
                 }
                 pos[k] = n.pos;
-                vel[k] = n.vel;
             }
+            // Velocities are rebuilt from positions after the solve; keep the
+            // predicted height to measure how far the ground pushed the node.
+            vel[k] = vec2f(pos[k].y, 0.0);
         }
 
         let grounded = tick >= SETTLE && p.ground > 0.0;
+        if grounded {
+            for (var j = 0u; j < MAXN; j++) {
+                if j >= body_nodes { break; }
+                let k = j * WG + lane;
+                pos[k].y = max(pos[k].y, radius[j]);
+            }
+        }
         for (var iteration = 0u; iteration < BONE_SOLVE_ITERATIONS; iteration++) {
             for (var j = 0u; j < MAXB; j++) {
                 if j >= bone_count { break; }
@@ -382,6 +390,23 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let k = j * WG + lane;
                 pos[k].y += ground_lift;
             }
+        }
+        // Velocity is the actual movement over the step. Ground friction uses the
+        // real upward push the node received, so grip needs real pressure.
+        for (var j = 0u; j < MAXN; j++) {
+            if j >= body_nodes { break; }
+            let k = j * WG + lane;
+            let predicted_y = vel[k].x;
+            var velocity = (pos[k] - old[k]) * RATE;
+            if grounded && pos[k].y <= radius[j] + 1e-4 {
+                let push = max(pos[k].y - predicted_y, 0.0);
+                let max_change = friction[j] * p.friction * push * RATE;
+                velocity.x -= clamp(velocity.x, -max_change, max_change);
+            }
+            if failed[j] >= 0.5 {
+                velocity = vec2f(0.0);
+            }
+            vel[k] = velocity;
         }
         for (var iteration = 0u; iteration < VELOCITY_SOLVE_ITERATIONS; iteration++) {
             for (var j = 0u; j < MAXB; j++) {

@@ -14,6 +14,12 @@ use crate::simd::F;
 use rayon::prelude::*;
 use std::collections::HashMap;
 
+/// Diagnostic ledger of horizontal momentum changes for lane 0 of each group,
+/// enabled by `EVOLUTION_LEDGER`: [integration speed cap, ground contact,
+/// velocity-pass speed cap, velocity-pass constraints, projection/rebuild
+/// center-of-mass shift x mass / dt, muscle forces].
+pub static LEDGER: std::sync::Mutex<[f64; 6]> = std::sync::Mutex::new([0.0; 6]);
+
 const L: usize = 16;
 type V = [f32; L];
 const ZERO: V = [0.0; L];
@@ -242,6 +248,12 @@ impl Group {
 
     /// Runs the full trial and returns one result per real lane.
     fn simulate(&self, cfg: &Config) -> Vec<GpuResult> {
+        self.run(cfg, None)
+    }
+
+    /// Runs the trial; `record` receives lane 0's node positions before every
+    /// step and after the last one (index = steps completed).
+    fn run(&self, cfg: &Config, mut record: Option<&mut Vec<Vec<[f32; 2]>>>) -> Vec<GpuResult> {
         let n = self.nodes;
         let exact = std::env::var_os("EVOLUTION_EXACT_COS").is_some();
         let total_steps = physics::settle() + cfg.steps();
@@ -264,6 +276,15 @@ impl Group {
         let total_mass = mass.iter().fold(F::splat(0.0), |t, &m| t + m);
         let inv_total_mass = F::splat(1.0) / total_mass;
         let dt = physics::dt();
+        let ledger_on = std::env::var_os("EVOLUTION_LEDGER").is_some();
+        let lane0_mass: Vec<f32> = mass.iter().map(|m| m.to_array()[0]).collect();
+        let momentum = |v: &[F]| -> f32 {
+            v.iter().zip(&lane0_mass).map(|(x, m)| x.to_array()[0] * m).sum()
+        };
+        let com = |p: &[F]| -> f32 {
+            p.iter().zip(&lane0_mass).map(|(x, m)| x.to_array()[0] * m).sum()
+        };
+        let mut ledger = [0.0f64; 6];
         let rate = physics::rate() as f32;
         let rad_a = load(&self.rad_a);
         let rad_b = load(&self.rad_b);
@@ -309,7 +330,16 @@ impl Group {
         let mut trend = [0.0f32; L];
         let mut turns = [0.0f32; L];
 
+        let snapshot = |px: &[F], py: &[F]| -> Vec<[f32; 2]> {
+            px.iter()
+                .zip(py)
+                .map(|(x, y)| [x.to_array()[0], y.to_array()[0]])
+                .collect()
+        };
         for tick in 0..total_steps {
+            if let Some(frames) = record.as_mut() {
+                frames.push(snapshot(&px, &py));
+            }
             if tick == settle {
                 let mut avg = zero;
                 let mut low = F::splat(1e20);
@@ -372,20 +402,17 @@ impl Group {
             for j in 0..n {
                 let mut vel_x = (vx[j] + (sx[j] * inv_mass[j]) * dt) * air;
                 let mut vel_y = (vy[j] + (sy[j] * inv_mass[j] - gravity) * dt) * air;
-                limit_speed(&mut vel_x, &mut vel_y);
-                let pos_x = px[j] + vel_x * dt;
-                let mut pos_y = py[j] + vel_y * dt;
-                if colliding {
-                    let below = pos_y.lt(radius[j]);
-                    pos_y = F::select(below, pos_y + (radius[j] - pos_y), pos_y);
-                    let vn = vel_y;
-                    let hit = below & vn.lt(zero);
-                    let slid_y = vel_y - vn;
-                    let length = (vel_x * vel_x + slid_y * slid_y).sqrt().max(F::splat(1e-8));
-                    let keep = (one - (-vn) * friction[j] * ground_friction / length).max(zero);
-                    vel_x = F::select(hit, vel_x * keep, vel_x);
-                    vel_y = F::select(hit, slid_y * keep, vel_y);
+                let lane0 = |v: F| f64::from(v.to_array()[0] * lane0_mass[j]);
+                if ledger_on && colliding {
+                    ledger[5] += lane0(sx[j] * inv_mass[j] * dt);
                 }
+                let uncapped = vel_x;
+                limit_speed(&mut vel_x, &mut vel_y);
+                if ledger_on && colliding {
+                    ledger[0] += lane0(vel_x) - lane0(uncapped);
+                }
+                let pos_x = px[j] + vel_x * dt;
+                let pos_y = py[j] + vel_y * dt;
                 let limit = F::splat(1e6);
                 let finite = pos_x.abs().lt(limit)
                     & pos_y.abs().lt(limit)
@@ -397,11 +424,19 @@ impl Group {
                 let update = alive & finite;
                 px[j] = F::select(update, pos_x, F::select(fails, zero, px[j]));
                 py[j] = F::select(update, pos_y, F::select(fails, zero, py[j]));
-                vx[j] = F::select(update, vel_x, F::select(fails, zero, vx[j]));
-                vy[j] = F::select(update, vel_y, F::select(fails, zero, vy[j]));
+                // Velocities are rebuilt from positions after the solve; keep the
+                // predicted height to measure how far the ground pushed the node.
+                vx[j] = py[j];
+                let _ = vel_x;
+            }
+            if colliding {
+                for j in 0..n {
+                    py[j] = py[j].max(radius[j]);
+                }
             }
 
             let tiny = F::splat(1e-6);
+            let com_before = com(&px);
             for _ in 0..physics::solver_passes().0 {
                 for (b, &(a, c)) in self.bones.iter().enumerate() {
                     let dx = px[c] - px[a];
@@ -481,7 +516,33 @@ impl Group {
                     *y += lift;
                 }
             }
+            if ledger_on && colliding {
+                ledger[4] += f64::from((com(&px) - com_before) / dt);
+            }
+            // Velocity is the actual movement over the step. Ground friction uses
+            // the real upward push the node received, so grip needs real pressure.
+            for j in 0..n {
+                let predicted_y = vx[j];
+                let mut vel_x = (px[j] - ox[j]) * rate;
+                let vel_y = (py[j] - oy[j]) * rate;
+                if colliding {
+                    let contact = py[j].le(radius[j] + 1e-4);
+                    let push = (py[j] - predicted_y).max(zero);
+                    let max_change = friction[j] * ground_friction * push * rate;
+                    let reduced = vel_x - vel_x.max(-max_change).min(max_change);
+                    if ledger_on {
+                        let m = f64::from(lane0_mass[j]);
+                        let chosen = F::select(contact, reduced, vel_x);
+                        ledger[1] += (f64::from(chosen.to_array()[0]) - f64::from(vel_x.to_array()[0])) * m;
+                    }
+                    vel_x = F::select(contact, reduced, vel_x);
+                }
+                let alive = failed[j].lt(F::splat(0.5));
+                vx[j] = F::select(alive, vel_x, zero);
+                vy[j] = F::select(alive, vel_y, zero);
+            }
             for _ in 0..physics::solver_passes().1 {
+                let before = momentum(&vx);
                 for (b, &(a, c)) in self.bones.iter().enumerate() {
                     let dx = px[c] - px[a];
                     let dy = py[c] - py[a];
@@ -505,12 +566,17 @@ impl Group {
                     vx[c] = vcx - tx * angular * sb;
                     vy[c] = vcy - ty * angular * sb;
                 }
+                let middle = momentum(&vx);
                 for j in 0..n {
                     limit_speed(&mut vx[j], &mut vy[j]);
                     if colliding {
                         let resting = py[j].le(radius[j] + 1e-5);
                         vy[j] = F::select(resting, vy[j].max(zero), vy[j]);
                     }
+                }
+                if ledger_on && colliding {
+                    ledger[3] += f64::from(middle - before);
+                    ledger[2] += f64::from(momentum(&vx) - middle);
                 }
             }
 
@@ -572,6 +638,15 @@ impl Group {
             }
         }
 
+        if let Some(frames) = record.as_mut() {
+            frames.push(snapshot(&px, &py));
+        }
+        if ledger_on {
+            let mut total = LEDGER.lock().unwrap();
+            for (t, v) in total.iter_mut().zip(ledger) {
+                *t += v;
+            }
+        }
         let timed_steps = total_steps.saturating_sub(settle).max(1) as f32;
         let timed = total_steps > settle;
         let px: Vec<[f32; L]> = px.iter().map(|v| v.to_array()).collect();
@@ -651,6 +726,17 @@ fn build_groups(pop: &Population, unit: &[usize]) -> Vec<Group> {
         .par_iter()
         .map(|members| Group::build(pop, unit, members))
         .collect()
+}
+
+/// Node positions of one creature's full trial with the evaluation physics:
+/// entry `t` is the state after `t` steps. The replay shows exactly this.
+pub fn trajectory(creature: &crate::evolution::Creature, cfg: &Config) -> Vec<Vec<[f32; 2]>> {
+    let mut pop = Population::default();
+    pop.push(creature.clone());
+    let group = Group::build(&pop, &[0], &[0]);
+    let mut frames = Vec::with_capacity((physics::settle() + cfg.steps() + 1) as usize);
+    group.run(cfg, Some(&mut frames));
+    frames
 }
 
 /// Evaluates every creature of `unit` and returns results in unit order.

@@ -1,0 +1,974 @@
+diff --git a/examples/topology_groups.rs b/examples/topology_groups.rs
+index 30d2797..0301b88 100644
+--- a/examples/topology_groups.rs
++++ b/examples/topology_groups.rs
+@@ -1,7 +1,9 @@
+ //! How many creatures share an exact body plan (bones and muscle attachments)?
+ use std::collections::HashMap;
+ fn main() {
+-    let path = std::env::args().nth(1).unwrap_or("bench/w3-seed38-100k.evo".into());
++    let path = std::env::args()
++        .nth(1)
++        .unwrap_or("bench/w3-seed38-100k.evo".into());
+     let e = evolution_simulator::storage::load(std::path::Path::new(&path)).unwrap();
+     let mut groups: HashMap<Vec<u32>, usize> = HashMap::new();
+     for i in 0..e.population.genomes.len() {
+diff --git a/shaders/physics.wgsl b/shaders/physics.wgsl
+index 6dc1a7f..ad7b82a 100644
+--- a/shaders/physics.wgsl
++++ b/shaders/physics.wgsl
+@@ -58,6 +58,8 @@ struct Result {
+     vertical_trend: f32,
+     gait_turns: f32,
+     height_sum: f32,
++    previous_center_x: f32,
++    supported_distance: f32,
+ }
+ @group(0) @binding(0) var<storage, read_write> nodes: array<Node>;
+ @group(0) @binding(1) var<storage, read> muscles: array<Muscle>;
+@@ -78,10 +80,15 @@ const BONE_SOLVE_ITERATIONS: u32 = 8u;
+ const VELOCITY_SOLVE_ITERATIONS: u32 = 4u;
+ const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
+ const MAX_MUSCLE_FORCE: f32 = 5.0;
++const MAX_MUSCLE_STRETCH_FORCE: f32 = 1.0;
+ const MAX_NODE_SPEED: f32 = 5.0;
+ const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
+-const MAX_BONE_TURN_COS: f32 = 0.9921977;
+-const MAX_BONE_TURN_TAN: f32 = 0.12565514;
++const RATE: f32 = PHYSICSRATE;
++const DT: f32 = 1.0 / RATE;
++const SETTLE: u32 = SETTLESTEPSu;
++const SAMPLE: u32 = SAMPLEINTERVALu;
++const MAX_BONE_TURN_COS: f32 = TURNCOS;
++const MAX_BONE_TURN_TAN: f32 = TURNTAN;
+ 
+ fn limited_muscle_length(m: Muscle, time: f32) -> f32 {
+     let amplitude = min(
+@@ -147,7 +154,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+ 
+     // Only lane zero owns behavior metrics. Keep them in registers for the
+     // whole dispatch and exchange them with global memory at chunk boundaries.
+-    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0);
++    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+     if creature < p.count && local == 0u && p.tick > 0u {
+         metrics = results[creature];
+     }
+@@ -166,7 +173,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+             n.pos = positions[read_base + lane];
+             n.vel = velocities[read_base + lane];
+         }
+-        if tick == 200u {
++        if tick == SETTLE {
+             if local < body.nodes {
+                 var avg = 0.0;
+                 var mass_sum = 0.0;
+@@ -185,7 +192,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+             workgroupBarrier();
+         }
+         if local < body.nodes && n.failed < 0.5 {
+-            let time = f32(max(tick, 200u) - 200u) / 120.0;
++            let time = f32(max(tick, SETTLE) - SETTLE) * DT;
+             var force = vec2f(0.0);
+             for (var j = 0u; j < muscle_adjacency.count; j++) {
+                 let m = muscles[muscle_indices[muscle_adjacency.start + j]];
+@@ -214,9 +221,11 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+                 let dir = d / distance;
+                 let relative = dot(velocity_b - velocity_a, dir);
+                 let target_speed = (limited_muscle_length(m, time)
+-                    - limited_muscle_length(m, max(time - 1.0 / 120.0, 0.0))) * 120.0;
+-                let magnitude = clamp(-target_speed * m.stiffness * 0.25
+-                    + relative * 0.15, -MAX_MUSCLE_FORCE, MAX_MUSCLE_FORCE);
++                    - limited_muscle_length(m, max(time - DT, 0.0))) * RATE;
++                let drive = max(-target_speed * m.stiffness * 0.25 + relative * 0.15, 0.0);
++                let overextension = min(max(distance - m.long, 0.0) * m.stiffness,
++                    MAX_MUSCLE_STRETCH_FORCE);
++                let magnitude = min(drive + overextension, MAX_MUSCLE_FORCE);
+                 var weight = 0.0;
+                 if m.a0 == local { weight += 1.0 - m.anchor_a; }
+                 if m.a1 == local { weight += m.anchor_a; }
+@@ -225,11 +234,11 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+                 force += dir * magnitude * weight;
+             }
+             var gravity = 0.0;
+-            if tick >= 200u { gravity = p.gravity; }
+-            n.vel = (n.vel + (force / n.mass - vec2f(0.0, gravity)) / 120.0) * p.air;
++            if tick >= SETTLE { gravity = p.gravity; }
++            n.vel = (n.vel + (force / n.mass - vec2f(0.0, gravity)) * DT) * p.air;
+             n.vel = limit_speed(n.vel);
+-            n.pos += n.vel / 120.0;
+-            if tick >= 200u { n = collide(n); }
++            n.pos += n.vel * DT;
++            if tick >= SETTLE { n = collide(n); }
+             if !all(abs(n.pos) < vec2f(1e6)) || !all(abs(n.vel) < vec2f(1e6)) {
+                 n.failed = 1.0;
+                 n.pos = vec2f(0.0);
+@@ -262,7 +271,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+                     let old_b = positions[index_b];
+                     var new_a = old_a + direction * error * inverse_a / inverse_sum;
+                     var new_b = old_b - direction * error * inverse_b / inverse_sum;
+-                    if tick >= 200u && p.ground > 0.0 {
++                    if tick >= SETTLE && p.ground > 0.0 {
+                         new_a.y = max(new_a.y, radii[base + bone.a]);
+                         new_b.y = max(new_b.y, radii[base + bone.b]);
+                     }
+@@ -318,11 +327,11 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+             for (var j = 0u; j < body.nodes; j++) {
+                 let node_index = write_base + base + j;
+                 positions[node_index] += center_shift;
+-                if tick >= 200u && p.ground > 0.0 {
++                if tick >= SETTLE && p.ground > 0.0 {
+                     ground_lift = max(ground_lift, radii[base + j] - positions[node_index].y);
+                 }
+             }
+-            if tick >= 200u && p.ground > 0.0 {
++            if tick >= SETTLE && p.ground > 0.0 {
+                 for (var j = 0u; j < body.nodes; j++) {
+                     let node_index = write_base + base + j;
+                     positions[node_index].y += ground_lift;
+@@ -355,7 +364,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+                 for (var j = 0u; j < body.nodes; j++) {
+                     let node_index = write_base + base + j;
+                     velocities[node_index] = limit_speed(velocities[node_index]);
+-                    if tick >= 200u && p.ground > 0.0
++                    if tick >= SETTLE && p.ground > 0.0
+                         && positions[node_index].y <= radii[base + j] + 1e-5 {
+                         velocities[node_index].y = max(velocities[node_index].y, 0.0);
+                     }
+@@ -369,13 +378,17 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+         }
+ 
+         if creature < p.count && local == 0u {
+-            if tick >= 200u {
++            if tick >= SETTLE {
+                 var center_y = 0.0;
++                var center_x = 0.0;
++                var mass_sum = 0.0;
+                 var contacts = 0.0;
+                 var low = 1e20;
+                 var high = -1e20;
+                 for (var j = 0u; j < body.nodes; j++) {
+                     let y = positions[write_base + base + j].y;
++                    center_x += positions[write_base + base + j].x * masses[base + j];
++                    mass_sum += masses[base + j];
+                     center_y += y;
+                     low = min(low, y - radii[base + j]);
+                     high = max(high, y + radii[base + j]);
+@@ -385,16 +398,26 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+                     }
+                 }
+                 center_y /= f32(body.nodes);
++                center_x /= mass_sum;
+                 metrics.ground_contact += contacts;
+                 metrics.height_sum += high - low;
++                if tick == SETTLE {
++                    metrics.previous_center_x = center_x;
++                } else {
++                    let supported = p.ground <= 0.0 || contacts > 0.0;
++                    if supported {
++                        metrics.supported_distance += center_x - metrics.previous_center_x;
++                    }
++                    metrics.previous_center_x = center_x;
++                }
+                 metrics.vertical_oscillation = min(metrics.vertical_oscillation, center_y);
+                 metrics.gait_frequency = max(metrics.gait_frequency, center_y);
+-                if tick == 200u {
++                if tick == SETTLE {
+                     metrics.previous_center_y = center_y;
+                     metrics.vertical_extremum = center_y;
+                     metrics.vertical_trend = 0.0;
+                     metrics.gait_turns = 0.0;
+-                } else if (tick - 200u) % 4u == 0u {
++                } else if (tick - SETTLE) % SAMPLE == 0u {
+                     let delta = center_y - metrics.previous_center_y;
+                     if metrics.vertical_trend == 0.0 {
+                         if abs(delta) > 0.0005 {
+@@ -433,21 +456,24 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+                 if failed > 0.0 {
+                     metrics.fitness = -1e20;
+                 } else {
+-                    let timed_steps = max(p.total_steps - 200u, 1u);
++                    let timed_steps = max(p.total_steps - SETTLE, 1u);
+                     let mean_height = metrics.height_sum / f32(timed_steps);
+                     let contact_fraction = metrics.ground_contact
+                         / (f32(timed_steps) * f32(body.nodes));
+                     let posture = clamp((mean_height - 0.25) / 0.75, 0.0, 1.0);
+                     let stepping = clamp((0.95 - contact_fraction) / 0.20, 0.0, 1.0);
+-                    metrics.fitness = score / mass_sum * posture * stepping;
++                    let displacement = score / mass_sum;
++                    let supported_distance = max(metrics.supported_distance, 0.0);
++                    metrics.fitness = min(max(displacement, 0.0), supported_distance)
++                        * posture * stepping;
+                 }
+-                if p.total_steps > 200u {
++                if p.total_steps > SETTLE {
+                     metrics.vertical_oscillation = max(
+                         metrics.gait_frequency - metrics.vertical_oscillation,
+                         0.0,
+                     );
+                     metrics.gait_frequency = metrics.gait_turns * 0.5
+-                        / (f32(p.total_steps - 200u) / 120.0);
++                        / (f32(p.total_steps - SETTLE) / RATE);
+                 } else {
+                     metrics.vertical_oscillation = 0.0;
+                     metrics.gait_frequency = 0.0;
+diff --git a/shaders/physics_creature.wgsl b/shaders/physics_creature.wgsl
+index f948bb7..387a3e6 100644
+--- a/shaders/physics_creature.wgsl
++++ b/shaders/physics_creature.wgsl
+@@ -51,6 +51,8 @@ struct Result {
+     vertical_trend: f32,
+     gait_turns: f32,
+     height_sum: f32,
++    previous_center_x: f32,
++    supported_distance: f32,
+ }
+ @group(0) @binding(0) var<storage, read_write> nodes: array<Node>;
+ @group(0) @binding(1) var<storage, read> muscle_data: array<f32>;
+@@ -78,6 +80,7 @@ const BONE_SOLVE_ITERATIONS: u32 = 8u;
+ const VELOCITY_SOLVE_ITERATIONS: u32 = 4u;
+ const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
+ const MAX_MUSCLE_FORCE: f32 = 5.0;
++const MAX_MUSCLE_STRETCH_FORCE: f32 = 1.0;
+ const MAX_NODE_SPEED: f32 = 5.0;
+ const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
+ const MAX_BONE_TURN_COS: f32 = TURNCOS;
+@@ -189,7 +192,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+         bone_ra[j] = node_a.radius;
+         bone_rb[j] = node_b.radius;
+     }
+-    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0);
++    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+     if p.tick > 0u {
+         metrics = results[creature];
+     }
+@@ -248,13 +251,16 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+             let velocity_a = mix(vel[ka0], vel[ka1], m.anchor_a);
+             let velocity_b = mix(vel[kb0], vel[kb1], m.anchor_b);
+             let d = position_b - position_a;
+-            let dir = d * (1.0 / max(length(d), 1e-6));
++            let distance = max(length(d), 1e-6);
++            let dir = d / distance;
+             let relative = dot(velocity_b - velocity_a, dir);
+             let target_speed = (limited_muscle_length(m, time)
+                 - limited_muscle_length(m, max(time - DT, 0.0))) * RATE;
+-            let magnitude = clamp(-target_speed * m.stiffness * 0.25
+-                + relative * 0.15, -MAX_MUSCLE_FORCE, MAX_MUSCLE_FORCE);
+-            let push = dir * magnitude;
++            let drive = max(-target_speed * m.stiffness * 0.25 + relative * 0.15, 0.0);
++            let overextension = min(max(distance - m.long, 0.0) * m.stiffness,
++                MAX_MUSCLE_STRETCH_FORCE);
++            let magnitude = min(drive + overextension, MAX_MUSCLE_FORCE);
++            let pull = dir * magnitude;
+             let a0 = packed & 0xffu;
+             let a1 = (packed >> 8u) & 0xffu;
+             let b0 = (packed >> 16u) & 0xffu;
+@@ -269,7 +275,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+                 if a1 == node { weight += m.anchor_a; }
+                 if b0 == node { weight -= 1.0 - m.anchor_b; }
+                 if b1 == node { weight -= m.anchor_b; }
+-                let f = push * weight;
++                let f = pull * weight;
+                 let k = node * WG + lane;
+                 scr[k] += f;
+             }
+@@ -423,12 +429,14 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+ 
+         if tick >= SETTLE {
+             var center_y = 0.0;
++            var center_x = 0.0;
+             var contacts = 0.0;
+             var low = 1e20;
+             var high = -1e20;
+             for (var j = 0u; j < MAXN; j++) {
+                 if j >= body_nodes { break; }
+                 let y = pos[j * WG + lane].y;
++                center_x += pos[j * WG + lane].x * mass[j];
+                 center_y += y;
+                 low = min(low, y - radius[j]);
+                 high = max(high, y + radius[j]);
+@@ -438,8 +446,18 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+                 }
+             }
+             center_y *= inv_nodes;
++            center_x *= inv_total_mass;
+             metrics.ground_contact += contacts;
+             metrics.height_sum += high - low;
++            if tick == SETTLE {
++                metrics.previous_center_x = center_x;
++            } else {
++                let supported = p.ground <= 0.0 || contacts > 0.0;
++                if supported {
++                    metrics.supported_distance += center_x - metrics.previous_center_x;
++                }
++                metrics.previous_center_x = center_x;
++            }
+             metrics.vertical_oscillation = min(metrics.vertical_oscillation, center_y);
+             metrics.gait_frequency = max(metrics.gait_frequency, center_y);
+             if tick == SETTLE {
+@@ -493,7 +511,10 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
+                     / (f32(timed_steps) * f32(body_nodes));
+                 let posture = clamp((mean_height - 0.25) / 0.75, 0.0, 1.0);
+                 let stepping = clamp((0.95 - contact_fraction) / 0.20, 0.0, 1.0);
+-                metrics.fitness = score / mass_sum * posture * stepping;
++                let displacement = score / mass_sum;
++                let supported_distance = max(metrics.supported_distance, 0.0);
++                metrics.fitness = min(max(displacement, 0.0), supported_distance)
++                    * posture * stepping;
+             }
+             if p.total_steps > SETTLE {
+                 metrics.vertical_oscillation = max(
+diff --git a/src/cpu_engine.rs b/src/cpu_engine.rs
+index f5e328f..6ea8096 100644
+--- a/src/cpu_engine.rs
++++ b/src/cpu_engine.rs
+@@ -4,13 +4,8 @@
+ //! the lanes with branch-free selects, which LLVM compiles to AVX-512 on this
+ //! machine (`target-cpu=native`). The equations mirror
+ //! `shaders/physics_creature.wgsl`; results differ from the GPU by rounding.
+-use crate::{
+-    config::Config,
+-    creature_kernel::GpuResult,
+-    evolution::Population,
+-    physics,
+-};
+ use crate::simd::F;
++use crate::{config::Config, creature_kernel::GpuResult, evolution::Population, physics};
+ use rayon::prelude::*;
+ use std::collections::HashMap;
+ 
+@@ -19,6 +14,7 @@ type V = [f32; L];
+ const ZERO: V = [0.0; L];
+ 
+ const MAX_MUSCLE_FORCE: f32 = 5.0;
++const MAX_MUSCLE_STRETCH_FORCE: f32 = 1.0;
+ const MAX_NODE_SPEED: f32 = 5.0;
+ const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
+ const PI: f32 = 3.141_592_653_59;
+@@ -134,7 +130,8 @@ impl Group {
+     fn build(pop: &Population, unit: &[usize], members: &[usize]) -> Self {
+         let first = &pop.genomes[unit[members[0]]];
+         let nodes = first.node_count;
+-        let bones: Vec<(usize, usize)> = pop.bones[first.bone_start..first.bone_start + first.bone_count]
++        let bones: Vec<(usize, usize)> = pop.bones
++            [first.bone_start..first.bone_start + first.bone_count]
+             .iter()
+             .map(|b| (b.a as usize, b.b as usize))
+             .collect();
+@@ -258,8 +255,16 @@ impl Group {
+         let rest = load(&self.rest);
+         let inv_a = load(&self.inv_a);
+         let inv_b = load(&self.inv_b);
+-        let share_a: Vec<F> = inv_a.iter().zip(&inv_b).map(|(&a, &b)| a / (a + b)).collect();
+-        let share_b: Vec<F> = inv_a.iter().zip(&inv_b).map(|(&a, &b)| b / (a + b)).collect();
++        let share_a: Vec<F> = inv_a
++            .iter()
++            .zip(&inv_b)
++            .map(|(&a, &b)| a / (a + b))
++            .collect();
++        let share_b: Vec<F> = inv_a
++            .iter()
++            .zip(&inv_b)
++            .map(|(&a, &b)| b / (a + b))
++            .collect();
+         let inv_mass: Vec<F> = mass.iter().map(|&m| F::splat(1.0) / m).collect();
+         let total_mass = mass.iter().fold(F::splat(0.0), |t, &m| t + m);
+         let inv_total_mass = F::splat(1.0) / total_mass;
+@@ -302,8 +307,10 @@ impl Group {
+         let mut failed = vec![zero; n];
+         let mut ground_contact = zero;
+         let mut height_sum = zero;
++        let mut supported_distance = zero;
+         let mut low_center = F::splat(1e20);
+         let mut high_center = F::splat(-1e20);
++        let mut previous_center_x = zero;
+         let mut previous_center = [0.0f32; L];
+         let mut extremum = [0.0f32; L];
+         let mut trend = [0.0f32; L];
+@@ -346,23 +353,25 @@ impl Group {
+                 let vby = vy[shape.b0] * rb + vy[shape.b1] * ab;
+                 let dx = pbx - pax;
+                 let dy = pby - pay;
+-                let inv_distance = F::splat(1.0) / (dx * dx + dy * dy).sqrt().max(F::splat(1e-6));
++                let distance = (dx * dx + dy * dy).sqrt().max(F::splat(1e-6));
++                let inv_distance = F::splat(1.0) / distance;
+                 let dir_x = dx * inv_distance;
+                 let dir_y = dy * inv_distance;
+                 let relative = (vbx - vax) * dir_x + (vby - vay) * dir_y;
+-                let target_speed = (muscle_length(m, time, exact)
+-                    - muscle_length(m, previous_time, exact))
+-                    * rate;
+-                let magnitude = (-(target_speed * m.stiffness) * 0.25 + relative * 0.15)
+-                    .max(F::splat(-MAX_MUSCLE_FORCE))
+-                    .min(F::splat(MAX_MUSCLE_FORCE));
+-                let push_x = dir_x * magnitude;
+-                let push_y = dir_y * magnitude;
++                let target_speed =
++                    (muscle_length(m, time, exact) - muscle_length(m, previous_time, exact)) * rate;
++                let drive =
++                    (-(target_speed * m.stiffness) * 0.25 + relative * 0.15).max(F::splat(0.0));
++                let overextension = ((distance - m.long).max(F::splat(0.0)) * m.stiffness)
++                    .min(F::splat(MAX_MUSCLE_STRETCH_FORCE));
++                let magnitude = (drive + overextension).min(F::splat(MAX_MUSCLE_FORCE));
++                let pull_x = dir_x * magnitude;
++                let pull_y = dir_y * magnitude;
+                 for e in 0..4 {
+                     let node = shape.targets[e];
+                     if node != usize::MAX {
+-                        sx[node] += push_x * m.weights[e];
+-                        sy[node] += push_y * m.weights[e];
++                        sx[node] += pull_x * m.weights[e];
++                        sy[node] += pull_y * m.weights[e];
+                     }
+                 }
+             }
+@@ -449,7 +458,8 @@ impl Group {
+                 let inv_previous = one / previous_length;
+                 let prev_x = pdx * inv_previous;
+                 let prev_y = pdy * inv_previous;
+-                let turn = previous_length.gt(tiny) & (prev_x * dir_x + prev_y * dir_y).lt(turn_cos);
++                let turn =
++                    previous_length.gt(tiny) & (prev_x * dir_x + prev_y * dir_y).lt(turn_cos);
+                 if turn.any() {
+                     let cross = prev_x * dir_y - prev_y * dir_x;
+                     let sign = F::select(cross.lt(zero), F::splat(-1.0), one);
+@@ -516,12 +526,14 @@ impl Group {
+ 
+             if tick >= settle {
+                 let mut center = zero;
++                let mut center_x = zero;
+                 let mut contacts = zero;
+                 let mut low = F::splat(1e20);
+                 let mut high = F::splat(-1e20);
+                 for j in 0..n {
+                     let y = py[j];
+                     center += y;
++                    center_x += px[j] * mass[j];
+                     low = low.min(y - radius[j]);
+                     high = high.max(y + radius[j]);
+                     if ground {
+@@ -529,8 +541,19 @@ impl Group {
+                     }
+                 }
+                 let center = center * (1.0 / n as f32);
++                center_x = center_x * inv_total_mass;
+                 ground_contact += contacts;
+                 height_sum += high - low;
++                if tick > settle {
++                    let supported = if ground {
++                        F::select(contacts.gt(zero), one, zero)
++                    } else {
++                        F::splat(1.0)
++                    };
++                    supported_distance +=
++                        F::select(supported.gt(zero), center_x - previous_center_x, zero);
++                }
++                previous_center_x = center_x;
+                 low_center = low_center.min(center);
+                 high_center = high_center.max(center);
+                 let sample = tick == settle || (tick - settle) % sample_interval == 0;
+@@ -578,6 +601,8 @@ impl Group {
+         let failed: Vec<[f32; L]> = failed.iter().map(|v| v.to_array()).collect();
+         let ground_contact = ground_contact.to_array();
+         let height_sum = height_sum.to_array();
++        let previous_center_x = previous_center_x.to_array();
++        let supported_distance = supported_distance.to_array();
+         let low_center = low_center.to_array();
+         let high_center = high_center.to_array();
+         (0..self.slots.len())
+@@ -597,7 +622,10 @@ impl Group {
+                     let contact_fraction = ground_contact[l] / (timed_steps * n as f32);
+                     let posture = ((mean_height - 0.25) / 0.75).clamp(0.0, 1.0);
+                     let stepping = ((0.95 - contact_fraction) / 0.20).clamp(0.0, 1.0);
+-                    score / mass_sum * posture * stepping
++                    let displacement = score / mass_sum;
++                    physics::supported_locomotion_distance(displacement, supported_distance[l])
++                        * posture
++                        * stepping
+                 };
+                 GpuResult {
+                     fitness,
+@@ -617,6 +645,8 @@ impl Group {
+                     vertical_trend: trend[l],
+                     gait_turns: turns[l],
+                     height_sum: height_sum[l],
++                    previous_center_x: previous_center_x[l],
++                    supported_distance: supported_distance[l],
+                 }
+             })
+             .collect()
+diff --git a/src/creature_kernel.rs b/src/creature_kernel.rs
+index 38850ff..a6759bf 100644
+--- a/src/creature_kernel.rs
++++ b/src/creature_kernel.rs
+@@ -43,6 +43,8 @@ pub struct GpuResult {
+     pub vertical_trend: f32,
+     pub gait_turns: f32,
+     pub height_sum: f32,
++    pub previous_center_x: f32,
++    pub supported_distance: f32,
+ }
+ 
+ /// One node-capacity group, ready for upload.
+@@ -69,8 +71,7 @@ pub fn capacity_index(nodes: usize) -> usize {
+ /// Waveform amplitude: the full stroke, limited so the target length changes
+ /// at most `MAX_MUSCLE_LENGTH_SPEED` (2 m/s).
+ pub fn muscle_amplitude(m: &crate::evolution::Muscle) -> f32 {
+-    (m.long - m.short)
+-        .min(2.0 * 2.0 * m.period * m.duty.min(1.0 - m.duty) / std::f32::consts::PI)
++    (m.long - m.short).min(2.0 * 2.0 * m.period * m.duty.min(1.0 - m.duty) / std::f32::consts::PI)
+ }
+ 
+ /// Hash of a creature's bone and muscle attachment layout.
+@@ -237,14 +238,23 @@ pub fn shader_source(capacity: usize, workgroup: u32) -> String {
+             "const VELOCITY_SOLVE_ITERATIONS: u32 = 4u;",
+             &format!("const VELOCITY_SOLVE_ITERATIONS: u32 = {velocity_passes}u;"),
+         )
+-        .replace("PHYSICSRATE", &format!("{:.1}", crate::physics::rate() as f32))
++        .replace(
++            "PHYSICSRATE",
++            &format!("{:.1}", crate::physics::rate() as f32),
++        )
+         .replace("SETTLESTEPSu", &format!("{}u", crate::physics::settle()))
+         .replace(
+             "SAMPLEINTERVALu",
+             &format!("{}u", crate::physics::sample_interval()),
+         )
+-        .replace("TURNCOS", &format!("{:.9}", crate::physics::turn_limits().0))
+-        .replace("TURNTAN", &format!("{:.9}", crate::physics::turn_limits().1))
++        .replace(
++            "TURNCOS",
++            &format!("{:.9}", crate::physics::turn_limits().0),
++        )
++        .replace(
++            "TURNTAN",
++            &format!("{:.9}", crate::physics::turn_limits().1),
++        )
+         .replace("SHAREDLEN", &(capacity * workgroup as usize).to_string())
+         .replace("WGSIZEu", &format!("{workgroup}u"))
+         .replace("WGSIZE", &workgroup.to_string())
+diff --git a/src/engine.rs b/src/engine.rs
+index de1a47a..5610909 100644
+--- a/src/engine.rs
++++ b/src/engine.rs
+@@ -65,7 +65,10 @@ impl ThreadedEngine {
+         } else {
+             self.done.recv_timeout(timeout).ok()
+         };
+-        for item in first.into_iter().chain(self.done.try_iter().collect::<Vec<_>>()) {
++        for item in first
++            .into_iter()
++            .chain(self.done.try_iter().collect::<Vec<_>>())
++        {
+             self.ready
+                 .push_back(item.map_err(|e| anyhow::anyhow!("{} failed: {e}", self.name))?);
+         }
+@@ -218,9 +221,7 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
+             }
+         })
+         .context("GPU engine thread")?;
+-    let device_name = ready_rx
+-        .recv()
+-        .context("GPU engine thread stopped")??;
++    let device_name = ready_rx.recv().context("GPU engine thread stopped")??;
+     Ok(ThreadedEngine {
+         name: device_name,
+         max_nodes,
+@@ -266,10 +267,7 @@ pub fn cpu_engine(threads: usize) -> Result<ThreadedEngine> {
+         })
+         .context("CPU evaluation dispatcher")?;
+     Ok(ThreadedEngine {
+-        name: format!(
+-            "CPU ({threads} threads, {}-lane SIMD)",
+-            crate::simd::LANES
+-        ),
++        name: format!("CPU ({threads} threads, {}-lane SIMD)", crate::simd::LANES),
+         max_nodes: 64,
+         depth: 2,
+         jobs: Some(jobs),
+diff --git a/src/evolution.rs b/src/evolution.rs
+index eac2eed..fa3bf18 100644
+--- a/src/evolution.rs
++++ b/src/evolution.rs
+@@ -746,6 +746,16 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
+     normalize_bone_lengths(c);
+     canonicalize_bone_order(c);
+     align_nodes_with_bones(c);
++    // Anchor and bone mutations can make an inherited relaxed length shorter
++    // than the attachment span in the starting pose. Avoid beginning each
++    // trial with every such muscle already under stretch tension.
++    let bones = &c.bones;
++    let nodes = &c.nodes;
++    for muscle in &mut c.muscles {
++        let a = bone_point(bones[muscle.bone_a as usize], nodes, muscle.anchor_a);
++        let b = bone_point(bones[muscle.bone_b as usize], nodes, muscle.anchor_b);
++        muscle.long = muscle.long.max((a[0] - b[0]).hypot(a[1] - b[1]));
++    }
+ }
+ fn initial(cfg: &Config, index: usize) -> Creature {
+     random_creature(cfg, 0, index)
+@@ -885,41 +895,46 @@ pub fn emit_archive_batch_streaming(
+ ) -> Result<Population> {
+     ensure_archive_batch_memory(current, archive, cfg)?;
+     ensure!(plans.len() == cfg.population, "Invalid emitter plan count");
+-    collect_parallel_streaming(cfg.population, slice, |i| {
+-        let plan = plans[i];
+-        let mut rng = Rng::new(cfg.seed, generation, i);
+-        let mut creature = match plan.emitter {
+-            Emitter::Restart => random_creature(cfg, generation, i),
+-            Emitter::Cma => {
+-                if let Some(cma) = plan.cma.and_then(|index| cma_emitters.get(index)) {
+-                    cma.sample_scaled(&mut rng, cfg.mutation)
+-                } else {
+-                    let parent = &archive.entries[plan.parent.expect("CMA parent")].creature;
+-                    local_mutation(parent.clone(), cfg, &mut rng, 0.12)
++    collect_parallel_streaming(
++        cfg.population,
++        slice,
++        |i| {
++            let plan = plans[i];
++            let mut rng = Rng::new(cfg.seed, generation, i);
++            let mut creature = match plan.emitter {
++                Emitter::Restart => random_creature(cfg, generation, i),
++                Emitter::Cma => {
++                    if let Some(cma) = plan.cma.and_then(|index| cma_emitters.get(index)) {
++                        cma.sample_scaled(&mut rng, cfg.mutation)
++                    } else {
++                        let parent = &archive.entries[plan.parent.expect("CMA parent")].creature;
++                        local_mutation(parent.clone(), cfg, &mut rng, 0.12)
++                    }
+                 }
+-            }
+-            Emitter::Structural => {
+-                let parent = archive.entries[plan.parent.expect("structural parent")]
+-                    .creature
+-                    .clone();
+-                let (child, _) = structural_mutation(parent, cfg, &mut rng);
+-                local_mutation(child, cfg, &mut rng, 0.035)
+-            }
+-            Emitter::Novelty => {
+-                let parent = archive.entries[plan.parent.expect("novelty parent")]
+-                    .creature
+-                    .clone();
+-                let mut child = local_mutation(parent, cfg, &mut rng, 0.75);
+-                if rng.unit() < 0.18 {
+-                    let _ = structural_mutation_in_place(&mut child, cfg, &mut rng);
++                Emitter::Structural => {
++                    let parent = archive.entries[plan.parent.expect("structural parent")]
++                        .creature
++                        .clone();
++                    let (child, _) = structural_mutation(parent, cfg, &mut rng);
++                    local_mutation(child, cfg, &mut rng, 0.035)
+                 }
+-                child
+-            }
+-        };
+-        creature.id = (generation as u64) * cfg.population as u64 + i as u64 + 1;
+-        repair(&mut creature, cfg, &mut rng);
+-        creature
+-    }, on_slice)
++                Emitter::Novelty => {
++                    let parent = archive.entries[plan.parent.expect("novelty parent")]
++                        .creature
++                        .clone();
++                    let mut child = local_mutation(parent, cfg, &mut rng, 0.75);
++                    if rng.unit() < 0.18 {
++                        let _ = structural_mutation_in_place(&mut child, cfg, &mut rng);
++                    }
++                    child
++                }
++            };
++            creature.id = (generation as u64) * cfg.population as u64 + i as u64 + 1;
++            repair(&mut creature, cfg, &mut rng);
++            creature
++        },
++        on_slice,
++    )
+ }
+ 
+ pub fn ensure_archive_batch_memory(
+diff --git a/src/gpu.rs b/src/gpu.rs
+index e465f37..4bd554a 100644
+--- a/src/gpu.rs
++++ b/src/gpu.rs
+@@ -92,6 +92,8 @@ struct GpuResult {
+     vertical_trend: f32,
+     gait_turns: f32,
+     height_sum: f32,
++    previous_center_x: f32,
++    supported_distance: f32,
+ }
+ pub struct Gpu {
+     pub device: wgpu::Device,
+@@ -350,12 +352,28 @@ impl Gpu {
+             "The workgroup physics variant needs its source transform updated"
+         );
+         let variant_source = |lanes: u32| {
+-            apply_fast_cos(
+-                wide_source
+-                    .replace("WORKGROUPX2", &format!("{}", lanes * 2))
+-                    .replace("WORKGROUPu", &format!("{lanes}u"))
+-                    .replace("WORKGROUP", &lanes.to_string()),
+-            )
++            let (bone_passes, velocity_passes) = physics::solver_passes();
++            let source = wide_source
++                .replace("WORKGROUPX2", &format!("{}", lanes * 2))
++                .replace("WORKGROUPu", &format!("{lanes}u"))
++                .replace("WORKGROUP", &lanes.to_string())
++                .replace(
++                    "const BONE_SOLVE_ITERATIONS: u32 = 8u;",
++                    &format!("const BONE_SOLVE_ITERATIONS: u32 = {bone_passes}u;"),
++                )
++                .replace(
++                    "const VELOCITY_SOLVE_ITERATIONS: u32 = 4u;",
++                    &format!("const VELOCITY_SOLVE_ITERATIONS: u32 = {velocity_passes}u;"),
++                )
++                .replace("PHYSICSRATE", &format!("{:.1}", physics::rate()))
++                .replace("SETTLESTEPSu", &format!("{}u", physics::settle()))
++                .replace("TURNCOS", &format!("{:.9}", physics::turn_limits().0))
++                .replace("TURNTAN", &format!("{:.9}", physics::turn_limits().1))
++                .replace(
++                    "SAMPLEINTERVALu",
++                    &format!("{}u", physics::sample_interval()),
++                );
++            apply_fast_cos(source)
+         };
+         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+             label: Some("Muscle physics"),
+@@ -918,7 +936,7 @@ impl Gpu {
+                     stride: batch.stride as u32,
+                     count: batch.metadata.len() as u32,
+                     gravity: cfg.gravity,
+-                    air: cfg.air_retention.sqrt(),
++                    air: physics::air_per_step(cfg.air_retention),
+                     friction: cfg.ground_friction,
+                     ground: if cfg.ground { 1.0 } else { 0.0 },
+                     total_steps: steps,
+diff --git a/src/main.rs b/src/main.rs
+index 35e7312..c342f0c 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -436,9 +436,11 @@ fn main() -> Result<()> {
+             // `--engine cpu` runs the CPU SIMD engine alone; another name opens that
+             // Vulkan device alone (bodies up to 16 nodes).
+             let mut engine: Option<Box<dyn evolution_simulator::engine::Engine>> = match engine {
+-                Some(name) if name == "cpu" => Some(Box::new(evolution_simulator::engine::cpu_engine(
+-                    std::thread::available_parallelism().map_or(4, usize::from),
+-                )?)),
++                Some(name) if name == "cpu" => {
++                    Some(Box::new(evolution_simulator::engine::cpu_engine(
++                        std::thread::available_parallelism().map_or(4, usize::from),
++                    )?))
++                }
+                 Some(name) => Some(Box::new(evolution_simulator::engine::gpu_engine(
+                     &name,
+                     16,
+diff --git a/src/physics.rs b/src/physics.rs
+index 8253c53..70dce78 100644
+--- a/src/physics.rs
++++ b/src/physics.rs
+@@ -11,7 +11,7 @@ pub fn rate() -> u32 {
+             .ok()
+             .and_then(|v| v.parse().ok())
+             .filter(|&r: &u32| (15..=480).contains(&r))
+-            .unwrap_or(60)
++            .unwrap_or(30)
+     })
+ }
+ /// Seconds per physics step.
+@@ -49,13 +49,14 @@ pub fn solver_passes() -> (usize, usize) {
+                 .unwrap_or(default)
+         };
+         (
+-            read("EVOLUTION_BONE_PASSES", 2),
+-            read("EVOLUTION_VELOCITY_PASSES", 1),
++            read("EVOLUTION_BONE_PASSES", 8),
++            read("EVOLUTION_VELOCITY_PASSES", 4),
+         )
+     })
+ }
+ const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
+ const MAX_MUSCLE_FORCE: f32 = 5.0;
++const MAX_MUSCLE_STRETCH_FORCE: f32 = 1.0;
+ const MAX_NODE_SPEED: f32 = 5.0;
+ const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
+ #[repr(C)]
+@@ -101,12 +102,14 @@ fn limited_target(m: &Muscle, time: f32) -> f32 {
+     limited.short = m.long - amplitude;
+     target(&limited, time)
+ }
+-fn motor_force(m: &Muscle, time: f32, relative: f32) -> f32 {
++fn motor_force(m: &Muscle, time: f32, relative: f32, distance: f32) -> f32 {
+     let target_speed = (limited_target(m, time) - limited_target(m, (time - dt()).max(0.0))) / dt();
+     // A fixed target is a passive constraint, not an inexhaustible motor.
+-    // The actuator pulls while shortening and pushes while lengthening.
+-    (-target_speed * m.stiffness * 0.25 + relative * 0.15)
+-        .clamp(-MAX_MUSCLE_FORCE, MAX_MUSCLE_FORCE)
++    // It supplies tension while shortening, goes slack while lengthening, and
++    // resists extension beyond its relaxed (long) length.
++    let drive = (-target_speed * m.stiffness * 0.25 + relative * 0.15).max(0.0);
++    let overextension = ((distance - m.long).max(0.0) * m.stiffness).min(MAX_MUSCLE_STRETCH_FORCE);
++    (drive + overextension).min(MAX_MUSCLE_FORCE)
+ }
+ fn limit_speed(velocity: &mut [f32; 2]) {
+     let speed = velocity[0].hypot(velocity[1]);
+@@ -337,7 +340,7 @@ pub fn step(nodes: &mut [Node], bones: &[Bone], muscles: &[Muscle], cfg: &Config
+             let velocity_b = bone_point(bone_b, &old, m.anchor_b, true);
+             let relative =
+                 (velocity_b[0] - velocity_a[0]) * dir[0] + (velocity_b[1] - velocity_a[1]) * dir[1];
+-            let force = motor_force(m, time, relative);
++            let force = motor_force(m, time, relative, distance);
+             let mut weight = 0.0;
+             if bone_a.a as usize == i {
+                 weight += 1.0 - m.anchor_a;
+@@ -383,6 +386,8 @@ pub fn evaluate(c: &Creature, cfg: &Config) -> f32 {
+     let mut n = nodes(&canonical);
+     let mut height_sum = 0.0;
+     let mut contacts = 0usize;
++    let mut previous_center_x = 0.0;
++    let mut supported_distance = 0.0;
+     for tick in 0..settle() + cfg.steps() {
+         step(&mut n, &canonical.bones, &canonical.muscles, cfg, tick);
+         if tick >= settle() {
+@@ -395,10 +400,18 @@ pub fn evaluate(c: &Creature, cfg: &Config) -> f32 {
+                 .map(|node| node.pos[1] + node.radius)
+                 .fold(f32::NEG_INFINITY, f32::max);
+             height_sum += high - low;
+-            contacts += n
++            let frame_contacts = n
+                 .iter()
+                 .filter(|node| cfg.ground && node.pos[1] <= node.radius + 0.002)
+                 .count();
++            contacts += frame_contacts;
++            let mass_sum: f32 = n.iter().map(|node| node.mass).sum();
++            let center_x = n.iter().map(|node| node.pos[0] * node.mass).sum::<f32>() / mass_sum;
++            let supported = !cfg.ground || frame_contacts > 0;
++            if tick > settle() && supported {
++                supported_distance += center_x - previous_center_x;
++            }
++            previous_center_x = center_x;
+         }
+     }
+     let displacement = fitness(&n);
+@@ -407,13 +420,17 @@ pub fn evaluate(c: &Creature, cfg: &Config) -> f32 {
+     }
+     let steps = cfg.steps().max(1) as f32;
+     let contact_fraction = contacts as f32 / (steps * n.len() as f32);
+-    displacement * locomotion_factor(height_sum / steps, contact_fraction)
++    supported_locomotion_distance(displacement, supported_distance)
++        * locomotion_factor(height_sum / steps, contact_fraction)
+ }
+ pub fn locomotion_factor(mean_height: f32, contact_fraction: f32) -> f32 {
+     let posture = ((mean_height - 0.25) / 0.75).clamp(0.0, 1.0);
+     let stepping = ((0.95 - contact_fraction) / 0.20).clamp(0.0, 1.0);
+     posture * stepping
+ }
++pub fn supported_locomotion_distance(total_displacement: f32, supported_distance: f32) -> f32 {
++    total_displacement.min(supported_distance).max(0.0)
++}
+ pub fn fitness(n: &[Node]) -> f32 {
+     if n.iter().any(|n| n.failed != 0.0) {
+         FAILED
+@@ -481,9 +498,12 @@ mod tests {
+             stiffness: 120.0,
+         };
+         for tick in 0..120 {
+-            assert_eq!(motor_force(&muscle, tick as f32 * dt(), 0.0), 0.0);
++            assert_eq!(
++                motor_force(&muscle, tick as f32 * dt(), 0.0, muscle.long),
++                0.0
++            );
+         }
+-        assert!(motor_force(&muscle, 0.025, 0.0) == 0.0);
++        assert!(motor_force(&muscle, 0.025, 0.0, muscle.long) == 0.0);
+     }
+ 
+     #[test]
+@@ -493,6 +513,14 @@ mod tests {
+         assert!(locomotion_factor(0.7, 0.8) > 0.0);
+     }
+ 
++    #[test]
++    fn locomotion_score_counts_only_ground_supported_displacement() {
++        assert_eq!(supported_locomotion_distance(1.0, 0.01), 0.01);
++        assert_eq!(supported_locomotion_distance(1.0, 1.0), 1.0);
++        assert_eq!(supported_locomotion_distance(-1.0, 1.0), 0.0);
++        assert_eq!(supported_locomotion_distance(1.0, -0.5), 0.0);
++    }
++
+     #[test]
+     fn correcting_a_bone_does_not_create_velocity() {
+         let mut nodes = [test_node([0.0, 0.0]), test_node([0.2, 0.0])];
+diff --git a/src/qd.rs b/src/qd.rs
+index 6bb91f0..999d14a 100644
+--- a/src/qd.rs
++++ b/src/qd.rs
+@@ -8,7 +8,7 @@ pub(crate) const MORPHOLOGY_LIMIT: usize = 64;
+ pub(crate) const ARCHIVE_CAPACITY: usize = ARCHIVE_LIMIT + MORPHOLOGY_LIMIT;
+ pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 13_824;
+ pub(crate) const CMA_LIMIT: usize = 96;
+-pub const VERSION: u32 = 10;
++pub const VERSION: u32 = 13;
+ const LOCAL_NEIGHBORS: usize = 5;
+ const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
+ pub(crate) const MIN_MORPHOLOGY_DESCENDANTS: u64 = 8;
+diff --git a/src/simd.rs b/src/simd.rs
+index 841908c..732a081 100644
+--- a/src/simd.rs
++++ b/src/simd.rs
+@@ -46,9 +46,9 @@ mod imp {
+         #[inline(always)]
+         pub fn floor(self) -> F {
+             unsafe {
+-                F(_mm512_roundscale_ps::<{ _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC }>(
+-                    self.0,
+-                ))
++                F(_mm512_roundscale_ps::<
++                    { _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC },
++                >(self.0))
+             }
+         }
+         #[inline(always)]
+diff --git a/src/worker.rs b/src/worker.rs
+index b1ad991..faf5d69 100644
+--- a/src/worker.rs
++++ b/src/worker.rs
+@@ -320,7 +320,9 @@ fn run(
+                     match e.stage {
+                         Stage::Ready | Stage::Evaluating if gpu.async_capable() => {
+                             let stage_start = Instant::now();
+-                            if done.len() != e.config.population || done_key != (epoch, e.generation) {
++                            if done.len() != e.config.population
++                                || done_key != (epoch, e.generation)
++                            {
+                                 done = vec![false; e.config.population];
+                                 done[..e.evaluated].fill(true);
+                                 done_key = (epoch, e.generation);
+diff --git a/tests/simulation.rs b/tests/simulation.rs
+index c910d6b..9139f79 100644
+--- a/tests/simulation.rs
++++ b/tests/simulation.rs
+@@ -176,6 +176,24 @@ fn frozen_muscles_behave_like_unpowered_muscles() {
+     assert!((fixed_score - unpowered_score).abs() < 1e-5);
+ }
+ 
++#[test]
++fn cpu_simd_fitness_matches_scalar_with_grounded_distance_scoring() {
++    let cfg = Config {
++        duration: 0.5,
++        ..config()
++    };
++    let population = evolution::create(&cfg).unwrap();
++    let simd = evolution_simulator::cpu_engine::evaluate(&population, &cfg);
++    for (index, result) in simd.iter().enumerate() {
++        let scalar = physics::evaluate(&population.creature(index), &cfg);
++        assert!(
++            (result.fitness - scalar).abs() < 0.05,
++            "creature {index}: SIMD {}, scalar {scalar}",
++            result.fitness
++        );
++    }
++}
++
+ #[test]
+ fn bone_lengths_hold_and_off_center_muscles_rotate_bones() {
+     let cfg = Config {

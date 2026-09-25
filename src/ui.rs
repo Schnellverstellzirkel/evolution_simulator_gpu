@@ -103,36 +103,47 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
+/// Replays a creature's trial as simulated by the evaluation engines.
 struct Playback {
     creature: Creature,
     config: Config,
     nodes: Vec<Node>,
+    /// Node positions after each step, from the CPU evaluation engine.
+    frames: Vec<Vec<[f32; 2]>>,
     tick: u32,
     accumulator: f32,
 }
 impl Playback {
     fn new(creature: Creature, config: Config) -> Self {
-        let mut nodes = physics::nodes(&creature);
-        for tick in 0..physics::settle() {
-            physics::step(
-                &mut nodes,
-                &creature.bones,
-                &creature.muscles,
-                &config,
-                tick,
-            );
-        }
-        physics::center(&mut nodes);
-        Self {
-            creature,
+        let mut normalized = creature.clone();
+        crate::evolution::canonicalize_bone_order(&mut normalized);
+        let frames = crate::cpu_engine::trajectory(&normalized, &config);
+        let mut playback = Self {
+            nodes: physics::nodes(&normalized),
+            creature: normalized,
             config,
-            nodes,
-            tick: physics::settle(),
+            frames,
+            tick: physics::settle() + 1,
             accumulator: 0.0,
-        }
+        };
+        playback.show();
+        playback
     }
     fn reset(&mut self) {
-        *self = Self::new(self.creature.clone(), self.config.clone());
+        self.tick = physics::settle() + 1;
+        self.show();
+    }
+    /// Advances one physics step.
+    fn advance(&mut self) {
+        self.tick += 1;
+        self.show();
+    }
+    fn show(&mut self) {
+        if let Some(frame) = self.frames.get(self.tick as usize) {
+            for (node, position) in self.nodes.iter_mut().zip(frame) {
+                node.pos = *position;
+            }
+        }
     }
 }
 #[derive(Clone, Copy, PartialEq)]
@@ -791,14 +802,7 @@ impl App {
             if ui.button("Single tick").clicked() {
                 self.playing = false;
                 if let Some(p) = &mut self.playback {
-                    physics::step(
-                        &mut p.nodes,
-                        &p.creature.bones,
-                        &p.creature.muscles,
-                        &p.config,
-                        p.tick,
-                    );
-                    p.tick += 1;
+                    p.advance();
                 }
             }
             ui.add(
@@ -1365,14 +1369,7 @@ impl eframe::App for App {
                 if p.tick >= physics::settle() + p.config.steps() {
                     p.reset();
                 }
-                physics::step(
-                    &mut p.nodes,
-                    &p.creature.bones,
-                    &p.creature.muscles,
-                    &p.config,
-                    p.tick,
-                );
-                p.tick += 1;
+                p.advance();
                 p.accumulator -= physics::dt();
             }
             if self.follow {
