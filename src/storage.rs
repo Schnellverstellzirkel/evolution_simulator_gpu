@@ -320,12 +320,10 @@ impl Experiment {
             }
             let emitter_index = prep.emitter.index();
             attempts[emitter_index] += 1;
-            if prep.emitter == Emitter::Cma
-                && let Some(cma) = self.candidate_cma.get(i).copied().flatten()
-                && let Some(samples) = cma_samples.get_mut(cma)
-            {
-                samples.push((i, prep.score));
-            }
+            let elite_before = self
+                .archive
+                .slot_for(&prep.descriptor.niche())
+                .map(|slot| self.archive.entries[slot].fitness);
             let behavior_offer = if prep.behavior_candidate {
                 self.archive.offer(
                     &self.population,
@@ -360,6 +358,22 @@ impl Experiment {
             } else {
                 morphology_offer
             };
+            // CMA-ME improvement ranking: new niches first, then improvement over
+            // the niche's elite, then how far short of it a sample fell.
+            if prep.emitter == Emitter::Cma
+                && let Some(cma) = self.candidate_cma.get(i).copied().flatten()
+                && let Some(samples) = cma_samples.get_mut(cma)
+                && prep.score.is_finite()
+                && prep.score > FAILED
+            {
+                let key = match elite_before {
+                    None if behavior_offer.inserted => 1.0e6 + prep.score,
+                    Some(before) if behavior_offer.inserted => 1.0e3 + (prep.score - before),
+                    Some(before) => prep.score - before,
+                    None => prep.score - 1.0e3,
+                };
+                samples.push((i, key));
+            }
             if offer.inserted {
                 rewards[emitter_index] += offer.reward;
                 if offer.new_niche {

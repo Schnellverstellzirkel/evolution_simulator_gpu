@@ -859,13 +859,23 @@ impl CmaEmitter {
     }
     pub fn sample_scaled(&self, rng: &mut Rng, strength: f32) -> Creature {
         let phase_start = self.template.nodes.len() * 4 + self.template.bones.len();
+        // Diagonal covariance plus a rank-one term along the evolution path, so
+        // parameter changes that keep paying off move together.
+        let path_norm = self.path_c.iter().map(|p| p * p).sum::<f32>().sqrt();
+        let path_scale = if path_norm > 1e-6 {
+            PATH_WEIGHT.sqrt() * gaussian(rng) / path_norm * (self.mean.len() as f32).sqrt()
+        } else {
+            0.0
+        };
         let values: Vec<_> = self
             .mean
             .iter()
             .zip(&self.covariance)
+            .zip(&self.path_c)
             .enumerate()
-            .map(|(d, (&mean, &variance))| {
-                let value = mean + self.sigma * variance.sqrt() * gaussian(rng) * strength;
+            .map(|(d, ((&mean, &variance), &path))| {
+                let step = variance.sqrt() * gaussian(rng) + path * path_scale;
+                let value = mean + self.sigma * step * strength;
                 if is_phase_dimension(d, phase_start) {
                     value.rem_euclid(1.0)
                 } else {
@@ -896,7 +906,7 @@ impl CmaEmitter {
         if samples.len() < 2 {
             return;
         }
-        const MAX_UPDATE_SAMPLES: usize = 128;
+        const MAX_UPDATE_SAMPLES: usize = 1024;
         if samples.len() > MAX_UPDATE_SAMPLES {
             samples.select_nth_unstable_by(MAX_UPDATE_SAMPLES, |a, b| b.1.total_cmp(&a.1));
             samples.truncate(MAX_UPDATE_SAMPLES);
@@ -1000,6 +1010,9 @@ fn is_phase_dimension(dimension: usize, phase_start: usize) -> bool {
 fn wrap_phase(delta: f32) -> f32 {
     (delta + 0.5).rem_euclid(1.0) - 0.5
 }
+
+/// Share of each CMA step taken along the normalized evolution path.
+const PATH_WEIGHT: f32 = 0.3;
 
 pub(crate) fn gaussian(rng: &mut Rng) -> f32 {
     let u1 = (1.0 - rng.unit()).max(1e-7);
