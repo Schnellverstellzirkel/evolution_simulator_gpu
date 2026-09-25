@@ -51,6 +51,9 @@ struct Result {
     vertical_trend: f32,
     gait_turns: f32,
     height_sum: f32,
+    // Bitmasks (as f32 bits) of nodes 0-31 and 32-63 that touched the ground.
+    contact_lo: f32,
+    contact_hi: f32,
 }
 @group(0) @binding(0) var<storage, read_write> nodes: array<Node>;
 @group(0) @binding(1) var<storage, read> muscle_data: array<f32>;
@@ -189,7 +192,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         bone_ra[j] = node_a.radius;
         bone_rb[j] = node_b.radius;
     }
-    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0);
+    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     if p.tick > 0u {
         metrics = results[creature];
     }
@@ -460,6 +463,11 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if p.ground > 0.0
                     && y <= radius[j] + 0.002 {
                     contacts += 1.0;
+                    if j < 32u {
+                        metrics.contact_lo = bitcast<f32>(bitcast<u32>(metrics.contact_lo) | (1u << j));
+                    } else {
+                        metrics.contact_hi = bitcast<f32>(bitcast<u32>(metrics.contact_hi) | (1u << (j - 32u)));
+                    }
                 }
             }
             center_y *= inv_nodes;
@@ -516,8 +524,10 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let mean_height = metrics.height_sum / f32(timed_steps);
                 let contact_fraction = metrics.ground_contact
                     / (f32(timed_steps) * f32(body_nodes));
-                let posture = clamp((mean_height - 0.25) / 0.75, 0.0, 1.0);
-                let stepping = clamp((0.95 - contact_fraction) / 0.20, 0.0, 1.0);
+                // Soft preferences: low or fully grounded bodies keep a tenth of
+                // their distance, so evolution can still rank near misses.
+                let posture = 0.1 + 0.9 * clamp((mean_height - 0.25) / 0.75, 0.0, 1.0);
+                let stepping = 0.1 + 0.9 * clamp((0.95 - contact_fraction) / 0.20, 0.0, 1.0);
                 metrics.fitness = score / mass_sum * posture * stepping;
             }
             if p.total_steps > SETTLE {

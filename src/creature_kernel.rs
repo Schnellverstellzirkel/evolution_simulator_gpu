@@ -42,6 +42,15 @@ pub struct GpuResult {
     pub vertical_trend: f32,
     pub gait_turns: f32,
     pub height_sum: f32,
+    /// Bits of nodes 0-31 / 32-63 that touched the ground (stored as f32 bits).
+    pub contact_lo: f32,
+    pub contact_hi: f32,
+}
+impl GpuResult {
+    /// Number of distinct nodes that touched the ground during the trial.
+    pub fn feet(&self) -> u32 {
+        self.contact_lo.to_bits().count_ones() + self.contact_hi.to_bits().count_ones()
+    }
 }
 
 /// One node-capacity group, ready for upload.

@@ -329,6 +329,7 @@ impl Group {
         let mut extremum = [0.0f32; L];
         let mut trend = [0.0f32; L];
         let mut turns = [0.0f32; L];
+        let mut contact_bits = [0u64; L];
 
         let snapshot = |px: &[F], py: &[F]| -> Vec<[f32; 2]> {
             px.iter()
@@ -591,7 +592,14 @@ impl Group {
                     low = low.min(y - radius[j]);
                     high = high.max(y + radius[j]);
                     if ground {
-                        contacts += F::select(y.le(radius[j] + 0.002), one, zero);
+                        let touching = y.le(radius[j] + 0.002);
+                        contacts += F::select(touching, one, zero);
+                        let bits = F::select(touching, one, zero).to_array();
+                        for (l, &b) in bits.iter().enumerate() {
+                            if b > 0.0 {
+                                contact_bits[l] |= 1 << j;
+                            }
+                        }
                     }
                 }
                 let center = center * (1.0 / n as f32);
@@ -670,8 +678,8 @@ impl Group {
                 } else {
                     let mean_height = height_sum[l] / timed_steps;
                     let contact_fraction = ground_contact[l] / (timed_steps * n as f32);
-                    let posture = ((mean_height - 0.25) / 0.75).clamp(0.0, 1.0);
-                    let stepping = ((0.95 - contact_fraction) / 0.20).clamp(0.0, 1.0);
+                    let posture = 0.1 + 0.9 * ((mean_height - 0.25) / 0.75).clamp(0.0, 1.0);
+                    let stepping = 0.1 + 0.9 * ((0.95 - contact_fraction) / 0.20).clamp(0.0, 1.0);
                     score / mass_sum * posture * stepping
                 };
                 GpuResult {
@@ -692,6 +700,8 @@ impl Group {
                     vertical_trend: trend[l],
                     gait_turns: turns[l],
                     height_sum: height_sum[l],
+                    contact_lo: f32::from_bits(contact_bits[l] as u32),
+                    contact_hi: f32::from_bits((contact_bits[l] >> 32) as u32),
                 }
             })
             .collect()

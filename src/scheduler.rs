@@ -341,6 +341,8 @@ pub fn to_metrics(
             } else {
                 0.0
             },
+            mean_height: (r.height_sum / cfg.steps().max(1) as f32).max(0.0),
+            feet: r.feet() as f32,
         },
     }
 }

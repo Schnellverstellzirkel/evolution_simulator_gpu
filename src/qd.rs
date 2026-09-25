@@ -3,10 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 
 pub const EMITTER_COUNT: usize = 4;
-pub(crate) const ARCHIVE_LIMIT: usize = 192;
+/// Archive grid: ground contact, gait cadence, vertical bounce, mean body
+/// height, and feet (distinct nodes that touched the ground).
+const BINS: [u8; 5] = [6, 8, 6, 6, 5];
+pub(crate) const ARCHIVE_LIMIT: usize = 6 * 8 * 6 * 6 * 5;
 pub(crate) const MORPHOLOGY_LIMIT: usize = 64;
 pub(crate) const ARCHIVE_CAPACITY: usize = ARCHIVE_LIMIT + MORPHOLOGY_LIMIT;
-pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 13_824;
+pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 1 << 20;
 pub(crate) const CMA_LIMIT: usize = 96;
 pub const VERSION: u32 = 11;
 const LOCAL_NEIGHBORS: usize = 5;
@@ -18,10 +21,15 @@ pub(crate) const MORPHOLOGY_PARENT_FRACTION: f32 = 0.10;
 const INITIAL_EMITTER_MIX: [f64; EMITTER_COUNT] = [0.30, 0.30, 0.25, 0.15];
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TrialMetrics {
     pub ground_contact: f32,
     pub vertical_oscillation: f32,
     pub gait_frequency: f32,
+    /// Mean height of the body's bounding box during the timed trial (m).
+    pub mean_height: f32,
+    /// Distinct nodes that touched the ground.
+    pub feet: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -38,6 +46,10 @@ pub struct Descriptor {
     pub gait_frequency: f32,
     pub aspect_ratio: f32,
     pub vertical_oscillation: f32,
+    #[serde(default)]
+    pub mean_height: f32,
+    #[serde(default)]
+    pub feet: f32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -169,6 +181,8 @@ pub fn descriptor(
         gait_frequency: metrics.gait_frequency.clamp(0.0, 20.0),
         aspect_ratio: ((max_x - min_x).max(0.01) / (max_y - min_y).max(0.01)).clamp(0.0625, 16.0),
         vertical_oscillation: metrics.vertical_oscillation.max(0.0),
+        mean_height: metrics.mean_height.max(0.0),
+        feet: metrics.feet.max(0.0),
     }
 }
 
@@ -176,26 +190,50 @@ impl Descriptor {
     pub fn niche(self) -> Niche {
         // Only measured behavior determines archive cells. Morphology remains
         // attached to each descriptor for display and analysis.
+        let feet = (self.feet.round() as i32).clamp(1, BINS[4] as i32) as u8 - 1;
         Niche([
-            bin(self.ground_contact, 0.0, 1.0, 4),
-            bin(self.gait_frequency, 0.0, 6.0, 8),
-            bin(self.vertical_oscillation, 0.0, 0.8, 6),
-            0,
-            0,
+            bin(self.ground_contact, 0.0, 1.0, BINS[0]),
+            bin(self.gait_frequency, 0.0, 6.0, BINS[1]),
+            bin(self.vertical_oscillation, 0.0, 0.8, BINS[2]),
+            bin(self.mean_height, 0.25, 2.25, BINS[3]),
+            feet,
             0,
         ])
     }
 
-    fn behavior(self) -> [f32; 3] {
+    fn behavior(self) -> [f32; 5] {
         [
             self.ground_contact.clamp(0.0, 1.0),
             (self.gait_frequency / 6.0).clamp(0.0, 1.0),
             (self.vertical_oscillation / 0.8).clamp(0.0, 1.0),
+            ((self.mean_height - 0.25) / 2.0).clamp(0.0, 1.0),
+            ((self.feet - 1.0) / (BINS[4] as f32 - 1.0)).clamp(0.0, 1.0),
         ]
     }
 }
 fn bin(value: f32, low: f32, high: f32, count: u8) -> u8 {
     (((value.clamp(low, high) - low) / (high - low) * count as f32).floor() as u8).min(count - 1)
+}
+
+/// Behavior niches within `radius` grid steps of `center` (itself excluded).
+fn neighbor_niches(center: &Niche, radius: i32) -> impl Iterator<Item = Niche> + '_ {
+    let side = (2 * radius + 1) as usize;
+    let total = side.pow(BINS.len() as u32);
+    (0..total).filter_map(move |mut code| {
+        let mut cell = [0u8; 6];
+        let mut moved = false;
+        for (axis, &bins) in BINS.iter().enumerate() {
+            let offset = (code % side) as i32 - radius;
+            code /= side;
+            moved |= offset != 0;
+            let value = center.0[axis] as i32 + offset;
+            if !(0..bins as i32).contains(&value) {
+                return None;
+            }
+            cell[axis] = value as u8;
+        }
+        moved.then_some(Niche(cell))
+    })
 }
 
 fn behavior_distance(a: Descriptor, b: Descriptor) -> f32 {
@@ -400,55 +438,60 @@ impl QdArchive {
         }
         selected
     }
+    /// Novelty (mean distance to the nearest archived behaviors) and local
+    /// competition (share of those neighbors this elite beats), found through
+    /// adjacent grid cells instead of comparing every pair.
     pub fn refresh_behavior_scores(&mut self) {
+        use rayon::prelude::*;
         let behavior = &self.behavior_indices;
-        let count = behavior.len();
-        if count == 0 {
+        if behavior.is_empty() {
             self.behavior_scores = BehaviorScores::default();
             return;
         }
-        let mut novelty = vec![0.0; self.entries.len()];
-        let mut local_competition = vec![0.5; self.entries.len()];
-        if count == 1 {
-            novelty[behavior[0]] = 1.0;
-            self.behavior_scores = BehaviorScores {
-                novelty,
-                local_competition,
-            };
-            return;
-        }
-        let mut neighbors = Vec::with_capacity(count - 1);
-        for i in 0..count {
-            neighbors.clear();
-            for j in 0..count {
-                if i != j {
-                    neighbors.push((
-                        behavior_distance(
-                            self.entries[behavior[i]].descriptor,
-                            self.entries[behavior[j]].descriptor,
-                        ),
-                        behavior[j],
-                    ));
+        let scores: Vec<(usize, f32, f32)> = behavior
+            .par_iter()
+            .map(|&index| {
+                let elite = &self.entries[index];
+                let mut neighbors: Vec<(f32, f32)> = Vec::new();
+                for radius in 1..=2 {
+                    neighbors.clear();
+                    for niche in neighbor_niches(&elite.niche, radius) {
+                        if let Some(&slot) = self.lookup.get(&niche) {
+                            let other = &self.entries[slot];
+                            neighbors.push((
+                                behavior_distance(elite.descriptor, other.descriptor),
+                                other.fitness,
+                            ));
+                        }
+                    }
+                    if neighbors.len() >= LOCAL_NEIGHBORS {
+                        break;
+                    }
                 }
-            }
-            neighbors.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-            let nearest = &neighbors[..LOCAL_NEIGHBORS.min(neighbors.len())];
-            novelty[behavior[i]] =
-                nearest.iter().map(|(distance, _)| *distance).sum::<f32>() / nearest.len() as f32;
-            local_competition[behavior[i]] = nearest
-                .iter()
-                .map(|(_, j)| {
-                    match self.entries[behavior[i]]
-                        .fitness
-                        .total_cmp(&self.entries[*j].fitness)
-                    {
+                if neighbors.is_empty() {
+                    return (index, 1.0, 1.0);
+                }
+                neighbors.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+                let nearest = &neighbors[..LOCAL_NEIGHBORS.min(neighbors.len())];
+                let novelty =
+                    nearest.iter().map(|(d, _)| *d).sum::<f32>() / nearest.len() as f32;
+                let local = nearest
+                    .iter()
+                    .map(|(_, f)| match elite.fitness.total_cmp(f) {
                         std::cmp::Ordering::Greater => 1.0,
                         std::cmp::Ordering::Equal => 0.5,
                         std::cmp::Ordering::Less => 0.0,
-                    }
-                })
-                .sum::<f32>()
-                / nearest.len() as f32;
+                    })
+                    .sum::<f32>()
+                    / nearest.len() as f32;
+                (index, novelty, local)
+            })
+            .collect();
+        let mut novelty = vec![0.0; self.entries.len()];
+        let mut local_competition = vec![0.5; self.entries.len()];
+        for (index, n, l) in scores {
+            novelty[index] = n;
+            local_competition[index] = l;
         }
         self.behavior_scores = BehaviorScores {
             novelty,
@@ -695,40 +738,18 @@ impl QdArchive {
         self.behavior_scores = BehaviorScores::default();
     }
     fn local_competition_for(&self, niche: &Niche, fitness: f32) -> f32 {
-        if self.entries.is_empty() {
-            return 0.5;
-        }
-        let bounds = [4i32, 8, 6];
-        let center = [niche.0[0] as i32, niche.0[1] as i32, niche.0[2] as i32];
         let mut compared = 0usize;
         let mut wins = 0.0f32;
-        for a in -1..=1 {
-            let x = center[0] + a;
-            if !(0..bounds[0]).contains(&x) {
+        for neighbor in neighbor_niches(niche, 1) {
+            let Some(&slot) = self.lookup.get(&neighbor) else {
                 continue;
-            }
-            for b in -1..=1 {
-                let y = center[1] + b;
-                if !(0..bounds[1]).contains(&y) {
-                    continue;
-                }
-                for c in -1..=1 {
-                    let z = center[2] + c;
-                    if !(0..bounds[2]).contains(&z) {
-                        continue;
-                    }
-                    let neighbor = Niche([x as u8, y as u8, z as u8, 0, 0, 0]);
-                    let Some(&slot) = self.lookup.get(&neighbor) else {
-                        continue;
-                    };
-                    compared += 1;
-                    wins += match fitness.total_cmp(&self.entries[slot].fitness) {
-                        std::cmp::Ordering::Greater => 1.0,
-                        std::cmp::Ordering::Equal => 0.5,
-                        std::cmp::Ordering::Less => 0.0,
-                    };
-                }
-            }
+            };
+            compared += 1;
+            wins += match fitness.total_cmp(&self.entries[slot].fitness) {
+                std::cmp::Ordering::Greater => 1.0,
+                std::cmp::Ordering::Equal => 0.5,
+                std::cmp::Ordering::Less => 0.0,
+            };
         }
         if compared == 0 {
             0.5
