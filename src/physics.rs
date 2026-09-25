@@ -11,7 +11,7 @@ pub fn rate() -> u32 {
             .ok()
             .and_then(|v| v.parse().ok())
             .filter(|&r: &u32| (15..=480).contains(&r))
-            .unwrap_or(120)
+            .unwrap_or(60)
     })
 }
 /// Seconds per physics step.
@@ -49,8 +49,8 @@ pub fn solver_passes() -> (usize, usize) {
                 .unwrap_or(default)
         };
         (
-            read("EVOLUTION_BONE_PASSES", 8),
-            read("EVOLUTION_VELOCITY_PASSES", 4),
+            read("EVOLUTION_BONE_PASSES", 2),
+            read("EVOLUTION_VELOCITY_PASSES", 1),
         )
     })
 }
