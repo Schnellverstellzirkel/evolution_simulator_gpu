@@ -23,6 +23,44 @@ pub struct Bone {
     pub a: u32,
     pub b: u32,
     pub rest_length: f32,
+    /// Joint range at node `a` (radians), measured from the starting pose:
+    /// how far this bone may turn clockwise (`min_angle`, <= 0) and
+    /// counterclockwise (`max_angle`, >= 0) against its reference bone.
+    /// Both stay within `JOINT_LIMIT`, so no joint can spin all the way round.
+    #[serde(default = "joint_min")]
+    pub min_angle: f32,
+    #[serde(default = "joint_max")]
+    pub max_angle: f32,
+}
+/// Widest joint range on either side of the starting pose (150 degrees).
+pub const JOINT_LIMIT: f32 = 150.0 * std::f32::consts::PI / 180.0;
+fn joint_min() -> f32 {
+    -JOINT_LIMIT
+}
+fn joint_max() -> f32 {
+    JOINT_LIMIT
+}
+impl Bone {
+    /// A bone with the widest joint range.
+    pub fn new(a: u32, b: u32, rest_length: f32) -> Self {
+        Self {
+            a,
+            b,
+            rest_length,
+            min_angle: -JOINT_LIMIT,
+            max_angle: JOINT_LIMIT,
+        }
+    }
+    /// Keeps the joint range valid.
+    pub fn clamp_range(&mut self) {
+        self.min_angle = self.min_angle.clamp(-JOINT_LIMIT, 0.0);
+        self.max_angle = self.max_angle.clamp(0.0, JOINT_LIMIT);
+    }
+    fn mutate_range(&mut self, step: f32, rng: &mut Rng) {
+        self.min_angle += qd::gaussian(rng) * step;
+        self.max_angle += qd::gaussian(rng) * step;
+        self.clamp_range();
+    }
 }
 #[repr(C)]
 #[derive(
@@ -317,7 +355,9 @@ impl Population {
                         && (bone.a as usize) < g.node_count
                         && (bone.b as usize) < g.node_count
                         && bone.rest_length.is_finite()
-                        && (0.03..=max_bone_length).contains(&bone.rest_length),
+                        && (0.03..=max_bone_length).contains(&bone.rest_length)
+                        && (-JOINT_LIMIT..=0.0).contains(&bone.min_angle)
+                        && (0.0..=JOINT_LIMIT).contains(&bone.max_angle),
                     "Invalid bone in genome {genome_index}: {bone:?}"
                 );
                 ensure!(
@@ -475,7 +515,7 @@ pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
             ordered.push(Bone {
                 a: parent as u32,
                 b: child as u32,
-                rest_length: old.rest_length,
+                ..old
             });
         }
     }
@@ -510,11 +550,7 @@ pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
 fn bone(a: usize, b: usize, nodes: &[NodeGene]) -> Bone {
     let dx = nodes[a].x - nodes[b].x;
     let dy = nodes[a].y - nodes[b].y;
-    Bone {
-        a: a as u32,
-        b: b as u32,
-        rest_length: dx.hypot(dy).clamp(0.03, MAX_BONE_LENGTH),
-    }
+    Bone::new(a as u32, b as u32, dx.hypot(dy).clamp(0.03, MAX_BONE_LENGTH))
 }
 pub(crate) fn normalize_bone_lengths(c: &mut Creature) {
     for bone in &mut c.bones {
@@ -687,7 +723,8 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
     }
     let node_count = c.nodes.len().min(64);
     let candidates = std::mem::take(&mut c.bones);
-    for b in candidates {
+    for mut b in candidates {
+        b.clamp_range();
         let a = b.a as usize;
         let end = b.b as usize;
         if a < node_count
@@ -817,7 +854,10 @@ fn random_creature_from(cfg: &Config, rng: &mut Rng) -> Creature {
         mutability: 1.0,
     };
     for i in 0..n - 1 {
-        c.bones.push(bone(i, i + 1, &c.nodes));
+        let mut b = bone(i, i + 1, &c.nodes);
+        b.min_angle = -rng.range(0.3, JOINT_LIMIT);
+        b.max_angle = rng.range(0.3, JOINT_LIMIT);
+        c.bones.push(b);
     }
     for i in 0..c.bones.len() {
         let j = (i + 1) % c.bones.len();
@@ -1015,6 +1055,8 @@ pub fn crossover(a: &Creature, b: &Creature, rng: &mut Rng) -> Creature {
     for (bone, other) in child.bones.iter_mut().zip(&b.bones) {
         if rng.unit() < 0.5 && (bone.a, bone.b) == (other.a, other.b) {
             bone.rest_length = other.rest_length;
+            bone.min_angle = other.min_angle;
+            bone.max_angle = other.max_angle;
         }
     }
     let rhythm_from_b = if rng.unit() < 0.3 {
@@ -1080,10 +1122,13 @@ fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
     let new_node = creature.nodes.len() as u32;
     creature.nodes.push(mirror);
     let new_bone = creature.bones.len() as u32;
+    // The mirrored limb bends the other way.
     creature.bones.push(Bone {
         a: joint,
         b: new_node,
         rest_length: bone.rest_length,
+        min_angle: -bone.max_angle,
+        max_angle: -bone.min_angle,
     });
     for mut m in attached {
         if m.bone_a as usize == limb {
@@ -1180,6 +1225,7 @@ fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
     for bone in &mut creature.bones {
         bone.rest_length =
             (bone.rest_length + qd::gaussian(rng) * 0.035 * scale).clamp(0.03, MAX_BONE_LENGTH);
+        bone.mutate_range(0.15 * scale, rng);
     }
     for muscle in &mut creature.muscles {
         muscle.anchor_a = (muscle.anchor_a + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
@@ -1266,12 +1312,9 @@ fn split_bone(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
         a: original.a,
         b: mid,
         rest_length: first_length,
+        ..original
     };
-    creature.bones.push(Bone {
-        a: mid,
-        b: original.b,
-        rest_length: original.rest_length - first_length,
-    });
+    creature.bones.push(Bone::new(mid, original.b, original.rest_length - first_length));
     for muscle in &mut creature.muscles {
         if muscle.bone_a as usize == index {
             if muscle.anchor_a <= 0.5 {
@@ -1362,6 +1405,9 @@ fn mutate(mut c: Creature, cfg: &Config, generation: u32, index: usize) -> Creat
     for bone in &mut c.bones {
         bone.rest_length =
             (bone.rest_length + rng.delta() * 0.04 * strength).clamp(0.03, MAX_BONE_LENGTH);
+        bone.min_angle += rng.delta() * 0.2 * strength;
+        bone.max_angle += rng.delta() * 0.2 * strength;
+        bone.clamp_range();
     }
     for m in &mut c.muscles {
         m.anchor_a = (m.anchor_a + rng.delta() * 0.15 * strength).clamp(0.0, 1.0);
@@ -1453,11 +1499,7 @@ mod tests {
                     friction: 0.5,
                 },
             ],
-            bones: vec![Bone {
-                a: 0,
-                b: 1,
-                rest_length: 9.6,
-            }],
+            bones: vec![Bone::new(0, 1, 9.6)],
             muscles: vec![],
             id: 0,
             mutability: 1.0,
@@ -1494,16 +1536,8 @@ mod tests {
                 },
             ],
             bones: vec![
-                Bone {
-                    a: 0,
-                    b: 1,
-                    rest_length: 2.0,
-                },
-                Bone {
-                    a: 1,
-                    b: 2,
-                    rest_length: 2.0,
-                },
+                Bone::new(0, 1, 2.0),
+                Bone::new(1, 2, 2.0),
             ],
             muscles: vec![],
             id: 0,
@@ -1564,16 +1598,8 @@ mod tests {
             let mut creature = Creature {
                 nodes,
                 bones: vec![
-                    Bone {
-                        a: 0,
-                        b: 1,
-                        rest_length: 1.0,
-                    },
-                    Bone {
-                        a: 1,
-                        b: 2,
-                        rest_length: 1.0,
-                    },
+                    Bone::new(0, 1, 1.0),
+                    Bone::new(1, 2, 1.0),
                 ],
                 muscles: vec![
                     Muscle {
@@ -1649,21 +1675,9 @@ mod tests {
                 })
                 .collect(),
             bones: vec![
-                Bone {
-                    a: 2,
-                    b: 3,
-                    rest_length: 1.0,
-                },
-                Bone {
-                    a: 1,
-                    b: 0,
-                    rest_length: 1.0,
-                },
-                Bone {
-                    a: 2,
-                    b: 1,
-                    rest_length: 1.0,
-                },
+                Bone::new(2, 3, 1.0),
+                Bone::new(1, 0, 1.0),
+                Bone::new(2, 1, 1.0),
             ],
             muscles: vec![Muscle {
                 bone_a: 0,

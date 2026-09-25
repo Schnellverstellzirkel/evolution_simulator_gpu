@@ -77,6 +77,11 @@ struct Group {
     mass: Vec<V>,
     friction: Vec<V>,
     rest: Vec<V>,
+    /// Joint reference node of each bone (the same across a body plan).
+    joint_reference: Vec<Option<usize>>,
+    /// Per bone: range center (x, y), half range (cos, sin), child share, and
+    /// child and reference mass fractions, as in `physics::Joint`.
+    joint: Vec<[V; 7]>,
     inv_a: Vec<V>,
     inv_b: Vec<V>,
 }
@@ -149,6 +154,16 @@ fn terrain(x: F, amplitude: f32) -> (F, F) {
 /// Clearance a touching node must reach to count as a lifted foot.
 const LIFT_CLEARANCE: f32 = 0.01;
 
+/// Change of (x, y) under a small rotation; mirrors the kernel's
+/// `rotate_small`.
+#[inline(always)]
+fn rotate_small(x: F, y: F, angle: F) -> (F, F) {
+    let a2 = angle * angle;
+    let c = F::splat(1.0) - a2 * (F::splat(0.5) - a2 * (1.0 / 24.0));
+    let s = angle * (F::splat(1.0) - a2 * (F::splat(1.0 / 6.0) - a2 * (1.0 / 120.0)));
+    (x * c - y * s - x, x * s + y * c - y)
+}
+
 #[inline(always)]
 fn limit_speed(x: &mut F, y: &mut F) {
     let speed = (*x * *x + *y * *y).sqrt();
@@ -204,6 +219,8 @@ impl Group {
             mass: vec![ZERO; nodes],
             friction: vec![ZERO; nodes],
             rest: vec![ZERO; nodes - 1],
+            joint_reference: vec![None; nodes - 1],
+            joint: vec![[ZERO; 7]; nodes - 1],
             inv_a: vec![ZERO; nodes - 1],
             inv_b: vec![ZERO; nodes - 1],
         };
@@ -220,9 +237,24 @@ impl Group {
                 group.friction[j][l] = n.friction;
             }
             let bones = &pop.bones[g.bone_start..g.bone_start + g.bone_count];
+            let joints = physics::joints(genes, bones);
             for (j, b) in bones.iter().enumerate() {
                 let (a, bn) = (b.a as usize, b.b as usize);
                 group.rest[j][l] = b.rest_length;
+                let joint = joints[j];
+                group.joint_reference[j] = joint.reference;
+                let values = [
+                    joint.center[0],
+                    joint.center[1],
+                    joint.half[0],
+                    joint.half[1],
+                    joint.child_share,
+                    joint.child_mass,
+                    joint.reference_mass,
+                ];
+                for (field, value) in values.into_iter().enumerate() {
+                    group.joint[j][field][l] = value;
+                }
                 group.inv_a[j][l] = 1.0 / node_state[a].mass;
                 group.inv_b[j][l] = 1.0 / node_state[bn].mass;
             }
@@ -293,10 +325,11 @@ impl Group {
         let radius = load(&self.radius);
         let friction = load(&self.friction);
         let rest = load(&self.rest);
+        let joint: Vec<[F; 7]> = self.joint.iter().map(|j| j.map(|v| F::load(&v))).collect();
         let inv_a = load(&self.inv_a);
         let inv_b = load(&self.inv_b);
         let share_a: Vec<F> = inv_a.iter().zip(&inv_b).map(|(&a, &b)| a / (a + b)).collect();
-        let share_b: Vec<F> = inv_a.iter().zip(&inv_b).map(|(&a, &b)| b / (a + b)).collect();
+        let share_b: Vec<F> = share_a.iter().map(|&a| F::splat(1.0) - a).collect();
         let inv_mass: Vec<F> = mass.iter().map(|&m| F::splat(1.0) / m).collect();
         let total_mass = mass.iter().fold(F::splat(0.0), |t, &m| t + m);
         let inv_total_mass = F::splat(1.0) / total_mass;
@@ -525,6 +558,53 @@ impl Group {
                     }
                     py[a] = ay;
                     py[c] = cy;
+                }
+                // Joint ranges: a bone may not turn past its evolved limits
+                // against its reference bone, so no joint can spin like a wheel.
+                for (b, &(pivot, child)) in self.bones.iter().enumerate() {
+                    let Some(reference) = self.joint_reference[b] else {
+                        continue;
+                    };
+                    let [center_x, center_y, cos_half, sin_half, share, child_mass, reference_mass] =
+                        joint[b];
+                    let (nx, ny) = (px[pivot], py[pivot]);
+                    let (ux, uy) = (px[reference] - nx, py[reference] - ny);
+                    let (vx_, vy_) = (px[child] - nx, py[child] - ny);
+                    let norm = ((ux * ux + uy * uy) * (vx_ * vx_ + vy_ * vy_)).sqrt();
+                    let inv_norm = one / norm.max(F::splat(1e-12));
+                    let rx = (ux * vx_ + uy * vy_) * inv_norm;
+                    let ry = (ux * vy_ - uy * vx_) * inv_norm;
+                    let zx = rx * center_x + ry * center_y;
+                    let zy = ry * center_x - rx * center_y;
+                    let outside = zx.lt(cos_half) & !norm.lt(F::splat(1e-12));
+                    if !outside.any() {
+                        continue;
+                    }
+                    let side = F::select(zy.lt(zero), F::splat(-1.0), one);
+                    let abs_zy = zy.abs();
+                    let sin_excess = abs_zy * cos_half - zx * sin_half;
+                    let cos_excess = zx * cos_half + abs_zy * sin_half;
+                    let series = (sin_excess * (one + sin_excess * sin_excess * (1.0 / 6.0))).min(one);
+                    let excess = F::select(cos_excess.gt(zero), series, one);
+                    let excess = F::select(outside, excess, zero);
+                    let (dvx, dvy) = rotate_small(vx_, vy_, -side * excess * share);
+                    let (dux, duy) = rotate_small(ux, uy, side * excess * (one - share));
+                    let shift_x = dvx * child_mass + dux * reference_mass;
+                    let shift_y = dvy * child_mass + duy * reference_mass;
+                    px[pivot] = nx - shift_x;
+                    px[child] += dvx - shift_x;
+                    px[reference] += dux - shift_x;
+                    let mut new_n = ny - shift_y;
+                    let mut new_c = py[child] + dvy - shift_y;
+                    let mut new_q = py[reference] + duy - shift_y;
+                    if colliding {
+                        new_n = new_n.max(floor[pivot]);
+                        new_c = new_c.max(floor[child]);
+                        new_q = new_q.max(floor[reference]);
+                    }
+                    py[pivot] = new_n;
+                    py[child] = new_c;
+                    py[reference] = new_q;
                 }
             }
 

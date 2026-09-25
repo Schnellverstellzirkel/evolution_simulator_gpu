@@ -415,6 +415,76 @@ pub fn evaluate(c: &Creature, cfg: &Config) -> f32 {
     }
     fitness(&n)
 }
+/// Joint range constraint for one bone, precomputed from the genome. The bone
+/// turns about its parent node `a` against a reference bone that shares that
+/// node: the parent's own bone, or for bones leaving the root, the first root
+/// bone. Angles are measured from the reference end to the child end.
+#[derive(Clone, Copy, Debug)]
+pub struct Joint {
+    /// Far node of the reference bone; `None` for the unconstrained first bone.
+    pub reference: Option<usize>,
+    /// Direction of the middle of the allowed range, relative to the reference.
+    pub center: [f32; 2],
+    /// Cosine and sine of half the allowed range.
+    pub half: [f32; 2],
+    /// Share of a correction taken by the child end (by inverse inertia).
+    pub child_share: f32,
+    /// Masses of the child and reference ends over the three joint masses,
+    /// used to keep the joint's center of mass in place.
+    pub child_mass: f32,
+    pub reference_mass: f32,
+}
+impl Joint {
+    pub const FREE: Joint = Joint {
+        reference: None,
+        center: [1.0, 0.0],
+        half: [-1.0, 0.0],
+        child_share: 0.5,
+        child_mass: 0.0,
+        reference_mass: 0.0,
+    };
+}
+/// Rounds to the GPU's snorm16 storage of the joint range center.
+fn snorm16(v: f32) -> f32 {
+    (v.clamp(-1.0, 1.0) * 32767.0).round() / 32767.0
+}
+/// Joint constraints for a canonical (parent-first) skeleton.
+pub fn joints(genes: &[NodeGene], bones: &[Bone]) -> Vec<Joint> {
+    let state: Vec<Node> = genes.iter().map(node).collect();
+    let first_root = bones.iter().position(|b| b.a == 0);
+    bones
+        .iter()
+        .enumerate()
+        .map(|(index, bone)| {
+            let pivot = bone.a as usize;
+            let child = bone.b as usize;
+            let reference = match bones.iter().find(|p| p.b as usize == pivot) {
+                Some(parent) => parent.a as usize,
+                None => match first_root {
+                    Some(first) if first != index => bones[first].b as usize,
+                    _ => return Joint::FREE,
+                },
+            };
+            let at = |i: usize| [genes[i].x - genes[pivot].x, genes[i].y - genes[pivot].y];
+            let (u, v) = (at(reference), at(child));
+            let rest = (u[0] * v[1] - u[1] * v[0]).atan2(u[0] * v[0] + u[1] * v[1]);
+            let middle = rest + 0.5 * (bone.min_angle + bone.max_angle);
+            let half = 0.5 * (bone.max_angle - bone.min_angle);
+            let length = |d: [f32; 2]| d[0].hypot(d[1]).max(0.01);
+            let inertia_child = state[child].mass * length(v).powi(2);
+            let inertia_reference = state[reference].mass * length(u).powi(2);
+            let total = state[pivot].mass + state[child].mass + state[reference].mass;
+            Joint {
+                reference: Some(reference),
+                center: [snorm16(middle.cos()), snorm16(middle.sin())],
+                half: [half.cos(), half.sin()],
+                child_share: inertia_reference / (inertia_child + inertia_reference),
+                child_mass: state[child].mass / total,
+                reference_mass: state[reference].mass / total,
+            }
+        })
+        .collect()
+}
 /// Ground heights (m) of the bumps added by each roughness level.
 pub const TERRAIN_AMPLITUDES: [f32; 4] = [0.0, 0.02, 0.04, 0.07];
 /// Bump height for `Config::terrain`.
@@ -533,11 +603,7 @@ mod tests {
         let mut previous = [Node::default(); 64];
         previous[0] = nodes[0];
         previous[1] = nodes[1];
-        let bone = Bone {
-            a: 0,
-            b: 1,
-            rest_length: 1.0,
-        };
+        let bone = Bone::new(0, 1, 1.0);
 
         project_bones(&mut nodes, &[bone], false, &previous);
 
@@ -589,11 +655,7 @@ mod tests {
         let mut nodes = [previous[0], previous[1]];
         nodes[1].pos = [0.1, 0.1];
         nodes[1].vel = [0.0, 100.0];
-        let bone = Bone {
-            a: 0,
-            b: 1,
-            rest_length: 0.1,
-        };
+        let bone = Bone::new(0, 1, 0.1);
 
         project_bones(&mut nodes, &[bone], false, &previous);
 

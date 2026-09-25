@@ -31,11 +31,7 @@ fn stress_creature() -> Creature {
         .map(|i| {
             let a = &nodes[i];
             let b = &nodes[i + 1];
-            Bone {
-                a: i as u32,
-                b: (i + 1) as u32,
-                rest_length: (a.x - b.x).hypot(a.y - b.y),
-            }
+            Bone::new(i as u32, (i + 1) as u32, (a.x - b.x).hypot(a.y - b.y))
         })
         .collect();
     let muscles: Vec<_> = (0..bones.len())
@@ -217,21 +213,9 @@ fn bone_lengths_hold_and_off_center_muscles_rotate_bones() {
     let creature = Creature {
         nodes: genes.to_vec(),
         bones: vec![
-            Bone {
-                a: 0,
-                b: 1,
-                rest_length: 1.0,
-            },
-            Bone {
-                a: 1,
-                b: 2,
-                rest_length: 1.0,
-            },
-            Bone {
-                a: 2,
-                b: 3,
-                rest_length: 1.0,
-            },
+            Bone::new(0, 1, 1.0),
+            Bone::new(1, 2, 1.0),
+            Bone::new(2, 3, 1.0),
         ],
         muscles: vec![Muscle {
             bone_a: 0,
@@ -310,16 +294,8 @@ fn overlapping_nodes_remain_finite() {
             3
         ],
         bones: vec![
-            Bone {
-                a: 0,
-                b: 1,
-                rest_length: 0.03,
-            },
-            Bone {
-                a: 1,
-                b: 2,
-                rest_length: 0.03,
-            },
+            Bone::new(0, 1, 0.03),
+            Bone::new(1, 2, 0.03),
         ],
         muscles: vec![Muscle {
             bone_a: 0,
@@ -481,11 +457,7 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
             .map(|j| {
                 let a = &nodes[j];
                 let b = &nodes[j + 1];
-                Bone {
-                    a: j as u32,
-                    b: (j + 1) as u32,
-                    rest_length: (a.x - b.x).hypot(a.y - b.y).max(0.03),
-                }
+                Bone::new(j as u32, (j + 1) as u32, (a.x - b.x).hypot(a.y - b.y).max(0.03))
             })
             .collect();
         let muscle_links = if bones.len() > 2 { bones.len() } else { 1 };
@@ -608,5 +580,77 @@ fn gpu_matches_cpu_on_rough_ground() {
                 cpu_result.fitness
             );
         }
+    }
+}
+
+/// Angle at `pivot` from the reference end to the child end.
+fn joint_angle(p: &[[f32; 2]], pivot: usize, reference: usize, child: usize) -> f32 {
+    let u = [p[reference][0] - p[pivot][0], p[reference][1] - p[pivot][1]];
+    let v = [p[child][0] - p[pivot][0], p[child][1] - p[pivot][1]];
+    (u[0] * v[1] - u[1] * v[0]).atan2(u[0] * v[0] + u[1] * v[1])
+}
+
+#[test]
+fn joints_stay_within_their_evolved_range() {
+    let cfg = Config {
+        population: 64,
+        duration: 10.0,
+        ..config()
+    };
+    let pop = evolution::create(&cfg).unwrap();
+    let mut worst = 0.0f32;
+    for i in 0..pop.genomes.len() {
+        let mut creature = pop.creature(i);
+        for bone in &mut creature.bones {
+            bone.min_angle = -0.3;
+            bone.max_angle = 0.3;
+        }
+        let joints = physics::joints(&creature.nodes, &creature.bones);
+        let start: Vec<[f32; 2]> = creature.nodes.iter().map(|n| [n.x, n.y]).collect();
+        let frames = evolution_simulator::cpu_engine::trajectory(&creature, &cfg);
+        for (bone, joint) in creature.bones.iter().zip(&joints) {
+            let Some(reference) = joint.reference else {
+                continue;
+            };
+            let (pivot, child) = (bone.a as usize, bone.b as usize);
+            let rest = joint_angle(&start, pivot, reference, child);
+            for frame in &frames {
+                let offset = (joint_angle(frame, pivot, reference, child) - rest
+                    + std::f32::consts::PI)
+                    .rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI;
+                worst = worst.max(offset.abs() - 0.3);
+            }
+        }
+    }
+    // Later length and ground passes can push a joint a few degrees past its
+    // limit within a step; far from the half turn a wheel would need.
+    assert!(worst < 0.1, "a joint left its range by {worst} rad");
+}
+
+#[test]
+#[ignore = "requires a Vulkan GPU; run explicitly on the workstation"]
+fn gpu_matches_cpu_with_narrow_joints() {
+    let cfg = Config {
+        population: 64,
+        duration: 0.2,
+        ..config()
+    };
+    let mut pop = evolution::create(&cfg).unwrap();
+    for bone in &mut pop.bones {
+        bone.min_angle = -0.2;
+        bone.max_angle = 0.2;
+    }
+    let mut gpu = Gpu::new("RTX 4060").unwrap();
+    let scores = gpu
+        .evaluate(&pop, &(0..64).collect::<Vec<_>>(), &cfg)
+        .unwrap();
+    let cpu = evolution_simulator::cpu_engine::evaluate(&pop, &cfg);
+    for (i, (&gpu_score, cpu_result)) in scores.iter().zip(&cpu).enumerate() {
+        assert!(
+            (gpu_score - cpu_result.fitness).abs() < 0.05,
+            "score {i}: GPU {gpu_score}, CPU engine {}",
+            cpu_result.fitness
+        );
     }
 }

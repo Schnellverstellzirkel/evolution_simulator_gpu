@@ -13,7 +13,9 @@ use rayon::prelude::*;
 
 pub const TILE: usize = 32;
 pub const MUSCLE_FIELDS: usize = 15;
-pub const BONE_FIELDS: usize = 2;
+/// Per bone: endpoints and joint reference node, rest length, and the joint
+/// range constants of `physics::Joint`.
+pub const BONE_FIELDS: usize = 9;
 pub const CAPACITIES: [usize; 12] = [3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64];
 
 #[repr(C)]
@@ -167,10 +169,26 @@ pub fn pack(pop: &Population, indices: &[usize]) -> Result<Vec<LaneBatch>> {
                 let tile = tiles[j / TILE];
                 let lane = j % TILE;
                 let source_bones = &pop.bones[g.bone_start..g.bone_start + g.bone_count];
-                for (b, bone) in source_bones.iter().enumerate() {
+                let joints = physics::joints(genes, source_bones);
+                for (b, (bone, joint)) in source_bones.iter().zip(&joints).enumerate() {
                     let field = tile[1] as usize + b * BONE_FIELDS * TILE + lane;
-                    bones[field] = f32::from_bits(bone.a | (bone.b << 8));
-                    bones[field + TILE] = bone.rest_length;
+                    // A free joint points its reference at its own pivot; the
+                    // kernel skips it because its half range cosine is -1.
+                    let reference = joint.reference.unwrap_or(bone.a as usize) as u32;
+                    let values = [
+                        f32::from_bits(bone.a | (bone.b << 8) | (reference << 16)),
+                        bone.rest_length,
+                        joint.center[0],
+                        joint.center[1],
+                        joint.half[0],
+                        joint.half[1],
+                        joint.child_share,
+                        joint.child_mass,
+                        joint.reference_mass,
+                    ];
+                    for (f, value) in values.into_iter().enumerate() {
+                        bones[field + f * TILE] = value;
+                    }
                 }
                 let source = &pop.muscles[g.muscle_start..g.muscle_start + g.muscle_count];
                 for (m, muscle) in source.iter().enumerate() {

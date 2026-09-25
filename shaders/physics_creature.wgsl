@@ -87,7 +87,7 @@ const NO_SENSOR: u32 = 255u;
 const MUSCLE_CAPACITY: f32 = 15.0;
 const MUSCLE_RECOVERY: f32 = 0.25;
 const TIRED_DRIVE: f32 = 0.2;
-const BONE_FIELDS: u32 = 2u;
+const BONE_FIELDS: u32 = 9u;
 const MAXB: u32 = MAXN - 1u;
 
 var<workgroup> pos: array<vec2f, SHAREDLEN>;
@@ -135,6 +135,14 @@ fn limited_muscle_length(m: Muscle, time: f32) -> f32 {
         wave = 0.5 - 0.5 * cos(3.14159265359 * (phase - m.duty) * m.inv_complement);
     }
     return m.long - amplitude * (1.0 - wave);
+}
+// Small-angle rotation shared with the CPU engine; joint corrections stay
+// below one radian.
+fn rotate_small(v: vec2f, angle: f32) -> vec2f {
+    let a2 = angle * angle;
+    let c = 1.0 - a2 * (0.5 - a2 * (1.0 / 24.0));
+    let s = angle * (1.0 - a2 * ((1.0 / 6.0) - a2 * (1.0 / 120.0)));
+    return vec2f(v.x * c - v.y * s, v.x * s + v.y * c);
 }
 fn limit_speed(velocity: vec2f) -> vec2f {
     let speed = length(velocity);
@@ -203,24 +211,31 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
     var bone_kb: array<u32, MAXB>;
     var bone_rest: array<f32, MAXB>;
     // Mass shares of each bone's correction: inverse mass over their sum.
+    // The other endpoint's share is 1 - bone_sa.
     var bone_sa: array<f32, MAXB>;
-    var bone_sb: array<f32, MAXB>;
+    // Joint range: middle direction as two snorm16 values, and the cosine of
+    // half the range (-1 for a free joint). bone_ka carries the reference
+    // node's workgroup index in its upper 16 bits.
+    var bone_center: array<u32, MAXB>;
+    var bone_cos_half: array<f32, MAXB>;
     for (var j = 0u; j < MAXB; j++) {
         if j >= bone_count { break; }
         let field = tile.y + j * BONE_FIELDS * TILE + tl;
         let packed = bitcast<u32>(bone_data[field]);
         let na = packed & 0xffu;
-        let nb = packed >> 8u;
+        let nb = (packed >> 8u) & 0xffu;
         let node_a = nodes[base + na];
         let node_b = nodes[base + nb];
-        bone_ka[j] = na * WG + lane;
+        let nq = (packed >> 16u) & 0xffu;
+        bone_ka[j] = (na * WG + lane) | ((nq * WG + lane) << 16u);
         bone_kb[j] = nb * WG + lane;
         bone_rest[j] = bone_data[field + TILE];
         let inverse_a = 1.0 / node_a.mass;
         let inverse_b = 1.0 / node_b.mass;
         let inverse_sum = inverse_a + inverse_b;
         bone_sa[j] = inverse_a / inverse_sum;
-        bone_sb[j] = inverse_b / inverse_sum;
+        bone_center[j] = pack2x16snorm(vec2f(bone_data[field + 2u * TILE], bone_data[field + 3u * TILE]));
+        bone_cos_half[j] = bone_data[field + 4u * TILE];
     }
     var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     if p.tick > 0u {
@@ -392,7 +407,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         for (var iteration = 0u; iteration < BONE_SOLVE_ITERATIONS; iteration++) {
             for (var j = 0u; j < MAXB; j++) {
                 if j >= bone_count { break; }
-                let ka = bone_ka[j];
+                let ka = bone_ka[j] & 0xffffu;
                 let kb = bone_kb[j];
                 let old_a = pos[ka];
                 let old_b = pos[kb];
@@ -403,7 +418,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 // Correction along the bone: delta / distance * error.
                 let correction = select(vec2f(error, 0.0), delta * (error / distance), raw_distance > 1e-6);
                 var new_a = old_a + correction * bone_sa[j];
-                var new_b = old_b - correction * bone_sb[j];
+                var new_b = old_b - correction * (1.0 - bone_sa[j]);
                 if grounded {
                     new_a.y = max(new_a.y, vel[ka].y);
                     new_b.y = max(new_b.y, vel[kb].y);
@@ -411,6 +426,55 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 pos[ka] = new_a;
                 pos[kb] = new_b;
             }
+        }
+
+        // Joint ranges: a bone may not turn past its evolved limits
+        // against its reference bone, so no joint can spin like a wheel.
+        for (var j = 0u; j < MAXB; j++) {
+            if j >= bone_count { break; }
+            let cos_half = bone_cos_half[j];
+            if cos_half <= -1.0 { continue; }
+            let kn = bone_ka[j] & 0xffffu;
+            let kc = bone_kb[j];
+            let kq = bone_ka[j] >> 16u;
+            let pivot = pos[kn];
+            let u = pos[kq] - pivot;
+            let v = pos[kc] - pivot;
+            let norm = sqrt(dot(u, u) * dot(v, v));
+            if norm < 1e-12 { continue; }
+            let relative = vec2f(dot(u, v), u.x * v.y - u.y * v.x) * (1.0 / norm);
+            let center = unpack2x16snorm(bone_center[j]);
+            // Angle from the middle of the range, as a unit vector.
+            let z = vec2f(
+                relative.x * center.x + relative.y * center.y,
+                relative.y * center.x - relative.x * center.y,
+            );
+            if z.x >= cos_half { continue; }
+            let field = tile.y + j * BONE_FIELDS * TILE + tl;
+            let sin_half = bone_data[field + 5u * TILE];
+            let side = select(-1.0, 1.0, z.y >= 0.0);
+            let sin_excess = abs(z.y) * cos_half - z.x * sin_half;
+            let cos_excess = z.x * cos_half + abs(z.y) * sin_half;
+            var excess = 1.0;
+            if cos_excess > 0.0 {
+                excess = min(sin_excess * (1.0 + sin_excess * sin_excess * (1.0 / 6.0)), 1.0);
+            }
+            let share = bone_data[field + 6u * TILE];
+            let dv = rotate_small(v, -side * excess * share) - v;
+            let du = rotate_small(u, side * excess * (1.0 - share)) - u;
+            // Keep the three joint nodes' center of mass in place.
+            let shift = dv * bone_data[field + 7u * TILE] + du * bone_data[field + 8u * TILE];
+            var new_n = pivot - shift;
+            var new_c = pos[kc] + dv - shift;
+            var new_q = pos[kq] + du - shift;
+            if grounded {
+                new_n.y = max(new_n.y, vel[kn].y);
+                new_c.y = max(new_c.y, vel[kc].y);
+                new_q.y = max(new_q.y, vel[kq].y);
+            }
+            pos[kn] = new_n;
+            pos[kc] = new_c;
+            pos[kq] = new_q;
         }
 
         // Preserve the converged joint directions, then reconstruct the
@@ -427,7 +491,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         }
         for (var j = 0u; j < MAXB; j++) {
             if j >= bone_count { break; }
-            let ka = bone_ka[j];
+            let ka = bone_ka[j] & 0xffffu;
             let kb = bone_kb[j];
             let delta = scr[kb] - scr[ka];
             let raw_distance = length(delta);
@@ -498,13 +562,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         for (var iteration = 0u; iteration < VELOCITY_SOLVE_ITERATIONS; iteration++) {
             for (var j = 0u; j < MAXB; j++) {
                 if j >= bone_count { break; }
-                let ka = bone_ka[j];
+                let ka = bone_ka[j] & 0xffffu;
                 let kb = bone_kb[j];
                 let delta = pos[kb] - pos[ka];
                 let length_bone = max(length(delta), 1e-6);
                 let direction = delta * (1.0 / length_bone);
                 let share_a = bone_sa[j];
-                let share_b = bone_sb[j];
+                let share_b = 1.0 - share_a;
                 var velocity_a = vel[ka];
                 var velocity_b = vel[kb];
                 // Impulse / inverse-mass sum * inverse mass = relative speed * share.
