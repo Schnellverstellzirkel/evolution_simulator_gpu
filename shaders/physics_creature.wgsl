@@ -62,6 +62,10 @@ struct Result {
     // for muscle sensor touchdown events.
     ground_lo: f32,
     ground_hi: f32,
+    // Seconds into the trial when the head (node 0) tipped below its neck
+    // base (bone 0's child), or 0 while upright. After a fall the muscles go
+    // limp and the fitness keeps the distance at the fall.
+    fall_time: f32,
 }
 @group(0) @binding(0) var<storage, read_write> nodes: array<Node>;
 // Muscle genes plus per-muscle state (rhythm offset and energy), which the
@@ -237,7 +241,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         bone_center[j] = pack2x16snorm(vec2f(bone_data[field + 2u * TILE], bone_data[field + 3u * TILE]));
         bone_cos_half[j] = bone_data[field + 4u * TILE];
     }
-    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     if p.tick > 0u {
         metrics = results[creature];
     }
@@ -316,7 +320,10 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 - limited_muscle_length(m, max(time - DT, 0.0))) * RATE;
             // A tired muscle drives weaker and slower.
             let drive = -target_speed * m.stiffness * 0.25 * (TIRED_DRIVE + (1.0 - TIRED_DRIVE) * energy);
-            let magnitude = clamp(drive + relative * 0.15, -MAX_MUSCLE_FORCE, MAX_MUSCLE_FORCE);
+            var magnitude = clamp(drive + relative * 0.15, -MAX_MUSCLE_FORCE, MAX_MUSCLE_FORCE);
+            if metrics.fall_time > 0.0 {
+                magnitude = 0.0;
+            }
             if tick >= SETTLE {
                 let work = abs(magnitude * relative) * DT;
                 energy = clamp(
@@ -459,7 +466,18 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             if cos_excess > 0.0 {
                 excess = min(sin_excess * (1.0 + sin_excess * sin_excess * (1.0 / 6.0)), 1.0);
             }
-            let share = bone_data[field + 6u * TILE];
+            var share = bone_data[field + 6u * TILE];
+            if grounded {
+                // A node resting on the ground cannot give way, so the other
+                // side of the joint takes the whole correction.
+                let child_down = pos[kc].y <= vel[kc].y + 1e-4;
+                let reference_down = pos[kq].y <= vel[kq].y + 1e-4;
+                if child_down && !reference_down {
+                    share = 0.0;
+                } else if reference_down && !child_down {
+                    share = 1.0;
+                }
+            }
             let dv = rotate_small(v, -side * excess * share) - v;
             let du = rotate_small(u, side * excess * (1.0 - share)) - u;
             // Keep the three joint nodes' center of mass in place.
@@ -675,6 +693,15 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                     }
                 }
             }
+            if metrics.fall_time == 0.0 && pos[lane].y < pos[bone_kb[0]].y {
+                var fall_x = 0.0;
+                for (var j = 0u; j < MAXN; j++) {
+                    if j >= body_nodes { break; }
+                    fall_x += pos[j * WG + lane].x * mass[j];
+                }
+                metrics.fall_time = time + DT;
+                metrics.fitness = fall_x * inv_total_mass;
+            }
             metrics.ground_contact += contacts;
             metrics.height_sum += high - low;
             metrics.vertical_oscillation = min(metrics.vertical_oscillation, center_y);
@@ -723,7 +750,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             }
             if failures > 0.0 {
                 metrics.fitness = -1e20;
-            } else {
+            } else if metrics.fall_time == 0.0 {
                 // Fitness is distance only; gait style is left to the niches.
                 metrics.fitness = score / mass_sum;
             }

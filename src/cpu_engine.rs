@@ -392,6 +392,12 @@ impl Group {
         let mut grounded_before = [0u64; L];
         let mut offsets = vec![zero; muscles.len()];
         let mut energies = vec![one; muscles.len()];
+        // The head is node 0 and its neck base is bone 0's child. A creature
+        // falls when the head drops below the base: its muscles go limp and
+        // its fitness keeps the distance at the fall.
+        let neck_base = self.bones[0].1;
+        let mut fall_time = zero;
+        let mut fall_x = zero;
 
         let snapshot = |px: &[F], py: &[F]| -> Vec<[f32; 2]> {
             px.iter()
@@ -460,6 +466,7 @@ impl Group {
                 let magnitude = (-(target_speed * m.stiffness) * 0.25 * vigor + relative * 0.15)
                     .max(F::splat(-MAX_MUSCLE_FORCE))
                     .min(F::splat(MAX_MUSCLE_FORCE));
+                let magnitude = F::select(fall_time.gt(zero), zero, magnitude);
                 if tick >= settle {
                     let work = (magnitude * relative).abs() * dt;
                     energies[index] = (energies[index] - work * (1.0 / MUSCLE_CAPACITY)
@@ -587,6 +594,19 @@ impl Group {
                     let series = (sin_excess * (one + sin_excess * sin_excess * (1.0 / 6.0))).min(one);
                     let excess = F::select(cos_excess.gt(zero), series, one);
                     let excess = F::select(outside, excess, zero);
+                    // A node resting on the ground cannot give way, so the
+                    // other side of the joint takes the whole correction.
+                    let share = if colliding {
+                        let child_down = py[child].le(floor[child] + 1e-4);
+                        let reference_down = py[reference].le(floor[reference] + 1e-4);
+                        F::select(
+                            child_down & !reference_down,
+                            zero,
+                            F::select(reference_down & !child_down, one, share),
+                        )
+                    } else {
+                        share
+                    };
                     let (dvx, dvy) = rotate_small(vx_, vy_, -side * excess * share);
                     let (dux, duy) = rotate_small(ux, uy, side * excess * (one - share));
                     let shift_x = dvx * child_mass + dux * reference_mass;
@@ -789,6 +809,15 @@ impl Group {
                         }
                     }
                 }
+                let falls = fall_time.le(zero) & py[0].lt(py[neck_base]);
+                if falls.any() {
+                    let mut x = zero;
+                    for j in 0..n {
+                        x += px[j] * mass[j];
+                    }
+                    fall_x = F::select(falls, x * inv_total_mass, fall_x);
+                    fall_time = F::select(falls, F::splat(time_now + dt), fall_time);
+                }
                 let center = center * (1.0 / n as f32);
                 ground_contact += contacts;
                 height_sum += high - low;
@@ -849,6 +878,8 @@ impl Group {
         let height_sum = height_sum.to_array();
         let low_center = low_center.to_array();
         let high_center = high_center.to_array();
+        let fall_time = fall_time.to_array();
+        let fall_x = fall_x.to_array();
         (0..self.slots.len())
             .map(|l| {
                 let mut score = 0.0f32;
@@ -860,7 +891,13 @@ impl Group {
                     failures += failed[j][l];
                 }
                 // Fitness is distance only; gait style is left to the niches.
-                let fitness = if failures > 0.0 { -1e20 } else { score / mass_sum };
+                let fitness = if failures > 0.0 {
+                    -1e20
+                } else if fall_time[l] > 0.0 {
+                    fall_x[l]
+                } else {
+                    score / mass_sum
+                };
                 GpuResult {
                     fitness,
                     ground_contact: ground_contact[l],
@@ -885,6 +922,7 @@ impl Group {
                     lift_hi: f32::from_bits((lift_bits[l] >> 32) as u32),
                     ground_lo: f32::from_bits(grounded_before[l] as u32),
                     ground_hi: f32::from_bits((grounded_before[l] >> 32) as u32),
+                    fall_time: fall_time[l],
                 }
             })
             .collect()

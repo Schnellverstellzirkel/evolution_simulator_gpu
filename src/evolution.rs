@@ -716,6 +716,36 @@ fn bone_path_exists(bones: &[Bone], node_count: usize, start: usize, target: usi
         }
     }
 }
+/// Largest tilt of the neck from vertical in the starting pose.
+const HEAD_START_TILT: f32 = std::f32::consts::FRAC_PI_4;
+/// Every creature has a head: node 0, as large (and heavy) as a node can be,
+/// on a single neck bone. Other bones on the head move to the neck's base,
+/// and the neck starts pointing up. A creature whose neck tips below
+/// horizontal has fallen (see the engines).
+fn shape_head(c: &mut Creature, cfg: &Config) {
+    let Some(neck) = c.bones.iter().position(|b| b.a == 0 || b.b == 0) else {
+        return;
+    };
+    let base = (c.bones[neck].a + c.bones[neck].b) as usize;
+    for (index, b) in c.bones.iter_mut().enumerate() {
+        if index == neck || (b.a != 0 && b.b != 0) {
+            continue;
+        }
+        if b.a == 0 {
+            b.a = base as u32;
+        } else {
+            b.b = base as u32;
+        }
+        b.rest_length = bone(b.a as usize, b.b as usize, &c.nodes).rest_length;
+    }
+    c.nodes[0].diameter = cfg.max_size;
+    let (bx, by) = (c.nodes[base].x, c.nodes[base].y);
+    let (dx, dy) = (c.nodes[0].x - bx, c.nodes[0].y - by);
+    let length = dx.hypot(dy).max(0.03);
+    let tilt = dx.atan2(dy).clamp(-HEAD_START_TILT, HEAD_START_TILT);
+    c.nodes[0].x = bx + length * tilt.sin();
+    c.nodes[0].y = by + length * tilt.cos();
+}
 fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
     for node in &mut c.nodes {
         node.diameter = node.diameter.clamp(cfg.min_size, cfg.max_size);
@@ -744,6 +774,7 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
             c.bones.push(bone(0, node, &c.nodes));
         }
     }
+    shape_head(c, cfg);
 
     let bone_count = c.bones.len();
     c.muscles.retain_mut(|m| {

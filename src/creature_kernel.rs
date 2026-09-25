@@ -55,6 +55,9 @@ pub struct GpuResult {
     /// Nodes grounded after the last step (f32 bits), for sensor touchdowns.
     pub ground_lo: f32,
     pub ground_hi: f32,
+    /// Seconds into the trial when the head tipped below its neck base, or 0
+    /// if the creature stayed upright. Fitness is the distance at the fall.
+    pub fall_time: f32,
 }
 impl GpuResult {
     /// Number of feet: nodes that touched the ground and lifted off again.

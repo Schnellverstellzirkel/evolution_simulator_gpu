@@ -15,6 +15,7 @@ use std::{
 };
 const MINT: Color32 = Color32::from_rgb(22, 122, 91);
 const AMBER: Color32 = Color32::from_rgb(164, 96, 24);
+const FALLEN: Color32 = Color32::from_rgb(196, 64, 52);
 const MUTED: Color32 = Color32::from_rgb(105, 121, 113);
 const INK: Color32 = Color32::from_rgb(40, 55, 48);
 const PANEL: Color32 = Color32::from_rgb(255, 255, 252);
@@ -94,14 +95,32 @@ struct Playback {
     frames: Vec<Vec<[f32; 2]>>,
     tick: u32,
     accumulator: f32,
+    /// Frame at which the head tipped below its neck base, and the distance
+    /// the trial kept from that moment.
+    fall: Option<(u32, f32)>,
 }
 impl Playback {
     fn new(creature: Creature, config: Config) -> Self {
         let mut normalized = creature.clone();
         crate::evolution::canonicalize_bone_order(&mut normalized);
         let frames = crate::cpu_engine::trajectory(&normalized, &config);
+        let mut nodes = physics::nodes(&normalized);
+        // The engines check the fall after each timed step, as here.
+        let base = normalized.bones[0].b as usize;
+        let fall = frames
+            .iter()
+            .enumerate()
+            .skip(physics::settle() as usize + 1)
+            .find(|(_, frame)| frame[0][1] < frame[base][1])
+            .map(|(tick, frame)| {
+                for (node, position) in nodes.iter_mut().zip(frame) {
+                    node.pos = *position;
+                }
+                (tick as u32, physics::fitness(&nodes))
+            });
         let mut playback = Self {
-            nodes: physics::nodes(&normalized),
+            nodes,
+            fall,
             creature: normalized,
             config,
             frames,
@@ -119,6 +138,10 @@ impl Playback {
     fn advance(&mut self) {
         self.tick += 1;
         self.show();
+    }
+    /// The fall, once the replay has reached it.
+    fn fallen(&self) -> Option<(u32, f32)> {
+        self.fall.filter(|&(tick, _)| self.tick >= tick)
     }
     fn show(&mut self) {
         if let Some(frame) = self.frames.get(self.tick as usize) {
@@ -700,14 +723,38 @@ impl App {
                 origin,
                 self.zoom,
                 (p.tick - physics::settle()) as f32 * physics::dt(),
+                p.fallen().is_some(),
             );
-            painter.text(
-                rect.left_top() + Vec2::new(18., 16.),
-                Align2::LEFT_TOP,
-                format!("{:.2} m", physics::fitness(&p.nodes)),
-                FontId::proportional(24.),
-                MINT,
-            );
+            match p.fallen() {
+                Some((tick, distance)) => {
+                    painter.text(
+                        rect.left_top() + Vec2::new(18., 16.),
+                        Align2::LEFT_TOP,
+                        format!("{distance:.2} m"),
+                        FontId::proportional(24.),
+                        FALLEN,
+                    );
+                    painter.text(
+                        rect.left_top() + Vec2::new(18., 46.),
+                        Align2::LEFT_TOP,
+                        format!(
+                            "Fell over at {:.1} s: head below its neck",
+                            (tick - physics::settle()) as f32 * physics::dt()
+                        ),
+                        FontId::proportional(13.),
+                        FALLEN,
+                    );
+                }
+                None => {
+                    painter.text(
+                        rect.left_top() + Vec2::new(18., 16.),
+                        Align2::LEFT_TOP,
+                        format!("{:.2} m", physics::fitness(&p.nodes)),
+                        FontId::proportional(24.),
+                        MINT,
+                    );
+                }
+            }
             painter.text(
                 rect.right_top() + Vec2::new(-18., 18.),
                 Align2::RIGHT_TOP,
@@ -1615,6 +1662,7 @@ fn draw_creature(
     origin: Pos2,
     scale: f32,
     time: f32,
+    fallen: bool,
 ) {
     let position = |n: &Node| origin + Vec2::new(n.pos[0] * scale, -n.pos[1] * scale);
     for bone in &c.bones {
@@ -1641,8 +1689,12 @@ fn draw_creature(
         };
         let a = point(bone_a, m.anchor_a);
         let b = point(bone_b, m.anchor_b);
-        let length = physics::target(m, time);
-        let contraction = 1. - ((length - m.short) / (m.long - m.short).max(1e-5));
+        // A fallen creature's muscles are limp.
+        let contraction = if fallen {
+            0.
+        } else {
+            1. - ((physics::target(m, time) - m.short) / (m.long - m.short).max(1e-5))
+        };
         let width = (scale * 0.017 * (1. + 0.45 * contraction)).max(2.);
         p.line_segment(
             [a, b],
@@ -1674,6 +1726,17 @@ fn draw_creature(
         );
         p.circle_stroke(center, r, Stroke::new(1., Color32::from_white_alpha(60)));
     }
+    // The head (node 0) looks ahead with one eye.
+    if let Some(head) = nodes.first() {
+        let center = position(head);
+        let r = (head.radius * scale).max(2.);
+        if fallen {
+            p.circle_stroke(center, r + 1.5, Stroke::new(2., FALLEN));
+        }
+        let eye = center + Vec2::new(r * 0.4, -r * 0.2);
+        p.circle_filled(eye, r * 0.3, Color32::WHITE);
+        p.circle_filled(eye + Vec2::new(r * 0.08, 0.), r * 0.15, Color32::from_rgb(9, 17, 22));
+    }
 }
 fn thumbnail(p: &egui::Painter, c: &Creature, rect: Rect) {
     let nodes = physics::nodes(c);
@@ -1697,5 +1760,5 @@ fn thumbnail(p: &egui::Painter, c: &Creature, rect: Rect) {
         (rect.width() / (maxx - minx).max(0.1)).min(rect.height() / (maxy - miny).max(0.1)) * 0.82;
     let origin =
         rect.center() + Vec2::new(-(minx + maxx) * 0.5 * scale, (miny + maxy) * 0.5 * scale);
-    draw_creature(p, &nodes, c, origin, scale, 0.);
+    draw_creature(p, &nodes, c, origin, scale, 0., false);
 }
