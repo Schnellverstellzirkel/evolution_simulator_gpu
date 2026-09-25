@@ -20,7 +20,10 @@ zstd = "0.13"
 csv = "1"
 ctrlc = "3.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
+ash = "0.38"
+libc = "0.2"
+naga = { version = "30", features = ["wgsl-in", "spv-out"] }
 
 [profile.release]
-lto = "fat"
-codegen-units = 1
+lto = "thin"
+codegen-units = 16

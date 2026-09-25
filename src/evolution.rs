@@ -169,6 +169,55 @@ impl Population {
         }
         *self = migrated;
     }
+    /// Copies `indices` into a standalone population; creature `k` of the
+    /// result is `indices[k]` of `self`.
+    pub fn subset(&self, indices: &[usize]) -> Population {
+        let parts: Vec<Population> = indices
+            .par_chunks(4096)
+            .map(|chunk| {
+                let mut part = Population {
+                    genomes: Vec::with_capacity(chunk.len()),
+                    ..Default::default()
+                };
+                for &i in chunk {
+                    let g = &self.genomes[i];
+                    part.genomes.push(Genome {
+                        node_start: part.nodes.len(),
+                        bone_start: part.bones.len(),
+                        muscle_start: part.muscles.len(),
+                        ..g.clone()
+                    });
+                    part.nodes
+                        .extend_from_slice(&self.nodes[g.node_start..g.node_start + g.node_count]);
+                    part.bones
+                        .extend_from_slice(&self.bones[g.bone_start..g.bone_start + g.bone_count]);
+                    part.muscles.extend_from_slice(
+                        &self.muscles[g.muscle_start..g.muscle_start + g.muscle_count],
+                    );
+                }
+                part
+            })
+            .collect();
+        let mut out = Population {
+            genomes: Vec::with_capacity(indices.len()),
+            nodes: Vec::with_capacity(parts.iter().map(|p| p.nodes.len()).sum()),
+            bones: Vec::with_capacity(parts.iter().map(|p| p.bones.len()).sum()),
+            muscles: Vec::with_capacity(parts.iter().map(|p| p.muscles.len()).sum()),
+        };
+        for mut part in parts {
+            let (ns, bs, ms) = (out.nodes.len(), out.bones.len(), out.muscles.len());
+            for g in &mut part.genomes {
+                g.node_start += ns;
+                g.bone_start += bs;
+                g.muscle_start += ms;
+            }
+            out.genomes.extend(part.genomes);
+            out.nodes.extend(part.nodes);
+            out.bones.extend(part.bones);
+            out.muscles.extend(part.muscles);
+        }
+        out
+    }
     pub fn bytes(&self) -> usize {
         self.genomes.capacity() * std::mem::size_of::<Genome>()
             + self.nodes.capacity() * std::mem::size_of::<NodeGene>()
@@ -741,38 +790,54 @@ fn random_creature(cfg: &Config, generation: u32, index: usize) -> Creature {
     c
 }
 fn collect_parallel(count: usize, make: impl Fn(usize) -> Creature + Sync) -> Population {
-    // Bounded temporary arenas, not a Vec<Creature> with millions of allocations retained.
-    let chunks: Vec<Population> = (0..count.div_ceil(4096))
-        .into_par_iter()
-        .map(|chunk| {
-            let mut p = Population::default();
-            for i in chunk * 4096..((chunk + 1) * 4096).min(count) {
-                p.push(make(i));
-            }
-            p
-        })
-        .collect();
+    collect_parallel_streaming(count, count.max(1), make, |_, _| Ok(()))
+        .expect("infallible slice callback")
+}
+/// Builds creatures `0..count` in slices of `slice` creatures (each slice in
+/// parallel) and calls `on_slice` with the population built so far after each
+/// slice. Indices and contents do not depend on the slice size.
+fn collect_parallel_streaming(
+    count: usize,
+    slice: usize,
+    make: impl Fn(usize) -> Creature + Sync,
+    mut on_slice: impl FnMut(&Population, std::ops::Range<usize>) -> Result<()>,
+) -> Result<Population> {
     let mut out = Population {
         genomes: Vec::with_capacity(count),
-        nodes: Vec::with_capacity(chunks.iter().map(|p| p.nodes.len()).sum()),
-        bones: Vec::with_capacity(chunks.iter().map(|p| p.bones.len()).sum()),
-        muscles: Vec::with_capacity(chunks.iter().map(|p| p.muscles.len()).sum()),
+        ..Default::default()
     };
-    for mut chunk in chunks {
-        let ns = out.nodes.len();
-        let bs = out.bones.len();
-        let ms = out.muscles.len();
-        for g in &mut chunk.genomes {
-            g.node_start += ns;
-            g.bone_start += bs;
-            g.muscle_start += ms;
+    for start in (0..count).step_by(slice.max(1)) {
+        let end = (start + slice).min(count);
+        // Bounded temporary arenas, not a Vec<Creature> with millions of allocations retained.
+        let chunks: Vec<Population> = (start..end)
+            .step_by(4096)
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(|chunk| {
+                let mut p = Population::default();
+                for i in chunk..(chunk + 4096).min(end) {
+                    p.push(make(i));
+                }
+                p
+            })
+            .collect();
+        for mut chunk in chunks {
+            let ns = out.nodes.len();
+            let bs = out.bones.len();
+            let ms = out.muscles.len();
+            for g in &mut chunk.genomes {
+                g.node_start += ns;
+                g.bone_start += bs;
+                g.muscle_start += ms;
+            }
+            out.genomes.extend(chunk.genomes);
+            out.nodes.extend(chunk.nodes);
+            out.bones.extend(chunk.bones);
+            out.muscles.extend(chunk.muscles);
         }
-        out.genomes.extend(chunk.genomes);
-        out.nodes.extend(chunk.nodes);
-        out.bones.extend(chunk.bones);
-        out.muscles.extend(chunk.muscles);
+        on_slice(&out, start..end)?;
     }
-    out
+    Ok(out)
 }
 pub fn create(cfg: &Config) -> Result<Population> {
     cfg.validate()?;
@@ -794,9 +859,33 @@ pub fn emit_archive_batch(
     cfg: &Config,
     generation: u32,
 ) -> Result<Population> {
+    emit_archive_batch_streaming(
+        current,
+        archive,
+        cma_emitters,
+        plans,
+        cfg,
+        generation,
+        cfg.population.max(1),
+        |_, _| Ok(()),
+    )
+}
+/// Like `emit_archive_batch`, but hands each finished slice of offspring to
+/// `on_slice` so evaluation can start while the rest is bred.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_archive_batch_streaming(
+    current: &Population,
+    archive: &QdArchive,
+    cma_emitters: &[CmaEmitter],
+    plans: &[CandidatePlan],
+    cfg: &Config,
+    generation: u32,
+    slice: usize,
+    on_slice: impl FnMut(&Population, std::ops::Range<usize>) -> Result<()>,
+) -> Result<Population> {
     ensure_archive_batch_memory(current, archive, cfg)?;
     ensure!(plans.len() == cfg.population, "Invalid emitter plan count");
-    Ok(collect_parallel(cfg.population, |i| {
+    collect_parallel_streaming(cfg.population, slice, |i| {
         let plan = plans[i];
         let mut rng = Rng::new(cfg.seed, generation, i);
         let mut creature = match plan.emitter {
@@ -830,7 +919,7 @@ pub fn emit_archive_batch(
         creature.id = (generation as u64) * cfg.population as u64 + i as u64 + 1;
         repair(&mut creature, cfg, &mut rng);
         creature
-    }))
+    }, on_slice)
 }
 
 pub fn ensure_archive_batch_memory(
@@ -896,6 +985,22 @@ fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
 fn structural_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng) -> (Creature, bool) {
     let changed = structural_mutation_in_place(&mut creature, cfg, rng);
     (creature, changed)
+}
+
+/// Benchmark workload helper: grows a body with the game's own structural
+/// mutations until it has at least `target_nodes` nodes or cannot grow further.
+pub fn grow_for_benchmark(creature: &mut Creature, cfg: &Config, seed: u64, target_nodes: usize) {
+    let mut rng = Rng::new(seed, u32::MAX, creature.id as usize);
+    let mut attempts = 0;
+    while creature.nodes.len() < target_nodes.min(cfg.max_nodes) && attempts < 1000 {
+        attempts += 1;
+        if rng.unit() < 0.5 {
+            split_bone(creature, cfg, &mut rng);
+        } else {
+            duplicate_mirrored_node(creature, cfg, &mut rng);
+        }
+    }
+    repair(creature, cfg, &mut rng);
 }
 
 fn structural_mutation_in_place(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {

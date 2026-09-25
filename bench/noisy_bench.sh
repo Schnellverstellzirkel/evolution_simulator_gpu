@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Min-of-N graphical-app benchmark with low-rate host and GPU telemetry.
-# Usage: noisy_bench.sh <population> [runs] [generations] [default|serial|workgroup|lane]
+# Usage: noisy_bench.sh <population> [runs] [generations] [default|workgroup]
 # Keep diagnostic profiling disabled for throughput runs. Other experiment
 # variables can still be passed through the environment.
 set -euo pipefail
@@ -12,10 +12,8 @@ cd "$(dirname "$0")/.."
 
 case "$KERNEL" in
   default) kernel_env=() ;;
-  serial) kernel_env=(EVOLUTION_KERNEL=serial) ;;
   workgroup) kernel_env=(EVOLUTION_KERNEL=workgroup) ;;
-  lane) kernel_env=(EVOLUTION_KERNEL=workgroup EVOLUTION_LANE_SHADER=1) ;;
-  *) echo "kernel must be default, serial, workgroup, or lane" >&2; exit 2 ;;
+  *) echo "kernel must be default or workgroup" >&2; exit 2 ;;
 esac
 REVISION=$(git rev-parse --short HEAD)
 
@@ -35,8 +33,6 @@ clock_min=99999
 clock_max=0
 exact_cos=approx
 [[ -v EVOLUTION_EXACT_COS ]] && exact_cos=exact
-lane_mode=off
-[[ "$KERNEL" == lane ]] && lane_mode=on
 workgroup32=default
 workgroup64=off
 if [[ -v EVOLUTION_WORKGROUP64 ]]; then
@@ -52,7 +48,7 @@ force_bucket5=off
 legacy_bucket5=off
 [[ -v EVOLUTION_LEGACY_BUCKET5 ]] && legacy_bucket5=on
 {
-  echo "config: revision=$REVISION kernel=$KERNEL lane=$lane_mode exact_cos=$exact_cos workgroup32=$workgroup32 workgroup64=$workgroup64 gpu_batch=${EVOLUTION_GPU_BATCH:-auto} gpu_chunk=${EVOLUTION_GPU_CHUNK:-4096} pipeline_chunk=${EVOLUTION_PIPELINE_CHUNK:-auto} force_bucket5=$force_bucket5 legacy_bucket5=$legacy_bucket5"
+  echo "config: revision=$REVISION kernel=$KERNEL exact_cos=$exact_cos workgroup32=$workgroup32 workgroup64=$workgroup64 gpu_batch=${EVOLUTION_GPU_BATCH:-auto} gpu_chunk=${EVOLUTION_GPU_CHUNK:-4096} pipeline_chunk=${EVOLUTION_PIPELINE_CHUNK:-auto} force_bucket5=$force_bucket5 legacy_bucket5=$legacy_bucket5"
 } >>"$LOG"
 
 for ((r = 1; r <= RUNS; r++)); do
@@ -73,7 +69,7 @@ for ((r = 1; r <= RUNS; r++)); do
   }
   out=$(env -u EVOLUTION_GPU_PROFILE -u EVOLUTION_PROFILE_BREED \
     -u EVOLUTION_BENCH_THROUGHPUT -u EVOLUTION_BENCH_RESPONSIVE -u EVOLUTION_BENCH_DURATION \
-    -u EVOLUTION_KERNEL -u EVOLUTION_LANE_SHADER "${kernel_env[@]}" \
+    -u EVOLUTION_KERNEL "${kernel_env[@]}" \
     EVOLUTION_SMOKE_POPULATION="$POP" EVOLUTION_BENCH_GENERATIONS="$GENS" \
     taskset -c 4-15 nice -n 5 cargo run --release 2>&1) || {
     echo "$out" | tail -20

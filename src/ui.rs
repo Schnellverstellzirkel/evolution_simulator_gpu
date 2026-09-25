@@ -28,15 +28,37 @@ const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
 pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
     let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
     setup.instance_descriptor.backends = wgpu::Backends::VULKAN;
+    // Render the UI on the GPU the desktop compositor uses: frames then need no
+    // cross-GPU import, and when that is the integrated GPU the discrete GPU is
+    // left entirely to evolution. EVOLUTION_RENDER_GPU selects an adapter by name.
+    let render_name = std::env::var("EVOLUTION_RENDER_GPU")
+        .ok()
+        .map(|name| name.to_lowercase());
+    let compositor = compositor_vendor();
     let name = adapter_name.to_lowercase();
     setup.native_adapter_selector = Some(Arc::new(move |adapters, surface| {
-        adapters
-            .iter()
-            .find(|a| {
-                a.get_info().name.to_lowercase().contains(&name)
-                    && surface.is_none_or(|s| a.is_surface_supported(s))
+        let presentable = |a: &&wgpu::Adapter| surface.is_none_or(|s| a.is_surface_supported(s));
+        let named = |wanted: &str| {
+            adapters
+                .iter()
+                .filter(presentable)
+                .find(|a| a.get_info().name.to_lowercase().contains(wanted))
+                .cloned()
+        };
+        render_name
+            .as_deref()
+            .and_then(named)
+            .or_else(|| {
+                compositor.and_then(|vendor| {
+                    adapters
+                        .iter()
+                        .filter(presentable)
+                        .find(|a| a.get_info().vendor == vendor)
+                        .cloned()
+                })
             })
-            .cloned()
+            .or_else(|| named(&name))
+            .or_else(|| adapters.iter().find(presentable).cloned())
             .ok_or_else(|| format!("No presentation-capable Vulkan GPU matching {name}"))
     }));
     setup.device_descriptor = Arc::new(gpu::descriptor);
@@ -52,6 +74,7 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
         },
         ..Default::default()
     };
+    let compute_name = adapter_name.to_owned();
     eframe::run_native(
         "Evolution Laboratory",
         options,
@@ -72,7 +95,8 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
                         .adapter
                         .request_device(&gpu::descriptor(&render.adapter)),
                 )?;
-                Gpu::from_device(device, queue, render.adapter.get_info().name)?
+                // The Vulkan evaluation engine opens the compute GPU by name.
+                Gpu::from_device(device, queue, compute_name.clone())?
             };
             Ok(Box::new(App::new(cc, gpu)))
         }),
@@ -154,6 +178,9 @@ struct App {
     capture_path: Option<String>,
     sort_started: Instant,
     card_positions: std::collections::HashMap<u64, Pos2>,
+    /// Native benchmark frame intervals and the last control probe time.
+    bench_frames: Vec<f32>,
+    bench_last_ping: Instant,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, gpu: Gpu) -> Self {
@@ -187,7 +214,10 @@ impl App {
         {
             initial_config.population = n;
             initial_config.random_seed = false;
-            initial_config.checkpoint_interval = 0;
+            // Keep the normal periodic autosave in benchmarks unless explicitly disabled.
+            if std::env::var_os("EVOLUTION_BENCH_NO_AUTOSAVE").is_some() {
+                initial_config.checkpoint_interval = 0;
+            }
             initial_config.throughput = n >= 100_000;
         }
         if let Ok(duration) = std::env::var("EVOLUTION_BENCH_DURATION")
@@ -251,6 +281,8 @@ impl App {
             capture_requested: false,
             capture_path: std::env::var("EVOLUTION_SMOKE_CAPTURE").ok(),
             sort_started: Instant::now(),
+            bench_frames: Vec::new(),
+            bench_last_ping: Instant::now(),
             card_positions: Default::default(),
         }
     }
@@ -373,10 +405,10 @@ impl App {
         if let Some(s) = &self.snapshot {
             ui.label(RichText::new(s.stage.label()).color(MINT));
             ui.add(
-                egui::ProgressBar::new(s.evaluated as f32 / s.config.population as f32)
+                egui::ProgressBar::new(s.completed as f32 / s.config.population as f32)
                     .text(format!(
                         "{} / {} evaluated",
-                        number(s.evaluated),
+                        number(s.completed),
                         number(s.config.population)
                     ))
                     .fill(MINT.gamma_multiply(0.7)),
@@ -778,6 +810,9 @@ impl App {
         });
     }
     fn metrics(&self, ui: &mut egui::Ui) {
+        // Live creatures/s over complete generations; the last generation's own
+        // figure until enough generations have finished.
+        let live_rate = self.snapshot.as_ref().map_or(0.0, |s| s.end_to_end);
         if let Some(s) = self.snapshot.as_ref().and_then(|s| s.history.last()) {
             ui.columns(4, |cols| {
                 for (ui, (name, value, color)) in cols.iter_mut().zip([
@@ -786,7 +821,14 @@ impl App {
                     ("NICHES", number(s.archive_cells), INK),
                     (
                         "EVALUATIONS / SEC",
-                        format!("{:.0}", s.population as f64 / s.seconds.max(0.001)),
+                        format!(
+                            "{:.0}",
+                            if live_rate > 0.0 {
+                                live_rate
+                            } else {
+                                s.population as f64 / s.seconds.max(0.001)
+                            }
+                        ),
                         INK,
                     ),
                 ]) {
@@ -1237,6 +1279,24 @@ impl App {
     }
 }
 impl eframe::App for App {
+    fn on_exit(&mut self) {
+        if self.bench_frames.is_empty() {
+            return;
+        }
+        let mut frames = self.bench_frames.clone();
+        frames.sort_by(f32::total_cmp);
+        let pct = |q: usize| frames[(frames.len() * q / 100).min(frames.len() - 1)] * 1000.;
+        let total: f32 = frames.iter().sum();
+        eprintln!(
+            "Native benchmark frames: {} frames, {:.1} FPS, p50 {:.2} ms, p95 {:.2} ms, p99 {:.2} ms, max {:.2} ms",
+            frames.len(),
+            frames.len() as f32 / total.max(1e-6),
+            pct(50),
+            pct(95),
+            pct(99),
+            frames[frames.len() - 1] * 1000.
+        );
+    }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let now = Instant::now();
@@ -1252,6 +1312,13 @@ impl eframe::App for App {
         self.frame_times.push_back(dt);
         if self.frame_times.len() > 240 {
             self.frame_times.pop_front();
+        }
+        if self.worker.measuring.load(Ordering::Relaxed) {
+            self.bench_frames.push(dt);
+            if self.bench_last_ping.elapsed() >= Duration::from_millis(500) {
+                self.bench_last_ping = now;
+                self.worker.send(Command::Ping(now));
+            }
         }
         let next = self.worker.view.lock().unwrap().take();
         if let Some(mut next) = next {
@@ -1274,13 +1341,6 @@ impl eframe::App for App {
             }
             if let Some((c, cfg)) = next.preview.take() {
                 self.set_preview(c, cfg);
-            }
-            if std::env::var("EVOLUTION_BENCH_GENERATIONS")
-                .ok()
-                .and_then(|value| value.parse::<u32>().ok())
-                .is_some_and(|target| target > 0 && next.generation >= target && !next.running)
-            {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             self.snapshot = Some(next);
         }
@@ -1334,7 +1394,10 @@ if let Some(error)=&s.error {ui.colored_label(AMBER,error);
 if self.show_perf&& let Some(s)=&self.snapshot {let mut frames:Vec<_>=self.frame_times.iter().copied().collect();
 frames.sort_by(f32::total_cmp);
 let p95=frames.get(frames.len()*95/100).copied().unwrap_or(0.);
-ui.small(format!("Frame p95 {:.1} ms · evaluation {:.2} s · {:.0} creatures/s · GPU buffers {:.1} MiB · population {:.1} MiB",p95*1000.,s.elapsed,s.evaluated as f64/s.elapsed.max(0.001),s.gpu_bytes as f64/1048576.,s.ram_bytes as f64/1048576.));
+ui.small(format!("Frame p95 {:.1} ms · end-to-end {:.0} creatures/s · GPU buffers {:.1} MiB · population {:.1} MiB",p95*1000.,s.end_to_end,s.gpu_bytes as f64/1048576.,s.ram_bytes as f64/1048576.));
+for (name, rate, count) in &s.engines {
+    ui.small(format!("{name}: {rate:.0} creatures/s · {count} evaluated"));
+}
 }
 if let Some(m)=&self.message {ui.label(m);
 }});
@@ -1373,11 +1436,13 @@ if let Some(m)=&self.message {ui.label(m);
                 }
             });
         self.dialogs(&ctx);
-        if self.active() {
-            // Worker snapshots every 200ms already wake the UI; poll gently between them.
-            ctx.request_repaint_after(Duration::from_millis(100));
-        } else if self.playing {
-            ctx.request_repaint_after(Duration::from_millis(16));
+        if self.playing || self.active() {
+            // Playback and live evolution redraw at the frame cap; the rest of
+            // the GPU stays with evolution. EVOLUTION_UI_FPS=0 follows vsync.
+            match ui_frame_interval() {
+                Some(interval) => ctx.request_repaint_after(interval),
+                None => ctx.request_repaint(),
+            }
         }
         // Explicit opt-in capture hook for repeatable native rendering/performance checks.
         if let Some(path) = &self.capture_path {
@@ -1409,6 +1474,49 @@ if let Some(m)=&self.message {ui.label(m);
             }
         }
     }
+}
+/// PCI vendor of the GPU GNOME's compositor renders on: the card tagged
+/// `mutter-device-preferred-primary` by udev, otherwise the boot VGA card.
+fn compositor_vendor() -> Option<u32> {
+    let cards: Vec<_> = std::fs::read_dir("/sys/class/drm")
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("card") && !n.contains('-'))
+        })
+        .collect();
+    let read = |path: std::path::PathBuf| std::fs::read_to_string(path).ok();
+    let vendor = |card: &std::path::PathBuf| {
+        read(card.join("device/vendor"))
+            .and_then(|v| u32::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok())
+    };
+    let tagged = cards.iter().find(|card| {
+        read(card.join("dev")).is_some_and(|dev| {
+            read(format!("/run/udev/data/c{}", dev.trim()).into())
+                .is_some_and(|data| data.contains("mutter-device-preferred-primary"))
+        })
+    });
+    tagged
+        .or_else(|| {
+            cards
+                .iter()
+                .find(|card| read(card.join("device/boot_vga")).is_some_and(|v| v.trim() == "1"))
+        })
+        .and_then(vendor)
+}
+fn ui_frame_interval() -> Option<Duration> {
+    static INTERVAL: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        let fps = std::env::var("EVOLUTION_UI_FPS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(60.0);
+        // Aim slightly early so vsync-paced frames land on every other 120 Hz refresh.
+        (fps > 0.0).then(|| Duration::from_secs_f64(0.97 / fps))
+    })
 }
 fn color_dot(ui: &mut egui::Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.), Sense::hover());

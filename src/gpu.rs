@@ -100,13 +100,14 @@ pub struct Gpu {
     pipeline: wgpu::ComputePipeline,
     pipeline32: wgpu::ComputePipeline,
     pipeline30: wgpu::ComputePipeline,
-    serial_pipeline: Option<wgpu::ComputePipeline>,
-    /// Barrier-free one-creature-per-lane kernels for small strides.
-    lane_pipelines: [Option<wgpu::ComputePipeline>; 6],
     buffers: Option<Buffers>,
     pub allocated_bytes: u64,
     pub profile: Option<GpuProfile>,
     timestamps: Option<TimestampResources>,
+    /// One-creature-per-lane kernel; used for evaluation when present.
+    creature: Option<crate::creature_kernel::CreatureKernel>,
+    /// Raw Vulkan evaluation on every available device; used when present.
+    pub sched: Option<crate::scheduler::Scheduler>,
 }
 struct BucketBuffers {
     nodes: wgpu::Buffer,
@@ -160,19 +161,18 @@ fn split_five_bucket(population: usize) -> bool {
     (population <= 10_000 && std::env::var_os("EVOLUTION_LEGACY_BUCKET5").is_none())
         || std::env::var_os("EVOLUTION_FORCE_BUCKET5").is_some()
 }
-fn serial_kernels_enabled() -> bool {
-    // This path still uses node-to-node muscles and has no rigid-bone solve.
-    false
-}
-fn lane_kernels_enabled() -> bool {
-    // This path still uses node-to-node muscles and has no rigid-bone solve.
-    false
+fn creature_kernel_enabled() -> bool {
+    // The one-creature-per-lane kernel is the default; `workgroup` selects the
+    // older shared-memory kernel for comparisons.
+    std::env::var("EVOLUTION_KERNEL").map_or(true, |kernel| kernel != "workgroup")
 }
 fn exact_cos_enabled() -> bool {
     std::env::var_os("EVOLUTION_EXACT_COS").is_some()
 }
-const SERIAL_WORKGROUP: usize = 128;
-fn apply_fast_cos(source: String) -> String {
+/// Physics steps per dispatch on the Vulkan backend. Short ranges let the
+/// display's GPU work interleave; the engine keeps them nearly free.
+pub const DEFAULT_STEP_RANGE: u32 = 64;
+pub(crate) fn apply_fast_cos(source: String) -> String {
     if exact_cos_enabled() {
         return source;
     }
@@ -199,7 +199,7 @@ fn pipeline_chunk_size(cfg: &Config) -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value > 0)
         .unwrap_or(if cfg.population >= 100_000 {
-            16_384
+            100_000
         } else {
             4_096
         })
@@ -369,62 +369,6 @@ impl Gpu {
             compilation_options: Default::default(),
             cache: None,
         });
-        let serial_pipeline = if serial_kernels_enabled() {
-            let serial_source = apply_fast_cos(
-                include_str!("../shaders/physics_serial.wgsl").replace("MAXNODES", "8"),
-            );
-            ensure!(
-                serial_source.matches("@workgroup_size(128)").count() == 1
-                    && serial_source.matches("group.x*128u").count() == 1
-                    && !serial_source.contains("MAXNODES"),
-                "The serial physics source transform needs updating"
-            );
-            let serial_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("Serial creature physics"),
-                source: wgpu::ShaderSource::Wgsl(serial_source.into()),
-            });
-            Some(
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("Serial whole-body creature physics"),
-                    layout: Some(&pipeline_layout),
-                    module: &serial_shader,
-                    entry_point: Some("advance"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                }),
-            )
-        } else {
-            None
-        };
-        let mut lane_pipelines: [Option<wgpu::ComputePipeline>; 6] = [const { None }; 6];
-        if lane_kernels_enabled() {
-            let lane_template = include_str!("../shaders/physics_lane.wgsl");
-            ensure!(
-                lane_template.matches("MAXN").count() == 11,
-                "The lane physics source transform needs updating"
-            );
-            for (bucket, maxn) in [(0usize, 4u32), (1, 5), (2, 8), (3, 16)] {
-                let lane_source = apply_fast_cos(lane_template.replace("MAXN", &maxn.to_string()));
-                ensure!(
-                    !lane_source.contains("MAXN"),
-                    "lane MAXN substitution failed"
-                );
-                let lane_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("Lane creature physics"),
-                    source: wgpu::ShaderSource::Wgsl(lane_source.into()),
-                });
-                lane_pipelines[bucket] = Some(device.create_compute_pipeline(
-                    &wgpu::ComputePipelineDescriptor {
-                        label: Some("Lane creature physics"),
-                        layout: Some(&pipeline_layout),
-                        module: &lane_shader,
-                        entry_point: Some("advance"),
-                        compilation_options: Default::default(),
-                        cache: None,
-                    },
-                ));
-            }
-        }
         let shader32 = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("32-lane muscle physics"),
             source: wgpu::ShaderSource::Wgsl(variant_source(32).into()),
@@ -477,18 +421,33 @@ impl Gpu {
         } else {
             None
         };
+        let creature = if creature_kernel_enabled() {
+            Some(crate::creature_kernel::CreatureKernel::new(&device)?)
+        } else {
+            None
+        };
+        // The raw Vulkan engine is the default evaluation backend; EVOLUTION_BACKEND=wgpu
+        // runs the creature kernel through wgpu on `device` instead.
+        let sched = if creature.is_some()
+            && std::env::var("EVOLUTION_BACKEND").map_or(true, |backend| backend != "wgpu")
+        {
+            Some(crate::scheduler::Scheduler::new(&name)?)
+        } else {
+            None
+        };
+        let name = sched.as_ref().map_or(name, |s| s.names());
         Ok(Self {
+            sched,
             device,
             queue,
             name,
             pipeline,
             pipeline32,
             pipeline30,
-            serial_pipeline,
-            lane_pipelines,
             buffers: None,
             allocated_bytes: 0,
             profile: profiling.then(GpuProfile::default),
+            creature,
             timestamps,
         })
     }
@@ -713,8 +672,16 @@ impl Gpu {
         if indices.is_empty() {
             return Ok(out);
         }
+        if let Some(sched) = self.sched.as_mut() {
+            let metrics = sched.evaluate(pop, indices, cfg)?;
+            self.allocated_bytes = sched.allocated_bytes();
+            return Ok(metrics);
+        }
         let chunk_size = pipeline_chunk_size(cfg);
         let steps = physics::SETTLE + cfg.steps();
+        if self.creature.is_some() {
+            return self.evaluate_creature_lanes(pop, indices, cfg, steps, out);
+        }
         if indices.len() <= chunk_size {
             let packing_started = Instant::now();
             let batches = pack_batches(pop, indices, cfg)?;
@@ -770,6 +737,68 @@ impl Gpu {
             Ok::<(), anyhow::Error>(())
         })?;
         Ok(out)
+    }
+    fn evaluate_creature_lanes(
+        &mut self,
+        pop: &Population,
+        indices: &[usize],
+        cfg: &Config,
+        steps: u32,
+        mut out: Vec<EvaluationMetrics>,
+    ) -> Result<Vec<EvaluationMetrics>> {
+        use crate::creature_kernel::pack;
+        let chunk = std::env::var("EVOLUTION_GPU_CHUNK")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(4096);
+        let chunk_size = pipeline_chunk_size(cfg);
+        let chunks: Vec<&[usize]> = indices.chunks(chunk_size).collect();
+        let kernel = self.creature.as_mut().unwrap();
+        let mut packing = 0.0;
+        let (device, queue) = (&self.device, &self.queue);
+        std::thread::scope(|scope| {
+            let timed_pack = |slice| {
+                let started = std::time::Instant::now();
+                let packed = pack(pop, slice);
+                (started.elapsed().as_secs_f64(), packed)
+            };
+            let first = chunks[0];
+            let mut pending = Some(scope.spawn(move || timed_pack(first)));
+            for chunk_index in 0..chunks.len() {
+                let (pack_seconds, packed) = pending.take().unwrap().join().expect("packing task");
+                packing += pack_seconds;
+                let packed = packed?;
+                pending = chunks
+                    .get(chunk_index + 1)
+                    .map(|&next| scope.spawn(move || timed_pack(next)));
+                let results = kernel.run(device, queue, &packed, cfg, steps, chunk)?;
+                for (batch, results) in packed.iter().zip(&results) {
+                    merge_slots(
+                        pop,
+                        &batch.slots,
+                        &batch.creatures,
+                        results,
+                        cfg,
+                        chunk_index * chunk_size,
+                        &mut out,
+                    );
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        })?;
+        if let Some(profile) = &mut self.profile {
+            profile.packing_seconds += packing;
+        }
+        self.allocated_bytes = kernel.allocated_bytes;
+        Ok(out)
+    }
+    /// True when evaluation can be queued without blocking (Vulkan backend).
+    pub fn async_capable(&self) -> bool {
+        self.sched.is_some()
+    }
+    pub fn async_in_flight(&self) -> usize {
+        self.sched.as_ref().map_or(0, |s| s.in_flight())
     }
     pub fn trajectory(
         &mut self,
@@ -871,31 +900,18 @@ impl Gpu {
                 0,
                 bytemuck::cast_slice(&batch.node_adjacency),
             );
-            let serial_bucket = self.serial_pipeline.is_some() && bucket <= 2;
-            let lane_bucket = !serial_bucket && self.lane_pipelines[bucket].is_some();
             for tick in (0..steps).step_by(chunk as usize) {
                 let offset = dispatches.len() as u64 * buffers.params_stride;
                 ensure!(offset <= u32::MAX as u64, "GPU parameter offset overflow");
                 let dynamic_offset = offset as u32;
-                let (workgroups_x, workgroups_y) = if lane_bucket {
-                    let total = batch.metadata.len().div_ceil(64) as u32;
-                    let groups_x = total.clamp(1, u16::MAX as u32);
-                    (groups_x, total.div_ceil(groups_x).max(1))
-                } else if serial_bucket {
-                    (batch.metadata.len().div_ceil(SERIAL_WORKGROUP) as u32, 1)
+                let lanes = if bucket == 1 {
+                    30
+                } else if bucket < 5 && use_32_lanes {
+                    32
                 } else {
-                    let lanes = if bucket == 1 {
-                        30
-                    } else if bucket < 5 && use_32_lanes {
-                        32
-                    } else {
-                        64
-                    };
-                    (
-                        (batch.metadata.len() * batch.stride).div_ceil(lanes) as u32,
-                        1,
-                    )
+                    64
                 };
+                let workgroups = (batch.metadata.len() * batch.stride).div_ceil(lanes) as u32;
                 let params = Params {
                     tick,
                     steps: (steps - tick).min(chunk),
@@ -906,19 +922,12 @@ impl Gpu {
                     friction: cfg.ground_friction,
                     ground: if cfg.ground { 1.0 } else { 0.0 },
                     total_steps: steps,
-                    groups_x: if lane_bucket { workgroups_x } else { 0 },
+                    groups_x: 0,
                     pad: [0; 2],
                 };
                 self.queue
                     .write_buffer(&buffers.params, offset, bytemuck::bytes_of(&params));
-                dispatches.push((
-                    bucket,
-                    dynamic_offset,
-                    workgroups_x,
-                    workgroups_y,
-                    serial_bucket,
-                    lane_bucket,
-                ));
+                dispatches.push((bucket, dynamic_offset, workgroups));
             }
         }
         let mut encoder = self
@@ -943,18 +952,8 @@ impl Gpu {
                 }),
             });
             let mut previous_bucket = None;
-            for (bucket, offset, workgroups_x, workgroups_y, serial_bucket, lane_bucket) in
-                &dispatches
-            {
-                pass.set_pipeline(if *serial_bucket {
-                    self.serial_pipeline
-                        .as_ref()
-                        .expect("serial dispatch without serial pipeline")
-                } else if *lane_bucket {
-                    self.lane_pipelines[*bucket]
-                        .as_ref()
-                        .expect("lane dispatch without lane pipeline")
-                } else if *bucket == 1 {
+            for (bucket, offset, workgroups) in &dispatches {
+                pass.set_pipeline(if *bucket == 1 {
                     &self.pipeline30
                 } else if *bucket < 5 && use_32_lanes {
                     &self.pipeline32
@@ -973,7 +972,7 @@ impl Gpu {
                 used_buckets[*bucket] = true;
                 let resources = buffers.buckets[*bucket].as_ref().unwrap();
                 pass.set_bind_group(0, &resources.bind, &[*offset]);
-                pass.dispatch_workgroups(*workgroups_x, *workgroups_y, 1);
+                pass.dispatch_workgroups(*workgroups, 1, 1);
             }
             if detailed_timestamps
                 && let (Some(timestamps), Some(previous)) = (&self.timestamps, previous_bucket)
@@ -1173,11 +1172,34 @@ fn merge_metrics(
     out: &mut [EvaluationMetrics],
 ) {
     for (batch, results) in batches.iter().zip(results) {
-        for (j, &slot) in batch.slots.iter().enumerate() {
+        let results: Vec<crate::creature_kernel::GpuResult> =
+            bytemuck::cast_slice(results).to_vec();
+        merge_slots(
+            pop,
+            &batch.slots,
+            &batch.creatures,
+            &results,
+            cfg,
+            base_slot,
+            out,
+        );
+    }
+}
+pub fn merge_slots(
+    pop: &Population,
+    slots: &[usize],
+    creatures: &[usize],
+    results: &[crate::creature_kernel::GpuResult],
+    cfg: &Config,
+    base_slot: usize,
+    out: &mut [EvaluationMetrics],
+) {
+    {
+        for (j, &slot) in slots.iter().enumerate() {
             let r = results[j];
             let active_steps = cfg.steps();
             let contact_denominator =
-                (active_steps.max(1) * pop.genomes[batch.creatures[j]].node_count as u32) as f32;
+                (active_steps.max(1) * pop.genomes[creatures[j]].node_count as u32) as f32;
             out[base_slot + slot] = EvaluationMetrics {
                 fitness: r.fitness,
                 behavior: TrialMetrics {
@@ -1273,7 +1295,7 @@ fn append_adjacency_muscles(
     }
 }
 
-fn read_buffer<T: bytemuck::Pod>(
+pub(crate) fn read_buffer<T: bytemuck::Pod>(
     device: &wgpu::Device,
     buffer: &wgpu::Buffer,
     bytes: u64,

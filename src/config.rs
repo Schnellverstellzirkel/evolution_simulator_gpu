@@ -27,7 +27,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            population: 1000,
+            population: 1_000_000,
             seed: 38,
             random_seed: true,
             duration: 18.0,
@@ -44,7 +44,7 @@ impl Default for Config {
             max_muscles: 96,
             gpu_budget_mib: 4096,
             ram_budget_mib: 16384,
-            throughput: false,
+            throughput: true,
             checkpoint_interval: 10,
         }
     }

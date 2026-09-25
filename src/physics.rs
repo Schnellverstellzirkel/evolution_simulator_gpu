@@ -4,8 +4,25 @@ use crate::{
 };
 pub const DT: f32 = 1.0 / 120.0;
 pub const SETTLE: u32 = 200;
-const BONE_SOLVE_ITERATIONS: usize = 8;
-const VELOCITY_SOLVE_ITERATIONS: usize = 4;
+/// Position-projection and velocity-constraint passes per step. The rebuild
+/// after projection makes every bone exactly its rest length regardless.
+/// `EVOLUTION_BONE_PASSES` / `EVOLUTION_VELOCITY_PASSES` override them for
+/// solver experiments; every engine and the replay read the same values.
+pub fn solver_passes() -> (usize, usize) {
+    static PASSES: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
+    *PASSES.get_or_init(|| {
+        let read = |name: &str, default: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        (
+            read("EVOLUTION_BONE_PASSES", 8),
+            read("EVOLUTION_VELOCITY_PASSES", 4),
+        )
+    })
+}
 const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
 const MAX_MUSCLE_FORCE: f32 = 5.0;
 const MAX_NODE_SPEED: f32 = 5.0;
@@ -115,7 +132,7 @@ fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool, previous: &[N
     for (i, node) in nodes.iter().enumerate() {
         positions[i] = node.pos;
     }
-    for _ in 0..BONE_SOLVE_ITERATIONS {
+    for _ in 0..solver_passes().0 {
         for bone in bones {
             let a = bone.a as usize;
             let b = bone.b as usize;
@@ -227,7 +244,7 @@ fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool, previous: &[N
     }
     // Keep each link's rotation bounded and remove only velocity components
     // that would stretch a bone or rotate it beyond the same angular limit.
-    for _ in 0..VELOCITY_SOLVE_ITERATIONS {
+    for _ in 0..solver_passes().1 {
         for bone in bones {
             let a = bone.a as usize;
             let b = bone.b as usize;

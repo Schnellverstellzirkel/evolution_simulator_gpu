@@ -1160,6 +1160,7 @@ name = "evolution-simulator"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ash",
  "bincode",
  "bytemuck",
  "clap",
@@ -1168,6 +1169,8 @@ dependencies = [
  "eframe",
  "egui_plot",
  "image",
+ "libc",
+ "naga",
  "pollster 0.4.0",
  "rayon",
  "serde",

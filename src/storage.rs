@@ -442,6 +442,16 @@ impl Experiment {
         });
     }
     pub fn prepare_next_batch(&mut self) -> Result<()> {
+        self.prepare_next_batch_streaming(usize::MAX, |_, _, _| Ok(()))
+    }
+    /// Breeds the next generation, handing each finished slice of `slice`
+    /// offspring to `on_slice` (with the generation's settings) so evaluation
+    /// can start early. The result is identical for every slice size.
+    pub fn prepare_next_batch_streaming(
+        &mut self,
+        slice: usize,
+        mut on_slice: impl FnMut(&Population, std::ops::Range<usize>, &Config) -> Result<()>,
+    ) -> Result<()> {
         let preparation_started = std::time::Instant::now();
         ensure!(
             self.stage == Stage::Archived,
@@ -609,13 +619,15 @@ impl Experiment {
         }
         let plan_seconds = plan_started.elapsed().as_secs_f64();
         let emission_started = std::time::Instant::now();
-        let next = evolution::emit_archive_batch(
+        let next = evolution::emit_archive_batch_streaming(
             &self.population,
             &self.archive,
             &self.cma_emitters,
             &plans,
             &cfg,
             generation,
+            slice.min(cfg.population).max(1),
+            |population, range| on_slice(population, range, &cfg),
         )?;
         let emission_seconds = emission_started.elapsed().as_secs_f64();
         self.config = cfg;

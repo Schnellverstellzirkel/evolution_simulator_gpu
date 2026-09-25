@@ -1,9 +1,15 @@
 pub mod config;
+pub mod cpu_engine;
+pub mod creature_kernel;
+pub mod engine;
 pub mod evolution;
 pub mod gpu;
 pub mod physics;
 pub mod qd;
+pub mod scheduler;
 pub mod search_benchmark;
+pub mod simd;
 pub mod storage;
 pub mod ui;
+pub mod vk_engine;
 pub mod worker;
