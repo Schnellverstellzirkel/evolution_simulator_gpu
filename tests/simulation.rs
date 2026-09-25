@@ -549,3 +549,54 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
         );
     }
 }
+
+#[test]
+fn nodes_stay_on_top_of_rough_ground() {
+    let cfg = Config {
+        population: 16,
+        duration: 3.0,
+        terrain: 3,
+        ..config()
+    };
+    let amplitude = physics::terrain_amplitude(cfg.terrain);
+    let pop = evolution::create(&cfg).unwrap();
+    for i in 0..pop.genomes.len() {
+        let creature = pop.creature(i);
+        let frames = evolution_simulator::cpu_engine::trajectory(&creature, &cfg);
+        for frame in &frames[physics::settle() as usize + 1..] {
+            for (node, gene) in frame.iter().zip(&creature.nodes) {
+                let (height, slope) = physics::terrain(node[0], amplitude);
+                let floor = height + gene.diameter * 0.5 * (1.0 + slope * slope).sqrt();
+                assert!(node[1] >= floor - 0.01, "node sank to {} below {floor}", node[1]);
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a Vulkan GPU; run explicitly on the workstation"]
+fn gpu_matches_cpu_on_rough_ground() {
+    let base = Config {
+        population: 64,
+        // Contacts with small bumps amplify rounding differences quickly, so
+        // compare a short trial.
+        duration: 0.2,
+        ..config()
+    };
+    let pop = evolution::create(&base).unwrap();
+    let mut gpu = Gpu::new("RTX 4060").unwrap();
+    for terrain in 0..physics::TERRAIN_AMPLITUDES.len() as u8 {
+        let cfg = Config { terrain, ..base.clone() };
+        let scores = gpu
+            .evaluate(&pop, &(0..64).collect::<Vec<_>>(), &cfg)
+            .unwrap();
+        let cpu = evolution_simulator::cpu_engine::evaluate(&pop, &cfg);
+        for (i, (&gpu_score, cpu_result)) in scores.iter().zip(&cpu).enumerate() {
+            assert!(
+                (gpu_score - cpu_result.fitness).abs() < 0.05,
+                "roughness {terrain}, score {i}: GPU {gpu_score}, CPU engine {}",
+                cpu_result.fitness
+            );
+        }
+    }
+}

@@ -37,7 +37,8 @@ struct Params {
     friction: f32,
     ground: f32,
     total_steps: u32,
-    pad0: u32,
+    // Bump height of the rough ground; 0 is flat.
+    terrain: f32,
     pad1: u32,
     pad2: u32,
 }
@@ -54,6 +55,9 @@ struct Result {
     // Bitmasks (as f32 bits) of nodes 0-31 and 32-63 that touched the ground.
     contact_lo: f32,
     contact_hi: f32,
+    // Bitmasks of nodes that later lifted clear of the ground again.
+    lift_lo: f32,
+    lift_hi: f32,
 }
 @group(0) @binding(0) var<storage, read_write> nodes: array<Node>;
 @group(0) @binding(1) var<storage, read> muscle_data: array<f32>;
@@ -90,6 +94,22 @@ const RATE: f32 = PHYSICSRATE;
 const DT: f32 = 1.0 / RATE;
 const SETTLE: u32 = SETTLESTEPSu;
 const SAMPLE: u32 = SAMPLEINTERVALu;
+// Clearance a touching node must reach to count as a lifted foot.
+const LIFT_CLEARANCE: f32 = 0.01;
+
+// Height and slope of the rough ground; mirrors physics::terrain.
+fn terrain(x: f32) -> vec2f {
+    let t0 = x * (1.0 / 1.1);
+    let u0 = t0 - floor(t0);
+    let w0 = u0 * (1.0 - u0);
+    let t1 = x * (1.0 / 0.43) + 0.3;
+    let u1 = t1 - floor(t1);
+    let w1 = u1 * (1.0 - u1);
+    let height = 0.65 * 16.0 * w0 * w0 + 0.35 * 16.0 * w1 * w1;
+    let slope = 0.65 * 32.0 * w0 * (1.0 - 2.0 * u0) * (1.0 / 1.1)
+        + 0.35 * 32.0 * w1 * (1.0 - 2.0 * u1) * (1.0 / 0.43);
+    return p.terrain * vec2f(height, slope);
+}
 
 fn limited_muscle_length(m: Muscle, time: f32) -> f32 {
     let amplitude = m.amplitude;
@@ -171,8 +191,6 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
     // Mass shares of each bone's correction: inverse mass over their sum.
     var bone_sa: array<f32, MAXB>;
     var bone_sb: array<f32, MAXB>;
-    var bone_ra: array<f32, MAXB>;
-    var bone_rb: array<f32, MAXB>;
     for (var j = 0u; j < MAXB; j++) {
         if j >= bone_count { break; }
         let field = tile.y + j * BONE_FIELDS * TILE + tl;
@@ -189,10 +207,8 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         let inverse_sum = inverse_a + inverse_b;
         bone_sa[j] = inverse_a / inverse_sum;
         bone_sb[j] = inverse_b / inverse_sum;
-        bone_ra[j] = node_a.radius;
-        bone_rb[j] = node_b.radius;
     }
-    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     if p.tick > 0u {
         metrics = results[creature];
     }
@@ -208,9 +224,18 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let k = j * WG + lane;
                 avg += pos[k].x * mass[j];
                 mass_sum += mass[j];
-                low = min(low, pos[k].y - radius[j]);
             }
-            let shift = vec2f(avg * inv_total_mass, low);
+            let shift_x = avg * inv_total_mass;
+            for (var j = 0u; j < MAXN; j++) {
+                if j >= body_nodes { break; }
+                let k = j * WG + lane;
+                var floor_y = 0.0;
+                if p.terrain > 0.0 {
+                    floor_y = terrain(pos[k].x - shift_x).x;
+                }
+                low = min(low, pos[k].y - radius[j] - floor_y);
+            }
+            let shift = vec2f(shift_x, low);
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
                 let k = j * WG + lane;
@@ -297,8 +322,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 pos[k] = n.pos;
             }
             // Velocities are rebuilt from positions after the solve; keep the
-            // predicted height to measure how far the ground pushed the node.
-            vel[k] = vec2f(pos[k].y, 0.0);
+            // predicted height to measure how far the ground pushed the node,
+            // and the lowest allowed center height for this step.
+            vel[k] = vec2f(pos[k].y, radius[j]);
         }
 
         let grounded = tick >= SETTLE && p.ground > 0.0;
@@ -306,7 +332,20 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
                 let k = j * WG + lane;
-                pos[k].y = max(pos[k].y, radius[j]);
+                if p.terrain > 0.0 {
+                    // Push out along the ground normal, so bumps resist sliding.
+                    let ground = terrain(pos[k].x);
+                    let secant = sqrt(1.0 + ground.y * ground.y);
+                    let floor_y = ground.x + radius[j] * secant;
+                    vel[k].y = floor_y;
+                    let gap = floor_y - pos[k].y;
+                    if gap > 0.0 {
+                        let depth = gap / (secant * secant);
+                        pos[k] += vec2f(-ground.y, 1.0) * depth;
+                    }
+                } else {
+                    pos[k].y = max(pos[k].y, radius[j]);
+                }
             }
         }
         for (var iteration = 0u; iteration < BONE_SOLVE_ITERATIONS; iteration++) {
@@ -325,8 +364,8 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 var new_a = old_a + correction * bone_sa[j];
                 var new_b = old_b - correction * bone_sb[j];
                 if grounded {
-                    new_a.y = max(new_a.y, bone_ra[j]);
-                    new_b.y = max(new_b.y, bone_rb[j]);
+                    new_a.y = max(new_a.y, vel[ka].y);
+                    new_b.y = max(new_b.y, vel[kb].y);
                 }
                 pos[ka] = new_a;
                 pos[kb] = new_b;
@@ -384,7 +423,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             let shifted = pos[k] + center_shift;
             pos[k] = shifted;
             if grounded {
-                ground_lift = max(ground_lift, radius[j] - shifted.y);
+                ground_lift = max(ground_lift, vel[k].y - shifted.y);
             }
         }
         if grounded {
@@ -400,8 +439,12 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             if j >= body_nodes { break; }
             let k = j * WG + lane;
             let predicted_y = vel[k].x;
+            let floor_y = vel[k].y;
             var velocity = (pos[k] - old[k]) * RATE;
-            if grounded && pos[k].y <= radius[j] + 1e-4 {
+            // The previous position is no longer needed; keep the floor height
+            // for the velocity passes and contact metrics.
+            old[k] = vec2f(floor_y, 0.0);
+            if grounded && pos[k].y <= floor_y + 1e-4 {
                 let push = max(pos[k].y - predicted_y, 0.0);
                 let max_change = friction[j] * p.friction * push * RATE;
                 velocity.x -= clamp(velocity.x, -max_change, max_change);
@@ -442,7 +485,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if j >= body_nodes { break; }
                 let k = j * WG + lane;
                 var velocity = limit_speed(vel[k]);
-                if grounded && pos[k].y <= radius[j] + 1e-5 {
+                if grounded && pos[k].y <= old[k].x + 1e-5 {
                     velocity.y = max(velocity.y, 0.0);
                 }
                 vel[k] = velocity;
@@ -457,16 +500,28 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
                 let y = pos[j * WG + lane].y;
+                let floor_y = old[j * WG + lane].x;
                 center_y += y;
                 low = min(low, y - radius[j]);
                 high = max(high, y + radius[j]);
-                if p.ground > 0.0
-                    && y <= radius[j] + 0.002 {
-                    contacts += 1.0;
-                    if j < 32u {
-                        metrics.contact_lo = bitcast<f32>(bitcast<u32>(metrics.contact_lo) | (1u << j));
-                    } else {
-                        metrics.contact_hi = bitcast<f32>(bitcast<u32>(metrics.contact_hi) | (1u << (j - 32u)));
+                if p.ground > 0.0 {
+                    if y <= floor_y + 0.002 {
+                        contacts += 1.0;
+                        if j < 32u {
+                            metrics.contact_lo = bitcast<f32>(bitcast<u32>(metrics.contact_lo) | (1u << j));
+                        } else {
+                            metrics.contact_hi = bitcast<f32>(bitcast<u32>(metrics.contact_hi) | (1u << (j - 32u)));
+                        }
+                    } else if y > floor_y + LIFT_CLEARANCE {
+                        // A foot must leave the ground after touching it; a
+                        // dragged node never does.
+                        if j < 32u {
+                            let touched = bitcast<u32>(metrics.contact_lo) & (1u << j);
+                            metrics.lift_lo = bitcast<f32>(bitcast<u32>(metrics.lift_lo) | touched);
+                        } else {
+                            let touched = bitcast<u32>(metrics.contact_hi) & (1u << (j - 32u));
+                            metrics.lift_hi = bitcast<f32>(bitcast<u32>(metrics.lift_hi) | touched);
+                        }
                     }
                 }
             }
@@ -520,15 +575,8 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             if failures > 0.0 {
                 metrics.fitness = -1e20;
             } else {
-                let timed_steps = max(p.total_steps - SETTLE, 1u);
-                let mean_height = metrics.height_sum / f32(timed_steps);
-                let contact_fraction = metrics.ground_contact
-                    / (f32(timed_steps) * f32(body_nodes));
-                // Soft preferences: low or fully grounded bodies keep a tenth of
-                // their distance, so evolution can still rank near misses.
-                let posture = 0.1 + 0.9 * clamp((mean_height - 0.25) / 0.75, 0.0, 1.0);
-                let stepping = 0.1 + 0.9 * clamp((0.95 - contact_fraction) / 0.20, 0.0, 1.0);
-                metrics.fitness = score / mass_sum * posture * stepping;
+                // Fitness is distance only; gait style is left to the niches.
+                metrics.fitness = score / mass_sum;
             }
             if p.total_steps > SETTLE {
                 metrics.vertical_oscillation = max(

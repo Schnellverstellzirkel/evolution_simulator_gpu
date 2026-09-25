@@ -117,6 +117,10 @@ pub struct Experiment {
     /// Whether each slot's current creature came from crossover.
     #[serde(skip)]
     pub candidate_mates: Vec<bool>,
+    /// Elites from before an environment change, waiting to be evaluated again
+    /// in the new world. Breeding hands them out before new offspring.
+    #[serde(default)]
+    pub reseed: Vec<evolution::Creature>,
 }
 
 /// One recorded creature in an elite's ancestry.
@@ -215,6 +219,7 @@ impl Experiment {
             islands: Vec::new(),
             lineage: HashMap::new(),
             candidate_mates: Vec::new(),
+            reseed: Vec::new(),
         })
     }
     pub fn rank(&mut self) {
@@ -977,12 +982,21 @@ impl Experiment {
             self.breed_round,
         );
         for ((&slot, child), plan) in slots.iter().zip(children).zip(&planned) {
-            self.population.replace(slot, child);
-            self.candidate_emitters[slot] = plan.plan.emitter;
-            self.candidate_cma[slot] = plan.plan.cma;
-            self.candidate_parent_ids[slot] = plan.parent_id;
-            self.candidate_mates[slot] = plan.plan.mate.is_some();
-            self.protected_until[slot] = plan.protection;
+            if let Some(elite) = self.reseed.pop() {
+                self.population.replace(slot, elite);
+                self.candidate_emitters[slot] = Emitter::Restart;
+                self.candidate_cma[slot] = None;
+                self.candidate_parent_ids[slot] = None;
+                self.candidate_mates[slot] = false;
+                self.protected_until[slot] = 0;
+            } else {
+                self.population.replace(slot, child);
+                self.candidate_emitters[slot] = plan.plan.emitter;
+                self.candidate_cma[slot] = plan.plan.cma;
+                self.candidate_parent_ids[slot] = plan.parent_id;
+                self.candidate_mates[slot] = plan.plan.mate.is_some();
+                self.protected_until[slot] = plan.protection;
+            }
             self.parent_scores[slot] = f32::NAN;
             self.scores[slot] = f32::NAN;
             self.trial_metrics[slot] = TrialMetrics::default();
@@ -1069,7 +1083,13 @@ impl Experiment {
         }
         Ok(())
     }
+    /// Clears the archive after the world changed. Its scores no longer hold,
+    /// but its creatures are queued to compete again under the new physics.
     fn reset_search_context(&mut self) {
+        self.reseed = std::mem::take(&mut self.archive.entries)
+            .into_iter()
+            .map(|elite| elite.creature)
+            .collect();
         self.archive = QdArchive::default();
         self.islands.clear();
         self.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
@@ -1238,6 +1258,7 @@ fn fitness_context_changed(old: &Config, new: &Config) -> bool {
         || old.air_retention != new.air_retention
         || old.ground_friction != new.ground_friction
         || old.ground != new.ground
+        || old.terrain != new.terrain
 }
 pub fn save(path: &Path, experiment: &Experiment) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -1564,6 +1585,7 @@ impl From<V2Experiment> for Experiment {
             islands: Vec::new(),
             lineage: HashMap::new(),
             candidate_mates: Vec::new(),
+            reseed: Vec::new(),
         }
     }
 }
@@ -1602,6 +1624,7 @@ impl From<LegacyExperiment> for Experiment {
             islands: Vec::new(),
             lineage: HashMap::new(),
             candidate_mates: Vec::new(),
+            reseed: Vec::new(),
         }
     }
 }

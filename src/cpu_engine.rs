@@ -71,8 +71,6 @@ struct Group {
     rest: Vec<V>,
     inv_a: Vec<V>,
     inv_b: Vec<V>,
-    rad_a: Vec<V>,
-    rad_b: Vec<V>,
 }
 
 /// The GPU's default polynomial for cos(pi * x) on [0, 1].
@@ -123,6 +121,25 @@ fn muscle_length(m: &MuscleF, time: F, exact: bool) -> F {
     let wave = F::select(phase.lt(m.duty), rising, falling);
     m.long - m.amplitude * (F::splat(1.0) - wave)
 }
+
+/// Height and slope of the rough ground across the lanes; mirrors
+/// `physics::terrain`.
+#[inline(always)]
+fn terrain(x: F, amplitude: f32) -> (F, F) {
+    let mut height = F::splat(0.0);
+    let mut slope = F::splat(0.0);
+    for (wavelength, weight, offset) in physics::TERRAIN_WAVES {
+        let t = x * (1.0 / wavelength) + offset;
+        let u = t - t.floor();
+        let w = u * (F::splat(1.0) - u);
+        height += w * w * (weight * 16.0);
+        slope += w * (F::splat(1.0) - u * 2.0) * (weight * 32.0 * (1.0 / wavelength));
+    }
+    (height * amplitude, slope * amplitude)
+}
+
+/// Clearance a touching node must reach to count as a lifted foot.
+const LIFT_CLEARANCE: f32 = 0.01;
 
 #[inline(always)]
 fn limit_speed(x: &mut F, y: &mut F) {
@@ -181,8 +198,6 @@ impl Group {
             rest: vec![ZERO; nodes - 1],
             inv_a: vec![ZERO; nodes - 1],
             inv_b: vec![ZERO; nodes - 1],
-            rad_a: vec![ZERO; nodes - 1],
-            rad_b: vec![ZERO; nodes - 1],
         };
         // Unused lanes repeat the first creature; their results are discarded.
         for l in 0..L {
@@ -202,8 +217,6 @@ impl Group {
                 group.rest[j][l] = b.rest_length;
                 group.inv_a[j][l] = 1.0 / node_state[a].mass;
                 group.inv_b[j][l] = 1.0 / node_state[bn].mass;
-                group.rad_a[j][l] = node_state[a].radius;
-                group.rad_b[j][l] = node_state[bn].radius;
             }
             let muscles = &pop.muscles[g.muscle_start..g.muscle_start + g.muscle_count];
             for (j, m) in muscles.iter().enumerate() {
@@ -263,6 +276,8 @@ impl Group {
         let (turn_cos_limit, turn_tan) = physics::turn_limits();
         let ground_friction = cfg.ground_friction;
         let ground = cfg.ground;
+        let amplitude = physics::terrain_amplitude(cfg.terrain);
+        let rough = amplitude > 0.0;
         let load = |v: &Vec<V>| -> Vec<F> { v.iter().map(F::load).collect() };
         let mass = load(&self.mass);
         let radius = load(&self.radius);
@@ -286,8 +301,6 @@ impl Group {
         };
         let mut ledger = [0.0f64; 6];
         let rate = physics::rate() as f32;
-        let rad_a = load(&self.rad_a);
-        let rad_b = load(&self.rad_b);
         let muscles: Vec<MuscleF> = self
             .lanes
             .iter()
@@ -321,6 +334,8 @@ impl Group {
         let mut sx = vec![zero; n];
         let mut sy = vec![zero; n];
         let mut failed = vec![zero; n];
+        // Lowest allowed center height of each node for the current step.
+        let mut floor = radius.clone();
         let mut ground_contact = zero;
         let mut height_sum = zero;
         let mut low_center = F::splat(1e20);
@@ -330,6 +345,7 @@ impl Group {
         let mut trend = [0.0f32; L];
         let mut turns = [0.0f32; L];
         let mut contact_bits = [0u64; L];
+        let mut lift_bits = [0u64; L];
 
         let snapshot = |px: &[F], py: &[F]| -> Vec<[f32; 2]> {
             px.iter()
@@ -346,9 +362,12 @@ impl Group {
                 let mut low = F::splat(1e20);
                 for j in 0..n {
                     avg += px[j] * mass[j];
-                    low = low.min(py[j] - radius[j]);
                 }
                 let shift_x = avg * inv_total_mass;
+                for j in 0..n {
+                    let ground_y = if rough { terrain(px[j] - shift_x, amplitude).0 } else { zero };
+                    low = low.min(py[j] - radius[j] - ground_y);
+                }
                 for j in 0..n {
                     px[j] -= shift_x;
                     py[j] -= low;
@@ -432,7 +451,17 @@ impl Group {
             }
             if colliding {
                 for j in 0..n {
-                    py[j] = py[j].max(radius[j]);
+                    if rough {
+                        // Push out along the ground normal, so bumps resist sliding.
+                        let (height, slope) = terrain(px[j], amplitude);
+                        let secant_sq = one + slope * slope;
+                        floor[j] = height + radius[j] * secant_sq.sqrt();
+                        let depth = (floor[j] - py[j]).max(zero) / secant_sq;
+                        px[j] -= slope * depth;
+                        py[j] += depth;
+                    } else {
+                        py[j] = py[j].max(radius[j]);
+                    }
                 }
             }
 
@@ -454,8 +483,8 @@ impl Group {
                     let mut ay = py[a] + cy_ * share_a[b];
                     let mut cy = py[c] - cy_ * share_b[b];
                     if colliding {
-                        ay = ay.max(rad_a[b]);
-                        cy = cy.max(rad_b[b]);
+                        ay = ay.max(floor[a]);
+                        cy = cy.max(floor[c]);
                     }
                     py[a] = ay;
                     py[c] = cy;
@@ -510,7 +539,7 @@ impl Group {
             for j in 0..n {
                 px[j] += shift_x;
                 py[j] += shift_y;
-                lift = lift.max(radius[j] - py[j]);
+                lift = lift.max(floor[j] - py[j]);
             }
             if colliding {
                 for y in &mut py {
@@ -527,7 +556,7 @@ impl Group {
                 let mut vel_x = (px[j] - ox[j]) * rate;
                 let vel_y = (py[j] - oy[j]) * rate;
                 if colliding {
-                    let contact = py[j].le(radius[j] + 1e-4);
+                    let contact = py[j].le(floor[j] + 1e-4);
                     let push = (py[j] - predicted_y).max(zero);
                     let max_change = friction[j] * ground_friction * push * rate;
                     let reduced = vel_x - vel_x.max(-max_change).min(max_change);
@@ -571,7 +600,7 @@ impl Group {
                 for j in 0..n {
                     limit_speed(&mut vx[j], &mut vy[j]);
                     if colliding {
-                        let resting = py[j].le(radius[j] + 1e-5);
+                        let resting = py[j].le(floor[j] + 1e-5);
                         vy[j] = F::select(resting, vy[j].max(zero), vy[j]);
                     }
                 }
@@ -592,12 +621,17 @@ impl Group {
                     low = low.min(y - radius[j]);
                     high = high.max(y + radius[j]);
                     if ground {
-                        let touching = y.le(radius[j] + 0.002);
+                        let touching = y.le(floor[j] + 0.002);
                         contacts += F::select(touching, one, zero);
                         let bits = F::select(touching, one, zero).to_array();
-                        for (l, &b) in bits.iter().enumerate() {
-                            if b > 0.0 {
+                        // A foot must leave the ground after touching it; a
+                        // dragged node never does.
+                        let lifted = F::select(y.gt(floor[j] + LIFT_CLEARANCE), one, zero).to_array();
+                        for l in 0..L {
+                            if bits[l] > 0.0 {
                                 contact_bits[l] |= 1 << j;
+                            } else if lifted[l] > 0.0 {
+                                lift_bits[l] |= contact_bits[l] & (1 << j);
                             }
                         }
                     }
@@ -655,7 +689,6 @@ impl Group {
                 *t += v;
             }
         }
-        let timed_steps = total_steps.saturating_sub(settle).max(1) as f32;
         let timed = total_steps > settle;
         let px: Vec<[f32; L]> = px.iter().map(|v| v.to_array()).collect();
         let failed: Vec<[f32; L]> = failed.iter().map(|v| v.to_array()).collect();
@@ -673,15 +706,8 @@ impl Group {
                     mass_sum += self.mass[j][l];
                     failures += failed[j][l];
                 }
-                let fitness = if failures > 0.0 {
-                    -1e20
-                } else {
-                    let mean_height = height_sum[l] / timed_steps;
-                    let contact_fraction = ground_contact[l] / (timed_steps * n as f32);
-                    let posture = 0.1 + 0.9 * ((mean_height - 0.25) / 0.75).clamp(0.0, 1.0);
-                    let stepping = 0.1 + 0.9 * ((0.95 - contact_fraction) / 0.20).clamp(0.0, 1.0);
-                    score / mass_sum * posture * stepping
-                };
+                // Fitness is distance only; gait style is left to the niches.
+                let fitness = if failures > 0.0 { -1e20 } else { score / mass_sum };
                 GpuResult {
                     fitness,
                     ground_contact: ground_contact[l],
@@ -702,6 +728,8 @@ impl Group {
                     height_sum: height_sum[l],
                     contact_lo: f32::from_bits(contact_bits[l] as u32),
                     contact_hi: f32::from_bits((contact_bits[l] >> 32) as u32),
+                    lift_lo: f32::from_bits(lift_bits[l] as u32),
+                    lift_hi: f32::from_bits((lift_bits[l] >> 32) as u32),
                 }
             })
             .collect()

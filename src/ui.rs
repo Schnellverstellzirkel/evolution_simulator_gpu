@@ -412,97 +412,37 @@ impl App {
         }
         ui.separator();
         let before = self.config.clone();
-        ui.label("Population");
-        let population_changed = ui
-            .add(
-                egui::DragValue::new(&mut self.config.population)
-                    .speed(100)
-                    .range(2..=20_000_000),
-            )
-            .on_hover_text("Even population. Changing this starts a new experiment.")
-            .changed();
-        if population_changed && before.population < 100_000 && self.config.population >= 100_000 {
-            self.config.throughput = true;
-        }
-        ui.horizontal(|ui| {
-            for (label, n) in [
-                ("1k", 1000),
-                ("100k", 100000),
-                ("1m", 1000000),
-                ("3m", 3000000),
-            ] {
-                if ui.small_button(label).clicked() {
-                    self.config.population = n;
-                    if n >= 100_000 {
-                        self.config.throughput = true;
-                    }
-                }
-            }
-        });
+        ui.label(format!(
+            "{} creatures · {:.0} s trials",
+            number(self.config.population),
+            self.config.duration
+        ));
         ui.add_space(4.);
-        ui.label("Mutation strength");
-        ui.add(egui::Slider::new(&mut self.config.mutation, 0.0..=5.0).suffix("×"))
-            .on_hover_text(
-                "Scales continuous parameter edits. Structural edits, novelty search, and immigrant restarts still run when set to 0.",
-            );
-        ui.label("Trial duration");
-        ui.add(egui::Slider::new(&mut self.config.duration, 1.0..=60.0).suffix(" s"));
+        ui.label(RichText::new("Environment").strong());
+        let levels = crate::physics::TERRAIN_AMPLITUDES;
+        let level = usize::from(self.config.terrain);
+        ui.label(if level == 0 {
+            "Flat ground".to_owned()
+        } else {
+            format!("Rough ground, bumps up to {:.0} cm", levels[level] * 100.)
+        });
+        if level + 1 < levels.len()
+            && ui
+                .button("Roughen the ground")
+                .on_hover_text(format!(
+                    "Permanent. Raises the bumps to {:.0} cm. Current elites are tested again on the new ground; creatures that drag a node get caught on the bumps.",
+                    levels[level + 1] * 100.
+                ))
+                .clicked()
+        {
+            self.config.terrain += 1;
+            self.worker.send(Command::Configure(self.config.clone()));
+        }
+        ui.add_space(4.);
         ui.checkbox(&mut self.advanced, "Advanced controls");
         if self.advanced {
             ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Find a setting…"));
             let q = self.search.to_lowercase();
-            if matches_search(&q, "physics gravity air damping friction ground") {
-                egui::CollapsingHeader::new("Physics").default_open(true).show(ui,|ui|{
-                    ui.add(egui::Slider::new(&mut self.config.gravity,0.0..=30.0).text("Gravity").suffix(" m/s²"));
-                    ui.add(egui::Slider::new(&mut self.config.air_retention,0.0..=1.02).text("Air retention")).on_hover_text("Velocity retained per 1/60 s. 1 means no damping; above 1 adds energy.");
-                    ui.add(egui::Slider::new(&mut self.config.ground_friction,0.0..=20.0).text("Ground friction"));
-                    ui.checkbox(&mut self.config.ground, "Flat ground");
-                });
-            }
-            if matches_search(&q, "body node size friction muscle limits") {
-                egui::CollapsingHeader::new("Bodies & mutation bounds")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        numeric(
-                            ui,
-                            "Min diameter (m)",
-                            &mut self.config.min_size,
-                            0.01..=1.0,
-                            0.005,
-                        );
-                        numeric(
-                            ui,
-                            "Max diameter (m)",
-                            &mut self.config.max_size,
-                            0.01..=1.0,
-                            0.005,
-                        );
-                        numeric(
-                            ui,
-                            "Min node friction",
-                            &mut self.config.min_friction,
-                            0.0..=1.0,
-                            0.01,
-                        );
-                        numeric(
-                            ui,
-                            "Max node friction",
-                            &mut self.config.max_friction,
-                            0.0..=1.0,
-                            0.01,
-                        );
-                        ui.horizontal(|ui| {
-                            ui.label("Maximum nodes");
-                            ui.add(egui::DragValue::new(&mut self.config.max_nodes).range(3..=64));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Maximum muscles");
-                            ui.add(
-                                egui::DragValue::new(&mut self.config.max_muscles).range(3..=256),
-                            );
-                        });
-                    });
-            }
             if matches_search(&q, "seed random reproducibility") {
                 egui::CollapsingHeader::new("Randomness").show(ui, |ui| {
                     ui.checkbox(
@@ -608,7 +548,7 @@ impl App {
                 self.worker.send(Command::Configure(self.config.clone()));
                 self.dirty = false;
             }
-            ui.label(RichText::new("Physics and mutation changes apply between generations. Population and seed changes need a new experiment.").small().color(MUTED));
+            ui.label(RichText::new("Changes apply between generations. Seed changes need a new experiment.").small().color(MUTED));
         }
         ui.horizontal_wrapped(|ui| {
             if ui.small_button("Save preset").clicked() {
@@ -692,7 +632,31 @@ impl App {
                 MUTED,
             );
         }
-        if cfg.ground {
+        let amplitude = crate::physics::terrain_amplitude(cfg.terrain);
+        if cfg.ground && amplitude > 0.0 {
+            // Sample the bumps every few pixels and fill down to the frame.
+            let step = (4.0 / self.zoom).max(0.002);
+            let start = (rect.left() - origin.x) / self.zoom;
+            let end = (rect.right() - origin.x) / self.zoom;
+            let mut x = start;
+            let mut line = Vec::new();
+            while x <= end + step {
+                line.push(world(x, crate::physics::terrain(x, amplitude).0));
+                x += step;
+            }
+            for pair in line.windows(2) {
+                let (a, b) = (pair[0], pair[1]);
+                painter.add(egui::Shape::convex_polygon(
+                    vec![a, b, Pos2::new(b.x, rect.bottom()), Pos2::new(a.x, rect.bottom())],
+                    GROUND,
+                    Stroke::NONE,
+                ));
+            }
+            painter.add(egui::Shape::line(
+                line,
+                Stroke::new(2., Color32::from_rgb(125, 159, 135)),
+            ));
+        } else if cfg.ground {
             painter.rect_filled(
                 Rect::from_min_max(
                     Pos2::new(rect.left(), origin.y.clamp(rect.top(), rect.bottom())),
@@ -1626,23 +1590,6 @@ fn paint_card(
             if card.survivor { MINT } else { AMBER },
         );
     }
-}
-fn numeric(
-    ui: &mut egui::Ui,
-    label: &str,
-    v: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
-    speed: f64,
-) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.add(
-            egui::DragValue::new(v)
-                .range(range)
-                .speed(speed)
-                .max_decimals(3),
-        );
-    });
 }
 fn matches_search(q: &str, terms: &str) -> bool {
     q.is_empty() || terms.contains(q)

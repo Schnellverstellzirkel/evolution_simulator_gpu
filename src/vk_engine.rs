@@ -558,7 +558,8 @@ impl VkEngine {
                     friction: cfg.ground_friction,
                     ground: if cfg.ground { 1.0 } else { 0.0 },
                     total_steps: steps,
-                    pad: [0; 3],
+                    terrain: crate::physics::terrain_amplitude(cfg.terrain),
+                    pad: [0; 2],
                 };
                 param_data[offset..offset + std::mem::size_of::<Params>()]
                     .copy_from_slice(bytemuck::bytes_of(&p));

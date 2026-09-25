@@ -13,6 +13,8 @@ pub struct Config {
     pub air_retention: f32,
     pub ground_friction: f32,
     pub ground: bool,
+    /// Ground roughness level (0 = flat). Environment effects only ever raise it.
+    pub terrain: u8,
     pub min_size: f32,
     pub max_size: f32,
     pub min_friction: f32,
@@ -27,15 +29,16 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            population: 1_000_000,
+            population: 3_000_000,
             seed: 38,
             random_seed: true,
-            duration: 18.0,
+            duration: 60.0,
             mutation: 1.0,
             gravity: 9.8,
             air_retention: 0.985,
             ground_friction: 1.5,
             ground: true,
+            terrain: 0,
             min_size: 0.06,
             max_size: 0.12,
             min_friction: 0.65,
@@ -65,6 +68,7 @@ struct HumanConfig {
     air_retention: f32,
     ground_friction: f32,
     ground: bool,
+    terrain: u8,
     min_size: f32,
     max_size: f32,
     min_friction: f32,
@@ -90,6 +94,7 @@ impl Default for HumanConfig {
             air_retention: c.air_retention,
             ground_friction: c.ground_friction,
             ground: c.ground,
+            terrain: c.terrain,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -116,6 +121,7 @@ impl From<HumanConfig> for Config {
             air_retention: c.air_retention,
             ground_friction: c.ground_friction,
             ground: c.ground,
+            terrain: c.terrain,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -142,6 +148,7 @@ impl From<&Config> for HumanConfig {
             air_retention: c.air_retention,
             ground_friction: c.ground_friction,
             ground: c.ground,
+            terrain: c.terrain,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -167,6 +174,7 @@ struct BinaryConfig {
     air_retention: f32,
     ground_friction: f32,
     ground: bool,
+    terrain: u8,
     min_size: f32,
     max_size: f32,
     min_friction: f32,
@@ -192,6 +200,7 @@ impl From<&Config> for BinaryConfig {
             air_retention: c.air_retention,
             ground_friction: c.ground_friction,
             ground: c.ground,
+            terrain: c.terrain,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -218,6 +227,7 @@ impl From<BinaryConfig> for Config {
             gravity: c.gravity,
             air_retention: c.air_retention,
             ground: c.ground,
+            terrain: c.terrain,
             ground_friction: c.ground_friction,
             min_size: c.min_size,
             max_size: c.max_size,
@@ -284,6 +294,10 @@ impl Config {
         ensure!(
             self.ground_friction.is_finite() && (0.0..=20.0).contains(&self.ground_friction),
             "Ground friction must be 0–20"
+        );
+        ensure!(
+            usize::from(self.terrain) < crate::physics::TERRAIN_AMPLITUDES.len(),
+            "Unknown ground roughness level"
         );
         ensure!(
             self.min_size.is_finite()

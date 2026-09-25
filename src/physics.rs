@@ -410,38 +410,33 @@ pub fn evaluate(c: &Creature, cfg: &Config) -> f32 {
     let mut canonical = c.clone();
     crate::evolution::canonicalize_bone_order(&mut canonical);
     let mut n = nodes(&canonical);
-    let mut height_sum = 0.0;
-    let mut contacts = 0usize;
     for tick in 0..settle() + cfg.steps() {
         step(&mut n, &canonical.bones, &canonical.muscles, cfg, tick);
-        if tick >= settle() {
-            let low = n
-                .iter()
-                .map(|node| node.pos[1] - node.radius)
-                .fold(f32::INFINITY, f32::min);
-            let high = n
-                .iter()
-                .map(|node| node.pos[1] + node.radius)
-                .fold(f32::NEG_INFINITY, f32::max);
-            height_sum += high - low;
-            contacts += n
-                .iter()
-                .filter(|node| cfg.ground && node.pos[1] <= node.radius + 0.002)
-                .count();
-        }
     }
-    let displacement = fitness(&n);
-    if displacement <= FAILED {
-        return displacement;
-    }
-    let steps = cfg.steps().max(1) as f32;
-    let contact_fraction = contacts as f32 / (steps * n.len() as f32);
-    displacement * locomotion_factor(height_sum / steps, contact_fraction)
+    fitness(&n)
 }
-pub fn locomotion_factor(mean_height: f32, contact_fraction: f32) -> f32 {
-    let posture = ((mean_height - 0.25) / 0.75).clamp(0.0, 1.0);
-    let stepping = ((0.95 - contact_fraction) / 0.20).clamp(0.0, 1.0);
-    posture * stepping
+/// Ground heights (m) of the bumps added by each roughness level.
+pub const TERRAIN_AMPLITUDES: [f32; 4] = [0.0, 0.02, 0.04, 0.07];
+/// Bump height for `Config::terrain`.
+pub fn terrain_amplitude(level: u8) -> f32 {
+    TERRAIN_AMPLITUDES[usize::from(level).min(TERRAIN_AMPLITUDES.len() - 1)]
+}
+/// Wavelengths (m), weights, and phase offsets of the two bump trains. The
+/// engines and the UI all evaluate the same ground.
+pub const TERRAIN_WAVES: [(f32, f32, f32); 2] = [(1.1, 0.65, 0.0), (0.43, 0.35, 0.3)];
+/// Ground height and slope at `x` for bump height `amplitude`. Each bump is
+/// 16 u^2 (1 - u)^2 over one wavelength: smooth, cheap, and free of trig.
+pub fn terrain(x: f32, amplitude: f32) -> (f32, f32) {
+    let mut height = 0.0;
+    let mut slope = 0.0;
+    for (wavelength, weight, offset) in TERRAIN_WAVES {
+        let t = x / wavelength + offset;
+        let u = t - t.floor();
+        let w = u * (1.0 - u);
+        height += weight * 16.0 * w * w;
+        slope += weight * 32.0 * w * (1.0 - 2.0 * u) / wavelength;
+    }
+    (amplitude * height, amplitude * slope)
 }
 pub fn fitness(n: &[Node]) -> f32 {
     if n.iter().any(|n| n.failed != 0.0) {
@@ -516,10 +511,16 @@ mod tests {
     }
 
     #[test]
-    fn flat_or_permanently_grounded_bodies_do_not_score_as_walkers() {
-        assert_eq!(locomotion_factor(0.12, 0.4), 0.0);
-        assert_eq!(locomotion_factor(1.2, 1.0), 0.0);
-        assert!(locomotion_factor(0.7, 0.8) > 0.0);
+    fn terrain_slope_matches_its_height() {
+        for i in 0..200 {
+            let x = i as f32 * 0.037 - 3.0;
+            let (_, slope) = terrain(x, 0.05);
+            let h = 1e-3;
+            let numeric = (terrain(x + h, 0.05).0 - terrain(x - h, 0.05).0) / (2.0 * h);
+            assert!((slope - numeric).abs() < 1e-2, "{x}: {slope} vs {numeric}");
+            assert!((0.0..=0.05 + 1e-6).contains(&terrain(x, 0.05).0));
+        }
+        assert_eq!(terrain(0.7, 0.0), (0.0, 0.0));
     }
 
     #[test]
