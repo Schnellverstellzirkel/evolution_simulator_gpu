@@ -171,6 +171,8 @@ struct App {
     capture_path: Option<String>,
     sort_started: Instant,
     card_positions: std::collections::HashMap<u64, Pos2>,
+    /// Ancestors of the selected creature, newest first.
+    lineage: Vec<crate::worker::LineageStep>,
     /// Native benchmark frame intervals and the last control probe time.
     bench_frames: Vec<f32>,
     bench_last_ping: Instant,
@@ -274,6 +276,7 @@ impl App {
             capture_requested: false,
             capture_path: std::env::var("EVOLUTION_SMOKE_CAPTURE").ok(),
             sort_started: Instant::now(),
+            lineage: Vec::new(),
             bench_frames: Vec::new(),
             bench_last_ping: Instant::now(),
             card_positions: Default::default(),
@@ -1013,6 +1016,53 @@ impl App {
             self.tab = Tab::Overview;
         }
     }
+    /// Ancestor chain of the selected creature; the biggest gains stand out and
+    /// any ancestor can be replayed.
+    fn lineage_strip(&mut self, ui: &mut egui::Ui) {
+        if self.lineage.len() < 2 {
+            return;
+        }
+        let mut gains: Vec<f32> = self.lineage.iter().map(|step| step.gain).collect();
+        gains.sort_by(|a, b| b.total_cmp(a));
+        let highlight = gains.get(2).copied().unwrap_or(f32::INFINITY).max(0.01);
+        ui.label(
+            RichText::new(format!(
+                "Lineage · {} ancestors, newest first · click one to replay it",
+                self.lineage.len()
+            ))
+            .small()
+            .color(MUTED),
+        );
+        let mut chosen = None;
+        egui::ScrollArea::horizontal()
+            .id_salt("lineage")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (k, step) in self.lineage.iter().enumerate() {
+                        let big = step.gain >= highlight;
+                        let text = format!(
+                            "gen {} · {:.2} m\n{:+.2} m · {}",
+                            step.generation, step.fitness, step.gain, step.change
+                        );
+                        let button = egui::Button::new(
+                            RichText::new(text).small().color(if big { MINT } else { INK }),
+                        )
+                        .fill(if big { CARD_HOVER } else { CARD });
+                        if ui.add(button).clicked() {
+                            chosen = Some(k);
+                        }
+                    }
+                });
+            });
+        if let Some(k) = chosen {
+            let config = self
+                .snapshot
+                .as_ref()
+                .map_or_else(Config::default, |s| s.config.clone());
+            self.set_preview(self.lineage[k].creature.clone(), config);
+        }
+        ui.add_space(6.);
+    }
     fn species_history(&mut self, ui: &mut egui::Ui) {
         let Some(snapshot) = &self.snapshot else {
             return;
@@ -1328,6 +1378,9 @@ impl eframe::App for App {
             if let Some((c, cfg)) = next.preview.take() {
                 self.set_preview(c, cfg);
             }
+            if let Some(lineage) = next.lineage.take() {
+                self.lineage = lineage;
+            }
             self.snapshot = Some(next);
         }
         if !ctx.egui_wants_keyboard_input() {
@@ -1406,6 +1459,7 @@ if let Some(m)=&self.message {ui.label(m);
                         ui.add_space(10.);
                         self.viewport(ui, (ui.available_height() * 0.62).max(180.));
                         ui.add_space(8.);
+                        self.lineage_strip(ui);
                         self.trend(ui, ui.available_height().max(100.));
                     }
                     Tab::Population => self.population(ui),

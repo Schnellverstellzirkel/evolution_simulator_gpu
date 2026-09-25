@@ -45,6 +45,16 @@ pub struct Card {
     pub innovation_reserve: bool,
     pub creature: Creature,
 }
+/// One ancestor of a selected creature.
+#[derive(Clone)]
+pub struct LineageStep {
+    pub generation: u32,
+    pub fitness: f32,
+    /// Fitness gained over this ancestor's own parent.
+    pub gain: f32,
+    pub change: String,
+    pub creature: Creature,
+}
 #[derive(Clone)]
 pub struct Snapshot {
     pub epoch: u64,
@@ -60,6 +70,8 @@ pub struct Snapshot {
     pub page: Vec<Card>,
     pub page_start: usize,
     pub preview: Option<(Creature, Config)>,
+    /// Ancestor chain of the selected elite, newest first; sent once per selection.
+    pub lineage: Option<Vec<LineageStep>>,
     pub gpu: String,
     /// Evaluation engines: name, measured creatures/s, creatures evaluated.
     pub engines: Vec<(String, f64, u64)>,
@@ -135,6 +147,7 @@ fn run(
     let mut guided = false;
     let mut page = 0usize;
     let mut preview = None;
+    let mut lineage: Option<Vec<LineageStep>> = None;
     let mut status = "Create a population to begin".to_owned();
     let mut error = None;
     let mut last_publish = Instant::now() - Duration::from_secs(1);
@@ -301,6 +314,22 @@ fn run(
                         if let Some(e) = &exp {
                             if let Some(elite) = e.archive.entries.get(i) {
                                 preview = Some((elite.creature.clone(), e.config.clone()));
+                                let chain = e.ancestry(elite.creature.id, 400);
+                                lineage = Some(
+                                    chain
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(k, a)| LineageStep {
+                                            generation: a.generation,
+                                            fitness: a.fitness,
+                                            gain: chain
+                                                .get(k + 1)
+                                                .map_or(0.0, |parent| a.fitness - parent.fitness),
+                                            change: a.change.clone(),
+                                            creature: a.creature.clone(),
+                                        })
+                                        .collect(),
+                                );
                             } else if e.archive.entries.is_empty() && i < e.config.population {
                                 preview = Some((e.population.creature(i), e.config.clone()));
                             }
@@ -699,6 +728,7 @@ fn run(
                     page: cards,
                     page_start: page,
                     preview: preview.take(),
+                    lineage: lineage.take(),
                     gpu: gpu.name.clone(),
                     engines: engine_rows(&gpu),
                     end_to_end: end_to_end_rate(&generation_marks),
@@ -744,6 +774,7 @@ fn run(
                     page: vec![],
                     page_start: 0,
                     preview: None,
+                    lineage: None,
                     gpu: gpu.name.clone(),
                     engines: engine_rows(&gpu),
                     end_to_end: end_to_end_rate(&generation_marks),

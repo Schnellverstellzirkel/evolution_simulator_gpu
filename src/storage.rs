@@ -110,6 +110,54 @@ pub struct Experiment {
     /// `archive` collects every island's elites for display and statistics.
     #[serde(default)]
     pub islands: Vec<QdArchive>,
+    /// Every creature that entered an archive, keyed by creature id, with its
+    /// parent and the change that produced it. Pruned to living elites' ancestors.
+    #[serde(default)]
+    pub lineage: HashMap<u64, Ancestor>,
+    /// Whether each slot's current creature came from crossover.
+    #[serde(skip)]
+    pub candidate_mates: Vec<bool>,
+}
+
+/// One recorded creature in an elite's ancestry.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Ancestor {
+    pub parent: Option<u64>,
+    pub creature: Creature,
+    pub fitness: f32,
+    pub generation: u32,
+    /// What changed from the parent, for display.
+    pub change: String,
+}
+
+/// Short description of how a child differs from its parent.
+fn describe_change(parent: Option<&Creature>, child: &Creature, emitter: Emitter, crossed: bool) -> String {
+    let mut parts: Vec<String> = vec![match emitter {
+        Emitter::Cma => "fine-tuned".into(),
+        Emitter::Structural => "reshaped".into(),
+        Emitter::Novelty => "explored".into(),
+        Emitter::Restart => "new random body".into(),
+    }];
+    if crossed {
+        parts.push("crossed with a relative".into());
+    }
+    if let Some(parent) = parent {
+        let nodes = child.nodes.len() as i64 - parent.nodes.len() as i64;
+        let muscles = child.muscles.len() as i64 - parent.muscles.len() as i64;
+        if nodes != 0 {
+            parts.push(format!("{nodes:+} node{}", if nodes.abs() == 1 { "" } else { "s" }));
+        }
+        if muscles != 0 {
+            parts.push(format!("{muscles:+} muscle{}", if muscles.abs() == 1 { "" } else { "s" }));
+        }
+        let synced = |c: &Creature| {
+            c.muscles.len() > 1 && c.muscles.iter().all(|m| m.period == c.muscles[0].period)
+        };
+        if synced(child) && !synced(parent) {
+            parts.push("synced rhythm".into());
+        }
+    }
+    parts.join(", ")
 }
 
 /// Independent parent pools; elites migrate between neighbors periodically.
@@ -165,6 +213,8 @@ impl Experiment {
             qd_version: qd::VERSION,
             breed_round: 0,
             islands: Vec::new(),
+            lineage: HashMap::new(),
+            candidate_mates: Vec::new(),
         })
     }
     pub fn rank(&mut self) {
@@ -231,6 +281,7 @@ impl Experiment {
         let all: Vec<usize> = (0..self.config.population).collect();
         let failed = self.archive_slots(&all);
         self.push_archive_stats(failed);
+        self.prune_lineage();
         self.stage = Stage::Archived;
         Ok(())
     }
@@ -240,6 +291,7 @@ impl Experiment {
     pub fn archive_slots(&mut self, slots: &[usize]) -> usize {
         self.ensure_islands();
         // Every creature also competes in its own island's archive.
+        let mut entered: Vec<usize> = Vec::new();
         for &i in slots {
             let score = self.scores[i];
             if !score.is_finite() || score <= FAILED {
@@ -252,15 +304,20 @@ impl Experiment {
             let descriptor = qd::descriptor(nodes, muscles, self.trial_metrics[i]);
             let emitter = self.candidate_emitters.get(i).copied().unwrap_or(Emitter::Restart);
             let protection = self.protected_until.get(i).copied().unwrap_or(0);
-            self.islands[i % island_count()].offer(
-                &self.population,
-                i,
-                descriptor,
-                score,
-                emitter,
-                self.generation,
-                protection,
-            );
+            if self.islands[i % island_count()]
+                .offer(
+                    &self.population,
+                    i,
+                    descriptor,
+                    score,
+                    emitter,
+                    self.generation,
+                    protection,
+                )
+                .inserted
+            {
+                entered.push(i);
+            }
         }
         for island in &mut self.islands {
             island.refresh_behavior_scores();
@@ -423,6 +480,7 @@ impl Experiment {
                 samples.push((i, key));
             }
             if offer.inserted {
+                entered.push(i);
                 rewards[emitter_index] += offer.reward;
                 if offer.new_niche {
                     discoveries[emitter_index] += 1;
@@ -452,7 +510,73 @@ impl Experiment {
             stats.last_parent = parent_id.and_then(|id| parent_index_by_id.get(&id).copied());
         }
         self.archive.refresh_behavior_scores();
+        entered.sort_unstable();
+        entered.dedup();
+        for i in entered {
+            self.record_ancestor(i);
+        }
         failed
+    }
+    /// Records the creature in `slot` (which just entered an archive).
+    fn record_ancestor(&mut self, slot: usize) {
+        let creature = self.population.creature(slot);
+        if self.lineage.contains_key(&creature.id) {
+            return;
+        }
+        let parent = self.candidate_parent_ids.get(slot).copied().flatten();
+        let emitter = self.candidate_emitters.get(slot).copied().unwrap_or(Emitter::Restart);
+        let crossed = self.candidate_mates.get(slot).copied().unwrap_or(false);
+        let change = describe_change(
+            parent.and_then(|id| self.lineage.get(&id)).map(|a| &a.creature),
+            &creature,
+            emitter,
+            crossed,
+        );
+        self.lineage.insert(
+            creature.id,
+            Ancestor {
+                parent,
+                fitness: self.scores[slot],
+                generation: self.generation,
+                change,
+                creature,
+            },
+        );
+    }
+    /// Drops lineage records that no living elite descends from.
+    fn prune_lineage(&mut self) {
+        let mut keep: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let elites = self
+            .archive
+            .entries
+            .iter()
+            .chain(self.islands.iter().flat_map(|island| island.entries.iter()));
+        for elite in elites {
+            let mut id = Some(elite.creature.id);
+            while let Some(current) = id {
+                if !keep.insert(current) {
+                    break;
+                }
+                id = self.lineage.get(&current).and_then(|a| a.parent);
+            }
+        }
+        self.lineage.retain(|id, _| keep.contains(id));
+    }
+    /// Ancestor chain of a creature, newest first (at most `limit` steps).
+    pub fn ancestry(&self, id: u64, limit: usize) -> Vec<&Ancestor> {
+        let mut chain = Vec::new();
+        let mut current = Some(id);
+        while let Some(id) = current {
+            let Some(ancestor) = self.lineage.get(&id) else {
+                break;
+            };
+            chain.push(ancestor);
+            if chain.len() >= limit {
+                break;
+            }
+            current = ancestor.parent;
+        }
+        chain
     }
     fn push_archive_stats(&mut self, failed: usize) {
         let mut elites: Vec<_> = self
@@ -571,6 +695,7 @@ impl Experiment {
         self.candidate_emitters = emitters;
         self.candidate_cma = cma_indices;
         self.candidate_parent_ids = parent_ids;
+        self.candidate_mates = planned.iter().map(|p| p.plan.mate.is_some()).collect();
         self.protected_until = protections;
         self.parent_scores.fill(f32::NAN);
         self.generation = generation;
@@ -833,6 +958,7 @@ impl Experiment {
         }
         let count = self.config.population;
         self.candidate_parent_ids.resize(count, None);
+        self.candidate_mates.resize(count, false);
         self.candidate_emitters.resize(count, Emitter::Restart);
         self.candidate_cma.resize(count, None);
         self.protected_until.resize(count, 0);
@@ -855,6 +981,7 @@ impl Experiment {
             self.candidate_emitters[slot] = plan.plan.emitter;
             self.candidate_cma[slot] = plan.plan.cma;
             self.candidate_parent_ids[slot] = plan.parent_id;
+            self.candidate_mates[slot] = plan.plan.mate.is_some();
             self.protected_until[slot] = plan.protection;
             self.parent_scores[slot] = f32::NAN;
             self.scores[slot] = f32::NAN;
@@ -866,6 +993,7 @@ impl Experiment {
     /// records history, applies queued settings, and compacts the arenas.
     pub fn finish_steady_generation(&mut self, failed: usize) -> Result<()> {
         self.push_archive_stats(failed);
+        self.prune_lineage();
         self.generation += 1;
         self.migrate_islands();
         if let Some(cfg) = self.pending.take() {
@@ -1434,6 +1562,8 @@ impl From<V2Experiment> for Experiment {
             qd_version: 0,
             breed_round: 0,
             islands: Vec::new(),
+            lineage: HashMap::new(),
+            candidate_mates: Vec::new(),
         }
     }
 }
@@ -1470,6 +1600,8 @@ impl From<LegacyExperiment> for Experiment {
             qd_version: 0,
             breed_round: 0,
             islands: Vec::new(),
+            lineage: HashMap::new(),
+            candidate_mates: Vec::new(),
         }
     }
 }
