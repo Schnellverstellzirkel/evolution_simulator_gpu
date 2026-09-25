@@ -31,6 +31,22 @@ pub struct Bone {
     pub min_angle: f32,
     #[serde(default = "joint_max")]
     pub max_angle: f32,
+    /// Mass (kg) of the organ this bone carries; zero without an organ.
+    #[serde(default)]
+    pub organ_mass: f32,
+    /// Where the organ sits along the bone, from node `a` (0) to `b` (1).
+    #[serde(default = "organ_middle")]
+    pub organ_at: f32,
+}
+/// Organ masses (kg). A new organ starts light so it barely changes the gait.
+pub const MIN_ORGAN_MASS: f32 = 0.01;
+pub const MAX_ORGAN_MASS: f32 = 0.3;
+/// Organs sit within this distance (m) of the body's center of mass in the
+/// starting pose, measured without organs and without the head, so they stay
+/// inside the body instead of weighting the tips of limbs.
+pub const ORGAN_RADIUS: f32 = 0.5;
+fn organ_middle() -> f32 {
+    0.5
 }
 /// Widest joint range on either side of the starting pose (120 degrees).
 pub const JOINT_LIMIT: f32 = 120.0 * std::f32::consts::PI / 180.0;
@@ -49,6 +65,8 @@ impl Bone {
             rest_length,
             min_angle: -JOINT_LIMIT,
             max_angle: JOINT_LIMIT,
+            organ_mass: 0.0,
+            organ_at: 0.5,
         }
     }
     /// Keeps the joint range valid.
@@ -61,6 +79,89 @@ impl Bone {
         self.max_angle += qd::gaussian(rng) * step;
         self.clamp_range();
     }
+}
+/// Center of mass of the starting pose without the head (node 0) and
+/// without organs: the point organs must stay near.
+pub fn organ_center(nodes: &[NodeGene]) -> [f32; 2] {
+    let body = if nodes.len() > 1 { &nodes[1..] } else { nodes };
+    let mut sum = [0.0f32; 2];
+    let mut mass = 0.0f32;
+    for n in body {
+        let m = crate::physics::node_mass(n.diameter);
+        sum[0] += n.x * m;
+        sum[1] += n.y * m;
+        mass += m;
+    }
+    [sum[0] / mass.max(1e-9), sum[1] / mass.max(1e-9)]
+}
+/// Positions along `bone` (as a 0-1 range) that lie within `ORGAN_RADIUS`
+/// of `center`, or `None` when the whole bone is too far away.
+fn organ_range(bone: &Bone, nodes: &[NodeGene], center: [f32; 2]) -> Option<(f32, f32)> {
+    let a = nodes[bone.a as usize];
+    let b = nodes[bone.b as usize];
+    let d = [b.x - a.x, b.y - a.y];
+    let f = [a.x - center[0], a.y - center[1]];
+    // |f + t d|^2 <= R^2 is a quadratic in t.
+    let qa = d[0] * d[0] + d[1] * d[1];
+    let qb = 2.0 * (f[0] * d[0] + f[1] * d[1]);
+    let qc = f[0] * f[0] + f[1] * f[1] - ORGAN_RADIUS * ORGAN_RADIUS;
+    if qa < 1e-12 {
+        return (qc <= 0.0).then_some((0.0, 1.0));
+    }
+    let disc = qb * qb - 4.0 * qa * qc;
+    if disc < 0.0 {
+        return None;
+    }
+    let root = disc.sqrt();
+    let low = ((-qb - root) / (2.0 * qa)).max(0.0);
+    let high = ((-qb + root) / (2.0 * qa)).min(1.0);
+    (low <= high).then_some((low, high))
+}
+/// Keeps every organ valid and inside the body: an organ outside the allowed
+/// region slides to the nearest allowed point on its bone, and an organ on a
+/// bone that never comes close enough to the body's center is dropped.
+fn place_organs(c: &mut Creature) {
+    let center = organ_center(&c.nodes);
+    for bone in &mut c.bones {
+        if !(bone.organ_mass.is_finite() && bone.organ_at.is_finite()) || bone.organ_mass <= 0.0 {
+            bone.organ_mass = 0.0;
+            bone.organ_at = 0.5;
+            continue;
+        }
+        bone.organ_mass = bone.organ_mass.clamp(MIN_ORGAN_MASS, MAX_ORGAN_MASS);
+        match organ_range(bone, &c.nodes, center) {
+            Some((low, high)) => bone.organ_at = bone.organ_at.clamp(low, high),
+            None => {
+                bone.organ_mass = 0.0;
+                bone.organ_at = 0.5;
+            }
+        }
+    }
+}
+/// Adds a light organ to a bone that can hold one, or removes an organ.
+fn change_organ(creature: &mut Creature, rng: &mut Rng) -> bool {
+    let with: Vec<usize> = (0..creature.bones.len())
+        .filter(|&i| creature.bones[i].organ_mass > 0.0)
+        .collect();
+    if !with.is_empty() && rng.unit() < 0.3 {
+        let bone = &mut creature.bones[with[rng.index(with.len())]];
+        bone.organ_mass = 0.0;
+        bone.organ_at = 0.5;
+        return true;
+    }
+    let center = organ_center(&creature.nodes);
+    let free: Vec<(usize, (f32, f32))> = (0..creature.bones.len())
+        .filter(|&i| creature.bones[i].organ_mass <= 0.0)
+        .filter_map(|i| organ_range(&creature.bones[i], &creature.nodes, center).map(|r| (i, r)))
+        .collect();
+    if free.is_empty() {
+        return false;
+    }
+    let (index, (low, high)) = free[rng.index(free.len())];
+    let bone = &mut creature.bones[index];
+    bone.organ_mass = rng.range(MIN_ORGAN_MASS, 0.06);
+    bone.organ_at = rng.range(low, high);
+    true
 }
 #[repr(C)]
 #[derive(
@@ -357,7 +458,10 @@ impl Population {
                         && bone.rest_length.is_finite()
                         && (0.03..=max_bone_length).contains(&bone.rest_length)
                         && (-JOINT_LIMIT..=0.0).contains(&bone.min_angle)
-                        && (0.0..=JOINT_LIMIT).contains(&bone.max_angle),
+                        && (0.0..=JOINT_LIMIT).contains(&bone.max_angle)
+                        && (bone.organ_mass == 0.0
+                            || (MIN_ORGAN_MASS..=MAX_ORGAN_MASS).contains(&bone.organ_mass))
+                        && (0.0..=1.0).contains(&bone.organ_at),
                     "Invalid bone in genome {genome_index}: {bone:?}"
                 );
                 ensure!(
@@ -515,6 +619,11 @@ pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
             ordered.push(Bone {
                 a: parent as u32,
                 b: child as u32,
+                organ_at: if reversed[old_index] {
+                    1.0 - old.organ_at
+                } else {
+                    old.organ_at
+                },
                 ..old
             });
         }
@@ -829,6 +938,7 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
         normalize_bone_lengths(c);
         canonicalize_bone_order(c);
         align_nodes_with_bones(c);
+        place_organs(c);
         return;
     }
     // A motor-link ring keeps every rigid segment addressable to the actuator
@@ -858,6 +968,7 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
     normalize_bone_lengths(c);
     canonicalize_bone_order(c);
     align_nodes_with_bones(c);
+    place_organs(c);
 }
 fn initial(cfg: &Config, index: usize) -> Creature {
     random_creature(cfg, 0, index)
@@ -1088,6 +1199,8 @@ pub fn crossover(a: &Creature, b: &Creature, rng: &mut Rng) -> Creature {
             bone.rest_length = other.rest_length;
             bone.min_angle = other.min_angle;
             bone.max_angle = other.max_angle;
+            bone.organ_mass = other.organ_mass;
+            bone.organ_at = other.organ_at;
         }
     }
     let rhythm_from_b = if rng.unit() < 0.3 {
@@ -1160,6 +1273,7 @@ fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
         rest_length: bone.rest_length,
         min_angle: -bone.max_angle,
         max_angle: -bone.min_angle,
+        ..Bone::new(joint, new_node, bone.rest_length)
     });
     for mut m in attached {
         if m.bone_a as usize == limb {
@@ -1257,6 +1371,11 @@ fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
         bone.rest_length =
             (bone.rest_length + qd::gaussian(rng) * 0.035 * scale).clamp(0.03, MAX_BONE_LENGTH);
         bone.mutate_range(0.15 * scale, rng);
+        if bone.organ_mass > 0.0 {
+            bone.organ_mass = (bone.organ_mass * (qd::gaussian(rng) * 0.15 * scale).exp())
+                .clamp(MIN_ORGAN_MASS, MAX_ORGAN_MASS);
+            bone.organ_at = (bone.organ_at + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
+        }
     }
     for muscle in &mut creature.muscles {
         muscle.anchor_a = (muscle.anchor_a + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
@@ -1303,11 +1422,12 @@ pub fn grow_for_benchmark(creature: &mut Creature, cfg: &Config, seed: u64, targ
 }
 
 fn structural_mutation_in_place(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
-    match rng.index(5) {
+    match rng.index(6) {
         0 => split_bone(creature, cfg, rng),
         1 => duplicate_mirrored_node(creature, cfg, rng),
         2 => duplicate_limb(creature, cfg, rng),
         3 => sync_rhythm(creature, rng),
+        4 => change_organ(creature, rng),
         _ => phase_shift_group(creature, rng),
     }
 }
@@ -1345,7 +1465,19 @@ fn split_bone(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
         rest_length: first_length,
         ..original
     };
-    creature.bones.push(Bone::new(mid, original.b, original.rest_length - first_length));
+    let mut second = Bone::new(mid, original.b, original.rest_length - first_length);
+    // The organ stays where it was, on whichever half now holds that point.
+    if original.organ_mass > 0.0 {
+        if original.organ_at <= 0.5 {
+            creature.bones[index].organ_at = original.organ_at * 2.0;
+        } else {
+            creature.bones[index].organ_mass = 0.0;
+            creature.bones[index].organ_at = 0.5;
+            second.organ_mass = original.organ_mass;
+            second.organ_at = (original.organ_at - 0.5) * 2.0;
+        }
+    }
+    creature.bones.push(second);
     for muscle in &mut creature.muscles {
         if muscle.bone_a as usize == index {
             if muscle.anchor_a <= 0.5 {
@@ -1765,5 +1897,122 @@ mod tests {
             assert!((before[side][0] - after[side][0]).abs() < 1e-6);
             assert!((before[side][1] - after[side][1]).abs() < 1e-6);
         }
+    }
+
+    fn organ_point(creature: &Creature) -> Option<[f32; 2]> {
+        creature.bones.iter().find(|b| b.organ_mass > 0.0).map(|b| {
+            let a = creature.nodes[b.a as usize];
+            let c = creature.nodes[b.b as usize];
+            [
+                a.x + (c.x - a.x) * b.organ_at,
+                a.y + (c.y - a.y) * b.organ_at,
+            ]
+        })
+    }
+
+    #[test]
+    fn organs_stay_near_the_body_center_after_every_operator() {
+        let cfg = Config::default();
+        for index in 0..400 {
+            let mut rng = Rng::new(7, 3, index);
+            let mut creature = random_creature_from(&cfg, &mut rng);
+            for _ in 0..12 {
+                if rng.unit() < 0.5 {
+                    change_organ(&mut creature, &mut rng);
+                }
+                let _ = structural_mutation_in_place(&mut creature, &cfg, &mut rng);
+                creature = local_mutation(creature, &cfg, &mut rng, 0.75);
+                repair(&mut creature, &cfg, &mut rng);
+                let center = organ_center(&creature.nodes);
+                for bone in &creature.bones {
+                    if bone.organ_mass == 0.0 {
+                        continue;
+                    }
+                    assert!((MIN_ORGAN_MASS..=MAX_ORGAN_MASS).contains(&bone.organ_mass));
+                    let a = creature.nodes[bone.a as usize];
+                    let b = creature.nodes[bone.b as usize];
+                    let p = [
+                        a.x + (b.x - a.x) * bone.organ_at,
+                        a.y + (b.y - a.y) * bone.organ_at,
+                    ];
+                    let distance = (p[0] - center[0]).hypot(p[1] - center[1]);
+                    assert!(
+                        distance <= ORGAN_RADIUS + 1e-3,
+                        "organ {distance} m from center"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn organs_can_be_grown_and_keep_their_place_through_splits_and_reordering() {
+        let cfg = Config::default();
+        let mut grown = 0;
+        for index in 0..200 {
+            let mut rng = Rng::new(11, 0, index);
+            let mut creature = random_creature_from(&cfg, &mut rng);
+            if !change_organ(&mut creature, &mut rng) {
+                continue;
+            }
+            let Some(before) = organ_point(&creature) else {
+                continue;
+            };
+            grown += 1;
+            let organ_bone = creature
+                .bones
+                .iter()
+                .position(|b| b.organ_mass > 0.0)
+                .unwrap();
+            // Split exactly the organ's bone and check the organ did not move.
+            let mut split = creature.clone();
+            let others: Vec<f32> = split.bones.iter().map(|b| b.rest_length).collect();
+            for (i, b) in split.bones.iter_mut().enumerate() {
+                if i != organ_bone {
+                    b.rest_length = 0.01;
+                }
+            }
+            if split.bones[organ_bone].rest_length >= 0.06 && split_bone(&mut split, &cfg, &mut rng)
+            {
+                for (b, &length) in split.bones.iter_mut().zip(&others) {
+                    if b.rest_length == 0.01 {
+                        b.rest_length = length;
+                    }
+                }
+                let after = organ_point(&split).unwrap();
+                assert!((after[0] - before[0]).abs() < 1e-5 && (after[1] - before[1]).abs() < 1e-5);
+            }
+            // Reversing bone direction keeps the organ at the same point.
+            let mut reordered = creature.clone();
+            for b in &mut reordered.bones {
+                std::mem::swap(&mut b.a, &mut b.b);
+                b.organ_at = 1.0 - b.organ_at;
+            }
+            assert!(canonicalize_bone_order(&mut reordered));
+            let after = organ_point(&reordered).unwrap();
+            assert!((after[0] - before[0]).abs() < 1e-5 && (after[1] - before[1]).abs() < 1e-5);
+        }
+        assert!(grown > 100, "only {grown} creatures could grow an organ");
+    }
+
+    #[test]
+    fn organ_mass_is_shared_by_its_bone_nodes_at_its_position() {
+        let cfg = Config::default();
+        let mut rng = Rng::new(5, 0, 0);
+        let mut creature = random_creature_from(&cfg, &mut rng);
+        let bone = creature.bones[1];
+        creature.bones[1].organ_mass = 0.2;
+        creature.bones[1].organ_at = 0.25;
+        let plain = crate::physics::body(&creature.nodes, &[]);
+        let with = crate::physics::body(&creature.nodes, &creature.bones);
+        let mass = |n: &[crate::physics::Node]| n.iter().map(|x| x.mass).sum::<f32>();
+        assert!((mass(&with) - mass(&plain) - 0.2).abs() < 1e-6);
+        let com =
+            |n: &[crate::physics::Node]| n.iter().map(|x| x.pos[0] * x.mass).sum::<f32>() / mass(n);
+        let a = creature.nodes[bone.a as usize];
+        let b = creature.nodes[bone.b as usize];
+        let organ_x = a.x + (b.x - a.x) * 0.25;
+        let expected = (com(&plain) * mass(&plain) + organ_x * 0.2) / (mass(&plain) + 0.2);
+        assert!((com(&with) - expected).abs() < 1e-5);
     }
 }

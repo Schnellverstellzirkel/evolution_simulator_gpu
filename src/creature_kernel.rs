@@ -160,8 +160,12 @@ pub fn pack(pop: &Population, indices: &[usize]) -> Result<Vec<LaneBatch>> {
             for (j, &(_, i)) in members.iter().enumerate() {
                 let g = &pop.genomes[i];
                 let genes = &pop.nodes[g.node_start..g.node_start + g.node_count];
-                for (dst, gene) in nodes[j * capacity..].iter_mut().zip(genes) {
-                    *dst = physics::node(gene);
+                let body_bones = &pop.bones[g.bone_start..g.bone_start + g.bone_count];
+                for (dst, state) in nodes[j * capacity..]
+                    .iter_mut()
+                    .zip(physics::body(genes, body_bones))
+                {
+                    *dst = state;
                 }
                 info.push([
                     g.node_count as u32,

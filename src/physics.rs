@@ -68,6 +68,12 @@ pub struct Node {
     pub mass: f32,
     pub failed: f32,
 }
+/// Mass (kg) of a node of the given diameter.
+#[inline]
+pub fn node_mass(diameter: f32) -> f32 {
+    (0.1 * (diameter / 0.08).powi(2)).clamp(0.02, 10.0)
+}
+/// A node on its own, without the organs its bones carry.
 #[inline]
 pub fn node(gene: &NodeGene) -> Node {
     Node {
@@ -75,12 +81,29 @@ pub fn node(gene: &NodeGene) -> Node {
         vel: [0.0; 2],
         radius: gene.diameter * 0.5,
         friction: gene.friction,
-        mass: (0.1 * (gene.diameter / 0.08).powi(2)).clamp(0.02, 10.0),
+        mass: node_mass(gene.diameter),
         failed: 0.0,
     }
 }
+/// A body's nodes with its organs' masses included. An organ rides rigidly
+/// on its bone, so its mass is shared by the bone's two nodes in proportion
+/// to its position: the body's center of mass is exact, and the organ never
+/// touches the ground.
+pub fn body(genes: &[NodeGene], bones: &[Bone]) -> Vec<Node> {
+    let mut nodes: Vec<Node> = genes.iter().map(node).collect();
+    for bone in bones {
+        if bone.organ_mass > 0.0 {
+            let (a, b) = (bone.a as usize, bone.b as usize);
+            if a < nodes.len() && b < nodes.len() {
+                nodes[a].mass += bone.organ_mass * (1.0 - bone.organ_at);
+                nodes[b].mass += bone.organ_mass * bone.organ_at;
+            }
+        }
+    }
+    nodes
+}
 pub fn nodes(c: &Creature) -> Vec<Node> {
-    c.nodes.iter().map(node).collect()
+    body(&c.nodes, &c.bones)
 }
 pub fn target(m: &Muscle, time: f32) -> f32 {
     let phase = (time / m.period + m.phase).fract();
@@ -450,7 +473,7 @@ fn snorm16(v: f32) -> f32 {
 }
 /// Joint constraints for a canonical (parent-first) skeleton.
 pub fn joints(genes: &[NodeGene], bones: &[Bone]) -> Vec<Joint> {
-    let state: Vec<Node> = genes.iter().map(node).collect();
+    let state = body(genes, bones);
     let first_root = bones.iter().position(|b| b.a == 0);
     bones
         .iter()

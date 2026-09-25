@@ -154,6 +154,14 @@ fn describe_change(parent: Option<&Creature>, child: &Creature, emitter: Emitter
         if muscles != 0 {
             parts.push(format!("{muscles:+} muscle{}", if muscles.abs() == 1 { "" } else { "s" }));
         }
+        let organs = |c: &Creature| c.bones.iter().filter(|b| b.organ_mass > 0.0).count() as i64;
+        let organ_change = organs(child) - organs(parent);
+        if organ_change != 0 {
+            parts.push(format!(
+                "{organ_change:+} organ{}",
+                if organ_change.abs() == 1 { "" } else { "s" }
+            ));
+        }
         let synced = |c: &Creature| {
             c.muscles.len() > 1 && c.muscles.iter().all(|m| m.period == c.muscles[0].period)
         };

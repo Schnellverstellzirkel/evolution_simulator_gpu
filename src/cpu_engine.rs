@@ -228,7 +228,8 @@ impl Group {
         for l in 0..L {
             let g = &pop.genomes[unit[members[l.min(members.len() - 1)]]];
             let genes = &pop.nodes[g.node_start..g.node_start + g.node_count];
-            let node_state: Vec<_> = genes.iter().map(physics::node).collect();
+            let bones = &pop.bones[g.bone_start..g.bone_start + g.bone_count];
+            let node_state = physics::body(genes, bones);
             for (j, n) in node_state.iter().enumerate() {
                 group.pos_x[j][l] = n.pos[0];
                 group.pos_y[j][l] = n.pos[1];
@@ -236,7 +237,6 @@ impl Group {
                 group.mass[j][l] = n.mass;
                 group.friction[j][l] = n.friction;
             }
-            let bones = &pop.bones[g.bone_start..g.bone_start + g.bone_count];
             let joints = physics::joints(genes, bones);
             for (j, b) in bones.iter().enumerate() {
                 let (a, bn) = (b.a as usize, b.b as usize);

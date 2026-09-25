@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 const MINT: Color32 = Color32::from_rgb(22, 122, 91);
+const ORGAN: Color32 = Color32::from_rgb(190, 78, 104);
 const AMBER: Color32 = Color32::from_rgb(164, 96, 24);
 const FALLEN: Color32 = Color32::from_rgb(196, 64, 52);
 const MUTED: Color32 = Color32::from_rgb(105, 121, 113);
@@ -1674,6 +1675,25 @@ fn draw_creature(
             Stroke::new(width + 3.0, Color32::from_rgb(10, 15, 19)),
         );
         p.line_segment([a, b], Stroke::new(width, Color32::from_rgb(192, 205, 187)));
+    }
+    // Organs ride on their bones; drawn with the density of a node.
+    for bone in c.bones.iter().filter(|b| b.organ_mass > 0.0) {
+        let a = nodes[bone.a as usize].pos;
+        let b = nodes[bone.b as usize].pos;
+        let t = bone.organ_at;
+        let center = origin
+            + Vec2::new(
+                (a[0] + (b[0] - a[0]) * t) * scale,
+                -(a[1] + (b[1] - a[1]) * t) * scale,
+            );
+        let r = (0.04 * (bone.organ_mass / 0.1).sqrt() * scale).max(2.5);
+        p.circle_filled(center, r + 1.5, Color32::from_rgb(9, 17, 22));
+        p.circle_filled(center, r, ORGAN);
+        p.circle_filled(
+            center + Vec2::new(-r * 0.25, -r * 0.3),
+            r * 0.4,
+            Color32::from_white_alpha(40),
+        );
     }
     for m in &c.muscles {
         let bone_a = c.bones[m.bone_a as usize];
