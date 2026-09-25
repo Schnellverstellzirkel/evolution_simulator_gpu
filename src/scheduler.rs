@@ -22,8 +22,9 @@ use std::{
 
 pub struct Device {
     pub engine: Box<dyn Engine>,
-    /// Queued units: ticket and population indices.
-    queued: VecDeque<(u64, Vec<usize>)>,
+    /// Queued units: ticket, population indices, and whether each creature
+    /// also runs a perturbed second trial.
+    queued: VecDeque<(u64, Vec<usize>, bool)>,
     /// Measured creatures per second of device time (exponential average).
     pub rate: f64,
     pub creatures: u64,
@@ -47,7 +48,7 @@ impl Device {
         }
     }
     fn queued_creatures(&self) -> usize {
-        self.queued.iter().map(|(_, unit)| unit.len()).sum()
+        self.queued.iter().map(|(_, unit, _)| unit.len()).sum()
     }
 }
 
@@ -62,6 +63,9 @@ pub struct Scheduler {
     pub devices: Vec<Device>,
     round: Option<Round>,
     pub packing_seconds: f64,
+    /// Trials per creature (`EVOLUTION_ROBUST_TRIALS`, 1 or 2). With 2, fitness
+    /// is the lower score of the creature and a slightly perturbed copy.
+    robust_trials: usize,
 }
 
 fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -115,6 +119,7 @@ impl Scheduler {
             devices,
             round: None,
             packing_seconds: 0.0,
+            robust_trials: env_or("EVOLUTION_ROBUST_TRIALS", 2usize).clamp(1, 2),
         })
     }
 
@@ -232,9 +237,18 @@ impl Scheduler {
                     break;
                 }
                 let started = Instant::now();
-                let ticket = device.engine.submit(pop.subset(&indices), cfg)?;
+                let mut unit = pop.subset(&indices);
+                let robust = self.robust_trials > 1;
+                if robust {
+                    for k in 0..indices.len() {
+                        let mut creature = unit.creature(k);
+                        perturb(&mut creature);
+                        unit.push(creature);
+                    }
+                }
+                let ticket = device.engine.submit(unit, cfg)?;
                 self.packing_seconds += started.elapsed().as_secs_f64();
-                device.queued.push_back((ticket, indices));
+                device.queued.push_back((ticket, indices, robust));
             }
         }
         if round.cursor == round.order.len() && round.oversize.is_empty() {
@@ -256,7 +270,7 @@ impl Scheduler {
         loop {
             for device in &mut self.devices {
                 while let Some(done) = device.engine.poll()? {
-                    let (ticket, indices) = device
+                    let (ticket, indices, robust) = device
                         .queued
                         .pop_front()
                         .context("Unexpected evaluation result")?;
@@ -267,10 +281,18 @@ impl Scheduler {
                         let rate = indices.len() as f64 / done.busy_seconds;
                         device.rate = 0.7 * device.rate + 0.3 * rate;
                     }
+                    let n = indices.len();
                     let metrics = indices
                         .iter()
-                        .zip(&done.results)
-                        .map(|(&i, r)| to_metrics(pop, i, r, cfg))
+                        .enumerate()
+                        .map(|(k, &i)| {
+                            let mut metric = to_metrics(pop, i, &done.results[k], cfg);
+                            if robust {
+                                // Reliable motion only: keep the worse of both trials.
+                                metric.fitness = metric.fitness.min(done.results[n + k].fitness);
+                            }
+                            metric
+                        })
                         .collect();
                     out.push((indices, metrics));
                 }
@@ -316,6 +338,17 @@ impl Scheduler {
             }
         }
         Ok(out)
+    }
+}
+
+/// Small deterministic change to a creature's starting pose and grip, for the
+/// robustness trial.
+fn perturb(creature: &mut crate::evolution::Creature) {
+    let mut rng = crate::evolution::Rng::new(creature.id ^ 0x5eed_7a11, 0, 0);
+    for node in &mut creature.nodes {
+        node.x += rng.range(-0.02, 0.02);
+        node.y += rng.range(0.0, 0.02);
+        node.friction = (node.friction * rng.range(0.9, 1.1)).clamp(0.0, 1.0);
     }
 }
 
