@@ -106,7 +106,27 @@ pub struct Experiment {
     /// Steady-state breeding rounds so far; salts offspring random streams.
     #[serde(default)]
     pub breed_round: u64,
+    /// Island archives. Slot `i` breeds from island `i % island_count()`; the global
+    /// `archive` collects every island's elites for display and statistics.
+    #[serde(default)]
+    pub islands: Vec<QdArchive>,
 }
+
+/// Independent parent pools; elites migrate between neighbors periodically.
+/// `EVOLUTION_island_count()` overrides the count (1 disables islands).
+pub fn island_count() -> usize {
+    static COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *COUNT.get_or_init(|| {
+        std::env::var("EVOLUTION_island_count()")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n: &usize| (1..=64).contains(&n))
+            .unwrap_or(4)
+    })
+}
+/// Generations between migrations, and the share of elites that migrate.
+const MIGRATION_INTERVAL: u32 = 5;
+const MIGRATION_SHARE: f32 = 0.1;
 struct OffspringPlan {
     plan: CandidatePlan,
     parent_id: Option<u64>,
@@ -144,6 +164,7 @@ impl Experiment {
             trial_metrics: vec![TrialMetrics::default(); population_count],
             qd_version: qd::VERSION,
             breed_round: 0,
+            islands: Vec::new(),
         })
     }
     pub fn rank(&mut self) {
@@ -217,6 +238,33 @@ impl Experiment {
     /// order), updates CMA emitters and emitter statistics, and returns how
     /// many trials failed.
     pub fn archive_slots(&mut self, slots: &[usize]) -> usize {
+        self.ensure_islands();
+        // Every creature also competes in its own island's archive.
+        for &i in slots {
+            let score = self.scores[i];
+            if !score.is_finite() || score <= FAILED {
+                continue;
+            }
+            let genome = &self.population.genomes[i];
+            let nodes = &self.population.nodes[genome.node_start..genome.node_start + genome.node_count];
+            let muscles =
+                &self.population.muscles[genome.muscle_start..genome.muscle_start + genome.muscle_count];
+            let descriptor = qd::descriptor(nodes, muscles, self.trial_metrics[i]);
+            let emitter = self.candidate_emitters.get(i).copied().unwrap_or(Emitter::Restart);
+            let protection = self.protected_until.get(i).copied().unwrap_or(0);
+            self.islands[i % island_count()].offer(
+                &self.population,
+                i,
+                descriptor,
+                score,
+                emitter,
+                self.generation,
+                protection,
+            );
+        }
+        for island in &mut self.islands {
+            island.refresh_behavior_scores();
+        }
         let previous_parent_ids: [Option<u64>; qd::EMITTER_COUNT] = std::array::from_fn(|i| {
             self.emitter_stats[i]
                 .last_parent
@@ -508,7 +556,7 @@ impl Experiment {
         let emission_started = std::time::Instant::now();
         let next = evolution::emit_archive_batch_streaming(
             &self.population,
-            &self.archive,
+            &self.islands,
             &self.cma_emitters,
             &plans,
             &cfg,
@@ -526,6 +574,7 @@ impl Experiment {
         self.protected_until = protections;
         self.parent_scores.fill(f32::NAN);
         self.generation = generation;
+        self.migrate_islands();
         self.stage = Stage::Ready;
         self.evaluated = 0;
         self.scores.fill(f32::NAN);
@@ -545,6 +594,50 @@ impl Experiment {
         }
         Ok(())
     }
+    /// Creates the island archives if missing, seeding them from the global
+    /// archive's elites.
+    fn ensure_islands(&mut self) {
+        if self.islands.len() == island_count() {
+            return;
+        }
+        self.islands = vec![QdArchive::default(); island_count()];
+        for (index, elite) in self.archive.entries.iter().enumerate() {
+            self.islands[index % island_count()].absorb(elite);
+        }
+        for island in &mut self.islands {
+            island.refresh_behavior_scores();
+        }
+    }
+    /// Every few generations each island receives the best share of its
+    /// neighbor's elites.
+    fn migrate_islands(&mut self) {
+        if self.islands.len() != island_count() || !self.generation.is_multiple_of(MIGRATION_INTERVAL) {
+            return;
+        }
+        let migrants: Vec<Vec<qd::Elite>> = self
+            .islands
+            .iter()
+            .map(|island| {
+                let mut elites: Vec<&qd::Elite> = island
+                    .entries
+                    .iter()
+                    .filter(|e| !qd::is_morphology_niche(&e.niche))
+                    .collect();
+                elites.sort_unstable_by(|a, b| b.fitness.total_cmp(&a.fitness));
+                let take = ((elites.len() as f32 * MIGRATION_SHARE).ceil() as usize).min(elites.len());
+                elites[..take].iter().map(|e| (*e).clone()).collect()
+            })
+            .collect();
+        for (from, group) in migrants.into_iter().enumerate() {
+            let to = &mut self.islands[(from + 1) % island_count()];
+            for elite in &group {
+                to.absorb(elite);
+            }
+        }
+        for island in &mut self.islands {
+            island.refresh_behavior_scores();
+        }
+    }
     /// Chooses emitters, parents, and CMA slots for offspring in `slots`.
     /// Round 0 reproduces the generational random streams; other rounds salt
     /// them so steady-state breeding never repeats a draw.
@@ -555,6 +648,7 @@ impl Experiment {
         round: u64,
         slots: &[usize],
     ) -> Vec<OffspringPlan> {
+        self.ensure_islands();
         let weights = qd::emitter_weights(&self.emitter_stats);
         let mut reset_cma = HashMap::<(qd::Niche, qd::Topology), usize>::new();
         let mut cma_lookup: HashMap<(qd::Niche, qd::Topology), usize> = self
@@ -569,10 +663,7 @@ impl Experiment {
         // archive. Each creature has its own deterministic RNG, so parallel order
         // does not change the draws. last_parent is snapshotted instead of updating
         // mid-loop; visit() and CMA slot allocation stay sequential below.
-        let archive_empty = self.archive.entries.is_empty();
         let reserve_enabled = self.morphology_reserve_override != Some(false);
-        let last_parents: [Option<usize>; qd::EMITTER_COUNT] =
-            std::array::from_fn(|i| self.emitter_stats[i].last_parent);
         struct PlanPrep {
             emitter: Emitter,
             parent: Option<usize>,
@@ -580,49 +671,60 @@ impl Experiment {
             protection: u32,
             emitter_stale: bool,
             mate: Option<usize>,
+            island: usize,
         }
-        // Elites grouped by body plan, for crossover partners.
-        let mut by_plan: HashMap<&qd::Topology, Vec<usize>> = HashMap::new();
-        for (index, elite) in self.archive.entries.iter().enumerate() {
-            by_plan.entry(&elite.topology).or_default().push(index);
-        }
+        // Each island's elites grouped by body plan, for crossover partners.
+        let by_plan: Vec<HashMap<&qd::Topology, Vec<usize>>> = self
+            .islands
+            .iter()
+            .map(|island| {
+                let mut groups: HashMap<&qd::Topology, Vec<usize>> = HashMap::new();
+                for (index, elite) in island.entries.iter().enumerate() {
+                    groups.entry(&elite.topology).or_default().push(index);
+                }
+                groups
+            })
+            .collect();
         let seed = cfg.seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15);
         let plan_prep: Vec<PlanPrep> = slots
             .par_iter()
             .map(|&i| {
                 let mut rng = Rng::new(seed, generation, i);
+                let island = i % island_count();
+                let archive = &self.islands[island];
+                let archive_empty = archive.entries.is_empty();
                 let emitter = if archive_empty {
                     Emitter::Restart
                 } else {
                     qd::choose_emitter(&mut rng, &weights)
                 };
                 let emitter_stale = self.emitter_stats[emitter.index()].stale();
-                let avoid = last_parents[emitter.index()];
+                let avoid = None;
                 let parent = if emitter == Emitter::Restart || archive_empty {
                     None
                 } else if reserve_enabled
                     && emitter == Emitter::Structural
                     && rng.unit() < qd::MORPHOLOGY_PARENT_FRACTION
                 {
-                    self.archive
+                    archive
                         .sample_morphology(&mut rng, avoid)
-                        .or_else(|| self.archive.sample_local_competitive(&mut rng, avoid))
+                        .or_else(|| archive.sample_local_competitive(&mut rng, avoid))
                 } else if emitter == Emitter::Novelty || emitter_stale {
-                    self.archive.sample_novel(&mut rng, avoid)
+                    archive.sample_novel(&mut rng, avoid)
                 } else {
-                    self.archive.sample_local_competitive(&mut rng, avoid)
+                    archive.sample_local_competitive(&mut rng, avoid)
                 };
-                let parent_id = parent.map(|index| self.archive.entries[index].creature.id);
+                let parent_id = parent.map(|index| archive.entries[index].creature.id);
                 let protection = if matches!(emitter, Emitter::Structural | Emitter::Novelty) {
                     generation.saturating_add(3)
                 } else {
                     parent
-                        .map(|index| self.archive.entries[index].protected_until)
+                        .map(|index| archive.entries[index].protected_until)
                         .unwrap_or(0)
                 };
                 let mate = match (emitter, parent) {
-                    (Emitter::Structural | Emitter::Novelty, Some(p)) if rng.unit() < 0.2 => by_plan
-                        .get(&self.archive.entries[p].topology)
+                    (Emitter::Structural | Emitter::Novelty, Some(p)) if rng.unit() < 0.2 => by_plan[island]
+                        .get(&archive.entries[p].topology)
                         .filter(|group| group.len() > 1)
                         .map(|group| group[rng.index(group.len())])
                         .filter(|&m| m != p),
@@ -635,6 +737,7 @@ impl Experiment {
                     protection,
                     emitter_stale,
                     mate,
+                    island,
                 }
             })
             .collect();
@@ -646,10 +749,11 @@ impl Experiment {
                 protection,
                 emitter_stale,
                 mate,
+                island,
             } = prep;
             let cma_index = if emitter == Emitter::Cma {
                 if let Some(parent_index) = parent {
-                    let elite = &self.archive.entries[parent_index];
+                    let elite = &self.islands[island].entries[parent_index];
                     let template = &elite.creature;
                     let topology = &elite.topology;
                     let niche_key = (elite.niche.clone(), topology.clone());
@@ -706,8 +810,7 @@ impl Experiment {
                 None
             };
             if let Some(parent_index) = parent {
-                self.archive.visit(parent_index);
-                self.emitter_stats[emitter.index()].last_parent = Some(parent_index);
+                self.islands[island].visit(parent_index);
             }
             out.push(OffspringPlan {
                 plan: CandidatePlan {
@@ -739,7 +842,7 @@ impl Experiment {
         let planned = self.plan_offspring(&cfg, self.generation, self.breed_round, slots);
         let plans: Vec<CandidatePlan> = planned.iter().map(|p| p.plan).collect();
         let children = evolution::emit_offspring(
-            &self.archive,
+            &self.islands,
             &self.cma_emitters,
             &plans,
             slots,
@@ -764,6 +867,7 @@ impl Experiment {
     pub fn finish_steady_generation(&mut self, failed: usize) -> Result<()> {
         self.push_archive_stats(failed);
         self.generation += 1;
+        self.migrate_islands();
         if let Some(cfg) = self.pending.take() {
             cfg.validate()?;
             ensure!(
@@ -839,6 +943,7 @@ impl Experiment {
     }
     fn reset_search_context(&mut self) {
         self.archive = QdArchive::default();
+        self.islands.clear();
         self.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
         self.cma_emitters.clear();
     }
@@ -1096,6 +1201,9 @@ pub fn load(path: &Path) -> Result<Experiment> {
     }
     experiment.parent_scores = vec![f32::NAN; experiment.config.population];
     experiment.archive.rebuild_indices();
+    for island in &mut experiment.islands {
+        island.rebuild_indices();
+    }
     experiment.validate()?;
     Ok(experiment)
 }
@@ -1325,6 +1433,7 @@ impl From<V2Experiment> for Experiment {
             trial_metrics: vec![TrialMetrics::default(); population],
             qd_version: 0,
             breed_round: 0,
+            islands: Vec::new(),
         }
     }
 }
@@ -1360,6 +1469,7 @@ impl From<LegacyExperiment> for Experiment {
             trial_metrics: vec![TrialMetrics::default(); population],
             qd_version: 0,
             breed_round: 0,
+            islands: Vec::new(),
         }
     }
 }

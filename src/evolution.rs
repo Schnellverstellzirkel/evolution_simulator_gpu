@@ -883,7 +883,7 @@ pub struct CandidatePlan {
 
 pub fn emit_archive_batch(
     current: &Population,
-    archive: &QdArchive,
+    archive: &[QdArchive],
     cma_emitters: &[CmaEmitter],
     plans: &[CandidatePlan],
     cfg: &Config,
@@ -905,7 +905,7 @@ pub fn emit_archive_batch(
 #[allow(clippy::too_many_arguments)]
 pub fn emit_archive_batch_streaming(
     current: &Population,
-    archive: &QdArchive,
+    archive: &[QdArchive],
     cma_emitters: &[CmaEmitter],
     plans: &[CandidatePlan],
     cfg: &Config,
@@ -913,7 +913,7 @@ pub fn emit_archive_batch_streaming(
     slice: usize,
     on_slice: impl FnMut(&Population, std::ops::Range<usize>) -> Result<()>,
 ) -> Result<Population> {
-    ensure_archive_batch_memory(current, archive, cfg)?;
+    ensure_archive_batch_memory(current, &archive[0], cfg)?;
     ensure!(plans.len() == cfg.population, "Invalid emitter plan count");
     collect_parallel_streaming(
         cfg.population,
@@ -921,7 +921,7 @@ pub fn emit_archive_batch_streaming(
         |i| {
             let mut rng = Rng::new(cfg.seed, generation, i);
             let id = (generation as u64) * cfg.population as u64 + i as u64 + 1;
-            offspring(archive, cma_emitters, plans[i], cfg, &mut rng, id)
+            offspring(&archive[i % archive.len()], cma_emitters, plans[i], cfg, &mut rng, id)
         },
         on_slice,
     )
@@ -1097,7 +1097,7 @@ fn sync_rhythm(creature: &mut Creature, rng: &mut Rng) -> bool {
 /// Steady-state breeding: one offspring per plan, for population `slots`.
 /// `round` salts the random streams and keeps creature ids unique.
 pub fn emit_offspring(
-    archive: &QdArchive,
+    archive: &[QdArchive],
     cma_emitters: &[CmaEmitter],
     plans: &[CandidatePlan],
     slots: &[usize],
@@ -1112,7 +1112,7 @@ pub fn emit_offspring(
         .map(|(&plan, &slot)| {
             let mut rng = Rng::new(seed, generation, slot);
             let id = (round << 32) ^ ((generation as u64) << 24) ^ slot as u64 ^ (1 << 63);
-            offspring(archive, cma_emitters, plan, cfg, &mut rng, id)
+            offspring(&archive[slot % archive.len()], cma_emitters, plan, cfg, &mut rng, id)
         })
         .collect()
 }

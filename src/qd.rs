@@ -692,6 +692,40 @@ impl QdArchive {
             reward: 1.0,
         }
     }
+    /// Adds a copy of `elite` if its behavior niche is empty or it beats the
+    /// occupant. Used for island migration; returns whether it was kept.
+    pub fn absorb(&mut self, elite: &Elite) -> bool {
+        if is_morphology_niche(&elite.niche) {
+            return false;
+        }
+        if let Some(&slot) = self.lookup.get(&elite.niche) {
+            let current = &self.entries[slot];
+            if elite.fitness <= current.fitness {
+                return false;
+            }
+            self.qd_score += elite.fitness.max(0.0) as f64 - current.fitness.max(0.0) as f64;
+            let visits = current.visits;
+            self.entries[slot] = Elite {
+                visits,
+                ..elite.clone()
+            };
+        } else {
+            if self.behavior_count() >= ARCHIVE_LIMIT {
+                return false;
+            }
+            self.qd_score += elite.fitness.max(0.0) as f64;
+            self.entries.push(Elite {
+                visits: 0,
+                ..elite.clone()
+            });
+            let slot = self.entries.len() - 1;
+            self.lookup.insert(elite.niche.clone(), slot);
+            self.least_visited.insert((0, slot));
+            self.behavior_indices.push(slot);
+        }
+        self.behavior_scores = BehaviorScores::default();
+        true
+    }
     fn remove_morphology_topology(&mut self, topology: &Topology, behavior_fitness: f32) {
         if let Some(slot) = self.entries.iter().position(|elite| {
             is_morphology_niche(&elite.niche)
