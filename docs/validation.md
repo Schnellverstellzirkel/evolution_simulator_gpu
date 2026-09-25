@@ -1,5 +1,9 @@
 # Validation results
 
+## Rejected whole-creature lane kernel (2026-09-25)
+
+A full-window, five-generation comparison at 5,000 creatures and 1-second trials was run while the desktop compositor remained active. The lane-per-creature experiment evaluated at 17.8k creatures/s (0.280 s evaluation/generation) and completed 14.75 generations/s; the shared-memory kernel evaluated at 46.9k creatures/s (0.107 s evaluation/generation) and completed 34.44 generations/s. This short, non-default-duration trial is diagnostic only, but it clearly regressed, so the experiment was removed. The default 18-second workload remains the acceptance workload.
+
 Throughput figures in the historical sections below predate rigid bones and do not describe the current physics. This change was checked with low-impact correctness tests; no throughput profile was run while the CPU/GPU were busy.
 
 ## Rigid-bone correctness audit (2026-09-24)
