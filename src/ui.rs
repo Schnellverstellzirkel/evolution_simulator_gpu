@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     evolution::{Creature, FAILED},
-    gpu::{self, Gpu},
+    gpu::Gpu,
     physics::{self, Node},
     storage::{PERCENTILES, Stage, Stats},
     worker::{Command, Snapshot, Worker},
@@ -61,7 +61,6 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
             .or_else(|| adapters.iter().find(presentable).cloned())
             .ok_or_else(|| format!("No presentation-capable Vulkan GPU matching {name}"))
     }));
-    setup.device_descriptor = Arc::new(gpu::descriptor);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
@@ -79,25 +78,8 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
         "Evolution Laboratory",
         options,
         Box::new(|cc| {
-            let render = cc
-                .wgpu_render_state
-                .as_ref()
-                .ok_or("GPU renderer unavailable")?;
-            let gpu = if std::env::var_os("EVOLUTION_SHARED_DEVICE").is_some() {
-                Gpu::from_device(
-                    render.device.clone(),
-                    render.queue.clone(),
-                    render.adapter.get_info().name,
-                )?
-            } else {
-                let (device, queue) = pollster::block_on(
-                    render
-                        .adapter
-                        .request_device(&gpu::descriptor(&render.adapter)),
-                )?;
-                // The Vulkan evaluation engine opens the compute GPU by name.
-                Gpu::from_device(device, queue, compute_name.clone())?
-            };
+            // Evaluation opens its own Vulkan devices; the render device only draws.
+            let gpu = Gpu::new(&compute_name)?;
             Ok(Box::new(App::new(cc, gpu)))
         }),
     )

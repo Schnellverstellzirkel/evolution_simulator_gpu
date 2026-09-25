@@ -497,23 +497,6 @@ fn run(
                                         sched.packing_seconds
                                     );
                                 }
-                                if let Some(profile) = &gpu.profile {
-                                    eprintln!(
-                                        "GPU profile: {} calls, packing {:.6} s, allocation {:.6} s, upload/encode {:.6} s, readback {:.6} s, shader {:.6} s; buckets 4/5/8/16/32/64: {:.6}/{:.6}/{:.6}/{:.6}/{:.6}/{:.6} s",
-                                        profile.calls,
-                                        profile.packing_seconds,
-                                        profile.allocation_seconds,
-                                        profile.encoding_seconds,
-                                        profile.readback_seconds,
-                                        profile.shader_seconds,
-                                        profile.bucket_seconds[0],
-                                        profile.bucket_seconds[1],
-                                        profile.bucket_seconds[2],
-                                        profile.bucket_seconds[3],
-                                        profile.bucket_seconds[4],
-                                        profile.bucket_seconds[5]
-                                    );
-                                }
                                 running = false;
                                 ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
                                 ctx.request_repaint();
