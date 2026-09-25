@@ -630,6 +630,49 @@ fn joints_stay_within_their_evolved_range() {
 }
 
 #[test]
+fn full_joint_ranges_do_not_spin_through_a_half_turn() {
+    let cfg = Config {
+        population: 64,
+        duration: 10.0,
+        ..config()
+    };
+    let mut pop = evolution::create(&cfg).unwrap();
+    for bone in &mut pop.bones {
+        bone.min_angle = -evolution::JOINT_LIMIT;
+        bone.max_angle = evolution::JOINT_LIMIT;
+    }
+
+    let mut widest_turn = 0.0f32;
+    for i in 0..pop.genomes.len() {
+        let creature = pop.creature(i);
+        let joints = physics::joints(&creature.nodes, &creature.bones);
+        let frames = evolution_simulator::cpu_engine::trajectory(&creature, &cfg);
+        for (bone, joint) in creature.bones.iter().zip(&joints) {
+            let Some(reference) = joint.reference else {
+                continue;
+            };
+            let (pivot, child) = (bone.a as usize, bone.b as usize);
+            let mut previous = joint_angle(&frames[0], pivot, reference, child);
+            let mut unwrapped = 0.0f32;
+            for frame in &frames[1..] {
+                let current = joint_angle(frame, pivot, reference, child);
+                let delta = (current - previous + std::f32::consts::PI)
+                    .rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI;
+                unwrapped += delta;
+                widest_turn = widest_turn.max(unwrapped.abs());
+                previous = current;
+            }
+        }
+    }
+
+    assert!(
+        widest_turn < std::f32::consts::PI,
+        "a joint turned past a half turn: {widest_turn} rad"
+    );
+}
+
+#[test]
 #[ignore = "requires a Vulkan GPU; run explicitly on the workstation"]
 fn gpu_matches_cpu_with_narrow_joints() {
     let cfg = Config {

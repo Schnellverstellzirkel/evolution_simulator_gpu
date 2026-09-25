@@ -32,8 +32,8 @@ pub struct Bone {
     #[serde(default = "joint_max")]
     pub max_angle: f32,
 }
-/// Widest joint range on either side of the starting pose (150 degrees).
-pub const JOINT_LIMIT: f32 = 150.0 * std::f32::consts::PI / 180.0;
+/// Widest joint range on either side of the starting pose (120 degrees).
+pub const JOINT_LIMIT: f32 = 120.0 * std::f32::consts::PI / 180.0;
 fn joint_min() -> f32 {
     -JOINT_LIMIT
 }
