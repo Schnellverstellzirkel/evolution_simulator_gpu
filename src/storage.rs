@@ -579,6 +579,12 @@ impl Experiment {
             parent_id: Option<u64>,
             protection: u32,
             emitter_stale: bool,
+            mate: Option<usize>,
+        }
+        // Elites grouped by body plan, for crossover partners.
+        let mut by_plan: HashMap<&qd::Topology, Vec<usize>> = HashMap::new();
+        for (index, elite) in self.archive.entries.iter().enumerate() {
+            by_plan.entry(&elite.topology).or_default().push(index);
         }
         let seed = cfg.seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15);
         let plan_prep: Vec<PlanPrep> = slots
@@ -614,12 +620,21 @@ impl Experiment {
                         .map(|index| self.archive.entries[index].protected_until)
                         .unwrap_or(0)
                 };
+                let mate = match (emitter, parent) {
+                    (Emitter::Structural | Emitter::Novelty, Some(p)) if rng.unit() < 0.2 => by_plan
+                        .get(&self.archive.entries[p].topology)
+                        .filter(|group| group.len() > 1)
+                        .map(|group| group[rng.index(group.len())])
+                        .filter(|&m| m != p),
+                    _ => None,
+                };
                 PlanPrep {
                     emitter,
                     parent,
                     parent_id,
                     protection,
                     emitter_stale,
+                    mate,
                 }
             })
             .collect();
@@ -630,6 +645,7 @@ impl Experiment {
                 parent_id,
                 protection,
                 emitter_stale,
+                mate,
             } = prep;
             let cma_index = if emitter == Emitter::Cma {
                 if let Some(parent_index) = parent {
@@ -698,6 +714,7 @@ impl Experiment {
                     emitter,
                     parent,
                     cma: cma_index,
+                    mate,
                 },
                 parent_id,
                 protection,
@@ -1490,7 +1507,6 @@ mod migration_tests {
             protected_until: vec![0; 2],
             trial_metrics: vec![TrialMetrics::default(); 2],
             qd_version: qd::VERSION - 1,
-            breed_round: 0,
         };
         let payload = bincode::DefaultOptions::new()
             .with_fixint_encoding()

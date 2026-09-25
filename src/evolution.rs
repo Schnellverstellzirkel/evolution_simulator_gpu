@@ -877,6 +877,8 @@ pub struct CandidatePlan {
     pub emitter: Emitter,
     pub parent: Option<usize>,
     pub cma: Option<usize>,
+    /// Second archive parent with the same body plan, for crossover.
+    pub mate: Option<usize>,
 }
 
 pub fn emit_archive_batch(
@@ -945,17 +947,15 @@ fn offspring(
             }
         }
         Emitter::Structural => {
-            let parent = archive.entries[plan.parent.expect("structural parent")]
-                .creature
-                .clone();
+            let parent = mated(archive, plan, rng);
             let (child, _) = structural_mutation(parent, cfg, rng);
             local_mutation(child, cfg, rng, 0.035)
         }
         Emitter::Novelty => {
-            let parent = archive.entries[plan.parent.expect("novelty parent")]
-                .creature
-                .clone();
-            let mut child = local_mutation(parent, cfg, rng, 0.75);
+            let parent = mated(archive, plan, rng);
+            // Occasional large jumps help lineages cross fitness valleys.
+            let scale = if rng.unit() < 0.05 { 2.25 } else { 0.75 };
+            let mut child = local_mutation(parent, cfg, rng, scale);
             if rng.unit() < 0.18 {
                 let _ = structural_mutation_in_place(&mut child, cfg, rng);
             }
@@ -965,6 +965,133 @@ fn offspring(
     creature.id = id;
     repair(&mut creature, cfg, rng);
     creature
+}
+
+/// The plan's parent, crossed with its mate when it has one.
+fn mated(archive: &QdArchive, plan: CandidatePlan, rng: &mut Rng) -> Creature {
+    let parent = &archive.entries[plan.parent.expect("archive parent")].creature;
+    match plan.mate {
+        Some(mate) => crossover(parent, &archive.entries[mate].creature, rng),
+        None => parent.clone(),
+    }
+}
+
+/// Uniform crossover of two creatures with the same body plan: each node,
+/// bone, and muscle comes from one parent. Sometimes the whole muscle rhythm
+/// (periods and phases) comes from one parent so gaits stay coherent.
+pub fn crossover(a: &Creature, b: &Creature, rng: &mut Rng) -> Creature {
+    let mut child = a.clone();
+    if a.nodes.len() != b.nodes.len()
+        || a.bones.len() != b.bones.len()
+        || a.muscles.len() != b.muscles.len()
+    {
+        return child;
+    }
+    for (node, other) in child.nodes.iter_mut().zip(&b.nodes) {
+        if rng.unit() < 0.5 {
+            *node = *other;
+        }
+    }
+    for (bone, other) in child.bones.iter_mut().zip(&b.bones) {
+        if rng.unit() < 0.5 && (bone.a, bone.b) == (other.a, other.b) {
+            bone.rest_length = other.rest_length;
+        }
+    }
+    let rhythm_from_b = if rng.unit() < 0.3 {
+        Some(rng.unit() < 0.5)
+    } else {
+        None
+    };
+    for (muscle, other) in child.muscles.iter_mut().zip(&b.muscles) {
+        if (muscle.bone_a, muscle.bone_b) != (other.bone_a, other.bone_b) {
+            continue;
+        }
+        let (period, phase) = (muscle.period, muscle.phase);
+        if rng.unit() < 0.5 {
+            *muscle = *other;
+        }
+        match rhythm_from_b {
+            Some(true) => (muscle.period, muscle.phase) = (other.period, other.phase),
+            Some(false) => (muscle.period, muscle.phase) = (period, phase),
+            None => {}
+        }
+    }
+    child
+}
+
+/// Copies a leaf limb as its mirror image around its joint, with copies of the
+/// limb's muscles running half a cycle out of phase (alternating legs).
+fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
+    if creature.nodes.len() >= cfg.max_nodes || creature.bones.is_empty() {
+        return false;
+    }
+    let degree = |node: u32| {
+        creature
+            .bones
+            .iter()
+            .filter(|b| b.a == node || b.b == node)
+            .count()
+    };
+    let leaves: Vec<usize> = (0..creature.bones.len())
+        .filter(|&i| degree(creature.bones[i].b) == 1 || degree(creature.bones[i].a) == 1)
+        .collect();
+    if leaves.is_empty() {
+        return false;
+    }
+    let limb = leaves[rng.index(leaves.len())];
+    let bone = creature.bones[limb];
+    let (joint, tip) = if degree(bone.b) == 1 {
+        (bone.a, bone.b)
+    } else {
+        (bone.b, bone.a)
+    };
+    let attached: Vec<Muscle> = creature
+        .muscles
+        .iter()
+        .filter(|m| m.bone_a as usize == limb || m.bone_b as usize == limb)
+        .copied()
+        .collect();
+    if creature.muscles.len() + attached.len() > cfg.max_muscles {
+        return false;
+    }
+    let pivot = creature.nodes[joint as usize];
+    let mut mirror = creature.nodes[tip as usize];
+    mirror.x = (2.0 * pivot.x - mirror.x).clamp(-4.0, 4.0);
+    let new_node = creature.nodes.len() as u32;
+    creature.nodes.push(mirror);
+    let new_bone = creature.bones.len() as u32;
+    creature.bones.push(Bone {
+        a: joint,
+        b: new_node,
+        rest_length: bone.rest_length,
+    });
+    for mut m in attached {
+        if m.bone_a as usize == limb {
+            m.bone_a = new_bone;
+        }
+        if m.bone_b as usize == limb {
+            m.bone_b = new_bone;
+        }
+        if m.bone_a == m.bone_b {
+            continue;
+        }
+        m.phase = (m.phase + 0.5).rem_euclid(1.0);
+        creature.muscles.push(m);
+    }
+    repair(creature, cfg, rng);
+    true
+}
+
+/// Gives every muscle the same period, taken from one of them.
+fn sync_rhythm(creature: &mut Creature, rng: &mut Rng) -> bool {
+    if creature.muscles.len() < 2 {
+        return false;
+    }
+    let period = creature.muscles[rng.index(creature.muscles.len())].period;
+    for muscle in &mut creature.muscles {
+        muscle.period = period;
+    }
+    true
 }
 
 /// Steady-state breeding: one offspring per plan, for population `slots`.
@@ -1072,9 +1199,11 @@ pub fn grow_for_benchmark(creature: &mut Creature, cfg: &Config, seed: u64, targ
 }
 
 fn structural_mutation_in_place(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
-    match rng.index(3) {
+    match rng.index(5) {
         0 => split_bone(creature, cfg, rng),
         1 => duplicate_mirrored_node(creature, cfg, rng),
+        2 => duplicate_limb(creature, cfg, rng),
+        3 => sync_rhythm(creature, rng),
         _ => phase_shift_group(creature, rng),
     }
 }
