@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use bincode::Options;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -103,7 +103,16 @@ pub struct Experiment {
     pub trial_metrics: Vec<TrialMetrics>,
     #[serde(default)]
     pub qd_version: u32,
+    /// Steady-state breeding rounds so far; salts offspring random streams.
+    #[serde(default)]
+    pub breed_round: u64,
 }
+struct OffspringPlan {
+    plan: CandidatePlan,
+    parent_id: Option<u64>,
+    protection: u32,
+}
+
 impl Experiment {
     pub fn new(config: Config) -> Result<Self> {
         let config = config.resolved();
@@ -134,6 +143,7 @@ impl Experiment {
             protected_until: vec![0; population_count],
             trial_metrics: vec![TrialMetrics::default(); population_count],
             qd_version: qd::VERSION,
+            breed_round: 0,
         })
     }
     pub fn rank(&mut self) {
@@ -197,6 +207,16 @@ impl Experiment {
             self.trial_metrics.len() == self.config.population,
             "Invalid behavior metric count"
         );
+        let all: Vec<usize> = (0..self.config.population).collect();
+        let failed = self.archive_slots(&all);
+        self.push_archive_stats(failed);
+        self.stage = Stage::Archived;
+        Ok(())
+    }
+    /// Offers the evaluated creatures in `slots` to the archive (in slot-list
+    /// order), updates CMA emitters and emitter statistics, and returns how
+    /// many trials failed.
+    pub fn archive_slots(&mut self, slots: &[usize]) -> usize {
         let previous_parent_ids: [Option<u64>; qd::EMITTER_COUNT] = std::array::from_fn(|i| {
             self.emitter_stats[i]
                 .last_parent
@@ -234,11 +254,10 @@ impl Experiment {
             behavior_candidate: bool,
             morphology_topology: Option<qd::Topology>,
         }
-        let population_count = self.config.population;
         let reserve_enabled = self.morphology_reserve_override != Some(false);
-        let prep: Vec<Prep> = (0..population_count)
-            .into_par_iter()
-            .map(|i| {
+        let prep: Vec<Prep> = slots
+            .par_iter()
+            .map(|&i| {
                 let score = self.scores[i];
                 let emitter = self
                     .candidate_emitters
@@ -295,7 +314,7 @@ impl Experiment {
             .collect();
         let mut attempts = [0u64; qd::EMITTER_COUNT];
         let mut failed = 0usize;
-        for (i, prep) in prep.iter().enumerate() {
+        for (&i, prep) in slots.iter().zip(&prep) {
             if !prep.score.is_finite() || prep.score <= FAILED {
                 failed += 1;
             }
@@ -371,9 +390,7 @@ impl Experiment {
             stats.last_parent = parent_id.and_then(|id| parent_index_by_id.get(&id).copied());
         }
         self.archive.refresh_behavior_scores();
-        self.push_archive_stats(failed);
-        self.stage = Stage::Archived;
-        Ok(())
+        failed
     }
     fn push_archive_stats(&mut self, failed: usize) {
         let mut elites: Vec<_> = self
@@ -464,6 +481,66 @@ impl Experiment {
         }
         evolution::ensure_archive_batch_memory(&self.population, &self.archive, &cfg)?;
         let generation = self.generation + 1;
+        let setup_seconds = preparation_started.elapsed().as_secs_f64();
+        let plan_started = std::time::Instant::now();
+        let all: Vec<usize> = (0..cfg.population).collect();
+        let planned = self.plan_offspring(&cfg, generation, 0, &all);
+        let plans: Vec<CandidatePlan> = planned.iter().map(|p| p.plan).collect();
+        let emitters: Vec<Emitter> = planned.iter().map(|p| p.plan.emitter).collect();
+        let cma_indices: Vec<Option<usize>> = planned.iter().map(|p| p.plan.cma).collect();
+        let parent_ids: Vec<Option<u64>> = planned.iter().map(|p| p.parent_id).collect();
+        let protections: Vec<u32> = planned.iter().map(|p| p.protection).collect();
+        let plan_seconds = plan_started.elapsed().as_secs_f64();
+        let emission_started = std::time::Instant::now();
+        let next = evolution::emit_archive_batch_streaming(
+            &self.population,
+            &self.archive,
+            &self.cma_emitters,
+            &plans,
+            &cfg,
+            generation,
+            slice.min(cfg.population).max(1),
+            |population, range| on_slice(population, range, &cfg),
+        )?;
+        let emission_seconds = emission_started.elapsed().as_secs_f64();
+        self.config = cfg;
+        self.pending = None;
+        self.population = next;
+        self.candidate_emitters = emitters;
+        self.candidate_cma = cma_indices;
+        self.candidate_parent_ids = parent_ids;
+        self.protected_until = protections;
+        self.parent_scores.fill(f32::NAN);
+        self.generation = generation;
+        self.stage = Stage::Ready;
+        self.evaluated = 0;
+        self.scores.fill(f32::NAN);
+        self.trial_metrics.fill(TrialMetrics::default());
+        self.ranks.clear();
+        self.parents.clear();
+        self.evaluation_seconds = 0.0;
+        if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
+            eprintln!(
+                "Breeding profile: generation {generation}, setup {setup_seconds:.6} s, parent plans {plan_seconds:.6} s, candidate emission {emission_seconds:.6} s, finalization {:.6} s, total {:.6} s",
+                preparation_started.elapsed().as_secs_f64()
+                    - setup_seconds
+                    - plan_seconds
+                    - emission_seconds,
+                preparation_started.elapsed().as_secs_f64()
+            );
+        }
+        Ok(())
+    }
+    /// Chooses emitters, parents, and CMA slots for offspring in `slots`.
+    /// Round 0 reproduces the generational random streams; other rounds salt
+    /// them so steady-state breeding never repeats a draw.
+    fn plan_offspring(
+        &mut self,
+        cfg: &Config,
+        generation: u32,
+        round: u64,
+        slots: &[usize],
+    ) -> Vec<OffspringPlan> {
         let weights = qd::emitter_weights(&self.emitter_stats);
         let mut reset_cma = HashMap::<(qd::Niche, qd::Topology), usize>::new();
         let mut cma_lookup: HashMap<(qd::Niche, qd::Topology), usize> = self
@@ -473,13 +550,7 @@ impl Experiment {
             .map(|(i, cma)| ((cma.niche.clone(), cma.topology.clone()), i))
             .collect();
         let mut used_cma = vec![false; self.cma_emitters.len()];
-        let mut plans = Vec::with_capacity(cfg.population);
-        let mut emitters = Vec::with_capacity(cfg.population);
-        let mut cma_indices = Vec::with_capacity(cfg.population);
-        let mut parent_ids = Vec::with_capacity(cfg.population);
-        let mut protections = Vec::with_capacity(cfg.population);
-        let setup_seconds = preparation_started.elapsed().as_secs_f64();
-        let plan_started = std::time::Instant::now();
+        let mut out = Vec::with_capacity(slots.len());
         // Phase A: emitter choice and parent sampling against the start-of-batch
         // archive. Each creature has its own deterministic RNG, so parallel order
         // does not change the draws. last_parent is snapshotted instead of updating
@@ -495,10 +566,11 @@ impl Experiment {
             protection: u32,
             emitter_stale: bool,
         }
-        let plan_prep: Vec<PlanPrep> = (0..cfg.population)
-            .into_par_iter()
-            .map(|i| {
-                let mut rng = Rng::new(cfg.seed, generation, i);
+        let seed = cfg.seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let plan_prep: Vec<PlanPrep> = slots
+            .par_iter()
+            .map(|&i| {
+                let mut rng = Rng::new(seed, generation, i);
                 let emitter = if archive_empty {
                     Emitter::Restart
                 } else {
@@ -545,7 +617,6 @@ impl Experiment {
                 protection,
                 emitter_stale,
             } = prep;
-            parent_ids.push(parent_id);
             let cma_index = if emitter == Emitter::Cma {
                 if let Some(parent_index) = parent {
                     let elite = &self.archive.entries[parent_index];
@@ -608,54 +679,74 @@ impl Experiment {
                 self.archive.visit(parent_index);
                 self.emitter_stats[emitter.index()].last_parent = Some(parent_index);
             }
-            plans.push(CandidatePlan {
-                emitter,
-                parent,
-                cma: cma_index,
+            out.push(OffspringPlan {
+                plan: CandidatePlan {
+                    emitter,
+                    parent,
+                    cma: cma_index,
+                },
+                parent_id,
+                protection,
             });
-            emitters.push(emitter);
-            cma_indices.push(cma_index);
-            protections.push(protection);
         }
-        let plan_seconds = plan_started.elapsed().as_secs_f64();
-        let emission_started = std::time::Instant::now();
-        let next = evolution::emit_archive_batch_streaming(
-            &self.population,
+        out
+    }
+    /// Steady-state breeding: replaces the creatures in `slots` (already offered
+    /// to the archive) with offspring bred from the current archive.
+    pub fn breed_slots(&mut self, slots: &[usize]) -> Result<()> {
+        if slots.is_empty() {
+            return Ok(());
+        }
+        let count = self.config.population;
+        self.candidate_parent_ids.resize(count, None);
+        self.candidate_emitters.resize(count, Emitter::Restart);
+        self.candidate_cma.resize(count, None);
+        self.protected_until.resize(count, 0);
+        self.parent_scores.resize(count, f32::NAN);
+        let cfg = self.config.clone();
+        self.breed_round += 1;
+        let planned = self.plan_offspring(&cfg, self.generation, self.breed_round, slots);
+        let plans: Vec<CandidatePlan> = planned.iter().map(|p| p.plan).collect();
+        let children = evolution::emit_offspring(
             &self.archive,
             &self.cma_emitters,
             &plans,
+            slots,
             &cfg,
-            generation,
-            slice.min(cfg.population).max(1),
-            |population, range| on_slice(population, range, &cfg),
-        )?;
-        let emission_seconds = emission_started.elapsed().as_secs_f64();
-        self.config = cfg;
-        self.pending = None;
-        self.population = next;
-        self.candidate_emitters = emitters;
-        self.candidate_cma = cma_indices;
-        self.candidate_parent_ids = parent_ids;
-        self.protected_until = protections;
-        self.parent_scores.fill(f32::NAN);
-        self.generation = generation;
-        self.stage = Stage::Ready;
-        self.evaluated = 0;
-        self.scores.fill(f32::NAN);
-        self.trial_metrics.fill(TrialMetrics::default());
-        self.ranks.clear();
-        self.parents.clear();
-        self.evaluation_seconds = 0.0;
-        if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
-            eprintln!(
-                "Breeding profile: generation {generation}, setup {setup_seconds:.6} s, parent plans {plan_seconds:.6} s, candidate emission {emission_seconds:.6} s, finalization {:.6} s, total {:.6} s",
-                preparation_started.elapsed().as_secs_f64()
-                    - setup_seconds
-                    - plan_seconds
-                    - emission_seconds,
-                preparation_started.elapsed().as_secs_f64()
-            );
+            self.generation,
+            self.breed_round,
+        );
+        for ((&slot, child), plan) in slots.iter().zip(children).zip(&planned) {
+            self.population.replace(slot, child);
+            self.candidate_emitters[slot] = plan.plan.emitter;
+            self.candidate_cma[slot] = plan.plan.cma;
+            self.candidate_parent_ids[slot] = plan.parent_id;
+            self.protected_until[slot] = plan.protection;
+            self.parent_scores[slot] = f32::NAN;
+            self.scores[slot] = f32::NAN;
+            self.trial_metrics[slot] = TrialMetrics::default();
         }
+        Ok(())
+    }
+    /// Steady-state generation boundary (every `population` evaluations):
+    /// records history, applies queued settings, and compacts the arenas.
+    pub fn finish_steady_generation(&mut self, failed: usize) -> Result<()> {
+        self.push_archive_stats(failed);
+        self.generation += 1;
+        if let Some(cfg) = self.pending.take() {
+            cfg.validate()?;
+            ensure!(
+                cfg.population == self.config.population,
+                "Population changes need a new experiment"
+            );
+            if fitness_context_changed(&self.config, &cfg) {
+                self.reset_search_context();
+            }
+            self.config = cfg;
+        }
+        self.population.compact();
+        self.evaluation_seconds = 0.0;
+        self.evaluated = 0;
         Ok(())
     }
     pub fn select(&mut self) {
@@ -1202,6 +1293,7 @@ impl From<V2Experiment> for Experiment {
             protected_until: vec![0; population],
             trial_metrics: vec![TrialMetrics::default(); population],
             qd_version: 0,
+            breed_round: 0,
         }
     }
 }
@@ -1236,6 +1328,7 @@ impl From<LegacyExperiment> for Experiment {
             protected_until: vec![0; population],
             trial_metrics: vec![TrialMetrics::default(); population],
             qd_version: 0,
+            breed_round: 0,
         }
     }
 }
@@ -1383,6 +1476,7 @@ mod migration_tests {
             protected_until: vec![0; 2],
             trial_metrics: vec![TrialMetrics::default(); 2],
             qd_version: qd::VERSION - 1,
+            breed_round: 0,
         };
         let payload = bincode::DefaultOptions::new()
             .with_fixint_encoding()

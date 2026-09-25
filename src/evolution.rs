@@ -169,6 +169,30 @@ impl Population {
         }
         *self = migrated;
     }
+    /// Puts `c` into population slot `slot`. Its genes are appended to the
+    /// arenas; `compact` later drops the replaced genes.
+    pub fn replace(&mut self, slot: usize, c: Creature) {
+        let mut c = c;
+        canonicalize_bone_order(&mut c);
+        self.genomes[slot] = Genome {
+            node_start: self.nodes.len(),
+            node_count: c.nodes.len(),
+            bone_start: self.bones.len(),
+            bone_count: c.bones.len(),
+            muscle_start: self.muscles.len(),
+            muscle_count: c.muscles.len(),
+            id: c.id,
+            mutability: c.mutability,
+        };
+        self.nodes.extend(c.nodes);
+        self.bones.extend(c.bones);
+        self.muscles.extend(c.muscles);
+    }
+    /// Rebuilds the arenas without genes of replaced creatures.
+    pub fn compact(&mut self) {
+        let all: Vec<usize> = (0..self.genomes.len()).collect();
+        *self = self.subset(&all);
+    }
     /// Copies `indices` into a standalone population; creature `k` of the
     /// result is `indices[k]` of `self`.
     pub fn subset(&self, indices: &[usize]) -> Population {
@@ -751,7 +775,11 @@ fn initial(cfg: &Config, index: usize) -> Creature {
     random_creature(cfg, 0, index)
 }
 fn random_creature(cfg: &Config, generation: u32, index: usize) -> Creature {
-    let mut rng = Rng::new(cfg.seed, generation, index);
+    let mut creature = random_creature_from(cfg, &mut Rng::new(cfg.seed, generation, index));
+    creature.id = index as u64 + 1;
+    creature
+}
+fn random_creature_from(cfg: &Config, rng: &mut Rng) -> Creature {
     let n = (3 + rng.index(3)).min(cfg.max_nodes);
     let spacing = rng.range(0.18, 0.28);
     let mut c = Creature {
@@ -765,7 +793,7 @@ fn random_creature(cfg: &Config, generation: u32, index: usize) -> Creature {
             .collect(),
         bones: Vec::with_capacity(n - 1),
         muscles: vec![],
-        id: index as u64 + 1,
+        id: 0,
         mutability: 1.0,
     };
     for i in 0..n - 1 {
@@ -774,16 +802,16 @@ fn random_creature(cfg: &Config, generation: u32, index: usize) -> Creature {
     for i in 0..c.bones.len() {
         let j = (i + 1) % c.bones.len();
         if c.bones.len() > 2 || i < j {
-            c.muscles.push(muscle(i, j, &c.bones, &c.nodes, &mut rng));
+            c.muscles.push(muscle(i, j, &c.bones, &c.nodes, rng));
         }
     }
-    repair(&mut c, cfg, &mut rng);
+    repair(&mut c, cfg, rng);
     for _ in 0..rng.index(n) {
         if c.muscles.len() < cfg.max_muscles {
             let a = rng.index(c.bones.len());
             let b = rng.index(c.bones.len());
             if a != b {
-                c.muscles.push(muscle(a, b, &c.bones, &c.nodes, &mut rng));
+                c.muscles.push(muscle(a, b, &c.bones, &c.nodes, rng));
             }
         }
     }
@@ -885,41 +913,81 @@ pub fn emit_archive_batch_streaming(
 ) -> Result<Population> {
     ensure_archive_batch_memory(current, archive, cfg)?;
     ensure!(plans.len() == cfg.population, "Invalid emitter plan count");
-    collect_parallel_streaming(cfg.population, slice, |i| {
-        let plan = plans[i];
-        let mut rng = Rng::new(cfg.seed, generation, i);
-        let mut creature = match plan.emitter {
-            Emitter::Restart => random_creature(cfg, generation, i),
-            Emitter::Cma => {
-                if let Some(cma) = plan.cma.and_then(|index| cma_emitters.get(index)) {
-                    cma.sample_scaled(&mut rng, cfg.mutation)
-                } else {
-                    let parent = &archive.entries[plan.parent.expect("CMA parent")].creature;
-                    local_mutation(parent.clone(), cfg, &mut rng, 0.12)
-                }
+    collect_parallel_streaming(
+        cfg.population,
+        slice,
+        |i| {
+            let mut rng = Rng::new(cfg.seed, generation, i);
+            let id = (generation as u64) * cfg.population as u64 + i as u64 + 1;
+            offspring(archive, cma_emitters, plans[i], cfg, &mut rng, id)
+        },
+        on_slice,
+    )
+}
+
+/// Breeds one offspring from its plan with the given random stream.
+fn offspring(
+    archive: &QdArchive,
+    cma_emitters: &[CmaEmitter],
+    plan: CandidatePlan,
+    cfg: &Config,
+    rng: &mut Rng,
+    id: u64,
+) -> Creature {
+    let mut creature = match plan.emitter {
+        Emitter::Restart => random_creature_from(cfg, rng),
+        Emitter::Cma => {
+            if let Some(cma) = plan.cma.and_then(|index| cma_emitters.get(index)) {
+                cma.sample_scaled(rng, cfg.mutation)
+            } else {
+                let parent = &archive.entries[plan.parent.expect("CMA parent")].creature;
+                local_mutation(parent.clone(), cfg, rng, 0.12)
             }
-            Emitter::Structural => {
-                let parent = archive.entries[plan.parent.expect("structural parent")]
-                    .creature
-                    .clone();
-                let (child, _) = structural_mutation(parent, cfg, &mut rng);
-                local_mutation(child, cfg, &mut rng, 0.035)
+        }
+        Emitter::Structural => {
+            let parent = archive.entries[plan.parent.expect("structural parent")]
+                .creature
+                .clone();
+            let (child, _) = structural_mutation(parent, cfg, rng);
+            local_mutation(child, cfg, rng, 0.035)
+        }
+        Emitter::Novelty => {
+            let parent = archive.entries[plan.parent.expect("novelty parent")]
+                .creature
+                .clone();
+            let mut child = local_mutation(parent, cfg, rng, 0.75);
+            if rng.unit() < 0.18 {
+                let _ = structural_mutation_in_place(&mut child, cfg, rng);
             }
-            Emitter::Novelty => {
-                let parent = archive.entries[plan.parent.expect("novelty parent")]
-                    .creature
-                    .clone();
-                let mut child = local_mutation(parent, cfg, &mut rng, 0.75);
-                if rng.unit() < 0.18 {
-                    let _ = structural_mutation_in_place(&mut child, cfg, &mut rng);
-                }
-                child
-            }
-        };
-        creature.id = (generation as u64) * cfg.population as u64 + i as u64 + 1;
-        repair(&mut creature, cfg, &mut rng);
-        creature
-    }, on_slice)
+            child
+        }
+    };
+    creature.id = id;
+    repair(&mut creature, cfg, rng);
+    creature
+}
+
+/// Steady-state breeding: one offspring per plan, for population `slots`.
+/// `round` salts the random streams and keeps creature ids unique.
+pub fn emit_offspring(
+    archive: &QdArchive,
+    cma_emitters: &[CmaEmitter],
+    plans: &[CandidatePlan],
+    slots: &[usize],
+    cfg: &Config,
+    generation: u32,
+    round: u64,
+) -> Vec<Creature> {
+    let seed = cfg.seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x5bd1_e995;
+    plans
+        .par_iter()
+        .zip(slots)
+        .map(|(&plan, &slot)| {
+            let mut rng = Rng::new(seed, generation, slot);
+            let id = (round << 32) ^ ((generation as u64) << 24) ^ slot as u64 ^ (1 << 63);
+            offspring(archive, cma_emitters, plan, cfg, &mut rng, id)
+        })
+        .collect()
 }
 
 pub fn ensure_archive_batch_memory(

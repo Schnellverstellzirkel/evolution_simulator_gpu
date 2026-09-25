@@ -161,6 +161,8 @@ fn run(
     // (experiment, generation) the bitmap belongs to.
     let mut done: Vec<bool> = Vec::new();
     let mut done_key = (u64::MAX, u32::MAX);
+    // Steady-state evolution (continuous runs): slots cycle through the engines.
+    let mut steady = Steady::default();
     // Completion time and population of recent generations.
     let mut generation_marks: std::collections::VecDeque<(Instant, usize)> = Default::default();
     'worker: loop {
@@ -191,7 +193,7 @@ fn run(
                     | Command::Run { .. }
                     | Command::Next
             ) && let Some(e) = &mut exp
-                && let Err(err) = finish_queued(&mut gpu, e, &mut done)
+                && let Err(err) = finish_queued(&mut gpu, e, &mut done, &mut steady)
             {
                 error = Some(format!("{err:#}"));
                 running = false;
@@ -210,6 +212,7 @@ fn run(
                     Command::Shutdown => return Ok(()),
                     Command::New(cfg) => {
                         running = false;
+                        steady = Steady::default();
                         status = "Creating population…".into();
                         let next = Experiment::new(cfg)?;
                         preview = Some((next.population.creature(0), next.config.clone()));
@@ -260,6 +263,7 @@ fn run(
                         }
                     }
                     Command::Load(path) => {
+                        steady = Steady::default();
                         let next = storage::load(&path)?;
                         let creature = next
                             .archive
@@ -318,6 +322,54 @@ fn run(
             if let Some(e) = &mut exp {
                 let result: anyhow::Result<()> = (|| {
                     match e.stage {
+                        Stage::Ready | Stage::Evaluating
+                            if gpu.async_capable() && continuous && !guided =>
+                        {
+                            let stage_start = Instant::now();
+                            e.stage = Stage::Evaluating;
+                            let sched = gpu.sched.as_mut().unwrap();
+                            if !steady.active {
+                                if sched.in_flight() > 0 {
+                                    // Results from a generational run: keep them; the
+                                    // next pass offers them to the archive.
+                                    for (indices, metrics) in sched.collect(
+                                        &e.population,
+                                        &e.config,
+                                        Duration::from_millis(4),
+                                    )? {
+                                        for (&i, m) in indices.iter().zip(&metrics) {
+                                            e.scores[i] = m.fitness;
+                                            e.trial_metrics[i] = m.behavior;
+                                        }
+                                    }
+                                    return Ok(());
+                                }
+                                // Offer creatures that already have results, breed their
+                                // replacements, then keep every slot cycling.
+                                let evaluated: Vec<usize> = (0..e.config.population)
+                                    .filter(|&i| !e.scores[i].is_nan())
+                                    .collect();
+                                if !evaluated.is_empty() {
+                                    steady.failed += e.archive_slots(&evaluated);
+                                    e.breed_slots(&evaluated)?;
+                                }
+                                sched.stop();
+                                sched.begin(&e.population, 0..e.config.population);
+                                steady.active = true;
+                            }
+                            sched.pump(&e.population, &e.config, &[])?;
+                            for (indices, metrics) in
+                                sched.collect(&e.population, &e.config, Duration::from_millis(4))?
+                            {
+                                steady_absorb(e, &mut steady, sched, &indices, &metrics, true)?;
+                            }
+                            status = format!("Evolving · generation {}", e.generation);
+                            let seconds = stage_start.elapsed().as_secs_f64();
+                            e.evaluation_seconds += seconds;
+                            if benchmark_start.is_some() {
+                                benchmark_stage_seconds[0] += seconds;
+                            }
+                        }
                         Stage::Ready | Stage::Evaluating if gpu.async_capable() => {
                             let stage_start = Instant::now();
                             if done.len() != e.config.population || done_key != (epoch, e.generation) {
@@ -389,7 +441,14 @@ fn run(
                         }
                         Stage::Archived => {
                             let stage_start = Instant::now();
-                            if continuous
+                            if steady.boundary {
+                                steady.boundary = false;
+                                let failed = std::mem::take(&mut steady.failed);
+                                steady.count = steady.count.saturating_sub(e.config.population);
+                                e.finish_steady_generation(failed)?;
+                                e.stage = Stage::Evaluating;
+                                e.evaluated = steady.count.min(e.config.population);
+                            } else if continuous
                                 && !guided
                                 && let Some(sched) = gpu.sched.as_mut()
                             {
@@ -542,15 +601,25 @@ fn run(
             if sched.in_flight() > 0
                 && let Some(e) = &mut exp
             {
-                match sched.collect(&e.population, &e.config, Duration::from_millis(4)) {
-                    Ok(units) => {
+                let absorbed = sched
+                    .collect(&e.population, &e.config, Duration::from_millis(4))
+                    .and_then(|units| {
                         for (indices, metrics) in units {
-                            store_results(e, &mut done, &indices, &metrics);
+                            if steady.active {
+                                steady_absorb(e, &mut steady, sched, &indices, &metrics, false)?;
+                            } else {
+                                store_results(e, &mut done, &indices, &metrics);
+                            }
                         }
-                    }
-                    Err(err) => error = Some(format!("{err:#}")),
+                        Ok(())
+                    });
+                if let Err(err) = absorbed {
+                    error = Some(format!("{err:#}"));
                 }
                 changed = true;
+            }
+            if sched.in_flight() == 0 {
+                steady.active = false;
             }
         }
         if changed && (last_publish.elapsed() > Duration::from_millis(200) || !running) {
@@ -746,16 +815,67 @@ fn store_results(
     }
 }
 /// Waits for all queued GPU work and stores its results.
-fn finish_queued(gpu: &mut Gpu, e: &mut Experiment, done: &mut Vec<bool>) -> anyhow::Result<()> {
+fn finish_queued(
+    gpu: &mut Gpu,
+    e: &mut Experiment,
+    done: &mut Vec<bool>,
+    steady: &mut Steady,
+) -> anyhow::Result<()> {
     if let Some(sched) = gpu.sched.as_mut() {
         sched.stop();
         while sched.in_flight() > 0 {
             for (indices, metrics) in
                 sched.collect(&e.population, &e.config, Duration::from_millis(100))?
             {
-                store_results(e, done, &indices, &metrics);
+                if steady.active {
+                    steady_absorb(e, steady, sched, &indices, &metrics, false)?;
+                } else {
+                    store_results(e, done, &indices, &metrics);
+                }
             }
         }
+        steady.active = false;
+    }
+    Ok(())
+}
+
+/// Steady-state evolution bookkeeping.
+#[derive(Default)]
+struct Steady {
+    /// Slots are cycling through the engines.
+    active: bool,
+    /// Evaluations toward the current generation.
+    count: usize,
+    /// Failed trials in the current generation.
+    failed: usize,
+    /// A generation's worth of evaluations finished; record it next pass.
+    boundary: bool,
+}
+
+/// Stores a finished unit, offers it to the archive, breeds replacements into
+/// the same slots from the updated archive, and queues them when `resubmit`.
+fn steady_absorb(
+    e: &mut Experiment,
+    steady: &mut Steady,
+    sched: &mut crate::scheduler::Scheduler,
+    indices: &[usize],
+    metrics: &[crate::qd::EvaluationMetrics],
+    resubmit: bool,
+) -> anyhow::Result<()> {
+    for (&i, m) in indices.iter().zip(metrics) {
+        e.scores[i] = m.fitness;
+        e.trial_metrics[i] = m.behavior;
+    }
+    steady.failed += e.archive_slots(indices);
+    e.breed_slots(indices)?;
+    if resubmit {
+        sched.extend(&e.population, indices.iter().copied());
+    }
+    steady.count += indices.len();
+    e.evaluated = steady.count.min(e.config.population);
+    if steady.count >= e.config.population {
+        steady.boundary = true;
+        e.stage = Stage::Archived;
     }
     Ok(())
 }
