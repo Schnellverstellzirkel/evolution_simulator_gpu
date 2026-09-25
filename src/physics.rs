@@ -473,6 +473,8 @@ mod tests {
             phase: 0.0,
             duty: 0.5,
             stiffness: 20.0,
+            sensor: 255,
+            reset: 0.0,
         };
         for time in [0.025, 0.075] {
             assert!(
@@ -503,6 +505,8 @@ mod tests {
             phase: 0.25,
             duty: 0.5,
             stiffness: 120.0,
+            sensor: 255,
+            reset: 0.0,
         };
         for tick in 0..120 {
             assert_eq!(motor_force(&muscle, tick as f32 * dt(), 0.0), 0.0);

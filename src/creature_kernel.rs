@@ -12,7 +12,7 @@ use anyhow::{Result, ensure};
 use rayon::prelude::*;
 
 pub const TILE: usize = 32;
-pub const MUSCLE_FIELDS: usize = 11;
+pub const MUSCLE_FIELDS: usize = 15;
 pub const BONE_FIELDS: usize = 2;
 pub const CAPACITIES: [usize; 12] = [3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64];
 
@@ -50,6 +50,9 @@ pub struct GpuResult {
     /// Bits of touching nodes that later lifted clear of the ground again.
     pub lift_lo: f32,
     pub lift_hi: f32,
+    /// Nodes grounded after the last step (f32 bits), for sensor touchdowns.
+    pub ground_lo: f32,
+    pub ground_hi: f32,
 }
 impl GpuResult {
     /// Number of feet: nodes that touched the ground and lifted off again.
@@ -188,6 +191,10 @@ pub fn pack(pop: &Population, indices: &[usize]) -> Result<Vec<LaneBatch>> {
                         muscle.stiffness,
                         1.0 / muscle.duty,
                         1.0 / (1.0 - muscle.duty),
+                        f32::from_bits(muscle.sensor),
+                        muscle.reset,
+                        0.0,
+                        1.0,
                     ];
                     for (f, value) in values.into_iter().enumerate() {
                         muscles[field + f * TILE] = value;

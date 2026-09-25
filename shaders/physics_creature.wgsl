@@ -58,9 +58,15 @@ struct Result {
     // Bitmasks of nodes that later lifted clear of the ground again.
     lift_lo: f32,
     lift_hi: f32,
+    // Nodes touching the ground at the end of the previous step (f32 bits),
+    // for muscle sensor touchdown events.
+    ground_lo: f32,
+    ground_hi: f32,
 }
 @group(0) @binding(0) var<storage, read_write> nodes: array<Node>;
-@group(0) @binding(1) var<storage, read> muscle_data: array<f32>;
+// Muscle genes plus per-muscle state (rhythm offset and energy), which the
+// kernel updates.
+@group(0) @binding(1) var<storage, read_write> muscle_data: array<f32>;
 @group(0) @binding(2) var<storage, read> bone_data: array<f32>;
 @group(0) @binding(3) var<uniform> p: Params;
 @group(0) @binding(4) var<storage, read_write> results: array<Result>;
@@ -72,7 +78,15 @@ struct Result {
 const WG: u32 = WGSIZEu;
 const MAXN: u32 = MAXNODESu;
 const TILE: u32 = 32u;
-const MUSCLE_FIELDS: u32 = 11u;
+// Fields: packed endpoints, 10 muscle genes, sensor endpoint, reset phase,
+// rhythm offset (state), energy (state).
+const MUSCLE_FIELDS: u32 = 15u;
+const NO_SENSOR: u32 = 255u;
+// Muscle energy: stored work (J), recovery per second, and the drive left
+// when exhausted.
+const MUSCLE_CAPACITY: f32 = 15.0;
+const MUSCLE_RECOVERY: f32 = 0.25;
+const TIRED_DRIVE: f32 = 0.2;
 const BONE_FIELDS: u32 = 2u;
 const MAXB: u32 = MAXN - 1u;
 
@@ -208,7 +222,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         bone_sa[j] = inverse_a / inverse_sum;
         bone_sb[j] = inverse_b / inverse_sum;
     }
-    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     if p.tick > 0u {
         metrics = results[creature];
     }
@@ -255,13 +269,18 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         for (var j = 0u; j < muscle_count; j++) {
             let field = tile.x + j * MUSCLE_FIELDS * TILE + tl;
             let packed = bitcast<u32>(muscle_data[field]);
+            let offset = muscle_data[field + 13u * TILE];
+            var energy = muscle_data[field + 14u * TILE];
+            if tick == SETTLE {
+                energy = 1.0;
+            }
             let m = Muscle(
                 muscle_data[field + 1u * TILE],
                 muscle_data[field + 2u * TILE],
                 muscle_data[field + 3u * TILE],
                 muscle_data[field + 4u * TILE],
                 muscle_data[field + 5u * TILE],
-                muscle_data[field + 6u * TILE],
+                muscle_data[field + 6u * TILE] + offset,
                 muscle_data[field + 7u * TILE],
                 muscle_data[field + 8u * TILE],
                 muscle_data[field + 9u * TILE],
@@ -280,8 +299,18 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             let relative = dot(velocity_b - velocity_a, dir);
             let target_speed = (limited_muscle_length(m, time)
                 - limited_muscle_length(m, max(time - DT, 0.0))) * RATE;
-            let magnitude = clamp(-target_speed * m.stiffness * 0.25
-                + relative * 0.15, -MAX_MUSCLE_FORCE, MAX_MUSCLE_FORCE);
+            // A tired muscle drives weaker and slower.
+            let drive = -target_speed * m.stiffness * 0.25 * (TIRED_DRIVE + (1.0 - TIRED_DRIVE) * energy);
+            let magnitude = clamp(drive + relative * 0.15, -MAX_MUSCLE_FORCE, MAX_MUSCLE_FORCE);
+            if tick >= SETTLE {
+                let work = abs(magnitude * relative) * DT;
+                energy = clamp(
+                    energy - work / MUSCLE_CAPACITY + MUSCLE_RECOVERY * DT * (1.0 - energy),
+                    0.0,
+                    1.0,
+                );
+            }
+            muscle_data[field + 14u * TILE] = energy;
             let push = dir * magnitude;
             let a0 = packed & 0xffu;
             let a1 = (packed >> 8u) & 0xffu;
@@ -305,14 +334,26 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
 
         var gravity = 0.0;
         if tick >= SETTLE { gravity = p.gravity; }
+        // Integrate velocities first. The per-node speed cap must not push the
+        // body: the momentum it removes is spread back over the whole body.
+        var capped_momentum = vec2f(0.0);
+        for (var j = 0u; j < MAXN; j++) {
+            if j >= body_nodes { break; }
+            let k = j * WG + lane;
+            if failed[j] < 0.5 {
+                let free = (vel[k] + (scr[k] * inv_mass[j] - vec2f(0.0, gravity)) * DT) * p.air;
+                let capped = limit_speed(free);
+                capped_momentum += (free - capped) * mass[j];
+                scr[k] = capped;
+            }
+        }
+        let cap_correction = capped_momentum * inv_total_mass;
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
             let k = j * WG + lane;
             if failed[j] < 0.5 {
                 var n = Node(pos[k], vel[k], radius[j], friction[j], mass[j], 0.0);
-                let force = scr[k];
-                n.vel = (n.vel + (force * inv_mass[j] - vec2f(0.0, gravity)) * DT) * p.air;
-                n.vel = limit_speed(n.vel);
+                n.vel = scr[k] + cap_correction;
                 n.pos += n.vel * DT;
                 if !all(abs(n.pos) < vec2f(1e6)) || !all(abs(n.vel) < vec2f(1e6)) {
                     failed[j] = 1.0;
@@ -481,10 +522,19 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 vel[ka] = velocity_a;
                 vel[kb] = velocity_b;
             }
+            var removed = vec2f(0.0);
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
                 let k = j * WG + lane;
-                var velocity = limit_speed(vel[k]);
+                let velocity = limit_speed(vel[k]);
+                removed += (vel[k] - velocity) * mass[j];
+                vel[k] = velocity;
+            }
+            let correction = removed * inv_total_mass;
+            for (var j = 0u; j < MAXN; j++) {
+                if j >= body_nodes { break; }
+                let k = j * WG + lane;
+                var velocity = vel[k] + correction;
                 if grounded && pos[k].y <= old[k].x + 1e-5 {
                     velocity.y = max(velocity.y, 0.0);
                 }
@@ -526,6 +576,41 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 }
             }
             center_y *= inv_nodes;
+            // Touchdown: a node grounded now that was not after the last step.
+            var now_lo = 0u;
+            var now_hi = 0u;
+            if p.ground > 0.0 {
+                for (var j = 0u; j < MAXN; j++) {
+                    if j >= body_nodes { break; }
+                    if pos[j * WG + lane].y <= old[j * WG + lane].x + 0.002 {
+                        if j < 32u { now_lo |= 1u << j; } else { now_hi |= 1u << (j - 32u); }
+                    }
+                }
+            }
+            let down_lo = now_lo & ~bitcast<u32>(metrics.ground_lo);
+            let down_hi = now_hi & ~bitcast<u32>(metrics.ground_hi);
+            metrics.ground_lo = bitcast<f32>(now_lo);
+            metrics.ground_hi = bitcast<f32>(now_hi);
+            if (down_lo | down_hi) != 0u && tick > SETTLE {
+                // Muscles sensing a touchdown restart their rhythm at their
+                // reset phase from the next step on.
+                let next_time = time + DT;
+                for (var j = 0u; j < muscle_count; j++) {
+                    let field = tile.x + j * MUSCLE_FIELDS * TILE + tl;
+                    let sensor = bitcast<u32>(muscle_data[field + 11u * TILE]);
+                    if sensor == NO_SENSOR {
+                        continue;
+                    }
+                    let packed = bitcast<u32>(muscle_data[field]);
+                    let node = (packed >> (8u * sensor)) & 0xffu;
+                    let touched = select((down_hi >> (node - 32u)) & 1u, (down_lo >> node) & 1u, node < 32u);
+                    if touched == 1u {
+                        let clock = next_time * muscle_data[field + 5u * TILE] + muscle_data[field + 6u * TILE];
+                        let reset = muscle_data[field + 12u * TILE];
+                        muscle_data[field + 13u * TILE] = fract(reset - clock);
+                    }
+                }
+            }
             metrics.ground_contact += contacts;
             metrics.height_sum += high - low;
             metrics.vertical_oscillation = min(metrics.vertical_oscillation, center_y);

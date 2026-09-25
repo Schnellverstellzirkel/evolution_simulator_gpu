@@ -40,6 +40,18 @@ pub struct Muscle {
     pub phase: f32,
     pub duty: f32,
     pub stiffness: f32,
+    /// Which of the four attachment endpoints (bone_a.a, bone_a.b, bone_b.a,
+    /// bone_b.b) senses touchdowns, or `NO_SENSOR`.
+    #[serde(default = "no_sensor")]
+    pub sensor: u32,
+    /// Rhythm phase the muscle jumps to when its sensor touches down.
+    #[serde(default)]
+    pub reset: f32,
+}
+/// A muscle without a touchdown sensor.
+pub const NO_SENSOR: u32 = 255;
+fn no_sensor() -> u32 {
+    NO_SENSOR
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub(crate) struct LegacyMuscle {
@@ -566,6 +578,12 @@ fn muscle(
         phase: rng.unit(),
         duty: rng.range(0.25, 0.75),
         stiffness: rng.range(20.0, 80.0),
+        sensor: if rng.unit() < 0.5 {
+            rng.index(4) as u32
+        } else {
+            NO_SENSOR
+        },
+        reset: rng.unit(),
     }
 }
 
@@ -633,6 +651,8 @@ pub(crate) fn migrate_legacy_creature(
             phase: old.phase,
             duty: old.duty,
             stiffness: old.stiffness,
+            sensor: NO_SENSOR,
+            reset: 0.0,
         });
     }
     repair(&mut creature, cfg, &mut rng);
@@ -1172,6 +1192,13 @@ fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
         muscle.duty = (muscle.duty + qd::gaussian(rng) * 0.08 * scale).clamp(0.05, 0.95);
         muscle.stiffness =
             (muscle.stiffness * (qd::gaussian(rng) * 0.10 * scale).exp()).clamp(1.0, 120.0);
+        muscle.reset = (muscle.reset + qd::gaussian(rng) * 0.12 * scale).rem_euclid(1.0);
+        if rng.unit() < 0.05 * scale.min(1.0) {
+            muscle.sensor = match rng.index(5) {
+                4 => NO_SENSOR,
+                endpoint => endpoint as u32,
+            };
+        }
     }
     creature.mutability = (creature.mutability * (qd::gaussian(rng) * 0.05).exp()).clamp(0.05, 2.0);
     creature
@@ -1560,6 +1587,8 @@ mod tests {
                         phase: 0.0,
                         duty: 0.5,
                         stiffness: 40.0,
+                        sensor: 255,
+                        reset: 0.0,
                     },
                     Muscle {
                         bone_a: 0,
@@ -1572,6 +1601,8 @@ mod tests {
                         phase: 0.5,
                         duty: 0.5,
                         stiffness: 40.0,
+                        sensor: 255,
+                        reset: 0.0,
                     },
                 ],
                 id: 1,
@@ -1645,6 +1676,8 @@ mod tests {
                 phase: 0.0,
                 duty: 0.5,
                 stiffness: 40.0,
+                sensor: 255,
+                reset: 0.0,
             }],
             id: 1,
             mutability: 1.0,

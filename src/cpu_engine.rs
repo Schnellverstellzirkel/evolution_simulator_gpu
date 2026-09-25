@@ -21,6 +21,11 @@ use std::collections::HashMap;
 pub static LEDGER: std::sync::Mutex<[f64; 6]> = std::sync::Mutex::new([0.0; 6]);
 
 const L: usize = 16;
+/// Muscle energy: stored work (J), recovery per second, and the drive left
+/// when exhausted. Mirrors the GPU kernel.
+const MUSCLE_CAPACITY: f32 = 15.0;
+const MUSCLE_RECOVERY: f32 = 0.25;
+const TIRED_DRIVE: f32 = 0.2;
 type V = [f32; L];
 const ZERO: V = [0.0; L];
 
@@ -53,6 +58,9 @@ struct MuscleLanes {
     inv_complement: V,
     /// Summed weight of each distinct endpoint, per lane.
     weights: [V; 4],
+    /// Touchdown sensor endpoint (0-3) or `NO_SENSOR`, and reset phase.
+    sensor: [u32; L],
+    reset: V,
 }
 
 /// Up to 16 creatures with the same nodes, bones, and muscle attachments.
@@ -230,6 +238,8 @@ impl Group {
                 lanes.phase[l] = m.phase;
                 lanes.duty[l] = m.duty;
                 lanes.stiffness[l] = m.stiffness;
+                lanes.sensor[l] = m.sensor;
+                lanes.reset[l] = m.reset;
                 lanes.inv_duty[l] = 1.0 / m.duty;
                 lanes.inv_complement[l] = 1.0 / (1.0 - m.duty);
                 let shape = group.muscles[j];
@@ -346,6 +356,9 @@ impl Group {
         let mut turns = [0.0f32; L];
         let mut contact_bits = [0u64; L];
         let mut lift_bits = [0u64; L];
+        let mut grounded_before = [0u64; L];
+        let mut offsets = vec![zero; muscles.len()];
+        let mut energies = vec![one; muscles.len()];
 
         let snapshot = |px: &[F], py: &[F]| -> Vec<[f32; 2]> {
             px.iter()
@@ -383,7 +396,13 @@ impl Group {
             let time_now = (tick.max(settle) - settle) as f32 * dt;
             let time = F::splat(time_now);
             let previous_time = F::splat((time_now - dt).max(0.0));
-            for (shape, m) in self.muscles.iter().zip(&muscles) {
+            for (index, (shape, m)) in self.muscles.iter().zip(&muscles).enumerate() {
+                if tick == settle {
+                    energies[index] = one;
+                }
+                let mut clocked = *m;
+                clocked.phase = m.phase + offsets[index];
+                let m = &clocked;
                 let (aa, ab) = (m.anchor_a, m.anchor_b);
                 let (ra, rb) = (one - aa, one - ab);
                 let pax = px[shape.a0] * ra + px[shape.a1] * aa;
@@ -403,9 +422,18 @@ impl Group {
                 let target_speed = (muscle_length(m, time, exact)
                     - muscle_length(m, previous_time, exact))
                     * rate;
-                let magnitude = (-(target_speed * m.stiffness) * 0.25 + relative * 0.15)
+                // A tired muscle drives weaker and slower.
+                let vigor = F::splat(TIRED_DRIVE) + energies[index] * (1.0 - TIRED_DRIVE);
+                let magnitude = (-(target_speed * m.stiffness) * 0.25 * vigor + relative * 0.15)
                     .max(F::splat(-MAX_MUSCLE_FORCE))
                     .min(F::splat(MAX_MUSCLE_FORCE));
+                if tick >= settle {
+                    let work = (magnitude * relative).abs() * dt;
+                    energies[index] = (energies[index] - work * (1.0 / MUSCLE_CAPACITY)
+                        + (one - energies[index]) * (MUSCLE_RECOVERY * dt))
+                        .max(zero)
+                        .min(one);
+                }
                 let push_x = dir_x * magnitude;
                 let push_y = dir_y * magnitude;
                 for e in 0..4 {
@@ -419,18 +447,27 @@ impl Group {
 
             let gravity = if tick >= settle { cfg.gravity } else { 0.0 };
             let colliding = tick >= settle && ground;
+            // The speed cap must not push the body: spread the momentum it
+            // removes back over all nodes.
+            let (mut removed_x, mut removed_y) = (zero, zero);
             for j in 0..n {
-                let mut vel_x = (vx[j] + (sx[j] * inv_mass[j]) * dt) * air;
-                let mut vel_y = (vy[j] + (sy[j] * inv_mass[j] - gravity) * dt) * air;
-                let lane0 = |v: F| f64::from(v.to_array()[0] * lane0_mass[j]);
+                let free_x = (vx[j] + (sx[j] * inv_mass[j]) * dt) * air;
+                let free_y = (vy[j] + (sy[j] * inv_mass[j] - gravity) * dt) * air;
                 if ledger_on && colliding {
-                    ledger[5] += lane0(sx[j] * inv_mass[j] * dt);
+                    ledger[5] += f64::from((sx[j] * inv_mass[j] * dt).to_array()[0] * lane0_mass[j]);
                 }
-                let uncapped = vel_x;
-                limit_speed(&mut vel_x, &mut vel_y);
-                if ledger_on && colliding {
-                    ledger[0] += lane0(vel_x) - lane0(uncapped);
-                }
+                let (mut cap_x, mut cap_y) = (free_x, free_y);
+                limit_speed(&mut cap_x, &mut cap_y);
+                let alive = failed[j].lt(F::splat(0.5));
+                removed_x += F::select(alive, (free_x - cap_x) * mass[j], zero);
+                removed_y += F::select(alive, (free_y - cap_y) * mass[j], zero);
+                sx[j] = cap_x;
+                sy[j] = cap_y;
+            }
+            let (fix_x, fix_y) = (removed_x * inv_total_mass, removed_y * inv_total_mass);
+            for j in 0..n {
+                let vel_x = sx[j] + fix_x;
+                let vel_y = sy[j] + fix_y;
                 let pos_x = px[j] + vel_x * dt;
                 let pos_y = py[j] + vel_y * dt;
                 let limit = F::splat(1e6);
@@ -597,8 +634,17 @@ impl Group {
                     vy[c] = vcy - ty * angular * sb;
                 }
                 let middle = momentum(&vx);
+                let (mut removed_x, mut removed_y) = (zero, zero);
                 for j in 0..n {
+                    let (free_x, free_y) = (vx[j], vy[j]);
                     limit_speed(&mut vx[j], &mut vy[j]);
+                    removed_x += (free_x - vx[j]) * mass[j];
+                    removed_y += (free_y - vy[j]) * mass[j];
+                }
+                let (fix_x, fix_y) = (removed_x * inv_total_mass, removed_y * inv_total_mass);
+                for j in 0..n {
+                    vx[j] += fix_x;
+                    vy[j] += fix_y;
                     if colliding {
                         let resting = py[j].le(floor[j] + 1e-5);
                         vy[j] = F::select(resting, vy[j].max(zero), vy[j]);
@@ -610,6 +656,7 @@ impl Group {
                 }
             }
 
+            let mut grounded_now = [0u64; L];
             if tick >= settle {
                 let mut center = zero;
                 let mut contacts = zero;
@@ -629,10 +676,36 @@ impl Group {
                         let lifted = F::select(y.gt(floor[j] + LIFT_CLEARANCE), one, zero).to_array();
                         for l in 0..L {
                             if bits[l] > 0.0 {
+                                grounded_now[l] |= 1 << j;
                                 contact_bits[l] |= 1 << j;
                             } else if lifted[l] > 0.0 {
                                 lift_bits[l] |= contact_bits[l] & (1 << j);
                             }
+                        }
+                    }
+                }
+                // Muscles sensing a touchdown restart their rhythm at their reset
+                // phase from the next step on.
+                let next_time = time_now + dt;
+                for l in 0..L {
+                    let down = grounded_now[l] & !grounded_before[l];
+                    grounded_before[l] = grounded_now[l];
+                    if down == 0 || tick == settle {
+                        continue;
+                    }
+                    for (index, shape) in self.muscles.iter().enumerate() {
+                        let lanes = &self.lanes[index];
+                        let sensor = lanes.sensor[l];
+                        if sensor == crate::evolution::NO_SENSOR {
+                            continue;
+                        }
+                        let node = [shape.a0, shape.a1, shape.b0, shape.b1][sensor as usize];
+                        if down >> node & 1 == 1 {
+                            let clock = next_time * lanes.inv_period[l] + lanes.phase[l];
+                            let reset = lanes.reset[l] - clock;
+                            let mut values = offsets[index].to_array();
+                            values[l] = reset - reset.floor();
+                            offsets[index] = F::load(&values);
                         }
                     }
                 }
@@ -730,6 +803,8 @@ impl Group {
                     contact_hi: f32::from_bits((contact_bits[l] >> 32) as u32),
                     lift_lo: f32::from_bits(lift_bits[l] as u32),
                     lift_hi: f32::from_bits((lift_bits[l] >> 32) as u32),
+                    ground_lo: f32::from_bits(grounded_before[l] as u32),
+                    ground_hi: f32::from_bits((grounded_before[l] >> 32) as u32),
                 }
             })
             .collect()

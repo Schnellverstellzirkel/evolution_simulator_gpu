@@ -50,6 +50,8 @@ fn stress_creature() -> Creature {
             phase: (i % 7) as f32 / 7.0,
             duty: 0.5,
             stiffness: 120.0,
+            sensor: 255,
+            reset: 0.0,
         })
         .collect();
     Creature {
@@ -151,6 +153,8 @@ fn muscle_cycle_is_continuous_and_periodic() {
         phase: 0.,
         duty: 0.4,
         stiffness: 30.,
+        sensor: 255,
+        reset: 0.0,
     };
     assert!((physics::target(&m, 0.) - 0.3).abs() < 1e-6);
     assert!((physics::target(&m, 0.8) - 0.1).abs() < 1e-6);
@@ -240,6 +244,8 @@ fn bone_lengths_hold_and_off_center_muscles_rotate_bones() {
             phase: 0.25,
             duty: 0.5,
             stiffness: 40.0,
+            sensor: 255,
+            reset: 0.0,
         }],
         id: 1,
         mutability: 1.0,
@@ -326,6 +332,8 @@ fn overlapping_nodes_remain_finite() {
             phase: 0.,
             duty: 0.5,
             stiffness: 80.,
+            sensor: 255,
+            reset: 0.0,
         }],
         id: 1,
         mutability: 1.,
@@ -493,6 +501,8 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
                 phase: 0.2,
                 duty: 0.5,
                 stiffness: 20.,
+                sensor: 255,
+                reset: 0.0,
             })
             .collect();
         mixed.push(Creature {
