@@ -30,6 +30,142 @@ const GROUND_EDGE: Color32 = Color32::from_rgb(66, 118, 55);
 const MUSCLE_REST: Color32 = Color32::from_rgb(249, 168, 191);
 const MUSCLE_ACTIVE: Color32 = Color32::from_rgb(146, 16, 28);
 const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
+/// UI surface colors for the active theme. The scene itself (sky, grass,
+/// creatures) keeps fixed colors, so the viewport reads the same in both.
+#[derive(Clone, Copy)]
+struct Theme {
+    panel: Color32,
+    canvas: Color32,
+    card: Color32,
+    card_hover: Color32,
+    card_border: Color32,
+    ink: Color32,
+    muted: Color32,
+    accent: Color32,
+}
+impl Theme {
+    fn of(dark: bool) -> Self {
+        if dark {
+            Self {
+                panel: Color32::from_rgb(29, 34, 32),
+                canvas: Color32::from_rgb(20, 24, 23),
+                card: Color32::from_rgb(38, 45, 41),
+                card_hover: Color32::from_rgb(48, 57, 52),
+                card_border: Color32::from_rgb(62, 73, 67),
+                ink: Color32::from_rgb(228, 234, 229),
+                muted: Color32::from_rgb(150, 163, 155),
+                accent: Color32::from_rgb(88, 205, 155),
+            }
+        } else {
+            Self {
+                panel: PANEL,
+                canvas: CANVAS,
+                card: CARD,
+                card_hover: CARD_HOVER,
+                card_border: CARD_BORDER,
+                ink: INK,
+                muted: MUTED,
+                accent: MINT,
+            }
+        }
+    }
+}
+/// Marker carried by a screenshot request, so its reply can be told apart
+/// from the benchmark capture.
+struct ScreenshotRequest;
+/// How long between refreshes of the runs/ disk usage.
+const RUNS_REFRESH: Duration = Duration::from_secs(5);
+/// Total size of the files under a directory, ignoring unreadable entries.
+fn directory_bytes(root: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                stack.push(entry.path());
+            } else {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    total
+}
+fn file_size(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.0} KiB", bytes / KIB)
+    } else {
+        format!("{bytes:.0} B")
+    }
+}
+fn save_screenshot(capture: &egui::ColorImage, dir: &std::path::Path) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let path = dir.join(format!("screenshot-{stamp}.png"));
+    let bytes: Vec<u8> = capture.pixels.iter().flat_map(|p| p.to_array()).collect();
+    image::save_buffer(
+        &path,
+        &bytes,
+        capture.size[0] as u32,
+        capture.size[1] as u32,
+        image::ColorType::Rgba8,
+    )?;
+    Ok(path)
+}
+/// Applies the custom style of the chosen theme.
+fn apply_style(ctx: &egui::Context, dark: bool) {
+    let theme = Theme::of(dark);
+    ctx.set_theme(if dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    });
+    let mut style = (*ctx.global_style()).clone();
+    style.spacing.item_spacing = Vec2::new(10.0, 10.0);
+    style.spacing.button_padding = Vec2::new(12.0, 8.0);
+    let mut visuals = if dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    visuals.override_text_color = Some(theme.ink);
+    visuals.weak_text_color = Some(theme.muted);
+    visuals.panel_fill = theme.panel;
+    visuals.window_fill = theme.panel;
+    visuals.extreme_bg_color = theme.canvas;
+    visuals.code_bg_color = if dark { theme.canvas } else { VIEWPORT };
+    visuals.faint_bg_color = theme.card_border;
+    visuals.selection.bg_fill = if dark {
+        Color32::from_rgb(45, 84, 66)
+    } else {
+        Color32::from_rgb(219, 239, 227)
+    };
+    visuals.selection.stroke = Stroke::new(1.0, theme.accent);
+    visuals.hyperlink_color = theme.accent;
+    style.visuals = visuals;
+    style
+        .text_styles
+        .insert(egui::TextStyle::Body, FontId::proportional(14.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Heading, FontId::proportional(23.0));
+    ctx.set_global_style(style);
+}
 pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
     let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
     setup.instance_descriptor.backends = wgpu::Backends::VULKAN;
@@ -175,6 +311,34 @@ impl Playback {
             }
         }
     }
+    /// Mass-weighted center of the body at a recorded frame.
+    fn center_of_mass(&self, tick: u32) -> Option<[f32; 2]> {
+        let frame = self.frames.get(tick as usize)?;
+        let mut mass = 0.0;
+        let mut center = [0.0; 2];
+        for (node, position) in self.nodes.iter().zip(frame) {
+            mass += node.mass;
+            center[0] += node.mass * position[0];
+            center[1] += node.mass * position[1];
+        }
+        (mass > 0.0).then(|| [center[0] / mass, center[1] / mass])
+    }
+    /// Center-of-mass speed over the last fifth of a second of recorded
+    /// frames, in meters per second.
+    fn speed(&self) -> f32 {
+        let window = (physics::rate() / 5).max(1);
+        let start = self.tick.saturating_sub(window);
+        let (Some(now), Some(before)) =
+            (self.center_of_mass(self.tick), self.center_of_mass(start))
+        else {
+            return 0.0;
+        };
+        let seconds = self.tick.saturating_sub(start) as f32 * physics::dt();
+        if seconds <= 0.0 {
+            return 0.0;
+        }
+        (now[0] - before[0]).hypot(now[1] - before[1]) / seconds
+    }
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
@@ -224,32 +388,18 @@ struct App {
     /// Native benchmark frame intervals and the last control probe time.
     bench_frames: Vec<f32>,
     bench_last_ping: Instant,
+    /// Light is the default; the choice lives only in UI state.
+    dark: bool,
+    show_help: bool,
+    runs_bytes: u64,
+    runs_checked: Instant,
+    screenshot_pending: bool,
+    screenshot_waiting: bool,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, gpu: Gpu) -> Self {
         let ctx = &cc.egui_ctx;
-        ctx.set_theme(egui::Theme::Light);
-        let mut style = (*ctx.global_style()).clone();
-        style.spacing.item_spacing = Vec2::new(10.0, 10.0);
-        style.spacing.button_padding = Vec2::new(12.0, 8.0);
-        style.visuals = egui::Visuals::light();
-        style.visuals.override_text_color = Some(INK);
-        style.visuals.weak_text_color = Some(MUTED);
-        style.visuals.panel_fill = PANEL;
-        style.visuals.window_fill = PANEL;
-        style.visuals.extreme_bg_color = CANVAS;
-        style.visuals.code_bg_color = VIEWPORT;
-        style.visuals.faint_bg_color = CARD_BORDER;
-        style.visuals.selection.bg_fill = Color32::from_rgb(219, 239, 227);
-        style.visuals.selection.stroke = Stroke::new(1.0, MINT);
-        style.visuals.hyperlink_color = MINT;
-        style
-            .text_styles
-            .insert(egui::TextStyle::Body, FontId::proportional(14.0));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Heading, FontId::proportional(23.0));
-        ctx.set_global_style(style);
+        apply_style(ctx, false);
         let worker = Worker::spawn(gpu, ctx.clone());
         let mut initial_config = Config::default();
         if let Ok(n) = std::env::var("EVOLUTION_SMOKE_POPULATION")
@@ -328,7 +478,16 @@ impl App {
             bench_frames: Vec::new(),
             bench_last_ping: Instant::now(),
             card_positions: Default::default(),
+            dark: false,
+            show_help: false,
+            runs_bytes: 0,
+            runs_checked: Instant::now() - RUNS_REFRESH,
+            screenshot_pending: false,
+            screenshot_waiting: false,
         }
+    }
+    fn theme(&self) -> Theme {
+        Theme::of(self.dark)
     }
     fn active(&self) -> bool {
         self.snapshot.as_ref().is_some_and(|s| s.running)
@@ -358,6 +517,7 @@ impl App {
         self.camera = [0.; 2];
     }
     fn top(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme();
         ui.horizontal(|ui| {
             ui.add_space(5.);
             let (logo, _) = ui.allocate_exact_size(Vec2::splat(28.), Sense::hover());
@@ -372,7 +532,11 @@ impl App {
                 ui.painter().circle_filled(points[i], 3., MINT);
             }
             ui.label(RichText::new("EVOLUTION").size(22.).strong());
-            ui.label(RichText::new("CREATURE LABORATORY").size(10.).color(MUTED));
+            ui.label(
+                RichText::new("CREATURE LABORATORY")
+                    .size(10.)
+                    .color(theme.muted),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("New experiment").clicked() {
                     self.new_dialog = true;
@@ -387,11 +551,20 @@ impl App {
                 if ui.button("Open").clicked() {
                     self.file("Open experiment");
                 }
+                if ui
+                    .button("Screenshot")
+                    .on_hover_text("Save a PNG of the window under runs/")
+                    .clicked()
+                {
+                    self.screenshot_pending = true;
+                    self.screenshot_waiting = true;
+                    self.message = Some("Taking a screenshot…".into());
+                }
                 ui.separator();
                 if let Some(s) = &self.snapshot {
                     ui.label(
                         RichText::new(format!("GEN {:03}", s.generation))
-                            .color(MINT)
+                            .color(theme.accent)
                             .strong(),
                     );
                 }
@@ -402,10 +575,11 @@ impl App {
         egui::ScrollArea::vertical().show(ui, |ui| self.control_contents(ui));
     }
     fn control_contents(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme();
         ui.add_space(10.);
-        ui.label(RichText::new("EXPERIMENT").small().color(MUTED));
+        ui.label(RichText::new("EXPERIMENT").small().color(theme.muted));
         ui.heading("Let life find a way.");
-        ui.label(RichText::new("More kinds of life. Better walkers.").color(MUTED));
+        ui.label(RichText::new("More kinds of life. Better walkers.").color(theme.muted));
         ui.add_space(8.);
         let running = self.active();
         let text = if running {
@@ -447,7 +621,7 @@ impl App {
             }
         });
         if let Some(s) = &self.snapshot {
-            ui.label(RichText::new(s.stage.label()).color(MINT));
+            ui.label(RichText::new(s.stage.label()).color(theme.accent));
             ui.add(
                 egui::ProgressBar::new(s.completed as f32 / s.config.population as f32)
                     .text(format!(
@@ -455,7 +629,7 @@ impl App {
                         number(s.completed),
                         number(s.config.population)
                     ))
-                    .fill(MINT.gamma_multiply(0.7)),
+                    .fill(theme.accent.gamma_multiply(0.7)),
             );
         }
         ui.separator();
@@ -472,7 +646,7 @@ impl App {
                 "Every change can be undone. Elites are tested again under the new rules.",
             )
             .small()
-            .color(MUTED),
+            .color(theme.muted),
         );
         let mut world_changed = false;
         for effect in &crate::environment::EFFECTS {
@@ -563,7 +737,7 @@ impl App {
                     ui.label(
                         RichText::new("The resolved seed is always saved with the experiment.")
                             .small()
-                            .color(MUTED),
+                            .color(theme.muted),
                     );
                 });
             }
@@ -616,6 +790,10 @@ impl App {
                             .text("Sort animation speed"),
                     );
                     ui.checkbox(&mut self.show_perf, "Performance details");
+                    if ui.checkbox(&mut self.dark, "Dark theme").changed() {
+                        apply_style(ui.ctx(), self.dark);
+                    }
+                    ui.checkbox(&mut self.show_help, "Show help overlay");
                 });
             }
             if matches_search(&q, "histogram minimum maximum bins") {
@@ -660,7 +838,7 @@ impl App {
                     "Changes apply between generations. Seed changes need a new experiment.",
                 )
                 .small()
-                .color(MUTED),
+                .color(theme.muted),
             );
         }
         ui.horizontal_wrapped(|ui| {
@@ -676,22 +854,24 @@ impl App {
             }
         });
         ui.separator();
-        ui.label(RichText::new("Each creature runs its own trial. Faster walkers are more likely to survive; their offspring explore new shapes.").small().color(MUTED));
+        ui.label(RichText::new("Each creature runs its own trial. Faster walkers are more likely to survive; their offspring explore new shapes.").small().color(theme.muted));
     }
     fn viewport(&mut self, ui: &mut egui::Ui, height: f32) {
+        let theme = self.theme();
         ui.horizontal(|ui| {
-            ui.label(RichText::new("LIVE CREATURE").small().color(MUTED));
+            ui.label(RichText::new("LIVE CREATURE").small().color(theme.muted));
             if let Some(p) = &self.playback {
                 ui.label(format!(
-                    "#{} · {} nodes / {} bones / {} muscles · replay distance {:.1} m",
+                    "#{} · {} nodes / {} bones / {} muscles · replay distance {:.1} m · {:.2} m/s",
                     p.creature.id,
                     p.nodes.len(),
                     p.creature.bones.len(),
                     p.creature.muscles.len(),
-                    p.distance
+                    p.distance,
+                    p.speed()
                 ))
                 .on_hover_text(
-                    "The distance this replay reaches. An archive score is the worse of this trial and a check from a slightly shifted pose at four times the physics rate, so it is never higher.",
+                    "The distance this replay reaches, and its mass-weighted center-of-mass speed over the last fifth of a second of recorded frames. An archive score is the worse of this trial and a check from a slightly shifted pose at four times the physics rate, so it is never higher.",
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -805,6 +985,36 @@ impl App {
             );
         }
         if let Some(p) = &self.playback {
+            // Center-of-mass trail from the last two seconds of recorded
+            // frames, fading with age.
+            let span = physics::rate().saturating_mul(2).max(1);
+            let first = p.tick.saturating_sub(span);
+            let mut previous: Option<Pos2> = None;
+            for tick in first..=p.tick {
+                let Some(com) = p.center_of_mass(tick) else {
+                    continue;
+                };
+                let point = world(com[0], com[1]);
+                if let Some(from) = previous {
+                    let freshness = 1.0 - (p.tick - tick) as f32 / span as f32;
+                    let alpha = (freshness.clamp(0.0, 1.0) * 150.0) as u8;
+                    painter.line_segment(
+                        [from, point],
+                        Stroke::new(
+                            2.5,
+                            Color32::from_rgba_unmultiplied(INK.r(), INK.g(), INK.b(), alpha),
+                        ),
+                    );
+                }
+                previous = Some(point);
+            }
+            if let Some(com) = p.center_of_mass(p.tick) {
+                painter.circle_filled(
+                    world(com[0], com[1]),
+                    3.5,
+                    Color32::from_rgba_unmultiplied(INK.r(), INK.g(), INK.b(), 170),
+                );
+            }
             for n in &p.nodes {
                 let shadow = world(n.pos[0], 0.);
                 painter.add(egui::Shape::ellipse_filled(
@@ -931,26 +1141,28 @@ impl App {
                 }
             }
             ui.add(
-                egui::Slider::new(&mut self.speed, 0.25..=128.0)
+                egui::Slider::new(&mut self.speed, 0.25..=4.0)
                     .logarithmic(true)
                     .suffix("×")
-                    .text("Playback"),
-            );
+                    .text("Playback speed"),
+            )
+            .on_hover_text("Playback speed, from quarter speed to four times speed.");
         });
         if sought {
             self.playing = false;
         }
     }
     fn metrics(&self, ui: &mut egui::Ui) {
+        let theme = self.theme();
         // Live creatures/s over complete generations; the last generation's own
         // figure until enough generations have finished.
         let live_rate = self.snapshot.as_ref().map_or(0.0, |s| s.end_to_end);
         if let Some(s) = self.snapshot.as_ref().and_then(|s| s.history.last()) {
             ui.columns(4, |cols| {
                 for (ui, (name, value, color)) in cols.iter_mut().zip([
-                    ("BEST GAIT SCORE", format!("{:.3} m", s.best), MINT),
-                    ("QD SCORE", format!("{:.2}", s.qd_score), MINT),
-                    ("NICHES", number(s.archive_cells), INK),
+                    ("BEST GAIT SCORE", format!("{:.3} m", s.best), theme.accent),
+                    ("QD SCORE", format!("{:.2}", s.qd_score), theme.accent),
+                    ("NICHES", number(s.archive_cells), theme.ink),
                     (
                         "EVALUATIONS / SEC",
                         format!(
@@ -961,16 +1173,16 @@ impl App {
                                 s.population as f64 / s.seconds.max(0.001)
                             }
                         ),
-                        INK,
+                        theme.ink,
                     ),
                 ]) {
                     egui::Frame::new()
-                        .fill(CARD)
+                        .fill(theme.card)
                         .corner_radius(8)
                         .inner_margin(12)
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
-                            ui.label(RichText::new(name).small().color(MUTED));
+                            ui.label(RichText::new(name).small().color(theme.muted));
                             ui.label(RichText::new(value).size(22.).color(color));
                         });
                 }
@@ -978,12 +1190,13 @@ impl App {
         } else {
             ui.label(
                 RichText::new("Run a generation to see how far your creatures can travel.")
-                    .color(MUTED),
+                    .color(theme.muted),
             );
         }
     }
     fn trend(&self, ui: &mut egui::Ui, height: f32) {
         let Some(s) = &self.snapshot else { return };
+        let theme = self.theme();
         Plot::new("fitness_history")
             .height(height)
             .legend(Legend::default())
@@ -1001,7 +1214,7 @@ impl App {
                         .map(|h| [h.generation as f64, h.percentiles[i] as f64])
                         .collect();
                     let (name, color, width) = if i == 28 {
-                        ("Best".into(), MINT, 2.5)
+                        ("Best".into(), theme.accent, 2.5)
                     } else if i == 14 {
                         ("Median".into(), AMBER, 2.5)
                     } else if i == 0 {
@@ -1051,7 +1264,10 @@ impl App {
             .x_axis_label("Gait score (m)")
             .allow_scroll(false)
             .show(ui, |plot| {
-                plot.bar_chart(BarChart::new("Creatures", bars).color(MINT.gamma_multiply(0.65)));
+                plot.bar_chart(
+                    BarChart::new("Creatures", bars)
+                        .color(self.theme().accent.gamma_multiply(0.65)),
+                );
             });
         if outside > 0 {
             ui.small(format!(
@@ -1060,11 +1276,12 @@ impl App {
         }
     }
     fn population(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme();
         ui.horizontal(|ui| {
             ui.heading("Search archive");
             ui.label(
                 RichText::new("Behavior niches and protected topologies · click to replay")
-                    .color(MUTED),
+                    .color(theme.muted),
             );
         });
         let Some(snapshot) = &self.snapshot else {
@@ -1076,10 +1293,36 @@ impl App {
                 "{} topology reserves",
                 number(snapshot.innovation_reserve_count)
             ));
-            ui.label(RichText::new(format!("QD score {:.2}", snapshot.qd_score)).color(MINT));
+            ui.label(
+                RichText::new(format!("QD score {:.2}", snapshot.qd_score)).color(theme.accent),
+            );
         });
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Next batch:").small().color(MUTED));
+            ui.label(RichText::new("Archive axes:").small().color(theme.muted));
+            for (name, why) in [
+                (
+                    "Ground contact",
+                    "How much of the timed trial the creature kept its nodes on the ground.",
+                ),
+                (
+                    "Gait cadence",
+                    "How many up-and-down body oscillations the gait completes per second.",
+                ),
+                (
+                    "Mean body height",
+                    "The average height of the body's bounding box above the ground during the trial.",
+                ),
+                (
+                    "Feet",
+                    "Nodes that touched the ground and lifted off again; a node dragged along the ground never lifts, so it is not a foot.",
+                ),
+            ] {
+                ui.label(RichText::new(name).small().color(theme.ink))
+                    .on_hover_text(why);
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Next batch:").small().color(theme.muted));
             for (emitter, weight) in crate::qd::Emitter::ALL
                 .into_iter()
                 .zip(snapshot.emitter_weights)
@@ -1121,7 +1364,7 @@ impl App {
                                 if animating && let Some(previous) = self.card_positions.get(&card.creature.id) {
                                     rect = destination.translate((*previous - destination.min) * (1. - ease));
                                 }
-                                paint_card(ui.painter(), card, rect, response.hovered(), snapshot.stage);
+                                paint_card(ui.painter(), card, rect, response.hovered(), snapshot.stage, theme);
                                 if response.clicked() {
                                     selected = Some((card.creature.clone(), snapshot.config.clone()));
                                 }
@@ -1135,12 +1378,12 @@ impl App {
                                     card.emitter.map_or("Initial population".to_owned(), |emitter| format!("Emitter: {}", emitter.label())),
                                     card.descriptor.map_or_else(
                                         || if card.score.is_finite() { "Current trial evaluated".to_owned() } else { "Current trial pending".to_owned() },
-                                        |d| format!("Contact {:.0}% · observed gait {:.2} Hz · form {:.2} · bob {:.2} m · {} visits", d.ground_contact * 100.0, d.gait_frequency, d.aspect_ratio, d.vertical_oscillation, card.visits),
+                                        |d| format!("Contact {:.0}% · gait {:.2} Hz · form {:.2} · bob {:.2} m · height {:.2} m · {} feet · {} visits", d.ground_contact * 100.0, d.gait_frequency, d.aspect_ratio, d.vertical_oscillation, d.mean_height, d.feet, card.visits),
                                     )
                                 ));
                             } else {
-                                ui.painter().rect_filled(destination, 8, CARD);
-                                ui.painter().text(destination.center(), Align2::CENTER_CENTER, "Loading…", FontId::proportional(12.), MUTED);
+                                ui.painter().rect_filled(destination, 8, theme.card);
+                                ui.painter().text(destination.center(), Align2::CENTER_CENTER, "Loading…", FontId::proportional(12.), theme.muted);
                             }
                         }
                     });
@@ -1167,6 +1410,7 @@ impl App {
         if self.lineage.len() < 2 {
             return;
         }
+        let theme = self.theme();
         let mut gains: Vec<f32> = self.lineage.iter().map(|step| step.gain).collect();
         gains.sort_by(|a, b| b.total_cmp(a));
         let highlight = gains.get(2).copied().unwrap_or(f32::INFINITY).max(0.01);
@@ -1176,7 +1420,7 @@ impl App {
                 self.lineage.len()
             ))
             .small()
-            .color(MUTED),
+            .color(theme.muted),
         );
         let mut chosen = None;
         egui::ScrollArea::horizontal()
@@ -1190,11 +1434,15 @@ impl App {
                             step.generation, step.fitness, step.gain, step.change
                         );
                         let button = egui::Button::new(RichText::new(text).small().color(if big {
-                            MINT
+                            theme.accent
                         } else {
-                            INK
+                            theme.ink
                         }))
-                        .fill(if big { CARD_HOVER } else { CARD });
+                        .fill(if big {
+                            theme.card_hover
+                        } else {
+                            theme.card
+                        });
                         if ui.add(button).clicked() {
                             chosen = Some(k);
                         }
@@ -1217,10 +1465,11 @@ impl App {
         if snapshot.history.is_empty() {
             return;
         }
+        let theme = self.theme();
         ui.label(
             RichText::new("BODY TYPES THROUGH GENERATIONS")
                 .small()
-                .color(MUTED),
+                .color(theme.muted),
         );
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 80.), Sense::click());
@@ -1252,7 +1501,7 @@ impl App {
             rect.left() + rect.width() * (self.history_index as f32 + 0.5) / history.len() as f32;
         painter.line_segment(
             [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            Stroke::new(2., INK),
+            Stroke::new(2., theme.ink),
         );
         if let Some(pos) = response.hover_pos() {
             let index = (((pos.x - rect.left()) / rect.width()) * history.len() as f32) as usize;
@@ -1269,6 +1518,7 @@ impl App {
     }
     fn history(&mut self, ui: &mut egui::Ui) {
         let Some(s) = &self.snapshot else { return };
+        let theme = self.theme();
         let len = s.history.len();
         if len == 0 {
             ui.heading("A history waiting to happen");
@@ -1316,7 +1566,7 @@ impl App {
         });
         ui.columns(2, |cols| {
             self.histogram(&mut cols[0], &stats, 155.);
-            cols[1].label(RichText::new("BODY TYPES").small().color(MUTED));
+            cols[1].label(RichText::new("BODY TYPES").small().color(theme.muted));
             let mut species = stats.species.clone();
             species.sort_by_key(|&(_, _, n)| std::cmp::Reverse(n));
             egui::ScrollArea::vertical()
@@ -1345,7 +1595,7 @@ impl App {
                 ui.label(["Worst creature", "Median creature", "Best creature"][i]);
                 let (rect, response) =
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), 100.), Sense::click());
-                ui.painter().rect_filled(rect, 8, CARD);
+                ui.painter().rect_filled(rect, 8, theme.card);
                 thumbnail(
                     &ui.painter_at(rect),
                     &stats.representatives[i],
@@ -1360,6 +1610,61 @@ impl App {
             self.set_preview(c, stats.config);
             self.tab = Tab::Overview;
         }
+    }
+    /// Keyboard shortcuts and what each tab shows.
+    fn help_window(&mut self, ctx: &egui::Context) {
+        if !self.show_help {
+            return;
+        }
+        let theme = self.theme();
+        egui::Window::new("Help")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_max_width(460.);
+                ui.heading("Shortcuts");
+                egui::Grid::new("help_shortcuts")
+                    .num_columns(2)
+                    .spacing([18., 6.])
+                    .show(ui, |ui| {
+                        for (keys, action) in [
+                            ("1 / 2 / 3", "Overview · Behavior archive · History"),
+                            (
+                                "Space",
+                                "Play or pause the replay. Without a replay it pauses or resumes evolution.",
+                            ),
+                            ("← / →", "Seek one replay frame"),
+                            ("F1 or ?", "Toggle this help"),
+                            ("Ctrl+S", "Save the experiment"),
+                            ("Drag / scroll", "Pan and zoom the viewport"),
+                        ] {
+                            ui.label(RichText::new(keys).strong().color(theme.accent));
+                            ui.label(action);
+                            ui.end_row();
+                        }
+                    });
+                ui.separator();
+                ui.heading("Tabs");
+                for (name, why) in [
+                    (
+                        "Overview",
+                        "The replay of the selected creature, its playback controls, lineage and fitness trend.",
+                    ),
+                    (
+                        "Behavior archive",
+                        "Every behavior niche the search protects. Click a creature card to replay it.",
+                    ),
+                    (
+                        "History & statistics",
+                        "Per-generation curves, the mix of body types, and the distribution of gait scores.",
+                    ),
+                ] {
+                    ui.label(RichText::new(name).strong());
+                    ui.label(RichText::new(why).color(theme.muted));
+                    ui.add_space(4.);
+                }
+            });
     }
     fn dialogs(&mut self, ctx: &egui::Context) {
         if self.new_dialog {
@@ -1485,6 +1790,10 @@ impl eframe::App for App {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
+        if self.runs_checked.elapsed() >= RUNS_REFRESH {
+            self.runs_checked = now;
+            self.runs_bytes = directory_bytes(std::path::Path::new("runs"));
+        }
         if self.smoke_start_pending && self.started.elapsed() >= Duration::from_millis(250) {
             self.worker.send(Command::Run {
                 continuous: true,
@@ -1531,11 +1840,37 @@ impl eframe::App for App {
             self.snapshot = Some(next);
         }
         if !ctx.egui_wants_keyboard_input() {
-            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-                if self.active() {
+            let pressed = |key| ctx.input(|i| i.key_pressed(key));
+            if pressed(egui::Key::Num1) {
+                self.tab = Tab::Overview;
+            }
+            if pressed(egui::Key::Num2) {
+                self.tab = Tab::Population;
+            }
+            if pressed(egui::Key::Num3) {
+                self.tab = Tab::History;
+            }
+            if pressed(egui::Key::F1) || pressed(egui::Key::Questionmark) {
+                self.show_help = !self.show_help;
+            }
+            if pressed(egui::Key::Space) {
+                if self.playback.is_some() {
+                    self.playing = !self.playing;
+                } else if self.active() {
                     self.pause();
                 } else {
                     self.run(true, false);
+                }
+            }
+            if let Some(p) = &mut self.playback {
+                let elapsed = p.tick.saturating_sub(p.trial_start());
+                if pressed(egui::Key::ArrowLeft) {
+                    p.seek(elapsed.saturating_sub(1));
+                    self.playing = false;
+                }
+                if pressed(egui::Key::ArrowRight) {
+                    p.seek(elapsed.saturating_add(1));
+                    self.playing = false;
                 }
             }
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
@@ -1562,36 +1897,68 @@ impl eframe::App for App {
                 self.camera[0] += (x - self.camera[0]) * (dt * 8.).min(1.0);
             }
         }
+        let theme = self.theme();
         egui::Panel::top("top")
             .exact_size(64.)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(12))
+            .frame(egui::Frame::new().fill(theme.panel).inner_margin(12))
             .show(ui, |ui| self.top(ui));
-        egui::Panel::bottom("status").show(ui,|ui|{ui.horizontal(|ui|{if let Some(s)=&self.snapshot {color_dot(ui, MINT);
-ui.label(&s.status);
-if let Some(error)=&s.error {ui.colored_label(AMBER,error);
-}ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{if ui.small_button(if self.show_perf{"Hide performance"}else{"Performance"}).clicked(){self.show_perf= !self.show_perf;
-}ui.label(RichText::new(&s.gpu).small().color(MUTED));
-});
-}});
-if self.show_perf&& let Some(s)=&self.snapshot {let mut frames:Vec<_>=self.frame_times.iter().copied().collect();
-frames.sort_by(f32::total_cmp);
-let p95=frames.get(frames.len()*95/100).copied().unwrap_or(0.);
-ui.small(format!("Frame p95 {:.1} ms · end-to-end {:.0} creatures/s · GPU buffers {:.1} MiB · population {:.1} MiB",p95*1000.,s.end_to_end,s.gpu_bytes as f64/1048576.,s.ram_bytes as f64/1048576.));
-for (name, rate, count) in &s.engines {
-    ui.small(format!("{name}: {rate:.0} creatures/s · {count} evaluated"));
-}
-}
-if let Some(m)=&self.message {ui.label(m);
-}});
+        egui::Panel::bottom("status").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if let Some(s) = &self.snapshot {
+                    color_dot(ui, theme.accent);
+                    ui.label(&s.status);
+                    if let Some(error) = &s.error {
+                        ui.colored_label(AMBER, error);
+                    }
+                    ui.label(
+                        RichText::new(format!("{:.0} creatures/s", s.end_to_end))
+                            .small()
+                            .color(theme.muted),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button(if self.show_perf {
+                                "Hide performance"
+                            } else {
+                                "Performance"
+                            })
+                            .clicked()
+                        {
+                            self.show_perf = !self.show_perf;
+                        }
+                        ui.label(RichText::new(&s.gpu).small().color(theme.muted));
+                    });
+                }
+            });
+            if self.show_perf && let Some(s) = &self.snapshot {
+                let mut frames: Vec<_> = self.frame_times.iter().copied().collect();
+                frames.sort_by(f32::total_cmp);
+                let p95 = frames.get(frames.len() * 95 / 100).copied().unwrap_or(0.);
+                ui.small(format!(
+                    "Frame p95 {:.1} ms · end-to-end {:.0} creatures/s · GPU buffers {:.1} MiB · population {:.1} MiB · runs/ {}",
+                    p95 * 1000.,
+                    s.end_to_end,
+                    s.gpu_bytes as f64 / 1048576.,
+                    s.ram_bytes as f64 / 1048576.,
+                    file_size(self.runs_bytes)
+                ));
+                for (name, rate, count) in &s.engines {
+                    ui.small(format!("{name}: {rate:.0} creatures/s · {count} evaluated"));
+                }
+            }
+            if let Some(m) = &self.message {
+                ui.label(m);
+            }
+        });
         egui::Panel::left("controls")
             .default_size(300.)
             .min_size(260.)
             .max_size(440.)
             .resizable(true)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(16))
+            .frame(egui::Frame::new().fill(theme.panel).inner_margin(16))
             .show(ui, |ui| self.controls(ui));
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(CANVAS).inner_margin(20))
+            .frame(egui::Frame::new().fill(theme.canvas).inner_margin(20))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for (tab, label) in [
@@ -1619,6 +1986,7 @@ if let Some(m)=&self.message {ui.label(m);
                 }
             });
         self.dialogs(&ctx);
+        self.help_window(&ctx);
         if self.playing || self.active() {
             // Playback and live evolution redraw at the frame cap; the rest of
             // the GPU stays with evolution. EVOLUTION_UI_FPS=0 follows vsync.
@@ -1627,17 +1995,46 @@ if let Some(m)=&self.message {ui.label(m);
                 None => ctx.request_repaint(),
             }
         }
+        // Screenshot button: ask the viewport for one frame and save it as PNG.
+        if self.screenshot_pending {
+            self.screenshot_pending = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                ScreenshotRequest,
+            )));
+        }
         // Explicit opt-in capture hook for repeatable native rendering/performance checks.
-        if let Some(path) = &self.capture_path {
-            if self.started.elapsed() > Duration::from_secs(8) && !self.capture_requested {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
-                self.capture_requested = true;
-            }
+        if self.capture_path.is_some()
+            && self.started.elapsed() > Duration::from_secs(8)
+            && !self.capture_requested
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            self.capture_requested = true;
+        }
+        if self.screenshot_waiting || self.capture_path.is_some() {
             for event in ctx.input(|i| i.events.clone()) {
-                if let egui::Event::Screenshot { image, .. } = event {
+                let egui::Event::Screenshot {
+                    user_data, image, ..
+                } = event
+                else {
+                    continue;
+                };
+                if user_data
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.is::<ScreenshotRequest>())
+                {
+                    self.screenshot_waiting = false;
+                    match save_screenshot(&image, std::path::Path::new("runs")) {
+                        Ok(path) => {
+                            self.message = Some(format!("Screenshot saved to {}", path.display()));
+                            self.runs_checked = Instant::now() - RUNS_REFRESH;
+                        }
+                        Err(error) => self.message = Some(format!("Screenshot failed: {error}")),
+                    }
+                } else if let Some(path) = self.capture_path.clone() {
                     let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
                     if let Err(e) = image::save_buffer(
-                        path,
+                        &path,
                         &bytes,
                         image.size[0] as u32,
                         image.size[1] as u32,
@@ -1711,12 +2108,21 @@ fn paint_card(
     rect: Rect,
     hovered: bool,
     stage: Stage,
+    theme: Theme,
 ) {
-    painter.rect_filled(rect, 8, if hovered { CARD_HOVER } else { CARD });
+    painter.rect_filled(
+        rect,
+        8,
+        if hovered {
+            theme.card_hover
+        } else {
+            theme.card
+        },
+    );
     painter.rect_stroke(
         rect,
         8,
-        Stroke::new(1., CARD_BORDER),
+        Stroke::new(1., theme.card_border),
         egui::StrokeKind::Inside,
     );
     thumbnail(painter, &card.creature, rect.shrink2(Vec2::new(10., 23.)));
@@ -1729,7 +2135,7 @@ fn paint_card(
             format!("ID {}", card.creature.id)
         },
         FontId::proportional(11.),
-        MUTED,
+        theme.muted,
     );
     if card.innovation_reserve {
         painter.text(
@@ -1737,23 +2143,27 @@ fn paint_card(
             Align2::RIGHT_TOP,
             "MORPH",
             FontId::proportional(9.),
-            MINT,
+            theme.accent,
         );
     }
     let (label, score_color) = if !card.score.is_finite() {
         if card.parent_score.is_finite() && card.parent_score > FAILED {
-            (format!("Parent {:.3} m", card.parent_score), MUTED)
+            (format!("Parent {:.3} m", card.parent_score), theme.muted)
         } else if card.parent_score.is_finite() {
             ("Parent failed".into(), AMBER)
         } else {
-            ("Trial pending".into(), MUTED)
+            ("Trial pending".into(), theme.muted)
         }
     } else if card.score <= FAILED {
         ("Failed trial".into(), AMBER)
     } else {
         (
             format!("{:.3} m", card.score),
-            if card.survivor { MINT } else { INK },
+            if card.survivor {
+                theme.accent
+            } else {
+                theme.ink
+            },
         )
     };
     painter.text(
@@ -1773,7 +2183,7 @@ fn paint_card(
                 "Replaced"
             },
             FontId::proportional(10.),
-            if card.survivor { MINT } else { AMBER },
+            if card.survivor { theme.accent } else { AMBER },
         );
     }
 }
