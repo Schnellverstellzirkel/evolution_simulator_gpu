@@ -594,6 +594,13 @@ impl Joint {
         reference_mass: 0.0,
     };
 }
+/// How much heavier a node resting on the ground counts, per unit of grip
+/// (node friction times ground friction), when bones pull on it during the
+/// constraint passes. The solver splits every bone correction by mass, so a
+/// light foot would otherwise be dragged along by its heavy body instead of
+/// holding its place; with this, a body pivots over planted feet. On ice the
+/// grip is small, so feet still slide.
+pub const STANCE_GRIP: f32 = 10.0;
 /// Head shaking limit: the head's acceleration, averaged over about
 /// `HEAD_SHAKE_WINDOW` seconds, may not pass 8 g (m/s^2). A creature that
 /// shakes its head harder dies like a fall. Single impacts average out, but a

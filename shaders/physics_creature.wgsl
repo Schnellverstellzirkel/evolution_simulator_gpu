@@ -106,6 +106,9 @@ const VELOCITY_SOLVE_ITERATIONS: u32 = 4u;
 const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
 const MAX_MUSCLE_FORCE: f32 = 5.0;
 const MAX_NODE_SPEED: f32 = 5.0;
+// Extra weight per unit of grip for nodes resting on the ground during the
+// constraint passes (physics::STANCE_GRIP).
+const STANCE_GRIP: f32 = 10.0;
 // Head shaking limit (m/s^2) and averaging window (s); physics::HEAD_SHAKE_*.
 const HEAD_SHAKE_LIMIT: f32 = 78.4;
 const HEAD_SHAKE_WINDOW: f32 = 0.1;
@@ -138,6 +141,14 @@ fn terrain(x: f32) -> vec2f {
     return p.terrain * vec2f(height, slope);
 }
 
+// Whether node `n` is set in a 64-node bitmask split into two words.
+fn in_mask(n: u32, lo: u32, hi: u32) -> bool {
+    return select((hi >> (n - 32u)) & 1u, (lo >> n) & 1u, n < 32u) == 1u;
+}
+// Bone share of node a after weighting nodes on the ground by their grip.
+fn stance_share(share: f32, fa: f32, fb: f32) -> f32 {
+    return share * fb / (share * fb + (1.0 - share) * fa);
+}
 fn limited_muscle_length(m: Muscle, time: f32) -> f32 {
     let amplitude = m.amplitude;
     let phase = fract(time * m.inv_period + m.phase);
@@ -424,11 +435,33 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 }
             }
         }
+        // Nodes resting on the ground hold their place like planted feet: they
+        // count as heavier, by their grip, when bones pull on them.
+        var stance_lo = 0u;
+        var stance_hi = 0u;
+        if grounded {
+            for (var j = 0u; j < MAXN; j++) {
+                if j >= body_nodes { break; }
+                let k = j * WG + lane;
+                if pos[k].y <= vel[k].y + 1e-4 {
+                    if j < 32u {
+                        stance_lo |= 1u << j;
+                    } else {
+                        stance_hi |= 1u << (j - 32u);
+                    }
+                }
+            }
+        }
         for (var iteration = 0u; iteration < BONE_SOLVE_ITERATIONS; iteration++) {
             for (var j = 0u; j < MAXB; j++) {
                 if j >= bone_count { break; }
                 let ka = bone_ka[j] & 0xffffu;
                 let kb = bone_kb[j];
+                let na = ka / WG;
+                let nb = kb / WG;
+                let fa = select(1.0, 1.0 + STANCE_GRIP * friction[na] * p.friction, in_mask(na, stance_lo, stance_hi));
+                let fb = select(1.0, 1.0 + STANCE_GRIP * friction[nb] * p.friction, in_mask(nb, stance_lo, stance_hi));
+                let share = stance_share(bone_sa[j], fa, fb);
                 let old_a = pos[ka];
                 let old_b = pos[kb];
                 let delta = old_b - old_a;
@@ -437,8 +470,8 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let error = distance - bone_rest[j];
                 // Correction along the bone: delta / distance * error.
                 let correction = select(vec2f(error, 0.0), delta * (error / distance), raw_distance > 1e-6);
-                var new_a = old_a + correction * bone_sa[j];
-                var new_b = old_b - correction * (1.0 - bone_sa[j]);
+                var new_a = old_a + correction * share;
+                var new_b = old_b - correction * (1.0 - share);
                 if grounded {
                     // A clamp is the ground pushing back, so it counts toward the
                     // node's normal push (vel.x holds its height without ground).
@@ -625,6 +658,21 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 }
             }
         }
+        stance_lo = 0u;
+        stance_hi = 0u;
+        if grounded {
+            for (var j = 0u; j < MAXN; j++) {
+                if j >= body_nodes { break; }
+                let k = j * WG + lane;
+                if pos[k].y <= old[k].x + 1e-4 {
+                    if j < 32u {
+                        stance_lo |= 1u << j;
+                    } else {
+                        stance_hi |= 1u << (j - 32u);
+                    }
+                }
+            }
+        }
         for (var iteration = 0u; iteration < VELOCITY_SOLVE_ITERATIONS; iteration++) {
             for (var j = 0u; j < MAXB; j++) {
                 if j >= bone_count { break; }
@@ -633,7 +681,11 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let delta = pos[kb] - pos[ka];
                 let length_bone = max(length(delta), 1e-6);
                 let direction = delta * (1.0 / length_bone);
-                let share_a = bone_sa[j];
+                let na = ka / WG;
+                let nb = kb / WG;
+                let fa = select(1.0, 1.0 + STANCE_GRIP * friction[na] * p.friction, in_mask(na, stance_lo, stance_hi));
+                let fb = select(1.0, 1.0 + STANCE_GRIP * friction[nb] * p.friction, in_mask(nb, stance_lo, stance_hi));
+                let share_a = stance_share(bone_sa[j], fa, fb);
                 let share_b = 1.0 - share_a;
                 var velocity_a = vel[ka];
                 var velocity_b = vel[kb];

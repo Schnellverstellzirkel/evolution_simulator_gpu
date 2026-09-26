@@ -282,6 +282,13 @@ pub fn shader_source(
             &format!("const MAX_MUSCLE_FORCE: f32 = {:?};", limits.muscle_force),
         )
         .replace(
+            "const STANCE_GRIP: f32 = 10.0;",
+            &format!(
+                "const STANCE_GRIP: f32 = {:?};",
+                crate::physics::STANCE_GRIP
+            ),
+        )
+        .replace(
             "const HEAD_SHAKE_LIMIT: f32 = 78.4;",
             &format!(
                 "const HEAD_SHAKE_LIMIT: f32 = {:?};",

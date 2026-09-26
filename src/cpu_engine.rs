@@ -559,6 +559,25 @@ impl Group {
 
             let tiny = F::splat(1e-6);
             let com_before = com(&px);
+            // Nodes resting on the ground hold their place like planted feet:
+            // they count as heavier, by their grip, when bones pull on them.
+            let stance_grip = F::splat(physics::STANCE_GRIP);
+            let stance = |py: &[F], floor: &[F]| -> Vec<F> {
+                (0..n)
+                    .map(|j| {
+                        if colliding {
+                            F::select(
+                                py[j].le(floor[j] + 1e-4),
+                                one + stance_grip * friction[j] * ground_friction,
+                                one,
+                            )
+                        } else {
+                            one
+                        }
+                    })
+                    .collect()
+            };
+            let weight = stance(&py, &floor);
             for _ in 0..fidelity.bone_passes {
                 for (b, &(a, c)) in self.bones.iter().enumerate() {
                     let dx = px[c] - px[a];
@@ -570,10 +589,13 @@ impl Group {
                     let scale = error / distance;
                     let cx = F::select(valid, dx * scale, error);
                     let cy_ = F::select(valid, dy * scale, zero);
-                    px[a] += cx * share_a[b];
-                    px[c] -= cx * share_b[b];
-                    let mut ay = py[a] + cy_ * share_a[b];
-                    let mut cy = py[c] - cy_ * share_b[b];
+                    let sa =
+                        share_a[b] * weight[c] / (share_a[b] * weight[c] + share_b[b] * weight[a]);
+                    let sb = one - sa;
+                    px[a] += cx * sa;
+                    px[c] -= cx * sb;
+                    let mut ay = py[a] + cy_ * sa;
+                    let mut cy = py[c] - cy_ * sb;
                     if colliding {
                         // A clamp is the ground pushing back, so it counts toward
                         // the node's normal push (vx holds its height without
@@ -769,6 +791,7 @@ impl Group {
                     }
                 }
             }
+            let weight = stance(&py, &floor);
             for _ in 0..fidelity.velocity_passes {
                 let before = momentum(&vx);
                 for (b, &(a, c)) in self.bones.iter().enumerate() {
@@ -778,7 +801,9 @@ impl Group {
                     let inv_length = one / length;
                     let dir_x = dx * inv_length;
                     let dir_y = dy * inv_length;
-                    let (sa, sb) = (share_a[b], share_b[b]);
+                    let sa =
+                        share_a[b] * weight[c] / (share_a[b] * weight[c] + share_b[b] * weight[a]);
+                    let sb = one - sa;
                     let radial = (vx[c] - vx[a]) * dir_x + (vy[c] - vy[a]) * dir_y;
                     let vax = vx[a] + dir_x * radial * sa;
                     let vay = vy[a] + dir_y * radial * sa;

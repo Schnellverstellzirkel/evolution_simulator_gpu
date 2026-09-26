@@ -84,6 +84,40 @@ fn main() {
             shares[shares.len() / 2]
         );
     }
+    // Per-node detail for the fastest elite: which nodes touch the ground,
+    // how far each slides while touching, and what each weighs.
+    if let Some(elite) = elites.first()
+        && std::env::var_os("EVOLUTION_NODE_SLIP").is_some()
+    {
+        let c = &elite.creature;
+        let nodes = physics::nodes(c);
+        let frames = cpu_engine::trajectory(c, &e.config);
+        println!("node  mass_kg  contact_share  slip_m  lifts");
+        for (j, node) in nodes.iter().enumerate() {
+            let (mut touching, mut slip, mut lifts, mut was_down) = (0usize, 0.0f32, 0, false);
+            for t in settle + 1..frames.len() {
+                let (now, before) = (frames[t][j], frames[t - 1][j]);
+                let floor = physics::terrain(now[0], amplitude).0 + node.radius;
+                let down = now[1] <= floor + 0.002;
+                if down {
+                    touching += 1;
+                    if before[1] <= floor + 0.002 {
+                        slip += (now[0] - before[0]).abs();
+                    }
+                } else if was_down && now[1] > floor + 0.02 {
+                    lifts += 1;
+                }
+                if down || now[1] > floor + 0.02 {
+                    was_down = down;
+                }
+            }
+            let share = touching as f32 / (frames.len() - settle - 1) as f32;
+            println!(
+                "{j:4}  {:7.2}  {share:13.2}  {slip:6.1}  {lifts:5}",
+                node.mass
+            );
+        }
+    }
     if std::env::var_os("EVOLUTION_LEDGER").is_none() {
         return;
     }
