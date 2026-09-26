@@ -7,7 +7,7 @@ use crate::{
     worker::{Command, Snapshot, Worker},
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
-use egui_plot::{Bar, BarChart, Legend, Line, Plot};
+use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -421,6 +421,123 @@ fn body_plan_changed(
 ) -> bool {
     parent.is_some_and(|parent| body_counts(&step.creature) != body_counts(&parent.creature))
 }
+/// Invented stems for automatic species names. A stable body-plan hash picks
+/// one; the gait word is added after it.
+const SPECIES_STEMS: [&str; 16] = [
+    "Vex", "Tor", "Quil", "Nym", "Zeb", "Cro", "Fen", "Lum", "Tar", "Wisp", "Brak", "Ovi", "Pyr",
+    "Sable", "Dro", "Ril",
+];
+/// Short deterministic species name from body counts, a body-plan hash and
+/// the muscles' commanded rhythm. It uses only creature data, so archive
+/// cards, lineage tiles and race lanes agree without asking the worker.
+fn species_name(creature: &Creature) -> String {
+    let (nodes, bones, muscles) = body_counts(creature);
+    // Order-independent sums keep the name stable across bone reordering
+    // (playbacks canonicalize their copy of the creature).
+    let mut plan = ((nodes as u64) << 42) ^ ((bones as u64) << 21) ^ muscles as u64;
+    for bone in &creature.bones {
+        plan = plan.wrapping_add(
+            (bone.a as u64)
+                .wrapping_mul(0x9e3779b97f4a7c15)
+                .wrapping_add(bone.b as u64)
+                .wrapping_add(((bone.rest_length * 100.0) as u64).wrapping_mul(0xbf58476d1ce4e5b9)),
+        );
+    }
+    for muscle in &creature.muscles {
+        plan = plan.wrapping_add(
+            (muscle.bone_a as u64)
+                .wrapping_mul(0x94d049bb133111eb)
+                .wrapping_add(muscle.bone_b as u64)
+                .wrapping_add(((muscle.period * 100.0) as u64).wrapping_mul(0x2545f4914f6cdd1d)),
+        );
+    }
+    let stem = SPECIES_STEMS[(plan % SPECIES_STEMS.len() as u64) as usize];
+    let form = match bones {
+        0..=2 => "ling",
+        3..=4 => "pod",
+        5..=7 => "form",
+        8..=11 => "morph",
+        _ => "titan",
+    };
+    format!("{stem}{form} {}", gait_word(creature))
+}
+/// Cadence bucket from the muscles' rhythm periods, in cycles per second.
+fn gait_word(creature: &Creature) -> &'static str {
+    if creature.muscles.is_empty() {
+        return "Drifter";
+    }
+    let mean_period =
+        creature.muscles.iter().map(|m| m.period).sum::<f32>() / creature.muscles.len() as f32;
+    let hertz = 1.0 / mean_period.max(0.05);
+    if hertz < 0.5 {
+        "Crawler"
+    } else if hertz < 1.0 {
+        "Walker"
+    } else if hertz < 2.0 {
+        "Trotter"
+    } else {
+        "Sprinter"
+    }
+}
+/// Validates an imported creature JSON before it reaches the replay engine.
+/// Rejects bodies the physics cannot step, with a short reason.
+fn imported_creature(creature: &mut Creature) -> Result<(), String> {
+    let nodes = creature.nodes.len();
+    if !(3..=64).contains(&nodes) || creature.bones.len() + 1 != nodes {
+        return Err("expected a connected body with one bone per extra node".into());
+    }
+    if !crate::evolution::canonicalize_bone_order(creature) {
+        return Err("the body plan is not a connected tree".into());
+    }
+    if creature.nodes.iter().any(|n| {
+        ![n.x, n.y, n.diameter, n.friction]
+            .iter()
+            .all(|v| v.is_finite())
+    }) {
+        return Err("the file has non-finite node values".into());
+    }
+    if creature.bones.iter().any(|b| {
+        ![
+            b.rest_length,
+            b.min_angle,
+            b.max_angle,
+            b.organ_mass,
+            b.organ_at,
+        ]
+        .iter()
+        .all(|v| v.is_finite())
+    }) {
+        return Err("the file has non-finite bone values".into());
+    }
+    if creature.muscles.iter().any(|m| {
+        m.bone_a as usize >= creature.bones.len()
+            || m.bone_b as usize >= creature.bones.len()
+            || ![m.short, m.long, m.period, m.phase, m.duty, m.stiffness]
+                .iter()
+                .all(|v| v.is_finite())
+    }) {
+        return Err("the file has invalid muscles".into());
+    }
+    Ok(())
+}
+/// History positions where the all-time best distance moved, oldest first.
+fn record_entries(history: &[Stats]) -> Vec<(usize, f32)> {
+    let mut best = f32::NEG_INFINITY;
+    let mut records = Vec::new();
+    for (index, stats) in history.iter().enumerate() {
+        if stats.best.is_finite() && stats.best > best {
+            best = stats.best;
+            records.push((index, stats.best));
+        }
+    }
+    records
+}
+/// One all-time record in the session hall of fame.
+struct FameEntry {
+    generation: u32,
+    distance: f32,
+    creature: Creature,
+}
 /// Heat map of the occupied archive cells for the selected height and feet
 /// bins. Returns the niche key of a clicked cell.
 fn paint_archive_map(
@@ -616,7 +733,8 @@ fn paint_archive_map(
             clicked = Some(*niche);
         }
         response.on_hover_text(format!(
-            "Rank #{} · {:.3} m\n{:.2} m tall · {:.2} aspect ratio · {} feet\n{}\nClick to replay",
+            "{} · rank #{} · {:.3} m\n{:.2} m tall · {:.2} aspect ratio · {} feet\n{}\nClick to replay",
+            species_name(&cell.creature),
             cell.rank + 1,
             cell.score,
             cell.descriptor.mean_height,
@@ -692,9 +810,16 @@ fn paint_lineage_tile(
         FontId::proportional(12.),
         if step.gain >= 0. { theme.accent } else { AMBER },
     );
+    painter.text(
+        rect.right_bottom() + Vec2::new(-8., -6.),
+        Align2::RIGHT_BOTTOM,
+        species_name(&step.creature),
+        FontId::proportional(10.),
+        theme.muted,
+    );
     if current {
         painter.text(
-            rect.right_bottom() + Vec2::new(-8., -6.),
+            rect.right_bottom() + Vec2::new(-8., -20.),
             Align2::RIGHT_BOTTOM,
             "selected",
             FontId::proportional(10.),
@@ -713,7 +838,8 @@ fn paint_lineage_tile(
     let (nodes, bones, muscles) = body_counts(&step.creature);
     response
         .on_hover_text(format!(
-            "Generation {} · {:.2} m ({:+.2} m)\n{} nodes / {} bones / {} muscles\n{}\n{}",
+            "{} · generation {} · {:.2} m ({:+.2} m)\n{} nodes / {} bones / {} muscles\n{}\n{}",
+            species_name(&step.creature),
             step.generation,
             step.fitness,
             step.gain,
@@ -791,6 +917,11 @@ struct App {
     race_pending: bool,
     race_page_requested: bool,
     race_camera: f32,
+    /// Session hall of fame: all-time records seen so far, oldest first.
+    fame: Vec<FameEntry>,
+    fame_best: f32,
+    fame_seen: usize,
+    fame_epoch: u64,
     /// Native benchmark frame intervals and the last control probe time.
     bench_frames: Vec<f32>,
     bench_last_ping: Instant,
@@ -900,6 +1031,10 @@ impl App {
             race_pending: smoke_tab == "race",
             race_page_requested: false,
             race_camera: 0.0,
+            fame: Vec::new(),
+            fame_best: 0.0,
+            fame_seen: 0,
+            fame_epoch: u64::MAX,
             bench_frames: Vec::new(),
             bench_last_ping: Instant::now(),
             card_positions: Default::default(),
@@ -929,11 +1064,18 @@ impl App {
     fn file(&mut self, mode: &'static str) {
         self.file_mode = Some(mode);
         self.file_path = match mode {
-            "Export CSV" => "runs/statistics.csv",
-            "Save preset" | "Load preset" => "presets/custom.json",
-            _ => "runs/experiment.evo",
-        }
-        .into();
+            "Export CSV" => "runs/statistics.csv".to_owned(),
+            "Save preset" | "Load preset" => "presets/custom.json".to_owned(),
+            "Open creature JSON" => "runs/creature.json".to_owned(),
+            "Export creature JSON" => {
+                let id = self.playback.as_ref().map_or(0, |p| p.creature.id);
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis());
+                format!("runs/creature-{id}-{stamp}.json")
+            }
+            _ => "runs/experiment.evo".to_owned(),
+        };
     }
     fn set_preview(&mut self, c: Creature, cfg: Config) {
         self.playback = Some(Playback::new(c, cfg));
@@ -1273,6 +1415,23 @@ impl App {
             if ui.small_button("Load preset").clicked() {
                 self.file("Load preset");
             }
+            if ui
+                .add_enabled(
+                    self.playback.is_some(),
+                    egui::Button::new("Export JSON").small(),
+                )
+                .on_hover_text("Save the selected creature as JSON under runs/")
+                .clicked()
+            {
+                self.file("Export creature JSON");
+            }
+            if ui
+                .small_button("Open creature")
+                .on_hover_text("Replay a creature from a JSON file")
+                .clicked()
+            {
+                self.file("Open creature JSON");
+            }
             if ui.small_button("Reset settings").clicked() {
                 self.config = Config::default();
                 self.dirty = true;
@@ -1356,15 +1515,19 @@ impl App {
             );
         }
         let amplitude = crate::physics::terrain_amplitude(cfg.terrain);
-        if cfg.ground && amplitude > 0.0 {
-            // Sample the bumps every few pixels and fill down to the frame.
+        let slope = if cfg.ground { cfg.slope } else { 0.0 };
+        if cfg.ground && (amplitude > 0.0 || slope != 0.0) {
+            // Sample the tilted ground every few pixels and fill down to the frame.
             let step = (4.0 / self.zoom).max(0.002);
             let start = (rect.left() - origin.x) / self.zoom;
             let end = (rect.right() - origin.x) / self.zoom;
             let mut x = start;
             let mut line = Vec::new();
             while x <= end + step {
-                line.push(world(x, crate::physics::terrain(x, amplitude).0));
+                line.push(world(
+                    x,
+                    crate::physics::terrain_with_slope(x, amplitude, slope).0,
+                ));
                 x += step;
             }
             for pair in line.windows(2) {
@@ -1649,6 +1812,19 @@ impl App {
                     };
                     plot.line(Line::new(name, values).color(color).width(width));
                 }
+                // Record markers extend the best line instead of duplicating it.
+                let records: Vec<[f64; 2]> = record_entries(&s.history)
+                    .into_iter()
+                    .map(|(index, best)| [s.history[index].generation as f64, best as f64])
+                    .collect();
+                if !records.is_empty() {
+                    plot.points(
+                        Points::new("Record", records)
+                            .color(Color32::from_rgb(117, 76, 210))
+                            .filled(true)
+                            .radius(3.5),
+                    );
+                }
             });
     }
     fn histogram(&self, ui: &mut egui::Ui, stats: &Stats, height: f32) {
@@ -1865,7 +2041,8 @@ impl App {
                                         selected = Some((card.creature.clone(), snapshot.config.clone()));
                                     }
                                     response.on_hover_text(format!(
-                                        "ID {}\n{} nodes / {} bones / {} muscles\nMutability {:.2}\n{}\n{}\nClick to replay",
+                                        "{}\nID {}\n{} nodes / {} bones / {} muscles\nMutability {:.2}\n{}\n{}\nClick to replay",
+                                        species_name(&card.creature),
                                         card.creature.id,
                                         card.creature.nodes.len(),
                                         card.creature.bones.len(),
@@ -1970,6 +2147,142 @@ impl App {
                 total: scan.total,
             });
             self.worker.send(Command::Page(next));
+        }
+    }
+    /// Appends new all-time bests to the session hall of fame. Records come
+    /// from history stats, whose best representative is already in the
+    /// snapshot, so no archive page request is needed.
+    fn absorb_records(&mut self, snapshot: &Snapshot) {
+        if self.fame_epoch != snapshot.epoch {
+            self.fame_epoch = snapshot.epoch;
+            self.fame.clear();
+            self.fame_best = 0.0;
+            self.fame_seen = 0;
+        }
+        if snapshot.history.len() < self.fame_seen {
+            self.fame_seen = 0;
+        }
+        for stats in &snapshot.history[self.fame_seen..] {
+            if stats.best.is_finite() && stats.best > self.fame_best {
+                self.fame_best = stats.best;
+                if let Some(creature) = stats.representatives.last().cloned() {
+                    self.fame.push(FameEntry {
+                        generation: stats.generation,
+                        distance: stats.best,
+                        creature,
+                    });
+                }
+            }
+        }
+        self.fame_seen = snapshot.history.len();
+    }
+    /// Replays the best creature recorded for one history entry, through the
+    /// same preview path as an archive card click.
+    fn replay_history_holder(&mut self, index: usize) {
+        let Some((creature, config)) = self.snapshot.as_ref().and_then(|snapshot| {
+            let stats = snapshot.history.get(index)?;
+            Some((stats.representatives.last()?.clone(), stats.config.clone()))
+        }) else {
+            return;
+        };
+        self.worker.send(Command::Preview { creature, config });
+        self.tab = Tab::Overview;
+    }
+    /// Compact timeline of every new all-time best, newest first. Clicking one
+    /// replays its record holder.
+    fn records_timeline(&mut self, ui: &mut egui::Ui) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let records = record_entries(&snapshot.history);
+        if records.is_empty() {
+            return;
+        }
+        let theme = self.theme();
+        ui.label(
+            RichText::new("RECORDS · EVERY NEW BEST DISTANCE")
+                .small()
+                .color(theme.muted),
+        );
+        let mut chosen = None;
+        egui::ScrollArea::horizontal()
+            .id_salt("records_timeline")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for &(index, best) in records.iter().rev() {
+                        let stats = &snapshot.history[index];
+                        if ui
+                            .small_button(format!("Gen {} · {best:.2} m", stats.generation))
+                            .on_hover_text("Click to replay this record holder")
+                            .clicked()
+                        {
+                            chosen = Some(index);
+                        }
+                    }
+                });
+            });
+        if let Some(index) = chosen {
+            self.replay_history_holder(index);
+        }
+    }
+    /// Session record holders, newest first, with a replay button each.
+    fn hall_of_fame(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme();
+        ui.label(
+            RichText::new("HALL OF FAME · SESSION RECORDS")
+                .small()
+                .color(theme.muted),
+        );
+        if self.fame.is_empty() {
+            ui.label(
+                RichText::new("No records yet. The first improvement lands here.")
+                    .small()
+                    .color(theme.muted),
+            );
+            return;
+        }
+        let mut chosen = None;
+        egui::ScrollArea::vertical()
+            .id_salt("hall_of_fame")
+            .max_height(180.)
+            .show(ui, |ui| {
+                for (place, entry) in self.fame.iter().enumerate().rev() {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("{}.", place + 1))
+                                .small()
+                                .color(theme.muted),
+                        );
+                        ui.label(format!(
+                            "Gen {} · {:.2} m",
+                            entry.generation, entry.distance
+                        ));
+                        ui.label(
+                            RichText::new(species_name(&entry.creature))
+                                .small()
+                                .color(theme.muted),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button("Replay")
+                                .on_hover_text("Replay this record holder")
+                                .clicked()
+                            {
+                                chosen = Some(place);
+                            }
+                        });
+                    });
+                }
+            });
+        if let Some(place) = chosen {
+            let entry = &self.fame[place];
+            let creature = entry.creature.clone();
+            let config = self
+                .snapshot
+                .as_ref()
+                .map_or_else(Config::default, |s| s.config.clone());
+            self.worker.send(Command::Preview { creature, config });
+            self.tab = Tab::Overview;
         }
     }
     /// Builds race lanes from the top archive cards once the first page arrives.
@@ -2302,7 +2615,12 @@ impl App {
             painter.text(
                 lane_rect.left_top() + Vec2::new(8., 23.),
                 Align2::LEFT_TOP,
-                format!("ID {} · best {:.2} m", lane.id, lane.score),
+                format!(
+                    "{} · ID {} · best {:.2} m",
+                    species_name(&lane.playback.creature),
+                    lane.id,
+                    lane.score
+                ),
                 FontId::proportional(11.),
                 theme.muted,
             );
@@ -2464,6 +2782,10 @@ impl App {
             });
         });
         self.trend(ui, 180.);
+        self.records_timeline(ui);
+        ui.add_space(6.);
+        self.hall_of_fame(ui);
+        ui.add_space(6.);
         self.species_history(ui);
         let stats = self.snapshot.as_ref().unwrap().history[self.history_index].clone();
         let body_count = if stats.archive_cells > 0 {
@@ -2578,7 +2900,7 @@ impl App {
                     ),
                     (
                         "History & statistics",
-                        "Per-generation curves, the mix of body types, and the distribution of gait scores.",
+                        "Per-generation curves, every new record with a replay, the session hall of fame, the mix of body types, and the distribution of gait scores.",
                     ),
                     (
                         "Race",
@@ -2683,6 +3005,50 @@ impl App {
                                         Err(e) => self.message = Some(e.to_string()),
                                     }
                                 }
+                                "Export creature JSON" => {
+                                    let creature =
+                                        self.playback.as_ref().map(|p| p.creature.clone());
+                                    let result = (|| -> anyhow::Result<()> {
+                                        let creature = creature.as_ref().ok_or_else(|| {
+                                            anyhow::anyhow!("No creature is selected to export")
+                                        })?;
+                                        if let Some(parent) = path.parent() {
+                                            std::fs::create_dir_all(parent)?;
+                                        }
+                                        serde_json::to_writer_pretty(
+                                            std::fs::File::create(&path)?,
+                                            creature,
+                                        )?;
+                                        Ok(())
+                                    })();
+                                    self.message = Some(result.map_or_else(
+                                        |e| e.to_string(),
+                                        |_| format!("Creature saved to {}", path.display()),
+                                    ));
+                                }
+                                "Open creature JSON" => {
+                                    let config = self
+                                        .snapshot
+                                        .as_ref()
+                                        .map_or_else(Config::default, |s| s.config.clone());
+                                    let result = (|| -> anyhow::Result<Creature> {
+                                        let mut creature: Creature =
+                                            serde_json::from_reader(std::fs::File::open(&path)?)?;
+                                        imported_creature(&mut creature).map_err(|why| {
+                                            anyhow::anyhow!("{}: {why}", path.display())
+                                        })?;
+                                        Ok(creature)
+                                    })();
+                                    match result {
+                                        Ok(creature) => {
+                                            self.worker.send(Command::Preview { creature, config });
+                                            self.tab = Tab::Overview;
+                                            self.message =
+                                                Some(format!("Opened {}", path.display()));
+                                        }
+                                        Err(e) => self.message = Some(e.to_string()),
+                                    }
+                                }
                                 _ => {}
                             }
                             self.file_mode = None;
@@ -2743,6 +3109,7 @@ impl eframe::App for App {
         }
         let next = self.worker.view.lock().unwrap().take();
         if let Some(mut next) = next {
+            self.absorb_records(&next);
             self.absorb_archive_page(&next);
             if self
                 .snapshot
@@ -3112,6 +3479,13 @@ fn paint_card(
         FontId::proportional(11.),
         theme.muted,
     );
+    painter.text(
+        rect.left_top() + Vec2::new(9., 22.),
+        Align2::LEFT_TOP,
+        species_name(&card.creature),
+        FontId::proportional(10.),
+        theme.ink,
+    );
     if card.innovation_reserve {
         painter.text(
             rect.right_top() + Vec2::new(-9., 8.),
@@ -3336,4 +3710,77 @@ fn thumbnail(p: &egui::Painter, c: &Creature, rect: Rect) {
     let origin =
         rect.center() + Vec2::new(-(minx + maxx) * 0.5 * scale, (miny + maxy) * 0.5 * scale);
     draw_creature(p, &nodes, c, origin, scale, 0., false);
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evolution::{Bone, Muscle, NodeGene};
+    fn test_creature() -> Creature {
+        Creature {
+            nodes: vec![
+                NodeGene {
+                    x: 0.0,
+                    y: 0.0,
+                    diameter: 0.2,
+                    friction: 0.8,
+                },
+                NodeGene {
+                    x: 0.5,
+                    y: 0.0,
+                    diameter: 0.2,
+                    friction: 0.8,
+                },
+                NodeGene {
+                    x: 1.0,
+                    y: 0.0,
+                    diameter: 0.2,
+                    friction: 0.8,
+                },
+            ],
+            bones: vec![Bone::new(0, 1, 0.5), Bone::new(1, 2, 0.5)],
+            muscles: vec![Muscle {
+                bone_a: 0,
+                bone_b: 1,
+                anchor_a: 0.5,
+                anchor_b: 0.5,
+                short: 0.4,
+                long: 0.6,
+                period: 0.8,
+                phase: 0.0,
+                duty: 0.5,
+                stiffness: 10.0,
+                sensor: crate::evolution::NO_SENSOR,
+                reset: 0.0,
+            }],
+            id: 7,
+            mutability: 1.0,
+        }
+    }
+    #[test]
+    fn imported_creatures_round_trip_through_json() {
+        let mut creature = test_creature();
+        assert!(imported_creature(&mut creature).is_ok());
+        let json = serde_json::to_string(&creature).unwrap();
+        let mut loaded: Creature = serde_json::from_str(&json).unwrap();
+        assert!(imported_creature(&mut loaded).is_ok());
+        loaded.bones[0].b = 9;
+        assert!(imported_creature(&mut loaded).is_err());
+    }
+    #[test]
+    fn species_names_follow_the_body_plan() {
+        let creature = test_creature();
+        let name = species_name(&creature);
+        let mut reversed = creature.clone();
+        reversed.bones.reverse();
+        assert_eq!(name, species_name(&reversed));
+        let mut longer = creature.clone();
+        longer.nodes.push(NodeGene {
+            x: 1.5,
+            y: 0.0,
+            diameter: 0.2,
+            friction: 0.8,
+        });
+        longer.bones.push(Bone::new(2, 3, 0.5));
+        assert_ne!(name, species_name(&longer));
+    }
 }
