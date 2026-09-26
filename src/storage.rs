@@ -124,6 +124,10 @@ pub struct Experiment {
     /// in the new world. Breeding hands them out before new offspring.
     #[serde(default)]
     pub reseed: Vec<evolution::Creature>,
+    /// Elites a meteor wiped out, with their island (None for the global
+    /// archive), kept so the strike can be undone. Not saved in checkpoints.
+    #[serde(skip)]
+    pub fossils: Vec<(Option<usize>, qd::Elite)>,
 }
 
 /// One recorded creature in an elite's ancestry.
@@ -255,6 +259,7 @@ impl Experiment {
             candidate_mates: Vec::new(),
             island_progress: Vec::new(),
             reseed: Vec::new(),
+            fossils: Vec::new(),
         })
     }
     pub fn rank(&mut self) {
@@ -1398,6 +1403,68 @@ impl Experiment {
         }
         Ok(())
     }
+    /// A meteor strike wipes out `share` of the elites in the global archive
+    /// and in every island, chosen at random. Survivors and new offspring
+    /// refill the emptied cells, which opens room for new kinds of movement.
+    /// The lost elites become fossils so the strike can be undone. Returns how
+    /// many elites were lost.
+    pub fn meteor(&mut self, share: f32) -> usize {
+        let mut rng = evolution::Rng::new(
+            self.config.seed ^ 0x6d65_7465_6f72,
+            self.generation,
+            self.fossils.len(),
+        );
+        let mut strike = |archive: &mut QdArchive, island: Option<usize>| {
+            let (kept, lost): (Vec<_>, Vec<_>) = std::mem::take(&mut archive.entries)
+                .into_iter()
+                .partition(|_| rng.unit() >= share);
+            archive.entries = kept;
+            archive.rebuild_indices();
+            lost.into_iter().map(move |elite| (island, elite))
+        };
+        let mut fossils: Vec<_> = strike(&mut self.archive, None).collect();
+        for (index, island) in self.islands.iter_mut().enumerate() {
+            fossils.extend(strike(island, Some(index)));
+        }
+        let lost = fossils.len();
+        self.fossils.extend(fossils);
+        lost
+    }
+    /// Undoes meteor strikes: every fossil returns to its archive if its cell
+    /// is empty or holds a slower elite. Returns how many came back.
+    pub fn undo_meteor(&mut self) -> usize {
+        let mut restored = 0;
+        let mut touched = std::collections::BTreeSet::new();
+        for (island, elite) in std::mem::take(&mut self.fossils) {
+            let archive = match island {
+                None => &mut self.archive,
+                Some(index) => match self.islands.get_mut(index) {
+                    Some(archive) => archive,
+                    None => continue,
+                },
+            };
+            match archive.slot_for(&elite.niche) {
+                Some(slot) if archive.entries[slot].fitness < elite.fitness => {
+                    archive.entries[slot] = elite;
+                }
+                Some(_) => continue,
+                None => {
+                    archive.entries.push(elite);
+                    // Later fossils must see this cell as taken.
+                    archive.rebuild_indices();
+                }
+            }
+            touched.insert(island);
+            restored += 1;
+        }
+        for island in touched {
+            match island {
+                None => self.archive.rebuild_indices(),
+                Some(index) => self.islands[index].rebuild_indices(),
+            }
+        }
+        restored
+    }
     /// Clears the archive after the world changed. Its scores no longer hold,
     /// but its creatures are queued to compete again under the new physics.
     fn reset_search_context(&mut self) {
@@ -1938,6 +2005,7 @@ impl From<V2Experiment> for Experiment {
             candidate_mates: Vec::new(),
             island_progress: Vec::new(),
             reseed: Vec::new(),
+            fossils: Vec::new(),
         }
     }
 }
@@ -1978,6 +2046,7 @@ impl From<LegacyExperiment> for Experiment {
             candidate_mates: Vec::new(),
             island_progress: Vec::new(),
             reseed: Vec::new(),
+            fossils: Vec::new(),
         }
     }
 }

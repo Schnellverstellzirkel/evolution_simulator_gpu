@@ -486,6 +486,29 @@ impl App {
                 });
             });
         }
+        let fossils = self.snapshot.as_ref().map_or(0, |s| s.fossils);
+        ui.horizontal(|ui| {
+            ui.label("Catastrophe")
+                .on_hover_text("A meteor wipes out half of every archive's elites at random. Survivors and newcomers refill the empty cells, which makes room for new kinds of movement.");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(fossils > 0, egui::Button::new("Undo").small())
+                    .on_hover_text(format!(
+                        "Return {fossils} fossils to their cells where the cell is empty or holds a slower elite."
+                    ))
+                    .clicked()
+                {
+                    self.worker.send(Command::UndoMeteor);
+                }
+                if ui
+                    .add(egui::Button::new("Meteor strike").small())
+                    .on_hover_text("Wipe out half of every archive's elites at random. Undo brings them back.")
+                    .clicked()
+                {
+                    self.worker.send(Command::Meteor);
+                }
+            });
+        });
         if world_changed {
             self.worker.send(Command::Configure(self.config.clone()));
             // Applied already, so it does not count as an unapplied setting.

@@ -853,3 +853,35 @@ fn archive_scores_never_exceed_the_replayed_distance() {
         );
     }
 }
+
+#[test]
+fn meteor_strike_can_be_undone() {
+    let mut e = Experiment::new(config()).unwrap();
+    let all: Vec<usize> = (0..e.config.population).collect();
+    let metrics = evolution_simulator::scheduler::Scheduler::cpu_only(2)
+        .unwrap()
+        .evaluate(&e.population, &all, &e.config)
+        .unwrap();
+    for (i, m) in metrics.iter().enumerate() {
+        e.scores[i] = m.fitness;
+        e.trial_metrics[i] = m.behavior;
+    }
+    e.evaluated = e.config.population;
+    e.rank();
+    e.archive_batch().unwrap();
+    let count = |e: &Experiment| {
+        e.archive.entries.len() + e.islands.iter().map(|i| i.entries.len()).sum::<usize>()
+    };
+    let before = count(&e);
+    let mut ids: Vec<u64> = e.archive.entries.iter().map(|x| x.creature.id).collect();
+    ids.sort_unstable();
+    let lost = e.meteor(0.5);
+    assert!(lost > 0);
+    assert_eq!(count(&e), before - lost);
+    assert_eq!(e.undo_meteor(), lost);
+    assert_eq!(count(&e), before);
+    assert!(e.fossils.is_empty());
+    let mut back: Vec<u64> = e.archive.entries.iter().map(|x| x.creature.id).collect();
+    back.sort_unstable();
+    assert_eq!(back, ids);
+}
