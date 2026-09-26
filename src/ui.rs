@@ -21,11 +21,14 @@ const MUTED: Color32 = Color32::from_rgb(105, 121, 113);
 const INK: Color32 = Color32::from_rgb(40, 55, 48);
 const PANEL: Color32 = Color32::from_rgb(255, 255, 252);
 const CANVAS: Color32 = Color32::from_rgb(244, 247, 242);
-const VIEWPORT: Color32 = Color32::from_rgb(236, 243, 239);
+const VIEWPORT: Color32 = Color32::from_rgb(151, 203, 245);
 const CARD: Color32 = Color32::from_rgb(255, 255, 253);
 const CARD_HOVER: Color32 = Color32::from_rgb(238, 247, 241);
 const CARD_BORDER: Color32 = Color32::from_rgb(218, 229, 221);
-const GROUND: Color32 = Color32::from_rgb(220, 234, 222);
+const GROUND: Color32 = Color32::from_rgb(121, 176, 89);
+const GROUND_EDGE: Color32 = Color32::from_rgb(66, 118, 55);
+const MUSCLE_REST: Color32 = Color32::from_rgb(249, 168, 191);
+const MUSCLE_ACTIVE: Color32 = Color32::from_rgb(146, 16, 28);
 const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
 pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
     let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
@@ -717,6 +720,7 @@ impl App {
         let painter = ui.painter_at(rect);
         // All scene primitives are tessellated into egui's batched wgpu render pass.
         painter.rect_filled(rect, 12, VIEWPORT);
+        draw_clouds(&painter, rect, self.camera[0] * self.zoom);
         let origin = Pos2::new(
             rect.center().x - self.camera[0] * self.zoom,
             rect.bottom() - rect.height() * 0.22 + self.camera[1] * self.zoom,
@@ -771,10 +775,7 @@ impl App {
                     Stroke::NONE,
                 ));
             }
-            painter.add(egui::Shape::line(
-                line,
-                Stroke::new(2., Color32::from_rgb(125, 159, 135)),
-            ));
+            painter.add(egui::Shape::line(line, Stroke::new(2., GROUND_EDGE)));
         } else if cfg.ground {
             painter.rect_filled(
                 Rect::from_min_max(
@@ -789,7 +790,7 @@ impl App {
                     Pos2::new(rect.left(), origin.y),
                     Pos2::new(rect.right(), origin.y),
                 ],
-                Stroke::new(2., Color32::from_rgb(125, 159, 135)),
+                Stroke::new(2., GROUND_EDGE),
             );
         }
         for x in left..=right {
@@ -1793,6 +1794,40 @@ fn number(n: usize) -> String {
 fn species_color(n: usize, m: usize) -> Color32 {
     egui::ecolor::Hsva::new(((n * 257 + m) as f32 * 0.618034).fract(), 0.45, 0.9, 1.).into()
 }
+/// White clouds in the upper sky, drifting slowly against the camera.
+fn draw_clouds(painter: &egui::Painter, rect: Rect, parallax: f32) {
+    // Keep cloud centers and their reach clear of the rounded corners, so no
+    // cloud paints in the clipped corner squares.
+    let left = rect.left() + 40.0;
+    let span = (rect.width() - 80.0).max(1.0);
+    let top = rect.top() + 50.0;
+    let floor = (rect.top() + 120.0).min(rect.bottom() - 60.0).max(top);
+    for i in 0..5 {
+        let x = left + (i as f32 * 211.0 - parallax * 0.12).rem_euclid(span);
+        let y = top + (i * 67) as f32 % (floor - top).max(1.0);
+        cloud(painter, Pos2::new(x, y), 0.75 + (i % 3) as f32 * 0.2);
+    }
+}
+fn cloud(painter: &egui::Painter, center: Pos2, s: f32) {
+    for &(dx, dy, r) in &[
+        (0.0, 0.0, 26.0),
+        (-30.0, 7.0, 19.0),
+        (29.0, 8.0, 17.0),
+        (5.0, -13.0, 17.0),
+    ] {
+        painter.add(egui::Shape::ellipse_filled(
+            center + Vec2::new(dx * s, dy * s),
+            Vec2::new(r * s, r * 0.6 * s),
+            Color32::from_white_alpha(225),
+        ));
+    }
+}
+/// Linear blend between two colors; `t` is clamped to [0, 1].
+fn mix_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+}
 fn draw_creature(
     p: &egui::Painter,
     nodes: &[Node],
@@ -1857,16 +1892,10 @@ fn draw_creature(
             [a, b],
             Stroke::new(width + 3., Color32::from_rgb(10, 15, 19)),
         );
+        // Pink at rest, deep red at full contraction.
         p.line_segment(
             [a, b],
-            Stroke::new(
-                width,
-                if contraction > 0.5 {
-                    AMBER
-                } else {
-                    Color32::from_rgb(106, 138, 145)
-                },
-            ),
+            Stroke::new(width, mix_color(MUSCLE_REST, MUSCLE_ACTIVE, contraction)),
         );
     }
     for n in nodes {
