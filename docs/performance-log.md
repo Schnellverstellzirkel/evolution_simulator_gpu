@@ -69,6 +69,64 @@ Addendum: the Mud, Gaps, Hurdles and Earthquake effects added afterwards were me
 | Hurdles | 3 | Walls | 144816.1 | 95.7 | 0.69 |
 | Earthquake | 3 | Big one | 145242.9 | 97.4 | 0.67 |
 
+## Whole-group early exit in the CPU engine (2026-09-26)
+
+Backlog item 48. `EVOLUTION_EARLY_EXIT=1` stops a 16-lane SIMD group as soon
+as every real lane in it has a failed node or a recorded fall
+(`fall_time > 0`); the padding lanes that repeat a real creature do not count.
+The stop happens at the end of the tick, after that tick's totals, and a
+recorded trial (`replay`) never stops early, so the replay keeps every frame.
+The flag is diagnostic and off by default.
+
+The exit is **score-preserving but not descriptor-preserving**, so it cannot
+be the default yet. A probe on a 4096-body first-generation population
+(seed 38, 3 s trials, `n` = 520 fallen and 3576 upright lanes) found that
+`fitness`, `fall_time` and `head_shake` are bit-identical for every lane, and
+every field of every upright lane is bit-identical. Descriptor fields of
+fallen lanes differ when their group exits: `ground_contact` changed for 107
+of the 520 fallen lanes (max difference 784 contact-steps), `height_sum` for
+107 (max 80.7 m), `gait_turns` for 61, and the contact/lift/ground bitsets for
+25 to 96, because the default engine keeps accumulating those totals while the
+limp body lies there. This is the obstacle `docs/physics-audit-2026-09-26.md`
+records: freeze terminal results in both engines, update the `to_metrics`
+normalization and archive versioning first, then the exit can default on. The
+three cases a regression pins are `tests/early_exit.rs`: a group where every
+lane falls exits and keeps every score, a group with one live lane never exits
+and every field is unchanged, and a partial group exits on its real lanes.
+
+Workload: `examples/early_exit_cost.rs`, the same first-generation random
+population as `first_generation` (20,000 bodies, seed 38), alternating paired
+passes with the flag on and off on the calm default world, then on a harsh
+world (3 g, muscle energy 0.35). The example prints creatures/s, the paired
+ratio, the share of groups that exited, the share of fallen lanes and the
+share of configured physics steps the exited groups skipped. The step share is
+deterministic; the wall rates move with the load on this shared machine.
+
+    nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
+      cargo run --release --example early_exit_cost -- 20000 20 6
+    nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
+      cargo run --release --example early_exit_cost -- 20000 60 4
+
+| world | trial | groups exited | lanes fallen | steps skipped | median paired ratio | best on / best off |
+|---|---:|---:|---:|---:|---:|---|
+| calm, 20,000 bodies | 20 s | 12.8% | 13.7% | 11.0% | 1.14, 1.12 (two runs) | 46,536 / 43,676 and 62,425 / 58,658 |
+| calm, 20,000 bodies | 60 s | 13.4% | 13.9% | 12.4% | 1.27 | 17,856 / 14,519 |
+| harsh 3 g / 0.35 energy | 60 s | 7.2% | 11.2% | 6.8% | 1.15 | 15,368 / 13,120 |
+
+The calm first-generation population falls into two clear kinds of group,
+because a group shares one body plan: 12.8 to 13.4% of groups have every lane
+fallen and leave 86 to 92% of their steps unrun, while the rest run the full
+trial. In total the exit removes 11.0 to 12.4% of all configured physics
+steps, and the paired wall-time ratio sits at or above that share. The 3 g,
+low-energy world counter-intuitively falls less (a limp body lies flat with
+the head no lower than its neck base) and saves less. These are single-binary
+runs on a machine shared with other workers: within one configuration the
+per-pass rate swung by up to 2.6x (the off passes of the second 20 s run,
+22,762 to 58,658 creatures/s), so the median ratios and the step shares are
+the numbers to keep, not any single pass. The default path is untouched and
+`first_generation 20000 20` still reports median -0.07 m, p99 0.34 m, best
+11.03 m with the flag unset.
+
 ## 3M memory and end-to-end profile (2026-09-26)
 
 Backlog items 57, 59 and 60 ask for the memory use at 3 million creatures, one end-to-end GUI generation at 3M, and the fine-check share of GPU time. All runs below used commit `614e04a` on the workstation listed under Machine, under

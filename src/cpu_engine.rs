@@ -8,12 +8,21 @@ use crate::simd::F;
 use crate::{config::Config, creature_kernel::GpuResult, evolution::Population, physics};
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Diagnostic ledger of horizontal momentum changes for lane 0 of each group,
 /// enabled by `EVOLUTION_LEDGER`: [integration speed cap, ground contact,
 /// velocity-pass speed cap, velocity-pass constraints, projection/rebuild
 /// center-of-mass shift x mass / dt, muscle forces].
 pub static LEDGER: std::sync::Mutex<[f64; 6]> = std::sync::Mutex::new([0.0; 6]);
+
+/// Diagnostic counters for `EVOLUTION_EARLY_EXIT`: groups that stopped as
+/// soon as every real lane had finished, groups run with the flag set, and
+/// the physics steps those groups actually ran against a full trial.
+pub static EARLY_EXIT_GROUPS: AtomicU64 = AtomicU64::new(0);
+pub static EARLY_EXIT_GROUPS_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static EARLY_EXIT_TICKS: AtomicU64 = AtomicU64::new(0);
+pub static EARLY_EXIT_TICKS_FULL: AtomicU64 = AtomicU64::new(0);
 
 const L: usize = 16;
 /// Muscle energy: stored work (J), recovery per second, and the drive left
@@ -411,6 +420,13 @@ impl Group {
         let inv_total_mass = F::splat(1.0) / total_mass;
         let dt = fidelity.dt();
         let ledger_on = std::env::var_os("EVOLUTION_LEDGER").is_some();
+        // Diagnostic whole-group exit: stop as soon as every real lane has
+        // fallen or failed. It saves the post-fall tail but changes the
+        // behavior totals of finished lanes (contact, height, gait), which
+        // keep accumulating in the default path; see
+        // docs/physics-audit-2026-09-26.md. A recorded trial never exits
+        // early, so the replay keeps every frame.
+        let early_exit = record.is_none() && std::env::var_os("EVOLUTION_EARLY_EXIT").is_some();
         let lane0_mass: Vec<f32> = mass.iter().map(|m| m.to_array()[0]).collect();
         let momentum = |v: &[F]| -> f32 {
             v.iter()
@@ -489,6 +505,17 @@ impl Group {
         let mut fall_x = zero;
         let mut head_shake = zero;
         let shake_alpha = F::splat((1.0 / (physics::HEAD_SHAKE_WINDOW * rate)).min(1.0));
+        // Real lanes are the first `slots.len()` lanes; the rest repeat a real
+        // creature and their results are discarded. A lane is done once it has
+        // fallen or a node has failed.
+        let real_mask: u64 = (1u64 << self.slots.len()) - 1;
+        let mut done_mask: u64 = 0;
+        let mut failed_lanes = zero;
+        let mut fell_this_tick = zero;
+        let mut ticks_run = total_steps;
+        if early_exit {
+            EARLY_EXIT_GROUPS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
 
         let snapshot = |px: &[F], py: &[F]| -> Vec<[f32; 2]> {
             px.iter()
@@ -622,6 +649,9 @@ impl Group {
                 let alive = failed[j].lt(F::splat(0.5));
                 let fails = alive & !finite;
                 failed[j] = F::select(fails, one, failed[j]);
+                if early_exit {
+                    failed_lanes = failed_lanes.max(F::select(fails, one, zero));
+                }
                 let update = alive & finite;
                 px[j] = F::select(update, pos_x, F::select(fails, zero, px[j]));
                 py[j] = F::select(update, pos_y, F::select(fails, zero, py[j]));
@@ -1074,6 +1104,9 @@ impl Group {
                     }
                     fall_x = F::select(falls, x * inv_total_mass, fall_x);
                     fall_time = F::select(falls, F::splat(time_now + dt), fall_time);
+                    if early_exit {
+                        fell_this_tick = F::select(falls, one, zero);
+                    }
                 }
                 let center = center * (1.0 / n as f32);
                 ground_contact += contacts;
@@ -1117,6 +1150,38 @@ impl Group {
                     }
                 }
             }
+            // Every real lane has a recorded fall or a failed node, so no
+            // later step can give it a new distance. Stop after finishing
+            // this tick's totals, so the stopped run matches the full run up
+            // to that point. The descriptor totals still diverge, which is
+            // why the flag stays opt-in.
+            if early_exit {
+                if failed_lanes.gt(F::splat(0.5)).any() {
+                    for (l, value) in failed_lanes.to_array().iter().enumerate() {
+                        if *value > 0.5 {
+                            done_mask |= 1u64 << l;
+                        }
+                    }
+                    failed_lanes = zero;
+                }
+                if fell_this_tick.gt(zero).any() {
+                    for (l, value) in fell_this_tick.to_array().iter().enumerate() {
+                        if *value > 0.5 {
+                            done_mask |= 1u64 << l;
+                        }
+                    }
+                    fell_this_tick = zero;
+                }
+                if done_mask & real_mask == real_mask {
+                    ticks_run = tick + 1;
+                    EARLY_EXIT_GROUPS.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+            }
+        }
+        if early_exit {
+            EARLY_EXIT_TICKS.fetch_add(u64::from(ticks_run), Ordering::Relaxed);
+            EARLY_EXIT_TICKS_FULL.fetch_add(u64::from(total_steps), Ordering::Relaxed);
         }
 
         if let Some(frames) = record.as_mut() {
