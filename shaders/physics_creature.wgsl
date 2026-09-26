@@ -433,6 +433,10 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 var new_a = old_a + correction * bone_sa[j];
                 var new_b = old_b - correction * (1.0 - bone_sa[j]);
                 if grounded {
+                    // A clamp is the ground pushing back, so it counts toward the
+                    // node's normal push (vel.x holds its height without ground).
+                    vel[ka].x -= max(vel[ka].y - new_a.y, 0.0);
+                    vel[kb].x -= max(vel[kb].y - new_b.y, 0.0);
                     new_a.y = max(new_a.y, vel[ka].y);
                     new_b.y = max(new_b.y, vel[kb].y);
                 }
@@ -492,6 +496,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             var new_c = pos[kc] + dv - shift;
             var new_q = pos[kq] + du - shift;
             if grounded {
+                vel[kn].x -= max(vel[kn].y - new_n.y, 0.0);
+                vel[kc].x -= max(vel[kc].y - new_c.y, 0.0);
+                vel[kq].x -= max(vel[kq].y - new_q.y, 0.0);
                 new_n.y = max(new_n.y, vel[kn].y);
                 new_c.y = max(new_c.y, vel[kc].y);
                 new_q.y = max(new_q.y, vel[kq].y);
@@ -562,6 +569,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 pos[k].y += ground_lift;
             }
         }
+        var contact_mass = 0.0;
+        var contact_momentum = 0.0;
+        var contact_grip = 0.0;
         // Velocity is the actual movement over the step. Ground friction uses the
         // real upward push the node received, so grip needs real pressure. The
         // whole-body lift only moves the body out of the ground; it adds no
@@ -580,11 +590,33 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let push = max(pos[k].y - predicted_y, 0.0);
                 let max_change = friction[j] * p.friction * push * RATE;
                 velocity.x -= clamp(velocity.x, -max_change, max_change);
+                if failed[j] < 0.5 {
+                    contact_mass += mass[j];
+                    contact_momentum += mass[j] * velocity.x;
+                    contact_grip += mass[j] * friction[j];
+                }
             }
             if failed[j] >= 0.5 {
                 velocity = vec2f(0.0);
             }
             vel[k] = velocity;
+        }
+        // The whole-body lift is the ground holding the body up: its normal
+        // impulse is the body's mass times the lift. Each node's own friction
+        // only sees its own push, so the feet on the ground also resist the
+        // body's sliding with up to mu times the lift's impulse, applied to
+        // the whole body so momentum stays exact.
+        if grounded && ground_lift > 0.0 && contact_mass > 0.0 {
+            let inv_contact = 1.0 / contact_mass;
+            let budget = contact_grip * inv_contact * p.friction * ground_lift * RATE;
+            let slide = contact_momentum * inv_contact;
+            let change = -clamp(slide, -budget, budget);
+            for (var j = 0u; j < MAXN; j++) {
+                if j >= body_nodes { break; }
+                if failed[j] < 0.5 {
+                    vel[j * WG + lane].x += change;
+                }
+            }
         }
         for (var iteration = 0u; iteration < VELOCITY_SOLVE_ITERATIONS; iteration++) {
             for (var j = 0u; j < MAXB; j++) {
