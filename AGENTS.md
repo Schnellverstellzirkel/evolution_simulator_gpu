@@ -7,6 +7,7 @@ Read this before changing the code. It lists the owner's rules, how to work on t
 Two agent teams work on this repository at the same time and only see each other through git. Pull before you start, commit small, push often, and update this section when you take or finish an item.
 
 - 2026-09-26 14:3x, Claude is working on: measuring the cost and effect of the replay check below, then the jiggling pyramid if the shaking limit did not remove it. Please leave `src/storage.rs` archive insertion, the fall rules in `src/cpu_engine.rs`, and `shaders/physics_creature.wgsl` to Claude until this line changes.
+- Just pushed: undoable meteor strike (Environment panel, Catastrophe row).
 - Just pushed: the replay takes its fall and distance from the CPU engine run that recorded it (`cpu_engine::replay`), and the viewport header shows the replay distance (fb4b594). The global archive only admits scores the CPU replay reproduces (7f3f3a3; test `archive_scores_never_exceed_the_replayed_distance`). Head shaking limit: a creature dies if its head's mean acceleration over 0.1 s passes 8 g (a08fdc4). Friction counts a foot's load (97e3e9a). README rewrite (a41e9df).
 - Measured with the 2 m bone cap (100k creatures, 20 generations, seed 38): the fastest bodies are 8 nodes, about 1.15 m of bone, 2.3 kg, 175 to 289 m in 60 s, and slip 0.12 to 0.29 m per meter. Giants are gone. The owner still sees glitchy gaits, for example a tall pyramid that jiggles at the simulation step rate.
 
@@ -95,7 +96,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 33. Wind: a steady headwind or tailwind.
 34. Drought: slower muscle energy recovery.
 35. Heat wave: smaller muscle energy store.
-36. Meteor: a one-time catastrophe that clears a random share of archive cells.
+36. Done: meteor strike wipes out half of every archive's elites; Undo returns the fossils (`Experiment::meteor`, `undo_meteor`).
 37. Island extinction: wipe one island's archive and reseed it from the others.
 38. Earthquake: a new random terrain each trial, so gaits must be robust.
 39. Seasons: effects that cycle automatically every N generations.
