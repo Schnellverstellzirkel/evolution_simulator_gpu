@@ -57,9 +57,6 @@ impl Default for Config {
     }
 }
 
-// JSON settings no longer expose obstacles. The binary checkpoint helper keeps
-// the old field slot so existing checkpoints remain readable; its value is
-// discarded on load and always empty on save.
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct HumanConfig {
@@ -186,7 +183,6 @@ struct BinaryConfig {
     max_friction: f32,
     max_nodes: usize,
     max_muscles: usize,
-    obstacles: Vec<[f32; 4]>,
     gpu_budget_mib: usize,
     ram_budget_mib: usize,
     throughput: bool,
@@ -212,7 +208,6 @@ impl From<&Config> for BinaryConfig {
             max_friction: c.max_friction,
             max_nodes: c.max_nodes,
             max_muscles: c.max_muscles,
-            obstacles: Vec::new(),
             gpu_budget_mib: c.gpu_budget_mib,
             ram_budget_mib: c.ram_budget_mib,
             throughput: c.throughput,

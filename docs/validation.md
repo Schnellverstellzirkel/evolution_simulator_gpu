@@ -137,7 +137,7 @@ Four five-generation full-GUI runs at revision `7798381` used default/32-lane/32
 | Default (64 lanes for large populations) | 3.477 / 1.170 | 3.492 / 1.169 | 3.485 / 1.170 |
 | 32 lanes | 4.119 / 0.955 | 4.002 / 0.981 | 4.061 / 0.968 |
 
-The 32-lane variant improved this short paired sample by 16.5% in full-generation throughput and reduced evaluation time by 17.3%. A follow-up 10-generation full-GUI run with 32 lanes as the default measured 4.539 generations/s (evaluation 1.681 s, archive 0.184 s, breeding 0.336 s). This confirms the default path; longer repeats are still needed for a stable estimate. `EVOLUTION_WORKGROUP64=1` remains available for comparisons.
+The 32-lane variant improved this short paired sample by 16.5% in full-generation throughput and reduced evaluation time by 17.3%. A follow-up 10-generation full-GUI run with 32 lanes as the default measured 4.539 generations/s (evaluation 1.681 s, archive 0.184 s, breeding 0.336 s). This confirms the default path; longer repeats are still needed for a stable estimate. `EVOLUTION_LANE_WG` remains available for comparisons (32 or 64 lanes).
 
 Measurements below were captured on the local NVIDIA GeForce RTX 4060 Laptop GPU (8 GiB), Ubuntu 24.04 Wayland, with Rust release builds and the simulator's throughput mode. Each creature ran the default 15-second trial. These are workload measurements, not fixed hardware guarantees.
 

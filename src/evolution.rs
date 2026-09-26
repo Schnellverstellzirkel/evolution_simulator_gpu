@@ -1639,95 +1639,10 @@ fn phase_shift_group(creature: &mut Creature, rng: &mut Rng) -> bool {
     }
     changed
 }
-// The original rank-and-reproduce helpers remain for legacy callers. The game
-// and CLI use emit_archive_batch and never use the exact-clone pairing rule.
-fn mutate(mut c: Creature, cfg: &Config, generation: u32, index: usize) -> Creature {
-    let mut rng = Rng::new(cfg.seed, generation, index);
-    let strength = cfg.mutation * c.mutability;
-    if strength == 0.0 {
-        return c;
-    }
-    for n in &mut c.nodes {
-        n.x += rng.delta() * 0.1 * strength;
-        n.y += rng.delta() * 0.1 * strength;
-        n.diameter = (n.diameter + rng.delta() * 0.02 * strength).clamp(cfg.min_size, cfg.max_size);
-        n.friction =
-            (n.friction + rng.delta() * 0.1 * strength).clamp(cfg.min_friction, cfg.max_friction);
-    }
-    for bone in &mut c.bones {
-        bone.rest_length =
-            (bone.rest_length + rng.delta() * 0.04 * strength).clamp(0.03, max_bone_length());
-        bone.min_angle += rng.delta() * 0.2 * strength;
-        bone.max_angle += rng.delta() * 0.2 * strength;
-        bone.clamp_range();
-    }
-    for m in &mut c.muscles {
-        m.anchor_a = (m.anchor_a + rng.delta() * 0.15 * strength).clamp(0.0, 1.0);
-        m.anchor_b = (m.anchor_b + rng.delta() * 0.15 * strength).clamp(0.0, 1.0);
-        m.short = (m.short + rng.delta() * 0.1 * strength).clamp(0.02, 0.8);
-        m.long = (m.long + rng.delta() * 0.1 * strength).clamp(m.short, 1.0);
-        m.period = (m.period + rng.delta() * 0.2 * strength).clamp(min_muscle_period(), 10.0);
-        m.phase = (m.phase + rng.delta() * 0.2 * strength).rem_euclid(1.0);
-        m.duty = (m.duty + rng.delta() * 0.1 * strength).clamp(0.05, 0.95);
-        m.stiffness = (m.stiffness * (1.0 + rng.delta() * 0.3 * strength)).clamp(1.0, 120.0);
-    }
-    if rng.unit() < 0.04 * strength {
-        let _ = structural_mutation_in_place(&mut c, cfg, &mut rng);
-    }
-    if rng.unit() < 0.04 * strength && c.muscles.len() < cfg.max_muscles {
-        let a = rng.index(c.bones.len());
-        let b = rng.index(c.bones.len());
-        if a != b {
-            c.muscles.push(muscle(a, b, &c.bones, &c.nodes, &mut rng));
-        }
-    }
-    if rng.unit() < 0.04 * strength && c.muscles.len() > c.bones.len() {
-        let i = rng.index(c.muscles.len());
-        c.muscles.swap_remove(i);
-    }
-    repair(&mut c, cfg, &mut rng);
-    c.mutability = (c.mutability * rng.range(0.8, 1.25)).clamp(0.05, 2.0);
-    c
-}
 pub fn ranking(scores: &[f32]) -> Vec<usize> {
     let mut ranks: Vec<_> = (0..scores.len()).collect();
     ranks.par_sort_unstable_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
     ranks
-}
-pub fn survivors(cfg: &Config, generation: u32, ranks: &[usize]) -> Vec<usize> {
-    (0..ranks.len() / 2)
-        .map(|j| {
-            let mut rng = Rng::new(cfg.seed, generation + 1, j);
-            let chance = (rng.range(-1.0, 1.0).powi(3) + 1.0) * 0.5;
-            if j as f32 / ranks.len() as f32 <= chance {
-                ranks[j]
-            } else {
-                ranks[ranks.len() - 1 - j]
-            }
-        })
-        .collect()
-}
-pub fn reproduce(
-    pop: &Population,
-    cfg: &Config,
-    generation: u32,
-    parents: &[usize],
-) -> Result<Population> {
-    // Worst-case reserve includes old/new arenas, parallel assembly, fitness/rank tables, and I/O.
-    let growth = cfg.population.saturating_mul(96);
-    ensure!(
-        pop.bytes().saturating_mul(4).saturating_add(growth) < cfg.ram_budget_mib * 1024 * 1024,
-        "Evolution would exceed the RAM budget; save and raise the budget before continuing"
-    );
-    Ok(collect_parallel(cfg.population, |i| {
-        let parent = parents[i / 2];
-        let mut c = pop.creature(parent);
-        if i % 2 == 1 {
-            c = mutate(c, cfg, generation + 1, i);
-        }
-        c.id = (generation as u64 + 1) * cfg.population as u64 + i as u64 + 1;
-        c
-    }))
 }
 
 #[cfg(test)]

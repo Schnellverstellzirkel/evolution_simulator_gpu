@@ -1348,31 +1348,6 @@ impl Experiment {
         self.evaluated = 0;
         Ok(())
     }
-    pub fn select(&mut self) {
-        self.parents = evolution::survivors(&self.config, self.generation, &self.ranks);
-        self.stage = Stage::Selected;
-    }
-    pub fn reproduce(&mut self) -> Result<()> {
-        let cfg = self.pending.as_ref().unwrap_or(&self.config);
-        let next = evolution::reproduce(&self.population, cfg, self.generation, &self.parents)?;
-        self.parent_scores = self
-            .parents
-            .iter()
-            .flat_map(|&parent| [self.scores[parent]; 2])
-            .collect();
-        self.population = next;
-        if let Some(c) = self.pending.take() {
-            self.config = c;
-        }
-        self.generation += 1;
-        self.stage = Stage::Ready;
-        self.evaluated = 0;
-        self.scores.fill(f32::NAN);
-        self.ranks.clear();
-        self.parents.clear();
-        self.evaluation_seconds = 0.0;
-        Ok(())
-    }
     pub fn update_config(&mut self, cfg: Config) -> Result<()> {
         cfg.validate()?;
         ensure!(
@@ -1657,13 +1632,16 @@ impl Experiment {
         Ok(())
     }
 }
-const MAGIC: &[u8; 8] = b"EVORUST4";
+// V5 drops the unused obstacle slot from the binary configuration, so V4 files
+// no longer decode and are rejected cleanly instead of failing mid-stream.
+const MAGIC: &[u8; 8] = b"EVORUST5";
 const V3_MAGIC: &[u8; 8] = b"EVORUST3";
 const V2_MAGIC: &[u8; 8] = b"EVORUST2";
 const LEGACY_MAGIC: &[u8; 8] = b"EVORUST1";
 
 /// Search state omitted by Experiment's original serialized representation.
-/// V4 appends it inside the same checksummed stream, preserving V3 decoding.
+/// V4 and later append it inside the same checksummed stream, preserving V3
+/// decoding for the legacy conversion.
 #[derive(Serialize, Deserialize)]
 struct CheckpointResume {
     island_progress: Vec<(f32, u32)>,

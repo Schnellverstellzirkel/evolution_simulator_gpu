@@ -4,6 +4,7 @@ use evolution_simulator::{
     evolution::{self, Bone, Creature, Muscle, NodeGene},
     gpu::Gpu,
     physics::{self, Node},
+    qd::{Elite, Emitter, QdArchive},
     storage::{self, Experiment, Stage},
 };
 use std::path::PathBuf;
@@ -61,24 +62,57 @@ fn stress_creature() -> Creature {
 }
 
 #[test]
-fn seed_is_repeatable_and_selection_conserves_population() {
+fn seed_is_repeatable_and_breeding_conserves_population() {
     let cfg = config();
     let a = evolution::create(&cfg).unwrap();
     let b = evolution::create(&cfg).unwrap();
     assert_eq!(a.nodes, b.nodes);
     assert_eq!(a.bones, b.bones);
     assert_eq!(a.muscles, b.muscles);
+
     let scores: Vec<_> = (0..cfg.population).map(|i| i as f32).collect();
-    let ranks = evolution::ranking(&scores);
-    let parents = evolution::survivors(&cfg, 0, &ranks);
-    assert_eq!(parents.len(), cfg.population / 2);
-    let next = evolution::reproduce(&a, &cfg, 0, &parents).unwrap();
-    next.validate(&cfg).unwrap();
-    assert_eq!(next.genomes.len(), cfg.population);
-    let again = evolution::reproduce(&a, &cfg, 0, &parents).unwrap();
-    assert_eq!(next.nodes, again.nodes);
-    assert_eq!(next.bones, again.bones);
-    assert_eq!(next.muscles, again.muscles);
+    let mut first = Experiment::new(cfg.clone()).unwrap();
+    let mut second = Experiment::new(cfg.clone()).unwrap();
+    first.scores.clone_from(&scores);
+    second.scores.clone_from(&scores);
+    first.evaluated = cfg.population;
+    second.evaluated = cfg.population;
+    first.archive_batch().unwrap();
+    second.archive_batch().unwrap();
+    first.prepare_next_batch().unwrap();
+    second.prepare_next_batch().unwrap();
+    assert_eq!(first.population.genomes.len(), cfg.population);
+    first.population.validate(&cfg).unwrap();
+    assert_eq!(first.population.nodes, second.population.nodes);
+    assert_eq!(first.population.bones, second.population.bones);
+    assert_eq!(first.population.muscles, second.population.muscles);
+}
+fn assert_genomes_close(a: &Creature, b: &Creature) {
+    let close = |x: f32, y: f32| (x - y).abs() <= 1e-4;
+    assert_eq!(a.nodes.len(), b.nodes.len());
+    for (x, y) in a.nodes.iter().zip(&b.nodes) {
+        assert!((x.x - y.x).abs() <= 1e-4 && (x.y - y.y).abs() <= 1e-4);
+        assert!(close(x.diameter, y.diameter) && close(x.friction, y.friction));
+    }
+    assert_eq!(a.bones.len(), b.bones.len());
+    for (x, y) in a.bones.iter().zip(&b.bones) {
+        assert_eq!((x.a, x.b), (y.a, y.b));
+        assert!(close(x.rest_length, y.rest_length));
+        assert!(close(x.min_angle, y.min_angle) && close(x.max_angle, y.max_angle));
+        assert!(close(x.organ_mass, y.organ_mass) && close(x.organ_at, y.organ_at));
+    }
+    assert_eq!(a.muscles.len(), b.muscles.len());
+    for (x, y) in a.muscles.iter().zip(&b.muscles) {
+        assert_eq!(
+            (x.bone_a, x.bone_b, x.sensor),
+            (y.bone_a, y.bone_b, y.sensor)
+        );
+        assert!(close(x.anchor_a, y.anchor_a) && close(x.anchor_b, y.anchor_b));
+        assert!(close(x.short, y.short) && close(x.long, y.long));
+        assert!(close(x.period, y.period) && close(x.phase, y.phase));
+        assert!(close(x.duty, y.duty) && close(x.stiffness, y.stiffness));
+        assert!(close(x.reset, y.reset));
+    }
 }
 #[test]
 fn zero_mutation_copies_genetics() {
@@ -86,15 +120,32 @@ fn zero_mutation_copies_genetics() {
         mutation: 0.,
         ..config()
     };
-    let p = evolution::create(&cfg).unwrap();
-    let parents: Vec<_> = (0..cfg.population / 2).collect();
-    let next = evolution::reproduce(&p, &cfg, 0, &parents).unwrap();
-    for i in 0..cfg.population {
-        let a = p.creature(parents[i / 2]);
-        let b = next.creature(i);
-        assert_eq!(a.nodes, b.nodes);
-        assert_eq!(a.bones, b.bones);
-        assert_eq!(a.muscles, b.muscles);
+    let population = evolution::create(&cfg).unwrap();
+    let parent = population.creature(0);
+    let mut archive = QdArchive::default();
+    archive.entries.push(Elite {
+        niche: Default::default(),
+        descriptor: Default::default(),
+        creature: parent.clone(),
+        fitness: 1.0,
+        emitter: Emitter::Cma,
+        improved_generation: 0,
+        protected_until: 0,
+        visits: 0,
+        topology: evolution_simulator::qd::topology_of_population(&population, 0),
+    });
+    let plans: Vec<_> = (0..8)
+        .map(|_| evolution::CandidatePlan {
+            emitter: Emitter::Cma,
+            parent: Some(0),
+            cma: None,
+            mate: None,
+        })
+        .collect();
+    let slots: Vec<usize> = (0..8).collect();
+    let children = evolution::emit_offspring(&[archive], &[], &plans, &slots, &cfg, 0, 0);
+    for child in &children {
+        assert_genomes_close(child, &parent);
     }
 }
 #[test]
@@ -106,11 +157,15 @@ fn mutation_keeps_valid_graphs_at_limits() {
         mutation: 5.,
         ..config()
     };
-    let mut p = evolution::create(&cfg).unwrap();
+    let mut e = Experiment::new(cfg.clone()).unwrap();
     for generation in 0..80 {
-        let parents: Vec<_> = (0..cfg.population / 2).collect();
-        p = evolution::reproduce(&p, &cfg, generation, &parents).unwrap();
-        p.validate(&cfg).unwrap();
+        for (i, score) in e.scores.iter_mut().enumerate() {
+            *score = generation as f32 * 0.1 + i as f32;
+        }
+        e.evaluated = cfg.population;
+        e.archive_batch().unwrap();
+        e.prepare_next_batch().unwrap();
+        e.population.validate(&cfg).unwrap();
     }
 }
 #[test]
@@ -333,12 +388,10 @@ fn partial_checkpoint_resumes_identically() {
     assert_eq!(e.scores, loaded.scores);
     e.evaluated = e.config.population;
     loaded.evaluated = loaded.config.population;
-    e.rank();
-    loaded.rank();
-    e.select();
-    loaded.select();
-    e.reproduce().unwrap();
-    loaded.reproduce().unwrap();
+    e.archive_batch().unwrap();
+    loaded.archive_batch().unwrap();
+    e.prepare_next_batch().unwrap();
+    loaded.prepare_next_batch().unwrap();
     assert_eq!(e.population.nodes, loaded.population.nodes);
     assert_eq!(e.population.muscles, loaded.population.muscles);
     // A stale/incomplete temporary write cannot corrupt the committed checkpoint.
