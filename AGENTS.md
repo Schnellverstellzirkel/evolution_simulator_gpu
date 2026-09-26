@@ -118,7 +118,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 
 ### Checkpoints and storage
 
-61. Autosave rotation: keep autosaves of the few most recent experiments and delete stale `.evo.tmp` files. 76 autosaves filled 17 GB before.
+61. Done: autosave rotation keeps the three newest `seed-*-auto.evo` files and removes stale `.evo.tmp` files (`storage::rotate_autosaves`).
 62. Shrink checkpoints (1 to 1.5 GB at 3M creatures): store the population compactly and drop data that can be regenerated.
 63. Write autosaves off the worker thread so evolution does not stall.
 64. Show disk use of `runs/` in the UI.
