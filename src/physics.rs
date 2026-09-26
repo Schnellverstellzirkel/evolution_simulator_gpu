@@ -704,10 +704,17 @@ pub const TERRAIN_WAVES: [(f32, f32, f32); 2] = [(1.1, 0.65, 0.0), (0.43, 0.35, 
 /// Ground height and slope at `x` for bump height `amplitude`. Each bump is
 /// 16 u^2 (1 - u)^2 over one wavelength: smooth, cheap, and free of trig.
 pub fn terrain(x: f32, amplitude: f32) -> (f32, f32) {
+    terrain_phase(x, amplitude, 0.0)
+}
+/// Ground height and slope of the bump trains with a phase in wave turns:
+/// `phase` shifts both trains by the same fraction of their wavelength. The
+/// earthquake effect passes a per-creature phase here; a 16-bit fraction is
+/// exactly representable, so both engines apply it bit for bit.
+pub fn terrain_phase(x: f32, amplitude: f32, phase: f32) -> (f32, f32) {
     let mut height = 0.0;
     let mut slope = 0.0;
     for (wavelength, weight, offset) in TERRAIN_WAVES {
-        let t = x / wavelength + offset;
+        let t = x / wavelength + offset + phase;
         let u = t - t.floor();
         let w = u * (1.0 - u);
         height += weight * 16.0 * w * w;
@@ -761,14 +768,88 @@ pub fn gaps(x: f32, width: f32) -> (f32, f32) {
     };
     (-GAP_DEPTH * factor, -GAP_DEPTH * factor_slope)
 }
+/// Distance (m) between the centers of two raised hurdles.
+pub const HURDLE_SPACING: f32 = 3.0;
+/// Width (m) of each hurdle's flat top.
+pub const HURDLE_TOP: f32 = 1.2;
+/// Horizontal run (m) of each hurdle's ramp. Ramps are short and steep, not
+/// vertical steps, so a node never teleports when the sampled floor jumps.
+pub const HURDLE_RUN: f32 = 0.2;
+/// Ground height (m, positive) and slope of the periodic raised steps for step
+/// height `height`; both are 0 on clear ground. Each step is a ramp up, a flat
+/// top of `HURDLE_TOP` meters, and a ramp down, centered at odd multiples of
+/// half the spacing, so x = 0 starts on clear ground. Every engine and the UI
+/// raise the same steps.
+pub fn hurdles(x: f32, height: f32) -> (f32, f32) {
+    if height <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let spacing = HURDLE_SPACING;
+    let r = x - (x / spacing).floor() * spacing;
+    let center = 0.5 * spacing;
+    let distance = (r - center).abs();
+    let half = 0.5 * HURDLE_TOP;
+    let run = HURDLE_RUN;
+    let factor = if distance <= half {
+        1.0
+    } else if distance >= half + run {
+        0.0
+    } else {
+        (half + run - distance) / run
+    };
+    let factor_slope = if distance > half && distance < half + run {
+        if r < center { 1.0 / run } else { -1.0 / run }
+    } else {
+        0.0
+    };
+    (height * factor, height * factor_slope)
+}
+/// Deterministic earthquake stream of a creature id. Both engines derive a
+/// creature's terrain from this same unsigned word, so a replay and both
+/// engines give one creature one ground. Only the low 32 bits of the id are
+/// mixed; the GPU receives the mixed word directly.
+#[inline]
+pub fn quake_hash(id: u64) -> u32 {
+    let mut x = id as u32;
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^= x >> 16;
+    x
+}
+/// Phase (wave turns, 0 to 1) of a creature's earthquake bumps, from its
+/// hash. The exact 16-bit fraction keeps CPU and GPU bit for bit equal.
+pub fn quake_phase(hash: u32) -> f32 {
+    (hash & 0xffff) as f32 * (1.0 / 65536.0)
+}
+/// Amplitude multiplier of a creature's earthquake bumps, 0.6 to 1.4, from
+/// its hash. Applied to `Config::quake` on top of the shared roughness.
+pub fn quake_scale(hash: u32) -> f32 {
+    0.6 + ((hash >> 16) & 0xffff) as f32 * (0.8 / 65536.0)
+}
 /// Ground height and slope at `x` for bump height `amplitude`, linear `tilt`,
-/// and periodic pits of opening `width`. This is the one place the effects
-/// join the ground; `width` is 0 when the gaps effect is calm or the ground
+/// periodic pits of opening `width`, and raised steps of height `hurdle`.
+/// `phase` is the earthquake phase in wave turns applied to the bumps alone.
+/// This is the one place the effects join the ground; `width` and `hurdle`
+/// are 0 when the gaps or hurdles effects are calm, the phase is 0 when the
+/// quake is still, and the tilt, pits, and steps are zeroed when the ground
 /// is disabled.
-pub fn ground(x: f32, amplitude: f32, tilt: f32, width: f32) -> (f32, f32) {
-    let (height, slope) = terrain_with_slope(x, amplitude, tilt);
+pub fn ground(
+    x: f32,
+    amplitude: f32,
+    tilt: f32,
+    width: f32,
+    hurdle: f32,
+    phase: f32,
+) -> (f32, f32) {
+    let (bump_height, bump_slope) = terrain_phase(x, amplitude, phase);
+    let (mut height, mut slope) = (bump_height + tilt * x, bump_slope + tilt);
     let (pit_height, pit_slope) = gaps(x, width);
-    (height + pit_height, slope + pit_slope)
+    height += pit_height;
+    slope += pit_slope;
+    let (step_height, step_slope) = hurdles(x, hurdle);
+    (height + step_height, slope + step_slope)
 }
 /// Effective ground push multiplier while a node is sunk in mud. The push a
 /// contacting node receives counts this much higher at `MUD_FULL_DEPTH` of
@@ -928,18 +1009,91 @@ mod tests {
     fn ground_slope_matches_its_height_with_pits() {
         for i in 0..400 {
             let x = i as f32 * 0.037 - 4.0;
-            let (_, slope) = ground(x, 0.05, 0.15, 1.0);
+            let (_, slope) = ground(x, 0.05, 0.15, 1.0, 0.0, 0.0);
             let h = 1e-3;
-            let numeric =
-                (ground(x + h, 0.05, 0.15, 1.0).0 - ground(x - h, 0.05, 0.15, 1.0).0) / (2.0 * h);
+            let numeric = (ground(x + h, 0.05, 0.15, 1.0, 0.0, 0.0).0
+                - ground(x - h, 0.05, 0.15, 1.0, 0.0, 0.0).0)
+                / (2.0 * h);
             assert!((slope - numeric).abs() < 1e-2, "{x}: {slope} vs {numeric}");
         }
-        // With no gaps the combined ground is exactly terrain plus slope.
+        // With no gaps, hurdles, or phase the combined ground is exactly
+        // terrain plus slope.
         for x in [0.0, 0.7, -2.4, 13.1] {
             assert_eq!(
-                ground(x, 0.05, 0.15, 0.0),
+                ground(x, 0.05, 0.15, 0.0, 0.0, 0.0),
                 terrain_with_slope(x, 0.05, 0.15)
             );
+        }
+    }
+
+    #[test]
+    fn hurdles_rise_and_stay_continuous() {
+        let height = 0.3;
+        // The start is clear ground: a trial never begins on a step.
+        assert_eq!(hurdles(0.0, height), (0.0, 0.0));
+        assert_eq!(hurdles(1.5, 0.0), (0.0, 0.0));
+        // The flat top holds the full height with no slope.
+        let top = 0.5 * HURDLE_SPACING;
+        assert_eq!(hurdles(top, height), (height, 0.0));
+        // The profile is continuous across both ramps, and the height never
+        // leaves [0, height].
+        let step = 0.0005;
+        let mut previous = hurdles(-HURDLE_SPACING, height).0;
+        let mut x = -HURDLE_SPACING + step;
+        while x <= 2.0 * HURDLE_SPACING {
+            let current = hurdles(x, height).0;
+            assert!(
+                (current - previous).abs() < 0.5,
+                "hurdle profile jumps at {x}: {previous} to {current}"
+            );
+            assert!((0.0..=height + 1e-6).contains(&current));
+            previous = current;
+            x += step;
+        }
+        // A taller level raises the same profile proportionally.
+        for x in [0.2, 0.8, 1.5, 2.6] {
+            let (low, low_slope) = hurdles(x, 0.1);
+            let (high, high_slope) = hurdles(x, 0.2);
+            assert!((high - 2.0 * low).abs() < 1e-6);
+            assert!((high_slope - 2.0 * low_slope).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn quake_streams_are_deterministic_and_spread() {
+        assert_eq!(quake_hash(47300), quake_hash(47300));
+        let mut phases = std::collections::HashSet::new();
+        let mut scales = std::collections::HashSet::new();
+        for id in 1..=1000u64 {
+            let hash = quake_hash(id);
+            let (phase, scale) = (quake_phase(hash), quake_scale(hash));
+            assert!((0.0..1.0).contains(&phase), "phase {phase} for id {id}");
+            assert!((0.6..=1.4).contains(&scale), "scale {scale} for id {id}");
+            phases.insert(phase.to_bits());
+            scales.insert(scale.to_bits());
+        }
+        assert!(
+            phases.len() > 900,
+            "the phase must vary across creature ids: {} distinct",
+            phases.len()
+        );
+        assert!(
+            scales.len() > 900,
+            "the amplitude must vary across creature ids: {} distinct",
+            scales.len()
+        );
+    }
+
+    #[test]
+    fn ground_slope_matches_its_height_with_hurdles() {
+        for i in 0..400 {
+            let x = i as f32 * 0.0371 - 4.0;
+            let (_, slope) = ground(x, 0.03, 0.05, 0.0, 0.25, 0.37);
+            let h = 1e-3;
+            let numeric = (ground(x + h, 0.03, 0.05, 0.0, 0.25, 0.37).0
+                - ground(x - h, 0.03, 0.05, 0.0, 0.25, 0.37).0)
+                / (2.0 * h);
+            assert!((slope - numeric).abs() < 1e-2, "{x}: {slope} vs {numeric}");
         }
     }
 

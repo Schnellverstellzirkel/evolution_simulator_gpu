@@ -33,6 +33,14 @@ pub struct Config {
     /// into the ground with a fixed depth and a spacing that grows with the
     /// width.
     pub gaps: f32,
+    /// Raised step height (m); 0.0 is clear ground. Periodic steps with a flat
+    /// top and ramp walls rise to this height, spaced `physics::HURDLE_SPACING`
+    /// apart.
+    pub hurdles: f32,
+    /// Earthquake base bump height (m); 0.0 is still ground. Every creature
+    /// meets a different bump phase and amplitude, derived deterministically
+    /// from its id, so a gait cannot memorize one bump pattern.
+    pub quake: f32,
     pub min_size: f32,
     pub max_size: f32,
     pub min_friction: f32,
@@ -66,6 +74,8 @@ impl Default for Config {
             wind: 0.0,
             mud: 0.0,
             gaps: 0.0,
+            hurdles: 0.0,
+            quake: 0.0,
             min_size: 0.06,
             max_size: 0.12,
             min_friction: 0.65,
@@ -100,6 +110,8 @@ struct HumanConfig {
     wind: f32,
     mud: f32,
     gaps: f32,
+    hurdles: f32,
+    quake: f32,
     min_size: f32,
     max_size: f32,
     min_friction: f32,
@@ -132,6 +144,8 @@ impl Default for HumanConfig {
             wind: c.wind,
             mud: c.mud,
             gaps: c.gaps,
+            hurdles: c.hurdles,
+            quake: c.quake,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -166,6 +180,8 @@ impl From<HumanConfig> for Config {
             wind: c.wind,
             mud: c.mud,
             gaps: c.gaps,
+            hurdles: c.hurdles,
+            quake: c.quake,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -199,6 +215,8 @@ impl From<&Config> for HumanConfig {
             wind: c.wind,
             mud: c.mud,
             gaps: c.gaps,
+            hurdles: c.hurdles,
+            quake: c.quake,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -231,6 +249,8 @@ struct BinaryConfig {
     wind: f32,
     mud: f32,
     gaps: f32,
+    hurdles: f32,
+    quake: f32,
     min_size: f32,
     max_size: f32,
     min_friction: f32,
@@ -262,6 +282,8 @@ impl From<&Config> for BinaryConfig {
             wind: c.wind,
             mud: c.mud,
             gaps: c.gaps,
+            hurdles: c.hurdles,
+            quake: c.quake,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -295,6 +317,8 @@ impl From<BinaryConfig> for Config {
             wind: c.wind,
             mud: c.mud,
             gaps: c.gaps,
+            hurdles: c.hurdles,
+            quake: c.quake,
             ground_friction: c.ground_friction,
             min_size: c.min_size,
             max_size: c.max_size,
@@ -389,6 +413,14 @@ impl Config {
         ensure!(
             self.gaps.is_finite() && (0.0..=3.0).contains(&self.gaps),
             "Gap width must be 0–3 m"
+        );
+        ensure!(
+            self.hurdles.is_finite() && (0.0..=1.0).contains(&self.hurdles),
+            "Hurdle height must be 0–1 m"
+        );
+        ensure!(
+            self.quake.is_finite() && (0.0..=1.0).contains(&self.quake),
+            "Quake bump height must be 0–1 m"
         );
         ensure!(
             self.min_size.is_finite()

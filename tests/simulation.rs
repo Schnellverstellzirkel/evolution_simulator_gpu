@@ -559,6 +559,40 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
             cpu_result.fitness
         );
     }
+    // Hurdles and the earthquake reach the kernel through the uniform buffer
+    // and the packed id seed. Both engines must raise the same steps and give
+    // each creature the same phase and amplitude from its own id.
+    let shaking_steps = Config {
+        duration: 0.1,
+        hurdles: 0.2,
+        quake: 0.25,
+        ..cfg.clone()
+    };
+    let gpu_metrics = gpu
+        .evaluate_with_metrics(&pop, &indices, &shaking_steps)
+        .unwrap();
+    let cpu = evolution_simulator::cpu_engine::evaluate(&pop, &shaking_steps);
+    for (i, (gpu_result, cpu_result)) in gpu_metrics.iter().zip(&cpu).enumerate() {
+        assert!(
+            (gpu_result.fitness - cpu_result.fitness).abs() < 0.05,
+            "hurdles and quake score {i}: GPU {}, CPU engine {}",
+            gpu_result.fitness,
+            cpu_result.fitness
+        );
+    }
+    // The quake alone must not depend on the batch: a creature evaluated in a
+    // full group meets the same ground as when it runs alone through replay.
+    let alone = Config {
+        population: 1,
+        ..shaking_steps.clone()
+    };
+    let mut single_pop = evolution::Population::default();
+    single_pop.push(pop.creature(0));
+    let single = evolution_simulator::cpu_engine::evaluate(&single_pop, &alone)[0].fitness;
+    assert_eq!(
+        single, cpu[0].fitness,
+        "the same creature must meet the same quake ground in any batch"
+    );
     let cfg = Config {
         population: 8,
         max_nodes: 64,
@@ -1500,6 +1534,143 @@ fn gaps_stop_a_walker_where_solid_ground_lets_it_run() {
         },
     );
     assert_eq!(free, free_gaps, "gaps must not act while the ground is off");
+}
+
+#[test]
+fn hurdles_reduce_distance_and_spare_a_groundless_run() {
+    // The same walker on clear ground and over raised steps. Every step forces
+    // a climb or a leap, so taller hurdles must cost real distance.
+    let base = Config {
+        population: 16,
+        duration: 5.0,
+        ..config()
+    };
+    let mut pop = evolution::Population::default();
+    for i in 0..16 {
+        let mut walker = energy_dependent_walker();
+        walker.id = i as u64;
+        pop.push(walker);
+    }
+    let clear = mean_distance(&pop, &base);
+    let low = mean_distance(
+        &pop,
+        &Config {
+            hurdles: 0.08,
+            ..base.clone()
+        },
+    );
+    let high = mean_distance(
+        &pop,
+        &Config {
+            hurdles: 0.20,
+            ..base.clone()
+        },
+    );
+    let walls = mean_distance(
+        &pop,
+        &Config {
+            hurdles: 0.35,
+            ..base.clone()
+        },
+    );
+    eprintln!("mean distance: clear {clear} m, low {low} m, high {high} m, walls {walls} m");
+    assert!(
+        low < clear - 0.5,
+        "low hurdles must cost distance: {low} m vs {clear} m"
+    );
+    assert!(
+        high < clear - 0.5,
+        "high hurdles must cost distance: {high} m vs {clear} m"
+    );
+    assert!(
+        walls < clear - 0.5,
+        "walls must cost distance: {walls} m vs {clear} m"
+    );
+    // With the ground off the steps cannot act at all.
+    let free = mean_distance(
+        &pop,
+        &Config {
+            ground: false,
+            ..base.clone()
+        },
+    );
+    let free_walls = mean_distance(
+        &pop,
+        &Config {
+            ground: false,
+            hurdles: 0.35,
+            ..base.clone()
+        },
+    );
+    assert_eq!(
+        free, free_walls,
+        "hurdles must not act while the ground is off"
+    );
+}
+
+#[test]
+fn earthquake_gives_each_creature_its_own_repeatable_ground() {
+    // The same walker under still ground and in the strongest quake. Every
+    // creature meets its own bump phase and height from its id, so distances
+    // change, and the same id always meets the same ground twice.
+    let base = Config {
+        population: 16,
+        duration: 5.0,
+        ..config()
+    };
+    let quake = Config {
+        quake: 0.25,
+        ..base.clone()
+    };
+    let mut pop = evolution::Population::default();
+    for i in 0..16u64 {
+        let mut walker = energy_dependent_walker();
+        walker.id = i;
+        pop.push(walker);
+    }
+    let calm = evolution_simulator::cpu_engine::evaluate(&pop, &base);
+    let first = evolution_simulator::cpu_engine::evaluate(&pop, &quake);
+    let second = evolution_simulator::cpu_engine::evaluate(&pop, &quake);
+    let changed = calm
+        .iter()
+        .zip(&first)
+        .filter(|(a, b)| a.fitness != b.fitness)
+        .count();
+    eprintln!(
+        "quake: {changed}/16 distances changed; calm mean {:.3} m, quake mean {:.3} m",
+        calm.iter().map(|r| r.fitness).sum::<f32>() / 16.0,
+        first.iter().map(|r| r.fitness).sum::<f32>() / 16.0
+    );
+    assert!(
+        changed >= 8,
+        "the quake must move most walkers: {changed}/16 changed"
+    );
+    for (a, b) in first.iter().zip(&second) {
+        assert_eq!(
+            a.fitness, b.fitness,
+            "the same creature id must meet the same ground twice"
+        );
+    }
+    // The replay of one creature must score exactly what its batch trial
+    // scored, so the recorded ground and the scored ground agree.
+    let creature = pop.creature(0);
+    let (_, replay) = evolution_simulator::cpu_engine::replay(&creature, &quake);
+    assert_eq!(replay.fitness, first[0].fitness);
+    // Two different ids must not be forced onto one pattern.
+    let scores: Vec<f32> = [7u64, 8]
+        .into_iter()
+        .map(|id| {
+            let mut one = evolution::Population::default();
+            let mut walker = energy_dependent_walker();
+            walker.id = id;
+            one.push(walker);
+            evolution_simulator::cpu_engine::evaluate(&one, &quake)[0].fitness
+        })
+        .collect();
+    assert_ne!(
+        scores[0], scores[1],
+        "different creature ids must meet different ground"
+    );
 }
 
 /// The four-node sled evolution built while friction could push the body in

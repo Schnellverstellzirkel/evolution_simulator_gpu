@@ -1733,9 +1733,10 @@ impl Experiment {
         Ok(())
     }
 }
-// V5 drops the unused obstacle slot from the binary configuration, so V4 files
-// no longer decode and are rejected cleanly instead of failing mid-stream.
-const MAGIC: &[u8; 8] = b"EVORUST5";
+// V5 dropped the unused obstacle slot and V6 added the environment-effect
+// multipliers to the binary configuration. Older files cannot decode the new
+// layout and are rejected cleanly instead of failing mid-stream.
+const MAGIC: &[u8; 8] = b"EVORUST6";
 const V3_MAGIC: &[u8; 8] = b"EVORUST3";
 const V2_MAGIC: &[u8; 8] = b"EVORUST2";
 const LEGACY_MAGIC: &[u8; 8] = b"EVORUST1";
@@ -1761,6 +1762,8 @@ fn fitness_context_changed(old: &Config, new: &Config) -> bool {
         || old.wind != new.wind
         || old.mud != new.mud
         || old.gaps != new.gaps
+        || old.hurdles != new.hurdles
+        || old.quake != new.quake
 }
 /// Autosaves kept in `dir`: the newest `keep` `seed-*-auto.evo` files stay,
 /// older ones are deleted, and so are `.evo.tmp` files that an interrupted

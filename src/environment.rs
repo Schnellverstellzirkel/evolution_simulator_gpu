@@ -55,6 +55,12 @@ pub const MUD: [f32; 4] = [0.0, 0.02, 0.05, 0.10];
 /// Pit opening width (m) at each level, from solid ground to chasms. The pit
 /// spacing grows with the width (`physics::gap_spacing`).
 pub const GAPS: [f32; 4] = [0.0, 0.35, 0.8, 1.5];
+/// Hurdle height (m) at each level, from clear ground to steps tall enough
+/// that climbing or leaping over them is the gait's main job.
+pub const HURDLES: [f32; 4] = [0.0, 0.08, 0.20, 0.35];
+/// Earthquake base bump height (m) at each level. Each creature jitters the
+/// phase and height with its own deterministic stream.
+pub const QUAKE: [f32; 4] = [0.0, 0.05, 0.12, 0.25];
 
 fn nearest(table: &[f32], value: f32) -> usize {
     table
@@ -64,7 +70,7 @@ fn nearest(table: &[f32], value: f32) -> usize {
         .map_or(0, |(i, _)| i)
 }
 
-pub const EFFECTS: [Effect; 10] = [
+pub const EFFECTS: [Effect; 12] = [
     Effect {
         name: "Ground",
         levels: &[
@@ -171,6 +177,26 @@ pub const EFFECTS: [Effect; 10] = [
         get: |c| nearest(&GAPS, c.gaps),
         set: |c, level| c.gaps = GAPS[level],
     },
+    Effect {
+        name: "Hurdles",
+        levels: &["Clear", "Low", "High", "Walls"],
+        calm: 0,
+        raise: "Raise hurdles",
+        lower: "Lower hurdles",
+        why: "Periodic steps break a flat shuffle. A gait must lift over every step or leap it whole, so climbing charges energy the smooth world never asked for.",
+        get: |c| nearest(&HURDLES, c.hurdles),
+        set: |c, level| c.hurdles = HURDLES[level],
+    },
+    Effect {
+        name: "Earthquake",
+        levels: &["Still", "Tremors", "Quakes", "Big one"],
+        calm: 0,
+        raise: "Shake",
+        lower: "Calm",
+        why: "Every creature meets bumps with its own phase and height, so a gait cannot memorize one pattern. Robust gaits that handle any ground come out ahead.",
+        get: |c| nearest(&QUAKE, c.quake),
+        set: |c, level| c.quake = QUAKE[level],
+    },
 ];
 
 #[cfg(test)]
@@ -256,6 +282,28 @@ mod tests {
         let mut cfg = Config::default();
         gaps.set_level(&mut cfg, gaps.levels.len() - 1);
         assert!(cfg.gaps > 0.0, "chasms must open pits");
+    }
+
+    #[test]
+    fn hurdles_rise_and_quake_roughens_monotonically() {
+        assert!(
+            HURDLES.windows(2).all(|pair| pair[1] > pair[0]),
+            "hurdle levels must rise from clear ground"
+        );
+        assert!(
+            QUAKE.windows(2).all(|pair| pair[1] > pair[0]),
+            "quake levels must roughen from still ground"
+        );
+        assert_eq!(HURDLES[0], 0.0);
+        assert_eq!(QUAKE[0], 0.0);
+        let hurdles = EFFECTS.iter().find(|e| e.name == "Hurdles").unwrap();
+        let quake = EFFECTS.iter().find(|e| e.name == "Earthquake").unwrap();
+        let mut cfg = Config::default();
+        hurdles.set_level(&mut cfg, hurdles.levels.len() - 1);
+        assert!(cfg.hurdles > 0.0, "the tallest level must raise steps");
+        let mut cfg = Config::default();
+        quake.set_level(&mut cfg, quake.levels.len() - 1);
+        assert!(cfg.quake > 0.0, "the strongest level must shake the ground");
     }
 
     #[test]

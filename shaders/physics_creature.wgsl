@@ -55,6 +55,12 @@ struct Params {
     // Pit opening width (m); 0.0 is solid ground. Gaps are zeroed when the
     // ground is disabled.
     gaps: f32,
+    // Raised step height (m); 0.0 is clear ground. Periodic steps with a flat
+    // top and ramp walls rise to this height (physics::HURDLE_*).
+    hurdles: f32,
+    // Earthquake base bump height (m); each creature scales it by the jitter
+    // from its id hash, the last word of creature_info (physics::quake_*).
+    quake: f32,
 }
 struct Result {
     fitness: f32,
@@ -135,6 +141,10 @@ const MUD_DRAG: f32 = 2.0;
 const MUD_FULL_DEPTH: f32 = 0.1;
 const GAP_DEPTH: f32 = 2.0;
 const GAP_RUN: f32 = 0.15;
+// Hurdle geometry (physics::HURDLE_*).
+const HURDLE_SPACING: f32 = 3.0;
+const HURDLE_TOP: f32 = 1.2;
+const HURDLE_RUN: f32 = 0.2;
 const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
 const MAX_BONE_TURN_COS: f32 = TURNCOS;
 const MAX_BONE_TURN_TAN: f32 = TURNTAN;
@@ -150,21 +160,31 @@ const LIFT_CLEARANCE: f32 = 0.01;
 const JOINT_BREAK_COS: f32 = JOINTBREAKCOS;
 const JOINT_BREAK_SIN: f32 = JOINTBREAKSIN;
 
+// Earthquake per-creature bump phase (wave turns) and amplitude scale, from
+// the seed packed in creature_info.w. physics::quake_phase and
+// physics::quake_scale compute the same values from the same word.
+fn quake_phase(seed: u32) -> f32 {
+    return f32(seed & 0xffffu) * (1.0 / 65536.0);
+}
+fn quake_scale(seed: u32) -> f32 {
+    return 0.6 + f32((seed >> 16u) & 0xffffu) * (0.8 / 65536.0);
+}
 // Height and slope of the rough ground; mirrors physics::terrain plus the
-// linear tilt of physics::terrain_with_slope and the periodic pits of
-// physics::gaps.
-fn terrain(x: f32) -> vec2f {
-    let t0 = x * (1.0 / 1.1);
+// per-creature earthquake phase, the linear tilt of
+// physics::terrain_with_slope, the periodic pits of physics::gaps, and the
+// raised steps of physics::hurdles.
+fn terrain(x: f32, phase: f32, amplitude: f32) -> vec2f {
+    let t0 = x * (1.0 / 1.1) + phase;
     let u0 = t0 - floor(t0);
     let w0 = u0 * (1.0 - u0);
-    let t1 = x * (1.0 / 0.43) + 0.3;
+    let t1 = x * (1.0 / 0.43) + 0.3 + phase;
     let u1 = t1 - floor(t1);
     let w1 = u1 * (1.0 - u1);
     var height = 0.65 * 16.0 * w0 * w0 + 0.35 * 16.0 * w1 * w1;
     var slope = 0.65 * 32.0 * w0 * (1.0 - 2.0 * u0) * (1.0 / 1.1)
         + 0.35 * 32.0 * w1 * (1.0 - 2.0 * u1) * (1.0 / 0.43);
-    height = p.terrain * height + p.slope * x;
-    slope = p.terrain * slope + p.slope;
+    height = amplitude * height + p.slope * x;
+    slope = amplitude * slope + p.slope;
     if p.gaps > 0.0 {
         let spacing = 2.0 + 4.0 * p.gaps;
         let center = spacing * 0.5;
@@ -188,6 +208,31 @@ fn terrain(x: f32) -> vec2f {
         height -= GAP_DEPTH * factor;
         if on_ramp {
             slope -= GAP_DEPTH * (side / run);
+        }
+    }
+    if p.hurdles > 0.0 {
+        let spacing = HURDLE_SPACING;
+        let center = spacing * 0.5;
+        let t = x / spacing;
+        let r = x - floor(t) * spacing;
+        let distance = abs(r - center);
+        let half = 0.5 * HURDLE_TOP;
+        let run = HURDLE_RUN;
+        let ramp = clamp((half + run - distance) / run, 0.0, 1.0);
+        var factor = ramp;
+        if distance <= half {
+            factor = 1.0;
+        } else if distance >= half + run {
+            factor = 0.0;
+        }
+        let on_ramp = distance > half && distance < half + run;
+        var side = -1.0;
+        if r < center {
+            side = 1.0;
+        }
+        height += p.hurdles * factor;
+        if on_ramp {
+            slope += p.hurdles * (side / run);
         }
     }
     return vec2f(height, slope);
@@ -256,6 +301,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
     let body_nodes = info.x;
     let bone_count = info.y;
     let muscle_count = info.z;
+    // Earthquake: each creature's bump phase and height jitter come from its
+    // id hash. With a still world (p.quake <= 0) the phase is zero and the
+    // amplitude is exactly p.terrain.
+    let quake_seed = info.w;
+    let quake_phase_value = select(quake_phase(quake_seed), 0.0, p.quake <= 0.0);
+    let terrain_amplitude = p.terrain + p.quake * quake_scale(quake_seed);
+    let rough = terrain_amplitude > 0.0 || p.slope != 0.0 || p.gaps > 0.0 || p.hurdles > 0.0;
     let tile = tile_info[creature / TILE];
     let tl = creature % TILE;
     let base = creature * MAXN;
@@ -337,8 +389,8 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if j >= body_nodes { break; }
                 let k = j * WG + lane;
                 var floor_y = 0.0;
-                if p.terrain > 0.0 || p.slope != 0.0 || p.gaps > 0.0 {
-                    floor_y = terrain(pos[k].x - shift_x).x;
+                if rough {
+                    floor_y = terrain(pos[k].x - shift_x, quake_phase_value, terrain_amplitude).x;
                 }
                 low = min(low, pos[k].y - radius[j] - floor_y);
             }
@@ -478,10 +530,10 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
                 let k = j * WG + lane;
-                if p.terrain > 0.0 || p.slope != 0.0 || p.gaps > 0.0 {
-                    // Push out along the ground normal, so bumps and pit walls
-                    // resist sliding.
-                    let ground = terrain(pos[k].x);
+                if rough {
+                    // Push out along the ground normal, so bumps, pit walls,
+                    // and hurdle ramps resist sliding.
+                    let ground = terrain(pos[k].x, quake_phase_value, terrain_amplitude);
                     let secant = sqrt(1.0 + ground.y * ground.y);
                     let floor_y = ground.x + radius[j] * secant - p.mud;
                     vel[k].y = floor_y;

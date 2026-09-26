@@ -67,8 +67,10 @@ Environment buttons raise or lower each effect:
 | Wind | Calm, breeze, strong, gale (headwind) |
 | Mud | Dry, damp, muddy, deep mud |
 | Gaps | Solid, narrow, wide, chasms |
+| Hurdles | Clear, low, high, walls |
+| Earthquake | Still, tremors, quakes, big one |
 
-A world change invalidates the old scores and queues archive elites for evaluation under the new conditions. Effects change the physics; the objective remains distance.
+Hurdles raise periodic steps that a gait must climb or leap. The earthquake gives every creature its own bump phase and height, derived from its id, so no gait can memorize one pattern. A world change invalidates the old scores and queues archive elites for evaluation under the new conditions. Effects change the physics; the objective remains distance.
 
 The **Catastrophe** row adds **Meteor strike**, which removes about half the elites at random from each archive, and **Extinction**, which clears the island with the slowest best creature. **Undo** restores saved fossils where their cells are empty or hold slower elites. Fossils are kept in memory for the current session; catastrophe undo history is not saved in checkpoints.
 

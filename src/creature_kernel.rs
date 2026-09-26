@@ -44,6 +44,11 @@ pub struct Params {
     pub mud: f32,
     /// Pit opening width (m); 0.0 is solid ground.
     pub gaps: f32,
+    /// Raised step height (m); 0.0 is clear ground.
+    pub hurdles: f32,
+    /// Earthquake base bump height (m); each creature jitters it from the
+    /// hash of its id, packed in the last word of `creature_info`.
+    pub quake: f32,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -187,7 +192,10 @@ pub fn pack(pop: &Population, indices: &[usize]) -> Result<Vec<LaneBatch>> {
                     g.node_count as u32,
                     g.bone_count as u32,
                     g.muscle_count as u32,
-                    0,
+                    // Earthquake seed: the kernel derives this creature's bump
+                    // phase and height jitter from it, so it never needs to
+                    // compute the hash itself.
+                    crate::physics::quake_hash(g.id),
                 ]);
                 let tile = tiles[j / TILE];
                 let lane = j % TILE;
@@ -334,6 +342,21 @@ pub fn shader_source(
             &format!("const GAP_RUN: f32 = {:?};", crate::physics::GAP_RUN),
         )
         .replace(
+            "const HURDLE_SPACING: f32 = 3.0;",
+            &format!(
+                "const HURDLE_SPACING: f32 = {:?};",
+                crate::physics::HURDLE_SPACING
+            ),
+        )
+        .replace(
+            "const HURDLE_TOP: f32 = 1.2;",
+            &format!("const HURDLE_TOP: f32 = {:?};", crate::physics::HURDLE_TOP),
+        )
+        .replace(
+            "const HURDLE_RUN: f32 = 0.2;",
+            &format!("const HURDLE_RUN: f32 = {:?};", crate::physics::HURDLE_RUN),
+        )
+        .replace(
             "const HEAD_SHAKE_LIMIT: f32 = 78.4;",
             &format!(
                 "const HEAD_SHAKE_LIMIT: f32 = {:?};",
@@ -407,7 +430,30 @@ mod tests {
         assert_eq!(std::mem::offset_of!(Params, wind), 52);
         assert_eq!(std::mem::offset_of!(Params, mud), 56);
         assert_eq!(std::mem::offset_of!(Params, gaps), 60);
-        assert_eq!(std::mem::size_of::<Params>(), 64);
+        assert_eq!(std::mem::offset_of!(Params, hurdles), 64);
+        assert_eq!(std::mem::offset_of!(Params, quake), 68);
+        assert_eq!(std::mem::size_of::<Params>(), 72);
+    }
+
+    #[test]
+    fn packed_info_carries_the_quake_seed() {
+        let cfg = crate::config::Config {
+            population: 16,
+            ..Default::default()
+        };
+        let pop = crate::evolution::create(&cfg).unwrap();
+        let indices: Vec<usize> = (0..pop.genomes.len()).collect();
+        let batches = pack(&pop, &indices).unwrap();
+        for batch in &batches {
+            assert_eq!(batch.info.len(), batch.creatures.len());
+            for (j, &i) in batch.creatures.iter().enumerate() {
+                assert_eq!(
+                    batch.info[j][3],
+                    crate::physics::quake_hash(pop.genomes[i].id),
+                    "packed creature {i} must carry its own quake seed"
+                );
+            }
+        }
     }
 
     #[test]

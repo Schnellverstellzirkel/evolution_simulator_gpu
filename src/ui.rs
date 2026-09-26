@@ -1514,11 +1514,27 @@ impl App {
                 MUTED,
             );
         }
-        let amplitude = crate::physics::terrain_amplitude(cfg.terrain);
+        // The replay's own creature decides the earthquake ground, through
+        // the same id hash the engines use.
+        let quake_hash = self
+            .playback
+            .as_ref()
+            .map_or(0, |p| crate::physics::quake_hash(p.creature.id));
         let slope = if cfg.ground { cfg.slope } else { 0.0 };
         let gaps = if cfg.ground { cfg.gaps } else { 0.0 };
+        let hurdles = if cfg.ground { cfg.hurdles } else { 0.0 };
+        let quake = if cfg.ground { cfg.quake } else { 0.0 };
         let mud = if cfg.ground { cfg.mud } else { 0.0 };
-        if cfg.ground && (amplitude > 0.0 || slope != 0.0 || gaps > 0.0 || mud > 0.0) {
+        let amplitude = crate::physics::terrain_amplitude(cfg.terrain)
+            + quake * crate::physics::quake_scale(quake_hash);
+        let phase = if quake > 0.0 {
+            crate::physics::quake_phase(quake_hash)
+        } else {
+            0.0
+        };
+        if cfg.ground
+            && (amplitude > 0.0 || slope != 0.0 || gaps > 0.0 || hurdles > 0.0 || mud > 0.0)
+        {
             // Sample the ground every few pixels and fill down to the frame.
             // Pits carve notches into the polyline; mud draws its sunk layer
             // `mud` meters below the surface line.
@@ -1529,7 +1545,7 @@ impl App {
             let mut line = Vec::new();
             let mut mud_line = Vec::new();
             while x <= end + step {
-                let height = crate::physics::ground(x, amplitude, slope, gaps).0;
+                let height = crate::physics::ground(x, amplitude, slope, gaps, hurdles, phase).0;
                 line.push(world(x, height));
                 if mud > 0.0 {
                     mud_line.push(world(x, height - mud));

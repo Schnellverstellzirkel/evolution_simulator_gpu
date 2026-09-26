@@ -67,6 +67,10 @@ struct Group {
     radius: Vec<V>,
     mass: Vec<V>,
     friction: Vec<V>,
+    /// Per-lane earthquake bump phase (wave turns) and amplitude jitter,
+    /// derived from each creature's id in `build`.
+    quake_phase: V,
+    quake_scale: V,
     rest: Vec<V>,
     /// Joint reference node of each bone (the same across a body plan).
     joint_reference: Vec<Option<usize>>,
@@ -127,14 +131,16 @@ fn muscle_length(m: &MuscleF, time: F, exact: bool) -> F {
 }
 
 /// Height and slope of the rough ground across the lanes; mirrors
-/// `physics::terrain` plus the linear tilt of `physics::terrain_with_slope`
-/// and the periodic pits of `physics::gaps`.
+/// `physics::terrain_phase` plus the linear tilt of
+/// `physics::terrain_with_slope`, the periodic pits of `physics::gaps`, and
+/// the raised steps of `physics::hurdles`. The bump amplitude and phase are
+/// per lane (earthquake); the tilt, gap width, and hurdle height are shared.
 #[inline(always)]
-fn terrain(x: F, amplitude: f32, tilt: f32, gaps: f32) -> (F, F) {
+fn terrain(x: F, amplitude: F, tilt: f32, gaps: f32, hurdle: f32, phase: F) -> (F, F) {
     let mut height = F::splat(0.0);
     let mut slope = F::splat(0.0);
     for (wavelength, weight, offset) in physics::TERRAIN_WAVES {
-        let t = x * (1.0 / wavelength) + offset;
+        let t = x * (1.0 / wavelength) + offset + phase;
         let u = t - t.floor();
         let w = u * (F::splat(1.0) - u);
         height += w * w * (weight * 16.0);
@@ -162,6 +168,27 @@ fn terrain(x: F, amplitude: f32, tilt: f32, gaps: f32) -> (F, F) {
         let side = F::select(r.lt(center), F::splat(1.0), F::splat(-1.0)) / run.max(F::splat(1e-6));
         height -= F::splat(physics::GAP_DEPTH) * factor;
         slope += F::select(on_ramp, -F::splat(physics::GAP_DEPTH) * side, F::splat(0.0));
+    }
+    if hurdle > 0.0 {
+        let spacing = F::splat(physics::HURDLE_SPACING);
+        let center = spacing * 0.5;
+        let t = x / spacing;
+        let r = x - t.floor() * spacing;
+        let distance = (r - center).abs();
+        let half = F::splat(0.5 * physics::HURDLE_TOP);
+        let run = F::splat(physics::HURDLE_RUN);
+        let ramp = ((half + run - distance) / run)
+            .max(F::splat(0.0))
+            .min(F::splat(1.0));
+        let factor = F::select(
+            distance.le(half),
+            F::splat(1.0),
+            F::select(!distance.lt(half + run), F::splat(0.0), ramp),
+        );
+        let on_ramp = distance.gt(half) & distance.lt(half + run);
+        let side = F::select(r.lt(center), F::splat(1.0), F::splat(-1.0)) / run;
+        height += F::splat(hurdle) * factor;
+        slope += F::select(on_ramp, F::splat(hurdle) * side, F::splat(0.0));
     }
     (height, slope)
 }
@@ -230,6 +257,8 @@ impl Group {
             radius: vec![ZERO; nodes],
             mass: vec![ZERO; nodes],
             friction: vec![ZERO; nodes],
+            quake_phase: ZERO,
+            quake_scale: ZERO,
             rest: vec![ZERO; nodes - 1],
             joint_reference: vec![None; nodes - 1],
             joint: vec![[ZERO; 7]; nodes - 1],
@@ -309,6 +338,11 @@ impl Group {
                     lanes.weights[e][l] = weight;
                 }
             }
+            // Each lane's earthquake ground comes from its own creature id,
+            // exactly as the GPU derives it from the packed hash word.
+            let quake = physics::quake_hash(g.id);
+            group.quake_phase[l] = physics::quake_phase(quake);
+            group.quake_scale[l] = physics::quake_scale(quake);
         }
         group
     }
@@ -338,14 +372,26 @@ impl Group {
         let max_node_speed = F::splat(limits.node_speed);
         let max_force = F::splat(limits.muscle_force);
         let max_spin = F::splat(limits.bone_spin);
-        let amplitude = physics::terrain_amplitude(cfg.terrain);
-        // A disabled ground ignores the slope, gaps, and mud effects;
-        // otherwise the tilt joins the bumps and pits in one terrain sample
-        // and mud lowers every floor.
+        let base_amplitude = physics::terrain_amplitude(cfg.terrain);
+        // A disabled ground ignores the slope, gaps, hurdles, quake, and mud
+        // effects; otherwise the tilt joins the bumps, pits, and steps in one
+        // terrain sample and mud lowers every floor.
         let tilt = if ground { cfg.slope } else { 0.0 };
         let gaps = if ground { cfg.gaps } else { 0.0 };
+        let hurdle = if ground { cfg.hurdles } else { 0.0 };
+        let quake = if ground { cfg.quake } else { 0.0 };
         let mud = if ground { cfg.mud } else { 0.0 };
-        let rough = amplitude > 0.0 || tilt != 0.0 || gaps > 0.0;
+        // The bump amplitude and phase are per lane: the earthquake adds its
+        // own bumps and jitters both by the creature's id, so every lane
+        // meets its own ground.
+        let amplitude = F::splat(base_amplitude) + F::splat(quake) * F::load(&self.quake_scale);
+        let phase = if quake > 0.0 {
+            F::load(&self.quake_phase)
+        } else {
+            F::splat(0.0)
+        };
+        let rough =
+            base_amplitude > 0.0 || quake > 0.0 || tilt != 0.0 || gaps > 0.0 || hurdle > 0.0;
         let load = |v: &Vec<V>| -> Vec<F> { v.iter().map(F::load).collect() };
         let mass = load(&self.mass);
         let radius = load(&self.radius);
@@ -465,7 +511,7 @@ impl Group {
                 let shift_x = avg * inv_total_mass;
                 for j in 0..n {
                     let ground_y = if rough {
-                        terrain(px[j] - shift_x, amplitude, tilt, gaps).0
+                        terrain(px[j] - shift_x, amplitude, tilt, gaps, hurdle, phase).0
                     } else {
                         zero
                     };
@@ -587,9 +633,9 @@ impl Group {
             if colliding {
                 for j in 0..n {
                     if rough {
-                        // Push out along the ground normal, so bumps and pit
-                        // walls resist sliding.
-                        let (height, slope) = terrain(px[j], amplitude, tilt, gaps);
+                        // Push out along the ground normal, so bumps, pit
+                        // walls, and hurdle ramps resist sliding.
+                        let (height, slope) = terrain(px[j], amplitude, tilt, gaps, hurdle, phase);
                         let secant_sq = one + slope * slope;
                         floor[j] = height + radius[j] * secant_sq.sqrt() - F::splat(mud);
                         let depth = (floor[j] - py[j]).max(zero) / secant_sq;
