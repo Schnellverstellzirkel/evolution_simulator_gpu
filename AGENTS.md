@@ -40,6 +40,7 @@ The replay viewport plays frames recorded by the CPU engine (`cpu_engine::trajec
 - The GPU and CPU engine disagreed at 4x physics fidelity. The CPU engine applied joint limits inside every bone pass, while the GPU applied them once per step. Fixed in the CPU engine, and the GPU tests now compare like with like (b4f6e20).
 - Bones now have mass: bone density times length squared, split between the two joints (`Limits::bone_density`, `EVOLUTION_BONE_DENSITY`). Feet slid 0.43 m per meter traveled before and 0.02 m after.
 - Muscles only pull: the drive term cannot push. Exhausted muscles have no drive (`TIRED_DRIVE = 0`), so all work comes from each muscle's energy store.
+- Later the same day (commits b8ee76f to d47b2b1): the ground-lift glitch is fixed, the generational path re-tests elites after a world change, environment effects are undoable with gravity, air and grip added, and bones are capped at 2 m. See the items marked Done below.
 - Result of a 20-generation run (100k creatures, seed 38) with all three changes: feet no longer slide, but the fastest bodies are still about 20 m long, weigh 750 to 800 kg, and reach 800 m. The CPU engine replays the 801 m champion at only 90 m. Evolution now exploits the ground-contact glitch described in the first item below.
 
 ## Next steps
@@ -48,12 +49,12 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 
 ### Creature size and movement realism
 
-1. (owner) Fix the glitched giants: huge bodies that make a strange jump as soon as they touch the ground. Diagnosis: after the constraint passes, the parent-first rebuild restores exact bone lengths without looking at the ground. If a node ends up below the floor, the whole body is lifted by that depth (`lift` in `src/cpu_engine.rs` after the rebuild, `ground_lift` in `shaders/physics_creature.wgsl`). Velocity is then taken from each node's movement over the step, so the lift becomes upward speed for the whole body. A 20 m body that swings a limb into the ground gets a large lift and jumps. Fix ideas: subtract the lift from the velocity (a position-only correction), or keep children above the floor while rebuilding so the body pivots instead of rising. Validate with `size_report`: the archive's distance and the CPU replay's distance must agree, and the ledger's ground contact line must stay plausible.
-2. (owner) Stop evolution from favoring huge 20 to 100 m creatures. Bone mass, pull-only muscles and the energy budget did not do it on their own (see the run above). Fix item 1 first, then re-measure with a 20-generation run and `size_report`. If giants still win, try the items below.
-3. (owner) Stop feet from sliding as if there were no friction. Bone mass fixed most of it. Keep checking slip per meter with `size_report`.
+1. Done: (owner) the glitched jump. The whole-body lift after the parent-first rebuild is now a position-only correction in both engines (b8ee76f). Archive and CPU replay distances agree again (236 m vs 231 m; before, 90 m vs 801 m).
+2. (owner) Stop evolution from favoring huge creatures. Measure again with the 2 m bone cap: run 20 generations (100k creatures, seed 38, `EVOLUTION_DEVICES=primary`) and read `size_report`. If bodies still pile up at the cap, try the physics items below (muscle force scaling, bone breaking).
+3. (owner) Stop feet from sliding. Bone mass cut slip to 0.02 m per meter traveled while the lift glitch kept bodies airborne. After the lift fix, grounded feet slip a median 2.9 m per meter again. Cause: friction only changes a node's velocity after the step, while the rigid bone passes drag grounded feet across the ground within the step. Fix: static friction as a position correction inside the projection passes (cancel a grounded node's sideways move while it is within the friction cone, as in extended position based dynamics).
 4. Scale muscle force with muscle size. A longer or thicker muscle should be stronger and heavier, so a giant needs heavy muscles.
 5. Let bones break under load. Bone strength grows with cross-section while load grows with mass, so oversized bones fail like real ones.
-6. Lower `max_bone` from 10 m to about 2 m if physics alone does not bring body size down.
+6. Done: bones and muscle strokes are capped at 2 m again (d47b2b1). Physics alone did not stop giants: after the lift fix, 16 to 22 m bodies still won.
 7. Review the whole-body rescale mutation. It exists to grow giants and may no longer be needed.
 8. Review the log-scale height archive axis. It gives giants their own cells and protects them.
 9. Measure where a triangle's (2 bones, 1 muscle) forward motion comes from with the momentum ledger. It moves in ways the owner thinks should be impossible.
@@ -72,14 +73,14 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 
 ### Environment effects and catastrophes
 
-22. (owner) Make every environment effect undoable: a level can go down as well as up, and each change re-evaluates the archive elites.
+22. Done: (owner) every environment effect has raise and lower buttons, and every change re-tests the archive (b82ff21). Effects live in `src/environment.rs`. Add new effects there.
 23. (owner) Add more environment effects and catastrophes that create biodiversity and push toward complex, efficient movement.
-24. Bug: after a world change, `reset_search_context` (src/storage.rs) moves the archive elites into `Experiment::reseed` so they compete again. Only the steady-state path (`breed_slots`, continuous evolution in the GUI) puts them back into the population. The generational path (`prepare_next_batch` and `prepare_next_batch_streaming`, used by headless runs, `search-benchmark`, and the GUI's One generation and Guided step) never reads `reseed`, so there the elites are dropped instead of re-tested. The streaming path also hands slices to the devices while it emits them, so place the elites in the first slots before handing any slice over. A stopped agent found this.
+24. Done: the generational path now puts queued elites back after a world change, before any slice reaches a device (1214bd0). A test guards it.
 25. Hurdles: periodic steps whose height rises with each level.
 26. Slope: the ground tilts uphill, steeper at each level.
-27. Thick air: drag levels.
-28. Gravity levels: stronger and weaker gravity.
-29. Ice: lower ground friction.
+27. Done: air drag levels (Thin, Breezy, Thick, Syrup).
+28. Done: gravity levels (Earth, 1.5 g, 2 g, 3 g).
+29. Done: grip levels (Grippy, Firm, Wet, Ice).
 30. Mud: higher friction with sinking, so dragging feet cost more.
 31. Gaps: pits that force jumping or bridging.
 32. Water: a viscous medium that favors swimming strokes.
