@@ -30,16 +30,30 @@ enum Trial {
     Check,
 }
 
+/// Which engine backs a device. A failed GPU can hand its work to the CPU;
+/// a failed CPU is terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeviceKind {
+    Gpu,
+    Cpu,
+}
+
 struct QueuedUnit {
     ticket: u64,
     indices: Vec<usize>,
     trial: Trial,
     population: Arc<Population>,
     config: Config,
+    /// How many times this unit has moved to another engine.
+    retries: u8,
 }
 
 pub struct Device {
     pub engine: Box<dyn Engine>,
+    kind: DeviceKind,
+    /// Set when the engine reported a failure. A failed GPU is retired and its
+    /// unfinished units move to the CPU; a failed CPU stops the scheduler.
+    failure: Option<String>,
     /// Exact submitted input remains available until its result is accepted.
     queued: VecDeque<QueuedUnit>,
     /// Measured creatures per second of device time (exponential average).
@@ -53,9 +67,17 @@ pub struct Device {
 }
 
 impl Device {
-    fn new(engine: Box<dyn Engine>, rate: f64, min_unit: usize, unit_seconds: f64) -> Self {
+    fn new(
+        engine: Box<dyn Engine>,
+        kind: DeviceKind,
+        rate: f64,
+        min_unit: usize,
+        unit_seconds: f64,
+    ) -> Self {
         Self {
             engine,
+            kind,
+            failure: None,
             queued: VecDeque::new(),
             rate,
             creatures: 0,
@@ -74,6 +96,8 @@ struct Round {
     cursor: usize,
     /// Creatures skipped by an engine that cannot hold them.
     oversize: Vec<usize>,
+    /// Creatures whose submission failed; offered to another engine first.
+    retry: Vec<usize>,
 }
 
 pub struct Scheduler {
@@ -131,6 +155,7 @@ impl Scheduler {
         let step_range = env_or("EVOLUTION_GPU_CHUNK", crate::gpu::DEFAULT_STEP_RANGE);
         let mut devices = vec![Device::new(
             Box::new(engine::gpu_engine(primary, 64, step_range)?),
+            DeviceKind::Gpu,
             180_000.0,
             8192,
             env_or("EVOLUTION_UNIT_SECONDS", 1.0),
@@ -145,6 +170,7 @@ impl Scheduler {
             match engine::gpu_engine(name, 16, env_or("EVOLUTION_SECONDARY_CHUNK", 16)) {
                 Ok(engine) => devices.push(Device::new(
                     Box::new(engine),
+                    DeviceKind::Gpu,
                     40_000.0,
                     2048,
                     env_or("EVOLUTION_SECONDARY_UNIT_SECONDS", 0.05),
@@ -156,6 +182,7 @@ impl Scheduler {
         if threads > 0 {
             devices.push(Device::new(
                 Box::new(engine::cpu_engine(threads)?),
+                DeviceKind::Cpu,
                 30_000.0,
                 1024,
                 env_or("EVOLUTION_UNIT_SECONDS", 1.0),
@@ -178,6 +205,7 @@ impl Scheduler {
         Ok(Self {
             devices: vec![Device::new(
                 Box::new(engine::cpu_engine(threads.max(1))?),
+                DeviceKind::Cpu,
                 30_000.0,
                 64,
                 1.0,
@@ -200,9 +228,13 @@ impl Scheduler {
     }
 
     /// Queued units, plus one while contenders still wait for their checks.
+    /// A failed engine that has not been retired also counts as one, so drain
+    /// loops keep asking for results and the failure surfaces instead of
+    /// looking like a finished round.
     pub fn in_flight(&self) -> usize {
         self.devices.iter().map(|d| d.queued.len()).sum::<usize>()
             + usize::from(!self.held.is_empty())
+            + self.devices.iter().filter(|d| d.failure.is_some()).count()
     }
 
     /// Queues check units for waiting contenders. Checks go first, but wait
@@ -219,7 +251,10 @@ impl Scheduler {
             ..cfg.clone()
         };
         for device in &mut self.devices {
-            while device.engine.free_slots() > 0 && !self.checks.is_empty() {
+            while device.failure.is_none()
+                && device.engine.free_slots() > 0
+                && !self.checks.is_empty()
+            {
                 if self.checks.len() < device.min_unit / 2 && self.round.is_some() && !waited {
                     break;
                 }
@@ -248,17 +283,26 @@ impl Scheduler {
                     unit.push(creature);
                 }
                 let population = Arc::new(unit);
-                let ticket = device
-                    .engine
-                    .submit_shared(Arc::clone(&population), &fine)?;
-                self.packing_seconds += started.elapsed().as_secs_f64();
-                device.queued.push_back(QueuedUnit {
-                    ticket,
-                    indices,
-                    trial: Trial::Check,
-                    population,
-                    config: fine.clone(),
-                });
+                match device.engine.submit_shared(Arc::clone(&population), &fine) {
+                    Ok(ticket) => {
+                        self.packing_seconds += started.elapsed().as_secs_f64();
+                        device.queued.push_back(QueuedUnit {
+                            ticket,
+                            indices,
+                            trial: Trial::Check,
+                            population,
+                            config: fine.clone(),
+                            retries: 0,
+                        });
+                    }
+                    Err(error) => {
+                        // The checks stay waiting for another engine.
+                        self.checks.splice(0..0, indices);
+                        device.failure =
+                            Some(format!("{} failed: {error:#}", device.engine.name()));
+                        break;
+                    }
+                }
             }
         }
         if self.checks.is_empty() {
@@ -290,6 +334,7 @@ impl Scheduler {
                 order,
                 cursor: 0,
                 oversize: Vec::new(),
+                retry: Vec::new(),
             });
         }
     }
@@ -309,6 +354,7 @@ impl Scheduler {
                     order,
                     cursor: 0,
                     oversize: Vec::new(),
+                    retry: Vec::new(),
                 })
             }
             None => {}
@@ -330,8 +376,9 @@ impl Scheduler {
         let total_rate: f64 = self.devices.iter().map(|d| d.rate).sum();
         let queued: usize = self.devices.iter().map(Device::queued_creatures).sum();
         for device in &mut self.devices {
-            while device.engine.free_slots() > 0 {
-                let remaining = round.order.len() - round.cursor + round.oversize.len();
+            while device.failure.is_none() && device.engine.free_slots() > 0 {
+                let remaining =
+                    round.order.len() - round.cursor + round.oversize.len() + round.retry.len();
                 if remaining == 0 {
                     break;
                 }
@@ -350,8 +397,10 @@ impl Scheduler {
                     .min(remaining);
                 let capacity = device.engine.max_nodes();
                 let mut indices = Vec::with_capacity(size);
+                let retry = round.retry.len().min(size);
+                indices.extend(round.retry.drain(..retry));
                 if capacity >= 64 {
-                    let take = round.oversize.len().min(size);
+                    let take = round.oversize.len().min(size - indices.len());
                     indices.extend(round.oversize.drain(..take));
                 }
                 while indices.len() < size && round.cursor < round.order.len() {
@@ -371,18 +420,30 @@ impl Scheduler {
                 }
                 let started = Instant::now();
                 let population = Arc::new(pop.subset(&indices));
-                let ticket = device.engine.submit_shared(Arc::clone(&population), cfg)?;
-                self.packing_seconds += started.elapsed().as_secs_f64();
-                device.queued.push_back(QueuedUnit {
-                    ticket,
-                    indices,
-                    trial: Trial::Standard,
-                    population,
-                    config: cfg.clone(),
-                });
+                match device.engine.submit_shared(Arc::clone(&population), cfg) {
+                    Ok(ticket) => {
+                        self.packing_seconds += started.elapsed().as_secs_f64();
+                        device.queued.push_back(QueuedUnit {
+                            ticket,
+                            indices,
+                            trial: Trial::Standard,
+                            population,
+                            config: cfg.clone(),
+                            retries: 0,
+                        });
+                    }
+                    Err(error) => {
+                        // Keep the creatures: the next engine offers them again.
+                        round.retry.extend(indices);
+                        device.failure =
+                            Some(format!("{} failed: {error:#}", device.engine.name()));
+                        break;
+                    }
+                }
             }
         }
-        if round.cursor == round.order.len() && round.oversize.is_empty() {
+        if round.cursor == round.order.len() && round.oversize.is_empty() && round.retry.is_empty()
+        {
             self.round = None;
         }
         Ok(())
@@ -403,66 +464,90 @@ impl Scheduler {
         let deadline = Instant::now() + timeout;
         loop {
             for device in &mut self.devices {
-                while let Some(done) = device.engine.poll()? {
-                    let queued = device
-                        .queued
-                        .front()
-                        .context("Unexpected evaluation result")?;
-                    anyhow::ensure!(
-                        queued.ticket == done.ticket,
-                        "Evaluation results out of order"
-                    );
-                    anyhow::ensure!(
-                        done.results.len() == queued.indices.len(),
-                        "Evaluation result count mismatch: expected {}, received {}",
-                        queued.indices.len(),
-                        done.results.len()
-                    );
-                    let QueuedUnit {
-                        indices,
-                        trial,
-                        population,
-                        config,
-                        ..
-                    } = device.queued.pop_front().expect("validated queued unit");
-                    device.busy_seconds += done.busy_seconds;
-                    let mut finals = Vec::with_capacity(indices.len());
-                    let mut metrics = Vec::with_capacity(indices.len());
-                    match trial {
-                        Trial::Standard => {
-                            device.creatures += indices.len() as u64;
-                            if done.busy_seconds > 0.0 && indices.len() >= device.min_unit / 2 {
-                                let rate = indices.len() as f64 / done.busy_seconds;
-                                device.rate = 0.7 * device.rate + 0.3 * rate;
-                            }
-                            for (k, &i) in indices.iter().enumerate() {
-                                let metric = to_metrics(&population, k, &done.results[k], &config);
-                                if self.robust_trials > 1 && contender(i, &metric) {
-                                    self.held.insert(i, metric);
-                                    self.checks.push(i);
-                                    self.checks_since.get_or_insert_with(Instant::now);
-                                } else {
-                                    finals.push(i);
-                                    metrics.push(metric);
+                if device.failure.is_some() {
+                    continue;
+                }
+                loop {
+                    match device.engine.poll() {
+                        Ok(None) => break,
+                        Ok(Some(done)) => {
+                            let queued = device
+                                .queued
+                                .front()
+                                .context("Unexpected evaluation result")?;
+                            anyhow::ensure!(
+                                queued.ticket == done.ticket,
+                                "Evaluation results out of order"
+                            );
+                            anyhow::ensure!(
+                                done.results.len() == queued.indices.len(),
+                                "Evaluation result count mismatch: expected {}, received {}",
+                                queued.indices.len(),
+                                done.results.len()
+                            );
+                            let QueuedUnit {
+                                indices,
+                                trial,
+                                population,
+                                config,
+                                ..
+                            } = device.queued.pop_front().expect("validated queued unit");
+                            device.busy_seconds += done.busy_seconds;
+                            let mut finals = Vec::with_capacity(indices.len());
+                            let mut metrics = Vec::with_capacity(indices.len());
+                            match trial {
+                                Trial::Standard => {
+                                    device.creatures += indices.len() as u64;
+                                    if done.busy_seconds > 0.0
+                                        && indices.len() >= device.min_unit / 2
+                                    {
+                                        let rate = indices.len() as f64 / done.busy_seconds;
+                                        device.rate = 0.7 * device.rate + 0.3 * rate;
+                                    }
+                                    for (k, &i) in indices.iter().enumerate() {
+                                        let metric =
+                                            to_metrics(&population, k, &done.results[k], &config);
+                                        if self.robust_trials > 1 && contender(i, &metric) {
+                                            self.held.insert(i, metric);
+                                            self.checks.push(i);
+                                            self.checks_since.get_or_insert_with(Instant::now);
+                                        } else {
+                                            finals.push(i);
+                                            metrics.push(metric);
+                                        }
+                                    }
+                                }
+                                Trial::Check => {
+                                    for (k, &i) in indices.iter().enumerate() {
+                                        // A creature re-queued meanwhile may have been settled already.
+                                        if let Some(mut metric) = self.held.remove(&i) {
+                                            // Reliable motion only: keep the worse of both trials.
+                                            metric.fitness =
+                                                metric.fitness.min(done.results[k].fitness);
+                                            finals.push(i);
+                                            metrics.push(metric);
+                                        }
+                                    }
                                 }
                             }
-                        }
-                        Trial::Check => {
-                            for (k, &i) in indices.iter().enumerate() {
-                                // A creature re-queued meanwhile may have been settled already.
-                                if let Some(mut metric) = self.held.remove(&i) {
-                                    // Reliable motion only: keep the worse of both trials.
-                                    metric.fitness = metric.fitness.min(done.results[k].fitness);
-                                    finals.push(i);
-                                    metrics.push(metric);
-                                }
+                            if !finals.is_empty() {
+                                out.push((finals, metrics));
                             }
                         }
-                    }
-                    if !finals.is_empty() {
-                        out.push((finals, metrics));
+                        Err(error) => {
+                            let name = device.engine.name();
+                            device.failure = Some(format!("{name} failed: {error:#}"));
+                            break;
+                        }
                     }
                 }
+            }
+            if let Err(error) = self.retire_failed() {
+                // Completed output is delivered before a terminal failure.
+                if out.is_empty() {
+                    return Err(error);
+                }
+                return Ok(out);
             }
             if !out.is_empty() || self.in_flight() == 0 || Instant::now() >= deadline {
                 return Ok(out);
@@ -470,10 +555,82 @@ impl Scheduler {
             let wait = deadline
                 .saturating_duration_since(Instant::now())
                 .min(Duration::from_millis(2));
-            if let Some(device) = self.devices.iter_mut().find(|d| !d.queued.is_empty()) {
-                device.engine.wait(wait);
+            let Some(device) = self
+                .devices
+                .iter_mut()
+                .find(|d| d.failure.is_none() && !d.queued.is_empty())
+            else {
+                return Ok(out);
+            };
+            device.engine.wait(wait);
+        }
+    }
+
+    /// Retires every engine that reported a failure since the last pass. A
+    /// failed GPU hands its unfinished units to a healthy CPU engine, which
+    /// preserves their inputs and the order of their tickets. A failed CPU,
+    /// or a GPU with no CPU to fall back on, is terminal.
+    fn retire_failed(&mut self) -> Result<()> {
+        let mut index = 0;
+        while index < self.devices.len() {
+            if self.devices[index].failure.is_some() {
+                if self.retire(index) {
+                    continue;
+                }
+                let error = self.devices[index]
+                    .failure
+                    .clone()
+                    .unwrap_or_else(|| "Evaluation device failed".into());
+                anyhow::bail!("{error}");
+            }
+            index += 1;
+        }
+        Ok(())
+    }
+
+    /// Removes one failed device, re-submitting a GPU's queued units to the
+    /// CPU. Returns false when the failure is terminal.
+    fn retire(&mut self, index: usize) -> bool {
+        let reason = self.devices[index]
+            .failure
+            .clone()
+            .unwrap_or_else(|| "evaluation failed".into());
+        if self.devices[index].kind == DeviceKind::Cpu {
+            return false;
+        }
+        let Some(cpu) = self
+            .devices
+            .iter()
+            .position(|d| d.kind == DeviceKind::Cpu && d.failure.is_none())
+        else {
+            self.devices[index].failure =
+                Some(format!("{reason}; no CPU engine can retry its work"));
+            return false;
+        };
+        let units: Vec<QueuedUnit> = self.devices[index].queued.drain(..).collect();
+        let count = units.len();
+        for mut unit in units {
+            unit.retries = unit.retries.saturating_add(1);
+            match self.devices[cpu]
+                .engine
+                .submit_shared(Arc::clone(&unit.population), &unit.config)
+            {
+                Ok(ticket) => {
+                    self.devices[cpu]
+                        .queued
+                        .push_back(QueuedUnit { ticket, ..unit });
+                }
+                Err(error) => {
+                    let message = format!("{reason}; CPU retry failed: {error:#}");
+                    self.devices[cpu].failure = Some(message.clone());
+                    self.devices[index].failure = Some(message);
+                    return false;
+                }
             }
         }
+        self.devices.remove(index);
+        eprintln!("{reason}; retried {count} units on the CPU");
+        true
     }
 
     /// Evaluates `indices` on every engine and returns metrics in the same order.
@@ -586,13 +743,20 @@ mod tests {
         submissions: Vec<Submission>,
         results: VecDeque<Finished>,
         pending: bool,
+        /// Returned from the next poll.
+        poll_failure: Option<String>,
+        /// Returned from the next submission.
+        submit_failure: Option<String>,
     }
 
-    struct FakeEngine(Arc<Mutex<FakeState>>);
+    struct FakeEngine {
+        name: &'static str,
+        state: Arc<Mutex<FakeState>>,
+    }
 
     impl Engine for FakeEngine {
         fn name(&self) -> String {
-            "fake evaluator".into()
+            self.name.into()
         }
 
         fn max_nodes(&self) -> usize {
@@ -600,11 +764,16 @@ mod tests {
         }
 
         fn free_slots(&self) -> usize {
-            usize::from(!self.0.lock().unwrap().pending)
+            let state = self.state.lock().unwrap();
+            // A pending submission failure still lets the scheduler try once.
+            usize::from(!state.pending && state.poll_failure.is_none())
         }
 
         fn submit_shared(&mut self, population: Arc<Population>, config: &Config) -> Result<u64> {
-            let mut state = self.0.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
+            if let Some(error) = state.submit_failure.take() {
+                anyhow::bail!("{error}");
+            }
             let ticket = state.submissions.len() as u64 + 1;
             state.submissions.push(Submission {
                 ticket,
@@ -616,7 +785,10 @@ mod tests {
         }
 
         fn poll(&mut self) -> Result<Option<Finished>> {
-            let mut state = self.0.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
+            if let Some(error) = state.poll_failure.take() {
+                return Err(anyhow::anyhow!("{error}"));
+            }
             let done = state.results.pop_front();
             if done.is_some() {
                 state.pending = false;
@@ -627,15 +799,23 @@ mod tests {
         fn wait(&mut self, _timeout: Duration) {}
     }
 
+    fn fake_device(name: &'static str, kind: DeviceKind, state: &Arc<Mutex<FakeState>>) -> Device {
+        Device::new(
+            Box::new(FakeEngine {
+                name,
+                state: Arc::clone(state),
+            }),
+            kind,
+            100.0,
+            2,
+            1.0,
+        )
+    }
+
     fn fake_scheduler() -> (Scheduler, Arc<Mutex<FakeState>>) {
         let state = Arc::new(Mutex::new(FakeState::default()));
         let scheduler = Scheduler {
-            devices: vec![Device::new(
-                Box::new(FakeEngine(Arc::clone(&state))),
-                100.0,
-                2,
-                1.0,
-            )],
+            devices: vec![fake_device("fake evaluator", DeviceKind::Cpu, &state)],
             round: None,
             packing_seconds: 0.0,
             robust_trials: 1,
@@ -644,6 +824,25 @@ mod tests {
             held: HashMap::new(),
         };
         (scheduler, state)
+    }
+
+    /// One fake GPU and one fake CPU, for recovery tests that need both.
+    fn mixed_scheduler() -> (Scheduler, Arc<Mutex<FakeState>>, Arc<Mutex<FakeState>>) {
+        let gpu = Arc::new(Mutex::new(FakeState::default()));
+        let cpu = Arc::new(Mutex::new(FakeState::default()));
+        let scheduler = Scheduler {
+            devices: vec![
+                fake_device("fake gpu", DeviceKind::Gpu, &gpu),
+                fake_device("fake cpu", DeviceKind::Cpu, &cpu),
+            ],
+            round: None,
+            packing_seconds: 0.0,
+            robust_trials: 1,
+            checks: Vec::new(),
+            checks_since: None,
+            held: HashMap::new(),
+        };
+        (scheduler, gpu, cpu)
     }
 
     fn submission_config() -> Config {
@@ -849,6 +1048,269 @@ mod tests {
                 assert_eq!(scheduler.in_flight(), 0);
             }
         }
+    }
+
+    /// Queues one valid result per submission from `from` onward, in order.
+    fn complete_submissions(state: &Arc<Mutex<FakeState>>, from: usize, fitness: f32) {
+        let mut state = state.lock().unwrap();
+        let submissions: Vec<(u64, usize)> = state
+            .submissions
+            .iter()
+            .skip(from)
+            .map(|s| (s.ticket, s.population.genomes.len()))
+            .collect();
+        for (ticket, count) in submissions {
+            state.results.push_back(Finished {
+                ticket,
+                results: vec![
+                    GpuResult {
+                        fitness,
+                        ..GpuResult::default()
+                    };
+                    count
+                ],
+                busy_seconds: 0.5,
+            });
+        }
+    }
+
+    /// Collects until the scheduler is idle; returns every index once, sorted.
+    fn drain_all(scheduler: &mut Scheduler, pop: &Population, cfg: &Config) -> Vec<usize> {
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while scheduler.in_flight() > 0 {
+            assert!(Instant::now() < deadline, "evaluation stalled");
+            for (indices, _) in scheduler
+                .collect(pop, cfg, Duration::from_millis(5), |_, _| false)
+                .unwrap()
+            {
+                seen.extend(indices);
+            }
+        }
+        seen.sort_unstable();
+        seen
+    }
+
+    #[test]
+    fn a_failed_gpu_retries_its_unfinished_units_on_the_cpu() {
+        let cfg = submission_config();
+        let pop = crate::evolution::create(&cfg).unwrap();
+        let (mut scheduler, gpu, cpu) = mixed_scheduler();
+        scheduler.begin(&pop, 0..cfg.population);
+        scheduler.pump(&pop, &cfg, &[]).unwrap();
+        let (gpu_units, cpu_units, gpu_populations) = {
+            let gpu = gpu.lock().unwrap();
+            let cpu = cpu.lock().unwrap();
+            assert!(!gpu.submissions.is_empty(), "the GPU took no work");
+            assert!(!cpu.submissions.is_empty(), "the CPU took no work");
+            (
+                gpu.submissions.len(),
+                cpu.submissions.len(),
+                gpu.submissions
+                    .iter()
+                    .map(|s| Arc::clone(&s.population))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        // The GPU dies with every one of its units still unfinished.
+        gpu.lock().unwrap().poll_failure = Some("device lost".into());
+        let first = scheduler
+            .collect(&pop, &cfg, Duration::ZERO, |_, _| false)
+            .unwrap();
+        assert!(first.is_empty(), "the GPU returned a result");
+        assert!(
+            scheduler.devices.iter().all(|d| d.kind != DeviceKind::Gpu),
+            "the failed GPU must be retired"
+        );
+        {
+            let cpu = cpu.lock().unwrap();
+            assert_eq!(cpu.submissions.len(), cpu_units + gpu_units);
+            for (retried, original) in cpu.submissions[cpu_units..].iter().zip(&gpu_populations) {
+                assert!(
+                    Arc::ptr_eq(&retried.population, original),
+                    "the retried unit must keep the exact submitted creatures"
+                );
+                assert_eq!(retried.config, cfg);
+            }
+        }
+        assert!(
+            scheduler.devices[0]
+                .queued
+                .iter()
+                .skip(cpu_units)
+                .all(|unit| unit.retries == 1),
+            "moved units must carry their retry state"
+        );
+        complete_submissions(&cpu, 0, 3.0);
+        let seen = drain_all(&mut scheduler, &pop, &cfg);
+        assert_eq!(
+            seen,
+            (0..cfg.population).collect::<Vec<_>>(),
+            "every creature must finish exactly once"
+        );
+    }
+
+    #[test]
+    fn a_failed_gpu_submission_keeps_its_creatures_for_the_cpu() {
+        let cfg = submission_config();
+        let pop = crate::evolution::create(&cfg).unwrap();
+        let (mut scheduler, gpu, cpu) = mixed_scheduler();
+        gpu.lock().unwrap().submit_failure = Some("device lost".into());
+        scheduler.begin(&pop, 0..cfg.population);
+        scheduler.pump(&pop, &cfg, &[]).unwrap();
+        assert_eq!(gpu.lock().unwrap().submissions.len(), 0);
+        assert_eq!(
+            cpu.lock().unwrap().submissions.len(),
+            1,
+            "the CPU must take the rejected unit"
+        );
+        scheduler
+            .collect(&pop, &cfg, Duration::ZERO, |_, _| false)
+            .unwrap();
+        assert!(scheduler.devices.iter().all(|d| d.kind != DeviceKind::Gpu));
+        complete_submissions(&cpu, 0, 2.5);
+        let mut seen: Vec<usize> = scheduler
+            .collect(&pop, &cfg, Duration::ZERO, |_, _| false)
+            .unwrap()
+            .into_iter()
+            .flat_map(|(indices, _)| indices)
+            .collect();
+        // The remaining rejected creatures are still in the round.
+        scheduler.pump(&pop, &cfg, &[]).unwrap();
+        assert_eq!(cpu.lock().unwrap().submissions.len(), 2);
+        complete_submissions(&cpu, 1, 2.5);
+        seen.extend(drain_all(&mut scheduler, &pop, &cfg));
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            (0..cfg.population).collect::<Vec<_>>(),
+            "every creature must finish exactly once"
+        );
+    }
+
+    #[test]
+    fn a_failed_cpu_is_terminal_and_delivers_completed_output_first() {
+        let cfg = submission_config();
+        let pop = crate::evolution::create(&cfg).unwrap();
+        let (mut scheduler, gpu, cpu) = mixed_scheduler();
+        scheduler.begin(&pop, 0..cfg.population);
+        scheduler.pump(&pop, &cfg, &[]).unwrap();
+        let (ticket, count) = {
+            let gpu = gpu.lock().unwrap();
+            let submission = &gpu.submissions[0];
+            (submission.ticket, submission.population.genomes.len())
+        };
+        // One GPU unit completes; the CPU dies before returning anything.
+        gpu.lock().unwrap().results.push_back(Finished {
+            ticket,
+            results: vec![
+                GpuResult {
+                    fitness: 7.0,
+                    ..GpuResult::default()
+                };
+                count
+            ],
+            busy_seconds: 0.5,
+        });
+        cpu.lock().unwrap().poll_failure = Some("cpu lost".into());
+        let completed = scheduler
+            .collect(&pop, &cfg, Duration::ZERO, |_, _| false)
+            .unwrap();
+        assert_eq!(
+            completed
+                .iter()
+                .map(|(indices, _)| indices.len())
+                .sum::<usize>(),
+            count,
+            "completed output must be delivered before the CPU error"
+        );
+        let submissions = cpu.lock().unwrap().submissions.len();
+        for _ in 0..3 {
+            let error = scheduler
+                .collect(&pop, &cfg, Duration::ZERO, |_, _| false)
+                .expect_err("the CPU error must persist");
+            assert!(error.to_string().contains("cpu lost"));
+        }
+        assert_eq!(
+            cpu.lock().unwrap().submissions.len(),
+            submissions,
+            "a failed CPU must not be retried"
+        );
+        assert!(scheduler.in_flight() > 0, "the failure must stay visible");
+    }
+
+    #[test]
+    fn a_failed_gpu_retries_pending_checks_with_their_perturbed_inputs() {
+        let cfg = submission_config();
+        let pop = crate::evolution::create(&cfg).unwrap();
+        let (mut scheduler, gpu, cpu) = mixed_scheduler();
+        scheduler.robust_trials = 2;
+        let indices = vec![2, 0];
+        scheduler.checks = indices.clone();
+        for &index in &indices {
+            scheduler.held.insert(
+                index,
+                EvaluationMetrics {
+                    fitness: 10.0,
+                    ..EvaluationMetrics::default()
+                },
+            );
+        }
+        scheduler.pump_checks(&pop, &cfg).unwrap();
+        let fine = Config {
+            fidelity: Some(crate::physics::Fidelity::fine()),
+            ..cfg.clone()
+        };
+        {
+            let gpu = gpu.lock().unwrap();
+            assert_eq!(gpu.submissions.len(), 1);
+            let submission = &gpu.submissions[0];
+            assert_eq!(submission.config, fine);
+            for (slot, &index) in indices.iter().enumerate() {
+                let mut expected = pop.creature(index);
+                perturb(&mut expected);
+                let actual = submission.population.creature(slot);
+                assert_eq!(actual.id, expected.id);
+                assert_eq!(actual.nodes, expected.nodes);
+                assert_eq!(actual.bones, expected.bones);
+                assert_eq!(actual.muscles, expected.muscles);
+            }
+        }
+        gpu.lock().unwrap().poll_failure = Some("device lost".into());
+        scheduler
+            .collect(&pop, &cfg, Duration::ZERO, |_, _| false)
+            .unwrap();
+        {
+            let cpu = cpu.lock().unwrap();
+            assert_eq!(cpu.submissions.len(), 1, "the check must move to the CPU");
+            let submission = &cpu.submissions[0];
+            assert_eq!(submission.config, fine);
+            for (slot, &index) in indices.iter().enumerate() {
+                let mut expected = pop.creature(index);
+                perturb(&mut expected);
+                let actual = submission.population.creature(slot);
+                assert_eq!(actual.id, expected.id);
+                assert_eq!(actual.nodes, expected.nodes);
+                assert_eq!(actual.bones, expected.bones);
+                assert_eq!(actual.muscles, expected.muscles);
+            }
+        }
+        complete_submissions(&cpu, 0, 4.0);
+        let output = scheduler
+            .collect(&pop, &cfg, Duration::ZERO, |_, _| false)
+            .unwrap();
+        let mut finished: Vec<(usize, f32)> = output
+            .iter()
+            .flat_map(|(indices, metrics)| {
+                indices
+                    .iter()
+                    .copied()
+                    .zip(metrics.iter().map(|m| m.fitness))
+            })
+            .collect();
+        finished.sort_by_key(|&(index, _)| index);
+        assert_eq!(finished, vec![(0, 4.0), (2, 4.0)]);
+        assert_eq!(scheduler.in_flight(), 0);
     }
 
     #[test]
