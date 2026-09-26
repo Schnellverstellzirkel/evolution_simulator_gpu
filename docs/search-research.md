@@ -241,6 +241,31 @@ Fitness is noisy (trial A vs B rank correlation 0.82–0.90). Min-of-two is a pe
 
 Use `search-benchmark` with fixed seeds, the same evaluation budget, and at least 5 seeds per variant (seed-to-seed spread here was ±10–15%). Report best distance against evaluations and against GPU-seconds separately, and add body-complexity metrics: best distance among bodies with at least 8 nodes, and the node-count distribution of the top 50 elites. Turn one change on at a time, starting with the lossless cost changes (F1, F2), which make every later experiment cheaper.
 
+### Search A/B harness
+
+`examples/search_ab.rs` is the committed, CPU-only harness for quick paired checks. It runs the game's production loop on fixed seeds (`cpu_engine::evaluate` for every creature, then `archive_batch` and `prepare_next_batch`, the same path `src/worker.rs` uses), so a search change guarded by an environment flag is measured with the same command before and after. It prints one row per seed and generation, then a per-seed summary (archive best distance, QD score, archive cells, and the node-count, total-bone-length, and mass mix of the generation's top 50) and a paired mean/median across seeds. Wall time goes to stderr, so stdout is deterministic and can be diffed between runs.
+
+Arguments are generations, population, trial seconds, and a comma-separated seed list; the defaults are 2, 64, 1.0, and 38,39. `--tag NAME`, or a leading positional tag, labels the run.
+
+    nice -n 19 env CARGO_BUILD_JOBS=4 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
+        cargo run --release --example search_ab -- 2 64 0.5 38,39
+
+One tiny run finishes in under a second:
+
+    search_ab untagged: 2 generations, population 64, 0.50 s trials, seeds 38,39
+    untagged seed generation best_m qd_score cells
+    untagged 38 0 0.10 0.11 10
+    untagged 38 1 0.38 0.92 33
+    untagged seed 38 summary: best 0.38 m, qd 0.92, cells 33
+    untagged seed 38 top-50 node mix: 3x4 4x10 5x30 6x6
+    untagged seed 38 top-50: median length 1.22 m, median mass 2.24 kg, longest bone 2.00 m
+    untagged 39 0 0.32 0.50 16
+    untagged 39 1 0.56 3.22 36
+    untagged seed 39 summary: best 0.56 m, qd 3.22, cells 36
+    untagged seed 39 top-50 node mix: 4x17 5x29 6x4
+    untagged seed 39 top-50: median length 1.29 m, median mass 2.18 kg, longest bone 1.95 m
+    paired across 2 seeds: best distance mean 0.47 m, median 0.56 m; qd score mean 2.07, median 3.22
+
 ## 7. Reaching a kilometer in a minute
 
 Goal: evolved runners that cover 1 km in 60 s (16.7 m/s), at least 10× the 57.8 m best of the original search, without relying on solver errors. "Verified" below means the worst of 9 trials at 240 Hz with 8 bone and 4 velocity passes: one from the evolved pose and eight from poses perturbed by up to 2 cm, with node grip varied by ±10%.
