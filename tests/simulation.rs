@@ -948,3 +948,22 @@ fn a_passive_body_never_rises_above_its_start() {
         );
     }
 }
+
+#[test]
+fn random_bodies_get_no_free_propulsion() {
+    // Solver exploits show up first in random bodies: the uncapped planted
+    // feet let a random body travel 224 m in 20 s, against under 10 m with
+    // honest friction. Nothing random should come close to 20 m in 10 s.
+    let cfg = Config {
+        population: 512,
+        duration: 10.0,
+        ..config()
+    };
+    let pop = evolution::create(&cfg).unwrap();
+    let best = evolution_simulator::cpu_engine::evaluate(&pop, &cfg)
+        .iter()
+        .map(|r| r.fitness)
+        .filter(|f| f.is_finite())
+        .fold(f32::MIN, f32::max);
+    assert!(best < 20.0, "a random body traveled {best} m in 10 s");
+}
