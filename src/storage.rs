@@ -1506,6 +1506,42 @@ fn fitness_context_changed(old: &Config, new: &Config) -> bool {
         || old.ground != new.ground
         || old.terrain != new.terrain
 }
+/// Autosaves kept in `dir`: the newest `keep` `seed-*-auto.evo` files stay,
+/// older ones are deleted, and so are `.evo.tmp` files that an interrupted
+/// save left behind more than ten minutes ago. Files the player saved under
+/// other names are never touched. Returns how many files were removed.
+pub fn rotate_autosaves(dir: &Path, keep: usize) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let now = std::time::SystemTime::now();
+    let mut autosaves = Vec::new();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if name.ends_with(".evo.tmp") {
+            let stale = now
+                .duration_since(modified)
+                .is_ok_and(|age| age.as_secs() > 600);
+            if stale && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        } else if name.starts_with("seed-") && name.ends_with("-auto.evo") {
+            autosaves.push((modified, path));
+        }
+    }
+    autosaves.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in autosaves.into_iter().skip(keep) {
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
 pub fn save(path: &Path, experiment: &Experiment) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;

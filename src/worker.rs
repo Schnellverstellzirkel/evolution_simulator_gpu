@@ -615,6 +615,10 @@ fn run(
                                 checkpoint_thread = Some(std::thread::spawn(move || {
                                     if let Err(err) = storage::save(&path, &snapshot) {
                                         eprintln!("Background checkpoint failed: {err:#}");
+                                    } else if let Some(dir) = path.parent() {
+                                        // One autosave per experiment piles up: keep the
+                                        // three most recent experiments' autosaves.
+                                        storage::rotate_autosaves(dir, 3);
                                     }
                                 }));
                             }

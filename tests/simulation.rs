@@ -786,3 +786,34 @@ fn world_change_retests_archive_elites_in_generational_mode() {
         );
     }
 }
+
+#[test]
+fn autosave_rotation_keeps_the_newest_and_spares_manual_saves() {
+    let dir = std::env::temp_dir().join(format!("evolution-rotate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for seed in 0..5 {
+        std::fs::write(dir.join(format!("seed-{seed}-auto.evo")), b"x").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::fs::write(dir.join("my-champion.evo"), b"x").unwrap();
+    std::fs::write(dir.join("seed-9-auto.evo.tmp"), b"x").unwrap();
+    assert_eq!(storage::rotate_autosaves(&dir, 3), 2);
+    let mut left: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    // The fresh .tmp may belong to a save in progress, so it stays.
+    assert_eq!(
+        left,
+        [
+            "my-champion.evo",
+            "seed-2-auto.evo",
+            "seed-3-auto.evo",
+            "seed-4-auto.evo",
+            "seed-9-auto.evo.tmp"
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
