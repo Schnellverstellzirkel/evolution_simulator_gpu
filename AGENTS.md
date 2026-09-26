@@ -207,7 +207,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 135. Decide what to do with `research/`: commit the harness and results, or ignore the folder.
 136. Delete the stray `cuda-keyring_1.1-1_all.deb` files in the repository root.
 137. The local branch `wip/cpu-finalist-validation` (not pushed) holds an older owner change that replayed archive finalists on the CPU before they entered the archive. The contender check in 71e9088 replaces it. Delete the branch or port anything missing.
-138. Add `.claude/` to `.gitignore`.
+138. Done: `.claude/` is in `.gitignore`.
 139. Handle GPU device loss by falling back to the CPU engine instead of stopping.
 140. Log per-generation stage times to a file for later analysis.
 141. Speed up builds: consider the fast iteration profile as a named Cargo profile.
