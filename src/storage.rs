@@ -1534,7 +1534,7 @@ pub fn rotate_autosaves(dir: &Path, keep: usize) -> usize {
             autosaves.push((modified, path));
         }
     }
-    autosaves.sort_by(|a, b| b.0.cmp(&a.0));
+    autosaves.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     for (_, path) in autosaves.into_iter().skip(keep) {
         if std::fs::remove_file(&path).is_ok() {
             removed += 1;
