@@ -906,3 +906,45 @@ fn a_body_without_drive_does_not_travel() {
     // must never travel.
     assert!(worst < 0.5, "a body drifted {worst} m with no muscle drive");
 }
+
+#[test]
+fn a_passive_body_never_rises_above_its_start() {
+    // Without muscle drive, gravity can only lower a body. Rising above its
+    // starting height would be energy the solver created.
+    let cfg = Config {
+        population: 32,
+        duration: 5.0,
+        ..config()
+    };
+    let mut pop = evolution::create(&cfg).unwrap();
+    for muscle in &mut pop.muscles {
+        muscle.short = muscle.long;
+    }
+    let settle = evolution_simulator::physics::settle() as usize;
+    for i in 0..pop.genomes.len() {
+        let creature = pop.creature(i);
+        let masses: Vec<f32> = evolution_simulator::physics::nodes(&creature)
+            .iter()
+            .map(|n| n.mass)
+            .collect();
+        let total: f32 = masses.iter().sum();
+        let (frames, _) = evolution_simulator::cpu_engine::replay(&creature, &cfg);
+        let height = |frame: &Vec<[f32; 2]>| {
+            frame
+                .iter()
+                .zip(&masses)
+                .map(|(p, m)| p[1] * m)
+                .sum::<f32>()
+                / total
+        };
+        let start = height(&frames[settle + 1]);
+        let highest = frames[settle + 1..]
+            .iter()
+            .map(|f| height(f))
+            .fold(f32::MIN, f32::max);
+        assert!(
+            highest <= start + 0.02,
+            "body {i} rose from {start} m to {highest} m without muscle drive"
+        );
+    }
+}
