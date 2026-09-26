@@ -8,6 +8,10 @@ use crate::{
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points};
+use image::{
+    Delay as GifDelay, Frame as GifFrame, Rgba, RgbaImage,
+    codecs::gif::{GifEncoder, Repeat as GifRepeat},
+};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -30,7 +34,16 @@ const GROUND: Color32 = Color32::from_rgb(121, 176, 89);
 const GROUND_EDGE: Color32 = Color32::from_rgb(66, 118, 55);
 const MUSCLE_REST: Color32 = Color32::from_rgb(249, 168, 191);
 const MUSCLE_ACTIVE: Color32 = Color32::from_rgb(146, 16, 28);
+/// Ring around every node touching the ground in the current frame.
+const TOUCHDOWN: Color32 = Color32::from_rgb(255, 196, 64);
 const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
+/// Exported GIFs render the same scene as the viewport into this frame size.
+const GIF_WIDTH: u32 = 400;
+const GIF_HEIGHT: u32 = 224;
+/// Most frames an exported GIF keeps; a longer trial is sampled evenly.
+const GIF_MAX_FRAMES: usize = 360;
+/// Pixels per meter cap, so a tiny creature stays in frame whole.
+const GIF_MAX_SCALE: f32 = 200.0;
 /// UI surface colors for the active theme. The scene itself (sky, grass,
 /// creatures) keeps fixed colors, so the viewport reads the same in both.
 #[derive(Clone, Copy)]
@@ -232,6 +245,8 @@ struct Playback {
     creature: Creature,
     config: Config,
     nodes: Vec<Node>,
+    /// Joint ranges of the creature, for spotting broken joints per frame.
+    joints: Vec<physics::Joint>,
     /// Node positions after each step, from the CPU evaluation engine.
     frames: Vec<Vec<[f32; 2]>>,
     tick: u32,
@@ -250,6 +265,7 @@ impl Playback {
         // ended and how far it got, so the replay shows exactly its score.
         let (frames, result) = crate::cpu_engine::replay(&normalized, &config);
         let nodes = physics::nodes(&normalized);
+        let joints = physics::joints(&normalized.nodes, &normalized.bones);
         let last_frame = frames.len().saturating_sub(1).min(u32::MAX as usize) as u32;
         let fall = (result.fall_time > 0.0).then(|| {
             let tick = physics::settle()
@@ -258,6 +274,7 @@ impl Playback {
         });
         let mut playback = Self {
             nodes,
+            joints,
             fall,
             distance: result.fitness,
             creature: normalized,
@@ -344,6 +361,96 @@ impl Playback {
     fn current_distance(&self) -> f32 {
         self.fallen()
             .map_or_else(|| physics::fitness(&self.nodes), |(_, distance)| distance)
+    }
+}
+/// Marks the nodes touching the ground in `positions`, with the threshold
+/// `size_report` uses: a node is down when its center sits within 2 mm of the
+/// terrain surface plus its own radius measured along the local normal. Gaps
+/// lower the surface here too, so the marks follow the ground that is drawn.
+fn node_contact(nodes: &[Node], positions: &[[f32; 2]], config: &Config, out: &mut [bool]) {
+    out.fill(false);
+    if !config.ground {
+        return;
+    }
+    let amplitude = physics::terrain_amplitude(config.terrain);
+    for ((node, position), down) in nodes.iter().zip(positions).zip(out.iter_mut()) {
+        let (height, slope) = physics::ground(position[0], amplitude, config.slope, config.gaps);
+        let floor = height + node.radius * (1.0 + slope * slope).sqrt();
+        *down = position[1] <= floor + 0.002;
+    }
+}
+/// Marks both ends of every bone whose joint is forced past its break angle in
+/// `positions`. Mirrors `physics::broken_joint`, one bone at a time, so the
+/// drawing can point at the joint that actually broke.
+fn broken_nodes(
+    creature: &Creature,
+    positions: &[[f32; 2]],
+    joints: &[physics::Joint],
+    out: &mut [bool],
+) {
+    out.fill(false);
+    for (bone, joint) in creature.bones.iter().zip(joints) {
+        let Some(reference) = joint.reference else {
+            continue;
+        };
+        let pivot = positions[bone.a as usize];
+        let at = |i: usize| [positions[i][0] - pivot[0], positions[i][1] - pivot[1]];
+        let (u, v) = (at(reference), at(bone.b as usize));
+        let norm = ((u[0] * u[0] + u[1] * u[1]) * (v[0] * v[0] + v[1] * v[1])).sqrt();
+        if norm < 1e-12 {
+            continue;
+        }
+        let cos = (u[0] * v[0] + u[1] * v[1]) / norm;
+        let sin = (u[0] * v[1] - u[1] * v[0]) / norm;
+        if cos * joint.center[0] + sin * joint.center[1] < physics::joint_break_cos(joint.half) {
+            out[bone.a as usize] = true;
+            out[bone.b as usize] = true;
+        }
+    }
+}
+/// A red cross over a node that fell, shook, or broke its joint.
+fn draw_break_mark(p: &egui::Painter, center: Pos2, radius: f32) {
+    let d = radius.max(3.5);
+    let arm = |dx: f32, dy: f32| {
+        p.line_segment(
+            [
+                center + Vec2::new(-dx * d, -dy * d),
+                center + Vec2::new(dx * d, dy * d),
+            ],
+            Stroke::new(2.0, FALLEN),
+        );
+    };
+    arm(1.0, 1.0);
+    arm(1.0, -1.0);
+}
+/// Frame-varying drawing state: muscle time, fallen look, and the per-node
+/// marks for ground contact and broken joints.
+#[derive(Default)]
+struct FrameMarks {
+    time: f32,
+    fallen: bool,
+    contact: Vec<bool>,
+    broken: Vec<bool>,
+}
+impl FrameMarks {
+    /// Contact and broken-joint marks of a playback's current frame.
+    fn of(playback: &Playback) -> Self {
+        let mut marks = Self {
+            time: playback.tick.saturating_sub(physics::settle()) as f32 * physics::dt(),
+            fallen: playback.fallen().is_some(),
+            contact: vec![false; playback.nodes.len()],
+            broken: vec![false; playback.nodes.len()],
+        };
+        if let Some(frame) = playback.frames.get(playback.tick as usize) {
+            node_contact(&playback.nodes, frame, &playback.config, &mut marks.contact);
+            broken_nodes(
+                &playback.creature,
+                frame,
+                &playback.joints,
+                &mut marks.broken,
+            );
+        }
+        marks
     }
 }
 /// Behavior-axis bin counts, mirroring `qd::BINS` (ground contact, cadence,
@@ -1067,12 +1174,13 @@ impl App {
             "Export CSV" => "runs/statistics.csv".to_owned(),
             "Save preset" | "Load preset" => "presets/custom.json".to_owned(),
             "Open creature JSON" => "runs/creature.json".to_owned(),
-            "Export creature JSON" => {
+            "Export creature JSON" | "Export creature GIF" => {
                 let id = self.playback.as_ref().map_or(0, |p| p.creature.id);
                 let stamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis());
-                format!("runs/creature-{id}-{stamp}.json")
+                let extension = if mode.ends_with("GIF") { "gif" } else { "json" };
+                format!("runs/creature-{id}-{stamp}.{extension}")
             }
             _ => "runs/experiment.evo".to_owned(),
         };
@@ -1308,31 +1416,12 @@ impl App {
                     );
                 });
             }
-            if matches_search(
-                &q,
-                "performance gpu ram memory throughput checkpoint autosave",
-            ) {
+            if matches_search(&q, "performance throughput checkpoint autosave") {
                 egui::CollapsingHeader::new("Performance & checkpoints").show(ui, |ui| {
                     ui.checkbox(&mut self.config.throughput, "Maximum throughput")
                         .on_hover_text(
                             "Larger batches for long runs. Selected automatically when you choose 100k or more creatures; uncheck for shorter pauses.",
                         );
-                    ui.horizontal(|ui| {
-                        ui.label("GPU budget MiB");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.gpu_budget_mib)
-                                .speed(64)
-                                .range(32..=6144),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("RAM budget MiB");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.ram_budget_mib)
-                                .speed(256)
-                                .range(64..=24576),
-                        );
-                    });
                     ui.horizontal(|ui| {
                         ui.label("Autosave every");
                         ui.add(
@@ -1356,30 +1445,57 @@ impl App {
                         egui::Slider::new(&mut self.sort_speed, 0.5..=20.0)
                             .text("Sort animation speed"),
                     );
-                    ui.checkbox(&mut self.show_perf, "Performance details");
                     if ui.checkbox(&mut self.dark, "Dark theme").changed() {
                         apply_style(ui.ctx(), self.dark);
                     }
                     ui.checkbox(&mut self.show_help, "Show help overlay");
                 });
             }
-            if matches_search(&q, "histogram minimum maximum bins") {
-                egui::CollapsingHeader::new("Histogram").show(ui, |ui| {
+            if matches_search(
+                &q,
+                "debug histogram minimum maximum bins gpu ram memory budget performance details diagnostics",
+            ) {
+                egui::CollapsingHeader::new("Debug").show(ui, |ui| {
+                    ui.label(
+                        RichText::new(
+                            "Diagnostics and machine limits. Nothing here changes evolution.",
+                        )
+                        .small()
+                        .color(theme.muted),
+                    );
                     ui.horizontal(|ui| {
-                        ui.label("Min (m)");
+                        ui.label("Histogram min (m)");
                         ui.add(egui::DragValue::new(&mut self.hist_min).speed(0.1));
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Max (m)");
+                        ui.label("Histogram max (m)");
                         ui.add(egui::DragValue::new(&mut self.hist_max).speed(0.1));
                     });
-                    egui::ComboBox::from_label("Bins / meter")
+                    egui::ComboBox::from_label("Histogram bins / meter")
                         .selected_text(self.bins.to_string())
                         .show_ui(ui, |ui| {
                             for n in [1, 2, 5, 10, 20, 25, 50, 100] {
                                 ui.selectable_value(&mut self.bins, n, n.to_string());
                             }
                         });
+                    ui.checkbox(&mut self.show_perf, "Performance details");
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("GPU budget MiB");
+                        ui.add(
+                            egui::DragValue::new(&mut self.config.gpu_budget_mib)
+                                .speed(64)
+                                .range(32..=6144),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("RAM budget MiB");
+                        ui.add(
+                            egui::DragValue::new(&mut self.config.ram_budget_mib)
+                                .speed(256)
+                                .range(64..=24576),
+                        );
+                    });
                 });
             }
         }
@@ -1424,6 +1540,13 @@ impl App {
                 .clicked()
             {
                 self.file("Export creature JSON");
+            }
+            if ui
+                .add_enabled(self.playback.is_some(), egui::Button::new("GIF").small())
+                .on_hover_text("Save an animated GIF of the selected creature under runs/")
+                .clicked()
+            {
+                self.file("Export creature GIF");
             }
             if ui
                 .small_button("Open creature")
@@ -1631,15 +1754,8 @@ impl App {
                     Color32::from_black_alpha(30),
                 ));
             }
-            draw_creature(
-                &painter,
-                &p.nodes,
-                &p.creature,
-                origin,
-                self.zoom,
-                p.tick.saturating_sub(physics::settle()) as f32 * physics::dt(),
-                p.fallen().is_some(),
-            );
+            let marks = FrameMarks::of(p);
+            draw_creature(&painter, &p.nodes, &p.creature, origin, self.zoom, &marks);
             match p.fallen() {
                 Some((tick, distance)) => {
                     painter.text(
@@ -1892,7 +2008,7 @@ impl App {
             });
         if outside > 0 {
             ui.small(format!(
-                "{outside} outside this range or failed · change range in Advanced"
+                "{outside} outside this range or failed · change range in Advanced > Debug"
             ));
         }
     }
@@ -2616,14 +2732,14 @@ impl App {
             }
             let origin = Pos2::new(lane_rect.left() - camera * zoom, ground);
             let playback = &lane.playback;
+            let marks = FrameMarks::of(playback);
             draw_creature(
                 &painter,
                 &playback.nodes,
                 &playback.creature,
                 origin,
                 zoom,
-                playback.tick.saturating_sub(physics::settle()) as f32 * physics::dt(),
-                playback.fallen().is_some(),
+                &marks,
             );
             painter.text(
                 lane_rect.left_top() + Vec2::new(8., 6.),
@@ -3044,6 +3160,26 @@ impl App {
                                     self.message = Some(result.map_or_else(
                                         |e| e.to_string(),
                                         |_| format!("Creature saved to {}", path.display()),
+                                    ));
+                                }
+                                "Export creature GIF" => {
+                                    let result = (|| -> anyhow::Result<usize> {
+                                        let playback = self.playback.as_ref().ok_or_else(|| {
+                                            anyhow::anyhow!("No creature is selected to export")
+                                        })?;
+                                        if let Some(parent) = path.parent() {
+                                            std::fs::create_dir_all(parent)?;
+                                        }
+                                        export_creature_gif(playback, &path)
+                                    })();
+                                    self.message = Some(result.map_or_else(
+                                        |e| format!("GIF export failed: {e}"),
+                                        |frames| {
+                                            format!(
+                                                "GIF saved to {} ({frames} frames)",
+                                                path.display()
+                                            )
+                                        },
                                     ));
                                 }
                                 "Open creature JSON" => {
@@ -3613,8 +3749,7 @@ fn draw_creature(
     c: &Creature,
     origin: Pos2,
     scale: f32,
-    time: f32,
-    fallen: bool,
+    marks: &FrameMarks,
 ) {
     let position = |n: &Node| origin + Vec2::new(n.pos[0] * scale, -n.pos[1] * scale);
     for bone in &c.bones {
@@ -3661,10 +3796,10 @@ fn draw_creature(
         let a = point(bone_a, m.anchor_a);
         let b = point(bone_b, m.anchor_b);
         // A fallen creature's muscles are limp.
-        let contraction = if fallen {
+        let contraction = if marks.fallen {
             0.
         } else {
-            1. - ((physics::target(m, time) - m.short) / (m.long - m.short).max(1e-5))
+            1. - ((physics::target(m, marks.time) - m.short) / (m.long - m.short).max(1e-5))
         };
         let width = (scale * 0.017 * (1. + 0.45 * contraction)).max(2.);
         p.line_segment(
@@ -3677,7 +3812,7 @@ fn draw_creature(
             Stroke::new(width, mix_color(MUSCLE_REST, MUSCLE_ACTIVE, contraction)),
         );
     }
-    for n in nodes {
+    for (i, n) in nodes.iter().enumerate() {
         let center = position(n);
         let r = (n.radius * scale).max(2.);
         let color =
@@ -3690,13 +3825,21 @@ fn draw_creature(
             Color32::from_white_alpha(35),
         );
         p.circle_stroke(center, r, Stroke::new(1., Color32::from_white_alpha(60)));
+        if marks.contact.get(i).copied().unwrap_or(false) {
+            p.circle_stroke(center, r + 2.5, Stroke::new(2., TOUCHDOWN));
+        }
+        if marks.broken.get(i).copied().unwrap_or(false) {
+            p.circle_stroke(center, r + 2.5, Stroke::new(2., FALLEN));
+            draw_break_mark(p, center, r);
+        }
     }
     // The head (node 0) looks ahead with one eye.
     if let Some(head) = nodes.first() {
         let center = position(head);
         let r = (head.radius * scale).max(2.);
-        if fallen {
+        if marks.fallen {
             p.circle_stroke(center, r + 1.5, Stroke::new(2., FALLEN));
+            draw_break_mark(p, center, r);
         }
         let eye = center + Vec2::new(r * 0.4, -r * 0.2);
         p.circle_filled(eye, r * 0.3, Color32::WHITE);
@@ -3729,7 +3872,335 @@ fn thumbnail(p: &egui::Painter, c: &Creature, rect: Rect) {
         (rect.width() / (maxx - minx).max(0.1)).min(rect.height() / (maxy - miny).max(0.1)) * 0.82;
     let origin =
         rect.center() + Vec2::new(-(minx + maxx) * 0.5 * scale, (miny + maxy) * 0.5 * scale);
-    draw_creature(p, &nodes, c, origin, scale, 0., false);
+    draw_creature(p, &nodes, c, origin, scale, &FrameMarks::default());
+}
+/// Fixed camera and palette of an exported GIF. A frame is rasterized into one
+/// reused buffer, so painting allocates nothing beyond the frame itself.
+struct GifCamera {
+    /// World y at the bottom edge.
+    y0: f32,
+    /// Pixels per meter.
+    scale: f32,
+    /// Screen x the followed center of mass stays at, in pixels.
+    anchor_x: f32,
+}
+impl GifCamera {
+    fn fit(nodes: &[Node], frames: &[Vec<[f32; 2]>]) -> Self {
+        let mut min_y = 0.0f32;
+        let mut max_y = 0.4f32;
+        for frame in frames {
+            for (position, node) in frame.iter().zip(nodes) {
+                min_y = min_y.min(position[1] - node.radius);
+                max_y = max_y.max(position[1] + node.radius);
+            }
+        }
+        min_y -= 0.15;
+        let range = (max_y - min_y).max(0.4);
+        let scale = (GIF_HEIGHT as f32 / (range * 1.15)).min(GIF_MAX_SCALE);
+        let y0 = 0.5 * (min_y + max_y) - 0.5 * GIF_HEIGHT as f32 / scale;
+        Self {
+            y0,
+            scale,
+            anchor_x: GIF_WIDTH as f32 * 0.38,
+        }
+    }
+    fn origin_x(&self, center_x: f32) -> f32 {
+        center_x - self.anchor_x / self.scale
+    }
+    fn screen(&self, origin_x: f32, position: [f32; 2]) -> (f32, f32) {
+        (
+            (position[0] - origin_x) * self.scale,
+            GIF_HEIGHT as f32 - (position[1] - self.y0) * self.scale,
+        )
+    }
+}
+fn gif_color(c: Color32) -> Rgba<u8> {
+    Rgba([c.r(), c.g(), c.b(), 255])
+}
+fn gif_put(buffer: &mut RgbaImage, x: f32, y: f32, color: Rgba<u8>) {
+    let x = x.round() as i32;
+    let y = y.round() as i32;
+    if x >= 0 && y >= 0 && (x as u32) < buffer.width() && (y as u32) < buffer.height() {
+        buffer.put_pixel(x as u32, y as u32, color);
+    }
+}
+fn gif_disc(buffer: &mut RgbaImage, center: (f32, f32), radius: f32, color: Rgba<u8>) {
+    let radius = radius.max(0.5);
+    let r = radius.ceil() as i32;
+    let r2 = radius * radius;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if (dx * dx + dy * dy) as f32 <= r2 {
+                gif_put(buffer, center.0 + dx as f32, center.1 + dy as f32, color);
+            }
+        }
+    }
+}
+fn gif_ring(buffer: &mut RgbaImage, center: (f32, f32), radius: f32, width: f32, color: Rgba<u8>) {
+    let outer = radius + width * 0.5;
+    let inner = (radius - width * 0.5).max(0.0);
+    let r = outer.ceil() as i32;
+    let (outer2, inner2) = (outer * outer, inner * inner);
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let d2 = (dx * dx + dy * dy) as f32;
+            if d2 <= outer2 && d2 >= inner2 {
+                gif_put(buffer, center.0 + dx as f32, center.1 + dy as f32, color);
+            }
+        }
+    }
+}
+fn gif_line(buffer: &mut RgbaImage, a: (f32, f32), b: (f32, f32), radius: f32, color: Rgba<u8>) {
+    let radius = radius.max(0.5);
+    let length = (b.0 - a.0).hypot(b.1 - a.1);
+    let steps = (length / (radius * 0.5).max(1.0)).ceil().max(1.0) as u32;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        gif_disc(
+            buffer,
+            (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t),
+            radius,
+            color,
+        );
+    }
+}
+fn gif_cross(buffer: &mut RgbaImage, center: (f32, f32), radius: f32, color: Rgba<u8>) {
+    let d = radius.max(3.5);
+    gif_line(
+        buffer,
+        (center.0 - d, center.1 - d),
+        (center.0 + d, center.1 + d),
+        1.25,
+        color,
+    );
+    gif_line(
+        buffer,
+        (center.0 - d, center.1 + d),
+        (center.0 + d, center.1 - d),
+        1.25,
+        color,
+    );
+}
+/// Mass-weighted center x of a pose; the GIF camera follows it.
+fn pose_center_x(nodes: &[Node], positions: &[[f32; 2]]) -> f32 {
+    let mut mass = 0.0;
+    let mut x = 0.0;
+    for (node, position) in nodes.iter().zip(positions) {
+        mass += node.mass;
+        x += node.mass * position[0];
+    }
+    if mass > 0.0 { x / mass } else { 0.0 }
+}
+/// The viewport scene painted into a pixel buffer for one recorded pose.
+struct GifScene<'a> {
+    creature: &'a Creature,
+    config: &'a Config,
+    nodes: &'a [Node],
+    camera: &'a GifCamera,
+}
+impl GifScene<'_> {
+    fn render(
+        &self,
+        buffer: &mut RgbaImage,
+        positions: &[[f32; 2]],
+        time: f32,
+        fallen: bool,
+        contact: &[bool],
+        broken: &[bool],
+    ) {
+        let dark = gif_color(Color32::from_rgb(10, 15, 19));
+        let origin_x = self.camera.origin_x(pose_center_x(self.nodes, positions));
+        let at = |position: [f32; 2]| self.camera.screen(origin_x, position);
+        for pixel in buffer.pixels_mut() {
+            *pixel = gif_color(VIEWPORT);
+        }
+        // A meter grid; it scrolls with the follow camera, so motion reads even
+        // when the creature holds its screen position.
+        let right = origin_x + GIF_WIDTH as f32 / self.camera.scale;
+        let grid = gif_color(CARD_BORDER);
+        for meter in origin_x.floor() as i32..=right.ceil() as i32 {
+            let screen_x = (meter as f32 - origin_x) * self.camera.scale;
+            gif_line(
+                buffer,
+                (screen_x, 0.0),
+                (screen_x, GIF_HEIGHT as f32),
+                0.5,
+                grid,
+            );
+        }
+        if self.config.ground {
+            let amplitude = physics::terrain_amplitude(self.config.terrain);
+            let ground = gif_color(GROUND);
+            let edge = gif_color(GROUND_EDGE);
+            for px in 0..GIF_WIDTH {
+                let world_x = origin_x + px as f32 / self.camera.scale;
+                let (height, _) =
+                    physics::ground(world_x, amplitude, self.config.slope, self.config.gaps);
+                let surface = GIF_HEIGHT as f32 - (height - self.camera.y0) * self.camera.scale;
+                let top = surface.floor().max(0.0) as u32;
+                for y in top..GIF_HEIGHT {
+                    buffer.put_pixel(px, y, ground);
+                }
+                if top < GIF_HEIGHT {
+                    buffer.put_pixel(px, top, edge);
+                    if top + 1 < GIF_HEIGHT {
+                        buffer.put_pixel(px, top + 1, edge);
+                    }
+                }
+            }
+        }
+        for bone in &self.creature.bones {
+            let a = at(positions[bone.a as usize]);
+            let b = at(positions[bone.b as usize]);
+            let half = (self.camera.scale * 0.032).max(3.0) * 0.5;
+            gif_line(buffer, a, b, half + 1.5, dark);
+            gif_line(
+                buffer,
+                a,
+                b,
+                half,
+                gif_color(Color32::from_rgb(192, 205, 187)),
+            );
+        }
+        for bone in self.creature.bones.iter().filter(|b| b.organ_mass > 0.0) {
+            let a = positions[bone.a as usize];
+            let b = positions[bone.b as usize];
+            let t = bone.organ_at;
+            let center = at([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+            let r = (0.04 * (bone.organ_mass / 0.1).sqrt() * self.camera.scale).max(2.5);
+            gif_disc(buffer, center, r + 1.5, dark);
+            gif_disc(buffer, center, r, gif_color(ORGAN));
+        }
+        for m in &self.creature.muscles {
+            let bone_a = self.creature.bones[m.bone_a as usize];
+            let bone_b = self.creature.bones[m.bone_b as usize];
+            let point = |bone: crate::evolution::Bone, t: f32| {
+                let a = positions[bone.a as usize];
+                let b = positions[bone.b as usize];
+                at([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t])
+            };
+            let a = point(bone_a, m.anchor_a);
+            let b = point(bone_b, m.anchor_b);
+            // A fallen creature's muscles are limp.
+            let contraction = if fallen {
+                0.0
+            } else {
+                1. - ((physics::target(m, time) - m.short) / (m.long - m.short).max(1e-5))
+            };
+            let half = (self.camera.scale * 0.017 * (1. + 0.45 * contraction)).max(2.) * 0.5;
+            gif_line(buffer, a, b, half + 1.5, dark);
+            gif_line(
+                buffer,
+                a,
+                b,
+                half,
+                gif_color(mix_color(MUSCLE_REST, MUSCLE_ACTIVE, contraction)),
+            );
+        }
+        for (i, n) in self.nodes.iter().enumerate() {
+            let center = at(positions[i]);
+            let r = (n.radius * self.camera.scale).max(2.);
+            let color =
+                egui::ecolor::Hsva::new(0.44 - 0.07 * n.friction, 0.3 + 0.4 * n.friction, 0.95, 1.);
+            gif_disc(buffer, center, r + 1.5, dark);
+            gif_disc(buffer, center, r, gif_color(Color32::from(color)));
+            if contact.get(i).copied().unwrap_or(false) {
+                gif_ring(buffer, center, r + 2.5, 2.0, gif_color(TOUCHDOWN));
+            }
+            if broken.get(i).copied().unwrap_or(false) {
+                gif_ring(buffer, center, r + 2.5, 2.0, gif_color(FALLEN));
+                gif_cross(buffer, center, r, gif_color(FALLEN));
+            }
+        }
+        if let Some(head) = self.nodes.first() {
+            let center = at(positions[0]);
+            let r = (head.radius * self.camera.scale).max(2.);
+            gif_disc(
+                buffer,
+                (center.0 + r * 0.4, center.1 - r * 0.2),
+                r * 0.3,
+                gif_color(Color32::WHITE),
+            );
+            gif_disc(
+                buffer,
+                (center.0 + r * 0.48, center.1 - r * 0.2),
+                r * 0.15,
+                dark,
+            );
+            if fallen {
+                gif_ring(buffer, center, r + 1.5, 2.0, gif_color(FALLEN));
+                gif_cross(buffer, center, r, gif_color(FALLEN));
+            }
+        }
+    }
+}
+/// Writes an animated GIF of one recorded trial. `ticks` are frame indices in
+/// increasing order; the frame delay follows their average spacing, so the GIF
+/// plays at the speed the trial was simulated. Returns the frame count.
+fn write_creature_gif(
+    creature: &Creature,
+    config: &Config,
+    nodes: &[Node],
+    frames: &[Vec<[f32; 2]>],
+    ticks: &[u32],
+    fall: Option<(u32, f32)>,
+    path: &std::path::Path,
+) -> anyhow::Result<usize> {
+    let camera = GifCamera::fit(nodes, frames);
+    let scene = GifScene {
+        creature,
+        config,
+        nodes,
+        camera: &camera,
+    };
+    let delay = if ticks.len() > 1 {
+        let span = ticks[ticks.len() - 1].saturating_sub(ticks[0]) as f32;
+        let mean = span / (ticks.len() - 1) as f32;
+        ((mean * physics::dt() * 100.0).round() as u32).clamp(2, 200)
+    } else {
+        10
+    };
+    let delay = GifDelay::from_numer_denom_ms(delay * 10, 1);
+    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut encoder = GifEncoder::new_with_speed(file, 30);
+    encoder.set_repeat(GifRepeat::Infinite)?;
+    let joints = physics::joints(&creature.nodes, &creature.bones);
+    let mut buffer = RgbaImage::new(GIF_WIDTH, GIF_HEIGHT);
+    let mut contact = vec![false; nodes.len()];
+    let mut broken = vec![false; nodes.len()];
+    let mut written = 0usize;
+    for &tick in ticks {
+        let Some(frame) = frames.get(tick as usize) else {
+            break;
+        };
+        node_contact(nodes, frame, config, &mut contact);
+        broken_nodes(creature, frame, &joints, &mut broken);
+        let time = tick.saturating_sub(physics::settle()) as f32 * physics::dt();
+        let fallen = fall.is_some_and(|(fall_tick, _)| tick >= fall_tick);
+        scene.render(&mut buffer, frame, time, fallen, &contact, &broken);
+        encoder.encode_frame(GifFrame::from_parts(buffer.clone(), 0, 0, delay))?;
+        written += 1;
+    }
+    // Dropping the encoder writes the GIF trailer and flushes the writer.
+    drop(encoder);
+    Ok(written)
+}
+/// Samples a playback into at most `GIF_MAX_FRAMES` frames and animates them.
+fn export_creature_gif(playback: &Playback, path: &std::path::Path) -> anyhow::Result<usize> {
+    let first = playback.trial_start();
+    let last = playback.last_frame();
+    let total = last.saturating_sub(first) as usize + 1;
+    let stride = total.div_ceil(GIF_MAX_FRAMES).max(1);
+    let ticks: Vec<u32> = (first..=last).step_by(stride).collect();
+    write_creature_gif(
+        &playback.creature,
+        &playback.config,
+        &playback.nodes,
+        &playback.frames,
+        &ticks,
+        playback.fall,
+        path,
+    )
 }
 #[cfg(test)]
 mod tests {
@@ -3802,5 +4273,46 @@ mod tests {
         });
         longer.bones.push(Bone::new(2, 3, 0.5));
         assert_ne!(name, species_name(&longer));
+    }
+    #[test]
+    fn gif_export_encodes_three_synthetic_frames() {
+        use image::AnimationDecoder;
+        use image::codecs::gif::GifDecoder;
+        let creature = test_creature();
+        let config = Config::default();
+        let nodes = physics::nodes(&creature);
+        let frames: Vec<Vec<[f32; 2]>> = vec![
+            vec![[0.0, 0.10], [0.5, 0.10], [1.0, 0.10]],
+            vec![[0.1, 0.20], [0.6, 0.20], [1.1, 0.20]],
+            vec![[0.2, 0.10], [0.7, 0.10], [1.2, 0.10]],
+        ];
+        let dir = std::env::temp_dir().join(format!("evolution-gif-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("creature.gif");
+        let written =
+            write_creature_gif(&creature, &config, &nodes, &frames, &[0, 1, 2], None, &path)
+                .unwrap();
+        assert_eq!(written, 3);
+        // image::open proves the file is a decodable GIF.
+        let first = image::open(&path).unwrap();
+        assert_eq!((first.width(), first.height()), (GIF_WIDTH, GIF_HEIGHT));
+        let decoder =
+            GifDecoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap())).unwrap();
+        let decoded = decoder.into_frames().collect_frames().unwrap();
+        assert_eq!(decoded.len(), 3);
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+    #[test]
+    fn gif_export_samples_a_recorded_trial() {
+        let playback = Playback::new(test_creature(), Config::default());
+        let dir = std::env::temp_dir().join(format!("evolution-gif-trial-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trial.gif");
+        let written = export_creature_gif(&playback, &path).unwrap();
+        assert!((3..=GIF_MAX_FRAMES).contains(&written));
+        image::open(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
     }
 }
