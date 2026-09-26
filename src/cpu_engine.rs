@@ -401,6 +401,8 @@ impl Group {
         let neck_base = self.bones[0].1;
         let mut fall_time = zero;
         let mut fall_x = zero;
+        let mut head_shake = zero;
+        let shake_alpha = F::splat((1.0 / (physics::HEAD_SHAKE_WINDOW * rate)).min(1.0));
 
         let snapshot = |px: &[F], py: &[F]| -> Vec<[f32; 2]> {
             px.iter()
@@ -409,6 +411,8 @@ impl Group {
                 .collect()
         };
         for tick in 0..total_steps {
+            // The head's velocity before this step, for the head shaking limit.
+            let head_start = (vx[0], vy[0]);
             if let Some(frames) = record.as_mut() {
                 frames.push(snapshot(&px, &py));
             }
@@ -886,7 +890,17 @@ impl Group {
                     broken = broken
                         | ((rx * center_x + ry * center_y).lt(limit) & norm.gt(F::splat(1e-12)));
                 }
-                let falls = fall_time.le(zero) & (py[0].lt(py[neck_base]) | broken);
+                // A head shaken too hard kills the creature: its acceleration,
+                // averaged over about HEAD_SHAKE_WINDOW seconds, may not pass
+                // the limit.
+                if time_now >= physics::HEAD_SHAKE_WINDOW {
+                    let (hx, hy) = (vx[0] - head_start.0, vy[0] - head_start.1);
+                    let accel = (hx * hx + hy * hy).sqrt() * rate;
+                    let shaken = head_shake + (accel - head_shake) * shake_alpha;
+                    head_shake = F::select(fall_time.le(zero), shaken, head_shake);
+                }
+                let shaking = head_shake.gt(F::splat(physics::HEAD_SHAKE_LIMIT));
+                let falls = fall_time.le(zero) & (py[0].lt(py[neck_base]) | broken | shaking);
                 if falls.any() {
                     let mut x = zero;
                     for j in 0..n {
@@ -957,6 +971,7 @@ impl Group {
         let high_center = high_center.to_array();
         let fall_time = fall_time.to_array();
         let fall_x = fall_x.to_array();
+        let head_shake = head_shake.to_array();
         (0..self.slots.len())
             .map(|l| {
                 let mut score = 0.0f32;
@@ -1000,6 +1015,7 @@ impl Group {
                     ground_lo: f32::from_bits(grounded_before[l] as u32),
                     ground_hi: f32::from_bits((grounded_before[l] >> 32) as u32),
                     fall_time: fall_time[l],
+                    head_shake: head_shake[l],
                 }
             })
             .collect()

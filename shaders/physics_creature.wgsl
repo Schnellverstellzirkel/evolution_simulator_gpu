@@ -66,6 +66,8 @@ struct Result {
     // base (bone 0's child), or 0 while upright. After a fall the muscles go
     // limp and the fitness keeps the distance at the fall.
     fall_time: f32,
+    // Mean head acceleration (m/s^2) over about HEAD_SHAKE_WINDOW seconds.
+    head_shake: f32,
 }
 @group(0) @binding(0) var<storage, read_write> nodes: array<Node>;
 // Muscle genes plus per-muscle state (rhythm offset and energy), which the
@@ -104,6 +106,9 @@ const VELOCITY_SOLVE_ITERATIONS: u32 = 4u;
 const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
 const MAX_MUSCLE_FORCE: f32 = 5.0;
 const MAX_NODE_SPEED: f32 = 5.0;
+// Head shaking limit (m/s^2) and averaging window (s); physics::HEAD_SHAKE_*.
+const HEAD_SHAKE_LIMIT: f32 = 78.4;
+const HEAD_SHAKE_WINDOW: f32 = 0.1;
 const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
 const MAX_BONE_TURN_COS: f32 = TURNCOS;
 const MAX_BONE_TURN_TAN: f32 = TURNTAN;
@@ -245,13 +250,15 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         bone_center[j] = pack2x16snorm(vec2f(bone_data[field + 2u * TILE], bone_data[field + 3u * TILE]));
         bone_cos_half[j] = bone_data[field + 4u * TILE];
     }
-    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     if p.tick > 0u {
         metrics = results[creature];
     }
 
     for (var s = 0u; s < p.steps; s++) {
         let tick = p.tick + s;
+        // The head's velocity before this step, for the head shaking limit.
+        let head_start = vel[lane];
         if tick == SETTLE {
             var avg = 0.0;
             var mass_sum = 0.0;
@@ -754,7 +761,15 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                     broken = true;
                 }
             }
-            if metrics.fall_time == 0.0 && (pos[lane].y < pos[bone_kb[0]].y || broken) {
+            // A head shaken too hard kills the creature: its acceleration,
+            // averaged over about HEAD_SHAKE_WINDOW seconds, may not pass the limit.
+            if metrics.fall_time == 0.0 && time >= HEAD_SHAKE_WINDOW {
+                let head_accel = length(vel[lane] - head_start) * RATE;
+                metrics.head_shake += (head_accel - metrics.head_shake)
+                    * min(1.0, 1.0 / (HEAD_SHAKE_WINDOW * RATE));
+            }
+            if metrics.fall_time == 0.0
+                && (pos[lane].y < pos[bone_kb[0]].y || broken || metrics.head_shake > HEAD_SHAKE_LIMIT) {
                 var fall_x = 0.0;
                 for (var j = 0u; j < MAXN; j++) {
                     if j >= body_nodes { break; }

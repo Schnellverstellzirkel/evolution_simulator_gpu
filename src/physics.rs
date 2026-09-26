@@ -594,6 +594,13 @@ impl Joint {
         reference_mass: 0.0,
     };
 }
+/// Head shaking limit: the head's acceleration, averaged over about
+/// `HEAD_SHAKE_WINDOW` seconds, may not pass 8 g (m/s^2). A creature that
+/// shakes its head harder dies like a fall. Single impacts average out, but a
+/// body jiggling at the physics step rate does not, so solver jitter cannot
+/// carry a creature forward.
+pub const HEAD_SHAKE_LIMIT: f32 = 8.0 * 9.8;
+pub const HEAD_SHAKE_WINDOW: f32 = 0.1;
 /// How far (rad) a joint may be forced past its range before it breaks. A
 /// broken joint ends the trial like a fall, so no gait can profit from
 /// muscles forcing joints round like wheels.

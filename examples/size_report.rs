@@ -15,7 +15,9 @@ fn main() {
     elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
     let settle = physics::settle() as usize;
     let amplitude = physics::terrain_amplitude(e.config.terrain);
-    println!("distance_m  nodes  length_m  longest_bone_m  mass_kg  slip_m  slip_share");
+    println!(
+        "distance_m  nodes  length_m  longest_bone_m  mass_kg  slip_m  slip_share  peak_head_g"
+    );
     let mut lengths = Vec::new();
     let mut shares = Vec::new();
     for elite in elites.iter().take(count) {
@@ -37,17 +39,40 @@ fn main() {
             }
         }
         let share = slip / elite.fitness.abs().max(0.01);
+        // Peak head acceleration after the first 0.1 s, in g.
+        let rate = physics::rate() as f32;
+        let mut peak = 0.0f32;
+        // Head shaking: mean head acceleration over about 0.1 s, the measure the
+        // head g-force limit uses. Single impacts average out; jiggling does not.
+        let mut shake = 0.0f32;
+        let mut shake_peak = 0.0f32;
+        let alpha = (1.0 / (0.1 * rate)).min(1.0);
+        for t in settle + 8..frames.len() {
+            let v = |t: usize| {
+                [
+                    (frames[t][0][0] - frames[t - 1][0][0]) * rate,
+                    (frames[t][0][1] - frames[t - 1][0][1]) * rate,
+                ]
+            };
+            let (a, b) = (v(t), v(t - 1));
+            let g = (a[0] - b[0]).hypot(a[1] - b[1]) * rate / 9.8;
+            peak = peak.max(g);
+            shake += (g - shake) * alpha;
+            shake_peak = shake_peak.max(shake);
+        }
         lengths.push(length);
         shares.push(share);
         println!(
-            "{:10.1}  {:5}  {:8.2}  {:14.2}  {:7.2}  {:6.1}  {:10.2}",
+            "{:10.1}  {:5}  {:8.2}  {:14.2}  {:7.2}  {:6.1}  {:10.2}  {:11.1}  {:7.1}",
             elite.fitness,
             c.nodes.len(),
             length,
             longest,
             mass,
             slip,
-            share
+            share,
+            peak,
+            shake_peak
         );
     }
     lengths.sort_by(f32::total_cmp);
