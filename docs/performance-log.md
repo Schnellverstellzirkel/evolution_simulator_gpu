@@ -55,7 +55,7 @@ A second identical run put every row between 93.1% and 104.7% of calm, with Drou
 
 No environment effect costs more than about 8% extra CPU evaluation time (the worst row is Air/Breezy at 108.2% of calm, barely above the noise floor), so each one is cheap to leave on. This is CPU evaluation cost only; the GPU kernel is unchanged because the effect values travel in its existing uniform buffer.
 
-Addendum: the Mud and Gaps effects added afterwards were measured the same way on the VERSION 23 tree. Both stay inside the noise floor (Mud 102.7 to 106.6% of calm, Gaps 95.9 to 99.2% of calm against a calm row at 103.4%), so the conclusion is unchanged.
+Addendum: the Mud, Gaps, Hurdles and Earthquake effects added afterwards were measured the same way on the VERSION 24 tree. Every level stays within about 5% of the calm row (calm itself measured 98.6 to 103.4% across these runs), so they sit inside the run-to-run noise and the conclusion is unchanged. Selected worst levels:
 
 | effect | level | world | creatures/s | % of calm | best m |
 |---|---:|---|---:|---:|---:|
@@ -66,6 +66,103 @@ Addendum: the Mud and Gaps effects added afterwards were measured the same way o
 | Gaps | 1 | Narrow | 147158.9 | 95.9 | 0.77 |
 | Gaps | 2 | Wide | 147171.5 | 96.9 | 0.77 |
 | Gaps | 3 | Chasms | 144157.9 | 99.2 | 0.77 |
+| Hurdles | 3 | Walls | 144816.1 | 95.7 | 0.69 |
+| Earthquake | 3 | Big one | 145242.9 | 97.4 | 0.67 |
+
+## 3M memory and end-to-end profile (2026-09-26)
+
+Backlog items 57, 59 and 60 ask for the memory use at 3 million creatures, one end-to-end GUI generation at 3M, and the fine-check share of GPU time. All runs below used commit `614e04a` on the workstation listed under Machine, under
+
+    nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 ...
+
+so the RTX 4060 evaluated and the Radeon did not. The binary was built from a clean tree at 18:34; uncommitted edits from the other workers appeared in `src/` later, so every number here comes from that one binary. Free memory was checked before each 3M run: 24 GiB was available against a measured peak under 6 GiB, so the runs had headroom (system swap use moved from 106 MiB before the session to 189 MiB after it). Per-creature storage was not changed.
+
+### Memory scaling
+
+Headless command pattern, `N` = 100,000, 1,000,000, 3,000,000. The 0.5 s trial keeps evaluation small so the peak shows the data structures, and the checkpoint at the end is part of the peak:
+
+    nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
+      /usr/bin/time -v target/release/evolution-simulator headless \
+      --population N --seed 38 --generations 1 --duration 0.5 \
+      --checkpoint /tmp/opencode/mem3m/mem-N.evo
+
+`/usr/bin/time -v` reports the peak resident set size. A separate `benchmark` run prints the population arena (`Population::bytes()`, which counts vector capacity) and the GPU allocation:
+
+    nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
+      target/release/evolution-simulator benchmark \
+      --populations 100000,1000000,3000000 --duration 0.5 --generations 1 \
+      --output /tmp/opencode/mem3m/bench-mem.csv
+
+| population | peak RSS | evaluation | headless wall | checkpoint | population arena | per creature | GPU allocation |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100,000 | 422.1 MiB (0.41 GiB) | 0.49 s | 1.73 s | 30.1 MiB (31,607,539 B) | 47.1 MiB (49,366,912 B) | 494 B | 78.8 MiB |
+| 1,000,000 | 2016.6 MiB (1.97 GiB) | 2.96 s | 12.08 s | 309.1 MiB (324,068,377 B) | 388.8 MiB (407,735,296 B) | 408 B | 96.8 MiB |
+| 3,000,000 | 5744.1 MiB (5.61 GiB) | 9.09 s | 36.22 s | 942.2 MiB (988,025,720 B) | 1494.4 MiB (1,566,941,184 B) | 522 B | 96.8 MiB |
+
+The first 100k run of the session was cold (shader compilation) with 6.10 s evaluation; the table uses the warm repeat.
+
+Measured growth: 100k to 1M is 1.81 KB of peak RSS per creature, and 1M to 3M is 1.91 KB. A line through the three points is about 1.88 KB per creature plus a 213 MiB base; that fit is a bounded estimate from three points, and it predicts 5,870,254 KB at 3M against 5,881,932 KB measured. The arena itself is 408 to 522 B per creature. The rest of the peak is the per-slot state (scores, parent scores, trial metrics, ranks, candidate tables) plus the one generation of breeding and the checkpoint write holding old and new population memory at once. The `benchmark` process, which does not write a checkpoint, peaked at 5.22 GiB at 3M. The 3M checkpoint is 942 MiB.
+
+### GUI end to end at 3M, default 60 s trials
+
+Two generations, no warm-up, autosave off, stage log on:
+
+    nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
+      EVOLUTION_STAGE_LOG=/tmp/opencode/stage3m-robust2.csv \
+      EVOLUTION_SMOKE_POPULATION=3000000 EVOLUTION_BENCH_DURATION=60 \
+      EVOLUTION_BENCH_GENERATIONS=2 EVOLUTION_BENCH_WARMUP=0 \
+      EVOLUTION_BENCH_NO_AUTOSAVE=1 /usr/bin/time -v \
+      target/release/evolution-simulator --gpu "RTX 4060"
+
+Worker summary with the default `EVOLUTION_ROBUST_TRIALS=2`:
+
+- 2 generations in 132.238 s, end to end 45,373 creatures/s. Generation seconds: min 42.182, median 90.056, max 90.056.
+- Device busy, totals since start: RTX 4060 5,495,854 standard trials in 128.100 s (112,126/s), CPU (6 threads) 605,631 standard trials in 126.086 s (20,765/s). Packing 3.932 s.
+- GUI 15,425 frames at 116.6 FPS, p95 16.60 ms, p99 20.00 ms, max 73.69 ms.
+- Control latency 259 probes, p50 2.9 ms, p95 287.3 ms, p99 740.9 ms, max 1,255.6 ms.
+- Peak RSS 6,214,900 KB (5.93 GiB).
+
+Stage log rows (generation, evaluation, archive, breeding, end to end):
+
+| generation | evaluation | archive | breeding | end to end |
+|---:|---:|---:|---:|---:|
+| 0 | 30.226 s | 4.214 s | 7.694 s | 71,120/s |
+| 1 | 68.351 s | 11.640 s | 9.888 s | 33,315/s |
+
+The smoke start sends `Command::Run` in continuous mode, where evaluation, archive insertion and breeding overlap on the worker thread. The evaluation column is the generation wall minus the measured archive and breeding work, so the three columns sum to the generation wall but are not independent device timings. The summary's evaluation field wraps whole worker passes and also contains overlapped archive and breeding work; its archive field stays 0.000 s in the continuous path, and its breeding field (3.369 s) only counts the end-of-generation cleanup, which is why it is smaller than the 17.6 s of breeding in the stage log. The device busy totals are the cleaner compute numbers. Standard-trial counters are totals since start and exceed the 3,000,000 generation slots by about 2% (3,060,119 with checks on); the counter also sees work that crosses generation boundaries, so it is not a clean count of one generation. The rates above use the summary's generation wall, not the counters. This end-to-end rate is not comparable with the historical 341k/s at 3M figure, which used the earlier reduced-work physics.
+
+### Fine-check share of GPU time (item 60)
+
+Paired A/B: same fresh seed-38 population, one generation, 3M, 60 s trials, GUI benchmark, warm-up 0; only `EVOLUTION_ROBUST_TRIALS` differs. With 2, each creature whose score could enter an archive, plus every sample from an optimizing island CMA, gets a second trial at 4x physics rate and 4x solver passes; with 1 there are no check trials. In the continuous path the archive fills while results arrive, so eligibility is tested against a live archive.
+
+    nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
+      EVOLUTION_ROBUST_TRIALS=1 EVOLUTION_STAGE_LOG=/tmp/opencode/stage3m-g0-robust1.csv \
+      EVOLUTION_SMOKE_POPULATION=3000000 EVOLUTION_BENCH_DURATION=60 \
+      EVOLUTION_BENCH_GENERATIONS=1 EVOLUTION_BENCH_WARMUP=0 \
+      EVOLUTION_BENCH_NO_AUTOSAVE=1 /usr/bin/time -v \
+      target/release/evolution-simulator --gpu "RTX 4060"
+
+| metric | checks on (2) | checks off (1) | difference |
+|---|---:|---:|---:|
+| generation wall | 43.405 s | 21.241 s | +22.164 s (+104.3%) |
+| end-to-end rate | 69,117/s | 141,238/s | 2.04x slower |
+| GPU busy | 40.645 s | 18.718 s | +21.927 s (+117.1%) |
+| CPU busy | 41.103 s | 13.880 s | +27.223 s (+196.1%) |
+| packing | 2.219 s | 1.410 s | +0.809 s |
+| stage evaluation remainder | 28.818 s | 8.149 s | +20.669 s |
+| stage archive | 5.415 s | 4.486 s | +0.929 s |
+| stage breeding | 9.118 s | 8.589 s | +0.529 s |
+| peak RSS | 5.65 GiB | 5.43 GiB | +0.22 GiB |
+
+The extra 21.9 s of GPU busy and 22.2 s of generation wall is the check work plus scheduling: 53.9% of the check-on GPU busy and 51.1% of the check-on generation wall. This is a whole-check cost, including perturbing each body, packing it again and dispatching it, not a kernel-internal profile. A second check-on generation-0 sample from the two-generation run above took 42.18 s, 3% below 43.41 s, so read the share as about half, not to two decimals.
+
+Caveats:
+
+- Generation 0 starts with an empty archive, so this share is the cost while the archive fills. In the two-generation check-on run, generation 1 took 90.06 s against 22.82 s for the check-off run's generation 1, but those populations had already diverged, because check-on admission keeps the lower of the two trials. The later-generation share is not cleanly attributable, so no paired later-generation share is reported.
+- The GUI path checks only creatures that could enter an archive. The headless path (`Scheduler::evaluate`, used by `headless` and `benchmark`) passes a callback that is true for every creature; the source comment there reads "Without an archive to compare against, every creature is checked." Headless evaluation seconds therefore include a fine check per creature and are not comparable with the GUI numbers in this section.
+- GPU busy comes from Vulkan timestamp query spans summed across submissions; it can include stalls inside the command stream.
+
+Everything in the tables is measured, except the 1.88 KB per creature line fit and its 213 MiB base, which are bounded estimates from the three memory points. The following could not be measured: a per-generation split of device busy into standard and check trials (the scheduler exposes run totals only), and a paired later-generation check share (the two arms cannot share an archive).
 
 ## Historical version-16 bone-cap baseline, Windows headless (2026-09-26)
 

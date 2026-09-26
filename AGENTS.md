@@ -10,6 +10,7 @@ Two agent teams work on this repository at the same time and only see each other
 
 - 2026-09-26 18:xx, Claude pushed a backlog sweep: legacy `mutate`/`reproduce` removed with the obstacle config slot (checkpoint magic EVORUST5); `EVOLUTION_STAGE_LOG` CSV rows; `runs/` disk use, replay speed and center-of-mass trail, help overlay, screenshot button, dark theme, archive map, race view and lineage view in the UI; heat wave, drought, slope, wind, mud and gap effects in both engines with archive re-testing (qd::VERSION 23); `examples/search_ab.rs`; `examples/effect_cost.rs` with the measured per-effect cost; and `tests/engine_agreement.rs` with fine-fidelity evolved-creature checks. History records timeline, creature JSON export/open, species names and a hall of fame are in. Still open: a full evolution measurement under the planted-feet rule (5905316), near-neutral structural splits (66), and GIF export. Please leave the physics in `src/cpu_engine.rs` and `shaders/physics_creature.wgsl`, and archive insertion in `src/storage.rs`, to Claude until this line changes. Claude stays out of the files the Codex team listed below.
 - 2026-09-26, Codex Luna team (coordinated by the primary Codex session) is working on: CPU evaluation backend and top-50 body mix in `src/search_benchmark.rs`, `src/main.rs`, and `docs/search-benchmark.md`; current-physics details in `docs/architecture.md`. Please leave these files to the assigned workers until this line changes.
+- Just pushed: hurdles and per-creature earthquake terrain, near-neutral structural splits, and a fresh-perturbation elite refresh (both search flags measured and left default off), plus the 3M memory and check-cost measurements in docs/performance-log.md. `qd::VERSION` 24, checkpoint magic EVORUST6, 121 CPU tests, nine report tests, five RTX/agreement tests; `first_generation` unchanged at median -0.07 m, p99 0.34 m, best 11.03 m. 3M peak RSS 5.61 GiB; the fine contender check is 53.9% of check-on GPU busy time.
 - Just pushed: mud and gap terrain effects, an opt-in bounded elite-refresh flag (measured byte-identical on paired seeds), and `tests/engine_agreement.rs` with fine-fidelity evolved-creature and perturbed-check agreement. `qd::VERSION` 23, archive re-tests on mud/gap changes, 112 CPU tests, nine report tests, five RTX/agreement tests; `first_generation` unchanged. Mud and Gaps sit in the effect-cost noise floor.
 - Just pushed: slope and wind effects, the History records timeline, creature JSON export/open, species names, a hall of fame, and `examples/effect_cost.rs`. 104 CPU tests, nine report tests, three RTX agreement tests; `first_generation` stays at median -0.07 m, p99 0.34 m, best 11.03 m with the calm defaults. The UI smoke capture still runs; screenshots under /tmp/opencode.
 - Just pushed: the backlog wave above. 100 CPU tests, nine report tests, three RTX agreement tests, and `first_generation` at the same numbers as before the energy effects (median -0.07 m, p99 0.34 m, best 11.03 m). The two new effects are neutral at their calm defaults, and changing either re-tests the archive. `search_ab` tiny runs are byte-identical across repeats. UI features were smoke-run with screenshots under /tmp/opencode.
@@ -106,7 +107,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 22. Done: (owner) every environment effect has raise and lower buttons, and every change re-tests the archive (b82ff21). Effects live in `src/environment.rs`. Add new effects there.
 23. (owner) Add more environment effects and catastrophes that create biodiversity and push toward complex, efficient movement.
 24. Done: the generational path now puts queued elites back after a world change, before any slice reaches a device (1214bd0). A test guards it.
-25. Hurdles: periodic steps whose height rises with each level.
+25. Done: hurdle levels add periodic raised steps to the ground in both engines; the viewport draws them.
 26. Done: slope levels tilt the ground uphill in both engines; the replay viewport draws the tilted ground.
 27. Done: air drag levels (Thin, Breezy, Thick, Syrup).
 28. Done: gravity levels (Earth, 1.5 g, 2 g, 3 g).
@@ -119,7 +120,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 35. Done: heat wave levels shrink the muscle energy store (`Config::muscle_energy`, 1.0 down to 0.35) in both engines.
 36. Done: meteor strike wipes out half of every archive's elites; Undo returns the fossils (`Experiment::meteor`, `undo_meteor`).
 37. Done: Extinction wipes out the slowest island (`Experiment::extinction`), undoable with the same fossils as the meteor.
-38. Earthquake: a new random terrain each trial, so gaits must be robust.
+38. Done: quake levels give each creature its own deterministic terrain phase and amplitude jitter, seeded from its id, in both engines.
 39. Seasons: effects that cycle automatically every N generations.
 40. A curriculum that raises difficulty when the archive stalls, as in POET (Wang et al., 2019).
 41. Run the robustness trial on different terrain instead of a 2 cm pose shift (research note B7).
@@ -141,10 +142,10 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 54. Successive halving: short trials first, full trials for survivors (10 s ranks predict 60 s ranks with Spearman 0.89 to 0.94).
 55. Done: secondary GPUs are opt-in; the scheduler defaults to `primary`. General and CPU evaluation pools share a budget of at most eight threads and half the logical CPUs (six evaluation plus two general workers on this laptop). Continue setting the explicit workstation environment for every run.
 56. Size work units per device from measured rates, and re-measure after each engine change.
-57. Measure memory use at 3M creatures and shrink per-creature storage.
+57. Baseline measured: 3M peak RSS 5.61 GiB, checkpoint 942 MiB, population arena 408 to 522 B/creature, marginal fit 1.88 KB/creature plus 213 MiB base; see docs/performance-log.md. Shrinking storage remains open.
 58. Send only snapshot changes from worker to UI, not full copies.
-59. Profile end to end in the GUI at 3M and record numbers in `docs/performance-log.md`.
-60. Check the 4x-fidelity contender check's share of total GPU time.
+59. Done: a 3M GUI run recorded 45,373 creatures/s end to end with stage seconds, GPU/CPU busy split, 116.6 FPS and peak RSS in docs/performance-log.md.
+60. Done: the paired robust-trials A/B attributes 53.9% of check-on GPU busy time (51.1% of generation wall) to the contender checks; docs/performance-log.md.
 
 ### Checkpoints and storage
 
@@ -156,8 +157,8 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 
 ### Search
 
-66. Make structural mutations near-neutral: new parts start with weak muscles so the parent's gait survives (research: split children keep 1 to 2% of the parent's distance).
-67. Re-check top elites from fresh perturbations every few generations so steady gaits beat lucky ones.
+66. Implemented (measured no gain): EVOLUTION_NEUTRAL_SPLITS makes every added muscle passive (zero stroke, stiffness 5). Paired 60-generation, 10-seed runs showed no best/QD improvement, so it stays default off; splits remain broken and a rigid new joint is the next candidate, per docs/search-research.md.
+67. Implemented (mixed result): EVOLUTION_ELITE_REFRESH=N now re-scores a bounded rotating elite subset from a fresh deterministic perturbation and keeps the worse score. It lowered about 5 entries per cycle and caught exact-pose accidents, but the 10-seed best-distance effect was mixed, so it stays default off and the game is the place to re-measure.
 68. Spend more evaluations on the best elites (CMA-MAE thresholds, curiosity-based parent choice).
 69. Let CMA respect the configured body bounds and vary joint ranges, sensors and reset phases (F6).
 70. Use or remove `Creature.mutability` (mutated but unused, F8).
