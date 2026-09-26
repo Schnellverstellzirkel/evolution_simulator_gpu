@@ -123,7 +123,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 38. Done: quake levels give each creature its own deterministic terrain phase and amplitude jitter, seeded from its id, in both engines.
 39. Seasons: effects that cycle automatically every N generations.
 40. A curriculum that raises difficulty when the archive stalls, as in POET (Wang et al., 2019).
-41. Run the robustness trial on different terrain instead of a 2 cm pose shift (research note B7).
+41. Implemented (default off): `EVOLUTION_CHECK_TERRAIN=1` replaces the 2 cm pose shift with the contender's own nearby terrain (id-hashed level offset), still at fine fidelity with the held standard result and min-of-two rule; four scheduler tests cover on/off, determinism and input retention.
 42. An environment panel that lists active effects with their levels, undo buttons, and short explanations.
 43. A timeline of effects on the history chart.
 44. Save the effect history in checkpoints.
@@ -214,15 +214,15 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 114. Done: the Behavior archive tab has a Cards/Map selector with a heatmap slice of the archive, a fitness legend, axis selectors, and click-to-replay.
 115. Done: the History tab plots best distance with record markers and a clickable records timeline that replays each holder.
 116. Done: a Race tab replays the top five elites in parallel lanes with live standings and a leader highlight.
-117. Creature drawing: muscle activation and fatigue colors, head, organs, touchdown highlights, broken joint marks.
+117. Done: drawing adds touchdown contact rings and broken-joint marks; activation colors, head and organs were already in. Replay GIFs use the same scene renderer.
 118. Done: F1 or `?` opens a help overlay, 1/2/3 switch tabs, space toggles replay play/pause, arrow keys seek, and the status line shows creatures per second.
-119. Partly done: export and open creature JSON works; animated GIF export is still open.
+119. Done: JSON export/open and an animated GIF export (offscreen renderer, 3 to 360 sampled frames) with a status path.
 120. Done: a Lineage tab and an Overview strip show ancestor thumbnails, generation, gains, mutation text, and a BODY PLAN badge when part counts change.
 121. Show each muscle's energy during replay, to make fatigue visible.
 122. A debug overlay for forces and ground reactions.
 123. Done: a deterministic species name derived from morphology and cadence appears on cards, map hovers, lineage tiles, race lanes, and hall rows.
 124. Done: an in-memory hall of fame lists each new record with a replay button and resets per experiment.
-125. Remove settings the owner does not want (histogram controls, budgets) or move them to a debug panel.
+125. Done: histogram controls, budgets and performance details moved to Advanced > Debug; run/checkpoint settings stay in Performance & checkpoints.
 126. Done: the archive axis labels carry one-sentence hover explanations.
 127. Done: a Screenshot button saves a timestamped PNG under `runs/` and reports the path.
 128. Done: an Advanced > Display toggle switches light/dark egui visuals; the viewport scene keeps fixed colors.
