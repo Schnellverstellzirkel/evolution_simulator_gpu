@@ -282,6 +282,13 @@ pub fn shader_source(
             &format!("const MAX_MUSCLE_FORCE: f32 = {:?};", limits.muscle_force),
         )
         .replace(
+            "const PLANTED_SPEED: f32 = 0.01;",
+            &format!(
+                "const PLANTED_SPEED: f32 = {:?};",
+                crate::physics::PLANTED_SPEED
+            ),
+        )
+        .replace(
             "const STANCE_GRIP: f32 = 10.0;",
             &format!(
                 "const STANCE_GRIP: f32 = {:?};",

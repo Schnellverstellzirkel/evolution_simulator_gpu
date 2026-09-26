@@ -601,6 +601,10 @@ impl Joint {
 /// holding its place; with this, a body pivots over planted feet. On ice the
 /// grip is small, so feet still slide.
 pub const STANCE_GRIP: f32 = 10.0;
+/// Feet on the ground sliding slower than this (m/s, mass-weighted mean) count
+/// as planted, so friction may push the body forward from them. Faster, the
+/// feet slide and friction can only oppose the slide.
+pub const PLANTED_SPEED: f32 = 0.01;
 /// `STANCE_GRIP`, or `EVOLUTION_STANCE_GRIP` for experiments (0 turns planted
 /// feet off).
 pub fn stance_grip() -> f32 {
