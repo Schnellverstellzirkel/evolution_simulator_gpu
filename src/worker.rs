@@ -23,6 +23,12 @@ pub enum Command {
     Next,
     Pause,
     Configure(Config),
+    /// Wipe out half of every archive's elites (kept as fossils for undo).
+    Meteor,
+    /// Wipe out the weakest island (kept as fossils for undo).
+    Extinction,
+    /// Return the fossils of earlier catastrophes to their archives.
+    UndoMeteor,
     Save(PathBuf),
     Load(PathBuf),
     Export(PathBuf),
@@ -62,6 +68,8 @@ pub struct LineageStep {
 pub struct Snapshot {
     pub epoch: u64,
     pub config: Config,
+    /// Elites lost to meteor strikes that an undo could bring back.
+    pub fossils: usize,
     pub generation: u32,
     pub evaluated: usize,
     /// Creatures of the current generation with stored results. Engines finish
@@ -270,6 +278,24 @@ fn run(
                         if let Some(e) = &mut exp {
                             e.update_config(cfg)?;
                             status = "Settings applied or queued for the next generation".into();
+                        }
+                    }
+                    Command::Meteor => {
+                        if let Some(e) = &mut exp {
+                            let lost = e.meteor(0.5);
+                            status = format!("A meteor wiped out {lost} elites");
+                        }
+                    }
+                    Command::Extinction => {
+                        if let Some(e) = &mut exp {
+                            let lost = e.extinction();
+                            status = format!("The weakest island lost all {lost} elites");
+                        }
+                    }
+                    Command::UndoMeteor => {
+                        if let Some(e) = &mut exp {
+                            let back = e.undo_meteor();
+                            status = format!("{back} fossils returned to the archive");
                         }
                     }
                     Command::Save(path) => {
@@ -735,6 +761,7 @@ fn run(
                 Snapshot {
                     epoch,
                     config: e.config.clone(),
+                    fossils: e.fossils.len(),
                     generation: e.generation,
                     evaluated: e.evaluated,
                     completed: if done.len() == e.config.population
@@ -787,6 +814,7 @@ fn run(
                 Snapshot {
                     epoch,
                     config: Config::default(),
+                    fossils: 0,
                     generation: 0,
                     evaluated: 0,
                     completed: 0,

@@ -1,8 +1,16 @@
 # Validation results
 
-## Current baseline and foundation checks (2026-09-26)
+## Integration of the concurrent physics and foundation work (2026-09-26)
 
-This batch leaves the production contact solver, physics limits, distance-only fitness, and `qd::VERSION` unchanged. It adds regression coverage, aligns the public `physics::evaluate` wrapper with the CPU engine, repairs checkpoint restart state and Windows support, and configures CPU CI. The lower-level legacy `physics::step` remains for existing tests and diagnostics.
+The integration combines foundation commits `250ad82`/`ca75014` with `abb00cb` and its version-19 physics. Formatting, all-target Clippy, 72 release CPU tests, nine size-report tests, and all three explicit RTX GPU agreement tests passed. The GPU checks took 14.36 s; four GPU tests remain ignored in the default suite. The required 20,000-body, 20-second random-population diagnostic measured median -0.07 m, p99 1.85 m, and best 9.81 m. This is a propulsion check, not a proof of energy conservation or throughput. Remote CI execution is not yet verified.
+
+Checkpoint continuation remains deterministic with CPU validation of archive entrants enabled. The fall fixture was adjusted to keep toppling under stronger ground grip while retaining its frozen-score and terminal-COM assertions. The size report now obtains frames and their result from one `cpu_engine::replay` call and measures per-node slip and visible head motion only through the scored endpoint. Position-derived acceleration is labeled separately from the engine's recorded head-shake value because position-only corrections contribute to visible movement.
+
+## Historical version-16 baseline and foundation checks (2026-09-26)
+
+This section records parent physics revision `bd41746` (QD version 16) and local foundation commit `250ad82`, before the merge of `abb00cb`. The later version-19 physics adds load-aware friction, capped planted-foot propulsion, head-shaking termination, CPU validation of global archive entrants, and replay results recorded with frames. The baseline measurements and test counts below do not validate those merged changes. Loading the baseline checkpoint under version 19 invalidates its archive.
+
+The foundation batch itself left the production contact solver, physics limits, distance-only fitness, and `qd::VERSION` unchanged. It adds regression coverage, aligns the public `physics::evaluate` wrapper with the CPU engine, repairs checkpoint restart state and Windows support, and configures CPU CI. The lower-level legacy `physics::step` remains for existing tests and diagnostics.
 
 ### Baseline after the 2 m bone cap
 
@@ -43,13 +51,13 @@ Checkpoint format V4 persists island optimizer progress that V3 omitted; V3 rema
 | Default test selection | Four GPU-dependent tests remain ignored, including the worker test |
 | GitHub Actions | CPU workflow configured; remote execution not yet verified |
 
-The final checks above were run by the coordinator on the current foundation changes. Two test-only comparison failures were resolved by treating empty-archive cached QD scores of `+0.0` and `-0.0` as numerically equal; exact elite, population, and CMA comparisons remain. No active stepping change was needed.
+The checks above were run by the coordinator on foundation commit `250ad82`, before merging the later physics. Two test-only comparison failures were resolved by treating empty-archive cached QD scores of `+0.0` and `-0.0` as numerically equal; exact elite, population, and CMA comparisons remain. No active stepping change was needed.
 
 The local GPU suite covers partial workgroups/body buckets, rough ground, and narrow joints. Its standard/fine comparisons do not establish full-trial agreement for every evolved elite or resolve the rank-21 replay outlier. An evolved-creature fine-fidelity fixture and investigation of threshold-sensitive contender outcomes remain open.
 
-### Contact audit correction
+### Historical contact audit correction (version 16)
 
-The friction budget already includes positional clamp/lift displacement in `final_y - predicted_y`; the old description that those corrections were entirely absent was incorrect. The budget still uses the final touching node's own mass, missing support transferred through bones to the rest of the body. Later velocity clamps remove downward motion without adding that normal impulse to friction and can restore slip. This is a source-level finding, not a validated contact-solver fix. See the [physics audit](physics-audit-2026-09-26.md) for the remaining invariants and fixtures.
+At the inspected version-16 revision, the friction budget already includes positional clamp/lift displacement in `final_y - predicted_y`; the old description that those corrections were entirely absent was incorrect. The budget still uses the final touching node's own mass, missing support transferred through bones to the rest of the body. Later velocity clamps remove downward motion without adding that normal impulse to friction and can restore slip. This is a source-level finding, not a validated contact-solver fix. See the [physics audit](physics-audit-2026-09-26.md) for the remaining invariants and fixtures.
 
 ## Historical validation records
 

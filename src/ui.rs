@@ -96,37 +96,32 @@ struct Playback {
     frames: Vec<Vec<[f32; 2]>>,
     tick: u32,
     accumulator: f32,
-    /// Frame at which the head tipped below its neck base, and the distance
-    /// the trial kept from that moment.
+    /// Frame at which the trial ended early (a fall, a broken joint, or a
+    /// shaken head), and the distance the trial kept from that moment.
     fall: Option<(u32, f32)>,
+    /// The distance the CPU engine scored for this very recording.
+    distance: f32,
 }
 impl Playback {
     fn new(creature: Creature, config: Config) -> Self {
         let mut normalized = creature.clone();
         crate::evolution::canonicalize_bone_order(&mut normalized);
-        let frames = crate::cpu_engine::trajectory(&normalized, &config);
-        let mut nodes = physics::nodes(&normalized);
-        // The engines check the fall (or a broken joint) after each timed
-        // step, as here.
-        let base = normalized.bones[0].b as usize;
-        let joints = physics::joints(&normalized.nodes, &normalized.bones);
-        let fall = frames
-            .iter()
-            .enumerate()
-            .skip(physics::settle() as usize + 1)
-            .find(|(_, frame)| {
-                frame[0][1] < frame[base][1]
-                    || physics::broken_joint(frame, &normalized.bones, &joints)
-            })
-            .map(|(tick, frame)| {
-                for (node, position) in nodes.iter_mut().zip(frame) {
-                    node.pos = *position;
-                }
-                (tick as u32, physics::fitness(&nodes))
-            });
+        // The engine that recorded the frames also decides when the trial
+        // ended and how far it got, so the replay shows exactly its score.
+        let (frames, result) = crate::cpu_engine::replay(&normalized, &config);
+        let nodes = physics::nodes(&normalized);
+        let fall = (result.fall_time > 0.0).then(|| {
+            let tick =
+                physics::settle() + (result.fall_time * physics::rate() as f32).round() as u32;
+            (
+                tick.min(frames.len().saturating_sub(1) as u32),
+                result.fitness,
+            )
+        });
         let mut playback = Self {
             nodes,
             fall,
+            distance: result.fitness,
             creature: normalized,
             config,
             frames,
@@ -491,6 +486,36 @@ impl App {
                 });
             });
         }
+        let fossils = self.snapshot.as_ref().map_or(0, |s| s.fossils);
+        ui.horizontal(|ui| {
+            ui.label("Catastrophe")
+                .on_hover_text("A meteor wipes out half of every archive's elites at random. Survivors and newcomers refill the empty cells, which makes room for new kinds of movement.");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(fossils > 0, egui::Button::new("Undo").small())
+                    .on_hover_text(format!(
+                        "Return {fossils} fossils to their cells where the cell is empty or holds a slower elite."
+                    ))
+                    .clicked()
+                {
+                    self.worker.send(Command::UndoMeteor);
+                }
+                if ui
+                    .add(egui::Button::new("Extinction").small())
+                    .on_hover_text("Wipe out the island whose best creature is slowest, so it starts over from new designs. Undo brings its elites back.")
+                    .clicked()
+                {
+                    self.worker.send(Command::Extinction);
+                }
+                if ui
+                    .add(egui::Button::new("Meteor strike").small())
+                    .on_hover_text("Wipe out half of every archive's elites at random. Undo brings them back.")
+                    .clicked()
+                {
+                    self.worker.send(Command::Meteor);
+                }
+            });
+        });
         if world_changed {
             self.worker.send(Command::Configure(self.config.clone()));
             // Applied already, so it does not count as an unapplied setting.
@@ -634,12 +659,16 @@ impl App {
             ui.label(RichText::new("LIVE CREATURE").small().color(MUTED));
             if let Some(p) = &self.playback {
                 ui.label(format!(
-                    "#{} · {} nodes / {} bones / {} muscles",
+                    "#{} · {} nodes / {} bones / {} muscles · replay distance {:.1} m",
                     p.creature.id,
                     p.nodes.len(),
                     p.creature.bones.len(),
-                    p.creature.muscles.len()
-                ));
+                    p.creature.muscles.len(),
+                    p.distance
+                ))
+                .on_hover_text(
+                    "The distance this replay reaches. An archive score is the worse of this trial and a check from a slightly shifted pose at four times the physics rate, so it is never higher.",
+                );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.checkbox(&mut self.follow, "Follow");

@@ -592,6 +592,32 @@ impl Joint {
         reference_mass: 0.0,
     };
 }
+/// How much heavier a node resting on the ground counts, per unit of grip
+/// (node friction times ground friction), when bones pull on it during the
+/// constraint passes. The solver splits every bone correction by mass, so a
+/// light foot would otherwise be dragged along by its heavy body instead of
+/// holding its place; with this, a body pivots over planted feet. On ice the
+/// grip is small, so feet still slide.
+pub const STANCE_GRIP: f32 = 10.0;
+/// `STANCE_GRIP`, or `EVOLUTION_STANCE_GRIP` for experiments (0 turns planted
+/// feet off).
+pub fn stance_grip() -> f32 {
+    static GRIP: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *GRIP.get_or_init(|| {
+        std::env::var("EVOLUTION_STANCE_GRIP")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(STANCE_GRIP)
+    })
+}
+/// Head shaking limit: the head's acceleration, averaged over about
+/// `HEAD_SHAKE_WINDOW` seconds, may not pass 8 g (m/s^2). A creature that
+/// shakes its head harder dies like a fall. Single impacts average out, but a
+/// body jiggling at the physics step rate does not, so solver jitter cannot
+/// carry a creature forward.
+pub const HEAD_SHAKE_LIMIT: f32 = 8.0 * 9.8;
+pub const HEAD_SHAKE_WINDOW: f32 = 0.1;
 /// How far (rad) a joint may be forced past its range before it breaks. A
 /// broken joint ends the trial like a fall, so no gait can profit from
 /// muscles forcing joints round like wheels.

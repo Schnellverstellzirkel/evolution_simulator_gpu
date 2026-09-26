@@ -2,6 +2,19 @@
 
 Read this before changing the code. It lists the owner's rules, how to work on this machine, and the open work.
 
+## Live status (updated with each push)
+
+- Codex primary: finished integrating verified foundation commits 250ad82/ca75014 with origin abb00cb; 72 CPU, nine report and three RTX tests pass. Next ownership: engine failure propagation and GPU-loss recovery in src/engine.rs, src/scheduler.rs and src/gpu.rs. Active physics/archive-insertion work remains with Claude.
+
+Two agent teams work on this repository at the same time and only see each other through git. Pull before you start, commit small, push often, and update this section when you take or finish an item.
+
+- 2026-09-26 14:3x, Claude is working on: measuring the cost and effect of the replay check below, then the jiggling pyramid if the shaking limit did not remove it. Please leave `src/storage.rs` archive insertion, the fall rules in `src/cpu_engine.rs`, and `shaders/physics_creature.wgsl` to Claude until this line changes.
+- 2026-09-26, Codex Luna team (coordinated by the primary Codex session) is working on: default-secondary-device handling in `src/scheduler.rs`; replay scrubber and fall timeline in `src/ui.rs`; CPU evaluation backend and top-50 body mix in `src/search_benchmark.rs`, `src/main.rs`, and `docs/search-benchmark.md`; and current-physics details in `docs/architecture.md`. Please leave these files to the assigned workers until this line changes.
+- Just pushed: planted feet with a friction cap. b57f756 alone was an exploit (random bodies reached 224 m in 20 s because weighting grounded nodes broke momentum conservation). The fix limits the center-of-mass shift from the bone passes to mu times the ground's normal push; random bodies now reach 9.8 m at best (6.7 m without planted feet). `examples/first_generation` checks any physics change for free propulsion this way; run it before pushing physics changes.
+- Just pushed: undoable meteor strike (Environment panel, Catastrophe row).
+- Just pushed: the replay takes its fall and distance from the CPU engine run that recorded it (`cpu_engine::replay`), and the viewport header shows the replay distance (fb4b594). The global archive only admits scores the CPU replay reproduces (7f3f3a3; test `archive_scores_never_exceed_the_replayed_distance`). Head shaking limit: a creature dies if its head's mean acceleration over 0.1 s passes 8 g (a08fdc4). Friction counts a foot's load (97e3e9a). README rewrite (a41e9df).
+- Measured with the 2 m bone cap (100k creatures, 20 generations, seed 38): the fastest bodies are 8 nodes, about 1.15 m of bone, 2.3 kg, 175 to 289 m in 60 s, and slip 0.12 to 0.29 m per meter. Giants are gone. The owner still sees glitchy gaits, for example a tall pyramid that jiggles at the simulation step rate.
+
 ## The game
 
 Evolution Simulator is a Rust game. 2D creatures made of bones, joints and muscles evolve to travel as far as possible in 60 s trials. The search is MAP-Elites with CMA, structural, novelty and immigrant emitters over 4 island archives, with 3 million creatures per generation.
@@ -12,7 +25,7 @@ Physics exists in three places that must agree:
 - the AVX-512 CPU engine: `src/cpu_engine.rs` and `src/simd.rs`
 - the older CPU reference: `src/physics.rs`
 
-The replay viewport plays frames recorded by the CPU engine (`cpu_engine::trajectory`). `src/creature_kernel.rs` packs creatures for the GPU. `src/scheduler.rs` hands work units to every device. `physics::body()` computes node masses for every engine.
+The replay viewport plays frames and the matching scored result recorded by the CPU engine (`cpu_engine::replay`). `src/creature_kernel.rs` packs creatures for the GPU. `src/scheduler.rs` hands work units to every device. `physics::body()` computes node masses for every engine.
 
 ## Owner's product rules
 
@@ -41,14 +54,14 @@ The replay viewport plays frames recorded by the CPU engine (`cpu_engine::trajec
 - Bones now have mass: bone density times length squared, split between the two joints (`Limits::bone_density`, `EVOLUTION_BONE_DENSITY`). Feet slid 0.43 m per meter traveled before and 0.02 m after.
 - Muscles only pull: the drive term cannot push. Exhausted muscles have no drive (`TIRED_DRIVE = 0`), so all work comes from each muscle's energy store.
 - Later the same day (commits b8ee76f to d47b2b1): the ground-lift glitch is fixed, the generational path re-tests elites after a world change, environment effects are undoable with gravity, air and grip added, and bones are capped at 2 m. See the items marked Done below.
-- Historical result before the lift fix and 2 m bone cap: a 20-generation run (100k creatures, seed 38) produced roughly 20 m, 750–800 kg bodies and an 801 m archive champion that replayed at only 90 m. Its low slip measurements did not establish grounded traction. The later baseline below supersedes this as the current measurement.
+- Historical result before the lift fix and 2 m bone cap: a 20-generation run (100k creatures, seed 38) produced roughly 20 m, 750–800 kg bodies and an 801 m archive champion that replayed at only 90 m. Its low slip measurements did not establish grounded traction. The baseline below is a separate historical measurement before the newer contact and replay-admission fixes.
 
-### Latest 2 m-cap baseline and foundations (same session)
+### Historical bd41746 physics baseline and Codex foundations
 
 - Seed 38, 100k candidates, 20 generations, 60 s trials: final best 165.5846 m, 1,374 behavior cells, QD score 23,060.27. Top-50 median total bone length is 2.23 m; maximum individual bone is 1.81 m. No pile-up at the cap appeared in this sample.
-- The champion stores 165.6 m and replays at 157.3 m; rank 21 stores 111.2 m and replays at 6.4 m. The latter remains unexplained. Updated scored-interval slip reports a median 0.89 m per replay meter; old ratios are not directly comparable.
-- Public CPU evaluation now uses the replay engine. Checkpoint V4 preserves island optimizer progress, while V3 remains readable; stale island/reseed state is cleared on physics-version migration. Production physics equations and `qd::VERSION` are unchanged in this batch.
-- Resource defaults exclude Radeon compute and share eight workers across the two CPU pools. CPU CI, regression coverage, current docs, and a named fast profile are in place. Final local checks passed: formatting, all-target clippy, 68 CPU tests, seven size-report tests, and three explicit GPU agreement tests (3.32 s). Four GPU tests remain ignored in the default suite. Remote CI execution remains unverified; see docs/validation.md.
+- The champion stores 165.6 m and replays at 157.3 m; rank 21 stores 111.2 m and replays at 6.4 m. The latter was observed before the CPU archive-admission check (7f3f3a3); it is not evidence of a failure of that newer check. Updated scored-interval slip reports a median 0.89 m per replay meter; old ratios are not directly comparable.
+- Public CPU evaluation now uses the replay engine. Checkpoint V4 preserves island optimizer progress, while V3 remains readable; stale island/reseed state is cleared on physics-version migration. The foundation commit 250ad82 changed no production stepping equations; the concurrent changes now merged advance qd::VERSION from 16 to 19.
+- Resource defaults exclude Radeon compute and share eight workers across the two CPU pools. CPU CI, regression coverage, current docs, and a named fast profile are in place. Before merging concurrent physics work, local checks passed: formatting, all-target clippy, 68 CPU tests, seven size-report tests, and three explicit GPU agreement tests (3.32 s). Merged verification passed: 72 CPU tests, nine size-report tests, three RTX agreement tests (14.36 s), formatting and Clippy. The 20k-body, 20 s random-population check measured median -0.07 m, p99 1.85 m, best 9.81 m. Four GPU tests remain ignored in the default suite. Remote CI execution remains unverified; see docs/validation.md.
 - Sanitized baseline data: docs/results/2026-09-26-bone-cap-seed-38/. No checkpoint is committed.
 
 ## Next steps
@@ -59,7 +72,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 
 1. Done: (owner) the glitched jump. The whole-body lift after the parent-first rebuild is now a position-only correction in both engines (b8ee76f). Archive and CPU replay distances agree again (236 m vs 231 m; before, 90 m vs 801 m).
 2. Baseline measured: (owner) stop evolution from favoring huge creatures. The 20-generation, 100k, seed-38 run with the 2 m cap produced top-50 median total bone length 2.23 m and longest individual bone 1.81 m: no pile-up at the cap in this sample. The champion is 1.77 m total bone length and 3.20 kg. Broader seeds and longer runs remain open; this single sample does not justify declaring size selection solved. See docs/results/2026-09-26-bone-cap-seed-38/.
-3. Open: (owner) stop feet from sliding. The new top-50 baseline reports median slip 0.89 m per replay meter. The diagnostic now excludes initial recentering and unscored post-fall motion, uses configured fidelity and sloped contact, and divides by terminal replay distance; old 0.02 and 2.9 ratios are not directly comparable. Source audit correction: `final_y - predicted_y` already includes positional floor clamps and whole-body lift, but friction applies the final touching node's own mass and misses load transferred through bones. Later velocity clamps remove downward motion without adding to the friction budget and can restore slip. A fix must accumulate contact support and tangential impulse consistently without spending the same Coulomb budget twice, preserve position-only lift, and agree across CPU/GPU. See docs/physics-audit-2026-09-26.md. No contact-solver fix has landed in this batch.
+3. Implemented: (owner) feet grip with the load they carry (97e3e9a), with planted feet (b57f756) and a friction cap on projection-induced propulsion (8572d32). Re-measure under the merged physics using the corrected scored-interval size_report; the historical bd41746 median slip of 0.89 is not a current solver result. The earlier source audit is preserved as historical evidence only.
 4. Scale muscle force with muscle size. A longer or thicker muscle should be stronger and heavier, so a giant needs heavy muscles.
 5. Let bones break under load. Bone strength grows with cross-section while load grows with mass, so oversized bones fail like real ones.
 6. Done: bones and muscle strokes are capped at 2 m again (d47b2b1). Physics alone did not stop giants: after the lift fix, 16 to 22 m bodies still won.
@@ -67,7 +80,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 8. Review the log-scale height archive axis. It gives giants their own cells and protects them.
 9. Measure where a triangle's (2 bones, 1 muscle) forward motion comes from with the momentum ledger. It moves in ways the owner thinks should be impossible.
 10. Remove or justify the rebuild step that lifts the whole body when a node sinks into the ground. It adds potential energy that no force paid for.
-11. Add an energy conservation test: a passive body dropped on flat ground must never gain mechanical energy.
+11. Done: tests `a_passive_body_never_rises_above_its_start` and `a_body_without_drive_does_not_travel` guard against solver-made energy and propulsion. `examples/first_generation` compares random-population distances across physics changes.
 12. Add a momentum test: the projection and rebuild center-of-mass shift in the ledger should stay near zero.
 13. Charge muscle energy only for active contraction work, not for passive damping.
 14. Add passive elastic tendons as an evolvable part, so gaits can store and return energy honestly.
@@ -95,8 +108,8 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 33. Wind: a steady headwind or tailwind.
 34. Drought: slower muscle energy recovery.
 35. Heat wave: smaller muscle energy store.
-36. Meteor: a one-time catastrophe that clears a random share of archive cells.
-37. Island extinction: wipe one island's archive and reseed it from the others.
+36. Done: meteor strike wipes out half of every archive's elites; Undo returns the fossils (`Experiment::meteor`, `undo_meteor`).
+37. Done: Extinction wipes out the slowest island (`Experiment::extinction`), undoable with the same fossils as the meteor.
 38. Earthquake: a new random terrain each trial, so gaits must be robust.
 39. Seasons: effects that cycle automatically every N generations.
 40. A curriculum that raises difficulty when the archive stalls, as in POET (Wang et al., 2019).
@@ -176,7 +189,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 ### Correctness and tests
 
 104. Audit the top elites for physics exploits after every physics change.
-105. Done: standard/fine CPU scores are compared with mass-weighted terminal replay frames, including partial SIMD groups. This does not establish agreement for every evolved GPU-scored elite; the baseline rank-21 outlier remains open.
+105. Done: standard/fine CPU scores are compared with mass-weighted terminal replay frames, including partial SIMD groups. This does not establish agreement for every evolved GPU-scored elite; the historical rank-21 outlier predates the CPU archive-admission check.
 106. Done: archive insertion and island migration regression tests cover unique cells and rejection of slower candidates.
 107. Done: configuration regression tests cover defaults, float/integer boundaries, ordered bounds, and the population RAM limit.
 108. Done: modern archive-breeding tests compare valid offspring across fixed seeds and streaming slice sizes, including CMA, structural, and novelty output.

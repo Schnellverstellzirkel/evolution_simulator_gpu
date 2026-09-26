@@ -817,3 +817,134 @@ fn autosave_rotation_keeps_the_newest_and_spares_manual_saves() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn archive_scores_never_exceed_the_replayed_distance() {
+    let mut e = Experiment::new(config()).unwrap();
+    let all: Vec<usize> = (0..e.config.population).collect();
+    let metrics = evolution_simulator::scheduler::Scheduler::cpu_only(2)
+        .unwrap()
+        .evaluate(&e.population, &all, &e.config)
+        .unwrap();
+    // Pretend another engine scored every creature 100 m farther than the
+    // replay engine does.
+    for (i, m) in metrics.iter().enumerate() {
+        e.scores[i] = m.fitness + 100.0;
+        e.trial_metrics[i] = m.behavior;
+    }
+    e.evaluated = e.config.population;
+    e.rank();
+    e.archive_batch().unwrap();
+    assert!(!e.archive.entries.is_empty());
+    for elite in &e.archive.entries {
+        let replay = evolution_simulator::cpu_engine::evaluate(
+            &{
+                let mut pop = evolution::Population::default();
+                pop.push(elite.creature.clone());
+                pop
+            },
+            &e.config,
+        )[0]
+        .fitness;
+        assert!(
+            elite.fitness <= replay + 1e-4,
+            "archive shows {} m but the replay reaches {replay} m",
+            elite.fitness
+        );
+    }
+}
+
+#[test]
+fn meteor_strike_can_be_undone() {
+    let mut e = Experiment::new(config()).unwrap();
+    let all: Vec<usize> = (0..e.config.population).collect();
+    let metrics = evolution_simulator::scheduler::Scheduler::cpu_only(2)
+        .unwrap()
+        .evaluate(&e.population, &all, &e.config)
+        .unwrap();
+    for (i, m) in metrics.iter().enumerate() {
+        e.scores[i] = m.fitness;
+        e.trial_metrics[i] = m.behavior;
+    }
+    e.evaluated = e.config.population;
+    e.rank();
+    e.archive_batch().unwrap();
+    let count = |e: &Experiment| {
+        e.archive.entries.len() + e.islands.iter().map(|i| i.entries.len()).sum::<usize>()
+    };
+    let before = count(&e);
+    let mut ids: Vec<u64> = e.archive.entries.iter().map(|x| x.creature.id).collect();
+    ids.sort_unstable();
+    let lost = e.meteor(0.5);
+    assert!(lost > 0);
+    assert_eq!(count(&e), before - lost);
+    assert_eq!(e.undo_meteor(), lost);
+    assert_eq!(count(&e), before);
+    assert!(e.fossils.is_empty());
+    let mut back: Vec<u64> = e.archive.entries.iter().map(|x| x.creature.id).collect();
+    back.sort_unstable();
+    assert_eq!(back, ids);
+}
+
+#[test]
+fn a_body_without_drive_does_not_travel() {
+    // Muscles whose target never changes cannot drive, so nothing but the
+    // solver could move these bodies sideways on flat ground.
+    let cfg = Config {
+        population: 32,
+        duration: 5.0,
+        ..config()
+    };
+    let mut pop = evolution::create(&cfg).unwrap();
+    for muscle in &mut pop.muscles {
+        muscle.short = muscle.long;
+    }
+    let results = evolution_simulator::cpu_engine::evaluate(&pop, &cfg);
+    let worst = results.iter().map(|r| r.fitness.abs()).fold(0.0, f32::max);
+    eprintln!("worst drift without drive: {worst} m");
+    // A collapsing body can slide a little through real friction, but it
+    // must never travel.
+    assert!(worst < 0.5, "a body drifted {worst} m with no muscle drive");
+}
+
+#[test]
+fn a_passive_body_never_rises_above_its_start() {
+    // Without muscle drive, gravity can only lower a body. Rising above its
+    // starting height would be energy the solver created.
+    let cfg = Config {
+        population: 32,
+        duration: 5.0,
+        ..config()
+    };
+    let mut pop = evolution::create(&cfg).unwrap();
+    for muscle in &mut pop.muscles {
+        muscle.short = muscle.long;
+    }
+    let settle = evolution_simulator::physics::settle() as usize;
+    for i in 0..pop.genomes.len() {
+        let creature = pop.creature(i);
+        let masses: Vec<f32> = evolution_simulator::physics::nodes(&creature)
+            .iter()
+            .map(|n| n.mass)
+            .collect();
+        let total: f32 = masses.iter().sum();
+        let (frames, _) = evolution_simulator::cpu_engine::replay(&creature, &cfg);
+        let height = |frame: &Vec<[f32; 2]>| {
+            frame
+                .iter()
+                .zip(&masses)
+                .map(|(p, m)| p[1] * m)
+                .sum::<f32>()
+                / total
+        };
+        let start = height(&frames[settle + 1]);
+        let highest = frames[settle + 1..]
+            .iter()
+            .map(height)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            highest <= start + 0.02,
+            "body {i} rose from {start} m to {highest} m without muscle drive"
+        );
+    }
+}

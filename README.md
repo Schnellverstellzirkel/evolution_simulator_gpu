@@ -62,13 +62,19 @@ Environment buttons raise or lower each effect:
 
 A world change invalidates the old scores and queues archive elites for evaluation under the new conditions. Effects change the physics; the objective remains distance.
 
+The **Catastrophe** row adds **Meteor strike**, which removes about half the elites at random from each archive, and **Extinction**, which clears the island with the slowest best creature. **Undo** restores saved fossils where their cells are empty or hold slower elites. Fossils are kept in memory for the current session; catastrophe undo history is not saved in checkpoints.
+
 ## Creatures and search
 
-Bodies begin with 3–5 nodes connected by a tree of bones. Defaults allow growth to 32 nodes and 96 muscles; configuration supports up to 64 nodes and 256 muscles. Bones and muscle lengths are capped at 2 m by default. Muscles attach along bones, share a rhythm period, and provide active drive only while contracting. Their energy stores deplete with work and recover over time. Bone mass grows with length squared and is included in each engine's node masses.
+Bodies begin with 3–5 nodes connected by a tree of bones. Defaults allow growth to 32 nodes and 96 muscles; configuration supports up to 64 nodes and 256 muscles. Bones and muscle lengths are capped at 2 m by default. Muscles attach along bones, share a rhythm period, and provide active drive only while contracting. Their energy stores deplete with work and recover over time. Bone mass grows with length squared and is included in each engine's node masses. Touchdown sensors can reset muscle rhythms when a foot lands.
+
+Grounded nodes resist movement during bone and velocity constraints, so the body can pivot over planted feet. A friction cap limits the center-of-mass displacement this can produce, and ground support includes floor clamps and whole-body lift. A fall, a joint driven too far past its range, or head acceleration averaged over about 0.1 seconds exceeding 8 g ends scoring at the distance reached. These physical limits leave distance as the sole objective.
 
 Each behavior archive has 1,440 possible niches for ground contact, gait cadence, mean body height, and feet that touch down and lift off. Vertical oscillation is recorded but has one archive bin. A separate 64-entry morphology reserve gives new topologies offspring opportunities without adding to behavior coverage or QD score. Four islands retain separate parent pools and exchange their fastest tenth of elites every 25 generations. CMA, structural, and novelty emitter shares adapt to archive discoveries and improvements; immigrants seed empty archives.
 
-Potential archive entrants receive a perturbed trial at four times the standard physics rate and solver passes. The stored fitness is the lower distance from the standard and check trials. Replays run the unperturbed creature through the CPU evaluation engine, so an archive's conservative checked score can differ from the displayed replay distance. See [architecture](docs/architecture.md) for the execution paths and current legacy-physics limitations.
+Potential archive entrants receive a perturbed trial at four times the standard physics rate and solver passes. Before admission to the global archive shown in the dashboard, the best candidates for behavior cells and new body plans also repeat the standard trial on the CPU engine. Their score keeps the lowest distance, and their global archive cell uses the CPU behavior.
+
+Replays return the recorded frames and engine result together through `cpu_engine::replay`. The viewport displays that recording's distance and terminal event; the conservative archive score can be lower. See [architecture](docs/architecture.md) for the execution paths and remaining legacy-physics limitations.
 
 ## Headless experiments and diagnostics
 
@@ -100,7 +106,7 @@ This starts evolution, prints stage timings, and closes after the requested gene
 
 ## Save and resume
 
-Versioned `.evo` files store the current population, evaluation progress, archives, emitter and CMA state, settings, seed, lineage, and history using a compressed binary payload. Temporary writes are flushed and renamed. Compatible older checkpoints can keep their population while obsolete archives are cleared and reevaluated; not every historical format is guaranteed to load.
+Versioned `.evo` files store the current population, evaluation progress, archives, emitter and CMA state, settings, seed, lineage, and history using a compressed binary payload. Temporary writes are flushed and renamed. V4 checkpoints also retain island optimizer progress so continuation preserves its stall history; V3 files remain readable. Compatible older checkpoints can keep their population while obsolete archives are cleared and reevaluated. Current physics uses QD version 19, so archives from the earlier version-16 baseline are invalidated on load; not every historical format is guaranteed to load.
 
 The dashboard autosaves every ten generations by default to `runs/seed-<seed>-auto.evo`. It writes autosaves in a background thread and keeps the three newest experiment autosaves. Manual saves can preserve partial-generation progress. The interval is adjustable; zero disables autosave. Wait for a requested manual save to report completion before closing the app. Headless runs write to their chosen checkpoint path and also export history CSV.
 
@@ -115,6 +121,6 @@ RUST_TEST_THREADS=1 nice -n 10 cargo test --locked --release
 RUST_TEST_THREADS=1 nice -n 10 cargo test --locked --release --test simulation -- --ignored
 ```
 
-GitHub Actions runs formatting, clippy, and release CPU tests on Ubuntu, with the portable CPU vector implementation. GPU tests remain ignored during CI and must be run explicitly on the workstation. No GPU agreement result follows from a passing CPU workflow.
+GitHub Actions runs formatting, clippy, and release CPU tests on Ubuntu, with the portable CPU vector implementation. GPU tests remain ignored during CI and must be run explicitly on the workstation. No GPU agreement result follows from a passing CPU workflow. Physics changes also require the random-population propulsion diagnostic, `nice -n 10 cargo run --release --example first_generation`, with the same workstation environment. This is a diagnostic against solver-created propulsion, not a proof of energy conservation.
 
 See [architecture](docs/architecture.md), [validation](docs/validation.md), [performance log](docs/performance-log.md), and the owner's current [agent notes](AGENTS.md) for implementation details, measured results, and open work.

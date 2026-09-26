@@ -48,7 +48,9 @@ fn terminal_frame(result: &GpuResult, cfg: &Config) -> usize {
 
 fn passive_triangle(fallen: bool) -> Creature {
     let positions = if fallen {
-        [[0.4, 0.06], [0.0, 0.6], [-0.6, 0.06]]
+        // The head starts below the neck, and the center of mass lies beyond
+        // both feet, so the limp body keeps toppling after scoring ends.
+        [[0.4, 0.06], [2.0, 0.6], [0.8, 0.06]]
     } else {
         [[0.0, 0.8], [-0.5, 0.05], [0.5, 0.05]]
     };

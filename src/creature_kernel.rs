@@ -58,6 +58,9 @@ pub struct GpuResult {
     /// Seconds into the trial when the head tipped below its neck base, or 0
     /// if the creature stayed upright. Fitness is the distance at the fall.
     pub fall_time: f32,
+    /// Mean head acceleration (m/s^2) over about `physics::HEAD_SHAKE_WINDOW`
+    /// seconds, for the head shaking limit.
+    pub head_shake: f32,
 }
 impl GpuResult {
     /// Number of feet: nodes that touched the ground and lifted off again.
@@ -277,6 +280,27 @@ pub fn shader_source(
         .replace(
             "const MAX_MUSCLE_FORCE: f32 = 5.0;",
             &format!("const MAX_MUSCLE_FORCE: f32 = {:?};", limits.muscle_force),
+        )
+        .replace(
+            "const STANCE_GRIP: f32 = 10.0;",
+            &format!(
+                "const STANCE_GRIP: f32 = {:?};",
+                crate::physics::stance_grip()
+            ),
+        )
+        .replace(
+            "const HEAD_SHAKE_LIMIT: f32 = 78.4;",
+            &format!(
+                "const HEAD_SHAKE_LIMIT: f32 = {:?};",
+                crate::physics::HEAD_SHAKE_LIMIT
+            ),
+        )
+        .replace(
+            "const HEAD_SHAKE_WINDOW: f32 = 0.1;",
+            &format!(
+                "const HEAD_SHAKE_WINDOW: f32 = {:?};",
+                crate::physics::HEAD_SHAKE_WINDOW
+            ),
         )
         .replace(
             "const MAX_NODE_SPEED: f32 = 5.0;",

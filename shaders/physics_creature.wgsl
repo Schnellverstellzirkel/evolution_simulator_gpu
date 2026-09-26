@@ -66,6 +66,8 @@ struct Result {
     // base (bone 0's child), or 0 while upright. After a fall the muscles go
     // limp and the fitness keeps the distance at the fall.
     fall_time: f32,
+    // Mean head acceleration (m/s^2) over about HEAD_SHAKE_WINDOW seconds.
+    head_shake: f32,
 }
 @group(0) @binding(0) var<storage, read_write> nodes: array<Node>;
 // Muscle genes plus per-muscle state (rhythm offset and energy), which the
@@ -104,6 +106,12 @@ const VELOCITY_SOLVE_ITERATIONS: u32 = 4u;
 const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
 const MAX_MUSCLE_FORCE: f32 = 5.0;
 const MAX_NODE_SPEED: f32 = 5.0;
+// Extra weight per unit of grip for nodes resting on the ground during the
+// constraint passes (physics::STANCE_GRIP).
+const STANCE_GRIP: f32 = 10.0;
+// Head shaking limit (m/s^2) and averaging window (s); physics::HEAD_SHAKE_*.
+const HEAD_SHAKE_LIMIT: f32 = 78.4;
+const HEAD_SHAKE_WINDOW: f32 = 0.1;
 const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
 const MAX_BONE_TURN_COS: f32 = TURNCOS;
 const MAX_BONE_TURN_TAN: f32 = TURNTAN;
@@ -133,6 +141,14 @@ fn terrain(x: f32) -> vec2f {
     return p.terrain * vec2f(height, slope);
 }
 
+// Whether node `n` is set in a 64-node bitmask split into two words.
+fn in_mask(n: u32, lo: u32, hi: u32) -> bool {
+    return select((hi >> (n - 32u)) & 1u, (lo >> n) & 1u, n < 32u) == 1u;
+}
+// Bone share of node a after weighting nodes on the ground by their grip.
+fn stance_share(share: f32, fa: f32, fb: f32) -> f32 {
+    return share * fb / (share * fb + (1.0 - share) * fa);
+}
 fn limited_muscle_length(m: Muscle, time: f32) -> f32 {
     let amplitude = m.amplitude;
     let phase = fract(time * m.inv_period + m.phase);
@@ -245,13 +261,15 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         bone_center[j] = pack2x16snorm(vec2f(bone_data[field + 2u * TILE], bone_data[field + 3u * TILE]));
         bone_cos_half[j] = bone_data[field + 4u * TILE];
     }
-    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     if p.tick > 0u {
         metrics = results[creature];
     }
 
     for (var s = 0u; s < p.steps; s++) {
         let tick = p.tick + s;
+        // The head's velocity before this step, for the head shaking limit.
+        let head_start = vel[lane];
         if tick == SETTLE {
             var avg = 0.0;
             var mass_sum = 0.0;
@@ -417,11 +435,39 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 }
             }
         }
+        // Nodes resting on the ground hold their place like planted feet: they
+        // count as heavier, by their grip, when bones pull on them.
+        var stance_lo = 0u;
+        var stance_hi = 0u;
+        if grounded {
+            for (var j = 0u; j < MAXN; j++) {
+                if j >= body_nodes { break; }
+                let k = j * WG + lane;
+                if pos[k].y <= vel[k].y + 1e-4 {
+                    if j < 32u {
+                        stance_lo |= 1u << j;
+                    } else {
+                        stance_hi |= 1u << (j - 32u);
+                    }
+                }
+            }
+        }
+        var com_x_before = 0.0;
+        for (var j = 0u; j < MAXN; j++) {
+            if j >= body_nodes { break; }
+            com_x_before += pos[j * WG + lane].x * mass[j];
+        }
+        com_x_before *= inv_total_mass;
         for (var iteration = 0u; iteration < BONE_SOLVE_ITERATIONS; iteration++) {
             for (var j = 0u; j < MAXB; j++) {
                 if j >= bone_count { break; }
                 let ka = bone_ka[j] & 0xffffu;
                 let kb = bone_kb[j];
+                let na = ka / WG;
+                let nb = kb / WG;
+                let fa = select(1.0, 1.0 + STANCE_GRIP * friction[na] * p.friction, in_mask(na, stance_lo, stance_hi));
+                let fb = select(1.0, 1.0 + STANCE_GRIP * friction[nb] * p.friction, in_mask(nb, stance_lo, stance_hi));
+                let share = stance_share(bone_sa[j], fa, fb);
                 let old_a = pos[ka];
                 let old_b = pos[kb];
                 let delta = old_b - old_a;
@@ -430,9 +476,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let error = distance - bone_rest[j];
                 // Correction along the bone: delta / distance * error.
                 let correction = select(vec2f(error, 0.0), delta * (error / distance), raw_distance > 1e-6);
-                var new_a = old_a + correction * bone_sa[j];
-                var new_b = old_b - correction * (1.0 - bone_sa[j]);
+                var new_a = old_a + correction * share;
+                var new_b = old_b - correction * (1.0 - share);
                 if grounded {
+                    // A clamp is the ground pushing back, so it counts toward the
+                    // node's normal push (vel.x holds its height without ground).
+                    vel[ka].x -= max(vel[ka].y - new_a.y, 0.0);
+                    vel[kb].x -= max(vel[kb].y - new_b.y, 0.0);
                     new_a.y = max(new_a.y, vel[ka].y);
                     new_b.y = max(new_b.y, vel[kb].y);
                 }
@@ -492,6 +542,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             var new_c = pos[kc] + dv - shift;
             var new_q = pos[kq] + du - shift;
             if grounded {
+                vel[kn].x -= max(vel[kn].y - new_n.y, 0.0);
+                vel[kc].x -= max(vel[kc].y - new_c.y, 0.0);
+                vel[kq].x -= max(vel[kq].y - new_q.y, 0.0);
                 new_n.y = max(new_n.y, vel[kn].y);
                 new_c.y = max(new_c.y, vel[kc].y);
                 new_q.y = max(new_q.y, vel[kq].y);
@@ -562,6 +615,39 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 pos[k].y += ground_lift;
             }
         }
+        // Planted feet push the body along through the bone passes. That is
+        // ground friction, so it may move the body's center of mass at most mu
+        // times the ground's normal push this step (each node's push, plus the
+        // whole-body lift for the rest of the body). Beyond that, the feet
+        // slip: the excess is taken back as a rigid shift.
+        if grounded {
+            var held_mass = 0.0;
+            var held_grip = 0.0;
+            var normal = 0.0;
+            var com_x = 0.0;
+            for (var j = 0u; j < MAXN; j++) {
+                if j >= body_nodes { break; }
+                let k = j * WG + lane;
+                if pos[k].y <= vel[k].y + 1e-4 && failed[j] < 0.5 {
+                    held_mass += mass[j];
+                    held_grip += mass[j] * friction[j];
+                    normal += mass[j] * max(pos[k].y - vel[k].x, 0.0);
+                }
+                com_x += pos[k].x * mass[j];
+            }
+            normal += (total_mass - held_mass) * ground_lift;
+            let mu = held_grip / max(held_mass, 1e-6) * p.friction;
+            let allowed = mu * normal * inv_total_mass;
+            let shift = com_x * inv_total_mass - com_x_before;
+            let excess = shift - clamp(shift, -allowed, allowed);
+            for (var j = 0u; j < MAXN; j++) {
+                if j >= body_nodes { break; }
+                pos[j * WG + lane].x -= excess;
+            }
+        }
+        var contact_mass = 0.0;
+        var contact_momentum = 0.0;
+        var contact_grip = 0.0;
         // Velocity is the actual movement over the step. Ground friction uses the
         // real upward push the node received, so grip needs real pressure. The
         // whole-body lift only moves the body out of the ground; it adds no
@@ -580,11 +666,33 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let push = max(pos[k].y - predicted_y, 0.0);
                 let max_change = friction[j] * p.friction * push * RATE;
                 velocity.x -= clamp(velocity.x, -max_change, max_change);
+                if failed[j] < 0.5 {
+                    contact_mass += mass[j];
+                    contact_momentum += mass[j] * velocity.x;
+                    contact_grip += mass[j] * friction[j];
+                }
             }
             if failed[j] >= 0.5 {
                 velocity = vec2f(0.0);
             }
             vel[k] = velocity;
+        }
+        // The whole-body lift is the ground holding the body up: its normal
+        // impulse is the body's mass times the lift. Each node's own friction
+        // only sees its own push, so the feet on the ground also resist the
+        // body's sliding with up to mu times the lift's impulse, applied to
+        // the whole body so momentum stays exact.
+        if grounded && ground_lift > 0.0 && contact_mass > 0.0 {
+            let inv_contact = 1.0 / contact_mass;
+            let budget = contact_grip * inv_contact * p.friction * ground_lift * RATE;
+            let slide = contact_momentum * inv_contact;
+            let change = -clamp(slide, -budget, budget);
+            for (var j = 0u; j < MAXN; j++) {
+                if j >= body_nodes { break; }
+                if failed[j] < 0.5 {
+                    vel[j * WG + lane].x += change;
+                }
+            }
         }
         for (var iteration = 0u; iteration < VELOCITY_SOLVE_ITERATIONS; iteration++) {
             for (var j = 0u; j < MAXB; j++) {
@@ -722,7 +830,15 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                     broken = true;
                 }
             }
-            if metrics.fall_time == 0.0 && (pos[lane].y < pos[bone_kb[0]].y || broken) {
+            // A head shaken too hard kills the creature: its acceleration,
+            // averaged over about HEAD_SHAKE_WINDOW seconds, may not pass the limit.
+            if metrics.fall_time == 0.0 && time >= HEAD_SHAKE_WINDOW {
+                let head_accel = length(vel[lane] - head_start) * RATE;
+                metrics.head_shake += (head_accel - metrics.head_shake)
+                    * min(1.0, 1.0 / (HEAD_SHAKE_WINDOW * RATE));
+            }
+            if metrics.fall_time == 0.0
+                && (pos[lane].y < pos[bone_kb[0]].y || broken || metrics.head_shake > HEAD_SHAKE_LIMIT) {
                 var fall_x = 0.0;
                 for (var j = 0u; j < MAXN; j++) {
                     if j >= body_nodes { break; }

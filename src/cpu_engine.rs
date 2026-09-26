@@ -401,6 +401,8 @@ impl Group {
         let neck_base = self.bones[0].1;
         let mut fall_time = zero;
         let mut fall_x = zero;
+        let mut head_shake = zero;
+        let shake_alpha = F::splat((1.0 / (physics::HEAD_SHAKE_WINDOW * rate)).min(1.0));
 
         let snapshot = |px: &[F], py: &[F]| -> Vec<[f32; 2]> {
             px.iter()
@@ -409,6 +411,8 @@ impl Group {
                 .collect()
         };
         for tick in 0..total_steps {
+            // The head's velocity before this step, for the head shaking limit.
+            let head_start = (vx[0], vy[0]);
             if let Some(frames) = record.as_mut() {
                 frames.push(snapshot(&px, &py));
             }
@@ -555,6 +559,30 @@ impl Group {
 
             let tiny = F::splat(1e-6);
             let com_before = com(&px);
+            // Nodes resting on the ground hold their place like planted feet:
+            // they count as heavier, by their grip, when bones pull on them.
+            let stance_grip = F::splat(physics::stance_grip());
+            let stance = |py: &[F], floor: &[F]| -> Vec<F> {
+                (0..n)
+                    .map(|j| {
+                        if colliding {
+                            F::select(
+                                py[j].le(floor[j] + 1e-4),
+                                one + stance_grip * friction[j] * ground_friction,
+                                one,
+                            )
+                        } else {
+                            one
+                        }
+                    })
+                    .collect()
+            };
+            let weight = stance(&py, &floor);
+            let mut com_x_before = zero;
+            for j in 0..n {
+                com_x_before += px[j] * mass[j];
+            }
+            let com_x_before = com_x_before * inv_total_mass;
             for _ in 0..fidelity.bone_passes {
                 for (b, &(a, c)) in self.bones.iter().enumerate() {
                     let dx = px[c] - px[a];
@@ -566,11 +594,19 @@ impl Group {
                     let scale = error / distance;
                     let cx = F::select(valid, dx * scale, error);
                     let cy_ = F::select(valid, dy * scale, zero);
-                    px[a] += cx * share_a[b];
-                    px[c] -= cx * share_b[b];
-                    let mut ay = py[a] + cy_ * share_a[b];
-                    let mut cy = py[c] - cy_ * share_b[b];
+                    let sa =
+                        share_a[b] * weight[c] / (share_a[b] * weight[c] + share_b[b] * weight[a]);
+                    let sb = one - sa;
+                    px[a] += cx * sa;
+                    px[c] -= cx * sb;
+                    let mut ay = py[a] + cy_ * sa;
+                    let mut cy = py[c] - cy_ * sb;
                     if colliding {
+                        // A clamp is the ground pushing back, so it counts toward
+                        // the node's normal push (vx holds its height without
+                        // ground).
+                        vx[a] -= (floor[a] - ay).max(zero);
+                        vx[c] -= (floor[c] - cy).max(zero);
                         ay = ay.max(floor[a]);
                         cy = cy.max(floor[c]);
                     }
@@ -638,6 +674,9 @@ impl Group {
                 let mut new_c = py[child] + dvy - shift_y;
                 let mut new_q = py[reference] + duy - shift_y;
                 if colliding {
+                    vx[pivot] -= (floor[pivot] - new_n).max(zero);
+                    vx[child] -= (floor[child] - new_c).max(zero);
+                    vx[reference] -= (floor[reference] - new_q).max(zero);
                     new_n = new_n.max(floor[pivot]);
                     new_c = new_c.max(floor[child]);
                     new_q = new_q.max(floor[reference]);
@@ -703,6 +742,30 @@ impl Group {
                     *y += lift;
                 }
             }
+            // Planted feet push the body along through the bone passes. That is
+            // ground friction, so it may move the body's center of mass at most
+            // mu times the ground's normal push this step (each node's push,
+            // plus the whole-body lift for the rest of the body). Beyond that,
+            // the feet slip: the excess is taken back as a rigid shift.
+            if colliding {
+                let (mut contact_mass, mut grip, mut normal, mut com_x) = (zero, zero, zero, zero);
+                for j in 0..n {
+                    let contact = py[j].le(floor[j] + 1e-4) & failed[j].lt(F::splat(0.5));
+                    let push = (py[j] - vx[j]).max(zero);
+                    contact_mass += F::select(contact, mass[j], zero);
+                    grip += F::select(contact, mass[j] * friction[j], zero);
+                    normal += F::select(contact, mass[j] * push, zero);
+                    com_x += px[j] * mass[j];
+                }
+                normal += (total_mass - contact_mass) * lift;
+                let mu = grip / contact_mass.max(tiny) * ground_friction;
+                let allowed = mu * normal * inv_total_mass;
+                let shift = com_x * inv_total_mass - com_x_before;
+                let excess = shift - shift.max(-allowed).min(allowed);
+                for x in &mut px {
+                    *x -= excess;
+                }
+            }
             if ledger_on && colliding {
                 ledger[4] += f64::from((com(&px) - com_before) / dt);
             }
@@ -711,10 +774,12 @@ impl Group {
             // The whole-body lift only moves the body out of the ground; it adds
             // no upward speed, or a limb swung into the ground would launch it.
             let lifted = if colliding { lift } else { zero };
+            let (mut contact_mass, mut contact_momentum, mut contact_grip) = (zero, zero, zero);
             for j in 0..n {
                 let predicted_y = vx[j];
                 let mut vel_x = (px[j] - ox[j]) * rate;
                 let vel_y = (py[j] - oy[j] - lifted) * rate;
+                let alive = failed[j].lt(F::splat(0.5));
                 if colliding {
                     let contact = py[j].le(floor[j] + 1e-4);
                     let push = (py[j] - predicted_y).max(zero);
@@ -727,10 +792,33 @@ impl Group {
                             (f64::from(chosen.to_array()[0]) - f64::from(vel_x.to_array()[0])) * m;
                     }
                     vel_x = F::select(contact, reduced, vel_x);
+                    let counted = contact & alive;
+                    contact_mass += F::select(counted, mass[j], zero);
+                    contact_momentum += F::select(counted, mass[j] * vel_x, zero);
+                    contact_grip += F::select(counted, mass[j] * friction[j], zero);
                 }
-                let alive = failed[j].lt(F::splat(0.5));
                 vx[j] = F::select(alive, vel_x, zero);
                 vy[j] = F::select(alive, vel_y, zero);
+            }
+            // The whole-body lift is the ground holding the body up: its normal
+            // impulse is the body's mass times the lift. Each node's own friction
+            // only sees its own push, so the feet on the ground also resist the
+            // body's sliding with up to mu times the lift's impulse, applied to
+            // the whole body so momentum stays exact.
+            if colliding {
+                let holding = lifted.gt(zero) & contact_mass.gt(zero);
+                let inv_contact = one / contact_mass.max(tiny);
+                let budget = contact_grip * inv_contact * ground_friction * lifted * rate;
+                let slide = contact_momentum * inv_contact;
+                let change = F::select(holding, -slide.max(-budget).min(budget), zero);
+                for j in 0..n {
+                    let alive = failed[j].lt(F::splat(0.5));
+                    vx[j] = F::select(alive, vx[j] + change, vx[j]);
+                    if ledger_on {
+                        ledger[1] +=
+                            f64::from(F::select(alive, change, zero).to_array()[0] * lane0_mass[j]);
+                    }
+                }
             }
             for _ in 0..fidelity.velocity_passes {
                 let before = momentum(&vx);
@@ -853,7 +941,17 @@ impl Group {
                     broken = broken
                         | ((rx * center_x + ry * center_y).lt(limit) & norm.gt(F::splat(1e-12)));
                 }
-                let falls = fall_time.le(zero) & (py[0].lt(py[neck_base]) | broken);
+                // A head shaken too hard kills the creature: its acceleration,
+                // averaged over about HEAD_SHAKE_WINDOW seconds, may not pass
+                // the limit.
+                if time_now >= physics::HEAD_SHAKE_WINDOW {
+                    let (hx, hy) = (vx[0] - head_start.0, vy[0] - head_start.1);
+                    let accel = (hx * hx + hy * hy).sqrt() * rate;
+                    let shaken = head_shake + (accel - head_shake) * shake_alpha;
+                    head_shake = F::select(fall_time.le(zero), shaken, head_shake);
+                }
+                let shaking = head_shake.gt(F::splat(physics::HEAD_SHAKE_LIMIT));
+                let falls = fall_time.le(zero) & (py[0].lt(py[neck_base]) | broken | shaking);
                 if falls.any() {
                     let mut x = zero;
                     for j in 0..n {
@@ -924,6 +1022,7 @@ impl Group {
         let high_center = high_center.to_array();
         let fall_time = fall_time.to_array();
         let fall_x = fall_x.to_array();
+        let head_shake = head_shake.to_array();
         (0..self.slots.len())
             .map(|l| {
                 let mut score = 0.0f32;
@@ -967,6 +1066,7 @@ impl Group {
                     ground_lo: f32::from_bits(grounded_before[l] as u32),
                     ground_hi: f32::from_bits((grounded_before[l] >> 32) as u32),
                     fall_time: fall_time[l],
+                    head_shake: head_shake[l],
                 }
             })
             .collect()
@@ -1006,12 +1106,21 @@ fn build_groups(pop: &Population, unit: &[usize]) -> Vec<Group> {
 /// Node positions of one creature's full trial with the evaluation physics:
 /// entry `t` is the state after `t` steps. The replay shows exactly this.
 pub fn trajectory(creature: &crate::evolution::Creature, cfg: &Config) -> Vec<Vec<[f32; 2]>> {
+    replay(creature, cfg).0
+}
+
+/// A creature's recorded trial and the result the engine scored for it, from
+/// one run, so a replay can never disagree with its own score.
+pub fn replay(
+    creature: &crate::evolution::Creature,
+    cfg: &Config,
+) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
     let mut pop = Population::default();
     pop.push(creature.clone());
     let group = Group::build(&pop, &[0], &[0]);
     let mut frames = Vec::with_capacity((cfg.fidelity().settle() + cfg.steps() + 1) as usize);
-    group.run(cfg, Some(&mut frames));
-    frames
+    let result = group.run(cfg, Some(&mut frames))[0];
+    (frames, result)
 }
 
 /// Evaluates every creature of `unit` and returns results in unit order.

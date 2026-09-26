@@ -75,3 +75,7 @@
 - Open evidence: rank 21 stores 111.2 m but CPU replay travels 6.4 m. Diagnostic slip semantics changed, so historical ratios are not directly comparable. No contact-solver fix, energy-conservation claim, search A/B improvement, or performance speedup is asserted.
 - Checkpoint V4 persists island optimizer progress and reads V3. The public evaluation wrapper uses the production CPU engine; legacy `physics::step` remains. Production stepping and `qd::VERSION` are unchanged.
 - Commit and push remain coordinator actions after this handoff.
+
+## Concurrent integration
+
+Foundation commits 250ad82 and ca75014 were created, but origin advanced to abb00cb before the first push. The merge preserves the newer version-19 physics, CPU archive admission, replay result, and catastrophes. Its validation passed 72 CPU tests, nine report tests, three RTX tests, formatting and Clippy; the required random-population check returned best 9.81 m (20k bodies,20 s). The earlier measurements above describe version16 and do not measure current physics. Next work is engine error propagation and CPU fallback; active physics/archive-insertion work remains with the other team.

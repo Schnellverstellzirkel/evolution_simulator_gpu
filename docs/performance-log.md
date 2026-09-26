@@ -2,7 +2,9 @@
 
 Current goal: 2,000,000 evaluated creatures/s with fixed 60-second trials, 3 million creatures per generation, and the graphical game at 60 FPS. The measurements below do not establish that goal.
 
-## Bone-cap baseline, Windows headless (2026-09-26)
+## Historical version-16 bone-cap baseline, Windows headless (2026-09-26)
+
+This run uses parent physics `bd41746` (QD version 16), with foundation changes captured in `250ad82`. It predates merged revision `abb00cb` and its version-19 friction, planted-foot cap, head-shaking, and CPU archive checks. These timings do not measure the merged code; loading the checkpoint under version 19 invalidates its archive.
 
 Seed 38, 100,000 candidates per generation, 20 generations, 60-second trials, existing 2 m bone cap. Hardware/software: RTX 4060 Laptop GPU, driver 610.47, Windows, Rust 1.98.1. Build: native release optimization, LTO disabled, 256 codegen units. Resources: primary GPU only, six CPU evaluation threads, two general workers, low priority. The Radeon did not evaluate creatures.
 

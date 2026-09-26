@@ -2,6 +2,7 @@
 //! is, what it weighs, and how far its feet slide while touching the ground.
 //! With `EVOLUTION_LEDGER` set, it also prints where the three fastest
 //! bodies' forward momentum comes from.
+//! `EVOLUTION_NODE_SLIP` adds scored-interval contact details for the champion.
 //! Usage: cargo run --release --example size_report <checkpoint.evo> [count]
 use evolution_simulator::{
     config::Config, cpu_engine, creature_kernel::GpuResult, evolution::Population, physics, storage,
@@ -10,6 +11,16 @@ use evolution_simulator::{
 struct ReplayMetrics {
     distance: f32,
     slip: f32,
+    node_slip: Vec<NodeSlip>,
+    position_peak_g: f32,
+    position_shake_peak_g: f32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct NodeSlip {
+    contact_share: f32,
+    slip: f32,
+    lifts: usize,
 }
 
 fn replay_metrics(
@@ -32,27 +43,67 @@ fn replay_metrics(
         .map(|(position, node)| position[0] * node.mass)
         .sum::<f32>()
         / mass;
-    let mut slip = 0.0;
-    if cfg.ground {
+    let mut node_slip = vec![NodeSlip::default(); nodes.len()];
+    if cfg.ground && terminal > settle {
         let amplitude = physics::terrain_amplitude(cfg.terrain);
-        let touching = |position: [f32; 2], radius: f32| {
+        let floor = |position: [f32; 2], radius: f32| {
             let (height, slope) = physics::terrain(position[0], amplitude);
-            let floor = height + radius * (1.0 + slope * slope).sqrt();
-            position[1] <= floor + 0.002
+            height + radius * (1.0 + slope * slope).sqrt()
         };
-        // The first timed step includes recentering the settled body, which
-        // is not travel. Compare only subsequent scored steps; limp motion
-        // after the terminal frame must not inflate a frozen distance's slip.
-        for t in settle + 2..=terminal {
-            for (j, node) in nodes.iter().enumerate() {
+        for (j, (node, detail)) in nodes.iter().zip(&mut node_slip).enumerate() {
+            let mut touching = 0usize;
+            let mut was_down = false;
+            for t in settle + 1..=terminal {
                 let (now, before) = (frames[t][j], frames[t - 1][j]);
-                if touching(now, node.radius) && touching(before, node.radius) {
-                    slip += (now[0] - before[0]).abs();
+                let current_floor = floor(now, node.radius);
+                let down = now[1] <= current_floor + 0.002;
+                let clear = now[1] > current_floor + 0.02;
+                if down {
+                    touching += 1;
+                    // The first timed step includes recentering the settled
+                    // body. Count contact there, but not that artificial slip.
+                    if t >= settle + 2 && before[1] <= floor(before, node.radius) + 0.002 {
+                        detail.slip += (now[0] - before[0]).abs();
+                    }
+                } else if was_down && clear {
+                    detail.lifts += 1;
+                }
+                if down || clear {
+                    was_down = down;
                 }
             }
+            detail.contact_share = touching as f32 / (terminal - settle) as f32;
         }
     }
-    ReplayMetrics { distance, slip }
+    // Coordinate differences include position-only corrections such as the
+    // whole-body lift. These describe visible shaking, not the velocity-based
+    // acceleration used by the engine's head-shake rule.
+    let rate = fidelity.rate as f32;
+    let first_accel = settle + (physics::HEAD_SHAKE_WINDOW * rate).ceil() as usize + 2;
+    let alpha = (1.0 / (physics::HEAD_SHAKE_WINDOW * rate)).min(1.0);
+    let mut position_peak_g = 0.0f32;
+    let mut position_shake = 0.0;
+    let mut position_shake_peak_g = 0.0f32;
+    for t in first_accel..=terminal {
+        let velocity = |step: usize| {
+            [
+                (frames[step][0][0] - frames[step - 1][0][0]) * rate,
+                (frames[step][0][1] - frames[step - 1][0][1]) * rate,
+            ]
+        };
+        let (now, before) = (velocity(t), velocity(t - 1));
+        let acceleration_g = (now[0] - before[0]).hypot(now[1] - before[1]) * rate / 9.8;
+        position_peak_g = position_peak_g.max(acceleration_g);
+        position_shake += (acceleration_g - position_shake) * alpha;
+        position_shake_peak_g = position_shake_peak_g.max(position_shake);
+    }
+    ReplayMetrics {
+        distance,
+        slip: node_slip.iter().map(|node| node.slip).sum(),
+        node_slip,
+        position_peak_g,
+        position_shake_peak_g,
+    }
 }
 
 fn main() {
@@ -64,29 +115,29 @@ fn main() {
     let e = storage::load(std::path::Path::new(&path)).unwrap();
     let mut elites: Vec<_> = e.archive.entries.iter().collect();
     elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
-    let mut selected = Population::default();
-    for elite in elites.iter().take(count) {
-        selected.push(elite.creature.clone());
-    }
-    let results = cpu_engine::evaluate(&selected, &e.config);
+    let node_detail = std::env::var_os("EVOLUTION_NODE_SLIP").is_some();
+    let mut champion_detail = Vec::new();
     println!(
-        "archive_m  replay_m  nodes  length_m  longest_bone_m  mass_kg  slip_m  slip_per_replay_m"
+        "position-derived acceleration includes position corrections; engine_shake_g is the engine's recorded value at the scored endpoint"
+    );
+    println!(
+        "archive_m  replay_m  nodes  length_m  longest_bone_m  mass_kg  slip_m  slip_per_replay_m  pos_peak_g  pos_shake_peak_g  engine_shake_g"
     );
     let mut lengths = Vec::new();
     let mut shares = Vec::new();
-    for (elite, result) in elites.iter().take(count).zip(&results) {
+    for (rank, elite) in elites.iter().take(count).enumerate() {
         let c = &elite.creature;
         let nodes = physics::nodes(c);
         let mass: f32 = nodes.iter().map(|n| n.mass).sum();
         let length: f32 = c.bones.iter().map(|b| b.rest_length).sum();
         let longest = c.bones.iter().map(|b| b.rest_length).fold(0.0, f32::max);
-        let frames = cpu_engine::trajectory(c, &e.config);
-        let measured = replay_metrics(&nodes, &frames, result, &e.config);
+        let (frames, result) = cpu_engine::replay(c, &e.config);
+        let measured = replay_metrics(&nodes, &frames, &result, &e.config);
         let share = measured.slip / measured.distance.abs().max(0.01);
         lengths.push(length);
         shares.push(share);
         println!(
-            "{:9.1}  {:8.1}  {:5}  {:8.2}  {:14.2}  {:7.2}  {:6.1}  {:17.2}",
+            "{:9.1}  {:8.1}  {:5}  {:8.2}  {:14.2}  {:7.2}  {:6.1}  {:17.2}  {:10.1}  {:16.1}  {:14.1}",
             elite.fitness,
             measured.distance,
             c.nodes.len(),
@@ -94,8 +145,18 @@ fn main() {
             longest,
             mass,
             measured.slip,
-            share
+            share,
+            measured.position_peak_g,
+            measured.position_shake_peak_g,
+            result.head_shake / 9.8,
         );
+        if rank == 0 && node_detail {
+            champion_detail = nodes
+                .iter()
+                .zip(measured.node_slip)
+                .map(|(node, detail)| (node.mass, detail))
+                .collect();
+        }
     }
     lengths.sort_by(f32::total_cmp);
     shares.sort_by(f32::total_cmp);
@@ -105,6 +166,17 @@ fn main() {
             lengths[lengths.len() / 2],
             shares[shares.len() / 2]
         );
+    }
+    // Per-node detail for the fastest elite: which nodes touch the ground,
+    // how far each slides while touching, and what each weighs.
+    if !champion_detail.is_empty() {
+        println!("node  mass_kg  contact_share  slip_m  lifts");
+        for (j, (mass, detail)) in champion_detail.iter().enumerate() {
+            println!(
+                "{j:4}  {mass:7.2}  {:13.2}  {:6.1}  {:5}",
+                detail.contact_share, detail.slip, detail.lifts,
+            );
+        }
     }
     if std::env::var_os("EVOLUTION_LEDGER").is_none() {
         return;
@@ -209,6 +281,8 @@ mod tests {
         let measured = replay_metrics(&[node()], &frames, &GpuResult::default(), &cfg);
         assert_eq!(measured.distance, 2.0);
         assert_eq!(measured.slip, 0.0);
+        assert_eq!(measured.node_slip[0].contact_share, 0.0);
+        assert_eq!(measured.node_slip[0].lifts, 0);
     }
 
     #[test]
@@ -249,5 +323,35 @@ mod tests {
         let frames = vec![vec![[1.0, 0.1], [3.0, 0.1]]; cfg.fidelity().settle() as usize + 4];
         let measured = replay_metrics(&nodes, &frames, &GpuResult::default(), &cfg);
         assert_eq!(measured.distance, 2.5);
+    }
+
+    #[test]
+    fn node_contact_and_lifts_stop_at_the_scored_frame() {
+        let cfg = config();
+        let frames = frames(&cfg, &[[100.0, 0.1], [0.0, 0.1], [0.0, 0.13], [50.0, 0.1]]);
+        let result = GpuResult {
+            fall_time: 2.0 / cfg.fidelity().rate as f32,
+            ..GpuResult::default()
+        };
+        let measured = replay_metrics(&[node()], &frames, &result, &cfg);
+        assert_eq!(measured.node_slip[0].contact_share, 0.5);
+        assert_eq!(measured.node_slip[0].lifts, 1);
+        assert_eq!(measured.node_slip[0].slip, 0.0);
+    }
+
+    #[test]
+    fn position_acceleration_excludes_recentering_and_unscored_motion() {
+        let cfg = config();
+        let mut samples: Vec<_> = (0..=12).map(|t| [t as f32 * 0.125, 0.1]).collect();
+        samples[0][0] = 100.0;
+        samples[11][0] = 50.0;
+        let frames = frames(&cfg, &samples);
+        let result = GpuResult {
+            fall_time: 10.0 / cfg.fidelity().rate as f32,
+            ..GpuResult::default()
+        };
+        let measured = replay_metrics(&[node()], &frames, &result, &cfg);
+        assert_eq!(measured.position_peak_g, 0.0);
+        assert_eq!(measured.position_shake_peak_g, 0.0);
     }
 }

@@ -1,6 +1,8 @@
-# Physics audit: 2026-09-26
+# Historical physics audit: 2026-09-26, version 16
 
-This is a source inspection, not a measurement. No physics runs or benchmarks
+This is a historical source inspection of parent revision `bd41746` (QD version 16), not a measurement of current physics. Foundation follow-ups were captured in `250ad82`. The later merge of `abb00cb` brings QD version 19, load-aware friction, capped planted feet, head-shaking termination, CPU global-archive validation, and the combined replay/result API. The contact findings below describe the earlier implementation and must be re-audited against those changes; they are not a current defect list.
+
+This was a source inspection, not a measurement. No physics runs or benchmarks
 were performed for this audit. References describe the code inspected before
 the platform/default-device changes in this session.
 
@@ -8,7 +10,7 @@ Follow-up in this session: `physics::evaluate` now delegates to the current CPU
 engine, and `size_report` measures only scored replay intervals with the correct
 fidelity and sloped contact surface. The legacy `physics::step` remains for its
 low-level tests and old momentum diagnostic. The concerns below describe the
-source inspected before those fixes; the contact solver itself is unchanged.
+source inspected before those foundation fixes; that foundation batch did not change the contact solver. The later version-19 changes do change it.
 
 ## Ground support and sliding
 
