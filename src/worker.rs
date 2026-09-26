@@ -361,10 +361,12 @@ fn run(
                                 if sched.in_flight() > 0 {
                                     // Results from a generational run: keep them; the
                                     // next pass offers them to the archive.
+                                    sched.pump_checks(&e.population, &e.config)?;
                                     for (indices, metrics) in sched.collect(
                                         &e.population,
                                         &e.config,
                                         Duration::from_millis(4),
+                                        |i, m| e.contender(i, m),
                                     )? {
                                         for (&i, m) in indices.iter().zip(&metrics) {
                                             e.scores[i] = m.fitness;
@@ -387,9 +389,12 @@ fn run(
                                 steady.active = true;
                             }
                             sched.pump(&e.population, &e.config, &[])?;
-                            for (indices, metrics) in
-                                sched.collect(&e.population, &e.config, Duration::from_millis(4))?
-                            {
+                            for (indices, metrics) in sched.collect(
+                                &e.population,
+                                &e.config,
+                                Duration::from_millis(4),
+                                |i, m| e.contender(i, m),
+                            )? {
                                 steady_absorb(e, &mut steady, sched, &indices, &metrics, true)?;
                             }
                             status = format!("Evolving · generation {}", e.generation);
@@ -412,9 +417,12 @@ fn run(
                                 sched.begin(&e.population, e.evaluated..e.config.population);
                             }
                             sched.pump(&e.population, &e.config, &done)?;
-                            for (indices, metrics) in
-                                sched.collect(&e.population, &e.config, Duration::from_millis(4))?
-                            {
+                            for (indices, metrics) in sched.collect(
+                                &e.population,
+                                &e.config,
+                                Duration::from_millis(4),
+                                |i, m| e.contender(i, m),
+                            )? {
                                 store_results(e, &mut done, &indices, &metrics);
                             }
                             status = format!("Evaluating generation {}", e.generation);
@@ -631,7 +639,15 @@ fn run(
                 && let Some(e) = &mut exp
             {
                 let absorbed = sched
-                    .collect(&e.population, &e.config, Duration::from_millis(4))
+                    .pump_checks(&e.population, &e.config)
+                    .and_then(|()| {
+                        sched.collect(
+                            &e.population,
+                            &e.config,
+                            Duration::from_millis(4),
+                            |i, m| e.contender(i, m),
+                        )
+                    })
                     .and_then(|units| {
                         for (indices, metrics) in units {
                             if steady.active {
@@ -855,9 +871,14 @@ fn finish_queued(
     if let Some(sched) = gpu.sched.as_mut() {
         sched.stop();
         while sched.in_flight() > 0 {
-            for (indices, metrics) in
-                sched.collect(&e.population, &e.config, Duration::from_millis(100))?
-            {
+            // With no round left, waiting contenders go out for their checks now.
+            sched.pump_checks(&e.population, &e.config)?;
+            for (indices, metrics) in sched.collect(
+                &e.population,
+                &e.config,
+                Duration::from_millis(100),
+                |i, m| e.contender(i, m),
+            )? {
                 if steady.active {
                     steady_absorb(e, steady, sched, &indices, &metrics, false)?;
                 } else {

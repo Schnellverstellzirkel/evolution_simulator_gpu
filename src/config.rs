@@ -25,6 +25,9 @@ pub struct Config {
     pub ram_budget_mib: usize,
     pub throughput: bool,
     pub checkpoint_interval: u32,
+    /// Physics resolution for evaluations under this config; `None` is
+    /// `Fidelity::standard()`. Runtime only, never saved.
+    pub fidelity: Option<crate::physics::Fidelity>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -49,6 +52,7 @@ impl Default for Config {
             ram_budget_mib: 16384,
             throughput: true,
             checkpoint_interval: 10,
+            fidelity: None,
         }
     }
 }
@@ -112,6 +116,7 @@ impl Default for HumanConfig {
 impl From<HumanConfig> for Config {
     fn from(c: HumanConfig) -> Self {
         Self {
+            fidelity: None,
             population: c.population,
             seed: c.seed,
             random_seed: c.random_seed,
@@ -219,6 +224,7 @@ impl From<&Config> for BinaryConfig {
 impl From<BinaryConfig> for Config {
     fn from(c: BinaryConfig) -> Self {
         Self {
+            fidelity: None,
             population: c.population,
             seed: c.seed,
             random_seed: c.random_seed,
@@ -335,8 +341,14 @@ impl Config {
         );
         Ok(())
     }
+    /// This config's physics resolution.
+    pub fn fidelity(&self) -> crate::physics::Fidelity {
+        self.fidelity
+            .unwrap_or_else(crate::physics::Fidelity::standard)
+    }
+    /// Timed steps of a trial (after settling).
     pub fn steps(&self) -> u32 {
-        (self.duration * crate::physics::rate() as f32).round() as u32
+        (self.duration * self.fidelity().rate as f32).round() as u32
     }
     pub fn batch_size(&self) -> usize {
         // Fewer readback fences keep the GPU busier. Responsive mode still stays

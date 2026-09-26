@@ -4,21 +4,23 @@ use std::collections::{BTreeSet, HashMap};
 
 pub const EMITTER_COUNT: usize = 4;
 /// Archive grid: ground contact, gait cadence, vertical bounce, mean body
-/// height, and feet (distinct nodes that touched the ground).
-const BINS: [u8; 5] = [6, 8, 6, 6, 5];
-pub(crate) const ARCHIVE_LIMIT: usize = 6 * 8 * 6 * 6 * 5;
+/// height, and feet (distinct nodes that touched the ground). Bounce keeps a
+/// single bin: fewer cells give each one more offspring, which found faster
+/// creatures in fixed-seed tests (docs/search-research.md).
+const BINS: [u8; 5] = [6, 8, 1, 6, 5];
+pub(crate) const ARCHIVE_LIMIT: usize = 6 * 8 * 6 * 5;
 pub(crate) const MORPHOLOGY_LIMIT: usize = 64;
 pub(crate) const ARCHIVE_CAPACITY: usize = ARCHIVE_LIMIT + MORPHOLOGY_LIMIT;
 pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 1 << 20;
 pub(crate) const CMA_LIMIT: usize = 96;
-pub const VERSION: u32 = 11;
+pub const VERSION: u32 = 12;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 pub(crate) const MIN_MORPHOLOGY_DESCENDANTS: u64 = 8;
 pub(crate) const MORPHOLOGY_PARENT_FRACTION: f32 = 0.10;
-// Deliberately exploration-heavy: 70% of the initial batch uses structural,
-// novelty, or restart emitters so a stalled lineage cannot dominate for long.
-const INITIAL_EMITTER_MIX: [f64; EMITTER_COUNT] = [0.30, 0.30, 0.25, 0.15];
+// Random immigrants only seed an empty archive: against evolved elites they
+// almost never enter it (0.03-0.06% of attempts in fixed-seed tests).
+const INITIAL_EMITTER_MIX: [f64; EMITTER_COUNT] = [0.35, 0.35, 0.30, 0.0];
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -205,7 +207,8 @@ impl Descriptor {
         [
             self.ground_contact.clamp(0.0, 1.0),
             (self.gait_frequency / 6.0).clamp(0.0, 1.0),
-            (self.vertical_oscillation / 0.8).clamp(0.0, 1.0),
+            // Bounce is not an archive axis, so it adds no novelty either.
+            0.0,
             ((self.mean_height - 0.25) / 2.0).clamp(0.0, 1.0),
             ((self.feet - 1.0) / (BINS[4] as f32 - 1.0)).clamp(0.0, 1.0),
         ]
@@ -339,6 +342,18 @@ impl QdArchive {
     }
     pub fn morphology_count(&self) -> usize {
         self.morphology_indices.len()
+    }
+    /// Fitness a new topology must beat to enter the full topology reserve,
+    /// or `None` while the reserve has room.
+    pub(crate) fn morphology_floor(&self) -> Option<f32> {
+        (self.morphology_count() >= MORPHOLOGY_LIMIT).then(|| {
+            self.morphology_indices
+                .iter()
+                .map(|&i| &self.entries[i])
+                .filter(|elite| elite.visits >= MIN_MORPHOLOGY_DESCENDANTS)
+                .map(|elite| elite.fitness)
+                .fold(f32::INFINITY, f32::min)
+        })
     }
     pub fn coverage(&self) -> f32 {
         self.behavior_count() as f32 / ARCHIVE_LIMIT as f32
@@ -1067,7 +1082,7 @@ fn parameters(creature: &Creature) -> Vec<f32> {
     }
     for bone in &creature.bones {
         output.push(
-            ((bone.rest_length - 0.03) / (crate::evolution::MAX_BONE_LENGTH - 0.03))
+            ((bone.rest_length - 0.03) / (crate::evolution::max_bone_length() - 0.03))
                 .clamp(0.0, 1.0),
         );
     }
@@ -1077,9 +1092,9 @@ fn parameters(creature: &Creature) -> Vec<f32> {
             m.anchor_b.clamp(0.0, 1.0),
             ((m.short - 0.01) / 0.79).clamp(0.0, 1.0),
             ((m.long - 0.01) / 0.99).clamp(0.0, 1.0),
-            ((m.period - crate::evolution::MIN_MUSCLE_PERIOD)
-                / (10.0 - crate::evolution::MIN_MUSCLE_PERIOD))
-                .clamp(0.0, 1.0),
+            ((m.period - crate::evolution::min_muscle_period())
+                / (10.0 - crate::evolution::min_muscle_period()))
+            .clamp(0.0, 1.0),
             m.phase.clamp(0.0, 1.0),
             ((m.duty - 0.05) / 0.90).clamp(0.0, 1.0),
             ((m.stiffness - 1.0) / 119.0).clamp(0.0, 1.0),
@@ -1104,7 +1119,7 @@ fn parameters_into(population: &Population, index: usize, output: &mut [f32]) {
     }
     let bones = &population.bones[genome.bone_start..genome.bone_start + genome.bone_count];
     for bone in bones {
-        output[i] = ((bone.rest_length - 0.03) / (crate::evolution::MAX_BONE_LENGTH - 0.03))
+        output[i] = ((bone.rest_length - 0.03) / (crate::evolution::max_bone_length() - 0.03))
             .clamp(0.0, 1.0);
         i += 1;
     }
@@ -1114,9 +1129,9 @@ fn parameters_into(population: &Population, index: usize, output: &mut [f32]) {
             m.anchor_b.clamp(0.0, 1.0),
             ((m.short - 0.01) / 0.79).clamp(0.0, 1.0),
             ((m.long - 0.01) / 0.99).clamp(0.0, 1.0),
-            ((m.period - crate::evolution::MIN_MUSCLE_PERIOD)
-                / (10.0 - crate::evolution::MIN_MUSCLE_PERIOD))
-                .clamp(0.0, 1.0),
+            ((m.period - crate::evolution::min_muscle_period())
+                / (10.0 - crate::evolution::min_muscle_period()))
+            .clamp(0.0, 1.0),
             m.phase.clamp(0.0, 1.0),
             ((m.duty - 0.05) / 0.90).clamp(0.0, 1.0),
             ((m.stiffness - 1.0) / 119.0).clamp(0.0, 1.0),
@@ -1134,7 +1149,7 @@ fn apply_parameters(creature: &mut Creature, values: &[f32]) {
         i += 4;
     }
     for bone in &mut creature.bones {
-        bone.rest_length = 0.03 + values[i] * (crate::evolution::MAX_BONE_LENGTH - 0.03);
+        bone.rest_length = 0.03 + values[i] * (crate::evolution::max_bone_length() - 0.03);
         i += 1;
     }
     for m in &mut creature.muscles {
@@ -1142,8 +1157,8 @@ fn apply_parameters(creature: &mut Creature, values: &[f32]) {
         m.anchor_b = values[i + 1].clamp(0.0, 1.0);
         m.short = 0.01 + values[i + 2] * 0.79;
         m.long = (0.01 + values[i + 3] * 0.99).max(m.short);
-        m.period = crate::evolution::MIN_MUSCLE_PERIOD
-            + values[i + 4] * (10.0 - crate::evolution::MIN_MUSCLE_PERIOD);
+        m.period = crate::evolution::min_muscle_period()
+            + values[i + 4] * (10.0 - crate::evolution::min_muscle_period());
         m.phase = values[i + 5].fract();
         m.duty = 0.05 + values[i + 6] * 0.90;
         m.stiffness = 1.0 + values[i + 7] * 119.0;

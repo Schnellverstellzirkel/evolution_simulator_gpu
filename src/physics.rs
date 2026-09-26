@@ -16,24 +16,73 @@ pub fn rate() -> u32 {
 }
 /// Seconds per physics step.
 pub fn dt() -> f32 {
-    1.0 / rate() as f32
+    Fidelity::standard().dt()
 }
 /// Steps of pose settling (1.67 s) before the timed trial.
 pub fn settle() -> u32 {
-    (200 * rate()).div_ceil(120)
+    Fidelity::standard().settle()
 }
 /// Gait sampling interval in steps (30 samples per second).
 pub fn sample_interval() -> u32 {
-    (rate() / 30).max(1)
+    Fidelity::standard().sample_interval()
 }
 /// Cosine and tangent of the largest bone turn allowed in one step.
 pub fn turn_limits() -> (f32, f32) {
-    let angle = MAX_BONE_ANGULAR_SPEED * dt();
-    (angle.cos(), angle.tan())
+    Fidelity::standard().turn_limits()
 }
 /// Velocity kept per step, from `air_retention` per 1/60 s.
 pub fn air_per_step(air_retention: f32) -> f32 {
-    air_retention.powf(60.0 / rate() as f32)
+    Fidelity::standard().air_per_step(air_retention)
+}
+/// How finely one evaluation resolves the physics: steps per second and
+/// solver passes per step. Evaluations normally use `Fidelity::standard()`;
+/// a finer one checks that a gait does not depend on the coarse steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Fidelity {
+    pub rate: u32,
+    pub bone_passes: usize,
+    pub velocity_passes: usize,
+}
+impl Fidelity {
+    /// The configured physics: `EVOLUTION_PHYSICS_RATE` and the solver pass
+    /// overrides, or their defaults.
+    pub fn standard() -> Self {
+        let (bone_passes, velocity_passes) = solver_passes();
+        Self {
+            rate: rate(),
+            bone_passes,
+            velocity_passes,
+        }
+    }
+    /// Four times the standard rate and solver passes.
+    pub fn fine() -> Self {
+        let standard = Self::standard();
+        Self {
+            rate: (standard.rate * 4).min(960),
+            bone_passes: standard.bone_passes * 4,
+            velocity_passes: standard.velocity_passes * 4,
+        }
+    }
+    pub fn dt(self) -> f32 {
+        1.0 / self.rate as f32
+    }
+    /// Steps of pose settling (1.67 s) before the timed trial.
+    pub fn settle(self) -> u32 {
+        (200 * self.rate).div_ceil(120)
+    }
+    /// Gait sampling interval in steps (30 samples per second).
+    pub fn sample_interval(self) -> u32 {
+        (self.rate / 30).max(1)
+    }
+    /// Cosine and tangent of the largest bone turn allowed in one step.
+    pub fn turn_limits(self) -> (f32, f32) {
+        let angle = limits().bone_spin * self.dt();
+        (angle.cos(), angle.tan())
+    }
+    /// Velocity kept per step, from `air_retention` per 1/60 s.
+    pub fn air_per_step(self, air_retention: f32) -> f32 {
+        air_retention.powf(60.0 / self.rate as f32)
+    }
 }
 /// Position-projection and velocity-constraint passes per step. The rebuild
 /// after projection makes every bone exactly its rest length regardless.
@@ -54,10 +103,69 @@ pub fn solver_passes() -> (usize, usize) {
         )
     })
 }
-const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
-const MAX_MUSCLE_FORCE: f32 = 5.0;
-const MAX_NODE_SPEED: f32 = 5.0;
-const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
+/// Actuator and safety limits of the physics.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Limits {
+    /// Fastest a muscle's target length may change (m/s).
+    pub muscle_speed: f32,
+    /// Largest muscle force (N).
+    pub muscle_force: f32,
+    /// Fastest any node may move (m/s).
+    pub node_speed: f32,
+    /// Fastest a bone may turn (rad/s).
+    pub bone_spin: f32,
+    /// Shortest muscle rhythm period (s).
+    pub min_period: f32,
+    /// Work a rested muscle can do before it tires (J).
+    pub muscle_energy: f32,
+    /// Share of a muscle's missing energy restored per second.
+    pub muscle_recovery: f32,
+    /// Longest bone (m).
+    pub max_bone: f32,
+    /// Longest muscle length (m); the shortest contracted length is 80% of it.
+    pub max_stroke: f32,
+}
+impl Limits {
+    pub const DEFAULT: Limits = Limits {
+        muscle_speed: 2.0,
+        muscle_force: 5.0,
+        node_speed: 5.0,
+        bone_spin: 15.0,
+        min_period: 0.5,
+        muscle_energy: 15.0,
+        muscle_recovery: 0.25,
+        max_bone: 2.0,
+        max_stroke: 1.0,
+    };
+}
+/// The physics limits. `EVOLUTION_MAX_MUSCLE_SPEED`, `EVOLUTION_MAX_MUSCLE_FORCE`,
+/// `EVOLUTION_MAX_NODE_SPEED`, `EVOLUTION_MAX_BONE_SPIN`, and
+/// `EVOLUTION_MIN_MUSCLE_PERIOD` override them for experiments; every engine,
+/// the replay, and mutation read the same values.
+pub fn limits() -> Limits {
+    static LIMITS: std::sync::OnceLock<Limits> = std::sync::OnceLock::new();
+    *LIMITS.get_or_init(|| {
+        let read = |name: &str, default: f32| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .unwrap_or(default)
+        };
+        let d = Limits::DEFAULT;
+        Limits {
+            muscle_speed: read("EVOLUTION_MAX_MUSCLE_SPEED", d.muscle_speed),
+            muscle_force: read("EVOLUTION_MAX_MUSCLE_FORCE", d.muscle_force),
+            node_speed: read("EVOLUTION_MAX_NODE_SPEED", d.node_speed),
+            bone_spin: read("EVOLUTION_MAX_BONE_SPIN", d.bone_spin),
+            min_period: read("EVOLUTION_MIN_MUSCLE_PERIOD", d.min_period).clamp(0.05, 10.0),
+            muscle_energy: read("EVOLUTION_MUSCLE_ENERGY", d.muscle_energy),
+            muscle_recovery: read("EVOLUTION_MUSCLE_RECOVERY", d.muscle_recovery),
+            max_bone: read("EVOLUTION_MAX_BONE_LENGTH", d.max_bone).clamp(0.1, 12.0),
+            max_stroke: read("EVOLUTION_MAX_STROKE", d.max_stroke).clamp(0.1, 12.0),
+        }
+    })
+}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Node {
@@ -118,7 +226,7 @@ fn limited_target(m: &Muscle, time: f32) -> f32 {
     // Bound the slope of the entire waveform. Clamping each frame against the
     // previous *raw* target allowed the target to jump on the next frame.
     let amplitude = (m.long - m.short).min(
-        2.0 * MAX_MUSCLE_LENGTH_SPEED * m.period * m.duty.min(1.0 - m.duty) / std::f32::consts::PI,
+        2.0 * limits().muscle_speed * m.period * m.duty.min(1.0 - m.duty) / std::f32::consts::PI,
     );
     let mut limited = *m;
     limited.short = m.long - amplitude;
@@ -129,7 +237,7 @@ fn motor_force(m: &Muscle, time: f32, relative: f32) -> f32 {
     // A fixed target is a passive constraint, not an inexhaustible motor.
     // The actuator pulls while shortening and pushes while lengthening.
     (-target_speed * m.stiffness * 0.25 + relative * 0.15)
-        .clamp(-MAX_MUSCLE_FORCE, MAX_MUSCLE_FORCE)
+        .clamp(-limits().muscle_force, limits().muscle_force)
 }
 thread_local! {
     /// Diagnostic ledger of horizontal momentum changes by source:
@@ -149,8 +257,8 @@ fn momentum_x(nodes: &[Node]) -> f32 {
 }
 fn limit_speed(velocity: &mut [f32; 2]) {
     let speed = velocity[0].hypot(velocity[1]);
-    if speed > MAX_NODE_SPEED {
-        let scale = MAX_NODE_SPEED / speed;
+    if speed > limits().node_speed {
+        let scale = limits().node_speed / speed;
         velocity[0] *= scale;
         velocity[1] *= scale;
     }
@@ -342,10 +450,8 @@ fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool, previous: &[N
             let tangent = [-direction[1], direction[0]];
             let angular_velocity = (nodes[b].vel[0] - nodes[a].vel[0]) * tangent[0]
                 + (nodes[b].vel[1] - nodes[a].vel[1]) * tangent[1];
-            let target_angular_velocity = angular_velocity.clamp(
-                -MAX_BONE_ANGULAR_SPEED * length,
-                MAX_BONE_ANGULAR_SPEED * length,
-            );
+            let target_angular_velocity =
+                angular_velocity.clamp(-limits().bone_spin * length, limits().bone_spin * length);
             let impulse = (angular_velocity - target_angular_velocity) / inverse_sum;
             nodes[a].vel[0] += tangent[0] * impulse * inverse_a;
             nodes[a].vel[1] += tangent[1] * impulse * inverse_a;
@@ -573,14 +679,14 @@ mod tests {
             assert!(
                 (limited_target(&muscle, time) - limited_target(&muscle, (time - dt()).max(0.0)))
                     .abs()
-                    <= MAX_MUSCLE_LENGTH_SPEED * dt() + 1e-6
+                    <= limits().muscle_speed * dt() + 1e-6
             );
         }
         for tick in 1..120 {
             let time = tick as f32 * dt();
             assert!(
                 (limited_target(&muscle, time) - limited_target(&muscle, time - dt())).abs()
-                    <= MAX_MUSCLE_LENGTH_SPEED * dt() + 1e-6
+                    <= limits().muscle_speed * dt() + 1e-6
             );
         }
     }
@@ -687,11 +793,11 @@ mod tests {
             nodes[1].pos[1] - nodes[0].pos[1],
         ];
         let angle = delta[1].atan2(delta[0]).abs();
-        assert!(angle <= MAX_BONE_ANGULAR_SPEED * dt() + 1e-5);
+        assert!(angle <= limits().bone_spin * dt() + 1e-5);
         assert!(
             nodes
                 .iter()
-                .all(|node| node.vel[0].hypot(node.vel[1]) <= MAX_NODE_SPEED + 1e-5)
+                .all(|node| node.vel[0].hypot(node.vel[1]) <= limits().node_speed + 1e-5)
         );
         let length = delta[0].hypot(delta[1]);
         let direction = [delta[0] / length, delta[1] / length];
@@ -701,6 +807,6 @@ mod tests {
         let relative_tangent = (nodes[1].vel[0] - nodes[0].vel[0]) * tangent[0]
             + (nodes[1].vel[1] - nodes[0].vel[1]) * tangent[1];
         assert!(relative_radial.abs() < 1e-5);
-        assert!(relative_tangent.abs() <= MAX_BONE_ANGULAR_SPEED * length + 1e-5);
+        assert!(relative_tangent.abs() <= limits().bone_spin * length + 1e-5);
     }
 }

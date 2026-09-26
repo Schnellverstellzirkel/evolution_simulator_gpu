@@ -16,15 +16,23 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
 
+/// What a queued unit evaluates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Trial {
+    /// Each creature once, at the standard physics.
+    Standard,
+    /// Perturbed copies of contenders, at the fine physics.
+    Check,
+}
+
 pub struct Device {
     pub engine: Box<dyn Engine>,
-    /// Queued units: ticket, population indices, and whether each creature
-    /// also runs a perturbed second trial.
-    queued: VecDeque<(u64, Vec<usize>, bool)>,
+    /// Queued units: ticket, population indices, and what they evaluate.
+    queued: VecDeque<(u64, Vec<usize>, Trial)>,
     /// Measured creatures per second of device time (exponential average).
     pub rate: f64,
     pub creatures: u64,
@@ -63,9 +71,17 @@ pub struct Scheduler {
     pub devices: Vec<Device>,
     round: Option<Round>,
     pub packing_seconds: f64,
-    /// Trials per creature (`EVOLUTION_ROBUST_TRIALS`, 1 or 2). With 2, fitness
-    /// is the lower score of the creature and a slightly perturbed copy.
+    /// Trials per creature (`EVOLUTION_ROBUST_TRIALS`, 1 or 2). With 2, a
+    /// creature that could enter the archive also runs a slightly perturbed
+    /// copy at four times the physics resolution, and its fitness is the
+    /// lower of the two. Gaits that only work at the coarse standard physics,
+    /// or only from one exact pose, lose that way.
     robust_trials: usize,
+    /// Contenders waiting for their check trial, and when the oldest arrived.
+    checks: Vec<usize>,
+    checks_since: Option<Instant>,
+    /// Standard-trial results of contenders whose check is pending.
+    held: HashMap<usize, EvaluationMetrics>,
 }
 
 fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -120,6 +136,28 @@ impl Scheduler {
             round: None,
             packing_seconds: 0.0,
             robust_trials: env_or("EVOLUTION_ROBUST_TRIALS", 2usize).clamp(1, 2),
+            checks: Vec::new(),
+            checks_since: None,
+            held: HashMap::new(),
+        })
+    }
+
+    /// A scheduler with only the CPU engine, for machines without a GPU and
+    /// for tests.
+    pub fn cpu_only(threads: usize) -> Result<Self> {
+        Ok(Self {
+            devices: vec![Device::new(
+                Box::new(engine::cpu_engine(threads.max(1))?),
+                30_000.0,
+                64,
+                1.0,
+            )],
+            round: None,
+            packing_seconds: 0.0,
+            robust_trials: 2,
+            checks: Vec::new(),
+            checks_since: None,
+            held: HashMap::new(),
         })
     }
 
@@ -131,8 +169,63 @@ impl Scheduler {
             .join(" + ")
     }
 
+    /// Queued units, plus one while contenders still wait for their checks.
     pub fn in_flight(&self) -> usize {
-        self.devices.iter().map(|d| d.queued.len()).sum()
+        self.devices.iter().map(|d| d.queued.len()).sum::<usize>()
+            + usize::from(!self.held.is_empty())
+    }
+
+    /// Queues check units for waiting contenders. Checks go first, but wait
+    /// to fill a reasonable unit while standard work remains.
+    pub fn pump_checks(&mut self, pop: &Population, cfg: &Config) -> Result<()> {
+        if self.checks.is_empty() {
+            return Ok(());
+        }
+        let waited = self
+            .checks_since
+            .is_some_and(|since| since.elapsed() > Duration::from_millis(500));
+        let fine = Config {
+            fidelity: Some(crate::physics::Fidelity::fine()),
+            ..cfg.clone()
+        };
+        for device in &mut self.devices {
+            while device.engine.free_slots() > 0 && !self.checks.is_empty() {
+                if self.checks.len() < device.min_unit / 2 && self.round.is_some() && !waited {
+                    break;
+                }
+                // A check costs several standard trials; keep units about as long.
+                let size =
+                    ((device.rate * device.unit_seconds / 6.0) as usize).max(device.min_unit / 2);
+                let capacity = device.engine.max_nodes();
+                let mut indices = Vec::with_capacity(size.min(self.checks.len()));
+                let mut rest = Vec::new();
+                for i in self.checks.drain(..) {
+                    if indices.len() < size && pop.genomes[i].node_count <= capacity {
+                        indices.push(i);
+                    } else {
+                        rest.push(i);
+                    }
+                }
+                self.checks = rest;
+                if indices.is_empty() {
+                    break;
+                }
+                let started = Instant::now();
+                let mut unit = Population::default();
+                for &i in &indices {
+                    let mut creature = pop.creature(i);
+                    perturb(&mut creature);
+                    unit.push(creature);
+                }
+                let ticket = device.engine.submit(unit, &fine)?;
+                self.packing_seconds += started.elapsed().as_secs_f64();
+                device.queued.push_back((ticket, indices, Trial::Check));
+            }
+        }
+        if self.checks.is_empty() {
+            self.checks_since = None;
+        }
+        Ok(())
     }
 
     pub fn allocated_bytes(&self) -> u64 {
@@ -191,6 +284,7 @@ impl Scheduler {
     /// Queues work on every engine with a free slot. Creatures marked in
     /// `done` are skipped.
     pub fn pump(&mut self, pop: &Population, cfg: &Config, done: &[bool]) -> Result<()> {
+        self.pump_checks(pop, cfg)?;
         let Some(round) = self.round.as_mut() else {
             return Ok(());
         };
@@ -237,18 +331,10 @@ impl Scheduler {
                     break;
                 }
                 let started = Instant::now();
-                let mut unit = pop.subset(&indices);
-                let robust = self.robust_trials > 1;
-                if robust {
-                    for k in 0..indices.len() {
-                        let mut creature = unit.creature(k);
-                        perturb(&mut creature);
-                        unit.push(creature);
-                    }
-                }
+                let unit = pop.subset(&indices);
                 let ticket = device.engine.submit(unit, cfg)?;
                 self.packing_seconds += started.elapsed().as_secs_f64();
-                device.queued.push_back((ticket, indices, robust));
+                device.queued.push_back((ticket, indices, Trial::Standard));
             }
         }
         if round.cursor == round.order.len() && round.oversize.is_empty() {
@@ -257,44 +343,64 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Returns every finished unit as (population indices, metrics), waiting up
-    /// to `timeout` when nothing is ready.
+    /// Returns creatures whose evaluation is final as (population indices,
+    /// metrics), waiting up to `timeout` when nothing is ready. `contender`
+    /// says whether a standard-trial result could enter the archive; those
+    /// creatures are held for a check trial and returned once it finishes.
     pub fn collect(
         &mut self,
         pop: &Population,
         cfg: &Config,
         timeout: Duration,
+        mut contender: impl FnMut(usize, &EvaluationMetrics) -> bool,
     ) -> Result<Vec<(Vec<usize>, Vec<EvaluationMetrics>)>> {
         let mut out = Vec::new();
         let deadline = Instant::now() + timeout;
         loop {
             for device in &mut self.devices {
                 while let Some(done) = device.engine.poll()? {
-                    let (ticket, indices, robust) = device
+                    let (ticket, indices, trial) = device
                         .queued
                         .pop_front()
                         .context("Unexpected evaluation result")?;
                     anyhow::ensure!(ticket == done.ticket, "Evaluation results out of order");
                     device.busy_seconds += done.busy_seconds;
-                    device.creatures += indices.len() as u64;
-                    if done.busy_seconds > 0.0 && indices.len() >= device.min_unit / 2 {
-                        let rate = indices.len() as f64 / done.busy_seconds;
-                        device.rate = 0.7 * device.rate + 0.3 * rate;
-                    }
-                    let n = indices.len();
-                    let metrics = indices
-                        .iter()
-                        .enumerate()
-                        .map(|(k, &i)| {
-                            let mut metric = to_metrics(pop, i, &done.results[k], cfg);
-                            if robust {
-                                // Reliable motion only: keep the worse of both trials.
-                                metric.fitness = metric.fitness.min(done.results[n + k].fitness);
+                    let mut finals = Vec::with_capacity(indices.len());
+                    let mut metrics = Vec::with_capacity(indices.len());
+                    match trial {
+                        Trial::Standard => {
+                            device.creatures += indices.len() as u64;
+                            if done.busy_seconds > 0.0 && indices.len() >= device.min_unit / 2 {
+                                let rate = indices.len() as f64 / done.busy_seconds;
+                                device.rate = 0.7 * device.rate + 0.3 * rate;
                             }
-                            metric
-                        })
-                        .collect();
-                    out.push((indices, metrics));
+                            for (k, &i) in indices.iter().enumerate() {
+                                let metric = to_metrics(pop, i, &done.results[k], cfg);
+                                if self.robust_trials > 1 && contender(i, &metric) {
+                                    self.held.insert(i, metric);
+                                    self.checks.push(i);
+                                    self.checks_since.get_or_insert_with(Instant::now);
+                                } else {
+                                    finals.push(i);
+                                    metrics.push(metric);
+                                }
+                            }
+                        }
+                        Trial::Check => {
+                            for (k, &i) in indices.iter().enumerate() {
+                                // A creature re-queued meanwhile may have been settled already.
+                                if let Some(mut metric) = self.held.remove(&i) {
+                                    // Reliable motion only: keep the worse of both trials.
+                                    metric.fitness = metric.fitness.min(done.results[k].fitness);
+                                    finals.push(i);
+                                    metrics.push(metric);
+                                }
+                            }
+                        }
+                    }
+                    if !finals.is_empty() {
+                        out.push((finals, metrics));
+                    }
                 }
             }
             if !out.is_empty() || self.in_flight() == 0 || Instant::now() >= deadline {
@@ -317,10 +423,11 @@ impl Scheduler {
         cfg: &Config,
     ) -> Result<Vec<EvaluationMetrics>> {
         // Finish anything left from an interrupted round first.
-        while self.in_flight() > 0 {
-            self.collect(pop, cfg, Duration::from_secs(1))?;
-        }
         self.stop();
+        while self.in_flight() > 0 {
+            self.pump_checks(pop, cfg)?;
+            self.collect(pop, cfg, Duration::from_secs(1), |_, _| false)?;
+        }
         let mut position = std::collections::HashMap::with_capacity(indices.len());
         for (slot, &i) in indices.iter().enumerate() {
             position.insert(i, slot);
@@ -330,7 +437,8 @@ impl Scheduler {
         self.begin(pop, indices.iter().copied());
         while remaining > 0 {
             self.pump(pop, cfg, &[])?;
-            for (unit, metrics) in self.collect(pop, cfg, Duration::from_millis(50))? {
+            // Without an archive to compare against, every creature is checked.
+            for (unit, metrics) in self.collect(pop, cfg, Duration::from_millis(50), |_, _| true)? {
                 for (i, metric) in unit.into_iter().zip(metrics) {
                     out[position[&i]] = metric;
                     remaining -= 1;
@@ -377,5 +485,67 @@ pub fn to_metrics(
             mean_height: (r.height_sum / cfg.steps().max(1) as f32).max(0.0),
             feet: r.feet() as f32,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contenders_get_the_worse_of_a_fine_perturbed_check() {
+        let cfg = Config {
+            population: 48,
+            duration: 3.0,
+            random_seed: false,
+            ..Config::default()
+        };
+        let pop = crate::evolution::create(&cfg).unwrap();
+        let mut sched = Scheduler::cpu_only(2).unwrap();
+        sched.begin(&pop, 0..cfg.population);
+        let mut got = vec![None; cfg.population];
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while got.iter().any(Option::is_none) {
+            assert!(Instant::now() < deadline, "evaluation stalled");
+            sched.pump(&pop, &cfg, &[]).unwrap();
+            for (indices, metrics) in sched
+                .collect(&pop, &cfg, Duration::from_millis(20), |i, _| i % 2 == 0)
+                .unwrap()
+            {
+                for (i, m) in indices.into_iter().zip(metrics) {
+                    assert!(got[i].is_none(), "creature {i} returned twice");
+                    got[i] = Some(m.fitness);
+                }
+            }
+        }
+        assert_eq!(sched.in_flight(), 0);
+        let standard = crate::cpu_engine::evaluate(&pop, &cfg);
+        let mut perturbed = Population::default();
+        for i in 0..cfg.population {
+            let mut c = pop.creature(i);
+            perturb(&mut c);
+            perturbed.push(c);
+        }
+        let fine = Config {
+            fidelity: Some(crate::physics::Fidelity::fine()),
+            ..cfg.clone()
+        };
+        let check = crate::cpu_engine::evaluate(&perturbed, &fine);
+        for i in 0..cfg.population {
+            let expected = if i % 2 == 0 {
+                standard[i].fitness.min(check[i].fitness)
+            } else {
+                standard[i].fitness
+            };
+            let actual = got[i].unwrap();
+            assert!(
+                (actual - expected).abs() <= 1e-4 * expected.abs().max(1.0),
+                "creature {i}: {actual} vs {expected}"
+            );
+        }
+        // The check really ran at the fine physics: some differ from a
+        // perturbed trial at the standard physics.
+        let coarse = crate::cpu_engine::evaluate(&perturbed, &cfg);
+        assert!((0..cfg.population).any(|i| (coarse[i].fitness - check[i].fitness).abs() > 1e-3));
     }
 }

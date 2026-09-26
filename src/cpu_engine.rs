@@ -23,15 +23,10 @@ pub static LEDGER: std::sync::Mutex<[f64; 6]> = std::sync::Mutex::new([0.0; 6]);
 const L: usize = 16;
 /// Muscle energy: stored work (J), recovery per second, and the drive left
 /// when exhausted. Mirrors the GPU kernel.
-const MUSCLE_CAPACITY: f32 = 15.0;
-const MUSCLE_RECOVERY: f32 = 0.25;
 const TIRED_DRIVE: f32 = 0.2;
 type V = [f32; L];
 const ZERO: V = [0.0; L];
 
-const MAX_MUSCLE_FORCE: f32 = 5.0;
-const MAX_NODE_SPEED: f32 = 5.0;
-const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
 const PI: f32 = 3.141_592_653_59;
 
 #[derive(Clone, Copy)]
@@ -165,13 +160,9 @@ fn rotate_small(x: F, y: F, angle: F) -> (F, F) {
 }
 
 #[inline(always)]
-fn limit_speed(x: &mut F, y: &mut F) {
+fn limit_speed(x: &mut F, y: &mut F, max: F) {
     let speed = (*x * *x + *y * *y).sqrt();
-    let scale = F::select(
-        speed.gt(F::splat(MAX_NODE_SPEED)),
-        F::splat(MAX_NODE_SPEED) / speed,
-        F::splat(1.0),
-    );
+    let scale = F::select(speed.gt(max), max / speed, F::splat(1.0));
     *x = *x * scale;
     *y = *y * scale;
 }
@@ -311,13 +302,18 @@ impl Group {
     fn run(&self, cfg: &Config, mut record: Option<&mut Vec<Vec<[f32; 2]>>>) -> Vec<GpuResult> {
         let n = self.nodes;
         let exact = std::env::var_os("EVOLUTION_EXACT_COS").is_some();
-        let total_steps = physics::settle() + cfg.steps();
-        let air = physics::air_per_step(cfg.air_retention);
-        let settle = physics::settle();
-        let sample_interval = physics::sample_interval();
-        let (turn_cos_limit, turn_tan) = physics::turn_limits();
+        let fidelity = cfg.fidelity();
+        let total_steps = fidelity.settle() + cfg.steps();
+        let air = fidelity.air_per_step(cfg.air_retention);
+        let settle = fidelity.settle();
+        let sample_interval = fidelity.sample_interval();
+        let (turn_cos_limit, turn_tan) = fidelity.turn_limits();
         let ground_friction = cfg.ground_friction;
         let ground = cfg.ground;
+        let limits = physics::limits();
+        let max_node_speed = F::splat(limits.node_speed);
+        let max_force = F::splat(limits.muscle_force);
+        let max_spin = F::splat(limits.bone_spin);
         let amplitude = physics::terrain_amplitude(cfg.terrain);
         let rough = amplitude > 0.0;
         let load = |v: &Vec<V>| -> Vec<F> { v.iter().map(F::load).collect() };
@@ -333,7 +329,7 @@ impl Group {
         let inv_mass: Vec<F> = mass.iter().map(|&m| F::splat(1.0) / m).collect();
         let total_mass = mass.iter().fold(F::splat(0.0), |t, &m| t + m);
         let inv_total_mass = F::splat(1.0) / total_mass;
-        let dt = physics::dt();
+        let dt = fidelity.dt();
         let ledger_on = std::env::var_os("EVOLUTION_LEDGER").is_some();
         let lane0_mass: Vec<f32> = mass.iter().map(|m| m.to_array()[0]).collect();
         let momentum = |v: &[F]| -> f32 {
@@ -343,7 +339,7 @@ impl Group {
             p.iter().zip(&lane0_mass).map(|(x, m)| x.to_array()[0] * m).sum()
         };
         let mut ledger = [0.0f64; 6];
-        let rate = physics::rate() as f32;
+        let rate = fidelity.rate as f32;
         let muscles: Vec<MuscleF> = self
             .lanes
             .iter()
@@ -464,13 +460,13 @@ impl Group {
                 // A tired muscle drives weaker and slower.
                 let vigor = F::splat(TIRED_DRIVE) + energies[index] * (1.0 - TIRED_DRIVE);
                 let magnitude = (-(target_speed * m.stiffness) * 0.25 * vigor + relative * 0.15)
-                    .max(F::splat(-MAX_MUSCLE_FORCE))
-                    .min(F::splat(MAX_MUSCLE_FORCE));
+                    .max(-max_force)
+                    .min(max_force);
                 let magnitude = F::select(fall_time.gt(zero), zero, magnitude);
                 if tick >= settle {
                     let work = (magnitude * relative).abs() * dt;
-                    energies[index] = (energies[index] - work * (1.0 / MUSCLE_CAPACITY)
-                        + (one - energies[index]) * (MUSCLE_RECOVERY * dt))
+                    energies[index] = (energies[index] - work * (1.0 / limits.muscle_energy)
+                        + (one - energies[index]) * (limits.muscle_recovery * dt))
                         .max(zero)
                         .min(one);
                 }
@@ -497,7 +493,7 @@ impl Group {
                     ledger[5] += f64::from((sx[j] * inv_mass[j] * dt).to_array()[0] * lane0_mass[j]);
                 }
                 let (mut cap_x, mut cap_y) = (free_x, free_y);
-                limit_speed(&mut cap_x, &mut cap_y);
+                limit_speed(&mut cap_x, &mut cap_y, max_node_speed);
                 let alive = failed[j].lt(F::splat(0.5));
                 removed_x += F::select(alive, (free_x - cap_x) * mass[j], zero);
                 removed_y += F::select(alive, (free_y - cap_y) * mass[j], zero);
@@ -544,7 +540,7 @@ impl Group {
 
             let tiny = F::splat(1e-6);
             let com_before = com(&px);
-            for _ in 0..physics::solver_passes().0 {
+            for _ in 0..fidelity.bone_passes {
                 for (b, &(a, c)) in self.bones.iter().enumerate() {
                     let dx = px[c] - px[a];
                     let dy = py[c] - py[a];
@@ -708,7 +704,7 @@ impl Group {
                 vx[j] = F::select(alive, vel_x, zero);
                 vy[j] = F::select(alive, vel_y, zero);
             }
-            for _ in 0..physics::solver_passes().1 {
+            for _ in 0..fidelity.velocity_passes {
                 let before = momentum(&vx);
                 for (b, &(a, c)) in self.bones.iter().enumerate() {
                     let dx = px[c] - px[a];
@@ -725,7 +721,7 @@ impl Group {
                     let vcy = vy[c] - dir_y * radial * sb;
                     let (tx, ty) = (-dir_y, dir_x);
                     let tangent = (vcx - vax) * tx + (vcy - vay) * ty;
-                    let limit = length * MAX_BONE_ANGULAR_SPEED;
+                    let limit = length * max_spin;
                     let limited = tangent.max(-limit).min(limit);
                     let angular = tangent - limited;
                     vx[a] = vax + tx * angular * sa;
@@ -737,7 +733,7 @@ impl Group {
                 let (mut removed_x, mut removed_y) = (zero, zero);
                 for j in 0..n {
                     let (free_x, free_y) = (vx[j], vy[j]);
-                    limit_speed(&mut vx[j], &mut vy[j]);
+                    limit_speed(&mut vx[j], &mut vy[j], max_node_speed);
                     removed_x += (free_x - vx[j]) * mass[j];
                     removed_y += (free_y - vy[j]) * mass[j];
                 }
@@ -965,7 +961,7 @@ pub fn trajectory(creature: &crate::evolution::Creature, cfg: &Config) -> Vec<Ve
     let mut pop = Population::default();
     pop.push(creature.clone());
     let group = Group::build(&pop, &[0], &[0]);
-    let mut frames = Vec::with_capacity((physics::settle() + cfg.steps() + 1) as usize);
+    let mut frames = Vec::with_capacity((cfg.fidelity().settle() + cfg.steps() + 1) as usize);
     group.run(cfg, Some(&mut frames));
     frames
 }

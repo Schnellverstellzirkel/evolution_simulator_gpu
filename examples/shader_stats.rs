@@ -93,7 +93,9 @@ fn main() {
             .unwrap_or(32);
         for &capacity in evolution_simulator::creature_kernel::CAPACITIES.iter() {
             let code = spirv(&evolution_simulator::creature_kernel::shader_source(
-                capacity, workgroup,
+                capacity,
+                workgroup,
+                evolution_simulator::physics::Fidelity::standard(),
             ));
             let module = device
                 .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)

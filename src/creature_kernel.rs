@@ -89,10 +89,12 @@ pub fn capacity_index(nodes: usize) -> usize {
 }
 
 /// Waveform amplitude: the full stroke, limited so the target length changes
-/// at most `MAX_MUSCLE_LENGTH_SPEED` (2 m/s).
+/// at most `physics::limits().muscle_speed`.
 pub fn muscle_amplitude(m: &crate::evolution::Muscle) -> f32 {
-    (m.long - m.short)
-        .min(2.0 * 2.0 * m.period * m.duty.min(1.0 - m.duty) / std::f32::consts::PI)
+    (m.long - m.short).min(
+        2.0 * crate::physics::limits().muscle_speed * m.period * m.duty.min(1.0 - m.duty)
+            / std::f32::consts::PI,
+    )
 }
 
 /// Hash of a creature's bone and muscle attachment layout.
@@ -240,7 +242,11 @@ pub fn pack(pop: &Population, indices: &[usize]) -> Result<Vec<LaneBatch>> {
         .collect())
 }
 
-pub fn shader_source(capacity: usize, workgroup: u32) -> String {
+pub fn shader_source(
+    capacity: usize,
+    workgroup: u32,
+    fidelity: crate::physics::Fidelity,
+) -> String {
     let mut source = include_str!("../shaders/physics_creature.wgsl").to_owned();
     if capacity >= 24 {
         // Constant bounds let compilers unroll every node and bone loop. That
@@ -250,8 +256,39 @@ pub fn shader_source(capacity: usize, workgroup: u32) -> String {
             .replace("j < MAXN; j++)", "j < body_nodes; j++)")
             .replace("j < MAXB; j++)", "j < bone_count; j++)");
     }
-    let (bone_passes, velocity_passes) = crate::physics::solver_passes();
+    let (bone_passes, velocity_passes) = (fidelity.bone_passes, fidelity.velocity_passes);
+    let limits = crate::physics::limits();
     let source = source
+        .replace(
+            "const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;",
+            &format!(
+                "const MAX_MUSCLE_LENGTH_SPEED: f32 = {:?};",
+                limits.muscle_speed
+            ),
+        )
+        .replace(
+            "const MUSCLE_CAPACITY: f32 = 15.0;",
+            &format!("const MUSCLE_CAPACITY: f32 = {:?};", limits.muscle_energy),
+        )
+        .replace(
+            "const MUSCLE_RECOVERY: f32 = 0.25;",
+            &format!("const MUSCLE_RECOVERY: f32 = {:?};", limits.muscle_recovery),
+        )
+        .replace(
+            "const MAX_MUSCLE_FORCE: f32 = 5.0;",
+            &format!("const MAX_MUSCLE_FORCE: f32 = {:?};", limits.muscle_force),
+        )
+        .replace(
+            "const MAX_NODE_SPEED: f32 = 5.0;",
+            &format!("const MAX_NODE_SPEED: f32 = {:?};", limits.node_speed),
+        )
+        .replace(
+            "const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;",
+            &format!(
+                "const MAX_BONE_ANGULAR_SPEED: f32 = {:?};",
+                limits.bone_spin
+            ),
+        )
         .replace(
             "const BONE_SOLVE_ITERATIONS: u32 = 8u;",
             &format!("const BONE_SOLVE_ITERATIONS: u32 = {bone_passes}u;"),
@@ -260,17 +297,43 @@ pub fn shader_source(capacity: usize, workgroup: u32) -> String {
             "const VELOCITY_SOLVE_ITERATIONS: u32 = 4u;",
             &format!("const VELOCITY_SOLVE_ITERATIONS: u32 = {velocity_passes}u;"),
         )
-        .replace("PHYSICSRATE", &format!("{:.1}", crate::physics::rate() as f32))
-        .replace("SETTLESTEPSu", &format!("{}u", crate::physics::settle()))
+        .replace("PHYSICSRATE", &format!("{:.1}", fidelity.rate as f32))
+        .replace("SETTLESTEPSu", &format!("{}u", fidelity.settle()))
         .replace(
             "SAMPLEINTERVALu",
-            &format!("{}u", crate::physics::sample_interval()),
+            &format!("{}u", fidelity.sample_interval()),
         )
-        .replace("TURNCOS", &format!("{:.9}", crate::physics::turn_limits().0))
-        .replace("TURNTAN", &format!("{:.9}", crate::physics::turn_limits().1))
+        .replace("TURNCOS", &format!("{:.9}", fidelity.turn_limits().0))
+        .replace("TURNTAN", &format!("{:.9}", fidelity.turn_limits().1))
         .replace("SHAREDLEN", &(capacity * workgroup as usize).to_string())
         .replace("WGSIZEu", &format!("{workgroup}u"))
         .replace("WGSIZE", &workgroup.to_string())
         .replace("MAXNODESu", &format!("{capacity}u"));
     crate::gpu::apply_fast_cos(source)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::physics::Fidelity;
+
+    #[test]
+    fn kernels_compile_for_standard_and_fine_physics() {
+        for fidelity in [Fidelity::standard(), Fidelity::fine()] {
+            for capacity in CAPACITIES {
+                let source = shader_source(capacity, 32, fidelity);
+                for constant in [
+                    "PHYSICSRATE",
+                    "SETTLESTEPSu",
+                    "TURNCOS",
+                    "TURNTAN",
+                    "MAXNODESu",
+                ] {
+                    assert!(!source.contains(constant), "{constant} left unreplaced");
+                }
+                crate::vk_engine::spirv(&source)
+                    .unwrap_or_else(|e| panic!("{capacity}-node kernel at {fidelity:?}: {e:#}"));
+            }
+        }
+    }
 }

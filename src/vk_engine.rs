@@ -65,7 +65,9 @@ pub struct VkEngine {
     memory_properties: vk::PhysicalDeviceMemoryProperties,
     set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
-    pipelines: Vec<vk::Pipeline>,
+    /// One kernel per node capacity, for each physics fidelity in use. The
+    /// standard fidelity is built at startup; others on first use.
+    pipelines: Vec<(crate::physics::Fidelity, Vec<vk::Pipeline>)>,
     descriptor_pool: vk::DescriptorPool,
     command_pool: vk::CommandPool,
     slots: Vec<Slot>,
@@ -189,26 +191,11 @@ impl VkEngine {
                 .and_then(|v| v.parse::<u32>().ok())
                 .filter(|v| *v == 32 || *v == 64)
                 .unwrap_or(32);
-            let mut pipelines = Vec::with_capacity(CAPACITIES.len());
-            for &capacity in CAPACITIES.iter().filter(|&&c| c <= max_capacity) {
-                let code = spirv(&creature_kernel::shader_source(capacity, workgroup))?;
-                let module = device.create_shader_module(
-                    &vk::ShaderModuleCreateInfo::default().code(&code),
-                    None,
-                )?;
-                let stage = vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::COMPUTE)
-                    .module(module)
-                    .name(c"advance");
-                let info = vk::ComputePipelineCreateInfo::default()
-                    .stage(stage)
-                    .layout(pipeline_layout);
-                let pipeline = device
-                    .create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
-                    .map_err(|(_, e)| e)?[0];
-                device.destroy_shader_module(module, None);
-                pipelines.push(pipeline);
-            }
+            let standard = crate::physics::Fidelity::standard();
+            let pipelines = vec![(
+                standard,
+                Self::build_pipelines(&device, pipeline_layout, workgroup, max_capacity, standard)?,
+            )];
             let pool_sizes = [
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
@@ -522,6 +509,57 @@ impl VkEngine {
         self.slots.len() - self.free_slots()
     }
 
+    /// Compiles the kernel for every node capacity up to `max_capacity`.
+    fn build_pipelines(
+        device: &ash::Device,
+        layout: vk::PipelineLayout,
+        workgroup: u32,
+        max_capacity: usize,
+        fidelity: crate::physics::Fidelity,
+    ) -> Result<Vec<vk::Pipeline>> {
+        let mut pipelines = Vec::with_capacity(CAPACITIES.len());
+        for &capacity in CAPACITIES.iter().filter(|&&c| c <= max_capacity) {
+            let code = spirv(&creature_kernel::shader_source(
+                capacity, workgroup, fidelity,
+            ))?;
+            unsafe {
+                let module = device.create_shader_module(
+                    &vk::ShaderModuleCreateInfo::default().code(&code),
+                    None,
+                )?;
+                let stage = vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::COMPUTE)
+                    .module(module)
+                    .name(c"advance");
+                let info = vk::ComputePipelineCreateInfo::default()
+                    .stage(stage)
+                    .layout(layout);
+                let pipeline = device
+                    .create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
+                    .map_err(|(_, e)| e)?[0];
+                device.destroy_shader_module(module, None);
+                pipelines.push(pipeline);
+            }
+        }
+        Ok(pipelines)
+    }
+
+    /// Index of the kernel set for `fidelity`, building it on first use.
+    fn pipeline_set(&mut self, fidelity: crate::physics::Fidelity) -> Result<usize> {
+        if let Some(index) = self.pipelines.iter().position(|(f, _)| *f == fidelity) {
+            return Ok(index);
+        }
+        let set = Self::build_pipelines(
+            &self.device,
+            self.pipeline_layout,
+            self.workgroup,
+            self.max_capacity,
+            fidelity,
+        )?;
+        self.pipelines.push((fidelity, set));
+        Ok(self.pipelines.len() - 1)
+    }
+
     /// Uploads the batches and queues all `steps` in `chunk`-step ranges
     /// without waiting. Returns a ticket; results arrive through `poll`.
     pub fn submit(
@@ -536,6 +574,8 @@ impl VkEngine {
             batches.iter().all(|b| b.capacity <= self.max_capacity),
             "Body too large for this device's kernels"
         );
+        let fidelity = cfg.fidelity();
+        let pipeline_set = self.pipeline_set(fidelity)?;
         let slot = self
             .slots
             .iter()
@@ -554,7 +594,7 @@ impl VkEngine {
                     stride: batch.capacity as u32,
                     count: batch.info.len() as u32,
                     gravity: cfg.gravity,
-                    air: crate::physics::air_per_step(cfg.air_retention),
+                    air: fidelity.air_per_step(cfg.air_retention),
                     friction: cfg.ground_friction,
                     ground: if cfg.ground { 1.0 } else { 0.0 },
                     total_steps: steps,
@@ -620,7 +660,7 @@ impl VkEngine {
                     device.cmd_bind_pipeline(
                         cb,
                         vk::PipelineBindPoint::COMPUTE,
-                        self.pipelines[group],
+                        self.pipelines[pipeline_set].1[group],
                     );
                     let offset = ((r * batches.len() + b) as u64 * self.params_stride) as u32;
                     device.cmd_bind_descriptor_sets(
@@ -827,8 +867,10 @@ impl Drop for VkEngine {
             self.device.destroy_command_pool(self.command_pool, None);
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
-            for &p in &self.pipelines {
-                self.device.destroy_pipeline(p, None);
+            for (_, set) in &self.pipelines {
+                for &p in set {
+                    self.device.destroy_pipeline(p, None);
+                }
             }
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);

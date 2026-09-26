@@ -8,7 +8,6 @@ use crate::{
     config::Config,
     creature_kernel::{self, GpuResult},
     evolution::Population,
-    physics,
     vk_engine::VkEngine,
 };
 use anyhow::{Context, Result};
@@ -173,7 +172,12 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
                 {
                     let indices: Vec<usize> = (0..unit.genomes.len()).collect();
                     let submitted = creature_kernel::pack(&unit, &indices).and_then(|packed| {
-                        engine.submit(&packed, &cfg, physics::settle() + cfg.steps(), step_range)
+                        engine.submit(
+                            &packed,
+                            &cfg,
+                            cfg.fidelity().settle() + cfg.steps(),
+                            step_range,
+                        )
                     });
                     match submitted {
                         Ok(vk_ticket) => running.push_back((ticket, vk_ticket, indices.len())),

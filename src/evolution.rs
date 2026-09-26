@@ -5,8 +5,22 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub const FAILED: f32 = -1.0e20;
-pub const MAX_BONE_LENGTH: f32 = 2.0;
-pub const MIN_MUSCLE_PERIOD: f32 = 0.5;
+/// Longest bone (m), from `physics::limits()`.
+pub fn max_bone_length() -> f32 {
+    crate::physics::limits().max_bone
+}
+/// Largest distance (m) of a starting node from the origin on either axis.
+fn body_extent() -> f32 {
+    2.0 * max_bone_length()
+}
+/// Longest muscle length (m), from `physics::limits()`.
+fn max_stroke() -> f32 {
+    crate::physics::limits().max_stroke
+}
+/// Shortest muscle rhythm period (s), from `physics::limits()`.
+pub fn min_muscle_period() -> f32 {
+    crate::physics::limits().min_period
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct NodeGene {
@@ -400,7 +414,7 @@ impl Population {
             + self.muscles.capacity() * std::mem::size_of::<Muscle>()
     }
     pub fn validate(&self, cfg: &Config) -> Result<()> {
-        self.validate_with_max_bone(cfg, MAX_BONE_LENGTH, false)
+        self.validate_with_max_bone(cfg, max_bone_length(), false)
     }
     pub(crate) fn validate_with_max_bone(
         &self,
@@ -527,7 +541,7 @@ impl Population {
                         .all(|x| x.is_finite())
                         && m.short >= 0.01
                         && m.long >= m.short
-                        && m.period >= if historical { 0.1 } else { MIN_MUSCLE_PERIOD }
+                        && m.period >= if historical { 0.1 } else { min_muscle_period() }
                         && (0.05..=0.95).contains(&m.duty)
                         && (1.0..=120.0).contains(&m.stiffness),
                     "Invalid muscle attachment or parameters"
@@ -659,15 +673,19 @@ pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
 fn bone(a: usize, b: usize, nodes: &[NodeGene]) -> Bone {
     let dx = nodes[a].x - nodes[b].x;
     let dy = nodes[a].y - nodes[b].y;
-    Bone::new(a as u32, b as u32, dx.hypot(dy).clamp(0.03, MAX_BONE_LENGTH))
+    Bone::new(
+        a as u32,
+        b as u32,
+        dx.hypot(dy).clamp(0.03, max_bone_length()),
+    )
 }
 pub(crate) fn normalize_bone_lengths(c: &mut Creature) {
     for bone in &mut c.bones {
         let a = c.nodes[bone.a as usize];
         let b = c.nodes[bone.b as usize];
         let distance = (a.x - b.x).hypot(a.y - b.y);
-        let min = (distance * 0.75).clamp(0.03, MAX_BONE_LENGTH);
-        let max = (distance * 1.25).clamp(min, MAX_BONE_LENGTH);
+        let min = (distance * 0.75).clamp(0.03, max_bone_length());
+        let max = (distance * 1.25).clamp(min, max_bone_length());
         bone.rest_length = bone.rest_length.clamp(min, max);
     }
 }
@@ -711,7 +729,9 @@ fn muscle(
     let anchor_b = random_anchor(rng);
     let a = bone_point(bones[bone_a], nodes, anchor_a);
     let b = bone_point(bones[bone_b], nodes, anchor_b);
-    let length = (a[0] - b[0]).hypot(a[1] - b[1]).clamp(0.06, 0.6);
+    let length = (a[0] - b[0])
+        .hypot(a[1] - b[1])
+        .clamp(0.06, 0.6 * max_stroke());
     Muscle {
         bone_a: bone_a as u32,
         bone_b: bone_b as u32,
@@ -903,17 +923,17 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
             0.5
         };
         m.short = if m.short.is_finite() {
-            m.short.clamp(0.01, 0.8)
+            m.short.clamp(0.01, 0.8 * max_stroke())
         } else {
             0.1
         };
         m.long = if m.long.is_finite() {
-            m.long.clamp(m.short, 1.0)
+            m.long.clamp(m.short, max_stroke())
         } else {
             m.short
         };
         m.period = if m.period.is_finite() {
-            m.period.clamp(MIN_MUSCLE_PERIOD, 10.0)
+            m.period.clamp(min_muscle_period(), 10.0)
         } else {
             1.0
         };
@@ -963,6 +983,13 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
             if c.muscles.len() < cfg.max_muscles {
                 c.muscles.push(muscle(a, b, &c.bones, &c.nodes, rng));
             }
+        }
+    }
+    // Every muscle runs on the body's one clock, set by the first muscle.
+    // Muscles differ only in phase, so every gait repeats exactly.
+    if let Some(first) = c.muscles.first().map(|m| m.period) {
+        for m in &mut c.muscles {
+            m.period = first;
         }
     }
     normalize_bone_lengths(c);
@@ -1262,7 +1289,7 @@ fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
     }
     let pivot = creature.nodes[joint as usize];
     let mut mirror = creature.nodes[tip as usize];
-    mirror.x = (2.0 * pivot.x - mirror.x).clamp(-4.0, 4.0);
+    mirror.x = (2.0 * pivot.x - mirror.x).clamp(-body_extent(), body_extent());
     let new_node = creature.nodes.len() as u32;
     creature.nodes.push(mirror);
     let new_bone = creature.bones.len() as u32;
@@ -1291,15 +1318,14 @@ fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
     repair(creature, cfg, rng);
     true
 }
-
-/// Gives every muscle the same period, taken from one of them.
-fn sync_rhythm(creature: &mut Creature, rng: &mut Rng) -> bool {
-    if creature.muscles.len() < 2 {
+/// Changes the body clock's tempo by a large step, keeping every phase.
+fn retime_rhythm(creature: &mut Creature, rng: &mut Rng) -> bool {
+    if creature.muscles.is_empty() {
         return false;
     }
-    let period = creature.muscles[rng.index(creature.muscles.len())].period;
+    let tempo = (qd::gaussian(rng) * 0.35).exp();
     for muscle in &mut creature.muscles {
-        muscle.period = period;
+        muscle.period = (muscle.period * tempo).clamp(min_muscle_period(), 10.0);
     }
     true
 }
@@ -1360,8 +1386,8 @@ fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
         return creature;
     }
     for node in &mut creature.nodes {
-        node.x = (node.x + qd::gaussian(rng) * 0.10 * scale).clamp(-4.0, 4.0);
-        node.y = (node.y + qd::gaussian(rng) * 0.08 * scale).clamp(0.0, 4.0);
+        node.x = (node.x + qd::gaussian(rng) * 0.10 * scale).clamp(-body_extent(), body_extent());
+        node.y = (node.y + qd::gaussian(rng) * 0.08 * scale).clamp(0.0, body_extent());
         node.diameter =
             (node.diameter + qd::gaussian(rng) * 0.025 * scale).clamp(cfg.min_size, cfg.max_size);
         node.friction = (node.friction + qd::gaussian(rng) * 0.10 * scale)
@@ -1369,7 +1395,7 @@ fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
     }
     for bone in &mut creature.bones {
         bone.rest_length =
-            (bone.rest_length + qd::gaussian(rng) * 0.035 * scale).clamp(0.03, MAX_BONE_LENGTH);
+            (bone.rest_length + qd::gaussian(rng) * 0.035 * scale).clamp(0.03, max_bone_length());
         bone.mutate_range(0.15 * scale, rng);
         if bone.organ_mass > 0.0 {
             bone.organ_mass = (bone.organ_mass * (qd::gaussian(rng) * 0.15 * scale).exp())
@@ -1377,13 +1403,16 @@ fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
             bone.organ_at = (bone.organ_at + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
         }
     }
+    // The body's clock speeds up or slows down as a whole.
+    let tempo = (qd::gaussian(rng) * 0.10 * scale).exp();
     for muscle in &mut creature.muscles {
         muscle.anchor_a = (muscle.anchor_a + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
         muscle.anchor_b = (muscle.anchor_b + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
-        muscle.short = (muscle.short + qd::gaussian(rng) * 0.06 * scale).clamp(0.01, 0.8);
-        muscle.long = (muscle.long + qd::gaussian(rng) * 0.08 * scale).clamp(muscle.short, 1.0);
-        muscle.period =
-            (muscle.period + qd::gaussian(rng) * 0.20 * scale).clamp(MIN_MUSCLE_PERIOD, 10.0);
+        muscle.short =
+            (muscle.short + qd::gaussian(rng) * 0.06 * scale).clamp(0.01, 0.8 * max_stroke());
+        muscle.long =
+            (muscle.long + qd::gaussian(rng) * 0.08 * scale).clamp(muscle.short, max_stroke());
+        muscle.period = (muscle.period * tempo).clamp(min_muscle_period(), 10.0);
         muscle.phase = (muscle.phase + qd::gaussian(rng) * 0.12 * scale).rem_euclid(1.0);
         muscle.duty = (muscle.duty + qd::gaussian(rng) * 0.08 * scale).clamp(0.05, 0.95);
         muscle.stiffness =
@@ -1426,7 +1455,7 @@ fn structural_mutation_in_place(creature: &mut Creature, cfg: &Config, rng: &mut
         0 => split_bone(creature, cfg, rng),
         1 => duplicate_mirrored_node(creature, cfg, rng),
         2 => duplicate_limb(creature, cfg, rng),
-        3 => sync_rhythm(creature, rng),
+        3 => retime_rhythm(creature, rng),
         4 => change_organ(creature, rng),
         _ => phase_shift_group(creature, rng),
     }
@@ -1515,8 +1544,9 @@ fn duplicate_mirrored_node(creature: &mut Creature, cfg: &Config, rng: &mut Rng)
     };
     let center_x = creature.nodes.iter().map(|n| n.x).sum::<f32>() / creature.nodes.len() as f32;
     let mut duplicate = creature.nodes[source];
-    duplicate.x = (2.0 * center_x - duplicate.x + rng.range(-0.03, 0.03)).clamp(-4.0, 4.0);
-    duplicate.y = (duplicate.y + rng.range(-0.03, 0.03)).clamp(0.0, 4.0);
+    duplicate.x = (2.0 * center_x - duplicate.x + rng.range(-0.03, 0.03))
+        .clamp(-body_extent(), body_extent());
+    duplicate.y = (duplicate.y + rng.range(-0.03, 0.03)).clamp(0.0, body_extent());
     let target = creature.nodes.len() as u32;
     creature.nodes.push(duplicate);
     let new_bone = creature.bones.len();
@@ -1567,7 +1597,7 @@ fn mutate(mut c: Creature, cfg: &Config, generation: u32, index: usize) -> Creat
     }
     for bone in &mut c.bones {
         bone.rest_length =
-            (bone.rest_length + rng.delta() * 0.04 * strength).clamp(0.03, MAX_BONE_LENGTH);
+            (bone.rest_length + rng.delta() * 0.04 * strength).clamp(0.03, max_bone_length());
         bone.min_angle += rng.delta() * 0.2 * strength;
         bone.max_angle += rng.delta() * 0.2 * strength;
         bone.clamp_range();
@@ -1577,7 +1607,7 @@ fn mutate(mut c: Creature, cfg: &Config, generation: u32, index: usize) -> Creat
         m.anchor_b = (m.anchor_b + rng.delta() * 0.15 * strength).clamp(0.0, 1.0);
         m.short = (m.short + rng.delta() * 0.1 * strength).clamp(0.02, 0.8);
         m.long = (m.long + rng.delta() * 0.1 * strength).clamp(m.short, 1.0);
-        m.period = (m.period + rng.delta() * 0.2 * strength).clamp(MIN_MUSCLE_PERIOD, 10.0);
+        m.period = (m.period + rng.delta() * 0.2 * strength).clamp(min_muscle_period(), 10.0);
         m.phase = (m.phase + rng.delta() * 0.2 * strength).rem_euclid(1.0);
         m.duty = (m.duty + rng.delta() * 0.1 * strength).clamp(0.05, 0.95);
         m.stiffness = (m.stiffness * (1.0 + rng.delta() * 0.3 * strength)).clamp(1.0, 120.0);
@@ -1671,7 +1701,7 @@ mod tests {
         assert_eq!(creature.bones[0].rest_length, 0.625);
         creature.nodes[1].x = 4.0;
         normalize_bone_lengths(&mut creature);
-        assert_eq!(creature.bones[0].rest_length, MAX_BONE_LENGTH);
+        assert_eq!(creature.bones[0].rest_length, max_bone_length());
     }
 
     #[test]
@@ -1720,7 +1750,7 @@ mod tests {
             creature
                 .muscles
                 .iter()
-                .all(|m| m.period >= MIN_MUSCLE_PERIOD)
+                .all(|m| m.period >= min_muscle_period())
         );
     }
 

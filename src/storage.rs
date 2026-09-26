@@ -173,17 +173,21 @@ fn describe_change(parent: Option<&Creature>, child: &Creature, emitter: Emitter
 }
 
 /// Independent parent pools; elites migrate between neighbors periodically.
-/// `EVOLUTION_island_count()` overrides the count (1 disables islands).
+/// `EVOLUTION_ISLANDS` overrides the count (1 disables islands).
 pub fn island_count() -> usize {
     static COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *COUNT.get_or_init(|| {
-        std::env::var("EVOLUTION_island_count()")
+        std::env::var("EVOLUTION_ISLANDS")
             .ok()
             .and_then(|v| v.parse().ok())
             .filter(|&n: &usize| (1..=64).contains(&n))
             .unwrap_or(4)
     })
 }
+/// Share of CMA offspring whose parent is one of its island's fastest 1% of
+/// elites; the rest sample by local competition. Spending more on the best
+/// elites raised the best distance by about half in fixed-seed tests.
+const TOP_PARENT_SHARE: f32 = 0.5;
 /// Generations between migrations, and the share of elites that migrate.
 const MIGRATION_INTERVAL: u32 = 5;
 const MIGRATION_SHARE: f32 = 0.1;
@@ -297,6 +301,39 @@ impl Experiment {
         self.prune_lineage();
         self.stage = Stage::Archived;
         Ok(())
+    }
+    /// Whether creature `i`'s standard-trial result could enter an archive.
+    /// Only those creatures need the check trial: their final score is the
+    /// lower of both trials, so every other creature is rejected either way.
+    pub fn contender(&self, i: usize, metric: &qd::EvaluationMetrics) -> bool {
+        if !metric.fitness.is_finite() || metric.fitness <= FAILED {
+            return false;
+        }
+        let Some(genome) = self.population.genomes.get(i) else {
+            return false;
+        };
+        let nodes =
+            &self.population.nodes[genome.node_start..genome.node_start + genome.node_count];
+        let muscles = &self.population.muscles
+            [genome.muscle_start..genome.muscle_start + genome.muscle_count];
+        let niche = qd::descriptor(nodes, muscles, metric.behavior).niche();
+        let beats = |archive: &QdArchive| match archive.slot_for(&niche) {
+            Some(slot) => metric.fitness > archive.entries[slot].fitness,
+            None => archive.behavior_count() < qd::ARCHIVE_LIMIT,
+        };
+        if beats(&self.archive) || self.islands.get(i % island_count()).is_some_and(beats) {
+            return true;
+        }
+        let reserve_candidate = self.morphology_reserve_override != Some(false)
+            && matches!(
+                self.candidate_emitters.get(i),
+                Some(Emitter::Structural | Emitter::Novelty)
+            );
+        reserve_candidate
+            && self
+                .archive
+                .morphology_floor()
+                .is_none_or(|floor| metric.fitness > floor)
     }
     /// Offers the evaluated creatures in `slots` to the archive (in slot-list
     /// order), updates CMA emitters and emitter statistics, and returns how
@@ -824,6 +861,23 @@ impl Experiment {
             })
             .collect();
         let seed = cfg.seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        // Each island's fastest 1% of elites (at least 4), for exploitation.
+        let top_parents: Vec<Vec<usize>> = self
+            .islands
+            .iter()
+            .map(|island| {
+                let mut order: Vec<usize> = (0..island.entries.len())
+                    .filter(|&i| !qd::is_morphology_niche(&island.entries[i].niche))
+                    .collect();
+                order.sort_by(|&a, &b| {
+                    island.entries[b]
+                        .fitness
+                        .total_cmp(&island.entries[a].fitness)
+                });
+                order.truncate((order.len() / 100).max(4));
+                order
+            })
+            .collect();
         let plan_prep: Vec<PlanPrep> = slots
             .par_iter()
             .map(|&i| {
@@ -849,6 +903,11 @@ impl Experiment {
                         .or_else(|| archive.sample_local_competitive(&mut rng, avoid))
                 } else if emitter == Emitter::Novelty || emitter_stale {
                     archive.sample_novel(&mut rng, avoid)
+                } else if emitter == Emitter::Cma
+                    && !top_parents[island].is_empty()
+                    && rng.unit() < TOP_PARENT_SHARE
+                {
+                    Some(top_parents[island][rng.index(top_parents[island].len())])
                 } else {
                     archive.sample_local_competitive(&mut rng, avoid)
                 };
