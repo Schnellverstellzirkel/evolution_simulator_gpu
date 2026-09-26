@@ -58,7 +58,7 @@ Environment buttons raise or lower each effect:
 | Ground | Flat, pebbles (3 cm), rough (8 cm), rocky (15 cm), boulders (25 cm) |
 | Gravity | Earth, 1.5 g, 2 g, 3 g |
 | Air | Thin, breezy, thick, syrup |
-| Grip | Grippy, firm, wet, ice |
+| Grip | Sandpaper, grippy, firm, wet, ice |
 
 A world change invalidates the old scores and queues archive elites for evaluation under the new conditions. Effects change the physics; the objective remains distance.
 
