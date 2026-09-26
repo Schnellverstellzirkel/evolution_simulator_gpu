@@ -1,0 +1,49 @@
+name: CPU checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cpu-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: "8"
+  CARGO_TERM_COLOR: always
+  RAYON_NUM_THREADS: "8"
+  RUST_TEST_THREADS: "1"
+  EVOLUTION_DEVICES: primary
+  EVOLUTION_CPU_THREADS: "6"
+  # Override .cargo/config.toml's native CPU selection: hosted runners need
+  # no AVX-512 support, and this checks the portable CPU implementation.
+  RUSTFLAGS: "-C target-cpu=x86-64"
+
+jobs:
+  cpu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            pkg-config libwayland-dev libxkbcommon-dev libudev-dev \
+            libdbus-1-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev
+      - name: Install stable Rust
+        run: nice -n 10 rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Check formatting
+        run: nice -n 10 cargo +stable fmt --all --check
+      - name: Clippy
+        run: nice -n 10 cargo +stable clippy --locked --all-targets -- -D warnings
+      - name: CPU tests
+        # GPU tests remain #[ignore] and are run explicitly on the workstation.
+        run: nice -n 10 cargo +stable test --locked --release

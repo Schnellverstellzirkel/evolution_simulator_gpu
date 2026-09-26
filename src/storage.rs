@@ -118,6 +118,7 @@ pub struct Experiment {
     #[serde(skip)]
     pub candidate_mates: Vec<bool>,
     /// Each island's best distance so far and the generation it was set.
+    /// Stored separately in V4 checkpoints to keep the V3 payload readable.
     #[serde(skip)]
     pub island_progress: Vec<(f32, u32)>,
     /// Elites from before an environment change, waiting to be evaluated again
@@ -850,6 +851,7 @@ impl Experiment {
             return;
         }
         self.islands = vec![QdArchive::default(); island_count()];
+        self.island_progress.clear();
         for (index, elite) in self.archive.entries.iter().enumerate() {
             self.islands[index % island_count()].absorb(elite);
         }
@@ -1338,6 +1340,7 @@ impl Experiment {
             .collect();
         self.archive = QdArchive::default();
         self.islands.clear();
+        self.island_progress.clear();
         self.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
         self.cma_emitters.clear();
     }
@@ -1495,9 +1498,18 @@ impl Experiment {
         Ok(())
     }
 }
-const MAGIC: &[u8; 8] = b"EVORUST3";
+const MAGIC: &[u8; 8] = b"EVORUST4";
+const V3_MAGIC: &[u8; 8] = b"EVORUST3";
 const V2_MAGIC: &[u8; 8] = b"EVORUST2";
 const LEGACY_MAGIC: &[u8; 8] = b"EVORUST1";
+
+/// Search state omitted by Experiment's original serialized representation.
+/// V4 appends it inside the same checksummed stream, preserving V3 decoding.
+#[derive(Serialize, Deserialize)]
+struct CheckpointResume {
+    island_progress: Vec<(f32, u32)>,
+}
+
 fn fitness_context_changed(old: &Config, new: &Config) -> bool {
     old.duration != new.duration
         || old.gravity != new.gravity
@@ -1555,11 +1567,22 @@ pub fn save(path: &Path, experiment: &Experiment) -> Result<()> {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .serialize_into(&mut encoder, experiment)?;
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .serialize_into(
+            &mut encoder,
+            &CheckpointResume {
+                island_progress: experiment.island_progress.clone(),
+            },
+        )?;
     let mut out = encoder.finish()?;
     out.flush()?;
     out.get_ref().sync_all()?;
     drop(out);
     std::fs::rename(&tmp, path)?;
+    // Unix permits opening directories to persist the rename. Windows rejects
+    // File::open on a directory; the checkpoint file itself was synced above.
+    #[cfg(unix)]
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         File::open(parent)?.sync_all()?;
     }
@@ -1570,7 +1593,7 @@ pub fn load(path: &Path) -> Result<Experiment> {
     let mut magic = [0; 8];
     file.read_exact(&mut magic)?;
     ensure!(
-        &magic == MAGIC || &magic == V2_MAGIC || &magic == LEGACY_MAGIC,
+        &magic == MAGIC || &magic == V3_MAGIC || &magic == V2_MAGIC || &magic == LEGACY_MAGIC,
         "Unsupported checkpoint format/version"
     );
     let mut decoder = zstd::stream::read::Decoder::new(file)?;
@@ -1592,6 +1615,25 @@ pub fn load(path: &Path) -> Result<Experiment> {
             .with_limit(24 * 1024 * 1024 * 1024)
             .deserialize_from(&mut decoder)?
     };
+    if &magic == MAGIC {
+        let resume: CheckpointResume = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            // A fixed-width vector length plus at most 64 (fitness, generation)
+            // pairs. Bound corrupt metadata independently of the large body data.
+            .with_limit(8 + 64 * 8)
+            .deserialize_from(&mut decoder)?;
+        ensure!(
+            resume.island_progress.len() <= 64
+                && (resume.island_progress.is_empty()
+                    || resume.island_progress.len() == experiment.islands.len())
+                && resume.island_progress.iter().all(|&(fitness, generation)| {
+                    (fitness.is_finite() || fitness == f32::NEG_INFINITY)
+                        && generation <= experiment.generation
+                }),
+            "Invalid checkpoint optimizer progress"
+        );
+        experiment.island_progress = resume.island_progress;
+    }
     let mut trailing = [0u8; 1];
     ensure!(
         decoder.read(&mut trailing)? == 0,
@@ -1617,6 +1659,9 @@ pub fn load(path: &Path) -> Result<Experiment> {
             .migrate_actuator_geometry(&experiment.config);
         experiment.qd_version = qd::VERSION;
         experiment.archive = QdArchive::default();
+        experiment.islands.clear();
+        experiment.island_progress.clear();
+        experiment.reseed.clear();
         experiment.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
         experiment.cma_emitters.clear();
         experiment.candidate_emitters = vec![Emitter::Restart; experiment.config.population];

@@ -240,15 +240,89 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
     })
 }
 
-/// Starts a CPU engine on `threads` low-priority threads (see `cpu_engine`).
+fn worker_budget(logical: usize) -> usize {
+    (logical / 2).clamp(1, 8)
+}
+
+fn rayon_thread_count(
+    logical: usize,
+    requested: Option<usize>,
+    cpu_requested: Option<usize>,
+) -> usize {
+    let remaining = worker_budget(logical) - cpu_thread_count(logical, cpu_requested);
+    requested
+        .filter(|&n| n > 0)
+        .unwrap_or(remaining)
+        .min(remaining)
+}
+
+fn cpu_thread_count(logical: usize, requested: Option<usize>) -> usize {
+    // Breeding and packing need a general worker even during CPU evaluation.
+    requested
+        .unwrap_or(6)
+        .min(worker_budget(logical).saturating_sub(1))
+}
+
+fn logical_cpus() -> usize {
+    std::thread::available_parallelism().map_or(2, usize::from)
+}
+
+fn thread_override(name: &str) -> Option<usize> {
+    std::env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
+/// Breeding and general worker count after reserving the CPU evaluation workers.
+/// Both pools share at most eight threads and half the logical CPUs.
+/// `RAYON_NUM_THREADS` can reduce, but cannot exceed, the remaining budget.
+pub fn rayon_threads() -> usize {
+    rayon_thread_count(
+        logical_cpus(),
+        thread_override("RAYON_NUM_THREADS"),
+        thread_override("EVOLUTION_CPU_THREADS"),
+    )
+}
+
+/// Evaluation workers, defaulting to six while leaving one general worker.
+/// `EVOLUTION_CPU_THREADS=0` or a one-worker budget disables the scheduler's CPU
+/// engine, leaving the general pool available for breeding and packing.
+pub fn cpu_threads() -> usize {
+    cpu_thread_count(logical_cpus(), thread_override("EVOLUTION_CPU_THREADS"))
+}
+
+/// Best-effort worker priority reduction so evaluation yields to the desktop.
+pub fn lower_thread_priority() {
+    #[cfg(target_os = "linux")]
+    // Linux applies nice to the calling thread when the id is zero.
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            #[link_name = "GetCurrentThread"]
+            fn get_current_thread() -> *mut std::ffi::c_void;
+            #[link_name = "SetThreadPriority"]
+            fn set_thread_priority(thread: *mut std::ffi::c_void, priority: i32) -> i32;
+        }
+        // GetCurrentThread returns a pseudo-handle; it must not be closed.
+        const THREAD_PRIORITY_LOWEST: i32 = -2;
+        unsafe {
+            set_thread_priority(get_current_thread(), THREAD_PRIORITY_LOWEST);
+        }
+    }
+}
+
+/// Starts a CPU engine on low-priority threads, leaving one general worker in
+/// the shared budget. Explicit CPU-only callers can still run one evaluation
+/// worker when the budget is one; the scheduler disables that extra pool.
 pub fn cpu_engine(threads: usize) -> Result<ThreadedEngine> {
+    let threads = cpu_thread_count(logical_cpus(), Some(threads)).max(1);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .thread_name(|i| format!("cpu-eval-{i}"))
         // Evaluation yields to the UI, the compositor, and breeding.
-        .start_handler(|_| unsafe {
-            libc::setpriority(libc::PRIO_PROCESS, 0, 10);
-        })
+        .start_handler(|_| lower_thread_priority())
         .build()
         .context("CPU evaluation thread pool")?;
     let (jobs, job_rx) = mpsc::channel::<(u64, Population, Config)>();
@@ -282,4 +356,49 @@ pub fn cpu_engine(threads: usize) -> Result<ThreadedEngine> {
         next_ticket: 0,
         allocated: Default::default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_defaults_leave_half_the_machine_free() {
+        for (logical, rayon, cpu) in [(1, 1, 0), (3, 1, 0), (8, 1, 3), (16, 2, 6), (64, 2, 6)] {
+            assert_eq!(rayon_thread_count(logical, None, None), rayon);
+            assert_eq!(cpu_thread_count(logical, None), cpu);
+        }
+    }
+
+    #[test]
+    fn thread_overrides_respect_the_desktop_budget() {
+        assert_eq!(rayon_thread_count(16, Some(3), Some(6)), 2);
+        assert_eq!(rayon_thread_count(16, Some(0), None), 2);
+        assert_eq!(rayon_thread_count(16, Some(usize::MAX), None), 2);
+        assert_eq!(rayon_thread_count(16, None, Some(0)), 8);
+        assert_eq!(rayon_thread_count(16, Some(3), Some(0)), 3);
+        assert_eq!(rayon_thread_count(16, Some(3), Some(2)), 3);
+        assert_eq!(cpu_thread_count(16, Some(0)), 0);
+        assert_eq!(cpu_thread_count(16, Some(2)), 2);
+        assert_eq!(cpu_thread_count(8, Some(6)), 3);
+        assert_eq!(cpu_thread_count(16, Some(usize::MAX)), 7);
+        assert_eq!(cpu_thread_count(1, Some(6)), 0);
+    }
+
+    #[test]
+    fn concurrent_worker_pools_share_one_budget() {
+        for logical in [1, 2, 3, 4, 8, 12, 16, 32, 64] {
+            for cpu_request in [None, Some(0), Some(1), Some(6), Some(usize::MAX)] {
+                for rayon_request in [None, Some(0), Some(1), Some(8), Some(usize::MAX)] {
+                    let cpu = cpu_thread_count(logical, cpu_request);
+                    let rayon = rayon_thread_count(logical, rayon_request, cpu_request);
+                    assert!(rayon >= 1, "general workers must make progress");
+                    assert!(
+                        cpu + rayon <= 8 && cpu + rayon <= (logical / 2).max(1),
+                        "{logical} logical CPUs: {cpu} evaluation + {rayon} general workers"
+                    );
+                }
+            }
+        }
+    }
 }

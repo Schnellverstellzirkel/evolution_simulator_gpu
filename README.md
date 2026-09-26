@@ -1,8 +1,8 @@
-# Evolution · Creature Laboratory
+# Evolution Simulator
 
-A local Rust evolution game for Ubuntu/Wayland. Creatures learn to move through quality-diversity search: a MAP-Elites archive keeps the best creature in each measured combination of contact, gait cadence, and vertical motion. WGSL compute shaders evaluate independent creatures on the GPU; an egui dashboard lets you inspect the archive and tune the experiment.
+A Rust game in which 2D creatures made of bones, joints, and muscles evolve to travel as far as possible. The graphical game starts with **3 million creatures per generation** and **60-second trials**. Fitness is horizontal center-of-mass distance in meters. Gait, height, and ground contact describe archive niches; they do not multiply or penalize the score.
 
-The original Processing sketch is preserved in [`old_code.txt`](old_code.txt). This is a modernized simulation, not a bit-for-bit reproduction of its physics or random sequence.
+The search combines MAP-Elites, CMA optimizers, structural mutations, novelty search, and immigrants across four island archives. Vulkan compute evaluates creatures alongside a CPU engine. An egui dashboard shows the archive, history, lineage, and CPU-recorded replays.
 
 ## Original work and license
 
@@ -11,110 +11,110 @@ This project adapts Carykh's **Evolution Simulator** by Cary Huang.
 - Original source: [OpenProcessing sketch](https://openprocessing.org/@carykh/205807)
 - Original license: [CC BY-SA 3.0 Unported](https://creativecommons.org/licenses/by-sa/3.0/)
 - Modified by: Amipo (Schnellverstellzirkel)
-- Changes: Rebuilt in Rust with GPU-accelerated simulation, MAP-Elites quality-diversity search, constructive morphology mutations, a light-themed interface, configurable controls, and flat-ground physics.
+- Changes: rebuilt in Rust with GPU and CPU simulation, quality-diversity search, evolving body plans, environment effects, and an interactive dashboard.
 
-The full license text is in [`LICENSE`](LICENSE).
+The license text is in [LICENSE](LICENSE). The original Processing sketch is preserved in [old_code.txt](old_code.txt).
 
-## Run
+## Build and run
 
-```bash
-cargo run --release
-```
-
-The default adapter is this workstation's **NVIDIA RTX 4060 Laptop GPU**. To use the integrated Radeon:
+The runtime uses Vulkan for compute and rendering. Linux uses Wayland or X11 for the dashboard; Windows uses the native window system. Rust 1.95 or newer is required by the GUI dependencies. On Ubuntu, install the native build dependencies:
 
 ```bash
-cargo run --release -- --gpu Radeon
+sudo apt-get install build-essential pkg-config libwayland-dev libxkbcommon-dev \
+  libudev-dev libdbus-1-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev
 ```
 
-Use **Evolve continuously**, **One generation**, or **Guided step**. The search evaluates a batch, inserts better specimens into the behavior archive, then breeds from diverse archive entries. Guided mode pauses at evaluation, archive update, and breeding. Space pauses/resumes evolution; Ctrl+S opens Save. The creature playback controls are independent of population evaluation. Drag the scene to pan, scroll to zoom, and select an archive card to replay it.
+Use this environment for all builds, tests, game runs, and benchmarks on the owner's workstation:
 
-The first population has 1,000 creatures. Population presets include 100,000, one million, and three million. Increasing population requires **New experiment**. Populations must be even. No population is silently downsized to fit memory.
+```bash
+export CARGO_BUILD_JOBS=8
+export RAYON_NUM_THREADS=8
+export EVOLUTION_DEVICES=primary
+export EVOLUTION_CPU_THREADS=6
+nice -n 10 cargo run --release
+```
 
-## Controls
+The default compute adapter name is `RTX 4060`; `--gpu NAME` selects another primary adapter. `EVOLUTION_DEVICES=primary` prevents adding the desktop Radeon as an evaluation device. Keep that setting on this workstation: the Radeon drives the desktop and must not evaluate creatures. Evaluation and general Rayon workers share a budget of half the available logical CPUs, capped at eight. On the 16-thread workstation, the settings above give six evaluation workers and two general workers; `RAYON_NUM_THREADS` is limited to the remaining budget. `EVOLUTION_CPU_THREADS=0` makes all eight available to general workers. Smaller machines reduce evaluation workers first, preserving one general worker; a one-worker budget disables the scheduler's CPU engine.
 
-Main controls expose population, mutation strength, and trial duration. The archive page shows the current next-batch allocation across local CMA search, constructive morphology, novelty search, and random immigrants. Random immigrants only seed an empty archive; the other three start at 35%, 35%, and 30%, and their shares then adapt to discoveries and improvements. **Advanced controls** has a search box and the physics and body settings:
+For local iteration, use the named profile:
 
-| Original setting | New control / units |
+```bash
+nice -n 10 cargo build --profile release-fast
+nice -n 10 cargo run --profile release-fast
+```
+
+`release-fast` inherits release optimization, disables LTO, uses 256 codegen units, and enables incremental compilation. Its output is in `target/release-fast/`. The normal release profile retains thin LTO. The fast profile does not require a particular linker; Linux x86-64 builds already select the host CPU through [.cargo/config.toml](.cargo/config.toml). Use the normal release profile for comparable measurements.
+
+## Playing
+
+Use **Evolve continuously**, **One generation**, or **Guided step**. Guided mode pauses between evaluation, archive insertion, and breeding. Space pauses or resumes evolution; Ctrl+S opens Save. Select an archive card or historical creature to replay it. Playback has its own controls; drag the scene to pan and scroll to zoom.
+
+Population and trial duration are displayed in the main controls, with no mutation slider. The default game keeps them at three million and 60 seconds. Diagnostic CLI runs and JSON presets can use other sizes or durations. Advanced controls contain seed selection, performance and checkpoint settings, display options, and histogram controls.
+
+Environment buttons raise or lower each effect:
+
+| Effect | Levels |
 | --- | --- |
-| `USE_RANDOM_SEED`, `SEED` | Randomness: choose a seed automatically or supply a fixed seed; resolved seed is always saved |
-| `WINDOW_SIZE` | Resizable native window and UI scale |
-| `SORT_ANIMATION_SPEED` | Display: sorting transition speed |
-| Minimum/maximum node size | Body bounds: diameter in meters; defaults vary from 0.06–0.12 m (original 0.4 world units = 0.08 m) |
-| Minimum/maximum node friction | Body bounds: node grip, 0–1 |
-| `GRAVITY` | Physics: m/s²; new experiments default to 9.8 |
-| `AIR_FRICTION` | Physics: velocity retention per 1/60 second; default 1.0 (no air drag), so a runner's speed is limited by its gait rather than by drag |
-| `FRICTION` | Physics: global ground/contact friction multiplier; default 1.5 |
-| Default node friction | New bodies start with node grip between 0.65 and 1.0 |
-| `MUTABILITY_FACTOR` | Scales continuous parameter edits; structural changes and random immigrants remain available at zero |
-| `haveGround` | Physics: flat ground exists |
-| Histogram range/density | Histogram minimum/maximum and bins per meter |
-| Playback speed, camera zoom | Independent playback controls; mouse zoom and pan |
-| Step-by-step, quick, ASAP, continuous | Guided step, One generation, Evolve continuously |
-| Historical generation slider / previews | History & statistics: generation slider and worst/median/best replays |
+| Ground | Flat, pebbles (3 cm), rough (8 cm), rocky (15 cm), boulders (25 cm) |
+| Gravity | Earth, 1.5 g, 2 g, 3 g |
+| Air | Thin, breezy, thick, syrup |
+| Grip | Grippy, firm, wet, ice |
 
-World coordinates are meters with **positive Y upward**. New experiments run 18-second trials on flat ground with high grip. Genetics and physics changes are queued for the next generation; presentation changes are immediate. Genetic bounds apply to newly mutated offspring. Population/seed changes or limits below existing bodies require a new experiment. Use **Apply settings** after editing experiment settings.
+A world change invalidates the old scores and queues archive elites for evaluation under the new conditions. Effects change the physics; the objective remains distance.
 
-A creature whose trial could enter the archive is tested again from a slightly perturbed pose at four times the physics rate and solver passes (240 Hz with the defaults), and keeps the worse of the two distances. Gaits that only work at the coarse physics or from one exact pose lose that way; the rest skip the second trial. A joint forced more than 0.5 rad past its range breaks, which ends the trial like a fall, so no gait can profit from muscles forcing joints round like wheels.
+## Creatures and search
 
-The physics limits allow large, fast bodies: bones up to 10 m, muscles up to 5 m long that change length at up to 24 m/s with up to 100 N, nodes up to 60 m/s, bones turning up to 40 rad/s, rhythms as short as 0.2 s, and muscles that store 120 J and recover half their missing energy per second. Under Earth gravity running speed grows with body size, so the fastest runners evolve into giants; with these limits evolved runners cover about a kilometer in a minute. `EVOLUTION_MAX_NODE_SPEED`, `EVOLUTION_MAX_MUSCLE_FORCE`, `EVOLUTION_MAX_MUSCLE_SPEED`, `EVOLUTION_MIN_MUSCLE_PERIOD`, `EVOLUTION_MAX_BONE_SPIN`, `EVOLUTION_MUSCLE_ENERGY`, `EVOLUTION_MUSCLE_RECOVERY`, `EVOLUTION_MAX_BONE_LENGTH`, and `EVOLUTION_MAX_STROKE` override the physics limits for experiments.
+Bodies begin with 3–5 nodes connected by a tree of bones. Defaults allow growth to 32 nodes and 96 muscles; configuration supports up to 64 nodes and 256 muscles. Bones and muscle lengths are capped at 2 m by default. Muscles attach along bones, share a rhythm period, and provide active drive only while contracting. Their energy stores deplete with work and recover over time. Bone mass grows with length squared and is included in each engine's node masses.
 
-Archive niches use measured ground-contact fraction, center-of-mass gait cadence, mean body height (on a log scale from 15 cm up to the tallest bodies the bone limit allows, so small and giant bodies get separate cells), and feet; body shape remains visible on specimen cards but does not determine archive cells. The 1,440-cell archive stores the fastest creature in each behavior niche. Novelty uses distance to nearby archived behaviors, while local competition compares speed against elites in neighboring behavior cells. Half of CMA offspring descend from their island's fastest 1% of elites; other CMA and structural parents are locally competitive, and novelty and stalled emitters sample underexplored behaviors. Half of those top-elite offspring come from an optimizer: each island runs a separable CMA-ES on its fastest design (a body plan with a gait cadence band), searching node positions, sizes and grip, bone lengths, joint ranges and organs, the rhythm period, and every muscle setting in physical units, and ranking its samples by distance alone. It follows its own search mean instead of jumping to every new record, and restarts from the design's fastest elite once its steps shrink to nothing. When an island sets no record for 30 generations, its optimizer turns to the island's next fastest designs in turn. All optimizer samples get the perturbed fine-physics check, so they are ranked on the same terms. The four islands exchange their fastest tenth of elites only every 25 generations, so each settles on and refines its own design instead of all polishing the same one. Bodies start with 3–5 joint nodes connected by fixed-length bones and can grow. Muscles attach between bones at any normalized point, including endpoints; their forces are shared across the bone joints and rotate the linked segments. All of a body's muscles share one rhythm period and differ only in phase, so every gait repeats exactly; mutation changes the tempo as a whole. Structural emitters split bones while remapping muscle attachments, add a mirrored joint with a connected bone and motor, retime the rhythm, shift a connected oscillator group, or grow or shrink the whole body by up to half: lengths scale together and the rhythm slows with the square root of the size, as for animals of similar build, so the gait roughly carries over. Fresh morphologies are protected from replacement by a different topology for three generations. Default limits are 32 nodes/96 muscles; supported maximums are 64/256. Each skeleton is a connected tree and the motor network connects every bone. A bone can also carry an organ: a weight of 0.01–0.3 kg at any point along it that never touches the ground. Organs must sit within 0.5 m of the body's center of mass in the starting pose, measured without the head and without organs, so they stay inside the body rather than weighting limb tips. Structural mutation grows light organs or removes them, and ordinary mutation shifts their position and mass. An organ's mass is shared by its bone's two nodes in proportion to its position, so the body's center of mass is exact.
+Each behavior archive has 1,440 possible niches for ground contact, gait cadence, mean body height, and feet that touch down and lift off. Vertical oscillation is recorded but has one archive bin. A separate 64-entry morphology reserve gives new topologies offspring opportunities without adding to behavior coverage or QD score. Four islands retain separate parent pools and exchange their fastest tenth of elites every 25 generations. CMA, structural, and novelty emitter shares adapt to archive discoveries and improvements; immigrants seed empty archives.
 
-Alongside the behavior niches, a 64-entry topology reserve protects promising changed body graphs while they gather offspring trials. When the reserve has entries, ten percent of structural-emitter trials try a reserve parent. A reserve entry receives at least eight selected offspring before it can be evicted to make room for another topology; the behavior archive can absorb it earlier if a behavior elite matches or beats its distance. Fitness alone determines admission; triangles and other small bodies are not penalized. Reserve entries do not add to behavior coverage or QD score. The archive cards label them `MORPH` and report their count separately.
+Potential archive entrants receive a perturbed trial at four times the standard physics rate and solver passes. The stored fitness is the lower distance from the standard and check trials. Replays run the unperturbed creature through the CPU evaluation engine, so an archive's conservative checked score can differ from the displayed replay distance. See [architecture](docs/architecture.md) for the execution paths and current legacy-physics limitations.
 
-Archive cards show the stored elite's fitness, descriptor, emitter source, and niche visits. The archive keeps alternatives with different body plans and gaits while each niche independently improves.
+## Headless experiments and diagnostics
 
-## Headless experiments
+Run these after setting the environment above:
 
 ```bash
-cargo run --release -- headless --population 1000000 --seed 38 --generations 20 --throughput
-cargo run --release -- headless --resume runs/latest.evo --generations 20 --throughput
-cargo run --release -- headless --config presets/large-experiment.json --generations 10
+nice -n 10 cargo run --release -- headless --population 100000 --seed 38 --generations 20 --checkpoint runs/seed-38-100k.evo
+nice -n 10 cargo run --release -- headless --resume runs/seed-38-100k.evo --generations 20 --checkpoint runs/seed-38-100k.evo
+nice -n 10 cargo run --release --example size_report -- runs/seed-38-100k.evo 50
+EVOLUTION_LEDGER=1 nice -n 10 cargo run --release --example size_report -- runs/seed-38-100k.evo 10
 ```
 
-`--duration` overrides the trial duration for a new experiment. `--checkpoint PATH` changes the checkpoint destination. Ctrl+C stops after the current GPU batch and saves. A completed generation includes evaluation, archive insertion, emitter feedback, and offspring creation. `--generations` counts additional generations when resuming.
+`--generations` counts additional generations when resuming. `--config PATH` loads a JSON preset, `--duration` overrides trial duration for a new experiment, and `--checkpoint PATH` chooses the save destination. Ctrl+C requests a stop and checkpoint after the current evaluation call returns. `size_report` reports elite geometry, mass, travel, and foot slip; `EVOLUTION_LEDGER=1` adds momentum diagnostics.
 
-The dashboard uses responsive mode, evaluating up to 8,192 creatures per GPU batch, for populations below 100,000. Larger populations automatically start in **Maximum throughput** mode, which raises the batch limit to 100,000; the checkbox can be changed afterward. Both modes adapt batch size to the configured GPU memory budget. Compute uses a separate wgpu device so long batches do not block rendering. The Rayon pool reserves two logical CPUs for the desktop.
+```bash
+nice -n 10 cargo run --release -- benchmark --populations 1000,100000 --duration 60 --generations 3
+nice -n 10 cargo run --release -- analyze runs/seed-38-100k.evo --output runs/analysis.json --champion runs/champion.json
+```
+
+`benchmark --cpu` adds CPU timings. `search-benchmark` supports fixed seeds and paired search variants; see [search benchmark notes](docs/search-benchmark.md). Historical results in that document and [search research](docs/search-research.md) predate the current physics and should be remeasured before drawing conclusions about today's search.
+
+For complete-generation timing in the graphical app:
+
+```bash
+EVOLUTION_SMOKE_POPULATION=100000 EVOLUTION_BENCH_GENERATIONS=20 nice -n 10 cargo run --release
+```
+
+This starts evolution, prints stage timings, and closes after the requested generations. `EVOLUTION_BENCH_DURATION` overrides trial length for a diagnostic run. The performance target is two million evaluated creatures per second with the graphical game at 60 FPS; this is a goal, not a measured claim.
 
 ## Save and resume
 
-`.evo` checkpoints use a versioned header, a compact binary payload, and Zstandard compression. They contain current genomes, the MAP-Elites archive and visit counts, emitter feedback, CMA states, all settings, resolved seed, completed fitness and behavior metrics, generation stage, and historical summaries/representative creatures. Saves happen at completed batch boundaries; resume skips completed evaluations. Older checkpoints keep their current population and are reevaluated into a new archive. Temporary writes are renamed atomically after flushing.
+Versioned `.evo` files store the current population, evaluation progress, archives, emitter and CMA state, settings, seed, lineage, and history using a compressed binary payload. Temporary writes are flushed and renamed. Compatible older checkpoints can keep their population while obsolete archives are cleared and reevaluated; not every historical format is guaranteed to load.
 
-The dashboard automatically saves every ten generations to `runs/seed-<seed>-auto.evo`; the interval is adjustable, and 0 disables it. Manual saves can preserve partial generations. Full candidate populations and archive elites are stored in checkpoints. Close the app after a requested save reports completion.
+The dashboard autosaves every ten generations by default to `runs/seed-<seed>-auto.evo`. It writes autosaves in a background thread and keeps the three newest experiment autosaves. Manual saves can preserve partial-generation progress. The interval is adjustable; zero disables autosave. Wait for a requested manual save to report completion before closing the app. Headless runs write to their chosen checkpoint path and also export history CSV.
 
-Presets are editable JSON files. CSV export contains generation, population, best/median/worst/mean archive fitness, QD score, archive cells and coverage, failed count, evaluation time, and seed. Historical histograms retain centimeter bins; available display densities divide this stored resolution. Values outside the selected histogram range are reported, not silently dropped.
+## Checks
 
-## Development and measurements
-
-```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --release
-cargo test --release --test simulation gpu_matches_cpu_and_handles_partial_workgroups -- --ignored --nocapture
-cargo run --release -- benchmark --populations 1000,100000,1000000,3000000
-cargo run --release -- benchmark --populations 1000,100000 --cpu
-cargo run --release -- search-benchmark --variant behavior-only --seeds 38,39,40,41,42 --population 1000 --generations 300 --duration 18 --output-dir /tmp/search-behavior-only
-cargo run --release -- search-benchmark --variant morphology-reserve --seeds 38,39,40,41,42 --population 1000 --generations 300 --duration 18 --output-dir /tmp/search-morphology-reserve
-cargo run --release -- analyze runs/latest.evo --output /tmp/search-analysis.json --champion /tmp/champion.json
-```
-
-`benchmark --generations N` measures successive evolving populations. CSV includes creation, GPU evaluation, optional CPU evaluation, complete generation time, population allocation, and GPU buffer allocation. GPU allocation is tracked application buffer memory, not total driver VRAM; population allocation excludes temporary evolution/checkpoint storage. Use `/usr/bin/time -v` for process peak RSS.
-
-`search-benchmark` runs fixed-seed, headless MAP-Elites experiments and writes per-generation timing, archive, emitter, morphology, lineage, milestone, and record data. `behavior-only` disables the topology reserve for a paired baseline; `morphology-reserve` is the normal search mode. See [`docs/search-benchmark.md`](docs/search-benchmark.md) for the fixed-seed results and measurement limits.
-
-Opt-in native UI smoke capture (closes its own window after capturing):
+Use the workstation environment above, with serial test execution to avoid overlapping CPU evaluation pools:
 
 ```bash
-EVOLUTION_SMOKE_CAPTURE=/tmp/evolution.png EVOLUTION_SMOKE_POPULATION=1000000 cargo run --release
+nice -n 10 cargo fmt --all --check
+nice -n 10 cargo clippy --locked --all-targets -- -D warnings
+RUST_TEST_THREADS=1 nice -n 10 cargo test --locked --release
+RUST_TEST_THREADS=1 nice -n 10 cargo test --locked --release --test simulation -- --ignored
 ```
 
-To measure **complete generations in the graphical app**, including evaluation, archive update, breeding, and rendering activity, run:
+GitHub Actions runs formatting, clippy, and release CPU tests on Ubuntu, with the portable CPU vector implementation. GPU tests remain ignored during CI and must be run explicitly on the workstation. No GPU agreement result follows from a passing CPU workflow.
 
-```bash
-EVOLUTION_SMOKE_POPULATION=10000 EVOLUTION_BENCH_GENERATIONS=30 cargo run --release
-```
-
-The window starts evolution automatically, prints total generations/s and stage times, then closes. `EVOLUTION_BENCH_DURATION` changes the trial length. Populations of at least 100,000 start in throughput mode; `EVOLUTION_BENCH_THROUGHPUT=1` and `EVOLUTION_BENCH_RESPONSIVE=1` override that choice. `EVOLUTION_GPU_BATCH` overrides the batch limit and `EVOLUTION_GPU_CHUNK` overrides physics steps per dispatch for profiling. `EVOLUTION_GPU_PROFILE=1` adds GPU timestamps for shader time and the 4/5/8/16/32/64-node buckets; `EVOLUTION_PROFILE_BREED=1` reports parent planning and candidate emission times. 32-lane workgroups are the default; `EVOLUTION_WORKGROUP64=1` selects the older 64-lane kernel for comparison, and `EVOLUTION_WORKGROUP32=1` explicitly selects 32 lanes. `EVOLUTION_SHARED_DEVICE=1` restores a shared compute/render device for comparison.
-
-See [`docs/architecture.md`](docs/architecture.md) for the execution model and [`docs/validation.md`](docs/validation.md) for measured results.
+See [architecture](docs/architecture.md), [validation](docs/validation.md), [performance log](docs/performance-log.md), and the owner's current [agent notes](AGENTS.md) for implementation details, measured results, and open work.

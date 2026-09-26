@@ -1,5 +1,5 @@
-//! Spreads a generation's evaluations across every evaluation engine: the
-//! discrete GPU, the integrated GPU, and CPU SIMD cores.
+//! Spreads a generation's evaluations across the primary GPU and CPU SIMD cores.
+//! Additional GPUs require an explicit `EVOLUTION_DEVICES` selection.
 //!
 //! Work is handed out in body-size order so GPU units fill few, large buckets.
 //! Each engine keeps up to two units queued; unit sizes follow each engine's
@@ -93,9 +93,10 @@ fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
 
 impl Scheduler {
     /// Opens the named primary GPU, the other GPUs listed in `EVOLUTION_DEVICES`
-    /// (default `radeon`; `primary` for none), and a CPU engine with
-    /// `EVOLUTION_CPU_THREADS` threads (default: all but four logical CPUs,
-    /// which stay free for the display, the UI, and breeding).
+    /// (default `primary`, for none), and a CPU engine with
+    /// `EVOLUTION_CPU_THREADS` threads (default six). Evaluation and general
+    /// workers share half the logical CPUs, at most eight, with at least one
+    /// general worker. Zero or a one-worker budget disables the CPU engine.
     pub fn new(primary: &str) -> Result<Self> {
         let step_range = env_or("EVOLUTION_GPU_CHUNK", crate::gpu::DEFAULT_STEP_RANGE);
         let mut devices = vec![Device::new(
@@ -104,9 +105,11 @@ impl Scheduler {
             8192,
             env_or("EVOLUTION_UNIT_SECONDS", 1.0),
         )];
-        let extra = std::env::var("EVOLUTION_DEVICES").unwrap_or_else(|_| "radeon".into());
+        let extra = std::env::var("EVOLUTION_DEVICES").unwrap_or_else(|_| "primary".into());
         for name in extra.split(',').map(str::trim).filter(|n| !n.is_empty()) {
-            if name == "primary" || primary.to_lowercase().contains(&name.to_lowercase()) {
+            if name.eq_ignore_ascii_case("primary")
+                || primary.to_lowercase().contains(&name.to_lowercase())
+            {
                 continue;
             }
             // RADV compile time explodes for the largest bodies; those stay on the
@@ -121,8 +124,7 @@ impl Scheduler {
                 Err(err) => eprintln!("Evaluation device {name:?} unavailable: {err:#}"),
             }
         }
-        let logical = std::thread::available_parallelism().map_or(4, usize::from);
-        let threads = env_or("EVOLUTION_CPU_THREADS", logical.saturating_sub(4));
+        let threads = engine::cpu_threads();
         if threads > 0 {
             devices.push(Device::new(
                 Box::new(engine::cpu_engine(threads)?),

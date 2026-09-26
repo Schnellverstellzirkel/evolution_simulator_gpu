@@ -2,15 +2,15 @@
 name = "evolution-simulator"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.95"
 
 [dependencies]
 anyhow = "1.0"
 bytemuck = { version = "1.25", features = ["derive"] }
 clap = { version = "4.5", features = ["derive"] }
-eframe = { version = "0.36.2", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11", "accesskit"] }
+eframe = { version = "0.36.2", default-features = false, features = ["wgpu_no_default_features", "default_fonts", "wayland", "x11", "accesskit"] }
 egui_plot = "0.37"
-wgpu = "30.0"
+wgpu = { version = "30.0", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
 pollster = "0.4"
 rayon = "1.12"
 serde = { version = "1", features = ["derive"] }
@@ -27,3 +27,11 @@ naga = { version = "30", features = ["wgsl-in", "spv-out"] }
 [profile.release]
 lto = "thin"
 codegen-units = 16
+
+# Local iteration with release optimization and cheaper incremental rebuilds.
+# Keep CPU and linker selection in target configuration or local RUSTFLAGS.
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 256
+incremental = true

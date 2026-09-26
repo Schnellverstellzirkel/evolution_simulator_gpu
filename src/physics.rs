@@ -556,14 +556,12 @@ pub fn step(nodes: &mut [Node], bones: &[Bone], muscles: &[Muscle], cfg: &Config
     }
     project_bones(nodes, bones, tick >= settle() && cfg.ground, &old);
 }
+/// Evaluates one creature with the same stepping loop used by CPU replay.
+/// Evaluate a whole population with `cpu_engine::evaluate` to fill SIMD groups.
 pub fn evaluate(c: &Creature, cfg: &Config) -> f32 {
-    let mut canonical = c.clone();
-    crate::evolution::canonicalize_bone_order(&mut canonical);
-    let mut n = nodes(&canonical);
-    for tick in 0..settle() + cfg.steps() {
-        step(&mut n, &canonical.bones, &canonical.muscles, cfg, tick);
-    }
-    fitness(&n)
+    let mut population = crate::evolution::Population::default();
+    population.push(c.clone());
+    crate::cpu_engine::evaluate(&population, cfg)[0].fitness
 }
 /// Joint range constraint for one bone, precomputed from the genome. The bone
 /// turns about its parent node `a` against a reference bone that shares that

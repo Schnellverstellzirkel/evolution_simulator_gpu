@@ -2,12 +2,12 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use evolution_simulator::{
     config::Config,
+    engine::{self, Engine},
     gpu::Gpu,
-    physics, search_benchmark,
+    search_benchmark,
     storage::{self, Experiment, Stage},
     ui,
 };
-use rayon::prelude::*;
 use std::{
     path::PathBuf,
     sync::{
@@ -130,14 +130,10 @@ enum SearchVariant {
     MorphologyReserve,
 }
 fn main() -> Result<()> {
-    // Reserve two logical CPUs for the window system and other desktop applications.
+    // Evaluation and general workers share half the logical CPUs, at most eight.
     rayon::ThreadPoolBuilder::new()
-        .num_threads(
-            std::thread::available_parallelism()
-                .map_or(4, usize::from)
-                .saturating_sub(2)
-                .max(1),
-        )
+        .num_threads(engine::rayon_threads())
+        .start_handler(|_| engine::lower_thread_priority())
         .build_global()?;
     let cli = Cli::parse();
     let result = match cli.command {
@@ -279,6 +275,16 @@ fn main() -> Result<()> {
                 "failed",
             ])?;
             let mut gpu = Gpu::new(&cli.gpu)?;
+            let mut cpu_benchmark = if cpu {
+                let cpu = engine::cpu_engine(engine::cpu_threads().max(1))?;
+                eprintln!(
+                    "CPU benchmark: {}; CPU wall time includes population copying, dispatch, and result collection",
+                    cpu.name()
+                );
+                Some(cpu)
+            } else {
+                None
+            };
             for count in populations {
                 let cfg = Config {
                     population: count,
@@ -316,12 +322,17 @@ fn main() -> Result<()> {
                     let gpu_seconds = start.elapsed().as_secs_f64();
                     e.evaluation_seconds = gpu_seconds;
                     e.evaluated = count;
-                    let cpu_seconds = if cpu {
+                    let cpu_seconds = if let Some(cpu) = cpu_benchmark.as_mut() {
                         let start = Instant::now();
-                        let result: Vec<_> = (0..count)
-                            .into_par_iter()
-                            .map(|i| physics::evaluate(&e.population.creature(i), &e.config))
-                            .collect();
+                        // Keep the complete diagnostic wall time separate from
+                        // generation timing, including the owned population copy.
+                        cpu.submit(e.population.clone(), &e.config)?;
+                        let result = loop {
+                            if let Some(done) = cpu.poll()? {
+                                break done;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        };
                         std::hint::black_box(result);
                         Some(start.elapsed().as_secs_f64())
                     } else {
@@ -438,7 +449,7 @@ fn main() -> Result<()> {
             let mut engine: Option<Box<dyn evolution_simulator::engine::Engine>> = match engine {
                 Some(name) if name == "cpu" => {
                     Some(Box::new(evolution_simulator::engine::cpu_engine(
-                        std::thread::available_parallelism().map_or(4, usize::from),
+                        evolution_simulator::engine::cpu_threads().max(1),
                     )?))
                 }
                 Some(name) => Some(Box::new(evolution_simulator::engine::gpu_engine(
