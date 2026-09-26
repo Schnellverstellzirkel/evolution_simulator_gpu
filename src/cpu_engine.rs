@@ -127,9 +127,10 @@ fn muscle_length(m: &MuscleF, time: F, exact: bool) -> F {
 }
 
 /// Height and slope of the rough ground across the lanes; mirrors
-/// `physics::terrain` plus the linear tilt of `physics::terrain_with_slope`.
+/// `physics::terrain` plus the linear tilt of `physics::terrain_with_slope`
+/// and the periodic pits of `physics::gaps`.
 #[inline(always)]
-fn terrain(x: F, amplitude: f32, tilt: f32) -> (F, F) {
+fn terrain(x: F, amplitude: f32, tilt: f32, gaps: f32) -> (F, F) {
     let mut height = F::splat(0.0);
     let mut slope = F::splat(0.0);
     for (wavelength, weight, offset) in physics::TERRAIN_WAVES {
@@ -139,10 +140,30 @@ fn terrain(x: F, amplitude: f32, tilt: f32) -> (F, F) {
         height += w * w * (weight * 16.0);
         slope += w * (F::splat(1.0) - u * 2.0) * (weight * 32.0 * (1.0 / wavelength));
     }
-    (
-        height * amplitude + x * tilt,
-        slope * amplitude + F::splat(tilt),
-    )
+    let mut height = height * amplitude + x * tilt;
+    let mut slope = slope * amplitude + F::splat(tilt);
+    if gaps > 0.0 {
+        let spacing = F::splat(physics::gap_spacing(gaps));
+        let center = spacing * 0.5;
+        let t = x / spacing;
+        let r = x - t.floor() * spacing;
+        let distance = (r - center).abs();
+        let half = F::splat(0.5 * gaps);
+        let run = F::splat(physics::GAP_RUN).min(half);
+        let ramp = ((half - distance) / run.max(F::splat(1e-6)))
+            .max(F::splat(0.0))
+            .min(F::splat(1.0));
+        let factor = F::select(
+            distance.le(half - run),
+            F::splat(1.0),
+            F::select(!distance.lt(half), F::splat(0.0), ramp),
+        );
+        let on_ramp = distance.gt(half - run) & distance.lt(half);
+        let side = F::select(r.lt(center), F::splat(1.0), F::splat(-1.0)) / run.max(F::splat(1e-6));
+        height -= F::splat(physics::GAP_DEPTH) * factor;
+        slope += F::select(on_ramp, -F::splat(physics::GAP_DEPTH) * side, F::splat(0.0));
+    }
+    (height, slope)
 }
 
 /// Clearance a touching node must reach to count as a lifted foot.
@@ -318,10 +339,13 @@ impl Group {
         let max_force = F::splat(limits.muscle_force);
         let max_spin = F::splat(limits.bone_spin);
         let amplitude = physics::terrain_amplitude(cfg.terrain);
-        // A disabled ground ignores the slope effect; otherwise the tilt joins
-        // the bumps in one terrain sample.
+        // A disabled ground ignores the slope, gaps, and mud effects;
+        // otherwise the tilt joins the bumps and pits in one terrain sample
+        // and mud lowers every floor.
         let tilt = if ground { cfg.slope } else { 0.0 };
-        let rough = amplitude > 0.0 || tilt != 0.0;
+        let gaps = if ground { cfg.gaps } else { 0.0 };
+        let mud = if ground { cfg.mud } else { 0.0 };
+        let rough = amplitude > 0.0 || tilt != 0.0 || gaps > 0.0;
         let load = |v: &Vec<V>| -> Vec<F> { v.iter().map(F::load).collect() };
         let mass = load(&self.mass);
         let radius = load(&self.radius);
@@ -390,7 +414,14 @@ impl Group {
         let mut sy = vec![zero; n];
         let mut failed = vec![zero; n];
         // Lowest allowed center height of each node for the current step.
+        // Mud lowers the dry floor by the sink depth; the contact pass
+        // recomputes it from the terrain when the ground is rough.
         let mut floor = radius.clone();
+        if mud > 0.0 {
+            for f in &mut floor {
+                *f -= F::splat(mud);
+            }
+        }
         let mut ground_contact = zero;
         let mut height_sum = zero;
         let mut low_center = F::splat(1e20);
@@ -434,7 +465,7 @@ impl Group {
                 let shift_x = avg * inv_total_mass;
                 for j in 0..n {
                     let ground_y = if rough {
-                        terrain(px[j] - shift_x, amplitude, tilt).0
+                        terrain(px[j] - shift_x, amplitude, tilt, gaps).0
                     } else {
                         zero
                     };
@@ -556,19 +587,19 @@ impl Group {
             if colliding {
                 for j in 0..n {
                     if rough {
-                        // Push out along the ground normal, so bumps resist sliding.
-                        let (height, slope) = terrain(px[j], amplitude, tilt);
+                        // Push out along the ground normal, so bumps and pit
+                        // walls resist sliding.
+                        let (height, slope) = terrain(px[j], amplitude, tilt, gaps);
                         let secant_sq = one + slope * slope;
-                        floor[j] = height + radius[j] * secant_sq.sqrt();
+                        floor[j] = height + radius[j] * secant_sq.sqrt() - F::splat(mud);
                         let depth = (floor[j] - py[j]).max(zero) / secant_sq;
                         px[j] -= slope * depth;
                         py[j] += depth;
                     } else {
-                        py[j] = py[j].max(radius[j]);
+                        py[j] = py[j].max(floor[j]);
                     }
                 }
             }
-
             let tiny = F::splat(1e-6);
             let com_before = com(&px);
             // Nodes resting on the ground hold their place like planted feet:
@@ -802,20 +833,38 @@ impl Group {
                 let alive = failed[j].lt(F::splat(0.5));
                 if colliding {
                     let contact = py[j].le(floor[j] + 1e-4);
-                    let push = (py[j] - predicted_y).max(zero);
-                    let max_change = friction[j] * ground_friction * push * rate;
-                    let reduced = vel_x - vel_x.max(-max_change).min(max_change);
+                    // How deep the node sits below its dry floor, in meters,
+                    // capped at the local mud depth. The multipliers scale
+                    // with it up to MUD_FULL_DEPTH; a lifted node reads zero.
+                    let mut sink = zero;
+                    let (mut mud_normal, mut mud_grip) = (one, one);
+                    if mud > 0.0 {
+                        sink = ((floor[j] + F::splat(mud)) - py[j])
+                            .max(zero)
+                            .min(F::splat(mud))
+                            / F::splat(physics::MUD_FULL_DEPTH);
+                        mud_normal = one + F::splat(physics::MUD_NORMAL) * sink;
+                        mud_grip = one + F::splat(physics::MUD_GRIP) * sink;
+                    }
+                    let push = (py[j] - predicted_y).max(zero) * mud_normal;
+                    let max_change = friction[j] * ground_friction * mud_grip * push * rate;
+                    // Moving through mud also loses speed to viscous drag.
+                    // With no mud the retention is exactly one.
+                    let drag = (one - F::splat(physics::MUD_DRAG * dt) * sink).max(zero);
+                    let stopped = vel_x * drag;
+                    let reduced = (vel_x - vel_x.max(-max_change).min(max_change)) * drag;
+                    let muddy = sink.gt(zero);
                     if ledger_on {
                         let m = f64::from(lane0_mass[j]);
-                        let chosen = F::select(contact, reduced, vel_x);
+                        let chosen = F::select(contact, reduced, F::select(muddy, stopped, vel_x));
                         ledger[1] +=
                             (f64::from(chosen.to_array()[0]) - f64::from(vel_x.to_array()[0])) * m;
                     }
-                    vel_x = F::select(contact, reduced, vel_x);
+                    vel_x = F::select(contact, reduced, F::select(muddy, stopped, vel_x));
                     let counted = contact & alive;
                     contact_mass += F::select(counted, mass[j], zero);
                     contact_momentum += F::select(counted, mass[j] * vel_x, zero);
-                    contact_grip += F::select(counted, mass[j] * friction[j], zero);
+                    contact_grip += F::select(counted, mass[j] * friction[j] * mud_grip, zero);
                 }
                 vx[j] = F::select(alive, vel_x, zero);
                 vy[j] = F::select(alive, vel_y, zero);

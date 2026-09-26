@@ -50,6 +50,11 @@ pub const SLOPE: [f32; 5] = [0.0, 0.03, 0.08, 0.15, 0.25];
 /// Horizontal wind acceleration (m/s²) at each level, from calm to a steady
 /// headwind that opposes +x travel.
 pub const WIND: [f32; 4] = [0.0, -1.0, -3.0, -6.0];
+/// Mud sink depth (m) at each level, from dry ground to deep mud.
+pub const MUD: [f32; 4] = [0.0, 0.02, 0.05, 0.10];
+/// Pit opening width (m) at each level, from solid ground to chasms. The pit
+/// spacing grows with the width (`physics::gap_spacing`).
+pub const GAPS: [f32; 4] = [0.0, 0.35, 0.8, 1.5];
 
 fn nearest(table: &[f32], value: f32) -> usize {
     table
@@ -59,7 +64,7 @@ fn nearest(table: &[f32], value: f32) -> usize {
         .map_or(0, |(i, _)| i)
 }
 
-pub const EFFECTS: [Effect; 8] = [
+pub const EFFECTS: [Effect; 10] = [
     Effect {
         name: "Ground",
         levels: &[
@@ -146,6 +151,26 @@ pub const EFFECTS: [Effect; 8] = [
         get: |c| nearest(&WIND, c.wind),
         set: |c, level| c.wind = WIND[level],
     },
+    Effect {
+        name: "Mud",
+        levels: &["Dry", "Damp", "Muddy", "Deep mud"],
+        calm: 0,
+        raise: "Add water",
+        lower: "Drain",
+        why: "Sunk feet drag through the mud, so every stroke pays for the ground it scrapes. Lifted feet and real steps come out ahead.",
+        get: |c| nearest(&MUD, c.mud),
+        set: |c, level| c.mud = MUD[level],
+    },
+    Effect {
+        name: "Gaps",
+        levels: &["Solid", "Narrow", "Wide", "Chasms"],
+        calm: 0,
+        raise: "Open gaps",
+        lower: "Fill in",
+        why: "Periodic pits remove the ground a shuffling gait leans on. Bridges, leaps, and long bodies that can span a gap win.",
+        get: |c| nearest(&GAPS, c.gaps),
+        set: |c, level| c.gaps = GAPS[level],
+    },
 ];
 
 #[cfg(test)]
@@ -209,6 +234,28 @@ mod tests {
         let mut cfg = Config::default();
         wind.set_level(&mut cfg, wind.levels.len() - 1);
         assert!(cfg.wind < 0.0, "the strongest level must oppose +x travel");
+    }
+
+    #[test]
+    fn mud_deepens_and_gaps_widen_monotonically() {
+        assert!(
+            MUD.windows(2).all(|pair| pair[1] > pair[0]),
+            "mud levels must deepen from dry ground"
+        );
+        assert!(
+            GAPS.windows(2).all(|pair| pair[1] > pair[0]),
+            "gap levels must widen from solid ground"
+        );
+        assert_eq!(MUD[0], 0.0);
+        assert_eq!(GAPS[0], 0.0);
+        let mud = EFFECTS.iter().find(|e| e.name == "Mud").unwrap();
+        let gaps = EFFECTS.iter().find(|e| e.name == "Gaps").unwrap();
+        let mut cfg = Config::default();
+        mud.set_level(&mut cfg, mud.levels.len() - 1);
+        assert!(cfg.mud > 0.0, "deep mud must sink contacting nodes");
+        let mut cfg = Config::default();
+        gaps.set_level(&mut cfg, gaps.levels.len() - 1);
+        assert!(cfg.gaps > 0.0, "chasms must open pits");
     }
 
     #[test]

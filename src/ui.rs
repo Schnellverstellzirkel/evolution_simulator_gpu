@@ -1516,18 +1516,24 @@ impl App {
         }
         let amplitude = crate::physics::terrain_amplitude(cfg.terrain);
         let slope = if cfg.ground { cfg.slope } else { 0.0 };
-        if cfg.ground && (amplitude > 0.0 || slope != 0.0) {
-            // Sample the tilted ground every few pixels and fill down to the frame.
+        let gaps = if cfg.ground { cfg.gaps } else { 0.0 };
+        let mud = if cfg.ground { cfg.mud } else { 0.0 };
+        if cfg.ground && (amplitude > 0.0 || slope != 0.0 || gaps > 0.0 || mud > 0.0) {
+            // Sample the ground every few pixels and fill down to the frame.
+            // Pits carve notches into the polyline; mud draws its sunk layer
+            // `mud` meters below the surface line.
             let step = (4.0 / self.zoom).max(0.002);
             let start = (rect.left() - origin.x) / self.zoom;
             let end = (rect.right() - origin.x) / self.zoom;
             let mut x = start;
             let mut line = Vec::new();
+            let mut mud_line = Vec::new();
             while x <= end + step {
-                line.push(world(
-                    x,
-                    crate::physics::terrain_with_slope(x, amplitude, slope).0,
-                ));
+                let height = crate::physics::ground(x, amplitude, slope, gaps).0;
+                line.push(world(x, height));
+                if mud > 0.0 {
+                    mud_line.push(world(x, height - mud));
+                }
                 x += step;
             }
             for pair in line.windows(2) {
@@ -1541,6 +1547,20 @@ impl App {
                     ],
                     GROUND,
                     Stroke::NONE,
+                ));
+            }
+            if mud > 0.0 {
+                let fill = Color32::from_rgb(103, 76, 52);
+                for i in 0..line.len().saturating_sub(1) {
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![line[i], line[i + 1], mud_line[i + 1], mud_line[i]],
+                        fill,
+                        Stroke::NONE,
+                    ));
+                }
+                painter.add(egui::Shape::line(
+                    mud_line,
+                    Stroke::new(1., Color32::from_rgb(72, 51, 34)),
                 ));
             }
             painter.add(egui::Shape::line(line, Stroke::new(2., GROUND_EDGE)));

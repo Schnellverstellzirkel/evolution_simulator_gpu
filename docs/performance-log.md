@@ -55,6 +55,18 @@ A second identical run put every row between 93.1% and 104.7% of calm, with Drou
 
 No environment effect costs more than about 8% extra CPU evaluation time (the worst row is Air/Breezy at 108.2% of calm, barely above the noise floor), so each one is cheap to leave on. This is CPU evaluation cost only; the GPU kernel is unchanged because the effect values travel in its existing uniform buffer.
 
+Addendum: the Mud and Gaps effects added afterwards were measured the same way on the VERSION 23 tree. Both stay inside the noise floor (Mud 102.7 to 106.6% of calm, Gaps 95.9 to 99.2% of calm against a calm row at 103.4%), so the conclusion is unchanged.
+
+| effect | level | world | creatures/s | % of calm | best m |
+|---|---:|---|---:|---:|---:|
+| calm | 0 | default world | 149791.6 | 103.4 | 0.77 |
+| Mud | 1 | Damp | 159457.3 | 103.8 | 0.73 |
+| Mud | 2 | Muddy | 150287.5 | 102.7 | 0.85 |
+| Mud | 3 | Deep mud | 157463.0 | 106.6 | 0.69 |
+| Gaps | 1 | Narrow | 147158.9 | 95.9 | 0.77 |
+| Gaps | 2 | Wide | 147171.5 | 96.9 | 0.77 |
+| Gaps | 3 | Chasms | 144157.9 | 99.2 | 0.77 |
+
 ## Historical version-16 bone-cap baseline, Windows headless (2026-09-26)
 
 This run uses parent physics `bd41746` (QD version 16), with foundation changes captured in `250ad82`. It predates merged revision `abb00cb` and its version-19 friction, planted-foot cap, head-shaking, and CPU archive checks. These timings do not measure the merged code; loading the checkpoint under version 19 invalidates its archive.

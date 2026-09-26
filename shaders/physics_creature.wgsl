@@ -48,6 +48,13 @@ struct Params {
     // disabled, and steady horizontal wind acceleration (m/s²).
     slope: f32,
     wind: f32,
+    // Mud sink depth (m); 0.0 is dry ground. Contacting nodes sink by up to
+    // this depth, which raises the effective normal push and multiplies the
+    // friction budget.
+    mud: f32,
+    // Pit opening width (m); 0.0 is solid ground. Gaps are zeroed when the
+    // ground is disabled.
+    gaps: f32,
 }
 struct Result {
     fitness: f32,
@@ -121,6 +128,13 @@ const STANCE_GRIP: f32 = 10.0;
 // Head shaking limit (m/s^2) and averaging window (s); physics::HEAD_SHAKE_*.
 const HEAD_SHAKE_LIMIT: f32 = 78.4;
 const HEAD_SHAKE_WINDOW: f32 = 0.1;
+// Mud and gap geometry (physics::MUD_*, physics::GAP_*).
+const MUD_NORMAL: f32 = 2.0;
+const MUD_GRIP: f32 = 2.0;
+const MUD_DRAG: f32 = 2.0;
+const MUD_FULL_DEPTH: f32 = 0.1;
+const GAP_DEPTH: f32 = 2.0;
+const GAP_RUN: f32 = 0.15;
 const MAX_BONE_ANGULAR_SPEED: f32 = 15.0;
 const MAX_BONE_TURN_COS: f32 = TURNCOS;
 const MAX_BONE_TURN_TAN: f32 = TURNTAN;
@@ -137,7 +151,8 @@ const JOINT_BREAK_COS: f32 = JOINTBREAKCOS;
 const JOINT_BREAK_SIN: f32 = JOINTBREAKSIN;
 
 // Height and slope of the rough ground; mirrors physics::terrain plus the
-// linear tilt of physics::terrain_with_slope.
+// linear tilt of physics::terrain_with_slope and the periodic pits of
+// physics::gaps.
 fn terrain(x: f32) -> vec2f {
     let t0 = x * (1.0 / 1.1);
     let u0 = t0 - floor(t0);
@@ -145,10 +160,37 @@ fn terrain(x: f32) -> vec2f {
     let t1 = x * (1.0 / 0.43) + 0.3;
     let u1 = t1 - floor(t1);
     let w1 = u1 * (1.0 - u1);
-    let height = 0.65 * 16.0 * w0 * w0 + 0.35 * 16.0 * w1 * w1;
-    let slope = 0.65 * 32.0 * w0 * (1.0 - 2.0 * u0) * (1.0 / 1.1)
+    var height = 0.65 * 16.0 * w0 * w0 + 0.35 * 16.0 * w1 * w1;
+    var slope = 0.65 * 32.0 * w0 * (1.0 - 2.0 * u0) * (1.0 / 1.1)
         + 0.35 * 32.0 * w1 * (1.0 - 2.0 * u1) * (1.0 / 0.43);
-    return p.terrain * vec2f(height, slope) + vec2f(p.slope * x, p.slope);
+    height = p.terrain * height + p.slope * x;
+    slope = p.terrain * slope + p.slope;
+    if p.gaps > 0.0 {
+        let spacing = 2.0 + 4.0 * p.gaps;
+        let center = spacing * 0.5;
+        let t = x / spacing;
+        let r = x - floor(t) * spacing;
+        let distance = abs(r - center);
+        let half = 0.5 * p.gaps;
+        let run = max(min(GAP_RUN, half), 1e-6);
+        let ramp = clamp((half - distance) / run, 0.0, 1.0);
+        var factor = ramp;
+        if distance <= half - run {
+            factor = 1.0;
+        } else if distance >= half {
+            factor = 0.0;
+        }
+        let on_ramp = distance > half - run && distance < half;
+        var side = -1.0;
+        if r < center {
+            side = 1.0;
+        }
+        height -= GAP_DEPTH * factor;
+        if on_ramp {
+            slope -= GAP_DEPTH * (side / run);
+        }
+    }
+    return vec2f(height, slope);
 }
 
 // Whether node `n` is set in a 64-node bitmask split into two words.
@@ -295,7 +337,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if j >= body_nodes { break; }
                 let k = j * WG + lane;
                 var floor_y = 0.0;
-                if p.terrain > 0.0 || p.slope != 0.0 {
+                if p.terrain > 0.0 || p.slope != 0.0 || p.gaps > 0.0 {
                     floor_y = terrain(pos[k].x - shift_x).x;
                 }
                 low = min(low, pos[k].y - radius[j] - floor_y);
@@ -436,11 +478,12 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
                 let k = j * WG + lane;
-                if p.terrain > 0.0 || p.slope != 0.0 {
-                    // Push out along the ground normal, so bumps resist sliding.
+                if p.terrain > 0.0 || p.slope != 0.0 || p.gaps > 0.0 {
+                    // Push out along the ground normal, so bumps and pit walls
+                    // resist sliding.
                     let ground = terrain(pos[k].x);
                     let secant = sqrt(1.0 + ground.y * ground.y);
-                    let floor_y = ground.x + radius[j] * secant;
+                    let floor_y = ground.x + radius[j] * secant - p.mud;
                     vel[k].y = floor_y;
                     let gap = floor_y - pos[k].y;
                     if gap > 0.0 {
@@ -448,7 +491,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                         pos[k] += vec2f(-ground.y, 1.0) * depth;
                     }
                 } else {
-                    pos[k].y = max(pos[k].y, radius[j]);
+                    // Mud lowers the dry floor by the sink depth.
+                    vel[k].y = radius[j] - p.mud;
+                    pos[k].y = max(pos[k].y, vel[k].y);
                 }
             }
         }
@@ -687,15 +732,28 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             // The previous position is no longer needed; keep the floor height
             // for the velocity passes and contact metrics.
             old[k] = vec2f(floor_y, 0.0);
+            // How deep the node sits below its dry floor, in meters, capped
+            // at the local mud depth. The multipliers scale with it up to
+            // MUD_FULL_DEPTH.
+            var sink = 0.0;
+            var mud_mu = 1.0;
+            if p.mud > 0.0 {
+                sink = clamp(floor_y + p.mud - pos[k].y, 0.0, p.mud) / MUD_FULL_DEPTH;
+                mud_mu = 1.0 + MUD_GRIP * sink;
+            }
             if grounded && pos[k].y <= floor_y + 1e-4 {
-                let push = max(pos[k].y - predicted_y, 0.0);
-                let max_change = friction[j] * p.friction * push * RATE;
+                let push = max(pos[k].y - predicted_y, 0.0) * (1.0 + MUD_NORMAL * sink);
+                let max_change = friction[j] * p.friction * mud_mu * push * RATE;
                 velocity.x -= clamp(velocity.x, -max_change, max_change);
+                // Moving through mud also loses speed to viscous drag.
+                velocity.x *= max(0.0, 1.0 - MUD_DRAG * DT * sink);
                 if failed[j] < 0.5 {
                     contact_mass += mass[j];
                     contact_momentum += mass[j] * velocity.x;
-                    contact_grip += mass[j] * friction[j];
+                    contact_grip += mass[j] * friction[j] * mud_mu;
                 }
+            } else if sink > 0.0 {
+                velocity.x *= max(0.0, 1.0 - MUD_DRAG * DT * sink);
             }
             if failed[j] >= 0.5 {
                 velocity = vec2f(0.0);

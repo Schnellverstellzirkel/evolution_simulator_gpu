@@ -65,6 +65,8 @@ Environment buttons raise or lower each effect:
 | Drought | Normal, dry, parched, drought |
 | Slope | Flat, 3%, 8%, 15%, 25% uphill |
 | Wind | Calm, breeze, strong, gale (headwind) |
+| Mud | Dry, damp, muddy, deep mud |
+| Gaps | Solid, narrow, wide, chasms |
 
 A world change invalidates the old scores and queues archive elites for evaluation under the new conditions. Effects change the physics; the objective remains distance.
 

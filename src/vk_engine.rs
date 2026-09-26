@@ -604,6 +604,9 @@ impl VkEngine {
                     // A disabled ground ignores the slope effect, as on the CPU.
                     slope: if cfg.ground { cfg.slope } else { 0.0 },
                     wind: cfg.wind,
+                    // A disabled ground also ignores mud and gaps.
+                    mud: if cfg.ground { cfg.mud } else { 0.0 },
+                    gaps: if cfg.ground { cfg.gaps } else { 0.0 },
                 };
                 param_data[offset..offset + std::mem::size_of::<Params>()]
                     .copy_from_slice(bytemuck::bytes_of(&p));

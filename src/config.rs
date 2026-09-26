@@ -25,6 +25,14 @@ pub struct Config {
     /// Steady horizontal wind acceleration (m/s²); 0.0 is calm, positive
     /// pushes nodes in the +x direction.
     pub wind: f32,
+    /// Mud sink depth (m); 0.0 is dry ground. Contacting nodes sink by up to
+    /// this depth, which raises the effective normal push and multiplies the
+    /// friction budget, so dragging feet cost more.
+    pub mud: f32,
+    /// Pit opening width (m); 0.0 is solid ground. Pits are cut periodically
+    /// into the ground with a fixed depth and a spacing that grows with the
+    /// width.
+    pub gaps: f32,
     pub min_size: f32,
     pub max_size: f32,
     pub min_friction: f32,
@@ -56,6 +64,8 @@ impl Default for Config {
             muscle_recovery: 1.0,
             slope: 0.0,
             wind: 0.0,
+            mud: 0.0,
+            gaps: 0.0,
             min_size: 0.06,
             max_size: 0.12,
             min_friction: 0.65,
@@ -88,6 +98,8 @@ struct HumanConfig {
     muscle_recovery: f32,
     slope: f32,
     wind: f32,
+    mud: f32,
+    gaps: f32,
     min_size: f32,
     max_size: f32,
     min_friction: f32,
@@ -118,6 +130,8 @@ impl Default for HumanConfig {
             muscle_recovery: c.muscle_recovery,
             slope: c.slope,
             wind: c.wind,
+            mud: c.mud,
+            gaps: c.gaps,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -150,6 +164,8 @@ impl From<HumanConfig> for Config {
             muscle_recovery: c.muscle_recovery,
             slope: c.slope,
             wind: c.wind,
+            mud: c.mud,
+            gaps: c.gaps,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -181,6 +197,8 @@ impl From<&Config> for HumanConfig {
             muscle_recovery: c.muscle_recovery,
             slope: c.slope,
             wind: c.wind,
+            mud: c.mud,
+            gaps: c.gaps,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -211,6 +229,8 @@ struct BinaryConfig {
     muscle_recovery: f32,
     slope: f32,
     wind: f32,
+    mud: f32,
+    gaps: f32,
     min_size: f32,
     max_size: f32,
     min_friction: f32,
@@ -240,6 +260,8 @@ impl From<&Config> for BinaryConfig {
             muscle_recovery: c.muscle_recovery,
             slope: c.slope,
             wind: c.wind,
+            mud: c.mud,
+            gaps: c.gaps,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -271,6 +293,8 @@ impl From<BinaryConfig> for Config {
             muscle_recovery: c.muscle_recovery,
             slope: c.slope,
             wind: c.wind,
+            mud: c.mud,
+            gaps: c.gaps,
             ground_friction: c.ground_friction,
             min_size: c.min_size,
             max_size: c.max_size,
@@ -357,6 +381,14 @@ impl Config {
         ensure!(
             self.wind.is_finite() && (-20.0..=20.0).contains(&self.wind),
             "Wind must be -20–20 m/s²"
+        );
+        ensure!(
+            self.mud.is_finite() && (0.0..=0.5).contains(&self.mud),
+            "Mud sink depth must be 0–0.5 m"
+        );
+        ensure!(
+            self.gaps.is_finite() && (0.0..=3.0).contains(&self.gaps),
+            "Gap width must be 0–3 m"
         );
         ensure!(
             self.min_size.is_finite()

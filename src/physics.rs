@@ -723,6 +723,68 @@ pub fn terrain_with_slope(x: f32, amplitude: f32, tilt: f32) -> (f32, f32) {
     let (height, slope) = terrain(x, amplitude);
     (height + tilt * x, slope + tilt)
 }
+/// Depth (m) of every pit below the surrounding ground.
+pub const GAP_DEPTH: f32 = 2.0;
+/// Horizontal run (m) of each pit's wall. Walls are short steep ramps, not
+/// vertical steps, so a node never teleports when the sampled floor jumps.
+pub const GAP_RUN: f32 = 0.15;
+/// Distance (m) between pit centers for a pit opening `width` wide. Wider
+/// pits are also farther apart, so the solid stretches stay walkable.
+pub fn gap_spacing(width: f32) -> f32 {
+    2.0 + 4.0 * width
+}
+/// Ground height (m, negative) and slope of the periodic pits for pit width
+/// `width`; both are 0 on solid ground. Pit centers sit at odd multiples of
+/// `gap_spacing / 2`, so x = 0 is solid ground. Every engine and the UI carve
+/// the same pits.
+pub fn gaps(x: f32, width: f32) -> (f32, f32) {
+    if width <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let spacing = gap_spacing(width);
+    let r = x - (x / spacing).floor() * spacing;
+    let center = 0.5 * spacing;
+    let distance = (r - center).abs();
+    let half = 0.5 * width;
+    let run = GAP_RUN.min(half);
+    let factor = if distance >= half {
+        0.0
+    } else if distance <= half - run {
+        1.0
+    } else {
+        (half - distance) / run
+    };
+    let factor_slope = if distance > half - run && distance < half {
+        if r < center { 1.0 / run } else { -1.0 / run }
+    } else {
+        0.0
+    };
+    (-GAP_DEPTH * factor, -GAP_DEPTH * factor_slope)
+}
+/// Ground height and slope at `x` for bump height `amplitude`, linear `tilt`,
+/// and periodic pits of opening `width`. This is the one place the effects
+/// join the ground; `width` is 0 when the gaps effect is calm or the ground
+/// is disabled.
+pub fn ground(x: f32, amplitude: f32, tilt: f32, width: f32) -> (f32, f32) {
+    let (height, slope) = terrain_with_slope(x, amplitude, tilt);
+    let (pit_height, pit_slope) = gaps(x, width);
+    (height + pit_height, slope + pit_slope)
+}
+/// Effective ground push multiplier while a node is sunk in mud. The push a
+/// contacting node receives counts this much higher at `MUD_FULL_DEPTH` of
+/// sink, which multiplies the friction budget over it.
+pub const MUD_NORMAL: f32 = 2.0;
+/// Friction multiplier at `MUD_FULL_DEPTH` of sink. Together with
+/// `MUD_NORMAL` a node sunk that far feels Coulomb friction scaled by
+/// `(1 + MUD_GRIP) * (1 + MUD_NORMAL)`.
+pub const MUD_GRIP: f32 = 2.0;
+/// Horizontal velocity retention lost per second at `MUD_FULL_DEPTH` of
+/// sink: the viscous drag of moving a foot through mud. Zero effect on a
+/// lifted foot.
+pub const MUD_DRAG: f32 = 2.0;
+/// Sink depth (m) at which the mud multipliers reach their full value, i.e.
+/// the deepest mud level. Shallower mud drags proportionally less.
+pub const MUD_FULL_DEPTH: f32 = 0.10;
 pub fn fitness(n: &[Node]) -> f32 {
     if n.iter().any(|n| n.failed != 0.0) {
         FAILED
@@ -825,6 +887,60 @@ mod tests {
         }
         assert_eq!(terrain_with_slope(0.7, 0.0, 0.0), (0.0, 0.0));
         assert_eq!(terrain_with_slope(2.0, 0.0, 0.25), (0.5, 0.25));
+    }
+
+    #[test]
+    fn gaps_carve_bounded_pits_every_spacing() {
+        let width = 1.0;
+        let spacing = gap_spacing(width);
+        // The start is solid ground: a trial never begins over a pit.
+        assert_eq!(gaps(0.0, width), (0.0, 0.0));
+        assert!(gaps(0.6, width).0 > -1e-6);
+        // The middle of the first pit is at the full depth with a flat floor.
+        let center = 0.5 * spacing;
+        assert_eq!(gaps(center, width), (-GAP_DEPTH, 0.0));
+        let floor = -GAP_DEPTH;
+        for x in [0.01, 0.5, 1.4, 7.3, 15.9] {
+            let (height, _) = gaps(x, width);
+            assert!(
+                (floor - 1e-6..=0.0).contains(&height),
+                "pit at {x} has height {height}"
+            );
+        }
+        // Outside the pits the ground is untouched, and the profile is
+        // continuous across every pit wall.
+        let mut previous = gaps(-spacing, width).0;
+        let step = 0.001;
+        let mut x = -spacing + step;
+        while x <= 3.0 * spacing {
+            let height = gaps(x, width).0;
+            assert!(
+                (height - previous).abs() < 0.5,
+                "pit profile jumps at {x}: {previous} to {height}"
+            );
+            previous = height;
+            x += step;
+        }
+        assert_eq!(gaps(0.5, 0.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn ground_slope_matches_its_height_with_pits() {
+        for i in 0..400 {
+            let x = i as f32 * 0.037 - 4.0;
+            let (_, slope) = ground(x, 0.05, 0.15, 1.0);
+            let h = 1e-3;
+            let numeric =
+                (ground(x + h, 0.05, 0.15, 1.0).0 - ground(x - h, 0.05, 0.15, 1.0).0) / (2.0 * h);
+            assert!((slope - numeric).abs() < 1e-2, "{x}: {slope} vs {numeric}");
+        }
+        // With no gaps the combined ground is exactly terrain plus slope.
+        for x in [0.0, 0.7, -2.4, 13.1] {
+            assert_eq!(
+                ground(x, 0.05, 0.15, 0.0),
+                terrain_with_slope(x, 0.05, 0.15)
+            );
+        }
     }
 
     #[test]

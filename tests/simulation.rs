@@ -538,6 +538,27 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
             cpu_result.fitness
         );
     }
+    // Mud and gaps reach the kernel through the same uniform buffer. Sunk
+    // floors and pit walls change contacts quickly, so compare a short trial
+    // at both effects at once.
+    let muddy_gaps = Config {
+        duration: 0.1,
+        mud: 0.10,
+        gaps: 0.8,
+        ..cfg.clone()
+    };
+    let gpu_metrics = gpu
+        .evaluate_with_metrics(&pop, &indices, &muddy_gaps)
+        .unwrap();
+    let cpu = evolution_simulator::cpu_engine::evaluate(&pop, &muddy_gaps);
+    for (i, (gpu_result, cpu_result)) in gpu_metrics.iter().zip(&cpu).enumerate() {
+        assert!(
+            (gpu_result.fitness - cpu_result.fitness).abs() < 0.05,
+            "mud and gaps score {i}: GPU {}, CPU engine {}",
+            gpu_result.fitness,
+            cpu_result.fitness
+        );
+    }
     let cfg = Config {
         population: 8,
         max_nodes: 64,
@@ -1368,6 +1389,117 @@ fn uphill_slope_and_headwind_reduce_distance() {
         free, free_hill,
         "slope must not act while the ground is off"
     );
+}
+
+#[test]
+fn mud_reduces_distance_and_spares_a_groundless_run() {
+    // The same walker on dry ground and in the deepest mud. Sunk feet drag,
+    // so the mud must cost it real distance. A body that never touches the
+    // ground pays nothing: with the ground off, mud changes no result.
+    let base = Config {
+        population: 16,
+        duration: 5.0,
+        ..config()
+    };
+    let mut pop = evolution::Population::default();
+    for i in 0..16 {
+        let mut walker = energy_dependent_walker();
+        walker.id = i as u64;
+        pop.push(walker);
+    }
+    let dry = mean_distance(&pop, &base);
+    let damp = mean_distance(
+        &pop,
+        &Config {
+            mud: 0.02,
+            ..base.clone()
+        },
+    );
+    let muddy = mean_distance(
+        &pop,
+        &Config {
+            mud: 0.05,
+            ..base.clone()
+        },
+    );
+    let deep = mean_distance(
+        &pop,
+        &Config {
+            mud: 0.10,
+            ..base.clone()
+        },
+    );
+    eprintln!("mean distance: dry {dry} m, damp {damp} m, muddy {muddy} m, deep {deep} m");
+    assert!(
+        deep < dry - 0.5,
+        "deep mud must cost distance: {deep} m vs {dry} m"
+    );
+    assert!(
+        damp <= dry && muddy <= dry && deep <= dry,
+        "mud must never help: dry {dry}, damp {damp}, muddy {muddy}, deep {deep}"
+    );
+    let free = mean_distance(
+        &pop,
+        &Config {
+            ground: false,
+            ..base.clone()
+        },
+    );
+    let free_mud = mean_distance(
+        &pop,
+        &Config {
+            ground: false,
+            mud: 0.10,
+            ..base.clone()
+        },
+    );
+    assert_eq!(free, free_mud, "mud must not act while the ground is off");
+}
+
+#[test]
+fn gaps_stop_a_walker_where_solid_ground_lets_it_run() {
+    // The same walker on solid ground and over chasms. The first pit opens
+    // where the walker would otherwise run, so it must fall or stop early.
+    let base = Config {
+        population: 16,
+        duration: 5.0,
+        ..config()
+    };
+    let mut pop = evolution::Population::default();
+    for i in 0..16 {
+        let mut walker = energy_dependent_walker();
+        walker.id = i as u64;
+        pop.push(walker);
+    }
+    let solid = mean_distance(&pop, &base);
+    let chasms = mean_distance(
+        &pop,
+        &Config {
+            gaps: 1.5,
+            ..base.clone()
+        },
+    );
+    eprintln!("mean distance: solid {solid} m, chasms {chasms} m");
+    assert!(
+        chasms < solid - 2.0,
+        "chasms must stop the walker: {chasms} m vs {solid} m"
+    );
+    let free = mean_distance(
+        &pop,
+        &Config {
+            ground: false,
+            ..base.clone()
+        },
+    );
+    let free_gaps = mean_distance(
+        &pop,
+        &Config {
+            ground: false,
+            gaps: 1.5,
+            ..base.clone()
+        },
+    );
+    assert_eq!(free, free_gaps, "gaps must not act while the ground is off");
 }
 
 /// The four-node sled evolution built while friction could push the body in

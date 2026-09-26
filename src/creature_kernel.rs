@@ -40,6 +40,10 @@ pub struct Params {
     pub slope: f32,
     /// Steady horizontal wind acceleration (m/s²); positive pushes +x.
     pub wind: f32,
+    /// Mud sink depth (m); 0.0 is dry ground.
+    pub mud: f32,
+    /// Pit opening width (m); 0.0 is solid ground.
+    pub gaps: f32,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -303,6 +307,33 @@ pub fn shader_source(
             ),
         )
         .replace(
+            "const MUD_NORMAL: f32 = 2.0;",
+            &format!("const MUD_NORMAL: f32 = {:?};", crate::physics::MUD_NORMAL),
+        )
+        .replace(
+            "const MUD_GRIP: f32 = 2.0;",
+            &format!("const MUD_GRIP: f32 = {:?};", crate::physics::MUD_GRIP),
+        )
+        .replace(
+            "const MUD_DRAG: f32 = 2.0;",
+            &format!("const MUD_DRAG: f32 = {:?};", crate::physics::MUD_DRAG),
+        )
+        .replace(
+            "const MUD_FULL_DEPTH: f32 = 0.1;",
+            &format!(
+                "const MUD_FULL_DEPTH: f32 = {:?};",
+                crate::physics::MUD_FULL_DEPTH
+            ),
+        )
+        .replace(
+            "const GAP_DEPTH: f32 = 2.0;",
+            &format!("const GAP_DEPTH: f32 = {:?};", crate::physics::GAP_DEPTH),
+        )
+        .replace(
+            "const GAP_RUN: f32 = 0.15;",
+            &format!("const GAP_RUN: f32 = {:?};", crate::physics::GAP_RUN),
+        )
+        .replace(
             "const HEAD_SHAKE_LIMIT: f32 = 78.4;",
             &format!(
                 "const HEAD_SHAKE_LIMIT: f32 = {:?};",
@@ -374,7 +405,9 @@ mod tests {
         assert_eq!(std::mem::offset_of!(Params, muscle_recovery), 44);
         assert_eq!(std::mem::offset_of!(Params, slope), 48);
         assert_eq!(std::mem::offset_of!(Params, wind), 52);
-        assert_eq!(std::mem::size_of::<Params>(), 56);
+        assert_eq!(std::mem::offset_of!(Params, mud), 56);
+        assert_eq!(std::mem::offset_of!(Params, gaps), 60);
+        assert_eq!(std::mem::size_of::<Params>(), 64);
     }
 
     #[test]
