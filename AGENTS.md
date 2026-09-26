@@ -99,7 +99,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 34. Drought: slower muscle energy recovery.
 35. Heat wave: smaller muscle energy store.
 36. Done: meteor strike wipes out half of every archive's elites; Undo returns the fossils (`Experiment::meteor`, `undo_meteor`).
-37. Island extinction: wipe one island's archive and reseed it from the others.
+37. Done: Extinction wipes out the slowest island (`Experiment::extinction`), undoable with the same fossils as the meteor.
 38. Earthquake: a new random terrain each trial, so gaits must be robust.
 39. Seasons: effects that cycle automatically every N generations.
 40. A curriculum that raises difficulty when the archive stalls, as in POET (Wang et al., 2019).
