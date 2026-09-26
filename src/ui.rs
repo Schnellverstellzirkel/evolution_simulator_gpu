@@ -365,16 +365,37 @@ impl Playback {
 }
 /// Marks the nodes touching the ground in `positions`, with the threshold
 /// `size_report` uses: a node is down when its center sits within 2 mm of the
-/// terrain surface plus its own radius measured along the local normal. Gaps
-/// lower the surface here too, so the marks follow the ground that is drawn.
-fn node_contact(nodes: &[Node], positions: &[[f32; 2]], config: &Config, out: &mut [bool]) {
+/// terrain surface plus its own radius measured along the local normal. Gaps,
+/// hurdles and the creature's own quake phase lower and raise the surface here
+/// too, so the marks follow the ground that is drawn.
+fn node_contact(
+    nodes: &[Node],
+    positions: &[[f32; 2]],
+    creature: &Creature,
+    config: &Config,
+    out: &mut [bool],
+) {
     out.fill(false);
     if !config.ground {
         return;
     }
-    let amplitude = physics::terrain_amplitude(config.terrain);
+    let hash = physics::quake_hash(creature.id);
+    let amplitude =
+        physics::terrain_amplitude(config.terrain) + config.quake * physics::quake_scale(hash);
+    let phase = if config.quake > 0.0 {
+        physics::quake_phase(hash)
+    } else {
+        0.0
+    };
     for ((node, position), down) in nodes.iter().zip(positions).zip(out.iter_mut()) {
-        let (height, slope) = physics::ground(position[0], amplitude, config.slope, config.gaps);
+        let (height, slope) = physics::ground(
+            position[0],
+            amplitude,
+            config.slope,
+            config.gaps,
+            config.hurdles,
+            phase,
+        );
         let floor = height + node.radius * (1.0 + slope * slope).sqrt();
         *down = position[1] <= floor + 0.002;
     }
@@ -442,7 +463,13 @@ impl FrameMarks {
             broken: vec![false; playback.nodes.len()],
         };
         if let Some(frame) = playback.frames.get(playback.tick as usize) {
-            node_contact(&playback.nodes, frame, &playback.config, &mut marks.contact);
+            node_contact(
+                &playback.nodes,
+                frame,
+                &playback.creature,
+                &playback.config,
+                &mut marks.contact,
+            );
             broken_nodes(
                 &playback.creature,
                 frame,
@@ -4045,13 +4072,26 @@ impl GifScene<'_> {
             );
         }
         if self.config.ground {
-            let amplitude = physics::terrain_amplitude(self.config.terrain);
+            let hash = physics::quake_hash(self.creature.id);
+            let amplitude = physics::terrain_amplitude(self.config.terrain)
+                + self.config.quake * physics::quake_scale(hash);
+            let phase = if self.config.quake > 0.0 {
+                physics::quake_phase(hash)
+            } else {
+                0.0
+            };
             let ground = gif_color(GROUND);
             let edge = gif_color(GROUND_EDGE);
             for px in 0..GIF_WIDTH {
                 let world_x = origin_x + px as f32 / self.camera.scale;
-                let (height, _) =
-                    physics::ground(world_x, amplitude, self.config.slope, self.config.gaps);
+                let (height, _) = physics::ground(
+                    world_x,
+                    amplitude,
+                    self.config.slope,
+                    self.config.gaps,
+                    self.config.hurdles,
+                    phase,
+                );
                 let surface = GIF_HEIGHT as f32 - (height - self.camera.y0) * self.camera.scale;
                 let top = surface.floor().max(0.0) as u32;
                 for y in top..GIF_HEIGHT {
@@ -4189,7 +4229,7 @@ fn write_creature_gif(
         let Some(frame) = frames.get(tick as usize) else {
             break;
         };
-        node_contact(nodes, frame, config, &mut contact);
+        node_contact(nodes, frame, creature, config, &mut contact);
         broken_nodes(creature, frame, &joints, &mut broken);
         let time = tick.saturating_sub(physics::settle()) as f32 * physics::dt();
         let fallen = fall.is_some_and(|(fall_tick, _)| tick >= fall_tick);
