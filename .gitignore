@@ -5,6 +5,7 @@
 *.csv
 !docs/*.csv
 !docs/search-*/**/*.csv
+!docs/results/**/*.csv
 
 /presets/custom.json
 /.claude/
