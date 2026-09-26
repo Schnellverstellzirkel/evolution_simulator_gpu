@@ -70,7 +70,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 8. Review the log-scale height archive axis. It gives giants their own cells and protects them.
 9. Measure where a triangle's (2 bones, 1 muscle) forward motion comes from with the momentum ledger. It moves in ways the owner thinks should be impossible.
 10. Remove or justify the rebuild step that lifts the whole body when a node sinks into the ground. It adds potential energy that no force paid for.
-11. Add an energy conservation test: a passive body dropped on flat ground must never gain mechanical energy.
+11. Done: tests `a_passive_body_never_rises_above_its_start` and `a_body_without_drive_does_not_travel` guard against solver-made energy and propulsion. `examples/first_generation` compares random-population distances across physics changes.
 12. Add a momentum test: the projection and rebuild center-of-mass shift in the ledger should stay near zero.
 13. Charge muscle energy only for active contraction work, not for passive damping.
 14. Add passive elastic tendons as an evolvable part, so gaits can store and return energy honestly.
