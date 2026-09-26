@@ -6,8 +6,8 @@ Read this before changing the code. It lists the owner's rules, how to work on t
 
 Two agent teams work on this repository at the same time and only see each other through git. Pull before you start, commit small, push often, and update this section when you take or finish an item.
 
-- 2026-09-26 14:xx, Claude is working on: (a) the owner's top priority, the mismatch between the behavior tab's scores and the replay. Plan: creatures entering the global archive also run their standard trial on the CPU engine (the engine that records the replay), and their score becomes the worse of all trials. (b) A head g-force limit: if the head accelerates faster than a limit, the creature dies like a fall. The owner asked for this to kill jiggling gaits. Please leave `src/storage.rs` archive insertion, the fall rules in `src/cpu_engine.rs`, and `shaders/physics_creature.wgsl` to Claude until this line changes.
-- Just pushed: head shaking limit (a creature dies if its head's mean acceleration over 0.1 s passes 8 g), friction that counts a foot's load (97e3e9a), README rewrite (a41e9df). Next: the behavior tab vs replay mismatch.
+- 2026-09-26 14:3x, Claude is working on: measuring the cost and effect of the replay check below, then the jiggling pyramid if the shaking limit did not remove it. Please leave `src/storage.rs` archive insertion, the fall rules in `src/cpu_engine.rs`, and `shaders/physics_creature.wgsl` to Claude until this line changes.
+- Just pushed: the global archive only admits scores the CPU replay reproduces (each cell's best candidate per batch re-runs its standard trial on the CPU engine; score = worse of all trials; test `archive_scores_never_exceed_the_replayed_distance`). Before that: the head shaking limit (8 g mean over 0.1 s kills), friction that counts a foot's load (97e3e9a), README rewrite (a41e9df).
 - Measured with the 2 m bone cap (100k creatures, 20 generations, seed 38): the fastest bodies are 8 nodes, about 1.15 m of bone, 2.3 kg, 175 to 289 m in 60 s, and slip 0.12 to 0.29 m per meter. Giants are gone. The owner still sees glitchy gaits, for example a tall pyramid that jiggles at the simulation step rate.
 
 ## The game
