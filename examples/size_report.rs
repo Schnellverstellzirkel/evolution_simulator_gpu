@@ -47,7 +47,7 @@ fn replay_metrics(
     if cfg.ground && terminal > settle {
         let amplitude = physics::terrain_amplitude(cfg.terrain);
         let floor = |position: [f32; 2], radius: f32| {
-            let (height, slope) = physics::terrain(position[0], amplitude);
+            let (height, slope) = physics::terrain_with_slope(position[0], amplitude, cfg.slope);
             height + radius * (1.0 + slope * slope).sqrt()
         };
         for (j, (node, detail)) in nodes.iter().zip(&mut node_slip).enumerate() {
@@ -293,7 +293,7 @@ mod tests {
         };
         let amplitude = physics::terrain_amplitude(cfg.terrain);
         let point = |x| {
-            let (height, slope) = physics::terrain(x, amplitude);
+            let (height, slope) = physics::terrain_with_slope(x, amplitude, cfg.slope);
             [x, height + node().radius * (1.0 + slope * slope).sqrt()]
         };
         let frames = frames(&cfg, &[point(0.1), point(0.1), point(0.45)]);
@@ -308,7 +308,12 @@ mod tests {
             ..config()
         };
         let amplitude = physics::terrain_amplitude(cfg.terrain);
-        let point = |x| [x, physics::terrain(x, amplitude).0 + node().radius];
+        let point = |x| {
+            [
+                x,
+                physics::terrain_with_slope(x, amplitude, cfg.slope).0 + node().radius,
+            ]
+        };
         assert!(point(0.45)[1] > point(0.1)[1] + 0.02);
         let frames = frames(&cfg, &[point(0.45), point(0.45), point(0.1)]);
         let measured = replay_metrics(&[node()], &frames, &GpuResult::default(), &cfg);

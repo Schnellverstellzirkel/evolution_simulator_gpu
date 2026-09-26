@@ -12,7 +12,7 @@
 | `creature_kernel` | Body-size buckets and packed GPU inputs |
 | `vk_engine` | Vulkan buffers, shader compilation, pipelines, and dispatch |
 | `engine`, `scheduler`, `gpu` | Threaded evaluation devices, work scheduling, and the evaluation front end |
-| `environment` | Reversible ground, gravity, air, grip, heat wave, and drought levels |
+| `environment` | Reversible ground, gravity, air, grip, heat wave, drought, slope, and wind levels |
 | `storage` | Experiment stages, CPU-checked global archive admission, islands, catastrophes, history, checkpoints, migrations |
 | `worker` | Background evolution, command handling, snapshots, and autosaves |
 | `ui` | egui dashboard and CPU-recorded creature playback |
@@ -40,7 +40,7 @@ Default limits from `physics::Limits::DEFAULT` are:
 | Muscle energy store | 120 J |
 | Recovery | 0.5 of missing energy per second |
 
-The environment effects scale these two baselines per run: `Config::muscle_energy` multiplies the store (heat wave, 1.0 down to 0.35) and `Config::muscle_recovery` multiplies recovery (drought, 1.0 down to 0.1). Both default to 1.0, and every engine applies them to the shared `Limits` values.
+The environment effects scale these two baselines per run: `Config::muscle_energy` multiplies the store (heat wave, 1.0 down to 0.35) and `Config::muscle_recovery` multiplies recovery (drought, 1.0 down to 0.1). Both default to 1.0, and every engine applies them to the shared `Limits` values. Two further effects change the world instead of the limits. `Config::slope` (0.0 flat, 0.03 to 0.25 uphill) adds the linear term `slope * x` to the terrain height and `slope` to its local slope; a disabled ground ignores it. `Config::wind` (0.0 calm, -1 to -6 m/s² headwind) adds a steady horizontal acceleration to every live node in the same integration step that applies gravity. Neither is a fitness term.
 
 Touchdown sensors can restart a muscle's rhythm when its chosen node lands. The active muscle drive is nonnegative and acts only while the target shortens. Lengthening supplies no active push; exhausted muscles have zero active drive. Relative-velocity damping remains part of the force. The current energy debit uses the absolute work of the combined force, including damping; charging only active contraction work remains open work.
 
@@ -50,7 +50,7 @@ The parent-first rebuild restores exact lengths and recenters by mass. If nodes 
 
 Planting feet alone can create propulsion through weighted projections. The current solver caps the body's horizontal center-of-mass shift from the projection/rebuild stage to the grip coefficient times accumulated normal correction divided by body mass. It removes excess displacement with a rigid translation, so the feet slip when the budget is exhausted. Normal correction includes contacting-node pushes and the remaining body's share of whole-body lift. Velocity constraints then remove radial bone motion and bound rotation. This implementation is not a general proof of mechanical-energy conservation; `examples/first_generation` checks random bodies for excessive free propulsion after physics changes.
 
-The default environment has gravity 9.8 m/s², air velocity retention 1.0 per 1/60 s, ground-friction multiplier 1.5, node grip 0.65–1.0, node diameters 0.06–0.12 m, and both muscle multipliers at 1.0. Terrain can add deterministic bumps. Creatures do not collide with one another.
+The default environment has gravity 9.8 m/s², air velocity retention 1.0 per 1/60 s, ground-friction multiplier 1.5, node grip 0.65–1.0, node diameters 0.06–0.12 m, both muscle multipliers at 1.0, slope 0.0, and wind 0.0. Terrain can add deterministic bumps and a linear climb. Creatures do not collide with one another.
 
 Fitness is horizontal center-of-mass displacement after centering the start pose. It has no posture factor, stepping multiplier, size penalty, or energy bonus. A head dropping below its neck base, a joint more than 0.5 rad beyond its range, or excessive head shaking records the distance at that event and disables muscle force. The shaking rule uses the magnitude of per-step head acceleration, exponentially averaged over about 0.1 seconds, with an 8 g limit (`HEAD_SHAKE_LIMIT = 78.4 m/s²`). Its accumulator starts after the initial 0.1 seconds of the timed trial; invalid/nonfinite states receive the failed-trial sentinel. Measured ground contact, vertical oscillation, cadence, body height, and lifted feet are behavior descriptors, separate from fitness.
 

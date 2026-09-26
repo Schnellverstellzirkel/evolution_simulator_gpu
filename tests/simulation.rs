@@ -517,6 +517,27 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
             cpu_result.fitness
         );
     }
+    // The slope and wind effects reach the kernel through the same uniform
+    // buffer; both engines must apply the terrain tilt and the horizontal
+    // wind force identically. Sloped ground contacts amplify rounding
+    // differences quickly, so compare a short trial, as the rough-ground
+    // test does.
+    let weather = Config {
+        duration: 0.1,
+        slope: 0.15,
+        wind: -3.0,
+        ..cfg.clone()
+    };
+    let gpu_metrics = gpu.evaluate_with_metrics(&pop, &indices, &weather).unwrap();
+    let cpu = evolution_simulator::cpu_engine::evaluate(&pop, &weather);
+    for (i, (gpu_result, cpu_result)) in gpu_metrics.iter().zip(&cpu).enumerate() {
+        assert!(
+            (gpu_result.fitness - cpu_result.fitness).abs() < 0.05,
+            "slope and wind score {i}: GPU {}, CPU engine {}",
+            gpu_result.fitness,
+            cpu_result.fitness
+        );
+    }
     let cfg = Config {
         population: 8,
         max_nodes: 64,
@@ -627,6 +648,7 @@ fn nodes_stay_on_top_of_rough_ground() {
         population: 16,
         duration: 3.0,
         terrain: 3,
+        slope: 0.15,
         ..config()
     };
     let amplitude = physics::terrain_amplitude(cfg.terrain);
@@ -636,7 +658,7 @@ fn nodes_stay_on_top_of_rough_ground() {
         let frames = evolution_simulator::cpu_engine::trajectory(&creature, &cfg);
         for frame in &frames[physics::settle() as usize + 1..] {
             for (node, gene) in frame.iter().zip(&creature.nodes) {
-                let (height, slope) = physics::terrain(node[0], amplitude);
+                let (height, slope) = physics::terrain_with_slope(node[0], amplitude, cfg.slope);
                 let floor = height + gene.diameter * 0.5 * (1.0 + slope * slope).sqrt();
                 assert!(
                     node[1] >= floor - 0.01,
@@ -1282,6 +1304,69 @@ fn heat_wave_and_drought_reduce_distance() {
     assert!(
         drought < calm - 1.0,
         "drought must cost distance: {drought} m vs {calm} m"
+    );
+}
+
+#[test]
+fn uphill_slope_and_headwind_reduce_distance() {
+    // The same walker on flat ground, up a 25% hill, and into a gale. Both
+    // effects are forces, never scoring terms, and each must cost real
+    // distance.
+    let base = Config {
+        population: 16,
+        duration: 5.0,
+        ..config()
+    };
+    let mut pop = evolution::Population::default();
+    for i in 0..16 {
+        let mut walker = energy_dependent_walker();
+        walker.id = i as u64;
+        pop.push(walker);
+    }
+    let calm = mean_distance(&pop, &base);
+    let uphill = mean_distance(
+        &pop,
+        &Config {
+            slope: 0.25,
+            ..base.clone()
+        },
+    );
+    let headwind = mean_distance(
+        &pop,
+        &Config {
+            wind: -6.0,
+            ..base.clone()
+        },
+    );
+    eprintln!("mean distance: calm {calm} m, 25% uphill {uphill} m, gale {headwind} m");
+    assert!(
+        uphill < calm - 0.5,
+        "uphill must cost distance: {uphill} m vs {calm} m"
+    );
+    assert!(
+        headwind < calm - 0.5,
+        "a headwind must cost distance: {headwind} m vs {calm} m"
+    );
+    // With the ground disabled the slope must not act at all, so both
+    // free-fall trials are identical.
+    let free = mean_distance(
+        &pop,
+        &Config {
+            ground: false,
+            ..base.clone()
+        },
+    );
+    let free_hill = mean_distance(
+        &pop,
+        &Config {
+            ground: false,
+            slope: 0.25,
+            ..base.clone()
+        },
+    );
+    assert_eq!(
+        free, free_hill,
+        "slope must not act while the ground is off"
     );
 }
 

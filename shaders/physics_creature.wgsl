@@ -44,6 +44,10 @@ struct Params {
     // world and packed in the same order as creature_kernel::Params.
     muscle_energy: f32,
     muscle_recovery: f32,
+    // Ground slope (rise over run), already zeroed when the ground is
+    // disabled, and steady horizontal wind acceleration (m/s²).
+    slope: f32,
+    wind: f32,
 }
 struct Result {
     fitness: f32,
@@ -132,7 +136,8 @@ const LIFT_CLEARANCE: f32 = 0.01;
 const JOINT_BREAK_COS: f32 = JOINTBREAKCOS;
 const JOINT_BREAK_SIN: f32 = JOINTBREAKSIN;
 
-// Height and slope of the rough ground; mirrors physics::terrain.
+// Height and slope of the rough ground; mirrors physics::terrain plus the
+// linear tilt of physics::terrain_with_slope.
 fn terrain(x: f32) -> vec2f {
     let t0 = x * (1.0 / 1.1);
     let u0 = t0 - floor(t0);
@@ -143,7 +148,7 @@ fn terrain(x: f32) -> vec2f {
     let height = 0.65 * 16.0 * w0 * w0 + 0.35 * 16.0 * w1 * w1;
     let slope = 0.65 * 32.0 * w0 * (1.0 - 2.0 * u0) * (1.0 / 1.1)
         + 0.35 * 32.0 * w1 * (1.0 - 2.0 * u1) * (1.0 / 0.43);
-    return p.terrain * vec2f(height, slope);
+    return p.terrain * vec2f(height, slope) + vec2f(p.slope * x, p.slope);
 }
 
 // Whether node `n` is set in a 64-node bitmask split into two words.
@@ -290,7 +295,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if j >= body_nodes { break; }
                 let k = j * WG + lane;
                 var floor_y = 0.0;
-                if p.terrain > 0.0 {
+                if p.terrain > 0.0 || p.slope != 0.0 {
                     floor_y = terrain(pos[k].x - shift_x).x;
                 }
                 low = min(low, pos[k].y - radius[j] - floor_y);
@@ -385,7 +390,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         }
 
         var gravity = 0.0;
-        if tick >= SETTLE { gravity = p.gravity; }
+        var wind = 0.0;
+        if tick >= SETTLE {
+            gravity = p.gravity;
+            // A steady wind is a horizontal acceleration on every node. It is
+            // a force only, never a fitness term.
+            wind = p.wind;
+        }
         // Integrate velocities first. The per-node speed cap must not push the
         // body: the momentum it removes is spread back over the whole body.
         var capped_momentum = vec2f(0.0);
@@ -393,7 +404,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             if j >= body_nodes { break; }
             let k = j * WG + lane;
             if failed[j] < 0.5 {
-                let free = (vel[k] + (scr[k] * inv_mass[j] - vec2f(0.0, gravity)) * DT) * p.air;
+                let free = (vel[k] + (scr[k] * inv_mass[j] - vec2f(0.0, gravity) + vec2f(wind, 0.0)) * DT) * p.air;
                 let capped = limit_speed(free);
                 capped_momentum += (free - capped) * mass[j];
                 scr[k] = capped;
@@ -425,7 +436,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
                 let k = j * WG + lane;
-                if p.terrain > 0.0 {
+                if p.terrain > 0.0 || p.slope != 0.0 {
                     // Push out along the ground normal, so bumps resist sliding.
                     let ground = terrain(pos[k].x);
                     let secant = sqrt(1.0 + ground.y * ground.y);

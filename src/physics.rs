@@ -715,6 +715,14 @@ pub fn terrain(x: f32, amplitude: f32) -> (f32, f32) {
     }
     (amplitude * height, amplitude * slope)
 }
+/// Ground height and slope at `x` for bump height `amplitude` plus a linear
+/// `tilt` (rise over run) that raises the ground in the +x direction. The two
+/// engines sample this same ground; `tilt` is 0 when the slope effect is calm
+/// or the ground is disabled.
+pub fn terrain_with_slope(x: f32, amplitude: f32, tilt: f32) -> (f32, f32) {
+    let (height, slope) = terrain(x, amplitude);
+    (height + tilt * x, slope + tilt)
+}
 pub fn fitness(n: &[Node]) -> f32 {
     if n.iter().any(|n| n.failed != 0.0) {
         FAILED
@@ -802,6 +810,21 @@ mod tests {
             assert!((0.0..=0.05 + 1e-6).contains(&terrain(x, 0.05).0));
         }
         assert_eq!(terrain(0.7, 0.0), (0.0, 0.0));
+        // The linear tilt raises the ground and adds a constant to the slope,
+        // so the same numeric check holds on a hill.
+        let tilt = 0.15;
+        for i in 0..200 {
+            let x = i as f32 * 0.037 - 3.0;
+            let (height, slope) = terrain_with_slope(x, 0.05, tilt);
+            let h = 1e-3;
+            let numeric = (terrain_with_slope(x + h, 0.05, tilt).0
+                - terrain_with_slope(x - h, 0.05, tilt).0)
+                / (2.0 * h);
+            assert!((slope - numeric).abs() < 1e-2, "{x}: {slope} vs {numeric}");
+            assert!((height - (terrain(x, 0.05).0 + tilt * x)).abs() < 1e-6);
+        }
+        assert_eq!(terrain_with_slope(0.7, 0.0, 0.0), (0.0, 0.0));
+        assert_eq!(terrain_with_slope(2.0, 0.0, 0.25), (0.5, 0.25));
     }
 
     #[test]

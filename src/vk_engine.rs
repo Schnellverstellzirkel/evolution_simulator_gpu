@@ -601,6 +601,9 @@ impl VkEngine {
                     terrain: crate::physics::terrain_amplitude(cfg.terrain),
                     muscle_energy: cfg.muscle_energy,
                     muscle_recovery: cfg.muscle_recovery,
+                    // A disabled ground ignores the slope effect, as on the CPU.
+                    slope: if cfg.ground { cfg.slope } else { 0.0 },
+                    wind: cfg.wind,
                 };
                 param_data[offset..offset + std::mem::size_of::<Params>()]
                     .copy_from_slice(bytemuck::bytes_of(&p));

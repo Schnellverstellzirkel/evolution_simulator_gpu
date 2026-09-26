@@ -19,6 +19,12 @@ pub struct Config {
     pub muscle_energy: f32,
     /// Multiplier on muscle energy recovery per second (drought); 1.0 is calm.
     pub muscle_recovery: f32,
+    /// Ground slope as rise over run; 0.0 is flat, positive tilts the ground
+    /// up in the +x direction.
+    pub slope: f32,
+    /// Steady horizontal wind acceleration (m/s²); 0.0 is calm, positive
+    /// pushes nodes in the +x direction.
+    pub wind: f32,
     pub min_size: f32,
     pub max_size: f32,
     pub min_friction: f32,
@@ -48,6 +54,8 @@ impl Default for Config {
             terrain: 0,
             muscle_energy: 1.0,
             muscle_recovery: 1.0,
+            slope: 0.0,
+            wind: 0.0,
             min_size: 0.06,
             max_size: 0.12,
             min_friction: 0.65,
@@ -78,6 +86,8 @@ struct HumanConfig {
     terrain: u8,
     muscle_energy: f32,
     muscle_recovery: f32,
+    slope: f32,
+    wind: f32,
     min_size: f32,
     max_size: f32,
     min_friction: f32,
@@ -106,6 +116,8 @@ impl Default for HumanConfig {
             terrain: c.terrain,
             muscle_energy: c.muscle_energy,
             muscle_recovery: c.muscle_recovery,
+            slope: c.slope,
+            wind: c.wind,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -136,6 +148,8 @@ impl From<HumanConfig> for Config {
             terrain: c.terrain,
             muscle_energy: c.muscle_energy,
             muscle_recovery: c.muscle_recovery,
+            slope: c.slope,
+            wind: c.wind,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -165,6 +179,8 @@ impl From<&Config> for HumanConfig {
             terrain: c.terrain,
             muscle_energy: c.muscle_energy,
             muscle_recovery: c.muscle_recovery,
+            slope: c.slope,
+            wind: c.wind,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -193,6 +209,8 @@ struct BinaryConfig {
     terrain: u8,
     muscle_energy: f32,
     muscle_recovery: f32,
+    slope: f32,
+    wind: f32,
     min_size: f32,
     max_size: f32,
     min_friction: f32,
@@ -220,6 +238,8 @@ impl From<&Config> for BinaryConfig {
             terrain: c.terrain,
             muscle_energy: c.muscle_energy,
             muscle_recovery: c.muscle_recovery,
+            slope: c.slope,
+            wind: c.wind,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -249,6 +269,8 @@ impl From<BinaryConfig> for Config {
             terrain: c.terrain,
             muscle_energy: c.muscle_energy,
             muscle_recovery: c.muscle_recovery,
+            slope: c.slope,
+            wind: c.wind,
             ground_friction: c.ground_friction,
             min_size: c.min_size,
             max_size: c.max_size,
@@ -327,6 +349,14 @@ impl Config {
         ensure!(
             self.muscle_recovery.is_finite() && (0.05..=2.0).contains(&self.muscle_recovery),
             "Muscle recovery multiplier must be 0.05–2"
+        );
+        ensure!(
+            self.slope.is_finite() && (-0.6..=0.6).contains(&self.slope),
+            "Slope must be -0.6–0.6 rise over run"
+        );
+        ensure!(
+            self.wind.is_finite() && (-20.0..=20.0).contains(&self.wind),
+            "Wind must be -20–20 m/s²"
         );
         ensure!(
             self.min_size.is_finite()

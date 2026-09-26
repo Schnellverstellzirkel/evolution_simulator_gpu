@@ -127,9 +127,9 @@ fn muscle_length(m: &MuscleF, time: F, exact: bool) -> F {
 }
 
 /// Height and slope of the rough ground across the lanes; mirrors
-/// `physics::terrain`.
+/// `physics::terrain` plus the linear tilt of `physics::terrain_with_slope`.
 #[inline(always)]
-fn terrain(x: F, amplitude: f32) -> (F, F) {
+fn terrain(x: F, amplitude: f32, tilt: f32) -> (F, F) {
     let mut height = F::splat(0.0);
     let mut slope = F::splat(0.0);
     for (wavelength, weight, offset) in physics::TERRAIN_WAVES {
@@ -139,7 +139,10 @@ fn terrain(x: F, amplitude: f32) -> (F, F) {
         height += w * w * (weight * 16.0);
         slope += w * (F::splat(1.0) - u * 2.0) * (weight * 32.0 * (1.0 / wavelength));
     }
-    (height * amplitude, slope * amplitude)
+    (
+        height * amplitude + x * tilt,
+        slope * amplitude + F::splat(tilt),
+    )
 }
 
 /// Clearance a touching node must reach to count as a lifted foot.
@@ -315,7 +318,10 @@ impl Group {
         let max_force = F::splat(limits.muscle_force);
         let max_spin = F::splat(limits.bone_spin);
         let amplitude = physics::terrain_amplitude(cfg.terrain);
-        let rough = amplitude > 0.0;
+        // A disabled ground ignores the slope effect; otherwise the tilt joins
+        // the bumps in one terrain sample.
+        let tilt = if ground { cfg.slope } else { 0.0 };
+        let rough = amplitude > 0.0 || tilt != 0.0;
         let load = |v: &Vec<V>| -> Vec<F> { v.iter().map(F::load).collect() };
         let mass = load(&self.mass);
         let radius = load(&self.radius);
@@ -428,7 +434,7 @@ impl Group {
                 let shift_x = avg * inv_total_mass;
                 for j in 0..n {
                     let ground_y = if rough {
-                        terrain(px[j] - shift_x, amplitude).0
+                        terrain(px[j] - shift_x, amplitude, tilt).0
                     } else {
                         zero
                     };
@@ -503,12 +509,15 @@ impl Group {
             }
 
             let gravity = if tick >= settle { cfg.gravity } else { 0.0 };
+            // A steady wind is an acceleration on every node, like gravity but
+            // horizontal. It is a force only, never a fitness term.
+            let wind = if tick >= settle { cfg.wind } else { 0.0 };
             let colliding = tick >= settle && ground;
             // The speed cap must not push the body: spread the momentum it
             // removes back over all nodes.
             let (mut removed_x, mut removed_y) = (zero, zero);
             for j in 0..n {
-                let free_x = (vx[j] + (sx[j] * inv_mass[j]) * dt) * air;
+                let free_x = (vx[j] + (sx[j] * inv_mass[j] + wind) * dt) * air;
                 let free_y = (vy[j] + (sy[j] * inv_mass[j] - gravity) * dt) * air;
                 if ledger_on && colliding {
                     ledger[5] +=
@@ -548,7 +557,7 @@ impl Group {
                 for j in 0..n {
                     if rough {
                         // Push out along the ground normal, so bumps resist sliding.
-                        let (height, slope) = terrain(px[j], amplitude);
+                        let (height, slope) = terrain(px[j], amplitude, tilt);
                         let secant_sq = one + slope * slope;
                         floor[j] = height + radius[j] * secant_sq.sqrt();
                         let depth = (floor[j] - py[j]).max(zero) / secant_sq;

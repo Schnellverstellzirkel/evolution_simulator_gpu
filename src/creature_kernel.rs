@@ -36,6 +36,10 @@ pub struct Params {
     pub muscle_energy: f32,
     /// Multiplier on muscle energy recovery (drought); 1.0 is calm.
     pub muscle_recovery: f32,
+    /// Ground slope (rise over run), zeroed when the ground is disabled.
+    pub slope: f32,
+    /// Steady horizontal wind acceleration (m/s²); positive pushes +x.
+    pub wind: f32,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -368,7 +372,9 @@ mod tests {
         assert_eq!(std::mem::offset_of!(Params, terrain), 36);
         assert_eq!(std::mem::offset_of!(Params, muscle_energy), 40);
         assert_eq!(std::mem::offset_of!(Params, muscle_recovery), 44);
-        assert_eq!(std::mem::size_of::<Params>(), 48);
+        assert_eq!(std::mem::offset_of!(Params, slope), 48);
+        assert_eq!(std::mem::offset_of!(Params, wind), 52);
+        assert_eq!(std::mem::size_of::<Params>(), 56);
     }
 
     #[test]

@@ -45,6 +45,11 @@ pub const HEAT: [f32; 4] = [1.0, 0.7, 0.5, 0.35];
 /// Muscle energy recovery multiplier at each level, from the calm world down
 /// to almost no recovery.
 pub const DROUGHT: [f32; 4] = [1.0, 0.6, 0.3, 0.1];
+/// Ground slope (rise over run) at each level, from flat to a steep climb.
+pub const SLOPE: [f32; 5] = [0.0, 0.03, 0.08, 0.15, 0.25];
+/// Horizontal wind acceleration (m/s²) at each level, from calm to a steady
+/// headwind that opposes +x travel.
+pub const WIND: [f32; 4] = [0.0, -1.0, -3.0, -6.0];
 
 fn nearest(table: &[f32], value: f32) -> usize {
     table
@@ -54,7 +59,7 @@ fn nearest(table: &[f32], value: f32) -> usize {
         .map_or(0, |(i, _)| i)
 }
 
-pub const EFFECTS: [Effect; 6] = [
+pub const EFFECTS: [Effect; 8] = [
     Effect {
         name: "Ground",
         levels: &[
@@ -121,6 +126,26 @@ pub const EFFECTS: [Effect; 6] = [
         get: |c| nearest(&DROUGHT, c.muscle_recovery),
         set: |c, level| c.muscle_recovery = DROUGHT[level],
     },
+    Effect {
+        name: "Slope",
+        levels: &["Flat", "3%", "8%", "15%", "25%"],
+        calm: 0,
+        raise: "Tilt uphill",
+        lower: "Flatten",
+        why: "A climb charges the body for every meter of height it gains, so long, heavy bodies pay and compact ones keep their speed.",
+        get: |c| nearest(&SLOPE, c.slope),
+        set: |c, level| c.slope = SLOPE[level],
+    },
+    Effect {
+        name: "Wind",
+        levels: &["Calm", "Breeze", "Strong", "Gale"],
+        calm: 0,
+        raise: "Headwind",
+        lower: "Calm",
+        why: "A steady headwind pushes every node back. Low, streamlined bodies waste less of each stroke and stop flailing.",
+        get: |c| nearest(&WIND, c.wind),
+        set: |c, level| c.wind = WIND[level],
+    },
 ];
 
 #[cfg(test)]
@@ -162,6 +187,28 @@ mod tests {
             cfg.ground_friction < calm,
             "the last level must be slipperier than the calm world"
         );
+    }
+
+    #[test]
+    fn slope_only_climbs_and_wind_only_opposes_the_run() {
+        assert!(
+            SLOPE.windows(2).all(|pair| pair[1] > pair[0]),
+            "slope levels must rise monotonically from flat"
+        );
+        assert!(
+            WIND.windows(2).all(|pair| pair[1] < pair[0]),
+            "wind levels must strengthen monotonically from calm"
+        );
+        assert_eq!(SLOPE[0], 0.0);
+        assert_eq!(WIND[0], 0.0);
+        let slope = EFFECTS.iter().find(|e| e.name == "Slope").unwrap();
+        let wind = EFFECTS.iter().find(|e| e.name == "Wind").unwrap();
+        let mut cfg = Config::default();
+        slope.set_level(&mut cfg, slope.levels.len() - 1);
+        assert!(cfg.slope > 0.0, "the steepest level must tilt uphill");
+        let mut cfg = Config::default();
+        wind.set_level(&mut cfg, wind.levels.len() - 1);
+        assert!(cfg.wind < 0.0, "the strongest level must oppose +x travel");
     }
 
     #[test]
