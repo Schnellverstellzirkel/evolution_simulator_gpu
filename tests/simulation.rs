@@ -940,7 +940,7 @@ fn a_passive_body_never_rises_above_its_start() {
         let start = height(&frames[settle + 1]);
         let highest = frames[settle + 1..]
             .iter()
-            .map(|f| height(f))
+            .map(height)
             .fold(f32::MIN, f32::max);
         assert!(
             highest <= start + 0.02,
