@@ -501,6 +501,13 @@ impl App {
                     self.worker.send(Command::UndoMeteor);
                 }
                 if ui
+                    .add(egui::Button::new("Extinction").small())
+                    .on_hover_text("Wipe out the island whose best creature is slowest, so it starts over from new designs. Undo brings its elites back.")
+                    .clicked()
+                {
+                    self.worker.send(Command::Extinction);
+                }
+                if ui
                     .add(egui::Button::new("Meteor strike").small())
                     .on_hover_text("Wipe out half of every archive's elites at random. Undo brings them back.")
                     .clicked()

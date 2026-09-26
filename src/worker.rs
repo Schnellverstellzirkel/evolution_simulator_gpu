@@ -25,7 +25,9 @@ pub enum Command {
     Configure(Config),
     /// Wipe out half of every archive's elites (kept as fossils for undo).
     Meteor,
-    /// Return the fossils of earlier meteor strikes to their archives.
+    /// Wipe out the weakest island (kept as fossils for undo).
+    Extinction,
+    /// Return the fossils of earlier catastrophes to their archives.
     UndoMeteor,
     Save(PathBuf),
     Load(PathBuf),
@@ -282,6 +284,12 @@ fn run(
                         if let Some(e) = &mut exp {
                             let lost = e.meteor(0.5);
                             status = format!("A meteor wiped out {lost} elites");
+                        }
+                    }
+                    Command::Extinction => {
+                        if let Some(e) = &mut exp {
+                            let lost = e.extinction();
+                            status = format!("The weakest island lost all {lost} elites");
                         }
                     }
                     Command::UndoMeteor => {

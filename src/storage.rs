@@ -1430,6 +1430,29 @@ impl Experiment {
         self.fossils.extend(fossils);
         lost
     }
+    /// An extinction wipes out the island whose best creature is slowest. Its
+    /// cells refill from its own survivors' offspring and from migrants, so a
+    /// stalled island starts over from new designs (Lehman and Miikkulainen,
+    /// 2015). The lost elites become fossils, so it can be undone. Returns how
+    /// many elites were lost.
+    pub fn extinction(&mut self) -> usize {
+        let weakest = self
+            .islands
+            .iter()
+            .enumerate()
+            .filter(|(_, island)| !island.entries.is_empty())
+            .min_by(|a, b| a.1.best_fitness().total_cmp(&b.1.best_fitness()))
+            .map(|(index, _)| index);
+        let Some(index) = weakest else {
+            return 0;
+        };
+        let lost = std::mem::take(&mut self.islands[index].entries);
+        self.islands[index].rebuild_indices();
+        let count = lost.len();
+        self.fossils
+            .extend(lost.into_iter().map(|elite| (Some(index), elite)));
+        count
+    }
     /// Undoes meteor strikes: every fossil returns to its archive if its cell
     /// is empty or holds a slower elite. Returns how many came back.
     pub fn undo_meteor(&mut self) -> usize {
