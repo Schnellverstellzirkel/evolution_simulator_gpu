@@ -996,7 +996,9 @@ impl App {
                                     rect = destination.translate((*previous - destination.min) * (1. - ease));
                                 }
                                 paint_card(ui.painter(), card, rect, response.hovered(), snapshot.stage);
-                                if response.clicked() { selected = Some(card.index); }
+                                if response.clicked() {
+                                    selected = Some((card.creature.clone(), snapshot.config.clone()));
+                                }
                                 response.on_hover_text(format!(
                                     "ID {}\n{} nodes / {} bones / {} muscles\nMutability {:.2}\n{}\n{}\nClick to replay",
                                     card.creature.id,
@@ -1028,8 +1030,8 @@ impl App {
             self.worker.send(Command::Page(start));
             self.last_page = start;
         }
-        if let Some(i) = selected {
-            self.worker.send(Command::Preview(i));
+        if let Some((creature, config)) = selected {
+            self.worker.send(Command::Preview { creature, config });
             self.tab = Tab::Overview;
         }
     }

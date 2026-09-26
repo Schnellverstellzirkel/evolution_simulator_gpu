@@ -27,7 +27,10 @@ pub enum Command {
     Load(PathBuf),
     Export(PathBuf),
     Page(usize),
-    Preview(usize),
+    Preview {
+        creature: Creature,
+        config: Config,
+    },
     /// Benchmark probe: the UI send time, used to measure how long queued controls wait.
     Ping(Instant),
     Shutdown,
@@ -201,7 +204,7 @@ fn run(
                 command,
                 Command::Ping(_)
                     | Command::Page(_)
-                    | Command::Preview(_)
+                    | Command::Preview { .. }
                     | Command::Pause
                     | Command::Run { .. }
                     | Command::Next
@@ -310,29 +313,26 @@ fn run(
                     Command::Page(start) => {
                         page = start;
                     }
-                    Command::Preview(i) => {
+                    Command::Preview { creature, config } => {
                         if let Some(e) = &exp {
-                            if let Some(elite) = e.archive.entries.get(i) {
-                                preview = Some((elite.creature.clone(), e.config.clone()));
-                                let chain = e.ancestry(elite.creature.id, 400);
-                                lineage = Some(
-                                    chain
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(k, a)| LineageStep {
-                                            generation: a.generation,
-                                            fitness: a.fitness,
-                                            gain: chain
-                                                .get(k + 1)
-                                                .map_or(0.0, |parent| a.fitness - parent.fitness),
-                                            change: a.change.clone(),
-                                            creature: a.creature.clone(),
-                                        })
-                                        .collect(),
-                                );
-                            } else if e.archive.entries.is_empty() && i < e.config.population {
-                                preview = Some((e.population.creature(i), e.config.clone()));
-                            }
+                            let id = creature.id;
+                            preview = Some((creature, config));
+                            let chain = e.ancestry(id, 400);
+                            lineage = Some(
+                                chain
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(k, a)| LineageStep {
+                                        generation: a.generation,
+                                        fitness: a.fitness,
+                                        gain: chain
+                                            .get(k + 1)
+                                            .map_or(0.0, |parent| a.fitness - parent.fitness),
+                                        change: a.change.clone(),
+                                        creature: a.creature.clone(),
+                                    })
+                                    .collect(),
+                            );
                         }
                     }
                 }
