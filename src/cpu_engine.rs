@@ -805,7 +805,26 @@ impl Group {
                         }
                     }
                 }
-                let falls = fall_time.le(zero) & py[0].lt(py[neck_base]);
+                // A joint forced far past its range breaks, which also ends
+                // the trial.
+                let mut broken = zero.lt(zero);
+                for (b, &(pivot, child)) in self.bones.iter().enumerate() {
+                    let Some(reference) = self.joint_reference[b] else {
+                        continue;
+                    };
+                    let [center_x, center_y, cos_half, sin_half, ..] = joint[b];
+                    let (ux, uy) = (px[reference] - px[pivot], py[reference] - py[pivot]);
+                    let (vx_, vy_) = (px[child] - px[pivot], py[child] - py[pivot]);
+                    let norm = ((ux * ux + uy * uy) * (vx_ * vx_ + vy_ * vy_)).sqrt();
+                    let inv_norm = one / norm.max(F::splat(1e-12));
+                    let rx = (ux * vx_ + uy * vy_) * inv_norm;
+                    let ry = (ux * vy_ - uy * vx_) * inv_norm;
+                    let (sin_break, cos_break) = physics::JOINT_BREAK.sin_cos();
+                    let limit = cos_half * cos_break - sin_half * sin_break;
+                    broken = broken
+                        | ((rx * center_x + ry * center_y).lt(limit) & norm.gt(F::splat(1e-12)));
+                }
+                let falls = fall_time.le(zero) & (py[0].lt(py[neck_base]) | broken);
                 if falls.any() {
                     let mut x = zero;
                     for j in 0..n {

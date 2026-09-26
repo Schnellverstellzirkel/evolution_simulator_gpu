@@ -38,7 +38,7 @@ impl Default for Config {
             duration: 60.0,
             mutation: 1.0,
             gravity: 9.8,
-            air_retention: 0.985,
+            air_retention: 1.0,
             ground_friction: 1.5,
             ground: true,
             terrain: 0,

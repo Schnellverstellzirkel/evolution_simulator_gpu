@@ -303,6 +303,14 @@ pub fn shader_source(
             "SAMPLEINTERVALu",
             &format!("{}u", fidelity.sample_interval()),
         )
+        .replace(
+            "JOINTBREAKCOS",
+            &format!("{:.9}", physics::JOINT_BREAK.cos()),
+        )
+        .replace(
+            "JOINTBREAKSIN",
+            &format!("{:.9}", physics::JOINT_BREAK.sin()),
+        )
         .replace("TURNCOS", &format!("{:.9}", fidelity.turn_limits().0))
         .replace("TURNTAN", &format!("{:.9}", fidelity.turn_limits().1))
         .replace("SHAREDLEN", &(capacity * workgroup as usize).to_string())

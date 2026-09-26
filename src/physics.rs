@@ -127,15 +127,15 @@ pub struct Limits {
 }
 impl Limits {
     pub const DEFAULT: Limits = Limits {
-        muscle_speed: 2.0,
-        muscle_force: 5.0,
-        node_speed: 5.0,
-        bone_spin: 15.0,
-        min_period: 0.5,
-        muscle_energy: 15.0,
-        muscle_recovery: 0.25,
-        max_bone: 2.0,
-        max_stroke: 1.0,
+        muscle_speed: 24.0,
+        muscle_force: 100.0,
+        node_speed: 60.0,
+        bone_spin: 40.0,
+        min_period: 0.2,
+        muscle_energy: 120.0,
+        muscle_recovery: 0.5,
+        max_bone: 10.0,
+        max_stroke: 5.0,
     };
 }
 /// The physics limits. `EVOLUTION_MAX_MUSCLE_SPEED`, `EVOLUTION_MAX_MUSCLE_FORCE`,
@@ -573,6 +573,35 @@ impl Joint {
         reference_mass: 0.0,
     };
 }
+/// How far (rad) a joint may be forced past its range before it breaks. A
+/// broken joint ends the trial like a fall, so no gait can profit from
+/// muscles forcing joints round like wheels.
+pub const JOINT_BREAK: f32 = 0.5;
+/// Cosine of the angle from the middle of a joint's range at which it
+/// breaks, from the cosine and sine of half its range.
+pub fn joint_break_cos(half: [f32; 2]) -> f32 {
+    let (sin, cos) = JOINT_BREAK.sin_cos();
+    half[0] * cos - half[1] * sin
+}
+/// Whether a joint in `positions` is forced past its range by more than
+/// `JOINT_BREAK`.
+pub fn broken_joint(positions: &[[f32; 2]], bones: &[Bone], joints: &[Joint]) -> bool {
+    bones.iter().zip(joints).any(|(bone, joint)| {
+        let Some(reference) = joint.reference else {
+            return false;
+        };
+        let pivot = positions[bone.a as usize];
+        let at = |i: usize| [positions[i][0] - pivot[0], positions[i][1] - pivot[1]];
+        let (u, v) = (at(reference), at(bone.b as usize));
+        let norm = ((u[0] * u[0] + u[1] * u[1]) * (v[0] * v[0] + v[1] * v[1])).sqrt();
+        if norm < 1e-12 {
+            return false;
+        }
+        let cos = (u[0] * v[0] + u[1] * v[1]) / norm;
+        let sin = (u[0] * v[1] - u[1] * v[0]) / norm;
+        cos * joint.center[0] + sin * joint.center[1] < joint_break_cos(joint.half)
+    })
+}
 /// Rounds to the GPU's snorm16 storage of the joint range center.
 fn snorm16(v: f32) -> f32 {
     (v.clamp(-1.0, 1.0) * 32767.0).round() / 32767.0
@@ -739,6 +768,31 @@ mod tests {
         let length = (nodes[1].pos[0] - nodes[0].pos[0]).hypot(nodes[1].pos[1] - nodes[0].pos[1]);
         assert!((length - bone.rest_length).abs() < 1e-6);
         assert!(nodes.iter().all(|node| node.vel == [0.0; 2]));
+    }
+
+    #[test]
+    fn joints_break_only_well_past_their_range() {
+        let genes: Vec<NodeGene> = [[0.0, 1.0], [1.0, 1.0], [2.0, 1.0]]
+            .iter()
+            .map(|p| NodeGene {
+                x: p[0],
+                y: p[1],
+                diameter: 0.1,
+                friction: 1.0,
+            })
+            .collect();
+        let mut bones = vec![Bone::new(0, 1, 1.0), Bone::new(1, 2, 1.0)];
+        bones[1].min_angle = -0.3;
+        bones[1].max_angle = 0.3;
+        let joints = joints(&genes, &bones);
+        // Bend the second bone by `turn` from its starting direction.
+        let bent = |turn: f32| vec![[0.0, 1.0], [1.0, 1.0], [1.0 + turn.cos(), 1.0 + turn.sin()]];
+        for turn in [0.0, 0.3, -0.3, 0.7, -0.7] {
+            assert!(!broken_joint(&bent(turn), &bones, &joints), "turn {turn}");
+        }
+        for turn in [0.9, -0.9, 2.0, -3.0] {
+            assert!(broken_joint(&bent(turn), &bones, &joints), "turn {turn}");
+        }
     }
 
     #[test]

@@ -608,13 +608,25 @@ fn joints_stay_within_their_evolved_range() {
         let joints = physics::joints(&creature.nodes, &creature.bones);
         let start: Vec<[f32; 2]> = creature.nodes.iter().map(|n| [n.x, n.y]).collect();
         let frames = evolution_simulator::cpu_engine::trajectory(&creature, &cfg);
+        // The trial ends when the head falls or a joint breaks; a limp body
+        // may fold any way afterwards.
+        let base = creature.bones[0].b as usize;
+        let end = frames
+            .iter()
+            .enumerate()
+            .skip(physics::settle() as usize + 1)
+            .find(|(_, frame)| {
+                frame[0][1] < frame[base][1]
+                    || physics::broken_joint(frame, &creature.bones, &joints)
+            })
+            .map_or(frames.len(), |(tick, _)| tick + 1);
         for (bone, joint) in creature.bones.iter().zip(&joints) {
             let Some(reference) = joint.reference else {
                 continue;
             };
             let (pivot, child) = (bone.a as usize, bone.b as usize);
             let rest = joint_angle(&start, pivot, reference, child);
-            for frame in &frames {
+            for frame in &frames[..end] {
                 let offset = (joint_angle(frame, pivot, reference, child) - rest
                     + std::f32::consts::PI)
                     .rem_euclid(std::f32::consts::TAU)
@@ -624,8 +636,8 @@ fn joints_stay_within_their_evolved_range() {
         }
     }
     // Later length and ground passes can push a joint past its limit for a
-    // few steps, most when a fallen creature bounces on its heavy head; far
-    // from the half turn a wheel would need.
+    // few steps; beyond physics::JOINT_BREAK the joint breaks and the trial
+    // ends, far from the half turn a wheel would need.
     assert!(worst < 0.75, "a joint left its range by {worst} rad");
 }
 

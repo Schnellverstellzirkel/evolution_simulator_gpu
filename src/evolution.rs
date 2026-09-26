@@ -14,7 +14,7 @@ fn body_extent() -> f32 {
     2.0 * max_bone_length()
 }
 /// Longest muscle length (m), from `physics::limits()`.
-fn max_stroke() -> f32 {
+pub fn max_stroke() -> f32 {
     crate::physics::limits().max_stroke
 }
 /// Shortest muscle rhythm period (s), from `physics::limits()`.
@@ -1451,14 +1451,59 @@ pub fn grow_for_benchmark(creature: &mut Creature, cfg: &Config, seed: u64, targ
 }
 
 fn structural_mutation_in_place(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
-    match rng.index(6) {
+    match rng.index(7) {
         0 => split_bone(creature, cfg, rng),
         1 => duplicate_mirrored_node(creature, cfg, rng),
         2 => duplicate_limb(creature, cfg, rng),
         3 => retime_rhythm(creature, rng),
         4 => change_organ(creature, rng),
-        _ => phase_shift_group(creature, rng),
+        5 => phase_shift_group(creature, rng),
+        _ => rescale_body(creature, rng),
     }
+}
+
+/// Grows or shrinks the whole body. Lengths scale by `s` and the rhythm slows
+/// by `sqrt(s)`, as for animals of similar build under the same gravity, so
+/// the gait roughly carries over while the stride scales with the body.
+fn rescale_body(creature: &mut Creature, rng: &mut Rng) -> bool {
+    let longest_bone = creature
+        .bones
+        .iter()
+        .map(|b| b.rest_length)
+        .fold(0.0, f32::max);
+    let longest_muscle = creature.muscles.iter().map(|m| m.long).fold(0.0, f32::max);
+    if longest_bone <= 0.0 {
+        return false;
+    }
+    // Stay within the body limits instead of distorting the shape.
+    let most = (max_bone_length() / longest_bone)
+        .min(if longest_muscle > 0.0 {
+            max_stroke() / longest_muscle
+        } else {
+            f32::INFINITY
+        })
+        .min(1.5);
+    let scale = rng.range(0.75f32.ln(), 1.5f32.ln()).exp().min(most);
+    if (scale - 1.0).abs() < 0.02 {
+        return false;
+    }
+    let center = creature.nodes.iter().map(|n| n.x).sum::<f32>() / creature.nodes.len() as f32;
+    for node in &mut creature.nodes {
+        node.x = center + (node.x - center) * scale;
+        node.y *= scale;
+    }
+    for bone in &mut creature.bones {
+        bone.rest_length *= scale;
+    }
+    let tempo = scale.sqrt();
+    for muscle in &mut creature.muscles {
+        muscle.short *= scale;
+        muscle.long *= scale;
+        muscle.period *= tempo;
+        // Muscle force follows its target's speed, which grows by sqrt(s).
+        muscle.stiffness /= tempo;
+    }
+    true
 }
 
 fn split_bone(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
@@ -1699,7 +1744,7 @@ mod tests {
         };
         normalize_bone_lengths(&mut creature);
         assert_eq!(creature.bones[0].rest_length, 0.625);
-        creature.nodes[1].x = 4.0;
+        creature.nodes[1].x = 2.0 * max_bone_length();
         normalize_bone_lengths(&mut creature);
         assert_eq!(creature.bones[0].rest_length, max_bone_length());
     }
@@ -2023,6 +2068,42 @@ mod tests {
             assert!((after[0] - before[0]).abs() < 1e-5 && (after[1] - before[1]).abs() < 1e-5);
         }
         assert!(grown > 100, "only {grown} creatures could grow an organ");
+    }
+
+    #[test]
+    fn rescaling_scales_lengths_slows_the_rhythm_and_respects_limits() {
+        let cfg = Config::default();
+        let mut rescaled = 0;
+        for index in 0..200 {
+            let mut rng = Rng::new(13, 0, index);
+            let before = random_creature_from(&cfg, &mut rng);
+            let mut after = before.clone();
+            if !rescale_body(&mut after, &mut rng) {
+                continue;
+            }
+            rescaled += 1;
+            let scale = after.bones[0].rest_length / before.bones[0].rest_length;
+            assert!((0.74..=1.51).contains(&scale), "scale {scale}");
+            for (a, b) in after.bones.iter().zip(&before.bones) {
+                assert!((a.rest_length - b.rest_length * scale).abs() < 1e-4);
+                assert!(a.rest_length <= max_bone_length() + 1e-4);
+            }
+            for (a, b) in after.muscles.iter().zip(&before.muscles) {
+                assert!((a.long - b.long * scale).abs() < 1e-4);
+                assert!(a.long <= max_stroke() + 1e-4);
+                assert!((a.period - b.period * scale.sqrt()).abs() < 1e-4);
+            }
+            // The shape is kept: every node keeps its place relative to the
+            // body's horizontal center, scaled.
+            let center =
+                |c: &Creature| c.nodes.iter().map(|n| n.x).sum::<f32>() / c.nodes.len() as f32;
+            let (ca, cb) = (center(&after), center(&before));
+            for (a, b) in after.nodes.iter().zip(&before.nodes) {
+                assert!((a.x - ca - (b.x - cb) * scale).abs() < 1e-4);
+                assert!((a.y - b.y * scale).abs() < 1e-4);
+            }
+        }
+        assert!(rescaled > 150, "only {rescaled} creatures rescaled");
     }
 
     #[test]

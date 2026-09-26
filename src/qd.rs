@@ -13,9 +13,18 @@ pub(crate) const MORPHOLOGY_LIMIT: usize = 64;
 pub(crate) const ARCHIVE_CAPACITY: usize = ARCHIVE_LIMIT + MORPHOLOGY_LIMIT;
 pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 1 << 20;
 pub(crate) const CMA_LIMIT: usize = 96;
-pub const VERSION: u32 = 12;
+pub const VERSION: u32 = 13;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
+/// First byte of an optimizer's niche; behavior niches never reach it and
+/// morphology niches use 255.
+const OPTIMIZER_NICHE_MARKER: u8 = 254;
+/// The niche key of an island's optimizers for one gait cadence band;
+/// together with the body plan it identifies one optimizer.
+pub fn optimizer_niche(island: usize, cadence: u8) -> Niche {
+    let b = (island as u32).to_le_bytes();
+    Niche([OPTIMIZER_NICHE_MARKER, b[0], b[1], b[2], b[3], cadence])
+}
 pub(crate) const MIN_MORPHOLOGY_DESCENDANTS: u64 = 8;
 pub(crate) const MORPHOLOGY_PARENT_FRACTION: f32 = 0.10;
 // Random immigrants only seed an empty archive: against evolved elites they
@@ -197,7 +206,7 @@ impl Descriptor {
             bin(self.ground_contact, 0.0, 1.0, BINS[0]),
             bin(self.gait_frequency, 0.0, 6.0, BINS[1]),
             bin(self.vertical_oscillation, 0.0, 0.8, BINS[2]),
-            bin(self.mean_height, 0.25, 2.25, BINS[3]),
+            bin(height_axis(self.mean_height), 0.0, 1.0, BINS[3]),
             feet,
             0,
         ])
@@ -209,10 +218,17 @@ impl Descriptor {
             (self.gait_frequency / 6.0).clamp(0.0, 1.0),
             // Bounce is not an archive axis, so it adds no novelty either.
             0.0,
-            ((self.mean_height - 0.25) / 2.0).clamp(0.0, 1.0),
+            height_axis(self.mean_height),
             ((self.feet - 1.0) / (BINS[4] as f32 - 1.0)).clamp(0.0, 1.0),
         ]
     }
+}
+/// Mean height on a 0..1 log scale from 15 cm to the tallest bodies the
+/// bone limit allows, so small and large bodies each get their own cells.
+fn height_axis(height: f32) -> f32 {
+    let low = 0.15f32;
+    let high = (0.6 * crate::evolution::max_bone_length()).max(2.0 * low);
+    ((height.max(low) / low).ln() / (high / low).ln()).clamp(0.0, 1.0)
 }
 fn bin(value: f32, low: f32, high: f32, count: u8) -> u8 {
     (((value.clamp(low, high) - low) / (high - low) * count as f32).floor() as u8).min(count - 1)
@@ -888,8 +904,9 @@ pub fn record_emitter_batch(
 }
 
 impl CmaEmitter {
+    /// A CMA-ME emitter improving one niche of the archive.
     pub fn new(template: Creature, niche: Niche, generation: u32) -> Self {
-        let mean = parameters(&template);
+        let mean = exploring_parameters(&template);
         let dimensions = mean.len();
         Self {
             niche,
@@ -903,39 +920,55 @@ impl CmaEmitter {
             last_used_generation: generation,
         }
     }
+    /// A separable CMA-ES optimizer for one island's body plan, starting from
+    /// a fast elite: it searches in physical units and ranks samples by
+    /// fitness alone.
+    pub fn optimizer(template: Creature, niche: Niche, generation: u32) -> Self {
+        let mean = parameters(&template);
+        let dimensions = mean.len();
+        Self {
+            niche,
+            topology: Topology::of(&template),
+            template,
+            mean,
+            covariance: vec![1.0; dimensions],
+            path_c: vec![0.0; dimensions],
+            path_sigma: vec![0.0; dimensions],
+            sigma: 0.5,
+            last_used_generation: generation,
+        }
+    }
+    /// A new optimizer starting from `template` that keeps the step sizes
+    /// this one has learned for the same body plan.
+    pub fn recentered(&self, template: Creature, niche: Niche, generation: u32) -> Self {
+        let mut next = Self::optimizer(template, niche, generation);
+        if next.topology == self.topology && next.mean.len() == self.mean.len() {
+            next.covariance.clone_from(&self.covariance);
+            next.path_c.clone_from(&self.path_c);
+            next.path_sigma.clone_from(&self.path_sigma);
+            next.sigma = self.sigma;
+        }
+        next
+    }
+    pub fn optimizing(&self) -> bool {
+        self.niche.0[0] == OPTIMIZER_NICHE_MARKER
+    }
+    /// An optimizer whose steps have shrunk this far has converged.
+    pub fn converged(&self) -> bool {
+        self.optimizing() && self.sigma < 0.05
+    }
     pub fn sample(&self, rng: &mut Rng) -> Creature {
         self.sample_scaled(rng, 1.0)
     }
     pub fn sample_scaled(&self, rng: &mut Rng, strength: f32) -> Creature {
-        let phase_start = self.template.nodes.len() * 4 + self.template.bones.len();
-        // Diagonal covariance plus a rank-one term along the evolution path, so
-        // parameter changes that keep paying off move together.
-        let path_norm = self.path_c.iter().map(|p| p * p).sum::<f32>().sqrt();
-        let path_scale = if path_norm > 1e-6 {
-            PATH_WEIGHT.sqrt() * gaussian(rng) / path_norm * (self.mean.len() as f32).sqrt()
+        if self.optimizing() {
+            self.sample_optimizing(rng, strength)
         } else {
-            0.0
-        };
-        let values: Vec<_> = self
-            .mean
-            .iter()
-            .zip(&self.covariance)
-            .zip(&self.path_c)
-            .enumerate()
-            .map(|(d, ((&mean, &variance), &path))| {
-                let step = variance.sqrt() * gaussian(rng) + path * path_scale;
-                let value = mean + self.sigma * step * strength;
-                if is_phase_dimension(d, phase_start) {
-                    value.rem_euclid(1.0)
-                } else {
-                    value.clamp(0.0, 1.0)
-                }
-            })
-            .collect();
-        let mut creature = self.template.clone();
-        apply_parameters(&mut creature, &values);
-        creature
+            self.sample_exploring(rng, strength)
+        }
     }
+    /// Updates the search distribution from scored samples. CMA-ME emitters
+    /// get improvement keys; optimizers get fitness.
     pub fn tell(&mut self, population: &Population, samples: &mut Vec<(usize, f32)>) {
         if samples.len() < 2 {
             return;
@@ -961,6 +994,52 @@ impl CmaEmitter {
             samples.truncate(MAX_UPDATE_SAMPLES);
         }
         samples.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        if self.optimizing() {
+            self.tell_optimizing(population, samples);
+        } else {
+            self.tell_exploring(population, samples);
+        }
+    }
+    fn sample_exploring(&self, rng: &mut Rng, strength: f32) -> Creature {
+        let phase_start = self.template.nodes.len() * 4 + self.template.bones.len();
+        // Diagonal covariance plus a rank-one term along the evolution path, so
+        // parameter changes that keep paying off move together.
+        let path_norm = self.path_c.iter().map(|p| p * p).sum::<f32>().sqrt();
+        let path_scale = if path_norm > 1e-6 {
+            PATH_WEIGHT.sqrt() * gaussian(rng) / path_norm * (self.mean.len() as f32).sqrt()
+        } else {
+            0.0
+        };
+        let node_end = self.template.nodes.len() * 4;
+        let values: Vec<_> = self
+            .mean
+            .iter()
+            .zip(&self.covariance)
+            .zip(&self.path_c)
+            .enumerate()
+            .map(|(d, ((&mean, &variance), &path))| {
+                let step = variance.sqrt() * gaussian(rng) + path * path_scale;
+                let value = mean + self.sigma * step * strength;
+                // Positions and muscle lengths keep the original 4 m and 1 m
+                // scales but are open-ended, so large bodies keep their shape;
+                // repair enforces the body limits.
+                let muscle_field = d.checked_sub(phase_start).map(|m| m % 8);
+                if is_phase_dimension(d, phase_start) {
+                    value.rem_euclid(1.0)
+                } else if d < node_end && d % 4 == 0 {
+                    value
+                } else if (d < node_end && d % 4 == 1) || matches!(muscle_field, Some(2 | 3)) {
+                    value.max(0.0)
+                } else {
+                    value.clamp(0.0, 1.0)
+                }
+            })
+            .collect();
+        let mut creature = self.template.clone();
+        apply_exploring_parameters(&mut creature, &values);
+        creature
+    }
+    fn tell_exploring(&mut self, population: &Population, samples: &[(usize, f32)]) {
         let dimensions = self.mean.len();
         let mu = samples.len().div_ceil(2).max(1);
         let mut weights: Vec<f32> = (0..mu)
@@ -976,7 +1055,7 @@ impl CmaEmitter {
         let mut vector = vec![0.0; dimensions];
         let phase_start = self.template.nodes.len() * 4 + self.template.bones.len();
         for (rank, &(index, _)) in samples.iter().take(mu).enumerate() {
-            parameters_into(population, index, &mut vector);
+            exploring_parameters_into(population, index, &mut vector);
             for d in 0..dimensions {
                 if is_phase_dimension(d, phase_start) {
                     new_mean[d] += weights[rank] * wrap_phase(vector[d] - old_mean[d]);
@@ -1017,7 +1096,7 @@ impl CmaEmitter {
         let correction = if hsig { 0.0 } else { c_c * (2.0 - c_c) };
         let mut rank_mu = vec![0.0; dimensions];
         for (rank, &(index, _)) in samples.iter().take(mu).enumerate() {
-            parameters_into(population, index, &mut vector);
+            exploring_parameters_into(population, index, &mut vector);
             for d in 0..dimensions {
                 let coordinate_delta = if is_phase_dimension(d, phase_start) {
                     wrap_phase(vector[d] - old_mean[d])
@@ -1051,6 +1130,93 @@ impl CmaEmitter {
         .clamp(0.005, 0.35);
         self.mean = new_mean;
     }
+    fn sample_optimizing(&self, rng: &mut Rng, strength: f32) -> Creature {
+        let layout = Layout::of(&self.template);
+        let values: Vec<_> = self
+            .mean
+            .iter()
+            .zip(&self.covariance)
+            .enumerate()
+            .map(|(d, (&mean, &variance))| {
+                mean + self.sigma * strength * layout.scale(d) * variance.sqrt() * gaussian(rng)
+            })
+            .collect();
+        let mut creature = self.template.clone();
+        apply_parameters(&mut creature, &values);
+        creature
+    }
+    /// Separable CMA-ES update (Ros & Hansen 2008) from scored samples, fastest
+    /// first. Steps are measured in each coordinate's physical scale.
+    fn tell_optimizing(&mut self, population: &Population, samples: &[(usize, f32)]) {
+        let dimensions = self.mean.len();
+        let mu = samples.len().div_ceil(2).max(1);
+        let mut weights: Vec<f32> = (0..mu)
+            .map(|i| (mu as f32 + 0.5).ln() - ((i + 1) as f32).ln())
+            .collect();
+        let weight_sum = weights.iter().sum::<f32>().max(f32::MIN_POSITIVE);
+        for weight in &mut weights {
+            *weight /= weight_sum;
+        }
+        let mu_eff = 1.0 / weights.iter().map(|w| w * w).sum::<f32>().max(1e-6);
+        let layout = Layout::of(&self.template);
+        let sigma = self.sigma.max(1e-6);
+        // Weighted mean step and weighted squared steps, in units of sigma.
+        let mut step = vec![0.0; dimensions];
+        let mut rank_mu = vec![0.0; dimensions];
+        let mut vector = vec![0.0; dimensions];
+        for (rank, &(index, _)) in samples.iter().take(mu).enumerate() {
+            parameters_into(population, index, &mut vector);
+            for d in 0..dimensions {
+                let y = layout.delta(d, vector[d], self.mean[d]) / (sigma * layout.scale(d));
+                step[d] += weights[rank] * y;
+                rank_mu[d] += weights[rank] * y * y;
+            }
+        }
+        let n = dimensions as f32;
+        let c_sigma = (mu_eff + 2.0) / (n + mu_eff + 5.0);
+        let d_sigma =
+            1.0 + 2.0 * (((mu_eff - 1.0).max(0.0) / (n + 1.0)).sqrt() - 1.0).max(0.0) + c_sigma;
+        let c_c = (4.0 + mu_eff / n) / (n + 4.0 + 2.0 * mu_eff / n);
+        // A diagonal covariance learns (n + 2) / 3 times faster than a full one.
+        let separable = (n + 2.0) / 3.0;
+        let c1 = (2.0 / ((n + 1.3).powi(2) + mu_eff) * separable).min(0.5);
+        let c_mu = (2.0 * (mu_eff - 2.0 + 1.0 / mu_eff).max(0.0) / ((n + 2.0).powi(2) + mu_eff)
+            * separable)
+            .min(1.0 - c1);
+        let mut norm_sigma = 0.0;
+        for ((path, &step), &variance) in
+            self.path_sigma.iter_mut().zip(&step).zip(&self.covariance)
+        {
+            *path = (1.0 - c_sigma) * *path
+                + (c_sigma * (2.0 - c_sigma) * mu_eff).sqrt() * step / variance.sqrt().max(1e-6);
+            norm_sigma += *path * *path;
+        }
+        norm_sigma = norm_sigma.sqrt();
+        let chi = n.sqrt() * (1.0 - 1.0 / (4.0 * n) + 1.0 / (21.0 * n * n));
+        let hsig = norm_sigma / chi.max(1e-6) < 1.4 + 2.0 / (n + 1.0);
+        let correction = if hsig { 0.0 } else { c_c * (2.0 - c_c) };
+        for d in 0..dimensions {
+            self.path_c[d] = (1.0 - c_c) * self.path_c[d]
+                + if hsig {
+                    (c_c * (2.0 - c_c) * mu_eff).sqrt() * step[d]
+                } else {
+                    0.0
+                };
+            self.covariance[d] = ((1.0 - c1 - c_mu + c1 * correction) * self.covariance[d]
+                + c1 * self.path_c[d] * self.path_c[d]
+                + c_mu * rank_mu[d])
+                .clamp(1e-4, 1e4);
+            self.mean[d] = layout.moved(d, self.mean[d], sigma * layout.scale(d) * step[d]);
+        }
+        self.sigma = (self.sigma
+            * ((c_sigma / d_sigma) * (norm_sigma / chi.max(1e-6) - 1.0)).exp())
+        .clamp(0.01, 30.0);
+        // Fast gaits are fragile: when most samples fail outright, step-length
+        // control alone keeps growing the steps, so shrink them instead.
+        if samples[samples.len() / 2].1 < 0.25 * samples[0].1 {
+            self.sigma = (self.sigma * 0.6).max(0.01);
+        }
+    }
 }
 
 fn is_phase_dimension(dimension: usize, phase_start: usize) -> bool {
@@ -1068,14 +1234,14 @@ pub(crate) fn gaussian(rng: &mut Rng) -> f32 {
     let u2 = rng.unit();
     (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
 }
-fn parameters(creature: &Creature) -> Vec<f32> {
+fn exploring_parameters(creature: &Creature) -> Vec<f32> {
     let mut output = Vec::with_capacity(
         creature.nodes.len() * 4 + creature.bones.len() + creature.muscles.len() * 8,
     );
     for n in &creature.nodes {
         output.extend([
-            ((n.x + 4.0) / 8.0).clamp(0.0, 1.0),
-            (n.y / 4.0).clamp(0.0, 1.0),
+            (n.x + 4.0) / 8.0,
+            (n.y / 4.0).max(0.0),
             ((n.diameter - 0.01) / 0.99).clamp(0.0, 1.0),
             n.friction.clamp(0.0, 1.0),
         ]);
@@ -1090,8 +1256,8 @@ fn parameters(creature: &Creature) -> Vec<f32> {
         output.extend([
             m.anchor_a.clamp(0.0, 1.0),
             m.anchor_b.clamp(0.0, 1.0),
-            ((m.short - 0.01) / 0.79).clamp(0.0, 1.0),
-            ((m.long - 0.01) / 0.99).clamp(0.0, 1.0),
+            ((m.short - 0.01) / 0.79).max(0.0),
+            ((m.long - 0.01) / 0.99).max(0.0),
             ((m.period - crate::evolution::min_muscle_period())
                 / (10.0 - crate::evolution::min_muscle_period()))
             .clamp(0.0, 1.0),
@@ -1102,7 +1268,7 @@ fn parameters(creature: &Creature) -> Vec<f32> {
     }
     output
 }
-fn parameters_into(population: &Population, index: usize, output: &mut [f32]) {
+fn exploring_parameters_into(population: &Population, index: usize, output: &mut [f32]) {
     let genome = &population.genomes[index];
     let nodes = &population.nodes[genome.node_start..genome.node_start + genome.node_count];
     let muscles =
@@ -1110,8 +1276,8 @@ fn parameters_into(population: &Population, index: usize, output: &mut [f32]) {
     let mut i = 0;
     for n in nodes {
         output[i..i + 4].copy_from_slice(&[
-            ((n.x + 4.0) / 8.0).clamp(0.0, 1.0),
-            (n.y / 4.0).clamp(0.0, 1.0),
+            (n.x + 4.0) / 8.0,
+            (n.y / 4.0).max(0.0),
             ((n.diameter - 0.01) / 0.99).clamp(0.0, 1.0),
             n.friction.clamp(0.0, 1.0),
         ]);
@@ -1127,8 +1293,8 @@ fn parameters_into(population: &Population, index: usize, output: &mut [f32]) {
         output[i..i + 8].copy_from_slice(&[
             m.anchor_a.clamp(0.0, 1.0),
             m.anchor_b.clamp(0.0, 1.0),
-            ((m.short - 0.01) / 0.79).clamp(0.0, 1.0),
-            ((m.long - 0.01) / 0.99).clamp(0.0, 1.0),
+            ((m.short - 0.01) / 0.79).max(0.0),
+            ((m.long - 0.01) / 0.99).max(0.0),
             ((m.period - crate::evolution::min_muscle_period())
                 / (10.0 - crate::evolution::min_muscle_period()))
             .clamp(0.0, 1.0),
@@ -1139,7 +1305,7 @@ fn parameters_into(population: &Population, index: usize, output: &mut [f32]) {
         i += 8;
     }
 }
-fn apply_parameters(creature: &mut Creature, values: &[f32]) {
+fn apply_exploring_parameters(creature: &mut Creature, values: &[f32]) {
     let mut i = 0;
     for n in &mut creature.nodes {
         n.x = values[i] * 8.0 - 4.0;
@@ -1166,9 +1332,190 @@ fn apply_parameters(creature: &mut Creature, values: &[f32]) {
     }
 }
 
+/// Where each CMA coordinate lives in a body plan and how far one unit step
+/// moves it: per node x, y, diameter, friction; per bone rest length, joint
+/// range, and organ mass and position; the shared log period; per muscle
+/// anchors, lengths, phase, duty, log stiffness, and touchdown reset phase.
+/// An organ mass at or below zero means no organ, so organs can grow and
+/// vanish smoothly.
+struct Layout {
+    nodes: usize,
+    bones: usize,
+    /// Typical bone length (m), so positions and lengths search relative to
+    /// the body's size.
+    size: f32,
+}
+const NODE_SCALES: [f32; 4] = [0.02, 0.02, 0.005, 0.03];
+const BONE_SCALES: [f32; 5] = [0.02, 0.1, 0.1, 0.02, 0.05];
+const BONE_FIELDS: usize = BONE_SCALES.len();
+const PERIOD_SCALE: f32 = 0.05;
+const MUSCLE_SCALES: [f32; 8] = [0.05, 0.05, 0.02, 0.02, 0.05, 0.05, 0.1, 0.05];
+/// Which scales above are lengths, multiplied by the body's size.
+const MUSCLE_LENGTHS: [bool; 8] = [false, false, true, true, false, false, false, false];
+impl Layout {
+    fn of(template: &Creature) -> Self {
+        let size = if template.bones.is_empty() {
+            1.0
+        } else {
+            template.bones.iter().map(|b| b.rest_length).sum::<f32>() / template.bones.len() as f32
+        };
+        Self {
+            nodes: template.nodes.len(),
+            bones: template.bones.len(),
+            size: size.clamp(0.05, 10.0),
+        }
+    }
+    /// The muscle field of coordinate `d`, if it is one.
+    fn muscle_field(&self, d: usize) -> Option<usize> {
+        let start = self.nodes * 4 + self.bones * BONE_FIELDS + 1;
+        (d >= start).then(|| (d - start) % 8)
+    }
+    fn scale(&self, d: usize) -> f32 {
+        let node_end = self.nodes * 4;
+        let bone_end = node_end + self.bones * BONE_FIELDS;
+        if d < node_end {
+            NODE_SCALES[d % 4] * if d % 4 < 2 { self.size } else { 1.0 }
+        } else if d < bone_end {
+            let field = (d - node_end) % BONE_FIELDS;
+            BONE_SCALES[field] * if field == 0 { self.size } else { 1.0 }
+        } else if let Some(field) = self.muscle_field(d) {
+            MUSCLE_SCALES[field]
+                * if MUSCLE_LENGTHS[field] {
+                    self.size
+                } else {
+                    1.0
+                }
+        } else {
+            PERIOD_SCALE
+        }
+    }
+    /// Phases wrap around the cycle.
+    fn wraps(&self, d: usize) -> bool {
+        matches!(self.muscle_field(d), Some(4 | 7))
+    }
+    fn delta(&self, d: usize, value: f32, mean: f32) -> f32 {
+        if self.wraps(d) {
+            (value - mean + 0.5).rem_euclid(1.0) - 0.5
+        } else {
+            value - mean
+        }
+    }
+    fn moved(&self, d: usize, mean: f32, step: f32) -> f32 {
+        if self.wraps(d) {
+            (mean + step).rem_euclid(1.0)
+        } else {
+            mean + step
+        }
+    }
+}
+
+fn parameters(creature: &Creature) -> Vec<f32> {
+    let mut output = vec![
+        0.0;
+        parameter_count(
+            creature.nodes.len(),
+            creature.bones.len(),
+            creature.muscles.len()
+        )
+    ];
+    write_parameters(
+        &creature.nodes,
+        &creature.bones,
+        &creature.muscles,
+        &mut output,
+    );
+    output
+}
+fn parameter_count(nodes: usize, bones: usize, muscles: usize) -> usize {
+    nodes * 4 + bones * BONE_FIELDS + 1 + muscles * 8
+}
+fn parameters_into(population: &Population, index: usize, output: &mut [f32]) {
+    let genome = &population.genomes[index];
+    write_parameters(
+        &population.nodes[genome.node_start..genome.node_start + genome.node_count],
+        &population.bones[genome.bone_start..genome.bone_start + genome.bone_count],
+        &population.muscles[genome.muscle_start..genome.muscle_start + genome.muscle_count],
+        output,
+    );
+}
+fn write_parameters(
+    nodes: &[crate::evolution::NodeGene],
+    bones: &[crate::evolution::Bone],
+    muscles: &[crate::evolution::Muscle],
+    output: &mut [f32],
+) {
+    let mut i = 0;
+    for n in nodes {
+        output[i..i + 4].copy_from_slice(&[n.x, n.y, n.diameter, n.friction]);
+        i += 4;
+    }
+    for b in bones {
+        output[i..i + BONE_FIELDS].copy_from_slice(&[
+            b.rest_length,
+            b.min_angle,
+            b.max_angle,
+            b.organ_mass,
+            b.organ_at,
+        ]);
+        i += BONE_FIELDS;
+    }
+    output[i] = muscles.first().map_or(1.0, |m| m.period).max(1e-3).ln();
+    i += 1;
+    for m in muscles {
+        output[i..i + 8].copy_from_slice(&[
+            m.anchor_a,
+            m.anchor_b,
+            m.short,
+            m.long,
+            m.phase,
+            m.duty,
+            m.stiffness.max(1e-3).ln(),
+            m.reset,
+        ]);
+        i += 8;
+    }
+}
+fn apply_parameters(creature: &mut Creature, values: &[f32]) {
+    let mut i = 0;
+    for n in &mut creature.nodes {
+        n.x = values[i];
+        n.y = values[i + 1].max(0.0);
+        n.diameter = values[i + 2];
+        n.friction = values[i + 3];
+        i += 4;
+    }
+    for bone in &mut creature.bones {
+        bone.rest_length = values[i].clamp(0.03, crate::evolution::max_bone_length());
+        bone.min_angle = values[i + 1];
+        bone.max_angle = values[i + 2];
+        bone.clamp_range();
+        // Repair keeps organs within their mass range and near the center.
+        bone.organ_mass = values[i + 3].max(0.0);
+        bone.organ_at = values[i + 4].clamp(0.0, 1.0);
+        i += BONE_FIELDS;
+    }
+    let period = values[i]
+        .exp()
+        .clamp(crate::evolution::min_muscle_period(), 10.0);
+    i += 1;
+    let stroke = crate::evolution::max_stroke();
+    for m in &mut creature.muscles {
+        m.anchor_a = values[i].clamp(0.0, 1.0);
+        m.anchor_b = values[i + 1].clamp(0.0, 1.0);
+        m.short = values[i + 2].clamp(0.01, 0.8 * stroke);
+        m.long = values[i + 3].clamp(m.short, stroke);
+        m.period = period;
+        m.phase = values[i + 4].rem_euclid(1.0);
+        m.duty = values[i + 5].clamp(0.05, 0.95);
+        m.stiffness = values[i + 6].exp().clamp(1.0, 120.0);
+        m.reset = values[i + 7].rem_euclid(1.0);
+        i += 8;
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CmaEmitter, Niche, is_phase_dimension};
+    use super::{CmaEmitter, Layout, Niche};
     use crate::{
         config::Config,
         evolution::{self, Population},
@@ -1196,10 +1543,59 @@ mod tests {
 
     #[test]
     fn cma_phase_dimensions_follow_bones_and_eight_value_muscles() {
-        let phase_start = 5 * 4 + 4;
-        assert!(!is_phase_dimension(phase_start, phase_start));
-        assert!(is_phase_dimension(phase_start + 5, phase_start));
-        assert!(!is_phase_dimension(phase_start + 6, phase_start));
-        assert!(is_phase_dimension(phase_start + 13, phase_start));
+        let config = Config {
+            population: 2,
+            random_seed: false,
+            ..Config::default()
+        };
+        let template = evolution::create(&config).unwrap().creature(0);
+        let layout = Layout::of(&template);
+        let start = template.nodes.len() * 4 + template.bones.len() * super::BONE_FIELDS + 1;
+        assert!(!layout.wraps(start - 1));
+        assert!(!layout.wraps(start));
+        assert!(layout.wraps(start + 4));
+        assert!(layout.wraps(start + 7));
+        assert!(layout.wraps(start + 12));
+        assert!(!layout.wraps(start + 13));
+    }
+
+    #[test]
+    fn optimizer_moves_toward_its_faster_samples() {
+        let config = Config {
+            population: 2,
+            random_seed: false,
+            ..Config::default()
+        };
+        let template = evolution::create(&config).unwrap().creature(0);
+        let mut cma = CmaEmitter::optimizer(template.clone(), super::optimizer_niche(0, 0), 0);
+        assert!(cma.optimizing() && !cma.converged());
+        let mut population = Population::default();
+        for shift in [0.05, -0.05, 0.04, -0.04] {
+            let mut sample = template.clone();
+            for node in &mut sample.nodes {
+                node.x += shift;
+            }
+            population.push(sample);
+        }
+        let before = cma.mean[0];
+        cma.tell(
+            &population,
+            &mut vec![(0, 4.0), (2, 3.0), (3, 2.0), (1, 1.0)],
+        );
+        assert!(cma.mean[0] > before);
+    }
+
+    #[test]
+    fn cma_parameters_round_trip_through_a_creature() {
+        let config = Config {
+            population: 2,
+            random_seed: false,
+            ..Config::default()
+        };
+        let template = evolution::create(&config).unwrap().creature(0);
+        let cma = CmaEmitter::optimizer(template.clone(), super::optimizer_niche(0, 0), 0);
+        let mut copy = template.clone();
+        super::apply_parameters(&mut copy, &cma.mean);
+        assert_eq!(super::parameters(&copy), cma.mean);
     }
 }

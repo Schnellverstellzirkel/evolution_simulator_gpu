@@ -117,6 +117,9 @@ pub struct Experiment {
     /// Whether each slot's current creature came from crossover.
     #[serde(skip)]
     pub candidate_mates: Vec<bool>,
+    /// Each island's best distance so far and the generation it was set.
+    #[serde(skip)]
+    pub island_progress: Vec<(f32, u32)>,
     /// Elites from before an environment change, waiting to be evaluated again
     /// in the new world. Breeding hands them out before new offspring.
     #[serde(default)]
@@ -188,8 +191,16 @@ pub fn island_count() -> usize {
 /// elites; the rest sample by local competition. Spending more on the best
 /// elites raised the best distance by about half in fixed-seed tests.
 const TOP_PARENT_SHARE: f32 = 0.5;
+/// Share of those top-elite CMA offspring bred by an island optimizer
+/// (separable CMA-ES in physical units) on one of its fastest designs.
+const OPTIMIZER_SHARE: f32 = 0.5;
 /// Generations between migrations, and the share of elites that migrate.
-const MIGRATION_INTERVAL: u32 = 5;
+/// Rare migration lets each island settle on and refine its own design
+/// instead of all islands polishing the same one.
+const MIGRATION_INTERVAL: u32 = 25;
+/// Generations without a new island record before the island's optimizer
+/// turns to its next fastest design.
+const OPTIMIZER_STALL: u32 = 30;
 const MIGRATION_SHARE: f32 = 0.1;
 struct OffspringPlan {
     plan: CandidatePlan,
@@ -231,6 +242,7 @@ impl Experiment {
             islands: Vec::new(),
             lineage: HashMap::new(),
             candidate_mates: Vec::new(),
+            island_progress: Vec::new(),
             reseed: Vec::new(),
         })
     }
@@ -309,6 +321,9 @@ impl Experiment {
         if !metric.fitness.is_finite() || metric.fitness <= FAILED {
             return false;
         }
+        if self.from_optimizer(i) {
+            return true;
+        }
         let Some(genome) = self.population.genomes.get(i) else {
             return false;
         };
@@ -334,6 +349,18 @@ impl Experiment {
                 .archive
                 .morphology_floor()
                 .is_none_or(|floor| metric.fitness > floor)
+    }
+    /// Whether creature `i` was sampled by an island optimizer. Optimizers
+    /// rank all their samples, so all of them get the same check: ranking
+    /// checked samples by the check and the rest by their first trial alone
+    /// would steer the search away from its most promising samples.
+    pub fn from_optimizer(&self, i: usize) -> bool {
+        self.candidate_cma
+            .get(i)
+            .copied()
+            .flatten()
+            .and_then(|c| self.cma_emitters.get(c))
+            .is_some_and(|c| c.optimizing())
     }
     /// Offers the evaluated creatures in `slots` to the archive (in slot-list
     /// order), updates CMA emitters and emitter statistics, and returns how
@@ -382,6 +409,7 @@ impl Experiment {
         let mut improvements = [0u64; qd::EMITTER_COUNT];
         let mut rewards = [0.0f64; qd::EMITTER_COUNT];
         let mut cma_samples = vec![Vec::<(usize, f32)>::new(); self.cma_emitters.len()];
+        let optimizers: Vec<bool> = self.cma_emitters.iter().map(|c| c.optimizing()).collect();
         let parent_morphologies: HashMap<_, _> = self
             .archive
             .entries
@@ -522,6 +550,7 @@ impl Experiment {
                 && prep.score > FAILED
             {
                 let key = match elite_before {
+                    _ if optimizers[cma] => prep.score,
                     None if behavior_offer.inserted => 1.0e6 + prep.score,
                     Some(before) if behavior_offer.inserted => 1.0e3 + (prep.score - before),
                     Some(before) => prep.score - before,
@@ -847,6 +876,8 @@ impl Experiment {
             emitter_stale: bool,
             mate: Option<usize>,
             island: usize,
+            /// A fast elite whose design's optimizer breeds this offspring.
+            optimize: bool,
         }
         // Each island's elites grouped by body plan, for crossover partners.
         let by_plan: Vec<HashMap<&qd::Topology, Vec<usize>>> = self
@@ -878,6 +909,46 @@ impl Experiment {
                 order
             })
             .collect();
+        // An island's optimizer works on its fastest design: a body plan with
+        // a gait cadence band. When the island has not set a record for a
+        // while, it turns to its next fastest designs in turn, so one stuck
+        // design does not take all local search.
+        self.island_progress
+            .resize(self.islands.len(), (f32::NEG_INFINITY, generation));
+        let optimizer_targets: Vec<Option<usize>> = self
+            .islands
+            .iter()
+            .zip(&top_parents)
+            .zip(&mut self.island_progress)
+            .map(|((island, top), progress)| {
+                let best = *top.first()?;
+                let fitness = island.entries[best].fitness;
+                if fitness > progress.0 {
+                    *progress = (fitness, generation);
+                }
+                let mut plans: Vec<usize> = Vec::new();
+                let mut order: Vec<usize> = (0..island.entries.len())
+                    .filter(|&i| !qd::is_morphology_niche(&island.entries[i].niche))
+                    .collect();
+                order.sort_by(|&a, &b| {
+                    island.entries[b]
+                        .fitness
+                        .total_cmp(&island.entries[a].fitness)
+                });
+                // A design is a body plan with a gait cadence band.
+                let design = |i: usize| (&island.entries[i].topology, island.entries[i].niche.0[1]);
+                for i in order {
+                    if plans.len() >= 4 {
+                        break;
+                    }
+                    if !plans.iter().any(|&p| design(p) == design(i)) {
+                        plans.push(i);
+                    }
+                }
+                let turn = (generation.saturating_sub(progress.1) / OPTIMIZER_STALL) as usize;
+                Some(plans[turn % plans.len()])
+            })
+            .collect();
         let plan_prep: Vec<PlanPrep> = slots
             .par_iter()
             .map(|&i| {
@@ -892,6 +963,7 @@ impl Experiment {
                 };
                 let emitter_stale = self.emitter_stats[emitter.index()].stale();
                 let avoid = None;
+                let mut optimize = false;
                 let parent = if emitter == Emitter::Restart || archive_empty {
                     None
                 } else if reserve_enabled
@@ -907,7 +979,15 @@ impl Experiment {
                     && !top_parents[island].is_empty()
                     && rng.unit() < TOP_PARENT_SHARE
                 {
-                    Some(top_parents[island][rng.index(top_parents[island].len())])
+                    // Half of these come from the island's optimizer for one
+                    // of its fastest designs; the rest explore around the top
+                    // elites.
+                    optimize = rng.unit() < OPTIMIZER_SHARE;
+                    Some(if optimize {
+                        optimizer_targets[island].unwrap_or(top_parents[island][0])
+                    } else {
+                        top_parents[island][rng.index(top_parents[island].len())]
+                    })
                 } else {
                     archive.sample_local_competitive(&mut rng, avoid)
                 };
@@ -935,6 +1015,7 @@ impl Experiment {
                     emitter_stale,
                     mate,
                     island,
+                    optimize,
                 }
             })
             .collect();
@@ -947,20 +1028,41 @@ impl Experiment {
                 emitter_stale,
                 mate,
                 island,
+                optimize,
             } = prep;
             let cma_index = if emitter == Emitter::Cma {
                 if let Some(parent_index) = parent {
                     let elite = &self.islands[island].entries[parent_index];
                     let template = &elite.creature;
                     let topology = &elite.topology;
-                    let niche_key = (elite.niche.clone(), topology.clone());
-                    let mut index = if emitter_stale {
+                    // Each island runs one optimizer per design. It starts from
+                    // the design's fastest elite and then follows its own mean,
+                    // so recentering on every lucky new best does not throw
+                    // away its progress. A converged one restarts.
+                    let niche_key = if optimize {
+                        (
+                            qd::optimizer_niche(island, elite.niche.0[1]),
+                            topology.clone(),
+                        )
+                    } else {
+                        (elite.niche.clone(), topology.clone())
+                    };
+                    let converged = |i: &usize| self.cma_emitters[*i].converged() && !used_cma[*i];
+                    let mut index = if optimize {
+                        cma_lookup
+                            .get(&niche_key)
+                            .copied()
+                            .filter(|i| !converged(i))
+                    } else if emitter_stale {
                         reset_cma.get(&niche_key).copied()
                     } else {
                         cma_lookup.get(&niche_key).copied()
                     };
                     if index.is_none() {
-                        let replacement = if self.cma_emitters.len() < qd::CMA_LIMIT {
+                        let restart = cma_lookup.get(&niche_key).copied().filter(|_| optimize);
+                        let replacement = if restart.is_some() {
+                            restart
+                        } else if self.cma_emitters.len() < qd::CMA_LIMIT {
                             Some(self.cma_emitters.len())
                         } else {
                             self.cma_emitters
@@ -971,8 +1073,35 @@ impl Experiment {
                                 .map(|(i, _)| i)
                         };
                         if let Some(slot) = replacement {
-                            let new =
-                                CmaEmitter::new(template.clone(), elite.niche.clone(), generation);
+                            let new = if optimize {
+                                // Another island's optimizer for the same plan
+                                // lends its learned step sizes, unless this is
+                                // a restart after converging.
+                                self.cma_emitters
+                                    .iter()
+                                    .filter(|c| {
+                                        c.optimizing() && c.topology == *topology && !c.converged()
+                                    })
+                                    .max_by_key(|c| c.last_used_generation)
+                                    .map_or_else(
+                                        || {
+                                            CmaEmitter::optimizer(
+                                                template.clone(),
+                                                niche_key.0.clone(),
+                                                generation,
+                                            )
+                                        },
+                                        |c| {
+                                            c.recentered(
+                                                template.clone(),
+                                                niche_key.0.clone(),
+                                                generation,
+                                            )
+                                        },
+                                    )
+                            } else {
+                                CmaEmitter::new(template.clone(), elite.niche.clone(), generation)
+                            };
                             let new_key = (new.niche.clone(), new.topology.clone());
                             if slot == self.cma_emitters.len() {
                                 self.cma_emitters.push(new);
@@ -989,7 +1118,7 @@ impl Experiment {
                                 self.cma_emitters[slot] = new;
                             }
                             cma_lookup.insert(new_key, slot);
-                            if emitter_stale {
+                            if emitter_stale && !optimize {
                                 reset_cma.insert(niche_key, slot);
                             }
                             index = Some(slot);
@@ -1652,6 +1781,7 @@ impl From<V2Experiment> for Experiment {
             islands: Vec::new(),
             lineage: HashMap::new(),
             candidate_mates: Vec::new(),
+            island_progress: Vec::new(),
             reseed: Vec::new(),
         }
     }
@@ -1691,6 +1821,7 @@ impl From<LegacyExperiment> for Experiment {
             islands: Vec::new(),
             lineage: HashMap::new(),
             candidate_mates: Vec::new(),
+            island_progress: Vec::new(),
             reseed: Vec::new(),
         }
     }

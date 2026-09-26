@@ -106,13 +106,18 @@ impl Playback {
         crate::evolution::canonicalize_bone_order(&mut normalized);
         let frames = crate::cpu_engine::trajectory(&normalized, &config);
         let mut nodes = physics::nodes(&normalized);
-        // The engines check the fall after each timed step, as here.
+        // The engines check the fall (or a broken joint) after each timed
+        // step, as here.
         let base = normalized.bones[0].b as usize;
+        let joints = physics::joints(&normalized.nodes, &normalized.bones);
         let fall = frames
             .iter()
             .enumerate()
             .skip(physics::settle() as usize + 1)
-            .find(|(_, frame)| frame[0][1] < frame[base][1])
+            .find(|(_, frame)| {
+                frame[0][1] < frame[base][1]
+                    || physics::broken_joint(frame, &normalized.bones, &joints)
+            })
             .map(|(tick, frame)| {
                 for (node, position) in nodes.iter_mut().zip(frame) {
                     node.pos = *position;

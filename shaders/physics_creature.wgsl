@@ -114,6 +114,10 @@ const SETTLE: u32 = SETTLESTEPSu;
 const SAMPLE: u32 = SAMPLEINTERVALu;
 // Clearance a touching node must reach to count as a lifted foot.
 const LIFT_CLEARANCE: f32 = 0.01;
+// Cosine and sine of physics::JOINT_BREAK, the angle past its range at which
+// a joint breaks.
+const JOINT_BREAK_COS: f32 = JOINTBREAKCOS;
+const JOINT_BREAK_SIN: f32 = JOINTBREAKSIN;
 
 // Height and slope of the rough ground; mirrors physics::terrain.
 fn terrain(x: f32) -> vec2f {
@@ -693,7 +697,27 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                     }
                 }
             }
-            if metrics.fall_time == 0.0 && pos[lane].y < pos[bone_kb[0]].y {
+            // A joint forced far past its range breaks, which also ends the
+            // trial.
+            var broken = false;
+            for (var j = 0u; j < MAXB; j++) {
+                if j >= bone_count || metrics.fall_time != 0.0 { break; }
+                let cos_half = bone_cos_half[j];
+                if cos_half <= -1.0 { continue; }
+                let pivot = pos[bone_ka[j] & 0xffffu];
+                let u = pos[bone_ka[j] >> 16u] - pivot;
+                let v = pos[bone_kb[j]] - pivot;
+                let norm = sqrt(dot(u, u) * dot(v, v));
+                if norm < 1e-12 { continue; }
+                let relative = vec2f(dot(u, v), u.x * v.y - u.y * v.x) * (1.0 / norm);
+                let center = unpack2x16snorm(bone_center[j]);
+                let sin_half = bone_data[tile.y + j * BONE_FIELDS * TILE + tl + 5u * TILE];
+                let limit = cos_half * JOINT_BREAK_COS - sin_half * JOINT_BREAK_SIN;
+                if relative.x * center.x + relative.y * center.y < limit {
+                    broken = true;
+                }
+            }
+            if metrics.fall_time == 0.0 && (pos[lane].y < pos[bone_kb[0]].y || broken) {
                 var fall_x = 0.0;
                 for (var j = 0u; j < MAXN; j++) {
                     if j >= body_nodes { break; }
