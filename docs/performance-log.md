@@ -2,6 +2,59 @@
 
 Current goal: 2,000,000 evaluated creatures/s with fixed 60-second trials, 3 million creatures per generation, and the graphical game at 60 FPS. The measurements below do not establish that goal.
 
+## Environment effect cost (2026-09-26)
+
+Backlog item 46 asks whether each environment effect is cheap to leave on. `examples/effect_cost.rs` builds one deterministic random population (2048 bodies, seed 38, 2.0 s trials) and times CPU `cpu_engine::evaluate` on the calm world and on every level of every `environment::EFFECTS` entry, so a new effect is covered automatically. Each pass samples the calm world at its start, middle, and end. The table reports the best rate of eight passes and the median of the per-pass ratios to calm. Measured on the working tree at HEAD 144848a, which carried the uncommitted ground-roughness, slope, wind, and UI work.
+
+Command:
+
+    nice -n 15 env CARGO_BUILD_JOBS=4 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 cargo run --release --example effect_cost
+
+Same workstation as the Machine section below: Ryzen 7 7840HS (8 cores / 16 threads, Zen 4, AVX-512), Ubuntu 24.04, normal thin-LTO release build. This example is CPU only; the RTX 4060 and the Radeon do no work.
+
+| effect | level | world | creatures/s | % of calm | best m |
+|---|---:|---|---:|---:|---:|
+| calm | 0 | default world | 148207.1 | 97.1 | 0.77 |
+| Ground | 0 | Flat | 161017.7 | 105.7 | 0.77 |
+| Ground | 1 | Pebbles, 3 cm | 152155.2 | 96.2 | 0.79 |
+| Ground | 2 | Rough, 8 cm | 155389.9 | 103.5 | 0.80 |
+| Ground | 3 | Rocky, 15 cm | 155923.6 | 98.1 | 0.99 |
+| Ground | 4 | Boulders, 25 cm | 156631.5 | 96.7 | 0.51 |
+| Gravity | 0 | Earth | 159307.6 | 104.5 | 0.77 |
+| Gravity | 1 | 1.5 g | 155305.9 | 104.7 | 0.34 |
+| Gravity | 2 | 2 g | 157489.5 | 105.1 | 0.37 |
+| Gravity | 3 | 3 g | 149829.2 | 101.3 | 0.70 |
+| Air | 0 | Thin | 162336.1 | 101.4 | 0.77 |
+| Air | 1 | Breezy | 159646.7 | 108.2 | 0.86 |
+| Air | 2 | Thick | 158298.9 | 100.9 | 0.79 |
+| Air | 3 | Syrup | 152289.5 | 97.9 | 0.66 |
+| Grip | 0 | Sandpaper | 156064.7 | 102.6 | 0.79 |
+| Grip | 1 | Grippy | 157245.5 | 98.4 | 0.77 |
+| Grip | 2 | Firm | 155375.9 | 100.5 | 1.03 |
+| Grip | 3 | Wet | 167344.1 | 95.0 | 0.83 |
+| Grip | 4 | Ice | 155110.4 | 101.1 | 0.50 |
+| Heat wave | 0 | Full | 158211.8 | 99.8 | 0.77 |
+| Heat wave | 1 | Warm | 153933.9 | 100.0 | 0.76 |
+| Heat wave | 2 | Hot | 153114.0 | 105.4 | 0.91 |
+| Heat wave | 3 | Heat wave | 158269.8 | 104.2 | 0.82 |
+| Drought | 0 | Normal | 157460.8 | 105.8 | 0.77 |
+| Drought | 1 | Dry | 152531.9 | 102.1 | 0.77 |
+| Drought | 2 | Parched | 157417.7 | 93.9 | 0.78 |
+| Drought | 3 | Drought | 149504.5 | 100.0 | 0.79 |
+| Slope | 0 | Flat | 155768.7 | 99.9 | 0.77 |
+| Slope | 1 | 3% | 151740.2 | 99.5 | 1.09 |
+| Slope | 2 | 8% | 150890.7 | 98.2 | 0.98 |
+| Slope | 3 | 15% | 153481.9 | 94.9 | 0.72 |
+| Slope | 4 | 25% | 146086.0 | 94.4 | 0.75 |
+| Wind | 0 | Calm | 153386.3 | 100.1 | 0.77 |
+| Wind | 1 | Breeze | 152343.3 | 96.8 | 0.73 |
+| Wind | 2 | Strong | 159381.2 | 102.5 | 0.29 |
+| Wind | 3 | Gale | 154347.1 | 102.2 | 0.12 |
+
+A second identical run put every row between 93.1% and 104.7% of calm, with Drought level 0 the largest row-to-row change (105.8% then 93.1%, 12.7 points). Rows whose configuration equals calm (Ground Flat, Gravity Earth, Air Thin, Grip Grippy, Heat Full, Drought Normal, Slope Flat, Wind Calm) moved between 93.1% and 105.8% across the two runs, which is the noise floor while other builds share this machine. Absolute creatures/s stayed within 10% for every row.
+
+No environment effect costs more than about 8% extra CPU evaluation time (the worst row is Air/Breezy at 108.2% of calm, barely above the noise floor), so each one is cheap to leave on. This is CPU evaluation cost only; the GPU kernel is unchanged because the effect values travel in its existing uniform buffer.
+
 ## Historical version-16 bone-cap baseline, Windows headless (2026-09-26)
 
 This run uses parent physics `bd41746` (QD version 16), with foundation changes captured in `250ad82`. It predates merged revision `abb00cb` and its version-19 friction, planted-foot cap, head-shaking, and CPU archive checks. These timings do not measure the merged code; loading the checkpoint under version 19 invalidates its archive.
