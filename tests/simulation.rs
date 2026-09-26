@@ -817,3 +817,39 @@ fn autosave_rotation_keeps_the_newest_and_spares_manual_saves() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn archive_scores_never_exceed_the_replayed_distance() {
+    let mut e = Experiment::new(config()).unwrap();
+    let all: Vec<usize> = (0..e.config.population).collect();
+    let metrics = evolution_simulator::scheduler::Scheduler::cpu_only(2)
+        .unwrap()
+        .evaluate(&e.population, &all, &e.config)
+        .unwrap();
+    // Pretend another engine scored every creature 100 m farther than the
+    // replay engine does.
+    for (i, m) in metrics.iter().enumerate() {
+        e.scores[i] = m.fitness + 100.0;
+        e.trial_metrics[i] = m.behavior;
+    }
+    e.evaluated = e.config.population;
+    e.rank();
+    e.archive_batch().unwrap();
+    assert!(!e.archive.entries.is_empty());
+    for elite in &e.archive.entries {
+        let replay = evolution_simulator::cpu_engine::evaluate(
+            &{
+                let mut pop = evolution::Population::default();
+                pop.push(elite.creature.clone());
+                pop
+            },
+            &e.config,
+        )[0]
+        .fitness;
+        assert!(
+            elite.fitness <= replay + 1e-4,
+            "archive shows {} m but the replay reaches {replay} m",
+            elite.fitness
+        );
+    }
+}

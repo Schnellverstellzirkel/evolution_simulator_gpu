@@ -511,6 +511,75 @@ impl Experiment {
                 }
             })
             .collect();
+        // Players browse this archive and replay its creatures with the CPU
+        // engine, so it only admits scores the replay reproduces. The best
+        // candidate for each behavior cell and each new body plan in this batch
+        // (only it can end up as the elite) runs its standard trial again on
+        // the CPU engine; its score becomes the worse of all its trials, and
+        // its cell comes from the replayed behavior. A gait that only works
+        // through one engine's rounding loses its advantage here.
+        let mut prep = prep;
+        let mut best_by_niche: HashMap<qd::Niche, usize> = HashMap::new();
+        let mut best_by_topology: HashMap<qd::Topology, usize> = HashMap::new();
+        for (k, p) in prep.iter().enumerate() {
+            if p.behavior_candidate {
+                let best = best_by_niche.entry(p.descriptor.niche()).or_insert(k);
+                if prep[*best].score < p.score {
+                    *best = k;
+                }
+            }
+            if let Some(topology) = &p.morphology_topology {
+                let best = best_by_topology.entry(topology.clone()).or_insert(k);
+                if prep[*best].score < p.score {
+                    *best = k;
+                }
+            }
+        }
+        let behavior_best: std::collections::HashSet<usize> =
+            best_by_niche.values().copied().collect();
+        let topology_best: std::collections::HashSet<usize> =
+            best_by_topology.values().copied().collect();
+        let mut verify: Vec<usize> = behavior_best.union(&topology_best).copied().collect();
+        verify.sort_unstable();
+        for (k, p) in prep.iter_mut().enumerate() {
+            p.behavior_candidate &= behavior_best.contains(&k);
+            if !topology_best.contains(&k) {
+                p.morphology_topology = None;
+            }
+        }
+        if !verify.is_empty() {
+            let indices: Vec<usize> = verify.iter().map(|&k| slots[k]).collect();
+            let subset = self.population.subset(&indices);
+            let replay_cfg = Config {
+                fidelity: None,
+                ..self.config.clone()
+            };
+            let results = crate::cpu_engine::evaluate(&subset, &replay_cfg);
+            for (n, &k) in verify.iter().enumerate() {
+                let i = slots[k];
+                let replayed = crate::scheduler::to_metrics(&subset, n, &results[n], &replay_cfg);
+                let score = prep[k].score.min(replayed.fitness);
+                let genome = &self.population.genomes[i];
+                let nodes = &self.population.nodes
+                    [genome.node_start..genome.node_start + genome.node_count];
+                let muscles = &self.population.muscles
+                    [genome.muscle_start..genome.muscle_start + genome.muscle_count];
+                let descriptor = qd::descriptor(nodes, muscles, replayed.behavior);
+                self.scores[i] = score;
+                self.trial_metrics[i] = replayed.behavior;
+                let p = &mut prep[k];
+                p.score = score;
+                p.descriptor = descriptor;
+                if p.behavior_candidate {
+                    p.behavior_candidate = score.is_finite()
+                        && score > FAILED
+                        && match self.archive.slot_for(&descriptor.niche()) {
+                            Some(slot) => score > self.archive.entries[slot].fitness,
+                            None => self.archive.behavior_count() < qd::ARCHIVE_LIMIT,
+                        };
+                }
+            }
+        }
         let mut attempts = [0u64; qd::EMITTER_COUNT];
         let mut failed = 0usize;
         for (&i, prep) in slots.iter().zip(&prep) {
