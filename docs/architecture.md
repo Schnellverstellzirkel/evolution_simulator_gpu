@@ -12,7 +12,7 @@
 | `creature_kernel` | Body-size buckets and packed GPU inputs |
 | `vk_engine` | Vulkan buffers, shader compilation, pipelines, and dispatch |
 | `engine`, `scheduler`, `gpu` | Threaded evaluation devices, work scheduling, and the evaluation front end |
-| `environment` | Reversible ground, gravity, air, grip, heat wave, drought, slope, wind, mud, gaps, hurdles, and earthquake levels |
+| `environment` | Reversible ground, gravity, air, grip, heat wave, drought, slope, wind, mud, gaps, hurdles, and earthquake levels, plus the Off/Slow/Normal/Fast seasons rotation |
 | `storage` | Experiment stages, CPU-checked global archive admission, islands, catastrophes, history, checkpoints, migrations |
 | `worker` | Background evolution, command handling, snapshots, and autosaves |
 | `ui` | egui dashboard and CPU-recorded creature playback |
@@ -96,7 +96,7 @@ History retains summary statistics, centimeter fitness bins, body-size counts, s
 
 ## State and storage
 
-The normal generation path is `Ready → Evaluating → Evaluated → Archived → Ready`. Guided mode pauses between evaluation, archive insertion, and offspring creation; continuous mode repeats them. The worker services UI commands and asynchronous evaluation completions separately. World changes collect pending work, invalidate old evaluations and archives, and queue elites to be retested. Generational breeding restores those queued elites before submitting slices to evaluation devices.
+The normal generation path is `Ready → Evaluating → Evaluated → Archived → Ready`. Guided mode pauses between evaluation, archive insertion, and offspring creation; continuous mode repeats them. The worker services UI commands and asynchronous evaluation completions separately. World changes collect pending work, invalidate old evaluations and archives, and queue elites to be retested. Generational breeding restores those queued elites before submitting slices to evaluation devices. When the Seasons level is on, a generation boundary that is a multiple of its interval (20, 10, or 5 generations) applies one deterministic step of `environment::season_rotation` to the next generation's config before breeding, so the normal world-change path re-tests the archive; `Config::season_step` records the rotation position and travels in checkpoints.
 
 V4 checkpoints use a versioned header, compressed binary payload, and checksum. The V4 resume record stores `island_progress`, preserving the optimizer's stall history; V3 remains readable without that metadata. Old QD-version loads clear obsolete global/island archives, optimizer progress, and queued reseeds before reevaluation. Version-16 baseline files therefore cannot preserve their archives under current version-19 physics. A temporary file is flushed and renamed into place. Dashboard autosaves run in a background thread every ten generations by default; rotation keeps the three newest `seed-*-auto.evo` files and clears stale autosave temporary files. The headless CLI saves to its selected checkpoint path. A save contains current progress, so resume avoids repeating completed evaluations when its semantics are still current.
 

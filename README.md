@@ -57,6 +57,7 @@ Environment buttons raise or lower each effect:
 
 | Effect | Levels |
 | --- | --- |
+| Seasons | Off, slow, normal, fast (20, 10, 5 generations per step) |
 | Ground | Flat, pebbles (3 cm), rough (8 cm), rocky (15 cm), boulders (25 cm) |
 | Gravity | Earth, 1.5 g, 2 g, 3 g |
 | Air | Thin, breezy, thick, syrup |
@@ -70,7 +71,7 @@ Environment buttons raise or lower each effect:
 | Hurdles | Clear, low, high, walls |
 | Earthquake | Still, tremors, quakes, big one |
 
-Hurdles raise periodic steps that a gait must climb or leap. The earthquake gives every creature its own bump phase and height, derived from its id, so no gait can memorize one pattern. A world change invalidates the old scores and queues archive elites for evaluation under the new conditions. Effects change the physics; the objective remains distance.
+Hurdles raise periodic steps that a gait must climb or leap. The earthquake gives every creature its own bump phase and height, derived from its id, so no gait can memorize one pattern. The seasons alternate the world on schedule: every 20, 10, or 5 generations, exactly one effect advances one level, walking through wind, ground, grip, mud, and slope first and then the rest, with every effect's cycle returning the world to calm. The rotation step is saved with the experiment, so a resumed run continues mid-cycle, and Off is the default. A world change invalidates the old scores and queues archive elites for evaluation under the new conditions. Effects change the physics; the objective remains distance.
 
 The **Catastrophe** row adds **Meteor strike**, which removes about half the elites at random from each archive, and **Extinction**, which clears the island with the slowest best creature. **Undo** restores saved fossils where their cells are empty or hold slower elites. Fossils are kept in memory for the current session; catastrophe undo history is not saved in checkpoints.
 

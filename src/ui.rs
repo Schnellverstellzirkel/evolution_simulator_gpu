@@ -3326,6 +3326,16 @@ impl eframe::App for App {
             {
                 self.config = next.config.clone();
                 self.initial = false;
+            } else if self.config.seasons > 0
+                && !self.dirty
+                && self
+                    .snapshot
+                    .as_ref()
+                    .is_none_or(|old| old.epoch == next.epoch)
+            {
+                // Seasons advance in the worker; keep the environment panel on
+                // the live world unless the local controls have pending edits.
+                self.config = next.config.clone();
             }
             if let Some((c, cfg)) = next.preview.take() {
                 self.set_preview(c, cfg);

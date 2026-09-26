@@ -951,13 +951,14 @@ impl Experiment {
             self.stage == Stage::Archived,
             "The archive must be updated before breeding"
         );
-        let cfg = self.pending.clone().unwrap_or_else(|| self.config.clone());
+        let mut cfg = self.pending.clone().unwrap_or_else(|| self.config.clone());
         cfg.validate()?;
+        let generation = self.generation + 1;
+        crate::environment::advance_seasons(&mut cfg, generation);
         if fitness_context_changed(&self.config, &cfg) {
             self.reset_search_context();
         }
         evolution::ensure_archive_batch_memory(&self.population, &self.archive, &cfg)?;
-        let generation = self.generation + 1;
         let setup_seconds = preparation_started.elapsed().as_secs_f64();
         let plan_started = std::time::Instant::now();
         let all: Vec<usize> = (0..cfg.population).collect();
@@ -1447,24 +1448,27 @@ impl Experiment {
         self.prune_lineage();
         self.generation += 1;
         self.migrate_islands();
-        if let Some(cfg) = self.pending.take() {
-            cfg.validate()?;
-            ensure!(
-                cfg.population == self.config.population,
-                "Population changes need a new experiment"
-            );
-            if fitness_context_changed(&self.config, &cfg) {
-                self.reset_search_context();
-            }
-            self.config = cfg;
+        let mut cfg = self.pending.take().unwrap_or_else(|| self.config.clone());
+        cfg.validate()?;
+        ensure!(
+            cfg.population == self.config.population,
+            "Population changes need a new experiment"
+        );
+        crate::environment::advance_seasons(&mut cfg, self.generation);
+        if fitness_context_changed(&self.config, &cfg) {
+            self.reset_search_context();
         }
+        self.config = cfg;
         self.population.compact();
         self.evaluation_seconds = 0.0;
         self.evaluated = 0;
         Ok(())
     }
-    pub fn update_config(&mut self, cfg: Config) -> Result<()> {
+    pub fn update_config(&mut self, mut cfg: Config) -> Result<()> {
         cfg.validate()?;
+        // The season step advances in the worker, so a settings update must
+        // never rewind a checkpoint-carrying counter to its stale copy.
+        cfg.season_step = cfg.season_step.max(self.config.season_step);
         ensure!(
             cfg.population == self.config.population
                 && cfg.seed == self.config.seed
@@ -2470,5 +2474,51 @@ mod migration_tests {
                 assert!((actual[side][1] - points[side][1]).abs() < 1e-6);
             }
         }
+    }
+
+    #[test]
+    fn checkpoint_round_trip_keeps_the_season_step() {
+        let config = Config {
+            population: 2,
+            random_seed: false,
+            seasons: 2,
+            ..Config::default()
+        };
+        let mut experiment = Experiment::new(config).unwrap();
+        experiment.config.season_step = 7;
+        experiment.config.wind = crate::environment::WIND[2];
+        let checkpoint =
+            std::env::temp_dir().join(format!("evolution-season-step-{}.evo", std::process::id()));
+        save(&checkpoint, &experiment).unwrap();
+        let loaded = load(&checkpoint).unwrap();
+        let _ = std::fs::remove_file(checkpoint);
+        assert_eq!(loaded.config.seasons, 2);
+        assert_eq!(loaded.config.season_step, 7);
+        assert_eq!(loaded.config.wind, experiment.config.wind);
+    }
+
+    #[test]
+    fn generation_boundaries_advance_the_seasons() {
+        let interval = crate::environment::SEASON_INTERVALS[2];
+        let config = Config {
+            population: 4,
+            random_seed: false,
+            seasons: 2,
+            ..Config::default()
+        };
+        let mut experiment = Experiment::new(config).unwrap();
+        for generation in 1..=interval {
+            experiment.scores.fill(1.0);
+            experiment.evaluated = experiment.config.population;
+            experiment.stage = Stage::Evaluated;
+            experiment.archive_batch().unwrap();
+            experiment.prepare_next_batch().unwrap();
+            assert_eq!(experiment.generation, generation);
+            if generation < interval {
+                assert_eq!(experiment.config.season_step, 0);
+            }
+        }
+        assert_eq!(experiment.config.season_step, 1);
+        assert_eq!(experiment.config.wind, crate::environment::WIND[1]);
     }
 }

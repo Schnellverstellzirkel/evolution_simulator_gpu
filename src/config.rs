@@ -41,6 +41,13 @@ pub struct Config {
     /// meets a different bump phase and amplitude, derived deterministically
     /// from its id, so a gait cannot memorize one bump pattern.
     pub quake: f32,
+    /// Seasons level: 0 off, 1 slow, 2 normal, 3 fast. When on, the world
+    /// advances one step of the `environment::season_rotation` every 20, 10,
+    /// or 5 generations.
+    pub seasons: u8,
+    /// Season rotation steps applied so far. Saved in checkpoints, so a
+    /// resumed game continues mid-cycle at the same step.
+    pub season_step: u16,
     pub min_size: f32,
     pub max_size: f32,
     pub min_friction: f32,
@@ -76,6 +83,8 @@ impl Default for Config {
             gaps: 0.0,
             hurdles: 0.0,
             quake: 0.0,
+            seasons: 0,
+            season_step: 0,
             min_size: 0.06,
             max_size: 0.12,
             min_friction: 0.65,
@@ -112,6 +121,8 @@ struct HumanConfig {
     gaps: f32,
     hurdles: f32,
     quake: f32,
+    seasons: u8,
+    season_step: u16,
     min_size: f32,
     max_size: f32,
     min_friction: f32,
@@ -146,6 +157,8 @@ impl Default for HumanConfig {
             gaps: c.gaps,
             hurdles: c.hurdles,
             quake: c.quake,
+            seasons: c.seasons,
+            season_step: c.season_step,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -182,6 +195,8 @@ impl From<HumanConfig> for Config {
             gaps: c.gaps,
             hurdles: c.hurdles,
             quake: c.quake,
+            seasons: c.seasons,
+            season_step: c.season_step,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -217,6 +232,8 @@ impl From<&Config> for HumanConfig {
             gaps: c.gaps,
             hurdles: c.hurdles,
             quake: c.quake,
+            seasons: c.seasons,
+            season_step: c.season_step,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -251,6 +268,8 @@ struct BinaryConfig {
     gaps: f32,
     hurdles: f32,
     quake: f32,
+    seasons: u8,
+    season_step: u16,
     min_size: f32,
     max_size: f32,
     min_friction: f32,
@@ -284,6 +303,8 @@ impl From<&Config> for BinaryConfig {
             gaps: c.gaps,
             hurdles: c.hurdles,
             quake: c.quake,
+            seasons: c.seasons,
+            season_step: c.season_step,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -320,6 +341,8 @@ impl From<BinaryConfig> for Config {
             hurdles: c.hurdles,
             quake: c.quake,
             ground_friction: c.ground_friction,
+            seasons: c.seasons,
+            season_step: c.season_step,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -421,6 +444,10 @@ impl Config {
         ensure!(
             self.quake.is_finite() && (0.0..=1.0).contains(&self.quake),
             "Quake bump height must be 0–1 m"
+        );
+        ensure!(
+            usize::from(self.seasons) < crate::environment::SEASON_INTERVALS.len(),
+            "Unknown seasons level"
         );
         ensure!(
             self.min_size.is_finite()
