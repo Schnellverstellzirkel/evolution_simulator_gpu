@@ -139,8 +139,8 @@ impl Limits {
         min_period: 0.2,
         muscle_energy: 120.0,
         muscle_recovery: 0.5,
-        max_bone: 10.0,
-        max_stroke: 5.0,
+        max_bone: 2.0,
+        max_stroke: 2.0,
         bone_density: 4.0,
     };
 }
