@@ -159,7 +159,10 @@ fn run(
     let mut page = 0usize;
     let mut preview = None;
     let mut lineage: Option<Vec<LineageStep>> = None;
-    let mut status = "Create a population to begin".to_owned();
+    let mut status = gpu
+        .startup_warning
+        .clone()
+        .unwrap_or_else(|| "Create a population to begin".to_owned());
     let mut error = None;
     let mut last_publish = Instant::now() - Duration::from_secs(1);
     let mut changed = true;

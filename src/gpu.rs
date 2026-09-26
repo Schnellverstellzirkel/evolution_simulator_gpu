@@ -11,16 +11,21 @@ pub struct Gpu {
     pub name: String,
     pub allocated_bytes: u64,
     pub sched: Option<Scheduler>,
+    /// Why the primary GPU was not used, shown once when a session starts.
+    pub startup_warning: Option<String>,
 }
 
 impl Gpu {
-    /// Opens the named primary GPU plus the other evaluation engines.
+    /// Opens the named primary GPU plus the other evaluation engines. A
+    /// primary that cannot open falls back to the CPU instead of failing.
     pub fn new(name: &str) -> Result<Self> {
         let sched = Scheduler::new(name)?;
+        let startup_warning = sched.startup_failure().map(str::to_owned);
         Ok(Self {
             name: sched.names(),
             allocated_bytes: 0,
             sched: Some(sched),
+            startup_warning,
         })
     }
     /// The UI passes its render device; evaluation opens its own devices.

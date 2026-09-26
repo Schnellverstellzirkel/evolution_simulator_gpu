@@ -115,6 +115,8 @@ pub struct Scheduler {
     checks_since: Option<Instant>,
     /// Standard-trial results of contenders whose check is pending.
     held: HashMap<usize, EvaluationMetrics>,
+    /// Why the primary GPU was not used, reported once at startup.
+    startup_failure: Option<String>,
 }
 
 fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -150,16 +152,27 @@ impl Scheduler {
     /// (off by default; `primary` or `off` for none), and a CPU engine with
     /// `EVOLUTION_CPU_THREADS` threads (default six). Evaluation and general
     /// workers share half the logical CPUs, at most eight, with at least one
-    /// general worker. Zero or a one-worker budget disables the CPU engine.
+    /// general worker. Zero or a one-worker budget disables the separate CPU
+    /// engine. If the primary GPU cannot open, evaluation falls back to the
+    /// CPU; with the separate pool disabled, it shares the general Rayon pool.
     pub fn new(primary: &str) -> Result<Self> {
         let step_range = env_or("EVOLUTION_GPU_CHUNK", crate::gpu::DEFAULT_STEP_RANGE);
-        let mut devices = vec![Device::new(
-            Box::new(engine::gpu_engine(primary, 64, step_range)?),
-            DeviceKind::Gpu,
-            180_000.0,
-            8192,
-            env_or("EVOLUTION_UNIT_SECONDS", 1.0),
-        )];
+        let mut devices = Vec::new();
+        let mut startup_failure = None;
+        match engine::gpu_engine(primary, 64, step_range) {
+            Ok(gpu) => devices.push(Device::new(
+                Box::new(gpu),
+                DeviceKind::Gpu,
+                180_000.0,
+                8192,
+                env_or("EVOLUTION_UNIT_SECONDS", 1.0),
+            )),
+            Err(error) => {
+                let message = format!("Primary GPU {primary:?} unavailable: {error:#}");
+                eprintln!("{message}; evaluating on the CPU");
+                startup_failure = Some(message);
+            }
+        }
         let extra = std::env::var("EVOLUTION_DEVICES").ok();
         for name in secondary_device_names(extra.as_deref()) {
             if primary.to_lowercase().contains(&name.to_lowercase()) {
@@ -187,6 +200,17 @@ impl Scheduler {
                 1024,
                 env_or("EVOLUTION_UNIT_SECONDS", 1.0),
             ));
+        } else if devices.is_empty() {
+            // The primary GPU failed and the separate CPU pool is disabled:
+            // share the general pool so the session can still run and a later
+            // GPU failure has somewhere to retry.
+            devices.push(Device::new(
+                Box::new(engine::cpu_engine_shared()?),
+                DeviceKind::Cpu,
+                30_000.0,
+                64,
+                env_or("EVOLUTION_UNIT_SECONDS", 1.0),
+            ));
         }
         Ok(Self {
             devices,
@@ -196,6 +220,7 @@ impl Scheduler {
             checks: Vec::new(),
             checks_since: None,
             held: HashMap::new(),
+            startup_failure,
         })
     }
 
@@ -216,6 +241,7 @@ impl Scheduler {
             checks: Vec::new(),
             checks_since: None,
             held: HashMap::new(),
+            startup_failure: None,
         })
     }
 
@@ -225,6 +251,11 @@ impl Scheduler {
             .map(|d| d.engine.name())
             .collect::<Vec<_>>()
             .join(" + ")
+    }
+
+    /// Why the primary GPU was not used, for reporting once at startup.
+    pub fn startup_failure(&self) -> Option<&str> {
+        self.startup_failure.as_deref()
     }
 
     /// Queued units, plus one while contenders still wait for their checks.
@@ -822,6 +853,7 @@ mod tests {
             checks: Vec::new(),
             checks_since: None,
             held: HashMap::new(),
+            startup_failure: None,
         };
         (scheduler, state)
     }
@@ -841,6 +873,7 @@ mod tests {
             checks: Vec::new(),
             checks_since: None,
             held: HashMap::new(),
+            startup_failure: None,
         };
         (scheduler, gpu, cpu)
     }
@@ -1311,6 +1344,18 @@ mod tests {
         finished.sort_by_key(|&(index, _)| index);
         assert_eq!(finished, vec![(0, 4.0), (2, 4.0)]);
         assert_eq!(scheduler.in_flight(), 0);
+    }
+
+    #[test]
+    fn a_missing_primary_gpu_falls_back_to_the_cpu() {
+        // An invalid adapter name cannot open; the CPU keeps the session alive
+        // and reports why the GPU was skipped.
+        let scheduler = Scheduler::new("definitely not a vulkan adapter").unwrap();
+        assert!(scheduler.startup_failure().is_some());
+        assert!(
+            scheduler.devices.iter().any(|d| d.kind == DeviceKind::Cpu),
+            "the fallback must include a CPU engine"
+        );
     }
 
     #[test]

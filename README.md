@@ -36,6 +36,8 @@ nice -n 10 cargo run --release
 
 The default compute adapter name is `RTX 4060`; `--gpu NAME` selects another primary adapter. `EVOLUTION_DEVICES=primary` prevents adding the desktop Radeon as an evaluation device. Keep that setting on this workstation: the Radeon drives the desktop and must not evaluate creatures. Evaluation and general Rayon workers share a budget of half the available logical CPUs, capped at eight. On the 16-thread workstation, the settings above give six evaluation workers and two general workers; `RAYON_NUM_THREADS` is limited to the remaining budget. `EVOLUTION_CPU_THREADS=0` makes all eight available to general workers. Smaller machines reduce evaluation workers first, preserving one general worker; a one-worker budget disables the scheduler's CPU engine.
 
+If the primary GPU cannot open, evaluation falls back to the CPU and reports why once; with `EVOLUTION_CPU_THREADS=0` that fallback shares the general Rayon pool. A GPU that fails during a run is retired and its unfinished units, including pending fine checks, are retried on the CPU with the same creatures and settings. A failed CPU stops the session with a persistent error after completed results are stored.
+
 For local iteration, use the named profile:
 
 ```bash

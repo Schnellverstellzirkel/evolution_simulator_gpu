@@ -26,11 +26,13 @@ A reported GPU failure must leave every unfinished evaluation available for retr
 - [x] Persistent engine error correction
 - [x] Shared retained submissions
 - [x] Runtime CPU recovery and drain behavior
-- [ ] Startup fallback and backend reporting
-- [ ] Full validation and documentation
+- [x] Startup fallback and backend reporting
+- [x] Full validation and documentation
 
 Batch 1 verification: seven failure regressions reproduced the original errors before the fix, including the submission race. All-target release tests passed 83 CPU tests and nine diagnostic tests, with four GPU tests ignored. Three explicit RTX tests passed in3.34s; formatting and Clippy passed. Runtime CPU retry remains pending.
 
 Batch 2 verification: three scheduler regressions first failed for missing shared retention, caller-state normalization and consumed malformed results. Shared and owned submission tests verify allocation identity. Formatting, Clippy, 88 CPU tests, nine report tests and three RTX tests passed (GPU3.31s). Retained snapshots prepare recovery without duplicating body arenas. Automatic retry is still pending.
 
 Batch 3 verification: devices carry an explicit GPU/CPU kind and queued units carry a retry count. A polled GPU failure retires the device and re-submits every unfinished unit, including pending fine checks, to a healthy CPU with its exact population, configuration and ticket order; a submission failure keeps the rejected creatures in the round for the next engine. A failed CPU is terminal: already completed output is delivered first, the error persists on every later collection, and no retry loop starts. Five scheduler regressions first failed before the fix (retry inputs, rejected submission, terminal CPU with buffered output, pending checks, retry state). Formatting, Clippy, 94 CPU tests, nine report tests and three RTX agreement tests passed (GPU13.32s). Startup CPU fallback and backend reporting remain.
+
+Batch 4 verification: `Scheduler::new` catches a primary GPU that cannot open, records the original failure, and continues with the CPU; when the dedicated CPU pool is disabled it uses `cpu_engine_shared`, a dispatcher on the general Rayon pool. `Gpu` carries the warning, the worker shows it as the starting status once, and the snapshot header reports the active backend. Explicit `gpu_engine` constructors stay strict. Two new regressions cover the shared-pool engine and the missing-primary fallback. Formatting, Clippy, 96 CPU tests, nine report tests and three RTX agreement tests passed (GPU1.34s). Device recovery is complete; README and architecture document the behavior.

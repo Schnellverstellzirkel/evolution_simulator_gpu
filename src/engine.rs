@@ -359,6 +359,49 @@ pub fn lower_thread_priority() {
     }
 }
 
+/// A CPU engine that evaluates on the general Rayon pool instead of starting
+/// its own. Used when the primary GPU cannot open and no separate CPU
+/// evaluation pool is configured: evaluation then shares the breeding pool.
+pub fn cpu_engine_shared() -> Result<ThreadedEngine> {
+    let threads = rayon::current_num_threads();
+    let (jobs, job_rx) = mpsc::channel::<(u64, Arc<Population>, Config)>();
+    let (done_tx, done) = mpsc::channel();
+    let thread = std::thread::Builder::new()
+        .name("cpu-eval-shared".into())
+        .spawn(move || {
+            lower_thread_priority();
+            for (ticket, unit, cfg) in job_rx {
+                let started = Instant::now();
+                let results = crate::cpu_engine::evaluate(&unit, &cfg);
+                let message = Finished {
+                    ticket,
+                    results,
+                    busy_seconds: started.elapsed().as_secs_f64(),
+                };
+                if done_tx.send(Ok(message)).is_err() {
+                    break;
+                }
+            }
+        })
+        .context("shared CPU evaluation dispatcher")?;
+    Ok(ThreadedEngine {
+        name: format!(
+            "CPU (general pool, {threads} threads, {}-lane SIMD)",
+            crate::simd::LANES
+        ),
+        max_nodes: 64,
+        depth: 2,
+        jobs: Some(jobs),
+        done,
+        thread: Some(thread),
+        queued: VecDeque::new(),
+        ready: VecDeque::new(),
+        failure: None,
+        next_ticket: 0,
+        allocated: Default::default(),
+    })
+}
+
 /// Starts a CPU engine on low-priority threads, leaving one general worker in
 /// the shared budget. Explicit CPU-only callers can still run one evaluation
 /// worker when the budget is one; the scheduler disables that extra pool.
@@ -493,6 +536,27 @@ mod tests {
         assert_eq!(received_ticket, ticket);
         assert_eq!(received_unit.nodes.as_ptr(), node_storage);
         assert_eq!(received_unit.nodes[0].x, 1.25);
+    }
+
+    #[test]
+    fn shared_cpu_engine_evaluates_units_on_the_general_pool() {
+        let mut engine = cpu_engine_shared().unwrap();
+        let cfg = Config {
+            population: 4,
+            duration: 0.1,
+            random_seed: false,
+            ..Config::default()
+        };
+        let pop = Arc::new(crate::evolution::create(&cfg).unwrap());
+        let ticket = engine.submit_shared(Arc::clone(&pop), &cfg).unwrap();
+        let done = loop {
+            if let Some(done) = engine.poll().unwrap() {
+                break done;
+            }
+            engine.wait(Duration::from_millis(20));
+        };
+        assert_eq!(done.ticket, ticket);
+        assert_eq!(done.results.len(), cfg.population);
     }
 
     #[test]
