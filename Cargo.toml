@@ -27,3 +27,9 @@ naga = { version = "30", features = ["wgsl-in", "spv-out"] }
 [profile.release]
 lto = "thin"
 codegen-units = 16
+
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 256
+incremental = true
