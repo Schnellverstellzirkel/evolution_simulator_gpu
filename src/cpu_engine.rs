@@ -708,10 +708,13 @@ impl Group {
             }
             // Velocity is the actual movement over the step. Ground friction uses
             // the real upward push the node received, so grip needs real pressure.
+            // The whole-body lift only moves the body out of the ground; it adds
+            // no upward speed, or a limb swung into the ground would launch it.
+            let lifted = if colliding { lift } else { zero };
             for j in 0..n {
                 let predicted_y = vx[j];
                 let mut vel_x = (px[j] - ox[j]) * rate;
-                let vel_y = (py[j] - oy[j]) * rate;
+                let vel_y = (py[j] - oy[j] - lifted) * rate;
                 if colliding {
                     let contact = py[j].le(floor[j] + 1e-4);
                     let push = (py[j] - predicted_y).max(zero);

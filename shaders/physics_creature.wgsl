@@ -563,13 +563,16 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             }
         }
         // Velocity is the actual movement over the step. Ground friction uses the
-        // real upward push the node received, so grip needs real pressure.
+        // real upward push the node received, so grip needs real pressure. The
+        // whole-body lift only moves the body out of the ground; it adds no
+        // upward speed, or a limb swung into the ground would launch it.
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
             let k = j * WG + lane;
             let predicted_y = vel[k].x;
             let floor_y = vel[k].y;
             var velocity = (pos[k] - old[k]) * RATE;
+            velocity.y -= ground_lift * RATE;
             // The previous position is no longer needed; keep the floor height
             // for the velocity passes and contact metrics.
             old[k] = vec2f(floor_y, 0.0);
