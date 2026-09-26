@@ -1,5 +1,9 @@
 # Validation results
 
+## Version-20 integration checks (2026-09-26)
+
+The merge through 73ddf68 preserves the planted-foot direction rule, replay scrubber, secondary-device selection tests, and fast build profile. Both fast and release-fast profile names are supported. Formatting, all-target Clippy, 75 CPU tests, and all three RTX agreement tests passed (16.92 s for the GPU tests). The nine report tests passed before this merge; their code is unchanged. The required random-body diagnostic at 20,000 bodies and 20 s measured median -0.07 m, p99 0.34 m, and best 11.03 m. These are diagnostic motion statistics, not a GUI performance result.
+
 ## Integration of the concurrent physics and foundation work (2026-09-26)
 
 The integration combines foundation commits `250ad82`/`ca75014` with `abb00cb` and its version-19 physics. Formatting, all-target Clippy, 72 release CPU tests, nine size-report tests, and all three explicit RTX GPU agreement tests passed. The GPU checks took 14.36 s; four GPU tests remain ignored in the default suite. The required 20,000-body, 20-second random-population diagnostic measured median -0.07 m, p99 1.85 m, and best 9.81 m. This is a propulsion check, not a proof of energy conservation or throughput. Remote CI execution is not yet verified.

@@ -91,9 +91,30 @@ fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
+/// Returns explicitly requested secondary GPU names. The safe default is to
+/// use only the primary GPU; `primary` and `off` both keep secondary GPUs off.
+fn secondary_device_names(selection: Option<&str>) -> Vec<&str> {
+    let Some(selection) = selection else {
+        return Vec::new();
+    };
+    if matches!(
+        selection.trim().to_ascii_lowercase().as_str(),
+        "primary" | "off"
+    ) {
+        return Vec::new();
+    }
+    selection
+        .split(',')
+        .map(str::trim)
+        .filter(|name| {
+            !name.is_empty() && !matches!(name.to_ascii_lowercase().as_str(), "primary" | "off")
+        })
+        .collect()
+}
+
 impl Scheduler {
     /// Opens the named primary GPU, the other GPUs listed in `EVOLUTION_DEVICES`
-    /// (default `primary`, for none), and a CPU engine with
+    /// (off by default; `primary` or `off` for none), and a CPU engine with
     /// `EVOLUTION_CPU_THREADS` threads (default six). Evaluation and general
     /// workers share half the logical CPUs, at most eight, with at least one
     /// general worker. Zero or a one-worker budget disables the CPU engine.
@@ -105,11 +126,9 @@ impl Scheduler {
             8192,
             env_or("EVOLUTION_UNIT_SECONDS", 1.0),
         )];
-        let extra = std::env::var("EVOLUTION_DEVICES").unwrap_or_else(|_| "primary".into());
-        for name in extra.split(',').map(str::trim).filter(|n| !n.is_empty()) {
-            if name.eq_ignore_ascii_case("primary")
-                || primary.to_lowercase().contains(&name.to_lowercase())
-            {
+        let extra = std::env::var("EVOLUTION_DEVICES").ok();
+        for name in secondary_device_names(extra.as_deref()) {
+            if primary.to_lowercase().contains(&name.to_lowercase()) {
                 continue;
             }
             // RADV compile time explodes for the largest bodies; those stay on the
@@ -513,6 +532,27 @@ pub fn to_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secondary_devices_are_opt_in_and_selection_sentinels_disable_them() {
+        assert_eq!(secondary_device_names(None), Vec::<&str>::new());
+        assert_eq!(secondary_device_names(Some("primary")), Vec::<&str>::new());
+        assert_eq!(secondary_device_names(Some("off")), Vec::<&str>::new());
+        assert_eq!(secondary_device_names(Some(" OFF ")), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn secondary_device_names_preserve_explicit_comma_separated_selection() {
+        assert_eq!(
+            secondary_device_names(Some("radeon, RTX 4060")),
+            vec!["radeon", "RTX 4060"]
+        );
+        assert_eq!(
+            secondary_device_names(Some("primary, radeon, off")),
+            vec!["radeon"]
+        );
+        assert_eq!(secondary_device_names(Some(" , ")), Vec::<&str>::new());
+    }
 
     #[test]
     fn contenders_get_the_worse_of_a_fine_perturbed_check() {

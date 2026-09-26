@@ -110,13 +110,11 @@ impl Playback {
         // ended and how far it got, so the replay shows exactly its score.
         let (frames, result) = crate::cpu_engine::replay(&normalized, &config);
         let nodes = physics::nodes(&normalized);
+        let last_frame = frames.len().saturating_sub(1).min(u32::MAX as usize) as u32;
         let fall = (result.fall_time > 0.0).then(|| {
-            let tick =
-                physics::settle() + (result.fall_time * physics::rate() as f32).round() as u32;
-            (
-                tick.min(frames.len().saturating_sub(1) as u32),
-                result.fitness,
-            )
+            let tick = physics::settle()
+                .saturating_add((result.fall_time * physics::rate() as f32).round() as u32);
+            (tick.min(last_frame), result.fitness)
         });
         let mut playback = Self {
             nodes,
@@ -124,20 +122,43 @@ impl Playback {
             distance: result.fitness,
             creature: normalized,
             config,
+            tick: physics::settle()
+                .min(last_frame)
+                .saturating_add(1)
+                .min(last_frame),
             frames,
-            tick: physics::settle() + 1,
             accumulator: 0.0,
         };
         playback.show();
         playback
     }
     fn reset(&mut self) {
-        self.tick = physics::settle() + 1;
+        self.tick = self.trial_start().saturating_add(1).min(self.last_frame());
+        self.show();
+    }
+    fn last_frame(&self) -> u32 {
+        self.frames.len().saturating_sub(1).min(u32::MAX as usize) as u32
+    }
+    fn trial_start(&self) -> u32 {
+        physics::settle().min(self.last_frame())
+    }
+    fn elapsed_seconds(&self) -> f32 {
+        self.tick
+            .saturating_sub(self.trial_start())
+            .min(self.config.steps()) as f32
+            * physics::dt()
+    }
+    fn seek(&mut self, elapsed_frame: u32) {
+        self.tick = self
+            .trial_start()
+            .saturating_add(elapsed_frame)
+            .min(self.last_frame());
+        self.accumulator = 0.0;
         self.show();
     }
     /// Advances one physics step.
     fn advance(&mut self) {
-        self.tick += 1;
+        self.tick = self.tick.saturating_add(1).min(self.last_frame());
         self.show();
     }
     /// The fall, once the replay has reached it.
@@ -797,7 +818,7 @@ impl App {
                 &p.creature,
                 origin,
                 self.zoom,
-                (p.tick - physics::settle()) as f32 * physics::dt(),
+                p.tick.saturating_sub(physics::settle()) as f32 * physics::dt(),
                 p.fallen().is_some(),
             );
             match p.fallen() {
@@ -814,7 +835,7 @@ impl App {
                         Align2::LEFT_TOP,
                         format!(
                             "Fell over at {:.1} s: head below its neck",
-                            (tick - physics::settle()) as f32 * physics::dt()
+                            tick.saturating_sub(physics::settle()) as f32 * physics::dt()
                         ),
                         FontId::proportional(13.),
                         FALLEN,
@@ -830,17 +851,6 @@ impl App {
                     );
                 }
             }
-            painter.text(
-                rect.right_top() + Vec2::new(-18., 18.),
-                Align2::RIGHT_TOP,
-                format!(
-                    "{:.1} / {:.0} s",
-                    (p.tick - physics::settle()) as f32 * physics::dt(),
-                    p.config.duration
-                ),
-                FontId::proportional(14.),
-                MUTED,
-            );
         } else {
             painter.text(
                 rect.center(),
@@ -857,6 +867,49 @@ impl App {
             FontId::proportional(11.),
             MUTED,
         );
+        let mut sought = false;
+        if let Some(p) = &mut self.playback {
+            let last_frame = p.last_frame();
+            let trial_start = p.trial_start();
+            let trial_frames = last_frame.saturating_sub(trial_start);
+            ui.horizontal(|ui| {
+                ui.label("Time");
+                if trial_frames > 0 {
+                    let mut frame = p.tick.saturating_sub(trial_start).min(trial_frames);
+                    let response = ui.add(
+                        egui::Slider::new(&mut frame, 0..=trial_frames)
+                            .show_value(false)
+                            .text(""),
+                    );
+                    if let Some((fall_frame, _)) = p.fall
+                        && trial_frames > 0
+                    {
+                        let fraction = fall_frame.saturating_sub(trial_start).min(trial_frames)
+                            as f32
+                            / trial_frames as f32;
+                        let x = egui::lerp(response.rect.x_range(), fraction);
+                        ui.painter().line_segment(
+                            [
+                                Pos2::new(x, response.rect.top() + 3.),
+                                Pos2::new(x, response.rect.bottom() - 3.),
+                            ],
+                            Stroke::new(2., FALLEN),
+                        );
+                    }
+                    if response.changed() {
+                        p.seek(frame);
+                        sought = true;
+                    }
+                } else {
+                    ui.label("single frame");
+                }
+                ui.label(format!(
+                    "{:.1} / {:.0} s",
+                    p.elapsed_seconds(),
+                    p.config.duration
+                ));
+            });
+        }
         ui.horizontal(|ui| {
             if ui
                 .button(if self.playing { "Pause" } else { "Play" })
@@ -883,6 +936,9 @@ impl App {
                     .text("Playback"),
             );
         });
+        if sought {
+            self.playing = false;
+        }
     }
     fn metrics(&self, ui: &mut egui::Ui) {
         // Live creatures/s over complete generations; the last generation's own
@@ -1488,14 +1544,17 @@ impl eframe::App for App {
         if self.playing
             && let Some(p) = &mut self.playback
         {
-            p.accumulator = (p.accumulator + dt.min(0.1) * self.speed).min(1.0);
-            let start = Instant::now();
-            while p.accumulator >= physics::dt() && start.elapsed() < Duration::from_millis(5) {
-                if p.tick >= physics::settle() + p.config.steps() {
-                    p.reset();
+            let frame_dt = physics::dt();
+            if frame_dt.is_finite() && frame_dt > 0.0 {
+                p.accumulator = (p.accumulator + dt.clamp(0.0, 0.1) * self.speed).min(1.0);
+                let start = Instant::now();
+                while p.accumulator >= frame_dt && start.elapsed() < Duration::from_millis(5) {
+                    if p.tick >= p.last_frame() {
+                        p.reset();
+                    }
+                    p.advance();
+                    p.accumulator -= frame_dt;
                 }
-                p.advance();
-                p.accumulator -= physics::dt();
             }
             if self.follow {
                 let x = p.nodes.iter().map(|n| n.pos[0]).sum::<f32>() / p.nodes.len() as f32;

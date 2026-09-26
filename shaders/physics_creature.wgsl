@@ -106,6 +106,8 @@ const VELOCITY_SOLVE_ITERATIONS: u32 = 4u;
 const MAX_MUSCLE_LENGTH_SPEED: f32 = 2.0;
 const MAX_MUSCLE_FORCE: f32 = 5.0;
 const MAX_NODE_SPEED: f32 = 5.0;
+// Feet sliding slower than this (m/s) count as planted (physics::PLANTED_SPEED).
+const PLANTED_SPEED: f32 = 0.01;
 // Extra weight per unit of grip for nodes resting on the ground during the
 // constraint passes (physics::STANCE_GRIP).
 const STANCE_GRIP: f32 = 10.0;
@@ -618,13 +620,16 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         // Planted feet push the body along through the bone passes. That is
         // ground friction, so it may move the body's center of mass at most mu
         // times the ground's normal push this step (each node's push, plus the
-        // whole-body lift for the rest of the body). Beyond that, the feet
-        // slip: the excess is taken back as a rigid shift.
+        // whole-body lift for the rest of the body). Only planted feet may push
+        // the body forward: while the feet slide, friction can only oppose
+        // their slide, so a sliding body cannot propel itself. Beyond that, the
+        // excess is taken back as a rigid shift.
         if grounded {
             var held_mass = 0.0;
             var held_grip = 0.0;
             var normal = 0.0;
             var com_x = 0.0;
+            var slide = 0.0;
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
                 let k = j * WG + lane;
@@ -632,14 +637,19 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                     held_mass += mass[j];
                     held_grip += mass[j] * friction[j];
                     normal += mass[j] * max(pos[k].y - vel[k].x, 0.0);
+                    slide += mass[j] * (pos[k].x - old[k].x);
                 }
                 com_x += pos[k].x * mass[j];
             }
             normal += (total_mass - held_mass) * ground_lift;
             let mu = held_grip / max(held_mass, 1e-6) * p.friction;
             let allowed = mu * normal * inv_total_mass;
+            slide /= max(held_mass, 1e-6);
+            let planted = PLANTED_SPEED * DT;
+            let low = select(-allowed, 0.0, slide < -planted);
+            let high = select(allowed, 0.0, slide > planted);
             let shift = com_x * inv_total_mass - com_x_before;
-            let excess = shift - clamp(shift, -allowed, allowed);
+            let excess = shift - clamp(shift, low, high);
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
                 pos[j * WG + lane].x -= excess;

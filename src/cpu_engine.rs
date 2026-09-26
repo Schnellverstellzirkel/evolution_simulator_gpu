@@ -745,23 +745,31 @@ impl Group {
             // Planted feet push the body along through the bone passes. That is
             // ground friction, so it may move the body's center of mass at most
             // mu times the ground's normal push this step (each node's push,
-            // plus the whole-body lift for the rest of the body). Beyond that,
-            // the feet slip: the excess is taken back as a rigid shift.
+            // plus the whole-body lift for the rest of the body). Only planted
+            // feet may push the body forward: while the feet slide, friction
+            // can only oppose their slide, so a sliding body cannot propel
+            // itself. Beyond that, the excess is taken back as a rigid shift.
             if colliding {
-                let (mut contact_mass, mut grip, mut normal, mut com_x) = (zero, zero, zero, zero);
+                let (mut contact_mass, mut grip, mut normal, mut com_x, mut slide) =
+                    (zero, zero, zero, zero, zero);
                 for j in 0..n {
                     let contact = py[j].le(floor[j] + 1e-4) & failed[j].lt(F::splat(0.5));
                     let push = (py[j] - vx[j]).max(zero);
                     contact_mass += F::select(contact, mass[j], zero);
                     grip += F::select(contact, mass[j] * friction[j], zero);
                     normal += F::select(contact, mass[j] * push, zero);
+                    slide += F::select(contact, mass[j] * (px[j] - ox[j]), zero);
                     com_x += px[j] * mass[j];
                 }
                 normal += (total_mass - contact_mass) * lift;
                 let mu = grip / contact_mass.max(tiny) * ground_friction;
                 let allowed = mu * normal * inv_total_mass;
+                let slide = slide / contact_mass.max(tiny);
+                let planted = F::splat(physics::PLANTED_SPEED * dt);
+                let low = F::select(slide.lt(-planted), zero, -allowed);
+                let high = F::select(slide.gt(planted), zero, allowed);
                 let shift = com_x * inv_total_mass - com_x_before;
-                let excess = shift - shift.max(-allowed).min(allowed);
+                let excess = shift - shift.max(low).min(high);
                 for x in &mut px {
                     *x -= excess;
                 }
