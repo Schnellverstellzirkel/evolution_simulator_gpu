@@ -1,19 +1,19 @@
 # Building
 
 The normal `release` profile keeps thin LTO and 16 codegen units. For quicker
-iteration, `fast` inherits the release settings but disables LTO, uses 256
+iteration, `release-fast` inherits the release settings but disables LTO, uses 256
 codegen units, and enables incremental compilation:
 
 ```bash
-CARGO_BUILD_JOBS=8 nice -n 10 cargo build --profile fast
-CARGO_BUILD_JOBS=8 RAYON_NUM_THREADS=8 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 nice -n 10 cargo run --profile fast
+CARGO_BUILD_JOBS=8 nice -n 10 cargo build --profile release-fast
+CARGO_BUILD_JOBS=8 RAYON_NUM_THREADS=8 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 nice -n 10 cargo run --profile release-fast
 ```
 
 The repository's x86_64 Linux Cargo config already enables `target-cpu=native`.
 If `mold` is installed, it can speed up linking:
 
 ```bash
-CARGO_BUILD_JOBS=8 nice -n 10 env RUSTFLAGS="-C target-cpu=native -C link-arg=-fuse-ld=mold" cargo build --profile fast
+CARGO_BUILD_JOBS=8 nice -n 10 env RUSTFLAGS="-C target-cpu=native -C link-arg=-fuse-ld=mold" cargo build --profile release-fast
 ```
 
 Supplying `RUSTFLAGS` replaces Cargo's configured rustflags, so the command

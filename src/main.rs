@@ -88,6 +88,10 @@ enum Action {
         output_dir: PathBuf,
         #[arg(long, value_enum, default_value_t = SearchVariant::MorphologyReserve)]
         variant: SearchVariant,
+        /// Evaluate with the production CPU SIMD engine instead of initializing Vulkan.
+        /// Thread count comes from EVOLUTION_CPU_THREADS (default: logical CPUs minus four).
+        #[arg(long)]
+        cpu: bool,
     },
     /// Evaluate a fixed checkpoint population repeatedly (kernel diagnostics).
     EvalBench {
@@ -386,6 +390,7 @@ fn main() -> Result<()> {
             milestones,
             output_dir,
             variant,
+            cpu,
         }) => {
             let mut cfg: Config = if let Some(path) = config {
                 serde_json::from_reader(std::fs::File::open(path)?)?
@@ -396,15 +401,16 @@ fn main() -> Result<()> {
             if let Some(duration) = duration {
                 cfg.duration = duration;
             }
-            search_benchmark::run(
-                &cli.gpu,
-                cfg,
-                &seeds,
+            search_benchmark::run(search_benchmark::RunOptions {
+                gpu_name: &cli.gpu,
+                config: cfg,
+                seeds: &seeds,
                 generations,
-                &milestones,
-                &output_dir,
-                matches!(variant, SearchVariant::MorphologyReserve),
-            )
+                milestones: &milestones,
+                output_dir: &output_dir,
+                morphology_reserve_enabled: matches!(variant, SearchVariant::MorphologyReserve),
+                cpu_only: cpu,
+            })
         }
         Some(Action::EvalBench {
             checkpoint,

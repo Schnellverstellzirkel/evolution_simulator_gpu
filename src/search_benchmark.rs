@@ -2,9 +2,11 @@
 
 use crate::{
     config::Config,
+    cpu_engine,
     evolution::{Creature, FAILED, Population},
     gpu::Gpu,
     qd::{self, Elite, Emitter, EmitterStats, Topology},
+    scheduler,
     storage::{self, Experiment},
 };
 use anyhow::{Context, Result, ensure};
@@ -100,10 +102,10 @@ struct EmitterSnapshot {
 struct GenerationRow {
     seed: u64,
     generation: u32,
-    evaluations: u64,
+    candidate_evaluations: u64,
     search_wall_seconds: f64,
     generation_search_seconds: f64,
-    gpu_evaluation_seconds: f64,
+    evaluation_seconds: f64,
     archive_seconds: f64,
     offspring_seconds: f64,
     benchmark_wall_seconds: f64,
@@ -118,6 +120,7 @@ struct GenerationRow {
     archive_triangle_like_fraction: f64,
     archive_node_counts_json: String,
     archive_muscle_counts_json: String,
+    top50_body_sizes_json: String,
     innovation_reserve_count: usize,
     innovation_reserve_morphology_json: String,
     population_unique_topologies: usize,
@@ -166,9 +169,9 @@ struct SeedSummary {
     seed: u64,
     population: usize,
     generations: u32,
-    evaluations: u64,
+    candidate_evaluations: u64,
     population_creation_seconds: f64,
-    gpu_warmup_seconds: f64,
+    evaluator_warmup_seconds: f64,
     search_wall_seconds: f64,
     benchmark_wall_seconds: f64,
     best_distance_m: f32,
@@ -181,6 +184,8 @@ struct SeedSummary {
     final_archive_morphology: MorphologySnapshot,
     final_innovation_reserve_morphology: MorphologySnapshot,
     final_population_morphology: MorphologySnapshot,
+    /// Top archive elites sorted by fitness, with simple body-size measurements.
+    top50_body_sizes: Vec<TopEliteBodySize>,
     structural_topology_candidates: u64,
     /// First-time, distinct topologies admitted from structural offspring.
     archived_structural_innovations: u64,
@@ -198,13 +203,68 @@ struct RunMetadata {
     morphology_parent_fraction: f32,
     minimum_morphology_descendants_before_eviction: u64,
     created_unix_seconds: u64,
-    gpu: String,
+    backend: String,
+    evaluation_device: String,
     logical_cpus: usize,
     seeds: Vec<u64>,
     generations: u32,
-    evaluation_budget_per_seed: u64,
+    candidate_evaluation_budget_per_seed: u64,
     config: Config,
     notes: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TopEliteBodySize {
+    rank: usize,
+    distance_m: f32,
+    nodes: usize,
+    muscles: usize,
+    total_bone_length_m: f32,
+    starting_height_m: f32,
+}
+
+enum Evaluator {
+    Gpu(Box<Gpu>),
+    Cpu(rayon::ThreadPool),
+}
+
+impl Evaluator {
+    fn name(&self) -> String {
+        match self {
+            Self::Gpu(gpu) => gpu.name.clone(),
+            Self::Cpu(pool) => format!("CPU ({} threads)", pool.current_num_threads()),
+        }
+    }
+
+    fn evaluate(
+        &mut self,
+        population: &Population,
+        config: &Config,
+    ) -> Result<Vec<qd::EvaluationMetrics>> {
+        match self {
+            Self::Gpu(gpu) => {
+                let mut output = Vec::with_capacity(population.genomes.len());
+                let batch_size = config.batch_size().max(1);
+                for begin in (0..population.genomes.len()).step_by(batch_size) {
+                    let end = (begin + batch_size).min(population.genomes.len());
+                    output.extend(gpu.evaluate_with_metrics(
+                        population,
+                        &(begin..end).collect::<Vec<_>>(),
+                        config,
+                    )?);
+                }
+                Ok(output)
+            }
+            Self::Cpu(pool) => {
+                let results = pool.install(|| cpu_engine::evaluate(population, config));
+                Ok(results
+                    .iter()
+                    .enumerate()
+                    .map(|(index, result)| scheduler::to_metrics(population, index, result, config))
+                    .collect())
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -234,15 +294,28 @@ pub struct ChampionSummary {
     pub topology: String,
 }
 
-pub fn run(
-    gpu_name: &str,
-    mut config: Config,
-    seeds: &[u64],
-    generations: u32,
-    milestones: &[f32],
-    output_dir: &Path,
-    morphology_reserve_enabled: bool,
-) -> Result<()> {
+pub struct RunOptions<'a> {
+    pub gpu_name: &'a str,
+    pub config: Config,
+    pub seeds: &'a [u64],
+    pub generations: u32,
+    pub milestones: &'a [f32],
+    pub output_dir: &'a Path,
+    pub morphology_reserve_enabled: bool,
+    pub cpu_only: bool,
+}
+
+pub fn run(options: RunOptions<'_>) -> Result<()> {
+    let RunOptions {
+        gpu_name,
+        mut config,
+        seeds,
+        generations,
+        milestones,
+        output_dir,
+        morphology_reserve_enabled,
+        cpu_only,
+    } = options;
     ensure!(!seeds.is_empty(), "At least one fixed seed is required");
     ensure!(generations > 0, "Generation count must be positive");
     ensure!(
@@ -270,7 +343,23 @@ pub fn run(
         fs::create_dir_all(output_dir)?;
     }
 
-    let mut gpu = Gpu::new(gpu_name)?;
+    let mut evaluator = if cpu_only {
+        let threads = crate::engine::cpu_threads();
+        ensure!(
+            threads > 0,
+            "CPU search benchmark requires a positive EVOLUTION_CPU_THREADS setting and sufficient CPU budget"
+        );
+        Evaluator::Cpu(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(|index| format!("cpu-search-eval-{index}"))
+                .start_handler(|_| crate::engine::lower_thread_priority())
+                .build()
+                .context("Creating CPU benchmark thread pool")?,
+        )
+    } else {
+        Evaluator::Gpu(Box::new(Gpu::new(gpu_name)?))
+    };
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -292,13 +381,14 @@ pub fn run(
             0
         },
         created_unix_seconds: created,
-        gpu: gpu.name.clone(),
+        backend: if cpu_only { "cpu" } else { "gpu" }.to_string(),
+        evaluation_device: evaluator.name(),
         logical_cpus: std::thread::available_parallelism().map_or(1, usize::from),
         seeds: seeds.to_vec(),
         generations,
-        evaluation_budget_per_seed: config.population as u64 * generations as u64,
+        candidate_evaluation_budget_per_seed: config.population as u64 * generations as u64,
         config: config.clone(),
-        notes: "GPU evaluation uses throughput mode; physics and fitness are unchanged. Search wall time includes evaluation, archive insertion, and offspring creation. Benchmark wall time also includes metrics and file output.",
+        notes: "The candidate evaluation budget is population * generations: one standard trial for every candidate slot. GPU evaluation retains the scheduler contender-check behavior, which can add check trials (controlled by EVOLUTION_ROBUST_TRIALS). CPU evaluation uses one standard trial per candidate. Archive admission can also replay candidates through production CPU validation; those replays are outside the candidate budget and vary with contenders. Compare variants using the same backend and environment. CPU mode honors EVOLUTION_CPU_THREADS. CPU/GPU floating-point behavior can differ slightly.",
     };
     write_json(&output_dir.join("metadata.json"), &metadata)?;
 
@@ -308,7 +398,7 @@ pub fn run(
         seed_config.seed = seed;
         seed_config.random_seed = false;
         let summary = run_seed(
-            &mut gpu,
+            &mut evaluator,
             seed_config,
             generations,
             milestones,
@@ -336,7 +426,7 @@ pub fn run(
 }
 
 fn run_seed(
-    gpu: &mut Gpu,
+    evaluator: &mut Evaluator,
     config: Config,
     generations: u32,
     milestones: &[f32],
@@ -353,7 +443,7 @@ fn run_seed(
     experiment.morphology_reserve_override = Some(morphology_reserve_enabled);
     let creation_seconds = creation_started.elapsed().as_secs_f64();
     let warmup_started = Instant::now();
-    if warm_up {
+    if warm_up && let Evaluator::Gpu(gpu) = evaluator {
         gpu.evaluate(
             &experiment.population,
             &(0..experiment.config.population.min(256)).collect::<Vec<_>>(),
@@ -370,10 +460,10 @@ fn run_seed(
     curve.write_record([
         "seed",
         "generation",
-        "evaluations",
+        "candidate_evaluations",
         "search_wall_seconds",
         "generation_search_seconds",
-        "gpu_evaluation_seconds",
+        "evaluation_seconds",
         "archive_seconds",
         "offspring_seconds",
         "benchmark_wall_seconds",
@@ -388,6 +478,7 @@ fn run_seed(
         "archive_triangle_like_fraction",
         "archive_node_counts_json",
         "archive_muscle_counts_json",
+        "top50_body_sizes_json",
         "innovation_reserve_count",
         "innovation_reserve_morphology_json",
         "population_unique_topologies",
@@ -437,20 +528,16 @@ fn run_seed(
     for _ in 0..generations {
         let generation = experiment.generation;
         let evaluation_started = Instant::now();
-        let batch_size = experiment.config.batch_size();
-        for begin in (0..experiment.config.population).step_by(batch_size) {
-            let end = (begin + batch_size).min(experiment.config.population);
-            let metrics = gpu.evaluate_with_metrics(
-                &experiment.population,
-                &(begin..end).collect::<Vec<_>>(),
-                &experiment.config,
-            )?;
-            for (offset, metric) in metrics.iter().enumerate() {
-                experiment.scores[begin + offset] = metric.fitness;
-                experiment.trial_metrics[begin + offset] = metric.behavior;
-            }
+        let metrics = evaluator.evaluate(&experiment.population, &experiment.config)?;
+        ensure!(
+            metrics.len() == experiment.config.population,
+            "Evaluator returned an incomplete generation"
+        );
+        for (index, metric) in metrics.iter().enumerate() {
+            experiment.scores[index] = metric.fitness;
+            experiment.trial_metrics[index] = metric.behavior;
         }
-        let gpu_seconds = evaluation_started.elapsed().as_secs_f64();
+        let evaluation_seconds = evaluation_started.elapsed().as_secs_f64();
         experiment.evaluated = experiment.config.population;
 
         let old_topology_by_id: HashMap<u64, String> = experiment
@@ -675,6 +762,7 @@ fn run_seed(
             .count() as u64;
 
         let archive_morphology = archive_morphology(&experiment.archive.entries);
+        let top50_body_sizes = top_elite_body_sizes(&experiment.archive.entries, 50);
         let innovation_reserve_morphology =
             innovation_reserve_morphology(&experiment.archive.entries);
         let population_morphology = population_morphology(&experiment.population);
@@ -697,7 +785,7 @@ fn run_seed(
                 &serde_json::json!({
                     "seed": seed,
                     "generation": generation,
-                    "evaluations": evaluations,
+                    "candidate_evaluations": evaluations,
                     "distance_m": champion.fitness,
                     "morphology": archive_morphology,
                     "innovation_reserve_morphology": innovation_reserve_morphology,
@@ -711,7 +799,7 @@ fn run_seed(
         let offspring_started = Instant::now();
         experiment.prepare_next_batch()?;
         let offspring_seconds = offspring_started.elapsed().as_secs_f64();
-        let generation_search_seconds = gpu_seconds + archive_seconds + offspring_seconds;
+        let generation_search_seconds = evaluation_seconds + archive_seconds + offspring_seconds;
         search_wall_seconds += generation_search_seconds;
         let benchmark_wall_seconds = benchmark_started.elapsed().as_secs_f64();
         for (key, milestone) in reached.iter_mut() {
@@ -733,10 +821,10 @@ fn run_seed(
         curve.serialize(GenerationRow {
             seed,
             generation,
-            evaluations,
+            candidate_evaluations: evaluations,
             search_wall_seconds,
             generation_search_seconds,
-            gpu_evaluation_seconds: gpu_seconds,
+            evaluation_seconds,
             archive_seconds,
             offspring_seconds,
             benchmark_wall_seconds,
@@ -751,6 +839,7 @@ fn run_seed(
             archive_triangle_like_fraction: archive_morphology.triangle_like_fraction,
             archive_node_counts_json: serde_json::to_string(&archive_morphology.node_counts)?,
             archive_muscle_counts_json: serde_json::to_string(&archive_morphology.muscle_counts)?,
+            top50_body_sizes_json: serde_json::to_string(&top50_body_sizes)?,
             innovation_reserve_count: innovation_reserve_morphology.count,
             innovation_reserve_morphology_json: serde_json::to_string(
                 &innovation_reserve_morphology,
@@ -800,9 +889,9 @@ fn run_seed(
         seed,
         population: config.population,
         generations,
-        evaluations,
+        candidate_evaluations: evaluations,
         population_creation_seconds: creation_seconds,
-        gpu_warmup_seconds: warmup_seconds,
+        evaluator_warmup_seconds: warmup_seconds,
         search_wall_seconds,
         benchmark_wall_seconds: benchmark_started.elapsed().as_secs_f64(),
         best_distance_m: final_best,
@@ -815,6 +904,7 @@ fn run_seed(
         final_archive_morphology,
         final_innovation_reserve_morphology,
         final_population_morphology,
+        top50_body_sizes: top_elite_body_sizes(&experiment.archive.entries, 50),
         structural_topology_candidates,
         archived_structural_innovations,
         reintroduced_structural_lineages,
@@ -966,6 +1056,47 @@ fn archive_morphology(entries: &[Elite]) -> MorphologySnapshot {
         );
     }
     accumulator.finish()
+}
+
+fn top_elite_body_sizes(entries: &[Elite], limit: usize) -> Vec<TopEliteBodySize> {
+    let mut elites: Vec<&Elite> = entries.iter().collect();
+    elites.retain(|elite| elite.fitness.is_finite() && elite.fitness > FAILED);
+    elites.sort_unstable_by(|a, b| {
+        b.fitness
+            .total_cmp(&a.fitness)
+            .then_with(|| topology_key(&a.topology).cmp(&topology_key(&b.topology)))
+            .then_with(|| a.creature.id.cmp(&b.creature.id))
+    });
+    elites
+        .into_iter()
+        .take(limit)
+        .enumerate()
+        .map(|(index, elite)| {
+            let creature = &elite.creature;
+            let min_y = creature
+                .nodes
+                .iter()
+                .map(|node| node.y)
+                .fold(f32::INFINITY, f32::min);
+            let max_y = creature
+                .nodes
+                .iter()
+                .map(|node| node.y)
+                .fold(f32::NEG_INFINITY, f32::max);
+            TopEliteBodySize {
+                rank: index + 1,
+                distance_m: elite.fitness,
+                nodes: creature.nodes.len(),
+                muscles: creature.muscles.len(),
+                total_bone_length_m: creature.bones.iter().map(|bone| bone.rest_length).sum(),
+                starting_height_m: if creature.nodes.is_empty() {
+                    0.0
+                } else {
+                    (max_y - min_y).max(0.0)
+                },
+            }
+        })
+        .collect()
 }
 
 fn innovation_reserve_morphology(entries: &[Elite]) -> MorphologySnapshot {
