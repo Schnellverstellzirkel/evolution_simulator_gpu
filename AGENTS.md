@@ -8,8 +8,9 @@ Read this before changing the code. It lists the owner's rules, how to work on t
 
 Two agent teams work on this repository at the same time and only see each other through git. Pull before you start, commit small, push often, and update this section when you take or finish an item.
 
-- 2026-09-26 15:5x, Claude pushed: the sled regression test (2b8ae27..8fd2234); the grip effect now has both slippery and grippier levels with the calm world at Grippy; the live view has green ground, a blue sky with clouds, and muscles that go pink to deep red with contraction. Still open from the earlier list: a full evolution measurement under the planted-feet rule (5905316). Please leave the physics in `src/cpu_engine.rs` and `shaders/physics_creature.wgsl`, and archive insertion in `src/storage.rs`, to Claude until this line changes. Claude stays out of the files the Codex team listed below.
+- 2026-09-26 17:xx, Claude pushed a backlog sweep: legacy `mutate`/`reproduce` removed with the obstacle config slot (checkpoint magic EVORUST5); `EVOLUTION_STAGE_LOG` CSV rows; `runs/` disk use, replay speed and center-of-mass trail, help overlay, screenshot button, dark theme, archive map, race view and lineage view in the UI; heat wave and drought effects in both engines with archive re-testing (qd::VERSION 21); and `examples/search_ab.rs`. Still open: a full evolution measurement under the planted-feet rule (5905316). Please leave the physics in `src/cpu_engine.rs` and `shaders/physics_creature.wgsl`, and archive insertion in `src/storage.rs`, to Claude until this line changes. Claude stays out of the files the Codex team listed below.
 - 2026-09-26, Codex Luna team (coordinated by the primary Codex session) is working on: CPU evaluation backend and top-50 body mix in `src/search_benchmark.rs`, `src/main.rs`, and `docs/search-benchmark.md`; current-physics details in `docs/architecture.md`. Please leave these files to the assigned workers until this line changes.
+- Just pushed: the backlog wave above. 100 CPU tests, nine report tests, three RTX agreement tests, and `first_generation` at the same numbers as before the energy effects (median -0.07 m, p99 0.34 m, best 11.03 m). The two new effects are neutral at their calm defaults, and changing either re-tests the archive. `search_ab` tiny runs are byte-identical across repeats. UI features were smoke-run with screenshots under /tmp/opencode.
 - Just pushed: a failed GPU is retired and its unfinished units, including pending fine checks, are re-submitted to a healthy CPU with their exact creatures and settings; a failed CPU is terminal and delivers completed output before its persistent error. Rejected submissions keep their creatures in the round. 94 CPU tests, nine report tests, three RTX agreement tests.
 - Just pushed: a primary GPU that cannot open no longer stops the game. Evaluation falls back to the CPU and reports the original failure once; with the separate CPU pool disabled, it shares the general Rayon pool. Explicit GPU constructors stay strict. 96 CPU tests, nine report tests, three RTX agreement tests.
 - Just pushed: a `fast` Cargo profile and machine-safe build/run instructions in `docs/building.md`.
@@ -112,8 +113,8 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 31. Gaps: pits that force jumping or bridging.
 32. Water: a viscous medium that favors swimming strokes.
 33. Wind: a steady headwind or tailwind.
-34. Drought: slower muscle energy recovery.
-35. Heat wave: smaller muscle energy store.
+34. Done: drought levels slow muscle energy recovery (`Config::muscle_recovery`, 1.0 down to 0.1) in both engines.
+35. Done: heat wave levels shrink the muscle energy store (`Config::muscle_energy`, 1.0 down to 0.35) in both engines.
 36. Done: meteor strike wipes out half of every archive's elites; Undo returns the fossils (`Experiment::meteor`, `undo_meteor`).
 37. Done: Extinction wipes out the slowest island (`Experiment::extinction`), undoable with the same fossils as the meteor.
 38. Earthquake: a new random terrain each trial, so gaits must be robust.
@@ -169,7 +170,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 79. Reflexes built on the touchdown sensors (a muscle that fires when its foot lands).
 80. Re-run the GA research lab ablations under the new physics before drawing conclusions from old results.
 81. (owner) Improve the evolution algorithm itself. The items below are candidates. Test each with paired runs at equal evaluation budgets over at least 5 seeds, and report best distance, QD score, and the body-size mix of the top 50.
-82. Commit a search A/B harness (CPU engine, fixed seeds, equal budgets) so every search change is measured the same way.
+82. Done: `examples/search_ab.rs` runs fixed-seed CPU-only generations through the production archive/breeding path and reports best distance, QD score, archive cells, top-50 body mix, and paired seed summaries; see docs/search-research.md.
 83. Re-evaluate archive elites now and then and keep the worse score, so lucky results do not hold cells (noisy fitness).
 84. Deep grids for noisy fitness: keep several candidates per cell and let the steady ones win (Flageat and Cully, 2020).
 85. Racing: spend extra trials only on creatures whose rank is still uncertain (Hoeffding races, Heidrich-Meisner and Igel, 2009).
@@ -207,13 +208,13 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 ### Interface
 
 113. Done: replay viewer has a follow camera, distance ruler, speed readout (m/s), center-of-mass trail, playback speed (0.25x to 4x), scrubber and fall marker.
-114. Behavior archive map: a heatmap of cells colored by distance, click to replay.
+114. Done: the Behavior archive tab has a Cards/Map selector with a heatmap slice of the archive, a fitness legend, axis selectors, and click-to-replay.
 115. History tab: best distance over generations, records timeline, replay of each record holder.
-116. Race view: the top elites run side by side with a leaderboard.
+116. Done: a Race tab replays the top five elites in parallel lanes with live standings and a leader highlight.
 117. Creature drawing: muscle activation and fatigue colors, head, organs, touchdown highlights, broken joint marks.
 118. Done: F1 or `?` opens a help overlay, 1/2/3 switch tabs, space toggles replay play/pause, arrow keys seek, and the status line shows creatures per second.
 119. Share a creature: export an animated GIF and a JSON file, and open a creature JSON to replay it.
-120. Lineage view: ancestors with thumbnails, mutation labels, gains, and body plan changes highlighted.
+120. Done: a Lineage tab and an Overview strip show ancestor thumbnails, generation, gains, mutation text, and a BODY PLAN badge when part counts change.
 121. Show each muscle's energy during replay, to make fatigue visible.
 122. A debug overlay for forces and ground reactions.
 123. Name species automatically so players can follow them.
