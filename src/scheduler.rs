@@ -422,6 +422,25 @@ impl Scheduler {
         indices: &[usize],
         cfg: &Config,
     ) -> Result<Vec<EvaluationMetrics>> {
+        // Without an archive to compare against, every creature is checked.
+        self.evaluate_checked(pop, indices, cfg, true)
+    }
+    /// One trial per creature at `cfg`'s fidelity, without the contender check.
+    pub fn evaluate_single(
+        &mut self,
+        pop: &Population,
+        indices: &[usize],
+        cfg: &Config,
+    ) -> Result<Vec<EvaluationMetrics>> {
+        self.evaluate_checked(pop, indices, cfg, false)
+    }
+    fn evaluate_checked(
+        &mut self,
+        pop: &Population,
+        indices: &[usize],
+        cfg: &Config,
+        check: bool,
+    ) -> Result<Vec<EvaluationMetrics>> {
         // Finish anything left from an interrupted round first.
         self.stop();
         while self.in_flight() > 0 {
@@ -437,8 +456,9 @@ impl Scheduler {
         self.begin(pop, indices.iter().copied());
         while remaining > 0 {
             self.pump(pop, cfg, &[])?;
-            // Without an archive to compare against, every creature is checked.
-            for (unit, metrics) in self.collect(pop, cfg, Duration::from_millis(50), |_, _| true)? {
+            for (unit, metrics) in
+                self.collect(pop, cfg, Duration::from_millis(50), |_, _| check)?
+            {
                 for (i, metric) in unit.into_iter().zip(metrics) {
                     out[position[&i]] = metric;
                     remaining -= 1;

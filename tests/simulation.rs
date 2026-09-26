@@ -1,3 +1,4 @@
+use evolution_simulator::physics::Fidelity;
 use evolution_simulator::{
     config::Config,
     evolution::{self, Bone, Creature, Muscle, NodeGene},
@@ -420,14 +421,30 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
             .all(|s| s.is_finite() && *s > evolution::FAILED)
     );
     // The CPU SIMD engine (also the replay) runs the same physics as the GPU
-    // kernel; short trials keep rounding differences from growing chaotically.
-    let cpu = evolution_simulator::cpu_engine::evaluate(&pop, &cfg);
-    for (i, (&gpu_score, cpu_result)) in scores.iter().zip(&cpu).enumerate() {
-        assert!(
-            (gpu_score - cpu_result.fitness).abs() < 0.05,
-            "score {i}: GPU {gpu_score}, CPU engine {}",
-            cpu_result.fitness
-        );
+    // kernel at both fidelities; short trials keep rounding differences from
+    // growing chaotically. Single trials leave out the perturbed contender
+    // check, whose fall and break decisions can flip on rounding.
+    let indices: Vec<usize> = (0..10).collect();
+    for fidelity in [Fidelity::standard(), Fidelity::fine()] {
+        let cfg = Config {
+            fidelity: Some(fidelity),
+            ..cfg.clone()
+        };
+        let gpu_scores = gpu
+            .sched
+            .as_mut()
+            .unwrap()
+            .evaluate_single(&pop, &indices, &cfg)
+            .unwrap();
+        let cpu = evolution_simulator::cpu_engine::evaluate(&pop, &cfg);
+        for (i, (gpu_result, cpu_result)) in gpu_scores.iter().zip(&cpu).enumerate() {
+            assert!(
+                (gpu_result.fitness - cpu_result.fitness).abs() < 0.05,
+                "{fidelity:?} score {i}: GPU {}, CPU engine {}",
+                gpu_result.fitness,
+                cpu_result.fitness
+            );
+        }
     }
     let cfg = Config {
         population: 8,
@@ -580,12 +597,11 @@ fn gpu_matches_cpu_on_rough_ground() {
         let scores = gpu
             .evaluate(&pop, &(0..64).collect::<Vec<_>>(), &cfg)
             .unwrap();
-        let cpu = evolution_simulator::cpu_engine::evaluate(&pop, &cfg);
-        for (i, (&gpu_score, cpu_result)) in scores.iter().zip(&cpu).enumerate() {
+        let cpu = cpu_reference(&pop, &cfg);
+        for (i, (&gpu_score, &cpu_score)) in scores.iter().zip(&cpu).enumerate() {
             assert!(
-                (gpu_score - cpu_result.fitness).abs() < 0.05,
-                "roughness {terrain}, score {i}: GPU {gpu_score}, CPU engine {}",
-                cpu_result.fitness
+                (gpu_score - cpu_score).abs() < 0.05,
+                "roughness {terrain}, score {i}: GPU {gpu_score}, CPU engine {cpu_score}",
             );
         }
     }
@@ -709,12 +725,24 @@ fn gpu_matches_cpu_with_narrow_joints() {
     let scores = gpu
         .evaluate(&pop, &(0..64).collect::<Vec<_>>(), &cfg)
         .unwrap();
-    let cpu = evolution_simulator::cpu_engine::evaluate(&pop, &cfg);
-    for (i, (&gpu_score, cpu_result)) in scores.iter().zip(&cpu).enumerate() {
+    let cpu = cpu_reference(&pop, &cfg);
+    for (i, (&gpu_score, &cpu_score)) in scores.iter().zip(&cpu).enumerate() {
         assert!(
-            (gpu_score - cpu_result.fitness).abs() < 0.05,
-            "score {i}: GPU {gpu_score}, CPU engine {}",
-            cpu_result.fitness
+            (gpu_score - cpu_score).abs() < 0.05,
+            "score {i}: GPU {gpu_score}, CPU engine {cpu_score}",
         );
     }
+}
+
+/// Scores from the CPU-only scheduler, which runs the same trials as the GPU
+/// scheduler: every creature gets the perturbed fine-physics contender check.
+fn cpu_reference(pop: &evolution::Population, cfg: &Config) -> Vec<f32> {
+    let indices: Vec<usize> = (0..pop.genomes.len()).collect();
+    evolution_simulator::scheduler::Scheduler::cpu_only(4)
+        .unwrap()
+        .evaluate(pop, &indices, cfg)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.fitness)
+        .collect()
 }
