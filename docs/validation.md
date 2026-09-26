@@ -1,5 +1,13 @@
 # Validation results
 
+## Larger limits and broken joints (2026-09-26)
+
+The physics limits were raised so that large runners can reach a kilometer in a minute: 60 m/s nodes, 40 rad/s bone turning, 24 m/s and 100 N muscles, 0.2 s rhythms, 10 m bones, 5 m muscles, and no air drag by default. The earlier stability checks covered 2 m/s muscle targets, 5 m/s nodes, and 15 rad/s bones.
+
+With the larger limits, the existing joint-range test failed: a few of 64 small random creatures forced a joint through its limits and round a full turn, jamming it up to 2.8 rad outside its range. Any muscle force above 5 N or node speed above 5 m/s was enough. Strong muscles drive the joint faster than the per-step turn limit lets the joint projection pull it back. The fix does not change the solver. A joint forced more than 0.5 rad past its range breaks and ends the trial like a fall, in the CPU engine, the GPU kernel, and the replay. The test now checks joints up to the end of the trial, and a new unit test checks the break threshold. Evolved runners keep their joints within 0.06 rad of their ranges over a full trial.
+
+The GPU kernel change compiles (naga parses the substituted shader for standard and fine physics), but this container has no GPU, so CPU/GPU trajectory agreement was not rerun.
+
 ## Rejected whole-creature lane kernel (2026-09-25)
 
 A full-window, five-generation comparison at 5,000 creatures and 1-second trials was run while the desktop compositor remained active. The lane-per-creature experiment evaluated at 17.8k creatures/s (0.280 s evaluation/generation) and completed 14.75 generations/s; the shared-memory kernel evaluated at 46.9k creatures/s (0.107 s evaluation/generation) and completed 34.44 generations/s. This short, non-default-duration trial is diagnostic only, but it clearly regressed, so the experiment was removed. The default 18-second workload remains the acceptance workload.

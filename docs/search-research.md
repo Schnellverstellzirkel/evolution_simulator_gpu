@@ -241,6 +241,72 @@ Fitness is noisy (trial A vs B rank correlation 0.82–0.90). Min-of-two is a pe
 
 Use `search-benchmark` with fixed seeds, the same evaluation budget, and at least 5 seeds per variant (seed-to-seed spread here was ±10–15%). Report best distance against evaluations and against GPU-seconds separately, and add body-complexity metrics: best distance among bodies with at least 8 nodes, and the node-count distribution of the top 50 elites. Turn one change on at a time, starting with the lossless cost changes (F1, F2), which make every later experiment cheaper.
 
+## 7. Reaching a kilometer in a minute
+
+Goal: evolved runners that cover 1 km in 60 s (16.7 m/s), at least 10× the 57.8 m best of the original search, without relying on solver errors. "Verified" below means the worst of 9 trials at 240 Hz with 8 bone and 4 velocity passes: one from the evolved pose and eight from poses perturbed by up to 2 cm, with node grip varied by ±10%.
+
+### The old world could not allow it
+
+- Nodes were capped at 5 m/s, so no creature could exceed 300 m.
+- Air kept 98.5% of velocity per 1/60 s, a drag of 0.9 × speed per second. At 16.7 m/s that is about 15 m/s², more than ground grip (friction 1.5 × g ≈ 15 m/s²) can supply.
+- A momentum ledger of a fast gait with a much weaker drag (0.998) still showed drag removing about 110 of the 125 kg·m/s that ground contact added over a trial.
+- Muscles (2 m/s, 5 N), bones (2 m), and rhythms (0.5 s minimum) were all slower than the gaits a kilometer needs.
+
+### Size sets the speed limit
+
+Relaxing one limit at a time and re-tuning a champion with CMA-ES (300 iterations of 64 samples) showed which limits bind once they are no longer tiny. Node speed, bone spin, and muscle force did not: relaxing them left a tuned gait's distance unchanged. Removing air drag gave +24%, doubling ground grip +22% on top of that, and doubling muscle speed +12%. What mattered most was scale: doubling gravity gave +40–50%, and doubling the bone limit about +33%, in line with Froude scaling (running speed ∝ √(g·L)). With Earth gravity, a kilometer in a minute needs bodies about 10 m across; small bodies would need about 7 g. The new defaults keep g = 9.8 and ground grip 1.5, and allow large bodies: bones up to 10 m, muscles up to 5 m that change length at up to 24 m/s with up to 100 N, nodes up to 60 m/s, bones turning up to 40 rad/s, 0.2 s rhythms, 120 J of muscle energy recovering at half the deficit per second, and no air drag.
+
+Bodies start at about 0.25 m per bone, so the search must grow them 30–40×. Local mutation alone rarely did: long runs plateaued at 300–450 m with 2–4 m bones, while a standalone CMA-ES from a scaled-up champion reached about 960 m. Two changes let evolution grow bodies:
+
+- **Whole-body rescaling** as a structural mutation: all lengths × s (0.75–1.5), rhythm × √s, stiffness ÷ √s, so the gait roughly carries over.
+- **Log-scale height axis** from 15 cm up to 60% of the bone limit, so small and giant bodies occupy different archive cells instead of all giants sharing the top cell.
+
+Together: 304 → 856 m on seed 38 and 1,229 m on seed 40 at 241 generations (4,000 creatures per generation).
+
+### A local optimizer in physical units
+
+The existing CMA emitter works in normalized [0, 1] coordinates with σ = 0.12. That is about 1 m for node positions and 1.2 s for the rhythm period, so it acts as a large-step explorer. It found most new niches early in a run: 116 new niches in the first generation, against 8 when it was replaced by a fine-grained optimizer, which cut the gen-40 best from 270 m to 25 m. It stays for exploration.
+
+A second role was added: each island runs a separable CMA-ES (Ros and Hansen, 2008) on its fastest elite's body plan. It works in physical units: node positions, bone lengths, and muscle lengths scaled to the body's size; log period and log stiffness; joint ranges; organ mass and position; and touchdown reset phases. It ranks samples by distance alone. Alone, this optimizer lifts a 230 m chain to 515 m in 300 iterations of 64 samples. Inside evolution it needed three fixes before it helped:
+
+1. **Rank all samples on the same terms.** Only archive contenders got the perturbed fine check, so the samples that looked best were exactly the ones scored by min(A, B), and the rest by A alone. Every optimizer sample is now checked.
+2. **Do not jump to every new record.** Recentering on each new island best, often a lucky evaluation, kept resetting its progress. Step-length control was also misled by repair and body limits moving samples: σ collapsed to 0.09 or grew to 10. A sticky optimizer per island and body plan fixed it (seed 39: 455 → 958 m at 241 generations). So did shrinking σ whenever the median sample falls below a quarter of the best.
+3. **Start at σ = 0.5** of the base steps, since evolved gaits are fragile.
+
+### Independent islands
+
+Four islands exchanging their best 10% every 5 generations converged on one design within about 15 generations; every island's optimizer then polished the same local peak (seed 38: 855 m at 481 generations, flat from generation 240). Migrating every 25 generations lets each island settle on its own design and optimize it. The best island wins:
+
+| Migration interval | Seed 38 best at 241 generations |
+|---|---|
+| 5 generations | 847 m |
+| 25 generations | 1,556 m (1,562 m verified at 240 Hz) |
+| never | 1,243 m |
+
+### Glitch guard: joints that break
+
+With the new limits, strong muscles can force a joint of a small body through its limits and round like a wheel. In the existing joint test, a random creature spun a joint through a full turn and jammed 1.5 rad outside its range. A joint forced more than 0.5 rad past its range now breaks, which ends the trial like a fall: the CPU engine, GPU kernel, and replay all apply it. The fastest evolved runners keep their joints within 0.06 rad of their ranges, so the rule costs them nothing.
+
+### Result
+
+Final runs used the committed code and default physics: 4,000 creatures per generation for 481 generations (about 1.9 million evaluations), seeds 38–41. The 12 fastest creatures of each run were run again from 9 starts at 240 Hz; the median and worst columns give the best such creature (they may be different creatures).
+
+| Seed | Recorded best | Best median of 9 starts | Best worst of 9 starts | Best at 244,000 evaluations |
+|---|---|---|---|---|
+| 38 | 838 m | 834 m | 774 m | 647 m |
+| 39 | 1,021 m | 972 m | 860 m | 569 m |
+| 40 | 1,131 m | 1,103 m | 995 m | 437 m |
+| 41 | 1,176 m | 1,133 m | 1,092 m | 567 m |
+
+In two of four runs the best runner's median exceeds 1 km, and seed 41's best covers at least 1,092 m from every start. The other two stalled on designs that top out near 840 and 970 m; seed 38 set no new record in its last 200 generations. At the budget of the original measurements (4,000 creatures × 61 generations) the best distances are 437–647 m, 7.6–11× the 57.8 m the original search reached, although the physics differs.
+
+Open issues:
+
+- **Reliability.** Which design an island settles on early decides most of the outcome. Spending the same budget on 12,000 creatures per generation reached 584–618 m after 30 generations (two seeds) but was not run to completion. The game's populations are 25–750× larger than these CPU runs.
+- **Giants.** The fastest runners are 20–25 m long with bones at the 10 m limit. Under Earth gravity that is what a kilometer in a minute takes in this physics; smaller runners would need stronger gravity, stiffer tendon-like muscles, or better controllers.
+- **Chaos.** Many fast gaits fail from some perturbed starts even though they pass the single perturbed check. Re-checking top elites with fresh perturbations would favor steadier gaits.
+- **GPU.** The kernel change compiles, but these runs used the CPU engine; CPU/GPU agreement was not rerun.
+
 ## Sources
 
 - Arza, Le Goff, Hart (2024). [Generalized Early Stopping in Evolutionary Direct Policy Search](https://arxiv.org/abs/2308.03574). ACM TELO.
@@ -270,6 +336,7 @@ Use `search-benchmark` with fixed seeds, the same evaluation budget, and at leas
 - Mertan, Cheney (2025). [Evolutionary Brain-Body Co-Optimization Consistently Fails to Select for Morphological Potential](https://arxiv.org/abs/2508.17464). Artificial Life (accepted).
 - Mouret, Clune (2015). [Illuminating search spaces by mapping elites](https://arxiv.org/abs/1504.04909).
 - Nordmoen, Veenstra, Ellefsen, Glette (2021). [MAP-Elites Enables Powerful Stepping Stones and Diversity for Modular Robotics](https://arxiv.org/abs/2012.04375). Frontiers in Robotics and AI.
+- Ros, Hansen (2008). [A Simple Modification in CMA-ES Achieving Linear Time and Space Complexity](https://doi.org/10.1007/978-3-540-87700-4_30). PPSN X.
 - Sims (1994). [Evolving Virtual Creatures](https://www.karlsims.com/papers/siggraph94.pdf). SIGGRAPH.
 - Song, Yang, Xu, Wen, Peng, Li, Zhou, Yao (2026). [Shaping the Evolutionary Dynamics of Robot Morphology via Adaptive Control Learning](https://arxiv.org/abs/2608.23100).
 - Stanley, Miikkulainen (2002). [Evolving Neural Networks through Augmenting Topologies](https://nn.cs.utexas.edu/downloads/papers/stanley.ec02.pdf). Evolutionary Computation.
