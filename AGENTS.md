@@ -2,6 +2,14 @@
 
 Read this before changing the code. It lists the owner's rules, how to work on this machine, and the open work.
 
+## Live status (Claude session, updated with each push)
+
+Two agent teams work on this repository at the same time and only see each other through git. Pull before you start, commit small, push often, and update this section when you take or finish an item.
+
+- 2026-09-26 14:xx, Claude is working on: (a) the owner's top priority, the mismatch between the behavior tab's scores and the replay. Plan: creatures entering the global archive also run their standard trial on the CPU engine (the engine that records the replay), and their score becomes the worse of all trials. (b) A head g-force limit: if the head accelerates faster than a limit, the creature dies like a fall. The owner asked for this to kill jiggling gaits. Please leave `src/storage.rs` archive insertion, the fall rules in `src/cpu_engine.rs`, and `shaders/physics_creature.wgsl` to Claude until this line changes.
+- Just pushed: friction counts the load a foot carries (97e3e9a), README rewrite (a41e9df).
+- Measured with the 2 m bone cap (100k creatures, 20 generations, seed 38): the fastest bodies are 8 nodes, about 1.15 m of bone, 2.3 kg, 175 to 289 m in 60 s, and slip 0.12 to 0.29 m per meter. Giants are gone. The owner still sees glitchy gaits, for example a tall pyramid that jiggles at the simulation step rate.
+
 ## The game
 
 Evolution Simulator is a Rust game. 2D creatures made of bones, joints and muscles evolve to travel as far as possible in 60 s trials. The search is MAP-Elites with CMA, structural, novelty and immigrant emitters over 4 island archives, with 3 million creatures per generation.
@@ -51,7 +59,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 
 1. Done: (owner) the glitched jump. The whole-body lift after the parent-first rebuild is now a position-only correction in both engines (b8ee76f). Archive and CPU replay distances agree again (236 m vs 231 m; before, 90 m vs 801 m).
 2. (owner) Stop evolution from favoring huge creatures. Measure again with the 2 m bone cap: run 20 generations (100k creatures, seed 38, `EVOLUTION_DEVICES=primary`) and read `size_report`. If bodies still pile up at the cap, try the physics items below (muscle force scaling, bone breaking).
-3. (owner) Stop feet from sliding. Bone mass cut slip to 0.02 m per meter traveled while the lift glitch kept bodies airborne. After the lift fix, grounded feet slip a median 2.9 m per meter again (measured before the 2 m bone cap; re-measure). Root cause: each node's friction budget is `mu * push`, where push is only that node's own ground correction. When a leg carries the body, the support shows up as the whole-body lift after the rebuild and as floor clamps inside the bone passes, and neither counts toward the foot's normal force. So friction sees only the foot's own weight, and the body drags stance feet as if they were weightless. Fix idea: count the full normal impulse (floor clamps inside the passes, plus the lift times the body mass) and apply friction up to `mu` times that impulse, at least for the body's translation. Do it in both the CPU engine and the kernel, and keep the GPU tests passing.
+3. Done: (owner) feet grip with the load they carry (97e3e9a). Floor clamps inside the bone and joint passes count toward a node's push, and the whole-body lift's normal impulse lets the feet resist the body's slide. Re-measure slip with `size_report` after the next changes; if feet still skate, look at the step-rate jiggle (item 1 in Live status).
 4. Scale muscle force with muscle size. A longer or thicker muscle should be stronger and heavier, so a giant needs heavy muscles.
 5. Let bones break under load. Bone strength grows with cross-section while load grows with mass, so oversized bones fail like real ones.
 6. Done: bones and muscle strokes are capped at 2 m again (d47b2b1). Physics alone did not stop giants: after the lift fix, 16 to 22 m bodies still won.
@@ -198,7 +206,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 
 ### Code health and docs
 
-129. Rewrite README.md. It still describes 18 s trials, 1,000 creatures, a 192-cell archive and a mutation control.
+129. Done: README.md describes the current game (a41e9df).
 130. Update docs/architecture.md: trial length, fitness, physics limits, bone mass, pull-only muscles, the fidelity check.
 131. Update docs/validation.md with the new GPU agreement results.
 132. Remove the legacy `mutate()` path that the app no longer uses.
