@@ -13,7 +13,7 @@ pub struct Config {
     pub air_retention: f32,
     pub ground_friction: f32,
     pub ground: bool,
-    /// Ground roughness level (0 = flat). Environment effects only ever raise it.
+    /// Ground roughness level (0 = flat), set by the environment effects.
     pub terrain: u8,
     pub min_size: f32,
     pub max_size: f32,

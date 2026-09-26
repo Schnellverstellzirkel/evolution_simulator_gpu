@@ -665,7 +665,7 @@ pub fn joints(genes: &[NodeGene], bones: &[Bone]) -> Vec<Joint> {
         .collect()
 }
 /// Ground heights (m) of the bumps added by each roughness level.
-pub const TERRAIN_AMPLITUDES: [f32; 4] = [0.0, 0.02, 0.04, 0.07];
+pub const TERRAIN_AMPLITUDES: [f32; 5] = [0.0, 0.03, 0.08, 0.15, 0.25];
 /// Bump height for `Config::terrain`.
 pub fn terrain_amplitude(level: u8) -> f32 {
     TERRAIN_AMPLITUDES[usize::from(level).min(TERRAIN_AMPLITUDES.len() - 1)]

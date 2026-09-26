@@ -440,7 +440,7 @@ impl App {
             );
         }
         ui.separator();
-        let before = self.config.clone();
+        let mut before = self.config.clone();
         ui.label(format!(
             "{} creatures · {:.0} s trials",
             number(self.config.population),
@@ -448,24 +448,53 @@ impl App {
         ));
         ui.add_space(4.);
         ui.label(RichText::new("Environment").strong());
-        let levels = crate::physics::TERRAIN_AMPLITUDES;
-        let level = usize::from(self.config.terrain);
-        ui.label(if level == 0 {
-            "Flat ground".to_owned()
-        } else {
-            format!("Rough ground, bumps up to {:.0} cm", levels[level] * 100.)
-        });
-        if level + 1 < levels.len()
-            && ui
-                .button("Roughen the ground")
-                .on_hover_text(format!(
-                    "Permanent. Raises the bumps to {:.0} cm. Current elites are tested again on the new ground; creatures that drag a node get caught on the bumps.",
-                    levels[level + 1] * 100.
-                ))
-                .clicked()
-        {
-            self.config.terrain += 1;
+        ui.label(
+            RichText::new(
+                "Every change can be undone. Elites are tested again under the new rules.",
+            )
+            .small()
+            .color(MUTED),
+        );
+        let mut world_changed = false;
+        for effect in &crate::environment::EFFECTS {
+            let level = effect.level(&self.config);
+            let top = effect.levels.len() - 1;
+            ui.horizontal(|ui| {
+                ui.label(format!("{}: {}", effect.name, effect.levels[level]))
+                    .on_hover_text(effect.why);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(level < top, egui::Button::new(effect.raise).small())
+                        .on_hover_text(format!(
+                            "{} to: {}. {}",
+                            effect.raise,
+                            effect.levels[(level + 1).min(top)],
+                            effect.why
+                        ))
+                        .clicked()
+                    {
+                        effect.set_level(&mut self.config, level + 1);
+                        world_changed = true;
+                    }
+                    if ui
+                        .add_enabled(level > 0, egui::Button::new(effect.lower).small())
+                        .on_hover_text(format!(
+                            "{} to: {}.",
+                            effect.lower,
+                            effect.levels[level.saturating_sub(1)]
+                        ))
+                        .clicked()
+                    {
+                        effect.set_level(&mut self.config, level - 1);
+                        world_changed = true;
+                    }
+                });
+            });
+        }
+        if world_changed {
             self.worker.send(Command::Configure(self.config.clone()));
+            // Applied already, so it does not count as an unapplied setting.
+            before = self.config.clone();
         }
         ui.add_space(4.);
         ui.checkbox(&mut self.advanced, "Advanced controls");
