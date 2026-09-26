@@ -953,9 +953,9 @@ fn a_passive_body_never_rises_above_its_start() {
 fn random_bodies_get_no_free_propulsion() {
     // Solver exploits show up first in random bodies: the uncapped planted
     // feet let a random body travel 224 m in 20 s, against under 10 m with
-    // honest friction. Nothing random should come close to 20 m in 10 s.
+    // honest friction. None of 4,096 random bodies should reach 20 m in 10 s.
     let cfg = Config {
-        population: 512,
+        population: 4096,
         duration: 10.0,
         ..config()
     };
