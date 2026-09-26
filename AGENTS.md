@@ -14,6 +14,7 @@ Two agent teams work on this repository at the same time and only see each other
 - Just pushed: mud and gap terrain effects, an opt-in bounded elite-refresh flag (measured byte-identical on paired seeds), and `tests/engine_agreement.rs` with fine-fidelity evolved-creature and perturbed-check agreement. `qd::VERSION` 23, archive re-tests on mud/gap changes, 112 CPU tests, nine report tests, five RTX/agreement tests; `first_generation` unchanged. Mud and Gaps sit in the effect-cost noise floor.
 - Just pushed: slope and wind effects, the History records timeline, creature JSON export/open, species names, a hall of fame, and `examples/effect_cost.rs`. 104 CPU tests, nine report tests, three RTX agreement tests; `first_generation` stays at median -0.07 m, p99 0.34 m, best 11.03 m with the calm defaults. The UI smoke capture still runs; screenshots under /tmp/opencode.
 - Just pushed: the backlog wave above. 100 CPU tests, nine report tests, three RTX agreement tests, and `first_generation` at the same numbers as before the energy effects (median -0.07 m, p99 0.34 m, best 11.03 m). The two new effects are neutral at their calm defaults, and changing either re-tests the archive. `search_ab` tiny runs are byte-identical across repeats. UI features were smoke-run with screenshots under /tmp/opencode.
+- 2026-09-26 22:xx, Claude pushed: seasons that cycle the world effect by effect (default off), an opt-in whole-group CPU early exit with measurements, and the terrain-effects physics audit. Still open after this wave: the full backlog below, including water and curriculum effects, GPU lane compaction and register pressure, checkpoint shrinking, and the owner's search-algorithm items.
 - Just pushed: a failed GPU is retired and its unfinished units, including pending fine checks, are re-submitted to a healthy CPU with their exact creatures and settings; a failed CPU is terminal and delivers completed output before its persistent error. Rejected submissions keep their creatures in the round. 94 CPU tests, nine report tests, three RTX agreement tests.
 - Just pushed: a primary GPU that cannot open no longer stops the game. Evaluation falls back to the CPU and reports the original failure once; with the separate CPU pool disabled, it shares the general Rayon pool. Explicit GPU constructors stay strict. 96 CPU tests, nine report tests, three RTX agreement tests.
 - Just pushed: a `fast` Cargo profile and machine-safe build/run instructions in `docs/building.md`.
@@ -121,7 +122,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 36. Done: meteor strike wipes out half of every archive's elites; Undo returns the fossils (`Experiment::meteor`, `undo_meteor`).
 37. Done: Extinction wipes out the slowest island (`Experiment::extinction`), undoable with the same fossils as the meteor.
 38. Done: quake levels give each creature its own deterministic terrain phase and amplitude jitter, seeded from its id, in both engines.
-39. Seasons: effects that cycle automatically every N generations.
+39. Done (default off): seasons levels step the world one effect at a time on a deterministic schedule (Off/Slow/Normal/Fast = 20/10/5 generations); the step index is stored in checkpoints and every lap returns to calm.
 40. A curriculum that raises difficulty when the archive stalls, as in POET (Wang et al., 2019).
 41. Implemented (default off): `EVOLUTION_CHECK_TERRAIN=1` replaces the 2 cm pose shift with the contender's own nearby terrain (id-hashed level offset), still at fine fidelity with the held standard result and min-of-two rule; four scheduler tests cover on/off, determinism and input retention.
 42. An environment panel that lists active effects with their levels, undo buttons, and short explanations.
@@ -133,7 +134,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 ### Performance
 
 47. Stop simulating fallen creatures on the GPU (lane compaction at dispatch boundaries). Research ranks it first: 43 to 55% of simulated time comes after a fall.
-48. Early exit in the CPU engine when every lane in a vector group has fallen.
+48. Implemented (opt-in, default off): `EVOLUTION_EARLY_EXIT=1` stops a SIMD group once every real lane has fallen. Fitness and live lanes match exactly, but finished lanes' behavior descriptors keep accumulating in the default path, so a terminal-result freeze in both engines is the prerequisite to land it; measured 11 to 14% of steps saved on random populations.
 49. Reduce GPU kernel register pressure (about 120 registers per thread, about 30% occupancy).
 50. Cut CPU time between batches: archive insertion, emitter feedback, CMA updates, offspring creation.
 51. Keep the worker responsive: controls should never wait behind archive insertion or breeding (about 1 s at 1M creatures).
@@ -198,7 +199,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 
 ### Correctness and tests
 
-104. Audit the top elites for physics exploits after every physics change.
+104. Done for the terrain-effects wave: docs/physics-audit-2026-09-26-effects.md finds no free propulsion or inflated stored scores in the audited rows. The strongest anomaly is exact-pose fine-fidelity sensitivity: one calm champion stores 24.6 m but falls at 0.6 s at 4x fidelity while its perturbed check scores 25.7 m; the default-off fresh-perturbation refresh is designed for exactly this.
 105. Done: standard/fine CPU scores are compared with mass-weighted terminal replay frames, including partial SIMD groups. This does not establish agreement for every evolved GPU-scored elite; the historical rank-21 outlier predates the CPU archive-admission check.
 106. Done: archive insertion and island migration regression tests cover unique cells and rejection of slower candidates.
 107. Done: configuration regression tests cover defaults, float/integer boundaries, ordered bounds, and the population RAM limit.
