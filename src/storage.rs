@@ -1654,6 +1654,8 @@ fn fitness_context_changed(old: &Config, new: &Config) -> bool {
         || old.ground_friction != new.ground_friction
         || old.ground != new.ground
         || old.terrain != new.terrain
+        || old.muscle_energy != new.muscle_energy
+        || old.muscle_recovery != new.muscle_recovery
 }
 /// Autosaves kept in `dir`: the newest `keep` `seed-*-auto.evo` files stay,
 /// older ones are deleted, and so are `.evo.tmp` files that an interrupted
