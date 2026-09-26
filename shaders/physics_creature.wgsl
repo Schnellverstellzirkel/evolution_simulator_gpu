@@ -452,6 +452,12 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 }
             }
         }
+        var com_x_before = 0.0;
+        for (var j = 0u; j < MAXN; j++) {
+            if j >= body_nodes { break; }
+            com_x_before += pos[j * WG + lane].x * mass[j];
+        }
+        com_x_before *= inv_total_mass;
         for (var iteration = 0u; iteration < BONE_SOLVE_ITERATIONS; iteration++) {
             for (var j = 0u; j < MAXB; j++) {
                 if j >= bone_count { break; }
@@ -609,6 +615,36 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 pos[k].y += ground_lift;
             }
         }
+        // Planted feet push the body along through the bone passes. That is
+        // ground friction, so it may move the body's center of mass at most mu
+        // times the ground's normal push this step (each node's push, plus the
+        // whole-body lift for the rest of the body). Beyond that, the feet
+        // slip: the excess is taken back as a rigid shift.
+        if grounded {
+            var held_mass = 0.0;
+            var held_grip = 0.0;
+            var normal = 0.0;
+            var com_x = 0.0;
+            for (var j = 0u; j < MAXN; j++) {
+                if j >= body_nodes { break; }
+                let k = j * WG + lane;
+                if pos[k].y <= vel[k].y + 1e-4 && failed[j] < 0.5 {
+                    held_mass += mass[j];
+                    held_grip += mass[j] * friction[j];
+                    normal += mass[j] * max(pos[k].y - vel[k].x, 0.0);
+                }
+                com_x += pos[k].x * mass[j];
+            }
+            normal += (total_mass - held_mass) * ground_lift;
+            let mu = held_grip / max(held_mass, 1e-6) * p.friction;
+            let allowed = mu * normal * inv_total_mass;
+            let shift = com_x * inv_total_mass - com_x_before;
+            let excess = shift - clamp(shift, -allowed, allowed);
+            for (var j = 0u; j < MAXN; j++) {
+                if j >= body_nodes { break; }
+                pos[j * WG + lane].x -= excess;
+            }
+        }
         var contact_mass = 0.0;
         var contact_momentum = 0.0;
         var contact_grip = 0.0;
@@ -658,21 +694,6 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 }
             }
         }
-        stance_lo = 0u;
-        stance_hi = 0u;
-        if grounded {
-            for (var j = 0u; j < MAXN; j++) {
-                if j >= body_nodes { break; }
-                let k = j * WG + lane;
-                if pos[k].y <= old[k].x + 1e-4 {
-                    if j < 32u {
-                        stance_lo |= 1u << j;
-                    } else {
-                        stance_hi |= 1u << (j - 32u);
-                    }
-                }
-            }
-        }
         for (var iteration = 0u; iteration < VELOCITY_SOLVE_ITERATIONS; iteration++) {
             for (var j = 0u; j < MAXB; j++) {
                 if j >= bone_count { break; }
@@ -681,11 +702,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let delta = pos[kb] - pos[ka];
                 let length_bone = max(length(delta), 1e-6);
                 let direction = delta * (1.0 / length_bone);
-                let na = ka / WG;
-                let nb = kb / WG;
-                let fa = select(1.0, 1.0 + STANCE_GRIP * friction[na] * p.friction, in_mask(na, stance_lo, stance_hi));
-                let fb = select(1.0, 1.0 + STANCE_GRIP * friction[nb] * p.friction, in_mask(nb, stance_lo, stance_hi));
-                let share_a = stance_share(bone_sa[j], fa, fb);
+                let share_a = bone_sa[j];
                 let share_b = 1.0 - share_a;
                 var velocity_a = vel[ka];
                 var velocity_b = vel[kb];

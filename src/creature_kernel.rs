@@ -285,7 +285,7 @@ pub fn shader_source(
             "const STANCE_GRIP: f32 = 10.0;",
             &format!(
                 "const STANCE_GRIP: f32 = {:?};",
-                crate::physics::STANCE_GRIP
+                crate::physics::stance_grip()
             ),
         )
         .replace(

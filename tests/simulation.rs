@@ -885,3 +885,24 @@ fn meteor_strike_can_be_undone() {
     back.sort_unstable();
     assert_eq!(back, ids);
 }
+
+#[test]
+fn a_body_without_drive_does_not_travel() {
+    // Muscles whose target never changes cannot drive, so nothing but the
+    // solver could move these bodies sideways on flat ground.
+    let cfg = Config {
+        population: 32,
+        duration: 5.0,
+        ..config()
+    };
+    let mut pop = evolution::create(&cfg).unwrap();
+    for muscle in &mut pop.muscles {
+        muscle.short = muscle.long;
+    }
+    let results = evolution_simulator::cpu_engine::evaluate(&pop, &cfg);
+    let worst = results.iter().map(|r| r.fitness.abs()).fold(0.0, f32::max);
+    eprintln!("worst drift without drive: {worst} m");
+    // A collapsing body can slide a little through real friction, but it
+    // must never travel.
+    assert!(worst < 0.5, "a body drifted {worst} m with no muscle drive");
+}

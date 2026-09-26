@@ -601,6 +601,18 @@ impl Joint {
 /// holding its place; with this, a body pivots over planted feet. On ice the
 /// grip is small, so feet still slide.
 pub const STANCE_GRIP: f32 = 10.0;
+/// `STANCE_GRIP`, or `EVOLUTION_STANCE_GRIP` for experiments (0 turns planted
+/// feet off).
+pub fn stance_grip() -> f32 {
+    static GRIP: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *GRIP.get_or_init(|| {
+        std::env::var("EVOLUTION_STANCE_GRIP")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(STANCE_GRIP)
+    })
+}
 /// Head shaking limit: the head's acceleration, averaged over about
 /// `HEAD_SHAKE_WINDOW` seconds, may not pass 8 g (m/s^2). A creature that
 /// shakes its head harder dies like a fall. Single impacts average out, but a

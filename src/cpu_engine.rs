@@ -561,7 +561,7 @@ impl Group {
             let com_before = com(&px);
             // Nodes resting on the ground hold their place like planted feet:
             // they count as heavier, by their grip, when bones pull on them.
-            let stance_grip = F::splat(physics::STANCE_GRIP);
+            let stance_grip = F::splat(physics::stance_grip());
             let stance = |py: &[F], floor: &[F]| -> Vec<F> {
                 (0..n)
                     .map(|j| {
@@ -578,6 +578,11 @@ impl Group {
                     .collect()
             };
             let weight = stance(&py, &floor);
+            let mut com_x_before = zero;
+            for j in 0..n {
+                com_x_before += px[j] * mass[j];
+            }
+            let com_x_before = com_x_before * inv_total_mass;
             for _ in 0..fidelity.bone_passes {
                 for (b, &(a, c)) in self.bones.iter().enumerate() {
                     let dx = px[c] - px[a];
@@ -737,6 +742,30 @@ impl Group {
                     *y += lift;
                 }
             }
+            // Planted feet push the body along through the bone passes. That is
+            // ground friction, so it may move the body's center of mass at most
+            // mu times the ground's normal push this step (each node's push,
+            // plus the whole-body lift for the rest of the body). Beyond that,
+            // the feet slip: the excess is taken back as a rigid shift.
+            if colliding {
+                let (mut contact_mass, mut grip, mut normal, mut com_x) = (zero, zero, zero, zero);
+                for j in 0..n {
+                    let contact = py[j].le(floor[j] + 1e-4) & failed[j].lt(F::splat(0.5));
+                    let push = (py[j] - vx[j]).max(zero);
+                    contact_mass += F::select(contact, mass[j], zero);
+                    grip += F::select(contact, mass[j] * friction[j], zero);
+                    normal += F::select(contact, mass[j] * push, zero);
+                    com_x += px[j] * mass[j];
+                }
+                normal += (total_mass - contact_mass) * lift;
+                let mu = grip / contact_mass.max(tiny) * ground_friction;
+                let allowed = mu * normal * inv_total_mass;
+                let shift = com_x * inv_total_mass - com_x_before;
+                let excess = shift - shift.max(-allowed).min(allowed);
+                for x in &mut px {
+                    *x -= excess;
+                }
+            }
             if ledger_on && colliding {
                 ledger[4] += f64::from((com(&px) - com_before) / dt);
             }
@@ -791,7 +820,6 @@ impl Group {
                     }
                 }
             }
-            let weight = stance(&py, &floor);
             for _ in 0..fidelity.velocity_passes {
                 let before = momentum(&vx);
                 for (b, &(a, c)) in self.bones.iter().enumerate() {
@@ -801,9 +829,7 @@ impl Group {
                     let inv_length = one / length;
                     let dir_x = dx * inv_length;
                     let dir_y = dy * inv_length;
-                    let sa =
-                        share_a[b] * weight[c] / (share_a[b] * weight[c] + share_b[b] * weight[a]);
-                    let sb = one - sa;
+                    let (sa, sb) = (share_a[b], share_b[b]);
                     let radial = (vx[c] - vx[a]) * dir_x + (vy[c] - vy[a]) * dir_y;
                     let vax = vx[a] + dir_x * radial * sa;
                     let vay = vy[a] + dir_y * radial * sa;
