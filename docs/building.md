@@ -24,8 +24,11 @@ desktop Radeon and cap CPU use. Apply these environment settings to each such
 command:
 
 ```bash
-CARGO_BUILD_JOBS=8 RAYON_NUM_THREADS=8 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 nice -n 10 cargo test --release
+CARGO_BUILD_JOBS=8 RAYON_NUM_THREADS=8 RUST_TEST_THREADS=1 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 nice -n 10 cargo test --release --all-targets
 ```
 
-Use the same settings for other test or benchmark commands. Normal release
+Serial test execution prevents independently created evaluation pools from
+running concurrently. `--all-targets` includes the size-report diagnostic tests;
+GPU tests remain ignored unless explicitly selected. Use the same resource
+settings for other test or benchmark commands. Normal release
 builds and runs remain available with `--release`.

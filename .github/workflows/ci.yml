@@ -46,4 +46,4 @@ jobs:
         run: nice -n 10 cargo +stable clippy --locked --all-targets -- -D warnings
       - name: CPU tests
         # GPU tests remain #[ignore] and are run explicitly on the workstation.
-        run: nice -n 10 cargo +stable test --locked --release
+        run: nice -n 10 cargo +stable test --locked --release --all-targets

@@ -4,7 +4,7 @@ Read this before changing the code. It lists the owner's rules, how to work on t
 
 ## Live status (updated with each push)
 
-- Codex primary: finished integrating verified foundation commits 250ad82/ca75014 with origin 73ddf68; 75 CPU and three RTX tests pass, with nine report tests passed at the preceding diagnostic revision. Next ownership: engine failure propagation and GPU-loss recovery in src/engine.rs, src/scheduler.rs and src/gpu.rs. Active physics/archive-insertion work remains with Claude.
+- Codex primary: finished integrating verified foundation commits 250ad82/ca75014 with origin 73ddf68; 75 CPU and three RTX tests pass, with nine report tests passed at the preceding diagnostic revision. Worker failure propagation is now fixed and tested (83 CPU, nine report, three RTX tests). Next ownership: retained submissions and GPU-loss recovery in src/engine.rs, src/scheduler.rs and src/gpu.rs. Active physics/archive-insertion work remains with Claude.
 
 Two agent teams work on this repository at the same time and only see each other through git. Pull before you start, commit small, push often, and update this section when you take or finish an item.
 
@@ -233,6 +233,6 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 136. Delete the stray `cuda-keyring_1.1-1_all.deb` files in the repository root.
 137. The local branch `wip/cpu-finalist-validation` (not pushed) holds an older owner change that replayed archive finalists on the CPU before they entered the archive. The contender check in 71e9088 replaces it. Delete the branch or port anything missing.
 138. Done: `.claude/` is in `.gitignore`.
-139. Handle GPU device loss by falling back to the CPU engine instead of stopping.
+139. In progress (Codex primary): worker failures/disconnections now persist through wait/poll without losing completed results. CPU retry after GPU device loss is next; src/engine.rs, src/scheduler.rs, src/gpu.rs are assigned to this work.
 140. Log per-generation stage times to a file for later analysis.
 141. Done: `release-fast` is the named incremental release profile (LTO off, 256 codegen units); normal release retains thin LTO. No build-speed measurement is claimed.
