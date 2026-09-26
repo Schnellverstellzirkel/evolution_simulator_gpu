@@ -217,6 +217,20 @@ pub fn elite_refresh_interval() -> u64 {
 /// generation's own evaluation. The subset rotates, so every elite is reached
 /// after enough cycles.
 const ELITE_REFRESH_BATCH: usize = 4;
+/// Deterministic pose and grip perturbation for the fresh-perturbation elite
+/// refresh. It mirrors the contender robustness check in `scheduler::perturb`:
+/// node x and y move by up to 2 cm and grip varies by ±10%, seeded from the
+/// creature id alone so the same elite always gets the same fresh trial. The
+/// stored score already folded in the unperturbed standard trial, so only a
+/// different nearby pose can disprove it.
+pub fn perturb_elite(creature: &mut Creature) {
+    let mut rng = Rng::new(creature.id ^ 0x5eed_7a11, 0, 0);
+    for node in &mut creature.nodes {
+        node.x += rng.range(-0.02, 0.02);
+        node.y += rng.range(0.0, 0.02);
+        node.friction = (node.friction * rng.range(0.9, 1.1)).clamp(0.0, 1.0);
+    }
+}
 /// Share of CMA offspring whose parent is one of its island's fastest 1% of
 /// elites; the rest sample by local competition. Spending more on the best
 /// elites raised the best distance by about half in fixed-seed tests.
@@ -838,15 +852,13 @@ impl Experiment {
     /// Periodic bounded refresh of archive elites. Every `interval`
     /// generations a rotating, deterministic subset of at most
     /// `ELITE_REFRESH_BATCH` elites re-runs its standard trial on the CPU
-    /// engine, and the archive keeps the lower of the stored and re-evaluated
-    /// fitness. The cell, creature, and descriptor never change. `interval ==
-    /// 0` disables it. Returns how many elites were lowered.
-    ///
-    /// The stored score can already be lower than the standard trial (the
-    /// archive-admission check stores the minimum of the evaluating engine's
-    /// trial and the CPU trial), so in runs created under the current code
-    /// this is a no-op; it matters for archives a checkpoint restored from an
-    /// older pipeline or a test constructs directly.
+    /// engine from a fresh deterministic perturbation (`perturb_elite`, the
+    /// contender check's pose and grip shift), and the archive keeps the lower
+    /// of the stored and re-evaluated fitness. The stored score already folded
+    /// in the unperturbed standard trial, so the perturbation is what can
+    /// catch a fragile elite that got lucky on its own exact pose. The cell,
+    /// creature, and descriptor never change. `interval == 0` disables it.
+    /// Returns how many elites were lowered.
     pub fn refresh_elites(&mut self, interval: u64) -> usize {
         let completed = self.generation as u64 + 1;
         if interval == 0 || !completed.is_multiple_of(interval) {
@@ -880,7 +892,9 @@ impl Experiment {
         for k in 0..batch {
             let id = ids[(start + k) % ids.len()];
             if let Some(elite) = self.archive.entries.iter().find(|e| e.creature.id == id) {
-                unit.push(elite.creature.clone());
+                let mut creature = elite.creature.clone();
+                perturb_elite(&mut creature);
+                unit.push(creature);
             }
         }
         if unit.genomes.is_empty() {

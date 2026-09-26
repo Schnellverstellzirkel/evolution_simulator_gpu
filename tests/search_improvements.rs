@@ -1,8 +1,11 @@
 //! Regression tests for search changes measured with `examples/search_ab.rs`.
 //!
-//! Item 83: a bounded, periodic CPU re-test of archive elites keeps the lower
-//! score, so a lucky trial cannot hold a cell. It is opt-in through
-//! `EVOLUTION_ELITE_REFRESH` (generations) and off by default.
+//! Items 83 and 67: a bounded, periodic CPU re-test of archive elites keeps the
+//! lower score, so a lucky trial cannot hold a cell. Since item 67 the re-test
+//! is a fresh deterministic perturbation of the elite (the contender check's
+//! pose and grip shift), because the stored score already folded in the
+//! unperturbed standard trial. It is opt-in through `EVOLUTION_ELITE_REFRESH`
+//! (generations) and off by default.
 use evolution_simulator::{
     config::Config,
     cpu_engine,
@@ -24,6 +27,20 @@ fn config(seed: u64) -> Config {
     }
 }
 
+/// A slower config for the tests that need a real gait difference between the
+/// exact pose and its fresh perturbation.
+fn perturb_config(seed: u64) -> Config {
+    Config {
+        population: 64,
+        duration: 0.5,
+        seed,
+        random_seed: false,
+        max_nodes: 8,
+        max_muscles: 12,
+        ..Config::default()
+    }
+}
+
 /// The standard single-trial fitness of one creature on the CPU engine, the
 /// same call the archive-admission check and the refresh use.
 fn standard_fitness(creature: &Creature, cfg: &Config) -> f32 {
@@ -31,6 +48,14 @@ fn standard_fitness(creature: &Creature, cfg: &Config) -> f32 {
     unit.push(creature.clone());
     let results = cpu_engine::evaluate(&unit, cfg);
     scheduler::to_metrics(&unit, 0, &results[0], cfg).fitness
+}
+
+/// The score the current refresh stores: the standard trial of the fresh
+/// deterministic perturbation the refresh applies.
+fn refreshed_fitness(creature: &Creature, cfg: &Config) -> f32 {
+    let mut perturbed = creature.clone();
+    storage::perturb_elite(&mut perturbed);
+    standard_fitness(&perturbed, cfg)
 }
 
 /// An archive entry with a chosen cadence so each test creature gets its own
@@ -81,19 +106,19 @@ fn a_lucky_elite_is_lowered_after_a_refresh_and_a_stable_one_is_kept() {
     let mut experiment = Experiment::new(config(38)).unwrap();
     let creatures = viable_creatures(&experiment, 2);
     assert_eq!(creatures.len(), 2, "no viable random creature in the pool");
-    let stable_true = standard_fitness(&creatures[0], &experiment.config);
-    let lucky_true = standard_fitness(&creatures[1], &experiment.config);
-    let stable_niche = stored_elite(&creatures[0], stable_true, 0.5).niche;
-    let lucky_niche = stored_elite(&creatures[1], lucky_true, 2.5).niche;
+    let stable_fresh = refreshed_fitness(&creatures[0], &experiment.config);
+    let lucky_fresh = refreshed_fitness(&creatures[1], &experiment.config);
+    let stable_niche = stored_elite(&creatures[0], stable_fresh, 0.5).niche;
+    let lucky_niche = stored_elite(&creatures[1], lucky_fresh, 2.5).niche;
     assert_ne!(stable_niche, lucky_niche, "test needs two cells");
     experiment
         .archive
         .entries
-        .push(stored_elite(&creatures[0], stable_true, 0.5));
+        .push(stored_elite(&creatures[0], stable_fresh, 0.5));
     experiment
         .archive
         .entries
-        .push(stored_elite(&creatures[1], lucky_true + 500.0, 2.5));
+        .push(stored_elite(&creatures[1], lucky_fresh + 500.0, 2.5));
     experiment.archive.rebuild_indices();
     let qd_before = experiment.archive.qd_score;
     assert_eq!(experiment.archive.behavior_count(), 2);
@@ -104,22 +129,57 @@ fn a_lucky_elite_is_lowered_after_a_refresh_and_a_stable_one_is_kept() {
     let stable = &experiment.archive.entries[0];
     let lucky = &experiment.archive.entries[1];
     assert!(
-        (stable.fitness - stable_true).abs() < 1e-3,
-        "stable elite moved from {stable_true} to {}",
+        (stable.fitness - stable_fresh).abs() < 1e-3,
+        "stable elite moved from {stable_fresh} to {}",
         stable.fitness
     );
     assert!(
-        (lucky.fitness - lucky_true).abs() < 1e-3,
-        "lucky elite {} was not lowered to its standard trial {lucky_true}",
+        (lucky.fitness - lucky_fresh).abs() < 1e-3,
+        "lucky elite {} was not lowered to its fresh perturbed trial {lucky_fresh}",
         lucky.fitness
     );
-    assert!(lucky.fitness < lucky_true + 500.0);
+    assert!(lucky.fitness < lucky_fresh + 500.0);
     assert_eq!(stable.niche, stable_niche, "refresh must keep cells");
     assert_eq!(lucky.niche, lucky_niche, "refresh must keep cells");
     assert!(
         experiment.archive.qd_score < qd_before,
         "qd score must drop with the lowered elite"
     );
+}
+
+#[test]
+fn a_fresh_perturbation_can_disprove_the_admitted_standard_trial() {
+    let experiment_config = perturb_config(43);
+    let mut experiment = Experiment::new(experiment_config.clone()).unwrap();
+    let mut found = None;
+    for index in 0..experiment_config.population {
+        let creature = experiment.population.creature(index);
+        let standard = standard_fitness(&creature, &experiment.config);
+        if !standard.is_finite() || standard <= evolution::FAILED {
+            continue;
+        }
+        let fresh = refreshed_fitness(&creature, &experiment.config);
+        if fresh.is_finite() && fresh < standard - 1e-4 {
+            found = Some((creature, standard, fresh));
+            break;
+        }
+    }
+    let (creature, standard, fresh) =
+        found.expect("no random creature was weaker under perturbation; the test proves nothing");
+    // The archive-admission check stores the exact-pose standard trial.
+    experiment
+        .archive
+        .entries
+        .push(stored_elite(&creature, standard, 0.5));
+    experiment.archive.rebuild_indices();
+    assert_eq!(experiment.refresh_elites(1), 1);
+    let elite = &experiment.archive.entries[0];
+    assert!(
+        (elite.fitness - fresh).abs() < 1e-3,
+        "stored {} instead of the fresh perturbed {fresh}",
+        elite.fitness
+    );
+    assert!(elite.fitness < standard);
 }
 
 #[test]

@@ -5,6 +5,20 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub const FAILED: f32 = -1.0e20;
+/// Stiffness every muscle a structural mutation adds gets while
+/// `EVOLUTION_NEUTRAL_SPLITS` is on. Such a muscle also starts with
+/// `short == long` (zero stroke), so it applies no drive and only a weak
+/// passive force until later mutation tunes it.
+const NEUTRAL_MUSCLE_STIFFNESS: f32 = 5.0;
+/// Whether structural mutations start newly added parts weak.
+/// `EVOLUTION_NEUTRAL_SPLITS` unset, empty, `0`, `false`, `off`, or `no` means
+/// off, the default. Read once per breeding batch, not per creature.
+pub fn neutral_splits_enabled() -> bool {
+    std::env::var("EVOLUTION_NEUTRAL_SPLITS").is_ok_and(|value| {
+        let value = value.trim().to_ascii_lowercase();
+        !value.is_empty() && !matches!(value.as_str(), "0" | "false" | "off" | "no")
+    })
+}
 /// Longest bone (m), from `physics::limits()`.
 pub fn max_bone_length() -> f32 {
     crate::physics::limits().max_bone
@@ -751,6 +765,27 @@ fn muscle(
         reset: rng.unit(),
     }
 }
+/// Makes a newly added muscle passive: no stroke, weak spring.
+fn neutralize(m: &mut Muscle) {
+    m.short = m.long;
+    m.stiffness = NEUTRAL_MUSCLE_STIFFNESS;
+}
+/// A muscle added by a structural mutation. With near-neutral parts the new
+/// muscle starts passive so the parent's gait survives until mutation tunes it.
+fn added_muscle(
+    bone_a: usize,
+    bone_b: usize,
+    bones: &[Bone],
+    nodes: &[NodeGene],
+    rng: &mut Rng,
+    neutral: bool,
+) -> Muscle {
+    let mut m = muscle(bone_a, bone_b, bones, nodes, rng);
+    if neutral {
+        neutralize(&mut m);
+    }
+    m
+}
 
 pub(crate) fn migrate_legacy_creature(
     nodes: Vec<NodeGene>,
@@ -876,6 +911,11 @@ fn shape_head(c: &mut Creature, cfg: &Config) {
     c.nodes[0].y = by + length * tilt.cos();
 }
 fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
+    repair_with(c, cfg, rng, false);
+}
+/// `repair` for a body that just gained parts. With `neutral`, every muscle
+/// the ring loop adds starts passive (`added_muscle`).
+fn repair_with(c: &mut Creature, cfg: &Config, rng: &mut Rng, neutral: bool) {
     for node in &mut c.nodes {
         node.diameter = node.diameter.clamp(cfg.min_size, cfg.max_size);
         node.friction = node.friction.clamp(cfg.min_friction, cfg.max_friction);
@@ -981,7 +1021,8 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
                 c.muscles.swap_remove(i);
             }
             if c.muscles.len() < cfg.max_muscles {
-                c.muscles.push(muscle(a, b, &c.bones, &c.nodes, rng));
+                c.muscles
+                    .push(added_muscle(a, b, &c.bones, &c.nodes, rng, neutral));
             }
         }
     }
@@ -1144,6 +1185,7 @@ pub fn emit_archive_batch_streaming(
 ) -> Result<Population> {
     ensure_archive_batch_memory(current, &archive[0], cfg)?;
     ensure!(plans.len() == cfg.population, "Invalid emitter plan count");
+    let neutral = neutral_splits_enabled();
     collect_parallel_streaming(
         cfg.population,
         slice,
@@ -1157,13 +1199,16 @@ pub fn emit_archive_batch_streaming(
                 cfg,
                 &mut rng,
                 id,
+                neutral,
             )
         },
         on_slice,
     )
 }
 
-/// Breeds one offspring from its plan with the given random stream.
+/// Breeds one offspring from its plan with the given random stream. With
+/// `neutral` (from `neutral_splits_enabled`), structural emitters start the
+/// parts they add passive so the parent's gait survives.
 fn offspring(
     archive: &QdArchive,
     cma_emitters: &[CmaEmitter],
@@ -1171,6 +1216,7 @@ fn offspring(
     cfg: &Config,
     rng: &mut Rng,
     id: u64,
+    neutral: bool,
 ) -> Creature {
     let mut creature = match plan.emitter {
         Emitter::Restart => random_creature_from(cfg, rng),
@@ -1184,7 +1230,7 @@ fn offspring(
         }
         Emitter::Structural => {
             let parent = mated(archive, plan, rng);
-            let (child, _) = structural_mutation(parent, cfg, rng);
+            let (child, _) = structural_mutation(parent, cfg, rng, neutral);
             local_mutation(child, cfg, rng, 0.035)
         }
         Emitter::Novelty => {
@@ -1193,13 +1239,14 @@ fn offspring(
             let scale = if rng.unit() < 0.05 { 2.25 } else { 0.75 };
             let mut child = local_mutation(parent, cfg, rng, scale);
             if rng.unit() < 0.18 {
-                let _ = structural_mutation_in_place(&mut child, cfg, rng);
+                let _ = structural_mutation_in_place(&mut child, cfg, rng, neutral);
             }
             child
         }
     };
     creature.id = id;
-    repair(&mut creature, cfg, rng);
+    let structural = matches!(plan.emitter, Emitter::Structural | Emitter::Novelty);
+    repair_with(&mut creature, cfg, rng, neutral && structural);
     creature
 }
 
@@ -1260,8 +1307,9 @@ pub fn crossover(a: &Creature, b: &Creature, rng: &mut Rng) -> Creature {
 }
 
 /// Copies a leaf limb as its mirror image around its joint, with copies of the
-/// limb's muscles running half a cycle out of phase (alternating legs).
-fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
+/// limb's muscles running half a cycle out of phase (alternating legs). With
+/// `neutral`, the copied muscles start passive.
+fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng, neutral: bool) -> bool {
     if creature.nodes.len() >= cfg.max_nodes || creature.bones.is_empty() {
         return false;
     }
@@ -1320,9 +1368,12 @@ fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
             continue;
         }
         m.phase = (m.phase + 0.5).rem_euclid(1.0);
+        if neutral {
+            neutralize(&mut m);
+        }
         creature.muscles.push(m);
     }
-    repair(creature, cfg, rng);
+    repair_with(creature, cfg, rng, neutral);
     true
 }
 /// Changes the body clock's tempo by a large step, keeping every phase.
@@ -1349,6 +1400,7 @@ pub fn emit_offspring(
     round: u64,
 ) -> Vec<Creature> {
     let seed = cfg.seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x5bd1_e995;
+    let neutral = neutral_splits_enabled();
     plans
         .par_iter()
         .zip(slots)
@@ -1362,6 +1414,7 @@ pub fn emit_offspring(
                 cfg,
                 &mut rng,
                 id,
+                neutral,
             )
         })
         .collect()
@@ -1443,8 +1496,13 @@ fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
     creature
 }
 
-fn structural_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng) -> (Creature, bool) {
-    let changed = structural_mutation_in_place(&mut creature, cfg, rng);
+fn structural_mutation(
+    mut creature: Creature,
+    cfg: &Config,
+    rng: &mut Rng,
+    neutral: bool,
+) -> (Creature, bool) {
+    let changed = structural_mutation_in_place(&mut creature, cfg, rng, neutral);
     (creature, changed)
 }
 
@@ -1458,17 +1516,22 @@ pub fn grow_for_benchmark(creature: &mut Creature, cfg: &Config, seed: u64, targ
         if rng.unit() < 0.5 {
             split_bone(creature, cfg, &mut rng);
         } else {
-            duplicate_mirrored_node(creature, cfg, &mut rng);
+            duplicate_mirrored_node(creature, cfg, &mut rng, false);
         }
     }
     repair(creature, cfg, &mut rng);
 }
 
-fn structural_mutation_in_place(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
+fn structural_mutation_in_place(
+    creature: &mut Creature,
+    cfg: &Config,
+    rng: &mut Rng,
+    neutral: bool,
+) -> bool {
     match rng.index(7) {
         0 => split_bone(creature, cfg, rng),
-        1 => duplicate_mirrored_node(creature, cfg, rng),
-        2 => duplicate_limb(creature, cfg, rng),
+        1 => duplicate_mirrored_node(creature, cfg, rng, neutral),
+        2 => duplicate_limb(creature, cfg, rng, neutral),
         3 => retime_rhythm(creature, rng),
         4 => change_organ(creature, rng),
         5 => phase_shift_group(creature, rng),
@@ -1587,7 +1650,12 @@ fn split_bone(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
     true
 }
 
-fn duplicate_mirrored_node(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
+fn duplicate_mirrored_node(
+    creature: &mut Creature,
+    cfg: &Config,
+    rng: &mut Rng,
+    neutral: bool,
+) -> bool {
     if creature.nodes.len() >= cfg.max_nodes || creature.muscles.len() >= cfg.max_muscles {
         return false;
     }
@@ -1613,14 +1681,15 @@ fn duplicate_mirrored_node(creature: &mut Creature, cfg: &Config, rng: &mut Rng)
         .bones
         .push(bone(source, target as usize, &creature.nodes));
     let other_bone = rng.index(new_bone);
-    creature.muscles.push(muscle(
+    creature.muscles.push(added_muscle(
         new_bone,
         other_bone,
         &creature.bones,
         &creature.nodes,
         rng,
+        neutral,
     ));
-    repair(creature, cfg, rng);
+    repair_with(creature, cfg, rng, neutral);
     true
 }
 
@@ -1825,6 +1894,78 @@ mod tests {
     }
 
     #[test]
+    fn neutral_structural_mutations_start_their_new_muscles_passive() {
+        let cfg = Config {
+            max_nodes: 12,
+            max_muscles: 32,
+            ..Config::default()
+        };
+        let point_pair = |c: &Creature, m: &Muscle| {
+            [
+                muscle_point(c, m.bone_a, m.anchor_a),
+                muscle_point(c, m.bone_b, m.anchor_b),
+            ]
+        };
+        let same_pair = |a: &[[f32; 2]; 2], b: &[[f32; 2]; 2]| {
+            let same = |p: &[f32; 2], q: &[f32; 2]| {
+                (p[0] - q[0]).abs() < 1e-4 && (p[1] - q[1]).abs() < 1e-4
+            };
+            (same(&a[0], &b[0]) && same(&a[1], &b[1])) || (same(&a[0], &b[1]) && same(&a[1], &b[0]))
+        };
+        let mut splits = 0;
+        for index in 0..64 {
+            let parent = random_creature_from(&cfg, &mut Rng::new(21, 0, index));
+            let parent_pairs: Vec<[[f32; 2]; 2]> = parent
+                .muscles
+                .iter()
+                .map(|m| point_pair(&parent, m))
+                .collect();
+            for neutral in [false, true] {
+                for operator in 0..3 {
+                    let mut child = parent.clone();
+                    let mut rng = Rng::new(31 + operator as u64, 0, index);
+                    let changed = match operator {
+                        0 => {
+                            let ok = split_bone(&mut child, &cfg, &mut rng);
+                            if ok {
+                                repair_with(&mut child, &cfg, &mut rng, neutral);
+                            }
+                            ok
+                        }
+                        1 => duplicate_mirrored_node(&mut child, &cfg, &mut rng, neutral),
+                        _ => duplicate_limb(&mut child, &cfg, &mut rng, neutral),
+                    };
+                    if !changed {
+                        continue;
+                    }
+                    if operator == 0 {
+                        splits += 1;
+                    }
+                    for m in &child.muscles {
+                        let pair = point_pair(&child, m);
+                        if parent_pairs.iter().any(|p| same_pair(p, &pair)) {
+                            continue;
+                        }
+                        if neutral {
+                            assert_eq!(
+                                m.short, m.long,
+                                "a new muscle kept a stroke in a neutral mutation"
+                            );
+                            assert_eq!(m.stiffness, NEUTRAL_MUSCLE_STIFFNESS);
+                        } else {
+                            assert!(
+                                m.short < m.long,
+                                "a new muscle started passive without the flag"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(splits > 0, "no split ran; the test proves nothing");
+    }
+
+    #[test]
     fn canonical_bone_order_preserves_attachment_positions() {
         let mut creature = Creature {
             nodes: (0..4)
@@ -1918,7 +2059,7 @@ mod tests {
                 if rng.unit() < 0.5 {
                     change_organ(&mut creature, &mut rng);
                 }
-                let _ = structural_mutation_in_place(&mut creature, &cfg, &mut rng);
+                let _ = structural_mutation_in_place(&mut creature, &cfg, &mut rng, false);
                 creature = local_mutation(creature, &cfg, &mut rng, 0.75);
                 repair(&mut creature, &cfg, &mut rng);
                 let center = organ_center(&creature.nodes);

@@ -332,97 +332,182 @@ Open issues:
 - **Chaos.** Many fast gaits fail from some perturbed starts even though they pass the single perturbed check. Re-checking top elites with fresh perturbations would favor steadier gaits.
 - **GPU.** The kernel change compiles, but these runs used the CPU engine; CPU/GPU agreement was not rerun.
 
-## 8. Bounded elite refresh (item 83)
+## 8. Bounded elite refresh with fresh perturbations (items 83 and 67)
 
 The idea (note B10): fitness is noisy, so an elite that got lucky on both of its
 trials holds its cell forever. Re-evaluate a rotating subset of archive elites
 now and then and keep the lower score.
 
-The implementation lives in this wave's files. `Experiment::refresh_elites`
-(`src/storage.rs`) runs once per generation from `push_archive_stats`, so it
+The item 83 implementation lives in `Experiment::refresh_elites`
+(`src/storage.rs`). It runs once per generation from `push_archive_stats`, so it
 covers the generational loop (`archive_batch`) and the steady-state boundary
 (`finish_steady_generation`) alike. Every `EVOLUTION_ELITE_REFRESH` generations
 (unset or `0` disables it, which is the default) it picks at most four elites
-with a deterministic rotating window over the archive sorted by creature id,
+through a deterministic rotating window over the archive sorted by creature id,
 runs one standard trial each on the CPU engine (`cpu_engine::evaluate` with
-`fidelity: None`, exactly the archive-admission configuration), and lowers the
-stored fitness of any creature the trial scores lower. It lowers the entry in
-the global archive and any island archive that holds the same creature id.
-Cells, creatures, descriptors, protection, and the admission rules never
-change; `QdArchive::lower_fitness` (`src/qd.rs`) adjusts `qd_score` and
-invalidates the cached behavior scores. The batch is bounded at four creatures
-per cycle, so the refresh cannot stall the worker, and the whole feature is off
-by default.
+`fidelity: None`, the archive-admission configuration), and lowers the stored
+fitness of any creature the trial scores lower. It lowers the entry in the
+global archive and in any island archive that holds the same creature id. Cells,
+creatures, descriptors, protection, and the admission rules never change;
+`QdArchive::lower_fitness` (`src/qd.rs`) adjusts `qd_score` and invalidates the
+cached behavior scores. The batch is bounded at four creatures per cycle, so the
+refresh cannot stall the worker, and the whole feature is off by default.
 
-Measurement with the committed `examples/search_ab.rs`, CPU-only short trials.
-Equal budget for both variants: population 1024, 25 generations, 5 s trials,
-seeds 38, 39, 40, 41, 42 (128,000 creature-trials per variant, about 15 s wall
-each):
+Item 83 alone measured byte-identical paired runs. The reason holds today: since
+the archive-admission check (7f3f3a3), every stored score already folds in the
+exact-pose standard CPU trial, so re-running that same deterministic trial can
+never score lower. Item 67 extends the refresh to score a fresh deterministic
+perturbation of the elite instead (`storage::perturb_elite`). It mirrors the
+contender check in `scheduler::perturb`: node x and y move by up to 2 cm and
+grip varies by +-10%, seeded from the creature id alone, so each elite always
+gets the same fresh pose. The trial still runs at the standard configuration,
+and the archive still keeps the lower score. The refresh can now catch an elite
+whose exact-pose score is a pose accident.
 
-    nice -n 15 env EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
-        cargo run --release --example search_ab -- --tag refresh-off 25 1024 5.0 38,39,40,41,42
-    nice -n 15 env EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
-        EVOLUTION_ELITE_REFRESH=2 cargo run --release --example search_ab -- --tag refresh-on 25 1024 5.0 38,39,40,41,42
+Regression coverage is in `tests/search_improvements.rs`. The synthetic tests
+show a lucky score 500 m above its fresh perturbed trial dropping to that trial,
+a stable score surviving, the cell and descriptor staying, and the rotating
+window staying bounded. One test searches the random population for a creature
+whose fresh perturbed standard trial is lower than its admitted exact trial and
+shows the refresh replacing the stored score with the lower one.
 
-Archive best after the last generation, then QD score and cells:
+Measured lowering counts (section 10 lists the full runs): at
+`EVOLUTION_ELITE_REFRESH=1` the refresh lowered 2,999 archive entries over 600
+cycles (10 seeds times 60 generations), about five per cycle. At interval 2 it
+lowered 1,373 over 300 cycles, about 4.6 per cycle. A lowering count includes
+each archive that holds the creature (the global archive plus island archives),
+so one creature can contribute more than one. Nearly every elite the window
+reaches is pose-fragile at standard fidelity on this harness.
 
-| Variant | 38 | 39 | 40 | 41 | 42 | Best mean | QD mean | Cells mean |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| refresh off (default) | 16.71 | 7.68 | 13.56 | 9.17 | 28.77 | 15.18 m | 860.61 | 737.2 |
-| `EVOLUTION_ELITE_REFRESH=2` | 16.71 | 7.68 | 13.56 | 9.17 | 28.77 | 15.18 m | 860.61 | 737.2 |
+Conclusion: the fresh perturbation catches lucky elites, and the reported best
+distance falls by about 18 percent under interval 1 because short-budget
+champions are exact-pose accidents. The search metrics do not reliably improve
+at either budget. At 60 generations interval 1 is slightly negative (best mean
+20.86 m against 25.64 m, QD mean 2,341 against 2,617, 3/10 best wins), while
+interval 2 is slightly positive (best mean 32.28 m, QD mean 2,953, 6/10 QD wins)
+but one seed supplies a +53.4 m gain and a +5,859 QD gain, so that mean is not a
+reliable effect. The feature stays behind `EVOLUTION_ELITE_REFRESH`, default off,
+as a correctness improvement rather than a measured search gain. The harness
+admits exact-pose CPU trials only, while the real game also folds in its fine
+perturbed contender check, so the refresh's reach in the game may be smaller.
+The game is the place to re-measure.
 
-Paired per-seed differences are 0.00 m, 0.00 QD, and 0 cells on every seed; the
-whole stdout (including the top-50 node mix, median length, median mass, and
-longest bone) is byte-identical apart from the tag. A second paired run at the
-suggested smaller budget (population 512, 10 generations, 5 s trials, seeds
-38-42) was also byte-identical.
+## 9. Near-neutral structural mutations (item 66)
 
-Why the null result is expected. Since the archive-admission check (7f3f3a3),
-every stored score is `min(evaluating engine's score, standard CPU trial)`. The
-standard CPU trial is a deterministic function of the creature and the
-configuration, so re-running it returns exactly the value already folded into
-the minimum. It cannot be lower than the stored score, and `lower_fitness`
-never runs. The refresh is therefore only able to help an archive that a
-checkpoint restored from a pipeline without the admission check, or a directly
-constructed state; the regression tests in `tests/search_improvements.rs`
-construct that case (a lucky score 500 m above its standard trial) and show the
-lucky score dropping to the CPU value, a stable score surviving, the cell
-staying, and the rotating window staying bounded.
+The recipe the measurements in section 1 and B1 support: when a structural
+mutation adds a part, start its muscles weak so the parent's gait survives while
+the new part waits for mutation to tune it.
 
-Conclusion: keep the feature behind `EVOLUTION_ELITE_REFRESH`, default off. It
-is a correctness safety net, not a measured search gain on current checkpoints.
-A change that actually catches lucky trials would have to re-test with fresh
-perturbations, since trial A and trial B rank correlation is only 0.82-0.90
-(note B10), not with the deterministic standard trial.
+Implementation, behind `EVOLUTION_NEUTRAL_SPLITS` (unset, empty, `0`, `false`,
+`off`, or `no` disables it, the default): every muscle a mutation adds starts
+neutral, which sets `short = long` (zero stroke, so the motor drive is zero) and
+stiffness 5.0. The flag is read once per breeding batch. The paths that add
+muscles are `added_muscle` in `duplicate_mirrored_node` (`src/evolution.rs`), the
+copied limb muscles in `duplicate_limb`, and the ring muscles `repair_with` adds
+for every bone that lacks one, including the second half of a `split_bone`. New
+joints keep their full range; only muscles are neutralized. With the flag off
+the code path is unchanged, and the harness smoke run (2 generations,
+population 64, 0.5 s trials, seeds 38 and 39) is byte-identical before and
+after the change.
 
-## 9. Item 66 is blocked on file ownership
+A unit test in `src/evolution.rs`
+(`neutral_structural_mutations_start_their_new_muscles_passive`) runs split,
+duplicated-node, and duplicated-limb mutations over 64 random bodies in both
+modes. It matches new muscles to the parent by their attachment points and
+asserts that every new muscle is passive with the flag on and keeps a stroke
+with the flag off. A split child's first-trial distance is deliberately not
+asserted: section 1 measured splits at 1 to 6 percent of the parent even with
+neutral parts, so the weaker claim about the new muscles is what the evidence
+supports.
 
-Item 66 (start a new structural part with a short stroke and low stiffness)
-cannot be implemented from the files this wave owns. The structural mutation
-path is in `src/evolution.rs`:
+Conclusion: no measurable help at either budget. Under the flag the best
+distance and QD score are slightly lower at both budgets (60 generations: best
+mean 21.27 m against 25.64 m with 3/10 wins, QD mean 2,343 against 2,617 with
+4/10 wins), and the differences sit inside the seed spread. The flag stays
+default off. This implementation is also less neutral than the section 1 probe:
+only the muscles an operator or repair adds are neutralized, while a parent
+muscle that gets re-anchored onto a split's new half keeps its stroke. The
+likely remaining causes of broken splits are the new middle node in ground
+contact and the free new joint, so a leaf-growth operator or a rigid new joint
+is the next thing to try here.
 
-- `structural_mutation_in_place` (`src/evolution.rs:1467`) chooses among
-  `split_bone`, `duplicate_mirrored_node`, `duplicate_limb`, `retime_rhythm`,
-  `change_organ`, `phase_shift_group`, and `rescale_body`.
-- `split_bone` (`src/evolution.rs:1523`) makes its second half with
-  `Bone::new`, so the new middle joint starts with the full joint range and no
-  muscle crosses it.
-- `duplicate_mirrored_node` (`src/evolution.rs:1590`) and `duplicate_limb`
-  (`src/evolution.rs:1264`) add new drive through `muscle(...)`
-  (`src/evolution.rs:721`), and `repair` (`src/evolution.rs:878`) adds the
-  ring muscles that close the motor network at `src/evolution.rs:984` with the
-  default stroke, stiffness, and period.
+## 10. Measurements for items 66 and 67
 
-The recipe the measurements in section 1 and B1 support: give a new joint a
-zero range and start every newly added muscle, including the ones `repair`
-adds, with `short == long` (zero stroke) and a period copied from an existing
-muscle. With neutral new parts, duplications kept 13-37% of their parent's
-distance and fell 12-31%; with active new parts they kept 1-14% and fell
-43-77%. Splits stayed broken either way (1-6% kept, 45-73% fallen), and the
-new middle node in ground contact plus the projection-locked joint are the
-suspected causes, so a leaf-growth operator may be needed too. The next wave
-that owns `src/evolution.rs` should implement and measure this with
-`examples/search_ab.rs` before claiming a win.
+All runs are short-budget and CPU-only: population 1024, 5 s trials, fixed
+seeds, `cpu_engine::evaluate` for every creature through the production
+`archive_batch` and `prepare_next_batch` path. They ran on the workstation with
+`nice -n 15` and half the machine (`EVOLUTION_DEVICES=primary
+EVOLUTION_CPU_THREADS=6`). Every variant had the same evaluation budget; only
+the environment flag differed. The seed spread is large, so the paired per-seed
+differences and the win counts matter more than the means.
+
+    nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
+        cargo run --release --example search_ab -- --tag baseline 60 1024 5.0 38,39,40,41,42,43,44,45,46,47
+    nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
+        EVOLUTION_NEUTRAL_SPLITS=1 cargo run --release --example search_ab -- --tag neutral 60 1024 5.0 38,39,40,41,42,43,44,45,46,47
+    nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
+        EVOLUTION_ELITE_REFRESH=1 cargo run --release --example search_ab -- --tag refresh-1 60 1024 5.0 38,39,40,41,42,43,44,45,46,47
+    nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
+        EVOLUTION_ELITE_REFRESH=2 cargo run --release --example search_ab -- --tag refresh-2 60 1024 5.0 38,39,40,41,42,43,44,45,46,47
+
+### 25 generations, population 1024, 5 s trials, seeds 38 to 47
+
+Per-seed archive best after the last generation (m):
+
+| Variant | 38 | 39 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | best mean | best median | QD mean | QD median | cells mean |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 16.71 | 7.68 | 13.56 | 9.17 | 28.77 | 10.13 | 12.88 | 17.39 | 6.74 | 14.87 | 13.79 | 13.22 | 930 | 968 | 751 |
+| neutral-splits | 8.96 | 19.27 | 15.68 | 7.45 | 25.63 | 10.81 | 9.52 | 10.11 | 7.64 | 7.89 | 12.30 | 9.81 | 1016 | 1010 | 742 |
+| refresh-1 | 8.95 | 7.33 | 16.97 | 7.36 | 12.15 | 18.08 | 7.78 | 12.50 | 10.32 | 11.44 | 11.29 | 10.88 | 923 | 921 | 756 |
+| refresh-2 | 10.76 | 10.95 | 9.77 | 10.09 | 16.57 | 11.82 | 18.22 | 10.16 | 7.80 | 6.44 | 11.26 | 10.46 | 945 | 892 | 745 |
+
+Paired differences against the baseline (variant minus baseline):
+
+| Variant | 38 | 39 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | best mean diff | QD mean diff | cells mean diff | best wins | QD wins |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| neutral-splits | -7.75 | +11.59 | +2.12 | -1.72 | -3.14 | +0.68 | -3.36 | -7.28 | +0.90 | -6.98 | -1.49 | +86 | -9.3 | 4/10 | 5/10 |
+| refresh-1 | -7.76 | -0.35 | +3.41 | -1.81 | -16.62 | +7.95 | -5.10 | -4.89 | +3.58 | -3.43 | -2.50 | -7 | +5.2 | 3/10 | 4/10 |
+| refresh-2 | -5.95 | +3.27 | -3.79 | +0.92 | -12.20 | +1.69 | +5.34 | -7.23 | +1.06 | -8.43 | -2.53 | +15 | -6.2 | 5/10 | 6/10 |
+
+Top-50 body-size mix summed over the 10 seeds (node count x bodies):
+
+- baseline: 5x70 6x136 7x97 8x110 9x39 10x26 11x20 12x1 13x1
+- neutral-splits: 4x10 5x125 6x141 7x116 8x86 9x19 10x2 11x1
+- refresh-1: 5x36 6x100 7x182 8x129 9x46 10x7
+- refresh-2: 4x2 5x33 6x190 7x120 8x84 9x66 10x4 11x1
+
+### 60 generations, population 1024, 5 s trials, seeds 38 to 47
+
+Per-seed archive best after the last generation (m):
+
+| Variant | 38 | 39 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | best mean | best median | QD mean | QD median | cells mean |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 33.82 | 10.31 | 13.63 | 28.83 | 48.71 | 23.06 | 21.81 | 26.84 | 16.79 | 32.61 | 25.64 | 24.95 | 2617 | 2455 | 969 |
+| neutral-splits | 27.58 | 25.37 | 18.90 | 13.65 | 34.57 | 28.22 | 12.90 | 21.16 | 16.77 | 13.57 | 21.27 | 20.03 | 2343 | 2152 | 968 |
+| refresh-1 | 10.35 | 19.23 | 22.27 | 13.23 | 37.52 | 20.41 | 16.91 | 22.22 | 23.32 | 23.14 | 20.86 | 21.31 | 2341 | 2291 | 966 |
+| refresh-2 | 38.07 | 26.97 | 18.59 | 82.20 | 32.76 | 17.67 | 21.78 | 17.92 | 50.08 | 16.81 | 32.28 | 24.38 | 2953 | 2367 | 960 |
+
+Paired differences against the baseline (variant minus baseline):
+
+| Variant | 38 | 39 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | best mean diff | QD mean diff | cells mean diff | best wins | QD wins |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| neutral-splits | -6.24 | +15.06 | +5.27 | -15.18 | -14.14 | +5.16 | -8.91 | -5.68 | -0.02 | -19.04 | -4.37 | -274 | -1.4 | 3/10 | 4/10 |
+| refresh-1 | -23.47 | +8.92 | +8.64 | -15.60 | -11.19 | -2.65 | -4.90 | -4.62 | +6.53 | -9.47 | -4.78 | -276 | -2.6 | 3/10 | 4/10 |
+| refresh-2 | +4.25 | +16.66 | +4.96 | +53.37 | -15.95 | -5.39 | -0.03 | -8.92 | +33.29 | -15.80 | +6.64 | +336 | -9.5 | 5/10 | 6/10 |
+
+Top-50 body-size mix summed over the 10 seeds (node count x bodies):
+
+- baseline: 5x20 6x172 7x21 8x144 9x39 10x53 11x1 13x30 14x16 15x1 16x3
+- neutral-splits: 5x75 6x148 7x112 8x81 9x11 10x19 11x5 12x10 13x14 14x24 15x1
+- refresh-1: 5x6 6x83 7x135 8x94 9x105 10x60 11x11 13x1 14x1 15x4
+- refresh-2: 5x2 6x69 7x150 8x153 9x50 10x68 11x6 13x1 14x1
+
+How to read these: a "win" is one seed where the variant beat the baseline on
+that metric. The refresh variants lower stored elite scores, so their reported
+best can fall without any gait getting slower; that is the point of the
+correction. The neutral-splits flag changes which offspring get evaluated, so
+its comparison is a genuine search A/B. Neither variant shows a gain that
+survives the seed spread.
 
 ## Sources
 
