@@ -64,7 +64,10 @@ impl ThreadedEngine {
         } else {
             self.done.recv_timeout(timeout).ok()
         };
-        for item in first.into_iter().chain(self.done.try_iter().collect::<Vec<_>>()) {
+        for item in first
+            .into_iter()
+            .chain(self.done.try_iter().collect::<Vec<_>>())
+        {
             self.ready
                 .push_back(item.map_err(|e| anyhow::anyhow!("{} failed: {e}", self.name))?);
         }
@@ -222,9 +225,7 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
             }
         })
         .context("GPU engine thread")?;
-    let device_name = ready_rx
-        .recv()
-        .context("GPU engine thread stopped")??;
+    let device_name = ready_rx.recv().context("GPU engine thread stopped")??;
     Ok(ThreadedEngine {
         name: device_name,
         max_nodes,
@@ -270,10 +271,7 @@ pub fn cpu_engine(threads: usize) -> Result<ThreadedEngine> {
         })
         .context("CPU evaluation dispatcher")?;
     Ok(ThreadedEngine {
-        name: format!(
-            "CPU ({threads} threads, {}-lane SIMD)",
-            crate::simd::LANES
-        ),
+        name: format!("CPU ({threads} threads, {}-lane SIMD)", crate::simd::LANES),
         max_nodes: 64,
         depth: 2,
         jobs: Some(jobs),

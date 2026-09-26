@@ -4,13 +4,8 @@
 //! the lanes with branch-free selects, which LLVM compiles to AVX-512 on this
 //! machine (`target-cpu=native`). The equations mirror
 //! `shaders/physics_creature.wgsl`; results differ from the GPU by rounding.
-use crate::{
-    config::Config,
-    creature_kernel::GpuResult,
-    evolution::Population,
-    physics,
-};
 use crate::simd::F;
+use crate::{config::Config, creature_kernel::GpuResult, evolution::Population, physics};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
@@ -171,7 +166,8 @@ impl Group {
     fn build(pop: &Population, unit: &[usize], members: &[usize]) -> Self {
         let first = &pop.genomes[unit[members[0]]];
         let nodes = first.node_count;
-        let bones: Vec<(usize, usize)> = pop.bones[first.bone_start..first.bone_start + first.bone_count]
+        let bones: Vec<(usize, usize)> = pop.bones
+            [first.bone_start..first.bone_start + first.bone_count]
             .iter()
             .map(|b| (b.a as usize, b.b as usize))
             .collect();
@@ -324,7 +320,11 @@ impl Group {
         let joint: Vec<[F; 7]> = self.joint.iter().map(|j| j.map(|v| F::load(&v))).collect();
         let inv_a = load(&self.inv_a);
         let inv_b = load(&self.inv_b);
-        let share_a: Vec<F> = inv_a.iter().zip(&inv_b).map(|(&a, &b)| a / (a + b)).collect();
+        let share_a: Vec<F> = inv_a
+            .iter()
+            .zip(&inv_b)
+            .map(|(&a, &b)| a / (a + b))
+            .collect();
         let share_b: Vec<F> = share_a.iter().map(|&a| F::splat(1.0) - a).collect();
         let inv_mass: Vec<F> = mass.iter().map(|&m| F::splat(1.0) / m).collect();
         let total_mass = mass.iter().fold(F::splat(0.0), |t, &m| t + m);
@@ -333,10 +333,16 @@ impl Group {
         let ledger_on = std::env::var_os("EVOLUTION_LEDGER").is_some();
         let lane0_mass: Vec<f32> = mass.iter().map(|m| m.to_array()[0]).collect();
         let momentum = |v: &[F]| -> f32 {
-            v.iter().zip(&lane0_mass).map(|(x, m)| x.to_array()[0] * m).sum()
+            v.iter()
+                .zip(&lane0_mass)
+                .map(|(x, m)| x.to_array()[0] * m)
+                .sum()
         };
         let com = |p: &[F]| -> f32 {
-            p.iter().zip(&lane0_mass).map(|(x, m)| x.to_array()[0] * m).sum()
+            p.iter()
+                .zip(&lane0_mass)
+                .map(|(x, m)| x.to_array()[0] * m)
+                .sum()
         };
         let mut ledger = [0.0f64; 6];
         let rate = fidelity.rate as f32;
@@ -413,7 +419,11 @@ impl Group {
                 }
                 let shift_x = avg * inv_total_mass;
                 for j in 0..n {
-                    let ground_y = if rough { terrain(px[j] - shift_x, amplitude).0 } else { zero };
+                    let ground_y = if rough {
+                        terrain(px[j] - shift_x, amplitude).0
+                    } else {
+                        zero
+                    };
                     low = low.min(py[j] - radius[j] - ground_y);
                 }
                 for j in 0..n {
@@ -454,9 +464,8 @@ impl Group {
                 let dir_x = dx * inv_distance;
                 let dir_y = dy * inv_distance;
                 let relative = (vbx - vax) * dir_x + (vby - vay) * dir_y;
-                let target_speed = (muscle_length(m, time, exact)
-                    - muscle_length(m, previous_time, exact))
-                    * rate;
+                let target_speed =
+                    (muscle_length(m, time, exact) - muscle_length(m, previous_time, exact)) * rate;
                 // A tired muscle drives weaker and slower.
                 let vigor = F::splat(TIRED_DRIVE) + energies[index] * (1.0 - TIRED_DRIVE);
                 let magnitude = (-(target_speed * m.stiffness) * 0.25 * vigor + relative * 0.15)
@@ -490,7 +499,8 @@ impl Group {
                 let free_x = (vx[j] + (sx[j] * inv_mass[j]) * dt) * air;
                 let free_y = (vy[j] + (sy[j] * inv_mass[j] - gravity) * dt) * air;
                 if ledger_on && colliding {
-                    ledger[5] += f64::from((sx[j] * inv_mass[j] * dt).to_array()[0] * lane0_mass[j]);
+                    ledger[5] +=
+                        f64::from((sx[j] * inv_mass[j] * dt).to_array()[0] * lane0_mass[j]);
                 }
                 let (mut cap_x, mut cap_y) = (free_x, free_y);
                 limit_speed(&mut cap_x, &mut cap_y, max_node_speed);
@@ -568,8 +578,15 @@ impl Group {
                     let Some(reference) = self.joint_reference[b] else {
                         continue;
                     };
-                    let [center_x, center_y, cos_half, sin_half, share, child_mass, reference_mass] =
-                        joint[b];
+                    let [
+                        center_x,
+                        center_y,
+                        cos_half,
+                        sin_half,
+                        share,
+                        child_mass,
+                        reference_mass,
+                    ] = joint[b];
                     let (nx, ny) = (px[pivot], py[pivot]);
                     let (ux, uy) = (px[reference] - nx, py[reference] - ny);
                     let (vx_, vy_) = (px[child] - nx, py[child] - ny);
@@ -587,7 +604,8 @@ impl Group {
                     let abs_zy = zy.abs();
                     let sin_excess = abs_zy * cos_half - zx * sin_half;
                     let cos_excess = zx * cos_half + abs_zy * sin_half;
-                    let series = (sin_excess * (one + sin_excess * sin_excess * (1.0 / 6.0))).min(one);
+                    let series =
+                        (sin_excess * (one + sin_excess * sin_excess * (1.0 / 6.0))).min(one);
                     let excess = F::select(cos_excess.gt(zero), series, one);
                     let excess = F::select(outside, excess, zero);
                     // A node resting on the ground cannot give way, so the
@@ -647,7 +665,8 @@ impl Group {
                 let inv_previous = one / previous_length;
                 let prev_x = pdx * inv_previous;
                 let prev_y = pdy * inv_previous;
-                let turn = previous_length.gt(tiny) & (prev_x * dir_x + prev_y * dir_y).lt(turn_cos);
+                let turn =
+                    previous_length.gt(tiny) & (prev_x * dir_x + prev_y * dir_y).lt(turn_cos);
                 if turn.any() {
                     let cross = prev_x * dir_y - prev_y * dir_x;
                     let sign = F::select(cross.lt(zero), F::splat(-1.0), one);
@@ -696,7 +715,8 @@ impl Group {
                     if ledger_on {
                         let m = f64::from(lane0_mass[j]);
                         let chosen = F::select(contact, reduced, vel_x);
-                        ledger[1] += (f64::from(chosen.to_array()[0]) - f64::from(vel_x.to_array()[0])) * m;
+                        ledger[1] +=
+                            (f64::from(chosen.to_array()[0]) - f64::from(vel_x.to_array()[0])) * m;
                     }
                     vel_x = F::select(contact, reduced, vel_x);
                 }
@@ -769,7 +789,8 @@ impl Group {
                         let bits = F::select(touching, one, zero).to_array();
                         // A foot must leave the ground after touching it; a
                         // dragged node never does.
-                        let lifted = F::select(y.gt(floor[j] + LIFT_CLEARANCE), one, zero).to_array();
+                        let lifted =
+                            F::select(y.gt(floor[j] + LIFT_CLEARANCE), one, zero).to_array();
                         for l in 0..L {
                             if bits[l] > 0.0 {
                                 grounded_now[l] |= 1 << j;

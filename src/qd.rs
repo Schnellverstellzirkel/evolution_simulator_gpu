@@ -504,8 +504,7 @@ impl QdArchive {
                 }
                 neighbors.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
                 let nearest = &neighbors[..LOCAL_NEIGHBORS.min(neighbors.len())];
-                let novelty =
-                    nearest.iter().map(|(d, _)| *d).sum::<f32>() / nearest.len() as f32;
+                let novelty = nearest.iter().map(|(d, _)| *d).sum::<f32>() / nearest.len() as f32;
                 let local = nearest
                     .iter()
                     .map(|(_, f)| match elite.fitness.total_cmp(f) {

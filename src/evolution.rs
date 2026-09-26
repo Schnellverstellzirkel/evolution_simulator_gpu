@@ -1150,7 +1150,14 @@ pub fn emit_archive_batch_streaming(
         |i| {
             let mut rng = Rng::new(cfg.seed, generation, i);
             let id = (generation as u64) * cfg.population as u64 + i as u64 + 1;
-            offspring(&archive[i % archive.len()], cma_emitters, plans[i], cfg, &mut rng, id)
+            offspring(
+                &archive[i % archive.len()],
+                cma_emitters,
+                plans[i],
+                cfg,
+                &mut rng,
+                id,
+            )
         },
         on_slice,
     )
@@ -1348,7 +1355,14 @@ pub fn emit_offspring(
         .map(|(&plan, &slot)| {
             let mut rng = Rng::new(seed, generation, slot);
             let id = (round << 32) ^ ((generation as u64) << 24) ^ slot as u64 ^ (1 << 63);
-            offspring(&archive[slot % archive.len()], cma_emitters, plan, cfg, &mut rng, id)
+            offspring(
+                &archive[slot % archive.len()],
+                cma_emitters,
+                plan,
+                cfg,
+                &mut rng,
+                id,
+            )
         })
         .collect()
 }
@@ -1773,10 +1787,7 @@ mod tests {
                     friction: 0.2,
                 },
             ],
-            bones: vec![
-                Bone::new(0, 1, 2.0),
-                Bone::new(1, 2, 2.0),
-            ],
+            bones: vec![Bone::new(0, 1, 2.0), Bone::new(1, 2, 2.0)],
             muscles: vec![],
             id: 0,
             mutability: 1.0,
@@ -1835,10 +1846,7 @@ mod tests {
             ];
             let mut creature = Creature {
                 nodes,
-                bones: vec![
-                    Bone::new(0, 1, 1.0),
-                    Bone::new(1, 2, 1.0),
-                ],
+                bones: vec![Bone::new(0, 1, 1.0), Bone::new(1, 2, 1.0)],
                 muscles: vec![
                     Muscle {
                         bone_a: 0,

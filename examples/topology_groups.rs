@@ -1,7 +1,9 @@
 //! How many creatures share an exact body plan (bones and muscle attachments)?
 use std::collections::HashMap;
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or("bench/w3-seed38-100k.evo".into());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or("bench/w3-seed38-100k.evo".into());
     let e = evolution_simulator::storage::load(std::path::Path::new(&path)).unwrap();
     let mut groups: HashMap<Vec<u32>, usize> = HashMap::new();
     for i in 0..e.population.genomes.len() {

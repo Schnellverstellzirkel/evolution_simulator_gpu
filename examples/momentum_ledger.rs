@@ -4,8 +4,13 @@
 use evolution_simulator::{config::Config, evolution::Creature, physics};
 fn main() {
     let path = std::env::args().nth(1).expect("champion json");
-    let json: serde_json::Value = serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
-    let body = if json.get("creature").is_some() { json["creature"].clone() } else { json };
+    let json: serde_json::Value =
+        serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+    let body = if json.get("creature").is_some() {
+        json["creature"].clone()
+    } else {
+        json
+    };
     let creature: Creature = serde_json::from_value(body).unwrap();
     let cfg = Config::default();
     let mut c = creature.clone();
@@ -22,10 +27,25 @@ fn main() {
     }
     let end: f32 = n.iter().map(|x| x.pos[0] * x.mass).sum::<f32>() / mass;
     let l = physics::MOMENTUM_LEDGER.with(|l| l.get());
-    println!("{} nodes, {} muscles, total mass {:.3} kg", c.nodes.len(), c.muscles.len(), mass);
-    println!("center of mass moved {:.3} m over {} s (CPU reference)", end - start, cfg.duration);
+    println!(
+        "{} nodes, {} muscles, total mass {:.3} kg",
+        c.nodes.len(),
+        c.muscles.len(),
+        mass
+    );
+    println!(
+        "center of mass moved {:.3} m over {} s (CPU reference)",
+        end - start,
+        cfg.duration
+    );
     engines(&creature, &cfg);
-    let names = ["integration speed cap", "ground contact", "velocity-pass speed cap", "velocity-pass constraints", "projection COM shift"];
+    let names = [
+        "integration speed cap",
+        "ground contact",
+        "velocity-pass speed cap",
+        "velocity-pass constraints",
+        "projection COM shift",
+    ];
     for (name, v) in names.iter().zip(l) {
         println!("{name:28} {v:+10.3} kg*m/s summed");
     }
@@ -54,9 +74,20 @@ fn engines(creature: &Creature, cfg: &Config) {
         };
         println!("{:45} fitness {:.3} m", e.name(), done.results[0].fitness);
     }
-    println!("{:45} fitness {:.3} m", "CPU reference (replay physics)", physics::evaluate(creature, cfg));
+    println!(
+        "{:45} fitness {:.3} m",
+        "CPU reference (replay physics)",
+        physics::evaluate(creature, cfg)
+    );
     let l = *evolution_simulator::cpu_engine::LEDGER.lock().unwrap();
-    let names = ["integration speed cap", "ground contact", "velocity-pass speed cap", "velocity-pass constraints", "projection COM shift", "muscle forces"];
+    let names = [
+        "integration speed cap",
+        "ground contact",
+        "velocity-pass speed cap",
+        "velocity-pass constraints",
+        "projection COM shift",
+        "muscle forces",
+    ];
     println!("Engine physics ledger (lane 0, kg*m/s summed over the trial):");
     for (name, v) in names.iter().zip(l) {
         println!("  {name:28} {v:+10.3}");

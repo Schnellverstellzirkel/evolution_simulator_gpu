@@ -577,7 +577,13 @@ impl App {
                 self.worker.send(Command::Configure(self.config.clone()));
                 self.dirty = false;
             }
-            ui.label(RichText::new("Changes apply between generations. Seed changes need a new experiment.").small().color(MUTED));
+            ui.label(
+                RichText::new(
+                    "Changes apply between generations. Seed changes need a new experiment.",
+                )
+                .small()
+                .color(MUTED),
+            );
         }
         ui.horizontal_wrapped(|ui| {
             if ui.small_button("Save preset").clicked() {
@@ -676,7 +682,12 @@ impl App {
             for pair in line.windows(2) {
                 let (a, b) = (pair[0], pair[1]);
                 painter.add(egui::Shape::convex_polygon(
-                    vec![a, b, Pos2::new(b.x, rect.bottom()), Pos2::new(a.x, rect.bottom())],
+                    vec![
+                        a,
+                        b,
+                        Pos2::new(b.x, rect.bottom()),
+                        Pos2::new(a.x, rect.bottom()),
+                    ],
                     GROUND,
                     Stroke::NONE,
                 ));
@@ -1063,9 +1074,11 @@ impl App {
                             "gen {} · {:.2} m\n{:+.2} m · {}",
                             step.generation, step.fitness, step.gain, step.change
                         );
-                        let button = egui::Button::new(
-                            RichText::new(text).small().color(if big { MINT } else { INK }),
-                        )
+                        let button = egui::Button::new(RichText::new(text).small().color(if big {
+                            MINT
+                        } else {
+                            INK
+                        }))
                         .fill(if big { CARD_HOVER } else { CARD });
                         if ui.add(button).clicked() {
                             chosen = Some(k);
@@ -1762,7 +1775,11 @@ fn draw_creature(
         }
         let eye = center + Vec2::new(r * 0.4, -r * 0.2);
         p.circle_filled(eye, r * 0.3, Color32::WHITE);
-        p.circle_filled(eye + Vec2::new(r * 0.08, 0.), r * 0.15, Color32::from_rgb(9, 17, 22));
+        p.circle_filled(
+            eye + Vec2::new(r * 0.08, 0.),
+            r * 0.15,
+            Color32::from_rgb(9, 17, 22),
+        );
     }
 }
 fn thumbnail(p: &egui::Painter, c: &Creature, rect: Rect) {

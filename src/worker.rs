@@ -406,7 +406,9 @@ fn run(
                         }
                         Stage::Ready | Stage::Evaluating if gpu.async_capable() => {
                             let stage_start = Instant::now();
-                            if done.len() != e.config.population || done_key != (epoch, e.generation) {
+                            if done.len() != e.config.population
+                                || done_key != (epoch, e.generation)
+                            {
                                 done = vec![false; e.config.population];
                                 done[..e.evaluated].fill(true);
                                 done_key = (epoch, e.generation);

@@ -436,9 +436,11 @@ fn main() -> Result<()> {
             // `--engine cpu` runs the CPU SIMD engine alone; another name opens that
             // Vulkan device alone (bodies up to 16 nodes).
             let mut engine: Option<Box<dyn evolution_simulator::engine::Engine>> = match engine {
-                Some(name) if name == "cpu" => Some(Box::new(evolution_simulator::engine::cpu_engine(
-                    std::thread::available_parallelism().map_or(4, usize::from),
-                )?)),
+                Some(name) if name == "cpu" => {
+                    Some(Box::new(evolution_simulator::engine::cpu_engine(
+                        std::thread::available_parallelism().map_or(4, usize::from),
+                    )?))
+                }
                 Some(name) => Some(Box::new(evolution_simulator::engine::gpu_engine(
                     &name,
                     16,

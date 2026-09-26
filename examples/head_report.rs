@@ -4,7 +4,10 @@
 use evolution_simulator::{cpu_engine, physics, storage};
 fn main() {
     let path = std::env::args().nth(1).expect("checkpoint");
-    let count: usize = std::env::args().nth(2).and_then(|v| v.parse().ok()).unwrap_or(12);
+    let count: usize = std::env::args()
+        .nth(2)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(12);
     let e = storage::load(std::path::Path::new(&path)).unwrap();
     let mut elites: Vec<_> = e.archive.entries.iter().collect();
     elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));

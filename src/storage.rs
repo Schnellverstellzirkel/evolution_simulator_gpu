@@ -138,7 +138,12 @@ pub struct Ancestor {
 }
 
 /// Short description of how a child differs from its parent.
-fn describe_change(parent: Option<&Creature>, child: &Creature, emitter: Emitter, crossed: bool) -> String {
+fn describe_change(
+    parent: Option<&Creature>,
+    child: &Creature,
+    emitter: Emitter,
+    crossed: bool,
+) -> String {
     let mut parts: Vec<String> = vec![match emitter {
         Emitter::Cma => "fine-tuned".into(),
         Emitter::Structural => "reshaped".into(),
@@ -152,10 +157,16 @@ fn describe_change(parent: Option<&Creature>, child: &Creature, emitter: Emitter
         let nodes = child.nodes.len() as i64 - parent.nodes.len() as i64;
         let muscles = child.muscles.len() as i64 - parent.muscles.len() as i64;
         if nodes != 0 {
-            parts.push(format!("{nodes:+} node{}", if nodes.abs() == 1 { "" } else { "s" }));
+            parts.push(format!(
+                "{nodes:+} node{}",
+                if nodes.abs() == 1 { "" } else { "s" }
+            ));
         }
         if muscles != 0 {
-            parts.push(format!("{muscles:+} muscle{}", if muscles.abs() == 1 { "" } else { "s" }));
+            parts.push(format!(
+                "{muscles:+} muscle{}",
+                if muscles.abs() == 1 { "" } else { "s" }
+            ));
         }
         let organs = |c: &Creature| c.bones.iter().filter(|b| b.organ_mass > 0.0).count() as i64;
         let organ_change = organs(child) - organs(parent);
@@ -375,11 +386,16 @@ impl Experiment {
                 continue;
             }
             let genome = &self.population.genomes[i];
-            let nodes = &self.population.nodes[genome.node_start..genome.node_start + genome.node_count];
-            let muscles =
-                &self.population.muscles[genome.muscle_start..genome.muscle_start + genome.muscle_count];
+            let nodes =
+                &self.population.nodes[genome.node_start..genome.node_start + genome.node_count];
+            let muscles = &self.population.muscles
+                [genome.muscle_start..genome.muscle_start + genome.muscle_count];
             let descriptor = qd::descriptor(nodes, muscles, self.trial_metrics[i]);
-            let emitter = self.candidate_emitters.get(i).copied().unwrap_or(Emitter::Restart);
+            let emitter = self
+                .candidate_emitters
+                .get(i)
+                .copied()
+                .unwrap_or(Emitter::Restart);
             let protection = self.protected_until.get(i).copied().unwrap_or(0);
             if self.islands[i % island_count()]
                 .offer(
@@ -603,10 +619,16 @@ impl Experiment {
             return;
         }
         let parent = self.candidate_parent_ids.get(slot).copied().flatten();
-        let emitter = self.candidate_emitters.get(slot).copied().unwrap_or(Emitter::Restart);
+        let emitter = self
+            .candidate_emitters
+            .get(slot)
+            .copied()
+            .unwrap_or(Emitter::Restart);
         let crossed = self.candidate_mates.get(slot).copied().unwrap_or(false);
         let change = describe_change(
-            parent.and_then(|id| self.lineage.get(&id)).map(|a| &a.creature),
+            parent
+                .and_then(|id| self.lineage.get(&id))
+                .map(|a| &a.creature),
             &creature,
             emitter,
             crossed,
@@ -815,7 +837,9 @@ impl Experiment {
     /// Every few generations each island receives the best share of its
     /// neighbor's elites.
     fn migrate_islands(&mut self) {
-        if self.islands.len() != island_count() || !self.generation.is_multiple_of(MIGRATION_INTERVAL) {
+        if self.islands.len() != island_count()
+            || !self.generation.is_multiple_of(MIGRATION_INTERVAL)
+        {
             return;
         }
         let migrants: Vec<Vec<qd::Elite>> = self
@@ -828,7 +852,8 @@ impl Experiment {
                     .filter(|e| !qd::is_morphology_niche(&e.niche))
                     .collect();
                 elites.sort_unstable_by(|a, b| b.fitness.total_cmp(&a.fitness));
-                let take = ((elites.len() as f32 * MIGRATION_SHARE).ceil() as usize).min(elites.len());
+                let take =
+                    ((elites.len() as f32 * MIGRATION_SHARE).ceil() as usize).min(elites.len());
                 elites[..take].iter().map(|e| (*e).clone()).collect()
             })
             .collect();
@@ -1000,11 +1025,13 @@ impl Experiment {
                         .unwrap_or(0)
                 };
                 let mate = match (emitter, parent) {
-                    (Emitter::Structural | Emitter::Novelty, Some(p)) if rng.unit() < 0.2 => by_plan[island]
-                        .get(&archive.entries[p].topology)
-                        .filter(|group| group.len() > 1)
-                        .map(|group| group[rng.index(group.len())])
-                        .filter(|&m| m != p),
+                    (Emitter::Structural | Emitter::Novelty, Some(p)) if rng.unit() < 0.2 => {
+                        by_plan[island]
+                            .get(&archive.entries[p].topology)
+                            .filter(|group| group.len() > 1)
+                            .map(|group| group[rng.index(group.len())])
+                            .filter(|&m| m != p)
+                    }
                     _ => None,
                 };
                 PlanPrep {

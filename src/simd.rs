@@ -46,9 +46,9 @@ mod imp {
         #[inline(always)]
         pub fn floor(self) -> F {
             unsafe {
-                F(_mm512_roundscale_ps::<{ _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC }>(
-                    self.0,
-                ))
+                F(_mm512_roundscale_ps::<
+                    { _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC },
+                >(self.0))
             }
         }
         #[inline(always)]

@@ -412,7 +412,9 @@ fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool, previous: &[N
             position[1] += lift;
         }
     }
-    let com_after: f32 = (0..nodes.len()).map(|i| positions[i][0] * nodes[i].mass).sum();
+    let com_after: f32 = (0..nodes.len())
+        .map(|i| positions[i][0] * nodes[i].mass)
+        .sum();
     ledger_add(4, (com_after - com_before) / dt());
     let before = momentum_x(nodes);
     for (i, node) in nodes.iter_mut().enumerate() {

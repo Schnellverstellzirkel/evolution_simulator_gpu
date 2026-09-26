@@ -293,10 +293,7 @@ fn overlapping_nodes_remain_finite() {
             };
             3
         ],
-        bones: vec![
-            Bone::new(0, 1, 0.03),
-            Bone::new(1, 2, 0.03),
-        ],
+        bones: vec![Bone::new(0, 1, 0.03), Bone::new(1, 2, 0.03)],
         muscles: vec![Muscle {
             bone_a: 0,
             bone_b: 1,
@@ -457,7 +454,11 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
             .map(|j| {
                 let a = &nodes[j];
                 let b = &nodes[j + 1];
-                Bone::new(j as u32, (j + 1) as u32, (a.x - b.x).hypot(a.y - b.y).max(0.03))
+                Bone::new(
+                    j as u32,
+                    (j + 1) as u32,
+                    (a.x - b.x).hypot(a.y - b.y).max(0.03),
+                )
             })
             .collect();
         let muscle_links = if bones.len() > 2 { bones.len() } else { 1 };
@@ -549,7 +550,11 @@ fn nodes_stay_on_top_of_rough_ground() {
             for (node, gene) in frame.iter().zip(&creature.nodes) {
                 let (height, slope) = physics::terrain(node[0], amplitude);
                 let floor = height + gene.diameter * 0.5 * (1.0 + slope * slope).sqrt();
-                assert!(node[1] >= floor - 0.01, "node sank to {} below {floor}", node[1]);
+                assert!(
+                    node[1] >= floor - 0.01,
+                    "node sank to {} below {floor}",
+                    node[1]
+                );
             }
         }
     }
@@ -568,7 +573,10 @@ fn gpu_matches_cpu_on_rough_ground() {
     let pop = evolution::create(&base).unwrap();
     let mut gpu = Gpu::new("RTX 4060").unwrap();
     for terrain in 0..physics::TERRAIN_AMPLITUDES.len() as u8 {
-        let cfg = Config { terrain, ..base.clone() };
+        let cfg = Config {
+            terrain,
+            ..base.clone()
+        };
         let scores = gpu
             .evaluate(&pop, &(0..64).collect::<Vec<_>>(), &cfg)
             .unwrap();
