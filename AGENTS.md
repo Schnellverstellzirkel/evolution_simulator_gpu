@@ -148,7 +148,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 61. Done: autosave rotation keeps the three newest `seed-*-auto.evo` files and removes stale `.evo.tmp` files (`storage::rotate_autosaves`).
 62. Shrink checkpoints (1 to 1.5 GB at 3M creatures): store the population compactly and drop data that can be regenerated.
 63. Done (existing implementation): autosave serialization and writes use a background thread. Snapshot-copy cost on the worker still needs measurement before claiming stall-free autosaves.
-64. Show disk use of `runs/` in the UI.
+64. Done: the performance line shows the total size of `runs/`, refreshed at most every five seconds.
 65. Done: regression tests compare next-generation genomes, archive/CMA state, and offspring metadata after checkpoint round trips, including stalled island optimizers, steady breeding, and environment changes. V4 checkpoints now persist optimizer progress; V3 remains readable. Final integrated checks are recorded in docs/validation.md.
 
 ### Search
@@ -206,12 +206,12 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 
 ### Interface
 
-113. Replay viewer: follow camera, distance ruler, speed readout, center-of-mass trail, playback speed, scrubber, fall marker.
+113. Done: replay viewer has a follow camera, distance ruler, speed readout (m/s), center-of-mass trail, playback speed (0.25x to 4x), scrubber and fall marker.
 114. Behavior archive map: a heatmap of cells colored by distance, click to replay.
 115. History tab: best distance over generations, records timeline, replay of each record holder.
 116. Race view: the top elites run side by side with a leaderboard.
 117. Creature drawing: muscle activation and fatigue colors, head, organs, touchdown highlights, broken joint marks.
-118. Help overlay (F1 or ?), shortcuts for tabs and replay, and a status line with creatures per second.
+118. Done: F1 or `?` opens a help overlay, 1/2/3 switch tabs, space toggles replay play/pause, arrow keys seek, and the status line shows creatures per second.
 119. Share a creature: export an animated GIF and a JSON file, and open a creature JSON to replay it.
 120. Lineage view: ancestors with thumbnails, mutation labels, gains, and body plan changes highlighted.
 121. Show each muscle's energy during replay, to make fatigue visible.
@@ -219,22 +219,22 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 123. Name species automatically so players can follow them.
 124. A hall of fame of record holders across the whole run.
 125. Remove settings the owner does not want (histogram controls, budgets) or move them to a debug panel.
-126. Tooltips that explain each archive axis in plain words.
-127. A screenshot button.
-128. A dark theme.
+126. Done: the archive axis labels carry one-sentence hover explanations.
+127. Done: a Screenshot button saves a timestamped PNG under `runs/` and reports the path.
+128. Done: an Advanced > Display toggle switches light/dark egui visuals; the viewport scene keeps fixed colors.
 
 ### Code health and docs
 
 129. Done: README describes current 60 s / 3M defaults, distance-only scoring, archive/search behavior, safe runs, environment buttons, diagnostics, and save/resume.
 130. Done: architecture updated from source, including masses, pull-only active drive, fatigue, standard/fine checks, replay semantics, scheduler, and checkpoint state.
 131. Done: validation records the local three-test GPU pass and the new 20-generation baseline, with historical workloads clearly separated. Final local checks passed: 68 CPU, seven example, and three explicit GPU tests; remote CI remains unverified.
-132. Remove the legacy `mutate()` path that the app no longer uses.
-133. Remove the empty obstacle slot kept for old checkpoints, since breaking saves is fine.
-134. Remove environment variables that no experiment uses any more.
-135. Decide what to do with `research/`: commit the harness and results, or ignore the folder.
-136. Delete the stray `cuda-keyring_1.1-1_all.deb` files in the repository root.
-137. The local branch `wip/cpu-finalist-validation` (not pushed) holds an older owner change that replayed archive finalists on the CPU before they entered the archive. The contender check in 71e9088 replaces it. Delete the branch or port anything missing.
+132. Done: removed `mutate`, `survivors`, `reproduce`, and `Experiment::reproduce`/`select`; tests now exercise archive-batch breeding.
+133. Done: removed the `obstacles` config slot; the checkpoint magic is EVORUST5, so old V4 files are rejected cleanly.
+134. Done: audited every EVOLUTION_* read; all remain reachable. Fixed the stale `EVOLUTION_WORKGROUP64` mention in docs/validation.md to `EVOLUTION_LANE_WG`.
+135. Done: `research/` is ignored (its nested worktrees broke `git add -A`); see `.gitignore`.
+136. Done: both stray `.deb` files are deleted.
+137. Done: deleted the local `wip/cpu-finalist-validation` branch; its CPU-finalist check is replaced by the contender check in 71e9088.
 138. Done: `.claude/` is in `.gitignore`.
 139. Done: worker failures/disconnections persist through wait/poll without losing completed results; a failed GPU retries its unfinished units on the CPU, a failed CPU is terminal after completed output, and a primary GPU that cannot open falls back to the CPU. See `docs/superpowers/plans/2026-09-26-device-recovery.md`.
-140. Log per-generation stage times to a file for later analysis.
+140. Done: `EVOLUTION_STAGE_LOG=<path>` appends a CSV row per generation (evaluation, archive, breeding seconds, end-to-end rate).
 141. Done: `release-fast` is the named incremental release profile (LTO off, 256 codegen units); normal release retains thin LTO. No build-speed measurement is claimed.

@@ -8,3 +8,5 @@
 
 /presets/custom.json
 /.claude/
+# Local research harness and its nested worktrees; keep them off the game repo.
+/research/
