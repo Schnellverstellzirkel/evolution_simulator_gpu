@@ -6,6 +6,7 @@ use crate::{
     storage::{self, Experiment, Stage, Stats},
 };
 use std::{
+    io::Write,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -144,6 +145,58 @@ impl Drop for Worker {
         }
     }
 }
+struct StageLog {
+    file: std::fs::File,
+    started: Instant,
+    seconds: [f64; 3],
+}
+impl StageLog {
+    fn open() -> Option<Self> {
+        let path = std::env::var_os("EVOLUTION_STAGE_LOG")?;
+        let mut file = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(err) => {
+                eprintln!("Stage log {} unavailable: {err:#}", path.to_string_lossy());
+                return None;
+            }
+        };
+        if file.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
+            let _ = writeln!(
+                file,
+                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second"
+            );
+        }
+        Some(Self {
+            file,
+            started: Instant::now(),
+            seconds: [0.0; 3],
+        })
+    }
+    fn add(&mut self, stage: usize, seconds: f64) {
+        self.seconds[stage] += seconds;
+    }
+    fn reset(&mut self) {
+        self.started = Instant::now();
+        self.seconds = [0.0; 3];
+    }
+    fn write_row(&mut self, generation: u32, population: usize) {
+        let seconds = self.started.elapsed().as_secs_f64().max(1e-9);
+        let _ = writeln!(
+            self.file,
+            "{generation},{:.6},{:.6},{:.6},{:.3}",
+            self.seconds[0],
+            self.seconds[1],
+            self.seconds[2],
+            population as f64 / seconds
+        );
+        let _ = self.file.flush();
+        self.reset();
+    }
+}
 fn run(
     mut gpu: Gpu,
     rx: Receiver<Command>,
@@ -184,6 +237,7 @@ fn run(
     let mut benchmark_generation_seconds: Vec<f64> = Vec::new();
     let mut benchmark_generation_started = Instant::now();
     let mut benchmark_ping_ms: Vec<f64> = Vec::new();
+    let mut stage_log = StageLog::open();
     // Creatures of the current generation whose results are stored, and the
     // (experiment, generation) the bitmap belongs to.
     let mut done: Vec<bool> = Vec::new();
@@ -266,6 +320,9 @@ fn run(
                         guided = g;
                         pause.store(false, Ordering::Relaxed);
                         running = true;
+                        if let Some(log) = &mut stage_log {
+                            log.reset();
+                        }
                     }
                     Command::Pause => {
                         running = false;
@@ -432,6 +489,13 @@ fn run(
                             if benchmark_start.is_some() {
                                 benchmark_stage_seconds[0] += seconds;
                             }
+                            if let Some(log) = &mut stage_log {
+                                let archive = std::mem::take(&mut steady.stage_seconds[1]);
+                                let breeding = std::mem::take(&mut steady.stage_seconds[2]);
+                                log.add(0, (seconds - archive - breeding).max(0.0));
+                                log.add(1, archive);
+                                log.add(2, breeding);
+                            }
                         }
                         Stage::Ready | Stage::Evaluating if gpu.async_capable() => {
                             let stage_start = Instant::now();
@@ -465,6 +529,9 @@ fn run(
                             if benchmark_start.is_some() {
                                 benchmark_stage_seconds[0] += seconds;
                             }
+                            if let Some(log) = &mut stage_log {
+                                log.add(0, seconds);
+                            }
                         }
                         Stage::Ready | Stage::Evaluating => {
                             let stage_start = Instant::now();
@@ -488,15 +555,23 @@ fn run(
                                     running = false;
                                 }
                             }
+                            let evaluation_seconds = stage_start.elapsed().as_secs_f64();
                             if benchmark_start.is_some() {
-                                benchmark_stage_seconds[0] += stage_start.elapsed().as_secs_f64();
+                                benchmark_stage_seconds[0] += evaluation_seconds;
+                            }
+                            if let Some(log) = &mut stage_log {
+                                log.add(0, evaluation_seconds);
                             }
                         }
                         Stage::Evaluated | Stage::Ranked | Stage::Selected => {
                             let stage_start = Instant::now();
                             e.archive_batch()?;
+                            let archive_seconds = stage_start.elapsed().as_secs_f64();
                             if benchmark_start.is_some() {
-                                benchmark_stage_seconds[1] += stage_start.elapsed().as_secs_f64();
+                                benchmark_stage_seconds[1] += archive_seconds;
+                            }
+                            if let Some(log) = &mut stage_log {
+                                log.add(1, archive_seconds);
                             }
                             status = format!(
                                 "Archive: {} niches · QD score {:.2}",
@@ -532,8 +607,13 @@ fn run(
                             } else {
                                 e.prepare_next_batch()?;
                             }
+                            let breeding_seconds = stage_start.elapsed().as_secs_f64();
                             if benchmark_start.is_some() {
-                                benchmark_stage_seconds[2] += stage_start.elapsed().as_secs_f64();
+                                benchmark_stage_seconds[2] += breeding_seconds;
+                            }
+                            if let Some(log) = &mut stage_log {
+                                log.add(2, breeding_seconds);
+                                log.write_row(e.generation.saturating_sub(1), e.config.population);
                             }
                             generation_marks.push_back((Instant::now(), e.config.population));
                             while generation_marks.len() > 2
@@ -939,6 +1019,8 @@ struct Steady {
     failed: usize,
     /// A generation's worth of evaluations finished; record it next pass.
     boundary: bool,
+    /// Archive and breeding seconds inside the current generation.
+    stage_seconds: [f64; 3],
 }
 
 /// Stores a finished unit, offers it to the archive, breeds replacements into
@@ -955,8 +1037,12 @@ fn steady_absorb(
         e.scores[i] = m.fitness;
         e.trial_metrics[i] = m.behavior;
     }
+    let archive_started = Instant::now();
     steady.failed += e.archive_slots(indices);
+    steady.stage_seconds[1] += archive_started.elapsed().as_secs_f64();
+    let breeding_started = Instant::now();
     e.breed_slots(indices)?;
+    steady.stage_seconds[2] += breeding_started.elapsed().as_secs_f64();
     if resubmit {
         sched.extend(&e.population, indices.iter().copied());
     }
@@ -972,6 +1058,28 @@ fn steady_absorb(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_log_writes_one_csv_row_per_generation() {
+        let path =
+            std::env::temp_dir().join(format!("evolution-stage-log-{}.csv", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut log = StageLog {
+            file: std::fs::File::create(&path).unwrap(),
+            started: Instant::now(),
+            seconds: [1.0, 2.0, 3.0],
+        };
+        log.write_row(5, 1000);
+        log.add(0, 4.0);
+        log.write_row(6, 1000);
+        drop(log);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<&str> = text.lines().collect();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].starts_with("5,1.000000,2.000000,3.000000,"));
+        assert!(rows[1].starts_with("6,4.000000,0.000000,0.000000,"));
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     #[ignore = "requires a Vulkan GPU"]
