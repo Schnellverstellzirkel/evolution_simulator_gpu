@@ -949,6 +949,73 @@ fn a_passive_body_never_rises_above_its_start() {
     }
 }
 
+/// The four-node sled evolution built while friction could push the body in
+/// any direction: a flat chain of nodes resting on the ground, driven by
+/// muscles that pull it together along its length. Its momentum came almost
+/// entirely from the center-of-mass shift of the bone passes.
+fn sled_creature() -> Creature {
+    let spacing = 0.7;
+    let diameter = 0.16;
+    let nodes: Vec<_> = (0..4)
+        .map(|i| NodeGene {
+            x: i as f32 * spacing,
+            y: diameter * 0.5,
+            diameter,
+            friction: 1.0,
+        })
+        .collect();
+    let bones: Vec<_> = (0..3)
+        .map(|i| Bone::new(i as u32, i as u32 + 1, spacing))
+        .collect();
+    // Each muscle spans two bones, from bone i's start to bone i+1's end, so
+    // contracting it drags the chain together while every node stays down.
+    let muscles: Vec<_> = (0..2)
+        .map(|i| Muscle {
+            bone_a: i as u32,
+            bone_b: i as u32 + 1,
+            anchor_a: 0.0,
+            anchor_b: 1.0,
+            short: spacing * 1.05,
+            long: spacing * 2.0,
+            period: 1.0,
+            phase: i as f32 * 0.5,
+            duty: 0.5,
+            stiffness: 120.0,
+            sensor: 255,
+            reset: 0.0,
+        })
+        .collect();
+    Creature {
+        nodes,
+        bones,
+        muscles,
+        id: 0,
+        mutability: 1.0,
+    }
+}
+
+#[test]
+fn a_four_node_sled_stays_slow() {
+    // This known exploit shape reached 2,267 m in 60 s while the friction cap
+    // still let the bone passes push it forward. Friction may now push only
+    // while the feet stay planted, so a body that slides cannot propel itself.
+    let cfg = Config {
+        population: 1,
+        duration: 60.0,
+        random_seed: false,
+        ..config()
+    };
+    let mut pop = evolution::Population::default();
+    pop.push(sled_creature());
+    let result = evolution_simulator::cpu_engine::evaluate(&pop, &cfg);
+    let distance = result[0].fitness;
+    // A fall scores FAILED, which would also pass a pure upper bound.
+    assert!(
+        distance > evolution::FAILED && distance < 10.0,
+        "the sled exploit traveled {distance} m in 60 s"
+    );
+}
+
 #[test]
 fn random_bodies_get_no_free_propulsion() {
     // Solver exploits show up first in random bodies: the uncapped planted
