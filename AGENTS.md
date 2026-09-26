@@ -1,0 +1,210 @@
+# Agent notes
+
+Read this before changing the code. It lists the owner's rules, how to work on this machine, and the open work.
+
+## The game
+
+Evolution Simulator is a Rust game. 2D creatures made of bones, joints and muscles evolve to travel as far as possible in 60 s trials. The search is MAP-Elites with CMA, structural, novelty and immigrant emitters over 4 island archives, with 3 million creatures per generation.
+
+Physics exists in three places that must agree:
+
+- the GPU kernel: `shaders/physics_creature.wgsl`, driven by `src/gpu.rs` and `src/vk_engine.rs`
+- the AVX-512 CPU engine: `src/cpu_engine.rs` and `src/simd.rs`
+- the older CPU reference: `src/physics.rs`
+
+The replay viewport plays frames recorded by the CPU engine (`cpu_engine::trajectory`). `src/creature_kernel.rs` packs creatures for the GPU. `src/scheduler.rs` hands work units to every device. `physics::body()` computes node masses for every engine.
+
+## Owner's product rules
+
+- Fitness is horizontal distance only. Never add fitness terms, penalties or multipliers. Ask the owner before proposing one.
+- Pressure on behavior comes from physics or environment effects, never from scoring.
+- Keep settings few. The owner wants fixed 60 s trials, 3M creatures, and no mutation controls. Environment effects are buttons.
+- Breaking old checkpoints is fine. Bump `qd::VERSION` when archive or physics semantics change.
+- The old gameplay is not a reference. Speed matters. The long-term goal is 2M evaluated creatures per second in the graphical game at 60 FPS.
+- A physics change must land in all engines and keep CPU/GPU agreement.
+- Commit and push to `main` often, with plain commit messages that explain what changed, why, and what was measured.
+
+## Working on this machine
+
+- The laptop has 16 threads, an RTX 4060 for compute, and a Radeon 780M that drives the desktop.
+- Use at most half the machine for builds, tests and runs: 8 build jobs and 8 rayon threads, at low priority (`nice`).
+- Never evaluate creatures on the Radeon. Set `EVOLUTION_DEVICES=primary` and `EVOLUTION_CPU_THREADS=6` for every run of the game, the tests, and benchmarks. Heavy Radeon use crashed the desktop (mutter/Wayland) once.
+- Keep subagent fan-outs small for the same reason. The session limit is 20 concurrent subagents, and 20 at once also ran out the owner's token budget.
+- Fast iteration build: `CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=256 CARGO_PROFILE_RELEASE_INCREMENTAL=true RUSTFLAGS="-C target-cpu=native -C link-arg=-fuse-ld=mold" cargo build --release`. The committed profile uses thin LTO and rebuilds slowly.
+- GPU tests are `#[ignore]`d. Run them with `cargo test --release --test simulation -- --ignored`.
+- `examples/size_report.rs <checkpoint> [count]` prints body length, mass and foot slip for the best elites. With `EVOLUTION_LEDGER=1` it also prints where their forward momentum comes from.
+- Before committing: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test --release`.
+
+## Done in the 2026-09-26 session
+
+- The GPU and CPU engine disagreed at 4x physics fidelity. The CPU engine applied joint limits inside every bone pass, while the GPU applied them once per step. Fixed in the CPU engine, and the GPU tests now compare like with like (b4f6e20).
+- Bones now have mass: bone density times length squared, split between the two joints (`Limits::bone_density`, `EVOLUTION_BONE_DENSITY`). Feet slid 0.43 m per meter traveled before and 0.02 m after.
+- Muscles only pull: the drive term cannot push. Exhausted muscles have no drive (`TIRED_DRIVE = 0`), so all work comes from each muscle's energy store.
+- Result of a 20-generation run (100k creatures, seed 38) with all three changes: feet no longer slide, but the fastest bodies are still about 20 m long, weigh 750 to 800 kg, and reach 800 m. The CPU engine replays the 801 m champion at only 90 m. Evolution now exploits the ground-contact glitch described in the first item below.
+
+## Next steps
+
+Items marked (owner) were requested by the owner. The rest are suggestions, in rough priority order within each group.
+
+### Creature size and movement realism
+
+1. (owner) Fix the glitched giants: huge bodies that make a strange jump as soon as they touch the ground. Diagnosis: after the constraint passes, the parent-first rebuild restores exact bone lengths without looking at the ground. If a node ends up below the floor, the whole body is lifted by that depth (`lift` in `src/cpu_engine.rs` after the rebuild, `ground_lift` in `shaders/physics_creature.wgsl`). Velocity is then taken from each node's movement over the step, so the lift becomes upward speed for the whole body. A 20 m body that swings a limb into the ground gets a large lift and jumps. Fix ideas: subtract the lift from the velocity (a position-only correction), or keep children above the floor while rebuilding so the body pivots instead of rising. Validate with `size_report`: the archive's distance and the CPU replay's distance must agree, and the ledger's ground contact line must stay plausible.
+2. (owner) Stop evolution from favoring huge 20 to 100 m creatures. Bone mass, pull-only muscles and the energy budget did not do it on their own (see the run above). Fix item 1 first, then re-measure with a 20-generation run and `size_report`. If giants still win, try the items below.
+3. (owner) Stop feet from sliding as if there were no friction. Bone mass fixed most of it. Keep checking slip per meter with `size_report`.
+4. Scale muscle force with muscle size. A longer or thicker muscle should be stronger and heavier, so a giant needs heavy muscles.
+5. Let bones break under load. Bone strength grows with cross-section while load grows with mass, so oversized bones fail like real ones.
+6. Lower `max_bone` from 10 m to about 2 m if physics alone does not bring body size down.
+7. Review the whole-body rescale mutation. It exists to grow giants and may no longer be needed.
+8. Review the log-scale height archive axis. It gives giants their own cells and protects them.
+9. Measure where a triangle's (2 bones, 1 muscle) forward motion comes from with the momentum ledger. It moves in ways the owner thinks should be impossible.
+10. Remove or justify the rebuild step that lifts the whole body when a node sinks into the ground. It adds potential energy that no force paid for.
+11. Add an energy conservation test: a passive body dropped on flat ground must never gain mechanical energy.
+12. Add a momentum test: the projection and rebuild center-of-mass shift in the ledger should stay near zero.
+13. Charge muscle energy only for active contraction work, not for passive damping.
+14. Add passive elastic tendons as an evolvable part, so gaits can store and return energy honestly.
+15. Add static and kinetic friction (a higher coefficient to start sliding than to keep sliding).
+16. Give bones ground contact along their length, not only at the joints, so a bone cannot pass through the ground between two nodes.
+17. Align or delete `physics::evaluate` (the old CPU reference). It lacks joint limits and fatigue and no longer matches the engines.
+18. Consolidate the CPU engine and the old CPU reference into one CPU implementation.
+19. Review the fall rule (head below neck) for bodies without a clear head.
+20. Add air drag that scales with bone length times speed squared, so large fast bodies pay for moving air.
+21. Report cost of transport (energy used per kg per meter) in the UI and in `size_report`, as a diagnostic only, never as fitness.
+
+### Environment effects and catastrophes
+
+22. (owner) Make every environment effect undoable: a level can go down as well as up, and each change re-evaluates the archive elites.
+23. (owner) Add more environment effects and catastrophes that create biodiversity and push toward complex, efficient movement.
+24. Hurdles: periodic steps whose height rises with each level.
+25. Slope: the ground tilts uphill, steeper at each level.
+26. Thick air: drag levels.
+27. Gravity levels: stronger and weaker gravity.
+28. Ice: lower ground friction.
+29. Mud: higher friction with sinking, so dragging feet cost more.
+30. Gaps: pits that force jumping or bridging.
+31. Water: a viscous medium that favors swimming strokes.
+32. Wind: a steady headwind or tailwind.
+33. Drought: slower muscle energy recovery.
+34. Heat wave: smaller muscle energy store.
+35. Meteor: a one-time catastrophe that clears a random share of archive cells.
+36. Island extinction: wipe one island's archive and reseed it from the others.
+37. Earthquake: a new random terrain each trial, so gaits must be robust.
+38. Seasons: effects that cycle automatically every N generations.
+39. A curriculum that raises difficulty when the archive stalls, as in POET (Wang et al., 2019).
+40. Run the robustness trial on different terrain instead of a 2 cm pose shift (research note B7).
+41. An environment panel that lists active effects with their levels, undo buttons, and short explanations.
+42. A timeline of effects on the history chart.
+43. Save the effect history in checkpoints.
+44. Presets that combine effects ("rough hills", "icy slope").
+45. Keep each effect cheap: measure creatures per second with each one on.
+
+### Performance
+
+46. Stop simulating fallen creatures on the GPU (lane compaction at dispatch boundaries). Research ranks it first: 43 to 55% of simulated time comes after a fall.
+47. Early exit in the CPU engine when every lane in a vector group has fallen.
+48. Reduce GPU kernel register pressure (about 120 registers per thread, about 30% occupancy).
+49. Cut CPU time between batches: archive insertion, emitter feedback, CMA updates, offspring creation.
+50. Keep the worker responsive: controls should never wait behind archive insertion or breeding (about 1 s at 1M creatures).
+51. Keep the GUI at 60+ FPS during evolution at 3M creatures.
+52. Add a persistent Vulkan pipeline cache and compile pipelines in the background.
+53. Successive halving: short trials first, full trials for survivors (10 s ranks predict 60 s ranks with Spearman 0.89 to 0.94).
+54. Decide whether the Radeon should evaluate at all by default, since it drives the desktop.
+55. Size work units per device from measured rates, and re-measure after each engine change.
+56. Measure memory use at 3M creatures and shrink per-creature storage.
+57. Send only snapshot changes from worker to UI, not full copies.
+58. Profile end to end in the GUI at 3M and record numbers in `docs/performance-log.md`.
+59. Check the 4x-fidelity contender check's share of total GPU time.
+
+### Checkpoints and storage
+
+60. Autosave rotation: keep autosaves of the few most recent experiments and delete stale `.evo.tmp` files. 76 autosaves filled 17 GB before.
+61. Shrink checkpoints (1 to 1.5 GB at 3M creatures): store the population compactly and drop data that can be regenerated.
+62. Write autosaves off the worker thread so evolution does not stall.
+63. Show disk use of `runs/` in the UI.
+64. A save and load round-trip test that checks the next generation is identical.
+
+### Search
+
+65. Make structural mutations near-neutral: new parts start with weak muscles so the parent's gait survives (research: split children keep 1 to 2% of the parent's distance).
+66. Re-check top elites from fresh perturbations every few generations so steady gaits beat lucky ones.
+67. Spend more evaluations on the best elites (CMA-MAE thresholds, curiosity-based parent choice).
+68. Let CMA respect the configured body bounds and vary joint ranges, sensors and reset phases (F6).
+69. Use or remove `Creature.mutability` (mutated but unused, F8).
+70. Add body size or limb count as an archive axis (research: +24% with body size).
+71. Tune new bodies for a few generations before they compete (research B2, B3).
+72. Encode repetition and symmetry, so limbs can be copied as modules.
+73. Give each limb its own rhythm controller.
+74. Add a mutation that creates antagonist muscle pairs, now that muscles only pull.
+75. Crossover between different body plans.
+76. Periodic extinctions per island (Lehman and Miikkulainen, 2015).
+77. Age-layered populations (ALPS) so new bodies compete with their own age group.
+78. Reflexes built on the touchdown sensors (a muscle that fires when its foot lands).
+79. Re-run the GA research lab ablations under the new physics before drawing conclusions from old results.
+80. (owner) Improve the evolution algorithm itself. The items below are candidates. Test each with paired runs at equal evaluation budgets over at least 5 seeds, and report best distance, QD score, and the body-size mix of the top 50.
+81. Commit a search A/B harness (CPU engine, fixed seeds, equal budgets) so every search change is measured the same way.
+82. Re-evaluate archive elites now and then and keep the worse score, so lucky results do not hold cells (noisy fitness).
+83. Deep grids for noisy fitness: keep several candidates per cell and let the steady ones win (Flageat and Cully, 2020).
+84. Racing: spend extra trials only on creatures whose rank is still uncertain (Hoeffding races, Heidrich-Meisner and Igel, 2009).
+85. Generalized early stopping: end any trial that can no longer beat its cell's elite, not only fallen ones (Arza et al., 2024).
+86. CMA-MAE annealing thresholds, so emitters keep improving cells that already have elites (Fontaine and Nikolaidis, 2023).
+87. Choose emitter shares with a bandit that rewards archive improvement per evaluation.
+88. Directional variation: mutate along the difference between two elites with the same body plan (Vassiliades and Mouret, 2018).
+89. Discrete gene crossover between elites (Hutchinson et al., 2026).
+90. Dominated novelty search as the local competition rule (Bahlous-Boldi et al., 2025).
+91. Self-adapt mutation step sizes per lineage (1/5 success rule or log-normal self-adaptation).
+92. Protect morphological innovations: lower selection pressure on new bodies for a few generations (Cheney et al., 2018).
+93. Controller distillation, so a good gait can move to a different body (Mertan and Cheney, 2025).
+94. Lamarckian inheritance: children inherit their parent's tuned controller after a short local search.
+95. Review the behavior descriptors (ground contact, cadence, height). Candidates: number of feet in use, gait symmetry, body size.
+96. Tune the archive size: fewer, coarser cells give each cell more offspring (research: +27% from dropping one axis).
+97. Tune the island model: island count, migration interval, and which elites migrate.
+98. Seed the first population with more varied bodies (bilateral, longer chains), not only 3 to 5 node chains.
+99. A generative body encoding (grammar or L-system) so larger bodies stay coherent.
+100. An optional neural controller: a small network driven by rhythm and touchdown sensors, as an alternative to fixed waveforms.
+101. When the archive stalls, suggest an environment effect in the UI instead of changing the search silently.
+102. Re-run every research conclusion under the new physics (bone mass, pull-only muscles). All numbers in docs/search-research.md predate it.
+
+### Correctness and tests
+
+103. Audit the top elites for physics exploits after every physics change.
+104. Test that the CPU engine and the replay frames match the scored distance.
+105. Test that archive insertion keeps one elite per cell and never replaces a faster elite.
+106. Test that Config validation rejects bad values and accepts defaults.
+107. Test that breeding is deterministic for a fixed seed and every offspring is a valid body.
+108. Test that a creature that falls or breaks a joint keeps the score it had at that moment.
+109. Add a GPU agreement test at 4x fidelity for evolved creatures, not only random ones.
+110. Decide how to test the perturbed contender check across engines. Fall and break decisions can flip on rounding.
+111. Run clippy and CPU tests in CI (GitHub Actions), and keep GPU tests local.
+
+### Interface
+
+112. Replay viewer: follow camera, distance ruler, speed readout, center-of-mass trail, playback speed, scrubber, fall marker.
+113. Behavior archive map: a heatmap of cells colored by distance, click to replay.
+114. History tab: best distance over generations, records timeline, replay of each record holder.
+115. Race view: the top elites run side by side with a leaderboard.
+116. Creature drawing: muscle activation and fatigue colors, head, organs, touchdown highlights, broken joint marks.
+117. Help overlay (F1 or ?), shortcuts for tabs and replay, and a status line with creatures per second.
+118. Share a creature: export an animated GIF and a JSON file, and open a creature JSON to replay it.
+119. Lineage view: ancestors with thumbnails, mutation labels, gains, and body plan changes highlighted.
+120. Show each muscle's energy during replay, to make fatigue visible.
+121. A debug overlay for forces and ground reactions.
+122. Name species automatically so players can follow them.
+123. A hall of fame of record holders across the whole run.
+124. Remove settings the owner does not want (histogram controls, budgets) or move them to a debug panel.
+125. Tooltips that explain each archive axis in plain words.
+126. A screenshot button.
+127. A dark theme.
+
+### Code health and docs
+
+128. Rewrite README.md. It still describes 18 s trials, 1,000 creatures, a 192-cell archive and a mutation control.
+129. Update docs/architecture.md: trial length, fitness, physics limits, bone mass, pull-only muscles, the fidelity check.
+130. Update docs/validation.md with the new GPU agreement results.
+131. Remove the legacy `mutate()` path that the app no longer uses.
+132. Remove the empty obstacle slot kept for old checkpoints, since breaking saves is fine.
+133. Remove environment variables that no experiment uses any more.
+134. Decide what to do with `research/`: commit the harness and results, or ignore the folder.
+135. Delete the stray `cuda-keyring_1.1-1_all.deb` files in the repository root.
+136. Add `.claude/` to `.gitignore`.
+137. Handle GPU device loss by falling back to the CPU engine instead of stopping.
+138. Log per-generation stage times to a file for later analysis.
+139. Speed up builds: consider the fast iteration profile as a named Cargo profile.
