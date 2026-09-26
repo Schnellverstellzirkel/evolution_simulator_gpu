@@ -1546,7 +1546,7 @@ impl eframe::App for App {
         {
             let frame_dt = physics::dt();
             if frame_dt.is_finite() && frame_dt > 0.0 {
-                p.accumulator = (p.accumulator + dt.max(0.0).min(0.1) * self.speed).min(1.0);
+                p.accumulator = (p.accumulator + dt.clamp(0.0, 0.1) * self.speed).min(1.0);
                 let start = Instant::now();
                 while p.accumulator >= frame_dt && start.elapsed() < Duration::from_millis(5) {
                     if p.tick >= p.last_frame() {
