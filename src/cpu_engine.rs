@@ -1055,12 +1055,21 @@ fn build_groups(pop: &Population, unit: &[usize]) -> Vec<Group> {
 /// Node positions of one creature's full trial with the evaluation physics:
 /// entry `t` is the state after `t` steps. The replay shows exactly this.
 pub fn trajectory(creature: &crate::evolution::Creature, cfg: &Config) -> Vec<Vec<[f32; 2]>> {
+    replay(creature, cfg).0
+}
+
+/// A creature's recorded trial and the result the engine scored for it, from
+/// one run, so a replay can never disagree with its own score.
+pub fn replay(
+    creature: &crate::evolution::Creature,
+    cfg: &Config,
+) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
     let mut pop = Population::default();
     pop.push(creature.clone());
     let group = Group::build(&pop, &[0], &[0]);
     let mut frames = Vec::with_capacity((cfg.fidelity().settle() + cfg.steps() + 1) as usize);
-    group.run(cfg, Some(&mut frames));
-    frames
+    let result = group.run(cfg, Some(&mut frames))[0];
+    (frames, result)
 }
 
 /// Evaluates every creature of `unit` and returns results in unit order.
