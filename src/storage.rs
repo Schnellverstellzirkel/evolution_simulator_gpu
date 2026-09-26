@@ -203,6 +203,20 @@ pub fn island_count() -> usize {
             .unwrap_or(4)
     })
 }
+/// Generations between bounded archive-elite refreshes, read from
+/// `EVOLUTION_ELITE_REFRESH`. Unset, zero, or unparsable means off, which is
+/// the default. Read on every call so a running game and the measurement
+/// harness agree without a restart.
+pub fn elite_refresh_interval() -> u64 {
+    std::env::var("EVOLUTION_ELITE_REFRESH")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+/// Most elites one refresh cycle re-tests: a small, bounded cost next to the
+/// generation's own evaluation. The subset rotates, so every elite is reached
+/// after enough cycles.
+const ELITE_REFRESH_BATCH: usize = 4;
 /// Share of CMA offspring whose parent is one of its island's fastest 1% of
 /// elites; the rest sample by local competition. Spending more on the best
 /// elites raised the best distance by about half in fixed-seed tests.
@@ -755,6 +769,7 @@ impl Experiment {
         chain
     }
     fn push_archive_stats(&mut self, failed: usize) {
+        self.refresh_elites_from_env();
         let mut elites: Vec<_> = self
             .archive
             .entries
@@ -819,6 +834,92 @@ impl Experiment {
             archive_coverage: self.archive.coverage(),
             emitters: self.emitter_stats,
         });
+    }
+    /// Periodic bounded refresh of archive elites. Every `interval`
+    /// generations a rotating, deterministic subset of at most
+    /// `ELITE_REFRESH_BATCH` elites re-runs its standard trial on the CPU
+    /// engine, and the archive keeps the lower of the stored and re-evaluated
+    /// fitness. The cell, creature, and descriptor never change. `interval ==
+    /// 0` disables it. Returns how many elites were lowered.
+    ///
+    /// The stored score can already be lower than the standard trial (the
+    /// archive-admission check stores the minimum of the evaluating engine's
+    /// trial and the CPU trial), so in runs created under the current code
+    /// this is a no-op; it matters for archives a checkpoint restored from an
+    /// older pipeline or a test constructs directly.
+    pub fn refresh_elites(&mut self, interval: u64) -> usize {
+        let completed = self.generation as u64 + 1;
+        if interval == 0 || !completed.is_multiple_of(interval) {
+            return 0;
+        }
+        let cycle = completed / interval;
+        self.refresh_elite_batch(cycle)
+    }
+    /// `refresh_elites` with the interval read from `EVOLUTION_ELITE_REFRESH`
+    /// (generations; unset or 0 disables it, the default).
+    pub fn refresh_elites_from_env(&mut self) -> usize {
+        self.refresh_elites(elite_refresh_interval())
+    }
+    fn refresh_elite_batch(&mut self, cycle: u64) -> usize {
+        let batch = ELITE_REFRESH_BATCH.min(self.archive.entries.len());
+        if batch == 0 {
+            return 0;
+        }
+        // Sorting by creature id makes the rotating window independent of the
+        // archive's internal entry order, so the selection is deterministic
+        // even after insertions and removals reorder the arena.
+        let mut ids: Vec<u64> = self
+            .archive
+            .entries
+            .iter()
+            .map(|elite| elite.creature.id)
+            .collect();
+        ids.sort_unstable();
+        let start = ((cycle - 1).wrapping_mul(batch as u64) % ids.len() as u64) as usize;
+        let mut unit = Population::default();
+        for k in 0..batch {
+            let id = ids[(start + k) % ids.len()];
+            if let Some(elite) = self.archive.entries.iter().find(|e| e.creature.id == id) {
+                unit.push(elite.creature.clone());
+            }
+        }
+        if unit.genomes.is_empty() {
+            return 0;
+        }
+        // The standard configuration, exactly as the archive-admission check
+        // runs it (no fine-fidelity override).
+        let cfg = Config {
+            fidelity: None,
+            ..self.config.clone()
+        };
+        let results = crate::cpu_engine::evaluate(&unit, &cfg);
+        let mut lowered = 0;
+        for (index, result) in results.iter().enumerate() {
+            let metrics = crate::scheduler::to_metrics(&unit, index, result, &cfg);
+            if !metrics.fitness.is_finite() || metrics.fitness <= FAILED {
+                // A failed re-test says nothing about the stored score.
+                continue;
+            }
+            let id = unit.genomes[index].id;
+            for archive in std::iter::once(&mut self.archive).chain(self.islands.iter_mut()) {
+                let slot = archive
+                    .entries
+                    .iter()
+                    .position(|elite| elite.creature.id == id);
+                if let Some(slot) = slot
+                    && archive.lower_fitness(slot, metrics.fitness)
+                {
+                    lowered += 1;
+                }
+            }
+        }
+        if lowered > 0 {
+            self.archive.refresh_behavior_scores();
+            for island in &mut self.islands {
+                island.refresh_behavior_scores();
+            }
+        }
+        lowered
     }
     pub fn prepare_next_batch(&mut self) -> Result<()> {
         self.prepare_next_batch_streaming(usize::MAX, |_, _, _| Ok(()))
@@ -1658,6 +1759,8 @@ fn fitness_context_changed(old: &Config, new: &Config) -> bool {
         || old.muscle_recovery != new.muscle_recovery
         || old.slope != new.slope
         || old.wind != new.wind
+        || old.mud != new.mud
+        || old.gaps != new.gaps
 }
 /// Autosaves kept in `dir`: the newest `keep` `seed-*-auto.evo` files stay,
 /// older ones are deleted, and so are `.evo.tmp` files that an interrupted

@@ -13,7 +13,7 @@ pub(crate) const MORPHOLOGY_LIMIT: usize = 64;
 pub(crate) const ARCHIVE_CAPACITY: usize = ARCHIVE_LIMIT + MORPHOLOGY_LIMIT;
 pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 1 << 20;
 pub(crate) const CMA_LIMIT: usize = 96;
-pub const VERSION: u32 = 22;
+pub const VERSION: u32 = 23;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
@@ -349,6 +349,20 @@ impl QdArchive {
             .iter()
             .map(|e| e.fitness)
             .fold(f32::NEG_INFINITY, f32::max)
+    }
+    /// Lowers an elite's score to `fitness` when that is worse, keeping its
+    /// cell, creature, and descriptor. The periodic elite refresh uses this so
+    /// a lucky trial cannot hold a cell that a fresh standard trial disproves.
+    /// Returns whether the stored score changed.
+    pub fn lower_fitness(&mut self, slot: usize, fitness: f32) -> bool {
+        let current = self.entries[slot].fitness;
+        if !fitness.is_finite() || fitness <= crate::evolution::FAILED || fitness >= current {
+            return false;
+        }
+        self.entries[slot].fitness = fitness;
+        self.qd_score -= (current.max(0.0) - fitness.max(0.0)) as f64;
+        self.behavior_scores = BehaviorScores::default();
+        true
     }
     pub fn behavior_count(&self) -> usize {
         self.behavior_indices.len()

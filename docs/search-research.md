@@ -332,6 +332,98 @@ Open issues:
 - **Chaos.** Many fast gaits fail from some perturbed starts even though they pass the single perturbed check. Re-checking top elites with fresh perturbations would favor steadier gaits.
 - **GPU.** The kernel change compiles, but these runs used the CPU engine; CPU/GPU agreement was not rerun.
 
+## 8. Bounded elite refresh (item 83)
+
+The idea (note B10): fitness is noisy, so an elite that got lucky on both of its
+trials holds its cell forever. Re-evaluate a rotating subset of archive elites
+now and then and keep the lower score.
+
+The implementation lives in this wave's files. `Experiment::refresh_elites`
+(`src/storage.rs`) runs once per generation from `push_archive_stats`, so it
+covers the generational loop (`archive_batch`) and the steady-state boundary
+(`finish_steady_generation`) alike. Every `EVOLUTION_ELITE_REFRESH` generations
+(unset or `0` disables it, which is the default) it picks at most four elites
+with a deterministic rotating window over the archive sorted by creature id,
+runs one standard trial each on the CPU engine (`cpu_engine::evaluate` with
+`fidelity: None`, exactly the archive-admission configuration), and lowers the
+stored fitness of any creature the trial scores lower. It lowers the entry in
+the global archive and any island archive that holds the same creature id.
+Cells, creatures, descriptors, protection, and the admission rules never
+change; `QdArchive::lower_fitness` (`src/qd.rs`) adjusts `qd_score` and
+invalidates the cached behavior scores. The batch is bounded at four creatures
+per cycle, so the refresh cannot stall the worker, and the whole feature is off
+by default.
+
+Measurement with the committed `examples/search_ab.rs`, CPU-only short trials.
+Equal budget for both variants: population 1024, 25 generations, 5 s trials,
+seeds 38, 39, 40, 41, 42 (128,000 creature-trials per variant, about 15 s wall
+each):
+
+    nice -n 15 env EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
+        cargo run --release --example search_ab -- --tag refresh-off 25 1024 5.0 38,39,40,41,42
+    nice -n 15 env EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
+        EVOLUTION_ELITE_REFRESH=2 cargo run --release --example search_ab -- --tag refresh-on 25 1024 5.0 38,39,40,41,42
+
+Archive best after the last generation, then QD score and cells:
+
+| Variant | 38 | 39 | 40 | 41 | 42 | Best mean | QD mean | Cells mean |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| refresh off (default) | 16.71 | 7.68 | 13.56 | 9.17 | 28.77 | 15.18 m | 860.61 | 737.2 |
+| `EVOLUTION_ELITE_REFRESH=2` | 16.71 | 7.68 | 13.56 | 9.17 | 28.77 | 15.18 m | 860.61 | 737.2 |
+
+Paired per-seed differences are 0.00 m, 0.00 QD, and 0 cells on every seed; the
+whole stdout (including the top-50 node mix, median length, median mass, and
+longest bone) is byte-identical apart from the tag. A second paired run at the
+suggested smaller budget (population 512, 10 generations, 5 s trials, seeds
+38-42) was also byte-identical.
+
+Why the null result is expected. Since the archive-admission check (7f3f3a3),
+every stored score is `min(evaluating engine's score, standard CPU trial)`. The
+standard CPU trial is a deterministic function of the creature and the
+configuration, so re-running it returns exactly the value already folded into
+the minimum. It cannot be lower than the stored score, and `lower_fitness`
+never runs. The refresh is therefore only able to help an archive that a
+checkpoint restored from a pipeline without the admission check, or a directly
+constructed state; the regression tests in `tests/search_improvements.rs`
+construct that case (a lucky score 500 m above its standard trial) and show the
+lucky score dropping to the CPU value, a stable score surviving, the cell
+staying, and the rotating window staying bounded.
+
+Conclusion: keep the feature behind `EVOLUTION_ELITE_REFRESH`, default off. It
+is a correctness safety net, not a measured search gain on current checkpoints.
+A change that actually catches lucky trials would have to re-test with fresh
+perturbations, since trial A and trial B rank correlation is only 0.82-0.90
+(note B10), not with the deterministic standard trial.
+
+## 9. Item 66 is blocked on file ownership
+
+Item 66 (start a new structural part with a short stroke and low stiffness)
+cannot be implemented from the files this wave owns. The structural mutation
+path is in `src/evolution.rs`:
+
+- `structural_mutation_in_place` (`src/evolution.rs:1467`) chooses among
+  `split_bone`, `duplicate_mirrored_node`, `duplicate_limb`, `retime_rhythm`,
+  `change_organ`, `phase_shift_group`, and `rescale_body`.
+- `split_bone` (`src/evolution.rs:1523`) makes its second half with
+  `Bone::new`, so the new middle joint starts with the full joint range and no
+  muscle crosses it.
+- `duplicate_mirrored_node` (`src/evolution.rs:1590`) and `duplicate_limb`
+  (`src/evolution.rs:1264`) add new drive through `muscle(...)`
+  (`src/evolution.rs:721`), and `repair` (`src/evolution.rs:878`) adds the
+  ring muscles that close the motor network at `src/evolution.rs:984` with the
+  default stroke, stiffness, and period.
+
+The recipe the measurements in section 1 and B1 support: give a new joint a
+zero range and start every newly added muscle, including the ones `repair`
+adds, with `short == long` (zero stroke) and a period copied from an existing
+muscle. With neutral new parts, duplications kept 13-37% of their parent's
+distance and fell 12-31%; with active new parts they kept 1-14% and fell
+43-77%. Splits stayed broken either way (1-6% kept, 45-73% fallen), and the
+new middle node in ground contact plus the projection-locked joint are the
+suspected causes, so a leaf-growth operator may be needed too. The next wave
+that owns `src/evolution.rs` should implement and measure this with
+`examples/search_ab.rs` before claiming a win.
+
 ## Sources
 
 - Arza, Le Goff, Hart (2024). [Generalized Early Stopping in Evolutionary Direct Policy Search](https://arxiv.org/abs/2308.03574). ACM TELO.
