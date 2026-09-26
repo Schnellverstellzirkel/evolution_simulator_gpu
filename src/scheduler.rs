@@ -17,6 +17,7 @@ use crate::{
 use anyhow::{Context, Result};
 use std::{
     collections::{HashMap, VecDeque},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -29,10 +30,18 @@ enum Trial {
     Check,
 }
 
+struct QueuedUnit {
+    ticket: u64,
+    indices: Vec<usize>,
+    trial: Trial,
+    population: Arc<Population>,
+    config: Config,
+}
+
 pub struct Device {
     pub engine: Box<dyn Engine>,
-    /// Queued units: ticket, population indices, and what they evaluate.
-    queued: VecDeque<(u64, Vec<usize>, Trial)>,
+    /// Exact submitted input remains available until its result is accepted.
+    queued: VecDeque<QueuedUnit>,
     /// Measured creatures per second of device time (exponential average).
     pub rate: f64,
     pub creatures: u64,
@@ -56,7 +65,7 @@ impl Device {
         }
     }
     fn queued_creatures(&self) -> usize {
-        self.queued.iter().map(|(_, unit, _)| unit.len()).sum()
+        self.queued.iter().map(|unit| unit.indices.len()).sum()
     }
 }
 
@@ -238,9 +247,18 @@ impl Scheduler {
                     perturb(&mut creature);
                     unit.push(creature);
                 }
-                let ticket = device.engine.submit(unit, &fine)?;
+                let population = Arc::new(unit);
+                let ticket = device
+                    .engine
+                    .submit_shared(Arc::clone(&population), &fine)?;
                 self.packing_seconds += started.elapsed().as_secs_f64();
-                device.queued.push_back((ticket, indices, Trial::Check));
+                device.queued.push_back(QueuedUnit {
+                    ticket,
+                    indices,
+                    trial: Trial::Check,
+                    population,
+                    config: fine.clone(),
+                });
             }
         }
         if self.checks.is_empty() {
@@ -352,10 +370,16 @@ impl Scheduler {
                     break;
                 }
                 let started = Instant::now();
-                let unit = pop.subset(&indices);
-                let ticket = device.engine.submit(unit, cfg)?;
+                let population = Arc::new(pop.subset(&indices));
+                let ticket = device.engine.submit_shared(Arc::clone(&population), cfg)?;
                 self.packing_seconds += started.elapsed().as_secs_f64();
-                device.queued.push_back((ticket, indices, Trial::Standard));
+                device.queued.push_back(QueuedUnit {
+                    ticket,
+                    indices,
+                    trial: Trial::Standard,
+                    population,
+                    config: cfg.clone(),
+                });
             }
         }
         if round.cursor == round.order.len() && round.oversize.is_empty() {
@@ -370,8 +394,8 @@ impl Scheduler {
     /// creatures are held for a check trial and returned once it finishes.
     pub fn collect(
         &mut self,
-        pop: &Population,
-        cfg: &Config,
+        _pop: &Population,
+        _cfg: &Config,
         timeout: Duration,
         mut contender: impl FnMut(usize, &EvaluationMetrics) -> bool,
     ) -> Result<Vec<(Vec<usize>, Vec<EvaluationMetrics>)>> {
@@ -380,11 +404,27 @@ impl Scheduler {
         loop {
             for device in &mut self.devices {
                 while let Some(done) = device.engine.poll()? {
-                    let (ticket, indices, trial) = device
+                    let queued = device
                         .queued
-                        .pop_front()
+                        .front()
                         .context("Unexpected evaluation result")?;
-                    anyhow::ensure!(ticket == done.ticket, "Evaluation results out of order");
+                    anyhow::ensure!(
+                        queued.ticket == done.ticket,
+                        "Evaluation results out of order"
+                    );
+                    anyhow::ensure!(
+                        done.results.len() == queued.indices.len(),
+                        "Evaluation result count mismatch: expected {}, received {}",
+                        queued.indices.len(),
+                        done.results.len()
+                    );
+                    let QueuedUnit {
+                        indices,
+                        trial,
+                        population,
+                        config,
+                        ..
+                    } = device.queued.pop_front().expect("validated queued unit");
                     device.busy_seconds += done.busy_seconds;
                     let mut finals = Vec::with_capacity(indices.len());
                     let mut metrics = Vec::with_capacity(indices.len());
@@ -396,7 +436,7 @@ impl Scheduler {
                                 device.rate = 0.7 * device.rate + 0.3 * rate;
                             }
                             for (k, &i) in indices.iter().enumerate() {
-                                let metric = to_metrics(pop, i, &done.results[k], cfg);
+                                let metric = to_metrics(&population, k, &done.results[k], &config);
                                 if self.robust_trials > 1 && contender(i, &metric) {
                                     self.held.insert(i, metric);
                                     self.checks.push(i);
@@ -532,6 +572,284 @@ pub fn to_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::Finished;
+    use std::sync::{Arc, Mutex};
+
+    struct Submission {
+        ticket: u64,
+        population: Arc<Population>,
+        config: Config,
+    }
+
+    #[derive(Default)]
+    struct FakeState {
+        submissions: Vec<Submission>,
+        results: VecDeque<Finished>,
+        pending: bool,
+    }
+
+    struct FakeEngine(Arc<Mutex<FakeState>>);
+
+    impl Engine for FakeEngine {
+        fn name(&self) -> String {
+            "fake evaluator".into()
+        }
+
+        fn max_nodes(&self) -> usize {
+            64
+        }
+
+        fn free_slots(&self) -> usize {
+            usize::from(!self.0.lock().unwrap().pending)
+        }
+
+        fn submit_shared(&mut self, population: Arc<Population>, config: &Config) -> Result<u64> {
+            let mut state = self.0.lock().unwrap();
+            let ticket = state.submissions.len() as u64 + 1;
+            state.submissions.push(Submission {
+                ticket,
+                population,
+                config: config.clone(),
+            });
+            state.pending = true;
+            Ok(ticket)
+        }
+
+        fn poll(&mut self) -> Result<Option<Finished>> {
+            let mut state = self.0.lock().unwrap();
+            let done = state.results.pop_front();
+            if done.is_some() {
+                state.pending = false;
+            }
+            Ok(done)
+        }
+
+        fn wait(&mut self, _timeout: Duration) {}
+    }
+
+    fn fake_scheduler() -> (Scheduler, Arc<Mutex<FakeState>>) {
+        let state = Arc::new(Mutex::new(FakeState::default()));
+        let scheduler = Scheduler {
+            devices: vec![Device::new(
+                Box::new(FakeEngine(Arc::clone(&state))),
+                100.0,
+                2,
+                1.0,
+            )],
+            round: None,
+            packing_seconds: 0.0,
+            robust_trials: 1,
+            checks: Vec::new(),
+            checks_since: None,
+            held: HashMap::new(),
+        };
+        (scheduler, state)
+    }
+
+    fn submission_config() -> Config {
+        Config {
+            population: 4,
+            duration: 1.0,
+            random_seed: false,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn retained_standard_results_use_the_submitted_population_and_config() {
+        let cfg = submission_config();
+        let pop = crate::evolution::create(&cfg).unwrap();
+        let (mut scheduler, state) = fake_scheduler();
+        scheduler.begin(&pop, [3, 1]);
+        scheduler.pump(&pop, &cfg, &[]).unwrap();
+        let (ticket, indices, results) = {
+            let state = state.lock().unwrap();
+            let submission = &state.submissions[0];
+            assert_eq!(submission.config, cfg);
+            let indices: Vec<_> = submission
+                .population
+                .genomes
+                .iter()
+                .map(|genome| {
+                    pop.genomes
+                        .iter()
+                        .position(|original| original.id == genome.id)
+                        .unwrap()
+                })
+                .collect();
+            let results = submission
+                .population
+                .genomes
+                .iter()
+                .map(|genome| GpuResult {
+                    fitness: genome.id as f32,
+                    ground_contact: cfg.steps() as f32 * genome.node_count as f32 * 0.25,
+                    height_sum: cfg.steps() as f32 * 1.5,
+                    ..GpuResult::default()
+                })
+                .collect();
+            (submission.ticket, indices, results)
+        };
+        state.lock().unwrap().results.push_back(Finished {
+            ticket,
+            results,
+            busy_seconds: 0.5,
+        });
+        // The caller has moved to a new population and different trial settings
+        // while the original unit was in flight. Its results still use its own
+        // node counts, duration and fidelity for normalization.
+        let changed = Config {
+            duration: 2.0,
+            fidelity: Some(crate::physics::Fidelity::fine()),
+            ..cfg
+        };
+        let output = scheduler
+            .collect(&Population::default(), &changed, Duration::ZERO, |_, _| {
+                false
+            })
+            .unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].0, indices);
+        for (&index, metric) in indices.iter().zip(&output[0].1) {
+            assert_eq!(metric.fitness, pop.genomes[index].id as f32);
+            assert_eq!(metric.behavior.ground_contact, 0.25);
+            assert_eq!(metric.behavior.mean_height, 1.5);
+        }
+        assert_eq!(scheduler.in_flight(), 0);
+    }
+
+    #[test]
+    fn retained_fine_checks_keep_the_exact_perturbed_submission() {
+        let cfg = submission_config();
+        let pop = crate::evolution::create(&cfg).unwrap();
+        let (mut scheduler, state) = fake_scheduler();
+        let indices = vec![2, 0];
+        scheduler.checks = indices.clone();
+        for &index in &indices {
+            scheduler.held.insert(
+                index,
+                EvaluationMetrics {
+                    fitness: 10.0,
+                    ..EvaluationMetrics::default()
+                },
+            );
+        }
+        scheduler.pump_checks(&pop, &cfg).unwrap();
+        let ticket = {
+            let state = state.lock().unwrap();
+            let submission = &state.submissions[0];
+            assert_eq!(
+                submission.config.fidelity,
+                Some(crate::physics::Fidelity::fine())
+            );
+            assert!(
+                Arc::strong_count(&submission.population) >= 2,
+                "scheduler must retain the same shared population as the engine"
+            );
+            for (slot, &index) in indices.iter().enumerate() {
+                let mut expected = pop.creature(index);
+                perturb(&mut expected);
+                let actual = submission.population.creature(slot);
+                assert_eq!(actual.id, expected.id);
+                assert_eq!(actual.nodes, expected.nodes);
+                assert_eq!(actual.bones, expected.bones);
+                assert_eq!(actual.muscles, expected.muscles);
+            }
+            submission.ticket
+        };
+        state.lock().unwrap().results.push_back(Finished {
+            ticket,
+            results: vec![
+                GpuResult {
+                    fitness: 4.0,
+                    ..GpuResult::default()
+                };
+                indices.len()
+            ],
+            busy_seconds: 0.5,
+        });
+        let output = scheduler
+            .collect(
+                &Population::default(),
+                &Config::default(),
+                Duration::ZERO,
+                |_, _| false,
+            )
+            .unwrap();
+        assert_eq!(output[0].0, indices);
+        assert!(output[0].1.iter().all(|metric| metric.fitness == 4.0));
+        assert!(scheduler.held.is_empty());
+        assert_eq!(scheduler.in_flight(), 0);
+        assert_eq!(
+            Arc::strong_count(&state.lock().unwrap().submissions[0].population),
+            1
+        );
+    }
+
+    #[test]
+    fn retained_units_reject_malformed_results_without_consuming_work() {
+        let cfg = submission_config();
+        let pop = crate::evolution::create(&cfg).unwrap();
+        for trial in [Trial::Standard, Trial::Check] {
+            for (wrong_ticket, result_count) in [(true, 2), (false, 1), (false, 3)] {
+                let (mut scheduler, state) = fake_scheduler();
+                if trial == Trial::Check {
+                    scheduler.checks = vec![0, 1];
+                    for index in 0..2 {
+                        scheduler.held.insert(
+                            index,
+                            EvaluationMetrics {
+                                fitness: 10.0,
+                                ..EvaluationMetrics::default()
+                            },
+                        );
+                    }
+                    scheduler.pump_checks(&pop, &cfg).unwrap();
+                } else {
+                    scheduler.begin(&pop, 0..2);
+                    scheduler.pump(&pop, &cfg, &[]).unwrap();
+                }
+                let ticket = state.lock().unwrap().submissions[0].ticket;
+                let before = scheduler.in_flight();
+                let rate = scheduler.devices[0].rate;
+                state.lock().unwrap().results.push_back(Finished {
+                    ticket: ticket + u64::from(wrong_ticket),
+                    results: vec![GpuResult::default(); result_count],
+                    busy_seconds: 0.5,
+                });
+                assert!(
+                    scheduler
+                        .collect(&pop, &cfg, Duration::ZERO, |_, _| false)
+                        .is_err()
+                );
+                assert_eq!(
+                    scheduler.in_flight(),
+                    before,
+                    "{trial:?} pending work was consumed"
+                );
+                assert_eq!(scheduler.devices[0].queued.len(), 1);
+                assert_eq!(scheduler.devices[0].creatures, 0);
+                assert_eq!(scheduler.devices[0].busy_seconds, 0.0);
+                assert_eq!(scheduler.devices[0].rate, rate);
+                state.lock().unwrap().results.push_back(Finished {
+                    ticket,
+                    results: vec![GpuResult::default(); 2],
+                    busy_seconds: 0.5,
+                });
+                let output = scheduler
+                    .collect(&pop, &cfg, Duration::ZERO, |_, _| false)
+                    .unwrap();
+                assert_eq!(
+                    output
+                        .iter()
+                        .map(|(indices, _)| indices.len())
+                        .sum::<usize>(),
+                    2
+                );
+                assert_eq!(scheduler.in_flight(), 0);
+            }
+        }
+    }
 
     #[test]
     fn secondary_devices_are_opt_in_and_selection_sentinels_disable_them() {

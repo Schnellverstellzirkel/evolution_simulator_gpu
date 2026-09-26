@@ -2,8 +2,8 @@
 //!
 //! An engine accepts units of creatures, evaluates them asynchronously on its
 //! own thread, and returns raw per-creature results in unit order. Callers
-//! hand over a standalone copy of the unit's creatures, so packing and
-//! simulation never hold up the caller.
+//! hand over an immutable population, shared with any retained submission,
+//! so packing and simulation never hold up the caller.
 use crate::{
     config::Config,
     creature_kernel::{self, GpuResult},
@@ -13,7 +13,7 @@ use crate::{
 use anyhow::{Context, Result};
 use std::{
     collections::VecDeque,
-    sync::mpsc,
+    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 
@@ -32,7 +32,11 @@ pub trait Engine: Send {
     /// Units that can be queued now without waiting.
     fn free_slots(&self) -> usize;
     /// Queues a unit; `unit` holds exactly the unit's creatures, in order.
-    fn submit(&mut self, unit: Population, cfg: &Config) -> Result<u64>;
+    fn submit(&mut self, unit: Population, cfg: &Config) -> Result<u64> {
+        self.submit_shared(Arc::new(unit), cfg)
+    }
+    /// Queues an immutable unit without copying its population storage.
+    fn submit_shared(&mut self, unit: Arc<Population>, cfg: &Config) -> Result<u64>;
     /// Returns the next finished unit without blocking.
     fn poll(&mut self) -> Result<Option<Finished>>;
     /// Blocks up to `timeout` for the oldest queued unit.
@@ -48,7 +52,7 @@ pub struct ThreadedEngine {
     max_nodes: usize,
     depth: usize,
     /// Closed on drop so the engine thread finishes queued work and exits.
-    jobs: Option<mpsc::Sender<(u64, Population, Config)>>,
+    jobs: Option<mpsc::Sender<(u64, Arc<Population>, Config)>>,
     done: mpsc::Receiver<Result<Finished, String>>,
     thread: Option<std::thread::JoinHandle<()>>,
     queued: VecDeque<u64>,
@@ -115,7 +119,7 @@ impl Engine for ThreadedEngine {
             self.depth.saturating_sub(self.queued.len())
         }
     }
-    fn submit(&mut self, unit: Population, cfg: &Config) -> Result<u64> {
+    fn submit_shared(&mut self, unit: Arc<Population>, cfg: &Config) -> Result<u64> {
         self.receive(Duration::ZERO);
         if let Some(error) = &self.failure {
             anyhow::bail!("{error}");
@@ -173,7 +177,7 @@ impl Drop for ThreadedEngine {
 /// The thread packs the next unit while earlier units run on the GPU.
 pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<ThreadedEngine> {
     let (ready_tx, ready_rx) = mpsc::channel();
-    let (jobs, job_rx) = mpsc::channel::<(u64, Population, Config)>();
+    let (jobs, job_rx) = mpsc::channel::<(u64, Arc<Population>, Config)>();
     let (done_tx, done) = mpsc::channel();
     let allocated = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let thread_allocated = allocated.clone();
@@ -193,7 +197,7 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
             };
             // Submitted units: ticket and length, oldest first.
             let mut running: VecDeque<(u64, u64, usize)> = VecDeque::new();
-            let mut pending: Option<(u64, Population, Config)> = None;
+            let mut pending: Option<(u64, Arc<Population>, Config)> = None;
             let mut open = true;
             loop {
                 if pending.is_none() && open {
@@ -367,7 +371,7 @@ pub fn cpu_engine(threads: usize) -> Result<ThreadedEngine> {
         .start_handler(|_| lower_thread_priority())
         .build()
         .context("CPU evaluation thread pool")?;
-    let (jobs, job_rx) = mpsc::channel::<(u64, Population, Config)>();
+    let (jobs, job_rx) = mpsc::channel::<(u64, Arc<Population>, Config)>();
     let (done_tx, done) = mpsc::channel();
     let thread = std::thread::Builder::new()
         .name("cpu-eval-dispatch".into())
@@ -407,7 +411,7 @@ mod tests {
 
     struct WorkerFixture {
         engine: ThreadedEngine,
-        jobs: mpsc::Receiver<(u64, Population, Config)>,
+        jobs: mpsc::Receiver<(u64, Arc<Population>, Config)>,
         done: mpsc::Sender<Result<Finished, String>>,
     }
 
@@ -450,6 +454,45 @@ mod tests {
             }],
             busy_seconds: 0.25,
         }
+    }
+
+    #[test]
+    fn shared_submission_reaches_the_worker_without_copying_the_population() {
+        let mut worker = WorkerFixture::new();
+        let unit = Arc::new(Population::default());
+        let cfg = Config {
+            seed: 91,
+            duration: 2.5,
+            ..Config::default()
+        };
+        let engine: &mut dyn Engine = &mut worker.engine;
+        let ticket = engine.submit_shared(Arc::clone(&unit), &cfg).unwrap();
+        let (received_ticket, received_unit, received_cfg) = worker.jobs.try_recv().unwrap();
+        assert_eq!(received_ticket, ticket);
+        assert!(Arc::ptr_eq(&received_unit, &unit));
+        assert_eq!(received_cfg.seed, 91);
+        assert_eq!(received_cfg.duration, 2.5);
+    }
+
+    #[test]
+    fn owned_submission_moves_population_storage_into_the_shared_unit() {
+        let mut worker = WorkerFixture::new();
+        let unit = Population {
+            nodes: vec![crate::evolution::NodeGene {
+                x: 1.25,
+                y: 0.5,
+                diameter: 0.1,
+                friction: 0.8,
+            }],
+            ..Population::default()
+        };
+        let node_storage = unit.nodes.as_ptr();
+        let engine: &mut dyn Engine = &mut worker.engine;
+        let ticket = engine.submit(unit, &Config::default()).unwrap();
+        let (received_ticket, received_unit, _) = worker.jobs.try_recv().unwrap();
+        assert_eq!(received_ticket, ticket);
+        assert_eq!(received_unit.nodes.as_ptr(), node_storage);
+        assert_eq!(received_unit.nodes[0].x, 1.25);
     }
 
     #[test]

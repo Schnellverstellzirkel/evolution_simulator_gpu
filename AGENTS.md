@@ -4,7 +4,7 @@ Read this before changing the code. It lists the owner's rules, how to work on t
 
 ## Live status (updated with each push)
 
-- Codex primary: finished integrating verified foundation commits 250ad82/ca75014 with origin 73ddf68; 75 CPU and three RTX tests pass, with nine report tests passed at the preceding diagnostic revision. Worker failure propagation is now fixed and tested (83 CPU, nine report, three RTX tests). Next ownership: retained submissions and GPU-loss recovery in src/engine.rs, src/scheduler.rs and src/gpu.rs. Active physics/archive-insertion work remains with Claude.
+- Codex primary: finished integrating verified foundation commits 250ad82/ca75014 with origin 73ddf68; 75 CPU and three RTX tests pass, with nine report tests passed at the preceding diagnostic revision. Worker failure propagation is now fixed and tested (83 CPU, nine report, three RTX tests). Submitted bodies and configurations are now retained with shared ownership (88 CPU, nine report, three RTX tests). Next ownership: GPU-loss recovery in src/engine.rs, src/scheduler.rs and src/gpu.rs. Active physics/archive-insertion work remains with Claude.
 
 Two agent teams work on this repository at the same time and only see each other through git. Pull before you start, commit small, push often, and update this section when you take or finish an item.
 

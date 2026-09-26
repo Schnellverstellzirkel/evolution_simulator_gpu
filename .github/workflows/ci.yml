@@ -11,7 +11,9 @@ permissions:
 
 concurrency:
   group: cpu-checks-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Let the current release build finish during frequent coordinated pushes;
+  # GitHub keeps only the newest pending run for this group.
+  cancel-in-progress: false
 
 env:
   CARGO_BUILD_JOBS: "8"

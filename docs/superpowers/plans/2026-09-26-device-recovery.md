@@ -24,9 +24,11 @@ A reported GPU failure must leave every unfinished evaluation available for retr
 ## Progress
 
 - [x] Persistent engine error correction
-- [ ] Shared retained submissions
+- [x] Shared retained submissions
 - [ ] Runtime CPU recovery and drain behavior
 - [ ] Startup fallback and backend reporting
 - [ ] Full validation and documentation
 
 Batch 1 verification: seven failure regressions reproduced the original errors before the fix, including the submission race. All-target release tests passed 83 CPU tests and nine diagnostic tests, with four GPU tests ignored. Three explicit RTX tests passed in3.34s; formatting and Clippy passed. Runtime CPU retry remains pending.
+
+Batch 2 verification: three scheduler regressions first failed for missing shared retention, caller-state normalization and consumed malformed results. Shared and owned submission tests verify allocation identity. Formatting, Clippy, 88 CPU tests, nine report tests and three RTX tests passed (GPU3.31s). Retained snapshots prepare recovery without duplicating body arenas. Automatic retry is still pending.
