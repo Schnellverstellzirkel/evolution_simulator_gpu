@@ -1,0 +1,63 @@
+{
+  "date": "2026-09-26",
+  "purpose": "Baseline after the existing 2 m bone cap; no contact-solver change in this batch.",
+  "source_logs": [
+    "seed-38-100k-bone-cap-baseline.log",
+    "seed-38-100k-bone-cap-size-report.txt"
+  ],
+  "platform": {
+    "os": "Windows",
+    "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+    "driver": "610.47",
+    "rust": "1.98.1"
+  },
+  "build": {
+    "profile": "release",
+    "target_cpu": "native",
+    "lto": false,
+    "codegen_units": 256
+  },
+  "workload": {
+    "population": 100000,
+    "generations": 20,
+    "seed": 38,
+    "trial_seconds": 60,
+    "bone_cap_m": 2
+  },
+  "resources": {
+    "devices": "primary",
+    "cpu_evaluation_threads": 6,
+    "general_threads": 2,
+    "priority": "low"
+  },
+  "final": {
+    "best_m": 165.5846,
+    "archive_median_m": 8.8442,
+    "archive_cells": 1374,
+    "qd_score": 23060.27,
+    "failed_candidates": 0
+  },
+  "timing": {
+    "sum_logged_evaluation_seconds": 415.607,
+    "scope": "Headless evaluation calls, including standard and fine perturbed checks. Excludes archive insertion, breeding, saving, and GUI rendering. First call can include pipeline initialization."
+  },
+  "top_50": {
+    "reported_median_total_bone_length_m": 2.23,
+    "reported_median_slip_per_replay_m": 0.89,
+    "max_individual_bone_m": 1.81,
+    "median_convention": "size_report selects the upper middle entry for an even sample count.",
+    "no_pile_up_at_bone_cap_in_this_sample": true
+  },
+  "limitations": [
+    "One seed at 100k candidates per generation; not a search A/B comparison, a 3M GUI run, or a throughput acceptance test.",
+    "CSV values preserve the precision printed by the source logs; top-50 figures are rounded.",
+    "Body length is the sum of bone rest lengths, not the body bounding-box span.",
+    "Slip is summed horizontal travel of touching nodes over scored replay intervals, divided by absolute terminal replay distance. Post-fall motion and initial recentering are excluded; terrain contact includes slope.",
+    "The diagnostic changed, so old slip ratios are not directly comparable.",
+    "Archive rank 21 has archive distance 111.2 m and CPU replay distance 6.4 m; its cause remains unresolved.",
+    "Machine-local compiler and executable paths were removed. The checkpoint is not included."
+  ],
+  "parent_physics_revision": "bd41746",
+  "local_foundation_revision": "250ad82",
+  "revision_scope": "Historical local foundation baseline before merging remote abb00cb; does not measure the later remote physics or gameplay changes."
+}

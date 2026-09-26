@@ -1,5 +1,60 @@
 # Validation results
 
+## Current baseline and foundation checks (2026-09-26)
+
+This batch leaves the production contact solver, physics limits, distance-only fitness, and `qd::VERSION` unchanged. It adds regression coverage, aligns the public `physics::evaluate` wrapper with the CPU engine, repairs checkpoint restart state and Windows support, and configures CPU CI. The lower-level legacy `physics::step` remains for existing tests and diagnostics.
+
+### Baseline after the 2 m bone cap
+
+The prescribed headless run used seed 38, 100,000 candidates per generation, 20 generations (logged as 0–19), and 60-second trials. It ran on Windows with an RTX 4060 Laptop GPU, NVIDIA driver 610.47, and Rust 1.98.1. The native release build disabled LTO and used 256 codegen units. `EVOLUTION_DEVICES=primary`, six CPU evaluation threads, two general workers, and low priority kept the desktop Radeon out of evaluation.
+
+| Measurement | Result |
+| --- | ---: |
+| Final best archive distance | 165.5846 m |
+| Final median archive distance | 8.8442 m |
+| Final behavior cells | 1,374 / 1,440 |
+| Final QD score | 23,060.27 |
+| Reported failed candidates across 20 generations | 0 |
+| Top-50 reported median total bone length | 2.23 m |
+| Longest individual bone among the top 50 | 1.81 m |
+| Top-50 reported median slip per replay meter | 0.89 |
+| Champion archive / CPU replay distance | 165.6 / 157.3 m |
+| Champion total bone length / mass | 1.77 m / 3.20 kg |
+
+There is no pile-up at the 2 m bone cap in this top-50 sample. This single-seed baseline does not establish that size selection is solved for other seeds or longer runs. Foot slip remains material. Archive rank 21 scores 111.2 m but replays at 6.4 m; that discrepancy remains unresolved. Fine perturbed checks and device-sensitive fall/break thresholds can produce different trajectories, but the cause of this outlier has not been established.
+
+`size_report` now measures slip only during the scored CPU replay interval, excludes initial recentering and post-fall motion, uses the configuration's fidelity, and includes terrain slope in contact detection. It divides summed touching-node horizontal slip by absolute terminal replay distance. Its body length is the sum of bone rest lengths, and its even-sample median selects the upper middle entry. The earlier 0.02 and 2.9 slip-per-meter reports used different diagnostic semantics and cannot be compared directly with 0.89. A champion ratio printed as `0.00` is rounded; its reported absolute slip is 0.7 m.
+
+The sanitized [generation log](results/2026-09-26-bone-cap-seed-38/generations.csv), [top-50 report](results/2026-09-26-bone-cap-seed-38/top-50.csv), and [run metadata](results/2026-09-26-bone-cap-seed-38/metadata.json) preserve the printed measurements without machine-local paths or the checkpoint. Timing scope is recorded in the [performance log](performance-log.md).
+
+### Regression and GPU validation status
+
+New coverage exercises configuration boundaries, one fastest eligible archive entry per cell, migration, deterministic valid offspring across streaming slice sizes, checkpoint continuation including stalled island optimizers and environment changes, CPU score/replay agreement at standard and fine fidelity, and frozen scores after falls or joint breaks. `size_report` has focused tests for scored intervals and contact geometry.
+
+Checkpoint format V4 persists island optimizer progress that V3 omitted; V3 remains readable. Obsolete-physics loads clear stale island and reseed state. This is a storage-format repair, with no change to `qd::VERSION` or the current production physics solver.
+
+| Check | Status |
+| --- | --- |
+| Formatting | `cargo fmt --all --check` passed |
+| Clippy | `cargo clippy --locked --all-targets -- -D warnings` passed |
+| Release CPU suite | 68 passed: 30 library, 5 replay, 15 search-state, and 18 simulation tests; four GPU tests ignored |
+| Size-report example | Seven tests passed |
+| Explicit local simulation GPU suite | All three tests passed in the final rerun (3.32 s), with the RTX primary device and no Radeon evaluation |
+| Default test selection | Four GPU-dependent tests remain ignored, including the worker test |
+| GitHub Actions | CPU workflow configured; remote execution not yet verified |
+
+The final checks above were run by the coordinator on the current foundation changes. Two test-only comparison failures were resolved by treating empty-archive cached QD scores of `+0.0` and `-0.0` as numerically equal; exact elite, population, and CMA comparisons remain. No active stepping change was needed.
+
+The local GPU suite covers partial workgroups/body buckets, rough ground, and narrow joints. Its standard/fine comparisons do not establish full-trial agreement for every evolved elite or resolve the rank-21 replay outlier. An evolved-creature fine-fidelity fixture and investigation of threshold-sensitive contender outcomes remain open.
+
+### Contact audit correction
+
+The friction budget already includes positional clamp/lift displacement in `final_y - predicted_y`; the old description that those corrections were entirely absent was incorrect. The budget still uses the final touching node's own mass, missing support transferred through bones to the rest of the body. Later velocity clamps remove downward motion without adding that normal impulse to friction and can restore slip. This is a source-level finding, not a validated contact-solver fix. See the [physics audit](physics-audit-2026-09-26.md) for the remaining invariants and fixtures.
+
+## Historical validation records
+
+The sections below retain results under their original revisions and workloads. Their trial lengths, caps, kernels, and test counts do not describe the current defaults. In particular, the temporary 10 m bone / 5 m muscle limits were subsequently restored to 2 m, and the current game uses 60-second trials.
+
 ## Larger limits and broken joints (2026-09-26)
 
 The physics limits were raised so that large runners can reach a kilometer in a minute: 60 m/s nodes, 40 rad/s bone turning, 24 m/s and 100 N muscles, 0.2 s rhythms, 10 m bones, 5 m muscles, and no air drag by default. The earlier stability checks covered 2 m/s muscle targets, 5 m/s nodes, and 15 rad/s bones.
@@ -20,7 +75,7 @@ A 64-node chain with 63 muscles at maximum stiffness ran for 560 CPU steps with 
 
 The stability checks cover a 2 m/s muscle-target rate limit, a 5 m/s node-speed cap, and a 15 rad/s per-bone rotation limit. A collapsed zero-velocity chain is reconstructed to exact rest lengths without gaining speed, and the GPU smoke test checks the same case alongside CPU/GPU trajectory agreement. Fitness now tracks horizontal center-of-mass displacement, so a posture change alone cannot earn travel distance. The QD version is bumped so saved archives and scores are reevaluated under the changed physics. No throughput profile was run while the CPU/GPU were busy.
 
-## Current native app measurement (2026-09-23)
+## Native app measurement (2026-09-23)
 
 The graphical Wayland app was run on the NVIDIA RTX 4060 with driver 580.173.02, a fixed seed, 18-second trials, and 30 complete generations. The native benchmark includes GPU evaluation, archive insertion, breeding, worker publication, and active UI rendering. These are sequential runs on the same machine; background desktop activity and GPU clocks can affect small differences.
 
@@ -96,7 +151,7 @@ The native Wayland screenshot capture rendered the dashboard during a one-millio
 
 The updated light-theme population view rendered during a one-million-creature evaluation at 14.92 ms p95 across 240 frames, also below the 33 ms target.
 
-## Automated checks
+## Automated checks (historical)
 
 - Release test suite: 10 standard tests and the separately invoked Vulkan GPU agreement test passed, covering partial GPU workgroups, 3/5/6/8/9/17/33/64-node GPU buckets, collider contacts, deterministic evolution, mutation limits, checkpoint resumption, corrupt-checkpoint checksums, and history validation.
 - `cargo clippy --all-targets -- -D warnings`: passed.

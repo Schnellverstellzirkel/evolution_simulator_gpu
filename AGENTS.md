@@ -30,7 +30,7 @@ The replay viewport plays frames recorded by the CPU engine (`cpu_engine::trajec
 - Use at most half the machine for builds, tests and runs: 8 build jobs and 8 rayon threads, at low priority (`nice`).
 - Never evaluate creatures on the Radeon. Set `EVOLUTION_DEVICES=primary` and `EVOLUTION_CPU_THREADS=6` for every run of the game, the tests, and benchmarks. Heavy Radeon use crashed the desktop (mutter/Wayland) once.
 - Keep subagent fan-outs small for the same reason. The session limit is 20 concurrent subagents, and 20 at once also ran out the owner's token budget.
-- Fast iteration build: `CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=256 CARGO_PROFILE_RELEASE_INCREMENTAL=true RUSTFLAGS="-C target-cpu=native -C link-arg=-fuse-ld=mold" cargo build --release`. The committed profile uses thin LTO and rebuilds slowly.
+- Fast iteration build: `cargo build --profile release-fast` inherits release optimization with LTO disabled, 256 codegen units, and incremental compilation. It adds no platform-specific linker requirement. Use the normal thin-LTO release profile for comparable performance measurements.
 - GPU tests are `#[ignore]`d. Run them with `cargo test --release --test simulation -- --ignored`.
 - `examples/size_report.rs <checkpoint> [count]` prints body length, mass and foot slip for the best elites. With `EVOLUTION_LEDGER=1` it also prints where their forward momentum comes from.
 - Before committing: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test --release`.
@@ -41,7 +41,15 @@ The replay viewport plays frames recorded by the CPU engine (`cpu_engine::trajec
 - Bones now have mass: bone density times length squared, split between the two joints (`Limits::bone_density`, `EVOLUTION_BONE_DENSITY`). Feet slid 0.43 m per meter traveled before and 0.02 m after.
 - Muscles only pull: the drive term cannot push. Exhausted muscles have no drive (`TIRED_DRIVE = 0`), so all work comes from each muscle's energy store.
 - Later the same day (commits b8ee76f to d47b2b1): the ground-lift glitch is fixed, the generational path re-tests elites after a world change, environment effects are undoable with gravity, air and grip added, and bones are capped at 2 m. See the items marked Done below.
-- Result of a 20-generation run (100k creatures, seed 38) with all three changes: feet no longer slide, but the fastest bodies are still about 20 m long, weigh 750 to 800 kg, and reach 800 m. The CPU engine replays the 801 m champion at only 90 m. Evolution now exploits the ground-contact glitch described in the first item below.
+- Historical result before the lift fix and 2 m bone cap: a 20-generation run (100k creatures, seed 38) produced roughly 20 m, 750–800 kg bodies and an 801 m archive champion that replayed at only 90 m. Its low slip measurements did not establish grounded traction. The later baseline below supersedes this as the current measurement.
+
+### Latest 2 m-cap baseline and foundations (same session)
+
+- Seed 38, 100k candidates, 20 generations, 60 s trials: final best 165.5846 m, 1,374 behavior cells, QD score 23,060.27. Top-50 median total bone length is 2.23 m; maximum individual bone is 1.81 m. No pile-up at the cap appeared in this sample.
+- The champion stores 165.6 m and replays at 157.3 m; rank 21 stores 111.2 m and replays at 6.4 m. The latter remains unexplained. Updated scored-interval slip reports a median 0.89 m per replay meter; old ratios are not directly comparable.
+- Public CPU evaluation now uses the replay engine. Checkpoint V4 preserves island optimizer progress, while V3 remains readable; stale island/reseed state is cleared on physics-version migration. Production physics equations and `qd::VERSION` are unchanged in this batch.
+- Resource defaults exclude Radeon compute and share eight workers across the two CPU pools. CPU CI, regression coverage, current docs, and a named fast profile are in place. Final local checks passed: formatting, all-target clippy, 68 CPU tests, seven size-report tests, and three explicit GPU agreement tests (3.32 s). Four GPU tests remain ignored in the default suite. Remote CI execution remains unverified; see docs/validation.md.
+- Sanitized baseline data: docs/results/2026-09-26-bone-cap-seed-38/. No checkpoint is committed.
 
 ## Next steps
 
@@ -50,8 +58,8 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 ### Creature size and movement realism
 
 1. Done: (owner) the glitched jump. The whole-body lift after the parent-first rebuild is now a position-only correction in both engines (b8ee76f). Archive and CPU replay distances agree again (236 m vs 231 m; before, 90 m vs 801 m).
-2. (owner) Stop evolution from favoring huge creatures. Measure again with the 2 m bone cap: run 20 generations (100k creatures, seed 38, `EVOLUTION_DEVICES=primary`) and read `size_report`. If bodies still pile up at the cap, try the physics items below (muscle force scaling, bone breaking).
-3. (owner) Stop feet from sliding. Bone mass cut slip to 0.02 m per meter traveled while the lift glitch kept bodies airborne. After the lift fix, grounded feet slip a median 2.9 m per meter again (measured before the 2 m bone cap; re-measure). Root cause: each node's friction budget is `mu * push`, where push is only that node's own ground correction. When a leg carries the body, the support shows up as the whole-body lift after the rebuild and as floor clamps inside the bone passes, and neither counts toward the foot's normal force. So friction sees only the foot's own weight, and the body drags stance feet as if they were weightless. Fix idea: count the full normal impulse (floor clamps inside the passes, plus the lift times the body mass) and apply friction up to `mu` times that impulse, at least for the body's translation. Do it in both the CPU engine and the kernel, and keep the GPU tests passing.
+2. Baseline measured: (owner) stop evolution from favoring huge creatures. The 20-generation, 100k, seed-38 run with the 2 m cap produced top-50 median total bone length 2.23 m and longest individual bone 1.81 m: no pile-up at the cap in this sample. The champion is 1.77 m total bone length and 3.20 kg. Broader seeds and longer runs remain open; this single sample does not justify declaring size selection solved. See docs/results/2026-09-26-bone-cap-seed-38/.
+3. Open: (owner) stop feet from sliding. The new top-50 baseline reports median slip 0.89 m per replay meter. The diagnostic now excludes initial recentering and unscored post-fall motion, uses configured fidelity and sloped contact, and divides by terminal replay distance; old 0.02 and 2.9 ratios are not directly comparable. Source audit correction: `final_y - predicted_y` already includes positional floor clamps and whole-body lift, but friction applies the final touching node's own mass and misses load transferred through bones. Later velocity clamps remove downward motion without adding to the friction budget and can restore slip. A fix must accumulate contact support and tangential impulse consistently without spending the same Coulomb budget twice, preserve position-only lift, and agree across CPU/GPU. See docs/physics-audit-2026-09-26.md. No contact-solver fix has landed in this batch.
 4. Scale muscle force with muscle size. A longer or thicker muscle should be stronger and heavier, so a giant needs heavy muscles.
 5. Let bones break under load. Bone strength grows with cross-section while load grows with mass, so oversized bones fail like real ones.
 6. Done: bones and muscle strokes are capped at 2 m again (d47b2b1). Physics alone did not stop giants: after the lift fix, 16 to 22 m bodies still won.
@@ -65,7 +73,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 14. Add passive elastic tendons as an evolvable part, so gaits can store and return energy honestly.
 15. Add static and kinetic friction (a higher coefficient to start sliding than to keep sliding).
 16. Give bones ground contact along their length, not only at the joints, so a bone cannot pass through the ground between two nodes.
-17. Align or delete `physics::evaluate` (the old CPU reference). It lacks joint limits and fatigue and no longer matches the engines.
+17. Done: `physics::evaluate` now delegates to the production CPU engine, including configured fidelity, joint limits, fatigue, and fall/break scoring. Standard/fine replay regression coverage was added. The lower-level legacy `physics::step` remains; consolidation is still item 18.
 18. Consolidate the CPU engine and the old CPU reference into one CPU implementation.
 19. Review the fall rule (head below neck) for bodies without a clear head.
 20. Add air drag that scales with bone length times speed squared, so large fast bodies pay for moving air.
@@ -109,7 +117,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 52. Keep the GUI at 60+ FPS during evolution at 3M creatures.
 53. Add a persistent Vulkan pipeline cache and compile pipelines in the background.
 54. Successive halving: short trials first, full trials for survivors (10 s ranks predict 60 s ranks with Spearman 0.89 to 0.94).
-55. Decide whether the Radeon should evaluate at all by default, since it drives the desktop.
+55. Done: secondary GPUs are opt-in; the scheduler defaults to `primary`. General and CPU evaluation pools share a budget of at most eight threads and half the logical CPUs (six evaluation plus two general workers on this laptop). Continue setting the explicit workstation environment for every run.
 56. Size work units per device from measured rates, and re-measure after each engine change.
 57. Measure memory use at 3M creatures and shrink per-creature storage.
 58. Send only snapshot changes from worker to UI, not full copies.
@@ -120,9 +128,9 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 
 61. Done: autosave rotation keeps the three newest `seed-*-auto.evo` files and removes stale `.evo.tmp` files (`storage::rotate_autosaves`).
 62. Shrink checkpoints (1 to 1.5 GB at 3M creatures): store the population compactly and drop data that can be regenerated.
-63. Write autosaves off the worker thread so evolution does not stall.
+63. Done (existing implementation): autosave serialization and writes use a background thread. Snapshot-copy cost on the worker still needs measurement before claiming stall-free autosaves.
 64. Show disk use of `runs/` in the UI.
-65. A save and load round-trip test that checks the next generation is identical.
+65. Done: regression tests compare next-generation genomes, archive/CMA state, and offspring metadata after checkpoint round trips, including stalled island optimizers, steady breeding, and environment changes. V4 checkpoints now persist optimizer progress; V3 remains readable. Final integrated checks are recorded in docs/validation.md.
 
 ### Search
 
@@ -168,14 +176,14 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 ### Correctness and tests
 
 104. Audit the top elites for physics exploits after every physics change.
-105. Test that the CPU engine and the replay frames match the scored distance.
-106. Test that archive insertion keeps one elite per cell and never replaces a faster elite.
-107. Test that Config validation rejects bad values and accepts defaults.
-108. Test that breeding is deterministic for a fixed seed and every offspring is a valid body.
-109. Test that a creature that falls or breaks a joint keeps the score it had at that moment.
+105. Done: standard/fine CPU scores are compared with mass-weighted terminal replay frames, including partial SIMD groups. This does not establish agreement for every evolved GPU-scored elite; the baseline rank-21 outlier remains open.
+106. Done: archive insertion and island migration regression tests cover unique cells and rejection of slower candidates.
+107. Done: configuration regression tests cover defaults, float/integer boundaries, ordered bounds, and the population RAM limit.
+108. Done: modern archive-breeding tests compare valid offspring across fixed seeds and streaming slice sizes, including CMA, structural, and novelty output.
+109. Done: standard/fine regression fixtures verify frozen scores at falls and joint breaks while replay motion continues.
 110. Add a GPU agreement test at 4x fidelity for evolved creatures, not only random ones.
 111. Decide how to test the perturbed contender check across engines. Fall and break decisions can flip on rounding.
-112. Run clippy and CPU tests in CI (GitHub Actions), and keep GPU tests local.
+112. Configured: GitHub Actions runs formatting, all-target clippy, and release CPU tests with resource limits and the portable SIMD path. GPU tests remain local and ignored by default. Remote workflow execution is not yet verified.
 
 ### Interface
 
@@ -198,9 +206,9 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 
 ### Code health and docs
 
-129. Rewrite README.md. It still describes 18 s trials, 1,000 creatures, a 192-cell archive and a mutation control.
-130. Update docs/architecture.md: trial length, fitness, physics limits, bone mass, pull-only muscles, the fidelity check.
-131. Update docs/validation.md with the new GPU agreement results.
+129. Done: README describes current 60 s / 3M defaults, distance-only scoring, archive/search behavior, safe runs, environment buttons, diagnostics, and save/resume.
+130. Done: architecture updated from source, including masses, pull-only active drive, fatigue, standard/fine checks, replay semantics, scheduler, and checkpoint state.
+131. Done: validation records the local three-test GPU pass and the new 20-generation baseline, with historical workloads clearly separated. Final local checks passed: 68 CPU, seven example, and three explicit GPU tests; remote CI remains unverified.
 132. Remove the legacy `mutate()` path that the app no longer uses.
 133. Remove the empty obstacle slot kept for old checkpoints, since breaking saves is fine.
 134. Remove environment variables that no experiment uses any more.
@@ -210,4 +218,4 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 138. Done: `.claude/` is in `.gitignore`.
 139. Handle GPU device loss by falling back to the CPU engine instead of stopping.
 140. Log per-generation stage times to a file for later analysis.
-141. Speed up builds: consider the fast iteration profile as a named Cargo profile.
+141. Done: `release-fast` is the named incremental release profile (LTO off, 256 codegen units); normal release retains thin LTO. No build-speed measurement is claimed.
