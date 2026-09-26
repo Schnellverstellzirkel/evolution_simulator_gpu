@@ -1,0 +1,102 @@
+{
+  "date": "2026-09-26",
+  "purpose": "Second seed for the planted-feet physics measurement (bone mass, planted feet, friction cap on projection-induced propulsion) using the corrected scored-interval size_report. Contrasts with seed 38, which found a larger, slip-heavy elite mix.",
+  "source_logs": [
+    "planted-feet-seed-39.log",
+    "planted-feet-seed-39-size-report.txt",
+    "planted-feet-seed-38-first-generation.txt"
+  ],
+  "revision": "614e04a",
+  "platform": {
+    "os": "Linux 7.0.0-34-generic",
+    "machine": "AMD Ryzen 7 7840HS with Radeon 780M Graphics, 16 logical CPUs",
+    "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+    "driver": "580.178.04",
+    "rust": "1.98.1"
+  },
+  "build": {
+    "profile": "release",
+    "target_cpu": "native",
+    "lto": "thin",
+    "codegen_units": 16
+  },
+  "workload": {
+    "population": 100000,
+    "generations": 20,
+    "seed": 39,
+    "duration_s": 60,
+    "bone_cap_m": 2
+  },
+  "resources": {
+    "devices": "primary (RTX 4060 only)",
+    "cpu_evaluation_threads": 6,
+    "general_threads": 2,
+    "priority": "nice -n 15"
+  },
+  "commands": [
+    "nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 cargo run --release -q -- headless --population 100000 --seed 39 --generations 20 --duration 60 --checkpoint runs/planted-feet-seed-39.evo",
+    "nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 cargo run --release -q --example size_report -- runs/planted-feet-seed-39.evo 50",
+    "nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 cargo run --release -q --example first_generation"
+  ],
+  "finished": true,
+  "final": {
+    "generation": 19,
+    "best_m": 192.9634,
+    "archive_median_m": 12.7988,
+    "archive_cells": 1350,
+    "qd_score": 30914.45,
+    "failed_candidates": 0
+  },
+  "first_generation": {
+    "bodies": 20000,
+    "duration_s": 20,
+    "median_m": -0.07,
+    "p99_m": 0.34,
+    "best_m": 11.03,
+    "note": "Same binary and config as the seed-38 run; the random-population check does not depend on the evolution seed."
+  },
+  "timing": {
+    "sum_logged_evaluation_seconds": 697.855,
+    "scope": "Headless evaluation calls, including standard and fine perturbed checks. Excludes archive insertion, breeding, saving, and GUI rendering. First call can include pipeline initialization."
+  },
+  "top_50": {
+    "reported_median_total_bone_length_m": 2.02,
+    "reported_median_slip_per_replay_m": 0.53,
+    "max_individual_bone_m": 0.90,
+    "median_convention": "size_report selects the upper middle entry for an even sample count.",
+    "no_pile_up_at_bone_cap_in_this_sample": true,
+    "champion": {
+      "archive_m": 193.0,
+      "replay_m": 214.8,
+      "nodes": 5,
+      "total_bone_length_m": 1.53,
+      "longest_bone_m": 0.47,
+      "mass_kg": 3.20,
+      "slip_per_replay_m": 0.52,
+      "engine_shake_g": 2.6
+    },
+    "acceleration_columns_omitted_from_top_50_csv": {
+      "reason": "top-50.csv keeps the same nine columns as 2026-09-26-bone-cap-seed-38/top-50.csv. The current size_report also prints position-derived pos_peak_g, pos_shake_peak_g and the engine value engine_shake_g; position-derived values include position corrections, so they describe visible shaking rather than the engine's head-shake rule.",
+      "top_50_engine_shake_g_max": 8.1,
+      "top_50_engine_shake_g_median": 2.7,
+      "top_50_pos_peak_g_median": 17.4,
+      "top_50_pos_peak_g_max": 23.8,
+      "top_50_pos_shake_peak_g_median": 6.7,
+      "top_50_pos_shake_peak_g_max": 9.3
+    }
+  },
+  "limitations": [
+    "One seed at 100k candidates per generation; not a search A/B comparison, a 3M GUI run, or a throughput acceptance test.",
+    "CSV values preserve the precision printed by the source logs; top-50 figures are rounded.",
+    "Body length is the sum of bone rest lengths, not the body bounding-box span.",
+    "Slip is summed horizontal travel of touching nodes over scored replay intervals, divided by absolute terminal replay distance. Post-fall motion and initial recentering are excluded; terrain contact includes slope.",
+    "The champion stores 193.0 m but the size_report CPU replay measures 214.8 m. The archive-admission rule only requires the stored score not to exceed the replay; the stored score comes from the evaluation chain, so a replay above the stored score is not an admission failure.",
+    "Seed 39 keeps small bodies at the top: 5- and 6-node bodies of 1.5 to 2.6 m and 3.1 to 8.9 kg with slip 0.26 to 0.90. The largest body in the top 50 is 2.81 m and 6.63 kg. This is the opposite mix from seed 38, where 7-node 4 to 5 m bodies of 19 to 24 kg held several top ranks.",
+    "The across-seed spread is large: seed 38 best 117.3 m with median slip 1.34, seed 39 best 193.0 m with median slip 0.53. Two seeds are not enough to characterize the distribution.",
+    "Machine-local compiler and executable paths were removed. The checkpoint runs/planted-feet-seed-39.evo is local and not committed.",
+    "The release binary was built while the worktree also held uncommitted scheduler, UI and Cargo changes from a concurrent session. None of them touch the physics modules (cpu_engine, physics, shaders, config, storage, evolution), so fitness, size and slip reflect the 614e04a physics.",
+    "A separate headless evolution in the other workspace shared the machine for this whole run. Fitness values are deterministic and unaffected; the logged evaluation_seconds and wall-clock timing include that contention."
+  ],
+  "revision_scope": "Planted feet (5905316), friction cap (8572d32), bone mass, and CPU archive admission on top of the bd41746 baseline.",
+  "checkpoint": "runs/planted-feet-seed-39.evo (local, not committed)"
+}
