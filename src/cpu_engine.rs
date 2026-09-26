@@ -22,7 +22,8 @@ const TIRED_DRIVE: f32 = 0.2;
 type V = [f32; L];
 const ZERO: V = [0.0; L];
 
-const PI: f32 = 3.141_592_653_59;
+// Same f32 as the kernel's 3.14159265359 literal.
+const PI: f32 = std::f32::consts::PI;
 
 #[derive(Clone, Copy)]
 struct Muscle {
@@ -859,7 +860,7 @@ impl Group {
                 height_sum += high - low;
                 low_center = low_center.min(center);
                 high_center = high_center.max(center);
-                let sample = tick == settle || (tick - settle) % sample_interval == 0;
+                let sample = tick == settle || (tick - settle).is_multiple_of(sample_interval);
                 if sample {
                     let c = center.to_array();
                     for l in 0..L {

@@ -25,14 +25,14 @@ fn main() {
         let mut fell = None;
         let mut turned = 0.0f32;
         let mut widest = 0.0f32;
-        for t in settle + 1..frames.len() {
+        for (t, frame) in frames.iter().enumerate().skip(settle + 1) {
             let tilt = neck(t);
             let step = (tilt - neck(t - 1) + std::f32::consts::PI)
                 .rem_euclid(std::f32::consts::TAU)
                 - std::f32::consts::PI;
             turned += step;
             widest = widest.max(tilt.abs());
-            if fell.is_none() && frames[t][0][1] < frames[t][base][1] {
+            if fell.is_none() && frame[0][1] < frame[base][1] {
                 fell = Some((t - settle) as f32 / rate);
             }
         }
