@@ -61,6 +61,8 @@ Environment buttons raise or lower each effect:
 | Gravity | Earth, 1.5 g, 2 g, 3 g |
 | Air | Thin, breezy, thick, syrup |
 | Grip | Sandpaper, grippy, firm, wet, ice |
+| Heat wave | Full, warm, hot, heat wave |
+| Drought | Normal, dry, parched, drought |
 
 A world change invalidates the old scores and queues archive elites for evaluation under the new conditions. Effects change the physics; the objective remains distance.
 
@@ -87,9 +89,10 @@ nice -n 10 cargo run --release -- headless --population 100000 --seed 38 --gener
 nice -n 10 cargo run --release -- headless --resume runs/seed-38-100k.evo --generations 20 --checkpoint runs/seed-38-100k.evo
 nice -n 10 cargo run --release --example size_report -- runs/seed-38-100k.evo 50
 EVOLUTION_LEDGER=1 nice -n 10 cargo run --release --example size_report -- runs/seed-38-100k.evo 10
+nice -n 10 cargo run --release --example search_ab -- 2 64 0.5 38,39 --tag baseline
 ```
 
-`--generations` counts additional generations when resuming. `--config PATH` loads a JSON preset, `--duration` overrides trial duration for a new experiment, and `--checkpoint PATH` chooses the save destination. Ctrl+C requests a stop and checkpoint after the current evaluation call returns. `size_report` reports elite geometry, mass, travel, and foot slip; `EVOLUTION_LEDGER=1` adds momentum diagnostics.
+`--generations` counts additional generations when resuming. `--config PATH` loads a JSON preset, `--duration` overrides trial duration for a new experiment, and `--checkpoint PATH` chooses the save destination. Ctrl+C requests a stop and checkpoint after the current evaluation call returns. `size_report` reports elite geometry, mass, travel, and foot slip; `EVOLUTION_LEDGER=1` adds momentum diagnostics. `search_ab` runs fixed-seed CPU-only A/B generations and prints best distance, QD score, archive cells, and the top-50 body mix; see [search research](docs/search-research.md).
 
 ```bash
 nice -n 10 cargo run --release -- benchmark --populations 1000,100000 --duration 60 --generations 3

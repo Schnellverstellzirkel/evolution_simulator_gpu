@@ -32,7 +32,10 @@ pub struct Params {
     pub total_steps: u32,
     /// Bump height of the rough ground (m); 0 is flat.
     pub terrain: f32,
-    pub pad: [u32; 2],
+    /// Multiplier on the muscle energy store (heat wave); 1.0 is calm.
+    pub muscle_energy: f32,
+    /// Multiplier on muscle energy recovery (drought); 1.0 is calm.
+    pub muscle_recovery: f32,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -355,6 +358,18 @@ pub fn shader_source(
 mod tests {
     use super::*;
     use crate::physics::Fidelity;
+
+    #[test]
+    fn params_layout_matches_the_kernel_uniform() {
+        // The WGSL `Params` struct must read every field at these offsets.
+        // Adding or reordering a scalar can silently shift later fields.
+        assert_eq!(std::mem::offset_of!(Params, gravity), 16);
+        assert_eq!(std::mem::offset_of!(Params, total_steps), 32);
+        assert_eq!(std::mem::offset_of!(Params, terrain), 36);
+        assert_eq!(std::mem::offset_of!(Params, muscle_energy), 40);
+        assert_eq!(std::mem::offset_of!(Params, muscle_recovery), 44);
+        assert_eq!(std::mem::size_of::<Params>(), 48);
+    }
 
     #[test]
     fn kernels_compile_for_standard_and_fine_physics() {

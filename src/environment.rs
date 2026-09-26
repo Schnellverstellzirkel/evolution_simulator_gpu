@@ -39,6 +39,12 @@ pub const AIR: [f32; 4] = [1.0, 0.995, 0.985, 0.96];
 /// Ground friction multiplier at each level, from grippier than the calm
 /// world to nearly frictionless ice.
 pub const GRIP: [f32; 5] = [3.0, 1.5, 1.0, 0.6, 0.3];
+/// Muscle energy store multiplier at each level, from the calm world down to
+/// a harsh heat wave.
+pub const HEAT: [f32; 4] = [1.0, 0.7, 0.5, 0.35];
+/// Muscle energy recovery multiplier at each level, from the calm world down
+/// to almost no recovery.
+pub const DROUGHT: [f32; 4] = [1.0, 0.6, 0.3, 0.1];
 
 fn nearest(table: &[f32], value: f32) -> usize {
     table
@@ -48,7 +54,7 @@ fn nearest(table: &[f32], value: f32) -> usize {
         .map_or(0, |(i, _)| i)
 }
 
-pub const EFFECTS: [Effect; 4] = [
+pub const EFFECTS: [Effect; 6] = [
     Effect {
         name: "Ground",
         levels: &[
@@ -95,6 +101,26 @@ pub const EFFECTS: [Effect; 4] = [
         get: |c| nearest(&GRIP, c.ground_friction),
         set: |c, level| c.ground_friction = GRIP[level],
     },
+    Effect {
+        name: "Heat wave",
+        levels: &["Full", "Warm", "Hot", "Heat wave"],
+        calm: 0,
+        raise: "Heat up",
+        lower: "Cool down",
+        why: "A smaller energy store runs out sooner. Short strokes must count and the gait has to recover between them.",
+        get: |c| nearest(&HEAT, c.muscle_energy),
+        set: |c, level| c.muscle_energy = HEAT[level],
+    },
+    Effect {
+        name: "Drought",
+        levels: &["Normal", "Dry", "Parched", "Drought"],
+        calm: 0,
+        raise: "Dry out",
+        lower: "Water",
+        why: "Energy returns slowly, so bursts fail and steady, well-paced gaits win.",
+        get: |c| nearest(&DROUGHT, c.muscle_recovery),
+        set: |c, level| c.muscle_recovery = DROUGHT[level],
+    },
 ];
 
 #[cfg(test)]
@@ -136,5 +162,17 @@ mod tests {
             cfg.ground_friction < calm,
             "the last level must be slipperier than the calm world"
         );
+    }
+
+    #[test]
+    fn heat_wave_and_drought_only_get_harsher() {
+        let heat = EFFECTS.iter().find(|e| e.name == "Heat wave").unwrap();
+        let drought = EFFECTS.iter().find(|e| e.name == "Drought").unwrap();
+        let mut cfg = Config::default();
+        heat.set_level(&mut cfg, heat.levels.len() - 1);
+        assert!(cfg.muscle_energy < 1.0, "heat wave must shrink the store");
+        let mut cfg = Config::default();
+        drought.set_level(&mut cfg, drought.levels.len() - 1);
+        assert!(cfg.muscle_recovery < 1.0, "drought must slow recovery");
     }
 }

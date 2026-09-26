@@ -15,6 +15,10 @@ pub struct Config {
     pub ground: bool,
     /// Ground roughness level (0 = flat), set by the environment effects.
     pub terrain: u8,
+    /// Multiplier on each muscle's energy store (heat wave); 1.0 is calm.
+    pub muscle_energy: f32,
+    /// Multiplier on muscle energy recovery per second (drought); 1.0 is calm.
+    pub muscle_recovery: f32,
     pub min_size: f32,
     pub max_size: f32,
     pub min_friction: f32,
@@ -42,6 +46,8 @@ impl Default for Config {
             ground_friction: 1.5,
             ground: true,
             terrain: 0,
+            muscle_energy: 1.0,
+            muscle_recovery: 1.0,
             min_size: 0.06,
             max_size: 0.12,
             min_friction: 0.65,
@@ -70,6 +76,8 @@ struct HumanConfig {
     ground_friction: f32,
     ground: bool,
     terrain: u8,
+    muscle_energy: f32,
+    muscle_recovery: f32,
     min_size: f32,
     max_size: f32,
     min_friction: f32,
@@ -96,6 +104,8 @@ impl Default for HumanConfig {
             ground_friction: c.ground_friction,
             ground: c.ground,
             terrain: c.terrain,
+            muscle_energy: c.muscle_energy,
+            muscle_recovery: c.muscle_recovery,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -124,6 +134,8 @@ impl From<HumanConfig> for Config {
             ground_friction: c.ground_friction,
             ground: c.ground,
             terrain: c.terrain,
+            muscle_energy: c.muscle_energy,
+            muscle_recovery: c.muscle_recovery,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -151,6 +163,8 @@ impl From<&Config> for HumanConfig {
             ground_friction: c.ground_friction,
             ground: c.ground,
             terrain: c.terrain,
+            muscle_energy: c.muscle_energy,
+            muscle_recovery: c.muscle_recovery,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -177,6 +191,8 @@ struct BinaryConfig {
     ground_friction: f32,
     ground: bool,
     terrain: u8,
+    muscle_energy: f32,
+    muscle_recovery: f32,
     min_size: f32,
     max_size: f32,
     min_friction: f32,
@@ -202,6 +218,8 @@ impl From<&Config> for BinaryConfig {
             ground_friction: c.ground_friction,
             ground: c.ground,
             terrain: c.terrain,
+            muscle_energy: c.muscle_energy,
+            muscle_recovery: c.muscle_recovery,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -229,6 +247,8 @@ impl From<BinaryConfig> for Config {
             air_retention: c.air_retention,
             ground: c.ground,
             terrain: c.terrain,
+            muscle_energy: c.muscle_energy,
+            muscle_recovery: c.muscle_recovery,
             ground_friction: c.ground_friction,
             min_size: c.min_size,
             max_size: c.max_size,
@@ -299,6 +319,14 @@ impl Config {
         ensure!(
             usize::from(self.terrain) < crate::physics::TERRAIN_AMPLITUDES.len(),
             "Unknown ground roughness level"
+        );
+        ensure!(
+            self.muscle_energy.is_finite() && (0.05..=2.0).contains(&self.muscle_energy),
+            "Muscle energy multiplier must be 0.05–2"
+        );
+        ensure!(
+            self.muscle_recovery.is_finite() && (0.05..=2.0).contains(&self.muscle_recovery),
+            "Muscle recovery multiplier must be 0.05–2"
         );
         ensure!(
             self.min_size.is_finite()

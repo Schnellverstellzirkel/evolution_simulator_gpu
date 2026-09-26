@@ -308,6 +308,9 @@ impl Group {
         let ground_friction = cfg.ground_friction;
         let ground = cfg.ground;
         let limits = physics::limits();
+        // Environment effect multipliers on the shared baseline limits.
+        let muscle_energy = limits.muscle_energy * cfg.muscle_energy;
+        let muscle_recovery = limits.muscle_recovery * cfg.muscle_recovery;
         let max_node_speed = F::splat(limits.node_speed);
         let max_force = F::splat(limits.muscle_force);
         let max_spin = F::splat(limits.bone_spin);
@@ -483,8 +486,8 @@ impl Group {
                 let magnitude = F::select(fall_time.gt(zero), zero, magnitude);
                 if tick >= settle {
                     let work = (magnitude * relative).abs() * dt;
-                    energies[index] = (energies[index] - work * (1.0 / limits.muscle_energy)
-                        + (one - energies[index]) * (limits.muscle_recovery * dt))
+                    energies[index] = (energies[index] - work * (1.0 / muscle_energy)
+                        + (one - energies[index]) * (muscle_recovery * dt))
                         .max(zero)
                         .min(one);
                 }

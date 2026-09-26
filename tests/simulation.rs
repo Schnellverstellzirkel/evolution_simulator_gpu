@@ -499,6 +499,24 @@ fn gpu_matches_cpu_and_handles_partial_workgroups() {
             );
         }
     }
+    // The environment energy multipliers reach the kernel through the uniform
+    // buffer; both engines must apply them identically. Short trials keep
+    // rounding differences from growing chaotically.
+    let effect = Config {
+        muscle_energy: 0.35,
+        muscle_recovery: 0.1,
+        ..cfg.clone()
+    };
+    let gpu_metrics = gpu.evaluate_with_metrics(&pop, &indices, &effect).unwrap();
+    let cpu = evolution_simulator::cpu_engine::evaluate(&pop, &effect);
+    for (i, (gpu_result, cpu_result)) in gpu_metrics.iter().zip(&cpu).enumerate() {
+        assert!(
+            (gpu_result.fitness - cpu_result.fitness).abs() < 0.05,
+            "energy effects score {i}: GPU {}, CPU engine {}",
+            gpu_result.fitness,
+            cpu_result.fitness
+        );
+    }
     let cfg = Config {
         population: 8,
         max_nodes: 64,
@@ -1000,6 +1018,271 @@ fn a_passive_body_never_rises_above_its_start() {
             "body {i} rose from {start} m to {highest} m without muscle drive"
         );
     }
+}
+
+/// Mean distance of a whole random population, ignoring failed trials.
+fn mean_distance(pop: &evolution::Population, cfg: &Config) -> f32 {
+    let results = evolution_simulator::cpu_engine::evaluate(pop, cfg);
+    let mut total = 0.0;
+    let mut count = 0.0f32;
+    for result in &results {
+        if result.fitness.is_finite() {
+            total += result.fitness;
+            count += 1.0;
+        }
+    }
+    total / count.max(1.0)
+}
+
+/// A six-node walker evolved under the calm defaults (population 2048,
+/// 30 generations, seed 38, 15 s trials). It travels about 8 m in 5 s with
+/// full energy stores, and loses more than half of that when the heat wave
+/// shrinks the stores or drought slows recovery.
+fn energy_dependent_walker() -> Creature {
+    Creature {
+        nodes: vec![
+            NodeGene {
+                x: -0.5593486,
+                y: 0.61968184,
+                diameter: 0.12,
+                friction: 0.9475196,
+            },
+            NodeGene {
+                x: -0.41776797,
+                y: 0.3038751,
+                diameter: 0.06,
+                friction: 0.7486749,
+            },
+            NodeGene {
+                x: -0.116856754,
+                y: 0.3178858,
+                diameter: 0.108820364,
+                friction: 0.66710335,
+            },
+            NodeGene {
+                x: -0.039948717,
+                y: 0.43371728,
+                diameter: 0.0877441,
+                friction: 0.9974566,
+            },
+            NodeGene {
+                x: 0.19000307,
+                y: 0.37280446,
+                diameter: 0.07844837,
+                friction: 0.65871984,
+            },
+            NodeGene {
+                x: -0.27397153,
+                y: 0.3718743,
+                diameter: 0.08361293,
+                friction: 0.65,
+            },
+        ],
+        bones: vec![
+            Bone {
+                a: 0,
+                b: 1,
+                rest_length: 0.34609097,
+                min_angle: -1.6000074,
+                max_angle: 0.7977927,
+                organ_mass: 0.01,
+                organ_at: 0.5291506,
+            },
+            Bone {
+                a: 1,
+                b: 2,
+                rest_length: 0.30123723,
+                min_angle: -0.65684575,
+                max_angle: 1.6548456,
+                organ_mass: 0.0,
+                organ_at: 0.5,
+            },
+            Bone {
+                a: 2,
+                b: 3,
+                rest_length: 0.13903877,
+                min_angle: -1.5915323,
+                max_angle: 0.633044,
+                organ_mass: 0.0,
+                organ_at: 0.5,
+            },
+            Bone {
+                a: 3,
+                b: 4,
+                rest_length: 0.23788273,
+                min_angle: -1.9740598,
+                max_angle: 0.9501501,
+                organ_mass: 0.010241741,
+                organ_at: 0.4697004,
+            },
+            Bone {
+                a: 3,
+                b: 5,
+                rest_length: 0.24205624,
+                min_angle: -0.82507557,
+                max_angle: 2.0943952,
+                organ_mass: 0.0,
+                organ_at: 0.5,
+            },
+        ],
+        muscles: vec![
+            Muscle {
+                bone_a: 0,
+                bone_b: 1,
+                anchor_a: 0.9631201,
+                anchor_b: 0.6989166,
+                short: 0.18162505,
+                long: 0.18962646,
+                period: 0.5951622,
+                phase: 0.42644,
+                duty: 0.4687704,
+                stiffness: 35.06757,
+                sensor: 0,
+                reset: 0.43866375,
+            },
+            Muscle {
+                bone_a: 1,
+                bone_b: 2,
+                anchor_a: 0.5982309,
+                anchor_b: 0.66608244,
+                short: 0.08557357,
+                long: 0.18462573,
+                period: 0.5951622,
+                phase: 0.016101224,
+                duty: 0.38960835,
+                stiffness: 84.78909,
+                sensor: 1,
+                reset: 0.19877157,
+            },
+            Muscle {
+                bone_a: 2,
+                bone_b: 3,
+                anchor_a: 0.08075203,
+                anchor_b: 0.08479669,
+                short: 0.21270484,
+                long: 0.5398381,
+                period: 0.5951622,
+                phase: 0.59647053,
+                duty: 0.18719086,
+                stiffness: 35.218353,
+                sensor: 255,
+                reset: 0.2708392,
+            },
+            Muscle {
+                bone_a: 3,
+                bone_b: 0,
+                anchor_a: 0.58470476,
+                anchor_b: 0.39771268,
+                short: 0.5982563,
+                long: 0.9116529,
+                period: 0.5951622,
+                phase: 0.07857889,
+                duty: 0.4873734,
+                stiffness: 57.975662,
+                sensor: 255,
+                reset: 0.6004214,
+            },
+            Muscle {
+                bone_a: 1,
+                bone_b: 2,
+                anchor_a: 0.2654894,
+                anchor_b: 0.3410796,
+                short: 0.10381305,
+                long: 0.11306952,
+                period: 0.5951622,
+                phase: 0.5893883,
+                duty: 0.2278046,
+                stiffness: 73.649185,
+                sensor: 255,
+                reset: 0.91381097,
+            },
+            Muscle {
+                bone_a: 2,
+                bone_b: 4,
+                anchor_a: 0.06489495,
+                anchor_b: 0.092396125,
+                short: 0.20794365,
+                long: 0.53504324,
+                period: 0.5951622,
+                phase: 0.9986213,
+                duty: 0.22768927,
+                stiffness: 33.61832,
+                sensor: 255,
+                reset: 0.2898468,
+            },
+            Muscle {
+                bone_a: 4,
+                bone_b: 0,
+                anchor_a: 0.57180727,
+                anchor_b: 0.3885777,
+                short: 0.6111155,
+                long: 0.9209887,
+                period: 0.5951622,
+                phase: 0.5952037,
+                duty: 0.37932187,
+                stiffness: 71.13563,
+                sensor: 255,
+                reset: 0.60610723,
+            },
+            Muscle {
+                bone_a: 3,
+                bone_b: 4,
+                anchor_a: 0.07086325,
+                anchor_b: 0.26907945,
+                short: 0.059728526,
+                long: 0.1037927,
+                period: 0.5951622,
+                phase: 0.13944362,
+                duty: 0.62057906,
+                stiffness: 31.938673,
+                sensor: 255,
+                reset: 0.008283809,
+            },
+        ],
+        id: 47_300,
+        mutability: 0.87713593,
+    }
+}
+
+#[test]
+fn heat_wave_and_drought_reduce_distance() {
+    // The same walker under three worlds; only the muscle energy multipliers
+    // differ. A smaller store or slower recovery must cost it real distance.
+    let base = Config {
+        population: 16,
+        duration: 5.0,
+        ..config()
+    };
+    let mut pop = evolution::Population::default();
+    for i in 0..16 {
+        let mut walker = energy_dependent_walker();
+        walker.id = i as u64;
+        pop.push(walker);
+    }
+    let calm = mean_distance(&pop, &base);
+    let heat = mean_distance(
+        &pop,
+        &Config {
+            muscle_energy: 0.35,
+            ..base.clone()
+        },
+    );
+    let drought = mean_distance(
+        &pop,
+        &Config {
+            muscle_recovery: 0.1,
+            ..base.clone()
+        },
+    );
+    eprintln!("mean distance: calm {calm} m, heat wave {heat} m, drought {drought} m");
+    assert!(
+        heat < calm - 1.0,
+        "heat wave must cost distance: {heat} m vs {calm} m"
+    );
+    assert!(
+        drought < calm - 1.0,
+        "drought must cost distance: {drought} m vs {calm} m"
+    );
 }
 
 /// The four-node sled evolution built while friction could push the body in

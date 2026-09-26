@@ -23,12 +23,14 @@ fn config(seed: u64) -> Config {
 fn configuration_defaults_and_float_boundaries_are_validated() {
     Config::default().validate().unwrap();
     type FloatCase = (&'static str, fn(&mut Config) -> &mut f32, f32, f32);
-    let fields: [FloatCase; 9] = [
+    let fields: [FloatCase; 11] = [
         ("duration", |c| &mut c.duration, 0.1, 300.0),
         ("mutation", |c| &mut c.mutation, 0.0, 10.0),
         ("gravity", |c| &mut c.gravity, 0.0, 100.0),
         ("air retention", |c| &mut c.air_retention, 0.0, 1.02),
         ("ground friction", |c| &mut c.ground_friction, 0.0, 20.0),
+        ("muscle energy", |c| &mut c.muscle_energy, 0.05, 2.0),
+        ("muscle recovery", |c| &mut c.muscle_recovery, 0.05, 2.0),
         ("minimum diameter", |c| &mut c.min_size, 0.01, 1.0),
         ("maximum diameter", |c| &mut c.max_size, 0.01, 1.0),
         ("minimum friction", |c| &mut c.min_friction, 0.0, 1.0),

@@ -39,8 +39,11 @@ struct Params {
     total_steps: u32,
     // Bump height of the rough ground; 0 is flat.
     terrain: f32,
-    pad1: u32,
-    pad2: u32,
+    // Environment effect multipliers on the baseline constants: heat wave
+    // shrinks the energy store, drought slows recovery. Both 1.0 in the calm
+    // world and packed in the same order as creature_kernel::Params.
+    muscle_energy: f32,
+    muscle_recovery: f32,
 }
 struct Result {
     fitness: f32,
@@ -353,7 +356,8 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             if tick >= SETTLE {
                 let work = abs(magnitude * relative) * DT;
                 energy = clamp(
-                    energy - work / MUSCLE_CAPACITY + MUSCLE_RECOVERY * DT * (1.0 - energy),
+                    energy - work / (MUSCLE_CAPACITY * p.muscle_energy)
+                        + MUSCLE_RECOVERY * p.muscle_recovery * DT * (1.0 - energy),
                     0.0,
                     1.0,
                 );
