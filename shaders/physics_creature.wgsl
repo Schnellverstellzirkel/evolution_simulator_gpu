@@ -90,7 +90,7 @@ const NO_SENSOR: u32 = 255u;
 // when exhausted.
 const MUSCLE_CAPACITY: f32 = 15.0;
 const MUSCLE_RECOVERY: f32 = 0.25;
-const TIRED_DRIVE: f32 = 0.2;
+const TIRED_DRIVE: f32 = 0.0;
 const BONE_FIELDS: u32 = 9u;
 const MAXB: u32 = MAXN - 1u;
 
@@ -322,8 +322,10 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             let relative = dot(velocity_b - velocity_a, dir);
             let target_speed = (limited_muscle_length(m, time)
                 - limited_muscle_length(m, max(time - DT, 0.0))) * RATE;
-            // A tired muscle drives weaker and slower.
-            let drive = -target_speed * m.stiffness * 0.25 * (TIRED_DRIVE + (1.0 - TIRED_DRIVE) * energy);
+            // A muscle only pulls: it drives while its target shortens and goes
+            // slack while the target lengthens. Its drive scales with its stored
+            // energy, so an exhausted muscle does no work until it recovers.
+            let drive = max(-target_speed * m.stiffness * 0.25, 0.0) * (TIRED_DRIVE + (1.0 - TIRED_DRIVE) * energy);
             var magnitude = clamp(drive + relative * 0.15, -MAX_MUSCLE_FORCE, MAX_MUSCLE_FORCE);
             if metrics.fall_time > 0.0 {
                 magnitude = 0.0;

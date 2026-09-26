@@ -124,6 +124,11 @@ pub struct Limits {
     pub max_bone: f32,
     /// Longest muscle length (m); the shortest contracted length is 80% of it.
     pub max_stroke: f32,
+    /// Bone mass per squared meter of bone length (kg/m^2). Longer bones are
+    /// proportionally thicker, so mass grows with the square of length while
+    /// muscle force stays capped: large bodies are heavy and slow, and weight
+    /// gives feet the ground pressure they need to grip.
+    pub bone_density: f32,
 }
 impl Limits {
     pub const DEFAULT: Limits = Limits {
@@ -136,11 +141,12 @@ impl Limits {
         muscle_recovery: 0.5,
         max_bone: 10.0,
         max_stroke: 5.0,
+        bone_density: 4.0,
     };
 }
 /// The physics limits. `EVOLUTION_MAX_MUSCLE_SPEED`, `EVOLUTION_MAX_MUSCLE_FORCE`,
-/// `EVOLUTION_MAX_NODE_SPEED`, `EVOLUTION_MAX_BONE_SPIN`, and
-/// `EVOLUTION_MIN_MUSCLE_PERIOD` override them for experiments; every engine,
+/// `EVOLUTION_MAX_NODE_SPEED`, `EVOLUTION_MAX_BONE_SPIN`,
+/// `EVOLUTION_MIN_MUSCLE_PERIOD`, and `EVOLUTION_BONE_DENSITY` override them for experiments; every engine,
 /// the replay, and mutation read the same values.
 pub fn limits() -> Limits {
     static LIMITS: std::sync::OnceLock<Limits> = std::sync::OnceLock::new();
@@ -163,6 +169,12 @@ pub fn limits() -> Limits {
             muscle_recovery: read("EVOLUTION_MUSCLE_RECOVERY", d.muscle_recovery),
             max_bone: read("EVOLUTION_MAX_BONE_LENGTH", d.max_bone).clamp(0.1, 12.0),
             max_stroke: read("EVOLUTION_MAX_STROKE", d.max_stroke).clamp(0.1, 12.0),
+            // Zero is allowed here: massless bones, as before.
+            bone_density: std::env::var("EVOLUTION_BONE_DENSITY")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .unwrap_or(d.bone_density),
         }
     })
 }
@@ -193,19 +205,25 @@ pub fn node(gene: &NodeGene) -> Node {
         failed: 0.0,
     }
 }
-/// A body's nodes with its organs' masses included. An organ rides rigidly
-/// on its bone, so its mass is shared by the bone's two nodes in proportion
-/// to its position: the body's center of mass is exact, and the organ never
-/// touches the ground.
+/// A body's nodes with its bones' and organs' masses included. A bone's own
+/// mass (`Limits::bone_density` times its length squared) is split evenly
+/// between its two nodes. An organ rides rigidly on its bone, so its mass is
+/// shared by the bone's two nodes in proportion to its position: the body's
+/// center of mass is exact, and the organ never touches the ground.
 pub fn body(genes: &[NodeGene], bones: &[Bone]) -> Vec<Node> {
     let mut nodes: Vec<Node> = genes.iter().map(node).collect();
+    let density = limits().bone_density;
     for bone in bones {
+        let (a, b) = (bone.a as usize, bone.b as usize);
+        if a >= nodes.len() || b >= nodes.len() {
+            continue;
+        }
+        let half = 0.5 * density * bone.rest_length * bone.rest_length;
+        nodes[a].mass += half;
+        nodes[b].mass += half;
         if bone.organ_mass > 0.0 {
-            let (a, b) = (bone.a as usize, bone.b as usize);
-            if a < nodes.len() && b < nodes.len() {
-                nodes[a].mass += bone.organ_mass * (1.0 - bone.organ_at);
-                nodes[b].mass += bone.organ_mass * bone.organ_at;
-            }
+            nodes[a].mass += bone.organ_mass * (1.0 - bone.organ_at);
+            nodes[b].mass += bone.organ_mass * bone.organ_at;
         }
     }
     nodes
@@ -235,8 +253,9 @@ fn limited_target(m: &Muscle, time: f32) -> f32 {
 fn motor_force(m: &Muscle, time: f32, relative: f32) -> f32 {
     let target_speed = (limited_target(m, time) - limited_target(m, (time - dt()).max(0.0))) / dt();
     // A fixed target is a passive constraint, not an inexhaustible motor.
-    // The actuator pulls while shortening and pushes while lengthening.
-    (-target_speed * m.stiffness * 0.25 + relative * 0.15)
+    // The actuator only pulls: it drives while shortening and goes slack while
+    // lengthening.
+    ((-target_speed * m.stiffness * 0.25).max(0.0) + relative * 0.15)
         .clamp(-limits().muscle_force, limits().muscle_force)
 }
 thread_local! {

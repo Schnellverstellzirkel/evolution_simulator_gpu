@@ -2122,7 +2122,9 @@ mod tests {
         let bone = creature.bones[1];
         creature.bones[1].organ_mass = 0.2;
         creature.bones[1].organ_at = 0.25;
-        let plain = crate::physics::body(&creature.nodes, &[]);
+        let mut bare = creature.bones.clone();
+        bare[1].organ_mass = 0.0;
+        let plain = crate::physics::body(&creature.nodes, &bare);
         let with = crate::physics::body(&creature.nodes, &creature.bones);
         let mass = |n: &[crate::physics::Node]| n.iter().map(|x| x.mass).sum::<f32>();
         assert!((mass(&with) - mass(&plain) - 0.2).abs() < 1e-6);
@@ -2133,5 +2135,38 @@ mod tests {
         let organ_x = a.x + (b.x - a.x) * 0.25;
         let expected = (com(&plain) * mass(&plain) + organ_x * 0.2) / (mass(&plain) + 0.2);
         assert!((com(&with) - expected).abs() < 1e-5);
+    }
+
+    #[test]
+    fn bone_mass_grows_with_the_square_of_its_length() {
+        let cfg = Config::default();
+        let mut rng = Rng::new(9, 0, 0);
+        let mut creature = random_creature_from(&cfg, &mut rng);
+        for bone in &mut creature.bones {
+            bone.organ_mass = 0.0;
+        }
+        let mass = |bones: &[Bone]| {
+            crate::physics::body(&creature.nodes, bones)
+                .iter()
+                .map(|n| n.mass)
+                .sum::<f32>()
+        };
+        let nodes_only = mass(&[]);
+        let expected: f32 = creature
+            .bones
+            .iter()
+            .map(|b| crate::physics::limits().bone_density * b.rest_length * b.rest_length)
+            .sum();
+        assert!((mass(&creature.bones) - nodes_only - expected).abs() < 1e-4);
+        // Doubling every bone quadruples the bone mass.
+        let doubled: Vec<Bone> = creature
+            .bones
+            .iter()
+            .map(|b| Bone {
+                rest_length: b.rest_length * 2.0,
+                ..*b
+            })
+            .collect();
+        assert!((mass(&doubled) - nodes_only - 4.0 * expected).abs() < 1e-3);
     }
 }

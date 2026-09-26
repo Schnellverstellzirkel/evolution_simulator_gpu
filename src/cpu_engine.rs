@@ -18,7 +18,7 @@ pub static LEDGER: std::sync::Mutex<[f64; 6]> = std::sync::Mutex::new([0.0; 6]);
 const L: usize = 16;
 /// Muscle energy: stored work (J), recovery per second, and the drive left
 /// when exhausted. Mirrors the GPU kernel.
-const TIRED_DRIVE: f32 = 0.2;
+const TIRED_DRIVE: f32 = 0.0;
 type V = [f32; L];
 const ZERO: V = [0.0; L];
 
@@ -467,9 +467,13 @@ impl Group {
                 let relative = (vbx - vax) * dir_x + (vby - vay) * dir_y;
                 let target_speed =
                     (muscle_length(m, time, exact) - muscle_length(m, previous_time, exact)) * rate;
-                // A tired muscle drives weaker and slower.
+                // A muscle only pulls: it drives while its target shortens and
+                // goes slack while the target lengthens. Its drive scales with its
+                // stored energy, so an exhausted muscle does no work until it
+                // recovers.
                 let vigor = F::splat(TIRED_DRIVE) + energies[index] * (1.0 - TIRED_DRIVE);
-                let magnitude = (-(target_speed * m.stiffness) * 0.25 * vigor + relative * 0.15)
+                let drive = (-(target_speed * m.stiffness) * 0.25).max(zero);
+                let magnitude = (drive * vigor + relative * 0.15)
                     .max(-max_force)
                     .min(max_force);
                 let magnitude = F::select(fall_time.gt(zero), zero, magnitude);
