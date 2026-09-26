@@ -779,6 +779,9 @@ impl Experiment {
         let protections: Vec<u32> = planned.iter().map(|p| p.protection).collect();
         let plan_seconds = plan_started.elapsed().as_secs_f64();
         let emission_started = std::time::Instant::now();
+        // Elites queued by a world change take the first slots. No slice is
+        // handed over until they are placed, so every device sees them.
+        let reseeding = !self.reseed.is_empty();
         let next = evolution::emit_archive_batch_streaming(
             &self.population,
             &self.islands,
@@ -787,7 +790,13 @@ impl Experiment {
             &cfg,
             generation,
             slice.min(cfg.population).max(1),
-            |population, range| on_slice(population, range, &cfg),
+            |population, range| {
+                if reseeding {
+                    Ok(())
+                } else {
+                    on_slice(population, range, &cfg)
+                }
+            },
         )?;
         let emission_seconds = emission_started.elapsed().as_secs_f64();
         self.config = cfg;
@@ -798,6 +807,20 @@ impl Experiment {
         self.candidate_parent_ids = parent_ids;
         self.candidate_mates = planned.iter().map(|p| p.plan.mate.is_some()).collect();
         self.protected_until = protections;
+        if reseeding {
+            for slot in 0..self.config.population {
+                let Some(elite) = self.reseed.pop() else {
+                    break;
+                };
+                self.population.replace(slot, elite);
+                self.candidate_emitters[slot] = Emitter::Restart;
+                self.candidate_cma[slot] = None;
+                self.candidate_parent_ids[slot] = None;
+                self.candidate_mates[slot] = false;
+                self.protected_until[slot] = 0;
+            }
+            on_slice(&self.population, 0..self.config.population, &self.config)?;
+        }
         self.parent_scores.fill(f32::NAN);
         self.generation = generation;
         self.migrate_islands();

@@ -746,3 +746,43 @@ fn cpu_reference(pop: &evolution::Population, cfg: &Config) -> Vec<f32> {
         .map(|m| m.fitness)
         .collect()
 }
+
+#[test]
+fn world_change_retests_archive_elites_in_generational_mode() {
+    let mut e = Experiment::new(config()).unwrap();
+    let all: Vec<usize> = (0..e.config.population).collect();
+    let metrics = evolution_simulator::scheduler::Scheduler::cpu_only(2)
+        .unwrap()
+        .evaluate(&e.population, &all, &e.config)
+        .unwrap();
+    for (i, m) in metrics.iter().enumerate() {
+        e.scores[i] = m.fitness;
+        e.trial_metrics[i] = m.behavior;
+    }
+    e.evaluated = e.config.population;
+    e.rank();
+    e.archive_batch().unwrap();
+    let elites: Vec<u64> = e.archive.entries.iter().map(|x| x.creature.id).collect();
+    assert!(!elites.is_empty());
+    e.update_config(Config {
+        terrain: 1,
+        ..e.config.clone()
+    })
+    .unwrap();
+    let mut handed_over = Vec::new();
+    e.prepare_next_batch_streaming(4, |pop, range, _| {
+        handed_over.extend(range.map(|i| pop.creature(i).id));
+        Ok(())
+    })
+    .unwrap();
+    for id in elites {
+        assert!(
+            (0..e.config.population).any(|i| e.population.creature(i).id == id),
+            "elite {id} was dropped by the world change"
+        );
+        assert!(
+            handed_over.contains(&id),
+            "elite {id} never reached a device"
+        );
+    }
+}
