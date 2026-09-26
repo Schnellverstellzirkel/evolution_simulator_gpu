@@ -9,6 +9,7 @@ use crate::{
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use egui_plot::{Bar, BarChart, Legend, Line, Plot};
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
@@ -339,12 +340,401 @@ impl Playback {
         }
         (now[0] - before[0]).hypot(now[1] - before[1]) / seconds
     }
+    /// Distance covered so far, frozen at the fall the engine recorded.
+    fn current_distance(&self) -> f32 {
+        self.fallen()
+            .map_or_else(|| physics::fitness(&self.nodes), |(_, distance)| distance)
+    }
+}
+/// Behavior-axis bin counts, mirroring `qd::BINS` (ground contact, cadence,
+/// bounce, height, feet). Bounce keeps one bin, so it adds no map cell.
+const MAP_BINS: [usize; 5] = [6, 8, 1, 6, 5];
+/// One occupied behavior cell of the archive map: the creature that holds it.
+struct MapCell {
+    score: f32,
+    rank: usize,
+    descriptor: crate::qd::Descriptor,
+    emitter: Option<crate::qd::Emitter>,
+    creature: Creature,
+}
+/// A sweep through the archive pages that fills `App::map_cells`.
+#[derive(Clone, Copy)]
+struct MapScan {
+    /// Start offset of the next page to request.
+    next: usize,
+    /// Archive size when the sweep started.
+    total: usize,
+}
+/// Which representation the Behavior archive tab shows.
+#[derive(Clone, Copy, PartialEq)]
+enum ArchiveView {
+    Cards,
+    Map,
+}
+/// One archive elite running in the race view.
+struct RaceLane {
+    rank: usize,
+    id: u64,
+    score: f32,
+    playback: Playback,
+}
+/// Cold-to-hot color for a normalized map value.
+fn heat_color(t: f32) -> Color32 {
+    let cold = Color32::from_rgb(64, 98, 168);
+    let mid = Color32::from_rgb(242, 201, 76);
+    let hot = Color32::from_rgb(202, 58, 46);
+    if t < 0.5 {
+        mix_color(cold, mid, t * 2.0)
+    } else {
+        mix_color(mid, hot, (t - 0.5) * 2.0)
+    }
+}
+/// Height range of one archive height bin; mirrors `qd::height_axis`.
+fn height_bin_range(bin: usize) -> (f32, f32) {
+    let low = 0.15f32;
+    let high = (0.6 * crate::evolution::max_bone_length()).max(2.0 * low);
+    let at = |t: f32| low * (high / low).powf(t);
+    (at(bin as f32 / 6.0), at((bin + 1) as f32 / 6.0))
+}
+fn height_bin_label(bin: usize) -> String {
+    let (low, high) = height_bin_range(bin);
+    format!("{low:.2} to {high:.2} m")
+}
+fn feet_bin_label(bin: usize) -> String {
+    match bin {
+        0 => "1 foot".to_owned(),
+        1..=3 => format!("{} feet", bin + 1),
+        _ => "5+ feet".to_owned(),
+    }
+}
+fn body_counts(creature: &Creature) -> (usize, usize, usize) {
+    (
+        creature.nodes.len(),
+        creature.bones.len(),
+        creature.muscles.len(),
+    )
+}
+/// An ancestor whose node, bone or muscle count differs from its parent's.
+fn body_plan_changed(
+    step: &crate::worker::LineageStep,
+    parent: Option<&crate::worker::LineageStep>,
+) -> bool {
+    parent.is_some_and(|parent| body_counts(&step.creature) != body_counts(&parent.creature))
+}
+/// Heat map of the occupied archive cells for the selected height and feet
+/// bins. Returns the niche key of a clicked cell.
+fn paint_archive_map(
+    ui: &mut egui::Ui,
+    snapshot: &Snapshot,
+    cells: &HashMap<[u8; 6], MapCell>,
+    scan: Option<&MapScan>,
+    height_bin: usize,
+    feet_bin: usize,
+    theme: Theme,
+) -> Option<[u8; 6]> {
+    let visible: Vec<(&[u8; 6], &MapCell)> = cells
+        .iter()
+        .filter(|(niche, _)| niche[3] as usize == height_bin && niche[4] as usize == feet_bin)
+        .collect();
+    ui.label(
+        RichText::new(format!(
+            "Ground contact against gait cadence · {} occupied cells in this slice · {} archive elites total",
+            visible.len(),
+            snapshot.archive_size,
+        ))
+        .small()
+        .color(theme.muted),
+    );
+    if let Some(scan) = scan {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(
+                RichText::new(format!(
+                    "Mapping archive pages… {} / {}",
+                    scan.next.min(scan.total),
+                    scan.total
+                ))
+                .small()
+                .color(theme.accent),
+            );
+        });
+    }
+    let (min, max) = visible
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), (_, cell)| {
+            (lo.min(cell.score), hi.max(cell.score))
+        });
+    let range = (max - min).max(1e-6);
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), ui.available_height().max(220.)),
+        Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    let plot = Rect::from_min_max(
+        rect.left_top() + Vec2::new(56., 34.),
+        rect.right_bottom() - Vec2::new(12., 42.),
+    );
+    if plot.width() < 80. || plot.height() < 80. {
+        return None;
+    }
+    let columns = MAP_BINS[0];
+    let rows = MAP_BINS[1];
+    let column_width = plot.width() / columns as f32;
+    let row_height = plot.height() / rows as f32;
+    for column in 0..=columns {
+        let x = plot.left() + column as f32 * column_width;
+        painter.line_segment(
+            [Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())],
+            Stroke::new(1., theme.card_border),
+        );
+    }
+    for row in 0..=rows {
+        let y = plot.bottom() - row as f32 * row_height;
+        painter.line_segment(
+            [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
+            Stroke::new(1., theme.card_border),
+        );
+    }
+    for column in 0..=columns {
+        let x = plot.left() + column as f32 * column_width;
+        painter.text(
+            Pos2::new(x, plot.bottom() + 4.),
+            Align2::CENTER_TOP,
+            format!("{:.0}%", column as f32 / columns as f32 * 100.),
+            FontId::proportional(10.),
+            theme.muted,
+        );
+    }
+    for row in 0..=rows {
+        let y = plot.bottom() - row as f32 * row_height;
+        painter.text(
+            Pos2::new(plot.left() - 6., y),
+            Align2::RIGHT_CENTER,
+            format!("{:.2}", row as f32 / rows as f32 * 6.),
+            FontId::proportional(10.),
+            theme.muted,
+        );
+    }
+    painter.text(
+        Pos2::new(plot.center().x, plot.bottom() + 24.),
+        Align2::CENTER_TOP,
+        "Ground contact",
+        FontId::proportional(11.),
+        theme.ink,
+    );
+    painter.text(
+        Pos2::new(rect.left() + 4., plot.top() - 16.),
+        Align2::LEFT_BOTTOM,
+        "Cadence (Hz)",
+        FontId::proportional(11.),
+        theme.ink,
+    );
+    // Legend: cold (slow) to hot (fast), with the distance range.
+    if !visible.is_empty() {
+        let legend = Rect::from_min_max(
+            Pos2::new(rect.right() - 272., rect.top() + 8.),
+            Pos2::new(rect.right() - 92., rect.top() + 22.),
+        );
+        let steps = 48;
+        for i in 0..steps {
+            let t = i as f32 / (steps - 1) as f32;
+            painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(
+                        legend.left() + legend.width() * i as f32 / steps as f32,
+                        legend.top(),
+                    ),
+                    Pos2::new(
+                        legend.left() + legend.width() * (i + 1) as f32 / steps as f32,
+                        legend.bottom(),
+                    ),
+                ),
+                0,
+                heat_color(t),
+            );
+        }
+        painter.text(
+            Pos2::new(legend.left() - 6., legend.center().y),
+            Align2::RIGHT_CENTER,
+            format!("{min:.2} m"),
+            FontId::proportional(10.),
+            theme.muted,
+        );
+        painter.text(
+            Pos2::new(legend.right() + 6., legend.center().y),
+            Align2::LEFT_CENTER,
+            format!("{max:.2} m"),
+            FontId::proportional(10.),
+            theme.muted,
+        );
+    }
+    if visible.is_empty() && scan.is_none() {
+        painter.text(
+            plot.center(),
+            Align2::CENTER_CENTER,
+            "No occupied cells in this slice. Pick another height or feet level.",
+            FontId::proportional(13.),
+            theme.muted,
+        );
+    }
+    let mut clicked = None;
+    for (niche, cell) in visible {
+        let inner = Rect::from_min_size(
+            Pos2::new(
+                plot.left() + niche[0] as f32 * column_width + 1.5,
+                plot.bottom() - (niche[1] as f32 + 1.) * row_height + 1.5,
+            ),
+            Vec2::new(column_width - 3., row_height - 3.),
+        );
+        let color = heat_color((cell.score - min) / range);
+        painter.rect_filled(inner, 3, color);
+        let luminance = (color.r() as u32 + color.g() as u32 + color.b() as u32) / 3;
+        let ink = if luminance > 150 {
+            Color32::from_rgb(24, 24, 20)
+        } else {
+            Color32::WHITE
+        };
+        if inner.width() > 34. && inner.height() > 16. {
+            painter.text(
+                inner.center(),
+                Align2::CENTER_CENTER,
+                format!("{:.1}", cell.score),
+                FontId::proportional(11.),
+                ink,
+            );
+        }
+        let response = ui.interact(inner, ui.id().with(("archive_map", *niche)), Sense::click());
+        if response.hovered() {
+            painter.rect_stroke(
+                inner,
+                3,
+                Stroke::new(2., theme.ink),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if response.clicked() {
+            clicked = Some(*niche);
+        }
+        response.on_hover_text(format!(
+            "Rank #{} · {:.3} m\n{:.2} m tall · {:.2} aspect ratio · {} feet\n{}\nClick to replay",
+            cell.rank + 1,
+            cell.score,
+            cell.descriptor.mean_height,
+            cell.descriptor.aspect_ratio,
+            cell.descriptor.feet.round() as i32,
+            cell.emitter
+                .map_or("archive elite".to_owned(), |e| e.label().to_owned()),
+        ));
+    }
+    clicked
+}
+/// One ancestor tile with its thumbnail, generation, fitness and gain.
+fn paint_lineage_tile(
+    ui: &mut egui::Ui,
+    step: &crate::worker::LineageStep,
+    parent: Option<&crate::worker::LineageStep>,
+    big: bool,
+    current: bool,
+    theme: Theme,
+    size: Vec2,
+) -> bool {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let hovered = response.hovered();
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(
+        rect,
+        8,
+        if big || hovered {
+            theme.card_hover
+        } else {
+            theme.card
+        },
+    );
+    let changed = body_plan_changed(step, parent);
+    painter.rect_stroke(
+        rect,
+        8,
+        Stroke::new(
+            if current { 2. } else { 1. },
+            if current || changed {
+                theme.accent
+            } else {
+                theme.card_border
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    let art_size = (size.y - 16.).clamp(40., 96.);
+    thumbnail(
+        &painter,
+        &step.creature,
+        Rect::from_min_size(rect.left_top() + Vec2::splat(8.), Vec2::splat(art_size)),
+    );
+    let text_x = rect.left() + 16. + art_size;
+    painter.text(
+        Pos2::new(text_x, rect.top() + 8.),
+        Align2::LEFT_TOP,
+        format!("Generation {}", step.generation),
+        FontId::proportional(12.),
+        theme.muted,
+    );
+    painter.text(
+        Pos2::new(text_x, rect.top() + 24.),
+        Align2::LEFT_TOP,
+        format!("{:.2} m", step.fitness),
+        FontId::proportional(16.),
+        if big { theme.accent } else { theme.ink },
+    );
+    painter.text(
+        Pos2::new(text_x, rect.top() + 46.),
+        Align2::LEFT_TOP,
+        format!("{:+.2} m", step.gain),
+        FontId::proportional(12.),
+        if step.gain >= 0. { theme.accent } else { AMBER },
+    );
+    if current {
+        painter.text(
+            rect.right_bottom() + Vec2::new(-8., -6.),
+            Align2::RIGHT_BOTTOM,
+            "selected",
+            FontId::proportional(10.),
+            theme.accent,
+        );
+    }
+    if changed {
+        painter.text(
+            rect.right_top() + Vec2::new(-8., 6.),
+            Align2::RIGHT_TOP,
+            "BODY PLAN",
+            FontId::proportional(9.),
+            theme.accent,
+        );
+    }
+    let (nodes, bones, muscles) = body_counts(&step.creature);
+    response
+        .on_hover_text(format!(
+            "Generation {} · {:.2} m ({:+.2} m)\n{} nodes / {} bones / {} muscles\n{}\n{}",
+            step.generation,
+            step.fitness,
+            step.gain,
+            nodes,
+            bones,
+            muscles,
+            step.change,
+            parent.map_or_else(
+                || "oldest recorded ancestor".to_owned(),
+                |p| format!("parent: generation {} at {:.2} m", p.generation, p.fitness),
+            ),
+        ))
+        .clicked()
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Overview,
     Population,
     History,
+    Race,
+    Lineage,
 }
 struct App {
     worker: Worker,
@@ -385,6 +775,22 @@ struct App {
     card_positions: std::collections::HashMap<u64, Pos2>,
     /// Ancestors of the selected creature, newest first.
     lineage: Vec<crate::worker::LineageStep>,
+    /// Creature whose ancestors the UI has already asked the worker for.
+    lineage_requested: Option<u64>,
+    /// A lineage request is in flight.
+    lineage_pending: bool,
+    /// Behavior archive map: occupied cells keyed by their niche bytes.
+    map_cells: HashMap<[u8; 6], MapCell>,
+    map_scan: Option<MapScan>,
+    map_generation: u32,
+    map_height: usize,
+    map_feet: usize,
+    archive_view: ArchiveView,
+    /// Top archived elites racing side by side.
+    race: Vec<RaceLane>,
+    race_pending: bool,
+    race_page_requested: bool,
+    race_camera: f32,
     /// Native benchmark frame intervals and the last control probe time.
     bench_frames: Vec<f32>,
     bench_last_ping: Instant,
@@ -425,6 +831,7 @@ impl App {
             initial_config.throughput = false;
         }
         let smoke_start_pending = std::env::var_os("EVOLUTION_SMOKE_POPULATION").is_some();
+        let smoke_tab = std::env::var("EVOLUTION_SMOKE_TAB").unwrap_or_default();
         if let Some(path) = std::env::var_os("EVOLUTION_SMOKE_CHECKPOINT") {
             worker.send(Command::Load(PathBuf::from(path)));
         } else {
@@ -439,9 +846,11 @@ impl App {
             snapshot: None,
             config: Config::default(),
             playback: None,
-            tab: match std::env::var("EVOLUTION_SMOKE_TAB").as_deref() {
-                Ok("history") => Tab::History,
-                Ok("population") => Tab::Population,
+            tab: match smoke_tab.as_str() {
+                "history" => Tab::History,
+                "population" | "map" => Tab::Population,
+                "race" => Tab::Race,
+                "lineage" => Tab::Lineage,
                 _ => Tab::Overview,
             },
             speed: 1.0,
@@ -475,6 +884,22 @@ impl App {
             capture_path: std::env::var("EVOLUTION_SMOKE_CAPTURE").ok(),
             sort_started: Instant::now(),
             lineage: Vec::new(),
+            lineage_requested: None,
+            lineage_pending: false,
+            map_cells: HashMap::new(),
+            map_scan: None,
+            map_generation: u32::MAX,
+            map_height: 0,
+            map_feet: 0,
+            archive_view: if smoke_tab == "map" {
+                ArchiveView::Map
+            } else {
+                ArchiveView::Cards
+            },
+            race: Vec::new(),
+            race_pending: smoke_tab == "race",
+            race_page_requested: false,
+            race_camera: 0.0,
             bench_frames: Vec::new(),
             bench_last_ping: Instant::now(),
             card_positions: Default::default(),
@@ -1283,7 +1708,56 @@ impl App {
                 RichText::new("Behavior niches and protected topologies · click to replay")
                     .color(theme.muted),
             );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .selectable_value(&mut self.archive_view, ArchiveView::Map, "Map")
+                    .on_hover_text(
+                        "Watch the search fill behavior space. Cells are colored by gait score.",
+                    )
+                    .clicked()
+                {
+                    self.last_page = usize::MAX;
+                }
+                if ui
+                    .selectable_value(&mut self.archive_view, ArchiveView::Cards, "Cards")
+                    .clicked()
+                {
+                    self.map_scan = None;
+                    self.last_page = usize::MAX;
+                }
+            });
         });
+        if self.archive_view == ArchiveView::Map {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Body height").small().color(theme.muted));
+                egui::ComboBox::from_id_salt("map_height")
+                    .selected_text(height_bin_label(self.map_height))
+                    .show_ui(ui, |ui| {
+                        for bin in 0..MAP_BINS[3] {
+                            ui.selectable_value(
+                                &mut self.map_height,
+                                bin,
+                                height_bin_label(bin),
+                            );
+                        }
+                    });
+                ui.label(RichText::new("Feet").small().color(theme.muted));
+                egui::ComboBox::from_id_salt("map_feet")
+                    .selected_text(feet_bin_label(self.map_feet))
+                    .show_ui(ui, |ui| {
+                        for bin in 0..MAP_BINS[4] {
+                            ui.selectable_value(&mut self.map_feet, bin, feet_bin_label(bin));
+                        }
+                    });
+                ui.label(
+                    RichText::new(
+                        "Bounce adds no cell: its axis has one bin. Click an occupied cell to replay it.",
+                    )
+                    .small()
+                    .color(theme.muted),
+                );
+            });
+        }
         let Some(snapshot) = &self.snapshot else {
             return;
         };
@@ -1335,65 +1809,91 @@ impl App {
                 );
             }
         });
-        let columns = (ui.available_width() / 155.).floor().max(2.) as usize;
-        let width = (ui.available_width() - (columns - 1) as f32 * 10.) / columns as f32;
-        let progress = (self.sort_started.elapsed().as_secs_f32() * self.sort_speed / 3.).min(1.);
-        let animating = snapshot.stage == Stage::Archived && progress < 1.;
-        let ease = progress * progress * (3. - 2. * progress);
-        let item_count = if snapshot.archive_size > 0 {
-            snapshot.archive_size
-        } else {
-            snapshot.config.population
-        };
         let mut selected = None;
         let mut requested = None;
-        let mut positions = std::collections::HashMap::new();
-        egui::ScrollArea::vertical().id_salt("population_grid").show_rows(
-            ui, 137., item_count.div_ceil(columns), |ui, rows| {
-                let start = rows.start * columns;
-                if start != self.last_page { requested = Some(start); }
-                for row in rows {
-                    ui.horizontal(|ui| {
-                        for column in 0..columns {
-                            let rank = row * columns + column;
-                            if rank >= item_count { break; }
-                            let (destination, response) = ui.allocate_exact_size(Vec2::new(width, 127.), Sense::click());
-                            if let Some(card) = snapshot.page.iter().find(|c| c.rank == rank) {
-                                positions.insert(card.creature.id, destination.min);
-                                let mut rect = destination;
-                                if animating && let Some(previous) = self.card_positions.get(&card.creature.id) {
-                                    rect = destination.translate((*previous - destination.min) * (1. - ease));
-                                }
-                                paint_card(ui.painter(), card, rect, response.hovered(), snapshot.stage, theme);
-                                if response.clicked() {
-                                    selected = Some((card.creature.clone(), snapshot.config.clone()));
-                                }
-                                response.on_hover_text(format!(
-                                    "ID {}\n{} nodes / {} bones / {} muscles\nMutability {:.2}\n{}\n{}\nClick to replay",
-                                    card.creature.id,
-                                    card.creature.nodes.len(),
-                                    card.creature.bones.len(),
-                                    card.creature.muscles.len(),
-                                    card.creature.mutability,
-                                    card.emitter.map_or("Initial population".to_owned(), |emitter| format!("Emitter: {}", emitter.label())),
-                                    card.descriptor.map_or_else(
-                                        || if card.score.is_finite() { "Current trial evaluated".to_owned() } else { "Current trial pending".to_owned() },
-                                        |d| format!("Contact {:.0}% · gait {:.2} Hz · form {:.2} · bob {:.2} m · height {:.2} m · {} feet · {} visits", d.ground_contact * 100.0, d.gait_frequency, d.aspect_ratio, d.vertical_oscillation, d.mean_height, d.feet, card.visits),
-                                    )
-                                ));
-                            } else {
-                                ui.painter().rect_filled(destination, 8, theme.card);
-                                ui.painter().text(destination.center(), Align2::CENTER_CENTER, "Loading…", FontId::proportional(12.), theme.muted);
-                            }
-                        }
-                    });
-                }
+        let mut map_scan_request = None;
+        if self.archive_view == ArchiveView::Map {
+            if self.map_scan.is_none()
+                && snapshot.archive_size > 0
+                && (self.map_cells.is_empty() || self.map_generation != snapshot.generation)
+            {
+                map_scan_request = Some((snapshot.archive_size, snapshot.generation));
             }
-        );
-        if animating {
-            ui.ctx().request_repaint();
+            let clicked = paint_archive_map(
+                ui,
+                snapshot,
+                &self.map_cells,
+                self.map_scan.as_ref(),
+                self.map_height,
+                self.map_feet,
+                theme,
+            );
+            if let Some(cell) = clicked.and_then(|key| self.map_cells.get(&key)) {
+                selected = Some((cell.creature.clone(), snapshot.config.clone()));
+            }
         } else {
-            self.card_positions = positions;
+            let columns = (ui.available_width() / 155.).floor().max(2.) as usize;
+            let width = (ui.available_width() - (columns - 1) as f32 * 10.) / columns as f32;
+            let progress =
+                (self.sort_started.elapsed().as_secs_f32() * self.sort_speed / 3.).min(1.);
+            let animating = snapshot.stage == Stage::Archived && progress < 1.;
+            let ease = progress * progress * (3. - 2. * progress);
+            let item_count = if snapshot.archive_size > 0 {
+                snapshot.archive_size
+            } else {
+                snapshot.config.population
+            };
+            let mut positions = std::collections::HashMap::new();
+            egui::ScrollArea::vertical().id_salt("population_grid").show_rows(
+                ui, 137., item_count.div_ceil(columns), |ui, rows| {
+                    let start = rows.start * columns;
+                    if start != self.last_page { requested = Some(start); }
+                    for row in rows {
+                        ui.horizontal(|ui| {
+                            for column in 0..columns {
+                                let rank = row * columns + column;
+                                if rank >= item_count { break; }
+                                let (destination, response) = ui.allocate_exact_size(Vec2::new(width, 127.), Sense::click());
+                                if let Some(card) = snapshot.page.iter().find(|c| c.rank == rank) {
+                                    positions.insert(card.creature.id, destination.min);
+                                    let mut rect = destination;
+                                    if animating && let Some(previous) = self.card_positions.get(&card.creature.id) {
+                                        rect = destination.translate((*previous - destination.min) * (1. - ease));
+                                    }
+                                    paint_card(ui.painter(), card, rect, response.hovered(), snapshot.stage, theme);
+                                    if response.clicked() {
+                                        selected = Some((card.creature.clone(), snapshot.config.clone()));
+                                    }
+                                    response.on_hover_text(format!(
+                                        "ID {}\n{} nodes / {} bones / {} muscles\nMutability {:.2}\n{}\n{}\nClick to replay",
+                                        card.creature.id,
+                                        card.creature.nodes.len(),
+                                        card.creature.bones.len(),
+                                        card.creature.muscles.len(),
+                                        card.creature.mutability,
+                                        card.emitter.map_or("Initial population".to_owned(), |emitter| format!("Emitter: {}", emitter.label())),
+                                        card.descriptor.map_or_else(
+                                            || if card.score.is_finite() { "Current trial evaluated".to_owned() } else { "Current trial pending".to_owned() },
+                                            |d| format!("Contact {:.0}% · gait {:.2} Hz · form {:.2} · bob {:.2} m · height {:.2} m · {} feet · {} visits", d.ground_contact * 100.0, d.gait_frequency, d.aspect_ratio, d.vertical_oscillation, d.mean_height, d.feet, card.visits),
+                                        )
+                                    ));
+                                } else {
+                                    ui.painter().rect_filled(destination, 8, theme.card);
+                                    ui.painter().text(destination.center(), Align2::CENTER_CENTER, "Loading…", FontId::proportional(12.), theme.muted);
+                                }
+                            }
+                        });
+                    }
+                }
+            );
+            if animating {
+                ui.ctx().request_repaint();
+            } else {
+                self.card_positions = positions;
+            }
+        }
+        if let Some((total, generation)) = map_scan_request {
+            self.begin_map_scan(total, generation);
         }
         if let Some(start) = requested {
             self.worker.send(Command::Page(start));
@@ -1403,6 +1903,121 @@ impl App {
             self.worker.send(Command::Preview { creature, config });
             self.tab = Tab::Overview;
         }
+    }
+    /// Starts a sweep through the archive pages that fills the behavior map.
+    fn begin_map_scan(&mut self, total: usize, generation: u32) {
+        if total == 0 {
+            self.map_cells.clear();
+            self.map_scan = None;
+            return;
+        }
+        self.map_cells.clear();
+        self.map_generation = generation;
+        self.map_scan = Some(MapScan { next: 0, total });
+        self.last_page = usize::MAX;
+        self.worker.send(Command::Page(0));
+    }
+    /// Folds one published archive page into the behavior map while a sweep runs.
+    fn absorb_archive_page(&mut self, snapshot: &Snapshot) {
+        let Some(scan) = self.map_scan else { return };
+        if snapshot.archive_size != scan.total {
+            // The archive moved under the sweep, so start over.
+            let total = snapshot.archive_size;
+            self.map_cells.clear();
+            self.map_generation = snapshot.generation;
+            self.map_scan = (total > 0).then_some(MapScan { next: 0, total });
+            if total > 0 {
+                self.worker.send(Command::Page(0));
+            }
+            return;
+        }
+        if snapshot.page_start != scan.next || snapshot.page.is_empty() {
+            self.worker.send(Command::Page(scan.next));
+            return;
+        }
+        for card in &snapshot.page {
+            let Some(descriptor) = card.descriptor else {
+                continue;
+            };
+            if !card.score.is_finite() {
+                continue;
+            }
+            let key = descriptor.niche().0;
+            if self
+                .map_cells
+                .get(&key)
+                .is_none_or(|old| card.score > old.score)
+            {
+                self.map_cells.insert(
+                    key,
+                    MapCell {
+                        score: card.score,
+                        rank: card.rank,
+                        descriptor,
+                        emitter: card.emitter,
+                        creature: card.creature.clone(),
+                    },
+                );
+            }
+        }
+        self.map_generation = snapshot.generation;
+        let next = snapshot.page_start + snapshot.page.len();
+        if next >= scan.total {
+            self.map_scan = None;
+        } else {
+            self.map_scan = Some(MapScan {
+                next,
+                total: scan.total,
+            });
+            self.worker.send(Command::Page(next));
+        }
+    }
+    /// Builds race lanes from the top archive cards once the first page arrives.
+    fn maybe_build_race(&mut self) {
+        if !self.race_pending {
+            return;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let (archive_size, page_start) = (snapshot.archive_size, snapshot.page_start);
+        if archive_size == 0 {
+            return;
+        }
+        if page_start != 0 {
+            if !self.race_page_requested {
+                self.race_page_requested = true;
+                self.worker.send(Command::Page(0));
+            }
+            return;
+        }
+        let config = snapshot.config.clone();
+        let lanes: Vec<RaceLane> = snapshot
+            .page
+            .iter()
+            .filter(|card| card.descriptor.is_some() && card.score.is_finite())
+            .take(5)
+            .map(|card| RaceLane {
+                rank: card.rank,
+                id: card.creature.id,
+                score: card.score,
+                playback: Playback::new(card.creature.clone(), config.clone()),
+            })
+            .collect();
+        if lanes.is_empty() {
+            return;
+        }
+        self.race = lanes;
+        self.race_pending = false;
+        self.race_page_requested = false;
+        self.race_camera = 0.0;
+    }
+    /// Clears the race and asks for a fresh set of top elites.
+    fn restart_race(&mut self) {
+        self.race.clear();
+        self.race_pending = true;
+        self.race_page_requested = false;
+        self.race_camera = 0.0;
     }
     /// Ancestor chain of the selected creature; the biggest gains stand out and
     /// any ancestor can be replayed.
@@ -1427,23 +2042,17 @@ impl App {
             .id_salt("lineage")
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for (k, step) in self.lineage.iter().enumerate() {
-                        let big = step.gain >= highlight;
-                        let text = format!(
-                            "gen {} · {:.2} m\n{:+.2} m · {}",
-                            step.generation, step.fitness, step.gain, step.change
-                        );
-                        let button = egui::Button::new(RichText::new(text).small().color(if big {
-                            theme.accent
-                        } else {
-                            theme.ink
-                        }))
-                        .fill(if big {
-                            theme.card_hover
-                        } else {
-                            theme.card
-                        });
-                        if ui.add(button).clicked() {
+                    for k in 0..self.lineage.len() {
+                        let step = &self.lineage[k];
+                        if paint_lineage_tile(
+                            ui,
+                            step,
+                            self.lineage.get(k + 1),
+                            step.gain >= highlight,
+                            k == 0,
+                            theme,
+                            Vec2::new(176., 88.),
+                        ) {
                             chosen = Some(k);
                         }
                     }
@@ -1457,6 +2066,315 @@ impl App {
             self.set_preview(self.lineage[k].creature.clone(), config);
         }
         ui.add_space(6.);
+    }
+    /// Full ancestor list of the selected creature, one row per generation.
+    fn lineage_view(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme();
+        ui.horizontal(|ui| {
+            ui.heading("Lineage");
+            ui.label(
+                RichText::new(
+                    "Ancestors of the selected creature, newest first. Click one to replay it.",
+                )
+                .color(theme.muted),
+            );
+        });
+        if self.lineage.is_empty() {
+            ui.add_space(12.);
+            ui.label(
+                RichText::new(if self.playback.is_none() {
+                    "Select a creature in the Behavior archive to trace its ancestry."
+                } else if self.lineage_pending {
+                    "Requesting ancestors…"
+                } else {
+                    "No recorded ancestors for this creature yet. Evolve a few generations or pick an archive elite."
+                })
+                .color(theme.muted),
+            );
+            return;
+        }
+        if let Some(p) = &self.playback {
+            ui.label(format!(
+                "#{} · {} nodes / {} bones / {} muscles · {} recorded ancestors",
+                p.creature.id,
+                p.creature.nodes.len(),
+                p.creature.bones.len(),
+                p.creature.muscles.len(),
+                self.lineage.len()
+            ));
+        }
+        let mut chosen = None;
+        egui::ScrollArea::vertical()
+            .id_salt("lineage_view")
+            .show(ui, |ui| {
+                for k in 0..self.lineage.len() {
+                    let step = &self.lineage[k];
+                    if paint_lineage_tile(
+                        ui,
+                        step,
+                        self.lineage.get(k + 1),
+                        true,
+                        k == 0,
+                        theme,
+                        Vec2::new(ui.available_width(), 104.),
+                    ) {
+                        chosen = Some(k);
+                    }
+                    ui.add_space(6.);
+                }
+            });
+        if let Some(k) = chosen {
+            let config = self
+                .snapshot
+                .as_ref()
+                .map_or_else(Config::default, |s| s.config.clone());
+            self.set_preview(self.lineage[k].creature.clone(), config);
+            self.tab = Tab::Overview;
+        }
+    }
+    /// The top archived elites running side by side, with live standings.
+    fn race_view(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme();
+        ui.horizontal(|ui| {
+            ui.heading("Race");
+            ui.label(
+                RichText::new("The fastest archived creatures run their trials side by side.")
+                    .color(theme.muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("New race")
+                    .on_hover_text("Take the current top five archived creatures")
+                    .clicked()
+                {
+                    self.restart_race();
+                }
+            });
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .button(if self.playing { "Pause" } else { "Play" })
+                .clicked()
+            {
+                self.playing = !self.playing;
+            }
+            if ui.button("Replay").clicked() {
+                for lane in &mut self.race {
+                    lane.playback.reset();
+                }
+                self.race_camera = 0.0;
+            }
+            ui.add(
+                egui::Slider::new(&mut self.speed, 0.25..=4.0)
+                    .logarithmic(true)
+                    .suffix("×")
+                    .text("Playback speed"),
+            )
+            .on_hover_text("Shared with the single-creature replay.");
+        });
+        if self.race.is_empty() {
+            ui.add_space(12.);
+            let waiting = self.race_pending
+                && self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.archive_size > 0);
+            ui.label(
+                RichText::new(if waiting {
+                    "Loading the top archive elites…"
+                } else {
+                    "No archived creatures yet. Run a generation, then start a new race."
+                })
+                .color(theme.muted),
+            );
+            return;
+        }
+        let distances: Vec<f32> = self
+            .race
+            .iter()
+            .map(|lane| lane.playback.current_distance())
+            .collect();
+        let leader = distances
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map_or(0, |(i, _)| i);
+        let (rect, _) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), ui.available_height().max(260.)),
+            Sense::hover(),
+        );
+        let painter = ui.painter_at(rect);
+        let board_width = 200.0_f32.min(rect.width() * 0.3);
+        let lanes_rect = Rect::from_min_max(
+            rect.min,
+            Pos2::new(rect.right() - board_width - 12., rect.bottom()),
+        );
+        let zoom = 34.0;
+        let visible = lanes_rect.width() / zoom;
+        let target = (distances[leader] - visible * 0.6).max(0.0);
+        let dt = ui.ctx().input(|i| i.stable_dt).clamp(0.0, 0.1);
+        self.race_camera += (target - self.race_camera) * (dt * 4.0).min(1.0);
+        let camera = self.race_camera;
+        let lane_height = lanes_rect.height() / self.race.len() as f32;
+        for (i, lane) in self.race.iter().enumerate() {
+            let lane_rect = Rect::from_min_max(
+                Pos2::new(
+                    lanes_rect.left(),
+                    lanes_rect.top() + i as f32 * lane_height + 2.,
+                ),
+                Pos2::new(
+                    lanes_rect.right(),
+                    lanes_rect.top() + (i + 1) as f32 * lane_height - 2.,
+                ),
+            );
+            let is_leader = i == leader;
+            painter.rect_filled(
+                lane_rect,
+                8,
+                if is_leader {
+                    theme.card_hover
+                } else {
+                    theme.card
+                },
+            );
+            painter.rect_stroke(
+                lane_rect,
+                8,
+                Stroke::new(
+                    if is_leader { 2. } else { 1. },
+                    if is_leader {
+                        theme.accent
+                    } else {
+                        theme.card_border
+                    },
+                ),
+                egui::StrokeKind::Inside,
+            );
+            let ground = lane_rect.bottom() - 12.;
+            painter.line_segment(
+                [
+                    Pos2::new(lane_rect.left() + 4., ground),
+                    Pos2::new(lane_rect.right() - 4., ground),
+                ],
+                Stroke::new(2., GROUND_EDGE),
+            );
+            let step = 5.0;
+            let mut x = (camera / step).ceil() * step;
+            while x <= camera + visible {
+                let px = lane_rect.left() + (x - camera) * zoom;
+                painter.line_segment(
+                    [
+                        Pos2::new(px, ground),
+                        Pos2::new(px, lane_rect.bottom() - 5.),
+                    ],
+                    Stroke::new(1., theme.card_border),
+                );
+                if i == 0 {
+                    painter.text(
+                        Pos2::new(px + 3., ground - 2.),
+                        Align2::LEFT_BOTTOM,
+                        format!("{x:.0} m"),
+                        FontId::proportional(10.),
+                        theme.muted,
+                    );
+                }
+                x += step;
+            }
+            let origin = Pos2::new(lane_rect.left() - camera * zoom, ground);
+            let playback = &lane.playback;
+            draw_creature(
+                &painter,
+                &playback.nodes,
+                &playback.creature,
+                origin,
+                zoom,
+                playback.tick.saturating_sub(physics::settle()) as f32 * physics::dt(),
+                playback.fallen().is_some(),
+            );
+            painter.text(
+                lane_rect.left_top() + Vec2::new(8., 6.),
+                Align2::LEFT_TOP,
+                format!("#{}", lane.rank + 1),
+                FontId::proportional(13.),
+                if is_leader { theme.accent } else { theme.ink },
+            );
+            painter.text(
+                lane_rect.left_top() + Vec2::new(8., 23.),
+                Align2::LEFT_TOP,
+                format!("ID {} · best {:.2} m", lane.id, lane.score),
+                FontId::proportional(11.),
+                theme.muted,
+            );
+            painter.text(
+                lane_rect.right_top() + Vec2::new(-8., 6.),
+                Align2::RIGHT_TOP,
+                format!("{:.2} m", distances[i]),
+                FontId::proportional(15.),
+                if is_leader { theme.accent } else { theme.ink },
+            );
+            if playback.fallen().is_some() {
+                painter.text(
+                    lane_rect.right_top() + Vec2::new(-8., 26.),
+                    Align2::RIGHT_TOP,
+                    "fell",
+                    FontId::proportional(11.),
+                    FALLEN,
+                );
+            }
+        }
+        let board = Rect::from_min_max(
+            Pos2::new(lanes_rect.right() + 12., rect.top()),
+            rect.right_bottom(),
+        );
+        painter.rect_filled(board, 8, theme.card);
+        painter.rect_stroke(
+            board,
+            8,
+            Stroke::new(1., theme.card_border),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            board.left_top() + Vec2::new(10., 8.),
+            Align2::LEFT_TOP,
+            "STANDINGS",
+            FontId::proportional(11.),
+            theme.muted,
+        );
+        let mut order: Vec<usize> = (0..self.race.len()).collect();
+        order.sort_by(|&a, &b| distances[b].total_cmp(&distances[a]));
+        for (place, &i) in order.iter().enumerate() {
+            let y = board.top() + 34. + place as f32 * 26.;
+            if y > board.bottom() - 26. {
+                break;
+            }
+            let lane = &self.race[i];
+            painter.text(
+                Pos2::new(board.left() + 10., y),
+                Align2::LEFT_CENTER,
+                format!("{}. #{}", place + 1, lane.rank + 1),
+                FontId::proportional(12.),
+                if place == 0 { theme.accent } else { theme.ink },
+            );
+            painter.text(
+                Pos2::new(board.right() - 10., y),
+                Align2::RIGHT_CENTER,
+                format!("{:.1} m", distances[i]),
+                FontId::proportional(12.),
+                if place == 0 {
+                    theme.accent
+                } else {
+                    theme.muted
+                },
+            );
+        }
+        painter.text(
+            board.left_bottom() + Vec2::new(10., -8.),
+            Align2::LEFT_BOTTOM,
+            "Live distance · archive rank",
+            FontId::proportional(10.),
+            theme.muted,
+        );
     }
     fn species_history(&mut self, ui: &mut egui::Ui) {
         let Some(snapshot) = &self.snapshot else {
@@ -1629,7 +2547,10 @@ impl App {
                     .spacing([18., 6.])
                     .show(ui, |ui| {
                         for (keys, action) in [
-                            ("1 / 2 / 3", "Overview · Behavior archive · History"),
+                            (
+                                "1 to 5",
+                                "Overview · Behavior archive · History · Race · Lineage",
+                            ),
                             (
                                 "Space",
                                 "Play or pause the replay. Without a replay it pauses or resumes evolution.",
@@ -1653,11 +2574,19 @@ impl App {
                     ),
                     (
                         "Behavior archive",
-                        "Every behavior niche the search protects. Click a creature card to replay it.",
+                        "Every behavior niche the search protects, as cards or as a behavior map. Click a creature or an occupied map cell to replay it.",
                     ),
                     (
                         "History & statistics",
                         "Per-generation curves, the mix of body types, and the distribution of gait scores.",
+                    ),
+                    (
+                        "Race",
+                        "The five fastest archived creatures run their trials side by side with live standings.",
+                    ),
+                    (
+                        "Lineage",
+                        "Ancestors of the selected creature with thumbnails, fitness gains and body plan changes.",
                     ),
                 ] {
                     ui.label(RichText::new(name).strong());
@@ -1814,6 +2743,7 @@ impl eframe::App for App {
         }
         let next = self.worker.view.lock().unwrap().take();
         if let Some(mut next) = next {
+            self.absorb_archive_page(&next);
             if self
                 .snapshot
                 .as_ref()
@@ -1833,11 +2763,28 @@ impl eframe::App for App {
             }
             if let Some((c, cfg)) = next.preview.take() {
                 self.set_preview(c, cfg);
+                self.lineage.clear();
             }
             if let Some(lineage) = next.lineage.take() {
                 self.lineage = lineage;
+                self.lineage_pending = false;
             }
             self.snapshot = Some(next);
+            self.maybe_build_race();
+        }
+        let lineage_request =
+            if (self.tab == Tab::Overview || self.tab == Tab::Lineage) && self.lineage.is_empty() {
+                self.playback
+                    .as_ref()
+                    .filter(|p| self.lineage_requested != Some(p.creature.id))
+                    .map(|p| (p.creature.clone(), p.config.clone()))
+            } else {
+                None
+            };
+        if let Some((creature, config)) = lineage_request {
+            self.lineage_requested = Some(creature.id);
+            self.lineage_pending = true;
+            self.worker.send(Command::Preview { creature, config });
         }
         if !ctx.egui_wants_keyboard_input() {
             let pressed = |key| ctx.input(|i| i.key_pressed(key));
@@ -1850,11 +2797,20 @@ impl eframe::App for App {
             if pressed(egui::Key::Num3) {
                 self.tab = Tab::History;
             }
+            if pressed(egui::Key::Num4) {
+                self.tab = Tab::Race;
+                if self.race.is_empty() {
+                    self.race_pending = true;
+                }
+            }
+            if pressed(egui::Key::Num5) {
+                self.tab = Tab::Lineage;
+            }
             if pressed(egui::Key::F1) || pressed(egui::Key::Questionmark) {
                 self.show_help = !self.show_help;
             }
             if pressed(egui::Key::Space) {
-                if self.playback.is_some() {
+                if self.playback.is_some() || (self.tab == Tab::Race && !self.race.is_empty()) {
                     self.playing = !self.playing;
                 } else if self.active() {
                     self.pause();
@@ -1877,24 +2833,34 @@ impl eframe::App for App {
                 self.file("Save experiment");
             }
         }
-        if self.playing
-            && let Some(p) = &mut self.playback
-        {
+        if self.playing {
             let frame_dt = physics::dt();
             if frame_dt.is_finite() && frame_dt > 0.0 {
-                p.accumulator = (p.accumulator + dt.clamp(0.0, 0.1) * self.speed).min(1.0);
-                let start = Instant::now();
-                while p.accumulator >= frame_dt && start.elapsed() < Duration::from_millis(5) {
-                    if p.tick >= p.last_frame() {
-                        p.reset();
+                let speed = self.speed;
+                let advance = |p: &mut Playback| {
+                    p.accumulator = (p.accumulator + dt.clamp(0.0, 0.1) * speed).min(1.0);
+                    let start = Instant::now();
+                    while p.accumulator >= frame_dt && start.elapsed() < Duration::from_millis(5) {
+                        if p.tick >= p.last_frame() {
+                            p.reset();
+                        }
+                        p.advance();
+                        p.accumulator -= frame_dt;
                     }
-                    p.advance();
-                    p.accumulator -= frame_dt;
+                };
+                if let Some(p) = &mut self.playback {
+                    advance(p);
+                    if self.follow {
+                        let x =
+                            p.nodes.iter().map(|n| n.pos[0]).sum::<f32>() / p.nodes.len() as f32;
+                        self.camera[0] += (x - self.camera[0]) * (dt * 8.).min(1.0);
+                    }
                 }
-            }
-            if self.follow {
-                let x = p.nodes.iter().map(|n| n.pos[0]).sum::<f32>() / p.nodes.len() as f32;
-                self.camera[0] += (x - self.camera[0]) * (dt * 8.).min(1.0);
+                if self.tab == Tab::Race {
+                    for lane in &mut self.race {
+                        advance(&mut lane.playback);
+                    }
+                }
             }
         }
         let theme = self.theme();
@@ -1965,8 +2931,15 @@ impl eframe::App for App {
                         (Tab::Overview, "Overview"),
                         (Tab::Population, "Behavior archive"),
                         (Tab::History, "History & statistics"),
+                        (Tab::Race, "Race"),
+                        (Tab::Lineage, "Lineage"),
                     ] {
-                        ui.selectable_value(&mut self.tab, tab, RichText::new(label).size(15.));
+                        let clicked = ui
+                            .selectable_value(&mut self.tab, tab, RichText::new(label).size(15.))
+                            .clicked();
+                        if clicked && tab == Tab::Race && self.race.is_empty() {
+                            self.race_pending = true;
+                        }
                     }
                 });
                 ui.add_space(8.);
@@ -1983,6 +2956,8 @@ impl eframe::App for App {
                     Tab::History => {
                         egui::ScrollArea::vertical().show(ui, |ui| self.history(ui));
                     }
+                    Tab::Race => self.race_view(ui),
+                    Tab::Lineage => self.lineage_view(ui),
                 }
             });
         self.dialogs(&ctx);
