@@ -6,7 +6,7 @@ codegen units, and enables incremental compilation:
 
 ```bash
 CARGO_BUILD_JOBS=8 nice -n 10 cargo build --profile release-fast
-CARGO_BUILD_JOBS=8 RAYON_NUM_THREADS=8 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 nice -n 10 cargo run --profile release-fast
+CARGO_BUILD_JOBS=8 RAYON_NUM_THREADS=8 EVOLUTION_DEVICES=primary nice -n 10 cargo run --profile release-fast
 ```
 
 The repository's x86_64 Linux Cargo config already enables `target-cpu=native`.
@@ -24,7 +24,7 @@ desktop Radeon and cap CPU use. Apply these environment settings to each such
 command:
 
 ```bash
-CARGO_BUILD_JOBS=8 RAYON_NUM_THREADS=8 RUST_TEST_THREADS=1 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 nice -n 10 cargo test --release --all-targets
+CARGO_BUILD_JOBS=8 RAYON_NUM_THREADS=8 RUST_TEST_THREADS=1 EVOLUTION_DEVICES=primary nice -n 10 cargo test --release --all-targets
 ```
 
 Serial test execution prevents independently created evaluation pools from

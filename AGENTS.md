@@ -4,12 +4,13 @@ Read this before changing the code. It lists the owner's rules, how to work on t
 
 ## Live status (updated with each push)
 
-- 2026-09-27, Codex handoff: synced origin ffede6e and preserved its completed device recovery. Added live backend names in worker snapshots and refreshed cached backend/allocation status after blocking evaluation, including errors. Pushed at owner request before validation completed; formatting passed before synchronization, current all-target Clippy and release tests remain unverified. Earlier local recovery drafts are superseded by the implementation already on main.
+- 2026-09-27, Codex handoff (c176652): live backend names in worker snapshots and refreshed backend/allocation status after blocking evaluation. Claude verified it afterwards: all-target clippy and 149 release tests pass on a894038.
 
 Only Claude works on this repository now. The Codex team left on 2026-09-27; its last unmerged commit (search-benchmark `--cpu` with top-50 body sizes) is merged, and no files are reserved for anyone. Pull before you start, commit small, push often, and update this section when you take or finish an item.
 
 - 2026-09-27, Claude is working on: the 2M evaluated creatures/s goal, measured end to end in the full graphical game at 3M creatures and 60 s trials. Plan and baseline: `docs/performance-campaign.md`.
-- Just pushed: archive and breeding CPU cuts between batches (search output byte-identical to 2b1014c), the performance campaign baseline, and the Codex search-benchmark CPU backend.
+- Just pushed (2M/s campaign, first wave): the 3M GUI rate on an evolved checkpoint went from 36,381 to 65,288 creatures/s end to end (82.9 to 46.0 s per generation). Fine checks are shared per archive cell, global-archive replays run on the CPU engine next to the check, GPU units run on four parallel queues, units last 3 s, one check unit runs at a time, and the CPU threads go to breeding by default. A per-body-plan kernel prototype (`EVOLUTION_SPECIALIZE`) is bit-exact and 10 to 20% faster on single-plan buckets but is not wired into production batches yet. Measurements: `docs/performance-log.md`.
+- Earlier: archive and breeding CPU cuts between batches (search output byte-identical to 2b1014c), the performance campaign baseline, and the Codex search-benchmark CPU backend.
 - Done earlier (Codex): device recovery (see `docs/superpowers/plans/2026-09-26-device-recovery.md`). A failed GPU is retired and its unfinished units are retried on the CPU; a failed CPU is terminal after completed output; a primary GPU that cannot open falls back to the CPU.
 - 2026-09-26 18:xx, Claude pushed a backlog sweep: legacy `mutate`/`reproduce` removed with the obstacle config slot (checkpoint magic EVORUST5); `EVOLUTION_STAGE_LOG` CSV rows; `runs/` disk use, replay speed and center-of-mass trail, help overlay, screenshot button, dark theme, archive map, race view and lineage view in the UI; heat wave, drought, slope, wind, mud and gap effects in both engines with archive re-testing (qd::VERSION 23); `examples/search_ab.rs`; `examples/effect_cost.rs` with the measured per-effect cost; and `tests/engine_agreement.rs` with fine-fidelity evolved-creature checks.
 - Just pushed: hurdles and per-creature earthquake terrain, near-neutral structural splits, and a fresh-perturbation elite refresh (both search flags measured and left default off), plus the 3M memory and check-cost measurements in docs/performance-log.md. `qd::VERSION` 24, checkpoint magic EVORUST6, 121 CPU tests, nine report tests, five RTX/agreement tests; `first_generation` unchanged at median -0.07 m, p99 0.34 m, best 11.03 m. 3M peak RSS 5.61 GiB; the fine contender check is 53.9% of check-on GPU busy time.
@@ -55,7 +56,7 @@ The replay viewport plays frames and the matching scored result recorded by the 
 
 - The laptop has 16 threads, an RTX 4060 for compute, and a Radeon 780M that drives the desktop.
 - Use at most half the machine for builds, tests and runs: 8 build jobs and 8 rayon threads, at low priority (`nice`).
-- Never evaluate creatures on the Radeon. Set `EVOLUTION_DEVICES=primary` and `EVOLUTION_CPU_THREADS=6` for every run of the game, the tests, and benchmarks. Heavy Radeon use crashed the desktop (mutter/Wayland) once.
+- Never evaluate creatures on the Radeon. Set `EVOLUTION_DEVICES=primary` for every run of the game, the tests, and benchmarks. The default thread split (no separate CPU evaluation pool, eight general workers) stays inside half the machine; set `EVOLUTION_CPU_THREADS=6` only for CPU-only tools such as `search-benchmark --cpu`. Heavy Radeon use crashed the desktop (mutter/Wayland) once.
 - Keep subagent fan-outs small for the same reason. The session limit is 20 concurrent subagents, and 20 at once also ran out the owner's token budget.
 - Fast iteration build: `cargo build --profile release-fast` inherits release optimization with LTO disabled, 256 codegen units, and incremental compilation. It adds no platform-specific linker requirement. Use the normal thin-LTO release profile for comparable performance measurements.
 - GPU tests are `#[ignore]`d. Run them with `cargo test --release --test simulation -- --ignored`.
@@ -144,7 +145,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 52. Keep the GUI at 60+ FPS during evolution at 3M creatures.
 53. Add a persistent Vulkan pipeline cache and compile pipelines in the background.
 54. Successive halving: short trials first, full trials for survivors (10 s ranks predict 60 s ranks with Spearman 0.89 to 0.94).
-55. Done: secondary GPUs are opt-in; the scheduler defaults to `primary`. General and CPU evaluation pools share a budget of at most eight threads and half the logical CPUs (six evaluation plus two general workers on this laptop). Continue setting the explicit workstation environment for every run.
+55. Done: secondary GPUs are opt-in; the scheduler defaults to `primary`. General and CPU evaluation pools share a budget of at most eight threads and half the logical CPUs. Since 2026-09-27 the default gives all eight to general workers and runs the CPU engine on that pool as a replay and failover reserve (65k against 56k creatures/s with a six-thread evaluation pool at 3M).
 56. Size work units per device from measured rates, and re-measure after each engine change.
 57. Baseline measured: 3M peak RSS 5.61 GiB, checkpoint 942 MiB, population arena 408 to 522 B/creature, marginal fit 1.88 KB/creature plus 213 MiB base; see docs/performance-log.md. Shrinking storage remains open.
 58. Send only snapshot changes from worker to UI, not full copies.

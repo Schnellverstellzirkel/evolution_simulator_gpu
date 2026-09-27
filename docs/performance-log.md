@@ -391,3 +391,31 @@ GUI stage-log runs at 5 s trials: 300k reached 114,159/s end to end (GPU busy
 to 0.87 s); 1M reached 193,476/s (GPU busy 1,221,507/s, CPU busy 223,955/s,
 archive 1.05 to 1.63 s, breeding 2.04 to 2.34 s, packing 2.204 s). The 3M,
 60 s production point from the 2026-09-26 section stays at 45,373/s.
+
+## 2M/s campaign, first wave: keep the GPU busy (2026-09-27)
+
+Workload: `runs/evolved-3m.evo` (not committed), a 3M population evolved for 5 generations from seed 38 with 60 s trials and checks off, mean 5.16 nodes. Every row is the graphical game (`EVOLUTION_SMOKE_CHECKPOINT`, `EVOLUTION_BENCH_GENERATIONS=2`, `EVOLUTION_BENCH_WARMUP=1`, `EVOLUTION_BENCH_NO_AUTOSAVE=1`, `EVOLUTION_DEVICES=primary`, `RAYON_NUM_THREADS=8`, `nice -n 15`). One run per row: the search diverges between runs, so check counts and generation times vary by roughly 10%.
+
+| step | end to end | seconds per generation | note |
+|---|---:|---:|---|
+| baseline (41a2191, 6 CPU threads) | 36,381/s | 82.1 to 82.9 | archive stage 55 to 58 s: CPU verify on the worker |
+| shared checks + CPU replay | 33,806/s | 87.4 to 90.1 | archive 33 to 36 s; the GPU now waits on tiny check units |
+| + reserve-bar filter | 29,489/s | 90.6 to 112.9 | verify gone (2 inline of 2,796); GPU 96% busy on check units |
+| + four GPU queues | 41,842/s | 68.6 to 74.8 | small check units run beside standard units |
+| + wall-clock rates | 43,093/s | 69.1 to 70.1 | committed as ffede6e |
+| + 3 s units, one check unit at a time | 56,220/s | 48.6 to 58.1 | 6 CPU evaluation threads |
+| same, CPU pool of 2 threads | 58,390/s | 47.8 to 55.0 | |
+| same, no CPU pool (GPU only) | 64,095/s | 45.4 to 48.3 | inline replays on the worker |
+| same, reserve CPU on the general pool | 65,288/s | 45.9 to 46.0 | default now; 119.7 FPS, control p99 1.1 s |
+
+Unit length with the old rate estimator (checks on, 6 CPU threads, one measured generation each): 1 s 45k/s, 2 s 55.9k/s, 3 s 71.6k/s, 5 s 86.9k/s, 8 s 63.9k/s with 9.6 s of GPU idle. Those single generations had very different check counts (51k to 140k), and the old estimator inflated unit sizes, so the two-generation table above is the one to use.
+
+GPU metrics (`nsys --gpu-metrics-devices=0`, busy samples): eval-bench on evolved bodies runs about 24 warps in flight per SM at 44% issue; the 3M GUI run with 1 s units ran about 14 warps at 29%. Warps in flight clustered at 12 to 19, which is why longer units helped. DRAM bandwidth stays at 1 to 3%: the kernel is latency and instruction bound, not memory bound.
+
+Kernel facts measured on the way:
+
+- GPU-only standard throughput, eval-bench, 60 s trials: 98k/s on the first-generation 100k checkpoint (4.68 nodes), 56k/s on the evolved 100k checkpoint (6.51 nodes), 77.5k/s on the first 1M creatures of the evolved 3M checkpoint (5.16 nodes).
+- A fine check (240 Hz, 8 bone and 4 velocity passes) costs 5.6 standard trials on 50k evolved-100k bodies and 7.7 on the evolved 3M bodies, not 16.
+- Ablations on the evolved 100k population (share of kernel time): muscles 36% (the two waveform evaluations 14%, the force scatter 8%), descriptor metrics with fall and break checks 22%, joint limits 16%, the two bone passes 14%, the velocity pass 8%.
+- Simulated time after a fall (`examples/fall_profile.rs`): 25% on the evolved 100k population, 34% on a first generation; the median fall comes within 1 s.
+- Body plans: the evolved 3M population has 13,604 plans; the ten largest hold about half the creatures. A kernel specialized for one plan (`EVOLUTION_SPECIALIZE`, `eval-bench --plan-rank`) is bit-exact and 10 to 20% faster.
