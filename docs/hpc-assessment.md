@@ -12,11 +12,11 @@ The arithmetic is simple. At 2M creatures/s, with today's screening policy, the 
 
 Three structural changes can close most of the gap. They are independent and multiply:
 
-1. A cheaper physics formulation (section 7.2). Most of today's instructions go to keeping a chain of point masses rigid: two projection passes, a joint-limit pass, a parent-first rebuild, corrective rules for lift and friction, and a settling phase. A planar articulated tree in reduced coordinates is rigid by construction. It removes all of those passes, and its cost per step is a small multiple of the node count. Expected: 3 to 5 times fewer instructions per step. This changes the physics and needs the owner's approval.
+1. A cheaper physics formulation (section 7.2). Most of today's instructions go to keeping a chain of point masses rigid: two projection passes, a joint-limit pass, a parent-first rebuild, corrective rules for lift and friction, and a settling phase. A planar articulated tree in reduced coordinates is rigid by construction. It removes all of those passes, and its cost per step is a small multiple of the node count. Expected: about 2.5 to 3 times fewer instructions per step and much shorter dependency chains (`docs/data-architecture.md`, section 8). This changes the physics and needs the owner's approval.
 2. A persistent GPU kernel that keeps every creature's state in registers for its whole trial, and refills a lane from a work queue the moment its creature falls or is screened (section 7.3). This is the path-regeneration technique from GPU ray tracing. It removes idle lanes, the 64-step reload of state, and the host round trips that segments need today. Expected: 1.3 to 2 times.
 3. Control over registers, shared memory and profiling, either by moving the kernel to CUDA or by a language that targets both CUDA and Vulkan (section 7.4). Today the driver decides occupancy and we cannot see instruction-level stall reasons. Expected: 1.2 to 1.8 times, and much faster iteration on everything else.
 
-Together these give an estimated 5x to 18x on the same laptop, so 1M to 3.5M creatures/s. The 2M/s goal is reachable, but only if the physics formulation changes. Tuning the current formulation further tops out at an estimated 300,000 to 400,000/s. A desktop GPU would add a near-linear factor on top (section 8).
+Together these give an estimated 4x to 15x on the same laptop, so about 0.85M to 3M creatures/s. The data-architecture model gives 1.1M to 2.5M/s for the same design. The 2M/s goal is reachable, but only if the physics formulation changes. Tuning the current formulation further tops out at an estimated 300,000 to 400,000/s. A desktop GPU would add a near-linear factor on top (section 8).
 
 What I recommend doing first is not code. It is one to two days of proper profiling (section 9), because every estimate above rests on an instruction count that has not been measured directly.
 
@@ -135,7 +135,7 @@ The roofline model bounds performance by peak compute and by memory bandwidth ti
 
 Two ways out:
 
-- Reduce live state per creature, so more creatures fit. The reduced-coordinate formulation (section 7.2) has about half the state variables of the current one and no scratch arrays.
+- Reduce live state per creature, so more creatures fit. The reduced-coordinate formulation (section 7.2) has fewer state variables, but once muscles and step temporaries are counted a 6-node creature still needs 0.9 to 1 KB on chip, so occupancy stays at 12 to 16 warps (`docs/data-architecture.md`, section 3.4). The gain has to come from fewer instructions and shorter dependency chains.
 - Add ILP explicitly: two creatures per thread for the smallest bodies, or updates that are independent within a step (Jacobi-style or graph-coloured passes instead of strict Gauss-Seidel).
 
 CUDA exposes `__launch_bounds__` and a per-kernel shared-memory carveout, so these trade-offs can be steered and measured. Vulkan leaves them to the driver. The CUDA best-practice advice is to measure rather than to force occupancy, because spills can cost more than they gain ([NVIDIA forums on launch bounds and spills](https://forums.developer.nvidia.com/t/effect-of-launch-bounds-on-register-usage-and-spillage/303874)).
@@ -219,7 +219,7 @@ Proposal: each creature's state is the root node's position and velocity plus on
 
 What it removes: both bone projection passes, the joint-limit angle reconstruction, the parent-first rebuild, the turn limit, the whole-body lift, the length-drift problem, and the settling phase (a pose is valid by construction, so it needs no relaxing). The joint-break check becomes a comparison on a joint angle.
 
-Estimated cost per step for 6 nodes and 10 muscles: forward kinematics about 100 instructions, articulated-body passes about 400 to 600, muscles about 300, contacts and friction about 150 to 250, integration and metrics about 150. Total about 1,100 to 1,400 instructions, against about 4,000 to 5,000 today. That is roughly 3 to 4x fewer instructions per step, about 9% fewer steps without settling, and about half the live state.
+Estimated cost per step for 6 nodes, 5 bones and 9 muscles, counted pass by pass in `docs/data-architecture.md` section 8: forward kinematics about 90 instructions, muscles about 630, contacts and friction about 240, articulated-body passes and integration about 550, metrics about 60. Total about 1,500 to 1,700 instructions, against about 4,000 to 5,000 today. That is roughly 2.5 to 3x fewer instructions per step and about 9% fewer steps without settling. (An earlier version of this section said 1,100 to 1,400 and half the live state; the pass-by-pass count corrects both.)
 
 Risks and open questions:
 
@@ -227,9 +227,11 @@ Risks and open questions:
 - Contact is the hard part. Compliant contact needs small enough steps to stay stable against a stiff ground. Stiffness and damping must be tuned so that feet do not sink or bounce, and the "only planted feet push" rule must be re-established from first principles. The free-propulsion test (`examples/first_generation.rs`) and the momentum ledger must pass before anything lands.
 - A fallback within the current physics exists and is worth prototyping in parallel: the same formulation with every constant precomputed, node-count-specialized kernels that keep node state in registers, and fewer and fused passes. Most of that can stay bit-exact. Estimated 1.5 to 2.5x fewer instructions, with no change for the player.
 
-Gate: a CPU prototype that reproduces walking, falling and gait variety on the first-generation population, passes the free-propulsion and energy tests, and measures under 1,500 instructions per creature-step on the GPU.
+Gate: a CPU prototype that reproduces walking, falling and gait variety on the first-generation population, passes the free-propulsion and energy tests, and measures at most 1,700 instructions per creature-step on the GPU.
 
 ### 7.3 Persistent lanes with regeneration
+
+The detailed design (lane queues, refill cadence, epochs with device-side suspend, size classes, determinism) is in `docs/data-architecture.md`, section 7. This section is the short version.
 
 Proposal: launch one resident grid per body-size class that stays alive for many seconds. Each lane loads a creature from a device-side queue, keeps its entire state in registers across all its steps, and writes its result to a device-side ring when the creature falls, is screened or finishes. Then it takes the next creature from the queue at once. The host refills the queue and drains results asynchronously, with no per-segment readback and no repack. Queues are sorted by body plan so that the 32 lanes of a warp run the same loop counts. Madrona does this sort with a radix sort each step.
 
@@ -251,7 +253,11 @@ Options, in order of preference:
 
 Expected: 1.2 to 1.8x from register and occupancy control alone, plus much shorter measure-change-measure cycles.
 
+The data architecture adds requirements: subgroup ballot and prefix operations for the lane queues, and register and carveout control to hold 12 to 16 warps per SM (`docs/data-architecture.md`, section 7.8).
+
 ### 7.5 Move the loop onto the GPU
+
+The detailed design (genome records, plan records, archive tables, per-epoch kernels, data volumes, what stays on the CPU) is in `docs/data-architecture.md`, sections 5 to 7. This section is the short version.
 
 Proposal: genomes live in GPU memory in structure-of-arrays form. Parametric mutation (the CMA, gaussian and crossover emitters) runs on the GPU. Archive insertion is a parallel per-cell reduction, which QDax does. Results never leave the GPU except for the UI's snapshot and the elites the player looks at. Structural mutations (adding or removing nodes, bones, muscles) can stay on the CPU at first. They change body sizes and are a minority of offspring.
 
@@ -282,13 +288,13 @@ The factors are estimates and they multiply only if each holds. Conservative use
 
 | lever | conservative | optimistic | needs owner decision |
 |---|---:|---:|---|
-| physics v2, instructions per step (7.2) | 2.5x | 4x | yes |
+| physics v2, instructions per step (7.2) | 2.5x | 3x | yes |
 | no settling phase (7.2) | 1.08x | 1.09x | with 7.2 |
 | persistent lanes and regeneration (7.3) | 1.3x | 2x | no |
 | register and occupancy control (7.4) | 1.2x | 1.8x | no |
-| **kernel total** | **about 5x** | **about 14x** | |
+| **kernel total** | **about 4x** | **about 12x** | |
 | more screening rungs (7.6) | 1x | 1.3x | yes |
-| **end to end** | **about 1M creatures/s** | **about 3.5M creatures/s** | |
+| **end to end** | **about 0.85M creatures/s** | **about 3M creatures/s** | |
 
 The fallback without new physics (bit-exact restructuring plus 7.3 and 7.4) is about 1.5 to 2.5 times 1.3 to 2 times 1.2 to 1.8. That is 2.3x to 9x in theory. Given how much has already been taken, I would expect it to land near the low end, so 300,000 to 450,000/s.
 
