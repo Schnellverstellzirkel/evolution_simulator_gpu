@@ -99,6 +99,10 @@ pub struct VkEngine {
 // Mapped pointers are only touched by the thread that owns the engine.
 unsafe impl Send for VkEngine {}
 
+/// Descriptor sets the pool holds: one per batch of each submission slot
+/// (body-size buckets plus body-plan batches).
+const MAX_SETS: u32 = 1024;
+
 /// Submission slots per GPU (`EVOLUTION_GPU_SLOTS`, 1 to 8, default 4), each
 /// on its own queue when the device offers enough.
 pub fn gpu_slots() -> u32 {
@@ -227,17 +231,17 @@ impl VkEngine {
             let pool_sizes = [
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
-                    descriptor_count: 6 * CAPACITIES.len() as u32 * 8,
+                    descriptor_count: 6 * MAX_SETS,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                    descriptor_count: CAPACITIES.len() as u32 * 8,
+                    descriptor_count: MAX_SETS,
                 },
             ];
             let descriptor_pool = device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
-                    .max_sets(CAPACITIES.len() as u32 * 8)
+                    .max_sets(MAX_SETS)
                     .pool_sizes(&pool_sizes),
                 None,
             )?;
@@ -390,9 +394,12 @@ impl VkEngine {
                 self.create_buffer(params_bytes, vk::BufferUsageFlags::UNIFORM_BUFFER, false)?;
             self.slots[slot].params = Some(params);
             // Descriptor sets reference the parameter buffer; rebuild them.
-            for group in 0..CAPACITIES.len() {
+            for group in 0..self.slots[slot].groups.len() {
                 self.drop_group(slot, group);
             }
+        }
+        if self.slots[slot].groups.len() < batches.len() {
+            self.slots[slot].groups.resize_with(batches.len(), || None);
         }
         let mut result_bytes = batches.iter().map(|b| b.info.len()).sum::<usize>() as u64
             * std::mem::size_of::<GpuResult>() as u64;
@@ -417,8 +424,7 @@ impl VkEngine {
                 self.create_buffer(result_bytes, vk::BufferUsageFlags::TRANSFER_DST, true)?;
             self.slots[slot].readback = Some(readback);
         }
-        for batch in batches {
-            let group = creature_kernel::capacity_index(batch.capacity);
+        for (group, batch) in batches.iter().enumerate() {
             let need = [
                 std::mem::size_of_val(batch.nodes.as_slice()) as u64,
                 std::mem::size_of_val(batch.muscles.as_slice()) as u64,
@@ -708,10 +714,8 @@ impl VkEngine {
         }
         let resources = &self.slots[slot];
         Self::write(resources.params.as_ref().unwrap(), &param_data);
-        for batch in batches {
-            let res = resources.groups[creature_kernel::capacity_index(batch.capacity)]
-                .as_ref()
-                .unwrap();
+        for (group, batch) in batches.iter().enumerate() {
+            let res = resources.groups[group].as_ref().unwrap();
             Self::write(&res.nodes, &batch.nodes);
             Self::write(&res.muscles, &batch.muscles);
             Self::write(&res.bones, &batch.bones);
@@ -759,8 +763,7 @@ impl VkEngine {
                 }
                 for &b in &order {
                     let batch = &batches[b];
-                    let group = creature_kernel::capacity_index(batch.capacity);
-                    let res = resources.groups[group].as_ref().unwrap();
+                    let res = resources.groups[b].as_ref().unwrap();
                     device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, kernels[b]);
                     let offset = ((r * batches.len() + b) as u64 * self.params_stride) as u32;
                     device.cmd_bind_descriptor_sets(
@@ -795,10 +798,8 @@ impl VkEngine {
             );
             let readback = resources.readback.as_ref().unwrap();
             let mut offset = 0u64;
-            for batch in batches {
-                let res = resources.groups[creature_kernel::capacity_index(batch.capacity)]
-                    .as_ref()
-                    .unwrap();
+            for (group, batch) in batches.iter().enumerate() {
+                let res = resources.groups[group].as_ref().unwrap();
                 let bytes = (batch.info.len() * std::mem::size_of::<GpuResult>()) as u64;
                 device.cmd_copy_buffer(
                     cb,
@@ -809,10 +810,8 @@ impl VkEngine {
                 offset += bytes;
             }
             if read_state {
-                for batch in batches {
-                    let res = resources.groups[creature_kernel::capacity_index(batch.capacity)]
-                        .as_ref()
-                        .unwrap();
+                for (group, batch) in batches.iter().enumerate() {
+                    let res = resources.groups[group].as_ref().unwrap();
                     for (buffer, bytes) in [
                         (
                             res.nodes.buffer,
@@ -1034,7 +1033,7 @@ impl Drop for VkEngine {
             let _ = self.device.device_wait_idle();
         }
         for slot in 0..self.slots.len() {
-            for group in 0..CAPACITIES.len() {
+            for group in 0..self.slots[slot].groups.len() {
                 self.drop_group(slot, group);
             }
             if let Some(b) = self.slots[slot].params.take() {

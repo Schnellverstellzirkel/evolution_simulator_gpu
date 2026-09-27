@@ -210,17 +210,96 @@ pub fn pack(pop: &Population, indices: &[usize]) -> Result<Vec<LaneBatch>> {
         ensure!((1..=64).contains(&n), "Unsupported body size");
         groups[capacity_index(n)].push((slot, i));
     }
+    let plan_batch = plan_batch_size();
     Ok(groups
         .into_par_iter()
         .enumerate()
         .filter(|(_, g)| !g.is_empty())
-        .map(|(group, mut members)| {
+        .flat_map_iter(|(group, mut members)| {
             let capacity = CAPACITIES[group];
             // Identical body plans share a warp: same loop counts and index patterns.
             members.sort_by_cached_key(|&(_, i)| {
                 let g = &pop.genomes[i];
                 (g.node_count, g.muscle_count, plan_hash(pop, i), i)
             });
+            // Long runs of one body plan get their own batch and kernel.
+            let mut parts: Vec<(Option<Plan>, Members)> = Vec::new();
+            let mut rest = Vec::new();
+            let mut start = 0;
+            while start < members.len() {
+                let first = members[start].1;
+                let end = start
+                    + members[start..]
+                        .iter()
+                        .take_while(|&&(_, i)| same_plan(pop, first, i))
+                        .count();
+                if plan_batch > 0 && end - start >= plan_batch && capacity < 24 {
+                    parts.push((Some(plan_of(pop, first)), members[start..end].to_vec()));
+                } else {
+                    rest.extend_from_slice(&members[start..end]);
+                }
+                start = end;
+            }
+            if !rest.is_empty() {
+                parts.push((None, rest));
+            }
+            parts
+                .into_iter()
+                .map(move |(plan, members)| build_batch(pop, capacity, plan, &members))
+        })
+        .collect())
+}
+
+/// (unit position, population index) of the creatures in one batch.
+type Members = Vec<(usize, usize)>;
+
+/// Smallest run of one body plan in a unit that gets its own batch and
+/// specialized kernel (`EVOLUTION_PLAN_BATCH`; 0, the default, turns it off).
+/// Off because it measured no gain on mixed units: on 500k evolved 3M bodies
+/// generic kernels ran 82k creatures/s, plan batches of at least 2,048
+/// creatures 60k, 8,192 80k and 20,000 82k. Splitting a unit into smaller
+/// dispatches costs what the specialized kernels save (+10 to 20% on a
+/// single-plan population).
+fn plan_batch_size() -> usize {
+    std::env::var("EVOLUTION_PLAN_BATCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Whether creatures `a` and `b` have the same skeleton and muscle
+/// attachments, compared directly so a hash collision cannot mix plans.
+fn same_plan(pop: &Population, a: usize, b: usize) -> bool {
+    let (ga, gb) = (&pop.genomes[a], &pop.genomes[b]);
+    if ga.node_count != gb.node_count
+        || ga.bone_count != gb.bone_count
+        || ga.muscle_count != gb.muscle_count
+    {
+        return false;
+    }
+    let bones =
+        |g: &crate::evolution::Genome| &pop.bones[g.bone_start..g.bone_start + g.bone_count];
+    let muscles = |g: &crate::evolution::Genome| {
+        &pop.muscles[g.muscle_start..g.muscle_start + g.muscle_count]
+    };
+    bones(ga)
+        .iter()
+        .zip(bones(gb))
+        .all(|(x, y)| x.a == y.a && x.b == y.b)
+        && muscles(ga)
+            .iter()
+            .zip(muscles(gb))
+            .all(|(x, y)| x.bone_a == y.bone_a && x.bone_b == y.bone_b)
+}
+
+fn build_batch(
+    pop: &Population,
+    capacity: usize,
+    plan: Option<Plan>,
+    members: &[(usize, usize)],
+) -> LaneBatch {
+    {
+        {
             let count = members.len();
             let tile_count = count.div_ceil(TILE);
             let mut tiles = Vec::with_capacity(tile_count);
@@ -323,15 +402,6 @@ pub fn pack(pop: &Population, indices: &[usize]) -> Result<Vec<LaneBatch>> {
                     }
                 }
             }
-            // Prototype: EVOLUTION_SPECIALIZE runs a whole bucket on its plan's
-            // kernel when every creature in it shares that plan.
-            let plan = std::env::var_os("EVOLUTION_SPECIALIZE").and_then(|_| {
-                let first = plan_of(pop, members[0].1);
-                members
-                    .iter()
-                    .all(|&(_, i)| plan_of(pop, i) == first)
-                    .then_some(first)
-            });
             LaneBatch {
                 capacity,
                 plan,
@@ -344,8 +414,8 @@ pub fn pack(pop: &Population, indices: &[usize]) -> Result<Vec<LaneBatch>> {
                 bones,
                 results: None,
             }
-        })
-        .collect())
+        }
+    }
 }
 
 /// A body plan: the skeleton and muscle attachments as node numbers. Every
