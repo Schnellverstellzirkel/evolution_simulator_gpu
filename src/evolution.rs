@@ -704,12 +704,32 @@ pub(crate) fn normalize_bone_lengths(c: &mut Creature) {
     }
 }
 fn align_nodes_with_bones(c: &mut Creature) {
-    let original = c.nodes.clone();
+    // The starting positions are needed while the new ones are written in
+    // place. Bodies are at most 64 nodes, so the common case copies onto the
+    // stack instead of cloning the node vector.
+    let stack = (c.nodes.len() <= 64).then(|| {
+        let mut flat = [0.0f32; 128];
+        for (index, node) in c.nodes.iter().enumerate() {
+            flat[2 * index] = node.x;
+            flat[2 * index + 1] = node.y;
+        }
+        flat
+    });
+    let heap = stack.is_none().then(|| c.nodes.clone());
+    let original = |index: usize| -> (f32, f32) {
+        match (&stack, &heap) {
+            (Some(flat), _) => (flat[2 * index], flat[2 * index + 1]),
+            (_, Some(nodes)) => (nodes[index].x, nodes[index].y),
+            _ => unreachable!("one coordinate source"),
+        }
+    };
     for bone in &c.bones {
         let a = bone.a as usize;
         let b = bone.b as usize;
-        let dx = original[b].x - original[a].x;
-        let dy = original[b].y - original[a].y;
+        let (ax, ay) = original(a);
+        let (bx, by) = original(b);
+        let dx = bx - ax;
+        let dy = by - ay;
         let length = dx.hypot(dy);
         let direction = if length > 1.0e-6 {
             [dx / length, dy / length]
@@ -859,27 +879,6 @@ pub(crate) fn migrate_legacy_creature(
     creature
 }
 
-fn bone_path_exists(bones: &[Bone], node_count: usize, start: usize, target: usize) -> bool {
-    let mut reached = 1u64 << start;
-    loop {
-        let previous = reached;
-        for bone in bones {
-            let a = bone.a as usize;
-            let b = bone.b as usize;
-            if a < node_count && b < node_count {
-                if reached & (1u64 << a) != 0 {
-                    reached |= 1u64 << b;
-                }
-                if reached & (1u64 << b) != 0 {
-                    reached |= 1u64 << a;
-                }
-            }
-        }
-        if reached == previous {
-            return reached & (1u64 << target) != 0;
-        }
-    }
-}
 /// Largest tilt of the neck from vertical in the starting pose.
 const HEAD_START_TILT: f32 = std::f32::consts::FRAC_PI_4;
 /// Every creature has a head: node 0, as large (and heavy) as a node can be,
@@ -921,6 +920,25 @@ fn repair_with(c: &mut Creature, cfg: &Config, rng: &mut Rng, neutral: bool) {
         node.friction = node.friction.clamp(cfg.min_friction, cfg.max_friction);
     }
     let node_count = c.nodes.len().min(64);
+    // Incremental connectivity over the <= 64 nodes: accepted bones always
+    // join two components, so the union-find answers the reachability test
+    // that a per-candidate graph walk used to run.
+    fn root(parent: &mut [u8; 64], mut node: u8) -> u8 {
+        while parent[node as usize] != node {
+            parent[node as usize] = parent[parent[node as usize] as usize];
+            node = parent[node as usize];
+        }
+        node
+    }
+    let mut parent: [u8; 64] = std::array::from_fn(|index| index as u8);
+    let connected = |parent: &mut [u8; 64], a: u8, b: u8| {
+        let (ra, rb) = (root(parent, a), root(parent, b));
+        if ra == rb {
+            return true;
+        }
+        parent[ra as usize] = rb;
+        false
+    };
     let candidates = std::mem::take(&mut c.bones);
     for mut b in candidates {
         b.clamp_range();
@@ -931,7 +949,7 @@ fn repair_with(c: &mut Creature, cfg: &Config, rng: &mut Rng, neutral: bool) {
             && a != end
             && b.rest_length.is_finite()
             && (0.03..=12.0).contains(&b.rest_length)
-            && !bone_path_exists(&c.bones, node_count, a, end)
+            && !connected(&mut parent, a as u8, end as u8)
         {
             c.bones.push(b);
         }
@@ -939,7 +957,7 @@ fn repair_with(c: &mut Creature, cfg: &Config, rng: &mut Rng, neutral: bool) {
     // Keep a connected, cycle-free skeleton. New links inherit their current
     // length so repair does not teleport a mutated body before physics starts.
     for node in 1..node_count {
-        if !bone_path_exists(&c.bones, node_count, 0, node) {
+        if !connected(&mut parent, 0, node as u8) {
             c.bones.push(bone(0, node, &c.nodes));
         }
     }
@@ -1112,13 +1130,29 @@ fn collect_parallel_streaming(
             .collect::<Vec<_>>()
             .into_par_iter()
             .map(|chunk| {
-                let mut p = Population::default();
+                // Typical bodies are 3 to 8 nodes; a low estimate only costs a
+                // growth reallocation, never a different result.
+                let estimate = (chunk + 4096).min(end) - chunk;
+                let mut p = Population {
+                    nodes: Vec::with_capacity(estimate * 8),
+                    bones: Vec::with_capacity(estimate * 8),
+                    muscles: Vec::with_capacity(estimate * 10),
+                    ..Default::default()
+                };
                 for i in chunk..(chunk + 4096).min(end) {
                     p.push(make(i));
                 }
                 p
             })
             .collect();
+        // Reserve the merged arenas exactly so the copies below do not
+        // reallocate the growing gene vectors.
+        let node_total: usize = chunks.iter().map(|chunk| chunk.nodes.len()).sum();
+        let bone_total: usize = chunks.iter().map(|chunk| chunk.bones.len()).sum();
+        let muscle_total: usize = chunks.iter().map(|chunk| chunk.muscles.len()).sum();
+        out.nodes.reserve_exact(node_total);
+        out.bones.reserve_exact(bone_total);
+        out.muscles.reserve_exact(muscle_total);
         for mut chunk in chunks {
             let ns = out.nodes.len();
             let bs = out.bones.len();

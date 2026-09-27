@@ -93,6 +93,8 @@ pub struct QdArchive {
     #[serde(skip)]
     least_visited: BTreeSet<(u64, usize)>,
     #[serde(skip)]
+    least_visited_dirty: bool,
+    #[serde(skip)]
     behavior_indices: Vec<usize>,
     #[serde(skip)]
     morphology_indices: Vec<usize>,
@@ -341,6 +343,7 @@ impl QdArchive {
                 self.behavior_indices.push(i);
             }
         }
+        self.least_visited_dirty = false;
         self.recompute_score();
         self.refresh_behavior_scores();
     }
@@ -543,10 +546,21 @@ impl QdArchive {
         };
     }
     pub fn visit(&mut self, index: usize) {
-        let elite = &mut self.entries[index];
-        self.least_visited.remove(&(elite.visits, index));
-        elite.visits += 1;
-        self.least_visited.insert((elite.visits, index));
+        self.entries[index].visits += 1;
+        self.least_visited_dirty = true;
+    }
+    /// Rebuilds the least-visited index after batched visits. Consumers of
+    /// `least_visited` must call this first; rebuilding once per breeding round
+    /// is much cheaper than a balanced-tree update per visit.
+    pub fn ensure_least_visited(&mut self) {
+        if !self.least_visited_dirty {
+            return;
+        }
+        self.least_visited.clear();
+        for (index, elite) in self.entries.iter().enumerate() {
+            self.least_visited.insert((elite.visits, index));
+        }
+        self.least_visited_dirty = false;
     }
     #[allow(clippy::too_many_arguments)]
     pub fn offer(

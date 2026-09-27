@@ -5,7 +5,9 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use bincode::Options;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{
+    IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -344,6 +346,7 @@ impl Experiment {
         self.stage = Stage::Ranked;
     }
     pub fn archive_batch(&mut self) -> Result<()> {
+        let started = std::time::Instant::now();
         ensure!(
             self.evaluated == self.config.population,
             "Cannot archive an incomplete batch"
@@ -354,9 +357,18 @@ impl Experiment {
         );
         let all: Vec<usize> = (0..self.config.population).collect();
         let failed = self.archive_slots(&all);
+        let slots_seconds = started.elapsed().as_secs_f64();
         self.push_archive_stats(failed);
         self.prune_lineage();
         self.stage = Stage::Archived;
+        if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
+            let total = started.elapsed().as_secs_f64();
+            eprintln!(
+                "Archive batch: generation {}, archive_slots {slots_seconds:.6} s, stats {:.6} s, total {total:.6} s",
+                self.generation,
+                total - slots_seconds
+            );
+        }
         Ok(())
     }
     /// Whether creature `i`'s standard-trial result could enter an archive.
@@ -411,44 +423,11 @@ impl Experiment {
     /// order), updates CMA emitters and emitter statistics, and returns how
     /// many trials failed.
     pub fn archive_slots(&mut self, slots: &[usize]) -> usize {
+        let profile = std::env::var_os("EVOLUTION_PROFILE_BREED").is_some();
+        let mut timings = [0.0f64; 8];
+        let mut section = std::time::Instant::now();
         self.ensure_islands();
-        // Every creature also competes in its own island's archive.
         let mut entered: Vec<usize> = Vec::new();
-        for &i in slots {
-            let score = self.scores[i];
-            if !score.is_finite() || score <= FAILED {
-                continue;
-            }
-            let genome = &self.population.genomes[i];
-            let nodes =
-                &self.population.nodes[genome.node_start..genome.node_start + genome.node_count];
-            let muscles = &self.population.muscles
-                [genome.muscle_start..genome.muscle_start + genome.muscle_count];
-            let descriptor = qd::descriptor(nodes, muscles, self.trial_metrics[i]);
-            let emitter = self
-                .candidate_emitters
-                .get(i)
-                .copied()
-                .unwrap_or(Emitter::Restart);
-            let protection = self.protected_until.get(i).copied().unwrap_or(0);
-            if self.islands[i % island_count()]
-                .offer(
-                    &self.population,
-                    i,
-                    descriptor,
-                    score,
-                    emitter,
-                    self.generation,
-                    protection,
-                )
-                .inserted
-            {
-                entered.push(i);
-            }
-        }
-        for island in &mut self.islands {
-            island.refresh_behavior_scores();
-        }
         let previous_parent_ids: [Option<u64>; qd::EMITTER_COUNT] = std::array::from_fn(|i| {
             self.emitter_stats[i]
                 .last_parent
@@ -545,6 +524,56 @@ impl Experiment {
                 }
             })
             .collect();
+        timings[2] = section.elapsed().as_secs_f64();
+        section = std::time::Instant::now();
+        // Every creature also competes in its own island's archive. Each
+        // island's offers resolve in slot order and the islands are
+        // independent, so the four streams run in parallel.
+        let population = &self.population;
+        let generation = self.generation;
+        let island_total = self.islands.len().max(1);
+        let island_entered: Vec<Vec<usize>> = self
+            .islands
+            .par_iter_mut()
+            .enumerate()
+            .map(|(island, archive)| {
+                let mut entered = Vec::new();
+                for (k, &i) in slots.iter().enumerate() {
+                    if i % island_total != island {
+                        continue;
+                    }
+                    let p = &prep[k];
+                    if !p.score.is_finite() || p.score <= FAILED {
+                        continue;
+                    }
+                    if archive
+                        .offer(
+                            population,
+                            i,
+                            p.descriptor,
+                            p.score,
+                            p.emitter,
+                            generation,
+                            p.protection,
+                        )
+                        .inserted
+                    {
+                        entered.push(i);
+                    }
+                }
+                entered
+            })
+            .collect();
+        for group in island_entered {
+            entered.extend(group);
+        }
+        timings[0] = section.elapsed().as_secs_f64();
+        section = std::time::Instant::now();
+        for island in &mut self.islands {
+            island.refresh_behavior_scores();
+        }
+        timings[1] = section.elapsed().as_secs_f64();
+        section = std::time::Instant::now();
         // Players browse this archive and replay its creatures with the CPU
         // engine, so it only admits scores the replay reproduces. The best
         // candidate for each behavior cell and each new body plan in this batch
@@ -614,17 +643,23 @@ impl Experiment {
                 }
             }
         }
+        timings[3] = section.elapsed().as_secs_f64();
+        section = std::time::Instant::now();
         let mut attempts = [0u64; qd::EMITTER_COUNT];
         let mut failed = 0usize;
-        for (&i, prep) in slots.iter().zip(&prep) {
+        for (&i, prep) in slots.iter().zip(prep) {
             if !prep.score.is_finite() || prep.score <= FAILED {
                 failed += 1;
             }
             let emitter_index = prep.emitter.index();
             attempts[emitter_index] += 1;
-            let elite_before = self
-                .archive
-                .slot_for(&prep.descriptor.niche())
+            // The CMA improvement key needs the cell's fitness before the
+            // offers; only CMA samples use it.
+            let elite_before = (prep.emitter == Emitter::Cma)
+                .then(|| self.candidate_cma.get(i).copied().flatten())
+                .flatten()
+                .filter(|_| prep.score.is_finite() && prep.score > FAILED)
+                .and_then(|_| self.archive.slot_for(&prep.descriptor.niche()))
                 .map(|slot| self.archive.entries[slot].fitness);
             let behavior_offer = if prep.behavior_candidate {
                 self.archive.offer(
@@ -640,7 +675,7 @@ impl Experiment {
                 qd::Offer::default()
             };
             let morphology_offer = if !behavior_offer.inserted
-                && let Some(topology) = prep.morphology_topology.clone()
+                && let Some(topology) = prep.morphology_topology
             {
                 self.archive.offer_morphology(
                     &self.population,
@@ -687,6 +722,8 @@ impl Experiment {
                 }
             }
         }
+        timings[4] = section.elapsed().as_secs_f64();
+        section = std::time::Instant::now();
         for (emitter, samples) in self.cma_emitters.iter_mut().zip(&mut cma_samples) {
             emitter.tell(&self.population, samples);
         }
@@ -707,11 +744,32 @@ impl Experiment {
         for (stats, parent_id) in self.emitter_stats.iter_mut().zip(previous_parent_ids) {
             stats.last_parent = parent_id.and_then(|id| parent_index_by_id.get(&id).copied());
         }
+        timings[5] = section.elapsed().as_secs_f64();
+        section = std::time::Instant::now();
         self.archive.refresh_behavior_scores();
+        timings[6] = section.elapsed().as_secs_f64();
+        section = std::time::Instant::now();
         entered.sort_unstable();
         entered.dedup();
+        let entered_count = entered.len();
         for i in entered {
             self.record_ancestor(i);
+        }
+        timings[7] = section.elapsed().as_secs_f64();
+        if profile {
+            eprintln!(
+                "Archive profile: generation {}, island offers {:.6} s, island refresh {:.6} s, prefilter {:.6} s, verify {:.6} s, global offers {:.6} s, cma tell {:.6} s, archive refresh {:.6} s, lineage {:.6} s, entered {}",
+                self.generation,
+                timings[0],
+                timings[1],
+                timings[2],
+                timings[3],
+                timings[4],
+                timings[5],
+                timings[6],
+                timings[7],
+                entered_count
+            );
         }
         failed
     }
@@ -1092,15 +1150,76 @@ impl Experiment {
         round: u64,
         slots: &[usize],
     ) -> Vec<OffspringPlan> {
+        let profile = std::env::var_os("EVOLUTION_PROFILE_BREED").is_some();
+        let mut plan_times = [0.0f64; 4];
+        let mut section = std::time::Instant::now();
         self.ensure_islands();
+        for island in &mut self.islands {
+            island.ensure_least_visited();
+        }
         let weights = qd::emitter_weights(&self.emitter_stats);
         let mut reset_cma = HashMap::<(qd::Niche, qd::Topology), usize>::new();
-        let mut cma_lookup: HashMap<(qd::Niche, qd::Topology), usize> = self
-            .cma_emitters
-            .iter()
-            .enumerate()
-            .map(|(i, cma)| ((cma.niche.clone(), cma.topology.clone()), i))
-            .collect();
+        // CMA slot lookup keyed by (niche, body plan). The bucket stores the
+        // full key, so the per-offspring probe hashes and compares without
+        // cloning the topology vector; clones are only paid when a slot is
+        // created or replaced.
+        struct CmaLookup {
+            buckets: HashMap<u64, Vec<(qd::Niche, qd::Topology, usize)>>,
+        }
+        impl CmaLookup {
+            fn hash(niche: &qd::Niche, topology: &qd::Topology) -> u64 {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                niche.hash(&mut hasher);
+                topology.hash(&mut hasher);
+                hasher.finish()
+            }
+            fn get(&self, niche: &qd::Niche, topology: &qd::Topology) -> Option<usize> {
+                self.buckets
+                    .get(&Self::hash(niche, topology))?
+                    .iter()
+                    .find(|(stored_niche, stored_topology, _)| {
+                        stored_niche == niche && stored_topology == topology
+                    })
+                    .map(|(_, _, index)| *index)
+            }
+            fn insert(&mut self, niche: qd::Niche, topology: qd::Topology, index: usize) {
+                let bucket = self
+                    .buckets
+                    .entry(Self::hash(&niche, &topology))
+                    .or_default();
+                if let Some(entry) = bucket
+                    .iter_mut()
+                    .find(|(stored_niche, stored_topology, _)| {
+                        stored_niche == &niche && stored_topology == &topology
+                    })
+                {
+                    entry.2 = index;
+                } else {
+                    bucket.push((niche, topology, index));
+                }
+            }
+            fn remove(&mut self, niche: &qd::Niche, topology: &qd::Topology, index: usize) {
+                let hash = Self::hash(niche, topology);
+                let Some(bucket) = self.buckets.get_mut(&hash) else {
+                    return;
+                };
+                bucket.retain(|(stored_niche, stored_topology, stored_index)| {
+                    !(stored_niche == niche
+                        && stored_topology == topology
+                        && *stored_index == index)
+                });
+                if bucket.is_empty() {
+                    self.buckets.remove(&hash);
+                }
+            }
+        }
+        let mut cma_lookup = CmaLookup {
+            buckets: HashMap::new(),
+        };
+        for (index, cma) in self.cma_emitters.iter().enumerate() {
+            cma_lookup.insert(cma.niche.clone(), cma.topology.clone(), index);
+        }
         let mut used_cma = vec![false; self.cma_emitters.len()];
         let mut out = Vec::with_capacity(slots.len());
         // Phase A: emitter choice and parent sampling against the start-of-batch
@@ -1131,9 +1250,12 @@ impl Experiment {
                 groups
             })
             .collect();
+        plan_times[0] = section.elapsed().as_secs_f64();
+        section = std::time::Instant::now();
         let seed = cfg.seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        // Each island's fastest 1% of elites (at least 4), for exploitation.
-        let top_parents: Vec<Vec<usize>> = self
+        // Behavior elites per island, fastest first. Both the exploitation
+        // pool and the optimizer targets read this order.
+        let orders: Vec<Vec<usize>> = self
             .islands
             .iter()
             .map(|island| {
@@ -1145,9 +1267,13 @@ impl Experiment {
                         .fitness
                         .total_cmp(&island.entries[a].fitness)
                 });
-                order.truncate((order.len() / 100).max(4));
                 order
             })
+            .collect();
+        // Each island's fastest 1% of elites (at least 4), for exploitation.
+        let top_parents: Vec<Vec<usize>> = orders
+            .iter()
+            .map(|order| order[..(order.len() / 100).max(4).min(order.len())].to_vec())
             .collect();
         // An island's optimizer works on its fastest design: a body plan with
         // a gait cadence band. When the island has not set a record for a
@@ -1159,25 +1285,18 @@ impl Experiment {
             .islands
             .iter()
             .zip(&top_parents)
+            .zip(&orders)
             .zip(&mut self.island_progress)
-            .map(|((island, top), progress)| {
+            .map(|(((island, top), order), progress)| {
                 let best = *top.first()?;
                 let fitness = island.entries[best].fitness;
                 if fitness > progress.0 {
                     *progress = (fitness, generation);
                 }
                 let mut plans: Vec<usize> = Vec::new();
-                let mut order: Vec<usize> = (0..island.entries.len())
-                    .filter(|&i| !qd::is_morphology_niche(&island.entries[i].niche))
-                    .collect();
-                order.sort_by(|&a, &b| {
-                    island.entries[b]
-                        .fitness
-                        .total_cmp(&island.entries[a].fitness)
-                });
                 // A design is a body plan with a gait cadence band.
                 let design = |i: usize| (&island.entries[i].topology, island.entries[i].niche.0[1]);
-                for i in order {
+                for &i in order {
                     if plans.len() >= 4 {
                         break;
                     }
@@ -1189,6 +1308,8 @@ impl Experiment {
                 Some(plans[turn % plans.len()])
             })
             .collect();
+        plan_times[1] = section.elapsed().as_secs_f64();
+        section = std::time::Instant::now();
         let plan_prep: Vec<PlanPrep> = slots
             .par_iter()
             .map(|&i| {
@@ -1261,6 +1382,8 @@ impl Experiment {
                 }
             })
             .collect();
+        plan_times[2] = section.elapsed().as_secs_f64();
+        section = std::time::Instant::now();
         for prep in plan_prep {
             let PlanPrep {
                 emitter,
@@ -1281,27 +1404,25 @@ impl Experiment {
                     // the design's fastest elite and then follows its own mean,
                     // so recentering on every lucky new best does not throw
                     // away its progress. A converged one restarts.
-                    let niche_key = if optimize {
-                        (
-                            qd::optimizer_niche(island, elite.niche.0[1]),
-                            topology.clone(),
-                        )
+                    let lookup_niche = if optimize {
+                        qd::optimizer_niche(island, elite.niche.0[1])
                     } else {
-                        (elite.niche.clone(), topology.clone())
+                        elite.niche.clone()
                     };
                     let converged = |i: &usize| self.cma_emitters[*i].converged() && !used_cma[*i];
                     let mut index = if optimize {
                         cma_lookup
-                            .get(&niche_key)
-                            .copied()
+                            .get(&lookup_niche, topology)
                             .filter(|i| !converged(i))
                     } else if emitter_stale {
-                        reset_cma.get(&niche_key).copied()
+                        reset_cma
+                            .get(&(lookup_niche.clone(), topology.clone()))
+                            .copied()
                     } else {
-                        cma_lookup.get(&niche_key).copied()
+                        cma_lookup.get(&lookup_niche, topology)
                     };
                     if index.is_none() {
-                        let restart = cma_lookup.get(&niche_key).copied().filter(|_| optimize);
+                        let restart = cma_lookup.get(&lookup_niche, topology).filter(|_| optimize);
                         let replacement = if restart.is_some() {
                             restart
                         } else if self.cma_emitters.len() < qd::CMA_LIMIT {
@@ -1329,14 +1450,14 @@ impl Experiment {
                                         || {
                                             CmaEmitter::optimizer(
                                                 template.clone(),
-                                                niche_key.0.clone(),
+                                                lookup_niche.clone(),
                                                 generation,
                                             )
                                         },
                                         |c| {
                                             c.recentered(
                                                 template.clone(),
-                                                niche_key.0.clone(),
+                                                lookup_niche.clone(),
                                                 generation,
                                             )
                                         },
@@ -1344,24 +1465,23 @@ impl Experiment {
                             } else {
                                 CmaEmitter::new(template.clone(), elite.niche.clone(), generation)
                             };
-                            let new_key = (new.niche.clone(), new.topology.clone());
                             if slot == self.cma_emitters.len() {
                                 self.cma_emitters.push(new);
                                 used_cma.push(false);
                             } else {
-                                let old_key = (
-                                    self.cma_emitters[slot].niche.clone(),
-                                    self.cma_emitters[slot].topology.clone(),
-                                );
-                                if cma_lookup.get(&old_key) == Some(&slot) {
-                                    cma_lookup.remove(&old_key);
+                                let old_niche = self.cma_emitters[slot].niche.clone();
+                                let old_topology = self.cma_emitters[slot].topology.clone();
+                                if cma_lookup.get(&old_niche, &old_topology) == Some(slot) {
+                                    cma_lookup.remove(&old_niche, &old_topology, slot);
                                 }
                                 reset_cma.retain(|_, index| *index != slot);
                                 self.cma_emitters[slot] = new;
                             }
-                            cma_lookup.insert(new_key, slot);
+                            let new_niche = self.cma_emitters[slot].niche.clone();
+                            let new_topology = self.cma_emitters[slot].topology.clone();
+                            cma_lookup.insert(new_niche, new_topology, slot);
                             if emitter_stale && !optimize {
-                                reset_cma.insert(niche_key, slot);
+                                reset_cma.insert((lookup_niche.clone(), topology.clone()), slot);
                             }
                             index = Some(slot);
                         }
@@ -1390,6 +1510,13 @@ impl Experiment {
                 parent_id,
                 protection,
             });
+        }
+        plan_times[3] = section.elapsed().as_secs_f64();
+        if profile {
+            eprintln!(
+                "Plan profile: generation {generation}, by_plan {:.6} s, order/optimizer {:.6} s, sampling {:.6} s, cma/visit {:.6} s",
+                plan_times[0], plan_times[1], plan_times[2], plan_times[3]
+            );
         }
         out
     }
