@@ -733,7 +733,10 @@ fn run(
                                 ctx.request_repaint();
                             }
                             status = "Breeding from diverse archive elites".into();
+                            // Benchmarks keep autosaves off even for a loaded
+                            // checkpoint, which brings its own interval.
                             if e.config.checkpoint_interval > 0
+                                && std::env::var_os("EVOLUTION_BENCH_NO_AUTOSAVE").is_none()
                                 && e.generation.is_multiple_of(e.config.checkpoint_interval)
                                 && checkpoint_thread
                                     .as_ref()
