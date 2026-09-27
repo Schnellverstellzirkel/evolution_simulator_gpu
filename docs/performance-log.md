@@ -516,3 +516,15 @@ Every row is one 3M GUI benchmark run as above. Control latency is the wait of a
 | + no drain for steady settings changes | 204,820/s | 0.19 / 0.23 s | 0.025 / 0.16 s |
 
 A settings change, meteor, extinction or undo used to wait for all queued GPU work and its checks, which idled the GPU and blocked every other control behind it. In a steady run the change waits for the generation boundary anyway, and work in flight at a boundary already carries over, so those commands now skip the drain. Save and load still drain.
+
+Knobs re-measured after these changes (3M GUI benchmark, two runs each, interleaved), all left at their defaults:
+
+| knob | runs | end to end |
+|---|---|---:|
+| step range 64 (default, `EVOLUTION_GPU_CHUNK`) | 2 | 216,293 and 204,842/s |
+| step range 128 | 2 | 180,661 and 195,423/s |
+| step range 256 | 2 | 181,385 and 189,341/s (UI 65 FPS) |
+| segments at 2 and 10 s (default, `EVOLUTION_SEGMENTS`) | 2 | 212,034 and 192,205/s |
+| segments at 2, 10, 20 and 35 s | 2 | 197,182 and 183,383/s |
+
+An nsys trace with 1 s units shows the GPU at 100% activity for most of the measured generations, with short dips to 75 to 90%, at about 10 warps in flight per SM (p50) and 20% issue.
