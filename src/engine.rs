@@ -291,7 +291,13 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
                                     step_range,
                                     end < total,
                                 )
-                                .map(|vk_ticket| (vk_ticket, unit))
+                                .map(|vk_ticket| {
+                                    let mut unit = unit;
+                                    for batch in &mut unit.batches {
+                                        batch.release_uploaded();
+                                    }
+                                    (vk_ticket, unit)
+                                })
                         });
                         match submitted {
                             Ok(entry) => running.push(entry),

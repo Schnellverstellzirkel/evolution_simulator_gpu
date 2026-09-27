@@ -1861,14 +1861,20 @@ impl Experiment {
         cfg.screen = self.next_screen(world_changed, cfg.duration);
         self.config = cfg;
         let compact_started = std::time::Instant::now();
+        let before = (self.population.bytes(), self.arena_spare.bytes());
         self.population.compact_with(&mut self.arena_spare);
         if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
+            let mib = |b: usize| b as f64 / 1048576.0;
             eprintln!(
-                "Generation boundary: stats {:.3} s, lineage {:.3} s, migration {:.3} s, compact {:.3} s",
+                "Generation boundary: stats {:.3} s, lineage {:.3} s, migration {:.3} s, compact {:.3} s, arenas {:.0} + spare {:.0} MiB before, {:.0} + spare {:.0} MiB after",
                 stats.as_secs_f64(),
                 (lineage - stats).as_secs_f64(),
                 (migrated - lineage).as_secs_f64(),
-                compact_started.elapsed().as_secs_f64()
+                compact_started.elapsed().as_secs_f64(),
+                mib(before.0),
+                mib(before.1),
+                mib(self.population.bytes()),
+                mib(self.arena_spare.bytes()),
             );
         }
         self.evaluation_seconds = 0.0;

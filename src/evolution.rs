@@ -257,6 +257,14 @@ pub struct Arena {
     bones: Vec<Bone>,
     muscles: Vec<Muscle>,
 }
+impl Arena {
+    /// Bytes the spare arenas hold, by capacity.
+    pub fn bytes(&self) -> usize {
+        self.nodes.capacity() * std::mem::size_of::<NodeGene>()
+            + self.bones.capacity() * std::mem::size_of::<Bone>()
+            + self.muscles.capacity() * std::mem::size_of::<Muscle>()
+    }
+}
 /// Spare memory is not state: a copy starts empty.
 impl Clone for Arena {
     fn clone(&self) -> Self {
@@ -466,6 +474,19 @@ impl Population {
         std::mem::swap(nodes, &mut spare.nodes);
         std::mem::swap(bones, &mut spare.bones);
         std::mem::swap(muscles, &mut spare.muscles);
+        // Breeding appends a generation of children before the next
+        // compaction: room for them now (with an eighth more, as bodies
+        // grow) means no doubling reallocation later. The spare keeps only
+        // what that compaction fills, so the old arena's children do not stay
+        // resident.
+        fn resize_room<T>(live: &mut Vec<T>, spare: &mut Vec<T>, len: usize) {
+            live.reserve_exact(len + len / 8);
+            spare.clear();
+            spare.shrink_to(len + len / 8);
+        }
+        resize_room(nodes, &mut spare.nodes, total[0]);
+        resize_room(bones, &mut spare.bones, total[1]);
+        resize_room(muscles, &mut spare.muscles, total[2]);
     }
     /// `replace` for many slots at once: canonicalizes and copies the genes
     /// in parallel, then appends them in slot order, so the arenas end up
@@ -1891,6 +1912,55 @@ pub fn ranking(scores: &[f32]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_leaves_room_for_a_generation_and_keeps_a_small_spare() {
+        let cfg = Config {
+            population: 64,
+            random_seed: false,
+            seed: 5,
+            ..Config::default()
+        };
+        let mut population = create(&cfg).unwrap();
+        let children: Vec<Creature> = (0..cfg.population)
+            .map(|i| population.creature(i))
+            .collect();
+        let slots: Vec<usize> = (0..cfg.population).collect();
+        // Fill the spare with a large arena, as after a generation of breeding.
+        population.replace_many(&slots, children.clone());
+        population.replace_many(&slots, children.clone());
+        let mut spare = Arena::default();
+        population.compact_with(&mut spare);
+        population.replace_many(&slots, children.clone());
+        population.compact_with(&mut spare);
+        let live = population.bytes() - population.genomes.capacity() * size_of::<Genome>();
+        assert!(
+            spare.bytes() <= live,
+            "the spare keeps {} bytes for {live} live",
+            spare.bytes()
+        );
+        let arenas = (
+            population.nodes.as_ptr(),
+            population.bones.as_ptr(),
+            population.muscles.as_ptr(),
+        );
+        population.replace_many(&slots, children.clone());
+        assert_eq!(
+            arenas,
+            (
+                population.nodes.as_ptr(),
+                population.bones.as_ptr(),
+                population.muscles.as_ptr(),
+            ),
+            "a generation of children must fit without moving the arenas"
+        );
+        for (i, child) in children.iter().enumerate() {
+            let stored = population.creature(i);
+            assert_eq!(stored.nodes, child.nodes);
+            assert_eq!(stored.bones, child.bones);
+            assert_eq!(stored.muscles, child.muscles);
+        }
+    }
 
     #[test]
     fn bone_length_cannot_expand_far_beyond_its_starting_frame() {

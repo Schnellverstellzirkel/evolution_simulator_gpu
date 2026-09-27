@@ -276,15 +276,17 @@ impl Scheduler {
         let mut devices = Vec::new();
         let mut startup_failure = None;
         match engine::gpu_engine(primary, 64, step_range) {
-            // Long units keep every bucket dispatch large enough to fill the
-            // GPU between the step-range barriers: 1 s units measured 53k
-            // creatures/s end to end at 3M, 3 s units 60k.
+            // Units long enough to fill the GPU between the step-range
+            // barriers, short enough that the in-flight copies stay small.
+            // With screening and segments at 3M: 0.5 s units measured 165k
+            // creatures/s end to end, 1 s 187k (12.5 GB peak RSS), 2 s 177k,
+            // 3 s 169k (15.0 GB).
             Ok(gpu) => devices.push(Device::new(
                 Box::new(gpu),
                 DeviceKind::Gpu,
                 180_000.0,
                 8192,
-                env_or("EVOLUTION_UNIT_SECONDS", 3.0),
+                env_or("EVOLUTION_UNIT_SECONDS", 1.0),
             )),
             Err(error) => {
                 let message = format!("Primary GPU {primary:?} unavailable: {error:#}");

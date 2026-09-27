@@ -117,6 +117,14 @@ pub struct LaneBatch {
 }
 
 impl LaneBatch {
+    /// Frees the node state, muscle buffer and resumed totals once the GPU
+    /// holds them: a later segment repacks from the state it reads back, and
+    /// the bodies (`bones`, `info`, `tiles`) stay for that.
+    pub fn release_uploaded(&mut self) {
+        self.nodes = Vec::new();
+        self.muscles = Vec::new();
+        self.results = None;
+    }
     /// The creatures at positions `keep` (ascending) of this batch, with the
     /// node state, muscle buffer (rhythm offsets and energy included) and
     /// behavior totals read back after a trial segment, so a later segment

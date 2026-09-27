@@ -482,3 +482,23 @@ The gain does not survive a finer replay. The twelve fastest elites of three hea
 | evolved at 30 Hz | 60 Hz | 38% | 12 of 36 |
 
 For example, seed 41's 30 Hz elites of rank 5 to 7 cover 63.6, 60.8 and 58.7 m at 30 Hz and 0.2, -0.1 and 0.1 m at 60 Hz. Evolution at 30 Hz finds gaits that depend on the coarse step, so the extra search speed mostly buys exploits of the integrator. The default stays at 60 Hz.
+
+## Peak memory and GPU unit length (2026-09-27)
+
+The 3M GUI benchmark peaked at 18.3 GB RSS (`/usr/bin/time`), up from about 8 GB in the morning's runs; the laptop has 30 GB. Sampling `/proc/<pid>/smaps` during a run: 14.6 GB anonymous heap, 2.0 GB GPU-mapped buffers (`/dev/nvidiactl`), 0.2 GB `[heap]`. Loading the checkpoint alone costs 2.3 GB (`examples/mem_report.rs`). `MALLOC_ARENA_MAX=2` saved only 0.6 GB, so the memory is live data, not allocator fragmentation.
+
+Two causes:
+
+- Gene arenas. Breeding appends each generation's children to the arenas and the generation boundary compacts them into a spare and swaps. Appends grew the arenas by doubling, and the swap kept the old, oversized arena as the spare: at the second boundary the arenas held 8.2 GB plus an 8.0 GB spare by capacity for 2.2 GB of live genes. Now the boundary reserves one generation of children plus an eighth, and shrinks the spare to what the next compaction fills (4.6 GB plus 2.3 GB by capacity). Peak RSS 18.6 -> 14.8 GB in one run each.
+- Work in flight. Each GPU unit keeps its creatures, the packed batches and, with segments, the read-back state, and five units per GPU may be queued. With screening a 3 s unit held about a sixth of the population, so nearly all 3M creatures were in flight. The host copies of packed node state and muscle buffers are now freed once uploaded.
+
+GPU unit length after those changes, two or four GUI runs each (`EVOLUTION_UNIT_SECONDS`):
+
+| unit | end to end | peak RSS |
+|---:|---:|---:|
+| 0.5 s | 168,685 and 161,268/s | 11.3 to 11.4 GB |
+| 1 s | 186,134, 181,499, 195,927 and 183,352/s | 12.3 to 12.7 GB |
+| 2 s | 180,247 and 174,332/s | 13.4 to 13.9 GB |
+| 3 s | 164,244 and 172,891/s | 14.8 to 15.1 GB |
+
+The default is now 1 s: 186,700/s on average against 168,600/s for 3 s, with 2.5 GB less peak memory. FPS stayed at 76 to 81 and control p99 at 1.2 s in every row.
