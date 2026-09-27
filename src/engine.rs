@@ -171,6 +171,49 @@ impl Drop for ThreadedEngine {
     }
 }
 
+/// A unit on its way through the trial segments of `segment_ends`.
+struct SegmentedUnit {
+    ticket: u64,
+    /// Final results by unit position, filled as creatures finish.
+    results: Vec<GpuResult>,
+    ends: Vec<u32>,
+    /// Index into `ends` of the segment that runs next.
+    segment: usize,
+    cfg: Config,
+    busy: f64,
+    /// The creatures still running, packed for the next segment.
+    batches: Vec<creature_kernel::LaneBatch>,
+}
+
+/// Ticks at which a GPU trial pauses to drop fallen creatures, ending with
+/// the trial's last tick. A fall ends a trial, so every step a fallen
+/// creature would take after it is wasted; at a segment boundary the others
+/// are repacked into dense warps. `EVOLUTION_SEGMENTS` lists the pauses in
+/// seconds after settling (default `2,10`; empty or `0` for none). On an
+/// evolved 3M population 38% of creatures fall, most within a second, and
+/// pauses at 2 s and 10 s skip 34% of all steps.
+fn segment_ends(cfg: &Config) -> Vec<u32> {
+    let fidelity = cfg.fidelity();
+    let total = fidelity.settle() + cfg.steps();
+    let seconds: Vec<f32> = match std::env::var("EVOLUTION_SEGMENTS") {
+        Ok(list) => list
+            .split(',')
+            .filter_map(|v| v.trim().parse().ok())
+            .filter(|&v: &f32| v > 0.0)
+            .collect(),
+        Err(_) => vec![2.0, 10.0],
+    };
+    let mut ends: Vec<u32> = seconds
+        .into_iter()
+        .map(|s| fidelity.settle() + (s * fidelity.rate as f32).round() as u32)
+        .filter(|&tick| tick < total)
+        .collect();
+    ends.sort_unstable();
+    ends.dedup();
+    ends.push(total);
+    ends
+}
+
 /// Opens a Vulkan GPU running the creature-per-lane kernel on its own thread.
 /// The thread packs the next unit while earlier units run on the GPU.
 pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<ThreadedEngine> {
@@ -193,77 +236,125 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
                     return;
                 }
             };
-            // Submitted units: ticket and length, oldest first.
-            let mut running: VecDeque<(u64, u64, usize)> = VecDeque::new();
+            // Units whose next trial segment waits for a free slot (they go
+            // before new jobs), and submitted segments by Vulkan ticket.
+            let mut waiting: VecDeque<SegmentedUnit> = VecDeque::new();
+            let mut running: Vec<(u64, SegmentedUnit)> = Vec::new();
             let mut pending: Option<(u64, Arc<Population>, Config)> = None;
             let mut open = true;
             loop {
                 if pending.is_none() && open {
-                    let job = if running.is_empty() {
+                    let job = if running.is_empty() && waiting.is_empty() {
                         job_rx.recv().map_err(|_| ())
                     } else {
                         job_rx.try_recv().map_err(|_| ())
                     };
                     match job {
                         Ok(job) => pending = Some(job),
-                        Err(()) if running.is_empty() => open = false,
+                        Err(()) if running.is_empty() && waiting.is_empty() => open = false,
                         Err(()) => {}
                     }
                 }
-                if !open && running.is_empty() && pending.is_none() {
+                if !open && running.is_empty() && waiting.is_empty() && pending.is_none() {
                     break;
                 }
-                if engine.free_slots() > 0
-                    && let Some((ticket, unit, cfg)) = pending.take()
-                {
-                    let indices: Vec<usize> = (0..unit.genomes.len()).collect();
-                    let submitted = creature_kernel::pack(&unit, &indices).and_then(|packed| {
-                        engine.submit(
-                            &packed,
-                            &cfg,
-                            cfg.fidelity().settle() + cfg.steps(),
-                            step_range,
-                        )
-                    });
-                    match submitted {
-                        Ok(vk_ticket) => running.push_back((ticket, vk_ticket, indices.len())),
-                        Err(err) => {
-                            let _ = done_tx.send(Err(format!("{err:#}")));
-                            return;
+                if engine.free_slots() > 0 {
+                    let next = match waiting.pop_front() {
+                        Some(unit) => Some(Ok(unit)),
+                        None => pending.take().map(|(ticket, unit, cfg)| {
+                            let indices: Vec<usize> = (0..unit.genomes.len()).collect();
+                            creature_kernel::pack(&unit, &indices).map(|batches| SegmentedUnit {
+                                ticket,
+                                results: vec![GpuResult::default(); indices.len()],
+                                ends: segment_ends(&cfg),
+                                segment: 0,
+                                cfg,
+                                busy: 0.0,
+                                batches,
+                            })
+                        }),
+                    };
+                    if let Some(next) = next {
+                        let submitted = next.and_then(|unit| {
+                            let total = *unit.ends.last().expect("segment ends");
+                            let start = unit.segment.checked_sub(1).map_or(0, |s| unit.ends[s]);
+                            let end = unit.ends[unit.segment];
+                            engine
+                                .submit(
+                                    &unit.batches,
+                                    &unit.cfg,
+                                    start,
+                                    end,
+                                    total,
+                                    step_range,
+                                    end < total,
+                                )
+                                .map(|vk_ticket| (vk_ticket, unit))
+                        });
+                        match submitted {
+                            Ok(entry) => running.push(entry),
+                            Err(err) => {
+                                let _ = done_tx.send(Err(format!("{err:#}")));
+                                return;
+                            }
                         }
+                        thread_allocated
+                            .store(engine.allocated_bytes, std::sync::atomic::Ordering::Relaxed);
+                        continue;
                     }
-                    thread_allocated
-                        .store(engine.allocated_bytes, std::sync::atomic::Ordering::Relaxed);
-                    continue;
                 }
                 if running.is_empty() {
                     continue;
                 }
-                // Wait briefly for the oldest submission, then check for new jobs.
+                // Wait briefly for any submission, then check for new jobs.
                 match engine.poll(Duration::from_millis(1)) {
                     Ok(Some(finished)) => {
                         // Units on separate queues can finish out of order.
                         let Some(position) = running
                             .iter()
-                            .position(|&(_, vk_ticket, _)| vk_ticket == finished.ticket)
+                            .position(|(vk_ticket, _)| *vk_ticket == finished.ticket)
                         else {
                             let _ = done_tx.send(Err("unknown GPU submission finished".into()));
                             return;
                         };
-                        let (ticket, _, len) = running.remove(position).unwrap();
-                        let mut results = vec![GpuResult::default(); len];
-                        for (slots, _, batch) in finished.batches {
-                            for (slot, result) in slots.into_iter().zip(batch) {
-                                results[slot] = result;
+                        let (_, mut unit) = running.swap_remove(position);
+                        unit.busy += finished.gpu_seconds;
+                        let last = unit.segment + 1 == unit.ends.len();
+                        // Fallen creatures are final; the rest continue in the
+                        // next segment, repacked into dense warps.
+                        let mut next = Vec::new();
+                        for (b, (slots, _, results)) in finished.batches.iter().enumerate() {
+                            let mut keep = Vec::new();
+                            for (j, result) in results.iter().enumerate() {
+                                if last || result.fall_time > 0.0 {
+                                    unit.results[slots[j]] = *result;
+                                } else {
+                                    keep.push(j);
+                                }
+                            }
+                            if !keep.is_empty() {
+                                let Some((nodes, muscles)) =
+                                    finished.state.as_ref().and_then(|state| state.get(b))
+                                else {
+                                    let _ = done_tx.send(Err("GPU segment state missing".into()));
+                                    return;
+                                };
+                                next.push(unit.batches[b].repack(&keep, nodes, muscles, results));
                             }
                         }
-                        let message = Finished {
-                            ticket,
-                            results,
-                            busy_seconds: finished.gpu_seconds,
-                        };
-                        if done_tx.send(Ok(message)).is_err() {
-                            return;
+                        if next.is_empty() {
+                            let message = Finished {
+                                ticket: unit.ticket,
+                                results: std::mem::take(&mut unit.results),
+                                busy_seconds: unit.busy,
+                            };
+                            if done_tx.send(Ok(message)).is_err() {
+                                return;
+                            }
+                        } else {
+                            unit.batches = next;
+                            unit.segment += 1;
+                            waiting.push_front(unit);
                         }
                     }
                     Ok(None) => {}

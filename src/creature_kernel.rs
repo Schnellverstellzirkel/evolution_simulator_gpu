@@ -101,6 +101,76 @@ pub struct LaneBatch {
     pub tiles: Vec<[u32; 4]>,
     pub muscles: Vec<f32>,
     pub bones: Vec<f32>,
+    /// Behavior totals to resume from, for a batch that continues a trial
+    /// (`repack`); a fresh batch starts from zero.
+    pub results: Option<Vec<GpuResult>>,
+}
+
+impl LaneBatch {
+    /// The creatures at positions `keep` (ascending) of this batch, with the
+    /// node state, muscle buffer (rhythm offsets and energy included) and
+    /// behavior totals read back after a trial segment, so a later segment
+    /// continues their trials exactly. Tiles are rebuilt for the survivors.
+    pub fn repack(
+        &self,
+        keep: &[usize],
+        nodes: &[Node],
+        muscles: &[f32],
+        results: &[GpuResult],
+    ) -> LaneBatch {
+        let capacity = self.capacity;
+        let count = keep.len();
+        let mut tiles = Vec::with_capacity(count.div_ceil(TILE));
+        let mut muscle_len = 0usize;
+        let mut bone_len = 0usize;
+        for tile in keep.chunks(TILE) {
+            let max_muscles = tile.iter().map(|&j| self.info[j][2]).max().unwrap_or(0) as usize;
+            let max_bones = tile.iter().map(|&j| self.info[j][1]).max().unwrap_or(0) as usize;
+            tiles.push([
+                muscle_len as u32,
+                bone_len as u32,
+                max_muscles as u32,
+                max_bones as u32,
+            ]);
+            muscle_len += max_muscles * MUSCLE_FIELDS * TILE;
+            bone_len += max_bones * BONE_FIELDS * TILE;
+        }
+        let mut new_nodes = vec![Node::default(); count * capacity];
+        let mut new_muscles = vec![0f32; muscle_len.max(1)];
+        let mut new_bones = vec![0f32; bone_len.max(1)];
+        for (to, &from) in keep.iter().enumerate() {
+            new_nodes[to * capacity..(to + 1) * capacity]
+                .copy_from_slice(&nodes[from * capacity..(from + 1) * capacity]);
+            let (old_tile, old_lane) = (self.tiles[from / TILE], from % TILE);
+            let (new_tile, new_lane) = (tiles[to / TILE], to % TILE);
+            for m in 0..self.info[from][2] as usize {
+                for f in 0..MUSCLE_FIELDS {
+                    let at = (m * MUSCLE_FIELDS + f) * TILE;
+                    new_muscles[new_tile[0] as usize + at + new_lane] =
+                        muscles[old_tile[0] as usize + at + old_lane];
+                }
+            }
+            for b in 0..self.info[from][1] as usize {
+                for f in 0..BONE_FIELDS {
+                    let at = (b * BONE_FIELDS + f) * TILE;
+                    new_bones[new_tile[1] as usize + at + new_lane] =
+                        self.bones[old_tile[1] as usize + at + old_lane];
+                }
+            }
+        }
+        LaneBatch {
+            capacity,
+            plan: self.plan.clone(),
+            slots: keep.iter().map(|&j| self.slots[j]).collect(),
+            creatures: keep.iter().map(|&j| self.creatures[j]).collect(),
+            nodes: new_nodes,
+            info: keep.iter().map(|&j| self.info[j]).collect(),
+            tiles,
+            muscles: new_muscles,
+            bones: new_bones,
+            results: Some(keep.iter().map(|&j| results[j]).collect()),
+        }
+    }
 }
 
 pub fn capacity_index(nodes: usize) -> usize {
@@ -272,6 +342,7 @@ pub fn pack(pop: &Population, indices: &[usize]) -> Result<Vec<LaneBatch>> {
                 tiles,
                 muscles,
                 bones,
+                results: None,
             }
         })
         .collect())

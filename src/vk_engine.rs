@@ -50,6 +50,9 @@ struct Pending {
     ticket: u64,
     layout: Vec<(Vec<usize>, Vec<usize>)>,
     result_count: usize,
+    /// Per batch: node count and muscle buffer length read back after the
+    /// results, when the trial continues in a later segment.
+    state: Option<Vec<(usize, usize)>>,
 }
 
 /// Results of one completed submission: per batch, the slice positions, the
@@ -57,6 +60,9 @@ struct Pending {
 pub struct Completed {
     pub ticket: u64,
     pub batches: Vec<(Vec<usize>, Vec<usize>, Vec<GpuResult>)>,
+    /// Per batch, when asked for: node state and muscle buffer at the end of
+    /// the segment, for `LaneBatch::repack`.
+    pub state: Option<Vec<(Vec<crate::physics::Node>, Vec<f32>)>>,
     pub gpu_seconds: f64,
 }
 
@@ -369,6 +375,7 @@ impl VkEngine {
         slot: usize,
         batches: &[LaneBatch],
         dispatches: u64,
+        read_state: bool,
     ) -> Result<()> {
         let params_bytes = dispatches * self.params_stride;
         if self.slots[slot]
@@ -387,8 +394,17 @@ impl VkEngine {
                 self.drop_group(slot, group);
             }
         }
-        let result_bytes = batches.iter().map(|b| b.info.len()).sum::<usize>() as u64
+        let mut result_bytes = batches.iter().map(|b| b.info.len()).sum::<usize>() as u64
             * std::mem::size_of::<GpuResult>() as u64;
+        if read_state {
+            result_bytes += batches
+                .iter()
+                .map(|b| {
+                    (std::mem::size_of_val(b.nodes.as_slice())
+                        + std::mem::size_of_val(b.muscles.as_slice())) as u64
+                })
+                .sum::<u64>();
+        }
         if self.slots[slot]
             .readback
             .as_ref()
@@ -426,9 +442,10 @@ impl VkEngine {
             }
             self.drop_group(slot, group);
             let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
+            let readable = storage | vk::BufferUsageFlags::TRANSFER_SRC;
             let res = GroupRes {
-                nodes: self.create_buffer(need[0], storage, false)?,
-                muscles: self.create_buffer(need[1], storage, false)?,
+                nodes: self.create_buffer(need[0], readable, false)?,
+                muscles: self.create_buffer(need[1], readable, false)?,
                 bones: self.create_buffer(need[2], storage, false)?,
                 results: self.create_buffer(
                     need[3],
@@ -610,16 +627,26 @@ impl VkEngine {
         Ok(self.pipelines.len() - 1)
     }
 
-    /// Uploads the batches and queues all `steps` in `chunk`-step ranges
-    /// without waiting. Returns a ticket; results arrive through `poll`.
+    /// Uploads the batches and queues ticks `start..end` of trials that last
+    /// `total` ticks, in `chunk`-tick ranges, without waiting. With
+    /// `read_state`, the node state and muscle buffers are read back too, so
+    /// the trials can continue in another segment. Returns a ticket; results
+    /// arrive through `poll`.
+    #[allow(clippy::too_many_arguments)]
     pub fn submit(
         &mut self,
         batches: &[LaneBatch],
         cfg: &Config,
-        steps: u32,
+        start: u32,
+        end: u32,
+        total: u32,
         chunk: u32,
+        read_state: bool,
     ) -> Result<u64> {
-        ensure!(!batches.is_empty() && steps > 0, "Empty GPU batch");
+        ensure!(
+            !batches.is_empty() && start < end && end <= total,
+            "Empty GPU batch"
+        );
         ensure!(
             batches.iter().all(|b| b.capacity <= self.max_capacity),
             "Body too large for this device's kernels"
@@ -631,7 +658,7 @@ impl VkEngine {
             .iter()
             .position(|s| s.pending.is_none())
             .context("No free GPU submission slot")?;
-        let ranges = steps.div_ceil(chunk);
+        let ranges = (end - start).div_ceil(chunk);
         let kernels: Vec<vk::Pipeline> =
             batches
                 .iter()
@@ -641,22 +668,27 @@ impl VkEngine {
                         [creature_kernel::capacity_index(batch.capacity)]),
                 })
                 .collect::<Result<_>>()?;
-        self.ensure_buffers(slot, batches, u64::from(ranges) * batches.len() as u64)?;
+        self.ensure_buffers(
+            slot,
+            batches,
+            u64::from(ranges) * batches.len() as u64,
+            read_state,
+        )?;
         let mut param_data =
             vec![0u8; (u64::from(ranges) * batches.len() as u64 * self.params_stride) as usize];
-        for (r, tick) in (0..steps).step_by(chunk as usize).enumerate() {
+        for (r, tick) in (start..end).step_by(chunk as usize).enumerate() {
             for (b, batch) in batches.iter().enumerate() {
                 let offset = ((r * batches.len() + b) as u64 * self.params_stride) as usize;
                 let p = Params {
                     tick,
-                    steps: (steps - tick).min(chunk),
+                    steps: (end - tick).min(chunk),
                     stride: batch.capacity as u32,
                     count: batch.info.len() as u32,
                     gravity: cfg.gravity,
                     air: fidelity.air_per_step(cfg.air_retention),
                     friction: cfg.ground_friction,
                     ground: if cfg.ground { 1.0 } else { 0.0 },
-                    total_steps: steps,
+                    total_steps: total,
                     terrain: crate::physics::terrain_amplitude(cfg.terrain),
                     muscle_energy: cfg.muscle_energy,
                     muscle_recovery: cfg.muscle_recovery,
@@ -685,6 +717,9 @@ impl VkEngine {
             Self::write(&res.bones, &batch.bones);
             Self::write(&res.info, &batch.info);
             Self::write(&res.tiles, &batch.tiles);
+            if let Some(results) = &batch.results {
+                Self::write(&res.results, results);
+            }
         }
         let device = &self.device;
         let cb = resources.command_buffer;
@@ -773,6 +808,31 @@ impl VkEngine {
                 );
                 offset += bytes;
             }
+            if read_state {
+                for batch in batches {
+                    let res = resources.groups[creature_kernel::capacity_index(batch.capacity)]
+                        .as_ref()
+                        .unwrap();
+                    for (buffer, bytes) in [
+                        (
+                            res.nodes.buffer,
+                            std::mem::size_of_val(batch.nodes.as_slice()) as u64,
+                        ),
+                        (
+                            res.muscles.buffer,
+                            std::mem::size_of_val(batch.muscles.as_slice()) as u64,
+                        ),
+                    ] {
+                        device.cmd_copy_buffer(
+                            cb,
+                            buffer,
+                            readback.buffer,
+                            &[vk::BufferCopy::default().dst_offset(offset).size(bytes)],
+                        );
+                        offset += bytes;
+                    }
+                }
+            }
             let to_host = vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                 .dst_access_mask(vk::AccessFlags::HOST_READ);
@@ -802,6 +862,12 @@ impl VkEngine {
                 .map(|b| (b.slots.clone(), b.creatures.clone()))
                 .collect(),
             result_count,
+            state: read_state.then(|| {
+                batches
+                    .iter()
+                    .map(|b| (b.nodes.len(), b.muscles.len()))
+                    .collect()
+            }),
         });
         Ok(ticket)
     }
@@ -890,10 +956,29 @@ impl VkEngine {
                 batches.push((slots, creatures, flat[start..end].to_vec()));
                 start = end;
             }
+            let state = pending.state.map(|sizes| {
+                let mut at = readback
+                    .ptr
+                    .add(pending.result_count * std::mem::size_of::<GpuResult>());
+                sizes
+                    .into_iter()
+                    .map(|(nodes, muscles)| {
+                        let node_state =
+                            std::slice::from_raw_parts(at as *const crate::physics::Node, nodes)
+                                .to_vec();
+                        at = at.add(nodes * std::mem::size_of::<crate::physics::Node>());
+                        let muscle_state =
+                            std::slice::from_raw_parts(at as *const f32, muscles).to_vec();
+                        at = at.add(muscles * std::mem::size_of::<f32>());
+                        (node_state, muscle_state)
+                    })
+                    .collect()
+            });
             self.last_gpu_seconds = gpu_seconds;
             Ok(Some(Completed {
                 ticket: pending.ticket,
                 batches,
+                state,
                 gpu_seconds,
             }))
         }
@@ -932,7 +1017,7 @@ impl VkEngine {
         while self.in_flight() > 0 {
             self.poll(std::time::Duration::from_secs(60))?;
         }
-        let ticket = self.submit(batches, cfg, steps, chunk)?;
+        let ticket = self.submit(batches, cfg, 0, steps, steps, chunk, false)?;
         loop {
             if let Some(done) = self.poll(std::time::Duration::from_secs(60))?
                 && done.ticket == ticket
