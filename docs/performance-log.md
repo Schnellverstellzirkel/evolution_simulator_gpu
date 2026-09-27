@@ -453,3 +453,28 @@ Thread budget at 3M with screening (GUI): 8 general workers 137,824/s; 16 genera
 Kernel experiments that did not help, all bit-exact: grouping 2 or 4 muscles per loop iteration (79.9k, 79.1k, 79.3k creatures/s on 200k evolved bodies); per-plan batches in mixed units (see above).
 
 Muscle waveform (2026-09-27, eval-bench on the evolved 100k checkpoint, GPU only, interleaved runs). Both evaluations of the waveform cost 14% of kernel time, so two ways to evaluate it once per step were tried. Caching each muscle's last target length in a 16th muscle field measured 60.3k to 60.7k creatures/s against 63.8k to 64.8k for the committed kernel: the extra global load and store per muscle cost more than the cosine it saves. A branch-free waveform with one cosine for both halves of the stroke measured 61.2k to 62.8k against 64.2k to 64.6k and was not bit-exact on the GPU (3,162 of 100,000 identical; the driver fuses the multiply-adds differently). Neither landed on the GPU. On the CPU engine the one-cosine waveform is bit-exact (20,000 of 20,000 evolved bodies) and measured 9,588 to 9,790 creatures/s against 9,363 to 9,528 on six threads, so it landed there.
+
+## 30 Hz physics: measured, not adopted (2026-09-27)
+
+`EVOLUTION_PHYSICS_RATE=30` halves the standard steps per trial. In the 3M GUI benchmark it raised the rate from about 130,000 to about 214,000 creatures/s end to end.
+
+Search at equal wall time, `examples/search_ab.rs`, 10 seeds (38 to 47), 10,000 creatures, 60 s trials, screening on, CPU only:
+
+| run | generations | wall | best mean (median) | QD mean (median) | cells | top-50 median length |
+|---|---:|---:|---:|---:|---:|---:|
+| 60 Hz | 20 | 79.7 s | 243.7 m (239.2) | 19,117 (19,522) | 1,000 | 1.39 m |
+| 30 Hz | 20 | 45.4 s | 217.0 m (200.2) | 18,401 (17,831) | | |
+| 30 Hz | 32 | 80.0 s | 332.7 m (303.1) | 36,959 (32,678) | 1,090 | 2.94 m |
+| 60 Hz | 40 | 190.4 s | 420.3 m (429.0) | 52,929 (52,156) | 1,119 | 3.03 m |
+| 30 Hz | 40 | 104.8 s | 373.0 m (366.4) | 53,107 (48,424) | 1,137 | 3.08 m |
+
+At equal time 30 Hz is ahead on every seed but one (best distance higher on 9 of 10, QD on 10 of 10). At equal generations the two rates tie: 30 Hz is higher on 5 of 10 seeds for best, QD, cells, length and mass.
+
+The gain does not survive a finer replay. The twelve fastest elites of three headless 20-generation runs per rate (seeds 39 to 41, 100k creatures, `runs/hz30-s*.evo` and `runs/hz60-s*.evo`) were replayed by `examples/size_report.rs` at twice their evolved rate:
+
+| elites | replayed at | median share of the archive distance kept | below 10% of it |
+|---|---:|---:|---:|
+| evolved at 60 Hz | 120 Hz | 90% | 1 of 36 |
+| evolved at 30 Hz | 60 Hz | 38% | 12 of 36 |
+
+For example, seed 41's 30 Hz elites of rank 5 to 7 cover 63.6, 60.8 and 58.7 m at 30 Hz and 0.2, -0.1 and 0.1 m at 60 Hz. Evolution at 30 Hz finds gaits that depend on the coarse step, so the extra search speed mostly buys exploits of the integrator. The default stays at 60 Hz.
