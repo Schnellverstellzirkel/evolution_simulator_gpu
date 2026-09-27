@@ -116,10 +116,44 @@ const TIRED_DRIVE: f32 = 0.0;
 const BONE_FIELDS: u32 = 9u;
 const MAXB: u32 = MAXN - 1u;
 
+// NODE-STATE-BEGIN
 var<workgroup> pos: array<vec2f, SHAREDLEN>;
 var<workgroup> vel: array<vec2f, SHAREDLEN>;
 var<workgroup> old: array<vec2f, SHAREDLEN>;
 var<workgroup> scr: array<vec2f, SHAREDLEN>;
+// NODE-STATE-END
+
+// Index helpers. The generic kernel keeps node state in workgroup memory as
+// [node][lane] and reads each creature's bone and muscle endpoints from its
+// packed data. A kernel specialized for one body plan (see
+// creature_kernel::specialized_source) replaces these helpers with the plan's
+// constant endpoints and keeps node state in function-local arrays, so the
+// compiler can hold it in registers.
+// HELPERS-BEGIN
+// Node state index of node `j` of this lane's creature.
+fn node_k(j: u32, lane: u32) -> u32 {
+    return j * WG + lane;
+}
+// Node number of node state index `k`.
+fn node_of(k: u32) -> u32 {
+    return k / WG;
+}
+// Bone `j`'s endpoints and joint reference node as node state indices, from
+// the per-lane words packed at load time.
+fn bone_a(packed_a: u32, j: u32) -> u32 {
+    return packed_a & 0xffffu;
+}
+fn bone_q(packed_a: u32, j: u32) -> u32 {
+    return packed_a >> 16u;
+}
+fn bone_b(packed_b: u32, j: u32) -> u32 {
+    return packed_b;
+}
+// Endpoint `e` (0..3: a0, a1, b0, b1) of muscle `j`, as a node number.
+fn muscle_node(packed: u32, j: u32, e: u32) -> u32 {
+    return (packed >> (8u * e)) & 0xffu;
+}
+// HELPERS-END
 
 const BONE_SOLVE_ITERATIONS: u32 = 8u;
 const VELOCITY_SOLVE_ITERATIONS: u32 = 4u;
@@ -310,7 +344,8 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
     let rough = terrain_amplitude > 0.0 || p.slope != 0.0 || p.gaps > 0.0 || p.hurdles > 0.0;
     let tile = tile_info[creature / TILE];
     let tl = creature % TILE;
-    let base = creature * MAXN;
+    let base = creature * STRIDE;
+    // LOCAL-NODE-STATE
 
     var radius: array<f32, MAXN>;
     var mass: array<f32, MAXN>;
@@ -321,7 +356,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
     for (var j = 0u; j < MAXN; j++) {
         if j >= body_nodes { break; }
         let n = nodes[base + j];
-        let k = j * WG + lane;
+        let k = node_k(j, lane);
         pos[k] = n.pos;
         vel[k] = n.vel;
         radius[j] = n.radius;
@@ -373,21 +408,21 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
     for (var s = 0u; s < p.steps; s++) {
         let tick = p.tick + s;
         // The head's velocity before this step, for the head shaking limit.
-        let head_start = vel[lane];
+        let head_start = vel[node_k(0u, lane)];
         if tick == SETTLE {
             var avg = 0.0;
             var mass_sum = 0.0;
             var low = 1e20;
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
-                let k = j * WG + lane;
+                let k = node_k(j, lane);
                 avg += pos[k].x * mass[j];
                 mass_sum += mass[j];
             }
             let shift_x = avg * inv_total_mass;
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
-                let k = j * WG + lane;
+                let k = node_k(j, lane);
                 var floor_y = 0.0;
                 if rough {
                     floor_y = terrain(pos[k].x - shift_x, quake_phase_value, terrain_amplitude).x;
@@ -397,7 +432,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             let shift = vec2f(shift_x, low);
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
-                let k = j * WG + lane;
+                let k = node_k(j, lane);
                 let shifted_start = pos[k] - shift;
                 pos[k] = shifted_start;
                 vel[k] = vec2f(0.0);
@@ -405,13 +440,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         }
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
-            let k = j * WG + lane;
+            let k = node_k(j, lane);
             old[k] = pos[k];
             scr[k] = vec2f(0.0);
         }
 
         let time = f32(max(tick, SETTLE) - SETTLE) * DT;
-        for (var j = 0u; j < muscle_count; j++) {
+        for (var j = 0u; j < MUSCLE_LOOP; j++) {
             let field = tile.x + j * MUSCLE_FIELDS * TILE + tl;
             let packed = bitcast<u32>(muscle_data[field]);
             let offset = muscle_data[field + 13u * TILE];
@@ -431,10 +466,10 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 muscle_data[field + 9u * TILE],
                 muscle_data[field + 10u * TILE],
             );
-            let ka0 = (packed & 0xffu) * WG + lane;
-            let ka1 = ((packed >> 8u) & 0xffu) * WG + lane;
-            let kb0 = ((packed >> 16u) & 0xffu) * WG + lane;
-            let kb1 = (packed >> 24u) * WG + lane;
+            let ka0 = node_k(muscle_node(packed, j, 0u), lane);
+            let ka1 = node_k(muscle_node(packed, j, 1u), lane);
+            let kb0 = node_k(muscle_node(packed, j, 2u), lane);
+            let kb1 = node_k(muscle_node(packed, j, 3u), lane);
             let position_a = mix(pos[ka0], pos[ka1], m.anchor_a);
             let position_b = mix(pos[kb0], pos[kb1], m.anchor_b);
             let velocity_a = mix(vel[ka0], vel[ka1], m.anchor_a);
@@ -463,12 +498,12 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             }
             muscle_data[field + 14u * TILE] = energy;
             let push = dir * magnitude;
-            let a0 = packed & 0xffu;
-            let a1 = (packed >> 8u) & 0xffu;
-            let b0 = (packed >> 16u) & 0xffu;
-            let b1 = packed >> 24u;
+            let a0 = muscle_node(packed, j, 0u);
+            let a1 = muscle_node(packed, j, 1u);
+            let b0 = muscle_node(packed, j, 2u);
+            let b1 = muscle_node(packed, j, 3u);
             for (var e = 0u; e < 4u; e++) {
-                let node = (packed >> (8u * e)) & 0xffu;
+                let node = muscle_node(packed, j, e);
                 if (e >= 1u && node == a0) || (e >= 2u && node == a1) || (e == 3u && node == b0) {
                     continue;
                 }
@@ -478,7 +513,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if b0 == node { weight -= 1.0 - m.anchor_b; }
                 if b1 == node { weight -= m.anchor_b; }
                 let f = push * weight;
-                let k = node * WG + lane;
+                let k = node_k(node, lane);
                 scr[k] += f;
             }
         }
@@ -496,7 +531,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         var capped_momentum = vec2f(0.0);
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
-            let k = j * WG + lane;
+            let k = node_k(j, lane);
             if failed[j] < 0.5 {
                 let free = (vel[k] + (scr[k] * inv_mass[j] - vec2f(0.0, gravity) + vec2f(wind, 0.0)) * DT) * p.air;
                 let capped = limit_speed(free);
@@ -507,7 +542,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         let cap_correction = capped_momentum * inv_total_mass;
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
-            let k = j * WG + lane;
+            let k = node_k(j, lane);
             if failed[j] < 0.5 {
                 var n = Node(pos[k], vel[k], radius[j], friction[j], mass[j], 0.0);
                 n.vel = scr[k] + cap_correction;
@@ -529,7 +564,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         if grounded {
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
-                let k = j * WG + lane;
+                let k = node_k(j, lane);
                 if rough {
                     // Push out along the ground normal, so bumps, pit walls,
                     // and hurdle ramps resist sliding.
@@ -556,7 +591,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         if grounded {
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
-                let k = j * WG + lane;
+                let k = node_k(j, lane);
                 if pos[k].y <= vel[k].y + 1e-4 {
                     if j < 32u {
                         stance_lo |= 1u << j;
@@ -569,16 +604,16 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         var com_x_before = 0.0;
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
-            com_x_before += pos[j * WG + lane].x * mass[j];
+            com_x_before += pos[node_k(j, lane)].x * mass[j];
         }
         com_x_before *= inv_total_mass;
         for (var iteration = 0u; iteration < BONE_SOLVE_ITERATIONS; iteration++) {
             for (var j = 0u; j < MAXB; j++) {
                 if j >= bone_count { break; }
-                let ka = bone_ka[j] & 0xffffu;
-                let kb = bone_kb[j];
-                let na = ka / WG;
-                let nb = kb / WG;
+                let ka = bone_a(bone_ka[j], j);
+                let kb = bone_b(bone_kb[j], j);
+                let na = node_of(ka);
+                let nb = node_of(kb);
                 let fa = select(1.0, 1.0 + STANCE_GRIP * friction[na] * p.friction, in_mask(na, stance_lo, stance_hi));
                 let fb = select(1.0, 1.0 + STANCE_GRIP * friction[nb] * p.friction, in_mask(nb, stance_lo, stance_hi));
                 let share = stance_share(bone_sa[j], fa, fb);
@@ -611,9 +646,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             if j >= bone_count { break; }
             let cos_half = bone_cos_half[j];
             if cos_half <= -1.0 { continue; }
-            let kn = bone_ka[j] & 0xffffu;
-            let kc = bone_kb[j];
-            let kq = bone_ka[j] >> 16u;
+            let kn = bone_a(bone_ka[j], j);
+            let kc = bone_b(bone_kb[j], j);
+            let kq = bone_q(bone_ka[j], j);
             let pivot = pos[kn];
             let u = pos[kq] - pivot;
             let v = pos[kc] - pivot;
@@ -674,7 +709,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         var mass_sum = 0.0;
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
-            let k = j * WG + lane;
+            let k = node_k(j, lane);
             let shape = pos[k];
             scr[k] = shape;
             target_center += shape * mass[j];
@@ -682,8 +717,8 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         }
         for (var j = 0u; j < MAXB; j++) {
             if j >= bone_count { break; }
-            let ka = bone_ka[j] & 0xffffu;
-            let kb = bone_kb[j];
+            let ka = bone_a(bone_ka[j], j);
+            let kb = bone_b(bone_kb[j], j);
             let delta = scr[kb] - scr[ka];
             let raw_distance = length(delta);
             var direction = select(vec2f(1.0, 0.0), delta * (1.0 / max(raw_distance, 1e-6)), raw_distance > 1e-6);
@@ -708,14 +743,14 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         var current_center = vec2f(0.0);
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
-            let k = j * WG + lane;
+            let k = node_k(j, lane);
             current_center += pos[k] * mass[j];
         }
         let center_shift = (target_center - current_center) * inv_total_mass;
         var ground_lift = 0.0;
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
-            let k = j * WG + lane;
+            let k = node_k(j, lane);
             let shifted = pos[k] + center_shift;
             pos[k] = shifted;
             if grounded {
@@ -725,7 +760,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         if grounded {
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
-                let k = j * WG + lane;
+                let k = node_k(j, lane);
                 pos[k].y += ground_lift;
             }
         }
@@ -744,7 +779,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             var slide = 0.0;
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
-                let k = j * WG + lane;
+                let k = node_k(j, lane);
                 if pos[k].y <= vel[k].y + 1e-4 && failed[j] < 0.5 {
                     held_mass += mass[j];
                     held_grip += mass[j] * friction[j];
@@ -764,7 +799,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             let excess = shift - clamp(shift, low, high);
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
-                pos[j * WG + lane].x -= excess;
+                pos[node_k(j, lane)].x -= excess;
             }
         }
         var contact_mass = 0.0;
@@ -776,7 +811,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         // upward speed, or a limb swung into the ground would launch it.
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
-            let k = j * WG + lane;
+            let k = node_k(j, lane);
             let predicted_y = vel[k].x;
             let floor_y = vel[k].y;
             var velocity = (pos[k] - old[k]) * RATE;
@@ -825,15 +860,15 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
                 if failed[j] < 0.5 {
-                    vel[j * WG + lane].x += change;
+                    vel[node_k(j, lane)].x += change;
                 }
             }
         }
         for (var iteration = 0u; iteration < VELOCITY_SOLVE_ITERATIONS; iteration++) {
             for (var j = 0u; j < MAXB; j++) {
                 if j >= bone_count { break; }
-                let ka = bone_ka[j] & 0xffffu;
-                let kb = bone_kb[j];
+                let ka = bone_a(bone_ka[j], j);
+                let kb = bone_b(bone_kb[j], j);
                 let delta = pos[kb] - pos[ka];
                 let length_bone = max(length(delta), 1e-6);
                 let direction = delta * (1.0 / length_bone);
@@ -859,7 +894,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             var removed = vec2f(0.0);
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
-                let k = j * WG + lane;
+                let k = node_k(j, lane);
                 let velocity = limit_speed(vel[k]);
                 removed += (vel[k] - velocity) * mass[j];
                 vel[k] = velocity;
@@ -867,7 +902,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             let correction = removed * inv_total_mass;
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
-                let k = j * WG + lane;
+                let k = node_k(j, lane);
                 var velocity = vel[k] + correction;
                 if grounded && pos[k].y <= old[k].x + 1e-5 {
                     velocity.y = max(velocity.y, 0.0);
@@ -883,8 +918,8 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             var high = -1e20;
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
-                let y = pos[j * WG + lane].y;
-                let floor_y = old[j * WG + lane].x;
+                let y = pos[node_k(j, lane)].y;
+                let floor_y = old[node_k(j, lane)].x;
                 center_y += y;
                 low = min(low, y - radius[j]);
                 high = max(high, y + radius[j]);
@@ -916,7 +951,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             if p.ground > 0.0 {
                 for (var j = 0u; j < MAXN; j++) {
                     if j >= body_nodes { break; }
-                    if pos[j * WG + lane].y <= old[j * WG + lane].x + 0.002 {
+                    if pos[node_k(j, lane)].y <= old[node_k(j, lane)].x + 0.002 {
                         if j < 32u { now_lo |= 1u << j; } else { now_hi |= 1u << (j - 32u); }
                     }
                 }
@@ -952,9 +987,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if j >= bone_count || metrics.fall_time != 0.0 { break; }
                 let cos_half = bone_cos_half[j];
                 if cos_half <= -1.0 { continue; }
-                let pivot = pos[bone_ka[j] & 0xffffu];
-                let u = pos[bone_ka[j] >> 16u] - pivot;
-                let v = pos[bone_kb[j]] - pivot;
+                let pivot = pos[bone_a(bone_ka[j], j)];
+                let u = pos[bone_q(bone_ka[j], j)] - pivot;
+                let v = pos[bone_b(bone_kb[j], j)] - pivot;
                 let norm = sqrt(dot(u, u) * dot(v, v));
                 if norm < 1e-12 { continue; }
                 let relative = vec2f(dot(u, v), u.x * v.y - u.y * v.x) * (1.0 / norm);
@@ -968,16 +1003,16 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             // A head shaken too hard kills the creature: its acceleration,
             // averaged over about HEAD_SHAKE_WINDOW seconds, may not pass the limit.
             if metrics.fall_time == 0.0 && time >= HEAD_SHAKE_WINDOW {
-                let head_accel = length(vel[lane] - head_start) * RATE;
+                let head_accel = length(vel[node_k(0u, lane)] - head_start) * RATE;
                 metrics.head_shake += (head_accel - metrics.head_shake)
                     * min(1.0, 1.0 / (HEAD_SHAKE_WINDOW * RATE));
             }
             if metrics.fall_time == 0.0
-                && (pos[lane].y < pos[bone_kb[0]].y || broken || metrics.head_shake > HEAD_SHAKE_LIMIT) {
+                && (pos[node_k(0u, lane)].y < pos[bone_b(bone_kb[0], 0u)].y || broken || metrics.head_shake > HEAD_SHAKE_LIMIT) {
                 var fall_x = 0.0;
                 for (var j = 0u; j < MAXN; j++) {
                     if j >= body_nodes { break; }
-                    fall_x += pos[j * WG + lane].x * mass[j];
+                    fall_x += pos[node_k(j, lane)].x * mass[j];
                 }
                 metrics.fall_time = time + DT;
                 metrics.fitness = fall_x * inv_total_mass;
@@ -1024,7 +1059,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             var failures = 0.0;
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
-                score += pos[j * WG + lane].x * mass[j];
+                score += pos[node_k(j, lane)].x * mass[j];
                 mass_sum += mass[j];
                 failures += failed[j];
             }
@@ -1050,7 +1085,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
     results[creature] = metrics;
     for (var j = 0u; j < MAXN; j++) {
         if j >= body_nodes { break; }
-        let k = j * WG + lane;
+        let k = node_k(j, lane);
         var n = nodes[base + j];
         n.pos = pos[k];
         n.vel = vel[k];

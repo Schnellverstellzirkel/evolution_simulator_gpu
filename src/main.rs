@@ -117,6 +117,10 @@ enum Action {
         /// Evaluate directly on the named Vulkan device (bodies up to 16 nodes).
         #[arg(long)]
         engine: Option<String>,
+        /// Keep only creatures of the checkpoint's Nth most common body plan
+        /// (0 is the most common), before `--limit`.
+        #[arg(long)]
+        plan_rank: Option<usize>,
     },
     /// Summarize an existing checkpoint's record curve and archive morphology.
     Analyze {
@@ -421,6 +425,7 @@ fn main() -> Result<()> {
             compare,
             duration,
             engine,
+            plan_rank,
         }) => {
             let e = storage::load(&checkpoint)?;
             let mut cfg = e.config.clone();
@@ -428,9 +433,29 @@ fn main() -> Result<()> {
                 cfg.duration = duration;
             }
             cfg.throughput = true;
-            let count = limit.unwrap_or(cfg.population).min(cfg.population);
+            let mut source: Vec<usize> = (0..cfg.population).collect();
+            if let Some(rank) = plan_rank {
+                use evolution_simulator::creature_kernel::plan_of;
+                let mut counts = std::collections::HashMap::new();
+                for &i in &source {
+                    *counts.entry(plan_of(&e.population, i)).or_insert(0usize) += 1;
+                }
+                let mut ranked: Vec<_> = counts.into_iter().collect();
+                ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                let (plan, size) = ranked
+                    .get(rank)
+                    .context("No body plan of that rank")?
+                    .clone();
+                eprintln!(
+                    "Plan rank {rank}: {size} creatures, {} nodes, {} muscles",
+                    plan.nodes,
+                    plan.muscles.len()
+                );
+                source.retain(|&i| plan_of(&e.population, i) == plan);
+            }
+            let count = limit.unwrap_or(source.len()).min(source.len());
             let mut population = evolution_simulator::evolution::Population::default();
-            for i in 0..count {
+            for &i in &source[..count] {
                 let mut c = e.population.creature(i);
                 if let Some(target) = grow {
                     evolution_simulator::evolution::grow_for_benchmark(&mut c, &cfg, 38, target);

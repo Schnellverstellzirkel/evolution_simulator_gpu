@@ -91,12 +91,60 @@ fn main() {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(32);
-        for &capacity in evolution_simulator::creature_kernel::CAPACITIES.iter() {
-            let code = spirv(&evolution_simulator::creature_kernel::shader_source(
-                capacity,
-                workgroup,
-                evolution_simulator::physics::Fidelity::standard(),
+        // `EVOLUTION_STATS_PLAN=<checkpoint>:<rank>` adds the kernel
+        // specialized for that checkpoint's rank-th most common body plan.
+        let mut sources: Vec<(String, String)> = evolution_simulator::creature_kernel::CAPACITIES
+            .iter()
+            .map(|&capacity| {
+                (
+                    format!("capacity {capacity:2}"),
+                    evolution_simulator::creature_kernel::shader_source(
+                        capacity,
+                        workgroup,
+                        evolution_simulator::physics::Fidelity::standard(),
+                    ),
+                )
+            })
+            .collect();
+        if let Ok(spec) = std::env::var("EVOLUTION_STATS_PLAN") {
+            let (path, rank) = spec.rsplit_once(':').expect("checkpoint:rank");
+            let e = evolution_simulator::storage::load(std::path::Path::new(path)).unwrap();
+            let mut counts = std::collections::HashMap::new();
+            for i in 0..e.population.genomes.len() {
+                *counts
+                    .entry(evolution_simulator::creature_kernel::plan_of(
+                        &e.population,
+                        i,
+                    ))
+                    .or_insert(0usize) += 1;
+            }
+            let mut ranked: Vec<_> = counts.into_iter().collect();
+            ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            let (plan, size) = &ranked[rank.parse::<usize>().unwrap()];
+            let capacity = evolution_simulator::creature_kernel::CAPACITIES
+                [evolution_simulator::creature_kernel::capacity_index(usize::from(plan.nodes))];
+            sources.push((
+                format!(
+                    "plan {rank} ({size} creatures, {} nodes, {} muscles)",
+                    plan.nodes,
+                    plan.muscles.len()
+                ),
+                evolution_simulator::creature_kernel::specialized_source(
+                    plan,
+                    capacity,
+                    workgroup,
+                    evolution_simulator::physics::Fidelity::standard(),
+                ),
             ));
+        }
+        for (label, source) in &sources {
+            let capacity = label;
+            let code = spirv(source);
+            if let Some(dir) = std::env::var_os("EVOLUTION_DUMP_IR") {
+                let stem = std::path::Path::new(&dir).join(label.replace(' ', "_"));
+                let _ = std::fs::write(stem.with_extension("wgsl"), source);
+                let _ = std::fs::write(stem.with_extension("spv"), bytemuck::cast_slice(&code));
+            }
             let module = device
                 .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)
                 .unwrap();
@@ -108,7 +156,10 @@ fn main() {
             let info = vk::ComputePipelineCreateInfo::default()
                 .stage(stage)
                 .layout(layout)
-                .flags(vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR);
+                .flags(
+                    vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR
+                        | vk::PipelineCreateFlags::CAPTURE_INTERNAL_REPRESENTATIONS_KHR,
+                );
             let pipeline = device
                 .create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
                 .unwrap()[0];
@@ -138,7 +189,47 @@ fn main() {
                         format!("{name}={value}")
                     })
                     .collect();
-                println!("capacity {capacity:2}: {}", text.join(", "));
+                println!("{capacity}: {}", text.join(", "));
+                // `EVOLUTION_DUMP_IR=<dir>` writes the driver's internal
+                // representations (for example SASS) of every bucket.
+                if let Some(dir) = std::env::var_os("EVOLUTION_DUMP_IR") {
+                    let fp = exec_fn.fp();
+                    let raw = device.handle();
+                    let mut count = 0u32;
+                    let _ = (fp.get_pipeline_executable_internal_representations_khr)(
+                        raw,
+                        &einfo,
+                        &mut count,
+                        std::ptr::null_mut(),
+                    );
+                    let mut reps = vec![
+                        vk::PipelineExecutableInternalRepresentationKHR::default();
+                        count as usize
+                    ];
+                    let _ = (fp.get_pipeline_executable_internal_representations_khr)(
+                        raw,
+                        &einfo,
+                        &mut count,
+                        reps.as_mut_ptr(),
+                    );
+                    let mut buffers: Vec<Vec<u8>> =
+                        reps.iter().map(|rep| vec![0u8; rep.data_size]).collect();
+                    for (rep, buffer) in reps.iter_mut().zip(&mut buffers) {
+                        rep.p_data = buffer.as_mut_ptr().cast();
+                    }
+                    let _ = (fp.get_pipeline_executable_internal_representations_khr)(
+                        raw,
+                        &einfo,
+                        &mut count,
+                        reps.as_mut_ptr(),
+                    );
+                    for (r, (rep, buffer)) in reps.iter().zip(&buffers).enumerate() {
+                        let name = CStr::from_ptr(rep.name.as_ptr()).to_string_lossy();
+                        let path = std::path::Path::new(&dir)
+                            .join(format!("{}-{r}-{name}.txt", capacity.replace(' ', "_")));
+                        let _ = std::fs::write(path, buffer);
+                    }
+                }
             }
             device.destroy_pipeline(pipeline, None);
             device.destroy_shader_module(module, None);

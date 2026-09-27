@@ -656,21 +656,29 @@ fn snorm16(v: f32) -> f32 {
     (v.clamp(-1.0, 1.0) * 32767.0).round() / 32767.0
 }
 /// Joint constraints for a canonical (parent-first) skeleton.
+/// Reference node of bone `index`'s joint: its parent bone's pivot, or for a
+/// bone at the root the first root bone's child. `None` for a free joint. It
+/// depends only on the skeleton, so every creature of a body plan shares it.
+pub fn joint_reference(bones: &[Bone], index: usize) -> Option<usize> {
+    let pivot = bones[index].a as usize;
+    match bones.iter().find(|p| p.b as usize == pivot) {
+        Some(parent) => Some(parent.a as usize),
+        None => match bones.iter().position(|b| b.a == 0) {
+            Some(first) if first != index => Some(bones[first].b as usize),
+            _ => None,
+        },
+    }
+}
 pub fn joints(genes: &[NodeGene], bones: &[Bone]) -> Vec<Joint> {
     let state = body(genes, bones);
-    let first_root = bones.iter().position(|b| b.a == 0);
     bones
         .iter()
         .enumerate()
         .map(|(index, bone)| {
             let pivot = bone.a as usize;
             let child = bone.b as usize;
-            let reference = match bones.iter().find(|p| p.b as usize == pivot) {
-                Some(parent) => parent.a as usize,
-                None => match first_root {
-                    Some(first) if first != index => bones[first].b as usize,
-                    _ => return Joint::FREE,
-                },
+            let Some(reference) = joint_reference(bones, index) else {
+                return Joint::FREE;
             };
             let at = |i: usize| [genes[i].x - genes[pivot].x, genes[i].y - genes[pivot].y];
             let (u, v) = (at(reference), at(child));

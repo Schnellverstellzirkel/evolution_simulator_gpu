@@ -71,6 +71,11 @@ pub struct VkEngine {
     /// One kernel per node capacity, for each physics fidelity in use. The
     /// standard fidelity is built at startup; others on first use.
     pipelines: Vec<(crate::physics::Fidelity, Vec<vk::Pipeline>)>,
+    /// Kernels specialized for one body plan, by plan, bucket and fidelity.
+    specialized: std::collections::HashMap<
+        (creature_kernel::Plan, usize, crate::physics::Fidelity),
+        vk::Pipeline,
+    >,
     descriptor_pool: vk::DescriptorPool,
     command_pool: vk::CommandPool,
     slots: Vec<Slot>,
@@ -269,6 +274,7 @@ impl VkEngine {
                 set_layout,
                 pipeline_layout,
                 pipelines,
+                specialized: Default::default(),
                 descriptor_pool,
                 command_pool,
                 slots,
@@ -535,29 +541,57 @@ impl VkEngine {
     ) -> Result<Vec<vk::Pipeline>> {
         let mut pipelines = Vec::with_capacity(CAPACITIES.len());
         for &capacity in CAPACITIES.iter().filter(|&&c| c <= max_capacity) {
-            let code = spirv(&creature_kernel::shader_source(
-                capacity, workgroup, fidelity,
-            ))?;
-            unsafe {
-                let module = device.create_shader_module(
-                    &vk::ShaderModuleCreateInfo::default().code(&code),
-                    None,
-                )?;
-                let stage = vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::COMPUTE)
-                    .module(module)
-                    .name(c"advance");
-                let info = vk::ComputePipelineCreateInfo::default()
-                    .stage(stage)
-                    .layout(layout);
-                let pipeline = device
-                    .create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
-                    .map_err(|(_, e)| e)?[0];
-                device.destroy_shader_module(module, None);
-                pipelines.push(pipeline);
-            }
+            pipelines.push(Self::compile(
+                device,
+                layout,
+                &creature_kernel::shader_source(capacity, workgroup, fidelity),
+            )?);
         }
         Ok(pipelines)
+    }
+
+    fn compile(
+        device: &ash::Device,
+        layout: vk::PipelineLayout,
+        source: &str,
+    ) -> Result<vk::Pipeline> {
+        let code = spirv(source)?;
+        unsafe {
+            let module = device
+                .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)?;
+            let stage = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(module)
+                .name(c"advance");
+            let info = vk::ComputePipelineCreateInfo::default()
+                .stage(stage)
+                .layout(layout);
+            let pipeline = device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
+                .map_err(|(_, e)| e);
+            device.destroy_shader_module(module, None);
+            Ok(pipeline?[0])
+        }
+    }
+
+    /// The kernel specialized for `plan` in `capacity` buckets, built on first use.
+    fn specialized_pipeline(
+        &mut self,
+        plan: &creature_kernel::Plan,
+        capacity: usize,
+        fidelity: crate::physics::Fidelity,
+    ) -> Result<vk::Pipeline> {
+        let key = (plan.clone(), capacity, fidelity);
+        if let Some(&pipeline) = self.specialized.get(&key) {
+            return Ok(pipeline);
+        }
+        let pipeline = Self::compile(
+            &self.device,
+            self.pipeline_layout,
+            &creature_kernel::specialized_source(plan, capacity, self.workgroup, fidelity),
+        )?;
+        self.specialized.insert(key, pipeline);
+        Ok(pipeline)
     }
 
     /// Index of the kernel set for `fidelity`, building it on first use.
@@ -598,6 +632,15 @@ impl VkEngine {
             .position(|s| s.pending.is_none())
             .context("No free GPU submission slot")?;
         let ranges = steps.div_ceil(chunk);
+        let kernels: Vec<vk::Pipeline> =
+            batches
+                .iter()
+                .map(|batch| match &batch.plan {
+                    Some(plan) => self.specialized_pipeline(plan, batch.capacity, fidelity),
+                    None => Ok(self.pipelines[pipeline_set].1
+                        [creature_kernel::capacity_index(batch.capacity)]),
+                })
+                .collect::<Result<_>>()?;
         self.ensure_buffers(slot, batches, u64::from(ranges) * batches.len() as u64)?;
         let mut param_data =
             vec![0u8; (u64::from(ranges) * batches.len() as u64 * self.params_stride) as usize];
@@ -683,11 +726,7 @@ impl VkEngine {
                     let batch = &batches[b];
                     let group = creature_kernel::capacity_index(batch.capacity);
                     let res = resources.groups[group].as_ref().unwrap();
-                    device.cmd_bind_pipeline(
-                        cb,
-                        vk::PipelineBindPoint::COMPUTE,
-                        self.pipelines[pipeline_set].1[group],
-                    );
+                    device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, kernels[b]);
                     let offset = ((r * batches.len() + b) as u64 * self.params_stride) as u32;
                     device.cmd_bind_descriptor_sets(
                         cb,
@@ -932,6 +971,9 @@ impl Drop for VkEngine {
                 for &p in set {
                     self.device.destroy_pipeline(p, None);
                 }
+            }
+            for &p in self.specialized.values() {
+                self.device.destroy_pipeline(p, None);
             }
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);

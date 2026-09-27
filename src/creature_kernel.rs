@@ -89,6 +89,9 @@ impl GpuResult {
 /// One node-capacity group, ready for upload.
 pub struct LaneBatch {
     pub capacity: usize,
+    /// Set when every creature in the batch shares this body plan, so the
+    /// batch can run the plan's specialized kernel.
+    pub plan: Option<Plan>,
     /// Position of each packed creature within the caller's index slice.
     pub slots: Vec<usize>,
     /// Population index of each packed creature.
@@ -250,8 +253,18 @@ pub fn pack(pop: &Population, indices: &[usize]) -> Result<Vec<LaneBatch>> {
                     }
                 }
             }
+            // Prototype: EVOLUTION_SPECIALIZE runs a whole bucket on its plan's
+            // kernel when every creature in it shares that plan.
+            let plan = std::env::var_os("EVOLUTION_SPECIALIZE").and_then(|_| {
+                let first = plan_of(pop, members[0].1);
+                members
+                    .iter()
+                    .all(|&(_, i)| plan_of(pop, i) == first)
+                    .then_some(first)
+            });
             LaneBatch {
                 capacity,
+                plan,
                 slots: members.iter().map(|&(slot, _)| slot).collect(),
                 creatures: members.iter().map(|&(_, i)| i).collect(),
                 nodes,
@@ -264,8 +277,121 @@ pub fn pack(pop: &Population, indices: &[usize]) -> Result<Vec<LaneBatch>> {
         .collect())
 }
 
+/// A body plan: the skeleton and muscle attachments as node numbers. Every
+/// node index the kernel uses follows from it, so creatures of one plan can
+/// run a kernel with those indices compiled in (`specialized_source`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Plan {
+    pub nodes: u8,
+    /// Per bone: pivot, child, and joint reference node (the pivot for a free
+    /// joint, which the kernel skips).
+    pub bones: Vec<[u8; 3]>,
+    /// Per muscle: the endpoints of its two bones (a0, a1, b0, b1).
+    pub muscles: Vec<[u8; 4]>,
+}
+
+/// Body plan of creature `index`.
+pub fn plan_of(pop: &Population, index: usize) -> Plan {
+    let g = &pop.genomes[index];
+    let bones = &pop.bones[g.bone_start..g.bone_start + g.bone_count];
+    let muscles = &pop.muscles[g.muscle_start..g.muscle_start + g.muscle_count];
+    Plan {
+        nodes: g.node_count as u8,
+        bones: bones
+            .iter()
+            .enumerate()
+            .map(|(b, bone)| {
+                let reference = physics::joint_reference(bones, b).unwrap_or(bone.a as usize);
+                [bone.a as u8, bone.b as u8, reference as u8]
+            })
+            .collect(),
+        muscles: muscles
+            .iter()
+            .map(|m| {
+                let a = bones[m.bone_a as usize];
+                let b = bones[m.bone_b as usize];
+                [a.a as u8, a.b as u8, b.a as u8, b.b as u8]
+            })
+            .collect(),
+    }
+}
+
+/// The creature kernel for `capacity`-node buckets.
 pub fn shader_source(
     capacity: usize,
+    workgroup: u32,
+    fidelity: crate::physics::Fidelity,
+) -> String {
+    base_source(capacity, capacity, workgroup, fidelity).replace("MUSCLE_LOOP", "muscle_count")
+}
+
+/// The creature kernel for one body plan, in a bucket of node stride
+/// `capacity`. Node, bone and muscle endpoints are constants, so every node
+/// and bone loop unrolls with fixed indices and node state lives in
+/// function-local arrays the compiler can keep in registers. It computes the
+/// same expressions in the same order as `shader_source`.
+pub fn specialized_source(
+    plan: &Plan,
+    capacity: usize,
+    workgroup: u32,
+    fidelity: crate::physics::Fidelity,
+) -> String {
+    let nodes = usize::from(plan.nodes);
+    let mut source = base_source(nodes, capacity, workgroup, fidelity);
+    let cut = |source: &mut String, begin: &str, end: &str, with: &str| {
+        let a = source.find(begin).expect("kernel marker");
+        let b = source.find(end).expect("kernel marker") + end.len();
+        source.replace_range(a..b, with);
+    };
+    cut(&mut source, "// NODE-STATE-BEGIN", "// NODE-STATE-END", "");
+    let mut helpers = String::from(
+        "fn node_k(j: u32, lane: u32) -> u32 {\n    return j;\n}\n\
+         fn node_of(k: u32) -> u32 {\n    return k;\n}\n",
+    );
+    let mut bone = String::from("fn plan_bone(j: u32) -> u32 {\n    switch j {\n");
+    for (j, [a, b, q]) in plan.bones.iter().enumerate() {
+        let word = u32::from(*a) | u32::from(*b) << 8 | u32::from(*q) << 16;
+        bone.push_str(&format!("        case {j}u: {{ return {word}u; }}\n"));
+    }
+    bone.push_str("        default: { return 0u; }\n    }\n}\n");
+    let mut muscle = String::from("fn plan_muscle(j: u32) -> u32 {\n    switch j {\n");
+    for (j, ends) in plan.muscles.iter().enumerate() {
+        let word = u32::from_le_bytes(*ends);
+        muscle.push_str(&format!("        case {j}u: {{ return {word}u; }}\n"));
+    }
+    muscle.push_str("        default: { return 0u; }\n    }\n}\n");
+    helpers.push_str(&bone);
+    helpers.push_str(&muscle);
+    helpers.push_str(
+        "fn bone_a(packed_a: u32, j: u32) -> u32 {\n    return plan_bone(j) & 0xffu;\n}\n\
+         fn bone_q(packed_a: u32, j: u32) -> u32 {\n    return (plan_bone(j) >> 16u) & 0xffu;\n}\n\
+         fn bone_b(packed_b: u32, j: u32) -> u32 {\n    return (plan_bone(j) >> 8u) & 0xffu;\n}\n\
+         fn muscle_node(packed: u32, j: u32, e: u32) -> u32 {\n    return (plan_muscle(j) >> (8u * e)) & 0xffu;\n}\n",
+    );
+    cut(&mut source, "// HELPERS-BEGIN", "// HELPERS-END", &helpers);
+    let locals = "var pos: array<vec2f, MAXN>;\n    var vel: array<vec2f, MAXN>;\n    \
+                  var old: array<vec2f, MAXN>;\n    var scr: array<vec2f, MAXN>;";
+    let replace = |source: String, from: &str, to: &str| {
+        assert!(source.contains(from), "kernel text {from:?} missing");
+        source.replace(from, to)
+    };
+    let source = replace(source, "// LOCAL-NODE-STATE", locals);
+    let source = replace(source, "let body_nodes = info.x;", "let body_nodes = MAXN;");
+    let source = replace(source, "let bone_count = info.y;", "let bone_count = MAXB;");
+    let source = replace(
+        source,
+        "let muscle_count = info.z;",
+        &format!("let muscle_count = {}u;", plan.muscles.len()),
+    );
+    // `MAXN` is the plan's node count here, and `MAXB = MAXN - 1u` its bone
+    // count: skeletons are trees. The driver unrolls the loops it chooses;
+    // unrolling every loop in the text measured slower (register spills).
+    source.replace("MUSCLE_LOOP", &format!("{}u", plan.muscles.len()))
+}
+
+fn base_source(
+    capacity: usize,
+    stride: usize,
     workgroup: u32,
     fidelity: crate::physics::Fidelity,
 ) -> String {
@@ -408,6 +534,7 @@ pub fn shader_source(
         .replace("SHAREDLEN", &(capacity * workgroup as usize).to_string())
         .replace("WGSIZEu", &format!("{workgroup}u"))
         .replace("WGSIZE", &workgroup.to_string())
+        .replace("STRIDE", &format!("{stride}u"))
         .replace("MAXNODESu", &format!("{capacity}u"));
     crate::gpu::apply_fast_cos(source)
 }
