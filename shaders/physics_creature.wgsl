@@ -128,7 +128,6 @@ const MAXB: u32 = MAXN - 1u;
 var<workgroup> pos: array<vec2f, SHAREDLEN>;
 var<workgroup> vel: array<vec2f, SHAREDLEN>;
 var<workgroup> old: array<vec2f, SHAREDLEN>;
-var<workgroup> scr: array<vec2f, SHAREDLEN>;
 // NODE-STATE-END
 
 // Index helpers. The generic kernel keeps node state in workgroup memory as
@@ -458,8 +457,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
             let k = node_k(j, lane);
-            old[k] = pos[k];
-            scr[k] = vec2f(0.0);
+            // Muscle forces add up here; the step's start position replaces
+            // them when the velocities integrate.
+            old[k] = vec2f(0.0);
         }
 
         let time = f32(max(tick, SETTLE) - SETTLE) * DT;
@@ -531,7 +531,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if b1 == node { weight -= m.anchor_b; }
                 let f = push * weight;
                 let k = node_k(node, lane);
-                scr[k] += f;
+                old[k] += f;
             }
         }
 
@@ -550,19 +550,20 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             if j >= body_nodes { break; }
             let k = node_k(j, lane);
             if failed[j] < 0.5 {
-                let free = (vel[k] + (scr[k] * inv_mass[j] - vec2f(0.0, gravity) + vec2f(wind, 0.0)) * DT) * p.air;
+                let free = (vel[k] + (old[k] * inv_mass[j] - vec2f(0.0, gravity) + vec2f(wind, 0.0)) * DT) * p.air;
                 let capped = limit_speed(free);
                 capped_momentum += (free - capped) * mass[j];
-                scr[k] = capped;
+                old[k] = capped;
             }
         }
         let cap_correction = capped_momentum * inv_total_mass;
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
             let k = node_k(j, lane);
+            let start = pos[k];
             if failed[j] < 0.5 {
                 var n = Node(pos[k], vel[k], radius[j], friction[j], mass[j], 0.0);
-                n.vel = scr[k] + cap_correction;
+                n.vel = old[k] + cap_correction;
                 n.pos += n.vel * DT;
                 if !all(abs(n.pos) < vec2f(1e6)) || !all(abs(n.vel) < vec2f(1e6)) {
                     failed[j] = 1.0;
@@ -571,6 +572,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 }
                 pos[k] = n.pos;
             }
+            old[k] = start;
             // Velocities are rebuilt from positions after the solve; keep the
             // predicted height to measure how far the ground pushed the node,
             // and the lowest allowed center height for this step.
@@ -720,16 +722,23 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
             let k = node_k(j, lane);
-            let shape = pos[k];
-            scr[k] = shape;
-            target_center += shape * mass[j];
+            target_center += pos[k] * mass[j];
             mass_sum += mass[j];
+        }
+        // Each child keeps its offset from its parent in place of its
+        // position. Bones run parent-first, so children go before parents
+        // here, and the rebuild below writes each position back parent-first.
+        for (var i = 0u; i < MAXB; i++) {
+            if i >= bone_count { break; }
+            let j = bone_count - 1u - i;
+            let kb = bone_b(bone_kb[j], j);
+            pos[kb] = pos[kb] - pos[bone_a(bone_ka[j], j)];
         }
         for (var j = 0u; j < MAXB; j++) {
             if j >= bone_count { break; }
             let ka = bone_a(bone_ka[j], j);
             let kb = bone_b(bone_kb[j], j);
-            let delta = scr[kb] - scr[ka];
+            let delta = pos[kb];
             let raw_distance = length(delta);
             var direction = select(vec2f(1.0, 0.0), delta * (1.0 / max(raw_distance, 1e-6)), raw_distance > 1e-6);
             let previous_delta = old[kb] - old[ka];

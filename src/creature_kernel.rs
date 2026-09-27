@@ -521,7 +521,7 @@ pub fn specialized_source(
     );
     cut(&mut source, "// HELPERS-BEGIN", "// HELPERS-END", &helpers);
     let locals = "var pos: array<vec2f, MAXN>;\n    var vel: array<vec2f, MAXN>;\n    \
-                  var old: array<vec2f, MAXN>;\n    var scr: array<vec2f, MAXN>;";
+                  var old: array<vec2f, MAXN>;";
     let replace = |source: String, from: &str, to: &str| {
         assert!(source.contains(from), "kernel text {from:?} missing");
         source.replace(from, to)
