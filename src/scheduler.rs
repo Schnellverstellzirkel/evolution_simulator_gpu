@@ -870,9 +870,31 @@ impl Scheduler {
     /// creatures are held for a check trial and returned once it finishes.
     pub fn collect(
         &mut self,
+        pop: &Population,
+        cfg: &Config,
+        timeout: Duration,
+        contender: impl FnMut(usize, &EvaluationMetrics) -> bool,
+    ) -> Result<Vec<(Vec<usize>, Vec<EvaluationMetrics>)>> {
+        self.collect_up_to(pop, cfg, timeout, usize::MAX, contender)
+    }
+    /// `collect` that stops after the first unit with final results, so a
+    /// caller that archives and breeds each unit can answer controls between
+    /// units. Later units wait in their engines.
+    pub fn collect_one(
+        &mut self,
+        pop: &Population,
+        cfg: &Config,
+        timeout: Duration,
+        contender: impl FnMut(usize, &EvaluationMetrics) -> bool,
+    ) -> Result<Vec<(Vec<usize>, Vec<EvaluationMetrics>)>> {
+        self.collect_up_to(pop, cfg, timeout, 1, contender)
+    }
+    fn collect_up_to(
+        &mut self,
         _pop: &Population,
         _cfg: &Config,
         timeout: Duration,
+        limit: usize,
         mut contender: impl FnMut(usize, &EvaluationMetrics) -> bool,
     ) -> Result<Vec<(Vec<usize>, Vec<EvaluationMetrics>)>> {
         let mut out = Vec::new();
@@ -882,11 +904,14 @@ impl Scheduler {
         }
         let deadline = Instant::now() + timeout;
         loop {
-            for device in &mut self.devices {
+            'devices: for device in &mut self.devices {
                 if device.failure.is_some() {
                     continue;
                 }
                 loop {
+                    if out.len() >= limit {
+                        break 'devices;
+                    }
                     match device.engine.poll() {
                         Ok(None) => break,
                         Ok(Some(done)) => {

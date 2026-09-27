@@ -493,7 +493,10 @@ fn run(
                                 steady.active = true;
                             }
                             sched.pump(&e.population, &e.config, &[], |i, m| e.check_need(i, m))?;
-                            for (indices, metrics) in sched.collect(
+                            // One unit per pass: archiving and breeding a unit
+                            // takes a few tenths of a second, and controls are
+                            // read between passes.
+                            for (indices, metrics) in sched.collect_one(
                                 &e.population,
                                 &e.config,
                                 Duration::from_millis(4),
