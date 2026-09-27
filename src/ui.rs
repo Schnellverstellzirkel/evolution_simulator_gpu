@@ -1473,7 +1473,7 @@ impl App {
                                 .suffix(" gens"),
                         );
                     });
-                    ui.small("0 disables automatic checkpoints.");
+                    ui.small("Off (0) by default, also for a loaded game.");
                 });
             }
             if matches_search(&q, "display ui scale window sorting animation") {

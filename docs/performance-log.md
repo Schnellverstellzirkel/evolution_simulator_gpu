@@ -528,3 +528,34 @@ Knobs re-measured after these changes (3M GUI benchmark, two runs each, interlea
 | segments at 2, 10, 20 and 35 s | 2 | 197,182 and 183,383/s |
 
 An nsys trace with 1 s units shows the GPU at 100% activity for most of the measured generations, with short dips to 75 to 90%, at about 10 warps in flight per SM (p50) and 20% issue.
+
+## Long sessions (2026-09-28)
+
+The owner saw evolution slow sharply after a few dozen generations. Their 3M session reached generation 70 (autosave `runs/seed-1790546317494369957-auto.evo`, not committed). Measured against the evolved 3M checkpoint at generation 9. `examples/body_stats.rs` reports body sizes. The GUI benchmark ran one warm-up and two measured generations with `EVOLUTION_CPU_THREADS=0` and autosave off. `eval-bench` ran on 200,000 creatures with every creature fine-checked.
+
+| | generation 9 | generation 70 |
+|---|---:|---:|
+| mean nodes / bones / muscles | 6.02 / 5.02 / 8.99 | 10.64 / 9.64 / 33.98 |
+| largest body | 11 nodes, 30 muscles | 21 nodes, 96 muscles (the cap) |
+| packed GPU data per creature | 1,005 B | 2,818 B |
+| `eval-bench`, GPU only | 15,519 and 15,309/s | 3,638 and 3,784/s |
+| GUI end to end | 185,000 to 216,000/s (2026-09-27) | 29,720 (warm-up), 36,815, 40,601/s; 38,615/s over the two measured generations |
+| evaluation / archive / breeding per generation | | 61.9 to 68.9 s / 2.9 to 3.2 s / 9.0 to 9.3 s |
+| peak RSS | about 10 GB | 22.2 GB |
+| checkpoint | 1.37 GB | 4.18 GB |
+
+The GPU held 2,502 MHz mean at 44 W and 59 °C over the busy samples, so the slowdown is work per creature, not heat. `mem_report` puts the generation-70 population at 6.4 GB of genes. The arena keeps the live generation, its children and a compaction spare, and the old default autosave cloned the whole experiment every tenth generation on top. That is enough to reach swap on this 32 GB machine.
+
+Fixes landed:
+
+- A continuous run's autosave could not be loaded ("Invalid completed fitness values"). The loader assumed the first `evaluated` scores are the finished ones, which is false when slots are evaluated and re-bred in any order. It now checks only that every score is finite or NaN. Test: `a_continuous_run_checkpoint_with_scattered_scores_loads`.
+- Autosave is off by default, and a loaded game starts with it off (owner: as few files as possible).
+
+Measured and not adopted: removal operators (`EVOLUTION_SHRINK=1`: `remove_limb` and `remove_muscle` at the rate of the operators that add nodes). `examples/search_ab.rs` ran 10 seeds (38 to 47), 40 generations and 5,000 creatures, with 60 s trials. It now prints mean nodes and muscles per generation.
+
+| | nodes / muscles at generation 39 | best, mean (median) | QD, mean (median) | CPU wall |
+|---|---:|---:|---:|---:|
+| current operators | 7.31 / 13.61 | 346 m (280) | 30,075 (17,768) | 196 s |
+| with removal | 6.41 / 10.31 | 275 m (278) | 21,329 (18,111) | 182 s |
+
+Removal slows growth by about a quarter. Medians tie, and the means favour the current operators because of one or two strong seeds. Growth is selected for: a muscle has no mass and brings its own energy store and force. The design response is in `docs/data-architecture.md` section 10.

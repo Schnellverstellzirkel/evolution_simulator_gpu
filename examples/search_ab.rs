@@ -111,7 +111,7 @@ fn main() -> Result<()> {
             .collect::<Vec<_>>()
             .join(",")
     );
-    println!("{scope} seed generation best_m qd_score cells");
+    println!("{scope} seed generation best_m qd_score cells mean_nodes mean_muscles");
     let started = Instant::now();
     let (mut distances, mut scores) = (Vec::new(), Vec::new());
     for &seed in &options.seeds {
@@ -159,10 +159,18 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             .copied()
             .filter(|score| score.is_finite())
             .fold(f32::MIN, f32::max);
+        // Mean body size of the evaluated generation: bodies that only grow
+        // make every later generation slower to simulate.
+        let genomes = &experiment.population.genomes;
+        let mean = |part: fn(&evolution_simulator::evolution::Genome) -> usize| {
+            genomes.iter().map(part).sum::<usize>() as f64 / genomes.len().max(1) as f64
+        };
         println!(
-            "{scope} {seed} {generation} {generation_best:.2} {:.2} {}",
+            "{scope} {seed} {generation} {generation_best:.2} {:.2} {} {:.2} {:.2}",
             experiment.archive.qd_score,
-            experiment.archive.behavior_count()
+            experiment.archive.behavior_count(),
+            mean(|g| g.node_count),
+            mean(|g| g.muscle_count)
         );
         best = experiment
             .archive

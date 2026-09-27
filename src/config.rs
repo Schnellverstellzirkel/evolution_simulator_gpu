@@ -97,7 +97,10 @@ impl Default for Config {
             gpu_budget_mib: 4096,
             ram_budget_mib: 16384,
             throughput: true,
-            checkpoint_interval: 10,
+            // The game writes no files on its own (owner, 2026-09-28): a 3M
+            // autosave took 1.4 GB at generation 9 and 4.2 GB at generation 70,
+            // and the snapshot doubled the population in memory.
+            checkpoint_interval: 0,
             fidelity: None,
             screen: None,
         }

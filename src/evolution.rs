@@ -19,6 +19,21 @@ pub fn neutral_splits_enabled() -> bool {
         !value.is_empty() && !matches!(value.as_str(), "0" | "false" | "off" | "no")
     })
 }
+/// Whether structural mutation can also remove parts (`remove_limb`,
+/// `remove_muscle`). Without them every structural change adds or keeps
+/// parts, so bodies only grow: an evolved 3M run went from 6.0 nodes and 9.0
+/// muscles at generation 9 to 10.6 and 34.0 at generation 70, and simulation
+/// cost grows with them. `EVOLUTION_SHRINK` unset, empty, `0`, `false`,
+/// `off`, or `no` means off. Read once per process.
+pub fn shrink_enabled() -> bool {
+    static SHRINK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SHRINK.get_or_init(|| {
+        std::env::var("EVOLUTION_SHRINK").is_ok_and(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !value.is_empty() && !matches!(value.as_str(), "0" | "false" | "off" | "no")
+        })
+    })
+}
 /// Longest bone (m), from `physics::limits()`.
 pub fn max_bone_length() -> f32 {
     crate::physics::limits().max_bone
@@ -1774,15 +1789,102 @@ fn structural_mutation_in_place(
     rng: &mut Rng,
     neutral: bool,
 ) -> bool {
-    match rng.index(7) {
+    // With shrinking on, three operators remove nodes for the three that add
+    // them (split, mirrored node, limb), and one removes a muscle.
+    let operators = if shrink_enabled() { 11 } else { 7 };
+    match rng.index(operators) {
         0 => split_bone(creature, cfg, rng),
         1 => duplicate_mirrored_node(creature, cfg, rng, neutral),
         2 => duplicate_limb(creature, cfg, rng, neutral),
         3 => retime_rhythm(creature, rng),
         4 => change_organ(creature, rng),
         5 => phase_shift_group(creature, rng),
-        _ => rescale_body(creature, rng),
+        6 => rescale_body(creature, rng),
+        7..=9 => remove_limb(creature, cfg, rng),
+        _ => remove_muscle(creature, rng),
     }
+}
+
+/// Removes a limb tip: a leaf node other than the head or the neck base, its
+/// bone, and every muscle on that bone. The inverse of `duplicate_limb` and
+/// `duplicate_mirrored_node`.
+fn remove_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
+    if creature.nodes.len() <= 3 {
+        return false;
+    }
+    let degree = |node: u32| {
+        creature
+            .bones
+            .iter()
+            .filter(|b| b.a == node || b.b == node)
+            .count()
+    };
+    // Bones at the head are skipped, so the neck and its base stay.
+    let leaves: Vec<(usize, u32)> = creature
+        .bones
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.a != 0 && b.b != 0)
+        .filter_map(|(i, b)| {
+            if degree(b.b) == 1 {
+                Some((i, b.b))
+            } else if degree(b.a) == 1 {
+                Some((i, b.a))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if leaves.is_empty() {
+        return false;
+    }
+    let (limb, tip) = leaves[rng.index(leaves.len())];
+    creature.bones.remove(limb);
+    creature.nodes.remove(tip as usize);
+    for b in &mut creature.bones {
+        if b.a > tip {
+            b.a -= 1;
+        }
+        if b.b > tip {
+            b.b -= 1;
+        }
+    }
+    let limb = limb as u32;
+    creature
+        .muscles
+        .retain(|m| m.bone_a != limb && m.bone_b != limb);
+    for m in &mut creature.muscles {
+        if m.bone_a > limb {
+            m.bone_a -= 1;
+        }
+        if m.bone_b > limb {
+            m.bone_b -= 1;
+        }
+    }
+    repair(creature, cfg, rng);
+    true
+}
+
+/// Removes one muscle outside the ring of muscles between consecutive bones
+/// that `repair_with` keeps, the inverse of the muscles `duplicate_limb`
+/// copies.
+fn remove_muscle(creature: &mut Creature, rng: &mut Rng) -> bool {
+    let bones = creature.bones.len();
+    if bones < 3 {
+        return false;
+    }
+    let ring = |m: &Muscle| {
+        let (x, y) = (m.bone_a as usize, m.bone_b as usize);
+        (x + 1) % bones == y || (y + 1) % bones == x
+    };
+    let extra: Vec<usize> = (0..creature.muscles.len())
+        .filter(|&i| !ring(&creature.muscles[i]))
+        .collect();
+    if extra.is_empty() {
+        return false;
+    }
+    creature.muscles.remove(extra[rng.index(extra.len())]);
+    true
 }
 
 /// Grows or shrinks the whole body. Lengths scale by `s` and the rhythm slows
@@ -2186,6 +2288,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn removal_operators_shrink_bodies_and_keep_them_valid() {
+        let cfg = Config::default();
+        let mut shrunk_nodes = 0;
+        let mut shrunk_muscles = 0;
+        for index in 0..200 {
+            let mut creature = random_creature(&cfg, 0, index);
+            let mut rng = Rng::new(7, 0, index);
+            for _ in 0..3 {
+                duplicate_limb(&mut creature, &cfg, &mut rng, false);
+            }
+            let (nodes, muscles) = (creature.nodes.len(), creature.muscles.len());
+            let mut limb = creature.clone();
+            if remove_limb(&mut limb, &cfg, &mut rng) {
+                assert_eq!(limb.nodes.len(), nodes - 1);
+                assert_eq!(limb.bones.len(), limb.nodes.len() - 1);
+                shrunk_nodes += 1;
+            }
+            let mut muscle = creature.clone();
+            if remove_muscle(&mut muscle, &mut rng) {
+                assert_eq!(muscle.muscles.len(), muscles - 1);
+                shrunk_muscles += 1;
+            }
+            let mut population = Population::default();
+            population.push(limb);
+            population.push(muscle);
+            let pair = Config {
+                population: 2,
+                ..cfg.clone()
+            };
+            population.validate(&pair).unwrap();
+        }
+        assert!(shrunk_nodes > 100 && shrunk_muscles > 100);
     }
 
     #[test]

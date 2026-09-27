@@ -119,7 +119,7 @@ This starts evolution, prints stage timings, and closes after the requested gene
 
 Versioned `.evo` files store the current population, evaluation progress, archives, emitter and CMA state, settings, seed, lineage, and history using a compressed binary payload. Temporary writes are flushed and renamed. V4 checkpoints also retain island optimizer progress so continuation preserves its stall history; V3 files remain readable. Compatible older checkpoints can keep their population while obsolete archives are cleared and reevaluated. Current physics uses QD version 19, so archives from the earlier version-16 baseline are invalidated on load; not every historical format is guaranteed to load.
 
-The dashboard autosaves every ten generations by default to `runs/seed-<seed>-auto.evo`. It writes autosaves in a background thread and keeps the three newest experiment autosaves. Manual saves can preserve partial-generation progress. The interval is adjustable; zero disables autosave. Wait for a requested manual save to report completion before closing the app. Headless runs write to their chosen checkpoint path and also export history CSV.
+The dashboard writes no files on its own: autosave is off by default, and a loaded game starts with it off. When the player sets an interval (Advanced > Performance & checkpoints), autosaves go to `runs/seed-<seed>-auto.evo` in a background thread, and the three newest experiment autosaves are kept. Manual saves can preserve partial-generation progress. The interval is adjustable; zero disables autosave. Wait for a requested manual save to report completion before closing the app. Headless runs write to their chosen checkpoint path and also export history CSV.
 
 ## Checks
 

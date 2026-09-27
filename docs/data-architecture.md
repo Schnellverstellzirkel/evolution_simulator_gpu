@@ -22,7 +22,9 @@ The design that follows from those numbers:
 4. Work runs in epochs of about 100 ms. In each epoch, persistent kernels, one per body-size class, run a fixed step budget per lane. Each lane walks its own queue of creatures. It refills at fixed step boundaries and suspends its current creature on the device when the budget runs out. There are no segments, no readbacks and no tails.
 5. Results are absorbed in certificate order, and cell winners are chosen by (fitness, certificate). The search is therefore deterministic for a given GPU and settings, as it is today.
 
-Expected effect: with today's physics, stage 1 (section 10) removes host packing, segments and PCIe traffic. The assessment's estimate of 1.3 to 2x still applies to it. With the reduced-coordinate physics, the model in section 3 gives about 1.1M to 2.5M creatures/s on this laptop. The spread comes almost entirely from one number: the average stall per instruction must fall from about 19 cycles to about 6 to 8.
+Long sessions (section 10, measured on the owner's 3M session at generation 70): bodies grow from 6 nodes and 9 muscles to 10.6 nodes and 34 muscles. Each creature then costs 4.2 times the GPU work, and the game runs 5 times slower (38,600 creatures/s). Host memory reaches 22 GB, and an autosave (4.2 GB, cloned in memory) pushes the machine into swap. The growth is selected for, because a muscle is free work capacity in today's physics. The design therefore scales cost with body size without cliffs: lane groups for large bodies, memory sized for the caps, no population on the host, and no files unless the player saves.
+
+Expected effect: with today's physics, stage 1 (section 11) removes host packing, segments and PCIe traffic. The assessment's estimate of 1.3 to 2x still applies to it. With the reduced-coordinate physics, the model in section 3 gives about 1.1M to 2.5M creatures/s on this laptop. The spread comes almost entirely from one number: the average stall per instruction must fall from about 19 cycles to about 6 to 8.
 
 ## 2. Inventory: the data today
 
@@ -119,7 +121,7 @@ An SM has 256 KB of registers and 128 KB of L1 and shared memory, of which share
 | 32 | 1,024 | 64 | 256 | 100 |
 | 48 | 1,536 | 40 | 160 | 67 |
 
-Section 5.3 counts what a 6-node creature needs on chip in the new formulation: about 230 to 250 words, or 0.9 to 1 KB, with a muscle bound of 12. The budget at W = 12 is 234 words (168 registers plus 66 shared words). Bodies with at most 8 muscles need about 50 words less and fit at W = 16. A 6-node creature cannot fit at 24. The design point is therefore 12 to 16 warps, and the design must win on I and C: at most about 1,700 instructions and 6 to 8 cycles per instruction.
+Section 5.3 counts what a 6-node creature needs on chip in the new formulation: about 220 to 240 words, or 0.9 to 1 KB, with a muscle bound of 12. The budget at W = 12 is 234 words (168 registers plus 66 shared words). Bodies with at most 8 muscles need about 50 words less and fit at W = 16. A 6-node creature cannot fit at 24. The design point is therefore 12 to 16 warps, and the design must win on I and C: at most about 1,700 instructions and 6 to 8 cycles per instruction.
 
 ### 3.5 Ceilings of today's layout
 
@@ -159,7 +161,7 @@ Canonical order: node 0 is the head, nodes are numbered depth-first, and bone j 
 | bone | rest length, joint min and max, organ mass, organ position; the child is implicit | 20 each |
 | muscle | bone a, bone b, sensor (u8 each), anchors a and b, short, long, period, phase, duty, stiffness, reset | 40 each |
 
-A mean creature of the 3M checkpoint takes 604 B. Records live in 128-B-aligned slots of two sizes. A standard slot is 1,152 B and holds up to 8 nodes and 20 muscles, which covers 95.7% of the evolved 3M checkpoint and 91.5% of the evolved 100k one (measured). A large slot is 2,560 B and holds up to 16 nodes and 48 muscles. Bodies above 16 nodes (none in either checkpoint) fall back to the CPU engine.
+A mean creature of the evolved 3M checkpoint (generation 9) takes 604 B. A mean creature of the owner's generation-70 session takes 1,771 B. A body at the caps (32 nodes, 96 muscles) takes 5,020 B. Fixed slot sizes do not survive a long session: a slot for 8 nodes and 20 muscles held 95.7% of the generation-9 population and 27.6% of the generation-70 one (measured). Records are therefore variable-size and 128-B aligned in one byte ring. The breed kernel places each epoch's children contiguously, by a prefix sum over their sizes. The ring frees an epoch's range once every creature born in it is absorbed. A contender whose check is still running is copied into a small check pool, so it does not hold its epoch's range.
 
 Why records and not structure-of-arrays: every consumer takes whole records. Breeding writes a child whole, the archive copies a winner whole, and a lane reads its own creature whole, once. SoA pays off when the lanes of a warp read the same field of neighbouring items. Here each lane reads a different slot at a different time, so SoA would give no coalescing and would scatter every record copy over 30 to 60 arrays. A lane reads its slot with 16-byte vector loads. Each load fetches a 32-B sector and uses half of it. The next load usually finds the other half in L1, so a 604-B genome costs 0.6 to 1.2 KB of DRAM traffic, once per trial.
 
@@ -178,16 +180,16 @@ This is the layout for the most common class under the physics proposed in the a
 | bone constants: length, inverse length, parent table (3 bits per node) | 11 | registers | every tree pass |
 | joint limits: two limit directions as f16 pairs, break threshold | 15 | shared, lane-sliced | once per step, few instructions |
 | muscle state: rhythm phase, energy (bucket bound 12) | 24 | registers | every step; the muscle loop is unrolled to the bucket bound, so indices are static |
-| muscle constants: anchors as a unorm16 pair, phase rate, duty and its two reciprocals and the drive gain as f16 (bucket bound 12) | 48 | registers and shared | every step |
+| muscle constants: anchors as a unorm16 pair; duty, its two reciprocals and the drive gain as f16 (bucket bound 12). All muscles of a body share one clock (repair sets every period to the first muscle's), so the phase rate is one word per creature | 37 | registers and shared | every step |
 | behavior metrics | 12 | registers | every step |
 | bone table for muscle gathers (7 words per bone) and force accumulators (3 per bone) | 50 | shared, lane-sliced | a muscle names its bones by data, so these indices are dynamic |
 | temporaries at the peak of the step | 40 to 60 | registers | |
-| total | 231 to 251 | | budget at W = 12: 234 |
+| total | 220 to 240 | | budget at W = 12: 234 |
 
 Lane-sliced means stored as [word][lane], so the 32 lanes of a warp hit 32 different banks. Two choices here are deliberate:
 
 - The muscle bone indices stay dynamic. They are gathered through a small per-step bone table in shared memory: 35 stores per step, then 14 loads and 12 read-modify-writes per muscle, about 280 accesses per step in total. The alternative, selecting among 5 bones in registers, costs about 64 instructions per muscle, about 580 per step. That is a third of the instruction budget, so shared memory is the better trade.
-- Muscle quantities that change slowly are stored as f16 in the genome itself (section 11, decision 5), so the CPU and GPU start from the same values. Energy stays f32, because its per-step change is about 1e-4.
+- Muscle quantities that change slowly are stored as f16 in the genome itself (section 12, decision 5), so the CPU and GPU start from the same values. Energy stays f32, because its per-step change is about 1e-4.
 
 ### 5.4 Suspend record
 
@@ -199,11 +201,11 @@ At an epoch's end, each lane writes its running creature: the state, the muscle 
 
 ### 5.6 Archive
 
-There is one table per archive (global and four islands), with up to about 2,000 cells each (1,440 behavior niches plus morphology niches). The tables are structure-of-arrays, indexed by cell: best fitness, epoch winner scratch, check-running certificate, elite slot, visits, generation stamps, emitter, descriptor, topology hash. That comes to about 64 B per cell, and 128 KB per archive. SoA fits here, unlike for genomes, because absorption touches one or two fields at random cells, and those small arrays stay in L1 and L2. The elites' genomes sit in a pool of standard and large slots indexed by cell, about 12 MB in total. That fits in the 32 MB L2, where breeding reads parents.
+There is one table per archive (global and four islands), with up to about 2,000 cells each (1,440 behavior niches plus morphology niches). The tables are structure-of-arrays, indexed by cell: best fitness, check-running certificate, elite slot, visits, generation stamps, emitter, descriptor, topology hash. That comes to about 64 B per cell, and 128 KB per archive. SoA fits here, unlike for genomes, because absorption touches one or two fields at random cells, and those small arrays stay in L1 and L2. The elites' genomes sit in a pool of cap-sized slots (5,120 B) indexed by cell, 51 MB for five archives of 2,000 cells. The unused tail of a slot costs VRAM but no cache, because L2 holds lines, not slots. The genomes themselves take 4 to 13 MB, from generation 9 to generation 70, and stay in the 32 MB L2, where breeding reads parents.
 
 ### 5.7 Queues and rings
 
-- Genome rings, one per slot size, hold about three epochs of children.
+- The genome ring holds about four epochs of children, in bytes (section 5.1).
 - Each lane has its own FIFO of 64 slot indices in global memory. The enqueue kernel fills the FIFOs.
 - The result ring holds two epochs of result records.
 - The check queue is a FIFO per fine-fidelity class.
@@ -214,19 +216,19 @@ There is one table per archive (global and four islands), with up to about 2,000
 
 | item | size |
 |---|---:|
-| genome rings (600,000 standard slots and 30,000 large) | 770 MB |
+| genome ring (4 epochs of 200,000 at the generation-70 mean of 1.8 KB; 4 GB if every body sat at the caps) | 1.4 GB |
 | per-lane FIFOs and suspend records (about 9,200 lanes) | 5 MB |
 | result ring (2 epochs of 250,000) | 32 MB |
-| archives, tables and elite genomes | 13 MB |
+| archives, tables and elite genome slots | 52 MB |
 | plan buffers | 8 MB |
 | screen histogram, stats, deltas | under 1 MB |
-| total | under 1 GB of 8 GB |
+| total | about 1.5 GB of 8 GB (4.1 GB at the caps) |
 
-For comparison, today's host holds about 10 GB at peak for the same run.
+For comparison, today's host holds about 10 GB at peak at generation 9 and 22 GB at generation 70. Nothing in the device map grows during a session: every buffer is sized for the caps or for a byte budget at start.
 
 ### 5.9 Host data
 
-The host keeps a mirror of the archive metadata and elite genomes (about 10 MB), the CMA emitter state, the UI history, and the replays the player asks for. Checkpoints hold the archives, emitters, counters and screen bar, about 10 to 20 MB against 1.1 to 1.4 GB today (section 11, decision 3).
+The host keeps a mirror of the archive metadata and elite genomes (about 10 MB), the CMA emitter state, the UI history, and the replays the player asks for. Checkpoints hold the archives, emitters, counters and screen bar, about 10 to 20 MB against 1.1 to 1.4 GB today (section 12, decision 3).
 
 ## 6. Data movement
 
@@ -323,7 +325,7 @@ Nothing depends on which lane is faster:
 - Every lane runs exactly K steps per epoch.
 - The set of results finished in an epoch is therefore a function of the inputs.
 - Absorption processes them in certificate order.
-- A cell's winner in an epoch is the maximum of (fitness, inverse certificate). This needs no 64-bit atomics. One pass takes the maximum fitness with a 32-bit ordered-integer atomic. A second pass takes, among the entries at that fitness, the smallest certificate with a 32-bit atomic minimum.
+- Contenders are offered to each archive one at a time, in certificate order, by one warp per archive. That keeps today's insertion semantics exactly, emitter rewards included. Contenders are about 5% of results (measured at generation 70: 63,000 to 90,000 global and 63,000 to 92,000 island contenders per 3M generation), so about 10,000 offers per epoch take about 1 ms.
 - Counts are integer atomics.
 - Float sums that feed decisions, such as QD score and emitter rewards, are summed per cell or per emitter by one warp in index order, or in fixed point.
 - Ring and queue positions come from prefix sums ([Merrill and Garland 2016](https://research.nvidia.com/publication/2016-03_single-pass-parallel-prefix-scan-decoupled-look-back)).
@@ -333,7 +335,7 @@ Dynamic load balancing through a shared atomic queue would be simpler to write. 
 ### 7.5 Checks, replays and the screen
 
 - Contenders: absorption compares a result with the cell elites of its island and of the global archive. Screened creatures never qualify, as today.
-- One check per cell at a time. The epoch's winning contender for a free cell sets the cell's check-running certificate. The other contenders for that cell are dropped, which is today's rule. The winner's genome slot is pinned until its check returns.
+- One check per cell at a time. The first contender in certificate order to beat a free cell's elite sets the cell's check-running certificate. The other contenders for that cell are dropped, which is today's rule. The winner's genome slot is pinned until its check returns.
 - A check runs in a fine-fidelity class kernel with the deterministic pose perturbation. Absorption takes the minimum of the standard and fine scores and admits or drops the creature. Admission copies the genome into the archive pool.
 - CPU replays exist today because the CPU and GPU engines differ in the last bits. With a single physics source compiled for both (assessment 7.4), replays become an audit that samples a few elites per second off the critical path. Without it, admissions to the global archive would stay provisional until the host's replay returns, about 100 per epoch.
 - Screen bar: absorption builds a histogram of distances at the screen, 4,096 integer bins of 1 cm around the current bar. At each generation boundary (every 3M absorbed results), one warp scans it and writes the next bar. Each creature carries its birth generation, and the kernel reads the bar of that generation.
@@ -351,7 +353,7 @@ The CPU stays mostly idle. That returns power budget to the GPU under Dynamic Bo
 
 - Settings changes take effect at the next epoch, through the settings version in the parameter buffer, within 100 to 200 ms.
 - A world change flushes the lane FIFOs and suspend records and drops results from the old version, about two epochs of work (0.2 s). It then queues the archive's elites for re-testing ahead of new children. About 7,500 elites, at full trial length, take about 10 ms of GPU time at the target rate.
-- A checkpoint is written at an epoch boundary. It holds the archives, emitters, counters and screen bar. Children in flight are re-bred after loading, unless the owner wants exact resume (section 11, decision 3).
+- A checkpoint is written at an epoch boundary. It holds the archives, emitters, counters and screen bar. Children in flight are bred again after loading (section 12, decision 3).
 
 ### 7.8 What the toolchain must provide
 
@@ -389,7 +391,7 @@ Rate estimate: I is about 1,500 to 1,700. With an average of 6 to 10 cycles per 
 
 ### 8.1 Today's physics in the same framework
 
-Stages 1 and 2 (section 10) work with the current kernel. It keeps its in-kernel layout: node state in shared memory, muscles in global memory. So the ceilings of section 3.5 remain at about 0.8M/s and 1.15M/s. Today's rate is a quarter of the lower one, so there is room. The gains come from outside the step:
+Stages 1 and 2 (section 11) work with the current kernel. It keeps its in-kernel layout: node state in shared memory, muscles in global memory. So the ceilings of section 3.5 remain at about 0.8M/s and 1.15M/s. Today's rate is a quarter of the lower one, so there is room. The gains come from outside the step:
 
 - No host packing and no PCIe traffic.
 - No segment round trips.
@@ -406,7 +408,57 @@ The assessment's estimate for this path, 300,000 to 450,000 creatures/s, stands.
 
 The assessment's combined estimate is updated to match.
 
-## 10. Build order and gates
+## 10. Long sessions
+
+### 10.1 What a long session does (measured)
+
+The owner noticed that evolution slows sharply after a few dozen generations. The owner's 3M session reached generation 70 and left an autosave. It was measured against the evolved 3M checkpoint at generation 9 with the same binary settings. The GUI benchmark ran one warm-up and two measured generations, with `EVOLUTION_CPU_THREADS=0`. `eval-bench` ran on 200,000 creatures, with every creature fine-checked.
+
+| | generation 9 | generation 70 |
+|---|---:|---:|
+| mean nodes / bones / muscles | 6.02 / 5.02 / 8.99 | 10.64 / 9.64 / 33.98 |
+| largest body | 11 nodes, 30 muscles | 21 nodes, 96 muscles (the muscle cap) |
+| bodies within 8 nodes and 20 muscles | 95.7% | 27.6% |
+| packed GPU data per creature | 1,005 B | 2,818 B |
+| GPU rate, `eval-bench` | 15,400/s | 3,700/s |
+| game, end to end | 185,000 to 216,000/s (2026-09-27) | 38,600/s |
+| breeding per generation | 2.6 to 3.8 s | 9.0 to 11.1 s |
+| peak RSS, autosave off | about 10 GB | 22.2 GB |
+| checkpoint | 1.37 GB | 4.18 GB |
+| GPU under load | | 2,502 MHz mean, 44 W, 59 °C |
+
+The slowdown is work per creature, not heat. The clock held at 2,502 MHz. Memory adds a cliff on top. At generation 70 the population's genes take 6.4 GB, and the arena keeps three copies (live, children, compaction spare). The session's autosave cloned the whole experiment on the worker thread every tenth generation. With 22 GB already resident, that clone crosses into swap on this 32 GB machine, which likely explains why the drop felt sudden. The autosave itself could not be loaded: validation assumed that the first `evaluated` scores are the finished ones, which is false in a continuous run. That is fixed, with a regression test.
+
+### 10.2 Why bodies grow
+
+- Structural mutation had three operators that add parts (split a bone, mirror a node, duplicate a limb) and none that removes them.
+- Repair keeps a muscle between every pair of consecutive bones, so the muscle count rises with the bone count.
+- In today's physics a muscle has no mass, and each one brings its own 15 J energy store and up to 5 N of force. More muscles are free work capacity.
+
+Removal operators were measured as a test of the first cause. `EVOLUTION_SHRINK=1` adds `remove_limb` (a leaf node with its bone and muscles) and `remove_muscle` (one muscle outside the consecutive-bone ring), at the same rate as the operators that add nodes. `examples/search_ab.rs` ran 10 seeds (38 to 47), 40 generations and 5,000 creatures, with 60 s trials:
+
+| | nodes / muscles at generation 39 | best, mean (median) | QD, mean (median) | CPU wall |
+|---|---:|---:|---:|---:|
+| current operators | 7.31 / 13.61 | 346 m (280) | 30,100 (17,800) | 196 s |
+| with removal | 6.41 / 10.31 | 275 m (278) | 21,300 (18,100) | 182 s |
+
+Removal slows growth by about a quarter. Medians tie, and the means favour the current operators because of one or two strong seeds. So growth is selected for, not only drift, and removal alone does not fix it without a cost. The flag stays off. The lever that fits the owner's rules is the third cause. If muscles weigh something and their energy scales with that weight, each muscle must pay for itself (section 12, decision 6).
+
+### 10.3 Architecture rules for long sessions
+
+1. Cost follows body size without cliffs. Today's kernel loses occupancy in steps as bodies cross the capacity buckets 8, 12, 16 and 24. That is why it slowed 4.2 times where its shared-memory accesses per step grew about 2.1 times (estimate from the counts in section 2.4).
+   - In the new design, classes extend to the caps (32 nodes, 96 muscles). A body above the per-lane budget spans a lane group of 2, 4 or 8 lanes. Its muscles, joint limits and gather table are split across the group, and the tree passes exchange values through warp shuffles inside it.
+   - The generation-70 mean body needs about 430 words on chip in the layout of section 5.3, twice the per-lane budget. A group of 4 brings it to about 150 words per lane, inside the 16-warp budget.
+   - The class table is recomputed every epoch from the live mix, so the mapping follows the bodies as they grow. This is the warp-cooperative mapping Madrona uses for large entities.
+2. Nothing grows during a session except the archive, which is bounded by its cells (5 x about 1,500 plus 64 morphology cells) and by lineage pruning. Device buffers are sized at start for the caps or a byte budget (section 5.8). The host holds no population. Today's host holds three copies of it, which scale with body size.
+3. The host's cost per creature does not depend on body size. Planning is per child. Breeding, whose cost scales with the genome, runs on the GPU.
+4. No clones and no files. Checkpoints hold the archives and search state, and are written only when the player saves. Today's manual save serializes the whole population on the worker thread. At generation 70 that is a 4.2 GB file, and loading the same file took 48 s. The small checkpoint makes that trivial.
+5. The speed readout separates body growth from engine speed. When bodies grow, creatures/s falls by design. The status line should also show the work rate (creature-steps per second, or node-steps) and the mean body size. A drop caused by growth then reads as growth, and a drop caused by the engine stands out.
+6. A long-session gate. Every stage in section 11 is benchmarked on a generation-70-class population as well as on the generation-9 one. The work rate must not fall more than the body-size ratio explains.
+
+The 2M creatures/s target is defined at a body mix. At the generation-70 mix a creature is about four times the work, so on the same hardware the target means about 500,000/s there. Holding creatures/s constant across a session needs either physics that stops free growth (decision 6) or lower caps.
+
+## 11. Build order and gates
 
 | stage | work | physics | gate |
 |---:|---|---|---|
@@ -425,15 +477,20 @@ Phase 0 of the assessment gains four measurements for this design:
 - Shared-memory and L2 throughput of today's kernel in the game, to check the 25% and 17% figures.
 - Shared load and store instructions per creature-step, to check the count of 1,100.
 
-## 11. Decisions for the owner
+## 12. Decisions
 
-These come in addition to the four in the assessment.
+Answered by the owner on 2026-09-28:
 
-1. Determinism. Keep the search bit-reproducible for a given GPU and settings? Recommended: yes. It costs the static lane FIFOs of section 7.4 and nothing measurable in throughput.
-2. Archive insertion by epoch. The GPU inserts the best contender per cell per epoch in parallel, where today's code offers creatures one at a time. The result for "best per cell" is the same. Emitter rewards are computed against the archive at the start of the epoch, which slightly changes the bandit's feedback. This needs a 10-seed A/B before it lands.
-3. Checkpoints. Save only the archives and search state (10 to 20 MB; children in flight are bred again after loading)? Or also save the rings and FIFOs for an exact resume (about 0.8 GB)? Recommended: the small form.
-4. Screen bar resolution of 1 cm, instead of an exact percentile.
-5. Slow muscle genes as f16. This matters only for the new physics's register budget. Mutation steps and CMA samples are rounded to about 3 significant digits.
+1. Determinism: keep the search bit-reproducible for a given GPU and settings. Yes.
+2. Archive insertion: left to the design. Chosen: keep today's one-at-a-time offers, in certificate order (section 7.4). They cost about 1 ms per epoch, so the parallel alternative and its search A/B are not needed.
+3. Checkpoints: only the archives and search state, 10 to 20 MB; children in flight are bred again after loading. Yes. More generally, the game should be as stateless as possible and write as few files as possible. Done now: autosave is off by default and after loading.
+4. Screen bar resolution of 1 cm. Yes.
+5. Slow muscle genes as f16. Yes.
+
+Open:
+
+6. Muscle mass (section 10.2). Give muscles weight and an energy store that scales with it, so a muscle pays for itself and body growth stops being free. This is backlog item 4 in `AGENTS.md`, and it is a physics change for all engines. It is the lever that bounds per-creature cost in long sessions within the rule that pressure comes from physics, not scoring.
+7. The four decisions of the assessment (new physics formulation, NVIDIA-only fast path, search-side levers, clock pinning) are still open.
 
 ## References
 

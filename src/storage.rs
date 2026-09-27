@@ -2038,13 +2038,12 @@ impl Experiment {
                 && self.protected_until.len() == self.config.population,
             "Invalid QD candidate state"
         );
+        // A continuous run evaluates and re-breeds slots in any order, so a
+        // finished score can sit at any slot and a new child (NaN) below
+        // `evaluated`. Only the values themselves are checked.
         ensure!(
-            self.scores[..self.evaluated].iter().all(|s| s.is_finite()),
-            "Invalid completed fitness values"
-        );
-        ensure!(
-            self.scores[self.evaluated..].iter().all(|s| s.is_nan()),
-            "Invalid pending fitness values"
+            self.scores.iter().all(|s| s.is_finite() || s.is_nan()),
+            "Invalid fitness values"
         );
         if matches!(
             self.stage,
@@ -2913,6 +2912,29 @@ mod migration_tests {
                 assert!((actual[side][1] - points[side][1]).abs() < 1e-6);
             }
         }
+    }
+
+    #[test]
+    fn a_continuous_run_checkpoint_with_scattered_scores_loads() {
+        // A steady run's autosave: the generation's count is complete, but
+        // slots re-bred during it hold new, unevaluated children.
+        let config = Config {
+            population: 4,
+            random_seed: false,
+            ..Config::default()
+        };
+        let mut experiment = Experiment::new(config).unwrap();
+        experiment.scores = vec![f32::NAN, 2.0, f32::NAN, -1e20];
+        experiment.evaluated = experiment.config.population;
+        experiment.stage = Stage::Archived;
+        let checkpoint =
+            std::env::temp_dir().join(format!("evolution-steady-{}.evo", std::process::id()));
+        save(&checkpoint, &experiment).unwrap();
+        let loaded = load(&checkpoint);
+        let _ = std::fs::remove_file(checkpoint);
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.scores[1], 2.0);
+        assert!(loaded.scores[0].is_nan());
     }
 
     #[test]

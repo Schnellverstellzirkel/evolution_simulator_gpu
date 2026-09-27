@@ -412,7 +412,10 @@ fn run(
                     }
                     Command::Load(path) => {
                         steady = Steady::default();
-                        let next = storage::load(&path)?;
+                        let mut next = storage::load(&path)?;
+                        // A loaded game starts with autosave off, like a new one,
+                        // whatever interval the checkpoint carried.
+                        next.config.checkpoint_interval = 0;
                         let creature = next
                             .archive
                             .entries
