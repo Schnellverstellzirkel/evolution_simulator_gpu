@@ -250,6 +250,20 @@ pub struct Creature {
     pub id: u64,
     pub mutability: f32,
 }
+/// Spare gene arenas that `Population::compact_with` fills and swaps in.
+#[derive(Default)]
+pub struct Arena {
+    nodes: Vec<NodeGene>,
+    bones: Vec<Bone>,
+    muscles: Vec<Muscle>,
+}
+/// Spare memory is not state: a copy starts empty.
+impl Clone for Arena {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Population {
     pub genomes: Vec<Genome>,
@@ -369,8 +383,134 @@ impl Population {
     }
     /// Rebuilds the arenas without genes of replaced creatures.
     pub fn compact(&mut self) {
-        let all: Vec<usize> = (0..self.genomes.len()).collect();
-        *self = self.subset(&all);
+        self.compact_with(&mut Arena::default());
+    }
+    /// Rebuilds the arenas without genes of replaced creatures, copying the
+    /// live genes in parallel into `spare`, whose memory is already mapped
+    /// after the first generation; the old arenas become the next spare.
+    /// Genes keep their creature order, so the result equals `compact`.
+    pub fn compact_with(&mut self, spare: &mut Arena) {
+        const CHUNK: usize = 4096;
+        let Population {
+            genomes,
+            nodes,
+            bones,
+            muscles,
+        } = self;
+        let sizes: Vec<[usize; 3]> = genomes
+            .par_chunks(CHUNK)
+            .map(|chunk| {
+                chunk.iter().fold([0; 3], |t, g| {
+                    [
+                        t[0] + g.node_count,
+                        t[1] + g.bone_count,
+                        t[2] + g.muscle_count,
+                    ]
+                })
+            })
+            .collect();
+        let mut starts = Vec::with_capacity(sizes.len());
+        let mut total = [0usize; 3];
+        for size in &sizes {
+            starts.push(total);
+            for k in 0..3 {
+                total[k] += size[k];
+            }
+        }
+        fn sized<T: Copy>(spare: &mut Vec<T>, len: usize, fill: Option<T>) {
+            spare.clear();
+            if let Some(fill) = fill {
+                spare.resize(len, fill);
+            }
+        }
+        sized(&mut spare.nodes, total[0], nodes.first().copied());
+        sized(&mut spare.bones, total[1], bones.first().copied());
+        sized(&mut spare.muscles, total[2], muscles.first().copied());
+        fn split<T>(mut all: &mut [T], sizes: impl Iterator<Item = usize>) -> Vec<&mut [T]> {
+            let mut out = Vec::new();
+            for size in sizes {
+                let (head, tail) = std::mem::take(&mut all).split_at_mut(size);
+                out.push(head);
+                all = tail;
+            }
+            out
+        }
+        let node_parts = split(&mut spare.nodes, sizes.iter().map(|s| s[0]));
+        let bone_parts = split(&mut spare.bones, sizes.iter().map(|s| s[1]));
+        let muscle_parts = split(&mut spare.muscles, sizes.iter().map(|s| s[2]));
+        let (old_nodes, old_bones, old_muscles) = (&*nodes, &*bones, &*muscles);
+        genomes
+            .par_chunks_mut(CHUNK)
+            .zip(node_parts)
+            .zip(bone_parts)
+            .zip(muscle_parts)
+            .zip(starts)
+            .for_each(|((((chunk, node_part), bone_part), muscle_part), start)| {
+                let mut at = [0usize; 3];
+                for g in chunk {
+                    node_part[at[0]..at[0] + g.node_count]
+                        .copy_from_slice(&old_nodes[g.node_start..g.node_start + g.node_count]);
+                    bone_part[at[1]..at[1] + g.bone_count]
+                        .copy_from_slice(&old_bones[g.bone_start..g.bone_start + g.bone_count]);
+                    muscle_part[at[2]..at[2] + g.muscle_count].copy_from_slice(
+                        &old_muscles[g.muscle_start..g.muscle_start + g.muscle_count],
+                    );
+                    g.node_start = start[0] + at[0];
+                    g.bone_start = start[1] + at[1];
+                    g.muscle_start = start[2] + at[2];
+                    at[0] += g.node_count;
+                    at[1] += g.bone_count;
+                    at[2] += g.muscle_count;
+                }
+            });
+        std::mem::swap(nodes, &mut spare.nodes);
+        std::mem::swap(bones, &mut spare.bones);
+        std::mem::swap(muscles, &mut spare.muscles);
+    }
+    /// `replace` for many slots at once: canonicalizes and copies the genes
+    /// in parallel, then appends them in slot order, so the arenas end up
+    /// exactly as after replacing the slots one by one.
+    pub fn replace_many(&mut self, slots: &[usize], mut creatures: Vec<Creature>) {
+        creatures.par_iter_mut().for_each(|c| {
+            canonicalize_bone_order(c);
+        });
+        let parts: Vec<(Vec<NodeGene>, Vec<Bone>, Vec<Muscle>)> = creatures
+            .par_chunks(4096)
+            .map(|chunk| {
+                let mut part = (Vec::new(), Vec::new(), Vec::new());
+                for c in chunk {
+                    part.0.extend_from_slice(&c.nodes);
+                    part.1.extend_from_slice(&c.bones);
+                    part.2.extend_from_slice(&c.muscles);
+                }
+                part
+            })
+            .collect();
+        let mut at = [self.nodes.len(), self.bones.len(), self.muscles.len()];
+        for (&slot, c) in slots.iter().zip(&creatures) {
+            self.genomes[slot] = Genome {
+                node_start: at[0],
+                node_count: c.nodes.len(),
+                bone_start: at[1],
+                bone_count: c.bones.len(),
+                muscle_start: at[2],
+                muscle_count: c.muscles.len(),
+                id: c.id,
+                mutability: c.mutability,
+            };
+            at[0] += c.nodes.len();
+            at[1] += c.bones.len();
+            at[2] += c.muscles.len();
+        }
+        self.nodes.reserve(at[0] - self.nodes.len());
+        self.bones.reserve(at[1] - self.bones.len());
+        self.muscles.reserve(at[2] - self.muscles.len());
+        for (nodes, bones, muscles) in parts {
+            self.nodes.extend(nodes);
+            self.bones.extend(bones);
+            self.muscles.extend(muscles);
+        }
+        creatures.into_par_iter().for_each(drop);
     }
     /// Copies `indices` into a standalone population; creature `k` of the
     /// result is `indices[k]` of `self`.

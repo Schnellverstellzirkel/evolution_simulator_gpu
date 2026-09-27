@@ -150,6 +150,9 @@ pub struct Experiment {
     pub screened: Vec<bool>,
     #[serde(skip)]
     pub screen_distance: Vec<f32>,
+    /// Gene memory reused by each generation's compaction.
+    #[serde(skip)]
+    arena_spare: evolution::Arena,
     #[serde(default)]
     pub qd_version: u32,
     /// Steady-state breeding rounds so far; salts offspring random streams.
@@ -341,6 +344,7 @@ impl Experiment {
             replayed: Vec::new(),
             screened: Vec::new(),
             screen_distance: Vec::new(),
+            arena_spare: evolution::Arena::default(),
             qd_version: qd::VERSION,
             breed_round: 0,
             islands: Vec::new(),
@@ -1767,16 +1771,17 @@ impl Experiment {
             self.breed_round,
         );
         let emitted_at = started.elapsed();
+        let mut creatures = Vec::with_capacity(slots.len());
         for ((&slot, child), plan) in slots.iter().zip(children).zip(&planned) {
             if let Some(elite) = self.reseed.pop() {
-                self.population.replace(slot, elite);
+                creatures.push(elite);
                 self.candidate_emitters[slot] = Emitter::Restart;
                 self.candidate_cma[slot] = None;
                 self.candidate_parent_ids[slot] = None;
                 self.candidate_mates[slot] = false;
                 self.protected_until[slot] = 0;
             } else {
-                self.population.replace(slot, child);
+                creatures.push(child);
                 self.candidate_emitters[slot] = plan.plan.emitter;
                 self.candidate_cma[slot] = plan.plan.cma;
                 self.candidate_parent_ids[slot] = plan.parent_id;
@@ -1787,6 +1792,7 @@ impl Experiment {
             self.scores[slot] = f32::NAN;
             self.trial_metrics[slot] = TrialMetrics::default();
         }
+        self.population.replace_many(slots, creatures);
         let total = started.elapsed();
         let add = |k: usize, d: std::time::Duration| {
             BREED_NANOS[k].fetch_add(d.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -1821,7 +1827,7 @@ impl Experiment {
         cfg.screen = self.next_screen(world_changed, cfg.duration);
         self.config = cfg;
         let compact_started = std::time::Instant::now();
-        self.population.compact();
+        self.population.compact_with(&mut self.arena_spare);
         if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
             eprintln!(
                 "Generation boundary: stats {:.3} s, lineage {:.3} s, migration {:.3} s, compact {:.3} s",
@@ -2555,6 +2561,7 @@ impl From<V2Experiment> for Experiment {
             replayed: Vec::new(),
             screened: Vec::new(),
             screen_distance: Vec::new(),
+            arena_spare: evolution::Arena::default(),
             qd_version: 0,
             breed_round: 0,
             islands: Vec::new(),
@@ -2599,6 +2606,7 @@ impl From<LegacyExperiment> for Experiment {
             replayed: Vec::new(),
             screened: Vec::new(),
             screen_distance: Vec::new(),
+            arena_spare: evolution::Arena::default(),
             qd_version: 0,
             breed_round: 0,
             islands: Vec::new(),
