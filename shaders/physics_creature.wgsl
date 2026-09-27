@@ -494,8 +494,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             let d = position_b - position_a;
             let dir = d * (1.0 / max(length(d), 1e-6));
             let relative = dot(velocity_b - velocity_a, dir);
-            let target_speed = (limited_muscle_length(m, time)
-                - limited_muscle_length(m, max(time - DT, 0.0))) * RATE;
+            // The rhythm clock stands at zero until settling ends, so the
+            // target does not move.
+            var target_speed = 0.0;
+            if tick > SETTLE {
+                target_speed = (limited_muscle_length(m, time)
+                    - limited_muscle_length(m, max(time - DT, 0.0))) * RATE;
+            }
             // A muscle only pulls: it drives while its target shortens and goes
             // slack while the target lengthens. Its drive scales with its stored
             // energy, so an exhausted muscle does no work until it recovers.

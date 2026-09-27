@@ -600,8 +600,13 @@ impl Group {
                 let dir_x = dx * inv_distance;
                 let dir_y = dy * inv_distance;
                 let relative = (vbx - vax) * dir_x + (vby - vay) * dir_y;
-                let target_speed =
-                    (muscle_length(m, time, exact) - muscle_length(m, previous_time, exact)) * rate;
+                // The rhythm clock stands at zero until settling ends, so the
+                // target does not move.
+                let target_speed = if tick > settle {
+                    (muscle_length(m, time, exact) - muscle_length(m, previous_time, exact)) * rate
+                } else {
+                    zero
+                };
                 // A muscle only pulls: it drives while its target shortens and
                 // goes slack while the target lengthens. Its drive scales with its
                 // stored energy, so an exhausted muscle does no work until it
