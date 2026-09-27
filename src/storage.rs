@@ -1,3 +1,4 @@
+use crate::scheduler::CheckNeed;
 use crate::{
     config::Config,
     evolution::{self, CandidatePlan, Creature, FAILED, LegacyMuscle, Population, Rng},
@@ -15,6 +16,34 @@ use std::{
     io::{BufReader, BufWriter, Read, Write},
     path::Path,
 };
+
+/// Why a standard-trial result was or was not held for a fine check, in the
+/// order `Experiment::contender` tests the rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContenderReason {
+    Rejected,
+    Optimizer,
+    Global,
+    Island,
+    Reserve,
+}
+/// Contender decisions since the last `take_contender_counts`, indexed by
+/// `ContenderReason` (a diagnostic for the check cost).
+pub static CONTENDER_COUNTS: [std::sync::atomic::AtomicU64; 5] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+/// Key of one behavior cell in one archive (0 is the global archive, 1 + k
+/// island k), for sharing checks between contenders for the same cell.
+fn cell_key(archive: u64, niche: &qd::Niche) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    archive.hash(&mut hasher);
+    niche.hash(&mut hasher);
+    hasher.finish()
+}
+/// Returns and clears the contender counters.
+pub fn take_contender_counts() -> [u64; 5] {
+    std::array::from_fn(|i| CONTENDER_COUNTS[i].swap(0, std::sync::atomic::Ordering::Relaxed))
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Stage {
@@ -103,6 +132,10 @@ pub struct Experiment {
     pub protected_until: Vec<u32>,
     #[serde(default)]
     pub trial_metrics: Vec<TrialMetrics>,
+    /// Per slot: the stored result already folds in the CPU replay that the
+    /// global archive requires (set by `record_result`, cleared on insertion).
+    #[serde(skip)]
+    pub replayed: Vec<bool>,
     #[serde(default)]
     pub qd_version: u32,
     /// Steady-state breeding rounds so far; salts offspring random streams.
@@ -283,6 +316,7 @@ impl Experiment {
             morphology_reserve_override: None,
             protected_until: vec![0; population_count],
             trial_metrics: vec![TrialMetrics::default(); population_count],
+            replayed: Vec::new(),
             qd_version: qd::VERSION,
             breed_round: 0,
             islands: Vec::new(),
@@ -375,14 +409,70 @@ impl Experiment {
     /// Only those creatures need the check trial: their final score is the
     /// lower of both trials, so every other creature is rejected either way.
     pub fn contender(&self, i: usize, metric: &qd::EvaluationMetrics) -> bool {
-        if !metric.fitness.is_finite() || metric.fitness <= FAILED {
-            return false;
+        let (reason, _) = self.contender_reason(i, metric);
+        CONTENDER_COUNTS[reason as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        reason != ContenderReason::Rejected
+    }
+    /// What a held contender needs now. The scheduler re-tests waiting
+    /// contenders against the live archives each time it sends checks, and
+    /// checks one contender per archive cell at a time. A waiting contender
+    /// that no longer beats its cell is released unchecked: its final score
+    /// would be the lower of both trials, so it is rejected either way.
+    pub fn check_need(&self, i: usize, metric: &qd::EvaluationMetrics) -> CheckNeed {
+        match self.contender_reason(i, metric) {
+            (ContenderReason::Rejected, _) => CheckNeed::Release,
+            (reason, cell) => CheckNeed::Check {
+                cell,
+                // Global contenders also get their CPU replay now, in parallel
+                // with the check, instead of on the worker during insertion.
+                replay: match reason {
+                    ContenderReason::Global | ContenderReason::Reserve => true,
+                    ContenderReason::Optimizer => self.beats_global(i, metric),
+                    _ => false,
+                },
+            },
         }
-        if self.from_optimizer(i) {
-            return true;
-        }
+    }
+    /// Whether `metric` would take or open a cell of the global archive.
+    fn beats_global(&self, i: usize, metric: &qd::EvaluationMetrics) -> bool {
         let Some(genome) = self.population.genomes.get(i) else {
             return false;
+        };
+        let nodes =
+            &self.population.nodes[genome.node_start..genome.node_start + genome.node_count];
+        let muscles = &self.population.muscles
+            [genome.muscle_start..genome.muscle_start + genome.muscle_count];
+        let niche = qd::descriptor(nodes, muscles, metric.behavior).niche();
+        match self.archive.slot_for(&niche) {
+            Some(slot) => metric.fitness > self.archive.entries[slot].fitness,
+            None => self.archive.behavior_count() < qd::ARCHIVE_LIMIT,
+        }
+    }
+    /// Stores creature `i`'s final evaluation result.
+    pub fn record_result(&mut self, i: usize, metric: &qd::EvaluationMetrics) {
+        self.scores[i] = metric.fitness;
+        self.trial_metrics[i] = metric.behavior;
+        if self.replayed.len() < self.scores.len() {
+            self.replayed.resize(self.scores.len(), false);
+        }
+        self.replayed[i] = metric.replayed;
+    }
+    /// The first rule that makes `i` a contender, and the archive cell it
+    /// competes for (none for optimizer samples and reserve candidates, which
+    /// are checked without sharing).
+    fn contender_reason(
+        &self,
+        i: usize,
+        metric: &qd::EvaluationMetrics,
+    ) -> (ContenderReason, Option<u64>) {
+        if !metric.fitness.is_finite() || metric.fitness <= FAILED {
+            return (ContenderReason::Rejected, None);
+        }
+        if self.from_optimizer(i) {
+            return (ContenderReason::Optimizer, None);
+        }
+        let Some(genome) = self.population.genomes.get(i) else {
+            return (ContenderReason::Rejected, None);
         };
         let nodes =
             &self.population.nodes[genome.node_start..genome.node_start + genome.node_count];
@@ -393,19 +483,30 @@ impl Experiment {
             Some(slot) => metric.fitness > archive.entries[slot].fitness,
             None => archive.behavior_count() < qd::ARCHIVE_LIMIT,
         };
-        if beats(&self.archive) || self.islands.get(i % island_count()).is_some_and(beats) {
-            return true;
+        if beats(&self.archive) {
+            return (ContenderReason::Global, Some(cell_key(0, &niche)));
+        }
+        let island = i % island_count();
+        if self.islands.get(island).is_some_and(beats) {
+            return (
+                ContenderReason::Island,
+                Some(cell_key(1 + island as u64, &niche)),
+            );
         }
         let reserve_candidate = self.morphology_reserve_override != Some(false)
             && matches!(
                 self.candidate_emitters.get(i),
                 Some(Emitter::Structural | Emitter::Novelty)
             );
-        reserve_candidate
+        if reserve_candidate
             && self
                 .archive
                 .morphology_floor()
                 .is_none_or(|floor| metric.fitness > floor)
+        {
+            return (ContenderReason::Reserve, None);
+        }
+        (ContenderReason::Rejected, None)
     }
     /// Whether creature `i` was sampled by an island optimizer. Optimizers
     /// rank all their samples, so all of them get the same check: ranking
@@ -467,6 +568,42 @@ impl Experiment {
             morphology_topology: Option<qd::Topology>,
         }
         let reserve_enabled = self.morphology_reserve_override != Some(false);
+        // Reserve admission needs a score above the best behavior elite and
+        // the reserve entry of the same body plan, or above the reserve's
+        // floor once it is full (`QdArchive::offer_morphology`). The CPU
+        // replay only lowers a score, so a candidate below these bars in the
+        // batch-start archive is not offered and skips its replay. (Rarely,
+        // offers earlier in the same batch lower a bar, when a body plan loses
+        // its behavior cell or reserve entry; such a candidate now waits for a
+        // later batch instead.)
+        let mut reserve_bars: HashMap<&qd::Topology, (f32, f32)> = HashMap::new();
+        if reserve_enabled {
+            for elite in &self.archive.entries {
+                let bars = reserve_bars
+                    .entry(&elite.topology)
+                    .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
+                if qd::is_morphology_niche(&elite.niche) {
+                    bars.1 = bars.1.max(elite.fitness);
+                } else {
+                    bars.0 = bars.0.max(elite.fitness);
+                }
+            }
+        }
+        let reserve_floor = self.archive.morphology_floor();
+        let reserve_admits = |topology: &qd::Topology, score: f32| {
+            if !score.is_finite() || score <= FAILED {
+                return false;
+            }
+            match reserve_bars.get(topology) {
+                Some(&(behavior, reserve)) if reserve > f32::NEG_INFINITY => {
+                    score > behavior && score > reserve
+                }
+                Some(&(behavior, _)) => {
+                    score > behavior && reserve_floor.is_none_or(|floor| score > floor)
+                }
+                None => reserve_floor.is_none_or(|floor| score > floor),
+            }
+        };
         let prep: Vec<Prep> = slots
             .par_iter()
             .map(|&i| {
@@ -510,7 +647,9 @@ impl Experiment {
                             *morphology
                                 && qd::topology_equivalent_for_archive(&topology, parent_topology)
                         });
-                    (descended_from_reserve || topology_changed).then_some(topology)
+                    ((descended_from_reserve || topology_changed)
+                        && reserve_admits(&topology, score))
+                    .then_some(topology)
                 } else {
                     None
                 };
@@ -608,6 +747,16 @@ impl Experiment {
             p.behavior_candidate &= behavior_best.contains(&k);
             if !topology_best.contains(&k) {
                 p.morphology_topology = None;
+            }
+        }
+        // Results that already fold in their CPU replay (it ran next to the
+        // check) are final; only the rest replay here.
+        let verify_before = verify.len();
+        verify.retain(|&k| !self.replayed.get(slots[k]).copied().unwrap_or(false));
+        let verify_inline = verify.len();
+        for &i in slots {
+            if let Some(flag) = self.replayed.get_mut(i) {
+                *flag = false;
             }
         }
         if !verify.is_empty() {
@@ -758,8 +907,9 @@ impl Experiment {
         timings[7] = section.elapsed().as_secs_f64();
         if profile {
             eprintln!(
-                "Archive profile: generation {}, island offers {:.6} s, island refresh {:.6} s, prefilter {:.6} s, verify {:.6} s, global offers {:.6} s, cma tell {:.6} s, archive refresh {:.6} s, lineage {:.6} s, entered {}",
+                "Archive profile: generation {}, slots {}, verify candidates {verify_before} inline {verify_inline}, island offers {:.6} s, island refresh {:.6} s, prefilter {:.6} s, verify {:.6} s, global offers {:.6} s, cma tell {:.6} s, archive refresh {:.6} s, lineage {:.6} s, entered {}",
                 self.generation,
+                slots.len(),
                 timings[0],
                 timings[1],
                 timings[2],
@@ -2299,6 +2449,7 @@ impl From<V2Experiment> for Experiment {
             morphology_reserve_override: None,
             protected_until: vec![0; population],
             trial_metrics: vec![TrialMetrics::default(); population],
+            replayed: Vec::new(),
             qd_version: 0,
             breed_round: 0,
             islands: Vec::new(),
@@ -2340,6 +2491,7 @@ impl From<LegacyExperiment> for Experiment {
             morphology_reserve_override: None,
             protected_until: vec![0; population],
             trial_metrics: vec![TrialMetrics::default(); population],
+            replayed: Vec::new(),
             qd_version: 0,
             breed_round: 0,
             islands: Vec::new(),

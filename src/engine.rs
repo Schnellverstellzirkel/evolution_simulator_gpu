@@ -146,11 +146,9 @@ impl Engine for ThreadedEngine {
             }
             return Ok(None);
         };
-        anyhow::ensure!(
-            self.queued.pop_front() == Some(done.ticket),
-            "{} results arrived out of order",
-            self.name
-        );
+        let position = self.queued.iter().position(|&ticket| ticket == done.ticket);
+        anyhow::ensure!(position.is_some(), "{} returned an unknown unit", self.name);
+        self.queued.remove(position.unwrap());
         Ok(Some(done))
     }
     fn wait(&mut self, timeout: Duration) {
@@ -244,8 +242,15 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
                 // Wait briefly for the oldest submission, then check for new jobs.
                 match engine.poll(Duration::from_millis(1)) {
                     Ok(Some(finished)) => {
-                        let (ticket, vk_ticket, len) = running.pop_front().unwrap();
-                        debug_assert_eq!(vk_ticket, finished.ticket);
+                        // Units on separate queues can finish out of order.
+                        let Some(position) = running
+                            .iter()
+                            .position(|&(_, vk_ticket, _)| vk_ticket == finished.ticket)
+                        else {
+                            let _ = done_tx.send(Err("unknown GPU submission finished".into()));
+                            return;
+                        };
+                        let (ticket, _, len) = running.remove(position).unwrap();
                         let mut results = vec![GpuResult::default(); len];
                         for (slots, _, batch) in finished.batches {
                             for (slot, result) in slots.into_iter().zip(batch) {
@@ -274,7 +279,8 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
     Ok(ThreadedEngine {
         name: device_name,
         max_nodes,
-        depth: 3,
+        // One unit packs on the engine thread while every slot runs.
+        depth: crate::vk_engine::gpu_slots() as usize + 1,
         jobs: Some(jobs),
         done,
         thread: Some(thread),

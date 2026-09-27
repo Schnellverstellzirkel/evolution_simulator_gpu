@@ -47,6 +47,9 @@ pub struct TrialMetrics {
 pub struct EvaluationMetrics {
     pub fitness: f32,
     pub behavior: TrialMetrics,
+    /// The fitness already folds in a CPU-engine replay of the standard trial
+    /// and `behavior` comes from it, so archive insertion need not replay it.
+    pub replayed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]

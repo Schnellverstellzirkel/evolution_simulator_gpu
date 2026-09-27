@@ -185,6 +185,13 @@ impl StageLog {
     }
     fn write_row(&mut self, generation: u32, population: usize) {
         let seconds = self.started.elapsed().as_secs_f64().max(1e-9);
+        if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
+            let [rejected, optimizer, global, island, reserve] =
+                crate::storage::take_contender_counts();
+            eprintln!(
+                "Contenders: generation {generation}, optimizer {optimizer}, global {global}, island {island}, reserve {reserve}, not checked {rejected}"
+            );
+        }
         let _ = writeln!(
             self.file,
             "{generation},{:.6},{:.6},{:.6},{:.3}",
@@ -447,7 +454,9 @@ fn run(
                                 if sched.in_flight() > 0 {
                                     // Results from a generational run: keep them; the
                                     // next pass offers them to the archive.
-                                    sched.pump_checks(&e.population, &e.config)?;
+                                    sched.pump_checks(&e.population, &e.config, |i, m| {
+                                        e.check_need(i, m)
+                                    })?;
                                     for (indices, metrics) in sched.collect(
                                         &e.population,
                                         &e.config,
@@ -455,8 +464,7 @@ fn run(
                                         |i, m| e.contender(i, m),
                                     )? {
                                         for (&i, m) in indices.iter().zip(&metrics) {
-                                            e.scores[i] = m.fitness;
-                                            e.trial_metrics[i] = m.behavior;
+                                            e.record_result(i, m);
                                         }
                                     }
                                     return Ok(());
@@ -474,7 +482,7 @@ fn run(
                                 sched.begin(&e.population, 0..e.config.population);
                                 steady.active = true;
                             }
-                            sched.pump(&e.population, &e.config, &[])?;
+                            sched.pump(&e.population, &e.config, &[], |i, m| e.check_need(i, m))?;
                             for (indices, metrics) in sched.collect(
                                 &e.population,
                                 &e.config,
@@ -511,7 +519,8 @@ fn run(
                             if sched.in_flight() == 0 {
                                 sched.begin(&e.population, e.evaluated..e.config.population);
                             }
-                            sched.pump(&e.population, &e.config, &done)?;
+                            sched
+                                .pump(&e.population, &e.config, &done, |i, m| e.check_need(i, m))?;
                             for (indices, metrics) in sched.collect(
                                 &e.population,
                                 &e.config,
@@ -600,7 +609,7 @@ fn run(
                                 let slice = (e.config.population / 8).max(4096);
                                 e.prepare_next_batch_streaming(slice, |pop, range, cfg| {
                                     sched.extend(pop, range);
-                                    sched.pump(pop, cfg, &[])
+                                    sched.pump_standard(pop, cfg, &[])
                                 })?;
                                 done = vec![false; e.config.population];
                                 done_key = (epoch, e.generation);
@@ -700,8 +709,11 @@ fn run(
                                         );
                                     }
                                     eprintln!(
-                                        "Native benchmark packing {:.3} s",
-                                        sched.packing_seconds
+                                        "Native benchmark packing {:.3} s, checks {} submitted, {} released unchecked, {} CPU replays with checks (totals since start)",
+                                        sched.packing_seconds,
+                                        sched.checks_submitted,
+                                        sched.checks_released,
+                                        sched.replays_submitted
                                     );
                                 }
                                 running = false;
@@ -754,7 +766,7 @@ fn run(
                 && let Some(e) = &mut exp
             {
                 let absorbed = sched
-                    .pump_checks(&e.population, &e.config)
+                    .pump_checks(&e.population, &e.config, |i, m| e.check_need(i, m))
                     .and_then(|()| {
                         sched.collect(
                             &e.population,
@@ -967,8 +979,7 @@ fn store_results(
         done[..e.evaluated].fill(true);
     }
     for (&i, metric) in indices.iter().zip(metrics) {
-        e.scores[i] = metric.fitness;
-        e.trial_metrics[i] = metric.behavior;
+        e.record_result(i, metric);
         done[i] = true;
     }
     while e.evaluated < e.config.population && done[e.evaluated] {
@@ -989,7 +1000,7 @@ fn finish_queued(
         sched.stop();
         while sched.in_flight() > 0 {
             // With no round left, waiting contenders go out for their checks now.
-            sched.pump_checks(&e.population, &e.config)?;
+            sched.pump_checks(&e.population, &e.config, |i, m| e.check_need(i, m))?;
             for (indices, metrics) in sched.collect(
                 &e.population,
                 &e.config,
@@ -1034,8 +1045,7 @@ fn steady_absorb(
     resubmit: bool,
 ) -> anyhow::Result<()> {
     for (&i, m) in indices.iter().zip(metrics) {
-        e.scores[i] = m.fitness;
-        e.trial_metrics[i] = m.behavior;
+        e.record_result(i, m);
     }
     let archive_started = Instant::now();
     steady.failed += e.archive_slots(indices);

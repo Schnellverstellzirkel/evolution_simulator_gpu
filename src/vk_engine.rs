@@ -30,8 +30,12 @@ struct GroupRes {
     set: vk::DescriptorSet,
 }
 
-/// Per-submission resources. Two slots let one batch upload while another runs.
+/// Per-submission resources. Each slot submits to its own queue when the
+/// device has enough, so units run side by side: the step-range barriers of
+/// one unit do not hold back another, and a small unit (a batch of checks)
+/// fills the SMs a large one leaves idle instead of running alone.
 struct Slot {
+    queue: vk::Queue,
     groups: Vec<Option<GroupRes>>,
     params: Option<Buf>,
     readback: Option<Buf>,
@@ -60,7 +64,6 @@ pub struct VkEngine {
     _entry: ash::Entry,
     instance: ash::Instance,
     device: ash::Device,
-    queue: vk::Queue,
     pub name: String,
     memory_properties: vk::PhysicalDeviceMemoryProperties,
     set_layout: vk::DescriptorSetLayout,
@@ -84,6 +87,16 @@ pub struct VkEngine {
 
 // Mapped pointers are only touched by the thread that owns the engine.
 unsafe impl Send for VkEngine {}
+
+/// Submission slots per GPU (`EVOLUTION_GPU_SLOTS`, 1 to 8, default 4), each
+/// on its own queue when the device offers enough.
+pub fn gpu_slots() -> u32 {
+    std::env::var("EVOLUTION_GPU_SLOTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n: &u32| (1..=8).contains(n))
+        .unwrap_or(4)
+}
 
 pub fn spirv(source: &str) -> Result<Vec<u32>> {
     let module = naga::front::wgsl::parse_str(source).context("WGSL parse")?;
@@ -150,7 +163,9 @@ impl VkEngine {
                         .position(|f| f.queue_flags.contains(vk::QueueFlags::COMPUTE))
                 })
                 .context("No compute queue")? as u32;
-            let priorities = [1.0];
+            let slot_count = gpu_slots();
+            let queue_count = families[family as usize].queue_count.clamp(1, slot_count);
+            let priorities = vec![1.0; queue_count as usize];
             let queue_info = [vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(family)
                 .queue_priorities(&priorities)];
@@ -161,7 +176,9 @@ impl VkEngine {
                     None,
                 )
                 .context("Vulkan device")?;
-            let queue = device.get_device_queue(family, 0);
+            let queues: Vec<vk::Queue> = (0..queue_count)
+                .map(|index| device.get_device_queue(family, index))
+                .collect();
             let memory_properties = instance.get_physical_device_memory_properties(physical);
 
             let bindings: Vec<_> = (0..7u32)
@@ -219,15 +236,15 @@ impl VkEngine {
                     .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
                 None,
             )?;
-            let slot_count = 2;
             let command_buffers = device.allocate_command_buffers(
                 &vk::CommandBufferAllocateInfo::default()
                     .command_pool(command_pool)
                     .command_buffer_count(slot_count),
             )?;
             let mut slots = Vec::new();
-            for command_buffer in command_buffers {
+            for (index, command_buffer) in command_buffers.into_iter().enumerate() {
                 slots.push(Slot {
+                    queue: queues[index % queues.len()],
                     groups: (0..CAPACITIES.len()).map(|_| None).collect(),
                     params: None,
                     readback: None,
@@ -247,7 +264,6 @@ impl VkEngine {
                 _entry: entry,
                 instance,
                 device,
-                queue,
                 name: device_name,
                 memory_properties,
                 set_layout,
@@ -733,7 +749,7 @@ impl VkEngine {
             device.end_command_buffer(cb)?;
             device.reset_fences(&[resources.fence])?;
             device.queue_submit(
-                self.queue,
+                resources.queue,
                 &[vk::SubmitInfo::default().command_buffers(&[cb])],
                 resources.fence,
             )?;
@@ -754,15 +770,49 @@ impl VkEngine {
     /// Returns the oldest submission's results once it has finished, waiting up
     /// to `timeout`. Submissions complete in order on the single queue.
     pub fn poll(&mut self, timeout: std::time::Duration) -> Result<Option<Completed>> {
-        let Some(slot) = self
+        // Units on different queues finish in any order: return the oldest
+        // finished one, waiting up to `timeout` for any of them.
+        let mut pending: Vec<(u64, usize)> = self
             .slots
             .iter()
             .enumerate()
             .filter_map(|(i, s)| s.pending.as_ref().map(|p| (p.ticket, i)))
-            .min()
-            .map(|(_, i)| i)
-        else {
+            .collect();
+        if pending.is_empty() {
             return Ok(None);
+        }
+        pending.sort_unstable();
+        let finished = |this: &Self| -> Result<Option<usize>> {
+            for &(_, i) in &pending {
+                match unsafe { this.device.get_fence_status(this.slots[i].fence) } {
+                    Ok(true) => return Ok(Some(i)),
+                    Ok(false) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Ok(None)
+        };
+        let slot = match finished(self)? {
+            Some(slot) => slot,
+            None => {
+                let fences: Vec<vk::Fence> =
+                    pending.iter().map(|&(_, i)| self.slots[i].fence).collect();
+                match unsafe {
+                    self.device.wait_for_fences(
+                        &fences,
+                        false,
+                        timeout.as_nanos().min(u128::from(u64::MAX)) as u64,
+                    )
+                } {
+                    Ok(()) => {}
+                    Err(vk::Result::TIMEOUT) => return Ok(None),
+                    Err(e) => return Err(e.into()),
+                }
+                match finished(self)? {
+                    Some(slot) => slot,
+                    None => return Ok(None),
+                }
+            }
         };
         let resources = &self.slots[slot];
         unsafe {
@@ -810,20 +860,21 @@ impl VkEngine {
         }
     }
 
-    /// Waits up to `timeout` for the oldest submission without collecting it.
+    /// Waits up to `timeout` for any submission without collecting it.
     pub fn wait(&self, timeout: std::time::Duration) -> Result<()> {
-        let Some(slot) = self
+        let fences: Vec<vk::Fence> = self
             .slots
             .iter()
-            .filter_map(|s| s.pending.as_ref().map(|p| (p.ticket, s.fence)))
-            .min_by_key(|&(ticket, _)| ticket)
-        else {
+            .filter(|s| s.pending.is_some())
+            .map(|s| s.fence)
+            .collect();
+        if fences.is_empty() {
             return Ok(());
-        };
+        }
         unsafe {
             match self
                 .device
-                .wait_for_fences(&[slot.1], true, timeout.as_nanos() as u64)
+                .wait_for_fences(&fences, false, timeout.as_nanos() as u64)
             {
                 Ok(()) | Err(vk::Result::TIMEOUT) => Ok(()),
                 Err(e) => Err(e.into()),
