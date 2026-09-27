@@ -206,6 +206,8 @@ fn segment_ends(cfg: &Config) -> Vec<u32> {
     let mut ends: Vec<u32> = seconds
         .into_iter()
         .map(|s| fidelity.settle() + (s * fidelity.rate as f32).round() as u32)
+        // Screened creatures leave right after the screen step.
+        .chain(cfg.screen.map(|screen| screen.tick(fidelity) + 1))
         .filter(|&tick| tick < total)
         .collect();
     ends.sort_unstable();
@@ -326,7 +328,7 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
                         for (b, (slots, _, results)) in finished.batches.iter().enumerate() {
                             let mut keep = Vec::new();
                             for (j, result) in results.iter().enumerate() {
-                                if last || result.fall_time > 0.0 {
+                                if last || result.fall_time > 0.0 || result.screened > 0.0 {
                                     unit.results[slots[j]] = *result;
                                 } else {
                                     keep.push(j);

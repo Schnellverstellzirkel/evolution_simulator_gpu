@@ -49,6 +49,10 @@ pub struct Params {
     /// Earthquake base bump height (m); each creature jitters it from the
     /// hash of its id, packed in the last word of `creature_info`.
     pub quake: f32,
+    /// Step at whose end trials are screened (`physics::Screen::tick`), or 0
+    /// for no screen, and the distance a creature needs there to continue.
+    pub screen_tick: u32,
+    pub screen_bar: f32,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -77,6 +81,12 @@ pub struct GpuResult {
     /// Mean head acceleration (m/s^2) over about `physics::HEAD_SHAKE_WINDOW`
     /// seconds, for the head shaking limit.
     pub head_shake: f32,
+    /// Distance at the screen, or at an earlier fall; 0 until then. The
+    /// experiment sets the next generation's screen bar from these.
+    pub screen_x: f32,
+    /// Seconds into the trial when the screen stopped the creature, or 0.
+    /// Its fitness is the distance there and its behavior totals end there.
+    pub screened: f32,
 }
 impl GpuResult {
     /// Number of feet: nodes that touched the ground and lifted off again.
@@ -700,7 +710,9 @@ mod tests {
         assert_eq!(std::mem::offset_of!(Params, gaps), 60);
         assert_eq!(std::mem::offset_of!(Params, hurdles), 64);
         assert_eq!(std::mem::offset_of!(Params, quake), 68);
-        assert_eq!(std::mem::size_of::<Params>(), 72);
+        assert_eq!(std::mem::offset_of!(Params, screen_tick), 72);
+        assert_eq!(std::mem::offset_of!(Params, screen_bar), 76);
+        assert_eq!(std::mem::size_of::<Params>(), 80);
     }
 
     #[test]

@@ -419,3 +419,35 @@ Kernel facts measured on the way:
 - Ablations on the evolved 100k population (share of kernel time): muscles 36% (the two waveform evaluations 14%, the force scatter 8%), descriptor metrics with fall and break checks 22%, joint limits 16%, the two bone passes 14%, the velocity pass 8%.
 - Simulated time after a fall (`examples/fall_profile.rs`): 25% on the evolved 100k population, 34% on a first generation; the median fall comes within 1 s.
 - Body plans: the evolved 3M population has 13,604 plans; the ten largest hold about half the creatures. A kernel specialized for one plan (`EVOLUTION_PLAN_BATCH=1` with `eval-bench --plan-rank`) is bit-exact and 10 to 20% faster on a single-plan population, but splitting mixed units into plan batches measured no gain (82k generic against 60k to 82k creatures/s), so it stays off.
+
+## Segments, early screening and thread budgets (2026-09-27)
+
+Workload: `runs/evolved-3m-v26.evo` (not committed), the evolved 3M checkpoint resumed for 4 generations under `qd::VERSION` 26 with checks off. GUI benchmark as in the section above, one run per row.
+
+| step | end to end | seconds per generation |
+|---|---:|---:|
+| fall freeze, no segments (`EVOLUTION_SEGMENTS=0`) | 47,024/s | 57.8 to 69.8 |
+| GPU segments at 2 s and 10 s | 65,351/s | 39.0 to 52.8 |
+| screening off (`EVOLUTION_SCREEN=0`), same binary | 69,805/s | 41.6 to 44.4 |
+| screening at 5 s, top 20% continue (default) | 121,885/s | 21.3 to 27.9 |
+| same, second run | 137,824/s | 18.6 to 25.0 (last generation 161,445/s) |
+
+Segments are bit-exact against unsegmented runs (100,000 evolved 100k and 500,000 evolved 3M creatures). eval-bench, GPU only: 56.9k -> 63.4k on the evolved 100k checkpoint and 77.2k -> 93.3k on the evolved 3M bodies.
+
+Screening predicts well: on 200k evolved 3M creatures, keeping the top 20% by distance at 5 s kept every creature of the final top 1% and 96% of the final top 10% (Spearman 0.887; at 10 s 0.942; at 2 s 0.730).
+
+Search quality, `examples/search_ab.rs`, 10 seeds (38 to 47), 10,000 creatures, 60 s trials, CPU only:
+
+| variant | generations | best mean (median) | QD mean (median) | cells | wall |
+|---|---:|---:|---:|---:|---:|
+| no screening | 20 | 270.0 m (235.3) | 22,177 (20,353) | 1,228 | 189.8 s |
+| screened, never in an archive | 20 | 243.7 m (239.2) | 19,117 (19,522) | 1,000 | 84.7 s |
+| screened, never in an archive | 40 | 420.3 m (429.0) | 52,929 (52,156) | 1,119 | 190.4 s |
+| screened may open empty global cells | 20 | 199.8 m (200.0) | 17,727 (16,718) | 1,088 | 84.7 s |
+| screened may open empty global cells | 40 | 425.8 m (412.1) | 53,266 (44,642) | 1,191 | 190.9 s |
+
+At equal evaluations screening costs about 14% of QD and a fifth of the cells; at equal time it gives +56% best distance and 2.4x QD for 9% fewer cells. The shipped rule keeps screened creatures out of every archive: letting them open empty cells tied at equal time, lost per evaluation, and would leave 5 s scores in the player's archive. Single seeds swing by 2x between variants, so read only the 10-seed means.
+
+Thread budget at 3M with screening (GUI): 8 general workers 137,824/s; 16 general workers 129,792/s; 8 general plus 8 CPU evaluation workers 121,273/s (the GPU's own rate fell from 174k to 137k standard/s with the CPU evaluating). The game keeps the 8-worker budget.
+
+Kernel experiments that did not help, all bit-exact: grouping 2 or 4 muscles per loop iteration (79.9k, 79.1k, 79.3k creatures/s on 200k evolved bodies); per-plan batches in mixed units (see above).

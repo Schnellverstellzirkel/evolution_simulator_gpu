@@ -138,7 +138,11 @@ enum SearchVariant {
     MorphologyReserve,
 }
 fn main() -> Result<()> {
-    // Evaluation and general workers share half the logical CPUs, at most eight.
+    // Evaluation and general workers share half the logical CPUs, at most
+    // eight. The owner allows the game the whole machine, but at 3M creatures
+    // 16 general workers (129.8k creatures/s) or 8 plus 8 CPU evaluation
+    // workers (121.3k) were no faster than 8 (137.8k): the GPU bounds the
+    // game and busy CPU cores slow it.
     rayon::ThreadPoolBuilder::new()
         .num_threads(engine::rayon_threads())
         .start_handler(|_| engine::lower_thread_priority())
@@ -212,8 +216,7 @@ fn main() -> Result<()> {
                             )?;
                             e.evaluation_seconds += start.elapsed().as_secs_f64();
                             for (offset, metric) in metrics.iter().enumerate() {
-                                e.scores[e.evaluated + offset] = metric.fitness;
-                                e.trial_metrics[e.evaluated + offset] = metric.behavior;
+                                e.record_result(e.evaluated + offset, metric);
                             }
                             e.evaluated = end;
                             if end == e.config.population {
@@ -323,8 +326,7 @@ fn main() -> Result<()> {
                             &e.config,
                         )?;
                         for (offset, metric) in metrics.iter().enumerate() {
-                            e.scores[begin + offset] = metric.fitness;
-                            e.trial_metrics[begin + offset] = metric.behavior;
+                            e.record_result(begin + offset, metric);
                         }
                     }
                     let gpu_seconds = start.elapsed().as_secs_f64();

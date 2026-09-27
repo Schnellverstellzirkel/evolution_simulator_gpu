@@ -622,6 +622,41 @@ pub fn stance_grip() -> f32 {
 /// carry a creature forward.
 pub const HEAD_SHAKE_LIMIT: f32 = 8.0 * 9.8;
 pub const HEAD_SHAKE_WINDOW: f32 = 0.1;
+/// Early screening of a standard trial: at `seconds` after settling, a
+/// creature whose distance is below `bar` stops, like a fall, keeping that
+/// distance. Survivors run the full trial. A screened creature never enters
+/// an archive, so every elite has a full trial.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Screen {
+    pub seconds: f32,
+    pub bar: f32,
+}
+impl Screen {
+    /// The step at whose end the screen applies.
+    pub fn tick(self, fidelity: Fidelity) -> u32 {
+        fidelity.settle() + ((self.seconds * fidelity.rate as f32).round() as u32).max(1) - 1
+    }
+}
+/// Seconds after settling at which trials are screened
+/// (`EVOLUTION_SCREEN`, default 5; `0` turns screening off).
+pub fn screen_seconds() -> Option<f32> {
+    let seconds = std::env::var("EVOLUTION_SCREEN")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(5.0);
+    (seconds > 0.0).then_some(seconds)
+}
+/// Share of creatures, by distance at the screen, that runs the full trial
+/// (`EVOLUTION_SCREEN_KEEP`, default 0.2). At 5 s the top 20% held every
+/// creature of the final top 1% and 96% of the final top 10% on an evolved
+/// 3M population.
+pub fn screen_keep() -> f32 {
+    std::env::var("EVOLUTION_SCREEN_KEEP")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|k| (0.0..=1.0).contains(k))
+        .unwrap_or(0.2)
+}
 /// How far (rad) a joint may be forced past its range before it breaks. A
 /// broken joint ends the trial like a fall, so no gait can profit from
 /// muscles forcing joints round like wheels.

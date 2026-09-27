@@ -534,8 +534,7 @@ fn run_seed(
             "Evaluator returned an incomplete generation"
         );
         for (index, metric) in metrics.iter().enumerate() {
-            experiment.scores[index] = metric.fitness;
-            experiment.trial_metrics[index] = metric.behavior;
+            experiment.record_result(index, metric);
         }
         let evaluation_seconds = evaluation_started.elapsed().as_secs_f64();
         experiment.evaluated = experiment.config.population;

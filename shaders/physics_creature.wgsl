@@ -61,6 +61,10 @@ struct Params {
     // Earthquake base bump height (m); each creature scales it by the jitter
     // from its id hash, the last word of creature_info (physics::quake_*).
     quake: f32,
+    // Step at whose end trials are screened (0 for none), and the distance a
+    // creature needs there to run the full trial (physics::Screen).
+    screen_tick: u32,
+    screen_bar: f32,
 }
 struct Result {
     fitness: f32,
@@ -88,6 +92,10 @@ struct Result {
     fall_time: f32,
     // Mean head acceleration (m/s^2) over about HEAD_SHAKE_WINDOW seconds.
     head_shake: f32,
+    // Distance at the screen, or at an earlier fall.
+    screen_x: f32,
+    // Seconds into the trial when the screen stopped the creature, or 0.
+    screened: f32,
 }
 @group(0) @binding(0) var<storage, read_write> nodes: array<Node>;
 // Muscle genes plus per-muscle state (rhythm offset and energy), which the
@@ -400,15 +408,15 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         bone_center[j] = pack2x16snorm(vec2f(bone_data[field + 2u * TILE], bone_data[field + 3u * TILE]));
         bone_cos_half[j] = bone_data[field + 4u * TILE];
     }
-    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     if p.tick > 0u {
         metrics = results[creature];
     }
 
     for (var s = 0u; s < p.steps; s++) {
-        // A fall ends the trial: its score and behavior totals are final, so
-        // a fallen creature takes no more steps.
-        if metrics.fall_time > 0.0 {
+        // A fall or the screen ends the trial: its score and behavior
+        // totals are final, so the creature takes no more steps.
+        if metrics.fall_time > 0.0 || metrics.screened > 0.0 {
             break;
         }
         let tick = p.tick + s;
@@ -1025,6 +1033,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 metrics.fall_time = time + DT;
                 // Only failures up to the fall count: it ends the trial.
                 metrics.fitness = select(fall_x * inv_total_mass, -1e20, failures > 0.0);
+                if tick <= p.screen_tick {
+                    metrics.screen_x = metrics.fitness;
+                }
                 fell_now = true;
             }
             metrics.ground_contact += contacts;
@@ -1062,14 +1073,34 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 }
                 metrics.previous_center_y = center_y;
             }
-            if fell_now {
+            // Early screen: a creature standing at the screen step continues
+            // only if it has come far enough; otherwise the trial ends here
+            // like a fall, keeping this distance.
+            var screened_now = false;
+            if tick == p.screen_tick && !fell_now {
+                var screen_x = 0.0;
+                var failures = 0.0;
+                for (var j = 0u; j < MAXN; j++) {
+                    if j >= body_nodes { break; }
+                    screen_x += pos[node_k(j, lane)].x * mass[j];
+                    failures += failed[j];
+                }
+                metrics.screen_x = screen_x * inv_total_mass;
+                if metrics.screen_x < p.screen_bar {
+                    metrics.screened = time + DT;
+                    metrics.fitness = select(metrics.screen_x, -1e20, failures > 0.0);
+                    screened_now = true;
+                }
+            }
+            if fell_now || screened_now {
                 // The behavior totals end with this step; gait frequency is
                 // over the time the creature walked.
                 metrics.vertical_oscillation = max(
                     metrics.gait_frequency - metrics.vertical_oscillation,
                     0.0,
                 );
-                metrics.gait_frequency = metrics.gait_turns * 0.5 / metrics.fall_time;
+                metrics.gait_frequency = metrics.gait_turns * 0.5 / (time + DT);
+                fell_now = true;
             }
         }
         if tick + 1u == p.total_steps && !fell_now {

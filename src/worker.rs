@@ -553,8 +553,7 @@ fn run(
                                 gpu.evaluate_with_metrics(&e.population, &indices, &e.config)?;
                             e.evaluation_seconds += start.elapsed().as_secs_f64();
                             for (offset, metric) in metrics.iter().enumerate() {
-                                e.scores[e.evaluated + offset] = metric.fitness;
-                                e.trial_metrics[e.evaluated + offset] = metric.behavior;
+                                e.record_result(e.evaluated + offset, metric);
                             }
                             e.evaluated = end;
                             status = format!("Evaluating generation {}", e.generation);

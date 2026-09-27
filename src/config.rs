@@ -61,6 +61,9 @@ pub struct Config {
     /// Physics resolution for evaluations under this config; `None` is
     /// `Fidelity::standard()`. Runtime only, never saved.
     pub fidelity: Option<crate::physics::Fidelity>,
+    /// Early screening of standard trials, set by the experiment each
+    /// generation; `None` runs every trial in full. Runtime only, never saved.
+    pub screen: Option<crate::physics::Screen>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -96,6 +99,7 @@ impl Default for Config {
             throughput: true,
             checkpoint_interval: 10,
             fidelity: None,
+            screen: None,
         }
     }
 }
@@ -177,6 +181,7 @@ impl From<HumanConfig> for Config {
     fn from(c: HumanConfig) -> Self {
         Self {
             fidelity: None,
+            screen: None,
             population: c.population,
             seed: c.seed,
             random_seed: c.random_seed,
@@ -323,6 +328,7 @@ impl From<BinaryConfig> for Config {
     fn from(c: BinaryConfig) -> Self {
         Self {
             fidelity: None,
+            screen: None,
             population: c.population,
             seed: c.seed,
             random_seed: c.random_seed,

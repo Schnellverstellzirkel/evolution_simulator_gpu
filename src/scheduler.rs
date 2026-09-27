@@ -484,8 +484,10 @@ impl Scheduler {
         }
         let waited = *self.checks_since.get_or_insert_with(Instant::now);
         let waited = waited.elapsed() > Duration::from_millis(500);
+        // Checks run the full trial: only standard trials are screened.
         let fine = Config {
             fidelity: Some(crate::physics::Fidelity::fine()),
+            screen: None,
             ..cfg.clone()
         };
         let standby = self.reserves_standing_by();
@@ -620,8 +622,10 @@ impl Scheduler {
         if self.replays.is_empty() {
             return;
         }
+        // A replay reproduces the full trial the player will watch.
         let standard = Config {
             fidelity: None,
+            screen: None,
             ..cfg.clone()
         };
         for device in &mut self.devices {
@@ -1102,9 +1106,9 @@ impl Scheduler {
                 cell: None,
                 replay: false,
             })?;
-            for (unit, metrics) in
-                self.collect(pop, cfg, Duration::from_millis(50), |_, _| check)?
-            {
+            for (unit, metrics) in self.collect(pop, cfg, Duration::from_millis(50), |_, m| {
+                check && !m.screened
+            })? {
                 for (i, metric) in unit.into_iter().zip(metrics) {
                     out[position[&i]] = metric;
                     remaining -= 1;
@@ -1146,9 +1150,15 @@ pub fn to_metrics(
     r: &GpuResult,
     cfg: &Config,
 ) -> EvaluationMetrics {
-    // Behavior totals end at a fall, so they average over the steps walked.
-    let steps = if r.fall_time > 0.0 {
-        ((r.fall_time * cfg.fidelity().rate as f32).round() as u32).clamp(1, cfg.steps().max(1))
+    // Behavior totals end at a fall or the screen, so they average over the
+    // steps walked.
+    let ended = if r.fall_time > 0.0 {
+        r.fall_time
+    } else {
+        r.screened
+    };
+    let steps = if ended > 0.0 {
+        ((ended * cfg.fidelity().rate as f32).round() as u32).clamp(1, cfg.steps().max(1))
     } else {
         cfg.steps().max(1)
     };
@@ -1171,6 +1181,8 @@ pub fn to_metrics(
             feet: r.feet() as f32,
         },
         replayed: false,
+        screened: r.screened > 0.0,
+        screen_x: r.screen_x,
     }
 }
 

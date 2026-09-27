@@ -147,8 +147,7 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
         for (index, result) in results.iter().enumerate() {
             let metrics =
                 scheduler::to_metrics(&experiment.population, index, result, &experiment.config);
-            experiment.scores[index] = metrics.fitness;
-            experiment.trial_metrics[index] = metrics.behavior;
+            experiment.record_result(index, &metrics);
         }
         experiment.evaluated = experiment.config.population;
         experiment

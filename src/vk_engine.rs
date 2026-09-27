@@ -707,6 +707,8 @@ impl VkEngine {
                     gaps: if cfg.ground { cfg.gaps } else { 0.0 },
                     hurdles: if cfg.ground { cfg.hurdles } else { 0.0 },
                     quake: if cfg.ground { cfg.quake } else { 0.0 },
+                    screen_tick: cfg.screen.map_or(0, |screen| screen.tick(fidelity)),
+                    screen_bar: cfg.screen.map_or(f32::NEG_INFINITY, |screen| screen.bar),
                 };
                 param_data[offset..offset + std::mem::size_of::<Params>()]
                     .copy_from_slice(bytemuck::bytes_of(&p));

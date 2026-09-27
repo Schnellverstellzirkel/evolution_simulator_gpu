@@ -52,6 +52,12 @@ pub struct EvaluationMetrics {
     /// The fitness already folds in a CPU-engine replay of the standard trial
     /// and `behavior` comes from it, so archive insertion need not replay it.
     pub replayed: bool,
+    /// The early screen stopped the trial (`physics::Screen`): the creature
+    /// never enters an archive.
+    pub screened: bool,
+    /// Distance at the screen, or at an earlier fall (0 when there was no
+    /// screen and no earlier fall).
+    pub screen_x: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]

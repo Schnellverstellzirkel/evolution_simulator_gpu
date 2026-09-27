@@ -47,6 +47,8 @@ The replay viewport plays frames and the matching scored result recorded by the 
 - Fitness is horizontal distance only. Never add fitness terms, penalties or multipliers. Ask the owner before proposing one.
 - Pressure on behavior comes from physics or environment effects, never from scoring.
 - Keep settings few. The owner wants fixed 60 s trials, 3M creatures, and no mutation controls. Environment effects are buttons.
+- Early screening (owner, 2026-09-27): a standard trial stops at 5 s when the creature is below the generation's bar, the distance at 5 s that the previous generation's top 20% reached; survivors run the full 60 s. A screened creature may only open an empty cell of the global archive (never an island or the reserve) and earns its emitter no reward. Fine checks, CPU replays and elite re-tests always run full trials. The first generation, and the first after a load or a world change, runs unscreened and sets the bar. `EVOLUTION_SCREEN=0` turns it off for comparisons.
+- 30 Hz physics (owner, 2026-09-27): try it and measure evolution before deciding the default.
 - Breaking old checkpoints is fine. Bump `qd::VERSION` when archive or physics semantics change.
 - The old gameplay is not a reference. Speed matters. The long-term goal is 2M evaluated creatures per second in the graphical game at 60 FPS.
 - A physics change must land in all engines and keep CPU/GPU agreement.
@@ -55,7 +57,7 @@ The replay viewport plays frames and the matching scored result recorded by the 
 ## Working on this machine
 
 - The laptop has 16 threads, an RTX 4060 for compute, and a Radeon 780M that drives the desktop.
-- Use at most half the machine for builds, tests and runs: 8 build jobs and 8 rayon threads, at low priority (`nice`).
+- Use at most half the machine for builds, tests and runs: 8 build jobs and 8 rayon threads, at low priority (`nice`). The owner allows the game itself the whole machine (2026-09-27), but it measured no faster at 3M (16 general workers 129.8k, 8 general plus 8 CPU evaluation workers 121.3k, 8 general 137.8k creatures/s): the GPU bounds the game and busy CPU cores slow it, so the game keeps the 8-worker budget.
 - Never evaluate creatures on the Radeon. Set `EVOLUTION_DEVICES=primary` for every run of the game, the tests, and benchmarks. The default thread split (no separate CPU evaluation pool, eight general workers) stays inside half the machine; set `EVOLUTION_CPU_THREADS=6` only for CPU-only tools such as `search-benchmark --cpu`. Heavy Radeon use crashed the desktop (mutter/Wayland) once.
 - Keep subagent fan-outs small for the same reason. The session limit is 20 concurrent subagents, and 20 at once also ran out the owner's token budget.
 - Fast iteration build: `cargo build --profile release-fast` inherits release optimization with LTO disabled, 256 codegen units, and incremental compilation. It adds no platform-specific linker requirement. Use the normal thin-LTO release profile for comparable performance measurements.

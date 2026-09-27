@@ -506,6 +506,16 @@ impl Group {
         // Lanes whose nodes had failed by their fall; a fall ends the trial,
         // so later failures cannot count.
         let mut fall_failed = zero;
+        // Early screen (physics::Screen): at the end of `screen_tick`, a
+        // standing lane below the bar stops like a fall, keeping that
+        // distance. `screen_x` holds each lane's distance there or at an
+        // earlier fall.
+        let screen_tick = cfg.screen.map(|screen| screen.tick(fidelity));
+        let screen_bar = F::splat(cfg.screen.map_or(f32::NEG_INFINITY, |screen| screen.bar));
+        let mut screen_x = zero;
+        let mut screened = zero;
+        let mut screen_fit = zero;
+        let mut screen_failed = zero;
         let mut head_shake = zero;
         let shake_alpha = F::splat((1.0 / (physics::HEAD_SHAKE_WINDOW * rate)).min(1.0));
         // Real lanes are the first `slots.len()` lanes; the rest repeat a real
@@ -1014,9 +1024,9 @@ impl Group {
 
             let mut grounded_now = [0u64; L];
             if tick >= settle {
-                // A fall ends the trial: lanes that fell in an earlier step
-                // no longer add to their behavior totals.
-                let active = fall_time.le(zero);
+                // A fall or the screen ends the trial: lanes that stopped in
+                // an earlier step no longer add to their behavior totals.
+                let active = fall_time.le(zero) & screened.le(zero);
                 let active_bits = active.bits();
                 let mut center = zero;
                 let mut contacts = zero;
@@ -1102,10 +1112,10 @@ impl Group {
                     let (hx, hy) = (vx[0] - head_start.0, vy[0] - head_start.1);
                     let accel = (hx * hx + hy * hy).sqrt() * rate;
                     let shaken = head_shake + (accel - head_shake) * shake_alpha;
-                    head_shake = F::select(fall_time.le(zero), shaken, head_shake);
+                    head_shake = F::select(active, shaken, head_shake);
                 }
                 let shaking = head_shake.gt(F::splat(physics::HEAD_SHAKE_LIMIT));
-                let falls = fall_time.le(zero) & (py[0].lt(py[neck_base]) | broken | shaking);
+                let falls = active & (py[0].lt(py[neck_base]) | broken | shaking);
                 if falls.any() {
                     let mut x = zero;
                     let mut failures = zero;
@@ -1115,6 +1125,12 @@ impl Group {
                     }
                     fall_x = F::select(falls, x * inv_total_mass, fall_x);
                     fall_failed = F::select(falls, failures, fall_failed);
+                    if screen_tick.is_some_and(|screen| tick <= screen) {
+                        // The fall's score, failure included, as the kernel.
+                        let score =
+                            F::select(failures.gt(zero), F::splat(-1e20), x * inv_total_mass);
+                        screen_x = F::select(falls, score, screen_x);
+                    }
                     fall_time = F::select(falls, F::splat(time_now + dt), fall_time);
                     if early_exit {
                         fell_this_tick = F::select(falls, one, zero);
@@ -1165,11 +1181,27 @@ impl Group {
                     }
                 }
             }
-            // Every real lane has a recorded fall or a failed node, so no
-            // later step can give it a new distance. Stop after finishing
-            // this tick's totals, so the stopped run matches the full run up
-            // to that point. The descriptor totals still diverge, which is
-            // why the flag stays opt-in.
+            if screen_tick == Some(tick) {
+                let standing = fall_time.le(zero) & screened.le(zero);
+                let mut x = zero;
+                let mut failures = zero;
+                for j in 0..n {
+                    x += px[j] * mass[j];
+                    failures += failed[j];
+                }
+                let x = x * inv_total_mass;
+                screen_x = F::select(standing, x, screen_x);
+                let below = standing & x.lt(screen_bar);
+                screened = F::select(below, F::splat(time_now + dt), screened);
+                screen_fit = F::select(below, x, screen_fit);
+                screen_failed = F::select(below, failures, screen_failed);
+                if early_exit {
+                    fell_this_tick = fell_this_tick.max(F::select(below, one, zero));
+                }
+            }
+            // Every real lane has stopped (fall or screen), so no later step
+            // can change any of its results. Stop after finishing this tick's
+            // totals, so the stopped run matches the full run.
             if early_exit {
                 if fell_this_tick.gt(zero).any() {
                     for (l, value) in fell_this_tick.to_array().iter().enumerate() {
@@ -1210,6 +1242,10 @@ impl Group {
         let fall_time = fall_time.to_array();
         let fall_x = fall_x.to_array();
         let fall_failed = fall_failed.to_array();
+        let screen_x = screen_x.to_array();
+        let screened = screened.to_array();
+        let screen_fit = screen_fit.to_array();
+        let screen_failed = screen_failed.to_array();
         let head_shake = head_shake.to_array();
         (0..self.slots.len())
             .map(|l| {
@@ -1229,6 +1265,12 @@ impl Group {
                     } else {
                         fall_x[l]
                     }
+                } else if screened[l] > 0.0 {
+                    if screen_failed[l] > 0.0 {
+                        -1e20
+                    } else {
+                        screen_fit[l]
+                    }
                 } else if failures > 0.0 {
                     -1e20
                 } else {
@@ -1238,6 +1280,8 @@ impl Group {
                 // time the creature walked.
                 let walked = if fall_time[l] > 0.0 {
                     fall_time[l]
+                } else if screened[l] > 0.0 {
+                    screened[l]
                 } else {
                     (total_steps - settle) as f32 / rate
                 };
@@ -1263,6 +1307,8 @@ impl Group {
                     ground_hi: f32::from_bits((grounded_before[l] >> 32) as u32),
                     fall_time: fall_time[l],
                     head_shake: head_shake[l],
+                    screen_x: screen_x[l],
+                    screened: screened[l],
                 }
             })
             .collect()
@@ -1315,7 +1361,12 @@ pub fn replay(
     pop.push(creature.clone());
     let group = Group::build(&pop, &[0], &[0]);
     let mut frames = Vec::with_capacity((cfg.fidelity().settle() + cfg.steps() + 1) as usize);
-    let result = group.run(cfg, Some(&mut frames))[0];
+    // Archive creatures ran full trials; a replay shows the full trial.
+    let cfg = Config {
+        screen: None,
+        ..cfg.clone()
+    };
+    let result = group.run(&cfg, Some(&mut frames))[0];
     (frames, result)
 }
 

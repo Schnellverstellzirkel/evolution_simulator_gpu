@@ -136,6 +136,12 @@ pub struct Experiment {
     /// global archive requires (set by `record_result`, cleared on insertion).
     #[serde(skip)]
     pub replayed: Vec<bool>,
+    /// Per slot: the early screen stopped this result's trial (never offered
+    /// to an archive), and its distance at the screen or an earlier fall.
+    #[serde(skip)]
+    pub screened: Vec<bool>,
+    #[serde(skip)]
+    pub screen_distance: Vec<f32>,
     #[serde(default)]
     pub qd_version: u32,
     /// Steady-state breeding rounds so far; salts offspring random streams.
@@ -289,7 +295,15 @@ struct OffspringPlan {
 
 impl Experiment {
     pub fn new(config: Config) -> Result<Self> {
-        let config = config.resolved();
+        let mut config = config.resolved();
+        // The first generation has no bar yet: every trial runs in full and
+        // records its distance at the screen.
+        config.screen = crate::physics::screen_seconds()
+            .filter(|&seconds| seconds < config.duration)
+            .map(|seconds| crate::physics::Screen {
+                seconds,
+                bar: f32::NEG_INFINITY,
+            });
         let population = evolution::create(&config)?;
         let population_count = config.population;
         let scores = vec![f32::NAN; population_count];
@@ -317,6 +331,8 @@ impl Experiment {
             protected_until: vec![0; population_count],
             trial_metrics: vec![TrialMetrics::default(); population_count],
             replayed: Vec::new(),
+            screened: Vec::new(),
+            screen_distance: Vec::new(),
             qd_version: qd::VERSION,
             breed_round: 0,
             islands: Vec::new(),
@@ -456,6 +472,34 @@ impl Experiment {
             self.replayed.resize(self.scores.len(), false);
         }
         self.replayed[i] = metric.replayed;
+        if self.screened.len() < self.scores.len() {
+            self.screened.resize(self.scores.len(), false);
+            self.screen_distance.resize(self.scores.len(), f32::NAN);
+        }
+        self.screened[i] = metric.screened;
+        self.screen_distance[i] = metric.screen_x;
+    }
+    /// The early screen for the next generation: its bar is the distance at
+    /// the screen that the best `physics::screen_keep()` share of this
+    /// generation reached. After a world change distances are not comparable,
+    /// so the next generation runs unscreened and sets a new bar.
+    fn next_screen(&self, world_changed: bool, duration: f32) -> Option<crate::physics::Screen> {
+        // A trial no longer than the screen time has nothing to screen.
+        let seconds = crate::physics::screen_seconds().filter(|&s| s < duration)?;
+        let mut distances: Vec<f32> = self
+            .screen_distance
+            .iter()
+            .copied()
+            .filter(|d| !d.is_nan())
+            .collect();
+        let bar = if world_changed || distances.len() < 64 {
+            f32::NEG_INFINITY
+        } else {
+            let keep = crate::physics::screen_keep();
+            let rank = ((distances.len() as f32 * (1.0 - keep)) as usize).min(distances.len() - 1);
+            *distances.select_nth_unstable_by(rank, f32::total_cmp).1
+        };
+        Some(crate::physics::Screen { seconds, bar })
     }
     /// The first rule that makes `i` a contender, and the archive cell it
     /// competes for (none for optimizer samples and reserve candidates, which
@@ -465,7 +509,9 @@ impl Experiment {
         i: usize,
         metric: &qd::EvaluationMetrics,
     ) -> (ContenderReason, Option<u64>) {
-        if !metric.fitness.is_finite() || metric.fitness <= FAILED {
+        // A screened creature's score is its distance at the screen, not a
+        // full trial: it enters no archive.
+        if !metric.fitness.is_finite() || metric.fitness <= FAILED || metric.screened {
             return (ContenderReason::Rejected, None);
         }
         if self.from_optimizer(i) {
@@ -566,6 +612,8 @@ impl Experiment {
             protection: u32,
             behavior_candidate: bool,
             morphology_topology: Option<qd::Topology>,
+            /// Stopped by the early screen: offered to no archive.
+            screened: bool,
         }
         let reserve_enabled = self.morphology_reserve_override != Some(false);
         // Reserve admission needs a score above the best behavior elite and
@@ -620,7 +668,9 @@ impl Experiment {
                     [genome.muscle_start..genome.muscle_start + genome.muscle_count];
                 let descriptor = qd::descriptor(nodes, muscles, self.trial_metrics[i]);
                 let protection = self.protected_until.get(i).copied().unwrap_or(0);
-                let behavior_candidate = if score.is_finite() && score > FAILED {
+                let screened = self.screened.get(i).copied().unwrap_or(false);
+                // A screened creature enters no archive.
+                let behavior_candidate = if score.is_finite() && score > FAILED && !screened {
                     let niche = descriptor.niche();
                     match self.archive.slot_for(&niche) {
                         Some(slot) => score > self.archive.entries[slot].fitness,
@@ -630,6 +680,7 @@ impl Experiment {
                     false
                 };
                 let morphology_topology = if reserve_enabled
+                    && !screened
                     && matches!(emitter, Emitter::Structural | Emitter::Novelty)
                 {
                     let topology = qd::topology_of_population(&self.population, i);
@@ -660,6 +711,7 @@ impl Experiment {
                     protection,
                     behavior_candidate,
                     morphology_topology,
+                    screened,
                 }
             })
             .collect();
@@ -683,6 +735,9 @@ impl Experiment {
                     }
                     let p = &prep[k];
                     if !p.score.is_finite() || p.score <= FAILED {
+                        continue;
+                    }
+                    if p.screened {
                         continue;
                     }
                     if archive
@@ -762,8 +817,10 @@ impl Experiment {
         if !verify.is_empty() {
             let indices: Vec<usize> = verify.iter().map(|&k| slots[k]).collect();
             let subset = self.population.subset(&indices);
+            // The full trial the player will replay; no screen.
             let replay_cfg = Config {
                 fidelity: None,
+                screen: None,
                 ..self.config.clone()
             };
             let results = crate::cpu_engine::evaluate(&subset, &replay_cfg);
@@ -1112,6 +1169,7 @@ impl Experiment {
         // runs it (no fine-fidelity override).
         let cfg = Config {
             fidelity: None,
+            screen: None,
             ..self.config.clone()
         };
         let results = crate::cpu_engine::evaluate(&unit, &cfg);
@@ -1163,9 +1221,11 @@ impl Experiment {
         cfg.validate()?;
         let generation = self.generation + 1;
         crate::environment::advance_seasons(&mut cfg, generation);
-        if fitness_context_changed(&self.config, &cfg) {
+        let world_changed = fitness_context_changed(&self.config, &cfg);
+        if world_changed {
             self.reset_search_context();
         }
+        cfg.screen = self.next_screen(world_changed, cfg.duration);
         evolution::ensure_archive_batch_memory(&self.population, &self.archive, &cfg)?;
         let setup_seconds = preparation_started.elapsed().as_secs_f64();
         let plan_started = std::time::Instant::now();
@@ -1732,9 +1792,11 @@ impl Experiment {
             "Population changes need a new experiment"
         );
         crate::environment::advance_seasons(&mut cfg, self.generation);
-        if fitness_context_changed(&self.config, &cfg) {
+        let world_changed = fitness_context_changed(&self.config, &cfg);
+        if world_changed {
             self.reset_search_context();
         }
+        cfg.screen = self.next_screen(world_changed, cfg.duration);
         self.config = cfg;
         self.population.compact();
         self.evaluation_seconds = 0.0;
@@ -1767,9 +1829,15 @@ impl Experiment {
             "Archived bodies exceed these limits; start a new experiment"
         );
         if self.stage == Stage::Ready {
-            if fitness_context_changed(&self.config, &cfg) {
+            let world_changed = fitness_context_changed(&self.config, &cfg);
+            if world_changed {
                 self.reset_search_context();
             }
+            cfg.screen = if world_changed {
+                self.next_screen(true, cfg.duration)
+            } else {
+                self.config.screen
+            };
             self.config = cfg;
         } else {
             self.pending = Some(cfg);
@@ -2218,6 +2286,9 @@ pub fn load(path: &Path) -> Result<Experiment> {
         experiment.evaluation_seconds = 0.0;
     }
     experiment.parent_scores = vec![f32::NAN; experiment.config.population];
+    // The screen bar is not saved: the first resumed generation runs every
+    // trial in full and sets a new one.
+    experiment.config.screen = experiment.next_screen(true, experiment.config.duration);
     experiment.archive.rebuild_indices();
     for island in &mut experiment.islands {
         island.rebuild_indices();
@@ -2450,6 +2521,8 @@ impl From<V2Experiment> for Experiment {
             protected_until: vec![0; population],
             trial_metrics: vec![TrialMetrics::default(); population],
             replayed: Vec::new(),
+            screened: Vec::new(),
+            screen_distance: Vec::new(),
             qd_version: 0,
             breed_round: 0,
             islands: Vec::new(),
@@ -2492,6 +2565,8 @@ impl From<LegacyExperiment> for Experiment {
             protected_until: vec![0; population],
             trial_metrics: vec![TrialMetrics::default(); population],
             replayed: Vec::new(),
+            screened: Vec::new(),
+            screen_distance: Vec::new(),
             qd_version: 0,
             breed_round: 0,
             islands: Vec::new(),
