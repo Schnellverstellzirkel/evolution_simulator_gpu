@@ -293,3 +293,101 @@ The user allowed simulation changes that keep the game concept (natural selectio
 - Control latency at 1M: archive insertion and breeding block the worker thread for up to about 1 s.
 - NPU: disabled in firmware; a fixed-point engine would be needed (no native fp32).
 - End-to-end overlap of archive/breeding with GPU work is limited by the generational algorithm.
+
+## Between-batch CPU costs (2026-09-27, archive and breeding)
+
+Workload: headless, seed 38, 3 generations, 5 s trials, at 100k and 1M; `EVOLUTION_PROFILE_BREED=1`; 3 runs per side, alternating the baseline and optimized binaries back to back. Figures are medians over generations 1 and 2. The probe now also prints `Archive batch` (archive slots, stats, total), `Archive profile` (island offers, island refresh, prefilter, verify, global offers, cma tell, archive refresh, lineage), and `Plan profile` (by_plan, order/optimizer, sampling, cma/visit).
+
+### Results
+
+| metric | 100k before | 100k after | 1M before | 1M after |
+| --- | --- | --- | --- | --- |
+| archive total | 0.3057 s | 0.2826 s (-7.5%) | 0.8569 s | 0.8826 s (+3.0%) |
+| archive without verify | 0.0540 s | 0.0423 s (-21.7%) | 0.3736 s | 0.3219 s (-13.8%) |
+| breeding total | 0.1683 s | 0.1477 s (-12.2%) | 1.8194 s | 1.6907 s (-7.1%) |
+| parent plans | 0.0244 s | 0.0174 s | 0.3410 s | 0.2593 s |
+| candidate emission | 0.1406 s | 0.1283 s | 1.4160 s | 1.3917 s |
+| island offers | 0.0157 s | 0.0078 s | 0.1047 s | 0.0531 s |
+| global offers | 0.0093 s | 0.0064 s | 0.0611 s | 0.0424 s |
+| verify (CPU replay) | 0.2517 s | 0.2403 s | 0.4833 s | 0.5607 s |
+
+The archive side is dominated by verify, the CPU re-run of the best candidate per cell and per new body plan. That work is unchanged and deterministic; its 1M timing moved by run-to-run CPU contention, which is why the 1M archive total rose while every other archive section fell. At the real 3M / 60 s workload verify will be a larger share still, so the stage-log archive saving there will be smaller than these probe numbers. The 100k pair, where contention was lower, shows the addressable costs falling together.
+
+### Changes
+
+1. `Experiment::archive_slots` computes each descriptor once in the parallel prefilter and reuses it for the per-island offers. The four island offer streams now run in parallel, each preserving its own slot order. The global offers probe the cell fitness only for CMA candidates, and the morphology topology moves instead of cloning.
+2. `plan_offspring` derives both the top-parent pool and the optimizer targets from one sorted elite order (was two identical sorts per island), and the CMA slot lookup probes `(niche, topology)` through hash buckets with borrowed keys, so a CMA offspring no longer clones a topology vector.
+3. `QdArchive::visit` increments the visit count and marks the least-visited index dirty. The set is rebuilt once per breeding round (`ensure_least_visited`), replacing one balanced-tree remove and insert per visit.
+4. `repair_with` answers skeleton connectivity with a union-find over the at most 64 nodes instead of a graph walk per candidate bone.
+5. `align_nodes_with_bones` copies the starting coordinates onto the stack for bodies of at most 64 nodes instead of cloning the node vector.
+6. `collect_parallel_streaming` preallocates each 4096-creature chunk from a size estimate and reserves the merged gene arenas exactly, removing the growth reallocation copies.
+
+### Equivalence evidence
+
+- `search_ab 3 256 2 38,39` and `search_ab 2 20000 0.5 38,39` stdout are byte-identical between the baseline and optimized builds.
+- `cargo test --release`: 136 passed, 0 failed (79 lib, 3 early exit, 5 replay, 4 search improvements, 15 search state, 30 simulation); the GPU tests remain ignored.
+- `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean.
+
+### Not kept
+
+- Offspring-level timers (atomic counters plus `Instant::now` per section) distorted emission by 2 to 3 times under six rayon threads, so the split was read from a single-thread run and the counters were removed.
+- A `perf stat task-clock` A/B at 1M / 0.1 s trials showed only a 2.8% total CPU change, inside the noise; the wall section medians above resolved the change better.
+
+## Performance campaign baseline (2026-09-27)
+
+Planning measurements for the 2M/s target. Details, sweeps, and the candidate
+list are in `docs/performance-campaign.md`. Measured on revision `2b1014c`
+plus the concurrent `src/storage.rs` profiling edit, with a fixed snapshot
+binary (sha256
+`897529257d2eba776da62eddb6ea53fcd17fb967320260de3bfdf6377e825093`). Another
+worker's CPU profiling shared the machine, load average 3.8 to 16.4, so the
+medians and bests below are the numbers to keep.
+
+Fixed checkpoint:
+
+    nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=6 \
+      cargo run --release -q -- headless --population 100000 --seed 38 \
+      --generations 1 --duration 60 --checkpoint runs/perf-100k.evo
+
+Kernel sweeps (eval-bench, 60 s trials, round-robin rounds, medians of 7):
+
+    nice -n 15 env CARGO_BUILD_JOBS=6 EVOLUTION_DEVICES=primary EVOLUTION_CPU_THREADS=0 \
+      EVOLUTION_ROBUST_TRIALS=1 ... eval-bench --checkpoint runs/perf-100k.evo --repeat 1
+
+    config                         median      best
+    default                      92,632/s   94,933/s   (chunk 64, batch 100k, wg 32)
+    EVOLUTION_GPU_BATCH=8192     66,326/s   68,963/s
+    EVOLUTION_GPU_BATCH=100000   94,056/s   95,358/s
+    EVOLUTION_GPU_CHUNK=16        86,426/s   89,289/s
+    EVOLUTION_GPU_CHUNK=128       92,573/s   95,919/s
+    EVOLUTION_LANE_WG=64          92,456/s   95,072/s
+    EVOLUTION_KERNEL + EVOLUTION_PIPELINE_CHUNK  93,137/s   95,822/s (dead variables)
+
+No default changed: batch 100k, chunk 64, and wg 32 are already at the
+measured plateau. The two removed kernel variables are no-ops since `bd4c126`.
+With the 6-thread CPU engine on the same workload the mixed rate was
+39,775/s median (noisy), and with checks forced on every creature 7,439/s
+median (3 rounds, very noisy).
+
+Shader stats (`examples/shader_stats.rs`, workgroup 32): 128 to 155 registers
+per thread depending on capacity, 5.5 to 65.5 KiB shared per block, and 128
+KiB for capacity 64 at workgroup 64. Register occupancy estimate about 27 to
+33% per SM, matching the earlier Nsight reading.
+
+Benchmark subcommand, 5 s trials, one generation, checks on (every creature
+is fine-checked because `Scheduler::evaluate` has no archive to compare
+against):
+
+| population | evaluation | generation | creatures/s |
+|---:|---:|---:|---:|
+| 100,000 | 0.748 s | 0.960 s | 133,724 |
+| 1,000,000 | 7.696 s | 9.620 s | 129,936 |
+
+With `EVOLUTION_ROBUST_TRIALS=1`: 359,967/s at 100k and 703,183/s at 1M. A
+separate `--cpu` pass measured 174,486/s on 6 CPU threads at 100k / 5 s.
+
+GUI stage-log runs at 5 s trials: 300k reached 114,159/s end to end (GPU busy
+918,629 standard/s, CPU busy 67,538/s, archive 0.61 to 1.51 s, breeding 0.73
+to 0.87 s); 1M reached 193,476/s (GPU busy 1,221,507/s, CPU busy 223,955/s,
+archive 1.05 to 1.63 s, breeding 2.04 to 2.34 s, packing 2.204 s). The 3M,
+60 s production point from the 2026-09-26 section stays at 45,373/s.
