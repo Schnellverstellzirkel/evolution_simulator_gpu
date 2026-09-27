@@ -133,9 +133,15 @@ struct MuscleF {
 fn muscle_length(m: &MuscleF, time: F, exact: bool) -> F {
     let x = time * m.inv_period + m.phase;
     let phase = x - x.floor();
-    let rising = cos_pi(phase * m.inv_duty, exact) * 0.5 + 0.5;
-    let falling = F::splat(0.5) - cos_pi((phase - m.duty) * m.inv_complement, exact) * 0.5;
-    let wave = F::select(phase.lt(m.duty), rising, falling);
+    // One cosine for both halves of the stroke.
+    let rising = phase.lt(m.duty);
+    let turn = F::select(
+        rising,
+        phase * m.inv_duty,
+        (phase - m.duty) * m.inv_complement,
+    );
+    let half = cos_pi(turn, exact) * 0.5;
+    let wave = F::select(rising, half + 0.5, F::splat(0.5) - half);
     m.long - m.amplitude * (F::splat(1.0) - wave)
 }
 
