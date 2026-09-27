@@ -40,6 +40,14 @@ fn cell_key(archive: u64, niche: &qd::Niche) -> u64 {
     niche.hash(&mut hasher);
     hasher.finish()
 }
+/// Nanoseconds of steady breeding spent planning, emitting offspring, and
+/// writing them into the population, since the last `take_breed_nanos`.
+pub static BREED_NANOS: [std::sync::atomic::AtomicU64; 3] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+/// Returns and clears the breeding timers.
+pub fn take_breed_nanos() -> [u64; 3] {
+    std::array::from_fn(|i| BREED_NANOS[i].swap(0, std::sync::atomic::Ordering::Relaxed))
+}
 /// Returns and clears the contender counters.
 pub fn take_contender_counts() -> [u64; 5] {
     std::array::from_fn(|i| CONTENDER_COUNTS[i].swap(0, std::sync::atomic::Ordering::Relaxed))
@@ -1745,8 +1753,10 @@ impl Experiment {
         self.parent_scores.resize(count, f32::NAN);
         let cfg = self.config.clone();
         self.breed_round += 1;
+        let started = std::time::Instant::now();
         let planned = self.plan_offspring(&cfg, self.generation, self.breed_round, slots);
         let plans: Vec<CandidatePlan> = planned.iter().map(|p| p.plan).collect();
+        let planned_at = started.elapsed();
         let children = evolution::emit_offspring(
             &self.islands,
             &self.cma_emitters,
@@ -1756,6 +1766,7 @@ impl Experiment {
             self.generation,
             self.breed_round,
         );
+        let emitted_at = started.elapsed();
         for ((&slot, child), plan) in slots.iter().zip(children).zip(&planned) {
             if let Some(elite) = self.reseed.pop() {
                 self.population.replace(slot, elite);
@@ -1776,15 +1787,26 @@ impl Experiment {
             self.scores[slot] = f32::NAN;
             self.trial_metrics[slot] = TrialMetrics::default();
         }
+        let total = started.elapsed();
+        let add = |k: usize, d: std::time::Duration| {
+            BREED_NANOS[k].fetch_add(d.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        };
+        add(0, planned_at);
+        add(1, emitted_at.saturating_sub(planned_at));
+        add(2, total.saturating_sub(emitted_at));
         Ok(())
     }
     /// Steady-state generation boundary (every `population` evaluations):
     /// records history, applies queued settings, and compacts the arenas.
     pub fn finish_steady_generation(&mut self, failed: usize) -> Result<()> {
+        let started = std::time::Instant::now();
         self.push_archive_stats(failed);
+        let stats = started.elapsed();
         self.prune_lineage();
+        let lineage = started.elapsed();
         self.generation += 1;
         self.migrate_islands();
+        let migrated = started.elapsed();
         let mut cfg = self.pending.take().unwrap_or_else(|| self.config.clone());
         cfg.validate()?;
         ensure!(
@@ -1798,7 +1820,17 @@ impl Experiment {
         }
         cfg.screen = self.next_screen(world_changed, cfg.duration);
         self.config = cfg;
+        let compact_started = std::time::Instant::now();
         self.population.compact();
+        if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
+            eprintln!(
+                "Generation boundary: stats {:.3} s, lineage {:.3} s, migration {:.3} s, compact {:.3} s",
+                stats.as_secs_f64(),
+                (lineage - stats).as_secs_f64(),
+                (migrated - lineage).as_secs_f64(),
+                compact_started.elapsed().as_secs_f64()
+            );
+        }
         self.evaluation_seconds = 0.0;
         self.evaluated = 0;
         Ok(())

@@ -194,6 +194,10 @@ pub struct Scheduler {
     ready: Vec<(usize, bool)>,
     /// Contenders waiting for the check on their claimed cell to land.
     blocked: HashMap<u64, Vec<usize>>,
+    /// Standard work has stopped (a pause, a save, the end of a run): every
+    /// waiting contender goes out for its check at once instead of one per
+    /// cell, so draining takes one check round, not a chain of them.
+    draining: bool,
     /// Waiting contenders that no longer need a check, with their final result.
     released: Vec<(usize, EvaluationMetrics)>,
     /// Trials still running for each held contender that has left the
@@ -340,6 +344,7 @@ impl Scheduler {
             busy_cells: Default::default(),
             ready: Vec::new(),
             blocked: HashMap::new(),
+            draining: false,
             released: Vec::new(),
             outstanding: HashMap::new(),
             replays: Vec::new(),
@@ -371,6 +376,7 @@ impl Scheduler {
             busy_cells: Default::default(),
             ready: Vec::new(),
             blocked: HashMap::new(),
+            draining: false,
             released: Vec::new(),
             outstanding: HashMap::new(),
             replays: Vec::new(),
@@ -435,6 +441,11 @@ impl Scheduler {
         // claims it, the rest wait on the cell and are decided again when its
         // check lands. Decided contenders keep their claim until a check
         // unit takes them, so nothing is decided twice per landing.
+        if self.draining {
+            for (_, waiters) in self.blocked.drain() {
+                self.checks.extend(waiters);
+            }
+        }
         let undecided = std::mem::take(&mut self.checks);
         let mut decided = Vec::with_capacity(undecided.len());
         let mut champions: HashMap<u64, (f32, usize)> = HashMap::new();
@@ -449,6 +460,8 @@ impl Scheduler {
                     self.checks_released += 1;
                 }
                 CheckNeed::Check { cell, replay } => {
+                    // While draining no cell is shared.
+                    let cell = cell.filter(|_| !self.draining);
                     if let Some(cell) = cell
                         && !self.busy_cells.contains(&cell)
                     {
@@ -502,7 +515,9 @@ impl Scheduler {
             // A check unit runs four times as many steps as a standard one and
             // holds its queue slot that long, so a device runs one at a time,
             // or a second one while more than a unit's worth is waiting.
-            let check_units = if self.ready.len() > size {
+            let check_units = if self.draining {
+                usize::MAX
+            } else if self.ready.len() > size {
                 max_check_units
             } else {
                 1
@@ -673,6 +688,7 @@ impl Scheduler {
     /// Starts handing out `indices` unless a round is active. Creatures are
     /// ordered by kernel capacity so each GPU unit fills few, large buckets.
     pub fn begin(&mut self, pop: &Population, indices: impl IntoIterator<Item = usize>) {
+        self.draining = false;
         if self.round.is_some() {
             return;
         }
@@ -694,6 +710,7 @@ impl Scheduler {
     /// Appends `indices` to the active round (or starts one). Used while the
     /// next generation is still being bred.
     pub fn extend(&mut self, pop: &Population, indices: impl IntoIterator<Item = usize>) {
+        self.draining = false;
         let mut groups: [Vec<usize>; creature_kernel::CAPACITIES.len()] = Default::default();
         for i in indices {
             groups[creature_kernel::capacity_index(pop.genomes[i].node_count)].push(i);
@@ -716,6 +733,7 @@ impl Scheduler {
     /// Stops handing out new work; queued work still completes.
     pub fn stop(&mut self) {
         self.round = None;
+        self.draining = true;
     }
 
     /// Queues work on every engine with a free slot. Creatures marked in
@@ -1293,6 +1311,7 @@ mod tests {
             busy_cells: Default::default(),
             ready: Vec::new(),
             blocked: HashMap::new(),
+            draining: false,
             released: Vec::new(),
             outstanding: HashMap::new(),
             replays: Vec::new(),
@@ -1323,6 +1342,7 @@ mod tests {
             busy_cells: Default::default(),
             ready: Vec::new(),
             blocked: HashMap::new(),
+            draining: false,
             released: Vec::new(),
             outstanding: HashMap::new(),
             replays: Vec::new(),
@@ -2034,6 +2054,50 @@ mod tests {
                 metric.fitness
             );
         }
+    }
+
+    #[test]
+    fn a_stopped_scheduler_checks_every_waiting_contender_at_once() {
+        let cfg = Config {
+            population: 6,
+            duration: 1.0,
+            random_seed: false,
+            ..Config::default()
+        };
+        let pop = crate::evolution::create(&cfg).unwrap();
+        let mut sched = Scheduler::cpu_only(2).unwrap();
+        let shared = |_: usize, _: &EvaluationMetrics| CheckNeed::Check {
+            cell: Some(7),
+            replay: false,
+        };
+        sched.begin(&pop, 0..cfg.population);
+        let deadline = Instant::now() + Duration::from_secs(120);
+        // Run until every standard result is held.
+        while sched.held.len() < cfg.population {
+            assert!(Instant::now() < deadline, "evaluation stalled");
+            sched.pump_standard(&pop, &cfg, &[]).unwrap();
+            let out = sched
+                .collect(&pop, &cfg, Duration::from_millis(20), |_, _| true)
+                .unwrap();
+            assert!(out.is_empty(), "no check has run yet");
+        }
+        sched.stop();
+        sched.pump(&pop, &cfg, &[], shared).unwrap();
+        assert_eq!(
+            sched.checks_submitted, cfg.population as u64,
+            "draining sends every contender at once"
+        );
+        let mut done = 0;
+        while done < cfg.population {
+            assert!(Instant::now() < deadline, "checks stalled");
+            for (indices, _) in sched
+                .collect(&pop, &cfg, Duration::from_millis(20), |_, _| true)
+                .unwrap()
+            {
+                done += indices.len();
+            }
+        }
+        assert_eq!(sched.in_flight(), 0);
     }
 
     #[test]

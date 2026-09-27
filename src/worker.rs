@@ -191,6 +191,13 @@ impl StageLog {
             eprintln!(
                 "Contenders: generation {generation}, optimizer {optimizer}, global {global}, island {island}, reserve {reserve}, not checked {rejected}"
             );
+            let [plan, emit, write] = crate::storage::take_breed_nanos();
+            eprintln!(
+                "Breeding: generation {generation}, plan {:.3} s, emit {:.3} s, write {:.3} s",
+                plan as f64 * 1e-9,
+                emit as f64 * 1e-9,
+                write as f64 * 1e-9
+            );
         }
         let _ = writeln!(
             self.file,
