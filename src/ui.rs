@@ -1059,6 +1059,7 @@ struct App {
     /// Native benchmark frame intervals and the last control probe time.
     bench_frames: Vec<f32>,
     bench_last_ping: Instant,
+    bench_pings: u64,
     /// Light is the default; the choice lives only in UI state.
     dark: bool,
     show_help: bool,
@@ -1171,6 +1172,7 @@ impl App {
             fame_epoch: u64::MAX,
             bench_frames: Vec::new(),
             bench_last_ping: Instant::now(),
+            bench_pings: 0,
             card_positions: Default::default(),
             dark: false,
             show_help: false,
@@ -3317,7 +3319,16 @@ impl eframe::App for App {
             self.bench_frames.push(dt);
             if self.bench_last_ping.elapsed() >= Duration::from_millis(500) {
                 self.bench_last_ping = now;
-                self.worker.send(Command::Ping(now));
+                self.bench_pings += 1;
+                // Every tenth probe re-applies the settings, like an
+                // environment button, when EVOLUTION_BENCH_SETTINGS_PROBE is set.
+                if self.bench_pings.is_multiple_of(10)
+                    && std::env::var_os("EVOLUTION_BENCH_SETTINGS_PROBE").is_some()
+                {
+                    self.worker.send(Command::ConfigureProbe(now));
+                } else {
+                    self.worker.send(Command::Ping(now));
+                }
             }
         }
         let next = self.worker.view.lock().unwrap().take();

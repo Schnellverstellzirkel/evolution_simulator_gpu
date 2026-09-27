@@ -40,6 +40,9 @@ pub enum Command {
     },
     /// Benchmark probe: the UI send time, used to measure how long queued controls wait.
     Ping(Instant),
+    /// Benchmark probe: re-applies the current settings like an environment
+    /// button, to measure how long such a change waits.
+    ConfigureProbe(Instant),
     Shutdown,
 }
 #[derive(Clone)]
@@ -254,6 +257,7 @@ fn run(
     let mut benchmark_generation_seconds: Vec<f64> = Vec::new();
     let mut benchmark_generation_started = Instant::now();
     let mut benchmark_ping_ms: Vec<f64> = Vec::new();
+    let mut benchmark_configure_ms: Vec<f64> = Vec::new();
     let mut stage_log = StageLog::open();
     // Creatures of the current generation whose results are stored, and the
     // (experiment, generation) the bitmap belongs to.
@@ -282,15 +286,31 @@ fn run(
             }
             // Commands that change or persist the experiment first collect the
             // results of queued GPU work, so the completed prefix stays exact.
-            if !matches!(
-                command,
-                Command::Ping(_)
-                    | Command::Page(_)
-                    | Command::Preview { .. }
-                    | Command::Pause
-                    | Command::Run { .. }
-                    | Command::Next
-            ) && let Some(e) = &mut exp
+            // A steady run needs no such prefix: settings wait for the next
+            // generation boundary, where work in flight carries over anyway,
+            // and catastrophes only thin the archives. Draining there froze
+            // the worker and idled the GPU for 3 to 9 s per button.
+            let steady_safe = steady.active
+                && matches!(
+                    command,
+                    Command::Configure(_)
+                        | Command::ConfigureProbe(_)
+                        | Command::Meteor
+                        | Command::Extinction
+                        | Command::UndoMeteor
+                        | Command::Export(_)
+                );
+            if !steady_safe
+                && !matches!(
+                    command,
+                    Command::Ping(_)
+                        | Command::Page(_)
+                        | Command::Preview { .. }
+                        | Command::Pause
+                        | Command::Run { .. }
+                        | Command::Next
+                )
+                && let Some(e) = &mut exp
                 && let Err(err) = finish_queued(&mut gpu, e, &mut done, &mut steady)
             {
                 error = Some(format!("{err:#}"));
@@ -355,6 +375,15 @@ fn run(
                         if let Some(e) = &mut exp {
                             e.update_config(cfg)?;
                             status = "Settings applied or queued for the next generation".into();
+                        }
+                    }
+                    Command::ConfigureProbe(sent) => {
+                        if let Some(e) = &mut exp {
+                            let cfg = e.config.clone();
+                            e.update_config(cfg)?;
+                            if measuring.load(Ordering::Relaxed) {
+                                benchmark_configure_ms.push(sent.elapsed().as_secs_f64() * 1e3);
+                            }
                         }
                     }
                     Command::Meteor => {
@@ -691,6 +720,16 @@ fn run(
                                         .unwrap_or(0.0),
                                     per_generation.last().copied().unwrap_or(0.0)
                                 );
+                                let mut configures = benchmark_configure_ms.clone();
+                                configures.sort_by(f64::total_cmp);
+                                if !configures.is_empty() {
+                                    eprintln!(
+                                        "Native benchmark settings latency: {} probes, median {:.1} ms, max {:.1} ms",
+                                        configures.len(),
+                                        configures[configures.len() / 2],
+                                        configures.last().copied().unwrap_or(0.0)
+                                    );
+                                }
                                 let mut pings = benchmark_ping_ms.clone();
                                 pings.sort_by(f64::total_cmp);
                                 let pct = |q: usize| {

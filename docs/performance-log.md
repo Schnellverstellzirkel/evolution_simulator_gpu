@@ -502,3 +502,17 @@ GPU unit length after those changes, two or four GUI runs each (`EVOLUTION_UNIT_
 | 3 s | 164,244 and 172,891/s | 14.8 to 15.1 GB |
 
 The default is now 1 s: 186,700/s on average against 168,600/s for 3 s, with 2.5 GB less peak memory. FPS stayed at 76 to 81 and control p99 at 1.2 s in every row.
+
+## Control latency (2026-09-27)
+
+Every row is one 3M GUI benchmark run as above. Control latency is the wait of a ping probe sent every 0.5 s. Settings latency (`EVOLUTION_BENCH_SETTINGS_PROBE=1`) re-applies the current settings every 5 s, like an environment button.
+
+| change | end to end | control p95 / p99 | settings median / max |
+|---|---:|---:|---:|
+| before (1 s units) | 186,700/s mean | 0.6 / 1.2 s | not measured |
+| breeding writes the arena in parallel | 171,041 and 197,551/s | 0.42 to 0.61 / 0.57 to 1.0 s | |
+| + one finished unit per worker pass | 197,048 and 195,990/s | 0.21 to 0.24 / 0.25 to 0.39 s | |
+| same binary, settings probe on | 153,130/s | 7.3 / 8.3 s | 3.0 / 8.8 s |
+| + no drain for steady settings changes | 204,820/s | 0.19 / 0.23 s | 0.025 / 0.16 s |
+
+A settings change, meteor, extinction or undo used to wait for all queued GPU work and its checks, which idled the GPU and blocked every other control behind it. In a steady run the change waits for the generation boundary anyway, and work in flight at a boundary already carries over, so those commands now skip the drain. Save and load still drain.
