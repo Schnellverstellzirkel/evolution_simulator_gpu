@@ -1324,14 +1324,28 @@ impl App {
         });
         if let Some(s) = &self.snapshot {
             ui.label(RichText::new(s.stage.label()).color(theme.accent));
+            let text = if s.checking > 0 {
+                format!(
+                    "{} / {} evaluated · {} in checks",
+                    number(s.completed),
+                    number(s.config.population),
+                    number(s.checking)
+                )
+            } else {
+                format!(
+                    "{} / {} evaluated",
+                    number(s.completed),
+                    number(s.config.population)
+                )
+            };
             ui.add(
                 egui::ProgressBar::new(s.completed as f32 / s.config.population as f32)
-                    .text(format!(
-                        "{} / {} evaluated",
-                        number(s.completed),
-                        number(s.config.population)
-                    ))
+                    .text(text)
                     .fill(theme.accent.gamma_multiply(0.7)),
+            )
+            .on_hover_text(
+                "Creatures of this generation whose trial has counted. A creature that could \
+                 enter the archive first runs a finer check trial; it counts when that ends.",
             );
         }
         ui.separator();

@@ -55,6 +55,9 @@ pub struct EvaluationMetrics {
     /// The early screen stopped the trial (`physics::Screen`): the creature
     /// never enters an archive.
     pub screened: bool,
+    /// The creature could have entered an archive but another contender took
+    /// its cell's check: it enters no archive this time.
+    pub unchecked: bool,
     /// Distance at the screen, or at an earlier fall (0 when there was no
     /// screen and no earlier fall).
     pub screen_x: f32,

@@ -192,8 +192,7 @@ pub struct Scheduler {
     /// Decided contenders waiting for a check unit, with whether they also
     /// need a CPU replay.
     ready: Vec<(usize, bool)>,
-    /// Contenders waiting for the check on their claimed cell to land.
-    blocked: HashMap<u64, Vec<usize>>,
+
     /// Standard work has stopped (a pause, a save, the end of a run): every
     /// waiting contender goes out for its check at once instead of one per
     /// cell, so draining takes one check round, not a chain of them.
@@ -211,6 +210,10 @@ pub struct Scheduler {
     /// without one.
     pub checks_submitted: u64,
     pub checks_released: u64,
+    /// Totals since start: check units submitted, and contenders dropped
+    /// because another contender held their cell's check.
+    pub check_units: u64,
+    pub checks_dropped: u64,
     /// Why the primary GPU was not used, reported once at startup.
     startup_failure: Option<String>,
 }
@@ -343,7 +346,6 @@ impl Scheduler {
             checking: HashMap::new(),
             busy_cells: Default::default(),
             ready: Vec::new(),
-            blocked: HashMap::new(),
             draining: false,
             released: Vec::new(),
             outstanding: HashMap::new(),
@@ -351,6 +353,8 @@ impl Scheduler {
             replays_submitted: 0,
             checks_submitted: 0,
             checks_released: 0,
+            check_units: 0,
+            checks_dropped: 0,
             startup_failure,
         })
     }
@@ -375,7 +379,6 @@ impl Scheduler {
             checking: HashMap::new(),
             busy_cells: Default::default(),
             ready: Vec::new(),
-            blocked: HashMap::new(),
             draining: false,
             released: Vec::new(),
             outstanding: HashMap::new(),
@@ -383,6 +386,8 @@ impl Scheduler {
             replays_submitted: 0,
             checks_submitted: 0,
             checks_released: 0,
+            check_units: 0,
+            checks_dropped: 0,
             startup_failure: None,
         })
     }
@@ -435,17 +440,15 @@ impl Scheduler {
         terrain_checks: bool,
         mut need: impl FnMut(usize, &EvaluationMetrics) -> CheckNeed,
     ) -> Result<()> {
-        // Decide new contenders, and those whose cell's check has landed,
-        // against the live archives. Each archive cell gets at most one
-        // check at a time: the best undecided contender for a free cell
-        // claims it, the rest wait on the cell and are decided again when its
-        // check lands. Decided contenders keep their claim until a check
-        // unit takes them, so nothing is decided twice per landing.
-        if self.draining {
-            for (_, waiters) in self.blocked.drain() {
-                self.checks.extend(waiters);
-            }
-        }
+        // Decide new contenders against the live archives. Each archive cell
+        // gets one check at a time: the best new contender for a free cell
+        // claims it, and the other contenders for that cell, or for a cell
+        // whose check is running, are dropped: they count as evaluated but
+        // enter no archive. Checks cost several standard trials, so their
+        // volume is bounded by the archive's cells, not by the population:
+        // on ground where fine checks fail for most gaits, nearly every
+        // creature beats the low checked elites, and checking each one held
+        // the whole 3M population for minutes.
         let undecided = std::mem::take(&mut self.checks);
         let mut decided = Vec::with_capacity(undecided.len());
         let mut champions: HashMap<u64, (f32, usize)> = HashMap::new();
@@ -460,7 +463,7 @@ impl Scheduler {
                     self.checks_released += 1;
                 }
                 CheckNeed::Check { cell, replay } => {
-                    // While draining no cell is shared.
+                    // While draining, every contender still held is checked.
                     let cell = cell.filter(|_| !self.draining);
                     if let Some(cell) = cell
                         && !self.busy_cells.contains(&cell)
@@ -487,7 +490,12 @@ impl Scheduler {
                     self.checking.insert(i, cell);
                     self.ready.push((i, replay));
                 }
-                Some(cell) => self.blocked.entry(cell).or_default().push(i),
+                Some(_) => {
+                    let mut metric = self.held.remove(&i).expect("held contender");
+                    metric.unchecked = true;
+                    self.released.push((i, metric));
+                    self.checks_dropped += 1;
+                }
             }
         }
         if self.ready.is_empty() {
@@ -586,6 +594,7 @@ impl Scheduler {
                     Ok(ticket) => {
                         self.packing_seconds += started.elapsed().as_secs_f64();
                         self.checks_submitted += indices.len() as u64;
+                        self.check_units += 1;
                         for (&i, &replay) in indices.iter().zip(&replays) {
                             let trials = if replay {
                                 self.replays.push(i);
@@ -621,6 +630,11 @@ impl Scheduler {
         }
         self.pump_replays(pop, cfg);
         Ok(())
+    }
+
+    /// Contenders held for their check (waiting, ready or running).
+    pub fn holding(&self) -> usize {
+        self.held.len()
     }
 
     /// Whether reserve engines stand by: another engine is healthy.
@@ -936,9 +950,6 @@ impl Scheduler {
                                             // The cell is free: its waiters are
                                             // decided again on the next pump.
                                             self.busy_cells.remove(&cell);
-                                            if let Some(waiters) = self.blocked.remove(&cell) {
-                                                self.checks.extend(waiters);
-                                            }
                                         }
                                         // A creature re-queued meanwhile may have been settled already.
                                         let Some(metric) = self.held.get_mut(&i) else {
@@ -1199,6 +1210,7 @@ pub fn to_metrics(
             feet: r.feet() as f32,
         },
         replayed: false,
+        unchecked: false,
         screened: r.screened > 0.0,
         screen_x: r.screen_x,
     }
@@ -1310,7 +1322,6 @@ mod tests {
             checking: HashMap::new(),
             busy_cells: Default::default(),
             ready: Vec::new(),
-            blocked: HashMap::new(),
             draining: false,
             released: Vec::new(),
             outstanding: HashMap::new(),
@@ -1318,6 +1329,8 @@ mod tests {
             replays_submitted: 0,
             checks_submitted: 0,
             checks_released: 0,
+            check_units: 0,
+            checks_dropped: 0,
             startup_failure: None,
         };
         (scheduler, state)
@@ -1341,7 +1354,6 @@ mod tests {
             checking: HashMap::new(),
             busy_cells: Default::default(),
             ready: Vec::new(),
-            blocked: HashMap::new(),
             draining: false,
             released: Vec::new(),
             outstanding: HashMap::new(),
@@ -1349,6 +1361,8 @@ mod tests {
             replays_submitted: 0,
             checks_submitted: 0,
             checks_released: 0,
+            check_units: 0,
+            checks_dropped: 0,
             startup_failure: None,
         };
         (scheduler, gpu, cpu)
@@ -1944,7 +1958,9 @@ mod tests {
     /// Evaluates a small population where every creature is a contender for
     /// one shared cell; `release_after_landing` releases the waiting ones once
     /// the first check is back. Returns final fitness per creature.
-    fn shared_cell_run(release_after_landing: bool) -> (Scheduler, Vec<f32>, Population, Config) {
+    /// Evaluates a small population in which every creature is a contender
+    /// for one shared cell. Returns the final metrics per creature.
+    fn shared_cell_run() -> (Scheduler, Vec<EvaluationMetrics>, Population, Config) {
         let cfg = Config {
             population: 6,
             duration: 1.0,
@@ -1955,20 +1971,13 @@ mod tests {
         let mut sched = Scheduler::cpu_only(2).unwrap();
         sched.begin(&pop, 0..cfg.population);
         let mut got = vec![None; cfg.population];
-        let landed = std::cell::Cell::new(false);
         let deadline = Instant::now() + Duration::from_secs(120);
         while got.iter().any(Option::is_none) {
             assert!(Instant::now() < deadline, "evaluation stalled");
             sched
-                .pump(&pop, &cfg, &[], |_, _| {
-                    if release_after_landing && landed.get() {
-                        CheckNeed::Release
-                    } else {
-                        CheckNeed::Check {
-                            cell: Some(7),
-                            replay: false,
-                        }
-                    }
+                .pump(&pop, &cfg, &[], |_, _| CheckNeed::Check {
+                    cell: Some(7),
+                    replay: false,
                 })
                 .unwrap();
             for (indices, metrics) in sched
@@ -1977,8 +1986,7 @@ mod tests {
             {
                 for (i, m) in indices.into_iter().zip(metrics) {
                     assert!(got[i].is_none(), "creature {i} returned twice");
-                    got[i] = Some(m.fitness);
-                    landed.set(true);
+                    got[i] = Some(m);
                 }
             }
         }
@@ -2101,36 +2109,28 @@ mod tests {
     }
 
     #[test]
-    fn contenders_for_one_cell_are_checked_one_at_a_time() {
-        let (sched, got, pop, cfg) = shared_cell_run(false);
-        assert_eq!(sched.checks_submitted, cfg.population as u64);
-        assert_eq!(sched.checks_released, 0);
-        let (standard, check) = standard_and_check(&pop, &cfg);
-        for i in 0..cfg.population {
-            let expected = standard[i].min(check[i]);
-            assert!(
-                (got[i] - expected).abs() <= 1e-4 * expected.abs().max(1.0),
-                "creature {i}: {} vs {expected}",
-                got[i]
-            );
-        }
-    }
-
-    #[test]
-    fn waiting_contenders_that_lose_their_cell_keep_the_standard_result() {
-        let (sched, got, pop, cfg) = shared_cell_run(true);
+    fn only_the_best_contender_for_a_cell_is_checked() {
+        let (sched, got, pop, cfg) = shared_cell_run();
+        // One standard unit returns all six together: the best claims the
+        // cell's check and the other five are dropped unchecked.
         assert_eq!(sched.checks_submitted, 1);
-        assert_eq!(sched.checks_released, cfg.population as u64 - 1);
+        assert_eq!(sched.checks_dropped, cfg.population as u64 - 1);
         let (standard, check) = standard_and_check(&pop, &cfg);
-        let checked: Vec<usize> = (0..cfg.population)
-            .filter(|&i| (got[i] - standard[i]).abs() > 1e-4 * standard[i].abs().max(1.0))
-            .collect();
-        assert!(checked.len() <= 1, "only one check ran: {checked:?}");
-        for i in 0..cfg.population {
-            let unchecked = (got[i] - standard[i]).abs() <= 1e-4 * standard[i].abs().max(1.0);
-            let checked =
-                (got[i] - standard[i].min(check[i])).abs() <= 1e-4 * standard[i].abs().max(1.0);
-            assert!(unchecked || checked, "creature {i}: {}", got[i]);
+        let best = (0..cfg.population)
+            .max_by(|&a, &b| standard[a].total_cmp(&standard[b]))
+            .unwrap();
+        for (i, metric) in got.iter().enumerate() {
+            let close = |a: f32, b: f32| (a - b).abs() <= 1e-4 * b.abs().max(1.0);
+            if i == best {
+                assert!(!metric.unchecked);
+                assert!(
+                    close(metric.fitness, standard[i].min(check[i])),
+                    "creature {i}"
+                );
+            } else {
+                assert!(metric.unchecked, "creature {i} must be dropped");
+                assert!(close(metric.fitness, standard[i]), "creature {i}");
+            }
         }
     }
 

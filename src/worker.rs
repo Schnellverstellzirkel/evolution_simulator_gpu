@@ -76,6 +76,9 @@ pub struct Snapshot {
     /// Creatures of the current generation with stored results. Engines finish
     /// out of order, so this runs ahead of the contiguous `evaluated` prefix.
     pub completed: usize,
+    /// Creatures whose standard trial could enter an archive, waiting for
+    /// their fine check before their result counts.
+    pub checking: usize,
     pub stage: Stage,
     pub running: bool,
     pub history: Arc<Vec<Stats>>,
@@ -716,10 +719,12 @@ fn run(
                                         );
                                     }
                                     eprintln!(
-                                        "Native benchmark packing {:.3} s, checks {} submitted, {} released unchecked, {} CPU replays with checks (totals since start)",
+                                        "Native benchmark packing {:.3} s, checks {} submitted in {} units, {} released, {} dropped for a shared cell, {} CPU replays with checks (totals since start)",
                                         sched.packing_seconds,
                                         sched.checks_submitted,
+                                        sched.check_units,
                                         sched.checks_released,
+                                        sched.checks_dropped,
                                         sched.replays_submitted
                                     );
                                 }
@@ -873,6 +878,7 @@ fn run(
                     } else {
                         e.evaluated
                     },
+                    checking: gpu.sched.as_ref().map_or(0, |sched| sched.holding()),
                     stage: e.stage,
                     running,
                     history: history.clone(),
@@ -920,6 +926,7 @@ fn run(
                     generation: 0,
                     evaluated: 0,
                     completed: 0,
+                    checking: 0,
                     stage: Stage::Ready,
                     running: false,
                     history: history.clone(),
@@ -1096,6 +1103,77 @@ mod tests {
         assert!(rows[0].starts_with("5,1.000000,2.000000,3.000000,"));
         assert!(rows[1].starts_with("6,4.000000,0.000000,0.000000,"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A world change mid-generation empties the archive at the next
+    /// boundary, so nearly every result becomes a contender. The run must
+    /// keep advancing generations instead of holding every slot for checks.
+    #[test]
+    #[ignore = "requires a Vulkan GPU"]
+    fn a_world_change_mid_generation_keeps_generations_advancing() {
+        let gpu = Gpu::new("RTX 4060").unwrap();
+        let worker = Worker::spawn(gpu, eframe::egui::Context::default());
+        let population = std::env::var("EVOLUTION_TEST_POPULATION")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60_000);
+        let cfg = Config {
+            population,
+            duration: 20.0,
+            random_seed: false,
+            checkpoint_interval: 0,
+            throughput: true,
+            ..Config::default()
+        };
+        match std::env::var_os("EVOLUTION_TEST_CHECKPOINT") {
+            Some(path) => worker.send(Command::Load(std::path::PathBuf::from(path))),
+            None => worker.send(Command::New(cfg)),
+        }
+        worker.send(Command::Run {
+            continuous: true,
+            guided: false,
+        });
+        let started = Instant::now();
+        let mut first_generation: Option<u32> = None;
+        let mut changed_at: Option<u32> = None;
+        let mut last_print = Instant::now();
+        loop {
+            if let Some(snapshot) = worker.view.lock().unwrap().take() {
+                assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+                if last_print.elapsed() > Duration::from_secs(2) {
+                    eprintln!(
+                        "{:6.1} s: generation {}, evaluated {}, in checks {}, cells {}",
+                        started.elapsed().as_secs_f64(),
+                        snapshot.generation,
+                        snapshot.evaluated,
+                        snapshot.checking,
+                        snapshot.archive_cells
+                    );
+                    last_print = Instant::now();
+                }
+                let first = *first_generation.get_or_insert(snapshot.generation);
+                if changed_at.is_none()
+                    && snapshot.generation >= first + 2
+                    && snapshot.evaluated > snapshot.config.population / 2
+                {
+                    let mut rough = snapshot.config.clone();
+                    rough.terrain = 3;
+                    worker.send(Command::Configure(rough));
+                    changed_at = Some(snapshot.generation);
+                    eprintln!("roughened at generation {}", snapshot.generation);
+                }
+                if let Some(at) = changed_at
+                    && snapshot.generation >= at + 3
+                {
+                    break;
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(900),
+                "the run stopped advancing after the world change"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

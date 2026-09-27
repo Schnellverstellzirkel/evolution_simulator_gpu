@@ -144,8 +144,9 @@ pub struct Experiment {
     /// global archive requires (set by `record_result`, cleared on insertion).
     #[serde(skip)]
     pub replayed: Vec<bool>,
-    /// Per slot: the early screen stopped this result's trial (never offered
-    /// to an archive), and its distance at the screen or an earlier fall.
+    /// Per slot: the result is never offered to an archive (the early screen
+    /// stopped it, or another contender took its cell's check), and its
+    /// distance at the screen or an earlier fall.
     #[serde(skip)]
     pub screened: Vec<bool>,
     #[serde(skip)]
@@ -488,7 +489,8 @@ impl Experiment {
             self.screened.resize(self.scores.len(), false);
             self.screen_distance.resize(self.scores.len(), f32::NAN);
         }
-        self.screened[i] = metric.screened;
+        // Screened and unchecked results are both kept out of the archives.
+        self.screened[i] = metric.screened || metric.unchecked;
         self.screen_distance[i] = metric.screen_x;
     }
     /// The early screen for the next generation: its bar is the distance at
@@ -523,7 +525,11 @@ impl Experiment {
     ) -> (ContenderReason, Option<u64>) {
         // A screened creature's score is its distance at the screen, not a
         // full trial: it enters no archive.
-        if !metric.fitness.is_finite() || metric.fitness <= FAILED || metric.screened {
+        if !metric.fitness.is_finite()
+            || metric.fitness <= FAILED
+            || metric.screened
+            || metric.unchecked
+        {
             return (ContenderReason::Rejected, None);
         }
         if self.from_optimizer(i) {
