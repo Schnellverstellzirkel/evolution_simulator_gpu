@@ -1,15 +1,13 @@
-//! Backlog item 48: the CPU engine's whole-group early exit, behind
-//! `EVOLUTION_EARLY_EXIT`.
+//! Backlog item 48: the CPU engine's whole-group early exit, on by default
+//! (`EVOLUTION_EARLY_EXIT=0` turns it off).
 //!
-//! A lane's fitness is final once it has fallen or a node has failed, but the
-//! default engine keeps accumulating behavior totals (ground contact, height,
-//! gait turns, contact bitsets) for the rest of the trial. Stopping the whole
-//! group on the last finished lane therefore keeps fitness, fall time and
-//! head shake bit for bit, while the descriptor totals of finished lanes are
-//! lower than in the full run. The tests below pin both sides of that:
+//! A fall ends a trial: the lane's fitness and every behavior total (ground
+//! contact, height, gait turns, contact bitsets) freeze at its fall. Stopping
+//! the whole group once its last real lane has fallen therefore changes no
+//! result. The tests below pin that:
 //!
 //! - a group where every lane falls exits after the first timed step and
-//!   keeps every lane's score;
+//!   keeps every field of every lane;
 //! - a group with one live lane never exits, and every field of every lane
 //!   (including the live one) is unchanged;
 //! - a short (partial) group exits once its real lanes have finished.
@@ -83,11 +81,7 @@ fn population(creatures: impl IntoIterator<Item = Creature>) -> Population {
 
 fn evaluate(early_exit: bool, pop: &Population, cfg: &Config) -> Vec<GpuResult> {
     unsafe {
-        if early_exit {
-            std::env::set_var("EVOLUTION_EARLY_EXIT", "1");
-        } else {
-            std::env::remove_var("EVOLUTION_EARLY_EXIT");
-        }
+        std::env::set_var("EVOLUTION_EARLY_EXIT", if early_exit { "1" } else { "0" });
     }
     cpu_engine::evaluate(pop, cfg)
 }
@@ -138,9 +132,8 @@ fn assert_same_result(label: &str, a: &GpuResult, b: &GpuResult) {
     same!(head_shake);
 }
 
-/// A full group of lanes that all fall on the first timed step exits early.
-/// Fitness, fall time and head shake match the full run; the behavior totals
-/// are lower because the post-fall tail is skipped.
+/// A full group of lanes that all fall on the first timed step exits early,
+/// and every field of every lane matches the full run.
 #[test]
 fn every_fallen_group_stops_early_and_keeps_every_score() {
     let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
@@ -159,27 +152,8 @@ fn every_fallen_group_stops_early_and_keeps_every_score() {
     assert_eq!(exit_groups, 1, "the group must exit early");
 
     for (lane, (a, b)) in full.iter().zip(&early).enumerate() {
-        assert_eq!(
-            a.fitness.to_bits(),
-            b.fitness.to_bits(),
-            "lane {lane}: fitness {} vs {}",
-            a.fitness,
-            b.fitness
-        );
-        assert_eq!(a.fall_time.to_bits(), b.fall_time.to_bits(), "lane {lane}");
-        assert_eq!(
-            a.head_shake.to_bits(),
-            b.head_shake.to_bits(),
-            "lane {lane}"
-        );
+        assert_same_result(&format!("lane {lane}"), a, b);
     }
-    assert!(
-        early
-            .iter()
-            .zip(&full)
-            .any(|(a, b)| a.ground_contact < b.ground_contact),
-        "the stopped run must drop the post-fall contact totals"
-    );
     assert!(
         early
             .iter()
@@ -241,7 +215,6 @@ fn a_partial_group_exits_on_its_real_lanes() {
     assert_eq!(total_groups, 1);
     assert_eq!(exit_groups, 1, "the real five lanes must finish the group");
     for (lane, (a, b)) in full.iter().zip(&early).enumerate() {
-        assert_eq!(a.fitness.to_bits(), b.fitness.to_bits(), "lane {lane}");
-        assert_eq!(a.fall_time.to_bits(), b.fall_time.to_bits(), "lane {lane}");
+        assert_same_result(&format!("lane {lane}"), a, b);
     }
 }

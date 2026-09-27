@@ -13,7 +13,9 @@ pub(crate) const MORPHOLOGY_LIMIT: usize = 64;
 pub(crate) const ARCHIVE_CAPACITY: usize = ARCHIVE_LIMIT + MORPHOLOGY_LIMIT;
 pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 1 << 20;
 pub(crate) const CMA_LIMIT: usize = 96;
-pub const VERSION: u32 = 25;
+// 26: a fall ends the trial; behavior totals stop at the fall and average
+// over the steps walked.
+pub const VERSION: u32 = 26;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and

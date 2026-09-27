@@ -101,6 +101,11 @@ mod imp {
         pub fn any(self) -> bool {
             self.0 != 0
         }
+        /// One bit per lane, lane 0 lowest.
+        #[inline(always)]
+        pub fn bits(self) -> u16 {
+            self.0
+        }
     }
     macro_rules! binop {
         ($t:ident, $f:ident, $i:ident) => {
@@ -219,6 +224,10 @@ mod imp {
         }
         pub fn any(self) -> bool {
             self.0 != 0
+        }
+        /// One bit per lane, lane 0 lowest.
+        pub fn bits(self) -> u16 {
+            self.0
         }
     }
     impl std::ops::Add for F {

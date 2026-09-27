@@ -406,6 +406,11 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
     }
 
     for (var s = 0u; s < p.steps; s++) {
+        // A fall ends the trial: its score and behavior totals are final, so
+        // a fallen creature takes no more steps.
+        if metrics.fall_time > 0.0 {
+            break;
+        }
         let tick = p.tick + s;
         // The head's velocity before this step, for the head shaking limit.
         let head_start = vel[node_k(0u, lane)];
@@ -911,6 +916,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             }
         }
 
+        var fell_now = false;
         if tick >= SETTLE {
             var center_y = 0.0;
             var contacts = 0.0;
@@ -1010,12 +1016,16 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             if metrics.fall_time == 0.0
                 && (pos[node_k(0u, lane)].y < pos[bone_b(bone_kb[0], 0u)].y || broken || metrics.head_shake > HEAD_SHAKE_LIMIT) {
                 var fall_x = 0.0;
+                var failures = 0.0;
                 for (var j = 0u; j < MAXN; j++) {
                     if j >= body_nodes { break; }
                     fall_x += pos[node_k(j, lane)].x * mass[j];
+                    failures += failed[j];
                 }
                 metrics.fall_time = time + DT;
-                metrics.fitness = fall_x * inv_total_mass;
+                // Only failures up to the fall count: it ends the trial.
+                metrics.fitness = select(fall_x * inv_total_mass, -1e20, failures > 0.0);
+                fell_now = true;
             }
             metrics.ground_contact += contacts;
             metrics.height_sum += high - low;
@@ -1052,8 +1062,17 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 }
                 metrics.previous_center_y = center_y;
             }
+            if fell_now {
+                // The behavior totals end with this step; gait frequency is
+                // over the time the creature walked.
+                metrics.vertical_oscillation = max(
+                    metrics.gait_frequency - metrics.vertical_oscillation,
+                    0.0,
+                );
+                metrics.gait_frequency = metrics.gait_turns * 0.5 / metrics.fall_time;
+            }
         }
-        if tick + 1u == p.total_steps {
+        if tick + 1u == p.total_steps && !fell_now {
             var score = 0.0;
             var mass_sum = 0.0;
             var failures = 0.0;

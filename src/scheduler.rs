@@ -185,10 +185,15 @@ pub struct Scheduler {
     checks_since: Option<Instant>,
     /// Standard-trial results of contenders whose check is pending.
     held: HashMap<usize, EvaluationMetrics>,
-    /// Archive cell of each contender whose check is in flight, and the cells
-    /// that have one.
+    /// Archive cell claimed by each contender that is ready or being
+    /// checked, and the claimed cells.
     checking: HashMap<usize, u64>,
     busy_cells: std::collections::HashSet<u64>,
+    /// Decided contenders waiting for a check unit, with whether they also
+    /// need a CPU replay.
+    ready: Vec<(usize, bool)>,
+    /// Contenders waiting for the check on their claimed cell to land.
+    blocked: HashMap<u64, Vec<usize>>,
     /// Waiting contenders that no longer need a check, with their final result.
     released: Vec<(usize, EvaluationMetrics)>,
     /// Trials still running for each held contender that has left the
@@ -333,6 +338,8 @@ impl Scheduler {
             held: HashMap::new(),
             checking: HashMap::new(),
             busy_cells: Default::default(),
+            ready: Vec::new(),
+            blocked: HashMap::new(),
             released: Vec::new(),
             outstanding: HashMap::new(),
             replays: Vec::new(),
@@ -362,6 +369,8 @@ impl Scheduler {
             held: HashMap::new(),
             checking: HashMap::new(),
             busy_cells: Default::default(),
+            ready: Vec::new(),
+            blocked: HashMap::new(),
             released: Vec::new(),
             outstanding: HashMap::new(),
             replays: Vec::new(),
@@ -420,17 +429,16 @@ impl Scheduler {
         terrain_checks: bool,
         mut need: impl FnMut(usize, &EvaluationMetrics) -> CheckNeed,
     ) -> Result<()> {
-        if self.checks.is_empty() {
-            return Ok(());
-        }
-        // Decide every waiting contender again against the live archives.
-        // Each archive cell gets at most one check in flight: the waiting
-        // contender with the best standard score goes, the rest wait for its
-        // result. Submission keeps arrival order.
-        let waiting = std::mem::take(&mut self.checks);
-        let mut decided = Vec::with_capacity(waiting.len());
+        // Decide new contenders, and those whose cell's check has landed,
+        // against the live archives. Each archive cell gets at most one
+        // check at a time: the best undecided contender for a free cell
+        // claims it, the rest wait on the cell and are decided again when its
+        // check lands. Decided contenders keep their claim until a check
+        // unit takes them, so nothing is decided twice per landing.
+        let undecided = std::mem::take(&mut self.checks);
+        let mut decided = Vec::with_capacity(undecided.len());
         let mut champions: HashMap<u64, (f32, usize)> = HashMap::new();
-        for i in waiting {
+        for i in undecided {
             let Some(metric) = self.held.get(&i) else {
                 continue;
             };
@@ -457,50 +465,49 @@ impl Scheduler {
             .devices
             .iter()
             .any(|d| d.kind == DeviceKind::Cpu && d.failure.is_none());
-        let mut claimed: HashMap<usize, u64> = HashMap::new();
-        let mut replay: std::collections::HashSet<usize> = Default::default();
-        let mut blocked = Vec::new();
         for (i, cell, wants_replay) in decided {
-            let send = match cell {
-                None => true,
+            let replay = wants_replay && has_cpu;
+            match cell {
+                None => self.ready.push((i, replay)),
                 Some(cell) if champions.get(&cell).is_some_and(|&(_, c)| c == i) => {
-                    claimed.insert(i, cell);
-                    true
+                    self.busy_cells.insert(cell);
+                    self.checking.insert(i, cell);
+                    self.ready.push((i, replay));
                 }
-                Some(_) => false,
-            };
-            if send {
-                if wants_replay && has_cpu {
-                    replay.insert(i);
-                }
-                self.checks.push(i);
-            } else {
-                blocked.push(i);
+                Some(cell) => self.blocked.entry(cell).or_default().push(i),
             }
         }
-        if self.checks.is_empty() {
-            self.checks = blocked;
+        if self.ready.is_empty() {
+            self.checks_since = None;
+            self.pump_replays(pop, cfg);
             return Ok(());
         }
-        let waited = self
-            .checks_since
-            .is_some_and(|since| since.elapsed() > Duration::from_millis(500));
+        let waited = *self.checks_since.get_or_insert_with(Instant::now);
+        let waited = waited.elapsed() > Duration::from_millis(500);
         let fine = Config {
             fidelity: Some(crate::physics::Fidelity::fine()),
             ..cfg.clone()
         };
         let standby = self.reserves_standing_by();
+        let max_check_units = env_or("EVOLUTION_CHECK_UNITS", 2usize).max(1);
         for device in &mut self.devices {
             if standby && device.reserve {
                 continue;
             }
-            // A check unit runs four times as many steps as a standard one
-            // and holds its queue slot that long, so each device runs a
-            // limited number at once and standard units keep the rest full.
-            let check_units = env_or("EVOLUTION_CHECK_UNITS", 1usize).max(1);
+            // A check costs several standard trials; keep units about as long.
+            let size =
+                ((device.rate * device.unit_seconds / 6.0) as usize).max(device.min_unit / 2);
+            // A check unit runs four times as many steps as a standard one and
+            // holds its queue slot that long, so a device runs one at a time,
+            // or a second one while more than a unit's worth is waiting.
+            let check_units = if self.ready.len() > size {
+                max_check_units
+            } else {
+                1
+            };
             while device.failure.is_none()
                 && device.engine.free_slots() > 0
-                && !self.checks.is_empty()
+                && !self.ready.is_empty()
                 && device
                     .queued
                     .iter()
@@ -508,35 +515,34 @@ impl Scheduler {
                     .count()
                     < check_units
             {
-                if self.checks.len() < device.min_unit / 2 && self.round.is_some() && !waited {
+                if self.ready.len() < device.min_unit / 2 && self.round.is_some() && !waited {
                     break;
                 }
-                // A check costs several standard trials; keep units about as long.
-                let size =
-                    ((device.rate * device.unit_seconds / 6.0) as usize).max(device.min_unit / 2);
                 let capacity = device.engine.max_nodes();
                 // A Config carries one terrain level, so one submission serves
                 // one level. Take the level of the oldest waiting check; later
                 // passes pick up the other levels of the same batch.
                 let level = if terrain_checks {
-                    self.checks
+                    self.ready
                         .first()
-                        .map(|&i| check_terrain(cfg.terrain, pop.genomes[i].id))
+                        .map(|&(i, _)| check_terrain(cfg.terrain, pop.genomes[i].id))
                 } else {
                     None
                 };
-                let mut indices = Vec::with_capacity(size.min(self.checks.len()));
+                let mut indices = Vec::with_capacity(size.min(self.ready.len()));
+                let mut replays = Vec::new();
                 let mut rest = Vec::new();
-                for i in self.checks.drain(..) {
+                for (i, replay) in self.ready.drain(..) {
                     let same_level = !terrain_checks
                         || Some(check_terrain(cfg.terrain, pop.genomes[i].id)) == level;
                     if indices.len() < size && pop.genomes[i].node_count <= capacity && same_level {
                         indices.push(i);
+                        replays.push(replay);
                     } else {
-                        rest.push(i);
+                        rest.push((i, replay));
                     }
                 }
-                self.checks = rest;
+                self.ready = rest;
                 if indices.is_empty() {
                     break;
                 }
@@ -563,18 +569,14 @@ impl Scheduler {
                     Ok(ticket) => {
                         self.packing_seconds += started.elapsed().as_secs_f64();
                         self.checks_submitted += indices.len() as u64;
-                        for i in &indices {
-                            if let Some(&cell) = claimed.get(i) {
-                                self.checking.insert(*i, cell);
-                                self.busy_cells.insert(cell);
-                            }
-                            let trials = if replay.contains(i) {
-                                self.replays.push(*i);
+                        for (&i, &replay) in indices.iter().zip(&replays) {
+                            let trials = if replay {
+                                self.replays.push(i);
                                 2
                             } else {
                                 1
                             };
-                            self.outstanding.insert(*i, trials);
+                            self.outstanding.insert(i, trials);
                         }
                         self.checks_since = Some(Instant::now());
                         device.queued.push_back(QueuedUnit {
@@ -587,8 +589,9 @@ impl Scheduler {
                         });
                     }
                     Err(error) => {
-                        // The checks stay waiting for another engine.
-                        self.checks.splice(0..0, indices);
+                        // The checks stay ready for another engine.
+                        let back: Vec<(usize, bool)> = indices.into_iter().zip(replays).collect();
+                        self.ready.splice(0..0, back);
                         device.failure =
                             Some(format!("{} failed: {error:#}", device.engine.name()));
                         break;
@@ -596,8 +599,7 @@ impl Scheduler {
                 }
             }
         }
-        self.checks.extend(blocked);
-        if self.checks.is_empty() {
+        if self.ready.is_empty() {
             self.checks_since = None;
         }
         self.pump_replays(pop, cfg);
@@ -909,7 +911,12 @@ impl Scheduler {
                                         if trial == Trial::Check
                                             && let Some(cell) = self.checking.remove(&i)
                                         {
+                                            // The cell is free: its waiters are
+                                            // decided again on the next pump.
                                             self.busy_cells.remove(&cell);
+                                            if let Some(waiters) = self.blocked.remove(&cell) {
+                                                self.checks.extend(waiters);
+                                            }
                                         }
                                         // A creature re-queued meanwhile may have been settled already.
                                         let Some(metric) = self.held.get_mut(&i) else {
@@ -1139,7 +1146,13 @@ pub fn to_metrics(
     r: &GpuResult,
     cfg: &Config,
 ) -> EvaluationMetrics {
-    let contact_denominator = (cfg.steps().max(1) * pop.genomes[index].node_count as u32) as f32;
+    // Behavior totals end at a fall, so they average over the steps walked.
+    let steps = if r.fall_time > 0.0 {
+        ((r.fall_time * cfg.fidelity().rate as f32).round() as u32).clamp(1, cfg.steps().max(1))
+    } else {
+        cfg.steps().max(1)
+    };
+    let contact_denominator = (steps * pop.genomes[index].node_count as u32) as f32;
     EvaluationMetrics {
         fitness: r.fitness,
         behavior: TrialMetrics {
@@ -1154,7 +1167,7 @@ pub fn to_metrics(
             } else {
                 0.0
             },
-            mean_height: (r.height_sum / cfg.steps().max(1) as f32).max(0.0),
+            mean_height: (r.height_sum / steps as f32).max(0.0),
             feet: r.feet() as f32,
         },
         replayed: false,
@@ -1266,6 +1279,8 @@ mod tests {
             held: HashMap::new(),
             checking: HashMap::new(),
             busy_cells: Default::default(),
+            ready: Vec::new(),
+            blocked: HashMap::new(),
             released: Vec::new(),
             outstanding: HashMap::new(),
             replays: Vec::new(),
@@ -1294,6 +1309,8 @@ mod tests {
             held: HashMap::new(),
             checking: HashMap::new(),
             busy_cells: Default::default(),
+            ready: Vec::new(),
+            blocked: HashMap::new(),
             released: Vec::new(),
             outstanding: HashMap::new(),
             replays: Vec::new(),

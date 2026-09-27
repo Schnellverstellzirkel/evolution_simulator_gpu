@@ -420,13 +420,13 @@ impl Group {
         let inv_total_mass = F::splat(1.0) / total_mass;
         let dt = fidelity.dt();
         let ledger_on = std::env::var_os("EVOLUTION_LEDGER").is_some();
-        // Diagnostic whole-group exit: stop as soon as every real lane has
-        // fallen or failed. It saves the post-fall tail but changes the
-        // behavior totals of finished lanes (contact, height, gait), which
-        // keep accumulating in the default path; see
-        // docs/physics-audit-2026-09-26.md. A recorded trial never exits
-        // early, so the replay keeps every frame.
-        let early_exit = record.is_none() && std::env::var_os("EVOLUTION_EARLY_EXIT").is_some();
+        // Whole-group exit: a fallen lane's fitness and behavior totals are
+        // frozen at its fall, so once every real lane has fallen no later
+        // step can change any result. `EVOLUTION_EARLY_EXIT=0` turns it off
+        // for comparisons. A recorded trial never exits early, so the replay
+        // keeps every frame.
+        let early_exit =
+            record.is_none() && std::env::var("EVOLUTION_EARLY_EXIT").map_or(true, |v| v != "0");
         let lane0_mass: Vec<f32> = mass.iter().map(|m| m.to_array()[0]).collect();
         let momentum = |v: &[F]| -> f32 {
             v.iter()
@@ -503,14 +503,16 @@ impl Group {
         let neck_base = self.bones[0].1;
         let mut fall_time = zero;
         let mut fall_x = zero;
+        // Lanes whose nodes had failed by their fall; a fall ends the trial,
+        // so later failures cannot count.
+        let mut fall_failed = zero;
         let mut head_shake = zero;
         let shake_alpha = F::splat((1.0 / (physics::HEAD_SHAKE_WINDOW * rate)).min(1.0));
         // Real lanes are the first `slots.len()` lanes; the rest repeat a real
         // creature and their results are discarded. A lane is done once it has
-        // fallen or a node has failed.
+        // fallen.
         let real_mask: u64 = (1u64 << self.slots.len()) - 1;
         let mut done_mask: u64 = 0;
-        let mut failed_lanes = zero;
         let mut fell_this_tick = zero;
         let mut ticks_run = total_steps;
         if early_exit {
@@ -649,9 +651,6 @@ impl Group {
                 let alive = failed[j].lt(F::splat(0.5));
                 let fails = alive & !finite;
                 failed[j] = F::select(fails, one, failed[j]);
-                if early_exit {
-                    failed_lanes = failed_lanes.max(F::select(fails, one, zero));
-                }
                 let update = alive & finite;
                 px[j] = F::select(update, pos_x, F::select(fails, zero, px[j]));
                 py[j] = F::select(update, pos_y, F::select(fails, zero, py[j]));
@@ -1015,6 +1014,10 @@ impl Group {
 
             let mut grounded_now = [0u64; L];
             if tick >= settle {
+                // A fall ends the trial: lanes that fell in an earlier step
+                // no longer add to their behavior totals.
+                let active = fall_time.le(zero);
+                let active_bits = active.bits();
                 let mut center = zero;
                 let mut contacts = zero;
                 let mut low = F::splat(1e20);
@@ -1033,6 +1036,9 @@ impl Group {
                         let lifted =
                             F::select(y.gt(floor[j] + LIFT_CLEARANCE), one, zero).to_array();
                         for l in 0..L {
+                            if active_bits >> l & 1 == 0 {
+                                continue;
+                            }
                             if bits[l] > 0.0 {
                                 grounded_now[l] |= 1 << j;
                                 contact_bits[l] |= 1 << j;
@@ -1046,6 +1052,9 @@ impl Group {
                 // phase from the next step on.
                 let next_time = time_now + dt;
                 for l in 0..L {
+                    if active_bits >> l & 1 == 0 {
+                        continue;
+                    }
                     let down = grounded_now[l] & !grounded_before[l];
                     grounded_before[l] = grounded_now[l];
                     if down == 0 || tick == settle {
@@ -1099,24 +1108,30 @@ impl Group {
                 let falls = fall_time.le(zero) & (py[0].lt(py[neck_base]) | broken | shaking);
                 if falls.any() {
                     let mut x = zero;
+                    let mut failures = zero;
                     for j in 0..n {
                         x += px[j] * mass[j];
+                        failures += failed[j];
                     }
                     fall_x = F::select(falls, x * inv_total_mass, fall_x);
+                    fall_failed = F::select(falls, failures, fall_failed);
                     fall_time = F::select(falls, F::splat(time_now + dt), fall_time);
                     if early_exit {
                         fell_this_tick = F::select(falls, one, zero);
                     }
                 }
                 let center = center * (1.0 / n as f32);
-                ground_contact += contacts;
-                height_sum += high - low;
-                low_center = low_center.min(center);
-                high_center = high_center.max(center);
+                ground_contact += F::select(active, contacts, zero);
+                height_sum += F::select(active, high - low, zero);
+                low_center = F::select(active, low_center.min(center), low_center);
+                high_center = F::select(active, high_center.max(center), high_center);
                 let sample = tick == settle || (tick - settle).is_multiple_of(sample_interval);
                 if sample {
                     let c = center.to_array();
                     for l in 0..L {
+                        if active_bits >> l & 1 == 0 {
+                            continue;
+                        }
                         let c = c[l];
                         if tick == settle {
                             previous_center[l] = c;
@@ -1156,14 +1171,6 @@ impl Group {
             // to that point. The descriptor totals still diverge, which is
             // why the flag stays opt-in.
             if early_exit {
-                if failed_lanes.gt(F::splat(0.5)).any() {
-                    for (l, value) in failed_lanes.to_array().iter().enumerate() {
-                        if *value > 0.5 {
-                            done_mask |= 1u64 << l;
-                        }
-                    }
-                    failed_lanes = zero;
-                }
                 if fell_this_tick.gt(zero).any() {
                     for (l, value) in fell_this_tick.to_array().iter().enumerate() {
                         if *value > 0.5 {
@@ -1202,6 +1209,7 @@ impl Group {
         let high_center = high_center.to_array();
         let fall_time = fall_time.to_array();
         let fall_x = fall_x.to_array();
+        let fall_failed = fall_failed.to_array();
         let head_shake = head_shake.to_array();
         (0..self.slots.len())
             .map(|l| {
@@ -1214,12 +1222,24 @@ impl Group {
                     failures += failed[j][l];
                 }
                 // Fitness is distance only; gait style is left to the niches.
-                let fitness = if failures > 0.0 {
+                // A fall ends the trial, so only failures up to it count.
+                let fitness = if fall_time[l] > 0.0 {
+                    if fall_failed[l] > 0.0 {
+                        -1e20
+                    } else {
+                        fall_x[l]
+                    }
+                } else if failures > 0.0 {
                     -1e20
-                } else if fall_time[l] > 0.0 {
-                    fall_x[l]
                 } else {
                     score / mass_sum
+                };
+                // Behavior totals end at the fall; gait frequency is over the
+                // time the creature walked.
+                let walked = if fall_time[l] > 0.0 {
+                    fall_time[l]
+                } else {
+                    (total_steps - settle) as f32 / rate
                 };
                 GpuResult {
                     fitness,
@@ -1229,11 +1249,7 @@ impl Group {
                     } else {
                         0.0
                     },
-                    gait_frequency: if timed {
-                        turns[l] * 0.5 / ((total_steps - settle) as f32 / rate)
-                    } else {
-                        0.0
-                    },
+                    gait_frequency: if timed { turns[l] * 0.5 / walked } else { 0.0 },
                     previous_center_y: previous_center[l],
                     vertical_extremum: extremum[l],
                     vertical_trend: trend[l],

@@ -67,6 +67,30 @@ fn main() -> Result<()> {
         "simulated time after a fall: {:.1}% of all steps",
         100.0 * after_fall / (count as f64 * total)
     );
+    // Share of all steps a GPU saves by dropping fallen creatures only at
+    // segment boundaries (seconds after settling).
+    let boundary_sets: [&[f64]; 5] = [
+        &[2.0],
+        &[2.0, 10.0],
+        &[1.0, 3.0, 10.0],
+        &[1.0, 3.0, 10.0, 30.0],
+        &[0.5, 1.5, 4.0, 12.0, 30.0],
+    ];
+    for bounds in boundary_sets {
+        let mut saved = 0.0f64;
+        for (index, result) in results.iter().enumerate() {
+            let _ = index;
+            if result.fall_time > 0.0 {
+                let fall = f64::from(result.fall_time);
+                let stop = bounds.iter().copied().find(|&b| b >= fall).unwrap_or(trial);
+                saved += trial - stop;
+            }
+        }
+        println!(
+            "segments at {bounds:?} s: {:.1}% of all steps saved",
+            100.0 * saved / (count as f64 * total)
+        );
+    }
     println!("nodes creatures fallen after-fall share");
     for (nodes, (n, f, lost)) in by_nodes {
         println!(
