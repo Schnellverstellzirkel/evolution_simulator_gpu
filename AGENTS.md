@@ -4,6 +4,8 @@ Read this before changing the code. It lists the owner's rules, how to work on t
 
 ## Live status (updated with each push)
 
+- 2026-09-27, Codex handoff: synced origin ffede6e and preserved its completed device recovery. Added live backend names in worker snapshots and refreshed cached backend/allocation status after blocking evaluation, including errors. Pushed at owner request before validation completed; formatting passed before synchronization, current all-target Clippy and release tests remain unverified. Earlier local recovery drafts are superseded by the implementation already on main.
+
 Only Claude works on this repository now. The Codex team left on 2026-09-27; its last unmerged commit (search-benchmark `--cpu` with top-50 body sizes) is merged, and no files are reserved for anyone. Pull before you start, commit small, push often, and update this section when you take or finish an item.
 
 - 2026-09-27, Claude is working on: the 2M evaluated creatures/s goal, measured end to end in the full graphical game at 3M creatures and 60 s trials. Plan and baseline: `docs/performance-campaign.md`.
