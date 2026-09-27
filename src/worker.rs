@@ -701,10 +701,11 @@ fn run(
                                 if let Some(sched) = &gpu.sched {
                                     for device in &sched.devices {
                                         eprintln!(
-                                            "Native benchmark device {}: {} creatures, busy {:.3} s, rate {:.0}/s (totals since start)",
+                                            "Native benchmark device {}: {} creatures, busy {:.3} s, idle {:.3} s, rate {:.0}/s (totals since start)",
                                             device.engine.name(),
                                             device.creatures,
                                             device.busy_seconds,
+                                            device.idle_seconds,
                                             device.rate
                                         );
                                     }

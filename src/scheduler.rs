@@ -33,6 +33,10 @@ enum Trial {
     Replay,
 }
 
+/// Standard trials one fine check costs (four times the steps at four
+/// times the solver passes; 7.7 measured on the RTX 4060 for evolved bodies).
+const CHECK_COST: f64 = 8.0;
+
 /// What a held contender needs, decided again each time checks are sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckNeed {
@@ -72,19 +76,28 @@ pub struct Device {
     failure: Option<String>,
     /// Exact submitted input remains available until its result is accepted.
     queued: VecDeque<QueuedUnit>,
-    /// Measured standard creatures per wall second while the device is busy
-    /// (exponential average). Units on separate queues overlap, so their
-    /// own busy times would overstate the device's time.
+    /// Measured standard creatures per wall second while the device has
+    /// work queued. Units on separate queues overlap, so their own busy
+    /// times would overstate the device's time.
     pub rate: f64,
-    /// Start of the current busy stretch's rate window, and the standard
-    /// creatures finished in it.
-    window: Option<(Instant, usize)>,
+    /// Exponentially decayed standard creatures finished and busy wall
+    /// seconds behind `rate`, and when they were last updated.
+    rate_work: f64,
+    rate_time: f64,
+    rate_at: Option<Instant>,
+    /// Wall seconds with nothing queued, and since when the device has been
+    /// idle (sampled whenever the scheduler pumps or collects).
+    pub idle_seconds: f64,
+    idle_since: Option<Instant>,
     pub creatures: u64,
     pub busy_seconds: f64,
     /// Smallest unit worth submitting to this engine.
     min_unit: usize,
     /// Seconds of work per unit; short on a GPU that also drives the display.
     unit_seconds: f64,
+    /// A reserve engine only runs CPU replays while another engine is
+    /// healthy, and takes over the rest of the work when none is.
+    reserve: bool,
 }
 
 impl Device {
@@ -103,35 +116,44 @@ impl Device {
             rate,
             creatures: 0,
             busy_seconds: 0.0,
-            window: None,
+            rate_work: 0.0,
+            rate_time: 0.0,
+            rate_at: None,
+            idle_seconds: 0.0,
+            idle_since: None,
             min_unit,
             unit_seconds,
+            reserve: false,
         }
     }
-    /// Folds a finished standard unit into the wall-clock rate. The first
-    /// unit of a busy stretch only starts the window.
-    fn observe_rate(&mut self, creatures: usize) {
-        let now = Instant::now();
-        let Some((start, count)) = self.window else {
-            if !self.queued.is_empty() {
-                self.window = Some((now, 0));
+    /// Advances the rate average to `now`, counting the time since the last
+    /// update as busy when work was queued, plus `done` finished standard
+    /// creatures. Averages decay over about 20 s of wall time.
+    fn update_rate(&mut self, now: Instant, busy: bool, done: usize) {
+        if let Some(at) = self.rate_at {
+            let dt = now.duration_since(at).as_secs_f64();
+            let decay = (-dt / 20.0).exp();
+            self.rate_work *= decay;
+            self.rate_time *= decay;
+            if busy {
+                self.rate_time += dt;
             }
-            return;
-        };
-        let count = count + creatures;
-        let elapsed = now.duration_since(start).as_secs_f64();
-        if elapsed >= 1.0 && count >= self.min_unit / 2 {
-            let rate = count as f64 / elapsed;
-            self.rate = 0.7 * self.rate + 0.3 * rate;
-            self.window = Some((now, 0));
-        } else if elapsed >= 10.0 {
-            // Mostly check work: no standard rate to learn from this stretch.
-            self.window = Some((now, 0));
-        } else {
-            self.window = Some((start, count));
         }
-        if self.queued.is_empty() {
-            self.window = None;
+        self.rate_at = Some(now);
+        self.rate_work += done as f64;
+        if self.rate_time >= 2.0 && self.rate_work >= self.min_unit as f64 {
+            self.rate = self.rate_work / self.rate_time;
+        }
+    }
+    fn sample_idle(&mut self, now: Instant) {
+        self.update_rate(now, self.idle_since.is_none(), 0);
+        match (self.queued.is_empty(), self.idle_since) {
+            (true, None) => self.idle_since = Some(now),
+            (false, Some(since)) => {
+                self.idle_seconds += now.duration_since(since).as_secs_f64();
+                self.idle_since = None;
+            }
+            _ => {}
         }
     }
     fn queued_creatures(&self) -> usize {
@@ -242,12 +264,15 @@ impl Scheduler {
         let mut devices = Vec::new();
         let mut startup_failure = None;
         match engine::gpu_engine(primary, 64, step_range) {
+            // Long units keep every bucket dispatch large enough to fill the
+            // GPU between the step-range barriers: 1 s units measured 53k
+            // creatures/s end to end at 3M, 3 s units 60k.
             Ok(gpu) => devices.push(Device::new(
                 Box::new(gpu),
                 DeviceKind::Gpu,
                 180_000.0,
                 8192,
-                env_or("EVOLUTION_UNIT_SECONDS", 1.0),
+                env_or("EVOLUTION_UNIT_SECONDS", 3.0),
             )),
             Err(error) => {
                 let message = format!("Primary GPU {primary:?} unavailable: {error:#}");
@@ -280,19 +305,23 @@ impl Scheduler {
                 DeviceKind::Cpu,
                 30_000.0,
                 1024,
-                env_or("EVOLUTION_UNIT_SECONDS", 1.0),
+                env_or("EVOLUTION_CPU_UNIT_SECONDS", 1.0),
             ));
-        } else if devices.is_empty() {
-            // The primary GPU failed and the separate CPU pool is disabled:
-            // share the general pool so the session can still run and a later
-            // GPU failure has somewhere to retry.
-            devices.push(Device::new(
+        } else {
+            // Without a separate CPU pool the CPU engine shares the general
+            // pool. Beside a GPU it only replays global-archive contenders
+            // (their breeding and archive work need those threads more than
+            // evaluation does) and stands by for a GPU failure; alone, it
+            // evaluates everything.
+            let mut shared = Device::new(
                 Box::new(engine::cpu_engine_shared()?),
                 DeviceKind::Cpu,
                 30_000.0,
                 64,
-                env_or("EVOLUTION_UNIT_SECONDS", 1.0),
-            ));
+                env_or("EVOLUTION_CPU_UNIT_SECONDS", 1.0),
+            );
+            shared.reserve = !devices.is_empty();
+            devices.push(shared);
         }
         Ok(Self {
             devices,
@@ -460,10 +489,24 @@ impl Scheduler {
             fidelity: Some(crate::physics::Fidelity::fine()),
             ..cfg.clone()
         };
+        let standby = self.reserves_standing_by();
         for device in &mut self.devices {
+            if standby && device.reserve {
+                continue;
+            }
+            // A check unit runs four times as many steps as a standard one
+            // and holds its queue slot that long, so each device runs a
+            // limited number at once and standard units keep the rest full.
+            let check_units = env_or("EVOLUTION_CHECK_UNITS", 1usize).max(1);
             while device.failure.is_none()
                 && device.engine.free_slots() > 0
                 && !self.checks.is_empty()
+                && device
+                    .queued
+                    .iter()
+                    .filter(|unit| unit.trial == Trial::Check)
+                    .count()
+                    < check_units
             {
                 if self.checks.len() < device.min_unit / 2 && self.round.is_some() && !waited {
                     break;
@@ -559,6 +602,13 @@ impl Scheduler {
         }
         self.pump_replays(pop, cfg);
         Ok(())
+    }
+
+    /// Whether reserve engines stand by: another engine is healthy.
+    fn reserves_standing_by(&self) -> bool {
+        self.devices
+            .iter()
+            .any(|d| !d.reserve && d.failure.is_none())
     }
 
     /// Sends waiting CPU replays of checked global contenders to a CPU engine
@@ -672,18 +722,33 @@ impl Scheduler {
         need: impl FnMut(usize, &EvaluationMetrics) -> CheckNeed,
     ) -> Result<()> {
         self.pump_checks(pop, cfg, need)?;
-        self.pump_standard(pop, cfg, done)
+        let result = self.pump_standard(pop, cfg, done);
+        let now = Instant::now();
+        for device in &mut self.devices {
+            device.sample_idle(now);
+        }
+        result
     }
 
     /// Queues standard work only; waiting contenders keep waiting. For
     /// callers that cannot decide contenders at the moment (while breeding).
     pub fn pump_standard(&mut self, pop: &Population, cfg: &Config, done: &[bool]) -> Result<()> {
+        let standby = self.reserves_standing_by();
         let Some(round) = self.round.as_mut() else {
             return Ok(());
         };
-        let total_rate: f64 = self.devices.iter().map(|d| d.rate).sum();
+        let working = |d: &Device| !(standby && d.reserve);
+        let total_rate: f64 = self
+            .devices
+            .iter()
+            .filter(|d| working(d))
+            .map(|d| d.rate)
+            .sum();
         let queued: usize = self.devices.iter().map(Device::queued_creatures).sum();
         for device in &mut self.devices {
+            if standby && device.reserve {
+                continue;
+            }
             while device.failure.is_none() && device.engine.free_slots() > 0 {
                 let remaining =
                     round.order.len() - round.cursor + round.oversize.len() + round.retry.len();
@@ -809,14 +874,10 @@ impl Scheduler {
                             device.busy_seconds += done.busy_seconds;
                             let mut finals = Vec::with_capacity(indices.len());
                             let mut metrics = Vec::with_capacity(indices.len());
-                            if device.queued.is_empty() {
-                                // Idle from here: the next busy stretch starts a new window.
-                                device.window = None;
-                            }
                             match trial {
                                 Trial::Standard => {
                                     device.creatures += indices.len() as u64;
-                                    device.observe_rate(indices.len());
+                                    device.update_rate(Instant::now(), true, indices.len());
                                     for (k, &i) in indices.iter().enumerate() {
                                         let metric =
                                             to_metrics(&population, k, &done.results[k], &config);
@@ -831,6 +892,19 @@ impl Scheduler {
                                     }
                                 }
                                 Trial::Check | Trial::Replay => {
+                                    // The rate counts standard-trial equivalents,
+                                    // so a device busy with checks and replays
+                                    // still shows its capacity.
+                                    let cost = if trial == Trial::Check {
+                                        CHECK_COST
+                                    } else {
+                                        1.0
+                                    };
+                                    device.update_rate(
+                                        Instant::now(),
+                                        true,
+                                        (indices.len() as f64 * cost) as usize,
+                                    );
                                     for (k, &i) in indices.iter().enumerate() {
                                         if trial == Trial::Check
                                             && let Some(cell) = self.checking.remove(&i)
@@ -878,6 +952,10 @@ impl Scheduler {
                         }
                     }
                 }
+            }
+            let now = Instant::now();
+            for device in &mut self.devices {
+                device.sample_idle(now);
             }
             if let Err(error) = self.retire_failed() {
                 // Completed output is delivered before a terminal failure.
@@ -1530,6 +1608,35 @@ mod tests {
             (0..cfg.population).collect::<Vec<_>>(),
             "every creature must finish exactly once"
         );
+    }
+
+    #[test]
+    fn a_reserve_cpu_stands_by_while_the_gpu_works_and_takes_over_after() {
+        let cfg = submission_config();
+        let pop = crate::evolution::create(&cfg).unwrap();
+        let (mut scheduler, gpu, cpu) = mixed_scheduler();
+        scheduler.devices[1].reserve = true;
+        scheduler.begin(&pop, 0..cfg.population);
+        scheduler.pump(&pop, &cfg, &[], unshared).unwrap();
+        let gpu_units = gpu.lock().unwrap().submissions.len();
+        assert!(gpu_units > 0, "the GPU took no work");
+        assert!(
+            cpu.lock().unwrap().submissions.is_empty(),
+            "a reserve CPU must not take standard work beside a healthy GPU"
+        );
+        gpu.lock().unwrap().poll_failure = Some("device lost".into());
+        let first = scheduler
+            .collect(&pop, &cfg, Duration::ZERO, |_, _| false)
+            .unwrap();
+        assert!(first.is_empty(), "the GPU returned a result");
+        scheduler.pump(&pop, &cfg, &[], unshared).unwrap();
+        assert!(
+            cpu.lock().unwrap().submissions.len() >= gpu_units,
+            "the reserve must take over the failed GPU's work"
+        );
+        complete_submissions(&cpu, 0, 3.0);
+        let seen = drain_all(&mut scheduler, &pop, &cfg);
+        assert_eq!(seen, (0..cfg.population).collect::<Vec<_>>());
     }
 
     #[test]

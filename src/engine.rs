@@ -309,9 +309,12 @@ fn rayon_thread_count(
 }
 
 fn cpu_thread_count(logical: usize, requested: Option<usize>) -> usize {
+    // By default the CPU evaluates nothing beside the GPU: at 3M creatures a
+    // separate six-thread pool slowed the game (56k against 64k creatures/s
+    // end to end) because archive insertion and breeding lost their threads.
     // Breeding and packing need a general worker even during CPU evaluation.
     requested
-        .unwrap_or(6)
+        .unwrap_or(0)
         .min(worker_budget(logical).saturating_sub(1))
 }
 
@@ -719,7 +722,7 @@ mod tests {
 
     #[test]
     fn worker_defaults_leave_half_the_machine_free() {
-        for (logical, rayon, cpu) in [(1, 1, 0), (3, 1, 0), (8, 1, 3), (16, 2, 6), (64, 2, 6)] {
+        for (logical, rayon, cpu) in [(1, 1, 0), (3, 1, 0), (8, 4, 0), (16, 8, 0), (64, 8, 0)] {
             assert_eq!(rayon_thread_count(logical, None, None), rayon);
             assert_eq!(cpu_thread_count(logical, None), cpu);
         }
@@ -728,8 +731,8 @@ mod tests {
     #[test]
     fn thread_overrides_respect_the_desktop_budget() {
         assert_eq!(rayon_thread_count(16, Some(3), Some(6)), 2);
-        assert_eq!(rayon_thread_count(16, Some(0), None), 2);
-        assert_eq!(rayon_thread_count(16, Some(usize::MAX), None), 2);
+        assert_eq!(rayon_thread_count(16, Some(0), None), 8);
+        assert_eq!(rayon_thread_count(16, Some(usize::MAX), None), 8);
         assert_eq!(rayon_thread_count(16, None, Some(0)), 8);
         assert_eq!(rayon_thread_count(16, Some(3), Some(0)), 3);
         assert_eq!(rayon_thread_count(16, Some(3), Some(2)), 3);
