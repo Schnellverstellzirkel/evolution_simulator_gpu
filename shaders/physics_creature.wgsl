@@ -389,6 +389,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
     // node's workgroup index in its upper 16 bits.
     var bone_center: array<u32, MAXB>;
     var bone_cos_half: array<f32, MAXB>;
+    // Cosine of the angle from the middle of the range at which the joint
+    // breaks (range plus physics::JOINT_BREAK), constant through the trial.
+    var bone_break: array<f32, MAXB>;
     for (var j = 0u; j < MAXB; j++) {
         if j >= bone_count { break; }
         let field = tile.y + j * BONE_FIELDS * TILE + tl;
@@ -407,6 +410,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         bone_sa[j] = inverse_a / inverse_sum;
         bone_center[j] = pack2x16snorm(vec2f(bone_data[field + 2u * TILE], bone_data[field + 3u * TILE]));
         bone_cos_half[j] = bone_data[field + 4u * TILE];
+        bone_break[j] = bone_cos_half[j] * JOINT_BREAK_COS - bone_data[field + 5u * TILE] * JOINT_BREAK_SIN;
     }
     var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     if p.tick > 0u {
@@ -574,10 +578,17 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         }
 
         let grounded = tick >= SETTLE && p.ground > 0.0;
-        if grounded {
-            for (var j = 0u; j < MAXN; j++) {
-                if j >= body_nodes { break; }
-                let k = node_k(j, lane);
+        // Nodes resting on the ground hold their place like planted feet: they
+        // count as heavier, by their grip, when bones pull on them. One pass
+        // pushes each node out of the ground, marks its stance, and adds it
+        // to the center of mass before the bone passes.
+        var stance_lo = 0u;
+        var stance_hi = 0u;
+        var com_x_before = 0.0;
+        for (var j = 0u; j < MAXN; j++) {
+            if j >= body_nodes { break; }
+            let k = node_k(j, lane);
+            if grounded {
                 if rough {
                     // Push out along the ground normal, so bumps, pit walls,
                     // and hurdle ramps resist sliding.
@@ -595,16 +606,6 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                     vel[k].y = radius[j] - p.mud;
                     pos[k].y = max(pos[k].y, vel[k].y);
                 }
-            }
-        }
-        // Nodes resting on the ground hold their place like planted feet: they
-        // count as heavier, by their grip, when bones pull on them.
-        var stance_lo = 0u;
-        var stance_hi = 0u;
-        if grounded {
-            for (var j = 0u; j < MAXN; j++) {
-                if j >= body_nodes { break; }
-                let k = node_k(j, lane);
                 if pos[k].y <= vel[k].y + 1e-4 {
                     if j < 32u {
                         stance_lo |= 1u << j;
@@ -613,11 +614,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                     }
                 }
             }
-        }
-        var com_x_before = 0.0;
-        for (var j = 0u; j < MAXN; j++) {
-            if j >= body_nodes { break; }
-            com_x_before += pos[node_k(j, lane)].x * mass[j];
+            com_x_before += pos[k].x * mass[j];
         }
         com_x_before *= inv_total_mass;
         for (var iteration = 0u; iteration < BONE_SOLVE_ITERATIONS; iteration++) {
@@ -770,13 +767,6 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 ground_lift = max(ground_lift, vel[k].y - shifted.y);
             }
         }
-        if grounded {
-            for (var j = 0u; j < MAXN; j++) {
-                if j >= body_nodes { break; }
-                let k = node_k(j, lane);
-                pos[k].y += ground_lift;
-            }
-        }
         // Planted feet push the body along through the bone passes. That is
         // ground friction, so it may move the body's center of mass at most mu
         // times the ground's normal push this step (each node's push, plus the
@@ -784,6 +774,8 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         // the body forward: while the feet slide, friction can only oppose
         // their slide, so a sliding body cannot propel itself. Beyond that, the
         // excess is taken back as a rigid shift.
+        // One pass lifts each node with the whole body, then counts it.
+        var excess = 0.0;
         if grounded {
             var held_mass = 0.0;
             var held_grip = 0.0;
@@ -793,6 +785,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
                 let k = node_k(j, lane);
+                pos[k].y += ground_lift;
                 if pos[k].y <= vel[k].y + 1e-4 && failed[j] < 0.5 {
                     held_mass += mass[j];
                     held_grip += mass[j] * friction[j];
@@ -809,11 +802,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             let low = select(-allowed, 0.0, slide < -planted);
             let high = select(allowed, 0.0, slide > planted);
             let shift = com_x * inv_total_mass - com_x_before;
-            let excess = shift - clamp(shift, low, high);
-            for (var j = 0u; j < MAXN; j++) {
-                if j >= body_nodes { break; }
-                pos[node_k(j, lane)].x -= excess;
-            }
+            excess = shift - clamp(shift, low, high);
         }
         var contact_mass = 0.0;
         var contact_momentum = 0.0;
@@ -825,6 +814,10 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         for (var j = 0u; j < MAXN; j++) {
             if j >= body_nodes { break; }
             let k = node_k(j, lane);
+            // The planted-feet rule's rigid shift, node by node.
+            if grounded {
+                pos[k].x -= excess;
+            }
             let predicted_y = vel[k].x;
             let floor_y = vel[k].y;
             var velocity = (pos[k] - old[k]) * RATE;
@@ -930,6 +923,14 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             var contacts = 0.0;
             var low = 1e20;
             var high = -1e20;
+            // Contact, lift and touchdown bits of nodes 0-31 and 32-63; the
+            // touchdown bits (grounded now) feed the muscle sensors below.
+            var contact_lo = bitcast<u32>(metrics.contact_lo);
+            var contact_hi = bitcast<u32>(metrics.contact_hi);
+            var lift_lo = bitcast<u32>(metrics.lift_lo);
+            var lift_hi = bitcast<u32>(metrics.lift_hi);
+            var now_lo = 0u;
+            var now_hi = 0u;
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
                 let y = pos[node_k(j, lane)].y;
@@ -941,35 +942,28 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                     if y <= floor_y + 0.002 {
                         contacts += 1.0;
                         if j < 32u {
-                            metrics.contact_lo = bitcast<f32>(bitcast<u32>(metrics.contact_lo) | (1u << j));
+                            contact_lo |= 1u << j;
+                            now_lo |= 1u << j;
                         } else {
-                            metrics.contact_hi = bitcast<f32>(bitcast<u32>(metrics.contact_hi) | (1u << (j - 32u)));
+                            contact_hi |= 1u << (j - 32u);
+                            now_hi |= 1u << (j - 32u);
                         }
                     } else if y > floor_y + LIFT_CLEARANCE {
                         // A foot must leave the ground after touching it; a
                         // dragged node never does.
                         if j < 32u {
-                            let touched = bitcast<u32>(metrics.contact_lo) & (1u << j);
-                            metrics.lift_lo = bitcast<f32>(bitcast<u32>(metrics.lift_lo) | touched);
+                            lift_lo |= contact_lo & (1u << j);
                         } else {
-                            let touched = bitcast<u32>(metrics.contact_hi) & (1u << (j - 32u));
-                            metrics.lift_hi = bitcast<f32>(bitcast<u32>(metrics.lift_hi) | touched);
+                            lift_hi |= contact_hi & (1u << (j - 32u));
                         }
                     }
                 }
             }
+            metrics.contact_lo = bitcast<f32>(contact_lo);
+            metrics.contact_hi = bitcast<f32>(contact_hi);
+            metrics.lift_lo = bitcast<f32>(lift_lo);
+            metrics.lift_hi = bitcast<f32>(lift_hi);
             center_y *= inv_nodes;
-            // Touchdown: a node grounded now that was not after the last step.
-            var now_lo = 0u;
-            var now_hi = 0u;
-            if p.ground > 0.0 {
-                for (var j = 0u; j < MAXN; j++) {
-                    if j >= body_nodes { break; }
-                    if pos[node_k(j, lane)].y <= old[node_k(j, lane)].x + 0.002 {
-                        if j < 32u { now_lo |= 1u << j; } else { now_hi |= 1u << (j - 32u); }
-                    }
-                }
-            }
             let down_lo = now_lo & ~bitcast<u32>(metrics.ground_lo);
             let down_hi = now_hi & ~bitcast<u32>(metrics.ground_hi);
             metrics.ground_lo = bitcast<f32>(now_lo);
@@ -1008,9 +1002,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if norm < 1e-12 { continue; }
                 let relative = vec2f(dot(u, v), u.x * v.y - u.y * v.x) * (1.0 / norm);
                 let center = unpack2x16snorm(bone_center[j]);
-                let sin_half = bone_data[tile.y + j * BONE_FIELDS * TILE + tl + 5u * TILE];
-                let limit = cos_half * JOINT_BREAK_COS - sin_half * JOINT_BREAK_SIN;
-                if relative.x * center.x + relative.y * center.y < limit {
+                if relative.x * center.x + relative.y * center.y < bone_break[j] {
                     broken = true;
                 }
             }

@@ -505,10 +505,12 @@ impl Scheduler {
         }
         let waited = *self.checks_since.get_or_insert_with(Instant::now);
         let waited = waited.elapsed() > Duration::from_millis(500);
-        // Checks run the full trial: only standard trials are screened.
+        // A check faces the same screen as the standard trial it checks: a
+        // contender whose fine trial falls below the bar at the screen is
+        // not robust, and its check stops there instead of running the full
+        // trial at four times the steps.
         let fine = Config {
             fidelity: Some(crate::physics::Fidelity::fine()),
-            screen: None,
             ..cfg.clone()
         };
         let standby = self.reserves_standing_by();
@@ -958,6 +960,11 @@ impl Scheduler {
                                         // Reliable motion only: keep the worse of all trials.
                                         metric.fitness =
                                             metric.fitness.min(done.results[k].fitness);
+                                        if trial == Trial::Check && done.results[k].screened > 0.0 {
+                                            // The check did not pass the screen: the
+                                            // creature enters no archive.
+                                            metric.unchecked = true;
+                                        }
                                         if trial == Trial::Replay {
                                             // The cell comes from the replayed behavior.
                                             metric.behavior = to_metrics(
@@ -2106,6 +2113,44 @@ mod tests {
             }
         }
         assert_eq!(sched.in_flight(), 0);
+    }
+
+    #[test]
+    fn a_check_that_fails_the_screen_keeps_its_creature_out_of_the_archive() {
+        let cfg = Config {
+            population: 4,
+            duration: 3.0,
+            random_seed: false,
+            screen: Some(crate::physics::Screen {
+                seconds: 1.0,
+                bar: f32::INFINITY,
+            }),
+            ..Config::default()
+        };
+        let pop = crate::evolution::create(&cfg).unwrap();
+        let mut sched = Scheduler::cpu_only(2).unwrap();
+        sched.begin(&pop, 0..cfg.population);
+        let mut got = vec![None; cfg.population];
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while got.iter().any(Option::is_none) {
+            assert!(Instant::now() < deadline, "evaluation stalled");
+            sched.pump(&pop, &cfg, &[], unshared).unwrap();
+            for (indices, metrics) in sched
+                .collect(&pop, &cfg, Duration::from_millis(20), |_, _| true)
+                .unwrap()
+            {
+                for (i, m) in indices.into_iter().zip(metrics) {
+                    got[i] = Some(m);
+                }
+            }
+        }
+        assert_eq!(sched.checks_submitted, cfg.population as u64);
+        for (i, metric) in got.into_iter().enumerate() {
+            assert!(
+                metric.unwrap().unchecked,
+                "creature {i}: its check stopped at the screen"
+            );
+        }
     }
 
     #[test]
