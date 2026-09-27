@@ -154,6 +154,9 @@ pub struct Experiment {
     /// Gene memory reused by each generation's compaction.
     #[serde(skip)]
     arena_spare: evolution::Arena,
+    /// Screen distances recorded since the generation started without a bar.
+    #[serde(skip)]
+    screen_samples: usize,
     #[serde(default)]
     pub qd_version: u32,
     /// Steady-state breeding rounds so far; salts offspring random streams.
@@ -346,6 +349,7 @@ impl Experiment {
             screened: Vec::new(),
             screen_distance: Vec::new(),
             arena_spare: evolution::Arena::default(),
+            screen_samples: 0,
             qd_version: qd::VERSION,
             breed_round: 0,
             islands: Vec::new(),
@@ -492,6 +496,30 @@ impl Experiment {
         // Screened and unchecked results are both kept out of the archives.
         self.screened[i] = metric.screened || metric.unchecked;
         self.screen_distance[i] = metric.screen_x;
+        if self
+            .config
+            .screen
+            .is_some_and(|screen| screen.bar == f32::NEG_INFINITY)
+        {
+            self.screen_samples += 1;
+        }
+    }
+    /// Sets the screen bar inside a generation that started without one (a
+    /// new game, the first generation after a load or a world change) once a
+    /// quarter of the population has recorded its distance at the screen, so
+    /// only that first quarter runs every trial in full. Steady runs call it
+    /// as results arrive; later generations take their bar at the boundary.
+    pub fn arm_screen_early(&mut self) {
+        let Some(screen) = self.config.screen else {
+            return;
+        };
+        if screen.bar != f32::NEG_INFINITY
+            || self.screen_samples < (self.config.population / 4).max(64)
+        {
+            return;
+        }
+        self.screen_samples = 0;
+        self.config.screen = self.next_screen(false, self.config.duration);
     }
     /// The early screen for the next generation: its bar is the distance at
     /// the screen that the best `physics::screen_keep()` share of this
@@ -1985,6 +2013,9 @@ impl Experiment {
         self.island_progress.clear();
         self.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
         self.cma_emitters.clear();
+        // Distances measured in the old world say nothing about the new one.
+        self.screen_distance.fill(f32::NAN);
+        self.screen_samples = 0;
     }
     pub fn validate(&self) -> Result<()> {
         self.config.validate()?;
@@ -2568,6 +2599,7 @@ impl From<V2Experiment> for Experiment {
             screened: Vec::new(),
             screen_distance: Vec::new(),
             arena_spare: evolution::Arena::default(),
+            screen_samples: 0,
             qd_version: 0,
             breed_round: 0,
             islands: Vec::new(),
@@ -2613,6 +2645,7 @@ impl From<LegacyExperiment> for Experiment {
             screened: Vec::new(),
             screen_distance: Vec::new(),
             arena_spare: evolution::Arena::default(),
+            screen_samples: 0,
             qd_version: 0,
             breed_round: 0,
             islands: Vec::new(),

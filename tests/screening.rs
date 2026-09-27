@@ -211,3 +211,41 @@ fn gpu_screens_like_the_cpu_engine() {
     }
     assert!(screened > 0, "the median bar must screen some creatures");
 }
+
+#[test]
+fn a_generation_without_a_bar_sets_one_after_a_quarter_of_its_results() {
+    let cfg = Config {
+        population: 256,
+        duration: 8.0,
+        random_seed: false,
+        seed: 53,
+        ..Config::default()
+    };
+    let mut experiment = Experiment::new(cfg).unwrap();
+    let results = cpu_engine::evaluate(&experiment.population, &experiment.config);
+    let bar = |e: &Experiment| e.config.screen.unwrap().bar;
+    for (i, result) in results.iter().enumerate() {
+        let metric = scheduler::to_metrics(&experiment.population, i, result, &experiment.config);
+        experiment.record_result(i, &metric);
+        experiment.arm_screen_early();
+        if i + 1 < 64 {
+            assert_eq!(bar(&experiment), f32::NEG_INFINITY, "result {i}");
+        }
+    }
+    let armed = bar(&experiment);
+    assert!(
+        armed.is_finite(),
+        "a quarter of the results must set the bar"
+    );
+    let distances: Vec<f32> = results[..64].iter().map(|r| r.screen_x).collect();
+    let kept = distances.iter().filter(|&&d| d >= armed).count() as f32 / 64.0;
+    assert!(
+        (kept - physics::screen_keep()).abs() < 0.05,
+        "the bar keeps {kept} of the sample"
+    );
+    // A world change forgets the old world's distances and the bar.
+    let mut rough = experiment.config.clone();
+    rough.terrain = 3;
+    experiment.update_config(rough).unwrap();
+    assert_eq!(bar(&experiment), f32::NEG_INFINITY);
+}

@@ -1061,6 +1061,7 @@ fn steady_absorb(
     for (&i, m) in indices.iter().zip(metrics) {
         e.record_result(i, m);
     }
+    e.arm_screen_early();
     let archive_started = Instant::now();
     steady.failed += e.archive_slots(indices);
     steady.stage_seconds[1] += archive_started.elapsed().as_secs_f64();
