@@ -1426,11 +1426,15 @@ pub struct CandidatePlan {
     pub cma: Option<usize>,
     /// Second archive parent with the same body plan, for crossover.
     pub mate: Option<usize>,
+    /// `parent` indexes the global archive's morphology reserve instead of
+    /// the offspring's island archive.
+    pub reserve: bool,
 }
 
 pub fn emit_archive_batch(
     current: &Population,
     archive: &[QdArchive],
+    reserve: &QdArchive,
     cma_emitters: &[CmaEmitter],
     plans: &[CandidatePlan],
     cfg: &Config,
@@ -1439,6 +1443,7 @@ pub fn emit_archive_batch(
     emit_archive_batch_streaming(
         current,
         archive,
+        reserve,
         cma_emitters,
         plans,
         cfg,
@@ -1453,6 +1458,7 @@ pub fn emit_archive_batch(
 pub fn emit_archive_batch_streaming(
     current: &Population,
     archive: &[QdArchive],
+    reserve: &QdArchive,
     cma_emitters: &[CmaEmitter],
     plans: &[CandidatePlan],
     cfg: &Config,
@@ -1471,6 +1477,7 @@ pub fn emit_archive_batch_streaming(
             let id = (generation as u64) * cfg.population as u64 + i as u64 + 1;
             offspring(
                 &archive[i % archive.len()],
+                reserve,
                 cma_emitters,
                 plans[i],
                 cfg,
@@ -1488,6 +1495,7 @@ pub fn emit_archive_batch_streaming(
 /// parts they add passive so the parent's gait survives.
 fn offspring(
     archive: &QdArchive,
+    reserve: &QdArchive,
     cma_emitters: &[CmaEmitter],
     plan: CandidatePlan,
     cfg: &Config,
@@ -1506,13 +1514,13 @@ fn offspring(
             }
         }
         Emitter::Structural => {
-            let parent = mated(archive, plan, rng);
+            let parent = mated(if plan.reserve { reserve } else { archive }, plan, rng);
             let mut child = parent;
             let _ = structural_mutation_from(&mut child, cfg, rng, neutral, archive);
             local_mutation(child, cfg, rng, 0.035)
         }
         Emitter::Novelty => {
-            let parent = mated(archive, plan, rng);
+            let parent = mated(if plan.reserve { reserve } else { archive }, plan, rng);
             // Occasional large jumps help lineages cross fitness valleys.
             let scale = if rng.unit() < 0.05 { 2.25 } else { 0.75 };
             let mut child = local_mutation(parent, cfg, rng, scale);
@@ -1670,6 +1678,7 @@ fn retime_rhythm(creature: &mut Creature, rng: &mut Rng) -> bool {
 /// `round` salts the random streams and keeps creature ids unique.
 pub fn emit_offspring(
     archive: &[QdArchive],
+    reserve: &QdArchive,
     cma_emitters: &[CmaEmitter],
     plans: &[CandidatePlan],
     slots: &[usize],
@@ -1687,6 +1696,7 @@ pub fn emit_offspring(
             let id = (round << 32) ^ ((generation as u64) << 24) ^ slot as u64 ^ (1 << 63);
             offspring(
                 &archive[slot % archive.len()],
+                reserve,
                 cma_emitters,
                 plan,
                 cfg,

@@ -1201,6 +1201,7 @@ impl Experiment {
         let next = evolution::emit_archive_batch_streaming(
             &self.population,
             &self.islands,
+            &self.archive,
             &self.cma_emitters,
             &plans,
             &cfg,
@@ -1402,6 +1403,7 @@ impl Experiment {
             protection: u32,
             emitter_stale: bool,
             mate: Option<usize>,
+            from_reserve: bool,
             island: usize,
             /// A fast elite whose design's optimizer breeds this offspring.
             optimize: bool,
@@ -1493,15 +1495,17 @@ impl Experiment {
                 let emitter_stale = self.emitter_stats[emitter.index()].stale();
                 let avoid = None;
                 let mut optimize = false;
+                let mut from_reserve = false;
                 let parent = if emitter == Emitter::Restart || archive_empty {
                     None
                 } else if reserve_enabled
                     && emitter == Emitter::Structural
                     && rng.unit() < qd::MORPHOLOGY_PARENT_FRACTION
                 {
-                    archive
-                        .sample_morphology(&mut rng, avoid)
-                        .or_else(|| archive.sample_local_competitive(&mut rng, avoid))
+                    // The reserve lives in the global archive only.
+                    let drawn = self.archive.sample_morphology(&mut rng, avoid);
+                    from_reserve = drawn.is_some();
+                    drawn.or_else(|| archive.sample_local_competitive(&mut rng, avoid))
                 } else if emitter == Emitter::Novelty || emitter_stale {
                     archive.sample_novel(&mut rng, avoid)
                 } else if emitter == Emitter::Cma
@@ -1520,16 +1524,19 @@ impl Experiment {
                 } else {
                     archive.sample_local_competitive(&mut rng, avoid)
                 };
-                let parent_id = parent.map(|index| archive.entries[index].creature.id);
+                let parent_archive = if from_reserve { &self.archive } else { archive };
+                let parent_id = parent.map(|index| parent_archive.entries[index].creature.id);
                 let protection = if matches!(emitter, Emitter::Structural | Emitter::Novelty) {
                     generation.saturating_add(3)
                 } else {
                     parent
-                        .map(|index| archive.entries[index].protected_until)
+                        .map(|index| parent_archive.entries[index].protected_until)
                         .unwrap_or(0)
                 };
                 let mate = match (emitter, parent) {
-                    (Emitter::Structural | Emitter::Novelty, Some(p)) if rng.unit() < 0.2 => {
+                    (Emitter::Structural | Emitter::Novelty, Some(p))
+                        if !from_reserve && rng.unit() < 0.2 =>
+                    {
                         by_plan[island]
                             .get(&archive.entries[p].topology)
                             .filter(|group| group.len() > 1)
@@ -1545,6 +1552,7 @@ impl Experiment {
                     protection,
                     emitter_stale,
                     mate,
+                    from_reserve,
                     island,
                     optimize,
                 }
@@ -1560,6 +1568,7 @@ impl Experiment {
                 protection,
                 emitter_stale,
                 mate,
+                from_reserve,
                 island,
                 optimize,
             } = prep;
@@ -1666,7 +1675,11 @@ impl Experiment {
                 None
             };
             if let Some(parent_index) = parent {
-                self.islands[island].visit(parent_index);
+                if from_reserve {
+                    self.archive.visit(parent_index);
+                } else {
+                    self.islands[island].visit(parent_index);
+                }
             }
             out.push(OffspringPlan {
                 plan: CandidatePlan {
@@ -1674,6 +1687,7 @@ impl Experiment {
                     parent,
                     cma: cma_index,
                     mate,
+                    reserve: from_reserve,
                 },
                 parent_id,
                 protection,
@@ -1709,6 +1723,7 @@ impl Experiment {
         let planned_at = started.elapsed();
         let children = evolution::emit_offspring(
             &self.islands,
+            &self.archive,
             &self.cma_emitters,
             &plans,
             slots,
