@@ -592,3 +592,37 @@ Mean nodes / muscles of the population by generation, averaged over the ten seed
 Best distance per seed (38 to 47): massless 238, 214, 321, 778, 353, 227, 378, 617, 152, 184 m. At 1 kg/m: 57, 80, 57, 162, 128, 421, 139, 255, 152, 103 m. At 4 kg/m: 216, 53, 69, 384, 77, 126, 153, 152, 93, 117 m.
 
 Muscle mass does not stop body growth. At 1 kg/m the population grows at the same rate as without it. The second setting, 4 kg/m, was tried because at 1 kg/m a typical 0.5 m muscle weighs about 5 N against the 100 N a muscle may pull, so the cost might have been too small to matter. At 4 kg/m the population grows faster and the top 50 are larger. Best distance and QD fall by about half at both settings, and archive coverage falls. Two causes are likely and neither was tested. A store that grows with span rewards long muscles, and long muscles need large bodies. Grip grows with the load a foot carries (97e3e9a), so extra weight helps traction. Not measured: the GPU cost of the 16th muscle field.
+
+### Five variants over 80 generations (2026-09-28)
+
+The owner accepts half the best distance if muscle mass stops the muscle monsters, the bodies that jiggle dozens of appendages. The span-scaled store did not lower muscle counts in 40 generations. The next variant keeps muscle mass and gives every muscle the old flat 120 J store. `EVOLUTION_MUSCLE_STORE=120` sets it in all engines (`physics::muscle_capacity`). The owner's problem appeared at generation 70 of a 3M run, so every variant ran to 80 generations. `search_ab` now also prints the top 50's mean and largest muscle count. Settings are as above: seeds 38 to 47, 5,000 creatures, 60 s trials, CPU only, 4 threads. The baseline is cb5119e. Each run's first 40 generations match the 40-generation runs exactly. The top-50 columns describe the final generation's 50 best-scoring creatures.
+
+| | nodes / muscles, gen 39 | nodes / muscles, gen 79 | top-50 mean muscles | most muscles in a seed's top 50 | top-50 mean nodes | top-50 bone length / mass, median of seeds | best, mean (median) | QD, mean (median) | cells, mean | CPU wall |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| massless muscles, 120 J | 7.31 / 13.61 | 8.37 / 18.56 | 21.7 | 78 | 8.86 | 3.00 m / 8.9 kg | 588 m (490) | 104,828 (57,527) | 1,131 | 477 s |
+| 1 kg/m, 200 J/m | 7.47 / 13.60 | 8.55 / 17.43 | 26.7 | 76 | 10.85 | 5.36 m / 34.3 kg | 247 m (195) | 33,506 (23,569) | 1,075 | 468 s |
+| 4 kg/m, 200 J/m | 7.66 / 14.93 | 9.05 / 19.96 | 31.4 | 60 | 12.11 | 10.55 m / 196.2 kg | 222 m (181) | 27,975 (25,865) | 957 | 552 s |
+| 1 kg/m, flat 120 J | 7.42 / 13.43 | 8.70 / 18.24 | 29.0 | 91 | 11.38 | 6.66 m / 54.8 kg | 289 m (237) | 30,121 (31,108) | 1,072 | 507 s |
+| 4 kg/m, flat 120 J | 7.65 / 14.09 | 9.14 / 20.34 | 31.9 | 59 | 11.82 | 9.28 m / 124.3 kg | 245 m (233) | 24,072 (20,586) | 956 | 539 s |
+
+Largest muscle count in each seed's top 50, seeds 38 to 47:
+
+- massless: 16, 9, 17, 78, 9, 11, 23, 17, 49, 46
+- 1 kg/m, 200 J/m: 33, 25, 76, 8, 33, 21, 64, 42, 13, 35
+- 4 kg/m, 200 J/m: 41, 38, 23, 60, 60, 45, 14, 53, 16, 42
+- 1 kg/m, flat 120 J: 62, 46, 19, 72, 17, 25, 57, 25, 91, 52
+- 4 kg/m, flat 120 J: 33, 17, 28, 25, 19, 38, 59, 55, 46, 56
+
+No variant holds muscle counts down. The population's mean at generation 79 ranges from 6% lower (17.43 at 1 kg/m with the span store) to 10% higher (20.34 at 4 kg/m with the flat store) than the 18.56 without muscle mass, and the top 50 of the 6% arm carry 23% more muscles than the baseline's top 50. In every variant the top 50 carry more muscles and more nodes than without muscle mass, and they are 1.8 to 3.5 times longer and 4 to 22 times heavier. The largest monster shrinks in the 4 kg/m arms (59 and 60 muscles against 78), but typical top bodies grow. Best distance falls by 51 to 62% and QD by 68 to 77%. Heavier bodies win under muscle mass. One likely reason, untested: grip grows with the load on a foot (97e3e9a), and a muscle's 100 N force limit dwarfs its weight (5 N for a 0.5 m muscle at 1 kg/m). Because no variant held muscle counts down, first_generation and the agreement tests were not re-run for the flat store.
+
+A quicker check on an existing save: `examples/monster_check.rs` samples every 150th creature of the owner's generation-70 3M autosave (20,000 creatures, mean 37.5 muscles) and scores the sample with full 60 s trials, no screening, on the CPU engine under each physics. It takes 45 s to sample and 7 to 10 s per physics.
+
+| muscles | creatures | massless: median, p90, share of the top 10% | 1 kg/m, 200 J/m | 1 kg/m, flat 120 J | 4 kg/m, flat 120 J |
+|---|---:|---:|---:|---:|---:|
+| 0 to 12 | 3,149 | 0.23 m, 34.3 m, 15% | 0.17 m, 3.0 m, 17% | 0.17 m, 3.2 m, 19% | 0.11 m, 1.2 m, 14% |
+| 13 to 20 | 2,870 | 0.48 m, 43.7 m, 15% | 0.29 m, 5.3 m, 22% | 0.29 m, 4.1 m, 21% | 0.16 m, 1.4 m, 15% |
+| 21 to 34 | 2,315 | 1.36 m, 69.8 m, 15% | 0.39 m, 5.4 m, 23% | 0.39 m, 4.6 m, 21% | 0.23 m, 2.0 m, 23% |
+| 35 to 60 | 8,584 | 2.23 m, 36.1 m, 30% | 0.14 m, 1.9 m, 33% | 0.14 m, 1.9 m, 34% | 0.04 m, 1.3 m, 42% |
+| 61 and more | 3,082 | 8.51 m, 44.0 m, 24% | 0.07 m, 1.0 m, 4% | 0.06 m, 1.0 m, 4% | -0.01 m, 0.3 m, 5% |
+
+Today's monsters collapse under muscle mass: the median body with 61 or more muscles falls from 8.51 m to 0.07 m, and its share of the top 10% from 24% to 4%. The 200 J/m store without mass (`EVOLUTION_MUSCLE_DENSITY=0`) leaves that bin at 8.23 m, so the mass causes the collapse. But lean bodies lose most of their distance too (p90 34 m to 3 m), because every gait in the save was tuned to massless muscles. The save test shows what a change does to existing creatures. It cannot show what evolution builds afterwards. The 80-generation runs answer that, and there evolution builds heavy, muscular bodies again.

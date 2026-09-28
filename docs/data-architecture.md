@@ -452,7 +452,19 @@ Muscle mass was measured next as a test of the third cause (section 12, decision
 | 1 kg/m, 200 J/m | 7.47 / 13.60 | 7.74 | 155 m (133) | 16,007 (12,648) | 957 |
 | 4 kg/m, 200 J/m | 7.51 / 14.21 | 8.73 | 144 m (121) | 15,707 (13,343) | 830 |
 
-Muscle mass does not stop growth. At 1 kg/m the population grows at the same rate. At 4 kg/m it grows faster and the top 50 are larger (median total bone length 5.6 m against 2.0 m). Distance and QD fall by about half in both. Two causes are likely and neither is tested. A store that grows with span rewards long muscles, which need large bodies. Grip grows with the load a foot carries, so weight helps traction. The implementation stays on branch `claude/muscle-mass` and is not merged. Details are in `docs/performance-log.md`, section "Muscle mass".
+Muscle mass does not stop growth. At 1 kg/m the population grows at the same rate. At 4 kg/m it grows faster and the top 50 are larger (median total bone length 5.6 m against 2.0 m). Distance and QD fall by about half in both.
+
+All variants and the baseline were then run to 80 generations, with a flat 120 J store as a further variant:
+
+| | nodes / muscles, gen 39 | nodes / muscles, gen 79 | top-50 mean muscles | best, mean (median) | QD, mean (median) |
+|---|---:|---:|---:|---:|---:|
+| massless muscles, 120 J | 7.31 / 13.61 | 8.37 / 18.56 | 21.7 | 588 m (490) | 104,828 (57,527) |
+| 1 kg/m, 200 J/m | 7.47 / 13.60 | 8.55 / 17.43 | 26.7 | 247 m (195) | 33,506 (23,569) |
+| 4 kg/m, 200 J/m | 7.66 / 14.93 | 9.05 / 19.96 | 31.4 | 222 m (181) | 27,975 (25,865) |
+| 1 kg/m, flat 120 J | 7.42 / 13.43 | 8.70 / 18.24 | 29.0 | 289 m (237) | 30,121 (31,108) |
+| 4 kg/m, flat 120 J | 7.65 / 14.09 | 9.14 / 20.34 | 31.9 | 245 m (233) | 24,072 (20,586) |
+
+No variant holds muscle counts down, and in every one the best bodies become heavier and more muscular than without muscle mass. On the owner's generation-70 save, today's many-muscle bodies collapse under muscle mass, but so do lean ones, because every gait there was tuned to massless muscles. A likely reason heavy bodies win, untested: grip grows with the load a foot carries, and a muscle's 100 N force limit dwarfs its weight. The implementation stays on branch `claude/muscle-mass` and is not merged. Details are in `docs/performance-log.md`, section "Muscle mass".
 
 ### 10.3 Architecture rules for long sessions
 
@@ -499,7 +511,7 @@ Answered by the owner on 2026-09-28:
 
 Open:
 
-6. Muscle mass (section 10.2). The owner asked for it to be built and measured (2026-09-28). Muscles that weigh 1 or 4 kg per meter of span, with a 200 J per meter store, do not stop body growth and halve best distance and QD over 10 seeds. It is not adopted. Bounding per-creature cost in long sessions still needs a physics lever or lower caps. Untested candidates are a flat store with muscle mass, and a store that does not grow with span.
+6. Muscle mass (section 10.2). The owner asked for it to be built and measured (2026-09-28), and accepts half the best distance if it stops muscle monsters. It does not. Muscles that weigh 1 or 4 kg per meter of span, with a 200 J per meter store or a flat 120 J store, leave the population's muscle count between 6% lower and 10% higher than today's after 80 generations, and the best bodies become heavier and more muscular. It is not adopted. Bounding per-creature cost in long sessions still needs a different physics lever or lower caps.
 7. The four decisions of the assessment (new physics formulation, NVIDIA-only fast path, search-side levers, clock pinning) are still open.
 
 ## References
