@@ -4,6 +4,10 @@ use anyhow::{Result, ensure};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+// The helpers and Context fields are used as the operators land.
+#[allow(dead_code)]
+mod anatomy;
+
 pub const FAILED: f32 = -1.0e20;
 /// Stiffness every muscle a structural mutation adds gets while
 /// `EVOLUTION_NEUTRAL_SPLITS` is on. Such a muscle also starts with
@@ -1491,7 +1495,8 @@ fn offspring(
         }
         Emitter::Structural => {
             let parent = mated(archive, plan, rng);
-            let (child, _) = structural_mutation(parent, cfg, rng, neutral);
+            let mut child = parent;
+            let _ = structural_mutation_from(&mut child, cfg, rng, neutral, archive);
             local_mutation(child, cfg, rng, 0.035)
         }
         Emitter::Novelty => {
@@ -1500,7 +1505,7 @@ fn offspring(
             let scale = if rng.unit() < 0.05 { 2.25 } else { 0.75 };
             let mut child = local_mutation(parent, cfg, rng, scale);
             if rng.unit() < 0.18 {
-                let _ = structural_mutation_in_place(&mut child, cfg, rng, neutral);
+                let _ = structural_mutation_from(&mut child, cfg, rng, neutral, archive);
             }
             child
         }
@@ -1757,16 +1762,6 @@ fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
     creature
 }
 
-fn structural_mutation(
-    mut creature: Creature,
-    cfg: &Config,
-    rng: &mut Rng,
-    neutral: bool,
-) -> (Creature, bool) {
-    let changed = structural_mutation_in_place(&mut creature, cfg, rng, neutral);
-    (creature, changed)
-}
-
 /// Benchmark workload helper: grows a body with the game's own structural
 /// mutations until it has at least `target_nodes` nodes or cannot grow further.
 pub fn grow_for_benchmark(creature: &mut Creature, cfg: &Config, seed: u64, target_nodes: usize) {
@@ -1783,16 +1778,66 @@ pub fn grow_for_benchmark(creature: &mut Creature, cfg: &Config, seed: u64, targ
     repair(creature, cfg, &mut rng);
 }
 
+/// `structural_mutation_in_place` for a child bred from `archive`. With
+/// `EVOLUTION_ANATOMY` on, the anatomy operators join the classic ones (and
+/// graft limbs from another elite of the archive); off, it is exactly the
+/// classic mutation.
+fn structural_mutation_from(
+    creature: &mut Creature,
+    cfg: &Config,
+    rng: &mut Rng,
+    neutral: bool,
+    archive: &QdArchive,
+) -> bool {
+    let extra = anatomy::enabled();
+    if extra.is_empty() {
+        return structural_mutation_in_place(creature, cfg, rng, neutral);
+    }
+    let donor = (!archive.entries.is_empty())
+        .then(|| &archive.entries[rng.index(archive.entries.len())].creature);
+    let cx = anatomy::Context { neutral, donor };
+    let classic = classic_operators();
+    // An operator that does not fit this body leaves it unchanged; try
+    // another, a few times.
+    for _ in 0..4 {
+        let pick = rng.index(classic + extra.len());
+        let changed = if pick < classic {
+            classic_operator(pick, creature, cfg, rng, neutral)
+        } else {
+            anatomy::apply(extra[pick - classic], creature, cfg, rng, &cx)
+        };
+        if changed {
+            return true;
+        }
+    }
+    false
+}
+
+/// Classic structural operators: with shrinking on, three operators remove
+/// nodes for the three that add them (split, mirrored node, limb), and one
+/// removes a muscle.
+fn classic_operators() -> usize {
+    if shrink_enabled() { 11 } else { 7 }
+}
+
 fn structural_mutation_in_place(
     creature: &mut Creature,
     cfg: &Config,
     rng: &mut Rng,
     neutral: bool,
 ) -> bool {
-    // With shrinking on, three operators remove nodes for the three that add
-    // them (split, mirrored node, limb), and one removes a muscle.
-    let operators = if shrink_enabled() { 11 } else { 7 };
-    match rng.index(operators) {
+    let pick = rng.index(classic_operators());
+    classic_operator(pick, creature, cfg, rng, neutral)
+}
+
+fn classic_operator(
+    pick: usize,
+    creature: &mut Creature,
+    cfg: &Config,
+    rng: &mut Rng,
+    neutral: bool,
+) -> bool {
+    match pick {
         0 => split_bone(creature, cfg, rng),
         1 => duplicate_mirrored_node(creature, cfg, rng, neutral),
         2 => duplicate_limb(creature, cfg, rng, neutral),
