@@ -645,46 +645,11 @@ pub const HEAD_SHAKE_WINDOW: f32 = 0.1;
 pub struct Screen {
     pub seconds: f32,
     pub bar: f32,
-    /// A second, later rung (`SCREEN2_SECONDS`): a creature that passed the
-    /// first screen stops there too if it is below this bar. `None` when the
-    /// trial ends before it.
-    pub second: Option<Rung>,
-}
-/// One later screening rung: at `seconds` after settling, a standing
-/// creature below `bar` stops like at the first screen.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rung {
-    pub seconds: f32,
-    pub bar: f32,
-}
-/// The step at whose end a screen at `seconds` after settling applies.
-fn rung_tick(seconds: f32, fidelity: Fidelity) -> u32 {
-    fidelity.settle() + ((seconds * fidelity.rate as f32).round() as u32).max(1) - 1
 }
 impl Screen {
-    /// One screen at `seconds` with `bar` and no second rung.
-    pub fn single(seconds: f32, bar: f32) -> Self {
-        Self {
-            seconds,
-            bar,
-            second: None,
-        }
-    }
     /// The step at whose end the screen applies.
     pub fn tick(self, fidelity: Fidelity) -> u32 {
-        rung_tick(self.seconds, fidelity)
-    }
-    /// The step at whose end the second rung applies, if there is one.
-    pub fn second_tick(self, fidelity: Fidelity) -> Option<u32> {
-        self.second.map(|rung| rung_tick(rung.seconds, fidelity))
-    }
-    /// Whether a trial that stopped at `screened` seconds (the result's
-    /// `screened` field) stopped at the first rung rather than the second.
-    pub fn stopped_first(self, screened: f32) -> bool {
-        screened > 0.0
-            && self
-                .second
-                .is_none_or(|rung| screened < 0.5 * (self.seconds + rung.seconds))
+        fidelity.settle() + ((self.seconds * fidelity.rate as f32).round() as u32).max(1) - 1
     }
 }
 /// Seconds after settling at which trials are screened
@@ -707,15 +672,6 @@ pub fn screen_keep() -> f32 {
         .filter(|k| (0.0..=1.0).contains(k))
         .unwrap_or(0.2)
 }
-/// Seconds after settling of the second screening rung. A creature that
-/// passed the first screen stops here too if it is below the second bar.
-/// Measured on 2026-09-28 against rungs at 10, 15, 20 and 30 s keeping half
-/// or 60%: only 30 s keeping 60% held search quality per evaluation, and it
-/// raised the GPU rate by 10% (`docs/performance-log.md`).
-pub const SCREEN2_SECONDS: f32 = 30.0;
-/// Share of the first screen's survivors, by distance at the second rung,
-/// that runs the full trial.
-pub const SCREEN2_KEEP: f32 = 0.6;
 /// The distance that the best `keep` share of `distances` reached (NaN
 /// entries are ignored), or no bar when fewer than 64 distances are known.
 pub fn screen_bar(distances: impl Iterator<Item = f32>, keep: f32) -> f32 {
@@ -725,29 +681,6 @@ pub fn screen_bar(distances: impl Iterator<Item = f32>, keep: f32) -> f32 {
     }
     let rank = ((distances.len() as f32 * (1.0 - keep)) as usize).min(distances.len() - 1);
     *distances.select_nth_unstable_by(rank, f32::total_cmp).1
-}
-/// The second rung of a screen at `first` seconds in a trial of `duration`
-/// seconds, with `bar`, when the trial reaches it.
-pub fn second_rung(first: f32, duration: f32, bar: f32) -> Option<Rung> {
-    let seconds = SCREEN2_SECONDS;
-    (seconds > first && seconds < duration).then_some(Rung { seconds, bar })
-}
-/// Both rungs' bars from one generation's distances: the first keeps the
-/// best `screen_keep()` share at the first screen, the second keeps the best
-/// `SCREEN2_KEEP` share, at the second rung, of the creatures that pass
-/// that first bar. `second` holds each creature's distance at the second
-/// rung (or at an earlier fall), NaN when the first screen stopped it.
-pub fn screen_bars(first: &[f32], second: &[f32]) -> (f32, f32) {
-    let bar = screen_bar(first.iter().copied(), screen_keep());
-    let late = screen_bar(
-        first
-            .iter()
-            .zip(second)
-            .filter(|&(&x, _)| x >= bar)
-            .map(|(_, &late)| late),
-        SCREEN2_KEEP,
-    );
-    (bar, late)
 }
 /// How far (rad) a joint may be forced past its range before it breaks. A
 /// broken joint ends the trial like a fall, so no gait can profit from

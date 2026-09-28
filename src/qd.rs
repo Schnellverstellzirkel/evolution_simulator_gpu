@@ -19,7 +19,8 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // may only slow the body (sliders).
 // 28: selected-engine scores and descriptors own archive admission; GPU
 //     results are no longer rescored through CPU playback.
-pub const VERSION: u32 = 28;
+// 29: trials last 20 s instead of 60 s; older games move to 20 s on load.
+pub const VERSION: u32 = 29;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
@@ -62,9 +63,6 @@ pub struct EvaluationMetrics {
     /// Distance at the screen, or at an earlier fall (0 when there was no
     /// screen and no earlier fall).
     pub screen_x: f32,
-    /// Distance at the second screening rung, or at an earlier fall; NaN
-    /// when there is no second rung or the first screen stopped the trial.
-    pub screen2_x: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]

@@ -71,7 +71,8 @@ impl Default for Config {
             population: 3_000_000,
             seed: 38,
             random_seed: true,
-            duration: 60.0,
+            // The owner's fixed trial length (2026-09-28; was 60 s).
+            duration: 20.0,
             mutation: 1.0,
             gravity: 9.8,
             air_retention: 1.0,

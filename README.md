@@ -1,6 +1,6 @@
 # Evolution Simulator
 
-A Rust game in which 2D creatures made of bones, joints, and muscles evolve to travel as far as possible. The graphical game starts with **3 million creatures per generation** and **60-second trials**. Fitness is horizontal center-of-mass distance in meters. Gait, height, and ground contact describe archive niches; they do not multiply or penalize the score.
+A Rust game in which 2D creatures made of bones, joints, and muscles evolve to travel as far as possible. The graphical game starts with **3 million creatures per generation** and **20-second trials**. Fitness is horizontal center-of-mass distance in meters. Gait, height, and ground contact describe archive niches; they do not multiply or penalize the score.
 
 The search combines MAP-Elites, CMA optimizers, structural mutations, novelty search, and immigrants across four island archives. Vulkan compute is the scoring authority in the full-performance run; the CPU engine remains available for fallback, diagnostics, and recorded playback. An egui dashboard shows the archive, history, lineage, and replays.
 
@@ -50,7 +50,7 @@ nice -n 10 cargo run --profile release-fast
 
 Use **Evolve continuously**, **One generation**, or **Guided step**. Guided mode pauses between evaluation, archive insertion, and breeding. Space pauses or resumes evolution; Ctrl+S opens Save. Select an archive card or historical creature to replay it. Playback has its own controls; drag the scene to pan and scroll to zoom.
 
-Population and trial duration are displayed in the main controls, with no mutation slider. The default game keeps them at three million and 60 seconds. Diagnostic CLI runs and JSON presets can use other sizes or durations. Advanced controls contain seed selection, performance and checkpoint settings, display options, and histogram controls.
+Population and trial duration are displayed in the main controls, with no mutation slider. The default game keeps them at three million and 20 seconds. Diagnostic CLI runs and JSON presets can use other sizes or durations. Advanced controls contain seed selection, performance and checkpoint settings, display options, and histogram controls.
 
 Environment buttons raise or lower each effect:
 

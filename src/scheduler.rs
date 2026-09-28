@@ -1190,12 +1190,6 @@ pub fn to_metrics(
         unchecked: false,
         screened: r.screened > 0.0,
         screen_x: r.screen_x,
-        screen2_x: match cfg.screen {
-            Some(screen) if screen.second.is_some() && !screen.stopped_first(r.screened) => {
-                r.screen2_x
-            }
-            _ => f32::NAN,
-        },
     }
 }
 
@@ -2202,7 +2196,10 @@ mod tests {
             population: 4,
             duration: 3.0,
             random_seed: false,
-            screen: Some(crate::physics::Screen::single(1.0, f32::INFINITY)),
+            screen: Some(crate::physics::Screen {
+                seconds: 1.0,
+                bar: f32::INFINITY,
+            }),
             ..Config::default()
         };
         let pop = crate::evolution::create(&cfg).unwrap();

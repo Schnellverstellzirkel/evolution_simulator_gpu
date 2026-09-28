@@ -6,7 +6,7 @@ use evolution_simulator::{
     cpu_engine,
     creature_kernel::GpuResult,
     evolution,
-    physics::{self, Rung, Screen},
+    physics::{self, Screen},
     scheduler,
     storage::Experiment,
 };
@@ -25,7 +25,10 @@ fn config(duration: f32) -> Config {
 
 fn screened(cfg: &Config, bar: f32) -> Config {
     Config {
-        screen: Some(Screen::single(SCREEN_SECONDS, bar)),
+        screen: Some(Screen {
+            seconds: SCREEN_SECONDS,
+            bar,
+        }),
         ..cfg.clone()
     }
 }
@@ -88,103 +91,6 @@ fn screened_creatures_end_at_the_screen_and_survivors_run_in_full() {
         }
     }
     assert!(stopped > 0, "the median bar must stop some creatures");
-}
-
-fn median(mut values: Vec<f32>) -> f32 {
-    values.sort_by(f32::total_cmp);
-    values[values.len() / 2]
-}
-
-fn two_rungs(cfg: &Config, bar: f32, late: f32) -> Config {
-    Config {
-        screen: Some(Screen {
-            seconds: SCREEN_SECONDS,
-            bar,
-            second: Some(Rung {
-                seconds: LATE_SECONDS,
-                bar: late,
-            }),
-        }),
-        ..cfg.clone()
-    }
-}
-
-const LATE_SECONDS: f32 = 4.0;
-
-#[test]
-fn a_second_rung_stops_the_first_screens_survivors_below_its_bar() {
-    let cfg = config(6.0);
-    let pop = evolution::create(&cfg).unwrap();
-    // No bars: every trial runs in full and records both distances.
-    let open = two_rungs(&cfg, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    let full = cpu_engine::evaluate(&pop, &open);
-    let plain = cpu_engine::evaluate(&pop, &cfg);
-    for (i, (f, p)) in full.iter().zip(&plain).enumerate() {
-        assert_eq!(f.screened, 0.0);
-        assert_eq!(
-            f.fitness.to_bits(),
-            p.fitness.to_bits(),
-            "creature {i}: a rung without a bar only records"
-        );
-    }
-    let bar = median(full.iter().map(|r| r.screen_x).collect());
-    let late = median(
-        full.iter()
-            .filter(|r| r.screen_x >= bar)
-            .map(|r| r.screen2_x)
-            .collect(),
-    );
-    let short = cpu_engine::evaluate(&pop, &config(LATE_SECONDS));
-    let screen_cfg = two_rungs(&cfg, bar, late);
-    let results = cpu_engine::evaluate(&pop, &screen_cfg);
-    let (mut first, mut second) = (0, 0);
-    for (i, ((r, f), s)) in results.iter().zip(&full).zip(&short).enumerate() {
-        assert_eq!(r.screen_x.to_bits(), f.screen_x.to_bits(), "creature {i}");
-        let fell_first = f.fall_time > 0.0 && f.fall_time <= SCREEN_SECONDS + 1e-4;
-        if !fell_first && f.screen_x < bar {
-            first += 1;
-            assert!(
-                r.screened > 0.0 && r.screened < LATE_SECONDS,
-                "creature {i}"
-            );
-            let metric = scheduler::to_metrics(&pop, i, r, &screen_cfg);
-            assert!(metric.screened && metric.screen2_x.is_nan(), "creature {i}");
-            continue;
-        }
-        assert_eq!(
-            r.screen2_x.to_bits(),
-            f.screen2_x.to_bits(),
-            "creature {i}: the second rung's distance must not depend on its bar"
-        );
-        let fell_second = f.fall_time > 0.0 && f.fall_time <= LATE_SECONDS + 1e-4;
-        if !fell_second && f.screen2_x < late {
-            second += 1;
-            assert!(
-                r.screened >= LATE_SECONDS - 1e-3,
-                "creature {i} stops at the second rung"
-            );
-            assert!(
-                close(r.fitness, s.fitness),
-                "creature {i}: screened {} vs a {LATE_SECONDS} s trial {}",
-                r.fitness,
-                s.fitness
-            );
-            let metric = scheduler::to_metrics(&pop, i, r, &screen_cfg);
-            assert!(metric.screened, "creature {i} enters no archive");
-            assert_eq!(metric.screen2_x.to_bits(), r.screen2_x.to_bits());
-        } else {
-            assert_eq!(
-                r.screened, 0.0,
-                "creature {i} passed both rungs or fell first"
-            );
-            assert_eq!(r.fitness.to_bits(), f.fitness.to_bits(), "creature {i}");
-            assert_eq!(r.ground_contact.to_bits(), f.ground_contact.to_bits());
-        }
-    }
-    assert!(
-        first > 0 && second > 0,
-        "both rungs must stop some creatures"
-    );
 }
 
 #[test]
@@ -270,7 +176,7 @@ fn gpu_cpu_diagnostic_screening() {
     };
     let pop = evolution::create(&cfg).unwrap();
     let screen = |bar| Config {
-        screen: Some(Screen::single(1.0, bar)),
+        screen: Some(Screen { seconds: 1.0, bar }),
         ..cfg.clone()
     };
     let recorded = cpu_engine::evaluate(&pop, &screen(f32::NEG_INFINITY));
@@ -290,7 +196,6 @@ fn gpu_cpu_diagnostic_screening() {
         if (recorded[i].screen_x - bar).abs() < 0.01 {
             continue;
         }
-        assert!(g.screen2_x.is_nan(), "creature {i}: no second rung");
         assert_eq!(
             g.screened,
             c.screened > 0.0,
@@ -305,83 +210,6 @@ fn gpu_cpu_diagnostic_screening() {
         );
     }
     assert!(screened > 0, "the median bar must screen some creatures");
-}
-
-/// Optional cross-engine diagnostic for the second screening rung.
-#[test]
-#[ignore = "optional CPU/GPU diagnostic; not a physics acceptance gate"]
-fn gpu_cpu_diagnostic_second_screening_rung() {
-    let cfg = Config {
-        population: 96,
-        duration: 3.0,
-        random_seed: false,
-        seed: 47,
-        ..Config::default()
-    };
-    let pop = evolution::create(&cfg).unwrap();
-    let screen = |bar, late| Config {
-        screen: Some(Screen {
-            seconds: 1.0,
-            bar,
-            second: Some(Rung {
-                seconds: 2.0,
-                bar: late,
-            }),
-        }),
-        ..cfg.clone()
-    };
-    let recorded = cpu_engine::evaluate(&pop, &screen(f32::NEG_INFINITY, f32::NEG_INFINITY));
-    let bar = median(recorded.iter().map(|r| r.screen_x).collect());
-    let late = median(
-        recorded
-            .iter()
-            .filter(|r| r.screen_x >= bar)
-            .map(|r| r.screen2_x)
-            .collect(),
-    );
-    let screen_cfg = screen(bar, late);
-    let cpu = cpu_engine::evaluate(&pop, &screen_cfg);
-    let mut gpu = evolution_simulator::gpu::Gpu::new("RTX 4060").unwrap();
-    let indices: Vec<usize> = (0..cfg.population).collect();
-    let gpu = gpu
-        .sched
-        .as_mut()
-        .unwrap()
-        .evaluate_single(&pop, &indices, &screen_cfg)
-        .unwrap();
-    let mut late_screened = 0;
-    for (i, (g, c)) in gpu.iter().zip(&cpu).enumerate() {
-        if (recorded[i].screen_x - bar).abs() < 0.01 || (recorded[i].screen2_x - late).abs() < 0.01
-        {
-            continue;
-        }
-        assert_eq!(
-            g.screened,
-            c.screened > 0.0,
-            "creature {i}: screen decision"
-        );
-        if c.screened > 1.5 {
-            late_screened += 1;
-            assert!(!g.screen2_x.is_nan(), "creature {i}");
-        }
-        assert!(
-            (g.screen2_x.is_nan() && c.screened > 0.0 && c.screened < 1.5)
-                || (g.screen2_x - c.screen2_x).abs() < 0.05,
-            "creature {i}: second rung distance GPU {} vs CPU {}",
-            g.screen2_x,
-            c.screen2_x
-        );
-        assert!(
-            (g.fitness - c.fitness).abs() < 0.05,
-            "creature {i}: GPU {} vs CPU {}",
-            g.fitness,
-            c.fitness
-        );
-    }
-    assert!(
-        late_screened > 0,
-        "the second bar must screen some creatures"
-    );
 }
 
 #[test]
