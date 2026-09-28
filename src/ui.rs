@@ -256,6 +256,37 @@ struct Playback {
     fall: Option<(u32, f32)>,
     /// The distance the CPU engine scored for this very recording.
     distance: f32,
+    /// Where the follow camera looks at each frame: the body's center of
+    /// mass averaged over `CAMERA_WINDOW` seconds on either side. Every
+    /// frame is recorded in advance, so the average cancels the swing of
+    /// each stride without lagging behind a steady walk.
+    track: Vec<f32>,
+}
+/// Half-width of the follow camera's average of the center of mass (s).
+const CAMERA_WINDOW: f32 = 1.0;
+/// The follow camera's target per recorded frame: the mass-weighted center of
+/// the body, averaged over `CAMERA_WINDOW` seconds on either side.
+fn camera_track(frames: &[Vec<[f32; 2]>], nodes: &[Node]) -> Vec<f32> {
+    let mass: f32 = nodes.iter().map(|n| n.mass).sum::<f32>().max(1e-6);
+    let centers: Vec<f64> = frames
+        .iter()
+        .map(|frame| {
+            let x: f32 = frame.iter().zip(nodes).map(|(p, n)| n.mass * p[0]).sum();
+            f64::from(x / mass)
+        })
+        .collect();
+    let mut sums = Vec::with_capacity(centers.len() + 1);
+    sums.push(0.0f64);
+    for c in &centers {
+        sums.push(sums.last().unwrap() + c);
+    }
+    let half = (CAMERA_WINDOW * physics::rate() as f32).round() as usize;
+    (0..centers.len())
+        .map(|i| {
+            let (a, b) = (i.saturating_sub(half), (i + half + 1).min(centers.len()));
+            ((sums[b] - sums[a]) / (b - a) as f64) as f32
+        })
+        .collect()
 }
 impl Playback {
     fn new(creature: Creature, config: Config) -> Self {
@@ -272,11 +303,13 @@ impl Playback {
                 .saturating_add((result.fall_time * physics::rate() as f32).round() as u32);
             (tick.min(last_frame), result.fitness)
         });
+        let track = camera_track(&frames, &nodes);
         let mut playback = Self {
             nodes,
             joints,
             fall,
             distance: result.fitness,
+            track,
             creature: normalized,
             config,
             tick: physics::settle()
@@ -328,6 +361,48 @@ impl Playback {
                 node.pos = *position;
             }
         }
+    }
+    /// Share of the way to the next recorded frame that the replay clock
+    /// has gone.
+    fn blend(&self) -> f32 {
+        (self.accumulator / physics::dt()).clamp(0.0, 1.0)
+    }
+    /// Places the nodes between the current frame and the next by `blend`,
+    /// so motion looks smooth when the screen refreshes faster than the
+    /// 60 Hz recording.
+    fn show_between(&mut self) {
+        let alpha = self.blend();
+        let (Some(now), Some(next)) = (
+            self.frames.get(self.tick as usize),
+            self.frames.get(self.tick as usize + 1),
+        ) else {
+            return self.show();
+        };
+        for ((node, a), b) in self.nodes.iter_mut().zip(now).zip(next) {
+            node.pos = [a[0] + (b[0] - a[0]) * alpha, a[1] + (b[1] - a[1]) * alpha];
+        }
+    }
+    /// Where the follow camera looks now (see `track`).
+    fn camera_x(&self) -> f32 {
+        let at = |tick: usize| {
+            self.track
+                .get(tick)
+                .or(self.track.last())
+                .copied()
+                .unwrap_or(0.0)
+        };
+        let tick = self.tick as usize;
+        let alpha = self.blend();
+        at(tick) + (at(tick + 1) - at(tick)) * alpha
+    }
+    /// Mass-weighted center of the body as drawn.
+    fn shown_center(&self) -> Option<[f32; 2]> {
+        let mass: f32 = self.nodes.iter().map(|n| n.mass).sum();
+        (mass > 0.0).then(|| {
+            let x = self.nodes.iter().map(|n| n.mass * n.pos[0]).sum::<f32>();
+            let y = self.nodes.iter().map(|n| n.mass * n.pos[1]).sum::<f32>();
+            [x / mass, y / mass]
+        })
     }
     /// Mass-weighted center of the body at a recorded frame.
     fn center_of_mass(&self, tick: u32) -> Option<[f32; 2]> {
@@ -1807,7 +1882,7 @@ impl App {
                 }
                 previous = Some(point);
             }
-            if let Some(com) = p.center_of_mass(p.tick) {
+            if let Some(com) = p.shown_center() {
                 painter.circle_filled(
                     world(com[0], com[1]),
                     3.5,
@@ -2795,7 +2870,9 @@ impl App {
         );
         let zoom = 34.0;
         let visible = lanes_rect.width() / zoom;
-        let target = (distances[leader] - visible * 0.6).max(0.0);
+        // The leader's averaged center of mass, so its stride does not shake
+        // the view; the easing below smooths a change of leader.
+        let target = (self.race[leader].playback.camera_x() - visible * 0.6).max(0.0);
         let dt = ui.ctx().input(|i| i.stable_dt).clamp(0.0, 0.1);
         self.race_camera += (target - self.race_camera) * (dt * 4.0).min(1.0);
         let camera = self.race_camera;
@@ -3526,18 +3603,22 @@ impl eframe::App for App {
                 };
                 if let Some(p) = &mut self.playback {
                     advance(p);
-                    if self.follow {
-                        let x =
-                            p.nodes.iter().map(|n| n.pos[0]).sum::<f32>() / p.nodes.len() as f32;
-                        self.camera[0] += (x - self.camera[0]) * (dt * 8.).min(1.0);
-                    }
+                    p.show_between();
                 }
                 if self.tab == Tab::Race {
                     for lane in &mut self.race {
                         advance(&mut lane.playback);
+                        lane.playback.show_between();
                     }
                 }
             }
+        }
+        // The camera follows the averaged center of mass, paused or not, so
+        // a seek also recenters it.
+        if self.follow
+            && let Some(p) = &self.playback
+        {
+            self.camera[0] = p.camera_x();
         }
         let theme = self.theme();
         egui::Panel::top("top")
@@ -4372,6 +4453,28 @@ fn export_creature_gif(playback: &Playback, path: &std::path::Path) -> anyhow::R
 mod tests {
     use super::*;
     use crate::evolution::{Bone, Muscle, NodeGene};
+    #[test]
+    fn the_follow_camera_ignores_the_stride_and_keeps_up_with_the_walk() {
+        // One node walking at 2 m/s, swinging 0.3 m back and forth once per
+        // second.
+        let rate = physics::rate() as f32;
+        let frames: Vec<Vec<[f32; 2]>> = (0..600)
+            .map(|i| {
+                let t = i as f32 / rate;
+                vec![[2.0 * t + 0.3 * (std::f32::consts::TAU * t).sin(), 0.5]]
+            })
+            .collect();
+        let nodes = vec![Node {
+            mass: 1.0,
+            ..Node::default()
+        }];
+        let track = camera_track(&frames, &nodes);
+        let margin = (CAMERA_WINDOW * rate) as usize;
+        for (i, x) in track.iter().enumerate().skip(margin).take(600 - 2 * margin) {
+            let walk = 2.0 * i as f32 / rate;
+            assert!((x - walk).abs() < 0.02, "frame {i}: camera {x}, walk {walk}");
+        }
+    }
     #[test]
     fn zoom_scales_a_plot_range_around_its_center() {
         assert_eq!(scaled_range(10.0..=20.0, 0.5), 12.5..=17.5);
