@@ -36,6 +36,10 @@ pub enum Command {
     Page(usize),
     /// Ancestors of the creature with this id, answered in `Snapshot::lineage`.
     Lineage(u64),
+    /// Start or stop sending the archive map table with snapshots.
+    MapTable(bool),
+    /// The archive creature with this id, answered in `Snapshot::selected`.
+    Select(u64),
     /// Benchmark probe: the UI send time, used to measure how long queued controls wait.
     Ping(Instant),
     /// Benchmark probe: re-applies the current settings like an environment
@@ -136,6 +140,18 @@ fn log_world_change(
     };
     log_event(events, generation, kind, text);
 }
+/// One occupied behavior cell of the global archive, for the map. The table
+/// is small (one row per elite) and carries no body, so it can follow every
+/// archive change; a click asks for the body with `Command::Select`.
+#[derive(Clone, Copy)]
+pub struct MapCell {
+    /// Behavior bins: ground contact, cadence, bounce, height, feet.
+    pub niche: [u8; 6],
+    pub score: f32,
+    /// Place in the archive ranking by distance.
+    pub rank: usize,
+    pub id: u64,
+}
 /// One ancestor of a selected creature.
 #[derive(Clone)]
 pub struct LineageStep {
@@ -171,6 +187,11 @@ pub struct Snapshot {
     pub preview: Option<(Creature, Config)>,
     /// What happened to this experiment, oldest first.
     pub events: Arc<Vec<Event>>,
+    /// The archive map table while the UI asks for it.
+    pub map: Option<Arc<Vec<MapCell>>>,
+    /// A creature the UI asked for with `Command::Select`, and the world it
+    /// is scored in; sent once.
+    pub selected: Option<(Creature, Config)>,
     /// Ancestor chain of a requested creature (its id first), newest first;
     /// sent once per request.
     pub lineage: Option<(u64, Vec<LineageStep>)>,
@@ -326,6 +347,12 @@ fn run(
     let mut epoch = 0u64;
     let mut history = Arc::new(Vec::new());
     let mut events: Arc<Vec<Event>> = Arc::new(Vec::new());
+    // Archive map table: whether the UI wants it, the last one built, and the
+    // archive state it was built from.
+    let mut want_map = false;
+    let mut map: Option<Arc<Vec<MapCell>>> = None;
+    let mut map_key = (u64::MAX, usize::MAX, 0u64);
+    let mut selected: Option<(Creature, Config)> = None;
     let mut checkpoint_thread: Option<std::thread::JoinHandle<()>> = None;
     let benchmark_generations = std::env::var("EVOLUTION_BENCH_GENERATIONS")
         .ok()
@@ -391,6 +418,8 @@ fn run(
                     Command::Ping(_)
                         | Command::Page(_)
                         | Command::Lineage(_)
+                        | Command::MapTable(_)
+                        | Command::Select(_)
                         | Command::Pause
                         | Command::Run { .. }
                         | Command::Next
@@ -599,6 +628,24 @@ fn run(
                     }
                     Command::Page(start) => {
                         page = start;
+                    }
+                    Command::MapTable(on) => {
+                        want_map = on;
+                        if !on {
+                            map = None;
+                            map_key = (u64::MAX, usize::MAX, 0);
+                        }
+                    }
+                    Command::Select(id) => {
+                        if let Some(e) = &exp
+                            && let Some(elite) = e
+                                .archive
+                                .entries
+                                .iter()
+                                .find(|elite| elite.creature.id == id)
+                        {
+                            selected = Some((elite.creature.clone(), e.config.clone()));
+                        }
                     }
                     Command::Lineage(id) => {
                         if let Some(e) = &exp {
@@ -1026,6 +1073,37 @@ fn run(
                 if history.len() != e.history.len() {
                     history = Arc::new(e.history.clone());
                 }
+                if want_map {
+                    let key = (epoch, e.archive.entries.len(), e.archive.qd_score.to_bits());
+                    if map.is_none() || key != map_key {
+                        map_key = key;
+                        let mut order: Vec<usize> = (0..e.archive.entries.len()).collect();
+                        order.sort_unstable_by(|&a, &b| {
+                            e.archive.entries[b]
+                                .fitness
+                                .total_cmp(&e.archive.entries[a].fitness)
+                        });
+                        map = Some(Arc::new(
+                            order
+                                .into_iter()
+                                .enumerate()
+                                .filter(|&(_, i)| {
+                                    !qd::is_morphology_niche(&e.archive.entries[i].niche)
+                                        && e.archive.entries[i].fitness.is_finite()
+                                })
+                                .map(|(rank, i)| {
+                                    let elite = &e.archive.entries[i];
+                                    MapCell {
+                                        niche: elite.descriptor.niche().0,
+                                        score: elite.fitness,
+                                        rank,
+                                        id: elite.creature.id,
+                                    }
+                                })
+                                .collect(),
+                        ));
+                    }
+                }
                 let archive_count = e.archive.entries.len();
                 let item_count = if archive_count > 0 {
                     archive_count
@@ -1099,6 +1177,8 @@ fn run(
                     running,
                     history: history.clone(),
                     events: events.clone(),
+                    map: map.clone(),
+                    selected: selected.take(),
                     page: cards,
                     page_start: page,
                     preview: preview.take(),
@@ -1149,6 +1229,8 @@ fn run(
                     running: false,
                     history: history.clone(),
                     events: events.clone(),
+                    map: None,
+                    selected: selected.take(),
                     page: vec![],
                     page_start: 0,
                     preview: None,

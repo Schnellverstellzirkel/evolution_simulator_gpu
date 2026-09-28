@@ -613,22 +613,6 @@ impl FrameMarks {
 /// Behavior-axis bin counts, mirroring `qd::BINS` (ground contact, cadence,
 /// bounce, height, feet). Bounce keeps one bin, so it adds no map cell.
 const MAP_BINS: [usize; 5] = [6, 8, 1, 6, 5];
-/// One occupied behavior cell of the archive map: the creature that holds it.
-struct MapCell {
-    score: f32,
-    rank: usize,
-    descriptor: crate::qd::Descriptor,
-    emitter: Option<crate::qd::Emitter>,
-    creature: Creature,
-}
-/// A sweep through the archive pages that fills `App::map_cells`.
-#[derive(Clone, Copy)]
-struct MapScan {
-    /// Start offset of the next page to request.
-    next: usize,
-    /// Archive size when the sweep started.
-    total: usize,
-}
 /// Which representation the Behavior archive tab shows.
 #[derive(Clone, Copy, PartialEq)]
 enum ArchiveView {
@@ -845,50 +829,47 @@ struct FameEntry {
     /// The world the record was set in.
     config: Config,
 }
-/// Heat map of the occupied archive cells for the selected height and feet
-/// bins. Returns the niche key of a clicked cell.
+/// Heat map of the archive: for each ground contact and cadence pair, the
+/// best creature among the height and feet bins the filters let through.
+/// One color scale spans every cell of the archive, so a color means the
+/// same distance whatever the filters. Returns the id of a clicked cell's
+/// creature.
 fn paint_archive_map(
     ui: &mut egui::Ui,
-    snapshot: &Snapshot,
-    cells: &HashMap<[u8; 6], MapCell>,
-    scan: Option<&MapScan>,
-    height_bin: usize,
-    feet_bin: usize,
+    cells: &[crate::worker::MapCell],
+    height_bin: Option<usize>,
+    feet_bin: Option<usize>,
     theme: Theme,
-) -> Option<[u8; 6]> {
-    let visible: Vec<(&[u8; 6], &MapCell)> = cells
+) -> Option<u64> {
+    let (min, max) = cells
         .iter()
-        .filter(|(niche, _)| niche[3] as usize == height_bin && niche[4] as usize == feet_bin)
-        .collect();
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), cell| {
+            (lo.min(cell.score), hi.max(cell.score))
+        });
+    let range = (max - min).max(1e-6);
+    // Best cell and how many ways of moving share each contact and cadence
+    // pair under the filters.
+    let mut best: HashMap<(u8, u8), (crate::worker::MapCell, usize)> = HashMap::new();
+    for cell in cells.iter().filter(|cell| {
+        height_bin.is_none_or(|bin| usize::from(cell.niche[3]) == bin)
+            && feet_bin.is_none_or(|bin| usize::from(cell.niche[4]) == bin)
+    }) {
+        let entry = best
+            .entry((cell.niche[0], cell.niche[1]))
+            .or_insert((*cell, 0));
+        entry.1 += 1;
+        if cell.score > entry.0.score {
+            entry.0 = *cell;
+        }
+    }
     ui.label(
         RichText::new(format!(
-            "Ground contact against gait cadence · {} occupied cells in this slice · {} archive elites total",
-            visible.len(),
-            snapshot.archive_size,
+            "Ground contact against stride rate · {} cells · the best of each is shown",
+            best.len(),
         ))
         .small()
         .color(theme.muted),
     );
-    if let Some(scan) = scan {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label(
-                RichText::new(format!(
-                    "Mapping archive pages… {} / {}",
-                    scan.next.min(scan.total),
-                    scan.total
-                ))
-                .small()
-                .color(theme.accent),
-            );
-        });
-    }
-    let (min, max) = visible
-        .iter()
-        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), (_, cell)| {
-            (lo.min(cell.score), hi.max(cell.score))
-        });
-    let range = (max - min).max(1e-6);
     let (rect, _) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), ui.available_height().max(220.)),
         Sense::hover(),
@@ -911,16 +892,6 @@ fn paint_archive_map(
             [Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())],
             Stroke::new(1., theme.card_border),
         );
-    }
-    for row in 0..=rows {
-        let y = plot.bottom() - row as f32 * row_height;
-        painter.line_segment(
-            [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
-            Stroke::new(1., theme.card_border),
-        );
-    }
-    for column in 0..=columns {
-        let x = plot.left() + column as f32 * column_width;
         painter.text(
             Pos2::new(x, plot.bottom() + 4.),
             Align2::CENTER_TOP,
@@ -931,6 +902,10 @@ fn paint_archive_map(
     }
     for row in 0..=rows {
         let y = plot.bottom() - row as f32 * row_height;
+        painter.line_segment(
+            [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
+            Stroke::new(1., theme.card_border),
+        );
         painter.text(
             Pos2::new(plot.left() - 6., y),
             Align2::RIGHT_CENTER,
@@ -942,19 +917,18 @@ fn paint_archive_map(
     painter.text(
         Pos2::new(plot.center().x, plot.bottom() + 24.),
         Align2::CENTER_TOP,
-        "Ground contact",
+        "Share of the trial on the ground",
         FontId::proportional(11.),
         theme.ink,
     );
     painter.text(
         Pos2::new(rect.left() + 4., plot.top() - 16.),
         Align2::LEFT_BOTTOM,
-        "Cadence (Hz)",
+        "Strides per second",
         FontId::proportional(11.),
         theme.ink,
     );
-    // Legend: cold (slow) to hot (fast), with the distance range.
-    if !visible.is_empty() {
+    if !cells.is_empty() {
         let legend = Rect::from_min_max(
             Pos2::new(rect.right() - 272., rect.top() + 8.),
             Pos2::new(rect.right() - 92., rect.top() + 22.),
@@ -992,21 +966,25 @@ fn paint_archive_map(
             theme.muted,
         );
     }
-    if visible.is_empty() && scan.is_none() {
+    if best.is_empty() {
         painter.text(
             plot.center(),
             Align2::CENTER_CENTER,
-            "No occupied cells in this slice. Pick another height or feet level.",
+            if cells.is_empty() {
+                "No creatures kept yet. The map fills as evolution runs."
+            } else {
+                "No creatures with this height and these feet. Try All."
+            },
             FontId::proportional(13.),
             theme.muted,
         );
     }
     let mut clicked = None;
-    for (niche, cell) in visible {
+    for (&(contact, cadence), (cell, count)) in &best {
         let inner = Rect::from_min_size(
             Pos2::new(
-                plot.left() + niche[0] as f32 * column_width + 1.5,
-                plot.bottom() - (niche[1] as f32 + 1.) * row_height + 1.5,
+                plot.left() + contact as f32 * column_width + 1.5,
+                plot.bottom() - (cadence as f32 + 1.) * row_height + 1.5,
             ),
             Vec2::new(column_width - 3., row_height - 3.),
         );
@@ -1027,7 +1005,11 @@ fn paint_archive_map(
                 ink,
             );
         }
-        let response = ui.interact(inner, ui.id().with(("archive_map", *niche)), Sense::click());
+        let response = ui.interact(
+            inner,
+            ui.id().with(("archive_map", contact, cadence)),
+            Sense::click(),
+        );
         if response.hovered() {
             painter.rect_stroke(
                 inner,
@@ -1037,20 +1019,15 @@ fn paint_archive_map(
             );
         }
         if response.clicked() {
-            clicked = Some(*niche);
+            clicked = Some(cell.id);
         }
         response.on_hover_text(format!(
-            "{} · rank {} · {:.2} m\n{:.2} m tall · {} feet\n{}\nClick to replay",
-            species_name(&cell.creature),
+            "Rank {} · {:.2} m · {} tall · {}\n{} ways of moving in this cell, the best is shown\nClick to replay",
             cell.rank + 1,
             cell.score,
-            cell.descriptor.mean_height,
-            cell.descriptor.feet.round() as i32,
-            cell.emitter
-                .map_or("First generation".to_owned(), |e| format!(
-                    "Born {}",
-                    origin_words(e)
-                )),
+            height_bin_label(usize::from(cell.niche[3])),
+            feet_bin_label(usize::from(cell.niche[4])),
+            count,
         ));
     }
     clicked
@@ -1221,11 +1198,11 @@ struct App {
     /// A newer champion that replaces the one on screen when its replay loops.
     next_champion: Option<(Creature, Config)>,
     /// Behavior archive map: occupied cells keyed by their niche bytes.
-    map_cells: HashMap<[u8; 6], MapCell>,
-    map_scan: Option<MapScan>,
-    map_generation: u32,
-    map_height: usize,
-    map_feet: usize,
+    /// Map filters; None shows every bin.
+    map_height: Option<usize>,
+    map_feet: Option<usize>,
+    /// Whether the worker was last asked to send the map table.
+    map_sent: bool,
     archive_view: ArchiveView,
     /// Top archived elites racing side by side.
     race: Vec<RaceLane>,
@@ -1331,11 +1308,9 @@ impl App {
             pinned: false,
             champion_shown: false,
             next_champion: None,
-            map_cells: HashMap::new(),
-            map_scan: None,
-            map_generation: u32::MAX,
-            map_height: 0,
-            map_feet: 0,
+            map_height: None,
+            map_feet: None,
+            map_sent: false,
             archive_view: if smoke_tab == "map" {
                 ArchiveView::Map
             } else {
@@ -2396,7 +2371,6 @@ impl App {
                     .selectable_value(&mut self.archive_view, ArchiveView::Cards, "Cards")
                     .clicked()
                 {
-                    self.map_scan = None;
                     self.last_page = usize::MAX;
                 }
             });
@@ -2405,18 +2379,24 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Body height").small().color(theme.muted));
                 egui::ComboBox::from_id_salt("map_height")
-                    .selected_text(height_bin_label(self.map_height))
+                    .selected_text(self.map_height.map_or("All".to_owned(), height_bin_label))
                     .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.map_height, None, "All");
                         for bin in 0..MAP_BINS[3] {
-                            ui.selectable_value(&mut self.map_height, bin, height_bin_label(bin));
+                            ui.selectable_value(
+                                &mut self.map_height,
+                                Some(bin),
+                                height_bin_label(bin),
+                            );
                         }
                     });
                 ui.label(RichText::new("Feet").small().color(theme.muted));
                 egui::ComboBox::from_id_salt("map_feet")
-                    .selected_text(feet_bin_label(self.map_feet))
+                    .selected_text(self.map_feet.map_or("All".to_owned(), feet_bin_label))
                     .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.map_feet, None, "All");
                         for bin in 0..MAP_BINS[4] {
-                            ui.selectable_value(&mut self.map_feet, bin, feet_bin_label(bin));
+                            ui.selectable_value(&mut self.map_feet, Some(bin), feet_bin_label(bin));
                         }
                     });
                 ui.label(
@@ -2462,26 +2442,11 @@ impl App {
         });
         let mut selected = None;
         let mut requested = None;
-        let mut map_scan_request = None;
+        let mut map_click = None;
         if self.archive_view == ArchiveView::Map {
-            if self.map_scan.is_none()
-                && snapshot.archive_size > 0
-                && (self.map_cells.is_empty() || self.map_generation != snapshot.generation)
-            {
-                map_scan_request = Some((snapshot.archive_size, snapshot.generation));
-            }
-            let clicked = paint_archive_map(
-                ui,
-                snapshot,
-                &self.map_cells,
-                self.map_scan.as_ref(),
-                self.map_height,
-                self.map_feet,
-                theme,
-            );
-            if let Some(cell) = clicked.and_then(|key| self.map_cells.get(&key)) {
-                selected = Some((cell.creature.clone(), snapshot.config.clone()));
-            }
+            let empty = Vec::new();
+            let cells = snapshot.map.as_deref().unwrap_or(&empty);
+            map_click = paint_archive_map(ui, cells, self.map_height, self.map_feet, theme);
         } else {
             let columns = (ui.available_width() / 155.).floor().max(2.) as usize;
             let width = (ui.available_width() - (columns - 1) as f32 * 10.) / columns as f32;
@@ -2541,8 +2506,8 @@ impl App {
                 self.card_positions = positions;
             }
         }
-        if let Some((total, generation)) = map_scan_request {
-            self.begin_map_scan(total, generation);
+        if let Some(id) = map_click {
+            self.worker.send(Command::Select(id));
         }
         if let Some(start) = requested {
             self.worker.send(Command::Page(start));
@@ -2551,74 +2516,6 @@ impl App {
         if let Some((creature, config)) = selected {
             self.select(creature, config);
             self.tab = Tab::Overview;
-        }
-    }
-    /// Starts a sweep through the archive pages that fills the behavior map.
-    fn begin_map_scan(&mut self, total: usize, generation: u32) {
-        if total == 0 {
-            self.map_cells.clear();
-            self.map_scan = None;
-            return;
-        }
-        self.map_cells.clear();
-        self.map_generation = generation;
-        self.map_scan = Some(MapScan { next: 0, total });
-        self.last_page = usize::MAX;
-        self.worker.send(Command::Page(0));
-    }
-    /// Folds one published archive page into the behavior map while a sweep runs.
-    fn absorb_archive_page(&mut self, snapshot: &Snapshot) {
-        let Some(scan) = self.map_scan else { return };
-        if snapshot.archive_size != scan.total {
-            // The archive moved under the sweep, so start over.
-            let total = snapshot.archive_size;
-            self.map_cells.clear();
-            self.map_generation = snapshot.generation;
-            self.map_scan = (total > 0).then_some(MapScan { next: 0, total });
-            if total > 0 {
-                self.worker.send(Command::Page(0));
-            }
-            return;
-        }
-        if snapshot.page_start != scan.next || snapshot.page.is_empty() {
-            self.worker.send(Command::Page(scan.next));
-            return;
-        }
-        for card in &snapshot.page {
-            let Some(descriptor) = card.descriptor else {
-                continue;
-            };
-            if !card.score.is_finite() {
-                continue;
-            }
-            let key = descriptor.niche().0;
-            if self
-                .map_cells
-                .get(&key)
-                .is_none_or(|old| card.score > old.score)
-            {
-                self.map_cells.insert(
-                    key,
-                    MapCell {
-                        score: card.score,
-                        rank: card.rank,
-                        descriptor,
-                        emitter: card.emitter,
-                        creature: card.creature.clone(),
-                    },
-                );
-            }
-        }
-        self.map_generation = snapshot.generation;
-        let next = snapshot.page_start + snapshot.page.len();
-        if next >= scan.total {
-            self.map_scan = None;
-        } else {
-            self.map_scan = Some(MapScan {
-                next,
-                total: scan.total,
-            });
-            self.worker.send(Command::Page(next));
         }
     }
     /// Appends new all-time bests to the session hall of fame. Records come
@@ -3707,7 +3604,6 @@ impl eframe::App for App {
         let next = self.worker.view.lock().unwrap().take();
         if let Some(mut next) = next {
             self.absorb_records(&next);
-            self.absorb_archive_page(&next);
             if self
                 .snapshot
                 .as_ref()
@@ -3744,6 +3640,11 @@ impl eframe::App for App {
                 self.show_champion(c, cfg);
                 self.champion_shown = loaded;
             }
+            if let Some((c, cfg)) = next.selected.take() {
+                // A creature the player clicked on the archive map.
+                self.select(c, cfg);
+                self.tab = Tab::Overview;
+            }
             if let Some((id, lineage)) = next.lineage.take() {
                 if self.playback.as_ref().is_some_and(|p| p.creature.id == id) {
                     self.lineage = lineage;
@@ -3753,6 +3654,12 @@ impl eframe::App for App {
             self.snapshot = Some(next);
             self.follow_champion();
             self.maybe_build_race();
+        }
+        // The worker sends the archive map table only while the map shows.
+        let want_map = self.tab == Tab::Population && self.archive_view == ArchiveView::Map;
+        if want_map != self.map_sent {
+            self.map_sent = want_map;
+            self.worker.send(Command::MapTable(want_map));
         }
         let lineage_request =
             if (self.tab == Tab::Overview || self.tab == Tab::Lineage) && self.lineage.is_empty() {
