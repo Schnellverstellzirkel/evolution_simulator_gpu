@@ -309,6 +309,15 @@ fn assert_same_archive(a: &QdArchive, b: &QdArchive) {
     assert_eq!(a.morphology_count(), b.morphology_count());
 }
 
+/// What loading a save of `e` gives: saves keep only the archives and the
+/// search state, so a loaded game breeds its next generation from them.
+fn resumed(e: &Experiment) -> Experiment {
+    let mut resumed = e.clone();
+    resumed.stage = Stage::Archived;
+    resumed.prepare_next_batch().unwrap();
+    resumed
+}
+
 fn assert_same_next_batch(a: &Experiment, b: &Experiment) {
     a.validate().unwrap();
     b.validate().unwrap();
@@ -401,8 +410,9 @@ fn saving_twice_replaces_the_checkpoint_with_the_latest_state() {
     experiment.prepare_next_batch().unwrap();
     storage::save(&checkpoint.0, &experiment).unwrap();
     let replaced = storage::load(&checkpoint.0).unwrap();
-    assert_eq!(replaced.generation, original.generation + 1);
-    assert_same_population(&experiment.population, &replaced.population);
+    // The save holds the archives, and loading breeds the next generation.
+    assert_eq!(replaced.generation, original.generation + 2);
+    assert_same_next_batch(&resumed(&experiment), &replaced);
     assert_eq!(encoded(&experiment.archive), encoded(&replaced.archive));
     assert!(!checkpoint.0.with_extension("evo.tmp").exists());
 }
@@ -418,9 +428,10 @@ fn checkpoint_restores_archive_and_cma_for_identical_next_generation() {
     assert!(!uninterrupted.cma_emitters.is_empty());
     let checkpoint = Checkpoint::new("archive-resume");
     storage::save(&checkpoint.0, &uninterrupted).unwrap();
-    let mut restored = storage::load(&checkpoint.0).unwrap();
+    // Saved right after archiving: the loaded game breeds exactly the
+    // generation the uninterrupted one breeds next.
+    let restored = storage::load(&checkpoint.0).unwrap();
     uninterrupted.prepare_next_batch().unwrap();
-    restored.prepare_next_batch().unwrap();
     assert_same_next_batch(&uninterrupted, &restored);
 
     // A steady-state resume must also retain the RNG salt from earlier rounds.
@@ -429,11 +440,14 @@ fn checkpoint_restores_archive_and_cma_for_identical_next_generation() {
     uninterrupted.breed_slots(&slots).unwrap();
     let steady_checkpoint = Checkpoint::new("steady-resume");
     storage::save(&steady_checkpoint.0, &uninterrupted).unwrap();
-    restored = storage::load(&steady_checkpoint.0).unwrap();
-    uninterrupted.breed_slots(&slots).unwrap();
+    let mut restored = storage::load(&steady_checkpoint.0).unwrap();
+    let mut expected = resumed(&uninterrupted);
+    assert_eq!(restored.breed_round, 2);
+    assert_same_next_batch(&expected, &restored);
+    expected.breed_slots(&slots).unwrap();
     restored.breed_slots(&slots).unwrap();
-    assert_eq!(uninterrupted.breed_round, 3);
-    assert_same_next_batch(&uninterrupted, &restored);
+    assert_eq!(restored.breed_round, 3);
+    assert_same_next_batch(&expected, &restored);
 }
 
 #[test]
@@ -461,10 +475,9 @@ fn checkpoint_preserves_stalled_island_optimizer_next_generation() {
     uninterrupted.validate().unwrap();
     let checkpoint = Checkpoint::new("stalled-island-resume");
     storage::save(&checkpoint.0, &uninterrupted).unwrap();
-    let mut restored = storage::load(&checkpoint.0).unwrap();
-    assert_eq!(uninterrupted.island_progress, restored.island_progress);
+    let restored = storage::load(&checkpoint.0).unwrap();
     uninterrupted.prepare_next_batch().unwrap();
-    restored.prepare_next_batch().unwrap();
+    assert_eq!(uninterrupted.island_progress, restored.island_progress);
     assert!(
         uninterrupted
             .candidate_cma
@@ -533,7 +546,10 @@ fn checkpoint_rejects_invalid_optimizer_resume_metadata() {
         experiment.island_progress = progress;
         storage::save(&checkpoint.0, &experiment).unwrap();
         let restored = storage::load(&checkpoint.0).unwrap();
-        assert_eq!(restored.island_progress, experiment.island_progress);
+        assert_eq!(
+            restored.island_progress,
+            resumed(&experiment).island_progress
+        );
     }
 }
 
@@ -601,17 +617,18 @@ fn ready_environment_change_checkpoint_retests_the_same_elites() {
 
     let checkpoint = Checkpoint::new("ready-world-change");
     storage::save(&checkpoint.0, &uninterrupted).unwrap();
-    let mut restored = storage::load(&checkpoint.0).unwrap();
+    let restored = storage::load(&checkpoint.0).unwrap();
     assert_eq!(restored.config, changed);
-    assert!(restored.island_progress.is_empty());
     assert!(restored.archive.entries.is_empty());
     assert!(restored.cma_emitters.is_empty());
-    assert_eq!(encoded(&restored.reseed), encoded(&uninterrupted.reseed));
-    let elite_ids: Vec<_> = restored.reseed.iter().map(|creature| creature.id).collect();
-    let slots: Vec<_> = (0..restored.config.population).collect();
-    uninterrupted.breed_slots(&slots).unwrap();
-    restored.breed_slots(&slots).unwrap();
-    assert_same_next_batch(&uninterrupted, &restored);
+    // The queued elites are bred back into the loaded generation first.
+    let elite_ids: Vec<_> = uninterrupted
+        .reseed
+        .iter()
+        .map(|creature| creature.id)
+        .collect();
+    assert!(restored.reseed.is_empty());
+    assert_same_next_batch(&resumed(&uninterrupted), &restored);
     assert!(elite_ids.iter().all(|id| {
         restored
             .population
@@ -645,19 +662,29 @@ fn steady_environment_change_checkpoint_keeps_boundary_state_valid() {
     let mut restored = storage::load(&checkpoint.0).unwrap();
     assert_eq!(restored.config, changed);
     assert!(restored.pending.is_none());
-    assert!(restored.island_progress.is_empty());
-    assert_eq!(encoded(&restored.reseed), encoded(&uninterrupted.reseed));
+    assert!(restored.reseed.is_empty());
     restored.validate().unwrap();
-    assert_same_population(&uninterrupted.population, &restored.population);
-    assert_eq!(restored.generation, uninterrupted.generation);
+    assert_eq!(restored.generation, uninterrupted.generation + 1);
     assert_eq!(restored.breed_round, uninterrupted.breed_round);
-    assert_eq!(restored.stage, Stage::Evaluating);
+    assert_eq!(restored.stage, Stage::Ready);
     assert_eq!(restored.evaluated, 0);
     assert!(restored.archive.entries.is_empty());
     assert!(restored.cma_emitters.is_empty());
-    uninterrupted.breed_slots(&slots).unwrap();
+    // The queued elites are bred back into the loaded generation first.
+    for elite in &uninterrupted.reseed {
+        assert!(
+            restored
+                .population
+                .genomes
+                .iter()
+                .any(|genome| genome.id == elite.id)
+        );
+    }
+    let mut expected = resumed(&uninterrupted);
+    assert_same_next_batch(&expected, &restored);
+    expected.breed_slots(&slots).unwrap();
     restored.breed_slots(&slots).unwrap();
-    assert_same_next_batch(&uninterrupted, &restored);
+    assert_same_next_batch(&expected, &restored);
 }
 
 #[test]

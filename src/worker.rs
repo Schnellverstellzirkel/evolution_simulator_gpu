@@ -827,13 +827,22 @@ fn run(
             } else if last_progress.elapsed() > Duration::from_millis(250) {
                 let done = load.progress.done.load(Ordering::Relaxed) as f64;
                 let total = load.progress.total.load(Ordering::Relaxed).max(1) as f64;
-                status = format!(
-                    "Loading {}: {:.0}% of {:.1} GB, {:.0} s",
-                    load.path.display(),
-                    100.0 * done / total,
-                    total / 1e9,
-                    load.started.elapsed().as_secs_f64()
-                );
+                status = if done < total {
+                    format!(
+                        "Loading {}: {:.0}% of {:.0} MB, {:.0} s",
+                        load.path.display(),
+                        100.0 * done / total,
+                        total / 1e6,
+                        load.started.elapsed().as_secs_f64()
+                    )
+                } else {
+                    // A save holds the archives; the population is bred again.
+                    format!(
+                        "Loading {}: breeding the population from the archives, {:.0} s",
+                        load.path.display(),
+                        load.started.elapsed().as_secs_f64()
+                    )
+                };
                 last_progress = Instant::now();
                 changed = true;
             }

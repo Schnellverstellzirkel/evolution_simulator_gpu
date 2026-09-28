@@ -370,7 +370,10 @@ fn overlapping_nodes_remain_finite() {
     assert!(physics::evaluate(&c, &config()).is_finite());
 }
 #[test]
-fn partial_checkpoint_resumes_identically() {
+fn a_checkpoint_mid_generation_resumes_from_its_archives() {
+    // Saves keep the archives and search state, not the generation in
+    // progress: a game saved before its first archive starts again from the
+    // same random population.
     let mut e = Experiment::new(config()).unwrap();
     e.stage = Stage::Evaluating;
     for i in 0..7 {
@@ -379,19 +382,9 @@ fn partial_checkpoint_resumes_identically() {
     e.evaluated = 7;
     let checkpoint = path("partial");
     storage::save(&checkpoint, &e).unwrap();
-    let mut loaded = storage::load(&checkpoint).unwrap();
-    assert_eq!(loaded.evaluated, 7);
-    for i in 7..e.config.population {
-        e.scores[i] = physics::evaluate(&e.population.creature(i), &e.config);
-        loaded.scores[i] = physics::evaluate(&loaded.population.creature(i), &loaded.config);
-    }
-    assert_eq!(e.scores, loaded.scores);
-    e.evaluated = e.config.population;
-    loaded.evaluated = loaded.config.population;
-    e.archive_batch().unwrap();
-    loaded.archive_batch().unwrap();
-    e.prepare_next_batch().unwrap();
-    loaded.prepare_next_batch().unwrap();
+    let loaded = storage::load(&checkpoint).unwrap();
+    assert_eq!(loaded.evaluated, 0);
+    assert_eq!(loaded.stage, Stage::Ready);
     assert_eq!(e.population.nodes, loaded.population.nodes);
     assert_eq!(e.population.muscles, loaded.population.muscles);
     // A stale/incomplete temporary write cannot corrupt the committed checkpoint.

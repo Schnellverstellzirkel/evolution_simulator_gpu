@@ -2085,9 +2085,161 @@ impl Experiment {
 // multipliers to the binary configuration. Older files cannot decode the new
 // layout and are rejected cleanly instead of failing mid-stream. V7 puts a
 // small uncompressed header (`SaveHeader`) before the stream, so the game can
-// turn down a save it cannot use before it reads gigabytes.
-const MAGIC: &[u8; 8] = b"EVORUST7";
+// turn down a save it cannot use before it reads gigabytes. V8 keeps only the
+// archives and the search state (`SmallSave`); a loaded game breeds its
+// population from the archives again (owner decision, docs/data-architecture.md
+// section 12).
+const MAGIC: &[u8; 8] = b"EVORUST8";
+const V7_MAGIC: &[u8; 8] = b"EVORUST7";
 const V6_MAGIC: &[u8; 8] = b"EVORUST6";
+
+/// What a save holds: the archives and the search state, without the
+/// population, its scores, or anything bred for the generation in progress.
+#[derive(Serialize)]
+struct SmallSave<'a> {
+    config: &'a Config,
+    pending: &'a Option<Config>,
+    generation: u32,
+    history: &'a [Stats],
+    archive: &'a QdArchive,
+    emitter_stats: &'a [EmitterStats; qd::EMITTER_COUNT],
+    cma_emitters: &'a [CmaEmitter],
+    qd_version: u32,
+    breed_round: u64,
+    islands: &'a [QdArchive],
+    lineage: &'a HashMap<u64, Ancestor>,
+    island_progress: &'a [(f32, u32)],
+    reseed: &'a [Creature],
+}
+#[derive(Deserialize)]
+struct SmallLoad {
+    config: Config,
+    pending: Option<Config>,
+    generation: u32,
+    history: Vec<Stats>,
+    archive: QdArchive,
+    emitter_stats: [EmitterStats; qd::EMITTER_COUNT],
+    cma_emitters: Vec<CmaEmitter>,
+    qd_version: u32,
+    breed_round: u64,
+    islands: Vec<QdArchive>,
+    lineage: HashMap<u64, Ancestor>,
+    island_progress: Vec<(f32, u32)>,
+    reseed: Vec<Creature>,
+}
+impl<'a> SmallSave<'a> {
+    fn of(e: &'a Experiment) -> Self {
+        Self {
+            config: &e.config,
+            pending: &e.pending,
+            generation: e.generation,
+            history: &e.history,
+            archive: &e.archive,
+            emitter_stats: &e.emitter_stats,
+            cma_emitters: &e.cma_emitters,
+            qd_version: e.qd_version,
+            breed_round: e.breed_round,
+            islands: &e.islands,
+            lineage: &e.lineage,
+            island_progress: &e.island_progress,
+            reseed: &e.reseed,
+        }
+    }
+}
+impl SmallLoad {
+    /// The game the save describes. With elites to breed from, the next
+    /// generation is bred from the archives, as the game would have after
+    /// the saved generation; without, the population starts at random.
+    fn into_experiment(self) -> Result<Experiment> {
+        let n = self.config.population;
+        let mut e = Experiment {
+            config: self.config,
+            pending: self.pending,
+            generation: self.generation,
+            population: Population::default(),
+            scores: vec![f32::NAN; n],
+            parent_scores: vec![f32::NAN; n],
+            evaluated: 0,
+            stage: Stage::Archived,
+            ranks: vec![],
+            parents: vec![],
+            history: self.history,
+            evaluation_seconds: 0.0,
+            archive: self.archive,
+            emitter_stats: self.emitter_stats,
+            cma_emitters: self.cma_emitters,
+            candidate_emitters: vec![Emitter::Restart; n],
+            candidate_cma: vec![None; n],
+            candidate_parent_ids: vec![None; n],
+            morphology_reserve_override: None,
+            protected_until: vec![0; n],
+            trial_metrics: vec![TrialMetrics::default(); n],
+            screened: Vec::new(),
+            screen_distance: Vec::new(),
+            arena_spare: evolution::Arena::default(),
+            screen_samples: 0,
+            qd_version: self.qd_version,
+            breed_round: self.breed_round,
+            islands: self.islands,
+            lineage: self.lineage,
+            candidate_mates: Vec::new(),
+            island_progress: self.island_progress,
+            reseed: self.reseed,
+            fossils: Vec::new(),
+        };
+        ensure!(
+            e.island_progress.len() <= 64
+                && (e.island_progress.is_empty() || e.island_progress.len() == e.islands.len())
+                && e.island_progress.iter().all(|&(fitness, generation)| {
+                    (fitness.is_finite() || fitness == f32::NEG_INFINITY)
+                        && generation <= e.generation
+                }),
+            "Invalid checkpoint optimizer progress"
+        );
+        e.archive.rebuild_indices();
+        for island in &mut e.islands {
+            island.rebuild_indices();
+        }
+        let elites =
+            e.archive.entries.len() + e.islands.iter().map(|i| i.entries.len()).sum::<usize>();
+        if e.qd_version != qd::VERSION || (elites == 0 && e.reseed.is_empty()) {
+            // Nothing valid to breed from: a random population, as in a new game.
+            e.population = evolution::create(&e.config)?;
+            e.stage = Stage::Ready;
+            if e.qd_version != qd::VERSION {
+                // The saved generation's statistics describe scores that no
+                // longer hold; its population is scored again.
+                if e.history
+                    .last()
+                    .is_some_and(|s| s.generation == e.generation)
+                {
+                    e.history.pop();
+                }
+                // Version 28 made trials 20 s long; a game saved with longer
+                // trials continues with the fixed length.
+                let duration = Config::default().duration;
+                e.config.duration = duration;
+                if let Some(pending) = e.pending.as_mut() {
+                    pending.duration = duration;
+                }
+                e.qd_version = qd::VERSION;
+                e.archive = QdArchive::default();
+                e.islands.clear();
+                e.island_progress.clear();
+                e.reseed.clear();
+                e.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
+                e.cma_emitters.clear();
+            }
+        } else {
+            e.prepare_next_batch()?;
+        }
+        // The screen bar is not saved: the first resumed generation runs every
+        // trial in full and sets a new one.
+        e.config.screen = e.next_screen(true, e.config.duration);
+        e.validate()?;
+        Ok(e)
+    }
+}
 const V3_MAGIC: &[u8; 8] = b"EVORUST3";
 const V2_MAGIC: &[u8; 8] = b"EVORUST2";
 const LEGACY_MAGIC: &[u8; 8] = b"EVORUST1";
@@ -2230,7 +2382,7 @@ pub fn peek(path: &Path) -> Result<SaveHeader> {
         );
     }
     ensure!(
-        &magic == MAGIC,
+        &magic == MAGIC || &magic == V7_MAGIC,
         "{} is not a save of this game",
         path.display()
     );
@@ -2283,15 +2435,7 @@ pub fn save_with_progress(
         let mut buffered = BufWriter::with_capacity(1 << 20, encoder);
         bincode::DefaultOptions::new()
             .with_fixint_encoding()
-            .serialize_into(&mut buffered, experiment)?;
-        bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .serialize_into(
-                &mut buffered,
-                &CheckpointResume {
-                    island_progress: experiment.island_progress.clone(),
-                },
-            )?;
+            .serialize_into(&mut buffered, &SmallSave::of(experiment))?;
         let encoder = buffered.into_inner().map_err(|error| error.into_error())?;
         let mut out = encoder.finish()?;
         out.flush()?;
@@ -2331,7 +2475,9 @@ pub fn summary(path: &Path) -> Option<SaveSummary> {
     let mut file = BufReader::new(File::open(path).ok()?);
     let mut magic = [0; 8];
     file.read_exact(&mut magic).ok()?;
-    if &magic != MAGIC {
+    // Both the small saves and the full V7 saves begin with the settings,
+    // the pending settings and the generation.
+    if &magic != MAGIC && &magic != V7_MAGIC {
         return None;
     }
     let mut header = [0; SaveHeader::BYTES];
@@ -2371,13 +2517,14 @@ pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Ex
     file.read_exact(&mut magic)?;
     ensure!(
         &magic == MAGIC
+            || &magic == V7_MAGIC
             || &magic == V6_MAGIC
             || &magic == V3_MAGIC
             || &magic == V2_MAGIC
             || &magic == LEGACY_MAGIC,
         "Unsupported checkpoint format/version"
     );
-    if &magic == MAGIC {
+    if &magic == MAGIC || &magic == V7_MAGIC {
         let mut header = [0; SaveHeader::BYTES];
         file.read_exact(&mut header)?;
     }
@@ -2385,6 +2532,18 @@ pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Ex
     // instead of a call into the decompressor (18 s to 5 s at 3M).
     let mut decoder =
         BufReader::with_capacity(1 << 20, zstd::stream::read::Decoder::with_buffer(file)?);
+    if &magic == MAGIC {
+        let small: SmallLoad = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(24 * 1024 * 1024 * 1024)
+            .deserialize_from(&mut decoder)?;
+        let mut trailing = [0u8; 1];
+        ensure!(
+            decoder.read(&mut trailing)? == 0,
+            "Unexpected trailing checkpoint data"
+        );
+        return small.into_experiment();
+    }
     let mut experiment: Experiment = if &magic == LEGACY_MAGIC {
         let legacy: LegacyExperiment = bincode::DefaultOptions::new()
             .with_fixint_encoding()
@@ -2403,7 +2562,7 @@ pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Ex
             .with_limit(24 * 1024 * 1024 * 1024)
             .deserialize_from(&mut decoder)?
     };
-    if &magic == MAGIC || &magic == V6_MAGIC {
+    if &magic == V7_MAGIC || &magic == V6_MAGIC {
         let resume: CheckpointResume = bincode::DefaultOptions::new()
             .with_fixint_encoding()
             // A fixed-width vector length plus at most 64 (fitness, generation)
@@ -2835,6 +2994,24 @@ mod peek_tests {
 mod migration_tests {
     use super::*;
 
+    /// Writes `experiment` as a full V7 save, the format before small saves,
+    /// which still loads (and migrates) through `load`.
+    fn write_v7(path: &Path, experiment: &Experiment) {
+        let options = bincode::DefaultOptions::new().with_fixint_encoding();
+        let mut payload = options.serialize(experiment).unwrap();
+        payload.extend(
+            options
+                .serialize(&CheckpointResume {
+                    island_progress: experiment.island_progress.clone(),
+                })
+                .unwrap(),
+        );
+        let mut bytes = V7_MAGIC.to_vec();
+        bytes.extend(SaveHeader::of(experiment).to_bytes());
+        bytes.extend(zstd::stream::encode_all(payload.as_slice(), 3).unwrap());
+        std::fs::write(path, bytes).unwrap();
+    }
+
     #[test]
     fn the_header_turns_down_old_saves_before_reading_them() {
         let config = Config {
@@ -3108,7 +3285,7 @@ mod migration_tests {
             "evolution-v3-bone-order-{}.evo",
             std::process::id()
         ));
-        save(&checkpoint, &experiment).unwrap();
+        write_v7(&checkpoint, &experiment);
         let loaded = load(&checkpoint).unwrap();
         let _ = std::fs::remove_file(checkpoint);
 
@@ -3143,12 +3320,17 @@ mod migration_tests {
         experiment.stage = Stage::Archived;
         let checkpoint =
             std::env::temp_dir().join(format!("evolution-steady-{}.evo", std::process::id()));
-        save(&checkpoint, &experiment).unwrap();
-        let loaded = load(&checkpoint);
-        let _ = std::fs::remove_file(checkpoint);
-        let loaded = loaded.unwrap();
+        write_v7(&checkpoint, &experiment);
+        let loaded = load(&checkpoint).unwrap();
         assert_eq!(loaded.scores[1], 2.0);
         assert!(loaded.scores[0].is_nan());
+        // A small save keeps no scores: the loaded game starts a fresh
+        // generation from its (here empty) archives.
+        save(&checkpoint, &experiment).unwrap();
+        let loaded = load(&checkpoint).unwrap();
+        let _ = std::fs::remove_file(checkpoint);
+        assert!(loaded.scores.iter().all(|score| score.is_nan()));
+        assert_eq!(loaded.evaluated, 0);
     }
 
     #[test]

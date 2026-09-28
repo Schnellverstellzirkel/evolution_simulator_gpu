@@ -777,3 +777,17 @@ More problems on the way:
 - A save from before the current `qd::VERSION` loads, but its archive is emptied and every creature must be scored again, so after minutes of loading the game starts from zero. Both of the owner's saves are like that. Saves now start with a small header (magic `EVORUST7`: physics version, generation, population). The game reads it first and turns an older save down at once with a message that says why. `examples/upgrade_save.rs` rewrites an old save in the new format for benchmarks (`storage::load` still reads the old formats and migrates them).
 - The worker kept the running game while it loaded the next one. At 3M that doubles the memory (a 3M game uses about 10 GB) and can push the machine into swap, which freezes everything. The game is now released first.
 - The load ran on the worker thread, so the status line said nothing until it ended. It now runs on its own thread, and the status line shows the percentage read every 0.25 s. Commands that arrive meanwhile wait and run after it, in order. A save shows "Saving…" before it starts, a failed or cancelled save removes its temporary file, and the status line says how long a load or save took.
+
+### Small saves: archives and search state only
+
+The owner decided that saves hold only the archives and the search state (`docs/data-architecture.md` section 12, decision 3). A save (magic `EVORUST8`) now holds the configuration, generation, history, global and island archives, CMA emitters, emitter statistics, lineage, island progress and the elites queued for a new world. It holds no population, scores or per-slot state. Loading breeds the next generation from the archives, as the game would have after the saved generation. A save made after archiving resumes with exactly the generation the running game breeds next (tests in `tests/search_state.rs`). A save made mid-generation loses the children in flight; they are bred again. Without elites the population starts at random, as in a new game.
+
+`examples/load_profile.rs --fill 3` loads the evolved 3M save, gives it three generations of made-up scores spread over the archive cells (832 elites in the global archive, 3,072 in the islands, 3,164 lineage entries), then saves and loads it. With 8 threads, the game's budget, at low priority:
+
+| | full save (before) | small save |
+|---|---:|---:|
+| file | 1,389 MB | 3.4 MB |
+| save | 24 s | 0.06 s |
+| load | 6.8 s (26.9 s before the buffer fix) | 3.8 s, nearly all of it breeding 3M children |
+
+An evolved archive fills more cells than the made-up scores, so real saves will be larger, likely 10 to 20 MB. The status line shows the breeding phase. `storage::summary` still reads the settings and generation from the start of the payload, for File > Open. `storage::load` still reads full V7 and older saves. `examples/upgrade_save.rs` refuses a save whose archives do not survive under the current physics, because it would come out as a random population. The GUI benchmark checkpoints have to be made again by playing a generation and saving.
