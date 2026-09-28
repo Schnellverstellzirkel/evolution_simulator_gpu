@@ -754,3 +754,23 @@ A finding for every search table in this log: without checks, the 50 best elites
 ### Behavior metrics every 2 or 4 steps (measured, removed)
 
 Ground contact, height, bounce and lifted feet were sampled every 2 or 4 standard steps, each sample counting for the steps it stands for; falls, joint breaks, head shaking and touchdown sensors stayed per step, so no score changed (0 of 5,000 and 0 of 500,000). eval-bench, GPU only, no checks, interleaved: every step 69,100 to 74,600/s, every 2 steps 68,100 to 70,500, every 4 steps 67,100 to 71,000. No gain: the per-node sums the sampling skips are a few instructions next to the joint break and fall checks, which must run every step. On 5,000 evolved creatures it moved 6.8% of creatures to another archive cell at every 2 steps (3.9% of those that walked more than 5 s) and 46% at every 4 steps (the gait sampling falls to 15 per second). It was removed.
+
+## Loading saves (2026-09-28)
+
+The owner opened a save and the game seemed to freeze for more than 2 minutes. `examples/load_profile.rs` times the parts of a load. On `runs/evolved-3m-v26.evo` (1.4 GB, 3M creatures, generation 9), with other agents' builds loading the machine:
+
+| | before | after |
+|---|---:|---:|
+| read the file | 1.1 s | |
+| zstd decompression alone (2.3 GB) | 3.0 s | |
+| `storage::load` | 26.9 s | 12.1 s (same file), 6.8 s (the same game saved in the new format) |
+| of which bincode deserialization | 17.8 s | 4.8 s |
+| of which migration of an older physics version | 3.4 s | |
+
+bincode read the stream field by field straight from the zstd decoder, so every 4-byte field was a call into the decompressor. A 1 MiB buffer between them cut deserialization by three quarters. Saving had the same problem on the write side and got the same buffer; a 3M save now takes about 24 s on this loaded machine.
+
+More problems on the way:
+
+- A save from before the current `qd::VERSION` loads, but its archive is emptied and every creature must be scored again, so after minutes of loading the game starts from zero. Both of the owner's saves are like that. Saves now start with a small header (magic `EVORUST7`: physics version, generation, population). The game reads it first and turns an older save down at once with a message that says why. `examples/upgrade_save.rs` rewrites an old save in the new format for benchmarks (`storage::load` still reads the old formats and migrates them).
+- The worker kept the running game while it loaded the next one. At 3M that doubles the memory (a 3M game uses about 10 GB) and can push the machine into swap, which freezes everything. The game is now released first.
+- The load ran on the worker thread, so the status line said nothing until it ended. It now runs on its own thread, and the status line shows the percentage read every 0.25 s. Commands that arrive meanwhile wait and run after it, in order. A save shows "Saving…" before it starts, a failed or cancelled save removes its temporary file, and the status line says how long a load or save took.
