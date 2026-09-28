@@ -353,7 +353,8 @@ fn run(
     let mut map: Option<Arc<Vec<MapCell>>> = None;
     let mut map_key = (u64::MAX, usize::MAX, 0u64);
     let mut selected: Option<(Creature, Config)> = None;
-    let mut checkpoint_thread: Option<std::thread::JoinHandle<()>> = None;
+    // A background autosave, which reports the file and generation it wrote.
+    let mut checkpoint_thread: Option<std::thread::JoinHandle<Option<(PathBuf, u32)>>> = None;
     let benchmark_generations = std::env::var("EVOLUTION_BENCH_GENERATIONS")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -1010,11 +1011,14 @@ fn run(
                                 checkpoint_thread = Some(std::thread::spawn(move || {
                                     if let Err(err) = storage::save(&path, &snapshot) {
                                         eprintln!("Background checkpoint failed: {err:#}");
-                                    } else if let Some(dir) = path.parent() {
+                                        return None;
+                                    }
+                                    if let Some(dir) = path.parent() {
                                         // One autosave per experiment piles up: keep the
                                         // three most recent experiments' autosaves.
                                         storage::rotate_autosaves(dir, 3);
                                     }
+                                    Some((path, snapshot.generation))
                                 }));
                             }
                             if !continuous || guided {
@@ -1067,6 +1071,22 @@ fn run(
             if sched.in_flight() == 0 {
                 steady.active = false;
             }
+        }
+        // A finished autosave goes into the event log, so the UI can say
+        // when the experiment was last saved.
+        if checkpoint_thread
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+            && let Some(handle) = checkpoint_thread.take()
+            && let Ok(Some((path, generation))) = handle.join()
+        {
+            log_event(
+                &mut events,
+                generation,
+                EventKind::Saved,
+                format!("Autosaved {}.", path.display()),
+            );
+            changed = true;
         }
         if changed && (last_publish.elapsed() > Duration::from_millis(200) || !running) {
             let snapshot = if let Some(e) = &exp {

@@ -1202,6 +1202,15 @@ struct App {
     file_mode: Option<&'static str>,
     /// The saves File > Open lists, newest first, while that window is open.
     open_list: Option<Vec<SaveEntry>>,
+    /// When this experiment was last saved (or opened) and at which
+    /// generation; None for a new experiment that was never saved.
+    saved: Option<(Instant, u32)>,
+    /// A save the worker is writing, since when.
+    saving: Option<Instant>,
+    /// A save path that exists and waits for the player to confirm.
+    overwrite: Option<PathBuf>,
+    /// The experiment and number of worker events already read.
+    events_seen: (u64, usize),
     file_path: String,
     message: Option<String>,
     /// The message on the status line and when it first showed.
@@ -1326,6 +1335,10 @@ impl App {
             history_latest: true,
             file_mode: None,
             open_list: None,
+            saved: None,
+            saving: None,
+            overwrite: None,
+            events_seen: (u64::MAX, 0),
             file_path: "runs/experiment.evo".into(),
             message: None,
             shown_message: None,
@@ -1605,6 +1618,18 @@ impl App {
                         self.config_sent = Some(Instant::now());
                     }
                 });
+                let (state, busy) = self.save_state();
+                ui.label(RichText::new(state).small().color(if busy {
+                    theme.accent
+                } else {
+                    theme.muted
+                }))
+                .on_hover_text("File > Save writes the experiment to runs/. The game writes nothing on its own unless autosave is on.");
+                if busy {
+                    ui.spinner();
+                    ui.ctx().request_repaint_after(Duration::from_millis(250));
+                }
+                ui.separator();
                 if let Some(s) = &self.snapshot {
                     ui.label(
                         RichText::new(format!(
@@ -3449,6 +3474,60 @@ impl App {
                 }
             });
     }
+    /// Follows the worker's event log for the save state: a save or an open
+    /// marks the experiment saved, a new game marks it unsaved.
+    fn absorb_events(&mut self, snapshot: &Snapshot) {
+        if self.events_seen.0 != snapshot.epoch || snapshot.events.len() < self.events_seen.1 {
+            self.events_seen = (snapshot.epoch, 0);
+        }
+        for event in &snapshot.events[self.events_seen.1..] {
+            match event.kind {
+                EventKind::Saved | EventKind::Opened => {
+                    self.saved = Some((Instant::now(), event.generation));
+                    if event.kind == EventKind::Saved {
+                        self.saving = None;
+                    }
+                }
+                EventKind::Started => self.saved = None,
+                _ => {}
+            }
+        }
+        self.events_seen.1 = snapshot.events.len();
+        if snapshot.error.is_some() {
+            self.saving = None;
+        }
+    }
+    /// Asks the worker to save, or first asks the player when the file exists.
+    fn save_to(&mut self, path: PathBuf, confirmed: bool) {
+        if !confirmed && path.exists() {
+            self.overwrite = Some(path);
+            return;
+        }
+        self.saving = Some(Instant::now());
+        self.worker.send(Command::Save(path));
+    }
+    /// Save state for the top bar: saving, saved how long ago, or not saved.
+    fn save_state(&self) -> (String, bool) {
+        if self.saving.is_some() {
+            return ("Saving…".to_owned(), true);
+        }
+        match self.saved {
+            Some((at, generation)) => {
+                let now = self.snapshot.as_ref().map_or(generation, |s| s.generation);
+                let since = now.saturating_sub(generation);
+                let ago = seconds_text(at.elapsed().as_secs_f64());
+                (
+                    if since > 0 {
+                        format!("Saved {ago} ago · {since} generations since")
+                    } else {
+                        format!("Saved {ago} ago")
+                    },
+                    false,
+                )
+            }
+            None => ("Not saved".to_owned(), false),
+        }
+    }
     /// Opens a saved experiment; the game starts paused on it.
     fn open_experiment(&mut self, path: PathBuf) {
         self.pause();
@@ -3544,6 +3623,35 @@ impl App {
     }
     fn dialogs(&mut self, ctx: &egui::Context) {
         self.open_window(ctx);
+        if let Some(path) = self.overwrite.clone() {
+            let mut answer = None;
+            egui::Window::new("Replace the save?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "{} already exists. Replace it with this experiment?",
+                        path.display()
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui.button("Replace").clicked() {
+                            answer = Some(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            answer = Some(false);
+                        }
+                    });
+                });
+            match answer {
+                Some(true) => {
+                    self.overwrite = None;
+                    self.save_to(path, true);
+                }
+                Some(false) => self.overwrite = None,
+                None => {}
+            }
+        }
         if self.new_dialog {
             egui::Window::new("Start a new experiment")
                 .collapsible(false)
@@ -3598,7 +3706,7 @@ impl App {
                         if ui.button(mode).clicked() {
                             let path = PathBuf::from(&self.file_path);
                             match mode {
-                                "Save experiment" => self.worker.send(Command::Save(path)),
+                                "Save experiment" => self.save_to(path, false),
                                 "Open experiment" => self.open_experiment(path),
                                 "Export CSV" => self.worker.send(Command::Export(path)),
                                 "Export creature JSON" => {
@@ -3771,6 +3879,7 @@ impl eframe::App for App {
                 self.show_champion(c, cfg);
                 self.champion_shown = loaded;
             }
+            self.absorb_events(&next);
             if let Some((c, cfg)) = next.selected.take() {
                 // A creature the player clicked on the archive map.
                 self.select(c, cfg);
