@@ -126,6 +126,10 @@ enum Action {
         /// runs with that bar.
         #[arg(long)]
         screened: bool,
+        /// Keep only creatures of at most this many nodes (a small kernel
+        /// class, for benchmarks beside another program on the GPU).
+        #[arg(long)]
+        max_nodes: Option<usize>,
     },
     /// Summarize an existing checkpoint's record curve and archive morphology.
     Analyze {
@@ -434,6 +438,7 @@ fn main() -> Result<()> {
             engine,
             plan_rank,
             screened,
+            max_nodes,
         }) => {
             let e = storage::load(&checkpoint)?;
             let mut cfg = e.config.clone();
@@ -460,6 +465,9 @@ fn main() -> Result<()> {
                     plan.muscles.len()
                 );
                 source.retain(|&i| plan_of(&e.population, i) == plan);
+            }
+            if let Some(max) = max_nodes {
+                source.retain(|&i| e.population.genomes[i].node_count as usize <= max);
             }
             let count = limit.unwrap_or(source.len()).min(source.len());
             let mut population = evolution_simulator::evolution::Population::default();
