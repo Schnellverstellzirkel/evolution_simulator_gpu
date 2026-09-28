@@ -217,3 +217,53 @@ Lineage becomes a panel opened from any creature's "Family tree" action instead 
 - Use of each path. An opt-in local log (for example `EVOLUTION_UI_LOG=path`, one CSV row per event) of replays by source (champion, card, map, record, race, lineage), tab visits, effect clicks and exports. A path nobody uses after a week of play is a candidate for removal.
 - Lost runs. Closes with unsaved generations and no confirmation should be zero.
 - No cost to evolution. The 3M GUI rate, frame p95 and control latency (`EVOLUTION_BENCH_SETTINGS_PROBE=1`) stay within run-to-run noise, because following the champion, the feed and the map must not slow the worker.
+
+## 6. After the overhaul
+
+Branch `claude/ux`, merged into main as it went (last UX commit 80565ac). Every quick win and structural change from section 4 landed, one commit each. The owner's readability feedback then added three more commits: contrast in both themes, bigger type, and alignment. Two items from the plan changed on the coordinator's instructions. Launch still starts playing at once, with no chooser. The opt-in usage log from section 5 was dropped, because it would be a setting.
+
+Screenshots after the overhaul were taken CPU-only (4,000 creatures, 2 s trials) while the RTX was busy. The 3M benchmark below ran on the RTX.
+
+| File | What it shows |
+| --- | --- |
+| [after-overview.png](ux-audit/after-overview.png) | Overview: tiles, the champion replay, chart and event feed |
+| [after-overview-dark.png](ux-audit/after-overview-dark.png) | The same in the dark theme |
+| [after-overview-1920.png](ux-audit/after-overview-1920.png) | The same laid out 1920 px wide (UI scale 0.75) |
+| [after-archive-cards.png](ux-audit/after-archive-cards.png) | Ways of moving: filters, cards, docked replay |
+| [after-archive-map.png](ux-audit/after-archive-map.png) | The map, filled while evolving |
+| [after-history.png](ux-audit/after-history.png) | History: chart and one records list |
+| [after-race.png](ux-audit/after-race.png) | Race, scaled to the farthest finish |
+| [after-lineage.png](ux-audit/after-lineage.png) | Lineage with species names |
+
+### Section 5 counts, before and after
+
+| Measure | Before | After |
+| --- | --- | --- |
+| Clicks from launch to watching the champion | 2 or more and a tab switch; never without clicks | 0: the Overview shows it after generation 1 |
+| Clicks to resume the latest save | 3, a typed path and a wasted 3M population | 2: File, then Open on the newest row |
+| Clicks to set one effect to a chosen level | up to 4, each a re-test | 1 |
+| Effects visible without scrolling at 1440x900 | 9 of 13 | 13 of 13, plus seasons and catastrophes |
+| Visible settings in the default UI | about 20, plus 29 percentile checkboxes | 4, none required: autosave (File), dark theme and UI scale (View), seed (New dialog) |
+| Research words on the main screen (QD, niche, emitter, CMA, topology reserve, gait score, mutability) | 7 | 0; they live in the closed Diagnostics drawer |
+| Map cells placed after 8 s of evolving (4,000 creatures) | 0 ("0 / 1025") | the full table, 43 to 44 cells |
+
+The resume count stays at 2 clicks because the owner wants no chooser at launch.
+
+### Cost to evolution
+
+The 3M GUI benchmark ran on the RTX under the GPU lock. Setup: a fresh 3M population, 20 s trials, one warm-up generation and two measured ones, `EVOLUTION_BENCH_SETTINGS_PROBE=1`, autosave off, `EVOLUTION_DEVICES=primary`, `RAYON_NUM_THREADS=8`. The Overview tab was on screen. Runs were interleaved, two per binary. The before binary is e161f51. The after binary is main at f371e70, which carries the UX work and also main's other changes since e161f51 (GPU authority, packing, the second screening rung, small saves). So the rate column bounds the combined effect and does not isolate the UI. The frame times are the UI thread's own.
+
+| Binary | Run | End to end | Frame p95 | FPS | Control p95 / p99 | Settings median / max |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| e161f51 | 1 | 346,246/s | 9.59 ms | 118.5 | 723 / 829 ms | 117 / 133 ms |
+| after | 1 | 356,337/s | 9.63 ms | 118.5 | 381 / 551 ms | 145 / 372 ms |
+| e161f51 | 2 | 331,553/s | 9.56 ms | 118.4 | 1,417 / 1,925 ms | 198 / 278 ms |
+| after | 2 | 367,805/s | 9.80 ms | 118.5 | 398 / 538 ms | 17 / 41 ms |
+
+Evolution is not slower. The after binary ran 3 to 11% faster end to end, and its control latency was lower. With two runs each, a 10% spread between single runs and main's other changes in the mix, the benchmark shows no cost from the UI; it does not show a UI gain. The UI thread's frame p95 rose by 0.04 to 0.24 ms (9.6 to 9.8 ms), and both binaries held the 120 FPS cap.
+
+### Known gaps
+
+- The Generation tile can read "100% done" while the last contender checks still run. The completed count reaches the population before the checks finish.
+- The event feed and the chart read the history rows, so a world change shows up in them only when the first generation in the new world ends. The world panel shows it at once.
+- The scripted think-aloud session from section 5 has not happened. It needs the owner.
