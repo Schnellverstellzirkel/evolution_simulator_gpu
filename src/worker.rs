@@ -70,6 +70,9 @@ pub struct LineageStep {
 pub struct Snapshot {
     pub epoch: u64,
     pub config: Config,
+    /// Settings the player asked for that take effect when the next
+    /// generation starts.
+    pub pending: Option<Config>,
     /// Elites lost to meteor strikes that an undo could bring back.
     pub fossils: usize,
     pub generation: u32,
@@ -914,6 +917,7 @@ fn run(
                 Snapshot {
                     epoch,
                     config: e.config.clone(),
+                    pending: e.pending.clone(),
                     fossils: e.fossils.len(),
                     generation: e.generation,
                     evaluated: e.evaluated,
@@ -968,6 +972,7 @@ fn run(
                 Snapshot {
                     epoch,
                     config: Config::default(),
+                    pending: None,
                     fossils: 0,
                     generation: 0,
                     evaluated: 0,

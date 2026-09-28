@@ -1152,6 +1152,8 @@ struct App {
     message: Option<String>,
     new_dialog: bool,
     dirty: bool,
+    /// When the UI last sent a settings change to the worker.
+    config_sent: Option<Instant>,
     last_frame: Instant,
     frame_times: std::collections::VecDeque<f32>,
     last_page: usize,
@@ -1277,6 +1279,7 @@ impl App {
             message: None,
             new_dialog: false,
             dirty: false,
+            config_sent: None,
             last_frame: Instant::now(),
             frame_times: Default::default(),
             last_page: usize::MAX,
@@ -1567,6 +1570,7 @@ impl App {
         ui.add_space(4.);
         let mut world_changed = false;
         ui.label(RichText::new("World").strong());
+        let live = self.snapshot.as_ref().map(|s| s.config.clone());
         let calm = world_is_calm(&self.config);
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(world_summary(&self.config)).color(if calm {
@@ -1588,6 +1592,18 @@ impl App {
                 world_changed = true;
             }
         });
+        if let Some(live) = &live
+            && live.physics_differs(&self.config)
+        {
+            ui.label(
+                RichText::new(format!(
+                    "Now: {}. The change starts with the next generation.",
+                    world_summary(live)
+                ))
+                .small()
+                .color(AMBER),
+            );
+        }
         ui.label(
             RichText::new(
                 "Click a level to change the world. The best creatures are tested again in the new world.",
@@ -1603,7 +1619,7 @@ impl App {
                     .iter()
                     .filter(|effect| effect.name != "Seasons")
                 {
-                    if effect_row(ui, effect, &mut self.config, theme) {
+                    if effect_row(ui, effect, &mut self.config, live.as_ref(), theme) {
                         world_changed = true;
                     }
                     ui.end_row();
@@ -1617,7 +1633,7 @@ impl App {
                 if let Some(seasons) = crate::environment::EFFECTS
                     .iter()
                     .find(|effect| effect.name == "Seasons")
-                    && effect_row(ui, seasons, &mut self.config, theme)
+                    && effect_row(ui, seasons, &mut self.config, None, theme)
                 {
                     world_changed = true;
                 }
@@ -1664,6 +1680,7 @@ impl App {
         });
         if world_changed {
             self.worker.send(Command::Configure(self.config.clone()));
+            self.config_sent = Some(Instant::now());
             // Applied already, so it does not count as an unapplied setting.
             before = self.config.clone();
         }
@@ -3729,16 +3746,19 @@ impl eframe::App for App {
             {
                 self.config = next.config.clone();
                 self.initial = false;
-            } else if self.config.seasons > 0
-                && !self.dirty
+            } else if !self.dirty
+                && self
+                    .config_sent
+                    .is_none_or(|sent| sent.elapsed() > Duration::from_secs(2))
                 && self
                     .snapshot
                     .as_ref()
                     .is_none_or(|old| old.epoch == next.epoch)
             {
-                // Seasons advance in the worker; keep the environment panel on
-                // the live world unless the local controls have pending edits.
-                self.config = next.config.clone();
+                // The worker owns the world: seasons advance it, and a change
+                // waits in `pending` until the next generation. The panel
+                // shows the world the player asked for.
+                self.config = next.pending.clone().unwrap_or_else(|| next.config.clone());
             }
             if let Some((c, cfg)) = next.preview.take() {
                 // The worker picks the creature of a new game (a random one)
@@ -4196,12 +4216,29 @@ fn effect_row(
     ui: &mut egui::Ui,
     effect: &crate::environment::Effect,
     config: &mut Config,
+    live: Option<&Config>,
     theme: Theme,
 ) -> bool {
     let level = effect.level(config);
     let away = level != effect.calm;
-    ui.label(RichText::new(effect.name).color(if away { theme.accent } else { theme.ink }))
-        .on_hover_text(effect.why);
+    let waiting = live.is_some_and(|live| effect.level(live) != level);
+    let color = if waiting {
+        AMBER
+    } else if away {
+        theme.accent
+    } else {
+        theme.ink
+    };
+    let name = ui.label(RichText::new(effect.name).color(color));
+    if let (true, Some(live)) = (waiting, live) {
+        name.on_hover_text(format!(
+            "Now {}. {} from the next generation.",
+            effect.levels[effect.level(live)],
+            effect.levels[level]
+        ));
+    } else {
+        name.on_hover_text(effect.why);
+    }
     let mut picked = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(3., 3.);
