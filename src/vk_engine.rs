@@ -113,6 +113,31 @@ pub fn gpu_slots() -> u32 {
         .unwrap_or(4)
 }
 
+/// Buffer size for `size` bytes of data. Small buffers round up to a power
+/// of two, which costs little. Large ones get 25% headroom, so units of
+/// slightly different sizes reuse them, without the up to 2x waste of a
+/// power of two.
+pub fn padded_size(size: u64) -> u64 {
+    const LARGE: u64 = 1 << 20;
+    let size = size.max(256);
+    if size <= LARGE {
+        size.next_power_of_two()
+    } else {
+        (size + size / 4).next_multiple_of(LARGE)
+    }
+}
+
+/// True when `error` comes from a failed device or host memory allocation,
+/// which another process holding GPU memory can cause for a while.
+pub fn out_of_memory(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<vk::Result>(),
+            Some(&vk::Result::ERROR_OUT_OF_DEVICE_MEMORY | &vk::Result::ERROR_OUT_OF_HOST_MEMORY)
+        )
+    })
+}
+
 pub fn spirv(source: &str) -> Result<Vec<u32>> {
     let module = naga::front::wgsl::parse_str(source).context("WGSL parse")?;
     let info = naga::valid::Validator::new(
@@ -316,13 +341,36 @@ impl VkEngine {
 
     /// Creates a persistently mapped buffer. Device-local mappable memory
     /// (ReBAR on discrete GPUs, all memory on integrated GPUs) is preferred.
+    /// Nothing leaks when an allocation fails part way.
     fn create_buffer(&self, size: u64, usage: vk::BufferUsageFlags, readback: bool) -> Result<Buf> {
-        let size = size.max(256).next_power_of_two();
+        let size = padded_size(size);
         unsafe {
             let buffer = self.device.create_buffer(
                 &vk::BufferCreateInfo::default().size(size).usage(usage),
                 None,
             )?;
+            match self.bind_mapped_memory(buffer, readback) {
+                Ok((memory, ptr)) => Ok(Buf {
+                    buffer,
+                    memory,
+                    size,
+                    ptr,
+                }),
+                Err(error) => {
+                    self.device.destroy_buffer(buffer, None);
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    /// Allocates, binds and maps the memory of a new buffer.
+    unsafe fn bind_mapped_memory(
+        &self,
+        buffer: vk::Buffer,
+        readback: bool,
+    ) -> Result<(vk::DeviceMemory, *mut u8)> {
+        unsafe {
             let requirements = self.device.get_buffer_memory_requirements(buffer);
             let wanted: &[vk::MemoryPropertyFlags] = if readback {
                 &[
@@ -346,17 +394,20 @@ impl VkEngine {
                     .memory_type_index(memory_type),
                 None,
             )?;
-            self.device.bind_buffer_memory(buffer, memory, 0)?;
-            let ptr =
-                self.device
-                    .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())?
-                    as *mut u8;
-            Ok(Buf {
-                buffer,
-                memory,
-                size,
-                ptr,
-            })
+            let mapped = self
+                .device
+                .bind_buffer_memory(buffer, memory, 0)
+                .and_then(|()| {
+                    self.device
+                        .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                });
+            match mapped {
+                Ok(ptr) => Ok((memory, ptr as *mut u8)),
+                Err(error) => {
+                    self.device.free_memory(memory, None);
+                    Err(error.into())
+                }
+            }
         }
     }
 
@@ -449,25 +500,52 @@ impl VkEngine {
             self.drop_group(slot, group);
             let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
             let readable = storage | vk::BufferUsageFlags::TRANSFER_SRC;
-            let res = GroupRes {
-                nodes: self.create_buffer(need[0], readable, false)?,
-                muscles: self.create_buffer(need[1], readable, false)?,
-                bones: self.create_buffer(need[2], storage, false)?,
-                results: self.create_buffer(
-                    need[3],
-                    storage | vk::BufferUsageFlags::TRANSFER_SRC,
-                    false,
-                )?,
-                info: self.create_buffer(need[4], storage, false)?,
-                tiles: self.create_buffer(need[5], storage, false)?,
-                set: vk::DescriptorSet::null(),
+            let usages = [readable, readable, storage, readable, storage, storage];
+            let mut made: Vec<Buf> = Vec::with_capacity(usages.len());
+            let mut failure = None;
+            for (bytes, usage) in need.into_iter().zip(usages) {
+                match self.create_buffer(bytes, usage, false) {
+                    Ok(buf) => made.push(buf),
+                    Err(error) => {
+                        failure = Some(error);
+                        break;
+                    }
+                }
+            }
+            let set = match failure {
+                Some(error) => Err(error),
+                None => unsafe {
+                    self.device
+                        .allocate_descriptor_sets(
+                            &vk::DescriptorSetAllocateInfo::default()
+                                .descriptor_pool(self.descriptor_pool)
+                                .set_layouts(&[self.set_layout]),
+                        )
+                        .map(|sets| sets[0])
+                        .map_err(anyhow::Error::from)
+                },
             };
-            let set = unsafe {
-                self.device.allocate_descriptor_sets(
-                    &vk::DescriptorSetAllocateInfo::default()
-                        .descriptor_pool(self.descriptor_pool)
-                        .set_layouts(&[self.set_layout]),
-                )?[0]
+            let set = match set {
+                Ok(set) => set,
+                Err(error) => {
+                    for buf in made {
+                        self.destroy_buffer(buf);
+                    }
+                    return Err(error);
+                }
+            };
+            let Ok([nodes, muscles, bones, results, info, tiles]) = <[Buf; 6]>::try_from(made)
+            else {
+                unreachable!("one buffer per binding");
+            };
+            let res = GroupRes {
+                nodes,
+                muscles,
+                bones,
+                results,
+                info,
+                tiles,
+                set,
             };
             let params = self.slots[slot].params.as_ref().unwrap();
             let infos = [
@@ -500,29 +578,54 @@ impl VkEngine {
                 })
                 .collect();
             unsafe { self.device.update_descriptor_sets(&writes, &[]) };
-            self.slots[slot].groups[group] = Some(GroupRes { set, ..res });
+            self.slots[slot].groups[group] = Some(res);
         }
-        self.allocated_bytes = self
-            .slots
-            .iter()
-            .map(|slot| {
-                slot.groups
-                    .iter()
-                    .flatten()
-                    .map(|g| {
-                        g.nodes.size
-                            + g.muscles.size
-                            + g.bones.size
-                            + g.results.size
-                            + g.info.size
-                            + g.tiles.size
-                    })
-                    .sum::<u64>()
-                    + slot.params.as_ref().map_or(0, |b| b.size)
-                    + slot.readback.as_ref().map_or(0, |b| b.size)
-            })
-            .sum();
         Ok(())
+    }
+
+    /// Bytes of buffers a slot keeps for reuse.
+    fn slot_bytes(slot: &Slot) -> u64 {
+        slot.groups
+            .iter()
+            .flatten()
+            .map(|g| {
+                g.nodes.size
+                    + g.muscles.size
+                    + g.bones.size
+                    + g.results.size
+                    + g.info.size
+                    + g.tiles.size
+            })
+            .sum::<u64>()
+            + slot.params.as_ref().map_or(0, |b| b.size)
+            + slot.readback.as_ref().map_or(0, |b| b.size)
+    }
+
+    fn recount_allocated(&mut self) {
+        self.allocated_bytes = self.slots.iter().map(Self::slot_bytes).sum();
+    }
+
+    /// Frees the buffers that idle slots keep for reuse, so a submission that
+    /// ran out of device memory can try again. Returns the bytes freed.
+    pub fn release_idle(&mut self) -> u64 {
+        self.recount_allocated();
+        let before = self.allocated_bytes;
+        for slot in 0..self.slots.len() {
+            if self.slots[slot].pending.is_some() {
+                continue;
+            }
+            for group in 0..self.slots[slot].groups.len() {
+                self.drop_group(slot, group);
+            }
+            if let Some(b) = self.slots[slot].params.take() {
+                self.destroy_buffer(b);
+            }
+            if let Some(b) = self.slots[slot].readback.take() {
+                self.destroy_buffer(b);
+            }
+        }
+        self.recount_allocated();
+        before.saturating_sub(self.allocated_bytes)
     }
 
     fn drop_group(&mut self, slot: usize, group: usize) {
@@ -659,10 +762,15 @@ impl VkEngine {
         );
         let fidelity = cfg.fidelity();
         let pipeline_set = self.pipeline_set(fidelity)?;
+        // The free slot with the most buffers to reuse: when memory is short,
+        // a new allocation may fail where reuse does not.
         let slot = self
             .slots
             .iter()
-            .position(|s| s.pending.is_none())
+            .enumerate()
+            .filter(|(_, s)| s.pending.is_none())
+            .max_by_key(|&(i, s)| (Self::slot_bytes(s), std::cmp::Reverse(i)))
+            .map(|(i, _)| i)
             .context("No free GPU submission slot")?;
         let ranges = (end - start).div_ceil(chunk);
         let kernels: Vec<vk::Pipeline> =
@@ -674,12 +782,14 @@ impl VkEngine {
                         [creature_kernel::capacity_index(batch.capacity)]),
                 })
                 .collect::<Result<_>>()?;
-        self.ensure_buffers(
+        let buffers = self.ensure_buffers(
             slot,
             batches,
             u64::from(ranges) * batches.len() as u64,
             read_state,
-        )?;
+        );
+        self.recount_allocated();
+        buffers?;
         let mut param_data =
             vec![0u8; (u64::from(ranges) * batches.len() as u64 * self.params_stride) as usize];
         for (r, tick) in (start..end).step_by(chunk as usize).enumerate() {

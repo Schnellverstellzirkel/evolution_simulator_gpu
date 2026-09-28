@@ -649,3 +649,20 @@ Why it is slower:
 - Lockstep epochs were a suspect but not the cause: a shared budget of lane chunks, so costly warps run fewer steps and every warp stops at the same time, changed the checked rate by less than 10%.
 
 What stage 1 would need to win: a kernel at 128 registers or fewer, and GPU-side compaction that moves running creatures into dense warps between epochs. Both are open. The segment engine stays the default.
+
+## GPU memory: ride out a full GPU, smaller buffers (2026-09-28)
+
+The owner started the game while another process held GPU memory. The first submission failed with "A device memory allocation has failed", the scheduler retired the GPU and sent every unit to the CPU for the rest of the session. The GPU thread now keeps a unit whose allocation fails for lack of device or host memory (`vk_engine::out_of_memory` looks for `ERROR_OUT_OF_DEVICE_MEMORY` or `ERROR_OUT_OF_HOST_MEMORY` in the error chain). It frees the buffers that idle slots keep for reuse and tries again. While other units run, the unit waits for one of them to finish, and fewer units run at once from then on; one more is tried every 10 s. With nothing running it retries every 0.5 s for up to 60 s and only then fails as before. It prints one line when it starts waiting and one when memory is back. A submission now prefers the free slot with the most cached buffers, and a failed allocation no longer leaks the buffers made before it. Tests in `src/engine.rs` run the GPU thread's loop on a fake device that runs out of memory.
+
+Buffers used to round up to the next power of two, which wastes up to half of a large buffer. Buffers above 1 MiB now get 25% headroom, rounded up to 1 MiB. Smaller ones still round up to a power of two.
+
+`examples/gpu_hog.rs` holds a chosen amount of GPU memory for a while, to test the recovery by hand.
+
+3M GUI benchmark on `runs/evolved-3m-v26.evo` (`EVOLUTION_BENCH_GENERATIONS=2`, `EVOLUTION_BENCH_WARMUP=1`, `EVOLUTION_BENCH_DURATION=60`, `EVOLUTION_CPU_THREADS=0`, `EVOLUTION_DEVICES=primary`, `RAYON_NUM_THREADS=8`, autosave off), the game's own GPU memory sampled every 0.5 s with `nvidia-smi --query-compute-apps`. One run each, on a machine with other agents' CPU work (load average about 11):
+
+| | peak GPU memory | p90 | median | end to end | peak RSS |
+|---|---:|---:|---:|---:|---:|
+| power-of-two buffers | 2,253 MiB | 1,811 MiB | 800 MiB | 226,603/s | 10.06 GB |
+| 25% headroom | 1,920 MiB | 1,536 MiB | 706 MiB | 212,805/s | 9.96 GB |
+
+Peak GPU memory falls by 15%. The rate difference is inside the 10% spread between single runs.

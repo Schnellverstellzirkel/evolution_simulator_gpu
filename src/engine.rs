@@ -8,12 +8,16 @@ use crate::{
     config::Config,
     creature_kernel::{self, GpuResult},
     evolution::Population,
-    vk_engine::VkEngine,
+    vk_engine::{Completed, VkEngine},
 };
 use anyhow::{Context, Result};
 use std::{
     collections::VecDeque,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
@@ -216,6 +220,176 @@ fn segment_ends(cfg: &Config) -> Vec<u32> {
     ends
 }
 
+/// What the GPU engine thread needs from a device. `VkEngine` implements it;
+/// tests use a fake that can run out of memory.
+trait SegmentDevice {
+    fn free_slots(&self) -> usize;
+    #[allow(clippy::too_many_arguments)]
+    fn submit(
+        &mut self,
+        batches: &[creature_kernel::LaneBatch],
+        cfg: &Config,
+        start: u32,
+        end: u32,
+        total: u32,
+        chunk: u32,
+        read_state: bool,
+    ) -> Result<u64>;
+    fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>>;
+    /// Frees buffers kept for reuse by slots with nothing in flight.
+    fn release_idle(&mut self) -> u64;
+    fn allocated_bytes(&self) -> u64;
+}
+
+impl SegmentDevice for VkEngine {
+    fn free_slots(&self) -> usize {
+        VkEngine::free_slots(self)
+    }
+    fn submit(
+        &mut self,
+        batches: &[creature_kernel::LaneBatch],
+        cfg: &Config,
+        start: u32,
+        end: u32,
+        total: u32,
+        chunk: u32,
+        read_state: bool,
+    ) -> Result<u64> {
+        VkEngine::submit(self, batches, cfg, start, end, total, chunk, read_state)
+    }
+    fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>> {
+        VkEngine::poll(self, timeout)
+    }
+    fn release_idle(&mut self) -> u64 {
+        VkEngine::release_idle(self)
+    }
+    fn allocated_bytes(&self) -> u64 {
+        self.allocated_bytes
+    }
+}
+
+/// What to do after a submission ran out of memory.
+#[derive(Debug, PartialEq)]
+enum OutOfMemory {
+    /// Keep the unit and try again later; print the line if there is one.
+    Retry(Option<String>),
+    /// Memory stayed short for this long with nothing running: fail.
+    GiveUp(Duration),
+}
+
+/// Rides out failed GPU memory allocations instead of retiring the GPU,
+/// which would leave the rest of the session on the CPU. Another process
+/// can hold GPU memory for a while. While other units run, a unit that does
+/// not fit waits for one of them to finish, and fewer units run at once from
+/// then on; one more is tried every `RAISE_AFTER`. With nothing running, it
+/// retries every `pause` for up to `limit`.
+struct MemoryBackoff {
+    slots: usize,
+    /// Units allowed in flight at once.
+    cap: usize,
+    raise_at: Option<Instant>,
+    /// When a submission first failed with nothing in flight, until one succeeds.
+    stalled_since: Option<Instant>,
+    retry_at: Option<Instant>,
+    waiting_announced: bool,
+    short_announced: bool,
+    pause: Duration,
+    limit: Duration,
+}
+
+impl MemoryBackoff {
+    const RAISE_AFTER: Duration = Duration::from_secs(10);
+
+    fn new(slots: usize, pause: Duration, limit: Duration) -> Self {
+        Self {
+            slots,
+            cap: slots,
+            raise_at: None,
+            stalled_since: None,
+            retry_at: None,
+            waiting_announced: false,
+            short_announced: false,
+            pause,
+            limit,
+        }
+    }
+
+    /// Whether another unit may be submitted now, with `in_flight` running.
+    fn may_submit(&mut self, now: Instant, in_flight: usize) -> bool {
+        if self.cap < self.slots && self.raise_at.is_some_and(|at| now >= at) {
+            self.cap += 1;
+            self.raise_at = (self.cap < self.slots).then(|| now + Self::RAISE_AFTER);
+        }
+        in_flight < self.cap && self.retry_at.is_none_or(|at| now >= at)
+    }
+
+    /// A submission failed for lack of memory with `in_flight` units still
+    /// running, after idle slots freed `freed` bytes of cached buffers.
+    fn out_of_memory(&mut self, now: Instant, in_flight: usize, freed: u64) -> OutOfMemory {
+        if in_flight > 0 {
+            // Running units hold memory this one needs: wait for them.
+            self.cap = self.cap.min(in_flight);
+            self.raise_at = Some(now + Self::RAISE_AFTER);
+            let line = (!self.short_announced).then(|| {
+                self.short_announced = true;
+                format!(
+                    "GPU memory is short; running {} of {} units at once",
+                    self.cap, self.slots
+                )
+            });
+            return OutOfMemory::Retry(line);
+        }
+        let first = self.stalled_since.is_none();
+        let since = *self.stalled_since.get_or_insert(now);
+        let waited = now.duration_since(since);
+        if waited >= self.limit {
+            return OutOfMemory::GiveUp(waited);
+        }
+        if first && freed > 0 {
+            // Buffers cached for other units were in the way: try at once.
+            self.retry_at = None;
+            return OutOfMemory::Retry(None);
+        }
+        self.retry_at = Some(now + self.pause);
+        let line = (!self.waiting_announced).then(|| {
+            self.waiting_announced = true;
+            format!(
+                "out of GPU memory; freed cached buffers, waiting up to {:.0} s for memory",
+                self.limit.as_secs_f64()
+            )
+        });
+        OutOfMemory::Retry(line)
+    }
+
+    /// A submission succeeded; `in_flight` units now run.
+    fn submitted(&mut self, now: Instant, in_flight: usize) -> Option<String> {
+        self.retry_at = None;
+        let mut lines = Vec::new();
+        if let Some(since) = self.stalled_since.take()
+            && self.waiting_announced
+        {
+            lines.push(format!(
+                "GPU memory available again after {:.1} s",
+                now.duration_since(since).as_secs_f64()
+            ));
+        }
+        self.waiting_announced = false;
+        if self.short_announced && in_flight >= self.slots {
+            self.short_announced = false;
+            lines.push(format!(
+                "GPU memory suffices again for {} units at once",
+                self.slots
+            ));
+        }
+        (!lines.is_empty()).then(|| lines.join("; "))
+    }
+
+    /// How long to wait before the next retry when nothing is running.
+    fn pause(&self, now: Instant) -> Option<Duration> {
+        self.retry_at.map(|at| at.saturating_duration_since(now))
+    }
+}
+
 /// Opens a Vulkan GPU running the creature-per-lane kernel on its own thread.
 /// The thread packs the next unit while earlier units run on the GPU.
 pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<ThreadedEngine> {
@@ -225,10 +399,11 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
     let allocated = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let thread_allocated = allocated.clone();
     let device_name = name.to_owned();
+    let slots = crate::vk_engine::gpu_slots() as usize;
     let thread = std::thread::Builder::new()
         .name(format!("gpu-{name}"))
         .spawn(move || {
-            let mut engine = match VkEngine::new(&device_name, max_nodes) {
+            let engine = match VkEngine::new(&device_name, max_nodes) {
                 Ok(engine) => {
                     let _ = ready_tx.send(Ok(engine.name.clone()));
                     engine
@@ -238,140 +413,18 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
                     return;
                 }
             };
-            // Units whose next trial segment waits for a free slot (they go
-            // before new jobs), and submitted segments by Vulkan ticket.
-            let mut waiting: VecDeque<SegmentedUnit> = VecDeque::new();
-            let mut running: Vec<(u64, SegmentedUnit)> = Vec::new();
-            let mut pending: Option<(u64, Arc<Population>, Config)> = None;
-            let mut open = true;
-            loop {
-                if pending.is_none() && open {
-                    let job = if running.is_empty() && waiting.is_empty() {
-                        job_rx.recv().map_err(|_| ())
-                    } else {
-                        job_rx.try_recv().map_err(|_| ())
-                    };
-                    match job {
-                        Ok(job) => pending = Some(job),
-                        Err(()) if running.is_empty() && waiting.is_empty() => open = false,
-                        Err(()) => {}
-                    }
-                }
-                if !open && running.is_empty() && waiting.is_empty() && pending.is_none() {
-                    break;
-                }
-                if engine.free_slots() > 0 {
-                    let next = match waiting.pop_front() {
-                        Some(unit) => Some(Ok(unit)),
-                        None => pending.take().map(|(ticket, unit, cfg)| {
-                            let indices: Vec<usize> = (0..unit.genomes.len()).collect();
-                            creature_kernel::pack(&unit, &indices).map(|batches| SegmentedUnit {
-                                ticket,
-                                results: vec![GpuResult::default(); indices.len()],
-                                ends: segment_ends(&cfg),
-                                segment: 0,
-                                cfg,
-                                busy: 0.0,
-                                batches,
-                            })
-                        }),
-                    };
-                    if let Some(next) = next {
-                        let submitted = next.and_then(|unit| {
-                            let total = *unit.ends.last().expect("segment ends");
-                            let start = unit.segment.checked_sub(1).map_or(0, |s| unit.ends[s]);
-                            let end = unit.ends[unit.segment];
-                            engine
-                                .submit(
-                                    &unit.batches,
-                                    &unit.cfg,
-                                    start,
-                                    end,
-                                    total,
-                                    step_range,
-                                    end < total,
-                                )
-                                .map(|vk_ticket| {
-                                    let mut unit = unit;
-                                    for batch in &mut unit.batches {
-                                        batch.release_uploaded();
-                                    }
-                                    (vk_ticket, unit)
-                                })
-                        });
-                        match submitted {
-                            Ok(entry) => running.push(entry),
-                            Err(err) => {
-                                let _ = done_tx.send(Err(format!("{err:#}")));
-                                return;
-                            }
-                        }
-                        thread_allocated
-                            .store(engine.allocated_bytes, std::sync::atomic::Ordering::Relaxed);
-                        continue;
-                    }
-                }
-                if running.is_empty() {
-                    continue;
-                }
-                // Wait briefly for any submission, then check for new jobs.
-                match engine.poll(Duration::from_millis(1)) {
-                    Ok(Some(finished)) => {
-                        // Units on separate queues can finish out of order.
-                        let Some(position) = running
-                            .iter()
-                            .position(|(vk_ticket, _)| *vk_ticket == finished.ticket)
-                        else {
-                            let _ = done_tx.send(Err("unknown GPU submission finished".into()));
-                            return;
-                        };
-                        let (_, mut unit) = running.swap_remove(position);
-                        unit.busy += finished.gpu_seconds;
-                        let last = unit.segment + 1 == unit.ends.len();
-                        // Fallen creatures are final; the rest continue in the
-                        // next segment, repacked into dense warps.
-                        let mut next = Vec::new();
-                        for (b, (slots, _, results)) in finished.batches.iter().enumerate() {
-                            let mut keep = Vec::new();
-                            for (j, result) in results.iter().enumerate() {
-                                if last || result.fall_time > 0.0 || result.screened > 0.0 {
-                                    unit.results[slots[j]] = *result;
-                                } else {
-                                    keep.push(j);
-                                }
-                            }
-                            if !keep.is_empty() {
-                                let Some((nodes, muscles)) =
-                                    finished.state.as_ref().and_then(|state| state.get(b))
-                                else {
-                                    let _ = done_tx.send(Err("GPU segment state missing".into()));
-                                    return;
-                                };
-                                next.push(unit.batches[b].repack(&keep, nodes, muscles, results));
-                            }
-                        }
-                        if next.is_empty() {
-                            let message = Finished {
-                                ticket: unit.ticket,
-                                results: std::mem::take(&mut unit.results),
-                                busy_seconds: unit.busy,
-                            };
-                            if done_tx.send(Ok(message)).is_err() {
-                                return;
-                            }
-                        } else {
-                            unit.batches = next;
-                            unit.segment += 1;
-                            waiting.push_front(unit);
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        let _ = done_tx.send(Err(format!("{err:#}")));
-                        return;
-                    }
-                }
-            }
+            let name = engine.name.clone();
+            let memory =
+                MemoryBackoff::new(slots, Duration::from_millis(500), Duration::from_secs(60));
+            run_segments(
+                engine,
+                &name,
+                job_rx,
+                done_tx,
+                &thread_allocated,
+                step_range,
+                memory,
+            );
         })
         .context("GPU engine thread")?;
     let device_name = ready_rx.recv().context("GPU engine thread stopped")??;
@@ -379,7 +432,7 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
         name: device_name,
         max_nodes,
         // One unit packs on the engine thread while every slot runs.
-        depth: crate::vk_engine::gpu_slots() as usize + 1,
+        depth: slots + 1,
         jobs: Some(jobs),
         done,
         thread: Some(thread),
@@ -389,6 +442,179 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
         next_ticket: 0,
         allocated,
     })
+}
+
+/// The GPU engine thread: packs jobs, runs them in trial segments, and
+/// returns finished units until the job channel closes.
+fn run_segments<D: SegmentDevice>(
+    mut engine: D,
+    name: &str,
+    job_rx: mpsc::Receiver<(u64, Arc<Population>, Config)>,
+    done_tx: mpsc::Sender<Result<Finished, String>>,
+    allocated: &AtomicU64,
+    step_range: u32,
+    mut memory: MemoryBackoff,
+) {
+    // Units whose next trial segment waits for a free slot (they go before
+    // new jobs), and submitted segments by device ticket.
+    let mut waiting: VecDeque<SegmentedUnit> = VecDeque::new();
+    let mut running: Vec<(u64, SegmentedUnit)> = Vec::new();
+    let mut pending: Option<(u64, Arc<Population>, Config)> = None;
+    let mut open = true;
+    loop {
+        if pending.is_none() && open {
+            let job = if running.is_empty() && waiting.is_empty() {
+                job_rx.recv().map_err(|_| ())
+            } else {
+                job_rx.try_recv().map_err(|_| ())
+            };
+            match job {
+                Ok(job) => pending = Some(job),
+                Err(()) if running.is_empty() && waiting.is_empty() => open = false,
+                Err(()) => {}
+            }
+        }
+        if !open && running.is_empty() && waiting.is_empty() && pending.is_none() {
+            break;
+        }
+        if engine.free_slots() > 0 && memory.may_submit(Instant::now(), running.len()) {
+            let next = match waiting.pop_front() {
+                Some(unit) => Some(Ok(unit)),
+                None => pending.take().map(|(ticket, unit, cfg)| {
+                    let indices: Vec<usize> = (0..unit.genomes.len()).collect();
+                    creature_kernel::pack(&unit, &indices).map(|batches| SegmentedUnit {
+                        ticket,
+                        results: vec![GpuResult::default(); indices.len()],
+                        ends: segment_ends(&cfg),
+                        segment: 0,
+                        cfg,
+                        busy: 0.0,
+                        batches,
+                    })
+                }),
+            };
+            if let Some(next) = next {
+                let mut unit = match next {
+                    Ok(unit) => unit,
+                    Err(err) => {
+                        let _ = done_tx.send(Err(format!("{err:#}")));
+                        return;
+                    }
+                };
+                let total = *unit.ends.last().expect("segment ends");
+                let start = unit.segment.checked_sub(1).map_or(0, |s| unit.ends[s]);
+                let end = unit.ends[unit.segment];
+                match engine.submit(
+                    &unit.batches,
+                    &unit.cfg,
+                    start,
+                    end,
+                    total,
+                    step_range,
+                    end < total,
+                ) {
+                    Ok(vk_ticket) => {
+                        for batch in &mut unit.batches {
+                            batch.release_uploaded();
+                        }
+                        running.push((vk_ticket, unit));
+                        if let Some(line) = memory.submitted(Instant::now(), running.len()) {
+                            eprintln!("{name}: {line}");
+                        }
+                    }
+                    // Keep the unit; it runs once memory frees up.
+                    Err(err) if crate::vk_engine::out_of_memory(&err) => {
+                        let freed = engine.release_idle();
+                        waiting.push_front(unit);
+                        match memory.out_of_memory(Instant::now(), running.len(), freed) {
+                            OutOfMemory::Retry(line) => {
+                                if let Some(line) = line {
+                                    eprintln!("{name}: {line}");
+                                }
+                            }
+                            OutOfMemory::GiveUp(waited) => {
+                                let _ = done_tx.send(Err(format!(
+                                    "{err:#} (no GPU memory for {:.0} s)",
+                                    waited.as_secs_f64()
+                                )));
+                                return;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let _ = done_tx.send(Err(format!("{err:#}")));
+                        return;
+                    }
+                }
+                allocated.store(engine.allocated_bytes(), Ordering::Relaxed);
+                continue;
+            }
+        }
+        if running.is_empty() {
+            // Nothing in flight: a unit may be waiting out a memory shortage.
+            if let Some(pause) = memory.pause(Instant::now()) {
+                std::thread::sleep(pause.min(Duration::from_millis(50)));
+            }
+            continue;
+        }
+        // Wait briefly for any submission, then check for new jobs.
+        match engine.poll(Duration::from_millis(1)) {
+            Ok(Some(finished)) => {
+                // Units on separate queues can finish out of order.
+                let Some(position) = running
+                    .iter()
+                    .position(|(vk_ticket, _)| *vk_ticket == finished.ticket)
+                else {
+                    let _ = done_tx.send(Err("unknown GPU submission finished".into()));
+                    return;
+                };
+                let (_, mut unit) = running.swap_remove(position);
+                unit.busy += finished.gpu_seconds;
+                let last = unit.segment + 1 == unit.ends.len();
+                // Fallen creatures are final; the rest continue in the
+                // next segment, repacked into dense warps.
+                let mut next = Vec::new();
+                for (b, (slots, _, results)) in finished.batches.iter().enumerate() {
+                    let mut keep = Vec::new();
+                    for (j, result) in results.iter().enumerate() {
+                        if last || result.fall_time > 0.0 || result.screened > 0.0 {
+                            unit.results[slots[j]] = *result;
+                        } else {
+                            keep.push(j);
+                        }
+                    }
+                    if !keep.is_empty() {
+                        let Some((nodes, muscles)) =
+                            finished.state.as_ref().and_then(|state| state.get(b))
+                        else {
+                            let _ = done_tx.send(Err("GPU segment state missing".into()));
+                            return;
+                        };
+                        next.push(unit.batches[b].repack(&keep, nodes, muscles, results));
+                    }
+                }
+                if next.is_empty() {
+                    let message = Finished {
+                        ticket: unit.ticket,
+                        results: std::mem::take(&mut unit.results),
+                        busy_seconds: unit.busy,
+                    };
+                    if done_tx.send(Ok(message)).is_err() {
+                        return;
+                    }
+                } else {
+                    unit.batches = next;
+                    unit.segment += 1;
+                    waiting.push_front(unit);
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                let _ = done_tx.send(Err(format!("{err:#}")));
+                return;
+            }
+        }
+    }
 }
 
 fn worker_budget(logical: usize) -> usize {
@@ -817,6 +1043,268 @@ mod tests {
         assert_eq!(worker.engine.free_slots(), 3);
         let ticket = worker.submit();
         assert_eq!(worker.jobs.try_recv().unwrap().0, ticket);
+    }
+
+    /// Slice positions and population indices of each submitted batch.
+    type Layout = Vec<(Vec<usize>, Vec<usize>)>;
+
+    /// A device that runs every unit at once and can fail submissions for
+    /// lack of memory, following `script` (true fails; missing entries succeed).
+    struct FakeDevice {
+        slots: usize,
+        script: VecDeque<bool>,
+        in_flight: VecDeque<(u64, Layout)>,
+        next: u64,
+        released: Arc<AtomicU64>,
+        most_in_flight: Arc<AtomicU64>,
+    }
+
+    impl FakeDevice {
+        fn new(slots: usize, script: &[bool]) -> Self {
+            Self {
+                slots,
+                script: script.iter().copied().collect(),
+                in_flight: VecDeque::new(),
+                next: 0,
+                released: Default::default(),
+                most_in_flight: Default::default(),
+            }
+        }
+    }
+
+    impl SegmentDevice for FakeDevice {
+        fn free_slots(&self) -> usize {
+            self.slots - self.in_flight.len()
+        }
+        fn submit(
+            &mut self,
+            batches: &[creature_kernel::LaneBatch],
+            _cfg: &Config,
+            _start: u32,
+            _end: u32,
+            _total: u32,
+            _chunk: u32,
+            _read_state: bool,
+        ) -> Result<u64> {
+            if self.script.pop_front().unwrap_or(false) {
+                return Err(
+                    anyhow::Error::from(ash::vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)
+                        .context("GPU buffers"),
+                );
+            }
+            let ticket = self.next;
+            self.next += 1;
+            let layout = batches
+                .iter()
+                .map(|b| (b.slots.clone(), b.creatures.clone()))
+                .collect();
+            self.in_flight.push_back((ticket, layout));
+            self.most_in_flight
+                .fetch_max(self.in_flight.len() as u64, Ordering::Relaxed);
+            Ok(ticket)
+        }
+        fn poll(&mut self, _timeout: Duration) -> Result<Option<Completed>> {
+            // Every creature falls, so each unit finishes in one segment.
+            Ok(self
+                .in_flight
+                .pop_front()
+                .map(|(ticket, layout)| Completed {
+                    ticket,
+                    batches: layout
+                        .into_iter()
+                        .map(|(slots, creatures)| {
+                            let results = creatures
+                                .iter()
+                                .map(|&i| GpuResult {
+                                    fitness: i as f32,
+                                    fall_time: 1.0,
+                                    ..GpuResult::default()
+                                })
+                                .collect();
+                            (slots, creatures, results)
+                        })
+                        .collect(),
+                    state: None,
+                    gpu_seconds: 0.001,
+                }))
+        }
+        fn release_idle(&mut self) -> u64 {
+            self.released.fetch_add(1, Ordering::Relaxed);
+            4096
+        }
+        fn allocated_bytes(&self) -> u64 {
+            0
+        }
+    }
+
+    /// Runs `units` jobs of `size` creatures through the GPU thread loop on
+    /// `device` and returns what it sent back.
+    fn run_fake(
+        device: FakeDevice,
+        units: usize,
+        size: usize,
+        limit: Duration,
+    ) -> Vec<Result<Finished, String>> {
+        let (jobs, job_rx) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let cfg = Config {
+            population: size,
+            duration: 1.0,
+            random_seed: false,
+            ..Config::default()
+        };
+        let pop = Arc::new(crate::evolution::create(&cfg).unwrap());
+        for ticket in 0..units as u64 {
+            jobs.send((ticket, Arc::clone(&pop), cfg.clone())).unwrap();
+        }
+        drop(jobs);
+        let memory = MemoryBackoff::new(device.slots, Duration::from_millis(2), limit);
+        run_segments(
+            device,
+            "fake GPU",
+            job_rx,
+            done_tx,
+            &AtomicU64::new(0),
+            64,
+            memory,
+        );
+        done.try_iter().collect()
+    }
+
+    #[test]
+    fn out_of_memory_is_recognized_through_error_context() {
+        use ash::vk;
+        for code in [
+            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+            vk::Result::ERROR_OUT_OF_HOST_MEMORY,
+        ] {
+            let error = anyhow::Error::from(code).context("GPU buffers");
+            assert!(crate::vk_engine::out_of_memory(&error));
+            assert!(crate::vk_engine::out_of_memory(&anyhow::Error::from(code)));
+        }
+        let lost = anyhow::Error::from(vk::Result::ERROR_DEVICE_LOST).context("fence");
+        assert!(!crate::vk_engine::out_of_memory(&lost));
+        let text = anyhow::anyhow!("A device memory allocation has failed");
+        assert!(!crate::vk_engine::out_of_memory(&text));
+    }
+
+    #[test]
+    fn large_buffers_get_a_quarter_of_headroom_and_small_ones_a_power_of_two() {
+        use crate::vk_engine::padded_size;
+        assert_eq!(padded_size(0), 256);
+        assert_eq!(padded_size(300), 512);
+        assert_eq!(padded_size(1 << 20), 1 << 20);
+        let mib = 1u64 << 20;
+        for size in [mib + 1, 3 * mib, 100 * mib + 7, 513 * mib] {
+            let padded = padded_size(size);
+            assert!(padded >= size + size / 4, "{size} -> {padded}");
+            assert!(padded < size + size / 4 + mib, "{size} -> {padded}");
+            assert_eq!(padded % mib, 0);
+        }
+        // A power of two would have taken 1024 MiB here.
+        assert_eq!(padded_size(513 * mib), 642 * mib);
+    }
+
+    #[test]
+    fn a_unit_that_runs_out_of_gpu_memory_waits_and_finishes() {
+        let device = FakeDevice::new(4, &[true, true, true]);
+        let released = Arc::clone(&device.released);
+        let sent = run_fake(device, 1, 40, Duration::from_secs(10));
+        assert_eq!(sent.len(), 1, "one finished unit and no failure");
+        let finished = sent[0].as_ref().expect("the unit must not fail");
+        assert_eq!(finished.ticket, 0);
+        assert_eq!(finished.results.len(), 40);
+        for (slot, result) in finished.results.iter().enumerate() {
+            assert_eq!(result.fitness, slot as f32, "results stay in unit order");
+        }
+        assert_eq!(
+            released.load(Ordering::Relaxed),
+            3,
+            "idle buffers freed per failure"
+        );
+    }
+
+    #[test]
+    fn a_unit_that_never_fits_fails_after_the_limit() {
+        let device = FakeDevice::new(2, &[true; 10_000]);
+        let sent = run_fake(device, 1, 8, Duration::from_millis(30));
+        assert_eq!(sent.len(), 1);
+        let error = sent[0]
+            .as_ref()
+            .err()
+            .expect("the GPU must fail in the end");
+        assert!(error.contains("no GPU memory"), "{error}");
+    }
+
+    #[test]
+    fn units_run_fewer_at_once_when_memory_is_short() {
+        // The second of four units fails while the first runs: it waits for
+        // the first, and at most one unit runs at a time afterwards.
+        let device = FakeDevice::new(4, &[false, true]);
+        let most = Arc::clone(&device.most_in_flight);
+        let sent = run_fake(device, 4, 12, Duration::from_secs(10));
+        let tickets: Vec<u64> = sent
+            .iter()
+            .map(|done| done.as_ref().expect("no unit may fail").ticket)
+            .collect();
+        let mut sorted = tickets.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, [0, 1, 2, 3]);
+        assert_eq!(most.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn memory_backoff_bookkeeping() {
+        let start = Instant::now();
+        let second = Duration::from_secs(1);
+        let mut memory = MemoryBackoff::new(4, Duration::from_millis(500), 60 * second);
+        assert!(memory.may_submit(start, 3));
+        assert!(!memory.may_submit(start, 4));
+
+        // Out of memory with two running: wait for them, then run two at once.
+        let line = memory.out_of_memory(start, 2, 0);
+        assert!(matches!(line, OutOfMemory::Retry(Some(ref l)) if l.contains("2 of 4")));
+        assert!(!memory.may_submit(start, 2));
+        assert!(memory.may_submit(start, 1));
+        assert_eq!(memory.out_of_memory(start, 1, 0), OutOfMemory::Retry(None));
+        assert!(!memory.may_submit(start, 1));
+        // One more is tried every RAISE_AFTER.
+        let later = start + MemoryBackoff::RAISE_AFTER;
+        assert!(memory.may_submit(later, 1));
+        assert!(!memory.may_submit(later, 2));
+        assert!(memory.may_submit(later + MemoryBackoff::RAISE_AFTER, 2));
+        assert!(memory.may_submit(later + 2 * MemoryBackoff::RAISE_AFTER, 3));
+        let line = memory.submitted(later + 2 * MemoryBackoff::RAISE_AFTER, 4);
+        assert!(line.is_some_and(|l| l.contains("4 units")));
+
+        // Nothing running: a quiet immediate retry after freeing buffers,
+        // then announced pauses until the limit.
+        let t = start + 100 * second;
+        assert_eq!(memory.out_of_memory(t, 0, 1024), OutOfMemory::Retry(None));
+        assert!(memory.may_submit(t, 0));
+        let line = memory.out_of_memory(t, 0, 1024);
+        assert!(matches!(line, OutOfMemory::Retry(Some(ref l)) if l.contains("waiting")));
+        assert!(!memory.may_submit(t, 0));
+        assert_eq!(memory.pause(t), Some(Duration::from_millis(500)));
+        let t2 = t + Duration::from_millis(500);
+        assert!(memory.may_submit(t2, 0));
+        assert_eq!(memory.out_of_memory(t2, 0, 0), OutOfMemory::Retry(None));
+        let line = memory.submitted(t2 + 2 * second, 1);
+        assert!(line.is_some_and(|l| l.contains("available again after 2.5 s")));
+        assert_eq!(memory.pause(t2), None);
+
+        // A shortage that outlasts the limit fails.
+        let t3 = t2 + 10 * second;
+        assert_eq!(
+            memory.out_of_memory(t3, 0, 0),
+            OutOfMemory::Retry(Some(
+                "out of GPU memory; freed cached buffers, waiting up to 60 s for memory".into()
+            ))
+        );
+        assert_eq!(
+            memory.out_of_memory(t3 + 61 * second, 0, 0),
+            OutOfMemory::GiveUp(61 * second)
+        );
     }
 
     #[test]
