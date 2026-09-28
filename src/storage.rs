@@ -2278,6 +2278,39 @@ pub fn save(path: &Path, experiment: &Experiment) -> Result<()> {
     }
     Ok(())
 }
+/// What the start of a checkpoint says about it: enough to list a save
+/// without loading its population.
+pub struct SaveSummary {
+    pub generation: u32,
+    pub config: Config,
+}
+/// Reads the settings and generation at the start of a checkpoint in the
+/// current format. The payload begins with them, so only a few kilobytes are
+/// decompressed. Other formats and unreadable files give None.
+pub fn peek(path: &Path) -> Option<SaveSummary> {
+    #[derive(Deserialize)]
+    struct Head {
+        config: Config,
+        _pending: Option<Config>,
+        generation: u32,
+    }
+    let mut file = BufReader::new(File::open(path).ok()?);
+    let mut magic = [0; 8];
+    file.read_exact(&mut magic).ok()?;
+    if &magic != MAGIC {
+        return None;
+    }
+    let decoder = zstd::stream::read::Decoder::new(file).ok()?;
+    let head: Head = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(1 << 20)
+        .deserialize_from(decoder)
+        .ok()?;
+    Some(SaveSummary {
+        generation: head.generation,
+        config: head.config,
+    })
+}
 pub fn load(path: &Path) -> Result<Experiment> {
     let mut file = BufReader::new(File::open(path).context("Cannot open checkpoint")?);
     let mut magic = [0; 8];
@@ -2703,6 +2736,33 @@ pub fn export_csv(path: &Path, history: &[Stats]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod peek_tests {
+    use super::*;
+
+    #[test]
+    fn peek_reads_the_generation_and_world_of_a_save() {
+        let config = Config {
+            population: 64,
+            random_seed: false,
+            terrain: 2,
+            ..Config::default()
+        };
+        let mut experiment = Experiment::new(config).unwrap();
+        experiment.generation = 7;
+        let dir = std::env::temp_dir().join(format!("evo-peek-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("peek.evo");
+        save(&path, &experiment).unwrap();
+        let summary = peek(&path).expect("a current checkpoint can be peeked");
+        assert_eq!(summary.generation, 7);
+        assert_eq!(summary.config.terrain, 2);
+        assert_eq!(summary.config.population, 64);
+        std::fs::write(&path, b"not a checkpoint").unwrap();
+        assert!(peek(&path).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
 #[cfg(test)]
 mod migration_tests {
     use super::*;

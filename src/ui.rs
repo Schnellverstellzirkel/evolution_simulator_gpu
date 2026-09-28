@@ -776,6 +776,43 @@ fn scaled_range(
     let half = (range.end() - range.start()) / 2.0 * factor;
     (center - half)..=(center + half)
 }
+/// One save in runs/, for File > Open.
+struct SaveEntry {
+    path: PathBuf,
+    modified: Option<std::time::SystemTime>,
+    bytes: u64,
+    summary: Option<crate::storage::SaveSummary>,
+}
+/// Every .evo file directly in `dir`, newest first, with what its first
+/// bytes say about it.
+fn list_saves(dir: &std::path::Path) -> Vec<SaveEntry> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut saves: Vec<SaveEntry> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "evo"))
+        .map(|path| {
+            let metadata = std::fs::metadata(&path).ok();
+            SaveEntry {
+                modified: metadata.as_ref().and_then(|m| m.modified().ok()),
+                bytes: metadata.map_or(0, |m| m.len()),
+                summary: crate::storage::peek(&path),
+                path,
+            }
+        })
+        .collect();
+    saves.sort_by_key(|save| std::cmp::Reverse(save.modified));
+    saves
+}
+/// "3 min ago" from a file time.
+fn ago(time: Option<std::time::SystemTime>) -> String {
+    time.and_then(|t| t.elapsed().ok()).map_or_else(
+        || "unknown time".to_owned(),
+        |age| format!("{} ago", seconds_text(age.as_secs_f64())),
+    )
+}
 /// What a line of the event feed lets the player do.
 #[derive(Clone, Copy)]
 enum FeedAction {
@@ -1163,6 +1200,8 @@ struct App {
     history_index: usize,
     history_latest: bool,
     file_mode: Option<&'static str>,
+    /// The saves File > Open lists, newest first, while that window is open.
+    open_list: Option<Vec<SaveEntry>>,
     file_path: String,
     message: Option<String>,
     /// The message on the status line and when it first showed.
@@ -1286,6 +1325,7 @@ impl App {
             history_index: 0,
             history_latest: true,
             file_mode: None,
+            open_list: None,
             file_path: "runs/experiment.evo".into(),
             message: None,
             shown_message: None,
@@ -1527,7 +1567,8 @@ impl App {
                         ui.close();
                     }
                     if ui.button("Open…").clicked() {
-                        self.file("Open experiment");
+                        self.open_list = Some(list_saves(std::path::Path::new("runs")));
+                        self.file_path = "runs/experiment.evo".to_owned();
                         ui.close();
                     }
                     if ui.button("Save…  Ctrl+S").clicked() {
@@ -3408,7 +3449,101 @@ impl App {
                 }
             });
     }
+    /// Opens a saved experiment; the game starts paused on it.
+    fn open_experiment(&mut self, path: PathBuf) {
+        self.pause();
+        self.worker.send(Command::Load(path));
+        self.initial = true;
+    }
+    /// File > Open: the saves in runs/, newest first, and a path field for
+    /// a file anywhere else.
+    fn open_window(&mut self, ctx: &egui::Context) {
+        let Some(saves) = &self.open_list else {
+            return;
+        };
+        let theme = self.theme();
+        let mut chosen: Option<PathBuf> = None;
+        let mut close = false;
+        egui::Window::new("Open a saved experiment")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_min_width(560.);
+                if saves.is_empty() {
+                    ui.label(RichText::new("No saves in runs/ yet.").color(theme.muted));
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(360.)
+                    .show(ui, |ui| {
+                        egui::Grid::new("saves")
+                            .num_columns(4)
+                            .spacing([14., 8.])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for save in saves {
+                                    let name =
+                                        save.path.file_name().map_or_else(String::new, |n| {
+                                            n.to_string_lossy().into_owned()
+                                        });
+                                    ui.vertical(|ui| {
+                                        ui.label(RichText::new(name).strong());
+                                        if let Some(summary) = &save.summary {
+                                            ui.label(
+                                                RichText::new(world_summary(&summary.config))
+                                                    .small()
+                                                    .color(theme.muted),
+                                            );
+                                        }
+                                    });
+                                    ui.label(save.summary.as_ref().map_or_else(
+                                        || "older format".to_owned(),
+                                        |summary| {
+                                            format!(
+                                                "generation {} · {} creatures",
+                                                summary.generation,
+                                                number(summary.config.population)
+                                            )
+                                        },
+                                    ));
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} · {}",
+                                            ago(save.modified),
+                                            file_size(save.bytes)
+                                        ))
+                                        .small()
+                                        .color(theme.muted),
+                                    );
+                                    if ui.button("Open").clicked() {
+                                        chosen = Some(save.path.clone());
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Another file");
+                    ui.add(egui::TextEdit::singleline(&mut self.file_path).desired_width(300.));
+                    if ui.button("Open").clicked() {
+                        chosen = Some(PathBuf::from(&self.file_path));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if let Some(path) = chosen {
+            self.open_experiment(path);
+            close = true;
+        }
+        if close {
+            self.open_list = None;
+        }
+    }
     fn dialogs(&mut self, ctx: &egui::Context) {
+        self.open_window(ctx);
         if self.new_dialog {
             egui::Window::new("Start a new experiment")
                 .collapsible(false)
@@ -3464,11 +3599,7 @@ impl App {
                             let path = PathBuf::from(&self.file_path);
                             match mode {
                                 "Save experiment" => self.worker.send(Command::Save(path)),
-                                "Open experiment" => {
-                                    self.pause();
-                                    self.worker.send(Command::Load(path));
-                                    self.initial = true;
-                                }
+                                "Open experiment" => self.open_experiment(path),
                                 "Export CSV" => self.worker.send(Command::Export(path)),
                                 "Export creature JSON" => {
                                     let creature =
