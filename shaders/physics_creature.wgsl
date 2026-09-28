@@ -800,10 +800,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if j >= body_nodes { break; }
                 let k = node_k(j, lane);
                 pos[k].y += ground_lift;
-                if pos[k].y <= vel[k].y + 1e-4 && failed[j] < 0.5 {
+                // A node the ground pushed this step touched it, even if the
+                // rebuild and the lift left it above the floor.
+                let push = max(min(pos[k].y, vel[k].y) - vel[k].x, 0.0);
+                if (pos[k].y <= vel[k].y + 1e-4 || push > 0.0) && failed[j] < 0.5 {
                     held_mass += mass[j];
                     held_grip += mass[j] * friction[j];
-                    normal += mass[j] * max(pos[k].y - vel[k].x, 0.0);
+                    normal += mass[j] * push;
                     slide += mass[j] * (pos[k].x - old[k].x);
                 }
                 com_x += pos[k].x * mass[j];
@@ -821,8 +824,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         var contact_mass = 0.0;
         var contact_momentum = 0.0;
         var contact_grip = 0.0;
+        var body_momentum = 0.0;
         // Velocity is the actual movement over the step. Ground friction uses the
-        // real upward push the node received, so grip needs real pressure. The
+        // real upward push the node received, so grip needs real pressure: how
+        // far the ground raised the node (push-out and floor clamps), up to
+        // the floor. Every node the ground pushed feels friction, also one the
+        // rebuild and the lift left above the floor, which would otherwise
+        // take the ground's support without its friction and slide. The
         // whole-body lift only moves the body out of the ground; it adds no
         // upward speed, or a limb swung into the ground would launch it.
         for (var j = 0u; j < MAXN; j++) {
@@ -848,8 +856,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 sink = clamp(floor_y + p.mud - pos[k].y, 0.0, p.mud) / MUD_FULL_DEPTH;
                 mud_mu = 1.0 + MUD_GRIP * sink;
             }
-            if grounded && pos[k].y <= floor_y + 1e-4 {
-                let push = max(pos[k].y - predicted_y, 0.0) * (1.0 + MUD_NORMAL * sink);
+            let pushed = max(min(pos[k].y, floor_y) - predicted_y, 0.0);
+            if grounded && (pos[k].y <= floor_y + 1e-4 || pushed > 0.0) {
+                let push = pushed * (1.0 + MUD_NORMAL * sink);
                 let max_change = friction[j] * p.friction * mud_mu * push * RATE;
                 velocity.x -= clamp(velocity.x, -max_change, max_change);
                 // Moving through mud also loses speed to viscous drag.
@@ -866,17 +875,21 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 velocity = vec2f(0.0);
             }
             vel[k] = velocity;
+            body_momentum += velocity.x * mass[j];
         }
         // The whole-body lift is the ground holding the body up: its normal
         // impulse is the body's mass times the lift. Each node's own friction
         // only sees its own push, so the feet on the ground also resist the
         // body's sliding with up to mu times the lift's impulse, applied to
-        // the whole body so momentum stays exact.
+        // the whole body so momentum stays exact. It may only slow the body,
+        // never speed it up: a light toe swinging backward on the ground would
+        // otherwise kick the whole body forward.
         if grounded && ground_lift > 0.0 && contact_mass > 0.0 {
             let inv_contact = 1.0 / contact_mass;
             let budget = contact_grip * inv_contact * p.friction * ground_lift * RATE;
             let slide = contact_momentum * inv_contact;
-            let change = -clamp(slide, -budget, budget);
+            let stop = -(body_momentum * inv_total_mass);
+            let change = clamp(-clamp(slide, -budget, budget), min(stop, 0.0), max(stop, 0.0));
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
                 if failed[j] < 0.5 {

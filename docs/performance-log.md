@@ -666,3 +666,20 @@ Buffers used to round up to the next power of two, which wastes up to half of a 
 | 25% headroom | 1,920 MiB | 1,536 MiB | 706 MiB | 212,805/s | 9.96 GB |
 
 Peak GPU memory falls by 15%. The rate difference is inside the 10% spread between single runs.
+
+## Sliders: every node the ground pushes feels friction (2026-09-28)
+
+The owner saw creatures slide along the ground as if it had no friction. `examples/slider_check.rs` evolves fixed seeds on the CPU with the game's loop and replays the archive's best. Its `drag` is the forward slide of the nodes touching the ground divided by the body's forward travel in the same steps: a walker plants its feet (near 0), a sled drags them (near 1). On main, 40 generations of 5,000 creatures with 60 s trials, seeds 38 to 41, top 10 of each: drag median 0.97, and 33 of the 40 elites above 0.5. `examples/slider_trace.rs` prints a replay step by step.
+
+The mechanism, traced step by step in seed 39's champion (184 m, 6 nodes, 6.8 kg, 14 muscles all on a 0.2 s period):
+
+- Friction only acted on nodes that ended the step within 0.1 mm of the floor. The bone passes clamp a node to the floor, and then the parent-first rebuild and the whole-body lift often leave it 0.1 to 10 mm above. Such a node took the ground's push without its friction. The champion's heaviest node (2 kg) slid forward at 3 to 4 m/s in every step. The ground pushed it up by 0.6 to 7 mm in 9 of the 12 steps of a cycle, and it felt friction in only 2 of them. The skipped friction was up to 0.9 m/s per step.
+- The whole-body lift's friction could propel. When a 0.11 kg toe swinging backward was the only node on the floor, that friction stopped the toe by changing the whole body's velocity: +0.73 and +0.96 m/s in two steps of each 0.2 s cycle.
+
+The fix, in the CPU engine and the GPU kernel. A node's push is how far the ground raised it from where it would have been without ground (push-out and floor clamps), up to the floor. Every node with a push feels friction and counts for the planted-feet rule, not only the ones that end on the floor. The lift's friction may slow the body but never speed it up. `physics::step`, the old reference, already applies friction whenever the ground pushes a node and has no lift friction, so it needed no change. `qd::VERSION` 27.
+
+Checks:
+
+- The 40 elites above, scored again: every one of the 97 to 349 m elites travels at most 21 m (seed 39's champion 2.2 m). With only the first half of the fix they keep up to 73 m; with only the second half, several keep 100 to 310 m.
+- `first_generation 20000 20`: median -0.07 m, p99 0.14 m, best 0.97 m (main: -0.07, 0.34, 11.03). Random bodies lost their free propulsion.
+- The effect tests' walker fixture used the leak. `examples/evolve_walker.rs` (from branch `claude/muscle-mass`, now with mud and hurdle worlds and size arguments) evolved a new one: 80 generations of 4,096 on seed 38. The 30-generation recipe of 2,048 reached only 7.9 m in 15 s, below the 4 m in 5 s the fixture needs.

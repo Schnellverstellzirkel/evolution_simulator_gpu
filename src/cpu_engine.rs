@@ -892,8 +892,11 @@ impl Group {
                 let (mut contact_mass, mut grip, mut normal, mut com_x, mut slide) =
                     (zero, zero, zero, zero, zero);
                 for j in 0..n {
-                    let contact = py[j].le(floor[j] + 1e-4) & failed[j].lt(F::splat(0.5));
-                    let push = (py[j] - vx[j]).max(zero);
+                    // A node the ground pushed this step touched it, even if
+                    // the rebuild and the lift left it above the floor.
+                    let push = (py[j].min(floor[j]) - vx[j]).max(zero);
+                    let contact =
+                        (py[j].le(floor[j] + 1e-4) | push.gt(zero)) & failed[j].lt(F::splat(0.5));
                     contact_mass += F::select(contact, mass[j], zero);
                     grip += F::select(contact, mass[j] * friction[j], zero);
                     normal += F::select(contact, mass[j] * push, zero);
@@ -918,17 +921,25 @@ impl Group {
             }
             // Velocity is the actual movement over the step. Ground friction uses
             // the real upward push the node received, so grip needs real pressure.
+            // The push is how far the ground raised the node from where it
+            // would have been without ground (push-out and floor clamps), up
+            // to the floor. Every node the ground pushed feels friction, also
+            // one that the rebuild and the lift left above the floor: before,
+            // such a node took the ground's support without its friction and
+            // could slide as on ice.
             // The whole-body lift only moves the body out of the ground; it adds
             // no upward speed, or a limb swung into the ground would launch it.
             let lifted = if colliding { lift } else { zero };
             let (mut contact_mass, mut contact_momentum, mut contact_grip) = (zero, zero, zero);
+            let mut body_momentum = zero;
             for j in 0..n {
                 let predicted_y = vx[j];
                 let mut vel_x = (px[j] - ox[j]) * rate;
                 let vel_y = (py[j] - oy[j] - lifted) * rate;
                 let alive = failed[j].lt(F::splat(0.5));
                 if colliding {
-                    let contact = py[j].le(floor[j] + 1e-4);
+                    let pushed = (py[j].min(floor[j]) - predicted_y).max(zero);
+                    let contact = py[j].le(floor[j] + 1e-4) | pushed.gt(zero);
                     // How deep the node sits below its dry floor, in meters,
                     // capped at the local mud depth. The multipliers scale
                     // with it up to MUD_FULL_DEPTH; a lifted node reads zero.
@@ -942,7 +953,7 @@ impl Group {
                         mud_normal = one + F::splat(physics::MUD_NORMAL) * sink;
                         mud_grip = one + F::splat(physics::MUD_GRIP) * sink;
                     }
-                    let push = (py[j] - predicted_y).max(zero) * mud_normal;
+                    let push = pushed * mud_normal;
                     let max_change = friction[j] * ground_friction * mud_grip * push * rate;
                     // Moving through mud also loses speed to viscous drag.
                     // With no mud the retention is exactly one.
@@ -964,18 +975,24 @@ impl Group {
                 }
                 vx[j] = F::select(alive, vel_x, zero);
                 vy[j] = F::select(alive, vel_y, zero);
+                body_momentum += vx[j] * mass[j];
             }
             // The whole-body lift is the ground holding the body up: its normal
             // impulse is the body's mass times the lift. Each node's own friction
             // only sees its own push, so the feet on the ground also resist the
             // body's sliding with up to mu times the lift's impulse, applied to
-            // the whole body so momentum stays exact.
+            // the whole body so momentum stays exact. It may only slow the
+            // body, never speed it up: a light toe swinging backward on the
+            // ground would otherwise kick the whole body forward.
             if colliding {
                 let holding = lifted.gt(zero) & contact_mass.gt(zero);
                 let inv_contact = one / contact_mass.max(tiny);
                 let budget = contact_grip * inv_contact * ground_friction * lifted * rate;
                 let slide = contact_momentum * inv_contact;
-                let change = F::select(holding, -slide.max(-budget).min(budget), zero);
+                let stop = -(body_momentum * inv_total_mass);
+                let change = F::select(holding, -slide.max(-budget).min(budget), zero)
+                    .max(stop.min(zero))
+                    .min(stop.max(zero));
                 for j in 0..n {
                     let alive = failed[j].lt(F::splat(0.5));
                     vx[j] = F::select(alive, vx[j] + change, vx[j]);
