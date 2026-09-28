@@ -1208,9 +1208,9 @@ struct App {
     file_mode: Option<&'static str>,
     /// The saves File > Open lists, newest first, while that window is open.
     open_list: Option<Vec<SaveEntry>>,
-    /// When this experiment was last saved (or opened) and at which
-    /// generation; None for a new experiment that was never saved.
-    saved: Option<(Instant, u32)>,
+    /// When this experiment was last saved or opened, at which generation,
+    /// and whether it was an open; None for a new experiment never saved.
+    saved: Option<(Instant, u32, bool)>,
     /// A save the worker is writing, since when.
     saving: Option<Instant>,
     /// A save path that exists and waits for the player to confirm.
@@ -1471,6 +1471,7 @@ impl App {
         };
         let showing = self.playback.as_ref().map(|p| p.creature.id);
         if showing == Some(creature.id) {
+            self.champion_shown = true;
             self.next_champion = None;
             return;
         }
@@ -3571,7 +3572,11 @@ impl App {
         for event in &snapshot.events[self.events_seen.1..] {
             match event.kind {
                 EventKind::Saved | EventKind::Opened => {
-                    self.saved = Some((Instant::now(), event.generation));
+                    self.saved = Some((
+                        Instant::now(),
+                        event.generation,
+                        event.kind == EventKind::Opened,
+                    ));
                     if event.kind == EventKind::Saved {
                         self.saving = None;
                     }
@@ -3600,15 +3605,16 @@ impl App {
             return ("Saving…".to_owned(), true);
         }
         match self.saved {
-            Some((at, generation)) => {
+            Some((at, generation, opened)) => {
                 let now = self.snapshot.as_ref().map_or(generation, |s| s.generation);
                 let since = now.saturating_sub(generation);
                 let ago = seconds_text(at.elapsed().as_secs_f64());
+                let verb = if opened { "Opened" } else { "Saved" };
                 (
                     if since > 0 {
-                        format!("Saved {ago} ago · {since} generations since")
+                        format!("{verb} {ago} ago · {since} generations since")
                     } else {
-                        format!("Saved {ago} ago")
+                        format!("{verb} {ago} ago")
                     },
                     false,
                 )
@@ -3962,9 +3968,10 @@ impl eframe::App for App {
             if let Some((c, cfg)) = next.preview.take() {
                 // The worker picks the creature of a new game (a random one)
                 // and of a loaded game (its best elite).
-                let loaded = !next.history.is_empty();
+                // Neither is known to be the champion: the history's best
+                // takes over at once below when it differs.
                 self.show_champion(c, cfg);
-                self.champion_shown = loaded;
+                self.champion_shown = false;
             }
             self.absorb_events(&next);
             if let Some((c, cfg)) = next.selected.take() {

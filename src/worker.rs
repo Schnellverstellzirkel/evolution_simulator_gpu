@@ -663,7 +663,10 @@ fn run(
                             EventKind::Opened,
                             format!(
                                 "Opened {} at generation {}.",
-                                path.display(),
+                                path.file_name().map_or_else(
+                                    || path.display().to_string(),
+                                    |name| name.to_string_lossy().into_owned()
+                                ),
                                 next.generation
                             ),
                         );
