@@ -631,9 +631,8 @@ enum ArchiveView {
 }
 /// One archive elite running in the race view.
 struct RaceLane {
+    /// Place in the archive ranking.
     rank: usize,
-    id: u64,
-    score: f32,
     playback: Playback,
 }
 /// Cold-to-hot color for a normalized map value.
@@ -2847,18 +2846,19 @@ impl App {
             return;
         }
         let config = snapshot.config.clone();
-        let lanes: Vec<RaceLane> = snapshot
+        let mut lanes: Vec<RaceLane> = snapshot
             .page
             .iter()
             .filter(|card| card.descriptor.is_some() && card.score.is_finite())
             .take(5)
             .map(|card| RaceLane {
                 rank: card.rank,
-                id: card.creature.id,
-                score: card.score,
                 playback: Playback::new(card.creature.clone(), config.clone()),
             })
             .collect();
+        // Lanes run in the order their replays finish, so the standings end
+        // the way the lanes are listed.
+        lanes.sort_by(|a, b| b.playback.distance.total_cmp(&a.playback.distance));
         if lanes.is_empty() {
             return;
         }
@@ -3154,7 +3154,7 @@ impl App {
             painter.text(
                 lane_rect.left_top() + Vec2::new(8., 6.),
                 Align2::LEFT_TOP,
-                format!("#{}", lane.rank + 1),
+                format!("{}. {}", i + 1, species_name(&lane.playback.creature)),
                 FontId::proportional(13.),
                 if is_leader { theme.accent } else { theme.ink },
             );
@@ -3162,10 +3162,9 @@ impl App {
                 lane_rect.left_top() + Vec2::new(8., 23.),
                 Align2::LEFT_TOP,
                 format!(
-                    "{} · ID {} · best {:.2} m",
-                    species_name(&lane.playback.creature),
-                    lane.id,
-                    lane.score
+                    "finishes at {:.2} m · archive rank {}",
+                    lane.playback.distance,
+                    lane.rank + 1
                 ),
                 FontId::proportional(11.),
                 theme.muted,
@@ -3216,7 +3215,7 @@ impl App {
             painter.text(
                 Pos2::new(board.left() + 10., y),
                 Align2::LEFT_CENTER,
-                format!("{}. #{}", place + 1, lane.rank + 1),
+                format!("{}. {}", place + 1, species_name(&lane.playback.creature)),
                 FontId::proportional(12.),
                 if place == 0 { theme.accent } else { theme.ink },
             );
@@ -3235,7 +3234,7 @@ impl App {
         painter.text(
             board.left_bottom() + Vec2::new(10., -8.),
             Align2::LEFT_BOTTOM,
-            "Live distance · archive rank",
+            "Live distance",
             FontId::proportional(10.),
             theme.muted,
         );
@@ -3756,10 +3755,10 @@ impl eframe::App for App {
                 self.tab = Tab::History;
             }
             if pressed(egui::Key::Num4) {
-                self.tab = Tab::Race;
-                if self.race.is_empty() {
-                    self.race_pending = true;
+                if self.tab != Tab::Race {
+                    self.restart_race();
                 }
+                self.tab = Tab::Race;
             }
             if pressed(egui::Key::Num5) {
                 self.tab = Tab::Lineage;
@@ -3899,6 +3898,7 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme.canvas).inner_margin(20))
             .show(ui, |ui| {
+                let before = self.tab;
                 ui.horizontal(|ui| {
                     for (tab, label) in [
                         (Tab::Overview, "Overview"),
@@ -3907,14 +3907,12 @@ impl eframe::App for App {
                         (Tab::Race, "Race"),
                         (Tab::Lineage, "Lineage"),
                     ] {
-                        let clicked = ui
-                            .selectable_value(&mut self.tab, tab, RichText::new(label).size(15.))
-                            .clicked();
-                        if clicked && tab == Tab::Race && self.race.is_empty() {
-                            self.race_pending = true;
-                        }
+                        ui.selectable_value(&mut self.tab, tab, RichText::new(label).size(15.));
                     }
                 });
+                if self.tab == Tab::Race && before != Tab::Race {
+                    self.restart_race();
+                }
                 ui.add_space(8.);
                 match self.tab {
                     Tab::Overview => {
