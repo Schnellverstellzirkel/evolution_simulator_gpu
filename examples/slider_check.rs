@@ -52,7 +52,7 @@ fn options() -> Result<Options> {
     Ok(Options {
         generations: get(0).map_or(Ok(20), str::parse)?,
         population: get(1).map_or(Ok(2000), str::parse)?,
-        duration: get(2).map_or(Ok(60.0), str::parse)?,
+        duration: get(2).map_or(Ok(20.0), str::parse)?,
         seeds: get(3)
             .unwrap_or("38")
             .split(',')

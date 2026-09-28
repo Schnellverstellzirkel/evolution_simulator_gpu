@@ -4,7 +4,7 @@
 
 | Module | Responsibility |
 | --- | --- |
-| `config` | Validated, serializable experiment settings; defaults are 3M creatures and 60 s trials |
+| `config` | Validated, serializable experiment settings; defaults are 3M creatures and 20 s trials |
 | `evolution` | Arena-packed genomes, deterministic creation and breeding, body repair |
 | `qd` | Behavior niches, elite archives, emitter allocation, diagonal CMA state |
 | `physics` | Shared masses, geometry, limits, and fidelity settings; also an older scalar simulator |

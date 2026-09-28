@@ -1,7 +1,7 @@
 //! Would a physics change stop muscle monsters? Takes an evenly spaced sample
 //! of a checkpoint's population once, then scores that sample on the CPU
 //! engine under whatever physics the binary and environment give, with full
-//! 60 s trials and no screening. Comparing the scores by muscle count across
+//! 20 s trials and no screening. Comparing the scores by muscle count across
 //! physics variants shows whether many-muscle bodies lose their lead.
 //!
 //! Usage:
@@ -60,7 +60,7 @@ fn main() -> Result<()> {
         }
         Some("eval") => {
             let path = args.get(1).context("eval <sample.bin> [seconds]")?;
-            let seconds: f32 = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(60.0);
+            let seconds: f32 = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(20.0);
             let sample: Vec<Creature> = options().deserialize(&std::fs::read(path)?)?;
             let mut pop = Population::default();
             for creature in &sample {
