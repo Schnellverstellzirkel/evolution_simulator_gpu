@@ -851,6 +851,8 @@ struct FeedItem {
     color: Color32,
     action: Option<FeedAction>,
 }
+/// The smallest gain that counts as a new record (m).
+const RECORD_STEP: f32 = 0.01;
 /// History positions where the best distance moved within one world, oldest
 /// first, and whether each is the first best after a world change. A harder
 /// world lowers the best, so records count again from its first generation.
@@ -861,7 +863,9 @@ fn world_records(history: &[Stats]) -> Vec<(usize, f32, bool)> {
         if index > 0 && stats.config.physics_differs(&history[index - 1].config) {
             best = f32::NEG_INFINITY;
         }
-        if stats.best.is_finite() && stats.best > best {
+        // A record beats the last one by at least a centimeter, so two
+        // records never read the same.
+        if stats.best.is_finite() && stats.best >= best + RECORD_STEP {
             let first = best == f32::NEG_INFINITY;
             best = stats.best;
             records.push((index, best, first && index > 0));
@@ -1763,11 +1767,50 @@ impl App {
             self.config_sent = Some(Instant::now());
         }
     }
+    /// The replay header's buttons: follow, reset camera, and back to the
+    /// champion or play the next one. Returns (back, play next).
+    fn viewport_buttons(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
+        let theme = self.theme();
+        let mut back = false;
+        let mut play_next = false;
+        ui.checkbox(&mut self.follow, "Follow");
+        if ui.small_button("Reset camera").clicked() {
+            self.zoom = DEFAULT_CAMERA_ZOOM;
+            self.camera = [0.; 2];
+            self.follow = true;
+        }
+        if self.pinned {
+            back = ui
+                .button(RichText::new("Back to champion").color(theme.accent))
+                .clicked();
+        } else if let Some((next, _)) = &self.next_champion {
+            play_next = ui
+                .small_button("Play now")
+                .on_hover_text("Show the new champion without waiting")
+                .clicked();
+            ui.label(
+                RichText::new(format!(
+                    "New champion {}{} plays next",
+                    species_name(next),
+                    self.snapshot
+                        .as_ref()
+                        .and_then(|s| s.history.last())
+                        .map_or_else(String::new, |stats| format!(" ({:.2} m)", stats.best))
+                ))
+                .small()
+                .color(theme.accent),
+            );
+        }
+        (back, play_next)
+    }
     fn viewport(&mut self, ui: &mut egui::Ui, height: f32) {
         let theme = self.theme();
         let mut back = false;
         let mut play_next = false;
-        ui.horizontal(|ui| {
+        // A narrow replay (docked beside the archive) puts its buttons on a
+        // line of their own.
+        let wide = ui.available_width() > 900.;
+        let mut header = |ui: &mut egui::Ui| {
             let (mode, color, why) = if self.pinned {
                 (
                     "WATCHING",
@@ -1804,30 +1847,24 @@ impl App {
                     p.creature.id, p.distance
                 ));
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.checkbox(&mut self.follow, "Follow");
-                if ui.small_button("Reset camera").clicked() {
-                    self.zoom = DEFAULT_CAMERA_ZOOM;
-                    self.camera = [0.; 2];
-                    self.follow = true;
-                }
-                if self.pinned {
-                    back = ui
-                        .button(RichText::new("Back to champion").color(theme.accent))
-                        .clicked();
-                } else if let Some((next, _)) = &self.next_champion {
-                    play_next = ui
-                        .small_button("Play now")
-                        .on_hover_text("Show the new champion without waiting")
-                        .clicked();
-                    ui.label(
-                        RichText::new(format!("New champion {} plays next", species_name(next)))
-                            .small()
-                            .color(theme.accent),
-                    );
-                }
+            if wide {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (b, p) = self.viewport_buttons(ui);
+                    (back, play_next) = (b, p);
+                });
+            }
+        };
+        if wide {
+            ui.horizontal(|ui| header(ui));
+        } else {
+            ui.horizontal_wrapped(|ui| header(ui));
+        }
+        if !wide {
+            ui.horizontal_wrapped(|ui| {
+                let (b, p) = self.viewport_buttons(ui);
+                (back, play_next) = (b, p);
             });
-        });
+        }
         if back {
             self.back_to_champion();
         }
@@ -2123,7 +2160,7 @@ impl App {
                 ));
             });
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .button(if self.playing {
                     "Pause  (K)"
@@ -4118,8 +4155,8 @@ impl eframe::App for App {
             }
         });
         egui::Panel::left("controls")
-            .default_size(300.)
-            .min_size(260.)
+            .default_size(350.)
+            .min_size(280.)
             .max_size(440.)
             .resizable(true)
             .frame(egui::Frame::new().fill(theme.panel).inner_margin(16))
@@ -4160,12 +4197,17 @@ impl eframe::App for App {
                         let height = (ui.available_height() - 34.).max(80.);
                         let width = ui.available_width();
                         ui.horizontal_top(|ui| {
-                            ui.allocate_ui(Vec2::new(width * 0.62, height + 34.), |ui| {
-                                self.trend(ui, height);
-                            });
-                            ui.allocate_ui(Vec2::new(ui.available_width(), height + 34.), |ui| {
-                                self.feed(ui, height + 10.);
-                            });
+                            let down = egui::Layout::top_down(egui::Align::Min);
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(width * 0.62, height + 34.),
+                                down,
+                                |ui| self.trend(ui, height),
+                            );
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(ui.available_width(), height + 34.),
+                                down,
+                                |ui| self.feed(ui, height + 10.),
+                            );
                         });
                     }
                     Tab::Population => {
