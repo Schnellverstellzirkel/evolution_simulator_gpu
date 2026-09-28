@@ -1565,109 +1565,102 @@ impl App {
             self.config.duration
         ));
         ui.add_space(4.);
-        ui.label(RichText::new("Environment").strong());
+        let mut world_changed = false;
+        ui.label(RichText::new("World").strong());
+        let calm = world_is_calm(&self.config);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(world_summary(&self.config)).color(if calm {
+                theme.muted
+            } else {
+                theme.accent
+            }));
+            if !calm
+                && ui
+                    .small_button("Calm world")
+                    .on_hover_text("Set every effect back to the calm world in one change.")
+                    .clicked()
+            {
+                for effect in &crate::environment::EFFECTS {
+                    if effect.name != "Seasons" {
+                        effect.set_level(&mut self.config, effect.calm);
+                    }
+                }
+                world_changed = true;
+            }
+        });
         ui.label(
             RichText::new(
-                "Every change can be undone. Elites are tested again under the new rules.",
+                "Click a level to change the world. The best creatures are tested again in the new world.",
             )
             .small()
             .color(theme.muted),
         );
-        let mut world_changed = false;
-        for effect in &crate::environment::EFFECTS {
-            let level = effect.level(&self.config);
-            let top = effect.levels.len() - 1;
-            let label = format!("{}: {}", effect.name, effect.levels[level]);
-            let why = format!("{label}. {}", effect.why);
-            // The label and both buttons on one line when they fit; on a
-            // narrow panel the label gets its own line above the buttons.
-            let width = |ui: &egui::Ui, text: &str| {
-                egui::WidgetText::from(text)
-                    .into_galley(
-                        ui,
-                        Some(egui::TextWrapMode::Extend),
-                        f32::INFINITY,
-                        egui::TextStyle::Body,
-                    )
-                    .size()
-                    .x
-            };
-            let spacing = ui.spacing().item_spacing.x;
-            let button =
-                |ui: &egui::Ui, text: &str| width(ui, text) + 2.0 * ui.spacing().button_padding.x;
-            let fits = width(ui, &label)
-                + button(ui, effect.raise)
-                + button(ui, effect.lower)
-                + 3.0 * spacing
-                <= ui.available_width();
-            if !fits {
-                ui.label(&label).on_hover_text(&why);
-            }
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled(level < top, egui::Button::new(effect.raise).small())
-                        .on_hover_text(format!(
-                            "{} to: {}. {}",
-                            effect.raise,
-                            effect.levels[(level + 1).min(top)],
-                            effect.why
-                        ))
-                        .clicked()
-                    {
-                        effect.set_level(&mut self.config, level + 1);
+        egui::Grid::new("world_effects")
+            .num_columns(2)
+            .spacing([8., 6.])
+            .show(ui, |ui| {
+                for effect in crate::environment::EFFECTS
+                    .iter()
+                    .filter(|effect| effect.name != "Seasons")
+                {
+                    if effect_row(ui, effect, &mut self.config, theme) {
                         world_changed = true;
                     }
-                    if ui
-                        .add_enabled(level > 0, egui::Button::new(effect.lower).small())
-                        .on_hover_text(format!(
-                            "{} to: {}.",
-                            effect.lower,
-                            effect.levels[level.saturating_sub(1)]
-                        ))
-                        .clicked()
-                    {
-                        effect.set_level(&mut self.config, level - 1);
-                        world_changed = true;
-                    }
-                    if fits {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.add(egui::Label::new(&label).truncate())
-                                .on_hover_text(&why);
-                        });
-                    }
-                });
+                    ui.end_row();
+                }
             });
-        }
+        ui.add_space(2.);
+        egui::Grid::new("world_seasons")
+            .num_columns(2)
+            .spacing([8., 6.])
+            .show(ui, |ui| {
+                if let Some(seasons) = crate::environment::EFFECTS
+                    .iter()
+                    .find(|effect| effect.name == "Seasons")
+                    && effect_row(ui, seasons, &mut self.config, theme)
+                {
+                    world_changed = true;
+                }
+                ui.end_row();
+            });
         let fossils = self.snapshot.as_ref().map_or(0, |s| s.fossils);
-        ui.horizontal(|ui| {
-            ui.label("Catastrophe")
-                .on_hover_text("A meteor wipes out half of every archive's elites at random. Survivors and newcomers refill the empty cells, which makes room for new kinds of movement.");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(fossils > 0, egui::Button::new("Undo").small())
-                    .on_hover_text(format!(
-                        "Return {fossils} fossils to their cells where the cell is empty or holds a slower elite."
-                    ))
-                    .clicked()
-                {
-                    self.worker.send(Command::UndoMeteor);
-                }
-                if ui
-                    .add(egui::Button::new("Extinction").small())
-                    .on_hover_text("Wipe out the island whose best creature is slowest, so it starts over from new designs. Undo brings its elites back.")
-                    .clicked()
-                {
-                    self.worker.send(Command::Extinction);
-                }
-                if ui
-                    .add(egui::Button::new("Meteor strike").small())
-                    .on_hover_text("Wipe out half of every archive's elites at random. Undo brings them back.")
-                    .clicked()
-                {
-                    self.worker.send(Command::Meteor);
-                }
-            });
+        ui.add_space(4.);
+        ui.label(RichText::new("Catastrophes").strong()).on_hover_text(
+            "A catastrophe wipes out creatures that evolution kept. Survivors and newcomers refill the empty places, which makes room for new ways of moving.",
+        );
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .small_button("Meteor strike")
+                .on_hover_text("Wipe out half of the kept creatures at random. Undo brings them back.")
+                .clicked()
+            {
+                self.worker.send(Command::Meteor);
+            }
+            if ui
+                .small_button("Extinction")
+                .on_hover_text("Wipe out the group whose best creature is slowest, so it starts over from new designs. Undo brings them back.")
+                .clicked()
+            {
+                self.worker.send(Command::Extinction);
+            }
+            if ui
+                .add_enabled(
+                    fossils > 0,
+                    egui::Button::new(if fossils > 0 {
+                        format!("Undo ({})", number(fossils))
+                    } else {
+                        "Undo".to_owned()
+                    })
+                    .small(),
+                )
+                .on_hover_text(format!(
+                    "Bring back {} creatures lost to catastrophes, where their place is empty or holds a slower creature.",
+                    number(fossils)
+                ))
+                .clicked()
+            {
+                self.worker.send(Command::UndoMeteor);
+            }
         });
         if world_changed {
             self.worker.send(Command::Configure(self.config.clone()));
@@ -4174,6 +4167,66 @@ fn paint_card(
             if card.survivor { theme.accent } else { AMBER },
         );
     }
+}
+/// Whether every effect except the seasons schedule sits at its calm level.
+fn world_is_calm(config: &Config) -> bool {
+    crate::environment::EFFECTS
+        .iter()
+        .filter(|effect| effect.name != "Seasons")
+        .all(|effect| effect.level(config) == effect.calm)
+}
+/// The world in a few words: "Calm world", or the effects away from calm,
+/// such as "Ground: Rough, 8 cm · Hurdles: Low".
+fn world_summary(config: &Config) -> String {
+    let parts: Vec<String> = crate::environment::EFFECTS
+        .iter()
+        .filter(|effect| effect.name != "Seasons")
+        .filter(|effect| effect.level(config) != effect.calm)
+        .map(|effect| format!("{}: {}", effect.name, effect.levels[effect.level(config)]))
+        .collect();
+    if parts.is_empty() {
+        "Calm world".to_owned()
+    } else {
+        parts.join(" · ")
+    }
+}
+/// One effect as its name and a button per level. The lit button is the
+/// current level. Returns true when the player picked another level.
+fn effect_row(
+    ui: &mut egui::Ui,
+    effect: &crate::environment::Effect,
+    config: &mut Config,
+    theme: Theme,
+) -> bool {
+    let level = effect.level(config);
+    let away = level != effect.calm;
+    ui.label(RichText::new(effect.name).color(if away { theme.accent } else { theme.ink }))
+        .on_hover_text(effect.why);
+    let mut picked = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(3., 3.);
+        ui.spacing_mut().button_padding = Vec2::new(6., 2.);
+        for (i, text) in effect.levels.iter().enumerate() {
+            let short = text.split(',').next().unwrap_or(text);
+            let hover = if i == effect.calm {
+                format!("{text}. The calm world.")
+            } else {
+                format!("{text}. {}", effect.why)
+            };
+            if ui
+                .selectable_label(i == level, RichText::new(short).small())
+                .on_hover_text(hover)
+                .clicked()
+                && i != level
+            {
+                picked = Some(i);
+            }
+        }
+    });
+    if let Some(i) = picked {
+        effect.set_level(config, i);
+    }
+    picked.is_some()
 }
 /// A short duration for people: "8 s", "3 min", "2 h".
 fn seconds_text(seconds: f64) -> String {
