@@ -8,6 +8,12 @@ Read this before changing the code. It lists the owner's rules, how to work on t
 
 Other agent sessions (Codex, OpenCode) sometimes work in this tree too. Before editing, check `git status` for changes you did not make, and work in a separate `git worktree` when another session is active. Pull before you start, commit small, push often, and update this section when you take or finish an item.
 
+- 2026-09-28 evening, paused at the owner's request. `cargo run --release` on main is the game; nothing needs a flag. Work in progress, each on its own pushed branch, none merged:
+  - `claude/physics2`: physics v2 CPU prototype (reduced coordinates, articulated-body solve, velocity-level contacts with projected Gauss-Seidel, Hill muscles, momentum balance). `docs/physics-v2.md` lists the seven exploits evolution found and their fixes; the last runs evolve honest movers (the integrator makes no momentum). Missing: a GPU kernel. It replaces the old physics only once it runs on the GPU; it will not ship as an option (owner: "a game, not a knobfest").
+  - `claude/cuda`: CUDA backend with register control (WIP commit, not reviewed).
+  - `claude/shortcuts`: second screening rung, cheaper checks, sparse metrics (WIP commit, not measured).
+  - `claude/mutations`: twelve more anatomy operators, off until measured.
+  - `claude/lanes`: persistent-lane engine, parked (see performance log).
 - 2026-09-28 afternoon, Claude:
   - Landed: old-world results (units in flight when the world changes) stay out of every archive, and History plot zoom controls (36e7c7b, written by an OpenCode session and finished by Claude). Phase 0 GPU measurements (`docs/phase0-measurements.md`, `tools/gpu-micro/`): L2 1.6 TB/s (twice the design estimate), shared memory 127 B per cycle per SM, and any kernel above 128 registers runs 12 resident warps instead of 16, so today's kernels at 7 or more nodes already run at 12.
   - Measured and not adopted: muscle mass, five variants over 80 generations (`docs/performance-log.md`). None holds muscle counts down; the best bodies get heavier and more muscular, and best distance falls by half or more. Tools: `examples/monster_check.rs`, and `search_ab` now reports top-50 muscles. The implementation is on branch `claude/muscle-mass`.
