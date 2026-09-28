@@ -240,6 +240,35 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
+/// How a trial ended early. The engines stop scoring at the first of three
+/// events; the replay names the one that happened.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Ending {
+    /// The head dropped below its neck.
+    Fell,
+    /// A joint was forced past its break angle.
+    Broke,
+    /// The head's averaged acceleration passed the 8 g limit.
+    Shook,
+}
+impl Ending {
+    /// Sentence for the replay, given the time of the event in seconds.
+    fn sentence(self, seconds: f32) -> String {
+        match self {
+            Self::Fell => format!("Fell over at {seconds:.1} s: head below its neck"),
+            Self::Broke => format!("Broke a joint at {seconds:.1} s"),
+            Self::Shook => format!("Shook its head too hard at {seconds:.1} s (over 8 g)"),
+        }
+    }
+    /// A word or two for a race lane.
+    fn short(self) -> &'static str {
+        match self {
+            Self::Fell => "fell",
+            Self::Broke => "broke a joint",
+            Self::Shook => "shook too hard",
+        }
+    }
+}
 /// Replays a creature's trial as simulated by the evaluation engines.
 struct Playback {
     creature: Creature,
@@ -254,6 +283,8 @@ struct Playback {
     /// Frame at which the trial ended early (a fall, a broken joint, or a
     /// shaken head), and the distance the trial kept from that moment.
     fall: Option<(u32, f32)>,
+    /// Which of the three events ended the trial, when one did.
+    ending: Ending,
     /// The distance the CPU engine scored for this very recording.
     distance: f32,
     /// Where the follow camera looks at each frame: the body's center of
@@ -304,10 +335,28 @@ impl Playback {
             (tick.min(last_frame), result.fitness)
         });
         let track = camera_track(&frames, &nodes);
+        // The head-shake average stops updating when the trial ends, so it
+        // still holds the value that ended it. A broken joint shows in the
+        // recorded pose at the end (the engine tests the pose after the step).
+        let ending = match fall {
+            _ if result.head_shake > physics::HEAD_SHAKE_LIMIT => Ending::Shook,
+            Some((tick, _)) => {
+                let mut broken = vec![false; nodes.len()];
+                let broke = [tick, tick.saturating_sub(1)].iter().any(|&t| {
+                    frames.get(t as usize).is_some_and(|frame| {
+                        broken_nodes(&normalized, frame, &joints, &mut broken);
+                        broken.iter().any(|&b| b)
+                    })
+                });
+                if broke { Ending::Broke } else { Ending::Fell }
+            }
+            None => Ending::Fell,
+        };
         let mut playback = Self {
             nodes,
             joints,
             fall,
+            ending,
             distance: result.fitness,
             track,
             creature: normalized,
@@ -582,9 +631,8 @@ enum ArchiveView {
 }
 /// One archive elite running in the race view.
 struct RaceLane {
+    /// Place in the archive ranking.
     rank: usize,
-    id: u64,
-    score: f32,
     playback: Playback,
 }
 /// Cold-to-hot color for a normalized map value.
@@ -2060,9 +2108,8 @@ impl App {
                     painter.text(
                         rect.left_top() + Vec2::new(18., 46.),
                         Align2::LEFT_TOP,
-                        format!(
-                            "Fell over at {:.1} s: head below its neck",
-                            tick.saturating_sub(physics::settle()) as f32 * physics::dt()
+                        p.ending.sentence(
+                            tick.saturating_sub(physics::settle()) as f32 * physics::dt(),
                         ),
                         FontId::proportional(13.),
                         FALLEN,
@@ -2799,18 +2846,19 @@ impl App {
             return;
         }
         let config = snapshot.config.clone();
-        let lanes: Vec<RaceLane> = snapshot
+        let mut lanes: Vec<RaceLane> = snapshot
             .page
             .iter()
             .filter(|card| card.descriptor.is_some() && card.score.is_finite())
             .take(5)
             .map(|card| RaceLane {
                 rank: card.rank,
-                id: card.creature.id,
-                score: card.score,
                 playback: Playback::new(card.creature.clone(), config.clone()),
             })
             .collect();
+        // Lanes run in the order their replays finish, so the standings end
+        // the way the lanes are listed.
+        lanes.sort_by(|a, b| b.playback.distance.total_cmp(&a.playback.distance));
         if lanes.is_empty() {
             return;
         }
@@ -3106,7 +3154,7 @@ impl App {
             painter.text(
                 lane_rect.left_top() + Vec2::new(8., 6.),
                 Align2::LEFT_TOP,
-                format!("#{}", lane.rank + 1),
+                format!("{}. {}", i + 1, species_name(&lane.playback.creature)),
                 FontId::proportional(13.),
                 if is_leader { theme.accent } else { theme.ink },
             );
@@ -3114,10 +3162,9 @@ impl App {
                 lane_rect.left_top() + Vec2::new(8., 23.),
                 Align2::LEFT_TOP,
                 format!(
-                    "{} · ID {} · best {:.2} m",
-                    species_name(&lane.playback.creature),
-                    lane.id,
-                    lane.score
+                    "finishes at {:.2} m · archive rank {}",
+                    lane.playback.distance,
+                    lane.rank + 1
                 ),
                 FontId::proportional(11.),
                 theme.muted,
@@ -3133,7 +3180,7 @@ impl App {
                 painter.text(
                     lane_rect.right_top() + Vec2::new(-8., 26.),
                     Align2::RIGHT_TOP,
-                    "fell",
+                    playback.ending.short(),
                     FontId::proportional(11.),
                     FALLEN,
                 );
@@ -3168,7 +3215,7 @@ impl App {
             painter.text(
                 Pos2::new(board.left() + 10., y),
                 Align2::LEFT_CENTER,
-                format!("{}. #{}", place + 1, lane.rank + 1),
+                format!("{}. {}", place + 1, species_name(&lane.playback.creature)),
                 FontId::proportional(12.),
                 if place == 0 { theme.accent } else { theme.ink },
             );
@@ -3187,7 +3234,7 @@ impl App {
         painter.text(
             board.left_bottom() + Vec2::new(10., -8.),
             Align2::LEFT_BOTTOM,
-            "Live distance · archive rank",
+            "Live distance",
             FontId::proportional(10.),
             theme.muted,
         );
@@ -3708,10 +3755,10 @@ impl eframe::App for App {
                 self.tab = Tab::History;
             }
             if pressed(egui::Key::Num4) {
-                self.tab = Tab::Race;
-                if self.race.is_empty() {
-                    self.race_pending = true;
+                if self.tab != Tab::Race {
+                    self.restart_race();
                 }
+                self.tab = Tab::Race;
             }
             if pressed(egui::Key::Num5) {
                 self.tab = Tab::Lineage;
@@ -3851,6 +3898,7 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme.canvas).inner_margin(20))
             .show(ui, |ui| {
+                let before = self.tab;
                 ui.horizontal(|ui| {
                     for (tab, label) in [
                         (Tab::Overview, "Overview"),
@@ -3859,14 +3907,12 @@ impl eframe::App for App {
                         (Tab::Race, "Race"),
                         (Tab::Lineage, "Lineage"),
                     ] {
-                        let clicked = ui
-                            .selectable_value(&mut self.tab, tab, RichText::new(label).size(15.))
-                            .clicked();
-                        if clicked && tab == Tab::Race && self.race.is_empty() {
-                            self.race_pending = true;
-                        }
+                        ui.selectable_value(&mut self.tab, tab, RichText::new(label).size(15.));
                     }
                 });
+                if self.tab == Tab::Race && before != Tab::Race {
+                    self.restart_race();
+                }
                 ui.add_space(8.);
                 match self.tab {
                     Tab::Overview => {
