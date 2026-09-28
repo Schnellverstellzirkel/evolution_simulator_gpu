@@ -37,6 +37,8 @@ const MUSCLE_ACTIVE: Color32 = Color32::from_rgb(146, 16, 28);
 /// Ring around every node touching the ground in the current frame.
 const TOUCHDOWN: Color32 = Color32::from_rgb(255, 196, 64);
 const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
+/// How long the UI's own messages hold the status line.
+const MESSAGE_SECONDS: f32 = 8.0;
 /// How fast archive cards glide to their new places after a re-sort.
 const SORT_SPEED: f32 = 5.0;
 /// Generations between autosaves when the player turns autosave on.
@@ -1153,6 +1155,8 @@ struct App {
     file_mode: Option<&'static str>,
     file_path: String,
     message: Option<String>,
+    /// The message on the status line and when it first showed.
+    shown_message: Option<(String, Instant)>,
     new_dialog: bool,
     /// When the UI last sent a settings change to the worker.
     config_sent: Option<Instant>,
@@ -1274,6 +1278,7 @@ impl App {
             file_mode: None,
             file_path: "runs/experiment.evo".into(),
             message: None,
+            shown_message: None,
             new_dialog: false,
             config_sent: None,
             last_frame: Instant::now(),
@@ -3695,9 +3700,25 @@ impl eframe::App for App {
             .show(ui, |ui| self.top(ui));
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
+                if let Some(message) = self.message.take() {
+                    self.shown_message = Some((message, Instant::now()));
+                }
+                if self
+                    .shown_message
+                    .as_ref()
+                    .is_some_and(|(_, at)| at.elapsed().as_secs_f32() > MESSAGE_SECONDS)
+                {
+                    self.shown_message = None;
+                }
                 if let Some(s) = &self.snapshot {
                     color_dot(ui, theme.accent);
-                    ui.label(&s.status);
+                    match &self.shown_message {
+                        Some((message, _)) => ui.label(message),
+                        None => ui.label(&s.status),
+                    };
+                    if self.shown_message.is_some() {
+                        ui.ctx().request_repaint_after(Duration::from_millis(500));
+                    }
                     if let Some(error) = &s.error {
                         ui.colored_label(AMBER, error);
                     }
@@ -3725,9 +3746,6 @@ impl eframe::App for App {
                 && let Some(s) = &self.snapshot
             {
                 self.diagnostics(ui, s);
-            }
-            if let Some(m) = &self.message {
-                ui.label(m);
             }
         });
         egui::Panel::left("controls")
