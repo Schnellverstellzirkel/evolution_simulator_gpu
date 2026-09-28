@@ -1300,6 +1300,9 @@ struct App {
     new_dialog: bool,
     /// When the UI last sent a settings change to the worker.
     config_sent: Option<Instant>,
+    /// Worlds before each change made in the World panel, newest last, for
+    /// its Undo button.
+    world_undo: Vec<Config>,
     last_frame: Instant,
     frame_times: std::collections::VecDeque<f32>,
     /// The Diagnostics drawer under the status line is open.
@@ -1307,6 +1310,7 @@ struct App {
     ui_scale: f32,
     initial: bool,
     smoke_start_pending: bool,
+    smoke_preset: Option<usize>,
     started: Instant,
     capture_requested: bool,
     capture_path: Option<String>,
@@ -1435,12 +1439,16 @@ impl App {
             shown_message: None,
             new_dialog: false,
             config_sent: None,
+            world_undo: Vec::new(),
             last_frame: Instant::now(),
             frame_times: Default::default(),
             show_perf: false,
             ui_scale: smoke_zoom.unwrap_or(1.0),
             initial: true,
             smoke_start_pending,
+            smoke_preset: std::env::var("EVOLUTION_SMOKE_PRESET")
+                .ok()
+                .and_then(|n| n.parse().ok()),
             started: Instant::now(),
             capture_requested: false,
             capture_path: std::env::var("EVOLUTION_SMOKE_CAPTURE").ok(),
@@ -1724,6 +1732,8 @@ impl App {
         let theme = self.theme();
         ui.add_space(GAP_M);
         let mut world_changed = false;
+        let world_before = self.config.clone();
+        let mut undoing = false;
         ui.label(RichText::new("World").strong());
         let live = self.snapshot.as_ref().map(|s| s.config.clone());
         let calm = world_is_calm(&self.config);
@@ -1759,6 +1769,68 @@ impl App {
                 .color(theme.warn),
             );
         }
+        // What is active, one line each, with a one-line reason and an undo
+        // that sets that effect back to calm.
+        let mut undo_effect = None;
+        for (i, effect) in crate::environment::EFFECTS
+            .iter()
+            .enumerate()
+            .filter(|(_, effect)| effect.name != "Seasons")
+            .filter(|(_, effect)| effect.level(&self.config) != effect.calm)
+        {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{}: {}",
+                        effect.name,
+                        effect.levels[effect.level(&self.config)]
+                    ))
+                    .color(theme.accent),
+                );
+                if ui
+                    .small_button("Undo")
+                    .on_hover_text("Set this effect back to calm")
+                    .clicked()
+                {
+                    undo_effect = Some(i);
+                }
+            });
+            ui.label(RichText::new(effect.why).small().color(theme.muted));
+        }
+        if let Some(i) = undo_effect {
+            let effect = &crate::environment::EFFECTS[i];
+            effect.set_level(&mut self.config, effect.calm);
+            world_changed = true;
+        }
+        ui.label(RichText::new("Presets").small().color(theme.muted));
+        ui.horizontal_wrapped(|ui| {
+            for preset in &crate::environment::PRESETS {
+                if ui
+                    .small_button(preset.name)
+                    .on_hover_text(format!(
+                        "{} Sets these effects and calms the rest. Undo returns the previous world.",
+                        preset.about
+                    ))
+                    .clicked()
+                {
+                    preset.apply(&mut self.config);
+                    world_changed = true;
+                }
+            }
+            if ui
+                .add_enabled(
+                    !self.world_undo.is_empty(),
+                    egui::Button::new("Undo last change").small(),
+                )
+                .on_hover_text("Return to the world before your last change here")
+                .clicked()
+                && let Some(previous) = self.world_undo.pop()
+            {
+                self.config = previous;
+                undoing = true;
+                world_changed = true;
+            }
+        });
         ui.label(
             RichText::new(
                 "Click a level to change the world. The best creatures are tested again in the new world.",
@@ -1838,6 +1910,12 @@ impl App {
             }
         });
         if world_changed {
+            if !undoing && world_before.physics_differs(&self.config) {
+                self.world_undo.push(world_before);
+                if self.world_undo.len() > 20 {
+                    self.world_undo.remove(0);
+                }
+            }
             self.worker.send(Command::Configure(self.config.clone()));
             self.config_sent = Some(Instant::now());
         }
@@ -2308,20 +2386,13 @@ impl App {
             .checked_sub(11)
             .map(|earlier| s.best - history[earlier].best);
         let population = snapshot.config.population.max(1);
-        let share = snapshot.completed.min(population) as f64 / population as f64;
-        let rate = snapshot.end_to_end;
-        let progress = if snapshot.running && rate > 0.0 {
-            let left = (population - snapshot.completed.min(population)) as f64 / rate;
-            format!(
-                "{:.0}% done · about {} left",
-                share * 100.0,
-                seconds_text(left)
-            )
-        } else if snapshot.running {
-            format!("{:.0}% done", share * 100.0)
-        } else {
-            "Paused".to_owned()
-        };
+        let progress = generation_progress(
+            snapshot.completed,
+            population,
+            snapshot.checking,
+            snapshot.running,
+            snapshot.end_to_end,
+        );
         let trial = format!(
             "How far the best creature travels in its {:.0} s trial. Distance is the only score.",
             snapshot.config.duration
@@ -2444,21 +2515,38 @@ impl App {
                     .collect();
                 plot.line(Line::new(name, values).color(color).width(2.5));
             }
-            // A vertical line where the world changed: the generation that
-            // first ran in the new world.
-            for pair in s.history.windows(2) {
-                if pair[1].config.physics_differs(&pair[0].config) {
-                    let season = pair[1].config.season_step != pair[0].config.season_step
-                        && pair[1].config.seasons > 0;
-                    plot.vline(
-                        VLine::new(
-                            if season { "Season" } else { "World change" },
-                            pair[1].generation as f64 - 0.5,
-                        )
-                        .color(theme.warn)
-                        .width(1.5),
-                    );
-                }
+            // A vertical line and a short label where the world changed: the
+            // generation that first runs in the new world. Marks come from
+            // the worker's events, so one shows when the generation starts,
+            // and from the history, so a loaded game still has them.
+            let top = s
+                .history
+                .iter()
+                .map(|h| h.percentiles[28] as f64)
+                .fold(1.0, f64::max);
+            for mark in world_marks(&s.events, &s.history) {
+                plot.vline(
+                    VLine::new(
+                        if mark.season {
+                            "Season"
+                        } else {
+                            "World change"
+                        },
+                        mark.generation as f64 - 0.5,
+                    )
+                    .color(theme.warn)
+                    .width(1.5),
+                );
+                plot.text(
+                    egui_plot::Text::new(
+                        "World change",
+                        egui_plot::PlotPoint::new(mark.generation as f64 - 0.4, top),
+                        RichText::new(short_label(&mark.label))
+                            .small()
+                            .color(theme.warn),
+                    )
+                    .anchor(egui::Align2::LEFT_TOP),
+                );
             }
             // Record markers extend the best line instead of duplicating it.
             // Records count again after a world change.
@@ -4030,6 +4118,17 @@ impl eframe::App for App {
             });
             self.smoke_start_pending = false;
         }
+        // Screenshot runs: EVOLUTION_SMOKE_PRESET=<number> applies that
+        // preset after 4 s, so the chart and feed have a world change.
+        if let Some(index) = self.smoke_preset
+            && self.started.elapsed() >= Duration::from_secs(4)
+        {
+            self.smoke_preset = None;
+            if let Some(preset) = crate::environment::PRESETS.get(index) {
+                preset.apply(&mut self.config);
+                self.worker.send(Command::Configure(self.config.clone()));
+            }
+        }
         self.frame_times.push_back(dt);
         if self.frame_times.len() > 240 {
             self.frame_times.pop_front();
@@ -4602,6 +4701,80 @@ fn season_forecast(config: &Config, generation: u32) -> Option<String> {
 /// as soon as the record lands.
 fn follows_champion(pinned: bool, showing: Option<u64>, champion: Option<u64>) -> bool {
     !pinned && champion.is_some() && showing != champion
+}
+/// A world change on the chart: the first generation in the new world and a
+/// short name for what changed.
+struct WorldMark {
+    generation: u32,
+    label: String,
+    season: bool,
+}
+/// A chart label cut to fit beside its line.
+fn short_label(label: &str) -> String {
+    let first = label.split(',').next().unwrap_or(label);
+    if first.chars().count() > 22 {
+        format!("{}...", first.chars().take(20).collect::<String>())
+    } else {
+        first.to_owned()
+    }
+}
+/// Every world change, oldest first. Events give the change as soon as its
+/// generation starts. History pairs fill in what events lack, such as after
+/// loading a save, when the feed is rebuilt from the history too.
+fn world_marks(events: &[crate::worker::Event], history: &[Stats]) -> Vec<WorldMark> {
+    let mut marks: Vec<WorldMark> = events
+        .iter()
+        .filter(|e| matches!(e.kind, EventKind::World | EventKind::Season))
+        .map(|e| WorldMark {
+            generation: e.generation,
+            label: e.text.split(". ").next().unwrap_or(&e.text).to_owned(),
+            season: e.kind == EventKind::Season,
+        })
+        .collect();
+    for pair in history.windows(2) {
+        let generation = pair[1].generation;
+        if pair[1].config.physics_differs(&pair[0].config)
+            && !marks.iter().any(|m| m.generation == generation)
+        {
+            marks.push(WorldMark {
+                generation,
+                label: crate::worker::world_change_text(&pair[0].config, &pair[1].config)
+                    .unwrap_or_else(|| "The world changed".into()),
+                season: pair[1].config.season_step != pair[0].config.season_step
+                    && pair[1].config.seasons > 0,
+            });
+        }
+    }
+    marks.sort_by_key(|m| m.generation);
+    marks
+}
+/// The Generation tile's second line. Percent rounds down, so "100%" only
+/// shows when every creature has a result, and while finalists still wait for
+/// their fine check the tile says so instead.
+fn generation_progress(
+    completed: usize,
+    population: usize,
+    checking: usize,
+    running: bool,
+    rate: f64,
+) -> String {
+    let done = completed.min(population);
+    if !running {
+        return "Paused".to_owned();
+    }
+    if done >= population && checking > 0 {
+        return format!("All tried · checking {} finalists", number(checking));
+    }
+    if done >= population {
+        return "Finishing the generation".to_owned();
+    }
+    let percent = (done as f64 / population as f64 * 100.0).floor();
+    if rate > 0.0 {
+        let left = (population - done) as f64 / rate;
+        format!("{percent:.0}% done · about {} left", seconds_text(left))
+    } else {
+        format!("{percent:.0}% done")
+    }
 }
 /// Whether every effect except the seasons schedule sits at its calm level.
 fn world_is_calm(config: &Config) -> bool {
@@ -5349,6 +5522,28 @@ mod tests {
         );
         config.seasons = 0;
         assert_eq!(season_forecast(&config, 7), None);
+    }
+    #[test]
+    fn the_generation_tile_tells_when_finalists_still_run() {
+        assert_eq!(
+            generation_progress(999_999, 1_000_000, 0, true, 0.0),
+            "99% done"
+        );
+        assert!(generation_progress(1_000_000, 1_000_000, 40, true, 5.0).contains("checking 40"));
+        assert!(!generation_progress(1_000_000, 1_000_000, 40, true, 5.0).contains("100%"));
+        assert_eq!(generation_progress(5, 10, 0, false, 1.0), "Paused");
+    }
+    #[test]
+    fn world_marks_come_from_events_and_history() {
+        let events = vec![crate::worker::Event {
+            generation: 4,
+            kind: EventKind::World,
+            text: "Ground Flat to Rough, 8 cm. Re-testing 3 kept creatures.".into(),
+        }];
+        let marks = world_marks(&events, &[]);
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].generation, 4);
+        assert_eq!(marks[0].label, "Ground Flat to Rough, 8 cm");
     }
     #[test]
     fn a_stall_suggests_the_next_harder_world() {

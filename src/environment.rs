@@ -32,6 +32,62 @@ impl Effect {
     }
 }
 
+/// A named world: every effect it lists is set to the given level and every
+/// other effect goes back to calm. The Seasons schedule is left alone.
+pub struct Preset {
+    pub name: &'static str,
+    pub about: &'static str,
+    pub levels: &'static [(&'static str, usize)],
+}
+
+pub const PRESETS: [Preset; 6] = [
+    Preset {
+        name: "Rough hills",
+        about: "Rocky ground on an 8% climb. Lifted feet and steady climbing win.",
+        levels: &[("Ground", 3), ("Slope", 2)],
+    },
+    Preset {
+        name: "Icy slope",
+        about: "Slippery ground on a 3% climb. Only a firm, planted foot can push.",
+        levels: &[("Grip", 4), ("Slope", 1)],
+    },
+    Preset {
+        name: "Swamp",
+        about: "Deep mud and thick air. Every dragged foot and every flail pays.",
+        levels: &[("Mud", 3), ("Air", 2)],
+    },
+    Preset {
+        name: "Desert",
+        about: "Heat, drought and a headwind. Short, well-paced strokes win.",
+        levels: &[("Heat wave", 2), ("Drought", 2), ("Wind", 1)],
+    },
+    Preset {
+        name: "Obstacle course",
+        about: "Hurdles and gaps on pebbly ground. A gait must lift, leap or span.",
+        levels: &[("Hurdles", 2), ("Gaps", 1), ("Ground", 1)],
+    },
+    Preset {
+        name: "Heavy world",
+        about: "1.5 g with an earthquake. Compact, robust bodies gain.",
+        levels: &[("Gravity", 1), ("Earthquake", 1)],
+    },
+];
+
+impl Preset {
+    /// Sets every effect except the Seasons schedule: the listed ones to
+    /// their level, the rest to calm.
+    pub fn apply(&self, cfg: &mut Config) {
+        for effect in EFFECTS.iter().filter(|e| e.name != "Seasons") {
+            let level = self
+                .levels
+                .iter()
+                .find(|(name, _)| *name == effect.name)
+                .map_or(effect.calm, |&(_, level)| level);
+            effect.set_level(cfg, level);
+        }
+    }
+}
+
 /// Gravity at each level (m/s^2).
 pub const GRAVITY: [f32; 4] = [9.8, 14.7, 19.6, 29.4];
 /// Velocity kept per 1/60 s at each level: less means thicker air.
@@ -283,6 +339,21 @@ mod tests {
                 effect.set_level(&mut cfg, level);
                 assert_eq!(effect.level(&cfg), level, "{}", effect.name);
                 cfg.validate().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn presets_name_real_effects_and_validate() {
+        for preset in &PRESETS {
+            let mut cfg = Config::default();
+            preset.apply(&mut cfg);
+            cfg.validate().unwrap();
+            for &(name, level) in preset.levels {
+                let effect = EFFECTS.iter().find(|e| e.name == name).unwrap();
+                assert!(level < effect.levels.len(), "{}", preset.name);
+                assert_ne!(level, effect.calm, "{}", preset.name);
+                assert_eq!(effect.level(&cfg), level, "{}", preset.name);
             }
         }
     }
