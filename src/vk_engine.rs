@@ -143,14 +143,17 @@ pub fn padded_size(size: u64) -> u64 {
     }
 }
 
-/// True when `error` comes from a failed device or host memory allocation,
-/// which another process holding GPU memory can cause for a while.
+/// True when `error` comes from a failed device or host memory allocation
+/// (Vulkan or CUDA), which another process holding GPU memory can cause for
+/// a while.
 pub fn out_of_memory(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         matches!(
             cause.downcast_ref::<vk::Result>(),
             Some(&vk::Result::ERROR_OUT_OF_DEVICE_MEMORY | &vk::Result::ERROR_OUT_OF_HOST_MEMORY)
-        )
+        ) || cause
+            .downcast_ref::<crate::cuda_engine::CudaError>()
+            .is_some_and(crate::cuda_engine::CudaError::out_of_memory)
     })
 }
 
@@ -941,31 +944,14 @@ impl VkEngine {
         for (r, tick) in (start..end).step_by(chunk as usize).enumerate() {
             for (b, batch) in batches.iter().enumerate() {
                 let offset = ((r * batches.len() + b) as u64 * self.params_stride) as usize;
-                let p = Params {
+                let p = creature_kernel::launch_params(
+                    cfg,
+                    batch.capacity,
+                    batch.info.len(),
                     tick,
-                    steps: (end - tick).min(chunk),
-                    stride: batch.capacity as u32,
-                    count: batch.info.len() as u32,
-                    gravity: cfg.gravity,
-                    air: fidelity.air_per_step(cfg.air_retention),
-                    friction: cfg.ground_friction,
-                    ground: if cfg.ground { 1.0 } else { 0.0 },
-                    total_steps: total,
-                    terrain: crate::physics::terrain_amplitude(cfg.terrain),
-                    muscle_energy: cfg.muscle_energy,
-                    muscle_recovery: cfg.muscle_recovery,
-                    // A disabled ground ignores the slope effect, as on the CPU.
-                    slope: if cfg.ground { cfg.slope } else { 0.0 },
-                    wind: cfg.wind,
-                    // A disabled ground also ignores mud, gaps, hurdles, and
-                    // the earthquake.
-                    mud: if cfg.ground { cfg.mud } else { 0.0 },
-                    gaps: if cfg.ground { cfg.gaps } else { 0.0 },
-                    hurdles: if cfg.ground { cfg.hurdles } else { 0.0 },
-                    quake: if cfg.ground { cfg.quake } else { 0.0 },
-                    screen_tick: cfg.screen.map_or(0, |screen| screen.tick(fidelity)),
-                    screen_bar: cfg.screen.map_or(f32::NEG_INFINITY, |screen| screen.bar),
-                };
+                    (end - tick).min(chunk),
+                    total,
+                );
                 param_data[offset..offset + std::mem::size_of::<Params>()]
                     .copy_from_slice(bytemuck::bytes_of(&p));
             }

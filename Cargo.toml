@@ -21,6 +21,8 @@ csv = "1"
 ctrlc = "3.4"
 image = { version = "0.25", default-features = false, features = ["png", "gif"] }
 ash = "0.38"
+# Loads the CUDA driver and NVRTC at run time (src/cuda_engine.rs).
+libloading = "0.8"
 libc = "0.2"
 naga = { version = "30", features = ["wgsl-in", "spv-out"] }
 

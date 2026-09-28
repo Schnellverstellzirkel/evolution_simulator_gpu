@@ -24,6 +24,16 @@ fn gpu_repeats_scores_for_identical_trials() {
         "the primary GPU did not open: {}",
         gpu.startup_warning.as_deref().unwrap_or("unknown")
     );
+    // The GPU runs CUDA on NVIDIA when it loads, else Vulkan. With
+    // EVOLUTION_CUDA=1 the test refuses a Vulkan fallback.
+    eprintln!("GPU engine: {}", gpu.names());
+    if evolution_simulator::cuda_engine::forced() {
+        assert!(
+            gpu.names().contains("CUDA"),
+            "EVOLUTION_CUDA=1 but the GPU opened as {}",
+            gpu.names()
+        );
+    }
     let scheduler = gpu.sched.as_mut().expect("scheduler");
     let first = scheduler
         .evaluate_single(&pop, &indices, &cfg)

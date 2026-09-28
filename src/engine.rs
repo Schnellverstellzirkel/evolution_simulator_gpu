@@ -7,6 +7,7 @@
 use crate::{
     config::Config,
     creature_kernel::{self, GpuResult},
+    cuda_engine::CudaEngine,
     evolution::{Creature, Population},
     vk_engine::{Completed, VkEngine},
 };
@@ -288,8 +289,8 @@ fn segment_ends(cfg: &Config) -> Vec<u32> {
     ends
 }
 
-/// What the GPU engine thread needs from a device. `VkEngine` implements it;
-/// tests use a fake that can run out of memory.
+/// What the GPU engine thread needs from a device. `VkEngine` and
+/// `CudaEngine` implement it; tests use a fake that can run out of memory.
 trait SegmentDevice {
     fn free_slots(&self) -> usize;
     #[allow(clippy::too_many_arguments)]
@@ -355,6 +356,45 @@ impl SegmentDevice for VkEngine {
         chunk: u32,
     ) -> Result<u64> {
         VkEngine::record(self, batch, cfg, total, chunk)
+    }
+}
+
+impl SegmentDevice for CudaEngine {
+    fn free_slots(&self) -> usize {
+        CudaEngine::free_slots(self)
+    }
+    fn submit(
+        &mut self,
+        batches: &[creature_kernel::LaneBatch],
+        cfg: &Config,
+        start: u32,
+        end: u32,
+        total: u32,
+        chunk: u32,
+        read_state: bool,
+    ) -> Result<u64> {
+        CudaEngine::submit(self, batches, cfg, start, end, total, chunk, read_state)
+    }
+    fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>> {
+        CudaEngine::poll(self, timeout)
+    }
+    fn release_idle(&mut self) -> u64 {
+        CudaEngine::release_idle(self)
+    }
+    fn allocated_bytes(&self) -> u64 {
+        self.allocated_bytes
+    }
+    fn replay_free(&self) -> bool {
+        false
+    }
+    fn record(
+        &mut self,
+        _batch: &creature_kernel::LaneBatch,
+        _cfg: &Config,
+        _total: u32,
+        _chunk: u32,
+    ) -> Result<u64> {
+        anyhow::bail!("the CUDA engine does not record replays yet")
     }
 }
 
@@ -480,7 +520,31 @@ impl MemoryBackoff {
     }
 }
 
-/// Opens a Vulkan GPU running the creature-per-lane kernel on its own thread.
+/// The GPU a `gpu_engine` thread runs on.
+enum Backend {
+    Cuda(CudaEngine),
+    Vulkan(Box<VkEngine>),
+}
+
+/// Opens the GPU named `name` through CUDA when it is an NVIDIA GPU whose
+/// driver and NVRTC load (1.6 to 1.8 times Vulkan's kernel rate on the
+/// RTX 4060, docs/performance-log.md), and through Vulkan otherwise.
+fn open_backend(name: &str, max_nodes: usize) -> Result<(Backend, String)> {
+    if crate::cuda_engine::enabled() {
+        match CudaEngine::new(name, max_nodes) {
+            Ok(engine) => {
+                let name = engine.name.clone();
+                return Ok((Backend::Cuda(engine), name));
+            }
+            Err(error) => eprintln!("CUDA not used ({error:#}); running on Vulkan"),
+        }
+    }
+    let engine = VkEngine::new(name, max_nodes)?;
+    let name = engine.name.clone();
+    Ok((Backend::Vulkan(Box::new(engine)), name))
+}
+
+/// Opens a GPU running the creature-per-lane kernel on its own thread.
 /// The thread packs the next unit while earlier units run on the GPU.
 pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<ThreadedEngine> {
     let (ready_tx, ready_rx) = mpsc::channel();
@@ -494,29 +558,46 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
     let thread = std::thread::Builder::new()
         .name(format!("gpu-{name}"))
         .spawn(move || {
-            let engine = match VkEngine::new(&device_name, max_nodes) {
-                Ok(engine) => {
-                    let _ = ready_tx.send(Ok(engine.name.clone()));
-                    engine
+            let (engine, name) = match open_backend(&device_name, max_nodes) {
+                Ok(opened) => {
+                    let _ = ready_tx.send(Ok(opened.1.clone()));
+                    opened
                 }
                 Err(err) => {
                     let _ = ready_tx.send(Err(err));
                     return;
                 }
             };
-            let name = engine.name.clone();
             let memory =
                 MemoryBackoff::new(slots, Duration::from_millis(500), Duration::from_secs(60));
-            run_segments(
-                engine,
-                &name,
-                job_rx,
-                done_tx,
-                Some(replay_rx),
-                &thread_allocated,
-                step_range,
-                memory,
-            );
+            match engine {
+                // Replays are recorded by the Vulkan kernel only; with CUDA
+                // scoring, the replay request channel closes and replays run
+                // on the CPU engine at once.
+                Backend::Cuda(engine) => {
+                    drop(replay_rx);
+                    run_segments(
+                        engine,
+                        &name,
+                        job_rx,
+                        done_tx,
+                        None,
+                        &thread_allocated,
+                        step_range,
+                        memory,
+                    )
+                }
+                Backend::Vulkan(engine) => run_segments(
+                    *engine,
+                    &name,
+                    job_rx,
+                    done_tx,
+                    Some(replay_rx),
+                    &thread_allocated,
+                    step_range,
+                    memory,
+                ),
+            }
         })
         .context("GPU engine thread")?;
     let device_name = ready_rx.recv().context("GPU engine thread stopped")??;
