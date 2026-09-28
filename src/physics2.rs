@@ -598,12 +598,16 @@ struct Scratch {
     /// Per contact this step: node, friction impulse (N s) and the ground's
     /// tangent, to check friction against the slip the step produced.
     friction: Vec<(usize, f32, [f32; 2])>,
+    /// Muscle work so far in this trial (J): the sum of |force x relative
+    /// speed| x dt that drains the muscle stores, for the cost of transport.
+    work_total: f64,
 }
 
 thread_local! {
     /// Momentum ledger of the last `run` on this thread, summed over steps:
     /// horizontal impulse from the ground and wind, and the body's change of
     /// horizontal momentum. The difference is momentum the integrator made.
+    pub static WORK: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
     pub static LEDGER: std::cell::Cell<[f64; 2]> = const { std::cell::Cell::new([0.0; 2]) };
     /// Energy ledger of the last replay on this thread, summed over steps:
     /// 0 the work the muscles did on the body (their force times the change
@@ -670,6 +674,7 @@ pub fn run(model: &Model, cfg: &Config, mut frames: Option<&mut Vec<Vec<[f32; 2]
         first_law: 0.0,
         contacts: 0,
         friction: Vec::new(),
+        work_total: 0.0,
     };
     if let Some(frames) = frames.as_deref_mut() {
         for _ in 0..=fidelity.settle() {
@@ -707,6 +712,7 @@ pub fn run(model: &Model, cfg: &Config, mut frames: Option<&mut Vec<Vec<[f32; 2]
         ledger[0] += f64::from(sc.impulse_x);
         ledger[1] += momentum_x(&s) - before;
         LEDGER.with(|l| l.set(ledger));
+        WORK.with(|w| w.set(sc.work_total));
         if diagnose {
             let work: f64 = model
                 .muscle_lengths(&s)
@@ -1054,6 +1060,7 @@ fn simulate_step_inner(
             magnitude = 0.0;
         }
         let work = (magnitude * relative).abs() * dt;
+        sc.work_total += f64::from(work);
         s.energy[k] = (energy - work * inv_capacity
             + limits.muscle_recovery * cfg.muscle_recovery * dt * (1.0 - energy))
             .clamp(0.0, 1.0);
@@ -2031,6 +2038,19 @@ pub fn replay(creature: &Creature, cfg: &Config) -> (Vec<Vec<[f32; 2]>>, GpuResu
     let mut frames = Vec::new();
     let result = run(&Model::new(creature, &cfg), &cfg, Some(&mut frames));
     (frames, result)
+}
+
+/// Muscle work (J) of a creature's full trial: the sum of |force x relative
+/// speed| x dt that drains the muscle stores, for the cost of transport, with
+/// the distance the trial scored.
+pub fn trial_work(creature: &Creature, cfg: &Config) -> (f32, f64) {
+    let cfg = Config {
+        screen: None,
+        ..cfg.clone()
+    };
+    WORK.with(|w| w.set(0.0));
+    let result = run(&Model::new(creature, &cfg), &cfg, None);
+    (result.fitness, WORK.with(|w| w.get()))
 }
 
 #[cfg(test)]

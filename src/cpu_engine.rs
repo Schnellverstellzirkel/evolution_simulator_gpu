@@ -1483,6 +1483,11 @@ pub fn replay(
 /// speed| x dt that drains the muscles' energy stores). Diagnostic only, never
 /// fitness. `None` when the creature did not move forward.
 pub fn transport_cost(creature: &crate::evolution::Creature, cfg: &Config) -> Option<f32> {
+    if crate::physics2::enabled() {
+        let (distance, work) = crate::physics2::trial_work(creature, cfg);
+        let mass: f32 = physics::nodes(creature).iter().map(|n| n.mass).sum();
+        return (distance > 0.01 && mass > 0.0).then(|| work as f32 / (mass * distance));
+    }
     let mut pop = Population::default();
     pop.push(creature.clone());
     let group = Group::build(&pop, &[0], &[0]);
