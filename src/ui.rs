@@ -7,7 +7,7 @@ use crate::{
     worker::{Command, EventKind, Snapshot, Worker},
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
-use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points};
+use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points, VLine};
 use image::{
     Delay as GifDelay, Frame as GifFrame, Rgba, RgbaImage,
     codecs::gif::{GifEncoder, Repeat as GifRepeat},
@@ -2302,10 +2302,27 @@ impl App {
                 };
                 plot.line(Line::new(name, values).color(color).width(width));
             }
+            // A vertical line where the world changed: the generation that
+            // first ran in the new world.
+            for pair in s.history.windows(2) {
+                if pair[1].config.physics_differs(&pair[0].config) {
+                    let season = pair[1].config.season_step != pair[0].config.season_step
+                        && pair[1].config.seasons > 0;
+                    plot.vline(
+                        VLine::new(
+                            if season { "Season" } else { "World change" },
+                            pair[1].generation as f64 - 0.5,
+                        )
+                        .color(AMBER)
+                        .width(1.5),
+                    );
+                }
+            }
             // Record markers extend the best line instead of duplicating it.
-            let records: Vec<[f64; 2]> = record_entries(&s.history)
+            // Records count again after a world change.
+            let records: Vec<[f64; 2]> = world_records(&s.history)
                 .into_iter()
-                .map(|(index, best)| [s.history[index].generation as f64, best as f64])
+                .map(|(index, best, _)| [s.history[index].generation as f64, best as f64])
                 .collect();
             if !records.is_empty() {
                 plot.points(
