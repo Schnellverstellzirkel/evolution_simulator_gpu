@@ -121,7 +121,7 @@ fn main() {
         "position-derived acceleration includes position corrections; engine_shake_g is the engine's recorded value at the scored endpoint"
     );
     println!(
-        "archive_m  replay_m  nodes  length_m  longest_bone_m  mass_kg  slip_m  slip_per_replay_m  pos_peak_g  pos_shake_peak_g  engine_shake_g"
+        "archive_m  replay_m  nodes  length_m  longest_bone_m  mass_kg  slip_m  slip_per_replay_m  pos_peak_g  pos_shake_peak_g  engine_shake_g  cost_J_per_kg_m"
     );
     let mut lengths = Vec::new();
     let mut shares = Vec::new();
@@ -137,7 +137,7 @@ fn main() {
         lengths.push(length);
         shares.push(share);
         println!(
-            "{:9.1}  {:8.1}  {:5}  {:8.2}  {:14.2}  {:7.2}  {:6.1}  {:17.2}  {:10.1}  {:16.1}  {:14.1}",
+            "{:9.1}  {:8.1}  {:5}  {:8.2}  {:14.2}  {:7.2}  {:6.1}  {:17.2}  {:10.1}  {:16.1}  {:14.1}  {:15}",
             elite.fitness,
             measured.distance,
             c.nodes.len(),
@@ -149,6 +149,8 @@ fn main() {
             measured.position_peak_g,
             measured.position_shake_peak_g,
             result.head_shake / 9.8,
+            cpu_engine::transport_cost(c, &e.config)
+                .map_or("n/a".to_owned(), |v| format!("{v:.2}")),
         );
         if rank == 0 && node_detail {
             champion_detail = nodes
