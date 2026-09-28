@@ -30,7 +30,10 @@
 //   nodes (a0 | a1 << 6 | b0 << 12 | b1 << 18, the sensor's endpoint << 24
 //   or 7 for none), anchors, waveform amplitude, Hill factor, 1/period,
 //   phase, duty, stiffness, 1/duty, 1/(1 - duty), the step's force
-//   (scratch), reset phase, rhythm offset (state), energy (state).
+//   (scratch), reset phase, rhythm offset (state), energy (state), longest
+//   length (where the tendon starts to pull).
+// Bone 0's joint range high (the neck has none) holds the creature's muscle
+// scale: each muscle's force cap and energy store over the fixed ones.
 struct Record {
     a: vec2f,
     b: vec2f,
@@ -95,7 +98,7 @@ const MAXB: u32 = MAXN - 1u;
 const MAXC: u32 = MAXCONTACTSu;
 const MAXR: u32 = 2u * MAXC;
 const TILE: u32 = 32u;
-const MUSCLE_FIELDS: u32 = 15u;
+const MUSCLE_FIELDS: u32 = 16u;
 const BONE_FIELDS: u32 = 9u;
 const NO_SENSOR: u32 = 7u;
 
@@ -109,6 +112,7 @@ const MAX_MUSCLE_FORCE: f32 = 100.0;
 const INV_JOINT_DAMPING: f32 = 10.0;
 const LIMIT_HARDNESS: f32 = 20.0;
 const JOINT_BREAK: f32 = 0.5;
+const TENDON: f32 = 0.0;
 const SPIN_CAP: f32 = 15.0;
 const INV_SPIN_CAP: f32 = 0.06666667;
 const SPIN_HARDNESS: f32 = 20.0;
@@ -740,7 +744,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
     }
     inv_mass = 1.0 / total_mass;
     let inv_nodes = 1.0 / f32(nn);
-    let inv_capacity = 1.0 / (MUSCLE_CAPACITY * p.muscle_energy);
+    let muscle_scale = bone_field(0u, 3u);
+    let inv_capacity = 1.0 / (MUSCLE_CAPACITY * p.muscle_energy * muscle_scale);
+    let cap = MAX_MUSCLE_FORCE * muscle_scale;
     kinematics(true);
 
     var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
@@ -851,7 +857,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             if hill > 0.0 {
                 drive *= clamp(1.0 + relative * hill, 0.0, 1.0);
             }
-            let magnitude = clamp(drive + relative * 0.15, -MAX_MUSCLE_FORCE, MAX_MUSCLE_FORCE);
+            let magnitude = clamp(drive + relative * 0.15, -cap, cap);
             let work = abs(magnitude * relative) * DT;
             muscle_data[field + 14u * TILE] = clamp(
                 energy - work * inv_capacity
@@ -861,7 +867,17 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             );
             muscle_data[field + 11u * TILE] = magnitude;
             muscle_start += magnitude * length_m;
-            let f = dir * magnitude;
+            // The tendon pulls too, passively; its energy counts as stored.
+            var pull = magnitude;
+            if TENDON > 0.0 {
+                let long = muscle_data[field + 15u * TILE];
+                let stretch = max(length_m - long, 0.0);
+                let k_t = TENDON * cap / max(long, 0.05);
+                pull += k_t * stretch;
+                energy_start += 0.5 * k_t * stretch * stretch;
+                energy_scale += 0.5 * k_t * stretch * stretch;
+            }
+            let f = dir * pull;
             body_add(a1 - 1u, 0u, force_at(pa - origin, f));
             body_add(b1 - 1u, 0u, -force_at(pb - origin, f));
         }
@@ -994,6 +1010,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         // First law in flight.
         if nc == 0u {
             var muscle_end = 0.0;
+            var stored_end = 0.0;
             for (var k = 0u; k < muscle_count; k++) {
                 let field = tile.x + k * MUSCLE_FIELDS * TILE + tl;
                 let packed = bitcast<u32>(muscle_data[field]);
@@ -1006,9 +1023,15 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let pa = vec2f(pa0.x + (pa1.x - pa0.x) * anchor_a, pa0.y + (pa1.y - pa0.y) * anchor_a);
                 let pb = vec2f(pb0.x + (pb1.x - pb0.x) * anchor_b, pb0.y + (pb1.y - pb0.y) * anchor_b);
                 let d = pb - pa;
-                muscle_end += muscle_data[field + 11u * TILE] * sqrt(d.x * d.x + d.y * d.y);
+                let length_m = sqrt(d.x * d.x + d.y * d.y);
+                muscle_end += muscle_data[field + 11u * TILE] * length_m;
+                if TENDON > 0.0 {
+                    let long = muscle_data[field + 15u * TILE];
+                    let stretch = max(max(length_m, 1e-6) - long, 0.0);
+                    stored_end += 0.5 * TENDON * cap / max(long, 0.05) * stretch * stretch;
+                }
             }
-            var energy_end = 0.0;
+            var energy_end = stored_end;
             var mass_x_end = 0.0;
             for (var i = 0u; i < MAXN; i++) {
                 if i >= nn { break; }

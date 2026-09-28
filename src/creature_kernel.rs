@@ -110,6 +110,8 @@ pub struct LaneBatch {
     pub info: Vec<[u32; 4]>,
     pub tiles: Vec<[u32; 4]>,
     pub muscles: Vec<f32>,
+    /// Fields per muscle in `muscles` (`MUSCLE_FIELDS` for this kernel).
+    pub muscle_fields: usize,
     pub bones: Vec<f32>,
     /// Behavior totals to resume from, for a batch that continues a trial
     /// (`repack`); a fresh batch starts from zero.
@@ -150,7 +152,7 @@ impl LaneBatch {
                 max_muscles as u32,
                 max_bones as u32,
             ]);
-            muscle_len += max_muscles * MUSCLE_FIELDS * TILE;
+            muscle_len += max_muscles * self.muscle_fields * TILE;
             bone_len += max_bones * BONE_FIELDS * TILE;
         }
         let mut new_nodes = vec![Node::default(); count * capacity];
@@ -162,8 +164,8 @@ impl LaneBatch {
             let (old_tile, old_lane) = (self.tiles[from / TILE], from % TILE);
             let (new_tile, new_lane) = (tiles[to / TILE], to % TILE);
             for m in 0..self.info[from][2] as usize {
-                for f in 0..MUSCLE_FIELDS {
-                    let at = (m * MUSCLE_FIELDS + f) * TILE;
+                for f in 0..self.muscle_fields {
+                    let at = (m * self.muscle_fields + f) * TILE;
                     new_muscles[new_tile[0] as usize + at + new_lane] =
                         muscles[old_tile[0] as usize + at + old_lane];
                 }
@@ -185,6 +187,7 @@ impl LaneBatch {
             info: keep.iter().map(|&j| self.info[j]).collect(),
             tiles,
             muscles: new_muscles,
+            muscle_fields: self.muscle_fields,
             bones: new_bones,
             results: Some(keep.iter().map(|&j| results[j]).collect()),
         }
@@ -431,6 +434,7 @@ fn build_batch(
                 info,
                 tiles,
                 muscles,
+                muscle_fields: MUSCLE_FIELDS,
                 bones,
                 results: None,
             }

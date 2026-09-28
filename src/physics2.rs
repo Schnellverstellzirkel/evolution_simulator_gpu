@@ -71,6 +71,37 @@ pub fn hill_speed() -> f32 {
             .unwrap_or(8.0)
     })
 }
+/// Fields per muscle in the v2 kernel's muscle buffer.
+pub const MUSCLE_FIELDS: usize = 16;
+/// Body mass (kg) that powers one muscle, to scale muscle strength with the
+/// body (`EVOLUTION_P2_MUSCLE_KG`, a measuring switch; 0, the default,
+/// keeps every muscle at the fixed `Limits` force and store). A muscle's
+/// force cap and energy store scale with the body's mass over its muscle
+/// count times this, so more muscles share the same budget.
+fn mass_per_muscle() -> f32 {
+    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("EVOLUTION_P2_MUSCLE_KG")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v: &f32| v.is_finite() && *v >= 0.0)
+            .unwrap_or(0.0)
+    })
+}
+/// Elastic tendons (`EVOLUTION_P2_TENDON`, a measuring switch; 0, the
+/// default, has none): a muscle stretched past its longest length pulls back
+/// like a spring stiff enough to reach the muscle's force cap when stretched
+/// by its longest length divided by this.
+fn tendon() -> f32 {
+    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("EVOLUTION_P2_TENDON")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v: &f32| v.is_finite() && *v >= 0.0)
+            .unwrap_or(0.0)
+    })
+}
 /// Sliding speed (m/s) below which friction holds a foot (as
 /// `physics::PLANTED_SPEED`).
 pub const STICK_SPEED: f32 = physics::PLANTED_SPEED;
@@ -187,6 +218,10 @@ struct MuscleModel {
     /// Hill's relation as a factor on the shortening speed: 1 / (v_max
     /// times the muscle's length, at least 5 cm).
     hill: f32,
+    /// Longest length (m), where the tendon starts to pull, and the
+    /// tendon's stiffness (N/m).
+    long: f32,
+    tendon: f32,
     amplitude: f32,
     inv_period: f32,
     phase: f32,
@@ -222,6 +257,9 @@ pub struct Model {
     /// Starting relative angle of every bone (the neck: its absolute angle).
     rest: Vec<f32>,
     muscles: Vec<MuscleModel>,
+    /// Each muscle's force cap and energy store as multiples of the fixed
+    /// `Limits` ones (1 unless muscle strength scales with the body).
+    muscle_scale: f32,
     /// Earthquake bump phase and ground amplitude for this creature.
     quake_phase: f32,
     amplitude: f32,
@@ -312,6 +350,8 @@ impl Model {
                     } else {
                         0.0
                     },
+                    long: m.long,
+                    tendon: 0.0,
                     amplitude: (m.long - m.short).min(
                         2.0 * limits.muscle_speed * m.period * m.duty.min(1.0 - m.duty)
                             / std::f32::consts::PI,
@@ -330,6 +370,16 @@ impl Model {
             .collect();
         let quake = crate::physics::quake_hash(c.id);
         let still = cfg.quake <= 0.0 || !cfg.ground;
+        let total: f32 = nodes.iter().map(|n| n.mass).sum();
+        let muscle_scale = if mass_per_muscle() > 0.0 && !c.muscles.is_empty() {
+            total / (c.muscles.len() as f32 * mass_per_muscle())
+        } else {
+            1.0
+        };
+        let mut muscles: Vec<MuscleModel> = muscles;
+        for m in &mut muscles {
+            m.tendon = tendon() * limits.muscle_force * muscle_scale / m.long.max(0.05);
+        }
         Model {
             mass: order.iter().map(|&i| nodes[i].mass).collect(),
             radius: order.iter().map(|&i| nodes[i].radius).collect(),
@@ -344,6 +394,7 @@ impl Model {
             hi,
             rest,
             muscles,
+            muscle_scale,
             quake_phase: if still {
                 0.0
             } else {
@@ -455,6 +506,14 @@ impl Model {
             let potential = self.mass[i] * gravity * s.pos[i][1];
             total += kinetic + potential;
             scale += kinetic + potential.abs();
+        }
+        if tendon() > 0.0 {
+            for (m, length) in self.muscles.iter().zip(self.muscle_lengths(s)) {
+                let stretch = (length - m.long).max(0.0);
+                let stored = 0.5 * m.tendon * stretch * stretch;
+                total += stored;
+                scale += stored;
+            }
         }
         (total, scale)
     }
@@ -1020,7 +1079,8 @@ fn simulate_step_inner(
             m.amplitude * (wave(settle_free) - wave((settle_free - dt).max(0.0))) * rate
         }
     };
-    let inv_capacity = 1.0 / (limits.muscle_energy * cfg.muscle_energy);
+    let inv_capacity = 1.0 / (limits.muscle_energy * cfg.muscle_energy * model.muscle_scale);
+    let cap = limits.muscle_force * model.muscle_scale;
     for (k, m) in model.muscles.iter().enumerate() {
         let point = |bone: usize, t: f32| {
             let (p, c) = (model.pivot[bone], model.child[bone]);
@@ -1048,8 +1108,7 @@ fn simulate_step_inner(
             // Shortening is a negative `relative`.
             drive *= (1.0 + relative * m.hill).clamp(0.0, 1.0);
         }
-        let mut magnitude =
-            (drive + relative * 0.15).clamp(-limits.muscle_force, limits.muscle_force);
+        let mut magnitude = (drive + relative * 0.15).clamp(-cap, cap);
         if limp {
             magnitude = 0.0;
         }
@@ -1060,8 +1119,10 @@ fn simulate_step_inner(
         sc.muscle_force[k] = magnitude;
         sc.muscle_length[k] = len;
         muscle_start += magnitude * len;
-        // A positive magnitude pulls the two points together.
-        let f = [dir[0] * magnitude, dir[1] * magnitude];
+        // A positive magnitude pulls the two points together. The tendon
+        // pulls too, passively (its energy is in `Model::energy`).
+        let pull = magnitude + m.tendon * (len - m.long).max(0.0);
+        let f = [dir[0] * pull, dir[1] * pull];
         sc.force[m.bone_a] = sc.force[m.bone_a].add(force_at(rel(pa), f));
         sc.force[m.bone_b] = sc.force[m.bone_b].sub(force_at(rel(pb), f));
     }
@@ -1537,6 +1598,10 @@ pub fn shader_source(capacity: usize, workgroup: u32, fidelity: physics::Fidelit
             format!("const JOINT_BREAK: f32 = {:?};", physics::JOINT_BREAK),
         ),
         (
+            "const TENDON: f32 = 0.0;",
+            format!("const TENDON: f32 = {:?};", tendon()),
+        ),
+        (
             "const SPIN_CAP: f32 = 15.0;",
             format!("const SPIN_CAP: f32 = {SPIN_CAP:?};"),
         ),
@@ -1629,9 +1694,7 @@ pub fn pack(
     indices: &[usize],
     cfg: &Config,
 ) -> anyhow::Result<Vec<crate::creature_kernel::LaneBatch>> {
-    use crate::creature_kernel::{
-        BONE_FIELDS, CAPACITIES, LaneBatch, MUSCLE_FIELDS, TILE, capacity_index,
-    };
+    use crate::creature_kernel::{BONE_FIELDS, CAPACITIES, LaneBatch, TILE, capacity_index};
     let mut groups: Vec<Vec<(usize, usize)>> = vec![Vec::new(); CAPACITIES.len()];
     for (slot, &i) in indices.iter().enumerate() {
         let n = pop.genomes[i].node_count;
@@ -1709,7 +1772,13 @@ pub fn pack(
                         } else {
                             model.lo[b]
                         },
-                        model.hi[b],
+                        // The neck has no range: its slot holds the muscle
+                        // scale.
+                        if b == 0 {
+                            model.muscle_scale
+                        } else {
+                            model.hi[b]
+                        },
                         model.mass[b + 1],
                         model.radius[b + 1],
                         model.friction[b + 1],
@@ -1754,6 +1823,7 @@ pub fn pack(
                         m.reset,
                         0.0,
                         1.0,
+                        m.long,
                     ];
                     for (f, value) in values.into_iter().enumerate() {
                         muscles[field + f * TILE] = value;
@@ -1769,6 +1839,7 @@ pub fn pack(
                 info,
                 tiles,
                 muscles,
+                muscle_fields: MUSCLE_FIELDS,
                 bones,
                 results: None,
             }
@@ -2458,7 +2529,7 @@ mod tests {
 
     #[test]
     fn the_gpu_packing_holds_each_creature_in_its_starting_state() {
-        use crate::creature_kernel::{BONE_FIELDS, MUSCLE_FIELDS, TILE};
+        use crate::creature_kernel::{BONE_FIELDS, TILE};
         let cfg = Config {
             population: 70,
             ..calm()
