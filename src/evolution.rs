@@ -1258,12 +1258,26 @@ fn repair_with(c: &mut Creature, cfg: &Config, rng: &mut Rng, neutral: bool) {
                     || (m.bone_a as usize == b && m.bone_b as usize == a)
             })
         {
+            // At the muscle limit, a muscle off the ring makes room, or else
+            // a second muscle on one ring pair: without it a limb's worth of
+            // duplicates could leave the network disconnected.
+            let pair = |m: &Muscle| (m.bone_a.min(m.bone_b), m.bone_a.max(m.bone_b));
             if c.muscles.len() >= cfg.max_muscles
-                && let Some(i) = c.muscles.iter().position(|m| {
-                    let x = m.bone_a as usize;
-                    let y = m.bone_b as usize;
-                    !((x + 1) % bone_count == y || (y + 1) % bone_count == x)
-                })
+                && let Some(i) = c
+                    .muscles
+                    .iter()
+                    .position(|m| {
+                        let x = m.bone_a as usize;
+                        let y = m.bone_b as usize;
+                        !((x + 1) % bone_count == y || (y + 1) % bone_count == x)
+                    })
+                    .or_else(|| {
+                        (1..c.muscles.len()).find(|&i| {
+                            c.muscles[..i]
+                                .iter()
+                                .any(|m| pair(m) == pair(&c.muscles[i]))
+                        })
+                    })
             {
                 c.muscles.swap_remove(i);
             }
