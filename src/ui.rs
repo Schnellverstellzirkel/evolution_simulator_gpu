@@ -37,6 +37,10 @@ const MUSCLE_ACTIVE: Color32 = Color32::from_rgb(146, 16, 28);
 /// Ring around every node touching the ground in the current frame.
 const TOUCHDOWN: Color32 = Color32::from_rgb(255, 196, 64);
 const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
+/// How fast archive cards glide to their new places after a re-sort.
+const SORT_SPEED: f32 = 5.0;
+/// Generations between autosaves when the player turns autosave on.
+const AUTOSAVE_INTERVAL: u32 = 10;
 /// Exported GIFs render the same scene as the viewport into this frame size.
 const GIF_WIDTH: u32 = 400;
 const GIF_HEIGHT: u32 = 224;
@@ -1001,15 +1005,17 @@ fn paint_archive_map(
             clicked = Some(*niche);
         }
         response.on_hover_text(format!(
-            "{} · rank #{} · {:.3} m\n{:.2} m tall · {:.2} aspect ratio · {} feet\n{}\nClick to replay",
+            "{} · rank {} · {:.2} m\n{:.2} m tall · {} feet\n{}\nClick to replay",
             species_name(&cell.creature),
             cell.rank + 1,
             cell.score,
             cell.descriptor.mean_height,
-            cell.descriptor.aspect_ratio,
             cell.descriptor.feet.round() as i32,
             cell.emitter
-                .map_or("archive elite".to_owned(), |e| e.label().to_owned()),
+                .map_or("First generation".to_owned(), |e| format!(
+                    "Born {}",
+                    origin_words(e)
+                )),
         ));
     }
     clicked
@@ -1141,11 +1147,6 @@ struct App {
     zoom: f32,
     camera: [f32; 2],
     follow: bool,
-    advanced: bool,
-    search: String,
-    hist_min: f64,
-    hist_max: f64,
-    bins: u32,
     percentiles: [bool; 29],
     history_index: usize,
     history_latest: bool,
@@ -1153,13 +1154,12 @@ struct App {
     file_path: String,
     message: Option<String>,
     new_dialog: bool,
-    dirty: bool,
     /// When the UI last sent a settings change to the worker.
     config_sent: Option<Instant>,
     last_frame: Instant,
     frame_times: std::collections::VecDeque<f32>,
     last_page: usize,
-    sort_speed: f32,
+    /// The Diagnostics drawer under the status line is open.
     show_perf: bool,
     ui_scale: f32,
     initial: bool,
@@ -1268,11 +1268,6 @@ impl App {
             zoom: DEFAULT_CAMERA_ZOOM,
             camera: [0.0, 0.0],
             follow: true,
-            advanced: false,
-            search: String::new(),
-            hist_min: -1.0,
-            hist_max: 8.0,
-            bins: 10,
             percentiles,
             history_index: 0,
             history_latest: true,
@@ -1280,12 +1275,10 @@ impl App {
             file_path: "runs/experiment.evo".into(),
             message: None,
             new_dialog: false,
-            dirty: false,
             config_sent: None,
             last_frame: Instant::now(),
             frame_times: Default::default(),
             last_page: usize::MAX,
-            sort_speed: 5.0,
             show_perf: false,
             ui_scale: 1.0,
             initial: true,
@@ -1349,7 +1342,6 @@ impl App {
         self.file_mode = Some(mode);
         self.file_path = match mode {
             "Export CSV" => "runs/statistics.csv".to_owned(),
-            "Save preset" | "Load preset" => "presets/custom.json".to_owned(),
             "Open creature JSON" => "runs/creature.json".to_owned(),
             "Export creature JSON" | "Export creature GIF" => {
                 let id = self.playback.as_ref().map_or(0, |p| p.creature.id);
@@ -1461,40 +1453,121 @@ impl App {
                 ui.painter().circle_filled(points[i], 3., MINT);
             }
             ui.label(RichText::new("EVOLUTION").size(22.).strong());
-            ui.label(
-                RichText::new("CREATURE LABORATORY")
-                    .size(10.)
-                    .color(theme.muted),
-            );
+            ui.add_space(12.);
+            let running = self.active();
+            let (text, fill, why) = if running {
+                (
+                    "Pause evolution",
+                    Color32::from_rgb(255, 239, 216),
+                    "Stop after the work in flight. The replay keeps playing.",
+                )
+            } else {
+                (
+                    "Evolve",
+                    Color32::from_rgb(222, 241, 229),
+                    "Run generation after generation until you pause.",
+                )
+            };
+            if ui
+                .add(
+                    egui::Button::new(RichText::new(text).strong().color(INK))
+                        .fill(fill)
+                        .min_size(Vec2::new(150., 34.)),
+                )
+                .on_hover_text(why)
+                .clicked()
+            {
+                if running {
+                    self.pause();
+                } else {
+                    self.run(true, false);
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("New experiment").clicked() {
-                    self.new_dialog = true;
-                }
                 if ui
-                    .button("Save")
-                    .on_hover_text("Save population, settings and progress · Ctrl+S")
+                    .button("Help")
+                    .on_hover_text("Shortcuts and what each tab shows · F1")
                     .clicked()
                 {
-                    self.file("Save experiment");
+                    self.show_help = !self.show_help;
                 }
-                if ui.button("Open").clicked() {
-                    self.file("Open experiment");
-                }
-                if ui
-                    .button("Screenshot")
-                    .on_hover_text("Save a PNG of the window under runs/")
-                    .clicked()
-                {
-                    self.screenshot_pending = true;
-                    self.screenshot_waiting = true;
-                    self.message = Some("Taking a screenshot…".into());
-                }
-                ui.separator();
+                ui.menu_button("View", |ui| {
+                    if ui.checkbox(&mut self.dark, "Dark theme").changed() {
+                        apply_style(ui.ctx(), self.dark);
+                    }
+                    if ui
+                        .add(egui::Slider::new(&mut self.ui_scale, 0.75..=1.6).text("UI scale"))
+                        .changed()
+                    {
+                        ui.ctx().set_zoom_factor(self.ui_scale);
+                    }
+                });
+                ui.menu_button("File", |ui| {
+                    if ui.button("New experiment…").clicked() {
+                        self.new_dialog = true;
+                        ui.close();
+                    }
+                    if ui.button("Open…").clicked() {
+                        self.file("Open experiment");
+                        ui.close();
+                    }
+                    if ui.button("Save…  Ctrl+S").clicked() {
+                        self.file("Save experiment");
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(self.playback.is_some(), egui::Button::new("Export creature GIF…"))
+                        .clicked()
+                    {
+                        self.file("Export creature GIF");
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(self.playback.is_some(), egui::Button::new("Export creature JSON…"))
+                        .clicked()
+                    {
+                        self.file("Export creature JSON");
+                        ui.close();
+                    }
+                    if ui.button("Open creature JSON…").clicked() {
+                        self.file("Open creature JSON");
+                        ui.close();
+                    }
+                    if ui.button("Export statistics CSV…").clicked() {
+                        self.file("Export CSV");
+                        ui.close();
+                    }
+                    if ui.button("Screenshot").clicked() {
+                        self.screenshot_pending = true;
+                        self.screenshot_waiting = true;
+                        self.message = Some("Taking a screenshot…".into());
+                        ui.close();
+                    }
+                    ui.separator();
+                    let mut autosave = self.config.checkpoint_interval > 0;
+                    if ui
+                        .checkbox(
+                            &mut autosave,
+                            format!("Autosave every {AUTOSAVE_INTERVAL} generations"),
+                        )
+                        .on_hover_text("Writes runs/seed-<seed>-auto.evo in the background and keeps the three newest.")
+                        .changed()
+                    {
+                        self.config.checkpoint_interval = if autosave { AUTOSAVE_INTERVAL } else { 0 };
+                        self.worker.send(Command::Configure(self.config.clone()));
+                        self.config_sent = Some(Instant::now());
+                    }
+                });
                 if let Some(s) = &self.snapshot {
                     ui.label(
-                        RichText::new(format!("GEN {:03}", s.generation))
-                            .color(theme.accent)
-                            .strong(),
+                        RichText::new(format!(
+                            "{} creatures · {:.0} s trials",
+                            number(s.config.population),
+                            s.config.duration
+                        ))
+                        .small()
+                        .color(theme.muted),
                     );
                 }
             });
@@ -1505,84 +1578,7 @@ impl App {
     }
     fn control_contents(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
-        ui.add_space(10.);
-        ui.label(RichText::new("EXPERIMENT").small().color(theme.muted));
-        ui.heading("Let life find a way.");
-        ui.label(RichText::new("More kinds of life. Better walkers.").color(theme.muted));
-        ui.add_space(8.);
-        let running = self.active();
-        let text = if running {
-            "Pause evolution"
-        } else {
-            "Evolve continuously"
-        };
-        if ui
-            .add_sized(
-                [ui.available_width(), 40.],
-                egui::Button::new(RichText::new(text).strong()).fill(if running {
-                    Color32::from_rgb(255, 239, 216)
-                } else {
-                    Color32::from_rgb(222, 241, 229)
-                }),
-            )
-            .clicked()
-        {
-            if running {
-                self.pause();
-            } else {
-                self.run(true, false);
-            }
-        }
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!running, egui::Button::new("One generation"))
-                .clicked()
-            {
-                self.run(false, false);
-            }
-            if ui
-                .add_enabled(!running, egui::Button::new("Guided step"))
-                .on_hover_text("Evaluate → update behavior archive → breed from diverse elites")
-                .clicked()
-            {
-                self.worker.pause.store(false, Ordering::Relaxed);
-                self.worker.send(Command::Next);
-            }
-        });
-        if let Some(s) = &self.snapshot {
-            ui.label(RichText::new(s.stage.label()).color(theme.accent));
-            let text = if s.checking > 0 {
-                format!(
-                    "{} / {} evaluated · {} in checks",
-                    number(s.completed),
-                    number(s.config.population),
-                    number(s.checking)
-                )
-            } else {
-                format!(
-                    "{} / {} evaluated",
-                    number(s.completed),
-                    number(s.config.population)
-                )
-            };
-            ui.add(
-                egui::ProgressBar::new(s.completed as f32 / s.config.population as f32)
-                    .text(text)
-                    .fill(theme.accent.gamma_multiply(0.7)),
-            )
-            .on_hover_text(
-                "Creatures of this generation whose trial has counted. A creature that could \
-                 enter the archive first runs a finer check trial; it counts when that ends.",
-            );
-        }
-        ui.separator();
-        let mut before = self.config.clone();
-        ui.label(format!(
-            "{} creatures · {:.0} s trials",
-            number(self.config.population),
-            self.config.duration
-        ));
-        ui.add_space(4.);
+        ui.add_space(6.);
         let mut world_changed = false;
         ui.label(RichText::new("World").strong());
         let live = self.snapshot.as_ref().map(|s| s.config.clone());
@@ -1696,177 +1692,7 @@ impl App {
         if world_changed {
             self.worker.send(Command::Configure(self.config.clone()));
             self.config_sent = Some(Instant::now());
-            // Applied already, so it does not count as an unapplied setting.
-            before = self.config.clone();
         }
-        ui.add_space(4.);
-        ui.checkbox(&mut self.advanced, "Advanced controls");
-        if self.advanced {
-            ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Find a setting…"));
-            let q = self.search.to_lowercase();
-            if matches_search(&q, "seed random reproducibility") {
-                egui::CollapsingHeader::new("Randomness").show(ui, |ui| {
-                    ui.checkbox(
-                        &mut self.config.random_seed,
-                        "Choose a new seed on creation",
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label("Seed");
-                        ui.add(egui::DragValue::new(&mut self.config.seed));
-                    });
-                    ui.label(
-                        RichText::new("The resolved seed is always saved with the experiment.")
-                            .small()
-                            .color(theme.muted),
-                    );
-                });
-            }
-            if matches_search(&q, "performance throughput checkpoint autosave") {
-                egui::CollapsingHeader::new("Performance & checkpoints").show(ui, |ui| {
-                    ui.checkbox(&mut self.config.throughput, "Maximum throughput")
-                        .on_hover_text(
-                            "Larger batches for long runs. Selected automatically when you choose 100k or more creatures; uncheck for shorter pauses.",
-                        );
-                    ui.horizontal(|ui| {
-                        ui.label("Autosave every");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.checkpoint_interval)
-                                .range(0..=1000)
-                                .suffix(" gens"),
-                        );
-                    });
-                    ui.small("Off (0) by default, also for a loaded game.");
-                });
-            }
-            if matches_search(&q, "display ui scale window sorting animation") {
-                egui::CollapsingHeader::new("Display").show(ui, |ui| {
-                    if ui
-                        .add(egui::Slider::new(&mut self.ui_scale, 0.75..=1.6).text("UI scale"))
-                        .changed()
-                    {
-                        ui.ctx().set_zoom_factor(self.ui_scale);
-                    }
-                    ui.add(
-                        egui::Slider::new(&mut self.sort_speed, 0.5..=20.0)
-                            .text("Sort animation speed"),
-                    );
-                    if ui.checkbox(&mut self.dark, "Dark theme").changed() {
-                        apply_style(ui.ctx(), self.dark);
-                    }
-                    ui.checkbox(&mut self.show_help, "Show help overlay");
-                });
-            }
-            if matches_search(
-                &q,
-                "debug histogram minimum maximum bins gpu ram memory budget performance details diagnostics",
-            ) {
-                egui::CollapsingHeader::new("Debug").show(ui, |ui| {
-                    ui.label(
-                        RichText::new(
-                            "Diagnostics and machine limits. Nothing here changes evolution.",
-                        )
-                        .small()
-                        .color(theme.muted),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label("Histogram min (m)");
-                        ui.add(egui::DragValue::new(&mut self.hist_min).speed(0.1));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Histogram max (m)");
-                        ui.add(egui::DragValue::new(&mut self.hist_max).speed(0.1));
-                    });
-                    egui::ComboBox::from_label("Histogram bins / meter")
-                        .selected_text(self.bins.to_string())
-                        .show_ui(ui, |ui| {
-                            for n in [1, 2, 5, 10, 20, 25, 50, 100] {
-                                ui.selectable_value(&mut self.bins, n, n.to_string());
-                            }
-                        });
-                    ui.checkbox(&mut self.show_perf, "Performance details");
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label("GPU budget MiB");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.gpu_budget_mib)
-                                .speed(64)
-                                .range(32..=6144),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("RAM budget MiB");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.ram_budget_mib)
-                                .speed(256)
-                                .range(64..=24576),
-                        );
-                    });
-                });
-            }
-        }
-        if before != self.config {
-            self.dirty = true;
-        }
-        if self.dirty {
-            if let Err(e) = self.config.validate() {
-                ui.colored_label(AMBER, e.to_string());
-            }
-            if ui
-                .add_enabled(
-                    self.config.validate().is_ok(),
-                    egui::Button::new("Apply settings"),
-                )
-                .clicked()
-            {
-                self.worker.send(Command::Configure(self.config.clone()));
-                self.dirty = false;
-            }
-            ui.label(
-                RichText::new(
-                    "Changes apply between generations. Seed changes need a new experiment.",
-                )
-                .small()
-                .color(theme.muted),
-            );
-        }
-        ui.horizontal_wrapped(|ui| {
-            if ui.small_button("Save preset").clicked() {
-                self.file("Save preset");
-            }
-            if ui.small_button("Load preset").clicked() {
-                self.file("Load preset");
-            }
-            if ui
-                .add_enabled(
-                    self.playback.is_some(),
-                    egui::Button::new("Export JSON").small(),
-                )
-                .on_hover_text("Save the selected creature as JSON under runs/")
-                .clicked()
-            {
-                self.file("Export creature JSON");
-            }
-            if ui
-                .add_enabled(self.playback.is_some(), egui::Button::new("GIF").small())
-                .on_hover_text("Save an animated GIF of the selected creature under runs/")
-                .clicked()
-            {
-                self.file("Export creature GIF");
-            }
-            if ui
-                .small_button("Open creature")
-                .on_hover_text("Replay a creature from a JSON file")
-                .clicked()
-            {
-                self.file("Open creature JSON");
-            }
-            if ui.small_button("Reset settings").clicked() {
-                self.config = Config::default();
-                self.dirty = true;
-            }
-        });
-        ui.separator();
-        ui.label(RichText::new("Each creature runs its own trial. Faster walkers are more likely to survive; their offspring explore new shapes.").small().color(theme.muted));
     }
     fn viewport(&mut self, ui: &mut egui::Ui, height: f32) {
         let theme = self.theme();
@@ -2237,12 +2063,6 @@ impl App {
             {
                 p.reset();
             }
-            if ui.button("Single tick").clicked() {
-                self.playing = false;
-                if let Some(p) = &mut self.playback {
-                    p.advance();
-                }
-            }
             ui.add(
                 egui::Slider::new(&mut self.speed, 0.25..=4.0)
                     .logarithmic(true)
@@ -2430,74 +2250,51 @@ impl App {
         });
     }
     fn histogram(&self, ui: &mut egui::Ui, stats: &Stats, height: f32) {
-        if !self.hist_min.is_finite()
-            || !self.hist_max.is_finite()
-            || self.hist_max <= self.hist_min
-        {
-            ui.colored_label(AMBER, "Histogram minimum must be below maximum.");
+        // The range fits the distances of this generation, in about 40 bars.
+        let (Some(low), Some(high)) = (
+            stats.histogram.iter().map(|&(cm, _)| cm).min(),
+            stats.histogram.iter().map(|&(cm, _)| cm).max(),
+        ) else {
+            ui.small("No distances recorded for this generation.");
             return;
-        }
-        let count = ((self.hist_max - self.hist_min) * self.bins as f64)
-            .ceil()
-            .min(4096.) as usize;
+        };
+        let (low, high) = (low as f64 / 100.0, (high + 1) as f64 / 100.0);
+        let width = ((high - low) / 40.0).max(0.01);
+        let count = ((high - low) / width).ceil().max(1.0) as usize;
         let mut bins = vec![0u32; count];
-        let mut outside = stats.failed as u64;
         for &(cm, n) in &stats.histogram {
             let value = (cm as f64 + 0.5) / 100.;
-            let index = ((value - self.hist_min) * self.bins as f64).floor();
-            if index >= 0. && (index as usize) < count {
-                bins[index as usize] += n;
-            } else {
-                outside += n as u64;
-            }
+            let index = (((value - low) / width).floor() as usize).min(count - 1);
+            bins[index] += n;
         }
         let bars = bins
             .iter()
             .enumerate()
-            .map(|(i, &n)| {
-                Bar::new(
-                    self.hist_min + (i as f64 + 0.5) / self.bins as f64,
-                    n as f64,
-                )
-                .width(0.85 / self.bins as f64)
-            })
+            .map(|(i, &n)| Bar::new(low + (i as f64 + 0.5) * width, n as f64).width(width * 0.85))
             .collect();
-        let mut reset = false;
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .small_button("Reset view")
-                    .on_hover_text("Fit the histogram again")
-                    .clicked()
-                {
-                    reset = true;
-                }
-            });
-        });
-        let mut plot = Plot::new("histogram")
+        Plot::new("histogram")
             .height(height)
             .x_axis_label("Distance (m)")
-            .allow_scroll(false);
-        if reset {
-            plot = plot.reset();
-        }
-        plot.show(ui, |plot| {
-            plot.bar_chart(
-                BarChart::new("Creatures", bars).color(self.theme().accent.gamma_multiply(0.65)),
-            );
-        });
-        if outside > 0 {
+            .allow_scroll(false)
+            .show(ui, |plot| {
+                plot.bar_chart(
+                    BarChart::new("Creatures", bars)
+                        .color(self.theme().accent.gamma_multiply(0.65)),
+                );
+            });
+        if stats.failed > 0 {
             ui.small(format!(
-                "{outside} outside this range or failed · change range in Advanced > Debug"
+                "{} failed trials are not shown",
+                number(stats.failed)
             ));
         }
     }
     fn population(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
         ui.horizontal(|ui| {
-            ui.heading("Search archive");
+            ui.heading("Ways of moving");
             ui.label(
-                RichText::new("Behavior niches and protected topologies · click to replay")
+                RichText::new("The best creature for each way of moving · click one to replay it")
                     .color(theme.muted),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2526,11 +2323,7 @@ impl App {
                     .selected_text(height_bin_label(self.map_height))
                     .show_ui(ui, |ui| {
                         for bin in 0..MAP_BINS[3] {
-                            ui.selectable_value(
-                                &mut self.map_height,
-                                bin,
-                                height_bin_label(bin),
-                            );
+                            ui.selectable_value(&mut self.map_height, bin, height_bin_label(bin));
                         }
                     });
                 ui.label(RichText::new("Feet").small().color(theme.muted));
@@ -2542,63 +2335,44 @@ impl App {
                         }
                     });
                 ui.label(
-                    RichText::new(
-                        "Bounce adds no cell: its axis has one bin. Click an occupied cell to replay it.",
-                    )
-                    .small()
-                    .color(theme.muted),
+                    RichText::new("Click a cell to replay its creature.")
+                        .small()
+                        .color(theme.muted),
                 );
             });
         }
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        ui.horizontal(|ui| {
-            ui.label(format!("{} niches", number(snapshot.archive_cells)));
-            ui.label(format!(
-                "{} topology reserves",
-                number(snapshot.innovation_reserve_count)
-            ));
-            ui.label(
-                RichText::new(format!("QD score {:.2}", snapshot.qd_score)).color(theme.accent),
-            );
-        });
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Archive axes:").small().color(theme.muted));
+            ui.label(
+                RichText::new(format!(
+                    "{} ways of moving, sorted by",
+                    number(snapshot.archive_cells)
+                ))
+                .small()
+                .color(theme.muted),
+            );
             for (name, why) in [
                 (
-                    "Ground contact",
-                    "How much of the timed trial the creature kept its nodes on the ground.",
+                    "ground contact",
+                    "How much of the trial the creature keeps its nodes on the ground.",
                 ),
                 (
-                    "Gait cadence",
-                    "How many up-and-down body oscillations the gait completes per second.",
+                    "stride rate",
+                    "How many up-and-down body swings the gait makes per second.",
                 ),
                 (
-                    "Mean body height",
-                    "The average height of the body's bounding box above the ground during the trial.",
+                    "body height",
+                    "The average height of the body above the ground during the trial.",
                 ),
                 (
-                    "Feet",
-                    "Nodes that touched the ground and lifted off again; a node dragged along the ground never lifts, so it is not a foot.",
+                    "feet",
+                    "Nodes that touch the ground and lift off again. A node dragged along the ground never lifts, so it is not a foot.",
                 ),
             ] {
                 ui.label(RichText::new(name).small().color(theme.ink))
                     .on_hover_text(why);
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Next batch:").small().color(theme.muted));
-            for (emitter, weight) in crate::qd::Emitter::ALL
-                .into_iter()
-                .zip(snapshot.emitter_weights)
-            {
-                ui.label(
-                    RichText::new(format!("{} {:.0}%", emitter.label(), weight * 100.0)).small(),
-                )
-                .on_hover_text(
-                    "Emitter shares adapt to recent archive discoveries and improvements.",
-                );
             }
         });
         let mut selected = None;
@@ -2626,8 +2400,7 @@ impl App {
         } else {
             let columns = (ui.available_width() / 155.).floor().max(2.) as usize;
             let width = (ui.available_width() - (columns - 1) as f32 * 10.) / columns as f32;
-            let progress =
-                (self.sort_started.elapsed().as_secs_f32() * self.sort_speed / 3.).min(1.);
+            let progress = (self.sort_started.elapsed().as_secs_f32() * SORT_SPEED / 3.).min(1.);
             let animating = snapshot.stage == Stage::Archived && progress < 1.;
             let ease = progress * progress * (3. - 2. * progress);
             let item_count = if snapshot.archive_size > 0 {
@@ -2657,17 +2430,15 @@ impl App {
                                         selected = Some((card.creature.clone(), snapshot.config.clone()));
                                     }
                                     response.on_hover_text(format!(
-                                        "{}\nID {}\n{} nodes / {} bones / {} muscles\nMutability {:.2}\n{}\n{}\nClick to replay",
+                                        "{}\n{} nodes, {} bones, {} muscles\n{}\n{}\nClick to replay",
                                         species_name(&card.creature),
-                                        card.creature.id,
                                         card.creature.nodes.len(),
                                         card.creature.bones.len(),
                                         card.creature.muscles.len(),
-                                        card.creature.mutability,
-                                        card.emitter.map_or("Initial population".to_owned(), |emitter| format!("Emitter: {}", emitter.label())),
+                                        card.emitter.map_or("First generation".to_owned(), |emitter| format!("Born {}", origin_words(emitter))),
                                         card.descriptor.map_or_else(
-                                            || if card.score.is_finite() { "Current trial evaluated".to_owned() } else { "Current trial pending".to_owned() },
-                                            |d| format!("Contact {:.0}% · gait {:.2} Hz · form {:.2} · bob {:.2} m · height {:.2} m · {} feet · {} visits", d.ground_contact * 100.0, d.gait_frequency, d.aspect_ratio, d.vertical_oscillation, d.mean_height, d.feet, card.visits),
+                                            || if card.score.is_finite() { "Trial done".to_owned() } else { "Trial running".to_owned() },
+                                            |d| format!("On the ground {:.0}% of the time · {:.2} strides/s · {:.2} m tall · {:.0} feet", d.ground_contact * 100.0, d.gait_frequency, d.mean_height, d.feet),
                                         )
                                     ));
                                 } else {
@@ -3406,13 +3177,10 @@ impl App {
         };
         ui.horizontal(|ui| {
             ui.label(format!(
-                "Generation {} · seed {} · {} evaluated · {} niches · QD {:.2} · {} failed",
+                "Generation {} · {} creatures tried · {} ways of moving kept",
                 stats.generation,
-                stats.config.seed,
                 number(stats.population),
                 number(stats.archive_cells),
-                stats.qd_score,
-                stats.failed
             ));
         });
         ui.columns(2, |cols| {
@@ -3462,6 +3230,66 @@ impl App {
             self.tab = Tab::Overview;
         }
     }
+    /// The closed-by-default drawer with search and machine numbers, and the
+    /// step-by-step run buttons developers use.
+    fn diagnostics(&self, ui: &mut egui::Ui, s: &Snapshot) {
+        let mut frames: Vec<_> = self.frame_times.iter().copied().collect();
+        frames.sort_by(f32::total_cmp);
+        let p95 = frames.get(frames.len() * 95 / 100).copied().unwrap_or(0.);
+        ui.small(format!(
+            "{} · seed {} · stage: {} · {} / {} evaluated · {} in checks",
+            s.gpu,
+            s.config.seed,
+            s.stage.label(),
+            number(s.completed),
+            number(s.config.population),
+            number(s.checking),
+        ));
+        ui.small(format!(
+            "QD score {:.2} · {} behavior niches · {} topology reserves · next batch {}",
+            s.qd_score,
+            number(s.archive_cells),
+            number(s.innovation_reserve_count),
+            crate::qd::Emitter::ALL
+                .into_iter()
+                .zip(s.emitter_weights)
+                .map(|(emitter, weight)| format!("{} {:.0}%", emitter.label(), weight * 100.0))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+        ui.small(format!(
+            "Frame p95 {:.1} ms · end-to-end {:.0} creatures/s · GPU buffers {:.1} MiB · population {:.1} MiB · runs/ {}",
+            p95 * 1000.,
+            s.end_to_end,
+            s.gpu_bytes as f64 / 1048576.,
+            s.ram_bytes as f64 / 1048576.,
+            file_size(self.runs_bytes)
+        ));
+        for (name, rate, count) in &s.engines {
+            ui.small(format!("{name}: {rate:.0} creatures/s · {count} evaluated"));
+        }
+        let running = self.active();
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!running, egui::Button::new("One generation").small())
+                .clicked()
+            {
+                self.worker.pause.store(false, Ordering::Relaxed);
+                self.worker.send(Command::Run {
+                    continuous: false,
+                    guided: false,
+                });
+            }
+            if ui
+                .add_enabled(!running, egui::Button::new("Guided step").small())
+                .on_hover_text("Evaluate, then update the archive, then breed, pausing after each")
+                .clicked()
+            {
+                self.worker.pause.store(false, Ordering::Relaxed);
+                self.worker.send(Command::Next);
+            }
+        });
+    }
     /// Keyboard shortcuts and what each tab shows.
     fn help_window(&mut self, ctx: &egui::Context) {
         if !self.show_help {
@@ -3507,7 +3335,7 @@ impl App {
                     ),
                     (
                         "Behavior archive",
-                        "Every behavior niche the search protects, as cards or as a behavior map. Click a creature or an occupied map cell to replay it.",
+                        "The best creature for every way of moving, as cards or as a map. Click a creature or a map cell to replay it.",
                     ),
                     (
                         "History & statistics",
@@ -3535,9 +3363,17 @@ impl App {
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.label(format!(
-                        "Create {} creatures using the settings in the sidebar.",
-                        number(self.config.population)
+                        "Start over with {} new creatures in this world: {}.",
+                        number(self.config.population),
+                        world_summary(&self.config)
                     ));
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.config.random_seed, "New random seed");
+                        if !self.config.random_seed {
+                            ui.label("Seed");
+                            ui.add(egui::DragValue::new(&mut self.config.seed));
+                        }
+                    });
                     ui.label("Save the current experiment first if you want to resume it later.");
                     ui.horizontal(|ui| {
                         if ui.button("Save current").clicked() {
@@ -3555,7 +3391,6 @@ impl App {
                             self.pause();
                             self.worker.send(Command::New(self.config.clone()));
                             self.initial = true;
-                            self.dirty = false;
                             self.last_page = usize::MAX;
                             self.new_dialog = false;
                         }
@@ -3583,39 +3418,6 @@ impl App {
                                     self.initial = true;
                                 }
                                 "Export CSV" => self.worker.send(Command::Export(path)),
-                                "Save preset" => {
-                                    let result = (|| -> anyhow::Result<()> {
-                                        self.config.validate()?;
-                                        if let Some(parent) = path.parent() {
-                                            std::fs::create_dir_all(parent)?;
-                                        }
-                                        serde_json::to_writer_pretty(
-                                            std::fs::File::create(path)?,
-                                            &self.config,
-                                        )?;
-                                        Ok(())
-                                    })();
-                                    self.message =
-                                        Some(result.map_or_else(
-                                            |e| e.to_string(),
-                                            |_| "Preset saved".into(),
-                                        ));
-                                }
-                                "Load preset" => {
-                                    let result = (|| -> anyhow::Result<Config> {
-                                        let cfg: Config =
-                                            serde_json::from_reader(std::fs::File::open(path)?)?;
-                                        cfg.validate()?;
-                                        Ok(cfg)
-                                    })();
-                                    match result {
-                                        Ok(cfg) => {
-                                            self.config = cfg;
-                                            self.dirty = true;
-                                        }
-                                        Err(e) => self.message = Some(e.to_string()),
-                                    }
-                                }
                                 "Export creature JSON" => {
                                     let creature =
                                         self.playback.as_ref().map(|p| p.creature.clone());
@@ -3767,10 +3569,9 @@ impl eframe::App for App {
             {
                 self.config = next.config.clone();
                 self.initial = false;
-            } else if !self.dirty
-                && self
-                    .config_sent
-                    .is_none_or(|sent| sent.elapsed() > Duration::from_secs(2))
+            } else if self
+                .config_sent
+                .is_none_or(|sent| sent.elapsed() > Duration::from_secs(2))
                 && self
                     .snapshot
                     .as_ref()
@@ -3925,33 +3726,22 @@ impl eframe::App for App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .small_button(if self.show_perf {
-                                "Hide performance"
+                                "Hide diagnostics"
                             } else {
-                                "Performance"
+                                "Diagnostics"
                             })
+                            .on_hover_text("Search and machine numbers for developers")
                             .clicked()
                         {
                             self.show_perf = !self.show_perf;
                         }
-                        ui.label(RichText::new(&s.gpu).small().color(theme.muted));
                     });
                 }
             });
-            if self.show_perf && let Some(s) = &self.snapshot {
-                let mut frames: Vec<_> = self.frame_times.iter().copied().collect();
-                frames.sort_by(f32::total_cmp);
-                let p95 = frames.get(frames.len() * 95 / 100).copied().unwrap_or(0.);
-                ui.small(format!(
-                    "Frame p95 {:.1} ms · end-to-end {:.0} creatures/s · GPU buffers {:.1} MiB · population {:.1} MiB · runs/ {}",
-                    p95 * 1000.,
-                    s.end_to_end,
-                    s.gpu_bytes as f64 / 1048576.,
-                    s.ram_bytes as f64 / 1048576.,
-                    file_size(self.runs_bytes)
-                ));
-                for (name, rate, count) in &s.engines {
-                    ui.small(format!("{name}: {rate:.0} creatures/s · {count} evaluated"));
-                }
+            if self.show_perf
+                && let Some(s) = &self.snapshot
+            {
+                self.diagnostics(ui, s);
             }
             if let Some(m) = &self.message {
                 ui.label(m);
@@ -4209,6 +3999,15 @@ fn paint_card(
         );
     }
 }
+/// How a creature came to be, in the words the lineage uses.
+fn origin_words(emitter: crate::qd::Emitter) -> &'static str {
+    match emitter {
+        crate::qd::Emitter::Cma => "fine-tuned from a parent",
+        crate::qd::Emitter::Structural => "reshaped from a parent",
+        crate::qd::Emitter::Novelty => "exploring a new way of moving",
+        crate::qd::Emitter::Restart => "as a new random body",
+    }
+}
 /// Whether every effect except the seasons schedule sits at its calm level.
 fn world_is_calm(config: &Config) -> bool {
     crate::environment::EFFECTS
@@ -4297,9 +4096,6 @@ fn seconds_text(seconds: f64) -> String {
     } else {
         format!("{:.0} h", seconds / 3600.0)
     }
-}
-fn matches_search(q: &str, terms: &str) -> bool {
-    q.is_empty() || terms.contains(q)
 }
 fn number(n: usize) -> String {
     let text = n.to_string();
