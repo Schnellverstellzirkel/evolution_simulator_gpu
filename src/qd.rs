@@ -1312,10 +1312,72 @@ fn wrap_phase(delta: f32) -> f32 {
 /// Share of each CMA step taken along the normalized evolution path.
 const PATH_WEIGHT: f32 = 0.3;
 
+/// A standard normal sample by the ziggurat method (Marsaglia and Tsang,
+/// 2000): about 98% of draws cost one table lookup, a compare and a multiply,
+/// instead of a logarithm, a square root and a cosine. Breeding draws about a
+/// hundred of these per child.
 pub(crate) fn gaussian(rng: &mut Rng) -> f32 {
-    let u1 = (1.0 - rng.unit()).max(1e-7);
-    let u2 = rng.unit();
-    (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+    let z = ziggurat();
+    loop {
+        let bits = (rng.next_u64() >> 32) as u32 as i32;
+        let layer = (bits & 127) as usize;
+        if bits.unsigned_abs() < z.k[layer] {
+            return bits as f32 * z.w[layer];
+        }
+        let x = bits as f32 * z.w[layer];
+        if layer == 0 {
+            // The tail beyond the base layer's edge.
+            loop {
+                let x = -(1.0 - rng.unit()).ln() / ZIGGURAT_EDGE;
+                let y = -(1.0 - rng.unit()).ln();
+                if y + y >= x * x {
+                    return if bits > 0 {
+                        ZIGGURAT_EDGE + x
+                    } else {
+                        -ZIGGURAT_EDGE - x
+                    };
+                }
+            }
+        }
+        if z.f[layer] + rng.unit() * (z.f[layer - 1] - z.f[layer]) < (-0.5 * x * x).exp() {
+            return x;
+        }
+    }
+}
+/// Right edge of the ziggurat's base layer.
+const ZIGGURAT_EDGE: f32 = 3.442_62;
+struct Ziggurat {
+    k: [u32; 128],
+    w: [f32; 128],
+    f: [f32; 128],
+}
+fn ziggurat() -> &'static Ziggurat {
+    static TABLES: std::sync::OnceLock<Ziggurat> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        let scale = 2_147_483_648.0f64;
+        let mut edge = 3.442_619_855_899f64;
+        let area = 9.912_563_035_262_17e-3f64;
+        let q = area / (-0.5 * edge * edge).exp();
+        let mut z = Ziggurat {
+            k: [0; 128],
+            w: [0.0; 128],
+            f: [0.0; 128],
+        };
+        z.k[0] = (edge / q * scale) as u32;
+        z.w[0] = (q / scale) as f32;
+        z.w[127] = (edge / scale) as f32;
+        z.f[0] = 1.0;
+        z.f[127] = (-0.5 * edge * edge).exp() as f32;
+        let mut previous = edge;
+        for i in (1..127).rev() {
+            edge = (-2.0 * (area / edge + (-0.5 * edge * edge).exp()).ln()).sqrt();
+            z.k[i + 1] = (edge / previous * scale) as u32;
+            previous = edge;
+            z.f[i] = (-0.5 * edge * edge).exp() as f32;
+            z.w[i] = (edge / scale) as f32;
+        }
+        z
+    })
 }
 fn exploring_parameters(creature: &Creature) -> Vec<f32> {
     let mut output = Vec::with_capacity(
@@ -1697,6 +1759,29 @@ mod tests {
         assert!(layout.wraps(start + 7));
         assert!(layout.wraps(start + 12));
         assert!(!layout.wraps(start + 13));
+    }
+
+    #[test]
+    fn gaussian_samples_are_standard_normal() {
+        let mut rng = crate::evolution::Rng::new(1, 2, 3);
+        let n = 2_000_000;
+        let (mut sum, mut squares, mut tails, mut far) = (0.0f64, 0.0f64, 0usize, 0usize);
+        for _ in 0..n {
+            let x = f64::from(super::gaussian(&mut rng));
+            sum += x;
+            squares += x * x;
+            tails += usize::from(x.abs() > 2.0);
+            far += usize::from(x.abs() > 3.5);
+        }
+        let mean = sum / n as f64;
+        let variance = squares / n as f64 - mean * mean;
+        assert!(mean.abs() < 0.003, "mean {mean}");
+        assert!((variance - 1.0).abs() < 0.005, "variance {variance}");
+        // P(|x| > 2) = 0.0455 and P(|x| > 3.5) = 0.000465.
+        let tails = tails as f64 / n as f64;
+        let far = far as f64 / n as f64;
+        assert!((tails - 0.0455).abs() < 0.001, "P(|x| > 2) = {tails}");
+        assert!((far - 0.000465).abs() < 0.0001, "P(|x| > 3.5) = {far}");
     }
 
     #[test]

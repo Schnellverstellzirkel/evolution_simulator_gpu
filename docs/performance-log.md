@@ -2,6 +2,21 @@
 
 Current goal: 2,000,000 evaluated creatures/s with fixed 60-second trials, 3 million creatures per generation, and the graphical game at 60 FPS. The measurements below do not establish that goal.
 
+## Host breeding: ziggurat normal samples (2026-09-28)
+
+Breeding draws about a hundred normal samples per child (local mutation and both CMA emitters), and each Box-Muller draw cost a logarithm, a square root and a cosine: 17% of host samples in `perf`. `qd::gaussian` now uses the ziggurat method (Marsaglia and Tsang, 2000, 128 layers), where about 98% of draws are a table lookup, a compare and a multiply. It is exact (a unit test checks mean, variance and the |x| > 2 and |x| > 3.5 tail rates over 2 million samples) and deterministic per seed, but draws a different stream, so seeded runs evolve differently from before.
+
+Measured with a steady-state host benchmark: the game's `archive_slots` plus `breed_slots` over 100,000-creature units with synthetic results and replays marked done, so only host work is timed (1M population, 3 to 4 generations, 4-core Xeon container, no GPU):
+
+| build | host creatures/s |
+|---|---:|
+| before | 523,784 and 538,181 |
+| ziggurat | 635,427, 679,070 and 691,370 |
+
+Stage split per 1M creatures after the change, 1 thread against 4: archive 0.76 and 0.30 s, planning 0.28 and 0.18 s, emission 1.63 and 0.44 s, writing into the arenas 0.75 and 0.26 s, generation boundary 0.16 and 0.10 s. Fitting serial plus parallel parts gives about 0.5 s of serial work per 1M creatures (planning's CMA and visit loop 0.15 s, archive offers 0.15 s, arena writes 0.10 s, boundary 0.08 s), which bounds the host near 2M creatures/s however many cores it has.
+
+mimalloc as the global allocator was tried and rejected: 307,076 creatures/s against 577,964 with glibc in the same benchmark, because arena compaction and growth of the large gene vectors went from about 0.1 s to 0.2 to 2.3 s per generation (glibc grows huge blocks with `mremap`; mimalloc copies and faults pages in again).
+
 ## Environment effect cost (2026-09-26)
 
 Backlog item 46 asks whether each environment effect is cheap to leave on. `examples/effect_cost.rs` builds one deterministic random population (2048 bodies, seed 38, 2.0 s trials) and times CPU `cpu_engine::evaluate` on the calm world and on every level of every `environment::EFFECTS` entry, so a new effect is covered automatically. Each pass samples the calm world at its start, middle, and end. The table reports the best rate of eight passes and the median of the per-pass ratios to calm. Measured on the working tree at HEAD 144848a, which carried the uncommitted ground-roughness, slope, wind, and UI work.
