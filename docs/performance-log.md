@@ -791,3 +791,87 @@ The owner decided that saves hold only the archives and the search state (`docs/
 | load | 6.8 s (26.9 s before the buffer fix) | 3.8 s, nearly all of it breeding 3M children |
 
 An evolved archive fills more cells than the made-up scores, so real saves will be larger, likely 10 to 20 MB. The status line shows the breeding phase. `storage::summary` still reads the settings and generation from the start of the payload, for File > Open. `storage::load` still reads full V7 and older saves. `examples/upgrade_save.rs` refuses a save whose archives do not survive under the current physics, because it would come out as a random population. The GUI benchmark checkpoints have to be made again by playing a generation and saving.
+
+## CUDA backend (2026-09-28)
+
+`src/cuda_engine.rs` runs `shaders/physics_creature.cu`, a CUDA C++ port of the WGSL creature kernel, on the same `LaneBatch` packing, `Params` and trial segments, behind the `VkEngine` submit and poll contract (`engine::LaneBackend`). The reason is register control, which Vulkan does not offer. The game uses it on NVIDIA GPUs whenever the driver and NVRTC load and falls back to Vulkan otherwise; `EVOLUTION_CUDA=0` is a developer override. Measured before main moved to 20 s trials (60 s trials, second screening rung at 30 s) unless a row says otherwise.
+
+Toolchain. Nothing is linked at build time. The engine loads `libcuda.so.1` (driver 580, CUDA 13.0) and NVRTC 13.0.88 from NVIDIA's pip wheel in `~/.local/share/evolution-cuda/venv` (no root, no toolkit) with `libloading`. NVRTC needs its builtins library loaded first with global symbols, because the wheel sets no library path. Kernels compile to sm_89 cubins, one per node capacity, on four threads when the engine opens; the fine kernels compile on first use. A first compile takes 1.5 to 3 s per kernel; NVIDIA's compute cache (`~/.nv/ComputeCache`) then serves them in about 0.3 s for all twelve. Options: `--prec-div=false --prec-sqrt=false --fmad=true` (division and square roots approximate, as the Vulkan driver compiles WGSL). Each batch of a unit runs on its own stream, so its step ranges follow one another while other batches fill the SMs; with one stream per unit the rate fell from 128k to 80k to 100k creatures/s.
+
+Registers and occupancy (`examples/cuda_stats.rs`, `CUDA_CACHE_DISABLE=1` for the spill counts). Two findings shaped the kernel launch:
+
+- The compiler's own choice is far above Vulkan's 128: 155 to 223 registers at 4 to 8 nodes and 255 with spills at 12 and 16 nodes, which leaves 8 to 12 warps per SM. `__launch_bounds__` silently overrides `--maxrregcount`, so a capped kernel is compiled without launch bounds.
+- CUDA reserves 1 KB of shared memory per block. With one-warp blocks that costs capacity 8 two warps (14 instead of 16). Blocks of 64 or 128 threads share the reservation, so the engine picks per capacity the block size with the most resident warps by the occupancy rule of `docs/phase0-measurements.md` plus the reservation. The rule matches the driver's occupancy calculator for every kernel below.
+
+Standard fidelity, capped at 128 (the default) and at the compiler's choice:
+
+| capacity | registers, cap 128 / none | local bytes (spill stores) at 128 | block threads | shared bytes per block | warps per SM, cap 128 / none |
+|---:|---:|---:|---:|---:|---:|
+| 3 | 128 / 128 | 24 (8) | 128 | 9,216 | 16 / 16 |
+| 4 | 128 / 155 | 96 (100) | 128 | 12,288 | 16 / 12 |
+| 5 | 128 / 196 | 176 (184) | 128 | 15,360 | 16 / 8 |
+| 6 | 128 / 168 | 128 (140) | 128 | 18,432 | 16 / 12 |
+| 7 | 128 / 204 | 168 (196) | 128 | 21,504 | 16 / 8 |
+| 8 | 128 / 223 | 224 (272) | 128 | 24,576 | 16 / 8 |
+| 12 | 128 / 255 | 528 (640) | 64 | 18,432 | 10 / 8 |
+| 16 | 128 / 255 | 880 (1,040) | 128 | 49,152 | 8 / 8 |
+| 24 | 102 / 102 | 1,136 (0) | 32 | 18,432 | 5 / 5 |
+| 32 | 102 / 102 | 1,520 (0) | 64 | 49,152 | 4 / 4 |
+| 48 | 102 / 102 | 2,288 (0) | 32 | 36,864 | 2 / 2 |
+| 64 | 102 / 102 | 3,056 (0) | 32 | 49,152 | 2 / 2 |
+
+Fine fidelity at 128 registers: the same 16 warps up to 8 nodes, 10 at 12 and 8 at 16, with 8 to 588 bytes of spill loads per thread up to 8 nodes. Capacities 24 and up keep their per-node arrays in local memory at any cap. At 6 nodes lower caps trade spills for warps: 104 registers 16 warps (280 B spill stores), 96 registers 18 to 20 warps (328 B), 80 registers 20 warps (444 B), 64 registers 20 warps (608 B). Shared memory stops capacity 6 at 20 warps and capacity 12 at 10.
+
+Rate sweep (release-fast, eval-bench, first 300,000 creatures of `runs/evolved-3m-v26.evo`, standard trials only, repeats 2 and 3 of one run each; other agents shared the machine):
+
+| kernel | creatures/s |
+|---|---:|
+| Vulkan | 68,700 to 73,000 |
+| CUDA, compiler's registers, 32-thread blocks | 103,500 to 115,300 |
+| CUDA, 128, 32-thread blocks | 116,800 to 128,600 |
+| CUDA, 128, 128-thread blocks | 123,100 to 128,700 |
+| CUDA, 128, block size per capacity | 128,200 to 131,100 (a second run 112,000 to 113,500) |
+| CUDA, 96, 32-thread blocks | 113,800 to 119,900 |
+| CUDA, 96, 64 or 128-thread blocks | 113,800 to 115,500 |
+| CUDA, 80, 128-thread blocks | 110,000 to 114,800 |
+| CUDA, 128, `CUDA_DEVICE_MAX_CONNECTIONS=32` | 112,400 to 112,700 |
+
+128 registers is the default; lower caps gain warps but lose more to spills.
+
+Formal rates (release build, interleaved runs, repeats after the first, which includes warm-up):
+
+| workload | Vulkan | CUDA | CUDA / Vulkan |
+|---|---:|---:|---:|
+| evolved 3M, 500,000 creatures, standard trials only | 70,900 to 71,300 and 70,400/s | 116,500 to 123,000 and 121,200 to 123,600/s | 1.64 to 1.76 |
+| evolved 3M, 300,000, every creature checked (second repeat) | 12,432 and 12,409/s | 21,168 and 20,778/s | 1.67 to 1.71 |
+| long session (generation 70, 10.6 nodes), 100,000, standard only | 19,700 to 20,400 and 20,600 to 20,800/s | 29,800 to 35,600 and 29,900 to 34,500/s | 1.45 to 1.75 |
+| long session, 50,000, every creature checked (second repeat) | 3,263 and 3,276/s | 4,336 and 4,118/s | 1.26 to 1.33 |
+
+In the first checked runs the uncached fine kernels compiled inside the timed repeat (36 kernels then, one per block size candidate), which showed CUDA at 2,276/s against 6,449/s; the engine now compiles one kernel per capacity and the table's repeats are warm.
+
+Agreement. Bit-exactness with Vulkan is not expected, since the two compilers contract and order floating point differently; register caps and block sizes change no arithmetic (identical results at every cap). Dumps of the first 100,000 creatures (`eval-bench --dump`, compared per creature on fitness):
+
+| against Vulkan | CUDA | CPU engine |
+|---|---:|---:|
+| bit-exact records | 497 (0.50%) | 0 |
+| fitness within 1 mm / 1 cm / 1 m | 49.5% / 56.7% / 85.1% | 37.8% / 48.1% / 81.8% |
+| median / p99 / max fitness difference | 1.2 mm / 26.1 m / 465 m | 14.7 mm / 33.0 m / 476 m |
+| mean signed difference | -0.040 m (standard error 0.021) | -0.019 m (0.030) |
+| mean fitness (Vulkan 15.411 m) | 15.371 m | 15.392 m |
+| failure flips | 0 | 0 |
+
+With every creature checked (standard trial plus fine check), CUDA against Vulkan: 874 fitness bit-exact, median difference 0.4 mm, p99 3.3 m, mean signed difference +0.004 m (standard error 0.003). CUDA sits closer to Vulkan than the CPU engine does, and the fitness distributions match. Vulkan against itself is bit-exact.
+
+The walker fixture of the old `tests/engine_agreement.rs` missed its 0.5 m tolerance on CUDA once (6.04 m against the CPU's 4.82 m at 60 s physics before the slider fix). After the rebase onto the slider fix it passed on both GPUs (CUDA 0.608 m, Vulkan 0.575 m, CPU 0.564 m), with the rest of that file. A step-by-step trace settled the question: stepping Vulkan and CUDA one tick at a time, with both kernels starting every tick from Vulkan's exact state, the largest one-tick difference over the 1,600 fine ticks was 4.1e-5 m and no tick exceeded 1e-4 m. Run freely, the two states part by 5e-7 m at the first step and grow to 1e-4 m by 0.08 s and 0.7 m by 0.7 s. That is rounding amplified by the contacts, not a line that computes something different. Main has since made the GPU score final and deleted the agreement file; the trace is not kept.
+
+Gates on main 5b5d50c (20 s trials, GPU authoritative), CUDA forced with `EVOLUTION_CUDA=1`, each suite once: `tests/gpu_repeatability.rs` passes (the same trial repeats bit for bit on CUDA), the three `tests/simulation.rs` GPU tests pass, and `gpu_screens_like_the_cpu_engine` passes. `cargo fmt`, all-target clippy and the CPU test suite pass.
+
+3M GUI benchmark, one run per engine (`EVOLUTION_BENCH_GENERATIONS=2`, `EVOLUTION_BENCH_WARMUP=1`, `EVOLUTION_BENCH_NO_AUTOSAVE=1`, `EVOLUTION_CPU_THREADS=0`, `EVOLUTION_DEVICES=primary`, `RAYON_NUM_THREADS=8`, `nice -n 15`). The search diverges between runs, so check counts differ.
+
+| workload | Vulkan | CUDA | CUDA / Vulkan |
+|---|---:|---:|---:|
+| `runs/evolved-3m-v26.evo`, 60 s trials, main 559487b | 226,276/s end to end (evaluation 232,546/s), 118.8 FPS, peak RSS 7.9 GB, 561,079 checks | 309,724/s (evaluation 320,805/s), 118.9 FPS, peak RSS 9.1 GB, 290,623 checks | 1.37 |
+| fresh 3M game, 20 s trials (current defaults), main 5b5d50c | 356,696/s end to end (evaluation 373,969/s), 119.0 FPS, peak RSS 8.2 GB, 597,633 checks | 360,624/s (evaluation 377,402/s), 119.0 FPS, peak RSS 9.9 GB, 660,164 checks | 1.01 |
+
+On the fresh game the two engines tie: a generation takes 8.0 to 9.2 s on either, and the devices report 12.4 s of busy time on CUDA against 36.9 s on Vulkan for about 10M trials (each engine times its own units, so the two figures are not strictly comparable). First-generation bodies are small (3 to 5 nodes), where both kernels run 16 warps, and breeding and archive work on the CPU bound the game. CUDA pulls ahead as bodies grow: 1.37 times end to end on the evolved population, 1.64 to 1.76 times in eval-bench, 1.45 to 1.75 times on the long-session population. It is the default because it is never slower and wins on the populations a session actually reaches.
+The GUI no longer loads saves from an older physics version, so the rows at 20 s trials start a fresh 3M game (`EVOLUTION_SMOKE_POPULATION=3000000`) instead of the evolved checkpoint. CUDA adds about 1.2 GB of peak RSS at 3M: pinned staging and readback buffers per submission slot.
