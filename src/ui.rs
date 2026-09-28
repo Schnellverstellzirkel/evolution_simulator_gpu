@@ -1344,12 +1344,18 @@ impl App {
             "Export CSV" => "runs/statistics.csv".to_owned(),
             "Open creature JSON" => "runs/creature.json".to_owned(),
             "Export creature JSON" | "Export creature GIF" => {
-                let id = self.playback.as_ref().map_or(0, |p| p.creature.id);
-                let stamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis());
                 let extension = if mode.ends_with("GIF") { "gif" } else { "json" };
-                format!("runs/creature-{id}-{stamp}.{extension}")
+                self.playback.as_ref().map_or_else(
+                    || format!("runs/creature.{extension}"),
+                    |p| {
+                        format!(
+                            "runs/{}-{:.1}m-{}.{extension}",
+                            species_name(&p.creature).replace(' ', "-"),
+                            p.distance,
+                            p.creature.id
+                        )
+                    },
+                )
             }
             _ => "runs/experiment.evo".to_owned(),
         };
@@ -1516,20 +1522,6 @@ impl App {
                         ui.close();
                     }
                     ui.separator();
-                    if ui
-                        .add_enabled(self.playback.is_some(), egui::Button::new("Export creature GIF…"))
-                        .clicked()
-                    {
-                        self.file("Export creature GIF");
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(self.playback.is_some(), egui::Button::new("Export creature JSON…"))
-                        .clicked()
-                    {
-                        self.file("Export creature JSON");
-                        ui.close();
-                    }
                     if ui.button("Open creature JSON…").clicked() {
                         self.file("Open creature JSON");
                         ui.close();
@@ -2069,6 +2061,22 @@ impl App {
                 .clicked()
             {
                 self.tab = Tab::Lineage;
+            }
+            if ui
+                .add_enabled(self.playback.is_some(), egui::Button::new("Export GIF"))
+                .on_hover_text("Save an animated GIF of this replay under runs/")
+                .clicked()
+            {
+                self.file("Export creature GIF");
+            }
+            if ui
+                .add_enabled(self.playback.is_some(), egui::Button::new("Export JSON"))
+                .on_hover_text(
+                    "Save this creature as JSON under runs/, to open it again or share it",
+                )
+                .clicked()
+            {
+                self.file("Export creature JSON");
             }
             ui.add(
                 egui::Slider::new(&mut self.speed, 0.25..=4.0)
