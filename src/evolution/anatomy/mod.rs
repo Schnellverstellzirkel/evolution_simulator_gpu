@@ -458,41 +458,98 @@ mod tests {
 
     #[test]
     fn every_operator_leaves_a_valid_body() {
-        let cfg = Config::default();
-        let bodies = bodies(&cfg, 160);
-        let donor = bodies[bodies.len() / 2].clone();
-        for (index, (name, _)) in OPERATORS.iter().enumerate() {
-            let mut applied = 0;
-            for (i, body) in bodies.iter().enumerate() {
-                for neutral in [false, true] {
-                    let mut c = body.clone();
-                    let mut rng = Rng::new(13, index as u32, i);
-                    let cx = Context {
-                        neutral,
-                        donor: Some(&donor),
-                    };
-                    if !apply(index, &mut c, &cfg, &mut rng, &cx) {
-                        continue;
-                    }
-                    applied += 1;
-                    assert!(c.nodes.len() <= cfg.max_nodes, "{name} grew past max_nodes");
-                    assert!(
-                        c.muscles.len() <= cfg.max_muscles,
-                        "{name} grew past max_muscles"
-                    );
-                    repair_with(&mut c, &cfg, &mut rng, neutral);
-                    let mut pop = Population::default();
-                    pop.push(c.clone());
-                    let check = Config {
-                        population: 1,
-                        ..cfg.clone()
-                    };
-                    if let Err(error) = pop.validate(&check) {
-                        panic!("{name} on body {i} (neutral {neutral}): {error:#}\n{c:?}");
+        // The default limits, and tight ones where bodies sit at the limits.
+        let tight = Config {
+            max_nodes: 8,
+            max_muscles: 8,
+            ..Config::default()
+        };
+        for cfg in [Config::default(), tight] {
+            let bodies = bodies(&cfg, 160);
+            let donor = bodies[bodies.len() / 2].clone();
+            for (index, (name, _)) in OPERATORS.iter().enumerate() {
+                let mut applied = 0;
+                for (i, body) in bodies.iter().enumerate() {
+                    for neutral in [false, true] {
+                        let mut c = body.clone();
+                        let mut rng = Rng::new(13, index as u32, i);
+                        let cx = Context {
+                            neutral,
+                            donor: Some(&donor),
+                        };
+                        if !apply(index, &mut c, &cfg, &mut rng, &cx) {
+                            continue;
+                        }
+                        applied += 1;
+                        assert!(c.nodes.len() <= cfg.max_nodes, "{name} grew past max_nodes");
+                        assert!(
+                            c.muscles.len() <= cfg.max_muscles,
+                            "{name} grew past max_muscles"
+                        );
+                        repair_with(&mut c, &cfg, &mut rng, neutral);
+                        let mut pop = Population::default();
+                        pop.push(c.clone());
+                        let check = Config {
+                            population: 1,
+                            ..cfg.clone()
+                        };
+                        if let Err(error) = pop.validate(&check) {
+                            panic!(
+                                "{name} on body {i} (neutral {neutral}, max_nodes {}, max_muscles {}): {error:#}\n{c:?}",
+                                cfg.max_nodes, cfg.max_muscles
+                            );
+                        }
                     }
                 }
+                eprintln!(
+                    "{name}: applied to {applied} of {} (max_nodes {})",
+                    2 * bodies.len(),
+                    cfg.max_nodes
+                );
             }
-            eprintln!("{name}: applied to {applied} of {}", 2 * bodies.len());
+        }
+    }
+
+    #[test]
+    fn chained_operators_keep_bodies_valid_at_tight_limits() {
+        // Lineages at the limits pile up muscles: apply random operators one
+        // after another, repairing in between as breeding does.
+        let cfg = Config {
+            max_nodes: 8,
+            max_muscles: 8,
+            ..Config::default()
+        };
+        let bodies = bodies(&cfg, 160);
+        let check = Config {
+            population: 1,
+            ..cfg.clone()
+        };
+        for (i, body) in bodies.iter().enumerate() {
+            let mut c = body.clone();
+            let mut rng = Rng::new(17, 0, i);
+            for step in 0..200 {
+                let donor = &bodies[rng.index(bodies.len())];
+                let cx = Context {
+                    neutral: false,
+                    donor: Some(donor),
+                };
+                let index = rng.index(OPERATORS.len());
+                if !apply(index, &mut c, &cfg, &mut rng, &cx) {
+                    continue;
+                }
+                // Breeding follows with a parameter mutation; the game test
+                // at these limits uses mutation 5.
+                c = crate::evolution::local_mutation(c, &cfg, &mut rng, 0.175);
+                repair_with(&mut c, &cfg, &mut rng, false);
+                let mut pop = Population::default();
+                pop.push(c.clone());
+                if let Err(error) = pop.validate(&check) {
+                    panic!(
+                        "{} on body {i} step {step}: {error:#}\n{c:?}",
+                        OPERATORS[index].0
+                    );
+                }
+            }
         }
     }
 
