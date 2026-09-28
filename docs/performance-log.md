@@ -626,3 +626,26 @@ A quicker check on an existing save: `examples/monster_check.rs` samples every 1
 | 61 and more | 3,082 | 8.51 m, 44.0 m, 24% | 0.07 m, 1.0 m, 4% | 0.06 m, 1.0 m, 4% | -0.01 m, 0.3 m, 5% |
 
 Today's monsters collapse under muscle mass: the median body with 61 or more muscles falls from 8.51 m to 0.07 m, and its share of the top 10% from 24% to 4%. The 200 J/m store without mass (`EVOLUTION_MUSCLE_DENSITY=0`) leaves that bin at 8.23 m, so the mass causes the collapse. But lean bodies lose most of their distance too (p90 34 m to 3 m), because every gait in the save was tuned to massless muscles. The save test shows what a change does to existing creatures. It cannot show what evolution builds afterwards. The 80-generation runs answer that, and there evolution builds heavy, muscular bodies again.
+
+## Persistent lanes, stage 1: measured, parked (2026-09-28)
+
+Stage 1 of `docs/data-architecture.md` section 11 is built on branch `claude/lanes` (`EVOLUTION_LANES=1`), default off and not merged. The host writes each creature once as a record (starting node state, bone fields, muscle fields, the same values as the tiles). Creatures wait in one queue per class (node capacity, fidelity and physics settings) and optionally per bucket of 4 muscles. Each workgroup is a warp slot whose node state, muscle and bone data stay in device memory between epochs. Every 32 steps the idle lanes of a warp take the next creatures from its queue. A creature still running at the end of an epoch is suspended in its lane and resumes in the next epoch. The host reads back only finished results, queue heads and running lanes. There are no tiles, segments, readbacks or repacks.
+
+Correctness: bit-exact against the segment engine, 100,000 of 100,000 evolved 3M creatures, both with one long epoch and with 2,048-step epochs that suspend creatures. One bug on the way: lanes of different classes used their own node stride and overlapped in the node buffer; every lane now has room for the largest class.
+
+Rates, evolved 3M checkpoint (`runs/evolved-3m-v26.evo`), GPU only, one run per row unless noted:
+
+| workload | segment engine | lanes |
+|---|---:|---:|
+| `eval-bench` 500k, standard trials only | 72,000 to 77,400/s | 59,000 to 65,400/s |
+| `eval-bench` 300k, every creature checked, muscle buckets of 4 | 14,800 to 15,400/s | 9,700 to 10,700/s |
+| same, no muscle buckets | | 11,300 to 11,400/s |
+| 3M GUI benchmark, end to end (before the time budget) | 243,857/s | 148,121/s |
+
+Why it is slower:
+
+- Registers. The lane kernel compiles to 155 to 168 registers at 4 to 8 nodes, where the segment kernel has 128. By the occupancy rule measured in `docs/phase0-measurements.md`, anything above 128 registers leaves 12 resident warps per SM instead of 16. Variants measured with `examples/shader_stats.rs` at 6 nodes: constants derived inside the step loop 168; derived afresh every 32-step chunk 155; the 19 trial metrics in workgroup memory 167; derived once before the loop with no refill 128. The driver's allocation does not follow live values in any simple way.
+- Sparse warps. Fine checks and long survivors spread over many classes and buckets, and a warp holding one long trial takes a full SM slot. At the end of one checked epoch 2,572 lanes ran in 901 warps. The segment engine repacks survivors into dense tiles at every segment, which is what the lanes lack.
+- Lockstep epochs were a suspect but not the cause: a shared budget of lane chunks, so costly warps run fewer steps and every warp stops at the same time, changed the checked rate by less than 10%.
+
+What stage 1 would need to win: a kernel at 128 registers or fewer, and GPU-side compaction that moves running creatures into dense warps between epochs. Both are open. The segment engine stays the default.

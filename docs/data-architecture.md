@@ -492,6 +492,10 @@ The 2M creatures/s target is defined at a body mix. At the generation-70 mix a c
 
 Stage 1 also answers the question the model cannot: how much of today's GUI inefficiency (12 warps at 23% issue in the game, against 24 warps at 44% in `eval-bench`) comes from orchestration rather than from the kernel.
 
+Stage 1 result (2026-09-28, `docs/performance-log.md`): built on branch `claude/lanes`, bit-exact, and slower than the segment engine (59,000 to 65,000 against 72,000 to 77,000 creatures/s on standard trials, 148,000 against 244,000 in the GUI). The lane kernel compiles to 155 to 168 registers, which leaves 12 resident warps per SM instead of 16, and without compaction checks and long survivors leave warps nearly empty. The gates above are unchanged; stage 1 now also needs a kernel at 128 registers or fewer and device-side compaction between epochs.
+
+Phase 0 result (2026-09-28, `docs/phase0-measurements.md`): L2 bandwidth measured 1.56 to 1.60 TB/s, twice the 0.8 TB/s used in section 3.5, so the L2 ceiling of today's layout is about 2.3M creatures/s, not 1.15M, and shared-memory bandwidth (127 B per cycle per SM, as estimated) is the lower ceiling. Resident warps follow min(24, 4 x floor(16,384 / (32 x registers rounded up to 8)), 102,400 / shared bytes): 16 at 128 registers and 12 anywhere from 129 to 168, so today's kernels at 7 or more nodes (135 to 149 registers) already run at 12 warps.
+
 Phase 0 of the assessment gains four measurements for this design:
 
 - L2 bandwidth on this GPU, to check the 0.8 TB/s estimate.
