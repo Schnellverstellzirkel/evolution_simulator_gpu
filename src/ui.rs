@@ -2211,8 +2211,7 @@ impl App {
             ui.add(
                 egui::Slider::new(&mut self.speed, 0.25..=4.0)
                     .logarithmic(true)
-                    .suffix("×")
-                    .text("Playback speed"),
+                    .suffix("× speed"),
             )
             .on_hover_text("Playback speed, from quarter speed to four times speed.");
         });
@@ -2458,10 +2457,7 @@ impl App {
         let theme = self.theme();
         ui.horizontal(|ui| {
             ui.heading("Ways of moving");
-            ui.label(
-                RichText::new("The best creature for each way of moving · click one to replay it")
-                    .color(theme.muted),
-            );
+            ui.label(RichText::new("Click a creature to replay it").color(theme.muted));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .selectable_value(&mut self.archive_view, ArchiveView::Map, "Map")
@@ -2967,7 +2963,7 @@ impl App {
             ui.heading("Lineage");
             ui.label(
                 RichText::new(
-                    "Ancestors of the selected creature, newest first. Click one to replay it.",
+                    "Ancestors of the creature on screen, newest first. Click one to replay it.",
                 )
                 .color(theme.muted),
             );
@@ -2988,8 +2984,8 @@ impl App {
         }
         if let Some(p) = &self.playback {
             ui.label(format!(
-                "#{} · {} nodes / {} bones / {} muscles · {} recorded ancestors",
-                p.creature.id,
+                "{} · {} nodes, {} bones, {} muscles · {} recorded ancestors",
+                species_name(&p.creature),
                 p.creature.nodes.len(),
                 p.creature.bones.len(),
                 p.creature.muscles.len(),
