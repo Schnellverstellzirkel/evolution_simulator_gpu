@@ -875,7 +875,14 @@ impl Scheduler {
         timeout: Duration,
         contender: impl FnMut(usize, &EvaluationMetrics) -> bool,
     ) -> Result<Vec<(Vec<usize>, Vec<EvaluationMetrics>)>> {
-        self.collect_up_to(pop, cfg, timeout, usize::MAX, contender)
+        self.collect_up_to(
+            pop,
+            cfg,
+            timeout,
+            usize::MAX,
+            check_terrain_enabled(),
+            contender,
+        )
     }
     /// `collect` that stops after the first unit with final results, so a
     /// caller that archives and breeds each unit can answer controls between
@@ -887,14 +894,15 @@ impl Scheduler {
         timeout: Duration,
         contender: impl FnMut(usize, &EvaluationMetrics) -> bool,
     ) -> Result<Vec<(Vec<usize>, Vec<EvaluationMetrics>)>> {
-        self.collect_up_to(pop, cfg, timeout, 1, contender)
+        self.collect_up_to(pop, cfg, timeout, 1, check_terrain_enabled(), contender)
     }
     fn collect_up_to(
         &mut self,
         _pop: &Population,
-        _cfg: &Config,
+        cfg: &Config,
         timeout: Duration,
         limit: usize,
+        terrain_checks: bool,
         mut contender: impl FnMut(usize, &EvaluationMetrics) -> bool,
     ) -> Result<Vec<(Vec<usize>, Vec<EvaluationMetrics>)>> {
         let mut out = Vec::new();
@@ -938,6 +946,17 @@ impl Scheduler {
                                 .queued
                                 .remove(position)
                                 .expect("validated queued unit");
+                            // A world change can leave units from the old
+                            // physics in flight. Their results are not
+                            // comparable with the live world, so they enter no
+                            // archive and their slots are re-bred from the new
+                            // world's archive. The opt-in different-ground
+                            // check varies only the terrain on purpose.
+                            let stale = if trial == Trial::Check && terrain_checks {
+                                config.physics_differs_ignoring_terrain(cfg)
+                            } else {
+                                config.physics_differs(cfg)
+                            };
                             device.busy_seconds += done.busy_seconds;
                             let mut finals = Vec::with_capacity(indices.len());
                             let mut metrics = Vec::with_capacity(indices.len());
@@ -946,8 +965,11 @@ impl Scheduler {
                                     device.creatures += indices.len() as u64;
                                     device.update_rate(Instant::now(), true, indices.len());
                                     for (k, &i) in indices.iter().enumerate() {
-                                        let metric =
+                                        let mut metric =
                                             to_metrics(&population, k, &done.results[k], &config);
+                                        if stale {
+                                            metric.unchecked = true;
+                                        }
                                         if self.robust_trials > 1 && contender(i, &metric) {
                                             self.held.insert(i, metric);
                                             self.checks.push(i);
@@ -987,6 +1009,11 @@ impl Scheduler {
                                         // Reliable motion only: keep the worse of all trials.
                                         metric.fitness =
                                             metric.fitness.min(done.results[k].fitness);
+                                        if stale {
+                                            // The check ran under the old physics:
+                                            // the whole evaluation is stale.
+                                            metric.unchecked = true;
+                                        }
                                         if trial == Trial::Check && done.results[k].screened > 0.0 {
                                             // The check did not pass the screen: the
                                             // creature enters no archive.
@@ -1001,7 +1028,10 @@ impl Scheduler {
                                                 &config,
                                             )
                                             .behavior;
-                                            metric.replayed = true;
+                                            // A replay from the old world does not
+                                            // verify the live one; the archive
+                                            // replays the creature again instead.
+                                            metric.replayed = !stale;
                                         }
                                         let left = self.outstanding.entry(i).or_insert(1);
                                         *left = left.saturating_sub(1);
@@ -2096,6 +2126,120 @@ mod tests {
                 metric.fitness
             );
         }
+    }
+
+    #[test]
+    fn a_world_change_stops_stale_results_from_entering_the_archive() {
+        let calm = Config {
+            population: 4,
+            duration: 1.0,
+            random_seed: false,
+            ..Config::default()
+        };
+        let rough = Config {
+            terrain: 3,
+            ..calm.clone()
+        };
+        let pop = crate::evolution::create(&calm).unwrap();
+        let mut sched = Scheduler::cpu_only(2).unwrap();
+        sched.begin(&pop, 0..calm.population);
+        let global = |_: usize, _: &EvaluationMetrics| CheckNeed::Check {
+            cell: None,
+            replay: true,
+        };
+        let deadline = Instant::now() + Duration::from_secs(120);
+        // Calm-world standards finish, then their checks and replays are
+        // queued; the replay is not collected yet.
+        while sched.replays_submitted == 0 {
+            assert!(Instant::now() < deadline, "evaluation stalled");
+            sched.pump(&pop, &calm, &[], global).unwrap();
+            if sched.replays_submitted > 0 {
+                break;
+            }
+            sched
+                .collect(&pop, &calm, Duration::from_millis(20), |_, _| true)
+                .unwrap();
+        }
+        // The world changes while that check and replay are in flight. Their
+        // results must not claim the new world.
+        let mut finals = 0;
+        while sched.in_flight() > 0 {
+            assert!(Instant::now() < deadline, "evaluation stalled");
+            for (indices, metrics) in sched
+                .collect(&pop, &rough, Duration::from_millis(20), |_, _| false)
+                .unwrap()
+            {
+                for (i, metric) in indices.into_iter().zip(metrics) {
+                    assert!(
+                        metric.unchecked,
+                        "old-world result {i} would enter an archive"
+                    );
+                    assert!(
+                        !metric.replayed,
+                        "old-world result {i} claimed a live replay"
+                    );
+                    finals += 1;
+                }
+            }
+        }
+        assert!(finals > 0, "the old-world results were never finalized");
+    }
+
+    #[test]
+    fn a_deliberate_terrain_check_is_not_an_old_world_result() {
+        let cfg = Config {
+            terrain: 2,
+            ..submission_config()
+        };
+        let pop = crate::evolution::create(&cfg).unwrap();
+        let (mut scheduler, state) = fake_scheduler();
+        let indices = vec![3, 1];
+        scheduler.checks = indices.clone();
+        for &index in &indices {
+            scheduler.held.insert(
+                index,
+                EvaluationMetrics {
+                    fitness: 10.0,
+                    ..EvaluationMetrics::default()
+                },
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut metrics = Vec::new();
+        let mut completed = 0usize;
+        while scheduler.in_flight() > 0 {
+            assert!(Instant::now() < deadline, "terrain check stalled");
+            scheduler
+                .pump_checks_with(&pop, &cfg, true, unshared)
+                .unwrap();
+            {
+                let mut state = state.lock().unwrap();
+                while completed < state.submissions.len() {
+                    let count = state.submissions[completed].population.genomes.len();
+                    state.results.push_back(Finished {
+                        ticket: completed as u64 + 1,
+                        results: vec![
+                            GpuResult {
+                                fitness: 0.0,
+                                ..GpuResult::default()
+                            };
+                            count
+                        ],
+                        busy_seconds: 0.0,
+                    });
+                    completed += 1;
+                }
+            }
+            let out = scheduler
+                .collect_up_to(&pop, &cfg, Duration::ZERO, usize::MAX, true, |_, _| false)
+                .unwrap();
+            metrics.extend(out.into_iter().flat_map(|(_, batch)| batch));
+        }
+        assert_eq!(metrics.len(), 2);
+        assert!(
+            metrics.iter().all(|metric| !metric.unchecked),
+            "a deliberate terrain check was treated as an old-world result"
+        );
     }
 
     #[test]

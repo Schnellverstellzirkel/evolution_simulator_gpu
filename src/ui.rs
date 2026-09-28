@@ -654,6 +654,15 @@ fn imported_creature(creature: &mut Creature) -> Result<(), String> {
     }
     Ok(())
 }
+/// Scales a plot range around its center. A factor below one zooms in.
+fn scaled_range(
+    range: std::ops::RangeInclusive<f64>,
+    factor: f64,
+) -> std::ops::RangeInclusive<f64> {
+    let center = (range.start() + range.end()) / 2.0;
+    let half = (range.end() - range.start()) / 2.0 * factor;
+    (center - half)..=(center + half)
+}
 /// History positions where the all-time best distance moved, oldest first.
 fn record_entries(history: &[Stats]) -> Vec<(usize, f32)> {
     let mut best = f32::NEG_INFINITY;
@@ -1980,47 +1989,99 @@ impl App {
     fn trend(&self, ui: &mut egui::Ui, height: f32) {
         let Some(s) = &self.snapshot else { return };
         let theme = self.theme();
-        Plot::new("fitness_history")
+        let mut reset = false;
+        let mut zoom = 1.0f64;
+        let mut last: Option<f64> = None;
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Drag to pan · double-click or Reset to fit again")
+                    .small()
+                    .color(theme.muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("Reset view")
+                    .on_hover_text("Fit every generation and gait score again")
+                    .clicked()
+                {
+                    reset = true;
+                }
+                if ui.small_button("+").on_hover_text("Zoom in").clicked() {
+                    zoom = 0.8;
+                }
+                if ui.small_button("−").on_hover_text("Zoom out").clicked() {
+                    zoom = 1.25;
+                }
+                if ui
+                    .small_button("Last 10")
+                    .on_hover_text("Show the ten newest generations only")
+                    .clicked()
+                {
+                    last = Some(10.0);
+                }
+                if ui
+                    .small_button("Last 50")
+                    .on_hover_text("Show the fifty newest generations only")
+                    .clicked()
+                {
+                    last = Some(50.0);
+                }
+            });
+        });
+        let mut plot = Plot::new("fitness_history")
             .height(height)
             .legend(Legend::default())
             .x_axis_label("Generation")
             .y_axis_label("Gait score (m)")
-            .allow_scroll(false)
-            .show(ui, |plot| {
-                for (i, &visible) in self.percentiles.iter().enumerate() {
-                    if !visible {
-                        continue;
-                    }
-                    let values: Vec<[f64; 2]> = s
-                        .history
-                        .iter()
-                        .map(|h| [h.generation as f64, h.percentiles[i] as f64])
-                        .collect();
-                    let (name, color, width) = if i == 28 {
-                        ("Best".into(), theme.accent, 2.5)
-                    } else if i == 14 {
-                        ("Median".into(), AMBER, 2.5)
-                    } else if i == 0 {
-                        ("Worst".into(), Color32::from_rgb(104, 133, 159), 1.5)
-                    } else {
-                        (format!("P{}", PERCENTILES[i]), species_color(i, 0), 1.)
-                    };
-                    plot.line(Line::new(name, values).color(color).width(width));
+            .allow_scroll(false);
+        if reset {
+            plot = plot.reset();
+        }
+        plot.show(ui, |plot| {
+            if zoom != 1.0 {
+                let bounds = plot.plot_bounds();
+                plot.set_plot_bounds_x(scaled_range(bounds.range_x(), zoom));
+                plot.set_plot_bounds_y(scaled_range(bounds.range_y(), zoom));
+            }
+            if let Some(generations) = last {
+                let end = s.history.last().map_or(1.0, |h| h.generation as f64 + 0.5);
+                plot.set_plot_bounds_x((end - generations).max(0.0)..=end);
+                plot.set_auto_bounds(egui::Vec2b::new(false, true));
+            }
+            for (i, &visible) in self.percentiles.iter().enumerate() {
+                if !visible {
+                    continue;
                 }
-                // Record markers extend the best line instead of duplicating it.
-                let records: Vec<[f64; 2]> = record_entries(&s.history)
-                    .into_iter()
-                    .map(|(index, best)| [s.history[index].generation as f64, best as f64])
+                let values: Vec<[f64; 2]> = s
+                    .history
+                    .iter()
+                    .map(|h| [h.generation as f64, h.percentiles[i] as f64])
                     .collect();
-                if !records.is_empty() {
-                    plot.points(
-                        Points::new("Record", records)
-                            .color(Color32::from_rgb(117, 76, 210))
-                            .filled(true)
-                            .radius(3.5),
-                    );
-                }
-            });
+                let (name, color, width) = if i == 28 {
+                    ("Best".into(), theme.accent, 2.5)
+                } else if i == 14 {
+                    ("Median".into(), AMBER, 2.5)
+                } else if i == 0 {
+                    ("Worst".into(), Color32::from_rgb(104, 133, 159), 1.5)
+                } else {
+                    (format!("P{}", PERCENTILES[i]), species_color(i, 0), 1.)
+                };
+                plot.line(Line::new(name, values).color(color).width(width));
+            }
+            // Record markers extend the best line instead of duplicating it.
+            let records: Vec<[f64; 2]> = record_entries(&s.history)
+                .into_iter()
+                .map(|(index, best)| [s.history[index].generation as f64, best as f64])
+                .collect();
+            if !records.is_empty() {
+                plot.points(
+                    Points::new("Record", records)
+                        .color(Color32::from_rgb(117, 76, 210))
+                        .filled(true)
+                        .radius(3.5),
+                );
+            }
+        });
     }
     fn histogram(&self, ui: &mut egui::Ui, stats: &Stats, height: f32) {
         if !self.hist_min.is_finite()
@@ -2055,16 +2116,30 @@ impl App {
                 .width(0.85 / self.bins as f64)
             })
             .collect();
-        Plot::new("histogram")
+        let mut reset = false;
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("Reset view")
+                    .on_hover_text("Fit the histogram again")
+                    .clicked()
+                {
+                    reset = true;
+                }
+            });
+        });
+        let mut plot = Plot::new("histogram")
             .height(height)
             .x_axis_label("Gait score (m)")
-            .allow_scroll(false)
-            .show(ui, |plot| {
-                plot.bar_chart(
-                    BarChart::new("Creatures", bars)
-                        .color(self.theme().accent.gamma_multiply(0.65)),
-                );
-            });
+            .allow_scroll(false);
+        if reset {
+            plot = plot.reset();
+        }
+        plot.show(ui, |plot| {
+            plot.bar_chart(
+                BarChart::new("Creatures", bars).color(self.theme().accent.gamma_multiply(0.65)),
+            );
+        });
         if outside > 0 {
             ui.small(format!(
                 "{outside} outside this range or failed · change range in Advanced > Debug"
@@ -4297,6 +4372,12 @@ fn export_creature_gif(playback: &Playback, path: &std::path::Path) -> anyhow::R
 mod tests {
     use super::*;
     use crate::evolution::{Bone, Muscle, NodeGene};
+    #[test]
+    fn zoom_scales_a_plot_range_around_its_center() {
+        assert_eq!(scaled_range(10.0..=20.0, 0.5), 12.5..=17.5);
+        assert_eq!(scaled_range(10.0..=20.0, 2.0), 5.0..=25.0);
+        assert_eq!(scaled_range(-4.0..=4.0, 1.0), -4.0..=4.0);
+    }
     fn test_creature() -> Creature {
         Creature {
             nodes: vec![

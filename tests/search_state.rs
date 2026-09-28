@@ -3,6 +3,7 @@ use evolution_simulator::{
     config::Config,
     evolution::{self, Population},
     qd::{Descriptor, Emitter, Niche, QdArchive, TrialMetrics},
+    scheduler::Scheduler,
     storage::{self, Experiment, Stage},
 };
 use serde::Serialize;
@@ -657,6 +658,79 @@ fn steady_environment_change_checkpoint_keeps_boundary_state_valid() {
     uninterrupted.breed_slots(&slots).unwrap();
     restored.breed_slots(&slots).unwrap();
     assert_same_next_batch(&uninterrupted, &restored);
+}
+
+#[test]
+fn a_steady_world_change_rescores_the_archive_in_the_new_world() {
+    let mut experiment = Experiment::new(Config {
+        duration: 2.0,
+        ..config(38)
+    })
+    .unwrap();
+    let mut scheduler = Scheduler::cpu_only(6).unwrap();
+    let all: Vec<usize> = (0..experiment.config.population).collect();
+    let metrics = scheduler
+        .evaluate(&experiment.population, &all, &experiment.config)
+        .unwrap();
+    for (i, metric) in metrics.iter().enumerate() {
+        experiment.record_result(i, metric);
+    }
+    experiment.evaluated = experiment.config.population;
+    experiment.archive_batch().unwrap();
+    assert!(!experiment.archive.entries.is_empty());
+    let calm_champion = experiment
+        .archive
+        .entries
+        .iter()
+        .max_by(|a, b| a.fitness.total_cmp(&b.fitness))
+        .unwrap()
+        .fitness;
+    assert!(calm_champion > 0.0);
+
+    // A mid-generation terrain change, as the environment buttons do in a
+    // steady run: the new world waits for the generation boundary.
+    experiment.stage = Stage::Evaluating;
+    experiment
+        .update_config(Config {
+            terrain: 3,
+            ..experiment.config.clone()
+        })
+        .unwrap();
+    assert!(experiment.pending.is_some());
+    experiment.archive_slots(&all);
+    experiment.breed_slots(&all).unwrap();
+    experiment.finish_steady_generation(0).unwrap();
+    assert!(
+        experiment.archive.entries.is_empty(),
+        "the world change must clear the old scores"
+    );
+    assert!(!experiment.reseed.is_empty());
+
+    // The steady loop breeds queued elites into freed slots as units finish;
+    // breeding every slot at once places them all, then the rough world
+    // evaluates them.
+    experiment.breed_slots(&all).unwrap();
+    let metrics = scheduler
+        .evaluate(&experiment.population, &all, &experiment.config)
+        .unwrap();
+    for (i, metric) in metrics.iter().enumerate() {
+        experiment.record_result(i, metric);
+    }
+    experiment.evaluated = experiment.config.population;
+    experiment.archive_batch().unwrap();
+
+    for elite in &experiment.archive.entries {
+        let mut population = Population::default();
+        population.push(elite.creature.clone());
+        let replay =
+            evolution_simulator::cpu_engine::evaluate(&population, &experiment.config)[0].fitness;
+        assert!(
+            elite.fitness <= replay + 1e-4,
+            "archive shows {} m for creature {} but the rough-world replay reaches {replay} m",
+            elite.fitness,
+            elite.creature.id
+        );
+    }
 }
 
 #[test]

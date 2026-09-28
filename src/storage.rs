@@ -2193,20 +2193,7 @@ struct CheckpointResume {
 }
 
 fn fitness_context_changed(old: &Config, new: &Config) -> bool {
-    old.duration != new.duration
-        || old.gravity != new.gravity
-        || old.air_retention != new.air_retention
-        || old.ground_friction != new.ground_friction
-        || old.ground != new.ground
-        || old.terrain != new.terrain
-        || old.muscle_energy != new.muscle_energy
-        || old.muscle_recovery != new.muscle_recovery
-        || old.slope != new.slope
-        || old.wind != new.wind
-        || old.mud != new.mud
-        || old.gaps != new.gaps
-        || old.hurdles != new.hurdles
-        || old.quake != new.quake
+    old.physics_differs(new)
 }
 /// Autosaves kept in `dir`: the newest `keep` `seed-*-auto.evo` files stay,
 /// older ones are deleted, and so are `.evo.tmp` files that an interrupted

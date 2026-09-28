@@ -494,6 +494,33 @@ impl Config {
         );
         Ok(())
     }
+    /// Whether the two settings describe different physics for a fixed
+    /// creature's trial. Runtime-only fields (`fidelity`, `screen`) and
+    /// creation-only settings (body limits, mutation) are not part of it.
+    pub fn physics_differs(&self, other: &Config) -> bool {
+        self.physics_differ(other, false)
+    }
+    /// `physics_differs` that ignores the ground-roughness level, which the
+    /// opt-in different-ground check varies on purpose.
+    pub fn physics_differs_ignoring_terrain(&self, other: &Config) -> bool {
+        self.physics_differ(other, true)
+    }
+    fn physics_differ(&self, other: &Config, ignore_terrain: bool) -> bool {
+        self.duration != other.duration
+            || self.gravity != other.gravity
+            || self.air_retention != other.air_retention
+            || self.ground_friction != other.ground_friction
+            || self.ground != other.ground
+            || (!ignore_terrain && self.terrain != other.terrain)
+            || self.muscle_energy != other.muscle_energy
+            || self.muscle_recovery != other.muscle_recovery
+            || self.slope != other.slope
+            || self.wind != other.wind
+            || self.mud != other.mud
+            || self.gaps != other.gaps
+            || self.hurdles != other.hurdles
+            || self.quake != other.quake
+    }
     /// This config's physics resolution.
     pub fn fidelity(&self) -> crate::physics::Fidelity {
         self.fidelity
