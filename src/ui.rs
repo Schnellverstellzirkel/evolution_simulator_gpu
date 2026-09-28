@@ -812,6 +812,37 @@ enum FeedAction {
     Replay(usize),
     /// Bring back creatures lost to catastrophes.
     Undo,
+    /// Set this effect (index into `EFFECTS`) to this level.
+    Try(usize, usize),
+}
+/// Generations without a record before the feed suggests a new world.
+const STALL_GENERATIONS: u32 = 25;
+/// The effects a stall hint suggests, in order; the first that can go one
+/// level harder wins.
+const STALL_EFFECTS: [&str; 12] = [
+    "Ground",
+    "Hurdles",
+    "Grip",
+    "Slope",
+    "Mud",
+    "Gaps",
+    "Wind",
+    "Air",
+    "Gravity",
+    "Earthquake",
+    "Heat wave",
+    "Drought",
+];
+/// An effect and the next harder level to try when evolution stalls.
+fn stall_suggestion(config: &Config) -> Option<(usize, usize)> {
+    STALL_EFFECTS.iter().find_map(|name| {
+        let index = crate::environment::EFFECTS
+            .iter()
+            .position(|effect| effect.name == *name)?;
+        let effect = &crate::environment::EFFECTS[index];
+        let level = effect.level(config);
+        (level + 1 < effect.levels.len()).then_some((index, level + 1))
+    })
 }
 /// One line of the event feed.
 struct FeedItem {
@@ -2652,7 +2683,8 @@ impl App {
                 action,
             });
         }
-        for (index, best, first_in_world) in world_records(history) {
+        let records = world_records(history);
+        for &(index, best, first_in_world) in &records {
             let stats = &history[index];
             let name = stats
                 .representatives
@@ -2672,6 +2704,25 @@ impl App {
                 color: theme.ink,
                 action: Some(FeedAction::Replay(index)),
             });
+        }
+        // A stall: no record in this world for a while. The feed suggests a
+        // harder world instead of changing the search silently.
+        if let (Some(last), Some(&(index, _, _))) = (history.last(), records.last()) {
+            let since = last.generation.saturating_sub(history[index].generation);
+            if since >= STALL_GENERATIONS
+                && let Some((effect, level)) = stall_suggestion(&self.config)
+            {
+                let effect_ref = &crate::environment::EFFECTS[effect];
+                items.push(FeedItem {
+                    generation: last.generation,
+                    text: format!(
+                        "No new record for {since} generations. A new world can open new ways of moving: try {} {}.",
+                        effect_ref.name, effect_ref.levels[level]
+                    ),
+                    color: theme.accent,
+                    action: Some(FeedAction::Try(effect, level)),
+                });
+            }
         }
         // Newest first; the sort is stable, so events of one generation keep
         // their order.
@@ -2712,6 +2763,7 @@ impl App {
                             let label = match action {
                                 FeedAction::Replay(_) => "Replay",
                                 FeedAction::Undo => "Undo",
+                                FeedAction::Try(..) => "Try it",
                             };
                             if ui.small_button(label).clicked() {
                                 chosen = Some(action);
@@ -2723,6 +2775,11 @@ impl App {
         match chosen {
             Some(FeedAction::Replay(index)) => self.replay_history_holder(index),
             Some(FeedAction::Undo) => self.worker.send(Command::UndoMeteor),
+            Some(FeedAction::Try(effect, level)) => {
+                crate::environment::EFFECTS[effect].set_level(&mut self.config, level);
+                self.worker.send(Command::Configure(self.config.clone()));
+                self.config_sent = Some(Instant::now());
+            }
             None => {}
         }
     }
@@ -5088,6 +5145,20 @@ mod tests {
         );
         config.seasons = 0;
         assert_eq!(season_forecast(&config, 7), None);
+    }
+    #[test]
+    fn a_stall_suggests_the_next_harder_world() {
+        let mut config = Config::default();
+        let ground = crate::environment::EFFECTS
+            .iter()
+            .position(|effect| effect.name == "Ground")
+            .unwrap();
+        assert_eq!(stall_suggestion(&config), Some((ground, 1)));
+        let top = crate::environment::EFFECTS[ground].levels.len() - 1;
+        crate::environment::EFFECTS[ground].set_level(&mut config, top);
+        let (next, level) = stall_suggestion(&config).unwrap();
+        assert_eq!(crate::environment::EFFECTS[next].name, "Hurdles");
+        assert_eq!(level, 1);
     }
     #[test]
     fn body_plans_ignore_lengths_and_rhythms() {
