@@ -151,6 +151,10 @@ pub struct Experiment {
     pub screened: Vec<bool>,
     #[serde(skip)]
     pub screen_distance: Vec<f32>,
+    /// Per slot: distance at the second screening rung or an earlier fall,
+    /// NaN when there is no second rung or the first screen stopped it.
+    #[serde(skip)]
+    pub screen2_distance: Vec<f32>,
     /// Gene memory reused by each generation's compaction.
     #[serde(skip)]
     arena_spare: evolution::Arena,
@@ -318,6 +322,7 @@ impl Experiment {
             .map(|seconds| crate::physics::Screen {
                 seconds,
                 bar: f32::NEG_INFINITY,
+                second: crate::physics::second_rung(seconds, config.duration, f32::NEG_INFINITY),
             });
         let population = evolution::create(&config)?;
         let population_count = config.population;
@@ -348,6 +353,7 @@ impl Experiment {
             replayed: Vec::new(),
             screened: Vec::new(),
             screen_distance: Vec::new(),
+            screen2_distance: Vec::new(),
             arena_spare: evolution::Arena::default(),
             screen_samples: 0,
             qd_version: qd::VERSION,
@@ -492,10 +498,12 @@ impl Experiment {
         if self.screened.len() < self.scores.len() {
             self.screened.resize(self.scores.len(), false);
             self.screen_distance.resize(self.scores.len(), f32::NAN);
+            self.screen2_distance.resize(self.scores.len(), f32::NAN);
         }
         // Screened and unchecked results are both kept out of the archives.
         self.screened[i] = metric.screened || metric.unchecked;
         self.screen_distance[i] = metric.screen_x;
+        self.screen2_distance[i] = metric.screen2_x;
         if self
             .config
             .screen
@@ -523,25 +531,29 @@ impl Experiment {
     }
     /// The early screen for the next generation: its bar is the distance at
     /// the screen that the best `physics::screen_keep()` share of this
-    /// generation reached. After a world change distances are not comparable,
-    /// so the next generation runs unscreened and sets a new bar.
+    /// generation reached. The optional second rung's bar is the distance
+    /// there that the best `physics::SCREEN2_KEEP` share of the creatures
+    /// passing the first bar reached. After a world change distances are not
+    /// comparable, so the next generation runs unscreened and sets new bars.
     fn next_screen(&self, world_changed: bool, duration: f32) -> Option<crate::physics::Screen> {
         // A trial no longer than the screen time has nothing to screen.
         let seconds = crate::physics::screen_seconds().filter(|&s| s < duration)?;
-        let mut distances: Vec<f32> = self
-            .screen_distance
-            .iter()
-            .copied()
-            .filter(|d| !d.is_nan())
-            .collect();
-        let bar = if world_changed || distances.len() < 64 {
+        let (bar, late) = if world_changed {
+            (f32::NEG_INFINITY, f32::NEG_INFINITY)
+        } else {
+            crate::physics::screen_bars(&self.screen_distance, &self.screen2_distance)
+        };
+        // Without a first bar the second rung only records distances.
+        let late = if bar == f32::NEG_INFINITY {
             f32::NEG_INFINITY
         } else {
-            let keep = crate::physics::screen_keep();
-            let rank = ((distances.len() as f32 * (1.0 - keep)) as usize).min(distances.len() - 1);
-            *distances.select_nth_unstable_by(rank, f32::total_cmp).1
+            late
         };
-        Some(crate::physics::Screen { seconds, bar })
+        Some(crate::physics::Screen {
+            seconds,
+            bar,
+            second: crate::physics::second_rung(seconds, duration, late),
+        })
     }
     /// The first rule that makes `i` a contender, and the archive cell it
     /// competes for (none for optimizer samples and reserve candidates, which
@@ -2021,6 +2033,7 @@ impl Experiment {
         self.cma_emitters.clear();
         // Distances measured in the old world say nothing about the new one.
         self.screen_distance.fill(f32::NAN);
+        self.screen2_distance.fill(f32::NAN);
         self.screen_samples = 0;
     }
     pub fn validate(&self) -> Result<()> {
@@ -2590,6 +2603,7 @@ impl From<V2Experiment> for Experiment {
             replayed: Vec::new(),
             screened: Vec::new(),
             screen_distance: Vec::new(),
+            screen2_distance: Vec::new(),
             arena_spare: evolution::Arena::default(),
             screen_samples: 0,
             qd_version: 0,
@@ -2636,6 +2650,7 @@ impl From<LegacyExperiment> for Experiment {
             replayed: Vec::new(),
             screened: Vec::new(),
             screen_distance: Vec::new(),
+            screen2_distance: Vec::new(),
             arena_spare: evolution::Arena::default(),
             screen_samples: 0,
             qd_version: 0,

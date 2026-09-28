@@ -37,6 +37,22 @@ enum Trial {
 /// times the solver passes; 7.7 measured on the RTX 4060 for evolved bodies).
 const CHECK_COST: f64 = 8.0;
 
+/// The configuration of a contender's check trial: fine physics
+/// (`physics::Fidelity::fine()`) and the same screen as the standard trial.
+pub fn check_config(cfg: &Config) -> Config {
+    Config {
+        fidelity: Some(crate::physics::Fidelity::fine()),
+        ..cfg.clone()
+    }
+}
+
+/// The score a contender keeps after its check trial, and whether it must
+/// stay out of every archive. The worse trial counts, and a check that the
+/// screen stopped is not robust: the creature enters no archive.
+pub fn check_verdict(standard: &EvaluationMetrics, check: &GpuResult) -> (f32, bool) {
+    (standard.fitness.min(check.fitness), check.screened > 0.0)
+}
+
 /// What a held contender needs, decided again each time checks are sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckNeed {
@@ -214,6 +230,8 @@ pub struct Scheduler {
     /// because another contender held their cell's check.
     pub check_units: u64,
     pub checks_dropped: u64,
+    /// Device busy seconds spent on check units (totals since start).
+    pub check_busy_seconds: f64,
     /// Why the primary GPU was not used, reported once at startup.
     startup_failure: Option<String>,
 }
@@ -354,6 +372,7 @@ impl Scheduler {
             replays: Vec::new(),
             replays_submitted: 0,
             checks_submitted: 0,
+            check_busy_seconds: 0.0,
             checks_released: 0,
             check_units: 0,
             checks_dropped: 0,
@@ -387,6 +406,7 @@ impl Scheduler {
             replays: Vec::new(),
             replays_submitted: 0,
             checks_submitted: 0,
+            check_busy_seconds: 0.0,
             checks_released: 0,
             check_units: 0,
             checks_dropped: 0,
@@ -511,10 +531,7 @@ impl Scheduler {
         // contender whose fine trial falls below the bar at the screen is
         // not robust, and its check stops there instead of running the full
         // trial at four times the steps.
-        let fine = Config {
-            fidelity: Some(crate::physics::Fidelity::fine()),
-            ..cfg.clone()
-        };
+        let fine = check_config(cfg);
         let standby = self.reserves_standing_by();
         let max_check_units = env_or("EVOLUTION_CHECK_UNITS", 2usize).max(1);
         for device in &mut self.devices {
@@ -958,6 +975,9 @@ impl Scheduler {
                                 config.physics_differs(cfg)
                             };
                             device.busy_seconds += done.busy_seconds;
+                            if trial == Trial::Check {
+                                self.check_busy_seconds += done.busy_seconds;
+                            }
                             let mut finals = Vec::with_capacity(indices.len());
                             let mut metrics = Vec::with_capacity(indices.len());
                             match trial {
@@ -1007,16 +1027,20 @@ impl Scheduler {
                                             continue;
                                         };
                                         // Reliable motion only: keep the worse of all trials.
-                                        metric.fitness =
-                                            metric.fitness.min(done.results[k].fitness);
+                                        if trial == Trial::Check {
+                                            let (fitness, unchecked) =
+                                                check_verdict(metric, &done.results[k]);
+                                            metric.fitness = fitness;
+                                            // A check stopped by the screen:
+                                            // the creature enters no archive.
+                                            metric.unchecked |= unchecked;
+                                        } else {
+                                            metric.fitness =
+                                                metric.fitness.min(done.results[k].fitness);
+                                        }
                                         if stale {
                                             // The check ran under the old physics:
                                             // the whole evaluation is stale.
-                                            metric.unchecked = true;
-                                        }
-                                        if trial == Trial::Check && done.results[k].screened > 0.0 {
-                                            // The check did not pass the screen: the
-                                            // creature enters no archive.
                                             metric.unchecked = true;
                                         }
                                         if trial == Trial::Replay {
@@ -1227,7 +1251,7 @@ fn check_terrain(standard: u8, id: u64) -> u8 {
 
 /// Small deterministic change to a creature's starting pose and grip, for the
 /// robustness trial.
-fn perturb(creature: &mut crate::evolution::Creature) {
+pub fn perturb(creature: &mut crate::evolution::Creature) {
     let mut rng = crate::evolution::Rng::new(creature.id ^ 0x5eed_7a11, 0, 0);
     for node in &mut creature.nodes {
         node.x += rng.range(-0.02, 0.02);
@@ -1277,6 +1301,12 @@ pub fn to_metrics(
         unchecked: false,
         screened: r.screened > 0.0,
         screen_x: r.screen_x,
+        screen2_x: match cfg.screen {
+            Some(screen) if screen.second.is_some() && !screen.stopped_first(r.screened) => {
+                r.screen2_x
+            }
+            _ => f32::NAN,
+        },
     }
 }
 
@@ -1392,6 +1422,7 @@ mod tests {
             replays: Vec::new(),
             replays_submitted: 0,
             checks_submitted: 0,
+            check_busy_seconds: 0.0,
             checks_released: 0,
             check_units: 0,
             checks_dropped: 0,
@@ -1424,6 +1455,7 @@ mod tests {
             replays: Vec::new(),
             replays_submitted: 0,
             checks_submitted: 0,
+            check_busy_seconds: 0.0,
             checks_released: 0,
             check_units: 0,
             checks_dropped: 0,
@@ -2287,15 +2319,28 @@ mod tests {
     }
 
     #[test]
+    fn check_verdicts_keep_the_worse_trial() {
+        let standard = EvaluationMetrics {
+            fitness: 30.0,
+            ..EvaluationMetrics::default()
+        };
+        let check = |fitness: f32, screened: f32| GpuResult {
+            fitness,
+            screened,
+            ..GpuResult::default()
+        };
+        assert_eq!(check_verdict(&standard, &check(25.0, 0.0)), (25.0, false));
+        assert_eq!(check_verdict(&standard, &check(35.0, 0.0)), (30.0, false));
+        assert!(check_verdict(&standard, &check(1.0, 5.0)).1);
+    }
+
+    #[test]
     fn a_check_that_fails_the_screen_keeps_its_creature_out_of_the_archive() {
         let cfg = Config {
             population: 4,
             duration: 3.0,
             random_seed: false,
-            screen: Some(crate::physics::Screen {
-                seconds: 1.0,
-                bar: f32::INFINITY,
-            }),
+            screen: Some(crate::physics::Screen::single(1.0, f32::INFINITY)),
             ..Config::default()
         };
         let pop = crate::evolution::create(&cfg).unwrap();

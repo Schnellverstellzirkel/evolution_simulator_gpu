@@ -15,7 +15,9 @@ pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 1 << 20;
 pub(crate) const CMA_LIMIT: usize = 96;
 // 26: a fall ends the trial; behavior totals stop at the fall and average
 // over the steps walked.
-pub const VERSION: u32 = 26;
+// 27: every node the ground pushes feels friction, and the lift's friction
+// may only slow the body (sliders).
+pub const VERSION: u32 = 27;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
@@ -61,6 +63,9 @@ pub struct EvaluationMetrics {
     /// Distance at the screen, or at an earlier fall (0 when there was no
     /// screen and no earlier fall).
     pub screen_x: f32,
+    /// Distance at the second screening rung, or at an earlier fall; NaN
+    /// when there is no second rung or the first screen stopped the trial.
+    pub screen2_x: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]

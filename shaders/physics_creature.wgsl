@@ -65,6 +65,12 @@ struct Params {
     // creature needs there to run the full trial (physics::Screen).
     screen_tick: u32,
     screen_bar: f32,
+    // Step of the second screening rung (0 for none) and its bar, for the
+    // creatures that passed the first screen.
+    screen2_tick: u32,
+    screen2_bar: f32,
+    pad0: u32,
+    pad1: u32,
 }
 struct Result {
     fitness: f32,
@@ -96,6 +102,8 @@ struct Result {
     screen_x: f32,
     // Seconds into the trial when the screen stopped the creature, or 0.
     screened: f32,
+    // Distance at the second screening rung, or at an earlier fall.
+    screen2_x: f32,
 }
 @group(0) @binding(0) var<storage, read_write> nodes: array<Node>;
 // Muscle genes plus per-muscle state (rhythm offset and energy), which the
@@ -411,7 +419,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         bone_cos_half[j] = bone_data[field + 4u * TILE];
         bone_break[j] = bone_cos_half[j] * JOINT_BREAK_COS - bone_data[field + 5u * TILE] * JOINT_BREAK_SIN;
     }
-    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     if p.tick > 0u {
         metrics = results[creature];
     }
@@ -800,10 +808,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if j >= body_nodes { break; }
                 let k = node_k(j, lane);
                 pos[k].y += ground_lift;
-                if pos[k].y <= vel[k].y + 1e-4 && failed[j] < 0.5 {
+                // A node the ground pushed this step touched it, even if the
+                // rebuild and the lift left it above the floor.
+                let push = max(min(pos[k].y, vel[k].y) - vel[k].x, 0.0);
+                if (pos[k].y <= vel[k].y + 1e-4 || push > 0.0) && failed[j] < 0.5 {
                     held_mass += mass[j];
                     held_grip += mass[j] * friction[j];
-                    normal += mass[j] * max(pos[k].y - vel[k].x, 0.0);
+                    normal += mass[j] * push;
                     slide += mass[j] * (pos[k].x - old[k].x);
                 }
                 com_x += pos[k].x * mass[j];
@@ -821,8 +832,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         var contact_mass = 0.0;
         var contact_momentum = 0.0;
         var contact_grip = 0.0;
+        var body_momentum = 0.0;
         // Velocity is the actual movement over the step. Ground friction uses the
-        // real upward push the node received, so grip needs real pressure. The
+        // real upward push the node received, so grip needs real pressure: how
+        // far the ground raised the node (push-out and floor clamps), up to
+        // the floor. Every node the ground pushed feels friction, also one the
+        // rebuild and the lift left above the floor, which would otherwise
+        // take the ground's support without its friction and slide. The
         // whole-body lift only moves the body out of the ground; it adds no
         // upward speed, or a limb swung into the ground would launch it.
         for (var j = 0u; j < MAXN; j++) {
@@ -848,8 +864,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 sink = clamp(floor_y + p.mud - pos[k].y, 0.0, p.mud) / MUD_FULL_DEPTH;
                 mud_mu = 1.0 + MUD_GRIP * sink;
             }
-            if grounded && pos[k].y <= floor_y + 1e-4 {
-                let push = max(pos[k].y - predicted_y, 0.0) * (1.0 + MUD_NORMAL * sink);
+            let pushed = max(min(pos[k].y, floor_y) - predicted_y, 0.0);
+            if grounded && (pos[k].y <= floor_y + 1e-4 || pushed > 0.0) {
+                let push = pushed * (1.0 + MUD_NORMAL * sink);
                 let max_change = friction[j] * p.friction * mud_mu * push * RATE;
                 velocity.x -= clamp(velocity.x, -max_change, max_change);
                 // Moving through mud also loses speed to viscous drag.
@@ -866,17 +883,21 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 velocity = vec2f(0.0);
             }
             vel[k] = velocity;
+            body_momentum += velocity.x * mass[j];
         }
         // The whole-body lift is the ground holding the body up: its normal
         // impulse is the body's mass times the lift. Each node's own friction
         // only sees its own push, so the feet on the ground also resist the
         // body's sliding with up to mu times the lift's impulse, applied to
-        // the whole body so momentum stays exact.
+        // the whole body so momentum stays exact. It may only slow the body,
+        // never speed it up: a light toe swinging backward on the ground would
+        // otherwise kick the whole body forward.
         if grounded && ground_lift > 0.0 && contact_mass > 0.0 {
             let inv_contact = 1.0 / contact_mass;
             let budget = contact_grip * inv_contact * p.friction * ground_lift * RATE;
             let slide = contact_momentum * inv_contact;
-            let change = -clamp(slide, -budget, budget);
+            let stop = -(body_momentum * inv_total_mass);
+            let change = clamp(-clamp(slide, -budget, budget), min(stop, 0.0), max(stop, 0.0));
             for (var j = 0u; j < MAXN; j++) {
                 if j >= body_nodes { break; }
                 if failed[j] < 0.5 {
@@ -1042,6 +1063,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if tick <= p.screen_tick {
                     metrics.screen_x = metrics.fitness;
                 }
+                if tick <= p.screen2_tick {
+                    metrics.screen2_x = metrics.fitness;
+                }
                 fell_now = true;
             }
             metrics.ground_contact += contacts;
@@ -1083,7 +1107,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             // only if it has come far enough; otherwise the trial ends here
             // like a fall, keeping this distance.
             var screened_now = false;
-            if tick == p.screen_tick && !fell_now {
+            if (tick == p.screen_tick || tick == p.screen2_tick) && !fell_now {
                 var screen_x = 0.0;
                 var failures = 0.0;
                 for (var j = 0u; j < MAXN; j++) {
@@ -1091,10 +1115,19 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                     screen_x += pos[node_k(j, lane)].x * mass[j];
                     failures += failed[j];
                 }
-                metrics.screen_x = screen_x * inv_total_mass;
-                if metrics.screen_x < p.screen_bar {
+                let x = screen_x * inv_total_mass;
+                var bar = p.screen_bar;
+                if tick == p.screen_tick {
+                    metrics.screen_x = x;
+                } else {
+                    // The second rung: only creatures that passed the first
+                    // screen are still running here.
+                    metrics.screen2_x = x;
+                    bar = p.screen2_bar;
+                }
+                if x < bar {
                     metrics.screened = time + DT;
-                    metrics.fitness = select(metrics.screen_x, -1e20, failures > 0.0);
+                    metrics.fitness = select(x, -1e20, failures > 0.0);
                     screened_now = true;
                 }
             }
