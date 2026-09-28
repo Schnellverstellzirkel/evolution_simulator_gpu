@@ -2063,6 +2063,13 @@ impl App {
             {
                 p.reset();
             }
+            if ui
+                .add_enabled(self.playback.is_some(), egui::Button::new("Family tree"))
+                .on_hover_text("The ancestors of this creature, with what changed at each step")
+                .clicked()
+            {
+                self.tab = Tab::Lineage;
+            }
             ui.add(
                 egui::Slider::new(&mut self.speed, 0.25..=4.0)
                     .logarithmic(true)
@@ -2716,52 +2723,6 @@ impl App {
         self.race_pending = true;
         self.race_page_requested = false;
         self.race_camera = 0.0;
-    }
-    /// Ancestor chain of the selected creature; the biggest gains stand out and
-    /// any ancestor can be replayed.
-    fn lineage_strip(&mut self, ui: &mut egui::Ui) {
-        if self.lineage.len() < 2 {
-            return;
-        }
-        let theme = self.theme();
-        let mut gains: Vec<f32> = self.lineage.iter().map(|step| step.gain).collect();
-        gains.sort_by(|a, b| b.total_cmp(a));
-        let highlight = gains.get(2).copied().unwrap_or(f32::INFINITY).max(0.01);
-        ui.label(
-            RichText::new(format!(
-                "Lineage · {} ancestors, newest first · click one to replay it",
-                self.lineage.len()
-            ))
-            .small()
-            .color(theme.muted),
-        );
-        let shown = self.playback.as_ref().map(|p| p.creature.id);
-        let mut chosen = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("lineage")
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for k in 0..self.lineage.len() {
-                        let step = &self.lineage[k];
-                        if paint_lineage_tile(
-                            ui,
-                            step,
-                            self.lineage.get(k + 1),
-                            step.gain >= highlight,
-                            shown == Some(step.creature.id),
-                            theme,
-                            Vec2::new(176., 88.),
-                        ) {
-                            chosen = Some(k);
-                        }
-                    }
-                });
-            });
-        if let Some(k) = chosen {
-            let config = self.world_of_generation(self.lineage[k].generation);
-            self.select_ancestor(self.lineage[k].creature.clone(), config);
-        }
-        ui.add_space(6.);
     }
     /// Full ancestor list of the selected creature, one row per generation.
     fn lineage_view(&mut self, ui: &mut egui::Ui) {
@@ -3776,11 +3737,17 @@ impl eframe::App for App {
                 match self.tab {
                     Tab::Overview => {
                         self.metrics(ui);
-                        ui.add_space(10.);
-                        self.viewport(ui, (ui.available_height() * 0.62).max(180.));
                         ui.add_space(8.);
-                        self.lineage_strip(ui);
-                        self.trend(ui, ui.available_height().max(100.));
+                        // The chart keeps a fixed height below the replay and
+                        // its controls; the replay takes the rest.
+                        const CHART: f32 = 160.;
+                        const REPLAY_CONTROLS: f32 = 120.;
+                        self.viewport(
+                            ui,
+                            (ui.available_height() - CHART - REPLAY_CONTROLS).max(180.),
+                        );
+                        ui.add_space(6.);
+                        self.trend(ui, (ui.available_height() - 34.).max(80.));
                     }
                     Tab::Population => self.population(ui),
                     Tab::History => {
