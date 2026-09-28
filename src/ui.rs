@@ -803,6 +803,8 @@ struct FameEntry {
     generation: u32,
     distance: f32,
     creature: Creature,
+    /// The world the record was set in.
+    config: Config,
 }
 /// Heat map of the occupied archive cells for the selected height and feet
 /// bins. Returns the niche key of a clicked cell.
@@ -1422,6 +1424,19 @@ impl App {
         } else {
             self.next_champion = Some((creature, config));
         }
+    }
+    /// The world a generation ran in: the settings its history row kept, or
+    /// the live world for a generation without a row yet.
+    fn world_of_generation(&self, generation: u32) -> Config {
+        let Some(snapshot) = &self.snapshot else {
+            return Config::default();
+        };
+        snapshot
+            .history
+            .iter()
+            .rev()
+            .find(|stats| stats.generation == generation)
+            .map_or_else(|| snapshot.config.clone(), |stats| stats.config.clone())
     }
     /// Stops watching a picked creature and shows the champion now.
     fn back_to_champion(&mut self) {
@@ -2144,6 +2159,21 @@ impl App {
                 MUTED,
             );
         }
+        if let Some(p) = &self.playback {
+            let live = self.snapshot.as_ref().map(|s| &s.config);
+            let earlier = live.is_some_and(|live| live.physics_differs(&p.config));
+            painter.text(
+                rect.right_top() + Vec2::new(-14., 12.),
+                Align2::RIGHT_TOP,
+                if earlier {
+                    format!("{} (an earlier world)", world_summary(&p.config))
+                } else {
+                    world_summary(&p.config)
+                },
+                FontId::proportional(13.),
+                INK,
+            );
+        }
         painter.text(
             rect.left_bottom() + Vec2::new(14., -12.),
             Align2::LEFT_BOTTOM,
@@ -2756,6 +2786,7 @@ impl App {
                         generation: stats.generation,
                         distance: stats.best,
                         creature,
+                        config: stats.config.clone(),
                     });
                 }
             }
@@ -2862,11 +2893,7 @@ impl App {
             });
         if let Some(place) = chosen {
             let entry = &self.fame[place];
-            let creature = entry.creature.clone();
-            let config = self
-                .snapshot
-                .as_ref()
-                .map_or_else(Config::default, |s| s.config.clone());
+            let (creature, config) = (entry.creature.clone(), entry.config.clone());
             self.select(creature, config);
             self.tab = Tab::Overview;
         }
@@ -2960,10 +2987,7 @@ impl App {
                 });
             });
         if let Some(k) = chosen {
-            let config = self
-                .snapshot
-                .as_ref()
-                .map_or_else(Config::default, |s| s.config.clone());
+            let config = self.world_of_generation(self.lineage[k].generation);
             self.select_ancestor(self.lineage[k].creature.clone(), config);
         }
         ui.add_space(6.);
@@ -3026,10 +3050,7 @@ impl App {
                 }
             });
         if let Some(k) = chosen {
-            let config = self
-                .snapshot
-                .as_ref()
-                .map_or_else(Config::default, |s| s.config.clone());
+            let config = self.world_of_generation(self.lineage[k].generation);
             self.select_ancestor(self.lineage[k].creature.clone(), config);
             self.tab = Tab::Overview;
         }
