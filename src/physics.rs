@@ -220,7 +220,11 @@ pub fn body(genes: &[NodeGene], bones: &[Bone]) -> Vec<Node> {
 /// processes millions of small bodies, so this avoids one heap allocation per
 /// creature while preserving the same mass calculation as `body`.
 pub fn body_into(genes: &[NodeGene], bones: &[Bone], nodes: &mut [Node]) {
-    assert_eq!(nodes.len(), genes.len(), "body output length must match genes");
+    assert_eq!(
+        nodes.len(),
+        genes.len(),
+        "body output length must match genes"
+    );
     for (dst, gene) in nodes.iter_mut().zip(genes) {
         *dst = node(gene);
     }
@@ -739,14 +743,17 @@ pub fn joints(genes: &[NodeGene], bones: &[Bone]) -> Vec<Joint> {
 /// Writes joint constants using an already computed body state. Callers that
 /// pack many bodies can reuse the output slice and avoid allocating both the
 /// body nodes and the joint vector for every creature.
-pub fn joints_from_body(
-    genes: &[NodeGene],
-    bones: &[Bone],
-    state: &[Node],
-    out: &mut [Joint],
-) {
-    assert_eq!(state.len(), genes.len(), "joint state length must match genes");
-    assert_eq!(out.len(), bones.len(), "joint output length must match bones");
+pub fn joints_from_body(genes: &[NodeGene], bones: &[Bone], state: &[Node], out: &mut [Joint]) {
+    assert_eq!(
+        state.len(),
+        genes.len(),
+        "joint state length must match genes"
+    );
+    assert_eq!(
+        out.len(),
+        bones.len(),
+        "joint output length must match bones"
+    );
     for (index, bone) in bones.iter().enumerate() {
         let pivot = bone.a as usize;
         let child = bone.b as usize;

@@ -48,11 +48,11 @@ nice -n 10 cargo run --profile release-fast
 
 ## Playing
 
-Use **Evolve continuously**, **One generation**, or **Guided step**. Guided mode pauses between evaluation, archive insertion, and breeding. Space pauses or resumes evolution; Ctrl+S opens Save. Select an archive card or historical creature to replay it. Playback has its own controls; drag the scene to pan and scroll to zoom.
+Press **Evolve** in the top bar, or Space, to run generation after generation; Space or **Pause evolution** stops. The replay follows the champion: the best creature of the newest generation, which the view switches to each time the replay on screen ends. Pick any creature (an archive card, a map cell, a record, an ancestor) to watch it instead, and **Back to champion** returns. K or a click on the replay pauses it, the arrow keys step one frame, drag pans and scroll zooms. Ctrl+S opens Save, F1 opens help.
 
-Population and trial duration are displayed in the main controls, with no mutation slider. The default game keeps them at three million and 20 seconds. Diagnostic CLI runs and JSON presets can use other sizes or durations. Advanced controls contain seed selection, performance and checkpoint settings, display options, and histogram controls.
+The top bar shows the population and trial length; the game keeps them at three million and 20 seconds, with no mutation controls. Diagnostic CLI runs and JSON presets can use other sizes or durations. The File menu opens, saves and exports; the New experiment dialog takes a seed; the View menu holds the dark theme and UI scale. **Diagnostics** in the status line opens a drawer with search and machine numbers and the step-by-step **One generation** and **Guided step** buttons; guided mode pauses between evaluation, archive insertion, and breeding.
 
-Environment buttons raise or lower each effect:
+Each environment effect is a row with one button per level. A click sets that level, and **Calm world** resets them all:
 
 | Effect | Levels |
 | --- | --- |
@@ -119,7 +119,7 @@ This starts evolution, prints stage timings, and closes after the requested gene
 
 Versioned `.evo` files store the current population, evaluation progress, archives, emitter and CMA state, settings, seed, lineage, and history using a compressed binary payload. Temporary writes are flushed and renamed. V4 checkpoints also retain island optimizer progress so continuation preserves its stall history; V3 files remain readable. Compatible older checkpoints can keep their population while obsolete archives are cleared and reevaluated. Current physics uses QD version 19, so archives from the earlier version-16 baseline are invalidated on load; not every historical format is guaranteed to load.
 
-The dashboard writes no files on its own: autosave is off by default, and a loaded game starts with it off. When the player sets an interval (Advanced > Performance & checkpoints), autosaves go to `runs/seed-<seed>-auto.evo` in a background thread, and the three newest experiment autosaves are kept. Manual saves can preserve partial-generation progress. The interval is adjustable; zero disables autosave. Wait for a requested manual save to report completion before closing the app. Headless runs write to their chosen checkpoint path and also export history CSV.
+The dashboard writes no files on its own: autosave is off by default, and a loaded game starts with it off. When the player turns on File > Autosave every 10 generations, autosaves go to `runs/seed-<seed>-auto.evo` in a background thread, and the three newest experiment autosaves are kept. Manual saves can preserve partial-generation progress. Wait for a requested manual save to report completion before closing the app. Headless runs write to their chosen checkpoint path and also export history CSV.
 
 ## Checks
 

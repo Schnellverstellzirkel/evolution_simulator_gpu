@@ -3,11 +3,11 @@ use crate::{
     evolution::{Creature, FAILED},
     gpu::Gpu,
     physics::{self, Node},
-    storage::{PERCENTILES, Stage, Stats},
-    worker::{Command, Snapshot, Worker},
+    storage::{Stage, Stats},
+    worker::{Command, EventKind, Snapshot, Worker},
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
-use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points};
+use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points, VLine};
 use image::{
     Delay as GifDelay, Frame as GifFrame, Rgba, RgbaImage,
     codecs::gif::{GifEncoder, Repeat as GifRepeat},
@@ -37,6 +37,12 @@ const MUSCLE_ACTIVE: Color32 = Color32::from_rgb(146, 16, 28);
 /// Ring around every node touching the ground in the current frame.
 const TOUCHDOWN: Color32 = Color32::from_rgb(255, 196, 64);
 const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
+/// How long the UI's own messages hold the status line.
+const MESSAGE_SECONDS: f32 = 8.0;
+/// How fast archive cards glide to their new places after a re-sort.
+const SORT_SPEED: f32 = 5.0;
+/// Generations between autosaves when the player turns autosave on.
+const AUTOSAVE_INTERVAL: u32 = 10;
 /// Exported GIFs render the same scene as the viewport into this frame size.
 const GIF_WIDTH: u32 = 400;
 const GIF_HEIGHT: u32 = 224;
@@ -607,22 +613,6 @@ impl FrameMarks {
 /// Behavior-axis bin counts, mirroring `qd::BINS` (ground contact, cadence,
 /// bounce, height, feet). Bounce keeps one bin, so it adds no map cell.
 const MAP_BINS: [usize; 5] = [6, 8, 1, 6, 5];
-/// One occupied behavior cell of the archive map: the creature that holds it.
-struct MapCell {
-    score: f32,
-    rank: usize,
-    descriptor: crate::qd::Descriptor,
-    emitter: Option<crate::qd::Emitter>,
-    creature: Creature,
-}
-/// A sweep through the archive pages that fills `App::map_cells`.
-#[derive(Clone, Copy)]
-struct MapScan {
-    /// Start offset of the next page to request.
-    next: usize,
-    /// Archive size when the sweep started.
-    total: usize,
-}
 /// Which representation the Behavior archive tab shows.
 #[derive(Clone, Copy, PartialEq)]
 enum ArchiveView {
@@ -631,10 +621,13 @@ enum ArchiveView {
 }
 /// One archive elite running in the race view.
 struct RaceLane {
-    /// Place in the archive ranking.
-    rank: usize,
+    /// Why the creature runs: its archive rank, "champion" or "your pick".
+    label: String,
     playback: Playback,
 }
+/// Creatures the player sends to the race with "Race it", at most this many
+/// beside the champion.
+const RACE_PICKS: usize = 4;
 /// Cold-to-hot color for a normalized map value.
 fn heat_color(t: f32) -> Color32 {
     let cold = Color32::from_rgb(64, 98, 168);
@@ -684,39 +677,28 @@ const SPECIES_STEMS: [&str; 16] = [
     "Vex", "Tor", "Quil", "Nym", "Zeb", "Cro", "Fen", "Lum", "Tar", "Wisp", "Brak", "Ovi", "Pyr",
     "Sable", "Dro", "Ril",
 ];
-/// Short deterministic species name from body counts, a body-plan hash and
-/// the muscles' commanded rhythm. It uses only creature data, so archive
-/// cards, lineage tiles and race lanes agree without asking the worker.
+/// Syllables between the stem and the size word.
+const SPECIES_LINKS: [&str; 8] = ["a", "o", "i", "u", "e", "y", "ar", "en"];
+/// Short deterministic species name from the body plan (see
+/// `worker::body_plan`) and a gait word from the muscles' rhythm. It uses
+/// only creature data, so archive cards, lineage tiles and race lanes agree
+/// without asking the worker.
 fn species_name(creature: &Creature) -> String {
-    let (nodes, bones, muscles) = body_counts(creature);
-    // Order-independent sums keep the name stable across bone reordering
-    // (playbacks canonicalize their copy of the creature).
-    let mut plan = ((nodes as u64) << 42) ^ ((bones as u64) << 21) ^ muscles as u64;
-    for bone in &creature.bones {
-        plan = plan.wrapping_add(
-            (bone.a as u64)
-                .wrapping_mul(0x9e3779b97f4a7c15)
-                .wrapping_add(bone.b as u64)
-                .wrapping_add(((bone.rest_length * 100.0) as u64).wrapping_mul(0xbf58476d1ce4e5b9)),
-        );
-    }
-    for muscle in &creature.muscles {
-        plan = plan.wrapping_add(
-            (muscle.bone_a as u64)
-                .wrapping_mul(0x94d049bb133111eb)
-                .wrapping_add(muscle.bone_b as u64)
-                .wrapping_add(((muscle.period * 100.0) as u64).wrapping_mul(0x2545f4914f6cdd1d)),
-        );
-    }
-    let stem = SPECIES_STEMS[(plan % SPECIES_STEMS.len() as u64) as usize];
-    let form = match bones {
+    // The body plan decides the name, so a creature keeps it through the
+    // small mutations that tune lengths and rhythms. A stem and a linking
+    // syllable give 128 names per size class.
+    let plan = crate::worker::body_plan(creature);
+    let mixed = plan ^ (plan >> 29) ^ (plan >> 47);
+    let stem = SPECIES_STEMS[(mixed % SPECIES_STEMS.len() as u64) as usize];
+    let link = SPECIES_LINKS[((mixed >> 8) % SPECIES_LINKS.len() as u64) as usize];
+    let form = match creature.bones.len() {
         0..=2 => "ling",
         3..=4 => "pod",
         5..=7 => "form",
         8..=11 => "morph",
         _ => "titan",
     };
-    format!("{stem}{form} {}", gait_word(creature))
+    format!("{stem}{link}{form} {}", gait_word(creature))
 }
 /// Cadence bucket from the muscles' rhythm periods, in cycles per second.
 fn gait_word(creature: &Creature) -> &'static str {
@@ -786,68 +768,152 @@ fn scaled_range(
     let half = (range.end() - range.start()) / 2.0 * factor;
     (center - half)..=(center + half)
 }
-/// History positions where the all-time best distance moved, oldest first.
-fn record_entries(history: &[Stats]) -> Vec<(usize, f32)> {
+/// One save in runs/, for File > Open.
+struct SaveEntry {
+    path: PathBuf,
+    modified: Option<std::time::SystemTime>,
+    bytes: u64,
+    summary: Option<crate::storage::SaveSummary>,
+}
+/// Every .evo file directly in `dir`, newest first, with what its first
+/// bytes say about it.
+fn list_saves(dir: &std::path::Path) -> Vec<SaveEntry> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut saves: Vec<SaveEntry> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "evo"))
+        .map(|path| {
+            let metadata = std::fs::metadata(&path).ok();
+            SaveEntry {
+                modified: metadata.as_ref().and_then(|m| m.modified().ok()),
+                bytes: metadata.map_or(0, |m| m.len()),
+                summary: crate::storage::summary(&path),
+                path,
+            }
+        })
+        .collect();
+    saves.sort_by_key(|save| std::cmp::Reverse(save.modified));
+    saves
+}
+/// "3 min ago" from a file time.
+fn ago(time: Option<std::time::SystemTime>) -> String {
+    time.and_then(|t| t.elapsed().ok()).map_or_else(
+        || "unknown time".to_owned(),
+        |age| format!("{} ago", seconds_text(age.as_secs_f64())),
+    )
+}
+/// What a line of the event feed lets the player do.
+#[derive(Clone, Copy)]
+enum FeedAction {
+    /// Replay the best creature of this history row.
+    Replay(usize),
+    /// Bring back creatures lost to catastrophes.
+    Undo,
+    /// Set this effect (index into `EFFECTS`) to this level.
+    Try(usize, usize),
+}
+/// Generations without a record before the feed suggests a new world.
+const STALL_GENERATIONS: u32 = 25;
+/// The effects a stall hint suggests, in order; the first that can go one
+/// level harder wins.
+const STALL_EFFECTS: [&str; 12] = [
+    "Ground",
+    "Hurdles",
+    "Grip",
+    "Slope",
+    "Mud",
+    "Gaps",
+    "Wind",
+    "Air",
+    "Gravity",
+    "Earthquake",
+    "Heat wave",
+    "Drought",
+];
+/// An effect and the next harder level to try when evolution stalls.
+fn stall_suggestion(config: &Config) -> Option<(usize, usize)> {
+    STALL_EFFECTS.iter().find_map(|name| {
+        let index = crate::environment::EFFECTS
+            .iter()
+            .position(|effect| effect.name == *name)?;
+        let effect = &crate::environment::EFFECTS[index];
+        let level = effect.level(config);
+        (level + 1 < effect.levels.len()).then_some((index, level + 1))
+    })
+}
+/// One line of the event feed.
+struct FeedItem {
+    generation: u32,
+    text: String,
+    color: Color32,
+    action: Option<FeedAction>,
+}
+/// The smallest gain that counts as a new record (m).
+const RECORD_STEP: f32 = 0.01;
+/// History positions where the best distance moved within one world, oldest
+/// first, and whether each is the first best after a world change. A harder
+/// world lowers the best, so records count again from its first generation.
+fn world_records(history: &[Stats]) -> Vec<(usize, f32, bool)> {
     let mut best = f32::NEG_INFINITY;
     let mut records = Vec::new();
     for (index, stats) in history.iter().enumerate() {
-        if stats.best.is_finite() && stats.best > best {
+        if index > 0 && stats.config.physics_differs(&history[index - 1].config) {
+            best = f32::NEG_INFINITY;
+        }
+        // A record beats the last one by at least a centimeter, so two
+        // records never read the same.
+        if stats.best.is_finite() && stats.best >= best + RECORD_STEP {
+            let first = best == f32::NEG_INFINITY;
             best = stats.best;
-            records.push((index, stats.best));
+            records.push((index, best, first && index > 0));
         }
     }
     records
 }
-/// One all-time record in the session hall of fame.
-struct FameEntry {
-    generation: u32,
-    distance: f32,
-    creature: Creature,
-}
-/// Heat map of the occupied archive cells for the selected height and feet
-/// bins. Returns the niche key of a clicked cell.
+/// Heat map of the archive: for each ground contact and cadence pair, the
+/// best creature among the height and feet bins the filters let through.
+/// One color scale spans every cell of the archive, so a color means the
+/// same distance whatever the filters. Returns the id of a clicked cell's
+/// creature.
 fn paint_archive_map(
     ui: &mut egui::Ui,
-    snapshot: &Snapshot,
-    cells: &HashMap<[u8; 6], MapCell>,
-    scan: Option<&MapScan>,
-    height_bin: usize,
-    feet_bin: usize,
+    cells: &[crate::worker::MapCell],
+    height_bin: Option<usize>,
+    feet_bin: Option<usize>,
     theme: Theme,
-) -> Option<[u8; 6]> {
-    let visible: Vec<(&[u8; 6], &MapCell)> = cells
+) -> Option<u64> {
+    let (min, max) = cells
         .iter()
-        .filter(|(niche, _)| niche[3] as usize == height_bin && niche[4] as usize == feet_bin)
-        .collect();
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), cell| {
+            (lo.min(cell.score), hi.max(cell.score))
+        });
+    let range = (max - min).max(1e-6);
+    // Best cell and how many ways of moving share each contact and cadence
+    // pair under the filters.
+    let mut best: HashMap<(u8, u8), (crate::worker::MapCell, usize)> = HashMap::new();
+    for cell in cells.iter().filter(|cell| {
+        height_bin.is_none_or(|bin| usize::from(cell.niche[3]) == bin)
+            && feet_bin.is_none_or(|bin| usize::from(cell.niche[4]) == bin)
+    }) {
+        let entry = best
+            .entry((cell.niche[0], cell.niche[1]))
+            .or_insert((*cell, 0));
+        entry.1 += 1;
+        if cell.score > entry.0.score {
+            entry.0 = *cell;
+        }
+    }
     ui.label(
         RichText::new(format!(
-            "Ground contact against gait cadence · {} occupied cells in this slice · {} archive elites total",
-            visible.len(),
-            snapshot.archive_size,
+            "Ground contact against stride rate · {} cells · the best of each is shown",
+            best.len(),
         ))
         .small()
         .color(theme.muted),
     );
-    if let Some(scan) = scan {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label(
-                RichText::new(format!(
-                    "Mapping archive pages… {} / {}",
-                    scan.next.min(scan.total),
-                    scan.total
-                ))
-                .small()
-                .color(theme.accent),
-            );
-        });
-    }
-    let (min, max) = visible
-        .iter()
-        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), (_, cell)| {
-            (lo.min(cell.score), hi.max(cell.score))
-        });
-    let range = (max - min).max(1e-6);
     let (rect, _) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), ui.available_height().max(220.)),
         Sense::hover(),
@@ -870,16 +936,6 @@ fn paint_archive_map(
             [Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())],
             Stroke::new(1., theme.card_border),
         );
-    }
-    for row in 0..=rows {
-        let y = plot.bottom() - row as f32 * row_height;
-        painter.line_segment(
-            [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
-            Stroke::new(1., theme.card_border),
-        );
-    }
-    for column in 0..=columns {
-        let x = plot.left() + column as f32 * column_width;
         painter.text(
             Pos2::new(x, plot.bottom() + 4.),
             Align2::CENTER_TOP,
@@ -890,6 +946,10 @@ fn paint_archive_map(
     }
     for row in 0..=rows {
         let y = plot.bottom() - row as f32 * row_height;
+        painter.line_segment(
+            [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
+            Stroke::new(1., theme.card_border),
+        );
         painter.text(
             Pos2::new(plot.left() - 6., y),
             Align2::RIGHT_CENTER,
@@ -901,19 +961,18 @@ fn paint_archive_map(
     painter.text(
         Pos2::new(plot.center().x, plot.bottom() + 24.),
         Align2::CENTER_TOP,
-        "Ground contact",
+        "Share of the trial on the ground",
         FontId::proportional(11.),
         theme.ink,
     );
     painter.text(
         Pos2::new(rect.left() + 4., plot.top() - 16.),
         Align2::LEFT_BOTTOM,
-        "Cadence (Hz)",
+        "Strides per second",
         FontId::proportional(11.),
         theme.ink,
     );
-    // Legend: cold (slow) to hot (fast), with the distance range.
-    if !visible.is_empty() {
+    if !cells.is_empty() {
         let legend = Rect::from_min_max(
             Pos2::new(rect.right() - 272., rect.top() + 8.),
             Pos2::new(rect.right() - 92., rect.top() + 22.),
@@ -951,21 +1010,25 @@ fn paint_archive_map(
             theme.muted,
         );
     }
-    if visible.is_empty() && scan.is_none() {
+    if best.is_empty() {
         painter.text(
             plot.center(),
             Align2::CENTER_CENTER,
-            "No occupied cells in this slice. Pick another height or feet level.",
+            if cells.is_empty() {
+                "No creatures kept yet. The map fills as evolution runs."
+            } else {
+                "No creatures with this height and these feet. Try All."
+            },
             FontId::proportional(13.),
             theme.muted,
         );
     }
     let mut clicked = None;
-    for (niche, cell) in visible {
+    for (&(contact, cadence), (cell, count)) in &best {
         let inner = Rect::from_min_size(
             Pos2::new(
-                plot.left() + niche[0] as f32 * column_width + 1.5,
-                plot.bottom() - (niche[1] as f32 + 1.) * row_height + 1.5,
+                plot.left() + contact as f32 * column_width + 1.5,
+                plot.bottom() - (cadence as f32 + 1.) * row_height + 1.5,
             ),
             Vec2::new(column_width - 3., row_height - 3.),
         );
@@ -986,7 +1049,11 @@ fn paint_archive_map(
                 ink,
             );
         }
-        let response = ui.interact(inner, ui.id().with(("archive_map", *niche)), Sense::click());
+        let response = ui.interact(
+            inner,
+            ui.id().with(("archive_map", contact, cadence)),
+            Sense::click(),
+        );
         if response.hovered() {
             painter.rect_stroke(
                 inner,
@@ -996,18 +1063,15 @@ fn paint_archive_map(
             );
         }
         if response.clicked() {
-            clicked = Some(*niche);
+            clicked = Some(cell.id);
         }
         response.on_hover_text(format!(
-            "{} · rank #{} · {:.3} m\n{:.2} m tall · {:.2} aspect ratio · {} feet\n{}\nClick to replay",
-            species_name(&cell.creature),
+            "Rank {} · {:.2} m · {} tall · {}\n{} ways of moving in this cell, the best is shown\nClick to replay",
             cell.rank + 1,
             cell.score,
-            cell.descriptor.mean_height,
-            cell.descriptor.aspect_ratio,
-            cell.descriptor.feet.round() as i32,
-            cell.emitter
-                .map_or("archive elite".to_owned(), |e| e.label().to_owned()),
+            height_bin_label(usize::from(cell.niche[3])),
+            feet_bin_label(usize::from(cell.niche[4])),
+            count,
         ));
     }
     clicked
@@ -1139,23 +1203,31 @@ struct App {
     zoom: f32,
     camera: [f32; 2],
     follow: bool,
-    advanced: bool,
-    search: String,
-    hist_min: f64,
-    hist_max: f64,
-    bins: u32,
-    percentiles: [bool; 29],
     history_index: usize,
     history_latest: bool,
     file_mode: Option<&'static str>,
+    /// The saves File > Open lists, newest first, while that window is open.
+    open_list: Option<Vec<SaveEntry>>,
+    /// When this experiment was last saved or opened, at which generation,
+    /// and whether it was an open; None for a new experiment never saved.
+    saved: Option<(Instant, u32, bool)>,
+    /// A save the worker is writing, since when.
+    saving: Option<Instant>,
+    /// A save path that exists and waits for the player to confirm.
+    overwrite: Option<PathBuf>,
+    /// The experiment and number of worker events already read.
+    events_seen: (u64, usize),
     file_path: String,
     message: Option<String>,
+    /// The message on the status line and when it first showed.
+    shown_message: Option<(String, Instant)>,
     new_dialog: bool,
-    dirty: bool,
+    /// When the UI last sent a settings change to the worker.
+    config_sent: Option<Instant>,
     last_frame: Instant,
     frame_times: std::collections::VecDeque<f32>,
     last_page: usize,
-    sort_speed: f32,
+    /// The Diagnostics drawer under the status line is open.
     show_perf: bool,
     ui_scale: f32,
     initial: bool,
@@ -1180,22 +1252,21 @@ struct App {
     /// A newer champion that replaces the one on screen when its replay loops.
     next_champion: Option<(Creature, Config)>,
     /// Behavior archive map: occupied cells keyed by their niche bytes.
-    map_cells: HashMap<[u8; 6], MapCell>,
-    map_scan: Option<MapScan>,
-    map_generation: u32,
-    map_height: usize,
-    map_feet: usize,
+    /// Map filters; None shows every bin.
+    map_height: Option<usize>,
+    map_feet: Option<usize>,
+    /// Whether the worker was last asked to send the map table.
+    map_sent: bool,
+    /// The archive cards the player filters for.
+    card_filter: crate::worker::CardFilter,
     archive_view: ArchiveView,
     /// Top archived elites racing side by side.
     race: Vec<RaceLane>,
     race_pending: bool,
     race_page_requested: bool,
     race_camera: f32,
-    /// Session hall of fame: all-time records seen so far, oldest first.
-    fame: Vec<FameEntry>,
-    fame_best: f32,
-    fame_seen: usize,
-    fame_epoch: u64,
+    /// Creatures the player sent to the race, oldest first, with their worlds.
+    race_picks: Vec<(Creature, Config)>,
     /// Native benchmark frame intervals and the last control probe time.
     bench_frames: Vec<f32>,
     bench_last_ping: Instant,
@@ -1243,10 +1314,6 @@ impl App {
         } else {
             worker.send(Command::New(initial_config));
         }
-        let mut percentiles = [false; 29];
-        percentiles[0] = true;
-        percentiles[14] = true;
-        percentiles[28] = true;
         Self {
             worker,
             snapshot: None,
@@ -1264,23 +1331,22 @@ impl App {
             zoom: DEFAULT_CAMERA_ZOOM,
             camera: [0.0, 0.0],
             follow: true,
-            advanced: false,
-            search: String::new(),
-            hist_min: -1.0,
-            hist_max: 8.0,
-            bins: 10,
-            percentiles,
             history_index: 0,
             history_latest: true,
             file_mode: None,
+            open_list: None,
+            saved: None,
+            saving: None,
+            overwrite: None,
+            events_seen: (u64::MAX, 0),
             file_path: "runs/experiment.evo".into(),
             message: None,
+            shown_message: None,
             new_dialog: false,
-            dirty: false,
+            config_sent: None,
             last_frame: Instant::now(),
             frame_times: Default::default(),
             last_page: usize::MAX,
-            sort_speed: 5.0,
             show_perf: false,
             ui_scale: 1.0,
             initial: true,
@@ -1295,11 +1361,10 @@ impl App {
             pinned: false,
             champion_shown: false,
             next_champion: None,
-            map_cells: HashMap::new(),
-            map_scan: None,
-            map_generation: u32::MAX,
-            map_height: 0,
-            map_feet: 0,
+            map_height: None,
+            map_feet: None,
+            map_sent: false,
+            card_filter: Default::default(),
             archive_view: if smoke_tab == "map" {
                 ArchiveView::Map
             } else {
@@ -1309,10 +1374,7 @@ impl App {
             race_pending: smoke_tab == "race",
             race_page_requested: false,
             race_camera: 0.0,
-            fame: Vec::new(),
-            fame_best: 0.0,
-            fame_seen: 0,
-            fame_epoch: u64::MAX,
+            race_picks: Vec::new(),
             bench_frames: Vec::new(),
             bench_last_ping: Instant::now(),
             bench_pings: 0,
@@ -1344,15 +1406,20 @@ impl App {
         self.file_mode = Some(mode);
         self.file_path = match mode {
             "Export CSV" => "runs/statistics.csv".to_owned(),
-            "Save preset" | "Load preset" => "presets/custom.json".to_owned(),
             "Open creature JSON" => "runs/creature.json".to_owned(),
             "Export creature JSON" | "Export creature GIF" => {
-                let id = self.playback.as_ref().map_or(0, |p| p.creature.id);
-                let stamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis());
                 let extension = if mode.ends_with("GIF") { "gif" } else { "json" };
-                format!("runs/creature-{id}-{stamp}.{extension}")
+                self.playback.as_ref().map_or_else(
+                    || format!("runs/creature.{extension}"),
+                    |p| {
+                        format!(
+                            "runs/{}-{:.1}m-{}.{extension}",
+                            species_name(&p.creature).replace(' ', "-"),
+                            p.distance,
+                            p.creature.id
+                        )
+                    },
+                )
             }
             _ => "runs/experiment.evo".to_owned(),
         };
@@ -1404,6 +1471,7 @@ impl App {
         };
         let showing = self.playback.as_ref().map(|p| p.creature.id);
         if showing == Some(creature.id) {
+            self.champion_shown = true;
             self.next_champion = None;
             return;
         }
@@ -1419,6 +1487,19 @@ impl App {
         } else {
             self.next_champion = Some((creature, config));
         }
+    }
+    /// The world a generation ran in: the settings its history row kept, or
+    /// the live world for a generation without a row yet.
+    fn world_of_generation(&self, generation: u32) -> Config {
+        let Some(snapshot) = &self.snapshot else {
+            return Config::default();
+        };
+        snapshot
+            .history
+            .iter()
+            .rev()
+            .find(|stats| stats.generation == generation)
+            .map_or_else(|| snapshot.config.clone(), |stats| stats.config.clone())
     }
     /// Stops watching a picked creature and shows the champion now.
     fn back_to_champion(&mut self) {
@@ -1443,40 +1524,120 @@ impl App {
                 ui.painter().circle_filled(points[i], 3., MINT);
             }
             ui.label(RichText::new("EVOLUTION").size(22.).strong());
-            ui.label(
-                RichText::new("CREATURE LABORATORY")
-                    .size(10.)
-                    .color(theme.muted),
-            );
+            ui.add_space(12.);
+            let running = self.active();
+            let (text, fill, why) = if running {
+                (
+                    "Pause evolution  (Space)",
+                    Color32::from_rgb(255, 239, 216),
+                    "Stop after the work in flight. The replay keeps playing.",
+                )
+            } else {
+                (
+                    "Evolve  (Space)",
+                    Color32::from_rgb(222, 241, 229),
+                    "Run generation after generation until you pause.",
+                )
+            };
+            if ui
+                .add(
+                    egui::Button::new(RichText::new(text).strong().color(INK))
+                        .fill(fill)
+                        .min_size(Vec2::new(150., 34.)),
+                )
+                .on_hover_text(why)
+                .clicked()
+            {
+                if running {
+                    self.pause();
+                } else {
+                    self.run(true, false);
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("New experiment").clicked() {
-                    self.new_dialog = true;
-                }
                 if ui
-                    .button("Save")
-                    .on_hover_text("Save population, settings and progress · Ctrl+S")
+                    .button("Help")
+                    .on_hover_text("Shortcuts and what each tab shows · F1")
                     .clicked()
                 {
-                    self.file("Save experiment");
+                    self.show_help = !self.show_help;
                 }
-                if ui.button("Open").clicked() {
-                    self.file("Open experiment");
-                }
-                if ui
-                    .button("Screenshot")
-                    .on_hover_text("Save a PNG of the window under runs/")
-                    .clicked()
-                {
-                    self.screenshot_pending = true;
-                    self.screenshot_waiting = true;
-                    self.message = Some("Taking a screenshot…".into());
+                ui.menu_button("View", |ui| {
+                    if ui.checkbox(&mut self.dark, "Dark theme").changed() {
+                        apply_style(ui.ctx(), self.dark);
+                    }
+                    if ui
+                        .add(egui::Slider::new(&mut self.ui_scale, 0.75..=1.6).text("UI scale"))
+                        .changed()
+                    {
+                        ui.ctx().set_zoom_factor(self.ui_scale);
+                    }
+                });
+                ui.menu_button("File", |ui| {
+                    if ui.button("New experiment…").clicked() {
+                        self.new_dialog = true;
+                        ui.close();
+                    }
+                    if ui.button("Open…").clicked() {
+                        self.open_list = Some(list_saves(std::path::Path::new("runs")));
+                        self.file_path = "runs/experiment.evo".to_owned();
+                        ui.close();
+                    }
+                    if ui.button("Save…  Ctrl+S").clicked() {
+                        self.file("Save experiment");
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Open creature JSON…").clicked() {
+                        self.file("Open creature JSON");
+                        ui.close();
+                    }
+                    if ui.button("Export statistics CSV…").clicked() {
+                        self.file("Export CSV");
+                        ui.close();
+                    }
+                    if ui.button("Screenshot").clicked() {
+                        self.screenshot_pending = true;
+                        self.screenshot_waiting = true;
+                        self.message = Some("Taking a screenshot…".into());
+                        ui.close();
+                    }
+                    ui.separator();
+                    let mut autosave = self.config.checkpoint_interval > 0;
+                    if ui
+                        .checkbox(
+                            &mut autosave,
+                            format!("Autosave every {AUTOSAVE_INTERVAL} generations"),
+                        )
+                        .on_hover_text("Writes runs/seed-<seed>-auto.evo in the background and keeps the three newest.")
+                        .changed()
+                    {
+                        self.config.checkpoint_interval = if autosave { AUTOSAVE_INTERVAL } else { 0 };
+                        self.worker.send(Command::Configure(self.config.clone()));
+                        self.config_sent = Some(Instant::now());
+                    }
+                });
+                let (state, busy) = self.save_state();
+                ui.label(RichText::new(state).small().color(if busy {
+                    theme.accent
+                } else {
+                    theme.muted
+                }))
+                .on_hover_text("File > Save writes the experiment to runs/. The game writes nothing on its own unless autosave is on.");
+                if busy {
+                    ui.spinner();
+                    ui.ctx().request_repaint_after(Duration::from_millis(250));
                 }
                 ui.separator();
                 if let Some(s) = &self.snapshot {
                     ui.label(
-                        RichText::new(format!("GEN {:03}", s.generation))
-                            .color(theme.accent)
-                            .strong(),
+                        RichText::new(format!(
+                            "{} creatures · {:.0} s trials",
+                            number(s.config.population),
+                            s.config.duration
+                        ))
+                        .small()
+                        .color(theme.muted),
                     );
                 }
             });
@@ -1487,367 +1648,170 @@ impl App {
     }
     fn control_contents(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
-        ui.add_space(10.);
-        ui.label(RichText::new("EXPERIMENT").small().color(theme.muted));
-        ui.heading("Let life find a way.");
-        ui.label(RichText::new("More kinds of life. Better walkers.").color(theme.muted));
-        ui.add_space(8.);
-        let running = self.active();
-        let text = if running {
-            "Pause evolution"
-        } else {
-            "Evolve continuously"
-        };
-        if ui
-            .add_sized(
-                [ui.available_width(), 40.],
-                egui::Button::new(RichText::new(text).strong()).fill(if running {
-                    Color32::from_rgb(255, 239, 216)
-                } else {
-                    Color32::from_rgb(222, 241, 229)
-                }),
-            )
-            .clicked()
-        {
-            if running {
-                self.pause();
+        ui.add_space(6.);
+        let mut world_changed = false;
+        ui.label(RichText::new("World").strong());
+        let live = self.snapshot.as_ref().map(|s| s.config.clone());
+        let calm = world_is_calm(&self.config);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(world_summary(&self.config)).color(if calm {
+                theme.muted
             } else {
-                self.run(true, false);
-            }
-        }
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!running, egui::Button::new("One generation"))
-                .clicked()
+                theme.accent
+            }));
+            if !calm
+                && ui
+                    .small_button("Calm world")
+                    .on_hover_text("Set every effect back to the calm world in one change.")
+                    .clicked()
             {
-                self.run(false, false);
-            }
-            if ui
-                .add_enabled(!running, egui::Button::new("Guided step"))
-                .on_hover_text("Evaluate → update behavior archive → breed from diverse elites")
-                .clicked()
-            {
-                self.worker.pause.store(false, Ordering::Relaxed);
-                self.worker.send(Command::Next);
+                for effect in &crate::environment::EFFECTS {
+                    if effect.name != "Seasons" {
+                        effect.set_level(&mut self.config, effect.calm);
+                    }
+                }
+                world_changed = true;
             }
         });
-        if let Some(s) = &self.snapshot {
-            ui.label(RichText::new(s.stage.label()).color(theme.accent));
-            let text = if s.checking > 0 {
-                format!(
-                    "{} / {} evaluated · {} in checks",
-                    number(s.completed),
-                    number(s.config.population),
-                    number(s.checking)
-                )
-            } else {
-                format!(
-                    "{} / {} evaluated",
-                    number(s.completed),
-                    number(s.config.population)
-                )
-            };
-            ui.add(
-                egui::ProgressBar::new(s.completed as f32 / s.config.population as f32)
-                    .text(text)
-                    .fill(theme.accent.gamma_multiply(0.7)),
-            )
-            .on_hover_text(
-                "Creatures of this generation whose trial has counted. A creature that could \
-                 enter the archive first runs a finer check trial; it counts when that ends.",
+        if let Some(live) = &live
+            && live.physics_differs(&self.config)
+        {
+            ui.label(
+                RichText::new(format!(
+                    "Now: {}. The change starts with the next generation.",
+                    world_summary(live)
+                ))
+                .small()
+                .color(AMBER),
             );
         }
-        ui.separator();
-        let mut before = self.config.clone();
-        ui.label(format!(
-            "{} creatures · {:.0} s trials",
-            number(self.config.population),
-            self.config.duration
-        ));
-        ui.add_space(4.);
-        ui.label(RichText::new("Environment").strong());
         ui.label(
             RichText::new(
-                "Every change can be undone. Elites are tested again under the new rules.",
+                "Click a level to change the world. The best creatures are tested again in the new world.",
             )
             .small()
             .color(theme.muted),
         );
-        let mut world_changed = false;
-        for effect in &crate::environment::EFFECTS {
-            let level = effect.level(&self.config);
-            let top = effect.levels.len() - 1;
-            let label = format!("{}: {}", effect.name, effect.levels[level]);
-            let why = format!("{label}. {}", effect.why);
-            // The label and both buttons on one line when they fit; on a
-            // narrow panel the label gets its own line above the buttons.
-            let width = |ui: &egui::Ui, text: &str| {
-                egui::WidgetText::from(text)
-                    .into_galley(
-                        ui,
-                        Some(egui::TextWrapMode::Extend),
-                        f32::INFINITY,
-                        egui::TextStyle::Body,
-                    )
-                    .size()
-                    .x
-            };
-            let spacing = ui.spacing().item_spacing.x;
-            let button =
-                |ui: &egui::Ui, text: &str| width(ui, text) + 2.0 * ui.spacing().button_padding.x;
-            let fits = width(ui, &label)
-                + button(ui, effect.raise)
-                + button(ui, effect.lower)
-                + 3.0 * spacing
-                <= ui.available_width();
-            if !fits {
-                ui.label(&label).on_hover_text(&why);
-            }
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled(level < top, egui::Button::new(effect.raise).small())
-                        .on_hover_text(format!(
-                            "{} to: {}. {}",
-                            effect.raise,
-                            effect.levels[(level + 1).min(top)],
-                            effect.why
-                        ))
-                        .clicked()
-                    {
-                        effect.set_level(&mut self.config, level + 1);
+        egui::Grid::new("world_effects")
+            .num_columns(2)
+            .spacing([8., 6.])
+            .show(ui, |ui| {
+                for effect in crate::environment::EFFECTS
+                    .iter()
+                    .filter(|effect| effect.name != "Seasons")
+                {
+                    if effect_row(ui, effect, &mut self.config, live.as_ref(), theme) {
                         world_changed = true;
                     }
-                    if ui
-                        .add_enabled(level > 0, egui::Button::new(effect.lower).small())
-                        .on_hover_text(format!(
-                            "{} to: {}.",
-                            effect.lower,
-                            effect.levels[level.saturating_sub(1)]
-                        ))
-                        .clicked()
-                    {
-                        effect.set_level(&mut self.config, level - 1);
-                        world_changed = true;
-                    }
-                    if fits {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.add(egui::Label::new(&label).truncate())
-                                .on_hover_text(&why);
-                        });
-                    }
-                });
+                    ui.end_row();
+                }
             });
+        ui.add_space(2.);
+        egui::Grid::new("world_seasons")
+            .num_columns(2)
+            .spacing([8., 6.])
+            .show(ui, |ui| {
+                if let Some(seasons) = crate::environment::EFFECTS
+                    .iter()
+                    .find(|effect| effect.name == "Seasons")
+                    && effect_row(ui, seasons, &mut self.config, None, theme)
+                {
+                    world_changed = true;
+                }
+                ui.end_row();
+            });
+        let generation = self.snapshot.as_ref().map_or(0, |s| s.generation);
+        if let Some(forecast) = season_forecast(&self.config, generation) {
+            ui.label(RichText::new(forecast).small().color(theme.muted));
         }
         let fossils = self.snapshot.as_ref().map_or(0, |s| s.fossils);
-        ui.horizontal(|ui| {
-            ui.label("Catastrophe")
-                .on_hover_text("A meteor wipes out half of every archive's elites at random. Survivors and newcomers refill the empty cells, which makes room for new kinds of movement.");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(fossils > 0, egui::Button::new("Undo").small())
-                    .on_hover_text(format!(
-                        "Return {fossils} fossils to their cells where the cell is empty or holds a slower elite."
-                    ))
-                    .clicked()
-                {
-                    self.worker.send(Command::UndoMeteor);
-                }
-                if ui
-                    .add(egui::Button::new("Extinction").small())
-                    .on_hover_text("Wipe out the island whose best creature is slowest, so it starts over from new designs. Undo brings its elites back.")
-                    .clicked()
-                {
-                    self.worker.send(Command::Extinction);
-                }
-                if ui
-                    .add(egui::Button::new("Meteor strike").small())
-                    .on_hover_text("Wipe out half of every archive's elites at random. Undo brings them back.")
-                    .clicked()
-                {
-                    self.worker.send(Command::Meteor);
-                }
-            });
+        ui.add_space(4.);
+        ui.label(RichText::new("Catastrophes").strong()).on_hover_text(
+            "A catastrophe wipes out creatures that evolution kept. Survivors and newcomers refill the empty places, which makes room for new ways of moving.",
+        );
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .small_button("Meteor strike")
+                .on_hover_text("Wipe out half of the kept creatures at random. Undo brings them back.")
+                .clicked()
+            {
+                self.worker.send(Command::Meteor);
+            }
+            if ui
+                .small_button("Extinction")
+                .on_hover_text("Wipe out the group whose best creature is slowest, so it starts over from new designs. Undo brings them back.")
+                .clicked()
+            {
+                self.worker.send(Command::Extinction);
+            }
+            if ui
+                .add_enabled(
+                    fossils > 0,
+                    egui::Button::new(if fossils > 0 {
+                        format!("Undo ({})", number(fossils))
+                    } else {
+                        "Undo".to_owned()
+                    })
+                    .small(),
+                )
+                .on_hover_text(format!(
+                    "Bring back {} creatures lost to catastrophes, where their place is empty or holds a slower creature.",
+                    number(fossils)
+                ))
+                .clicked()
+            {
+                self.worker.send(Command::UndoMeteor);
+            }
         });
         if world_changed {
             self.worker.send(Command::Configure(self.config.clone()));
-            // Applied already, so it does not count as an unapplied setting.
-            before = self.config.clone();
+            self.config_sent = Some(Instant::now());
         }
-        ui.add_space(4.);
-        ui.checkbox(&mut self.advanced, "Advanced controls");
-        if self.advanced {
-            ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Find a setting…"));
-            let q = self.search.to_lowercase();
-            if matches_search(&q, "seed random reproducibility") {
-                egui::CollapsingHeader::new("Randomness").show(ui, |ui| {
-                    ui.checkbox(
-                        &mut self.config.random_seed,
-                        "Choose a new seed on creation",
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label("Seed");
-                        ui.add(egui::DragValue::new(&mut self.config.seed));
-                    });
-                    ui.label(
-                        RichText::new("The resolved seed is always saved with the experiment.")
-                            .small()
-                            .color(theme.muted),
-                    );
-                });
-            }
-            if matches_search(&q, "performance throughput checkpoint autosave") {
-                egui::CollapsingHeader::new("Performance & checkpoints").show(ui, |ui| {
-                    ui.checkbox(&mut self.config.throughput, "Maximum throughput")
-                        .on_hover_text(
-                            "Larger batches for long runs. Selected automatically when you choose 100k or more creatures; uncheck for shorter pauses.",
-                        );
-                    ui.horizontal(|ui| {
-                        ui.label("Autosave every");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.checkpoint_interval)
-                                .range(0..=1000)
-                                .suffix(" gens"),
-                        );
-                    });
-                    ui.small("Off (0) by default, also for a loaded game.");
-                });
-            }
-            if matches_search(&q, "display ui scale window sorting animation") {
-                egui::CollapsingHeader::new("Display").show(ui, |ui| {
-                    if ui
-                        .add(egui::Slider::new(&mut self.ui_scale, 0.75..=1.6).text("UI scale"))
-                        .changed()
-                    {
-                        ui.ctx().set_zoom_factor(self.ui_scale);
-                    }
-                    ui.add(
-                        egui::Slider::new(&mut self.sort_speed, 0.5..=20.0)
-                            .text("Sort animation speed"),
-                    );
-                    if ui.checkbox(&mut self.dark, "Dark theme").changed() {
-                        apply_style(ui.ctx(), self.dark);
-                    }
-                    ui.checkbox(&mut self.show_help, "Show help overlay");
-                });
-            }
-            if matches_search(
-                &q,
-                "debug histogram minimum maximum bins gpu ram memory budget performance details diagnostics",
-            ) {
-                egui::CollapsingHeader::new("Debug").show(ui, |ui| {
-                    ui.label(
-                        RichText::new(
-                            "Diagnostics and machine limits. Nothing here changes evolution.",
-                        )
-                        .small()
-                        .color(theme.muted),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label("Histogram min (m)");
-                        ui.add(egui::DragValue::new(&mut self.hist_min).speed(0.1));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Histogram max (m)");
-                        ui.add(egui::DragValue::new(&mut self.hist_max).speed(0.1));
-                    });
-                    egui::ComboBox::from_label("Histogram bins / meter")
-                        .selected_text(self.bins.to_string())
-                        .show_ui(ui, |ui| {
-                            for n in [1, 2, 5, 10, 20, 25, 50, 100] {
-                                ui.selectable_value(&mut self.bins, n, n.to_string());
-                            }
-                        });
-                    ui.checkbox(&mut self.show_perf, "Performance details");
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label("GPU budget MiB");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.gpu_budget_mib)
-                                .speed(64)
-                                .range(32..=6144),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("RAM budget MiB");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.ram_budget_mib)
-                                .speed(256)
-                                .range(64..=24576),
-                        );
-                    });
-                });
-            }
+    }
+    /// The replay header's buttons: follow, reset camera, and back to the
+    /// champion or play the next one. Returns (back, play next).
+    fn viewport_buttons(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
+        let theme = self.theme();
+        let mut back = false;
+        let mut play_next = false;
+        ui.checkbox(&mut self.follow, "Follow");
+        if ui.small_button("Reset camera").clicked() {
+            self.zoom = DEFAULT_CAMERA_ZOOM;
+            self.camera = [0.; 2];
+            self.follow = true;
         }
-        if before != self.config {
-            self.dirty = true;
-        }
-        if self.dirty {
-            if let Err(e) = self.config.validate() {
-                ui.colored_label(AMBER, e.to_string());
-            }
-            if ui
-                .add_enabled(
-                    self.config.validate().is_ok(),
-                    egui::Button::new("Apply settings"),
-                )
-                .clicked()
-            {
-                self.worker.send(Command::Configure(self.config.clone()));
-                self.dirty = false;
-            }
+        if self.pinned {
+            back = ui
+                .button(RichText::new("Back to champion").color(theme.accent))
+                .clicked();
+        } else if let Some((next, _)) = &self.next_champion {
+            play_next = ui
+                .small_button("Play now")
+                .on_hover_text("Show the new champion without waiting")
+                .clicked();
             ui.label(
-                RichText::new(
-                    "Changes apply between generations. Seed changes need a new experiment.",
-                )
+                RichText::new(format!(
+                    "New champion {}{} plays next",
+                    species_name(next),
+                    self.snapshot
+                        .as_ref()
+                        .and_then(|s| s.history.last())
+                        .map_or_else(String::new, |stats| format!(" ({:.2} m)", stats.best))
+                ))
                 .small()
-                .color(theme.muted),
+                .color(theme.accent),
             );
         }
-        ui.horizontal_wrapped(|ui| {
-            if ui.small_button("Save preset").clicked() {
-                self.file("Save preset");
-            }
-            if ui.small_button("Load preset").clicked() {
-                self.file("Load preset");
-            }
-            if ui
-                .add_enabled(
-                    self.playback.is_some(),
-                    egui::Button::new("Export JSON").small(),
-                )
-                .on_hover_text("Save the selected creature as JSON under runs/")
-                .clicked()
-            {
-                self.file("Export creature JSON");
-            }
-            if ui
-                .add_enabled(self.playback.is_some(), egui::Button::new("GIF").small())
-                .on_hover_text("Save an animated GIF of the selected creature under runs/")
-                .clicked()
-            {
-                self.file("Export creature GIF");
-            }
-            if ui
-                .small_button("Open creature")
-                .on_hover_text("Replay a creature from a JSON file")
-                .clicked()
-            {
-                self.file("Open creature JSON");
-            }
-            if ui.small_button("Reset settings").clicked() {
-                self.config = Config::default();
-                self.dirty = true;
-            }
-        });
-        ui.separator();
-        ui.label(RichText::new("Each creature runs its own trial. Faster walkers are more likely to survive; their offspring explore new shapes.").small().color(theme.muted));
+        (back, play_next)
     }
     fn viewport(&mut self, ui: &mut egui::Ui, height: f32) {
         let theme = self.theme();
         let mut back = false;
         let mut play_next = false;
-        ui.horizontal(|ui| {
+        // A narrow replay (docked beside the archive) puts its buttons on a
+        // line of their own.
+        let wide = ui.available_width() > 900.;
+        let mut header = |ui: &mut egui::Ui| {
             let (mode, color, why) = if self.pinned {
                 (
                     "WATCHING",
@@ -1884,30 +1848,24 @@ impl App {
                     p.creature.id, p.distance
                 ));
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.checkbox(&mut self.follow, "Follow");
-                if ui.small_button("Reset camera").clicked() {
-                    self.zoom = DEFAULT_CAMERA_ZOOM;
-                    self.camera = [0.; 2];
-                    self.follow = true;
-                }
-                if self.pinned {
-                    back = ui
-                        .button(RichText::new("Back to champion").color(theme.accent))
-                        .clicked();
-                } else if let Some((next, _)) = &self.next_champion {
-                    play_next = ui
-                        .small_button("Play now")
-                        .on_hover_text("Show the new champion without waiting")
-                        .clicked();
-                    ui.label(
-                        RichText::new(format!("New champion {} plays next", species_name(next)))
-                            .small()
-                            .color(theme.accent),
-                    );
-                }
+            if wide {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (b, p) = self.viewport_buttons(ui);
+                    (back, play_next) = (b, p);
+                });
+            }
+        };
+        if wide {
+            ui.horizontal(|ui| header(ui));
+        } else {
+            ui.horizontal_wrapped(|ui| header(ui));
+        }
+        if !wide {
+            ui.horizontal_wrapped(|ui| {
+                let (b, p) = self.viewport_buttons(ui);
+                (back, play_next) = (b, p);
             });
-        });
+        }
         if back {
             self.back_to_champion();
         }
@@ -1916,8 +1874,11 @@ impl App {
         }
         let (rect, response) = ui.allocate_exact_size(
             Vec2::new(ui.available_width(), height.max(120.)),
-            Sense::drag(),
+            Sense::click_and_drag(),
         );
+        if response.clicked() {
+            self.playing = !self.playing;
+        }
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             self.zoom = (self.zoom * (scroll * 0.002).exp()).clamp(30., 1200.);
@@ -2134,14 +2095,30 @@ impl App {
                 MUTED,
             );
         }
+        if let Some(p) = &self.playback {
+            let live = self.snapshot.as_ref().map(|s| &s.config);
+            let earlier = live.is_some_and(|live| live.physics_differs(&p.config));
+            painter.text(
+                rect.right_top() + Vec2::new(-14., 12.),
+                Align2::RIGHT_TOP,
+                if earlier {
+                    format!("{} (an earlier world)", world_summary(&p.config))
+                } else {
+                    world_summary(&p.config)
+                },
+                FontId::proportional(13.),
+                INK,
+            );
+        }
         painter.text(
             rect.left_bottom() + Vec2::new(14., -12.),
             Align2::LEFT_BOTTOM,
-            "Drag to pan · scroll to zoom",
+            "Click to pause · drag to pan · scroll to zoom",
             FontId::proportional(11.),
             MUTED,
         );
         let mut sought = false;
+        let mut race_it = None;
         if let Some(p) = &mut self.playback {
             let last_frame = p.last_frame();
             let trial_start = p.trial_start();
@@ -2184,10 +2161,14 @@ impl App {
                 ));
             });
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
-                .button(if self.playing { "Pause" } else { "Play" })
-                .on_hover_text("Pause / play creature")
+                .button(if self.playing {
+                    "Pause  (K)"
+                } else {
+                    "Play  (K)"
+                })
+                .on_hover_text("Pause or play the replay. A click on the replay does the same.")
                 .clicked()
             {
                 self.playing = !self.playing;
@@ -2197,65 +2178,137 @@ impl App {
             {
                 p.reset();
             }
-            if ui.button("Single tick").clicked() {
-                self.playing = false;
-                if let Some(p) = &mut self.playback {
-                    p.advance();
-                }
+            if ui
+                .add_enabled(self.playback.is_some(), egui::Button::new("Family tree"))
+                .on_hover_text("The ancestors of this creature, with what changed at each step")
+                .clicked()
+            {
+                self.tab = Tab::Lineage;
+            }
+            if ui
+                .add_enabled(self.playback.is_some(), egui::Button::new("Race it"))
+                .on_hover_text("Race this creature against the champion")
+                .clicked()
+                && let Some(p) = &self.playback
+            {
+                race_it = Some((p.creature.clone(), p.config.clone()));
+            }
+            if ui
+                .add_enabled(self.playback.is_some(), egui::Button::new("Export GIF"))
+                .on_hover_text("Save an animated GIF of this replay under runs/")
+                .clicked()
+            {
+                self.file("Export creature GIF");
+            }
+            if ui
+                .add_enabled(self.playback.is_some(), egui::Button::new("Export JSON"))
+                .on_hover_text(
+                    "Save this creature as JSON under runs/, to open it again or share it",
+                )
+                .clicked()
+            {
+                self.file("Export creature JSON");
             }
             ui.add(
                 egui::Slider::new(&mut self.speed, 0.25..=4.0)
                     .logarithmic(true)
-                    .suffix("×")
-                    .text("Playback speed"),
+                    .suffix("× speed"),
             )
             .on_hover_text("Playback speed, from quarter speed to four times speed.");
         });
         if sought {
             self.playing = false;
         }
+        if let Some((creature, config)) = race_it {
+            self.race_picks.retain(|(pick, _)| pick.id != creature.id);
+            self.race_picks.push((creature, config));
+            if self.race_picks.len() > RACE_PICKS {
+                self.race_picks.remove(0);
+            }
+            self.tab = Tab::Race;
+            self.restart_race();
+        }
     }
     fn metrics(&self, ui: &mut egui::Ui) {
         let theme = self.theme();
-        // Live creatures/s over complete generations; the last generation's own
-        // figure until enough generations have finished.
-        let live_rate = self.snapshot.as_ref().map_or(0.0, |s| s.end_to_end);
-        if let Some(s) = self.snapshot.as_ref().and_then(|s| s.history.last()) {
-            ui.columns(4, |cols| {
-                for (ui, (name, value, color)) in cols.iter_mut().zip([
-                    ("BEST GAIT SCORE", format!("{:.3} m", s.best), theme.accent),
-                    ("QD SCORE", format!("{:.2}", s.qd_score), theme.accent),
-                    ("NICHES", number(s.archive_cells), theme.ink),
-                    (
-                        "EVALUATIONS / SEC",
-                        format!(
-                            "{:.0}",
-                            if live_rate > 0.0 {
-                                live_rate
-                            } else {
-                                s.population as f64 / s.seconds.max(0.001)
-                            }
-                        ),
-                        theme.ink,
-                    ),
-                ]) {
-                    egui::Frame::new()
-                        .fill(theme.card)
-                        .corner_radius(8)
-                        .inner_margin(12)
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            ui.label(RichText::new(name).small().color(theme.muted));
-                            ui.label(RichText::new(value).size(22.).color(color));
-                        });
-                }
-            });
-        } else {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let Some(s) = snapshot.history.last() else {
             ui.label(
-                RichText::new("Run a generation to see how far your creatures can travel.")
-                    .color(theme.muted),
+                RichText::new(
+                    "The first generation is running. Its best creature appears here when it ends.",
+                )
+                .color(theme.muted),
             );
-        }
+            return;
+        };
+        let history = &snapshot.history;
+        let gain = history
+            .len()
+            .checked_sub(11)
+            .map(|earlier| s.best - history[earlier].best);
+        let population = snapshot.config.population.max(1);
+        let share = snapshot.completed.min(population) as f64 / population as f64;
+        let rate = snapshot.end_to_end;
+        let progress = if snapshot.running && rate > 0.0 {
+            let left = (population - snapshot.completed.min(population)) as f64 / rate;
+            format!(
+                "{:.0}% done · about {} left",
+                share * 100.0,
+                seconds_text(left)
+            )
+        } else if snapshot.running {
+            format!("{:.0}% done", share * 100.0)
+        } else {
+            "Paused".to_owned()
+        };
+        let trial = format!(
+            "How far the best creature travels in its {:.0} s trial. Distance is the only score.",
+            snapshot.config.duration
+        );
+        ui.columns(3, |cols| {
+            for (ui, (name, value, color, note, why)) in cols.iter_mut().zip([
+                (
+                    "BEST DISTANCE",
+                    format!("{:.2} m", s.best),
+                    theme.accent,
+                    gain.map_or_else(
+                        || "so far".to_owned(),
+                        |gain| format!("{gain:+.2} m in the last 10 generations"),
+                    ),
+                    trial.as_str(),
+                ),
+                (
+                    "GENERATION",
+                    snapshot.generation.to_string(),
+                    theme.ink,
+                    progress,
+                    "Every generation tries a whole population of new creatures.",
+                ),
+                (
+                    "KINDS OF MOVEMENT",
+                    number(s.archive_cells),
+                    theme.ink,
+                    "different ways of moving kept".to_owned(),
+                    "Evolution keeps the best creature for each way of moving: how much of the time it touches the ground, its stride rate, its height and how many feet it uses.",
+                ),
+            ]) {
+                egui::Frame::new()
+                    .fill(theme.card)
+                    .corner_radius(8)
+                    .inner_margin(12)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.label(RichText::new(name).small().color(theme.muted))
+                            .on_hover_text(why);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(value).size(22.).color(color));
+                            ui.label(RichText::new(note).small().color(theme.muted));
+                        });
+                    });
+            }
+        });
     }
     fn trend(&self, ui: &mut egui::Ui, height: f32) {
         let Some(s) = &self.snapshot else { return };
@@ -2272,7 +2325,7 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .small_button("Reset view")
-                    .on_hover_text("Fit every generation and gait score again")
+                    .on_hover_text("Fit every generation and distance again")
                     .clicked()
                 {
                     reset = true;
@@ -2303,7 +2356,7 @@ impl App {
             .height(height)
             .legend(Legend::default())
             .x_axis_label("Generation")
-            .y_axis_label("Gait score (m)")
+            .y_axis_label("Distance (m)")
             .allow_scroll(false);
         if reset {
             plot = plot.reset();
@@ -2319,30 +2372,37 @@ impl App {
                 plot.set_plot_bounds_x((end - generations).max(0.0)..=end);
                 plot.set_auto_bounds(egui::Vec2b::new(false, true));
             }
-            for (i, &visible) in self.percentiles.iter().enumerate() {
-                if !visible {
-                    continue;
-                }
+            // The best creature and the typical kept one; the percentile
+            // index follows `storage::PERCENTILES` (28 is 100, 14 is 50).
+            for (i, name, color) in [(28, "Best", theme.accent), (14, "Median", AMBER)] {
                 let values: Vec<[f64; 2]> = s
                     .history
                     .iter()
                     .map(|h| [h.generation as f64, h.percentiles[i] as f64])
                     .collect();
-                let (name, color, width) = if i == 28 {
-                    ("Best".into(), theme.accent, 2.5)
-                } else if i == 14 {
-                    ("Median".into(), AMBER, 2.5)
-                } else if i == 0 {
-                    ("Worst".into(), Color32::from_rgb(104, 133, 159), 1.5)
-                } else {
-                    (format!("P{}", PERCENTILES[i]), species_color(i, 0), 1.)
-                };
-                plot.line(Line::new(name, values).color(color).width(width));
+                plot.line(Line::new(name, values).color(color).width(2.5));
+            }
+            // A vertical line where the world changed: the generation that
+            // first ran in the new world.
+            for pair in s.history.windows(2) {
+                if pair[1].config.physics_differs(&pair[0].config) {
+                    let season = pair[1].config.season_step != pair[0].config.season_step
+                        && pair[1].config.seasons > 0;
+                    plot.vline(
+                        VLine::new(
+                            if season { "Season" } else { "World change" },
+                            pair[1].generation as f64 - 0.5,
+                        )
+                        .color(AMBER)
+                        .width(1.5),
+                    );
+                }
             }
             // Record markers extend the best line instead of duplicating it.
-            let records: Vec<[f64; 2]> = record_entries(&s.history)
+            // Records count again after a world change.
+            let records: Vec<[f64; 2]> = world_records(&s.history)
                 .into_iter()
-                .map(|(index, best)| [s.history[index].generation as f64, best as f64])
+                .map(|(index, best, _)| [s.history[index].generation as f64, best as f64])
                 .collect();
             if !records.is_empty() {
                 plot.points(
@@ -2355,81 +2415,55 @@ impl App {
         });
     }
     fn histogram(&self, ui: &mut egui::Ui, stats: &Stats, height: f32) {
-        if !self.hist_min.is_finite()
-            || !self.hist_max.is_finite()
-            || self.hist_max <= self.hist_min
-        {
-            ui.colored_label(AMBER, "Histogram minimum must be below maximum.");
+        // The range fits the distances of this generation, in about 40 bars.
+        let (Some(low), Some(high)) = (
+            stats.histogram.iter().map(|&(cm, _)| cm).min(),
+            stats.histogram.iter().map(|&(cm, _)| cm).max(),
+        ) else {
+            ui.small("No distances recorded for this generation.");
             return;
-        }
-        let count = ((self.hist_max - self.hist_min) * self.bins as f64)
-            .ceil()
-            .min(4096.) as usize;
+        };
+        let (low, high) = (low as f64 / 100.0, (high + 1) as f64 / 100.0);
+        let width = ((high - low) / 40.0).max(0.01);
+        let count = ((high - low) / width).ceil().max(1.0) as usize;
         let mut bins = vec![0u32; count];
-        let mut outside = stats.failed as u64;
         for &(cm, n) in &stats.histogram {
             let value = (cm as f64 + 0.5) / 100.;
-            let index = ((value - self.hist_min) * self.bins as f64).floor();
-            if index >= 0. && (index as usize) < count {
-                bins[index as usize] += n;
-            } else {
-                outside += n as u64;
-            }
+            let index = (((value - low) / width).floor() as usize).min(count - 1);
+            bins[index] += n;
         }
         let bars = bins
             .iter()
             .enumerate()
-            .map(|(i, &n)| {
-                Bar::new(
-                    self.hist_min + (i as f64 + 0.5) / self.bins as f64,
-                    n as f64,
-                )
-                .width(0.85 / self.bins as f64)
-            })
+            .map(|(i, &n)| Bar::new(low + (i as f64 + 0.5) * width, n as f64).width(width * 0.85))
             .collect();
-        let mut reset = false;
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .small_button("Reset view")
-                    .on_hover_text("Fit the histogram again")
-                    .clicked()
-                {
-                    reset = true;
-                }
-            });
-        });
-        let mut plot = Plot::new("histogram")
+        Plot::new("histogram")
             .height(height)
-            .x_axis_label("Gait score (m)")
-            .allow_scroll(false);
-        if reset {
-            plot = plot.reset();
-        }
-        plot.show(ui, |plot| {
-            plot.bar_chart(
-                BarChart::new("Creatures", bars).color(self.theme().accent.gamma_multiply(0.65)),
-            );
-        });
-        if outside > 0 {
+            .x_axis_label("Distance (m)")
+            .allow_scroll(false)
+            .show(ui, |plot| {
+                plot.bar_chart(
+                    BarChart::new("Creatures", bars)
+                        .color(self.theme().accent.gamma_multiply(0.65)),
+                );
+            });
+        if stats.failed > 0 {
             ui.small(format!(
-                "{outside} outside this range or failed · change range in Advanced > Debug"
+                "{} failed trials are not shown",
+                number(stats.failed)
             ));
         }
     }
     fn population(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
         ui.horizontal(|ui| {
-            ui.heading("Search archive");
-            ui.label(
-                RichText::new("Behavior niches and protected topologies · click to replay")
-                    .color(theme.muted),
-            );
+            ui.heading("Ways of moving");
+            ui.label(RichText::new("Click a creature to replay it").color(theme.muted));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .selectable_value(&mut self.archive_view, ArchiveView::Map, "Map")
                     .on_hover_text(
-                        "Watch the search fill behavior space. Cells are colored by gait score.",
+                        "Watch evolution fill the ways of moving. Cells are colored by distance.",
                     )
                     .clicked()
                 {
@@ -2439,7 +2473,6 @@ impl App {
                     .selectable_value(&mut self.archive_view, ArchiveView::Cards, "Cards")
                     .clicked()
                 {
-                    self.map_scan = None;
                     self.last_page = usize::MAX;
                 }
             });
@@ -2448,118 +2481,131 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Body height").small().color(theme.muted));
                 egui::ComboBox::from_id_salt("map_height")
-                    .selected_text(height_bin_label(self.map_height))
+                    .selected_text(self.map_height.map_or("All".to_owned(), height_bin_label))
                     .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.map_height, None, "All");
                         for bin in 0..MAP_BINS[3] {
                             ui.selectable_value(
                                 &mut self.map_height,
-                                bin,
+                                Some(bin),
                                 height_bin_label(bin),
                             );
                         }
                     });
                 ui.label(RichText::new("Feet").small().color(theme.muted));
                 egui::ComboBox::from_id_salt("map_feet")
-                    .selected_text(feet_bin_label(self.map_feet))
+                    .selected_text(self.map_feet.map_or("All".to_owned(), feet_bin_label))
                     .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.map_feet, None, "All");
                         for bin in 0..MAP_BINS[4] {
-                            ui.selectable_value(&mut self.map_feet, bin, feet_bin_label(bin));
+                            ui.selectable_value(&mut self.map_feet, Some(bin), feet_bin_label(bin));
                         }
                     });
                 ui.label(
-                    RichText::new(
-                        "Bounce adds no cell: its axis has one bin. Click an occupied cell to replay it.",
-                    )
-                    .small()
-                    .color(theme.muted),
+                    RichText::new("Click a cell to replay its creature.")
+                        .small()
+                        .color(theme.muted),
                 );
             });
         }
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        ui.horizontal(|ui| {
-            ui.label(format!("{} niches", number(snapshot.archive_cells)));
-            ui.label(format!(
-                "{} topology reserves",
-                number(snapshot.innovation_reserve_count)
-            ));
-            ui.label(
-                RichText::new(format!("QD score {:.2}", snapshot.qd_score)).color(theme.accent),
-            );
-        });
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Archive axes:").small().color(theme.muted));
+            ui.label(
+                RichText::new(format!(
+                    "{} ways of moving, sorted by",
+                    number(snapshot.archive_cells)
+                ))
+                .small()
+                .color(theme.muted),
+            );
             for (name, why) in [
                 (
-                    "Ground contact",
-                    "How much of the timed trial the creature kept its nodes on the ground.",
+                    "ground contact",
+                    "How much of the trial the creature keeps its nodes on the ground.",
                 ),
                 (
-                    "Gait cadence",
-                    "How many up-and-down body oscillations the gait completes per second.",
+                    "stride rate",
+                    "How many up-and-down body swings the gait makes per second.",
                 ),
                 (
-                    "Mean body height",
-                    "The average height of the body's bounding box above the ground during the trial.",
+                    "body height",
+                    "The average height of the body above the ground during the trial.",
                 ),
                 (
-                    "Feet",
-                    "Nodes that touched the ground and lifted off again; a node dragged along the ground never lifts, so it is not a foot.",
+                    "feet",
+                    "Nodes that touch the ground and lift off again. A node dragged along the ground never lifts, so it is not a foot.",
                 ),
             ] {
                 ui.label(RichText::new(name).small().color(theme.ink))
                     .on_hover_text(why);
             }
         });
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Next batch:").small().color(theme.muted));
-            for (emitter, weight) in crate::qd::Emitter::ALL
-                .into_iter()
-                .zip(snapshot.emitter_weights)
-            {
-                ui.label(
-                    RichText::new(format!("{} {:.0}%", emitter.label(), weight * 100.0)).small(),
-                )
-                .on_hover_text(
-                    "Emitter shares adapt to recent archive discoveries and improvements.",
-                );
+        if self.archive_view == ArchiveView::Cards {
+            let mut filter = self.card_filter;
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.;
+                ui.label(RichText::new("Feet").small().color(theme.muted));
+                if ui.selectable_label(filter.feet.is_none(), "All").clicked() {
+                    filter.feet = None;
+                }
+                for bin in 0..MAP_BINS[4] as u8 {
+                    if ui
+                        .selectable_label(
+                            filter.feet == Some(bin),
+                            feet_bin_label(usize::from(bin))
+                                .replace(" feet", "")
+                                .replace(" foot", ""),
+                        )
+                        .clicked()
+                    {
+                        filter.feet = Some(bin);
+                    }
+                }
+                ui.add_space(8.);
+                ui.label(RichText::new("Body").small().color(theme.muted));
+                for (size, label, why) in [
+                    (None, "All", "Every body size"),
+                    (Some(0), "Small", "Up to 5 nodes"),
+                    (Some(1), "Medium", "6 to 9 nodes"),
+                    (Some(2), "Large", "10 nodes or more"),
+                ] {
+                    if ui
+                        .selectable_label(filter.size == size, label)
+                        .on_hover_text(why)
+                        .clicked()
+                    {
+                        filter.size = size;
+                    }
+                }
+                ui.add_space(8.);
+                ui.checkbox(&mut filter.one_per_plan, "One per body plan")
+                    .on_hover_text(
+                        "Show only the fastest creature of each body plan, with how many share it",
+                    );
+            });
+            if filter != self.card_filter {
+                self.card_filter = filter;
+                self.worker.send(Command::Filter(filter));
+                self.last_page = usize::MAX;
             }
-        });
+        }
         let mut selected = None;
         let mut requested = None;
-        let mut map_scan_request = None;
+        let mut map_click = None;
         if self.archive_view == ArchiveView::Map {
-            if self.map_scan.is_none()
-                && snapshot.archive_size > 0
-                && (self.map_cells.is_empty() || self.map_generation != snapshot.generation)
-            {
-                map_scan_request = Some((snapshot.archive_size, snapshot.generation));
-            }
-            let clicked = paint_archive_map(
-                ui,
-                snapshot,
-                &self.map_cells,
-                self.map_scan.as_ref(),
-                self.map_height,
-                self.map_feet,
-                theme,
-            );
-            if let Some(cell) = clicked.and_then(|key| self.map_cells.get(&key)) {
-                selected = Some((cell.creature.clone(), snapshot.config.clone()));
-            }
+            let empty = Vec::new();
+            let cells = snapshot.map.as_deref().unwrap_or(&empty);
+            map_click = paint_archive_map(ui, cells, self.map_height, self.map_feet, theme);
         } else {
             let columns = (ui.available_width() / 155.).floor().max(2.) as usize;
             let width = (ui.available_width() - (columns - 1) as f32 * 10.) / columns as f32;
-            let progress =
-                (self.sort_started.elapsed().as_secs_f32() * self.sort_speed / 3.).min(1.);
+            let progress = (self.sort_started.elapsed().as_secs_f32() * SORT_SPEED / 3.).min(1.);
             let animating = snapshot.stage == Stage::Archived && progress < 1.;
             let ease = progress * progress * (3. - 2. * progress);
-            let item_count = if snapshot.archive_size > 0 {
-                snapshot.archive_size
-            } else {
-                snapshot.config.population
-            };
+            let item_count = snapshot.page_total;
+            let shown = self.playback.as_ref().map(|p| p.creature.id);
             let mut positions = std::collections::HashMap::new();
             egui::ScrollArea::vertical().id_salt("population_grid").show_rows(
                 ui, 137., item_count.div_ceil(columns), |ui, rows| {
@@ -2577,22 +2623,20 @@ impl App {
                                     if animating && let Some(previous) = self.card_positions.get(&card.creature.id) {
                                         rect = destination.translate((*previous - destination.min) * (1. - ease));
                                     }
-                                    paint_card(ui.painter(), card, rect, response.hovered(), snapshot.stage, theme);
+                                    paint_card(ui.painter(), card, rect, response.hovered() || shown == Some(card.creature.id), snapshot.stage, theme);
                                     if response.clicked() {
                                         selected = Some((card.creature.clone(), snapshot.config.clone()));
                                     }
                                     response.on_hover_text(format!(
-                                        "{}\nID {}\n{} nodes / {} bones / {} muscles\nMutability {:.2}\n{}\n{}\nClick to replay",
+                                        "{}\n{} nodes, {} bones, {} muscles\n{}\n{}\nClick to replay",
                                         species_name(&card.creature),
-                                        card.creature.id,
                                         card.creature.nodes.len(),
                                         card.creature.bones.len(),
                                         card.creature.muscles.len(),
-                                        card.creature.mutability,
-                                        card.emitter.map_or("Initial population".to_owned(), |emitter| format!("Emitter: {}", emitter.label())),
+                                        card.emitter.map_or("First generation".to_owned(), |emitter| format!("Born {}", origin_words(emitter))),
                                         card.descriptor.map_or_else(
-                                            || if card.score.is_finite() { "Current trial evaluated".to_owned() } else { "Current trial pending".to_owned() },
-                                            |d| format!("Contact {:.0}% · gait {:.2} Hz · form {:.2} · bob {:.2} m · height {:.2} m · {} feet · {} visits", d.ground_contact * 100.0, d.gait_frequency, d.aspect_ratio, d.vertical_oscillation, d.mean_height, d.feet, card.visits),
+                                            || if card.score.is_finite() { "Trial done".to_owned() } else { "Trial running".to_owned() },
+                                            |d| format!("On the ground {:.0}% of the time · {:.2} strides/s · {:.2} m tall · {:.0} feet", d.ground_contact * 100.0, d.gait_frequency, d.mean_height, d.feet),
                                         )
                                     ));
                                 } else {
@@ -2610,8 +2654,8 @@ impl App {
                 self.card_positions = positions;
             }
         }
-        if let Some((total, generation)) = map_scan_request {
-            self.begin_map_scan(total, generation);
+        if let Some(id) = map_click {
+            self.worker.send(Command::Select(id));
         }
         if let Some(start) = requested {
             self.worker.send(Command::Page(start));
@@ -2619,103 +2663,7 @@ impl App {
         }
         if let Some((creature, config)) = selected {
             self.select(creature, config);
-            self.tab = Tab::Overview;
         }
-    }
-    /// Starts a sweep through the archive pages that fills the behavior map.
-    fn begin_map_scan(&mut self, total: usize, generation: u32) {
-        if total == 0 {
-            self.map_cells.clear();
-            self.map_scan = None;
-            return;
-        }
-        self.map_cells.clear();
-        self.map_generation = generation;
-        self.map_scan = Some(MapScan { next: 0, total });
-        self.last_page = usize::MAX;
-        self.worker.send(Command::Page(0));
-    }
-    /// Folds one published archive page into the behavior map while a sweep runs.
-    fn absorb_archive_page(&mut self, snapshot: &Snapshot) {
-        let Some(scan) = self.map_scan else { return };
-        if snapshot.archive_size != scan.total {
-            // The archive moved under the sweep, so start over.
-            let total = snapshot.archive_size;
-            self.map_cells.clear();
-            self.map_generation = snapshot.generation;
-            self.map_scan = (total > 0).then_some(MapScan { next: 0, total });
-            if total > 0 {
-                self.worker.send(Command::Page(0));
-            }
-            return;
-        }
-        if snapshot.page_start != scan.next || snapshot.page.is_empty() {
-            self.worker.send(Command::Page(scan.next));
-            return;
-        }
-        for card in &snapshot.page {
-            let Some(descriptor) = card.descriptor else {
-                continue;
-            };
-            if !card.score.is_finite() {
-                continue;
-            }
-            let key = descriptor.niche().0;
-            if self
-                .map_cells
-                .get(&key)
-                .is_none_or(|old| card.score > old.score)
-            {
-                self.map_cells.insert(
-                    key,
-                    MapCell {
-                        score: card.score,
-                        rank: card.rank,
-                        descriptor,
-                        emitter: card.emitter,
-                        creature: card.creature.clone(),
-                    },
-                );
-            }
-        }
-        self.map_generation = snapshot.generation;
-        let next = snapshot.page_start + snapshot.page.len();
-        if next >= scan.total {
-            self.map_scan = None;
-        } else {
-            self.map_scan = Some(MapScan {
-                next,
-                total: scan.total,
-            });
-            self.worker.send(Command::Page(next));
-        }
-    }
-    /// Appends new all-time bests to the session hall of fame. Records come
-    /// from history stats, whose best representative is already in the
-    /// snapshot, so no archive page request is needed.
-    fn absorb_records(&mut self, snapshot: &Snapshot) {
-        if self.fame_epoch != snapshot.epoch {
-            self.fame_epoch = snapshot.epoch;
-            self.fame.clear();
-            self.fame_best = 0.0;
-            self.fame_seen = 0;
-        }
-        if snapshot.history.len() < self.fame_seen {
-            self.fame_seen = 0;
-        }
-        for stats in &snapshot.history[self.fame_seen..] {
-            if stats.best.is_finite() && stats.best > self.fame_best {
-                self.fame_best = stats.best;
-                if let Some(creature) = stats.representatives.last().cloned() {
-                    self.fame.push(FameEntry {
-                        generation: stats.generation,
-                        distance: stats.best,
-                        creature,
-                    });
-                }
-            }
-        }
-        self.fame_seen = snapshot.history.len();
     }
     /// Replays the best creature recorded for one history entry, through the
     /// same preview path as an archive card click.
@@ -2729,54 +2677,159 @@ impl App {
         self.select(creature, config);
         self.tab = Tab::Overview;
     }
-    /// Compact timeline of every new all-time best, newest first. Clicking one
-    /// replays its record holder.
-    fn records_timeline(&mut self, ui: &mut egui::Ui) {
+    /// The lines of the event feed, newest first: the worker's events (world
+    /// changes, seasons, catastrophes, saves) and the records in the history.
+    fn feed_items(&self) -> Vec<FeedItem> {
+        let Some(snapshot) = &self.snapshot else {
+            return Vec::new();
+        };
+        let theme = self.theme();
+        let history = &snapshot.history;
+        let row = |generation: u32| history.iter().rev().find(|s| s.generation == generation);
+        let mut items = Vec::new();
+        for event in snapshot.events.iter() {
+            let mut text = event.text.clone();
+            let (color, action) = match event.kind {
+                EventKind::Catastrophe => {
+                    (AMBER, (snapshot.fossils > 0).then_some(FeedAction::Undo))
+                }
+                EventKind::World | EventKind::Season => {
+                    if let (Some(before), Some(after)) = (
+                        event.generation.checked_sub(1).and_then(row),
+                        row(event.generation),
+                    ) {
+                        text.push_str(&format!(
+                            " Best {:.2} m before, {:.2} m after one generation.",
+                            before.best, after.best
+                        ));
+                    }
+                    if event.kind == EventKind::Season {
+                        text.insert_str(0, "Season: ");
+                    }
+                    (theme.accent, None)
+                }
+                _ => (theme.muted, None),
+            };
+            items.push(FeedItem {
+                generation: event.generation,
+                text,
+                color,
+                action,
+            });
+        }
+        let records = world_records(history);
+        for &(index, best, first_in_world) in &records {
+            let stats = &history[index];
+            let name = stats
+                .representatives
+                .last()
+                .map(species_name)
+                .unwrap_or_default();
+            let text = if index == 0 {
+                format!("First generation: best {best:.2} m, {name}.")
+            } else if first_in_world {
+                format!("Best in the new world: {best:.2} m, {name}.")
+            } else {
+                format!("New record: {best:.2} m, {name}.")
+            };
+            items.push(FeedItem {
+                generation: stats.generation,
+                text,
+                color: theme.ink,
+                action: Some(FeedAction::Replay(index)),
+            });
+        }
+        // A stall: no record in this world for a while. The feed suggests a
+        // harder world instead of changing the search silently.
+        if let (Some(last), Some(&(index, _, _))) = (history.last(), records.last()) {
+            let since = last.generation.saturating_sub(history[index].generation);
+            if since >= STALL_GENERATIONS
+                && let Some((effect, level)) = stall_suggestion(&self.config)
+            {
+                let effect_ref = &crate::environment::EFFECTS[effect];
+                items.push(FeedItem {
+                    generation: last.generation,
+                    text: format!(
+                        "No new record for {since} generations. A new world can open new ways of moving: try {} {}.",
+                        effect_ref.name, effect_ref.levels[level]
+                    ),
+                    color: theme.accent,
+                    action: Some(FeedAction::Try(effect, level)),
+                });
+            }
+        }
+        // Newest first; the sort is stable, so events of one generation keep
+        // their order.
+        items.reverse();
+        items.sort_by_key(|item| std::cmp::Reverse(item.generation));
+        items.truncate(60);
+        items
+    }
+    /// The event feed: what happened, newest first, with a button to replay
+    /// a record holder or undo a catastrophe.
+    fn feed(&mut self, ui: &mut egui::Ui, height: f32) {
+        let theme = self.theme();
+        ui.label(RichText::new("WHAT HAPPENED").small().color(theme.muted));
+        let items = self.feed_items();
+        let mut chosen = None;
+        egui::ScrollArea::vertical()
+            .id_salt("event_feed")
+            .max_height(height)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if items.is_empty() {
+                    ui.label(
+                        RichText::new("Records, world changes and catastrophes appear here.")
+                            .small()
+                            .color(theme.muted),
+                    );
+                }
+                for item in &items {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.;
+                        ui.label(
+                            RichText::new(format!("Gen {}", item.generation))
+                                .small()
+                                .color(theme.muted),
+                        );
+                        ui.label(RichText::new(&item.text).small().color(item.color));
+                        if let Some(action) = item.action {
+                            let label = match action {
+                                FeedAction::Replay(_) => "Replay",
+                                FeedAction::Undo => "Undo",
+                                FeedAction::Try(..) => "Try it",
+                            };
+                            if ui.small_button(label).clicked() {
+                                chosen = Some(action);
+                            }
+                        }
+                    });
+                }
+            });
+        match chosen {
+            Some(FeedAction::Replay(index)) => self.replay_history_holder(index),
+            Some(FeedAction::Undo) => self.worker.send(Command::UndoMeteor),
+            Some(FeedAction::Try(effect, level)) => {
+                crate::environment::EFFECTS[effect].set_level(&mut self.config, level);
+                self.worker.send(Command::Configure(self.config.clone()));
+                self.config_sent = Some(Instant::now());
+            }
+            None => {}
+        }
+    }
+    /// Every record, newest first: generation, distance, species and the
+    /// world it was set in, with a Replay button. Records count again after
+    /// each world change, like the feed and the chart.
+    fn records_list(&mut self, ui: &mut egui::Ui) {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        let records = record_entries(&snapshot.history);
+        let theme = self.theme();
+        let records = world_records(&snapshot.history);
+        ui.label(RichText::new("RECORDS").small().color(theme.muted));
         if records.is_empty() {
-            return;
-        }
-        let theme = self.theme();
-        ui.label(
-            RichText::new("RECORDS · EVERY NEW BEST DISTANCE")
-                .small()
-                .color(theme.muted),
-        );
-        let mut chosen = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("records_timeline")
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for &(index, best) in records.iter().rev() {
-                        let stats = &snapshot.history[index];
-                        if ui
-                            .small_button(format!("Gen {} · {best:.2} m", stats.generation))
-                            .on_hover_text("Click to replay this record holder")
-                            .clicked()
-                        {
-                            chosen = Some(index);
-                        }
-                    }
-                });
-            });
-        if let Some(index) = chosen {
-            self.replay_history_holder(index);
-        }
-    }
-    /// Session record holders, newest first, with a replay button each.
-    fn hall_of_fame(&mut self, ui: &mut egui::Ui) {
-        let theme = self.theme();
-        ui.label(
-            RichText::new("HALL OF FAME · SESSION RECORDS")
-                .small()
-                .color(theme.muted),
-        );
-        if self.fame.is_empty() {
             ui.label(
-                RichText::new("No records yet. The first improvement lands here.")
+                RichText::new("No records yet. The first generation's best lands here.")
                     .small()
                     .color(theme.muted),
             );
@@ -2784,51 +2837,81 @@ impl App {
         }
         let mut chosen = None;
         egui::ScrollArea::vertical()
-            .id_salt("hall_of_fame")
-            .max_height(180.)
+            .id_salt("records_list")
+            .max_height(200.)
             .show(ui, |ui| {
-                for (place, entry) in self.fame.iter().enumerate().rev() {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!("{}.", place + 1))
+                egui::Grid::new("records_grid")
+                    .num_columns(4)
+                    .spacing([14., 4.])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for &(index, best, first) in records.iter().rev() {
+                            let stats = &snapshot.history[index];
+                            ui.label(
+                                RichText::new(format!("Gen {}", stats.generation))
+                                    .small()
+                                    .color(theme.muted),
+                            );
+                            ui.label(RichText::new(format!("{best:.2} m")).strong());
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} · {}{}",
+                                    stats
+                                        .representatives
+                                        .last()
+                                        .map(species_name)
+                                        .unwrap_or_default(),
+                                    world_summary(&stats.config),
+                                    if first && index > 0 {
+                                        " (new world)"
+                                    } else {
+                                        ""
+                                    }
+                                ))
                                 .small()
                                 .color(theme.muted),
-                        );
-                        ui.label(format!(
-                            "Gen {} · {:.2} m",
-                            entry.generation, entry.distance
-                        ));
-                        ui.label(
-                            RichText::new(species_name(&entry.creature))
-                                .small()
-                                .color(theme.muted),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .small_button("Replay")
-                                .on_hover_text("Replay this record holder")
-                                .clicked()
-                            {
-                                chosen = Some(place);
+                            );
+                            if ui.small_button("Replay").clicked() {
+                                chosen = Some(index);
                             }
-                        });
+                            ui.end_row();
+                        }
                     });
-                }
             });
-        if let Some(place) = chosen {
-            let entry = &self.fame[place];
-            let creature = entry.creature.clone();
-            let config = self
-                .snapshot
-                .as_ref()
-                .map_or_else(Config::default, |s| s.config.clone());
-            self.select(creature, config);
-            self.tab = Tab::Overview;
+        if let Some(index) = chosen {
+            self.replay_history_holder(index);
         }
     }
     /// Builds race lanes from the top archive cards once the first page arrives.
     fn maybe_build_race(&mut self) {
         if !self.race_pending {
+            return;
+        }
+        if !self.race_picks.is_empty() {
+            // The player's picks against the champion.
+            let mut lanes: Vec<RaceLane> = Vec::new();
+            if let Some((creature, config)) = self.champion()
+                && self
+                    .race_picks
+                    .iter()
+                    .all(|(pick, _)| pick.id != creature.id)
+            {
+                lanes.push(RaceLane {
+                    label: "champion".to_owned(),
+                    playback: Playback::new(creature, config),
+                });
+            }
+            for (creature, config) in &self.race_picks {
+                lanes.push(RaceLane {
+                    label: "your pick".to_owned(),
+                    playback: Playback::new(creature.clone(), config.clone()),
+                });
+            }
+            lanes.sort_by(|a, b| b.playback.distance.total_cmp(&a.playback.distance));
+            self.race = lanes;
+            self.race_pending = false;
+            self.race_page_requested = false;
+            self.race_camera = 0.0;
             return;
         }
         let Some(snapshot) = &self.snapshot else {
@@ -2852,7 +2935,7 @@ impl App {
             .filter(|card| card.descriptor.is_some() && card.score.is_finite())
             .take(5)
             .map(|card| RaceLane {
-                rank: card.rank,
+                label: format!("archive rank {}", card.rank + 1),
                 playback: Playback::new(card.creature.clone(), config.clone()),
             })
             .collect();
@@ -2874,55 +2957,6 @@ impl App {
         self.race_page_requested = false;
         self.race_camera = 0.0;
     }
-    /// Ancestor chain of the selected creature; the biggest gains stand out and
-    /// any ancestor can be replayed.
-    fn lineage_strip(&mut self, ui: &mut egui::Ui) {
-        if self.lineage.len() < 2 {
-            return;
-        }
-        let theme = self.theme();
-        let mut gains: Vec<f32> = self.lineage.iter().map(|step| step.gain).collect();
-        gains.sort_by(|a, b| b.total_cmp(a));
-        let highlight = gains.get(2).copied().unwrap_or(f32::INFINITY).max(0.01);
-        ui.label(
-            RichText::new(format!(
-                "Lineage · {} ancestors, newest first · click one to replay it",
-                self.lineage.len()
-            ))
-            .small()
-            .color(theme.muted),
-        );
-        let shown = self.playback.as_ref().map(|p| p.creature.id);
-        let mut chosen = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("lineage")
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for k in 0..self.lineage.len() {
-                        let step = &self.lineage[k];
-                        if paint_lineage_tile(
-                            ui,
-                            step,
-                            self.lineage.get(k + 1),
-                            step.gain >= highlight,
-                            shown == Some(step.creature.id),
-                            theme,
-                            Vec2::new(176., 88.),
-                        ) {
-                            chosen = Some(k);
-                        }
-                    }
-                });
-            });
-        if let Some(k) = chosen {
-            let config = self
-                .snapshot
-                .as_ref()
-                .map_or_else(Config::default, |s| s.config.clone());
-            self.select_ancestor(self.lineage[k].creature.clone(), config);
-        }
-        ui.add_space(6.);
-    }
     /// Full ancestor list of the selected creature, one row per generation.
     fn lineage_view(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
@@ -2930,7 +2964,7 @@ impl App {
             ui.heading("Lineage");
             ui.label(
                 RichText::new(
-                    "Ancestors of the selected creature, newest first. Click one to replay it.",
+                    "Ancestors of the creature on screen, newest first. Click one to replay it.",
                 )
                 .color(theme.muted),
             );
@@ -2951,8 +2985,8 @@ impl App {
         }
         if let Some(p) = &self.playback {
             ui.label(format!(
-                "#{} · {} nodes / {} bones / {} muscles · {} recorded ancestors",
-                p.creature.id,
+                "{} · {} nodes, {} bones, {} muscles · {} recorded ancestors",
+                species_name(&p.creature),
                 p.creature.nodes.len(),
                 p.creature.bones.len(),
                 p.creature.muscles.len(),
@@ -2981,10 +3015,7 @@ impl App {
                 }
             });
         if let Some(k) = chosen {
-            let config = self
-                .snapshot
-                .as_ref()
-                .map_or_else(Config::default, |s| s.config.clone());
+            let config = self.world_of_generation(self.lineage[k].generation);
             self.select_ancestor(self.lineage[k].creature.clone(), config);
             self.tab = Tab::Overview;
         }
@@ -2999,18 +3030,40 @@ impl App {
                     .color(theme.muted),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button("New race")
-                    .on_hover_text("Take the current top five archived creatures")
-                    .clicked()
-                {
-                    self.restart_race();
+                if self.race_picks.is_empty() {
+                    if ui
+                        .button("New race")
+                        .on_hover_text("Take the current top five kept creatures")
+                        .clicked()
+                    {
+                        self.restart_race();
+                    }
+                } else {
+                    if ui
+                        .button("Top five")
+                        .on_hover_text("Forget your picks and race the top five kept creatures")
+                        .clicked()
+                    {
+                        self.race_picks.clear();
+                        self.restart_race();
+                    }
+                    ui.label(
+                        RichText::new(
+                            "Your picks against the champion. Race it under any replay adds one.",
+                        )
+                        .small()
+                        .color(theme.muted),
+                    );
                 }
             });
         });
         ui.horizontal(|ui| {
             if ui
-                .button(if self.playing { "Pause" } else { "Play" })
+                .button(if self.playing {
+                    "Pause  (K)"
+                } else {
+                    "Play  (K)"
+                })
                 .clicked()
             {
                 self.playing = !self.playing;
@@ -3162,9 +3215,8 @@ impl App {
                 lane_rect.left_top() + Vec2::new(8., 23.),
                 Align2::LEFT_TOP,
                 format!(
-                    "finishes at {:.2} m · archive rank {}",
-                    lane.playback.distance,
-                    lane.rank + 1
+                    "finishes at {:.2} m · {}",
+                    lane.playback.distance, lane.label
                 ),
                 FontId::proportional(11.),
                 theme.muted,
@@ -3248,9 +3300,11 @@ impl App {
         }
         let theme = self.theme();
         ui.label(
-            RichText::new("BODY TYPES THROUGH GENERATIONS")
-                .small()
-                .color(theme.muted),
+            RichText::new(
+                "BODY TYPES THROUGH GENERATIONS · each color is one count of nodes and muscles, named in the list below",
+            )
+            .small()
+            .color(theme.muted),
         );
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 80.), Sense::click());
@@ -3303,11 +3357,11 @@ impl App {
         let len = s.history.len();
         if len == 0 {
             ui.heading("A history waiting to happen");
-            ui.label("Run your first generation to build fitness curves and creature replays.");
+            ui.label("Run your first generation to build distance curves and creature replays.");
             return;
         }
         ui.horizontal(|ui| {
-            ui.heading("Generation archive");
+            ui.heading("History");
             ui.checkbox(&mut self.history_latest, "Follow latest");
             if ui.button("Export CSV").clicked() {
                 self.file("Export CSV");
@@ -3319,17 +3373,9 @@ impl App {
         self.history_index = self.history_index.min(len - 1);
         ui.add(egui::Slider::new(&mut self.history_index, 0..=len - 1).text("Generation"))
             .on_hover_text("Disable Follow latest to keep a historical generation selected");
-        egui::CollapsingHeader::new("Percentile curves").show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for (i, p) in PERCENTILES.iter().enumerate() {
-                    ui.checkbox(&mut self.percentiles[i], format!("P{p}"));
-                }
-            });
-        });
         self.trend(ui, 180.);
-        self.records_timeline(ui);
         ui.add_space(6.);
-        self.hall_of_fame(ui);
+        self.records_list(ui);
         ui.add_space(6.);
         self.species_history(ui);
         let stats = self.snapshot.as_ref().unwrap().history[self.history_index].clone();
@@ -3340,13 +3386,10 @@ impl App {
         };
         ui.horizontal(|ui| {
             ui.label(format!(
-                "Generation {} · seed {} · {} evaluated · {} niches · QD {:.2} · {} failed",
+                "Generation {} · {} creatures tried · {} ways of moving kept",
                 stats.generation,
-                stats.config.seed,
                 number(stats.population),
                 number(stats.archive_cells),
-                stats.qd_score,
-                stats.failed
             ));
         });
         ui.columns(2, |cols| {
@@ -3396,6 +3439,66 @@ impl App {
             self.tab = Tab::Overview;
         }
     }
+    /// The closed-by-default drawer with search and machine numbers, and the
+    /// step-by-step run buttons developers use.
+    fn diagnostics(&self, ui: &mut egui::Ui, s: &Snapshot) {
+        let mut frames: Vec<_> = self.frame_times.iter().copied().collect();
+        frames.sort_by(f32::total_cmp);
+        let p95 = frames.get(frames.len() * 95 / 100).copied().unwrap_or(0.);
+        ui.small(format!(
+            "{} · seed {} · stage: {} · {} / {} evaluated · {} in checks",
+            s.gpu,
+            s.config.seed,
+            s.stage.label(),
+            number(s.completed),
+            number(s.config.population),
+            number(s.checking),
+        ));
+        ui.small(format!(
+            "QD score {:.2} · {} behavior niches · {} topology reserves · next batch {}",
+            s.qd_score,
+            number(s.archive_cells),
+            number(s.innovation_reserve_count),
+            crate::qd::Emitter::ALL
+                .into_iter()
+                .zip(s.emitter_weights)
+                .map(|(emitter, weight)| format!("{} {:.0}%", emitter.label(), weight * 100.0))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+        ui.small(format!(
+            "Frame p95 {:.1} ms · end-to-end {:.0} creatures/s · GPU buffers {:.1} MiB · population {:.1} MiB · runs/ {}",
+            p95 * 1000.,
+            s.end_to_end,
+            s.gpu_bytes as f64 / 1048576.,
+            s.ram_bytes as f64 / 1048576.,
+            file_size(self.runs_bytes)
+        ));
+        for (name, rate, count) in &s.engines {
+            ui.small(format!("{name}: {rate:.0} creatures/s · {count} evaluated"));
+        }
+        let running = self.active();
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!running, egui::Button::new("One generation").small())
+                .clicked()
+            {
+                self.worker.pause.store(false, Ordering::Relaxed);
+                self.worker.send(Command::Run {
+                    continuous: false,
+                    guided: false,
+                });
+            }
+            if ui
+                .add_enabled(!running, egui::Button::new("Guided step").small())
+                .on_hover_text("Evaluate, then update the archive, then breed, pausing after each")
+                .clicked()
+            {
+                self.worker.pause.store(false, Ordering::Relaxed);
+                self.worker.send(Command::Next);
+            }
+        });
+    }
     /// Keyboard shortcuts and what each tab shows.
     fn help_window(&mut self, ctx: &egui::Context) {
         if !self.show_help {
@@ -3418,11 +3521,9 @@ impl App {
                                 "1 to 5",
                                 "Overview · Behavior archive · History · Race · Lineage",
                             ),
-                            (
-                                "Space",
-                                "Play or pause the replay. Without a replay it pauses or resumes evolution.",
-                            ),
-                            ("← / →", "Seek one replay frame"),
+                            ("Space", "Evolve, or pause evolution"),
+                            ("K or a click on the replay", "Play or pause the replay"),
+                            ("← / →", "Step the replay one frame"),
                             ("F1 or ?", "Toggle this help"),
                             ("Ctrl+S", "Save the experiment"),
                             ("Drag / scroll", "Pan and zoom the viewport"),
@@ -3437,15 +3538,15 @@ impl App {
                 for (name, why) in [
                     (
                         "Overview",
-                        "The replay of the selected creature, its playback controls, lineage and fitness trend.",
+                        "The champion's replay (or the creature you picked), its playback controls, lineage and the best distance over time.",
                     ),
                     (
                         "Behavior archive",
-                        "Every behavior niche the search protects, as cards or as a behavior map. Click a creature or an occupied map cell to replay it.",
+                        "The best creature for every way of moving, as cards or as a map. Click a creature or a map cell to replay it.",
                     ),
                     (
                         "History & statistics",
-                        "Per-generation curves, every new record with a replay, the session hall of fame, the mix of body types, and the distribution of gait scores.",
+                        "The best and median distance over time with world changes marked, every record with a replay, the mix of body types, and the distances of one generation.",
                     ),
                     (
                         "Race",
@@ -3453,7 +3554,7 @@ impl App {
                     ),
                     (
                         "Lineage",
-                        "Ancestors of the selected creature with thumbnails, fitness gains and body plan changes.",
+                        "Ancestors of the creature on screen with thumbnails, distance gains and body plan changes.",
                     ),
                 ] {
                     ui.label(RichText::new(name).strong());
@@ -3462,16 +3563,206 @@ impl App {
                 }
             });
     }
+    /// Follows the worker's event log for the save state: a save or an open
+    /// marks the experiment saved, a new game marks it unsaved.
+    fn absorb_events(&mut self, snapshot: &Snapshot) {
+        if self.events_seen.0 != snapshot.epoch || snapshot.events.len() < self.events_seen.1 {
+            self.events_seen = (snapshot.epoch, 0);
+        }
+        for event in &snapshot.events[self.events_seen.1..] {
+            match event.kind {
+                EventKind::Saved | EventKind::Opened => {
+                    self.saved = Some((
+                        Instant::now(),
+                        event.generation,
+                        event.kind == EventKind::Opened,
+                    ));
+                    if event.kind == EventKind::Saved {
+                        self.saving = None;
+                    }
+                }
+                EventKind::Started => self.saved = None,
+                _ => {}
+            }
+        }
+        self.events_seen.1 = snapshot.events.len();
+        if snapshot.error.is_some() {
+            self.saving = None;
+        }
+    }
+    /// Asks the worker to save, or first asks the player when the file exists.
+    fn save_to(&mut self, path: PathBuf, confirmed: bool) {
+        if !confirmed && path.exists() {
+            self.overwrite = Some(path);
+            return;
+        }
+        self.saving = Some(Instant::now());
+        self.worker.send(Command::Save(path));
+    }
+    /// Save state for the top bar: saving, saved how long ago, or not saved.
+    fn save_state(&self) -> (String, bool) {
+        if self.saving.is_some() {
+            return ("Saving…".to_owned(), true);
+        }
+        match self.saved {
+            Some((at, generation, opened)) => {
+                let now = self.snapshot.as_ref().map_or(generation, |s| s.generation);
+                let since = now.saturating_sub(generation);
+                let ago = seconds_text(at.elapsed().as_secs_f64());
+                let verb = if opened { "Opened" } else { "Saved" };
+                (
+                    if since > 0 {
+                        format!("{verb} {ago} ago · {since} generations since")
+                    } else {
+                        format!("{verb} {ago} ago")
+                    },
+                    false,
+                )
+            }
+            None => ("Not saved".to_owned(), false),
+        }
+    }
+    /// Opens a saved experiment; the game starts paused on it.
+    fn open_experiment(&mut self, path: PathBuf) {
+        self.pause();
+        self.worker.send(Command::Load(path));
+        self.initial = true;
+    }
+    /// File > Open: the saves in runs/, newest first, and a path field for
+    /// a file anywhere else.
+    fn open_window(&mut self, ctx: &egui::Context) {
+        let Some(saves) = &self.open_list else {
+            return;
+        };
+        let theme = self.theme();
+        let mut chosen: Option<PathBuf> = None;
+        let mut close = false;
+        egui::Window::new("Open a saved experiment")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_min_width(560.);
+                if saves.is_empty() {
+                    ui.label(RichText::new("No saves in runs/ yet.").color(theme.muted));
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(360.)
+                    .show(ui, |ui| {
+                        egui::Grid::new("saves")
+                            .num_columns(4)
+                            .spacing([14., 8.])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for save in saves {
+                                    let name =
+                                        save.path.file_name().map_or_else(String::new, |n| {
+                                            n.to_string_lossy().into_owned()
+                                        });
+                                    ui.vertical(|ui| {
+                                        ui.label(RichText::new(name).strong());
+                                        if let Some(summary) = &save.summary {
+                                            ui.label(
+                                                RichText::new(world_summary(&summary.config))
+                                                    .small()
+                                                    .color(theme.muted),
+                                            );
+                                        }
+                                    });
+                                    ui.label(save.summary.as_ref().map_or_else(
+                                        || "older format".to_owned(),
+                                        |summary| {
+                                            format!(
+                                                "generation {} · {} creatures",
+                                                summary.generation,
+                                                number(summary.config.population)
+                                            )
+                                        },
+                                    ));
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} · {}",
+                                            ago(save.modified),
+                                            file_size(save.bytes)
+                                        ))
+                                        .small()
+                                        .color(theme.muted),
+                                    );
+                                    if ui.button("Open").clicked() {
+                                        chosen = Some(save.path.clone());
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Another file");
+                    ui.add(egui::TextEdit::singleline(&mut self.file_path).desired_width(300.));
+                    if ui.button("Open").clicked() {
+                        chosen = Some(PathBuf::from(&self.file_path));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if let Some(path) = chosen {
+            self.open_experiment(path);
+            close = true;
+        }
+        if close {
+            self.open_list = None;
+        }
+    }
     fn dialogs(&mut self, ctx: &egui::Context) {
+        self.open_window(ctx);
+        if let Some(path) = self.overwrite.clone() {
+            let mut answer = None;
+            egui::Window::new("Replace the save?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "{} already exists. Replace it with this experiment?",
+                        path.display()
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui.button("Replace").clicked() {
+                            answer = Some(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            answer = Some(false);
+                        }
+                    });
+                });
+            match answer {
+                Some(true) => {
+                    self.overwrite = None;
+                    self.save_to(path, true);
+                }
+                Some(false) => self.overwrite = None,
+                None => {}
+            }
+        }
         if self.new_dialog {
             egui::Window::new("Start a new experiment")
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.label(format!(
-                        "Create {} creatures using the settings in the sidebar.",
-                        number(self.config.population)
+                        "Start over with {} new creatures in this world: {}.",
+                        number(self.config.population),
+                        world_summary(&self.config)
                     ));
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.config.random_seed, "New random seed");
+                        if !self.config.random_seed {
+                            ui.label("Seed");
+                            ui.add(egui::DragValue::new(&mut self.config.seed));
+                        }
+                    });
                     ui.label("Save the current experiment first if you want to resume it later.");
                     ui.horizontal(|ui| {
                         if ui.button("Save current").clicked() {
@@ -3489,7 +3780,6 @@ impl App {
                             self.pause();
                             self.worker.send(Command::New(self.config.clone()));
                             self.initial = true;
-                            self.dirty = false;
                             self.last_page = usize::MAX;
                             self.new_dialog = false;
                         }
@@ -3510,46 +3800,9 @@ impl App {
                         if ui.button(mode).clicked() {
                             let path = PathBuf::from(&self.file_path);
                             match mode {
-                                "Save experiment" => self.worker.send(Command::Save(path)),
-                                "Open experiment" => {
-                                    self.pause();
-                                    self.worker.send(Command::Load(path));
-                                    self.initial = true;
-                                }
+                                "Save experiment" => self.save_to(path, false),
+                                "Open experiment" => self.open_experiment(path),
                                 "Export CSV" => self.worker.send(Command::Export(path)),
-                                "Save preset" => {
-                                    let result = (|| -> anyhow::Result<()> {
-                                        self.config.validate()?;
-                                        if let Some(parent) = path.parent() {
-                                            std::fs::create_dir_all(parent)?;
-                                        }
-                                        serde_json::to_writer_pretty(
-                                            std::fs::File::create(path)?,
-                                            &self.config,
-                                        )?;
-                                        Ok(())
-                                    })();
-                                    self.message =
-                                        Some(result.map_or_else(
-                                            |e| e.to_string(),
-                                            |_| "Preset saved".into(),
-                                        ));
-                                }
-                                "Load preset" => {
-                                    let result = (|| -> anyhow::Result<Config> {
-                                        let cfg: Config =
-                                            serde_json::from_reader(std::fs::File::open(path)?)?;
-                                        cfg.validate()?;
-                                        Ok(cfg)
-                                    })();
-                                    match result {
-                                        Ok(cfg) => {
-                                            self.config = cfg;
-                                            self.dirty = true;
-                                        }
-                                        Err(e) => self.message = Some(e.to_string()),
-                                    }
-                                }
                                 "Export creature JSON" => {
                                     let creature =
                                         self.playback.as_ref().map(|p| p.creature.clone());
@@ -3683,8 +3936,6 @@ impl eframe::App for App {
         }
         let next = self.worker.view.lock().unwrap().take();
         if let Some(mut next) = next {
-            self.absorb_records(&next);
-            self.absorb_archive_page(&next);
             if self
                 .snapshot
                 .as_ref()
@@ -3701,23 +3952,32 @@ impl eframe::App for App {
             {
                 self.config = next.config.clone();
                 self.initial = false;
-            } else if self.config.seasons > 0
-                && !self.dirty
+            } else if self
+                .config_sent
+                .is_none_or(|sent| sent.elapsed() > Duration::from_secs(2))
                 && self
                     .snapshot
                     .as_ref()
                     .is_none_or(|old| old.epoch == next.epoch)
             {
-                // Seasons advance in the worker; keep the environment panel on
-                // the live world unless the local controls have pending edits.
-                self.config = next.config.clone();
+                // The worker owns the world: seasons advance it, and a change
+                // waits in `pending` until the next generation. The panel
+                // shows the world the player asked for.
+                self.config = next.pending.clone().unwrap_or_else(|| next.config.clone());
             }
             if let Some((c, cfg)) = next.preview.take() {
                 // The worker picks the creature of a new game (a random one)
                 // and of a loaded game (its best elite).
-                let loaded = !next.history.is_empty();
+                // Neither is known to be the champion: the history's best
+                // takes over at once below when it differs.
                 self.show_champion(c, cfg);
-                self.champion_shown = loaded;
+                self.champion_shown = false;
+            }
+            self.absorb_events(&next);
+            if let Some((c, cfg)) = next.selected.take() {
+                // A creature the player clicked on the archive map; it plays
+                // in the player docked beside the map.
+                self.select(c, cfg);
             }
             if let Some((id, lineage)) = next.lineage.take() {
                 if self.playback.as_ref().is_some_and(|p| p.creature.id == id) {
@@ -3728,6 +3988,12 @@ impl eframe::App for App {
             self.snapshot = Some(next);
             self.follow_champion();
             self.maybe_build_race();
+        }
+        // The worker sends the archive map table only while the map shows.
+        let want_map = self.tab == Tab::Population && self.archive_view == ArchiveView::Map;
+        if want_map != self.map_sent {
+            self.map_sent = want_map;
+            self.worker.send(Command::MapTable(want_map));
         }
         let lineage_request =
             if (self.tab == Tab::Overview || self.tab == Tab::Lineage) && self.lineage.is_empty() {
@@ -3767,13 +4033,14 @@ impl eframe::App for App {
                 self.show_help = !self.show_help;
             }
             if pressed(egui::Key::Space) {
-                if self.playback.is_some() || (self.tab == Tab::Race && !self.race.is_empty()) {
-                    self.playing = !self.playing;
-                } else if self.active() {
+                if self.active() {
                     self.pause();
                 } else {
                     self.run(true, false);
                 }
+            }
+            if pressed(egui::Key::K) {
+                self.playing = !self.playing;
             }
             if let Some(p) = &mut self.playback {
                 let elapsed = p.tick.saturating_sub(p.trial_start());
@@ -3842,9 +4109,25 @@ impl eframe::App for App {
             .show(ui, |ui| self.top(ui));
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
+                if let Some(message) = self.message.take() {
+                    self.shown_message = Some((message, Instant::now()));
+                }
+                if self
+                    .shown_message
+                    .as_ref()
+                    .is_some_and(|(_, at)| at.elapsed().as_secs_f32() > MESSAGE_SECONDS)
+                {
+                    self.shown_message = None;
+                }
                 if let Some(s) = &self.snapshot {
                     color_dot(ui, theme.accent);
-                    ui.label(&s.status);
+                    match &self.shown_message {
+                        Some((message, _)) => ui.label(message),
+                        None => ui.label(&s.status),
+                    };
+                    if self.shown_message.is_some() {
+                        ui.ctx().request_repaint_after(Duration::from_millis(500));
+                    }
                     if let Some(error) = &s.error {
                         ui.colored_label(AMBER, error);
                     }
@@ -3856,41 +4139,27 @@ impl eframe::App for App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .small_button(if self.show_perf {
-                                "Hide performance"
+                                "Hide diagnostics"
                             } else {
-                                "Performance"
+                                "Diagnostics"
                             })
+                            .on_hover_text("Search and machine numbers for developers")
                             .clicked()
                         {
                             self.show_perf = !self.show_perf;
                         }
-                        ui.label(RichText::new(&s.gpu).small().color(theme.muted));
                     });
                 }
             });
-            if self.show_perf && let Some(s) = &self.snapshot {
-                let mut frames: Vec<_> = self.frame_times.iter().copied().collect();
-                frames.sort_by(f32::total_cmp);
-                let p95 = frames.get(frames.len() * 95 / 100).copied().unwrap_or(0.);
-                ui.small(format!(
-                    "Frame p95 {:.1} ms · end-to-end {:.0} creatures/s · GPU buffers {:.1} MiB · population {:.1} MiB · runs/ {}",
-                    p95 * 1000.,
-                    s.end_to_end,
-                    s.gpu_bytes as f64 / 1048576.,
-                    s.ram_bytes as f64 / 1048576.,
-                    file_size(self.runs_bytes)
-                ));
-                for (name, rate, count) in &s.engines {
-                    ui.small(format!("{name}: {rate:.0} creatures/s · {count} evaluated"));
-                }
-            }
-            if let Some(m) = &self.message {
-                ui.label(m);
+            if self.show_perf
+                && let Some(s) = &self.snapshot
+            {
+                self.diagnostics(ui, s);
             }
         });
         egui::Panel::left("controls")
-            .default_size(300.)
-            .min_size(260.)
+            .default_size(350.)
+            .min_size(280.)
             .max_size(440.)
             .resizable(true)
             .frame(egui::Frame::new().fill(theme.panel).inner_margin(16))
@@ -3917,13 +4186,49 @@ impl eframe::App for App {
                 match self.tab {
                     Tab::Overview => {
                         self.metrics(ui);
-                        ui.add_space(10.);
-                        self.viewport(ui, (ui.available_height() * 0.62).max(180.));
                         ui.add_space(8.);
-                        self.lineage_strip(ui);
-                        self.trend(ui, ui.available_height().max(100.));
+                        // The chart keeps a fixed height below the replay and
+                        // its controls; the replay takes the rest.
+                        const CHART: f32 = 160.;
+                        const REPLAY_CONTROLS: f32 = 120.;
+                        self.viewport(
+                            ui,
+                            (ui.available_height() - CHART - REPLAY_CONTROLS).max(180.),
+                        );
+                        ui.add_space(6.);
+                        // The chart and the event feed share the bottom row.
+                        let height = (ui.available_height() - 34.).max(80.);
+                        let width = ui.available_width();
+                        ui.horizontal_top(|ui| {
+                            let down = egui::Layout::top_down(egui::Align::Min);
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(width * 0.62, height + 34.),
+                                down,
+                                |ui| self.trend(ui, height),
+                            );
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(ui.available_width(), height + 34.),
+                                down,
+                                |ui| self.feed(ui, height + 10.),
+                            );
+                        });
                     }
-                    Tab::Population => self.population(ui),
+                    Tab::Population => {
+                        // The archive on the left, the replay docked on the
+                        // right, so browsing never leaves the tab.
+                        let height = ui.available_height();
+                        let width = ui.available_width();
+                        ui.horizontal_top(|ui| {
+                            ui.allocate_ui(Vec2::new(width * 0.6, height), |ui| {
+                                ui.vertical(|ui| self.population(ui));
+                            });
+                            ui.allocate_ui(Vec2::new(ui.available_width(), height), |ui| {
+                                ui.vertical(|ui| {
+                                    self.viewport(ui, (height * 0.55).max(180.));
+                                });
+                            });
+                        });
+                    }
                     Tab::History => {
                         egui::ScrollArea::vertical().show(ui, |ui| self.history(ui));
                     }
@@ -4090,11 +4395,19 @@ fn paint_card(
         FontId::proportional(10.),
         theme.ink,
     );
-    if card.innovation_reserve {
+    if card.plan_count > 1 {
         painter.text(
             rect.right_top() + Vec2::new(-9., 8.),
             Align2::RIGHT_TOP,
-            "MORPH",
+            format!("{} like it", card.plan_count),
+            FontId::proportional(9.),
+            theme.accent,
+        );
+    } else if card.innovation_reserve {
+        painter.text(
+            rect.right_top() + Vec2::new(-9., 8.),
+            Align2::RIGHT_TOP,
+            "NEW BODY",
             FontId::proportional(9.),
             theme.accent,
         );
@@ -4140,8 +4453,120 @@ fn paint_card(
         );
     }
 }
-fn matches_search(q: &str, terms: &str) -> bool {
-    q.is_empty() || terms.contains(q)
+/// How a creature came to be, in the words the lineage uses.
+fn origin_words(emitter: crate::qd::Emitter) -> &'static str {
+    match emitter {
+        crate::qd::Emitter::Cma => "fine-tuned from a parent",
+        crate::qd::Emitter::Structural => "reshaped from a parent",
+        crate::qd::Emitter::Novelty => "exploring a new way of moving",
+        crate::qd::Emitter::Restart => "as a new random body",
+    }
+}
+/// The next season step while seasons are on: "Next change at generation 60:
+/// Wind to Breeze". The worker applies step `season_step` when a generation
+/// that is a multiple of the interval begins.
+fn season_forecast(config: &Config, generation: u32) -> Option<String> {
+    let interval = *crate::environment::SEASON_INTERVALS.get(usize::from(config.seasons))?;
+    if interval == 0 {
+        return None;
+    }
+    let at = (generation / interval + 1) * interval;
+    let rotation = crate::environment::season_rotation();
+    let &(index, level) = rotation.get(usize::from(config.season_step) % rotation.len())?;
+    let effect = &crate::environment::EFFECTS[index];
+    Some(format!(
+        "Next change at generation {at}: {} to {}",
+        effect.name, effect.levels[level]
+    ))
+}
+/// Whether every effect except the seasons schedule sits at its calm level.
+fn world_is_calm(config: &Config) -> bool {
+    crate::environment::EFFECTS
+        .iter()
+        .filter(|effect| effect.name != "Seasons")
+        .all(|effect| effect.level(config) == effect.calm)
+}
+/// The world in a few words: "Calm world", or the effects away from calm,
+/// such as "Ground: Rough, 8 cm · Hurdles: Low".
+fn world_summary(config: &Config) -> String {
+    let parts: Vec<String> = crate::environment::EFFECTS
+        .iter()
+        .filter(|effect| effect.name != "Seasons")
+        .filter(|effect| effect.level(config) != effect.calm)
+        .map(|effect| format!("{}: {}", effect.name, effect.levels[effect.level(config)]))
+        .collect();
+    if parts.is_empty() {
+        "Calm world".to_owned()
+    } else {
+        parts.join(" · ")
+    }
+}
+/// One effect as its name and a button per level. The lit button is the
+/// current level. Returns true when the player picked another level.
+fn effect_row(
+    ui: &mut egui::Ui,
+    effect: &crate::environment::Effect,
+    config: &mut Config,
+    live: Option<&Config>,
+    theme: Theme,
+) -> bool {
+    let level = effect.level(config);
+    let away = level != effect.calm;
+    let waiting = live.is_some_and(|live| effect.level(live) != level);
+    let color = if waiting {
+        AMBER
+    } else if away {
+        theme.accent
+    } else {
+        theme.ink
+    };
+    let name = ui.label(RichText::new(effect.name).color(color));
+    if let (true, Some(live)) = (waiting, live) {
+        name.on_hover_text(format!(
+            "Now {}. {} from the next generation.",
+            effect.levels[effect.level(live)],
+            effect.levels[level]
+        ));
+    } else {
+        name.on_hover_text(effect.why);
+    }
+    let mut picked = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(3., 3.);
+        ui.spacing_mut().button_padding = Vec2::new(6., 2.);
+        for (i, text) in effect.levels.iter().enumerate() {
+            let short = text.split(',').next().unwrap_or(text);
+            let hover = if i == effect.calm {
+                format!("{text}. The calm world.")
+            } else {
+                format!("{text}. {}", effect.why)
+            };
+            if ui
+                .selectable_label(i == level, RichText::new(short).small())
+                .on_hover_text(hover)
+                .clicked()
+                && i != level
+            {
+                picked = Some(i);
+            }
+        }
+    });
+    if let Some(i) = picked {
+        effect.set_level(config, i);
+    }
+    picked.is_some()
+}
+/// A short duration for people: "8 s", "3 min", "2 h".
+fn seconds_text(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds < 0.0 {
+        "a while".to_owned()
+    } else if seconds < 90.0 {
+        format!("{:.0} s", seconds.max(1.0))
+    } else if seconds < 90.0 * 60.0 {
+        format!("{:.0} min", seconds / 60.0)
+    } else {
+        format!("{:.0} h", seconds / 3600.0)
+    }
 }
 fn number(n: usize) -> String {
     let text = n.to_string();
@@ -4750,6 +5175,50 @@ mod tests {
         assert!(imported_creature(&mut loaded).is_err());
     }
     #[test]
+    fn the_season_forecast_names_the_next_step() {
+        let mut config = Config {
+            seasons: 2,
+            ..Config::default()
+        };
+        assert_eq!(
+            season_forecast(&config, 7).as_deref(),
+            Some("Next change at generation 10: Wind to Breeze")
+        );
+        assert_eq!(
+            season_forecast(&config, 10).as_deref(),
+            Some("Next change at generation 20: Wind to Breeze")
+        );
+        config.seasons = 0;
+        assert_eq!(season_forecast(&config, 7), None);
+    }
+    #[test]
+    fn a_stall_suggests_the_next_harder_world() {
+        let mut config = Config::default();
+        let ground = crate::environment::EFFECTS
+            .iter()
+            .position(|effect| effect.name == "Ground")
+            .unwrap();
+        assert_eq!(stall_suggestion(&config), Some((ground, 1)));
+        let top = crate::environment::EFFECTS[ground].levels.len() - 1;
+        crate::environment::EFFECTS[ground].set_level(&mut config, top);
+        let (next, level) = stall_suggestion(&config).unwrap();
+        assert_eq!(crate::environment::EFFECTS[next].name, "Hurdles");
+        assert_eq!(level, 1);
+    }
+    #[test]
+    fn body_plans_ignore_lengths_and_rhythms() {
+        use crate::worker::body_plan;
+        let creature = test_creature();
+        let mut tuned = creature.clone();
+        tuned.bones[0].rest_length = 0.9;
+        tuned.muscles[0].period = 0.3;
+        tuned.nodes[1].x = 0.7;
+        assert_eq!(body_plan(&creature), body_plan(&tuned));
+        let mut more = creature.clone();
+        more.muscles.push(more.muscles[0]);
+        assert_ne!(body_plan(&creature), body_plan(&more));
+    }
+    #[test]
     fn species_names_follow_the_body_plan() {
         let creature = test_creature();
         let name = species_name(&creature);
@@ -4765,6 +5234,10 @@ mod tests {
         });
         longer.bones.push(Bone::new(2, 3, 0.5));
         assert_ne!(name, species_name(&longer));
+        let mut tuned = creature.clone();
+        tuned.bones[1].rest_length = 0.8;
+        tuned.muscles[0].phase = 0.4;
+        assert_eq!(name, species_name(&tuned), "tuning keeps the name");
     }
     #[test]
     fn gif_export_encodes_three_synthetic_frames() {

@@ -43,7 +43,6 @@ fn gpu_repeats_scores_for_identical_trials() {
                 a.behavior.mean_height.to_bits(),
                 a.behavior.feet.to_bits(),
                 a.screen_x.to_bits(),
-                a.screen2_x.to_bits(),
             ],
             [
                 b.behavior.ground_contact.to_bits(),
@@ -52,10 +51,13 @@ fn gpu_repeats_scores_for_identical_trials() {
                 b.behavior.mean_height.to_bits(),
                 b.behavior.feet.to_bits(),
                 b.screen_x.to_bits(),
-                b.screen2_x.to_bits(),
             ],
             "GPU metrics changed for creature {i}"
         );
-        assert_eq!((a.screened, a.unchecked), (b.screened, b.unchecked), "creature {i}");
+        assert_eq!(
+            (a.screened, a.unchecked),
+            (b.screened, b.unchecked),
+            "creature {i}"
+        );
     }
 }

@@ -36,12 +36,68 @@ pub enum Command {
     Page(usize),
     /// Ancestors of the creature with this id, answered in `Snapshot::lineage`.
     Lineage(u64),
+    /// Start or stop sending the archive map table with snapshots.
+    MapTable(bool),
+    /// The archive creature with this id, answered in `Snapshot::selected`.
+    Select(u64),
+    /// Which archive cards to page through.
+    Filter(CardFilter),
     /// Benchmark probe: the UI send time, used to measure how long queued controls wait.
     Ping(Instant),
     /// Benchmark probe: re-applies the current settings like an environment
     /// button, to measure how long such a change waits.
     ConfigureProbe(Instant),
     Shutdown,
+}
+/// Which archive cards the UI pages through.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct CardFilter {
+    /// Feet bin (0 is one foot, 4 is five or more), or every count.
+    pub feet: Option<u8>,
+    /// Body size by node count (see `size_class`), or every size.
+    pub size: Option<u8>,
+    /// Only the fastest creature of each body plan.
+    pub one_per_plan: bool,
+}
+/// Body size class by node count: 0 small (up to 5 nodes), 1 medium (6 to
+/// 9), 2 large (10 or more).
+pub fn size_class(nodes: usize) -> u8 {
+    match nodes {
+        0..=5 => 0,
+        6..=9 => 1,
+        _ => 2,
+    }
+}
+/// A key for a creature's body plan: its counts of nodes, bones and muscles
+/// and which parts connect to which. Lengths, masses and rhythms stay out,
+/// so a small mutation keeps the plan. The sums do not depend on part order.
+pub fn body_plan(creature: &Creature) -> u64 {
+    let (nodes, bones, muscles) = (
+        creature.nodes.len() as u64,
+        creature.bones.len() as u64,
+        creature.muscles.len() as u64,
+    );
+    let mut plan = (nodes << 42) ^ (bones << 21) ^ muscles;
+    for bone in &creature.bones {
+        let (a, b) = (u64::from(bone.a.min(bone.b)), u64::from(bone.a.max(bone.b)));
+        plan = plan.wrapping_add(
+            a.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .wrapping_add(b.wrapping_mul(0xbf58_476d_1ce4_e5b9))
+                .rotate_left(17),
+        );
+    }
+    for muscle in &creature.muscles {
+        let (a, b) = (
+            u64::from(muscle.bone_a.min(muscle.bone_b)),
+            u64::from(muscle.bone_a.max(muscle.bone_b)),
+        );
+        plan = plan.wrapping_add(
+            a.wrapping_mul(0x94d0_49bb_1331_11eb)
+                .wrapping_add(b.wrapping_mul(0x2545_f491_4f6c_dd1d))
+                .rotate_left(29),
+        );
+    }
+    plan
 }
 #[derive(Clone)]
 pub struct Card {
@@ -54,7 +110,102 @@ pub struct Card {
     pub emitter: Option<Emitter>,
     pub visits: u64,
     pub innovation_reserve: bool,
+    /// Kept creatures that share this card's body plan when the filter keeps
+    /// one per plan; 1 otherwise.
+    pub plan_count: usize,
     pub creature: Creature,
+}
+/// Something that happened to the experiment, for the UI's event feed.
+#[derive(Clone)]
+pub struct Event {
+    /// The generation running when it happened.
+    pub generation: u32,
+    pub kind: EventKind,
+    pub text: String,
+}
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum EventKind {
+    /// A new experiment began.
+    Started,
+    /// A saved experiment was opened.
+    Opened,
+    /// The player changed the world.
+    World,
+    /// The seasons changed the world.
+    Season,
+    /// A meteor strike or an extinction.
+    Catastrophe,
+    /// An undo brought creatures back.
+    Undo,
+    /// The experiment was saved.
+    Saved,
+}
+/// Events kept per experiment; older ones drop off.
+const EVENT_LOG: usize = 200;
+fn log_event(events: &mut Arc<Vec<Event>>, generation: u32, kind: EventKind, text: String) {
+    let log = Arc::make_mut(events);
+    if log.len() >= EVENT_LOG {
+        log.remove(0);
+    }
+    log.push(Event {
+        generation,
+        kind,
+        text,
+    });
+}
+/// The effects that differ between two worlds, as "Ground Flat to Rough, 8 cm".
+fn world_change_text(before: &Config, after: &Config) -> Option<String> {
+    let parts: Vec<String> = crate::environment::EFFECTS
+        .iter()
+        .filter(|effect| effect.name != "Seasons")
+        .filter(|effect| effect.level(before) != effect.level(after))
+        .map(|effect| {
+            format!(
+                "{} {} to {}",
+                effect.name,
+                effect.levels[effect.level(before)],
+                effect.levels[effect.level(after)]
+            )
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+/// Logs a world change between two configs, if the physics changed.
+fn log_world_change(
+    events: &mut Arc<Vec<Event>>,
+    before: &Config,
+    after: &Config,
+    generation: u32,
+    retesting: usize,
+) {
+    if !before.physics_differs(after) {
+        return;
+    }
+    let season = after.seasons > 0 && after.season_step != before.season_step;
+    let change = world_change_text(before, after).unwrap_or_else(|| "The world changed".into());
+    let text = if retesting > 0 {
+        format!("{change}. Re-testing {retesting} kept creatures in the new world.")
+    } else {
+        format!("{change}.")
+    };
+    let kind = if season {
+        EventKind::Season
+    } else {
+        EventKind::World
+    };
+    log_event(events, generation, kind, text);
+}
+/// One occupied behavior cell of the global archive, for the map. The table
+/// is small (one row per elite) and carries no body, so it can follow every
+/// archive change; a click asks for the body with `Command::Select`.
+#[derive(Clone, Copy)]
+pub struct MapCell {
+    /// Behavior bins: ground contact, cadence, bounce, height, feet.
+    pub niche: [u8; 6],
+    pub score: f32,
+    /// Place in the archive ranking by distance.
+    pub rank: usize,
+    pub id: u64,
 }
 /// One ancestor of a selected creature.
 #[derive(Clone)]
@@ -70,6 +221,9 @@ pub struct LineageStep {
 pub struct Snapshot {
     pub epoch: u64,
     pub config: Config,
+    /// Settings the player asked for that take effect when the next
+    /// generation starts.
+    pub pending: Option<Config>,
     /// Elites lost to meteor strikes that an undo could bring back.
     pub fossils: usize,
     pub generation: u32,
@@ -86,6 +240,13 @@ pub struct Snapshot {
     pub page: Vec<Card>,
     pub page_start: usize,
     pub preview: Option<(Creature, Config)>,
+    /// What happened to this experiment, oldest first.
+    pub events: Arc<Vec<Event>>,
+    /// The archive map table while the UI asks for it.
+    pub map: Option<Arc<Vec<MapCell>>>,
+    /// A creature the UI asked for with `Command::Select`, and the world it
+    /// is scored in; sent once.
+    pub selected: Option<(Creature, Config)>,
     /// Ancestor chain of a requested creature (its id first), newest first;
     /// sent once per request.
     pub lineage: Option<(u64, Vec<LineageStep>)>,
@@ -100,6 +261,8 @@ pub struct Snapshot {
     pub elapsed: f64,
     pub archive_cells: usize,
     pub archive_size: usize,
+    /// Cards the filter lets through (the archive size without a filter).
+    pub page_total: usize,
     pub innovation_reserve_count: usize,
     pub qd_score: f64,
     pub emitters: [EmitterStats; 4],
@@ -248,13 +411,22 @@ fn run(
     let mut changed = true;
     let mut epoch = 0u64;
     let mut history = Arc::new(Vec::new());
-    let mut checkpoint_thread: Option<std::thread::JoinHandle<()>> = None;
     // A save being loaded on its own thread, and a save waiting until the
     // "Saving" status has reached the window.
     let mut loading: Option<Loading> = None;
     let mut pending_save: Option<std::path::PathBuf> = None;
     let mut deferred: Vec<Command> = Vec::new();
     let mut last_progress = Instant::now();
+    let mut events: Arc<Vec<Event>> = Arc::new(Vec::new());
+    // Archive map table: whether the UI wants it, the last one built, and the
+    // archive state it was built from.
+    let mut want_map = false;
+    let mut map: Option<Arc<Vec<MapCell>>> = None;
+    let mut map_key = (u64::MAX, usize::MAX, 0u64);
+    let mut selected: Option<(Creature, Config)> = None;
+    let mut filter = CardFilter::default();
+    // A background autosave, which reports the file and generation it wrote.
+    let mut checkpoint_thread: Option<std::thread::JoinHandle<Option<(PathBuf, u32)>>> = None;
     let benchmark_generations = std::env::var("EVOLUTION_BENCH_GENERATIONS")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -336,6 +508,9 @@ fn run(
                     Command::Ping(_)
                         | Command::Page(_)
                         | Command::Lineage(_)
+                        | Command::MapTable(_)
+                        | Command::Select(_)
+                        | Command::Filter(_)
                         | Command::Pause
                         | Command::Run { .. }
                         | Command::Next
@@ -367,6 +542,16 @@ fn run(
                         status = "Creating population…".into();
                         let next = Experiment::new(cfg)?;
                         preview = Some((next.population.creature(0), next.config.clone()));
+                        events = Arc::new(Vec::new());
+                        log_event(
+                            &mut events,
+                            next.generation,
+                            EventKind::Started,
+                            format!(
+                                "New experiment: {} creatures, seed {}",
+                                next.config.population, next.config.seed
+                            ),
+                        );
                         exp = Some(next);
                         epoch += 1;
                         history = Arc::new(Vec::new());
@@ -406,8 +591,23 @@ fn run(
                     }
                     Command::Configure(cfg) => {
                         if let Some(e) = &mut exp {
+                            let before = e.config.clone();
                             e.update_config(cfg)?;
-                            status = "Settings applied or queued for the next generation".into();
+                            // Between generations a change applies at once;
+                            // otherwise it waits in `pending` and is logged
+                            // when the next generation starts.
+                            log_world_change(
+                                &mut events,
+                                &before,
+                                &e.config,
+                                e.generation,
+                                e.reseed.len(),
+                            );
+                            status = if e.pending.is_some() {
+                                "The world changes when the next generation starts".into()
+                            } else {
+                                "Settings applied".into()
+                            };
                         }
                     }
                     Command::ConfigureProbe(sent) => {
@@ -422,19 +622,37 @@ fn run(
                     Command::Meteor => {
                         if let Some(e) = &mut exp {
                             let lost = e.meteor(0.5);
-                            status = format!("A meteor wiped out {lost} elites");
+                            status = format!("A meteor wiped out {lost} creatures");
+                            log_event(
+                                &mut events,
+                                e.generation,
+                                EventKind::Catastrophe,
+                                format!("Meteor strike: {lost} kept creatures wiped out."),
+                            );
                         }
                     }
                     Command::Extinction => {
                         if let Some(e) = &mut exp {
                             let lost = e.extinction();
-                            status = format!("The weakest island lost all {lost} elites");
+                            status = format!("The slowest group lost all {lost} creatures");
+                            log_event(
+                                &mut events,
+                                e.generation,
+                                EventKind::Catastrophe,
+                                format!("Extinction: the slowest group lost all {lost} creatures."),
+                            );
                         }
                     }
                     Command::UndoMeteor => {
                         if let Some(e) = &mut exp {
                             let back = e.undo_meteor();
-                            status = format!("{back} fossils returned to the archive");
+                            status = format!("{back} creatures came back");
+                            log_event(
+                                &mut events,
+                                e.generation,
+                                EventKind::Undo,
+                                format!("Undo: {back} creatures came back."),
+                            );
                         }
                     }
                     Command::Save(path) => {
@@ -502,6 +720,28 @@ fn run(
                     Command::Page(start) => {
                         page = start;
                     }
+                    Command::MapTable(on) => {
+                        want_map = on;
+                        if !on {
+                            map = None;
+                            map_key = (u64::MAX, usize::MAX, 0);
+                        }
+                    }
+                    Command::Filter(next) => {
+                        filter = next;
+                        page = 0;
+                    }
+                    Command::Select(id) => {
+                        if let Some(e) = &exp
+                            && let Some(elite) = e
+                                .archive
+                                .entries
+                                .iter()
+                                .find(|elite| elite.creature.id == id)
+                        {
+                            selected = Some((elite.creature.clone(), e.config.clone()));
+                        }
+                    }
                     Command::Lineage(id) => {
                         if let Some(e) = &exp {
                             let chain = e.ancestry(id, 400);
@@ -550,6 +790,20 @@ fn run(
                                 |elite| elite.creature.clone(),
                             );
                         preview = Some((creature, next.config.clone()));
+                        events = Arc::new(Vec::new());
+                        log_event(
+                            &mut events,
+                            next.generation,
+                            EventKind::Opened,
+                            format!(
+                                "Opened {} at generation {}.",
+                                load.path.file_name().map_or_else(
+                                    || load.path.display().to_string(),
+                                    |name| name.to_string_lossy().into_owned()
+                                ),
+                                next.generation
+                            ),
+                        );
                         exp = Some(next);
                         epoch += 1;
                         history = Arc::new(Vec::new());
@@ -742,6 +996,8 @@ fn run(
                         }
                         Stage::Archived => {
                             let stage_start = Instant::now();
+                            let world_before = e.config.clone();
+                            let kept_before = e.archive.entries.len();
                             if steady.boundary {
                                 steady.boundary = false;
                                 let failed = std::mem::take(&mut steady.failed);
@@ -764,6 +1020,19 @@ fn run(
                                 done_key = (epoch, e.generation);
                             } else {
                                 e.prepare_next_batch()?;
+                            }
+                            if e.config.physics_differs(&world_before) {
+                                // The generation that just began runs in the
+                                // new world, and its first creatures are the
+                                // kept ones being re-tested.
+                                let retesting = kept_before.min(e.config.population);
+                                log_world_change(
+                                    &mut events,
+                                    &world_before,
+                                    &e.config,
+                                    e.generation,
+                                    retesting,
+                                );
                             }
                             let breeding_seconds = stage_start.elapsed().as_secs_f64();
                             if benchmark_start.is_some() {
@@ -901,11 +1170,14 @@ fn run(
                                 checkpoint_thread = Some(std::thread::spawn(move || {
                                     if let Err(err) = storage::save(&path, &snapshot) {
                                         eprintln!("Background checkpoint failed: {err:#}");
-                                    } else if let Some(dir) = path.parent() {
+                                        return None;
+                                    }
+                                    if let Some(dir) = path.parent() {
                                         // One autosave per experiment piles up: keep the
                                         // three most recent experiments' autosaves.
                                         storage::rotate_autosaves(dir, 3);
                                     }
+                                    Some((path, snapshot.generation))
                                 }));
                             }
                             if !continuous || guided {
@@ -959,14 +1231,103 @@ fn run(
                 steady.active = false;
             }
         }
+        // A finished autosave goes into the event log, so the UI can say
+        // when the experiment was last saved.
+        if checkpoint_thread
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+            && let Some(handle) = checkpoint_thread.take()
+            && let Ok(Some((path, generation))) = handle.join()
+        {
+            log_event(
+                &mut events,
+                generation,
+                EventKind::Saved,
+                format!("Autosaved {}.", path.display()),
+            );
+            changed = true;
+        }
         if changed && (last_publish.elapsed() > Duration::from_millis(200) || !running) {
             let snapshot = if let Some(e) = &exp {
                 if history.len() != e.history.len() {
                     history = Arc::new(e.history.clone());
                 }
+                if want_map {
+                    let key = (epoch, e.archive.entries.len(), e.archive.qd_score.to_bits());
+                    if map.is_none() || key != map_key {
+                        map_key = key;
+                        let mut order: Vec<usize> = (0..e.archive.entries.len()).collect();
+                        order.sort_unstable_by(|&a, &b| {
+                            e.archive.entries[b]
+                                .fitness
+                                .total_cmp(&e.archive.entries[a].fitness)
+                        });
+                        map = Some(Arc::new(
+                            order
+                                .into_iter()
+                                .enumerate()
+                                .filter(|&(_, i)| {
+                                    !qd::is_morphology_niche(&e.archive.entries[i].niche)
+                                        && e.archive.entries[i].fitness.is_finite()
+                                })
+                                .map(|(rank, i)| {
+                                    let elite = &e.archive.entries[i];
+                                    MapCell {
+                                        niche: elite.descriptor.niche().0,
+                                        score: elite.fitness,
+                                        rank,
+                                        id: elite.creature.id,
+                                    }
+                                })
+                                .collect(),
+                        ));
+                    }
+                }
                 let archive_count = e.archive.entries.len();
+                // The archive by distance, with each creature's overall rank,
+                // then the player's filter.
+                let mut ranked: Vec<(usize, usize)> = Vec::new();
+                let mut plan_counts: std::collections::HashMap<u64, usize> =
+                    std::collections::HashMap::new();
+                if archive_count > 0 {
+                    let mut order: Vec<_> = (0..archive_count).collect();
+                    order.sort_unstable_by(|&a, &b| {
+                        e.archive.entries[b]
+                            .fitness
+                            .total_cmp(&e.archive.entries[a].fitness)
+                    });
+                    ranked = order
+                        .into_iter()
+                        .enumerate()
+                        .filter(|&(_, i)| {
+                            let elite = &e.archive.entries[i];
+                            filter
+                                .feet
+                                .is_none_or(|feet| elite.descriptor.niche().0[4] == feet)
+                                && filter.size.is_none_or(|size| {
+                                    size_class(elite.creature.nodes.len()) == size
+                                })
+                        })
+                        .collect();
+                    if filter.one_per_plan {
+                        let plans: Vec<u64> = ranked
+                            .iter()
+                            .map(|&(_, i)| body_plan(&e.archive.entries[i].creature))
+                            .collect();
+                        for &plan in &plans {
+                            *plan_counts.entry(plan).or_default() += 1;
+                        }
+                        let mut seen = std::collections::HashSet::new();
+                        ranked = ranked
+                            .into_iter()
+                            .zip(plans)
+                            .filter(|&(_, plan)| seen.insert(plan))
+                            .map(|(pair, _)| pair)
+                            .collect();
+                    }
+                }
                 let item_count = if archive_count > 0 {
-                    archive_count
+                    ranked.len()
                 } else {
                     e.config.population
                 };
@@ -975,18 +1336,9 @@ fn run(
                 }
                 let end = (page + 120).min(item_count);
                 let cards = if archive_count > 0 {
-                    let mut order: Vec<_> = (0..archive_count).collect();
-                    order.sort_unstable_by(|&a, &b| {
-                        e.archive.entries[b]
-                            .fitness
-                            .total_cmp(&e.archive.entries[a].fitness)
-                    });
-                    order
-                        .into_iter()
-                        .enumerate()
-                        .skip(page)
-                        .take(end.saturating_sub(page))
-                        .map(|(rank, i)| {
+                    ranked[page.min(end)..end]
+                        .iter()
+                        .map(|&(rank, i)| {
                             let elite = &e.archive.entries[i];
                             Card {
                                 index: i,
@@ -998,6 +1350,14 @@ fn run(
                                 emitter: Some(elite.emitter),
                                 visits: elite.visits,
                                 innovation_reserve: qd::is_morphology_niche(&elite.niche),
+                                plan_count: if filter.one_per_plan {
+                                    plan_counts
+                                        .get(&body_plan(&elite.creature))
+                                        .copied()
+                                        .unwrap_or(1)
+                                } else {
+                                    1
+                                },
                                 creature: elite.creature.clone(),
                             }
                         })
@@ -1014,6 +1374,7 @@ fn run(
                             emitter: None,
                             visits: 0,
                             innovation_reserve: false,
+                            plan_count: 1,
                             creature: e.population.creature(i),
                         })
                         .collect()
@@ -1021,6 +1382,7 @@ fn run(
                 Snapshot {
                     epoch,
                     config: e.config.clone(),
+                    pending: e.pending.clone(),
                     fossils: e.fossils.len(),
                     generation: e.generation,
                     evaluated: e.evaluated,
@@ -1035,6 +1397,9 @@ fn run(
                     stage: e.stage,
                     running,
                     history: history.clone(),
+                    events: events.clone(),
+                    map: map.clone(),
+                    selected: selected.take(),
                     page: cards,
                     page_start: page,
                     preview: preview.take(),
@@ -1064,6 +1429,7 @@ fn run(
                     elapsed: e.evaluation_seconds,
                     archive_cells: e.archive.behavior_count(),
                     archive_size: archive_count,
+                    page_total: item_count,
                     innovation_reserve_count: e.archive.morphology_count(),
                     qd_score: e.archive.qd_score,
                     emitters: e.emitter_stats,
@@ -1075,6 +1441,7 @@ fn run(
                 Snapshot {
                     epoch,
                     config: Config::default(),
+                    pending: None,
                     fossils: 0,
                     generation: 0,
                     evaluated: 0,
@@ -1083,6 +1450,9 @@ fn run(
                     stage: Stage::Ready,
                     running: false,
                     history: history.clone(),
+                    events: events.clone(),
+                    map: None,
+                    selected: selected.take(),
                     page: vec![],
                     page_start: 0,
                     preview: None,
@@ -1095,6 +1465,7 @@ fn run(
                     elapsed: 0.,
                     archive_cells: 0,
                     archive_size: 0,
+                    page_total: 0,
                     innovation_reserve_count: 0,
                     qd_score: 0.0,
                     emitters: [EmitterStats::default(); 4],
@@ -1115,10 +1486,19 @@ fn run(
             let started = Instant::now();
             match storage::save(&path, e) {
                 Ok(()) => {
-                    status = format!(
-                        "Saved {} in {:.1} s",
-                        path.display(),
-                        started.elapsed().as_secs_f64()
+                    let seconds = started.elapsed().as_secs_f64();
+                    let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
+                    status = format!("Saved {} in {:.1} s", path.display(), seconds);
+                    log_event(
+                        &mut events,
+                        e.generation,
+                        EventKind::Saved,
+                        format!(
+                            "Saved {} ({:.1} MB in {:.1} s).",
+                            path.display(),
+                            bytes as f64 / 1e6,
+                            seconds
+                        ),
                     );
                 }
                 Err(err) => {
