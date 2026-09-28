@@ -61,6 +61,9 @@ pub struct EvaluationMetrics {
     /// Distance at the screen, or at an earlier fall (0 when there was no
     /// screen and no earlier fall).
     pub screen_x: f32,
+    /// Distance at the second screening rung, or at an earlier fall; NaN
+    /// when there is no second rung or the first screen stopped the trial.
+    pub screen2_x: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
