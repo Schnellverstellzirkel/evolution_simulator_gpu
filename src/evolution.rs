@@ -1813,6 +1813,64 @@ fn structural_mutation_from(
     false
 }
 
+/// Names of the classic structural operators, in `classic_operator` order.
+const CLASSIC_OPERATORS: [&str; 11] = [
+    "split_bone",
+    "duplicate_mirrored_node",
+    "duplicate_limb",
+    "retime_rhythm",
+    "change_organ",
+    "phase_shift_group",
+    "rescale_body",
+    "remove_limb",
+    "remove_limb",
+    "remove_limb",
+    "remove_muscle",
+];
+
+/// Every structural operator by name: the classic ones, then the anatomy
+/// operators. For diagnostics such as `examples/mutation_audit.rs`.
+pub fn structural_operator_names() -> Vec<&'static str> {
+    let mut names: Vec<&str> = CLASSIC_OPERATORS[..8].to_vec();
+    names.push("remove_muscle");
+    names.extend(anatomy::OPERATORS.iter().map(|(name, _)| *name));
+    names
+}
+
+/// Applies the structural operator `name` and repairs the body as breeding
+/// does. Returns whether the operator changed the body, or `None` for an
+/// unknown name.
+pub fn apply_structural_operator(
+    name: &str,
+    creature: &mut Creature,
+    cfg: &Config,
+    rng: &mut Rng,
+    donor: Option<&Creature>,
+) -> Option<bool> {
+    let changed = if let Some(pick) = CLASSIC_OPERATORS.iter().position(|n| *n == name) {
+        classic_operator(pick, creature, cfg, rng, false)
+    } else {
+        let index = anatomy::OPERATORS.iter().position(|(n, _)| *n == name)?;
+        let cx = anatomy::Context {
+            neutral: false,
+            donor,
+        };
+        anatomy::apply(index, creature, cfg, rng, &cx)
+    };
+    if changed {
+        repair_with(creature, cfg, rng, false);
+    }
+    Some(changed)
+}
+
+/// The small parameter mutation that follows every structural one in
+/// breeding (`local_mutation` at `scale`), for diagnostics.
+pub fn mutate_locally(creature: Creature, cfg: &Config, rng: &mut Rng, scale: f32) -> Creature {
+    let mut child = local_mutation(creature, cfg, rng, scale);
+    repair(&mut child, cfg, rng);
+    child
+}
+
 /// Classic structural operators: with shrinking on, three operators remove
 /// nodes for the three that add them (split, mirrored node, limb), and one
 /// removes a muscle.
