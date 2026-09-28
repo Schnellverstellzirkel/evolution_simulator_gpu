@@ -1230,6 +1230,8 @@ struct App {
     map_feet: Option<usize>,
     /// Whether the worker was last asked to send the map table.
     map_sent: bool,
+    /// The archive cards the player filters for.
+    card_filter: crate::worker::CardFilter,
     archive_view: ArchiveView,
     /// Top archived elites racing side by side.
     race: Vec<RaceLane>,
@@ -1333,6 +1335,7 @@ impl App {
             map_height: None,
             map_feet: None,
             map_sent: false,
+            card_filter: Default::default(),
             archive_view: if smoke_tab == "map" {
                 ArchiveView::Map
             } else {
@@ -2461,6 +2464,55 @@ impl App {
                     .on_hover_text(why);
             }
         });
+        if self.archive_view == ArchiveView::Cards {
+            let mut filter = self.card_filter;
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.;
+                ui.label(RichText::new("Feet").small().color(theme.muted));
+                if ui.selectable_label(filter.feet.is_none(), "All").clicked() {
+                    filter.feet = None;
+                }
+                for bin in 0..MAP_BINS[4] as u8 {
+                    if ui
+                        .selectable_label(
+                            filter.feet == Some(bin),
+                            feet_bin_label(usize::from(bin))
+                                .replace(" feet", "")
+                                .replace(" foot", ""),
+                        )
+                        .clicked()
+                    {
+                        filter.feet = Some(bin);
+                    }
+                }
+                ui.add_space(8.);
+                ui.label(RichText::new("Body").small().color(theme.muted));
+                for (size, label, why) in [
+                    (None, "All", "Every body size"),
+                    (Some(0), "Small", "Up to 5 nodes"),
+                    (Some(1), "Medium", "6 to 9 nodes"),
+                    (Some(2), "Large", "10 nodes or more"),
+                ] {
+                    if ui
+                        .selectable_label(filter.size == size, label)
+                        .on_hover_text(why)
+                        .clicked()
+                    {
+                        filter.size = size;
+                    }
+                }
+                ui.add_space(8.);
+                ui.checkbox(&mut filter.one_per_plan, "One per body plan")
+                    .on_hover_text(
+                        "Show only the fastest creature of each body plan, with how many share it",
+                    );
+            });
+            if filter != self.card_filter {
+                self.card_filter = filter;
+                self.worker.send(Command::Filter(filter));
+                self.last_page = usize::MAX;
+            }
+        }
         let mut selected = None;
         let mut requested = None;
         let mut map_click = None;
@@ -2474,11 +2526,8 @@ impl App {
             let progress = (self.sort_started.elapsed().as_secs_f32() * SORT_SPEED / 3.).min(1.);
             let animating = snapshot.stage == Stage::Archived && progress < 1.;
             let ease = progress * progress * (3. - 2. * progress);
-            let item_count = if snapshot.archive_size > 0 {
-                snapshot.archive_size
-            } else {
-                snapshot.config.population
-            };
+            let item_count = snapshot.page_total;
+            let shown = self.playback.as_ref().map(|p| p.creature.id);
             let mut positions = std::collections::HashMap::new();
             egui::ScrollArea::vertical().id_salt("population_grid").show_rows(
                 ui, 137., item_count.div_ceil(columns), |ui, rows| {
@@ -2496,7 +2545,7 @@ impl App {
                                     if animating && let Some(previous) = self.card_positions.get(&card.creature.id) {
                                         rect = destination.translate((*previous - destination.min) * (1. - ease));
                                     }
-                                    paint_card(ui.painter(), card, rect, response.hovered(), snapshot.stage, theme);
+                                    paint_card(ui.painter(), card, rect, response.hovered() || shown == Some(card.creature.id), snapshot.stage, theme);
                                     if response.clicked() {
                                         selected = Some((card.creature.clone(), snapshot.config.clone()));
                                     }
@@ -2536,7 +2585,6 @@ impl App {
         }
         if let Some((creature, config)) = selected {
             self.select(creature, config);
-            self.tab = Tab::Overview;
         }
     }
     /// Replays the best creature recorded for one history entry, through the
@@ -3773,9 +3821,9 @@ impl eframe::App for App {
             }
             self.absorb_events(&next);
             if let Some((c, cfg)) = next.selected.take() {
-                // A creature the player clicked on the archive map.
+                // A creature the player clicked on the archive map; it plays
+                // in the player docked beside the map.
                 self.select(c, cfg);
-                self.tab = Tab::Overview;
             }
             if let Some((id, lineage)) = next.lineage.take() {
                 if self.playback.as_ref().is_some_and(|p| p.creature.id == id) {
@@ -4006,7 +4054,22 @@ impl eframe::App for App {
                             });
                         });
                     }
-                    Tab::Population => self.population(ui),
+                    Tab::Population => {
+                        // The archive on the left, the replay docked on the
+                        // right, so browsing never leaves the tab.
+                        let height = ui.available_height();
+                        let width = ui.available_width();
+                        ui.horizontal_top(|ui| {
+                            ui.allocate_ui(Vec2::new(width * 0.6, height), |ui| {
+                                ui.vertical(|ui| self.population(ui));
+                            });
+                            ui.allocate_ui(Vec2::new(ui.available_width(), height), |ui| {
+                                ui.vertical(|ui| {
+                                    self.viewport(ui, (height * 0.55).max(180.));
+                                });
+                            });
+                        });
+                    }
                     Tab::History => {
                         egui::ScrollArea::vertical().show(ui, |ui| self.history(ui));
                     }
@@ -4173,11 +4236,19 @@ fn paint_card(
         FontId::proportional(10.),
         theme.ink,
     );
-    if card.innovation_reserve {
+    if card.plan_count > 1 {
         painter.text(
             rect.right_top() + Vec2::new(-9., 8.),
             Align2::RIGHT_TOP,
-            "MORPH",
+            format!("{} like it", card.plan_count),
+            FontId::proportional(9.),
+            theme.accent,
+        );
+    } else if card.innovation_reserve {
+        painter.text(
+            rect.right_top() + Vec2::new(-9., 8.),
+            Align2::RIGHT_TOP,
+            "NEW BODY",
             FontId::proportional(9.),
             theme.accent,
         );
@@ -4960,6 +5031,19 @@ mod tests {
         );
         config.seasons = 0;
         assert_eq!(season_forecast(&config, 7), None);
+    }
+    #[test]
+    fn body_plans_ignore_lengths_and_rhythms() {
+        use crate::worker::body_plan;
+        let creature = test_creature();
+        let mut tuned = creature.clone();
+        tuned.bones[0].rest_length = 0.9;
+        tuned.muscles[0].period = 0.3;
+        tuned.nodes[1].x = 0.7;
+        assert_eq!(body_plan(&creature), body_plan(&tuned));
+        let mut more = creature.clone();
+        more.muscles.push(more.muscles[0]);
+        assert_ne!(body_plan(&creature), body_plan(&more));
     }
     #[test]
     fn species_names_follow_the_body_plan() {

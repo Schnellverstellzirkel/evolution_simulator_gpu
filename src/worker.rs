@@ -40,12 +40,64 @@ pub enum Command {
     MapTable(bool),
     /// The archive creature with this id, answered in `Snapshot::selected`.
     Select(u64),
+    /// Which archive cards to page through.
+    Filter(CardFilter),
     /// Benchmark probe: the UI send time, used to measure how long queued controls wait.
     Ping(Instant),
     /// Benchmark probe: re-applies the current settings like an environment
     /// button, to measure how long such a change waits.
     ConfigureProbe(Instant),
     Shutdown,
+}
+/// Which archive cards the UI pages through.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct CardFilter {
+    /// Feet bin (0 is one foot, 4 is five or more), or every count.
+    pub feet: Option<u8>,
+    /// Body size by node count (see `size_class`), or every size.
+    pub size: Option<u8>,
+    /// Only the fastest creature of each body plan.
+    pub one_per_plan: bool,
+}
+/// Body size class by node count: 0 small (up to 5 nodes), 1 medium (6 to
+/// 9), 2 large (10 or more).
+pub fn size_class(nodes: usize) -> u8 {
+    match nodes {
+        0..=5 => 0,
+        6..=9 => 1,
+        _ => 2,
+    }
+}
+/// A key for a creature's body plan: its counts of nodes, bones and muscles
+/// and which parts connect to which. Lengths, masses and rhythms stay out,
+/// so a small mutation keeps the plan. The sums do not depend on part order.
+pub fn body_plan(creature: &Creature) -> u64 {
+    let (nodes, bones, muscles) = (
+        creature.nodes.len() as u64,
+        creature.bones.len() as u64,
+        creature.muscles.len() as u64,
+    );
+    let mut plan = (nodes << 42) ^ (bones << 21) ^ muscles;
+    for bone in &creature.bones {
+        let (a, b) = (u64::from(bone.a.min(bone.b)), u64::from(bone.a.max(bone.b)));
+        plan = plan.wrapping_add(
+            a.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .wrapping_add(b.wrapping_mul(0xbf58_476d_1ce4_e5b9))
+                .rotate_left(17),
+        );
+    }
+    for muscle in &creature.muscles {
+        let (a, b) = (
+            u64::from(muscle.bone_a.min(muscle.bone_b)),
+            u64::from(muscle.bone_a.max(muscle.bone_b)),
+        );
+        plan = plan.wrapping_add(
+            a.wrapping_mul(0x94d0_49bb_1331_11eb)
+                .wrapping_add(b.wrapping_mul(0x2545_f491_4f6c_dd1d))
+                .rotate_left(29),
+        );
+    }
+    plan
 }
 #[derive(Clone)]
 pub struct Card {
@@ -58,6 +110,9 @@ pub struct Card {
     pub emitter: Option<Emitter>,
     pub visits: u64,
     pub innovation_reserve: bool,
+    /// Kept creatures that share this card's body plan when the filter keeps
+    /// one per plan; 1 otherwise.
+    pub plan_count: usize,
     pub creature: Creature,
 }
 /// Something that happened to the experiment, for the UI's event feed.
@@ -206,6 +261,8 @@ pub struct Snapshot {
     pub elapsed: f64,
     pub archive_cells: usize,
     pub archive_size: usize,
+    /// Cards the filter lets through (the archive size without a filter).
+    pub page_total: usize,
     pub innovation_reserve_count: usize,
     pub qd_score: f64,
     pub emitters: [EmitterStats; 4],
@@ -353,6 +410,7 @@ fn run(
     let mut map: Option<Arc<Vec<MapCell>>> = None;
     let mut map_key = (u64::MAX, usize::MAX, 0u64);
     let mut selected: Option<(Creature, Config)> = None;
+    let mut filter = CardFilter::default();
     // A background autosave, which reports the file and generation it wrote.
     let mut checkpoint_thread: Option<std::thread::JoinHandle<Option<(PathBuf, u32)>>> = None;
     let benchmark_generations = std::env::var("EVOLUTION_BENCH_GENERATIONS")
@@ -421,6 +479,7 @@ fn run(
                         | Command::Lineage(_)
                         | Command::MapTable(_)
                         | Command::Select(_)
+                        | Command::Filter(_)
                         | Command::Pause
                         | Command::Run { .. }
                         | Command::Next
@@ -636,6 +695,10 @@ fn run(
                             map = None;
                             map_key = (u64::MAX, usize::MAX, 0);
                         }
+                    }
+                    Command::Filter(next) => {
+                        filter = next;
+                        page = 0;
                     }
                     Command::Select(id) => {
                         if let Some(e) = &exp
@@ -1125,8 +1188,50 @@ fn run(
                     }
                 }
                 let archive_count = e.archive.entries.len();
+                // The archive by distance, with each creature's overall rank,
+                // then the player's filter.
+                let mut ranked: Vec<(usize, usize)> = Vec::new();
+                let mut plan_counts: std::collections::HashMap<u64, usize> =
+                    std::collections::HashMap::new();
+                if archive_count > 0 {
+                    let mut order: Vec<_> = (0..archive_count).collect();
+                    order.sort_unstable_by(|&a, &b| {
+                        e.archive.entries[b]
+                            .fitness
+                            .total_cmp(&e.archive.entries[a].fitness)
+                    });
+                    ranked = order
+                        .into_iter()
+                        .enumerate()
+                        .filter(|&(_, i)| {
+                            let elite = &e.archive.entries[i];
+                            filter
+                                .feet
+                                .is_none_or(|feet| elite.descriptor.niche().0[4] == feet)
+                                && filter.size.is_none_or(|size| {
+                                    size_class(elite.creature.nodes.len()) == size
+                                })
+                        })
+                        .collect();
+                    if filter.one_per_plan {
+                        let plans: Vec<u64> = ranked
+                            .iter()
+                            .map(|&(_, i)| body_plan(&e.archive.entries[i].creature))
+                            .collect();
+                        for &plan in &plans {
+                            *plan_counts.entry(plan).or_default() += 1;
+                        }
+                        let mut seen = std::collections::HashSet::new();
+                        ranked = ranked
+                            .into_iter()
+                            .zip(plans)
+                            .filter(|&(_, plan)| seen.insert(plan))
+                            .map(|(pair, _)| pair)
+                            .collect();
+                    }
+                }
                 let item_count = if archive_count > 0 {
-                    archive_count
+                    ranked.len()
                 } else {
                     e.config.population
                 };
@@ -1135,18 +1240,9 @@ fn run(
                 }
                 let end = (page + 120).min(item_count);
                 let cards = if archive_count > 0 {
-                    let mut order: Vec<_> = (0..archive_count).collect();
-                    order.sort_unstable_by(|&a, &b| {
-                        e.archive.entries[b]
-                            .fitness
-                            .total_cmp(&e.archive.entries[a].fitness)
-                    });
-                    order
-                        .into_iter()
-                        .enumerate()
-                        .skip(page)
-                        .take(end.saturating_sub(page))
-                        .map(|(rank, i)| {
+                    ranked[page.min(end)..end]
+                        .iter()
+                        .map(|&(rank, i)| {
                             let elite = &e.archive.entries[i];
                             Card {
                                 index: i,
@@ -1158,6 +1254,14 @@ fn run(
                                 emitter: Some(elite.emitter),
                                 visits: elite.visits,
                                 innovation_reserve: qd::is_morphology_niche(&elite.niche),
+                                plan_count: if filter.one_per_plan {
+                                    plan_counts
+                                        .get(&body_plan(&elite.creature))
+                                        .copied()
+                                        .unwrap_or(1)
+                                } else {
+                                    1
+                                },
                                 creature: elite.creature.clone(),
                             }
                         })
@@ -1174,6 +1278,7 @@ fn run(
                             emitter: None,
                             visits: 0,
                             innovation_reserve: false,
+                            plan_count: 1,
                             creature: e.population.creature(i),
                         })
                         .collect()
@@ -1228,6 +1333,7 @@ fn run(
                     elapsed: e.evaluation_seconds,
                     archive_cells: e.archive.behavior_count(),
                     archive_size: archive_count,
+                    page_total: item_count,
                     innovation_reserve_count: e.archive.morphology_count(),
                     qd_score: e.archive.qd_score,
                     emitters: e.emitter_stats,
@@ -1263,6 +1369,7 @@ fn run(
                     elapsed: 0.,
                     archive_cells: 0,
                     archive_size: 0,
+                    page_total: 0,
                     innovation_reserve_count: 0,
                     qd_score: 0.0,
                     emitters: [EmitterStats::default(); 4],
