@@ -3,7 +3,7 @@ use crate::{
     evolution::{Creature, FAILED},
     gpu::Gpu,
     physics::{self, Node},
-    storage::{PERCENTILES, Stage, Stats},
+    storage::{Stage, Stats},
     worker::{Command, EventKind, Snapshot, Worker},
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
@@ -846,26 +846,6 @@ fn world_records(history: &[Stats]) -> Vec<(usize, f32, bool)> {
     }
     records
 }
-/// History positions where the all-time best distance moved, oldest first.
-fn record_entries(history: &[Stats]) -> Vec<(usize, f32)> {
-    let mut best = f32::NEG_INFINITY;
-    let mut records = Vec::new();
-    for (index, stats) in history.iter().enumerate() {
-        if stats.best.is_finite() && stats.best > best {
-            best = stats.best;
-            records.push((index, stats.best));
-        }
-    }
-    records
-}
-/// One all-time record in the session hall of fame.
-struct FameEntry {
-    generation: u32,
-    distance: f32,
-    creature: Creature,
-    /// The world the record was set in.
-    config: Config,
-}
 /// Heat map of the archive: for each ground contact and cadence pair, the
 /// best creature among the height and feet bins the filters let through.
 /// One color scale spans every cell of the archive, so a color means the
@@ -1196,7 +1176,6 @@ struct App {
     zoom: f32,
     camera: [f32; 2],
     follow: bool,
-    percentiles: [bool; 29],
     history_index: usize,
     history_latest: bool,
     file_mode: Option<&'static str>,
@@ -1257,11 +1236,6 @@ struct App {
     race_pending: bool,
     race_page_requested: bool,
     race_camera: f32,
-    /// Session hall of fame: all-time records seen so far, oldest first.
-    fame: Vec<FameEntry>,
-    fame_best: f32,
-    fame_seen: usize,
-    fame_epoch: u64,
     /// Native benchmark frame intervals and the last control probe time.
     bench_frames: Vec<f32>,
     bench_last_ping: Instant,
@@ -1309,10 +1283,6 @@ impl App {
         } else {
             worker.send(Command::New(initial_config));
         }
-        let mut percentiles = [false; 29];
-        percentiles[0] = true;
-        percentiles[14] = true;
-        percentiles[28] = true;
         Self {
             worker,
             snapshot: None,
@@ -1330,7 +1300,6 @@ impl App {
             zoom: DEFAULT_CAMERA_ZOOM,
             camera: [0.0, 0.0],
             follow: true,
-            percentiles,
             history_index: 0,
             history_latest: true,
             file_mode: None,
@@ -1373,10 +1342,6 @@ impl App {
             race_pending: smoke_tab == "race",
             race_page_requested: false,
             race_camera: 0.0,
-            fame: Vec::new(),
-            fame_best: 0.0,
-            fame_seen: 0,
-            fame_epoch: u64::MAX,
             bench_frames: Vec::new(),
             bench_last_ping: Instant::now(),
             bench_pings: 0,
@@ -2323,25 +2288,15 @@ impl App {
                 plot.set_plot_bounds_x((end - generations).max(0.0)..=end);
                 plot.set_auto_bounds(egui::Vec2b::new(false, true));
             }
-            for (i, &visible) in self.percentiles.iter().enumerate() {
-                if !visible {
-                    continue;
-                }
+            // The best creature and the typical kept one; the percentile
+            // index follows `storage::PERCENTILES` (28 is 100, 14 is 50).
+            for (i, name, color) in [(28, "Best", theme.accent), (14, "Median", AMBER)] {
                 let values: Vec<[f64; 2]> = s
                     .history
                     .iter()
                     .map(|h| [h.generation as f64, h.percentiles[i] as f64])
                     .collect();
-                let (name, color, width) = if i == 28 {
-                    ("Best".into(), theme.accent, 2.5)
-                } else if i == 14 {
-                    ("Median".into(), AMBER, 2.5)
-                } else if i == 0 {
-                    ("Worst".into(), Color32::from_rgb(104, 133, 159), 1.5)
-                } else {
-                    (format!("P{}", PERCENTILES[i]), species_color(i, 0), 1.)
-                };
-                plot.line(Line::new(name, values).color(color).width(width));
+                plot.line(Line::new(name, values).color(color).width(2.5));
             }
             // A vertical line where the world changed: the generation that
             // first ran in the new world.
@@ -2584,34 +2539,6 @@ impl App {
             self.tab = Tab::Overview;
         }
     }
-    /// Appends new all-time bests to the session hall of fame. Records come
-    /// from history stats, whose best representative is already in the
-    /// snapshot, so no archive page request is needed.
-    fn absorb_records(&mut self, snapshot: &Snapshot) {
-        if self.fame_epoch != snapshot.epoch {
-            self.fame_epoch = snapshot.epoch;
-            self.fame.clear();
-            self.fame_best = 0.0;
-            self.fame_seen = 0;
-        }
-        if snapshot.history.len() < self.fame_seen {
-            self.fame_seen = 0;
-        }
-        for stats in &snapshot.history[self.fame_seen..] {
-            if stats.best.is_finite() && stats.best > self.fame_best {
-                self.fame_best = stats.best;
-                if let Some(creature) = stats.representatives.last().cloned() {
-                    self.fame.push(FameEntry {
-                        generation: stats.generation,
-                        distance: stats.best,
-                        creature,
-                        config: stats.config.clone(),
-                    });
-                }
-            }
-        }
-        self.fame_seen = snapshot.history.len();
-    }
     /// Replays the best creature recorded for one history entry, through the
     /// same preview path as an archive card click.
     fn replay_history_holder(&mut self, index: usize) {
@@ -2738,54 +2665,19 @@ impl App {
             None => {}
         }
     }
-    /// Compact timeline of every new all-time best, newest first. Clicking one
-    /// replays its record holder.
-    fn records_timeline(&mut self, ui: &mut egui::Ui) {
+    /// Every record, newest first: generation, distance, species and the
+    /// world it was set in, with a Replay button. Records count again after
+    /// each world change, like the feed and the chart.
+    fn records_list(&mut self, ui: &mut egui::Ui) {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        let records = record_entries(&snapshot.history);
+        let theme = self.theme();
+        let records = world_records(&snapshot.history);
+        ui.label(RichText::new("RECORDS").small().color(theme.muted));
         if records.is_empty() {
-            return;
-        }
-        let theme = self.theme();
-        ui.label(
-            RichText::new("RECORDS · EVERY NEW BEST DISTANCE")
-                .small()
-                .color(theme.muted),
-        );
-        let mut chosen = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("records_timeline")
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for &(index, best) in records.iter().rev() {
-                        let stats = &snapshot.history[index];
-                        if ui
-                            .small_button(format!("Gen {} · {best:.2} m", stats.generation))
-                            .on_hover_text("Click to replay this record holder")
-                            .clicked()
-                        {
-                            chosen = Some(index);
-                        }
-                    }
-                });
-            });
-        if let Some(index) = chosen {
-            self.replay_history_holder(index);
-        }
-    }
-    /// Session record holders, newest first, with a replay button each.
-    fn hall_of_fame(&mut self, ui: &mut egui::Ui) {
-        let theme = self.theme();
-        ui.label(
-            RichText::new("HALL OF FAME · SESSION RECORDS")
-                .small()
-                .color(theme.muted),
-        );
-        if self.fame.is_empty() {
             ui.label(
-                RichText::new("No records yet. The first improvement lands here.")
+                RichText::new("No records yet. The first generation's best lands here.")
                     .small()
                     .color(theme.muted),
             );
@@ -2793,42 +2685,49 @@ impl App {
         }
         let mut chosen = None;
         egui::ScrollArea::vertical()
-            .id_salt("hall_of_fame")
-            .max_height(180.)
+            .id_salt("records_list")
+            .max_height(200.)
             .show(ui, |ui| {
-                for (place, entry) in self.fame.iter().enumerate().rev() {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!("{}.", place + 1))
+                egui::Grid::new("records_grid")
+                    .num_columns(4)
+                    .spacing([14., 4.])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for &(index, best, first) in records.iter().rev() {
+                            let stats = &snapshot.history[index];
+                            ui.label(
+                                RichText::new(format!("Gen {}", stats.generation))
+                                    .small()
+                                    .color(theme.muted),
+                            );
+                            ui.label(RichText::new(format!("{best:.2} m")).strong());
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} · {}{}",
+                                    stats
+                                        .representatives
+                                        .last()
+                                        .map(species_name)
+                                        .unwrap_or_default(),
+                                    world_summary(&stats.config),
+                                    if first && index > 0 {
+                                        " (new world)"
+                                    } else {
+                                        ""
+                                    }
+                                ))
                                 .small()
                                 .color(theme.muted),
-                        );
-                        ui.label(format!(
-                            "Gen {} · {:.2} m",
-                            entry.generation, entry.distance
-                        ));
-                        ui.label(
-                            RichText::new(species_name(&entry.creature))
-                                .small()
-                                .color(theme.muted),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .small_button("Replay")
-                                .on_hover_text("Replay this record holder")
-                                .clicked()
-                            {
-                                chosen = Some(place);
+                            );
+                            if ui.small_button("Replay").clicked() {
+                                chosen = Some(index);
                             }
-                        });
+                            ui.end_row();
+                        }
                     });
-                }
             });
-        if let Some(place) = chosen {
-            let entry = &self.fame[place];
-            let (creature, config) = (entry.creature.clone(), entry.config.clone());
-            self.select(creature, config);
-            self.tab = Tab::Overview;
+        if let Some(index) = chosen {
+            self.replay_history_holder(index);
         }
     }
     /// Builds race lanes from the top archive cards once the first page arrives.
@@ -3205,9 +3104,11 @@ impl App {
         }
         let theme = self.theme();
         ui.label(
-            RichText::new("BODY TYPES THROUGH GENERATIONS")
-                .small()
-                .color(theme.muted),
+            RichText::new(
+                "BODY TYPES THROUGH GENERATIONS · each color is one count of nodes and muscles, named in the list below",
+            )
+            .small()
+            .color(theme.muted),
         );
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 80.), Sense::click());
@@ -3264,7 +3165,7 @@ impl App {
             return;
         }
         ui.horizontal(|ui| {
-            ui.heading("Generation archive");
+            ui.heading("History");
             ui.checkbox(&mut self.history_latest, "Follow latest");
             if ui.button("Export CSV").clicked() {
                 self.file("Export CSV");
@@ -3276,17 +3177,9 @@ impl App {
         self.history_index = self.history_index.min(len - 1);
         ui.add(egui::Slider::new(&mut self.history_index, 0..=len - 1).text("Generation"))
             .on_hover_text("Disable Follow latest to keep a historical generation selected");
-        egui::CollapsingHeader::new("Percentile curves").show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for (i, p) in PERCENTILES.iter().enumerate() {
-                    ui.checkbox(&mut self.percentiles[i], format!("P{p}"));
-                }
-            });
-        });
         self.trend(ui, 180.);
-        self.records_timeline(ui);
         ui.add_space(6.);
-        self.hall_of_fame(ui);
+        self.records_list(ui);
         ui.add_space(6.);
         self.species_history(ui);
         let stats = self.snapshot.as_ref().unwrap().history[self.history_index].clone();
@@ -3457,7 +3350,7 @@ impl App {
                     ),
                     (
                         "History & statistics",
-                        "Per-generation curves, every new record with a replay, the session hall of fame, the mix of body types, and the distribution of distances.",
+                        "The best and median distance over time with world changes marked, every record with a replay, the mix of body types, and the distances of one generation.",
                     ),
                     (
                         "Race",
@@ -3842,7 +3735,6 @@ impl eframe::App for App {
         }
         let next = self.worker.view.lock().unwrap().take();
         if let Some(mut next) = next {
-            self.absorb_records(&next);
             if self
                 .snapshot
                 .as_ref()
