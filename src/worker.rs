@@ -1219,6 +1219,18 @@ fn run(
                                     );
                                 }
                                 running = false;
+                                // Developer benchmarks: EVOLUTION_BENCH_SAVE
+                                // keeps the evolved game for later runs.
+                                if let Some(path) = std::env::var_os("EVOLUTION_BENCH_SAVE") {
+                                    let path = PathBuf::from(path);
+                                    match storage::save(&path, e) {
+                                        Ok(()) => eprintln!("Benchmark saved {}", path.display()),
+                                        Err(err) => eprintln!(
+                                            "Benchmark save {} failed: {err:#}",
+                                            path.display()
+                                        ),
+                                    }
+                                }
                                 ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
                                 ctx.request_repaint();
                             }
