@@ -216,6 +216,14 @@ impl StageLog {
         self.reset();
     }
 }
+/// A save loading on its own thread.
+struct Loading {
+    path: std::path::PathBuf,
+    progress: Arc<storage::Progress>,
+    handle: std::thread::JoinHandle<anyhow::Result<Experiment>>,
+    started: Instant,
+}
+
 fn run(
     mut gpu: Gpu,
     rx: Receiver<Command>,
@@ -241,6 +249,12 @@ fn run(
     let mut epoch = 0u64;
     let mut history = Arc::new(Vec::new());
     let mut checkpoint_thread: Option<std::thread::JoinHandle<()>> = None;
+    // A save being loaded on its own thread, and a save waiting until the
+    // "Saving" status has reached the window.
+    let mut loading: Option<Loading> = None;
+    let mut pending_save: Option<std::path::PathBuf> = None;
+    let mut deferred: Vec<Command> = Vec::new();
+    let mut last_progress = Instant::now();
     let benchmark_generations = std::env::var("EVOLUTION_BENCH_GENERATIONS")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -277,11 +291,28 @@ fn run(
             }
         };
         // Handle every queued command now; controls never wait behind a GPU batch.
-        let mut commands: Vec<Command> = first.into_iter().collect();
+        // Commands held back during a load run first once it is done.
+        let mut commands: Vec<Command> = if loading.is_none() {
+            std::mem::take(&mut deferred)
+        } else {
+            Vec::new()
+        };
+        commands.extend(first);
         commands.extend(rx.try_iter());
         for command in commands {
             if matches!(command, Command::Shutdown) {
                 break 'worker;
+            }
+            // While a save loads there is no game to act on: hold every other
+            // command, in order, until the load is done.
+            if loading.is_some()
+                && !matches!(
+                    command,
+                    Command::New(_) | Command::Load(_) | Command::Ping(_)
+                )
+            {
+                deferred.push(command);
+                continue;
             }
             // Commands that change or persist the experiment first collect the
             // results of queued GPU work, so the completed prefix stays exact.
@@ -328,6 +359,9 @@ fn run(
                 match command {
                     Command::Shutdown => return Ok(()),
                     Command::New(cfg) => {
+                        if let Some(old) = loading.take() {
+                            old.progress.cancel.store(true, Ordering::Relaxed);
+                        }
                         running = false;
                         steady = Steady::default();
                         status = "Creating population…".into();
@@ -404,33 +438,54 @@ fn run(
                         }
                     }
                     Command::Save(path) => {
-                        if let Some(e) = &exp {
-                            storage::save(&path, e)?;
-                            status = format!("Saved {}", path.display());
+                        if exp.is_some() {
+                            // Saved after this status reaches the window.
+                            status = format!("Saving {}…", path.display());
+                            pending_save = Some(path);
                         }
                     }
                     Command::Load(path) => {
+                        // An incompatible save is turned down from its header,
+                        // before gigabytes are read.
+                        let header = storage::check(&path)?;
+                        if let Some(old) = loading.take() {
+                            old.progress.cancel.store(true, Ordering::Relaxed);
+                        }
                         steady = Steady::default();
-                        let mut next = storage::load(&path)?;
-                        // A loaded game starts with autosave off, like a new one,
-                        // whatever interval the checkpoint carried.
-                        next.config.checkpoint_interval = 0;
-                        let creature = next
-                            .archive
-                            .entries
-                            .iter()
-                            .max_by(|a, b| a.fitness.total_cmp(&b.fitness))
-                            .map_or_else(
-                                || next.population.creature(0),
-                                |elite| elite.creature.clone(),
-                            );
-                        preview = Some((creature, next.config.clone()));
-                        exp = Some(next);
+                        running = false;
+                        // Holding the current game while a 3M save loads
+                        // doubles the memory and can push the machine into
+                        // swap: let it go first.
+                        exp = None;
+                        preview = None;
+                        lineage = None;
                         epoch += 1;
                         history = Arc::new(Vec::new());
-                        running = false;
                         page = 0;
-                        status = format!("Loaded {}", path.display());
+                        let progress = Arc::new(storage::Progress::default());
+                        let thread_progress = progress.clone();
+                        let thread_path = path.clone();
+                        let handle =
+                            std::thread::Builder::new()
+                                .name("load".into())
+                                .spawn(move || {
+                                    storage::load_with_progress(
+                                        &thread_path,
+                                        Some(&thread_progress),
+                                    )
+                                })?;
+                        status = format!(
+                            "Loading {} (generation {}, {} creatures)…",
+                            path.display(),
+                            header.generation,
+                            header.population
+                        );
+                        loading = Some(Loading {
+                            path,
+                            progress,
+                            handle,
+                            started: Instant::now(),
+                        });
                     }
                     Command::Export(path) => {
                         if let Some(e) = &exp {
@@ -476,6 +531,58 @@ fn run(
                 running = false;
             }
             // Disconnection is handled separately; shutdown closes the receiver after this iteration.
+        }
+        if let Some(load) = &loading {
+            if load.handle.is_finished() {
+                let load = loading.take().expect("a load in progress");
+                match load.handle.join() {
+                    Ok(Ok(mut next)) => {
+                        // A loaded game starts with autosave off, like a new
+                        // one, whatever interval the checkpoint carried.
+                        next.config.checkpoint_interval = 0;
+                        let creature = next
+                            .archive
+                            .entries
+                            .iter()
+                            .max_by(|a, b| a.fitness.total_cmp(&b.fitness))
+                            .map_or_else(
+                                || next.population.creature(0),
+                                |elite| elite.creature.clone(),
+                            );
+                        preview = Some((creature, next.config.clone()));
+                        exp = Some(next);
+                        epoch += 1;
+                        history = Arc::new(Vec::new());
+                        page = 0;
+                        status = format!(
+                            "Loaded {} in {:.1} s",
+                            load.path.display(),
+                            load.started.elapsed().as_secs_f64()
+                        );
+                    }
+                    Ok(Err(err)) => {
+                        error = Some(format!("{err:#}"));
+                        status = format!("Could not load {}", load.path.display());
+                    }
+                    Err(_) => {
+                        error = Some("The loading thread stopped unexpectedly".into());
+                        status = format!("Could not load {}", load.path.display());
+                    }
+                }
+                changed = true;
+            } else if last_progress.elapsed() > Duration::from_millis(250) {
+                let done = load.progress.done.load(Ordering::Relaxed) as f64;
+                let total = load.progress.total.load(Ordering::Relaxed).max(1) as f64;
+                status = format!(
+                    "Loading {}: {:.0}% of {:.1} GB, {:.0} s",
+                    load.path.display(),
+                    100.0 * done / total,
+                    total / 1e9,
+                    load.started.elapsed().as_secs_f64()
+                );
+                last_progress = Instant::now();
+                changed = true;
+            }
         }
         if pause.load(Ordering::Relaxed) {
             running = false;
@@ -1000,6 +1107,26 @@ fn run(
             ctx.request_repaint();
             changed = false;
             last_publish = Instant::now();
+        }
+        // A save runs once its "Saving" status is on screen.
+        if let Some(path) = pending_save.take()
+            && let Some(e) = &exp
+        {
+            let started = Instant::now();
+            match storage::save(&path, e) {
+                Ok(()) => {
+                    status = format!(
+                        "Saved {} in {:.1} s",
+                        path.display(),
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+                Err(err) => {
+                    error = Some(format!("{err:#}"));
+                    status = format!("Could not save {}", path.display());
+                }
+            }
+            changed = true;
         }
     }
     if let Some(handle) = checkpoint_thread.take() {

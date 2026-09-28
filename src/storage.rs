@@ -2082,8 +2082,11 @@ impl Experiment {
 }
 // V5 dropped the unused obstacle slot and V6 added the environment-effect
 // multipliers to the binary configuration. Older files cannot decode the new
-// layout and are rejected cleanly instead of failing mid-stream.
-const MAGIC: &[u8; 8] = b"EVORUST6";
+// layout and are rejected cleanly instead of failing mid-stream. V7 puts a
+// small uncompressed header (`SaveHeader`) before the stream, so the game can
+// turn down a save it cannot use before it reads gigabytes.
+const MAGIC: &[u8; 8] = b"EVORUST7";
+const V6_MAGIC: &[u8; 8] = b"EVORUST6";
 const V3_MAGIC: &[u8; 8] = b"EVORUST3";
 const V2_MAGIC: &[u8; 8] = b"EVORUST2";
 const LEGACY_MAGIC: &[u8; 8] = b"EVORUST1";
@@ -2135,31 +2138,169 @@ pub fn rotate_autosaves(dir: &Path, keep: usize) -> usize {
     }
     removed
 }
+/// What a save's header says, read without decoding the save.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SaveHeader {
+    pub qd_version: u32,
+    pub generation: u32,
+    pub population: u64,
+}
+impl SaveHeader {
+    const BYTES: usize = 16;
+    fn of(experiment: &Experiment) -> Self {
+        Self {
+            qd_version: experiment.qd_version,
+            generation: experiment.generation,
+            population: experiment.population.genomes.len() as u64,
+        }
+    }
+    fn to_bytes(self) -> [u8; Self::BYTES] {
+        let mut bytes = [0; Self::BYTES];
+        bytes[..4].copy_from_slice(&self.qd_version.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.generation.to_le_bytes());
+        bytes[8..].copy_from_slice(&self.population.to_le_bytes());
+        bytes
+    }
+    fn from_bytes(bytes: [u8; Self::BYTES]) -> Self {
+        let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        Self {
+            qd_version: word(0),
+            generation: word(4),
+            population: u64::from_le_bytes(bytes[8..].try_into().unwrap()),
+        }
+    }
+}
+
+/// Progress of a load or save that runs on another thread: file bytes read
+/// or written so far, the file size when known, and a flag that stops it.
+#[derive(Default)]
+pub struct Progress {
+    pub done: std::sync::atomic::AtomicU64,
+    pub total: std::sync::atomic::AtomicU64,
+    pub cancel: std::sync::atomic::AtomicBool,
+}
+
+/// A file that counts its bytes into a `Progress` and fails once cancelled.
+struct Counted<'a, T> {
+    inner: T,
+    progress: Option<&'a Progress>,
+}
+impl<T> Counted<'_, T> {
+    fn count(&self, bytes: usize) -> std::io::Result<()> {
+        use std::sync::atomic::Ordering::Relaxed;
+        if let Some(progress) = self.progress {
+            if progress.cancel.load(Relaxed) {
+                return Err(std::io::Error::other("cancelled"));
+            }
+            progress.done.fetch_add(bytes as u64, Relaxed);
+        }
+        Ok(())
+    }
+}
+impl<T: Read> Read for Counted<'_, T> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.count(n)?;
+        Ok(n)
+    }
+}
+impl<T: Write> Write for Counted<'_, T> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.count(n)?;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Reads a save's header. Saves from before the header are from older game
+/// versions, whose creatures were scored under other physics.
+pub fn peek(path: &Path) -> Result<SaveHeader> {
+    let mut file = File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
+    let mut magic = [0; 8];
+    file.read_exact(&mut magic)
+        .with_context(|| format!("{} is not a save of this game", path.display()))?;
+    if &magic == V6_MAGIC || &magic == V3_MAGIC || &magic == V2_MAGIC || &magic == LEGACY_MAGIC {
+        anyhow::bail!(
+            "{} was saved by an older version of the game, under older physics. It cannot be loaded; start a new population instead.",
+            path.display()
+        );
+    }
+    ensure!(
+        &magic == MAGIC,
+        "{} is not a save of this game",
+        path.display()
+    );
+    let mut header = [0; SaveHeader::BYTES];
+    file.read_exact(&mut header)
+        .with_context(|| format!("{} is cut short", path.display()))?;
+    Ok(SaveHeader::from_bytes(header))
+}
+
+/// The header of a save the game can load now, or a message saying why not.
+pub fn check(path: &Path) -> Result<SaveHeader> {
+    let header = peek(path)?;
+    ensure!(
+        header.qd_version == qd::VERSION,
+        "{} was saved under physics version {}, and this game uses version {}. Its scores no longer hold, so it cannot be loaded; start a new population instead.",
+        path.display(),
+        header.qd_version,
+        qd::VERSION
+    );
+    Ok(header)
+}
+
 pub fn save(path: &Path, experiment: &Experiment) -> Result<()> {
+    save_with_progress(path, experiment, None)
+}
+
+/// Saves through a temporary file that is renamed only once complete; a
+/// failed or cancelled save removes it.
+pub fn save_with_progress(
+    path: &Path,
+    experiment: &Experiment,
+    progress: Option<&Progress>,
+) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("evo.tmp");
-    let file = File::create(&tmp)?;
-    let mut out = BufWriter::new(file);
-    out.write_all(MAGIC)?;
-    let mut encoder = zstd::stream::write::Encoder::new(out, 3)?;
-    encoder.include_checksum(true)?;
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .serialize_into(&mut encoder, experiment)?;
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .serialize_into(
-            &mut encoder,
-            &CheckpointResume {
-                island_progress: experiment.island_progress.clone(),
-            },
-        )?;
-    let mut out = encoder.finish()?;
-    out.flush()?;
-    out.get_ref().sync_all()?;
-    drop(out);
+    let written = (|| -> Result<()> {
+        let file = File::create(&tmp)?;
+        let mut out = BufWriter::new(Counted {
+            inner: file,
+            progress,
+        });
+        out.write_all(MAGIC)?;
+        out.write_all(&SaveHeader::of(experiment).to_bytes())?;
+        let mut encoder = zstd::stream::write::Encoder::new(out, 3)?;
+        encoder.include_checksum(true)?;
+        // bincode writes field by field; a buffer turns each write into a
+        // copy instead of a call into the compressor.
+        let mut buffered = BufWriter::with_capacity(1 << 20, encoder);
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .serialize_into(&mut buffered, experiment)?;
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .serialize_into(
+                &mut buffered,
+                &CheckpointResume {
+                    island_progress: experiment.island_progress.clone(),
+                },
+            )?;
+        let encoder = buffered.into_inner().map_err(|error| error.into_error())?;
+        let mut out = encoder.finish()?;
+        out.flush()?;
+        out.get_ref().inner.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
     std::fs::rename(&tmp, path)?;
     // Unix permits opening directories to persist the rename. Windows rejects
     // File::open on a directory; the checkpoint file itself was synced above.
@@ -2170,14 +2311,40 @@ pub fn save(path: &Path, experiment: &Experiment) -> Result<()> {
     Ok(())
 }
 pub fn load(path: &Path) -> Result<Experiment> {
-    let mut file = BufReader::new(File::open(path).context("Cannot open checkpoint")?);
+    load_with_progress(path, None)
+}
+
+/// `load`, counting the file bytes read into `progress`.
+pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Experiment> {
+    let file = File::open(path).context("Cannot open checkpoint")?;
+    if let Some(progress) = progress {
+        progress.total.store(
+            file.metadata().map_or(0, |m| m.len()),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    let mut file = BufReader::new(Counted {
+        inner: file,
+        progress,
+    });
     let mut magic = [0; 8];
     file.read_exact(&mut magic)?;
     ensure!(
-        &magic == MAGIC || &magic == V3_MAGIC || &magic == V2_MAGIC || &magic == LEGACY_MAGIC,
+        &magic == MAGIC
+            || &magic == V6_MAGIC
+            || &magic == V3_MAGIC
+            || &magic == V2_MAGIC
+            || &magic == LEGACY_MAGIC,
         "Unsupported checkpoint format/version"
     );
-    let mut decoder = zstd::stream::read::Decoder::new(file)?;
+    if &magic == MAGIC {
+        let mut header = [0; SaveHeader::BYTES];
+        file.read_exact(&mut header)?;
+    }
+    // bincode reads field by field; a buffer turns each read into a copy
+    // instead of a call into the decompressor (18 s to 5 s at 3M).
+    let mut decoder =
+        BufReader::with_capacity(1 << 20, zstd::stream::read::Decoder::with_buffer(file)?);
     let mut experiment: Experiment = if &magic == LEGACY_MAGIC {
         let legacy: LegacyExperiment = bincode::DefaultOptions::new()
             .with_fixint_encoding()
@@ -2196,7 +2363,7 @@ pub fn load(path: &Path) -> Result<Experiment> {
             .with_limit(24 * 1024 * 1024 * 1024)
             .deserialize_from(&mut decoder)?
     };
-    if &magic == MAGIC {
+    if &magic == MAGIC || &magic == V6_MAGIC {
         let resume: CheckpointResume = bincode::DefaultOptions::new()
             .with_fixint_encoding()
             // A fixed-width vector length plus at most 64 (fitness, generation)
@@ -2600,6 +2767,66 @@ pub fn export_csv(path: &Path, history: &[Stats]) -> Result<()> {
 #[cfg(test)]
 mod migration_tests {
     use super::*;
+
+    #[test]
+    fn the_header_turns_down_old_saves_before_reading_them() {
+        let config = Config {
+            population: 8,
+            random_seed: false,
+            ..Config::default()
+        };
+        let mut experiment = Experiment::new(config).unwrap();
+        let dir = std::env::temp_dir();
+        let current = dir.join(format!("evolution-header-{}.evo", std::process::id()));
+        save(&current, &experiment).unwrap();
+        let header = check(&current).unwrap();
+        assert_eq!(
+            header,
+            SaveHeader {
+                qd_version: qd::VERSION,
+                generation: experiment.generation,
+                population: 8,
+            }
+        );
+        assert_eq!(load(&current).unwrap().population.genomes.len(), 8);
+
+        // Saved under other physics: the header says so.
+        experiment.qd_version = qd::VERSION - 1;
+        save(&current, &experiment).unwrap();
+        let error = check(&current).unwrap_err().to_string();
+        assert!(error.contains("physics version"), "{error}");
+
+        // Before the header: only the magic is read.
+        let old = dir.join(format!("evolution-header-v6-{}.evo", std::process::id()));
+        let mut bytes = V6_MAGIC.to_vec();
+        bytes.extend([0u8; 64]);
+        std::fs::write(&old, bytes).unwrap();
+        let error = check(&old).unwrap_err().to_string();
+        assert!(error.contains("older version"), "{error}");
+        std::fs::write(&old, b"not a save").unwrap();
+        assert!(check(&old).is_err());
+        let _ = std::fs::remove_file(current);
+        let _ = std::fs::remove_file(old);
+    }
+
+    #[test]
+    fn a_cancelled_save_leaves_no_file_behind() {
+        let config = Config {
+            population: 8,
+            random_seed: false,
+            ..Config::default()
+        };
+        let experiment = Experiment::new(config).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("evolution-cancel-{}.evo", std::process::id()));
+        let progress = Progress::default();
+        progress
+            .cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(save_with_progress(&path, &experiment, Some(&progress)).is_err());
+        assert!(!path.exists());
+        assert!(!path.with_extension("evo.tmp").exists());
+    }
 
     #[test]
     fn v2_checkpoint_migrates_node_muscles_to_bones() {
