@@ -52,6 +52,10 @@ static REPLAYS: std::sync::Mutex<Option<mpsc::Sender<ReplayRequest>>> = std::syn
 /// with the kernel that scores evolution, waiting up to `timeout`. None
 /// when no GPU evaluates or it cannot answer in time.
 pub fn record_on_gpu(creature: &Creature, cfg: &Config, timeout: Duration) -> Option<Recording> {
+    // The v2 kernel records no frames yet: the CPU replays.
+    if crate::physics2::enabled() {
+        return None;
+    }
     let sender = REPLAYS.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
     let (reply, answer) = mpsc::channel();
     sender
@@ -530,7 +534,8 @@ enum Backend {
 /// driver and NVRTC load (1.6 to 1.8 times Vulkan's kernel rate on the
 /// RTX 4060, docs/performance-log.md), and through Vulkan otherwise.
 fn open_backend(name: &str, max_nodes: usize) -> Result<(Backend, String)> {
-    if crate::cuda_engine::enabled() {
+    // The v2 kernel has no CUDA port yet: it runs on Vulkan.
+    if crate::cuda_engine::enabled() && !crate::physics2::enabled() {
         match CudaEngine::new(name, max_nodes) {
             Ok(engine) => {
                 let name = engine.name.clone();

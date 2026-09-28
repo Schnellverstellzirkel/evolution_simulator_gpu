@@ -20,7 +20,8 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 28: selected-engine scores and descriptors own archive admission; GPU
 //     results are no longer rescored through CPU playback.
 // 29: trials last 20 s instead of 60 s; older games move to 20 s on load.
-pub const VERSION: u32 = 29;
+// 30: physics v2 (articulated tree in reduced coordinates) scores the game.
+pub const VERSION: u32 = 30;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and

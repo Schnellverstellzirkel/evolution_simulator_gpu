@@ -112,7 +112,6 @@ const MAX_MUSCLE_FORCE: f32 = 100.0;
 const INV_JOINT_DAMPING: f32 = 10.0;
 const LIMIT_HARDNESS: f32 = 20.0;
 const JOINT_BREAK: f32 = 0.5;
-const TENDON: f32 = 0.0;
 const SPIN_CAP: f32 = 15.0;
 const INV_SPIN_CAP: f32 = 0.06666667;
 const SPIN_HARDNESS: f32 = 20.0;
@@ -120,6 +119,10 @@ const PGS_SWEEPS: u32 = 20u;
 const PLANT_SWEEPS: u32 = 20u;
 const WARM: bool = false;
 const PUSH_OUT: f32 = 0.2;
+const MUD_NORMAL: f32 = 2.0;
+const MUD_GRIP: f32 = 2.0;
+const MUD_DRAG: f32 = 2.0;
+const MUD_FULL_DEPTH: f32 = 0.1;
 const HEAD_SHAKE_LIMIT: f32 = 78.4;
 const HEAD_SHAKE_WINDOW: f32 = 0.1;
 const CONTACT_SLACK: f32 = 0.002;
@@ -229,6 +232,14 @@ fn body_add(j: u32, s: u32, v: vec3f) {
 }
 fn bone_field(j: u32, f: u32) -> f32 {
     return bone_data[bone_base + (j * BONE_FIELDS + f) * TILE];
+}
+// How deep node `i` sits in the mud, as a share of the deepest mud.
+fn mud_sink(i: u32) -> f32 {
+    let pn = node_pos(i);
+    let g = terrain(pn.x);
+    let secant = sqrt(1.0 + g.y * g.y);
+    let dry = (pn.y - g.x) / secant - node_radius(i);
+    return clamp(-dry, 0.0, p.mud) * (1.0 / MUD_FULL_DEPTH);
 }
 fn node_radius(i: u32) -> f32 {
     if i == 0u {
@@ -537,7 +548,8 @@ fn contacts(origin: vec2f, before: vec2f, outside: vec2f) -> vec2f {
         let g = terrain(pn.x);
         let secant = sqrt(1.0 + g.y * g.y);
         let normal = vec2f(-g.y / secant, 1.0 / secant);
-        let gap = (pn.y - g.x) / secant - node_radius(i);
+        let mud = select(0.0, p.mud, p.ground > 0.0);
+        let gap = (pn.y - g.x) / secant - node_radius(i) + mud;
         let body = body_of(i);
         let r = pn - origin;
         let v = node_vel(i);
@@ -587,7 +599,10 @@ fn contacts(origin: vec2f, before: vec2f, outside: vec2f) -> vec2f {
         let secant = sqrt(1.0 + g.y * g.y);
         let normal = vec2f(-g.y / secant, 1.0 / secant);
         let tangent = vec2f(normal.y, -normal.x);
-        let gap = (pn.y - g.x) / secant - node_radius(node);
+        let mud = select(0.0, p.mud, p.ground > 0.0);
+        let dry = (pn.y - g.x) / secant - node_radius(node);
+        let gap = dry + mud;
+        let sink = clamp(-dry, 0.0, mud) * (1.0 / MUD_FULL_DEPTH);
         let body = body_of(node);
         let r = pn - origin;
         let v = node_vel(node);
@@ -605,7 +620,7 @@ fn contacts(origin: vec2f, before: vec2f, outside: vec2f) -> vec2f {
         c_vt[ci] = v.x * tangent.x + v.y * tangent.y
             + DT * (sdot(dtan, a) + w * (-v.y * tangent.x + v.x * tangent.y));
         c_goal[ci] = select(-gap * PUSH_OUT * RATE, -gap * RATE, gap >= 0.0);
-        c_mu[ci] = node_fric(node) * p.friction;
+        c_mu[ci] = node_fric(node) * p.friction * (1.0 + MUD_GRIP * sink) * (1.0 + MUD_NORMAL * sink);
         nc += 1u;
     }
     // Contact-space matrix, column by column from each unit force's
@@ -804,10 +819,17 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             bias[j] = crf(sv, sym_mul(i0[j], i1[j], sv));
         }
         // Gravity and wind on every node.
+        var mud_impulse = 0.0;
         for (var i = 0u; i < MAXN; i++) {
             if i >= nn { break; }
             let m = mass[i];
-            bias[body_of(i)] -= force_at(node_pos(i) - origin, vec2f(p.wind * m, -p.gravity * m));
+            var fx = p.wind * m;
+            if p.mud > 0.0 && p.ground > 0.0 {
+                let drag = -m * MUD_DRAG * mud_sink(i) * node_vel(i).x;
+                fx += drag;
+                mud_impulse += drag * DT;
+            }
+            bias[body_of(i)] -= force_at(node_pos(i) - origin, vec2f(fx, -p.gravity * m));
         }
         // Muscles pull between points on two bones; the forces collect in
         // the table.
@@ -867,16 +889,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             );
             muscle_data[field + 11u * TILE] = magnitude;
             muscle_start += magnitude * length_m;
-            // The tendon pulls too, passively; its energy counts as stored.
-            var pull = magnitude;
-            if TENDON > 0.0 {
-                let long = muscle_data[field + 15u * TILE];
-                let stretch = max(length_m - long, 0.0);
-                let k_t = TENDON * cap / max(long, 0.05);
-                pull += k_t * stretch;
-                energy_start += 0.5 * k_t * stretch * stretch;
-                energy_scale += 0.5 * k_t * stretch * stretch;
-            }
+            let pull = magnitude;
             let f = dir * pull;
             body_add(a1 - 1u, 0u, force_at(pa - origin, f));
             body_add(b1 - 1u, 0u, -force_at(pb - origin, f));
@@ -974,7 +987,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             body_set(j, 1u, vec3f(om[j], 0.0, 0.0));
         }
 
-        var impulse = vec2f(p.wind * total_mass * DT, -p.gravity * total_mass * DT);
+        var impulse = vec2f(p.wind * total_mass * DT + mud_impulse, -p.gravity * total_mass * DT);
         nc = 0u;
         if grounded {
             impulse = contacts(origin, before, impulse);
@@ -1025,11 +1038,6 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let d = pb - pa;
                 let length_m = sqrt(d.x * d.x + d.y * d.y);
                 muscle_end += muscle_data[field + 11u * TILE] * length_m;
-                if TENDON > 0.0 {
-                    let long = muscle_data[field + 15u * TILE];
-                    let stretch = max(max(length_m, 1e-6) - long, 0.0);
-                    stored_end += 0.5 * TENDON * cap / max(long, 0.05) * stretch * stretch;
-                }
             }
             var energy_end = stored_end;
             var mass_x_end = 0.0;

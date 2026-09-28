@@ -19,15 +19,23 @@ use std::time::Duration;
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn the_v2_kernel_agrees_with_the_cpu_prototype() {
-    // SAFETY: set before any thread reads the environment; this test binary
-    // has one test.
-    unsafe { std::env::set_var("EVOLUTION_PHYSICS", "2") };
+    agree(0.0);
+}
+
+#[test]
+#[ignore = "needs the RTX 4060"]
+fn the_v2_kernel_agrees_with_the_cpu_prototype_in_mud() {
+    agree(0.06);
+}
+
+fn agree(mud: f32) {
     assert!(physics2::enabled());
     let cfg = Config {
         population: 512,
         duration: 1.0,
         random_seed: false,
         screen: None,
+        mud,
         ..Config::default()
     };
     let mut pop = evolution::create(&cfg).unwrap();
@@ -79,7 +87,7 @@ fn the_v2_kernel_agrees_with_the_cpu_prototype() {
         close += usize::from(gap <= 0.005);
     }
     eprintln!(
-        "{} creatures, 1 s: worst distance gap {worst:.4} m, {close} within 5 mm",
+        "{} creatures, mud {mud}, 1 s: worst distance gap {worst:.4} m, {close} within 5 mm",
         cpu.len()
     );
     assert!(

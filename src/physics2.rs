@@ -1,6 +1,6 @@
 //! Physics v2 prototype: a planar articulated tree in reduced coordinates
 //! (`docs/hpc-assessment.md` section 7.2, `docs/data-architecture.md`
-//! section 8). Opt in with `EVOLUTION_PHYSICS=2`.
+//! section 8). The game's physics; `EVOLUTION_PHYSICS=1` selects the older one for comparisons.
 //!
 //! A creature is a tree of point masses (its nodes) joined by rigid,
 //! massless bones. The state is the head's position and velocity, the neck's
@@ -35,10 +35,15 @@ use crate::{
 };
 use rayon::prelude::*;
 
-/// Whether the v2 physics replaces the current one (`EVOLUTION_PHYSICS=2`).
+/// Whether the v2 physics scores the game. It does, unless the developer
+/// diagnostic `EVOLUTION_PHYSICS=1` selects the older physics (v1) for a
+/// comparison.
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("EVOLUTION_PHYSICS").is_ok_and(|v| v.trim() == "2"))
+    *ON.get_or_init(|| {
+        std::env::var("EVOLUTION_PHYSICS").is_ok_and(|v| v.trim() != "1")
+            || std::env::var("EVOLUTION_PHYSICS").is_err()
+    })
 }
 
 /// How firmly a joint limit holds: its damper weighs this many times the
@@ -73,35 +78,6 @@ pub fn hill_speed() -> f32 {
 }
 /// Fields per muscle in the v2 kernel's muscle buffer.
 pub const MUSCLE_FIELDS: usize = 16;
-/// Body mass (kg) that powers one muscle, to scale muscle strength with the
-/// body (`EVOLUTION_P2_MUSCLE_KG`, a measuring switch; 0, the default,
-/// keeps every muscle at the fixed `Limits` force and store). A muscle's
-/// force cap and energy store scale with the body's mass over its muscle
-/// count times this, so more muscles share the same budget.
-fn mass_per_muscle() -> f32 {
-    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("EVOLUTION_P2_MUSCLE_KG")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|v: &f32| v.is_finite() && *v >= 0.0)
-            .unwrap_or(0.0)
-    })
-}
-/// Elastic tendons (`EVOLUTION_P2_TENDON`, a measuring switch; 0, the
-/// default, has none): a muscle stretched past its longest length pulls back
-/// like a spring stiff enough to reach the muscle's force cap when stretched
-/// by its longest length divided by this.
-fn tendon() -> f32 {
-    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("EVOLUTION_P2_TENDON")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|v: &f32| v.is_finite() && *v >= 0.0)
-            .unwrap_or(0.0)
-    })
-}
 /// Sliding speed (m/s) below which friction holds a foot (as
 /// `physics::PLANTED_SPEED`).
 pub const STICK_SPEED: f32 = physics::PLANTED_SPEED;
@@ -218,10 +194,8 @@ struct MuscleModel {
     /// Hill's relation as a factor on the shortening speed: 1 / (v_max
     /// times the muscle's length, at least 5 cm).
     hill: f32,
-    /// Longest length (m), where the tendon starts to pull, and the
-    /// tendon's stiffness (N/m).
+    /// Longest length (m).
     long: f32,
-    tendon: f32,
     amplitude: f32,
     inv_period: f32,
     phase: f32,
@@ -351,7 +325,6 @@ impl Model {
                         0.0
                     },
                     long: m.long,
-                    tendon: 0.0,
                     amplitude: (m.long - m.short).min(
                         2.0 * limits.muscle_speed * m.period * m.duty.min(1.0 - m.duty)
                             / std::f32::consts::PI,
@@ -370,16 +343,8 @@ impl Model {
             .collect();
         let quake = crate::physics::quake_hash(c.id);
         let still = cfg.quake <= 0.0 || !cfg.ground;
-        let total: f32 = nodes.iter().map(|n| n.mass).sum();
-        let muscle_scale = if mass_per_muscle() > 0.0 && !c.muscles.is_empty() {
-            total / (c.muscles.len() as f32 * mass_per_muscle())
-        } else {
-            1.0
-        };
-        let mut muscles: Vec<MuscleModel> = muscles;
-        for m in &mut muscles {
-            m.tendon = tendon() * limits.muscle_force * muscle_scale / m.long.max(0.05);
-        }
+        // Muscle strength over the fixed limits; 1 for every body today.
+        let muscle_scale = 1.0;
         Model {
             mass: order.iter().map(|&i| nodes[i].mass).collect(),
             radius: order.iter().map(|&i| nodes[i].radius).collect(),
@@ -424,6 +389,15 @@ impl Model {
     }
 
     /// The ground's height and slope under `x`.
+    /// How deep node `i` at `pos` sits in the mud, as a share of the
+    /// deepest mud: 0 for a node clear of the surface.
+    fn mud_sink(&self, pos: [f32; 2], i: usize, cfg: &Config, mud: f32) -> f32 {
+        let (h, slope) = self.ground(pos[0], cfg);
+        let secant = (1.0 + slope * slope).sqrt();
+        let dry = (pos[1] - h) / secant - self.radius[i];
+        (-dry).clamp(0.0, mud) * (1.0 / physics::MUD_FULL_DEPTH)
+    }
+
     fn ground(&self, x: f32, cfg: &Config) -> (f32, f32) {
         if !cfg.ground {
             return (f32::NEG_INFINITY, 0.0);
@@ -507,14 +481,6 @@ impl Model {
             total += kinetic + potential;
             scale += kinetic + potential.abs();
         }
-        if tendon() > 0.0 {
-            for (m, length) in self.muscles.iter().zip(self.muscle_lengths(s)) {
-                let stretch = (length - m.long).max(0.0);
-                let stored = 0.5 * m.tendon * stretch * stretch;
-                total += stored;
-                scale += stored;
-            }
-        }
         (total, scale)
     }
 
@@ -590,48 +556,12 @@ const SPIN_HARDNESS: f32 = 20.0;
 /// four feet down, and a node left out sinks a little and joins the next
 /// step's solve.
 pub const MAX_CONTACTS: usize = 4;
-/// The contact bound in use (`EVOLUTION_P2_CONTACTS`, a measuring switch;
-/// at most `MAX_CONTACTS`).
-fn max_contacts() -> usize {
-    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *N.get_or_init(|| {
-        std::env::var("EVOLUTION_P2_CONTACTS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|&n: &usize| (1..=MAX_CONTACTS).contains(&n))
-            .unwrap_or(MAX_CONTACTS)
-    })
-}
 /// Gauss-Seidel sweeps over the contacts per step, warm-started from each
 /// node's contact force of the last step. Against 20 cold sweeps, 8 warm
 /// ones moved 1,000 random bodies by at most 0.1 m in 2 s (p99 0.8 mm).
 const PGS_ITERATIONS: usize = 8;
 /// Sweeps of the planting pass, which starts from the first solve.
 const PLANT_SWEEPS: usize = 4;
-fn pgs_iterations() -> usize {
-    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *N.get_or_init(|| {
-        std::env::var("EVOLUTION_P2_PGS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(PGS_ITERATIONS)
-    })
-}
-/// Gauss-Seidel sweeps of the planting pass, which starts from the first
-/// solve's forces (`EVOLUTION_P2_PLANT_SWEEPS`, a measuring switch).
-fn plant_sweeps() -> usize {
-    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *N.get_or_init(|| {
-        std::env::var("EVOLUTION_P2_PLANT_SWEEPS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(PLANT_SWEEPS)
-    })
-}
-fn warm_start() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("EVOLUTION_P2_WARM").map_or(true, |v| v != "0"))
-}
 /// Share of a node's depth inside the ground that the contact removes per
 /// step.
 const PUSH_OUT: f32 = 0.2;
@@ -1054,9 +984,20 @@ fn simulate_step_inner(
     }
     // Gravity and wind on every node.
     let gravity = cfg.gravity;
+    // Mud (v1's rules): the floor lies `mud` lower, a node sunk in it (in
+    // meters over `MUD_FULL_DEPTH`) has its friction budget scaled up and
+    // loses a `MUD_DRAG * sink` share of its horizontal speed per second.
+    let mud = if cfg.ground { cfg.mud } else { 0.0 };
+    let mut mud_impulse = 0.0f32;
     for i in 0..n {
         let m = model.mass[i];
-        let f = [cfg.wind * m, -gravity * m];
+        let mut f = [cfg.wind * m, -gravity * m];
+        if mud > 0.0 {
+            let sink = model.mud_sink(s.pos[i], i, cfg, mud);
+            let drag = -m * physics::MUD_DRAG * sink * s.vel[i][0];
+            f[0] += drag;
+            mud_impulse += drag * dt;
+        }
         let j = sc.body_of[i];
         sc.force[j] = sc.force[j].add(force_at(rel(s.pos[i]), f));
     }
@@ -1119,9 +1060,8 @@ fn simulate_step_inner(
         sc.muscle_force[k] = magnitude;
         sc.muscle_length[k] = len;
         muscle_start += magnitude * len;
-        // A positive magnitude pulls the two points together. The tendon
-        // pulls too, passively (its energy is in `Model::energy`).
-        let pull = magnitude + m.tendon * (len - m.long).max(0.0);
+        // A positive magnitude pulls the two points together.
+        let pull = magnitude;
         let f = [dir[0] * pull, dir[1] * pull];
         sc.force[m.bone_a] = sc.force[m.bone_a].add(force_at(rel(pa), f));
         sc.force[m.bone_b] = sc.force[m.bone_b].sub(force_at(rel(pb), f));
@@ -1165,7 +1105,9 @@ fn simulate_step_inner(
             let secant = (1.0 + slope * slope).sqrt();
             let normal = [-slope / secant, 1.0 / secant];
             let tangent = [normal[1], -normal[0]];
-            let gap = (y - h) / secant - model.radius[i];
+            let dry = (y - h) / secant - model.radius[i];
+            let gap = dry + mud;
+            let sink = (-dry).clamp(0.0, mud) * (1.0 / physics::MUD_FULL_DEPTH);
             let j = sc.body_of[i];
             let r = rel(s.pos[i]);
             let v = s.vel[i];
@@ -1193,18 +1135,21 @@ fn simulate_step_inner(
                 } else {
                     -gap * PUSH_OUT * rate
                 },
-                mu: model.friction[i] * cfg.ground_friction,
+                mu: model.friction[i]
+                    * cfg.ground_friction
+                    * (1.0 + physics::MUD_GRIP * sink)
+                    * (1.0 + physics::MUD_NORMAL * sink),
             });
         }
     }
     // At most `MAX_CONTACTS` nodes, the deepest, take part in one step's
     // solve, as the GPU kernel bounds it; the others follow the next step.
-    if contacts.len() > max_contacts() {
+    if contacts.len() > MAX_CONTACTS {
         contacts.sort_by(|a, b| a.reach.total_cmp(&b.reach).then(a.node.cmp(&b.node)));
-        contacts.truncate(max_contacts());
+        contacts.truncate(MAX_CONTACTS);
         contacts.sort_by_key(|c| c.node);
     }
-    let mut impulse = cfg.wind * model.total_mass * dt;
+    let mut impulse = cfg.wind * model.total_mass * dt + mud_impulse;
     let mut impulse_y = -cfg.gravity * model.total_mass * dt;
     if !contacts.is_empty() {
         // Each contact direction's response: the change of every body's
@@ -1230,14 +1175,12 @@ fn simulate_step_inner(
             }
         }
         let mut lambda = vec![0.0f32; m];
-        if warm_start() {
-            for (i, c) in contacts.iter().enumerate() {
-                let [n, t] = s.warm[c.node];
-                lambda[2 * i] = n;
-                lambda[2 * i + 1] = t.clamp(-c.mu * n, c.mu * n);
-            }
+        for (i, c) in contacts.iter().enumerate() {
+            let [n, t] = s.warm[c.node];
+            lambda[2 * i] = n;
+            lambda[2 * i + 1] = t.clamp(-c.mu * n, c.mu * n);
         }
-        let predicted = pgs(&contacts, &k, &mut lambda, pgs_iterations());
+        let predicted = pgs(&contacts, &k, &mut lambda, PGS_ITERATIONS);
         // The contact forces act on the bodies through one response.
         apply_contacts(model, sc, &contacts, &lambda, &mut da, &mut dq);
         // Plant against the end pose. The solve works on each contact's
@@ -1271,7 +1214,7 @@ fn simulate_step_inner(
             s.q = saved.4;
             s.qd = saved.5;
             let old = lambda.clone();
-            pgs(&contacts, &k, &mut lambda, plant_sweeps());
+            pgs(&contacts, &k, &mut lambda, PLANT_SWEEPS);
             let change: Vec<f32> = lambda.iter().zip(&old).map(|(a, b)| a - b).collect();
             apply_contacts(model, sc, &contacts, &change, &mut da, &mut dq);
         }
@@ -1598,8 +1541,20 @@ pub fn shader_source(capacity: usize, workgroup: u32, fidelity: physics::Fidelit
             format!("const JOINT_BREAK: f32 = {:?};", physics::JOINT_BREAK),
         ),
         (
-            "const TENDON: f32 = 0.0;",
-            format!("const TENDON: f32 = {:?};", tendon()),
+            "const MUD_NORMAL: f32 = 2.0;",
+            format!("const MUD_NORMAL: f32 = {:?};", physics::MUD_NORMAL),
+        ),
+        (
+            "const MUD_GRIP: f32 = 2.0;",
+            format!("const MUD_GRIP: f32 = {:?};", physics::MUD_GRIP),
+        ),
+        (
+            "const MUD_DRAG: f32 = 2.0;",
+            format!("const MUD_DRAG: f32 = {:?};", physics::MUD_DRAG),
+        ),
+        (
+            "const MUD_FULL_DEPTH: f32 = 0.1;",
+            format!("const MUD_FULL_DEPTH: f32 = {:?};", physics::MUD_FULL_DEPTH),
         ),
         (
             "const SPIN_CAP: f32 = 15.0;",
@@ -1615,15 +1570,15 @@ pub fn shader_source(capacity: usize, workgroup: u32, fidelity: physics::Fidelit
         ),
         (
             "const PGS_SWEEPS: u32 = 20u;",
-            format!("const PGS_SWEEPS: u32 = {}u;", pgs_iterations()),
+            format!("const PGS_SWEEPS: u32 = {}u;", PGS_ITERATIONS),
         ),
         (
             "const PLANT_SWEEPS: u32 = 20u;",
-            format!("const PLANT_SWEEPS: u32 = {}u;", plant_sweeps()),
+            format!("const PLANT_SWEEPS: u32 = {}u;", PLANT_SWEEPS),
         ),
         (
             "const WARM: bool = false;",
-            format!("const WARM: bool = {};", warm_start()),
+            "const WARM: bool = true;".to_string(),
         ),
         (
             "const PUSH_OUT: f32 = 0.2;",
@@ -1677,38 +1632,14 @@ pub fn shader_source(capacity: usize, workgroup: u32, fidelity: physics::Fidelit
             "SAMPLEINTERVALu",
             format!("{}u", fidelity.sample_interval()),
         ),
-        ("MAXCONTACTSu", format!("{}u", capacity.min(max_contacts()))),
+        ("MAXCONTACTSu", format!("{}u", capacity.min(MAX_CONTACTS))),
         ("WGSIZEu", format!("{workgroup}u")),
         ("STRIDE", format!("{capacity}u")),
         ("MAXNODESu", format!("{capacity}u")),
     ] {
         source = replace(source, from, to);
     }
-    // TEMPORARY timing experiments, not physics (EVOLUTION_P2_TIMING).
-    let timing = std::env::var("EVOLUTION_P2_TIMING").unwrap_or_default();
-    if timing.contains("noground") {
-        source = source.replace("let grounded = p.ground > 0.0;", "let grounded = false;");
-    }
-    if timing.contains("noplant") {
-        source = source.replace(
-            "        integrate_state(1.0);\n        kinematics(false);",
-            "        if false { integrate_state(1.0); }\n        if false { kinematics(false); }",
-        );
-        source = source.replace(
-            "        pgs(PLANT_SWEEPS);",
-            "        if false { pgs(PLANT_SWEEPS); }",
-        );
-    }
-    if timing.contains("nomuscle") {
-        source = source.replace(
-            "for (var k = 0u; k < muscle_count; k++) {",
-            "for (var k = 0u; k < 0u; k++) {",
-        );
-    }
-    if timing.contains("rolled") {
-        return source;
-    }
-    let contacts = capacity.min(max_contacts());
+    let contacts = capacity.min(MAX_CONTACTS);
     // Unrolled, the largest bodies' kernels take the driver very long to
     // build; they are rare and keep their loops.
     if capacity > 16 {
@@ -2754,5 +2685,32 @@ mod tests {
             "a passive body traveled {} m",
             result.fitness
         );
+    }
+
+    #[test]
+    fn a_passive_body_in_mud_sinks_by_the_mud_depth_and_stays_put() {
+        let cfg = Config {
+            mud: 0.05,
+            ..calm()
+        };
+        let c = chain(&[[0.0, 0.5], [0.0, 0.3], [-0.25, 0.1], [0.25, 0.05]], false);
+        let model = Model::new(&c, &cfg);
+        let mut frames = Vec::new();
+        let result = run(&model, &cfg, Some(&mut frames));
+        let last = frames.last().expect("frames");
+        let low = last.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
+        let dry = {
+            let mut dry_frames = Vec::new();
+            run(&Model::new(&c, &calm()), &calm(), Some(&mut dry_frames));
+            dry_frames
+                .last()
+                .expect("frames")
+                .iter()
+                .map(|p| p[1])
+                .fold(f32::MAX, f32::min)
+        };
+        assert!(low < dry - 0.01, "no sink: {low} against {dry}");
+        assert!(low > dry - 0.06, "sank past the mud: {low} against {dry}");
+        assert!(result.fitness.abs() < 0.05, "traveled {}", result.fitness);
     }
 }
