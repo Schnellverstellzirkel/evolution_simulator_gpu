@@ -173,6 +173,11 @@ pub struct Experiment {
     /// Stored separately in V4 checkpoints to keep the V3 payload readable.
     #[serde(skip)]
     pub island_progress: Vec<(f32, u32)>,
+    /// The last island migration this session: its generation, and per
+    /// island how many elites it sent and how many of those the neighbor
+    /// kept. Not saved; the schedule tells a loaded game when it was.
+    #[serde(skip)]
+    pub last_migration: Option<(u32, Vec<(usize, usize)>)>,
     /// Elites from before an environment change, waiting to be evaluated again
     /// in the new world. Breeding hands them out before new offspring.
     #[serde(default)]
@@ -293,11 +298,11 @@ const OPTIMIZER_SHARE: f32 = 0.5;
 /// Generations between migrations, and the share of elites that migrate.
 /// Rare migration lets each island settle on and refine its own design
 /// instead of all islands polishing the same one.
-const MIGRATION_INTERVAL: u32 = 25;
+pub const MIGRATION_INTERVAL: u32 = 25;
 /// Generations without a new island record before the island's optimizer
 /// turns to its next fastest design.
 const OPTIMIZER_STALL: u32 = 30;
-const MIGRATION_SHARE: f32 = 0.1;
+pub const MIGRATION_SHARE: f32 = 0.1;
 struct OffspringPlan {
     plan: CandidatePlan,
     parent_id: Option<u64>,
@@ -351,6 +356,7 @@ impl Experiment {
             lineage: HashMap::new(),
             candidate_mates: Vec::new(),
             island_progress: Vec::new(),
+            last_migration: None,
             reseed: Vec::new(),
             fossils: Vec::new(),
         })
@@ -1291,12 +1297,13 @@ impl Experiment {
                 elites[..take].iter().map(|e| (*e).clone()).collect()
             })
             .collect();
+        let mut exchange = vec![(0, 0); self.islands.len()];
         for (from, group) in migrants.into_iter().enumerate() {
             let to = &mut self.islands[(from + 1) % island_count()];
-            for elite in &group {
-                to.absorb(elite);
-            }
+            let kept = group.iter().filter(|elite| to.absorb(elite)).count();
+            exchange[from] = (group.len(), kept);
         }
+        self.last_migration = Some((self.generation, exchange));
         for island in &mut self.islands {
             island.refresh_behavior_scores();
         }
@@ -2184,6 +2191,7 @@ impl SmallLoad {
             lineage: self.lineage,
             candidate_mates: Vec::new(),
             island_progress: self.island_progress,
+            last_migration: None,
             reseed: self.reseed,
             fossils: Vec::new(),
         };
@@ -2874,6 +2882,7 @@ impl From<V2Experiment> for Experiment {
             lineage: HashMap::new(),
             candidate_mates: Vec::new(),
             island_progress: Vec::new(),
+            last_migration: None,
             reseed: Vec::new(),
             fossils: Vec::new(),
         }
@@ -2919,6 +2928,7 @@ impl From<LegacyExperiment> for Experiment {
             lineage: HashMap::new(),
             candidate_mates: Vec::new(),
             island_progress: Vec::new(),
+            last_migration: None,
             reseed: Vec::new(),
             fossils: Vec::new(),
         }
