@@ -4,8 +4,6 @@ use anyhow::{Result, ensure};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-// The helpers and Context fields are used as the operators land.
-#[allow(dead_code)]
 mod anatomy;
 
 pub const FAILED: f32 = -1.0e20;
