@@ -4,7 +4,7 @@ use crate::{
     gpu::Gpu,
     physics::{self, Node},
     storage::{PERCENTILES, Stage, Stats},
-    worker::{Command, Snapshot, Worker},
+    worker::{Command, EventKind, Snapshot, Worker},
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points};
@@ -791,6 +791,39 @@ fn scaled_range(
     let center = (range.start() + range.end()) / 2.0;
     let half = (range.end() - range.start()) / 2.0 * factor;
     (center - half)..=(center + half)
+}
+/// What a line of the event feed lets the player do.
+#[derive(Clone, Copy)]
+enum FeedAction {
+    /// Replay the best creature of this history row.
+    Replay(usize),
+    /// Bring back creatures lost to catastrophes.
+    Undo,
+}
+/// One line of the event feed.
+struct FeedItem {
+    generation: u32,
+    text: String,
+    color: Color32,
+    action: Option<FeedAction>,
+}
+/// History positions where the best distance moved within one world, oldest
+/// first, and whether each is the first best after a world change. A harder
+/// world lowers the best, so records count again from its first generation.
+fn world_records(history: &[Stats]) -> Vec<(usize, f32, bool)> {
+    let mut best = f32::NEG_INFINITY;
+    let mut records = Vec::new();
+    for (index, stats) in history.iter().enumerate() {
+        if index > 0 && stats.config.physics_differs(&history[index - 1].config) {
+            best = f32::NEG_INFINITY;
+        }
+        if stats.best.is_finite() && stats.best > best {
+            let first = best == f32::NEG_INFINITY;
+            best = stats.best;
+            records.push((index, best, first && index > 0));
+        }
+    }
+    records
 }
 /// History positions where the all-time best distance moved, oldest first.
 fn record_entries(history: &[Stats]) -> Vec<(usize, f32)> {
@@ -2140,6 +2173,10 @@ impl App {
         } else {
             "Paused".to_owned()
         };
+        let trial = format!(
+            "How far the best creature travels in its {:.0} s trial. Distance is the only score.",
+            snapshot.config.duration
+        );
         ui.columns(3, |cols| {
             for (ui, (name, value, color, note, why)) in cols.iter_mut().zip([
                 (
@@ -2150,7 +2187,7 @@ impl App {
                         || "so far".to_owned(),
                         |gain| format!("{gain:+.2} m in the last 10 generations"),
                     ),
-                    "How far the best creature travels in its 60 s trial. Distance is the only score.",
+                    trial.as_str(),
                 ),
                 (
                     "GENERATION",
@@ -2606,6 +2643,120 @@ impl App {
         };
         self.select(creature, config);
         self.tab = Tab::Overview;
+    }
+    /// The lines of the event feed, newest first: the worker's events (world
+    /// changes, seasons, catastrophes, saves) and the records in the history.
+    fn feed_items(&self) -> Vec<FeedItem> {
+        let Some(snapshot) = &self.snapshot else {
+            return Vec::new();
+        };
+        let theme = self.theme();
+        let history = &snapshot.history;
+        let row = |generation: u32| history.iter().rev().find(|s| s.generation == generation);
+        let mut items = Vec::new();
+        for event in snapshot.events.iter() {
+            let mut text = event.text.clone();
+            let (color, action) = match event.kind {
+                EventKind::Catastrophe => {
+                    (AMBER, (snapshot.fossils > 0).then_some(FeedAction::Undo))
+                }
+                EventKind::World | EventKind::Season => {
+                    if let (Some(before), Some(after)) = (
+                        event.generation.checked_sub(1).and_then(row),
+                        row(event.generation),
+                    ) {
+                        text.push_str(&format!(
+                            " Best {:.2} m before, {:.2} m after one generation.",
+                            before.best, after.best
+                        ));
+                    }
+                    if event.kind == EventKind::Season {
+                        text.insert_str(0, "Season: ");
+                    }
+                    (theme.accent, None)
+                }
+                _ => (theme.muted, None),
+            };
+            items.push(FeedItem {
+                generation: event.generation,
+                text,
+                color,
+                action,
+            });
+        }
+        for (index, best, first_in_world) in world_records(history) {
+            let stats = &history[index];
+            let name = stats
+                .representatives
+                .last()
+                .map(species_name)
+                .unwrap_or_default();
+            let text = if index == 0 {
+                format!("First generation: best {best:.2} m, {name}.")
+            } else if first_in_world {
+                format!("Best in the new world: {best:.2} m, {name}.")
+            } else {
+                format!("New record: {best:.2} m, {name}.")
+            };
+            items.push(FeedItem {
+                generation: stats.generation,
+                text,
+                color: theme.ink,
+                action: Some(FeedAction::Replay(index)),
+            });
+        }
+        // Newest first; the sort is stable, so events of one generation keep
+        // their order.
+        items.reverse();
+        items.sort_by_key(|item| std::cmp::Reverse(item.generation));
+        items.truncate(60);
+        items
+    }
+    /// The event feed: what happened, newest first, with a button to replay
+    /// a record holder or undo a catastrophe.
+    fn feed(&mut self, ui: &mut egui::Ui, height: f32) {
+        let theme = self.theme();
+        ui.label(RichText::new("WHAT HAPPENED").small().color(theme.muted));
+        let items = self.feed_items();
+        let mut chosen = None;
+        egui::ScrollArea::vertical()
+            .id_salt("event_feed")
+            .max_height(height)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if items.is_empty() {
+                    ui.label(
+                        RichText::new("Records, world changes and catastrophes appear here.")
+                            .small()
+                            .color(theme.muted),
+                    );
+                }
+                for item in &items {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.;
+                        ui.label(
+                            RichText::new(format!("Gen {}", item.generation))
+                                .small()
+                                .color(theme.muted),
+                        );
+                        ui.label(RichText::new(&item.text).small().color(item.color));
+                        if let Some(action) = item.action {
+                            let label = match action {
+                                FeedAction::Replay(_) => "Replay",
+                                FeedAction::Undo => "Undo",
+                            };
+                            if ui.small_button(label).clicked() {
+                                chosen = Some(action);
+                            }
+                        }
+                    });
+                }
+            });
+        match chosen {
+            Some(FeedAction::Replay(index)) => self.replay_history_holder(index),
+            Some(FeedAction::Undo) => self.worker.send(Command::UndoMeteor),
+            None => {}
+        }
     }
     /// Compact timeline of every new all-time best, newest first. Clicking one
     /// replays its record holder.
@@ -3787,7 +3938,17 @@ impl eframe::App for App {
                             (ui.available_height() - CHART - REPLAY_CONTROLS).max(180.),
                         );
                         ui.add_space(6.);
-                        self.trend(ui, (ui.available_height() - 34.).max(80.));
+                        // The chart and the event feed share the bottom row.
+                        let height = (ui.available_height() - 34.).max(80.);
+                        let width = ui.available_width();
+                        ui.horizontal_top(|ui| {
+                            ui.allocate_ui(Vec2::new(width * 0.62, height + 34.), |ui| {
+                                self.trend(ui, height);
+                            });
+                            ui.allocate_ui(Vec2::new(ui.available_width(), height + 34.), |ui| {
+                                self.feed(ui, height + 10.);
+                            });
+                        });
                     }
                     Tab::Population => self.population(ui),
                     Tab::History => {

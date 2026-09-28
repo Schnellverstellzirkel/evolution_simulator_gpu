@@ -56,6 +56,86 @@ pub struct Card {
     pub innovation_reserve: bool,
     pub creature: Creature,
 }
+/// Something that happened to the experiment, for the UI's event feed.
+#[derive(Clone)]
+pub struct Event {
+    /// The generation running when it happened.
+    pub generation: u32,
+    pub kind: EventKind,
+    pub text: String,
+}
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum EventKind {
+    /// A new experiment began.
+    Started,
+    /// A saved experiment was opened.
+    Opened,
+    /// The player changed the world.
+    World,
+    /// The seasons changed the world.
+    Season,
+    /// A meteor strike or an extinction.
+    Catastrophe,
+    /// An undo brought creatures back.
+    Undo,
+    /// The experiment was saved.
+    Saved,
+}
+/// Events kept per experiment; older ones drop off.
+const EVENT_LOG: usize = 200;
+fn log_event(events: &mut Arc<Vec<Event>>, generation: u32, kind: EventKind, text: String) {
+    let log = Arc::make_mut(events);
+    if log.len() >= EVENT_LOG {
+        log.remove(0);
+    }
+    log.push(Event {
+        generation,
+        kind,
+        text,
+    });
+}
+/// The effects that differ between two worlds, as "Ground Flat to Rough, 8 cm".
+fn world_change_text(before: &Config, after: &Config) -> Option<String> {
+    let parts: Vec<String> = crate::environment::EFFECTS
+        .iter()
+        .filter(|effect| effect.name != "Seasons")
+        .filter(|effect| effect.level(before) != effect.level(after))
+        .map(|effect| {
+            format!(
+                "{} {} to {}",
+                effect.name,
+                effect.levels[effect.level(before)],
+                effect.levels[effect.level(after)]
+            )
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+/// Logs a world change between two configs, if the physics changed.
+fn log_world_change(
+    events: &mut Arc<Vec<Event>>,
+    before: &Config,
+    after: &Config,
+    generation: u32,
+    retesting: usize,
+) {
+    if !before.physics_differs(after) {
+        return;
+    }
+    let season = after.seasons > 0 && after.season_step != before.season_step;
+    let change = world_change_text(before, after).unwrap_or_else(|| "The world changed".into());
+    let text = if retesting > 0 {
+        format!("{change}. Re-testing {retesting} kept creatures in the new world.")
+    } else {
+        format!("{change}.")
+    };
+    let kind = if season {
+        EventKind::Season
+    } else {
+        EventKind::World
+    };
+    log_event(events, generation, kind, text);
+}
 /// One ancestor of a selected creature.
 #[derive(Clone)]
 pub struct LineageStep {
@@ -89,6 +169,8 @@ pub struct Snapshot {
     pub page: Vec<Card>,
     pub page_start: usize,
     pub preview: Option<(Creature, Config)>,
+    /// What happened to this experiment, oldest first.
+    pub events: Arc<Vec<Event>>,
     /// Ancestor chain of a requested creature (its id first), newest first;
     /// sent once per request.
     pub lineage: Option<(u64, Vec<LineageStep>)>,
@@ -243,6 +325,7 @@ fn run(
     let mut changed = true;
     let mut epoch = 0u64;
     let mut history = Arc::new(Vec::new());
+    let mut events: Arc<Vec<Event>> = Arc::new(Vec::new());
     let mut checkpoint_thread: Option<std::thread::JoinHandle<()>> = None;
     let benchmark_generations = std::env::var("EVOLUTION_BENCH_GENERATIONS")
         .ok()
@@ -336,6 +419,16 @@ fn run(
                         status = "Creating population…".into();
                         let next = Experiment::new(cfg)?;
                         preview = Some((next.population.creature(0), next.config.clone()));
+                        events = Arc::new(Vec::new());
+                        log_event(
+                            &mut events,
+                            next.generation,
+                            EventKind::Started,
+                            format!(
+                                "New experiment: {} creatures, seed {}",
+                                next.config.population, next.config.seed
+                            ),
+                        );
                         exp = Some(next);
                         epoch += 1;
                         history = Arc::new(Vec::new());
@@ -375,8 +468,23 @@ fn run(
                     }
                     Command::Configure(cfg) => {
                         if let Some(e) = &mut exp {
+                            let before = e.config.clone();
                             e.update_config(cfg)?;
-                            status = "Settings applied or queued for the next generation".into();
+                            // Between generations a change applies at once;
+                            // otherwise it waits in `pending` and is logged
+                            // when the next generation starts.
+                            log_world_change(
+                                &mut events,
+                                &before,
+                                &e.config,
+                                e.generation,
+                                e.reseed.len(),
+                            );
+                            status = if e.pending.is_some() {
+                                "The world changes when the next generation starts".into()
+                            } else {
+                                "Settings applied".into()
+                            };
                         }
                     }
                     Command::ConfigureProbe(sent) => {
@@ -391,25 +499,56 @@ fn run(
                     Command::Meteor => {
                         if let Some(e) = &mut exp {
                             let lost = e.meteor(0.5);
-                            status = format!("A meteor wiped out {lost} elites");
+                            status = format!("A meteor wiped out {lost} creatures");
+                            log_event(
+                                &mut events,
+                                e.generation,
+                                EventKind::Catastrophe,
+                                format!("Meteor strike: {lost} kept creatures wiped out."),
+                            );
                         }
                     }
                     Command::Extinction => {
                         if let Some(e) = &mut exp {
                             let lost = e.extinction();
-                            status = format!("The weakest island lost all {lost} elites");
+                            status = format!("The slowest group lost all {lost} creatures");
+                            log_event(
+                                &mut events,
+                                e.generation,
+                                EventKind::Catastrophe,
+                                format!("Extinction: the slowest group lost all {lost} creatures."),
+                            );
                         }
                     }
                     Command::UndoMeteor => {
                         if let Some(e) = &mut exp {
                             let back = e.undo_meteor();
-                            status = format!("{back} fossils returned to the archive");
+                            status = format!("{back} creatures came back");
+                            log_event(
+                                &mut events,
+                                e.generation,
+                                EventKind::Undo,
+                                format!("Undo: {back} creatures came back."),
+                            );
                         }
                     }
                     Command::Save(path) => {
                         if let Some(e) = &exp {
+                            let started = Instant::now();
                             storage::save(&path, e)?;
+                            let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
                             status = format!("Saved {}", path.display());
+                            log_event(
+                                &mut events,
+                                e.generation,
+                                EventKind::Saved,
+                                format!(
+                                    "Saved {} ({:.1} MB in {:.1} s).",
+                                    path.display(),
+                                    bytes as f64 / 1e6,
+                                    started.elapsed().as_secs_f64()
+                                ),
+                            );
                         }
                     }
                     Command::Load(path) => {
@@ -428,6 +567,17 @@ fn run(
                                 |elite| elite.creature.clone(),
                             );
                         preview = Some((creature, next.config.clone()));
+                        events = Arc::new(Vec::new());
+                        log_event(
+                            &mut events,
+                            next.generation,
+                            EventKind::Opened,
+                            format!(
+                                "Opened {} at generation {}.",
+                                path.display(),
+                                next.generation
+                            ),
+                        );
                         exp = Some(next);
                         epoch += 1;
                         history = Arc::new(Vec::new());
@@ -638,6 +788,8 @@ fn run(
                         }
                         Stage::Archived => {
                             let stage_start = Instant::now();
+                            let world_before = e.config.clone();
+                            let kept_before = e.archive.entries.len();
                             if steady.boundary {
                                 steady.boundary = false;
                                 let failed = std::mem::take(&mut steady.failed);
@@ -660,6 +812,19 @@ fn run(
                                 done_key = (epoch, e.generation);
                             } else {
                                 e.prepare_next_batch()?;
+                            }
+                            if e.config.physics_differs(&world_before) {
+                                // The generation that just began runs in the
+                                // new world, and its first creatures are the
+                                // kept ones being re-tested.
+                                let retesting = kept_before.min(e.config.population);
+                                log_world_change(
+                                    &mut events,
+                                    &world_before,
+                                    &e.config,
+                                    e.generation,
+                                    retesting,
+                                );
                             }
                             let breeding_seconds = stage_start.elapsed().as_secs_f64();
                             if benchmark_start.is_some() {
@@ -933,6 +1098,7 @@ fn run(
                     stage: e.stage,
                     running,
                     history: history.clone(),
+                    events: events.clone(),
                     page: cards,
                     page_start: page,
                     preview: preview.take(),
@@ -982,6 +1148,7 @@ fn run(
                     stage: Stage::Ready,
                     running: false,
                     history: history.clone(),
+                    events: events.clone(),
                     page: vec![],
                     page_start: 0,
                     preview: None,
