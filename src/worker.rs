@@ -33,31 +33,20 @@ pub enum Command {
     Save(PathBuf),
     Load(PathBuf),
     Export(PathBuf),
-    Page(usize),
+    /// Send the whole archive, ranked by distance, once (`Snapshot::cards`).
+    Cards,
     /// Ancestors of the creature with this id, answered in `Snapshot::lineage`.
     Lineage(u64),
     /// Start or stop sending the archive map table with snapshots.
     MapTable(bool),
     /// The archive creature with this id, answered in `Snapshot::selected`.
     Select(u64),
-    /// Which archive cards to page through.
-    Filter(CardFilter),
     /// Benchmark probe: the UI send time, used to measure how long queued controls wait.
     Ping(Instant),
     /// Benchmark probe: re-applies the current settings like an environment
     /// button, to measure how long such a change waits.
     ConfigureProbe(Instant),
     Shutdown,
-}
-/// Which archive cards the UI pages through.
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
-pub struct CardFilter {
-    /// Feet bin (0 is one foot, 4 is five or more), or every count.
-    pub feet: Option<u8>,
-    /// Body size by node count (see `size_class`), or every size.
-    pub size: Option<u8>,
-    /// Only the fastest creature of each body plan.
-    pub one_per_plan: bool,
 }
 /// Body size class by node count: 0 small (up to 5 nodes), 1 medium (6 to
 /// 9), 2 large (10 or more).
@@ -99,6 +88,16 @@ pub fn body_plan(creature: &Creature) -> u64 {
     }
     plan
 }
+/// The whole archive at one moment, ranked by distance: the UI keeps it on
+/// screen unchanged until the player asks for a newer one.
+#[derive(Clone)]
+pub struct CardList {
+    /// The generation running when the list was made.
+    pub generation: u32,
+    /// The world the scores were measured in.
+    pub config: Config,
+    pub cards: Arc<Vec<Card>>,
+}
 #[derive(Clone)]
 pub struct Card {
     pub index: usize,
@@ -110,9 +109,6 @@ pub struct Card {
     pub emitter: Option<Emitter>,
     pub visits: u64,
     pub innovation_reserve: bool,
-    /// Kept creatures that share this card's body plan when the filter keeps
-    /// one per plan; 1 otherwise.
-    pub plan_count: usize,
     pub creature: Creature,
 }
 /// Something that happened to the experiment, for the UI's event feed.
@@ -237,8 +233,8 @@ pub struct Snapshot {
     pub stage: Stage,
     pub running: bool,
     pub history: Arc<Vec<Stats>>,
-    pub page: Vec<Card>,
-    pub page_start: usize,
+    /// The archive ranked by distance, sent once per `Command::Cards`.
+    pub cards: Option<CardList>,
     pub preview: Option<(Creature, Config)>,
     /// What happened to this experiment, oldest first.
     pub events: Arc<Vec<Event>>,
@@ -261,8 +257,6 @@ pub struct Snapshot {
     pub elapsed: f64,
     pub archive_cells: usize,
     pub archive_size: usize,
-    /// Cards the filter lets through (the archive size without a filter).
-    pub page_total: usize,
     pub innovation_reserve_count: usize,
     pub qd_score: f64,
     pub emitters: [EmitterStats; 4],
@@ -399,7 +393,8 @@ fn run(
     let mut running = false;
     let mut continuous = false;
     let mut guided = false;
-    let mut page = 0usize;
+    // The UI asked for the ranked archive (`Command::Cards`).
+    let mut send_cards = false;
     let mut preview = None;
     let mut lineage: Option<(u64, Vec<LineageStep>)> = None;
     let mut status = gpu
@@ -424,7 +419,6 @@ fn run(
     let mut map: Option<Arc<Vec<MapCell>>> = None;
     let mut map_key = (u64::MAX, usize::MAX, 0u64);
     let mut selected: Option<(Creature, Config)> = None;
-    let mut filter = CardFilter::default();
     // A background autosave, which reports the file and generation it wrote.
     let mut checkpoint_thread: Option<std::thread::JoinHandle<Option<(PathBuf, u32)>>> = None;
     let benchmark_generations = std::env::var("EVOLUTION_BENCH_GENERATIONS")
@@ -506,11 +500,10 @@ fn run(
                 && !matches!(
                     command,
                     Command::Ping(_)
-                        | Command::Page(_)
+                        | Command::Cards
                         | Command::Lineage(_)
                         | Command::MapTable(_)
                         | Command::Select(_)
-                        | Command::Filter(_)
                         | Command::Pause
                         | Command::Run { .. }
                         | Command::Next
@@ -555,7 +548,6 @@ fn run(
                         exp = Some(next);
                         epoch += 1;
                         history = Arc::new(Vec::new());
-                        page = 0;
                         status = "Population ready".into();
                     }
                     Command::Run {
@@ -679,7 +671,6 @@ fn run(
                         lineage = None;
                         epoch += 1;
                         history = Arc::new(Vec::new());
-                        page = 0;
                         let progress = Arc::new(storage::Progress::default());
                         let thread_progress = progress.clone();
                         let thread_path = path.clone();
@@ -717,8 +708,8 @@ fn run(
                         }
                         changed = false;
                     }
-                    Command::Page(start) => {
-                        page = start;
+                    Command::Cards => {
+                        send_cards = true;
                     }
                     Command::MapTable(on) => {
                         want_map = on;
@@ -726,10 +717,6 @@ fn run(
                             map = None;
                             map_key = (u64::MAX, usize::MAX, 0);
                         }
-                    }
-                    Command::Filter(next) => {
-                        filter = next;
-                        page = 0;
                     }
                     Command::Select(id) => {
                         if let Some(e) = &exp
@@ -807,7 +794,6 @@ fn run(
                         exp = Some(next);
                         epoch += 1;
                         history = Arc::new(Vec::new());
-                        page = 0;
                         status = format!(
                             "Loaded {} in {:.1} s",
                             load.path.display(),
@@ -1293,100 +1279,43 @@ fn run(
                     }
                 }
                 let archive_count = e.archive.entries.len();
-                // The archive by distance, with each creature's overall rank,
-                // then the player's filter.
-                let mut ranked: Vec<(usize, usize)> = Vec::new();
-                let mut plan_counts: std::collections::HashMap<u64, usize> =
-                    std::collections::HashMap::new();
-                if archive_count > 0 {
+                // The ranked archive, built only when the UI asks: one sort
+                // and one copy of each kept creature (about 1,500 at 3M).
+                let cards = if std::mem::take(&mut send_cards) {
                     let mut order: Vec<_> = (0..archive_count).collect();
                     order.sort_unstable_by(|&a, &b| {
                         e.archive.entries[b]
                             .fitness
                             .total_cmp(&e.archive.entries[a].fitness)
+                            .then(a.cmp(&b))
                     });
-                    ranked = order
-                        .into_iter()
-                        .enumerate()
-                        .filter(|&(_, i)| {
-                            let elite = &e.archive.entries[i];
-                            filter
-                                .feet
-                                .is_none_or(|feet| elite.descriptor.niche().0[4] == feet)
-                                && filter.size.is_none_or(|size| {
-                                    size_class(elite.creature.nodes.len()) == size
+                    Some(CardList {
+                        generation: e.generation,
+                        config: e.config.clone(),
+                        cards: Arc::new(
+                            order
+                                .into_iter()
+                                .enumerate()
+                                .map(|(rank, i)| {
+                                    let elite = &e.archive.entries[i];
+                                    Card {
+                                        index: i,
+                                        rank,
+                                        score: elite.fitness,
+                                        parent_score: f32::NAN,
+                                        survivor: false,
+                                        descriptor: Some(elite.descriptor),
+                                        emitter: Some(elite.emitter),
+                                        visits: elite.visits,
+                                        innovation_reserve: qd::is_morphology_niche(&elite.niche),
+                                        creature: elite.creature.clone(),
+                                    }
                                 })
-                        })
-                        .collect();
-                    if filter.one_per_plan {
-                        let plans: Vec<u64> = ranked
-                            .iter()
-                            .map(|&(_, i)| body_plan(&e.archive.entries[i].creature))
-                            .collect();
-                        for &plan in &plans {
-                            *plan_counts.entry(plan).or_default() += 1;
-                        }
-                        let mut seen = std::collections::HashSet::new();
-                        ranked = ranked
-                            .into_iter()
-                            .zip(plans)
-                            .filter(|&(_, plan)| seen.insert(plan))
-                            .map(|(pair, _)| pair)
-                            .collect();
-                    }
-                }
-                let item_count = if archive_count > 0 {
-                    ranked.len()
+                                .collect(),
+                        ),
+                    })
                 } else {
-                    e.config.population
-                };
-                if page >= item_count {
-                    page = 0;
-                }
-                let end = (page + 120).min(item_count);
-                let cards = if archive_count > 0 {
-                    ranked[page.min(end)..end]
-                        .iter()
-                        .map(|&(rank, i)| {
-                            let elite = &e.archive.entries[i];
-                            Card {
-                                index: i,
-                                rank,
-                                score: elite.fitness,
-                                parent_score: f32::NAN,
-                                survivor: false,
-                                descriptor: Some(elite.descriptor),
-                                emitter: Some(elite.emitter),
-                                visits: elite.visits,
-                                innovation_reserve: qd::is_morphology_niche(&elite.niche),
-                                plan_count: if filter.one_per_plan {
-                                    plan_counts
-                                        .get(&body_plan(&elite.creature))
-                                        .copied()
-                                        .unwrap_or(1)
-                                } else {
-                                    1
-                                },
-                                creature: elite.creature.clone(),
-                            }
-                        })
-                        .collect()
-                } else {
-                    (page.min(end)..end)
-                        .map(|i| Card {
-                            index: i,
-                            rank: i,
-                            score: e.scores[i],
-                            parent_score: e.parent_scores.get(i).copied().unwrap_or(f32::NAN),
-                            survivor: false,
-                            descriptor: None,
-                            emitter: None,
-                            visits: 0,
-                            innovation_reserve: false,
-                            plan_count: 1,
-                            creature: e.population.creature(i),
-                        })
-                        .collect()
+                    None
                 };
                 Snapshot {
                     epoch,
@@ -1409,8 +1338,7 @@ fn run(
                     events: events.clone(),
                     map: map.clone(),
                     selected: selected.take(),
-                    page: cards,
-                    page_start: page,
+                    cards,
                     preview: preview.take(),
                     lineage: lineage.take(),
                     gpu: gpu.names(),
@@ -1438,7 +1366,6 @@ fn run(
                     elapsed: e.evaluation_seconds,
                     archive_cells: e.archive.behavior_count(),
                     archive_size: archive_count,
-                    page_total: item_count,
                     innovation_reserve_count: e.archive.morphology_count(),
                     qd_score: e.archive.qd_score,
                     emitters: e.emitter_stats,
@@ -1462,8 +1389,7 @@ fn run(
                     events: events.clone(),
                     map: None,
                     selected: selected.take(),
-                    page: vec![],
-                    page_start: 0,
+                    cards: None,
                     preview: None,
                     lineage: None,
                     gpu: gpu.names(),
@@ -1474,7 +1400,6 @@ fn run(
                     elapsed: 0.,
                     archive_cells: 0,
                     archive_size: 0,
-                    page_total: 0,
                     innovation_reserve_count: 0,
                     qd_score: 0.0,
                     emitters: [EmitterStats::default(); 4],

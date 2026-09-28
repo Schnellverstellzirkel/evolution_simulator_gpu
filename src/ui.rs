@@ -48,8 +48,6 @@ const CONTROL_HEIGHT: f32 = 34.0;
 const LEVEL_HEIGHT: f32 = 26.0;
 /// How long the UI's own messages hold the status line.
 const MESSAGE_SECONDS: f32 = 8.0;
-/// How fast archive cards glide to their new places after a re-sort.
-const SORT_SPEED: f32 = 5.0;
 /// Generations between autosaves when the player turns autosave on.
 const AUTOSAVE_INTERVAL: u32 = 10;
 /// Exported GIFs render the same scene as the viewport into this frame size.
@@ -676,6 +674,23 @@ enum ArchiveView {
     Cards,
     Map,
 }
+/// Which archive cards the player looks at.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct CardFilter {
+    /// Feet bin (0 is one foot, 4 is five or more), or every count.
+    feet: Option<u8>,
+    /// Body size class (`worker::size_class`), or every size.
+    size: Option<u8>,
+}
+impl CardFilter {
+    fn shows(self, card: &crate::worker::Card) -> bool {
+        self.feet
+            .is_none_or(|feet| card.descriptor.is_some_and(|d| d.niche().0[4] == feet))
+            && self
+                .size
+                .is_none_or(|size| crate::worker::size_class(card.creature.nodes.len()) == size)
+    }
+}
 /// One archive elite running in the race view.
 struct RaceLane {
     /// Why the creature runs: its archive rank, "champion" or "your pick".
@@ -1287,7 +1302,6 @@ struct App {
     config_sent: Option<Instant>,
     last_frame: Instant,
     frame_times: std::collections::VecDeque<f32>,
-    last_page: usize,
     /// The Diagnostics drawer under the status line is open.
     show_perf: bool,
     ui_scale: f32,
@@ -1296,8 +1310,6 @@ struct App {
     started: Instant,
     capture_requested: bool,
     capture_path: Option<String>,
-    sort_started: Instant,
-    card_positions: std::collections::HashMap<u64, Pos2>,
     /// Ancestors of the selected creature, newest first.
     lineage: Vec<crate::worker::LineageStep>,
     /// Creature whose ancestors the UI has already asked the worker for.
@@ -1317,12 +1329,18 @@ struct App {
     /// Whether the worker was last asked to send the map table.
     map_sent: bool,
     /// The archive cards the player filters for.
-    card_filter: crate::worker::CardFilter,
+    card_filter: CardFilter,
+    /// The ranked archive on screen in Ways of moving and for the race. It
+    /// changes only when the player opens the tab or asks for the latest.
+    cards: Option<crate::worker::CardList>,
+    /// When the UI last asked the worker for the ranked archive.
+    cards_requested: Option<Instant>,
+    /// The tab of the previous frame, to notice when the player opens one.
+    prev_tab: Tab,
     archive_view: ArchiveView,
     /// Top archived elites racing side by side.
     race: Vec<RaceLane>,
     race_pending: bool,
-    race_page_requested: bool,
     race_camera: f32,
     /// Creatures the player sent to the race, oldest first, with their worlds.
     race_picks: Vec<(Creature, Config)>,
@@ -1419,7 +1437,6 @@ impl App {
             config_sent: None,
             last_frame: Instant::now(),
             frame_times: Default::default(),
-            last_page: usize::MAX,
             show_perf: false,
             ui_scale: smoke_zoom.unwrap_or(1.0),
             initial: true,
@@ -1427,7 +1444,6 @@ impl App {
             started: Instant::now(),
             capture_requested: false,
             capture_path: std::env::var("EVOLUTION_SMOKE_CAPTURE").ok(),
-            sort_started: Instant::now(),
             lineage: Vec::new(),
             lineage_requested: None,
             lineage_pending: false,
@@ -1437,6 +1453,9 @@ impl App {
             map_feet: None,
             map_sent: false,
             card_filter: Default::default(),
+            cards: None,
+            cards_requested: None,
+            prev_tab: Tab::Overview,
             archive_view: if smoke_tab == "map" {
                 ArchiveView::Map
             } else {
@@ -1444,13 +1463,11 @@ impl App {
             },
             race: Vec::new(),
             race_pending: smoke_tab == "race",
-            race_page_requested: false,
             race_camera: 0.0,
             race_picks: Vec::new(),
             bench_frames: Vec::new(),
             bench_last_ping: Instant::now(),
             bench_pings: 0,
-            card_positions: Default::default(),
             dark: smoke_dark,
             show_help: false,
             runs_bytes: 0,
@@ -2267,6 +2284,7 @@ impl App {
                 self.race_picks.remove(0);
             }
             self.tab = Tab::Race;
+            self.prev_tab = Tab::Race;
             self.restart_race();
         }
     }
@@ -2504,21 +2522,11 @@ impl App {
             ui.heading("Ways of moving");
             ui.label(RichText::new("Click a creature to replay it").color(theme.muted));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .selectable_value(&mut self.archive_view, ArchiveView::Map, "Map")
+                ui.selectable_value(&mut self.archive_view, ArchiveView::Map, "Map")
                     .on_hover_text(
                         "Watch evolution fill the ways of moving. Cells are colored by distance.",
-                    )
-                    .clicked()
-                {
-                    self.last_page = usize::MAX;
-                }
-                if ui
-                    .selectable_value(&mut self.archive_view, ArchiveView::Cards, "Cards")
-                    .clicked()
-                {
-                    self.last_page = usize::MAX;
-                }
+                    );
+                ui.selectable_value(&mut self.archive_view, ArchiveView::Cards, "Cards");
             });
         });
         if self.archive_view == ArchiveView::Map {
@@ -2618,91 +2626,133 @@ impl App {
                         filter.size = size;
                     }
                 }
-                ui.add_space(GAP_M);
-                ui.checkbox(&mut filter.one_per_plan, "One per body plan")
-                    .on_hover_text(
-                        "Show only the fastest creature of each body plan, with how many share it",
-                    );
             });
-            if filter != self.card_filter {
-                self.card_filter = filter;
-                self.worker.send(Command::Filter(filter));
-                self.last_page = usize::MAX;
-            }
+            self.card_filter = filter;
         }
         let mut selected = None;
-        let mut requested = None;
         let mut map_click = None;
         if self.archive_view == ArchiveView::Map {
             let empty = Vec::new();
             let cells = snapshot.map.as_deref().unwrap_or(&empty);
             map_click = paint_archive_map(ui, cells, self.map_height, self.map_feet, theme);
         } else {
-            let columns = (ui.available_width() / 190.).floor().max(2.) as usize;
-            let width = (ui.available_width() - (columns - 1) as f32 * 10.) / columns as f32;
-            let progress = (self.sort_started.elapsed().as_secs_f32() * SORT_SPEED / 3.).min(1.);
-            let animating = snapshot.stage == Stage::Archived && progress < 1.;
-            let ease = progress * progress * (3. - 2. * progress);
-            let item_count = snapshot.page_total;
-            let shown = self.playback.as_ref().map(|p| p.creature.id);
-            let mut positions = std::collections::HashMap::new();
-            egui::ScrollArea::vertical().id_salt("population_grid").show_rows(
-                ui, 162., item_count.div_ceil(columns), |ui, rows| {
-                    let start = rows.start * columns;
-                    if start != self.last_page { requested = Some(start); }
-                    for row in rows {
-                        ui.horizontal(|ui| {
-                            for column in 0..columns {
-                                let rank = row * columns + column;
-                                if rank >= item_count { break; }
-                                let (destination, response) = ui.allocate_exact_size(Vec2::new(width, 152.), Sense::click());
-                                if let Some(card) = snapshot.page.iter().find(|c| c.rank == rank) {
-                                    positions.insert(card.creature.id, destination.min);
-                                    let mut rect = destination;
-                                    if animating && let Some(previous) = self.card_positions.get(&card.creature.id) {
-                                        rect = destination.translate((*previous - destination.min) * (1. - ease));
-                                    }
-                                    paint_card(ui.painter(), card, rect, response.hovered() || shown == Some(card.creature.id), snapshot.stage, theme);
-                                    if response.clicked() {
-                                        selected = Some((card.creature.clone(), snapshot.config.clone()));
-                                    }
-                                    response.on_hover_text(format!(
-                                        "{}\n{} nodes, {} bones, {} muscles\n{}\n{}\nClick to replay",
-                                        species_name(&card.creature),
-                                        card.creature.nodes.len(),
-                                        card.creature.bones.len(),
-                                        card.creature.muscles.len(),
-                                        card.emitter.map_or("First generation".to_owned(), |emitter| format!("Born {}", origin_words(emitter))),
-                                        card.descriptor.map_or_else(
-                                            || if card.score.is_finite() { "Trial done".to_owned() } else { "Trial running".to_owned() },
-                                            |d| format!("On the ground {:.0}% of the time · {:.2} strides/s · {:.2} m tall · {:.0} feet", d.ground_contact * 100.0, d.gait_frequency, d.mean_height, d.feet),
-                                        )
-                                    ));
-                                } else {
-                                    ui.painter().rect_filled(destination, 8, theme.card);
-                                    ui.painter().text(destination.center(), Align2::CENTER_CENTER, "Loading…", FontId::proportional(15.), theme.muted);
-                                }
-                            }
-                        });
-                    }
-                }
-            );
-            if animating {
-                ui.ctx().request_repaint();
-            } else {
-                self.card_positions = positions;
-            }
+            self.card_grid(ui, &mut selected);
         }
         if let Some(id) = map_click {
             self.worker.send(Command::Select(id));
         }
-        if let Some(start) = requested {
-            self.worker.send(Command::Page(start));
-            self.last_page = start;
-        }
         if let Some((creature, config)) = selected {
             self.select(creature, config);
         }
+    }
+    /// The archive cards: the ranked list the UI holds, filtered here, so no
+    /// card waits for data or moves while the player looks. A newer list
+    /// replaces it only when the player asks for it (or opens the tab).
+    fn card_grid(&mut self, ui: &mut egui::Ui, selected: &mut Option<(Creature, Config)>) {
+        let theme = self.theme();
+        let (generation, archive_size) = self
+            .snapshot
+            .as_ref()
+            .map_or((0, 0), |s| (s.generation, s.archive_size));
+        let waiting = self
+            .cards_requested
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(2));
+        let empty = self.cards.as_ref().is_none_or(|list| list.cards.is_empty());
+        if empty && archive_size > 0 && !waiting {
+            // Nothing held yet (or the request got lost): ask again.
+            self.request_cards();
+        }
+        let Some(list) = self.cards.clone() else {
+            ui.label(
+                RichText::new(
+                    "The first generation is running. Its creatures appear here when it ends.",
+                )
+                .color(theme.muted),
+            );
+            return;
+        };
+        if list.generation < generation {
+            let mut refresh = false;
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("Showing generation {}.", list.generation))
+                        .small()
+                        .color(theme.muted),
+                );
+                refresh = ui
+                    .small_button(format!("Show latest (generation {generation})"))
+                    .on_hover_text(
+                        "The cards stay still while you look; this loads the newest ranking",
+                    )
+                    .clicked();
+            });
+            if refresh {
+                self.request_cards();
+            }
+        }
+        let filter = self.card_filter;
+        let visible: Vec<&crate::worker::Card> = list
+            .cards
+            .iter()
+            .filter(|card| filter.shows(card))
+            .collect();
+        if visible.is_empty() {
+            ui.label(
+                RichText::new(if list.cards.is_empty() {
+                    "No creatures kept yet."
+                } else {
+                    "No kept creature matches these filters."
+                })
+                .color(theme.muted),
+            );
+            return;
+        }
+        let columns = (ui.available_width() / 190.).floor().max(2.) as usize;
+        let width = (ui.available_width() - (columns - 1) as f32 * 10.) / columns as f32;
+        let shown = self.playback.as_ref().map(|p| p.creature.id);
+        egui::ScrollArea::vertical()
+            .id_salt("population_grid")
+            .show_rows(ui, 162., visible.len().div_ceil(columns), |ui, rows| {
+                for row in rows {
+                    ui.horizontal(|ui| {
+                        for card in visible.iter().skip(row * columns).take(columns) {
+                            let (rect, response) =
+                                ui.allocate_exact_size(Vec2::new(width, 152.), Sense::click());
+                            paint_card(
+                                ui.painter(),
+                                card,
+                                rect,
+                                response.hovered() || shown == Some(card.creature.id),
+                                Stage::Archived,
+                                theme,
+                            );
+                            if response.clicked() {
+                                *selected = Some((card.creature.clone(), list.config.clone()));
+                            }
+                            response.on_hover_text(format!(
+                                "{}\n{} nodes, {} bones, {} muscles\n{}\n{}\nClick to replay",
+                                species_name(&card.creature),
+                                card.creature.nodes.len(),
+                                card.creature.bones.len(),
+                                card.creature.muscles.len(),
+                                card.emitter.map_or("First generation".to_owned(), |emitter| {
+                                    format!("Born {}", origin_words(emitter))
+                                }),
+                                card.descriptor.map_or_else(
+                                    || "Trial done".to_owned(),
+                                    |d| format!(
+                                        "On the ground {:.0}% of the time · {:.2} strides/s · {:.2} m tall · {:.0} feet",
+                                        d.ground_contact * 100.0,
+                                        d.gait_frequency,
+                                        d.mean_height,
+                                        d.feet
+                                    ),
+                                )
+                            ));
+                        }
+                    });
+                }
+            });
     }
     /// Replays the best creature recorded for one history entry, through the
     /// same preview path as an archive card click.
@@ -2927,56 +2977,52 @@ impl App {
         if !self.race_pending {
             return;
         }
-        if !self.race_picks.is_empty() {
-            // The player's picks against the champion.
-            let mut lanes: Vec<RaceLane> = Vec::new();
-            if let Some((creature, config)) = self.champion()
-                && self
-                    .race_picks
-                    .iter()
-                    .all(|(pick, _)| pick.id != creature.id)
-            {
-                lanes.push(RaceLane {
-                    label: "champion".to_owned(),
-                    playback: Playback::new(creature, config),
-                });
-            }
-            for (creature, config) in &self.race_picks {
-                lanes.push(RaceLane {
-                    label: "your pick".to_owned(),
-                    playback: Playback::new(creature.clone(), config.clone()),
-                });
-            }
-            lanes.sort_by(|a, b| b.playback.distance.total_cmp(&a.playback.distance));
-            self.race = lanes;
-            self.race_pending = false;
-            self.race_page_requested = false;
-            self.race_camera = 0.0;
-            return;
-        }
-        let Some(snapshot) = &self.snapshot else {
-            return;
-        };
-        let (archive_size, page_start) = (snapshot.archive_size, snapshot.page_start);
-        if archive_size == 0 {
-            return;
-        }
-        if page_start != 0 {
-            if !self.race_page_requested {
-                self.race_page_requested = true;
-                self.worker.send(Command::Page(0));
+        if self.race_picks.is_empty() {
+            // The top five come with a ranked archive; ask again while none
+            // has arrived with creatures in it.
+            let kept = self.snapshot.as_ref().is_some_and(|s| s.archive_size > 0);
+            let waiting = self
+                .cards_requested
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(2));
+            if kept && !waiting {
+                self.request_cards();
             }
             return;
         }
-        let config = snapshot.config.clone();
-        let mut lanes: Vec<RaceLane> = snapshot
-            .page
+        // The player's picks against the champion.
+        let mut lanes: Vec<RaceLane> = Vec::new();
+        if let Some((creature, config)) = self.champion()
+            && self
+                .race_picks
+                .iter()
+                .all(|(pick, _)| pick.id != creature.id)
+        {
+            lanes.push(RaceLane {
+                label: "champion".to_owned(),
+                playback: Playback::new(creature, config),
+            });
+        }
+        for (creature, config) in &self.race_picks {
+            lanes.push(RaceLane {
+                label: "your pick".to_owned(),
+                playback: Playback::new(creature.clone(), config.clone()),
+            });
+        }
+        lanes.sort_by(|a, b| b.playback.distance.total_cmp(&a.playback.distance));
+        self.race = lanes;
+        self.race_pending = false;
+        self.race_camera = 0.0;
+    }
+    /// The top five kept creatures of a freshly ranked archive race.
+    fn build_top_race(&mut self, list: &crate::worker::CardList) {
+        let mut lanes: Vec<RaceLane> = list
+            .cards
             .iter()
             .filter(|card| card.descriptor.is_some() && card.score.is_finite())
             .take(5)
             .map(|card| RaceLane {
                 label: format!("archive rank {}", card.rank + 1),
-                playback: Playback::new(card.creature.clone(), config.clone()),
+                playback: Playback::new(card.creature.clone(), list.config.clone()),
             })
             .collect();
         // Lanes run in the order their replays finish, so the standings end
@@ -2987,15 +3033,30 @@ impl App {
         }
         self.race = lanes;
         self.race_pending = false;
-        self.race_page_requested = false;
         self.race_camera = 0.0;
     }
     /// Clears the race and asks for a fresh set of top elites.
     fn restart_race(&mut self) {
         self.race.clear();
         self.race_pending = true;
-        self.race_page_requested = false;
         self.race_camera = 0.0;
+        if self.race_picks.is_empty() {
+            self.request_cards();
+        }
+    }
+    /// Asks the worker for the ranked archive; it arrives with a snapshot.
+    fn request_cards(&mut self) {
+        self.cards_requested = Some(Instant::now());
+        self.worker.send(Command::Cards);
+    }
+    /// Runs when the player opens a tab: a fresh race, or the latest
+    /// ranked archive for Ways of moving.
+    fn opened_tab(&mut self, tab: Tab) {
+        match tab {
+            Tab::Race => self.restart_race(),
+            Tab::Population => self.request_cards(),
+            _ => {}
+        }
     }
     /// Full ancestor list of the selected creature, one row per generation.
     fn lineage_view(&mut self, ui: &mut egui::Ui) {
@@ -3836,7 +3897,6 @@ impl App {
                             self.pause();
                             self.worker.send(Command::New(self.config.clone()));
                             self.initial = true;
-                            self.last_page = usize::MAX;
                             self.new_dialog = false;
                         }
                         if ui.button("Cancel").clicked() {
@@ -3992,15 +4052,8 @@ impl eframe::App for App {
         }
         let next = self.worker.view.lock().unwrap().take();
         if let Some(mut next) = next {
-            if self
-                .snapshot
-                .as_ref()
-                .is_some_and(|old| old.stage != next.stage)
-            {
-                self.sort_started = Instant::now();
-            }
             if self.initial
-                && !next.page.is_empty()
+                && next.epoch > 0
                 && self
                     .snapshot
                     .as_ref()
@@ -4030,6 +4083,13 @@ impl eframe::App for App {
                 self.champion_shown = false;
             }
             self.absorb_events(&next);
+            if let Some(list) = next.cards.take() {
+                self.cards_requested = None;
+                if self.race_pending && self.race_picks.is_empty() {
+                    self.build_top_race(&list);
+                }
+                self.cards = Some(list);
+            }
             if let Some((c, cfg)) = next.selected.take() {
                 // A creature the player clicked on the archive map; it plays
                 // in the player docked beside the map.
@@ -4077,9 +4137,6 @@ impl eframe::App for App {
                 self.tab = Tab::History;
             }
             if pressed(egui::Key::Num4) {
-                if self.tab != Tab::Race {
-                    self.restart_race();
-                }
                 self.tab = Tab::Race;
             }
             if pressed(egui::Key::Num5) {
@@ -4112,6 +4169,10 @@ impl eframe::App for App {
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
                 self.file("Save experiment");
             }
+        }
+        if self.tab != self.prev_tab {
+            self.prev_tab = self.tab;
+            self.opened_tab(self.tab);
         }
         if self.playing {
             let frame_dt = physics::dt();
@@ -4224,7 +4285,6 @@ impl eframe::App for App {
                     .inner_margin(GAP_L as i8),
             )
             .show(ui, |ui| {
-                let before = self.tab;
                 ui.horizontal(|ui| {
                     for (tab, label) in [
                         (Tab::Overview, "Overview"),
@@ -4236,9 +4296,6 @@ impl eframe::App for App {
                         ui.selectable_value(&mut self.tab, tab, RichText::new(label).size(18.));
                     }
                 });
-                if self.tab == Tab::Race && before != Tab::Race {
-                    self.restart_race();
-                }
                 ui.add_space(GAP_M);
                 match self.tab {
                     Tab::Overview => {
@@ -4459,15 +4516,7 @@ fn paint_card(
         FontId::proportional(13.),
         theme.ink,
     );
-    if card.plan_count > 1 {
-        painter.text(
-            rect.right_top() + Vec2::new(-9., 8.),
-            Align2::RIGHT_TOP,
-            format!("{} like it", card.plan_count),
-            FontId::proportional(12.),
-            theme.accent,
-        );
-    } else if card.innovation_reserve {
+    if card.innovation_reserve {
         painter.text(
             rect.right_top() + Vec2::new(-9., 8.),
             Align2::RIGHT_TOP,
