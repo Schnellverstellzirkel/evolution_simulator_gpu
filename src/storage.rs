@@ -293,11 +293,11 @@ const OPTIMIZER_SHARE: f32 = 0.5;
 /// Generations between migrations, and the share of elites that migrate.
 /// Rare migration lets each island settle on and refine its own design
 /// instead of all islands polishing the same one.
-const MIGRATION_INTERVAL: u32 = 25;
+pub const MIGRATION_INTERVAL: u32 = 25;
 /// Generations without a new island record before the island's optimizer
 /// turns to its next fastest design.
 const OPTIMIZER_STALL: u32 = 30;
-const MIGRATION_SHARE: f32 = 0.1;
+pub const MIGRATION_SHARE: f32 = 0.1;
 struct OffspringPlan {
     plan: CandidatePlan,
     parent_id: Option<u64>,

@@ -213,6 +213,30 @@ pub struct LineageStep {
     pub change: String,
     pub creature: Creature,
 }
+/// One island archive at a glance, for the "How evolution works" schematic.
+#[derive(Clone)]
+pub struct IslandSummary {
+    /// Its fastest behavior elite's distance (NaN while it is empty).
+    pub best: f32,
+    /// Filled behavior niches.
+    pub cells: usize,
+    /// Its fastest behavior elite.
+    pub leader: Option<Creature>,
+}
+impl IslandSummary {
+    fn of(island: &qd::QdArchive) -> Self {
+        let leader = island
+            .entries
+            .iter()
+            .filter(|elite| !qd::is_morphology_niche(&elite.niche))
+            .max_by(|a, b| a.fitness.total_cmp(&b.fitness));
+        Self {
+            best: leader.map_or(f32::NAN, |elite| elite.fitness),
+            cells: island.behavior_count(),
+            leader: leader.map(|elite| elite.creature.clone()),
+        }
+    }
+}
 #[derive(Clone)]
 pub struct Snapshot {
     pub epoch: u64,
@@ -261,6 +285,8 @@ pub struct Snapshot {
     pub qd_score: f64,
     pub emitters: [EmitterStats; 4],
     pub emitter_weights: [f64; 4],
+    /// Each island archive, in island order.
+    pub islands: Vec<IslandSummary>,
     pub status: String,
     pub error: Option<String>,
 }
@@ -1370,6 +1396,7 @@ fn run(
                     qd_score: e.archive.qd_score,
                     emitters: e.emitter_stats,
                     emitter_weights: qd::emitter_weights(&e.emitter_stats),
+                    islands: e.islands.iter().map(IslandSummary::of).collect(),
                     status: status.clone(),
                     error: error.clone(),
                 }
@@ -1404,6 +1431,7 @@ fn run(
                     qd_score: 0.0,
                     emitters: [EmitterStats::default(); 4],
                     emitter_weights: qd::emitter_weights(&[EmitterStats::default(); 4]),
+                    islands: Vec::new(),
                     status: status.clone(),
                     error: error.clone(),
                 }
