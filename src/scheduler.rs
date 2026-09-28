@@ -272,11 +272,6 @@ impl Scheduler {
     /// engine. If the primary GPU cannot open, evaluation falls back to the
     /// CPU; with the separate pool disabled, it shares the general Rayon pool.
     pub fn new(primary: &str) -> Result<Self> {
-        // The GPU kernels run today's physics; the v2 prototype runs on the
-        // CPU only.
-        if crate::physics2::enabled() {
-            return Self::cpu_only(engine::rayon_threads().max(1));
-        }
         let step_range = env_or("EVOLUTION_GPU_CHUNK", crate::gpu::DEFAULT_STEP_RANGE);
         let mut devices = Vec::new();
         let mut startup_failure = None;
