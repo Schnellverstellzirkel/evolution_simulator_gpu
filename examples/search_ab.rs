@@ -196,6 +196,7 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
 
 struct BodySize {
     nodes: usize,
+    muscles: usize,
     length: f32,
     longest_bone: f32,
     mass: f32,
@@ -224,6 +225,7 @@ fn top_bodies(experiment: &Experiment, count: usize) -> Vec<BodySize> {
                 .fold(0.0, f32::max);
             BodySize {
                 nodes: creature.nodes.len(),
+                muscles: creature.muscles.len(),
                 length,
                 longest_bone,
                 mass,
@@ -258,6 +260,12 @@ fn print_body_mix(scope: &str, seed: u64, bodies: &[BodySize]) {
         median(&mut lengths),
         median(&mut masses),
         longest
+    );
+    let muscles: Vec<usize> = bodies.iter().map(|body| body.muscles).collect();
+    println!(
+        "{scope} seed {seed} top-{TOP_BODIES} muscles: mean {:.2}, most {}",
+        muscles.iter().sum::<usize>() as f32 / muscles.len() as f32,
+        muscles.iter().max().unwrap_or(&0)
     );
 }
 
