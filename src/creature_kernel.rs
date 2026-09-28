@@ -53,6 +53,12 @@ pub struct Params {
     /// for no screen, and the distance a creature needs there to continue.
     pub screen_tick: u32,
     pub screen_bar: f32,
+    /// Step at whose end the second screening rung applies, or 0 for none,
+    /// and the distance a creature that passed the first screen needs there.
+    pub screen2_tick: u32,
+    pub screen2_bar: f32,
+    /// Keeps the uniform a multiple of 16 bytes.
+    pub pad: [u32; 2],
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -87,6 +93,9 @@ pub struct GpuResult {
     /// Seconds into the trial when the screen stopped the creature, or 0.
     /// Its fitness is the distance there and its behavior totals end there.
     pub screened: f32,
+    /// Distance at the second screening rung, or at an earlier fall; 0 until
+    /// then and when there is no second rung.
+    pub screen2_x: f32,
 }
 impl GpuResult {
     /// Number of feet: nodes that touched the ground and lifted off again.
@@ -720,7 +729,9 @@ mod tests {
         assert_eq!(std::mem::offset_of!(Params, quake), 68);
         assert_eq!(std::mem::offset_of!(Params, screen_tick), 72);
         assert_eq!(std::mem::offset_of!(Params, screen_bar), 76);
-        assert_eq!(std::mem::size_of::<Params>(), 80);
+        assert_eq!(std::mem::offset_of!(Params, screen2_tick), 80);
+        assert_eq!(std::mem::offset_of!(Params, screen2_bar), 84);
+        assert_eq!(std::mem::size_of::<Params>(), 96);
     }
 
     #[test]

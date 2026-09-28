@@ -121,6 +121,11 @@ enum Action {
         /// (0 is the most common), before `--limit`.
         #[arg(long)]
         plan_rank: Option<usize>,
+        /// Screen like the game: a first pass of standard trials without bars
+        /// sets both screening rungs' bars from its distances, then every
+        /// repeat runs with those bars.
+        #[arg(long)]
+        screened: bool,
     },
     /// Summarize an existing checkpoint's record curve and archive morphology.
     Analyze {
@@ -428,6 +433,7 @@ fn main() -> Result<()> {
             duration,
             engine,
             plan_rank,
+            screened,
         }) => {
             let e = storage::load(&checkpoint)?;
             let mut cfg = e.config.clone();
@@ -498,6 +504,56 @@ fn main() -> Result<()> {
                 None
             };
             let indices: Vec<usize> = (0..count).collect();
+            if screened && let Some(screen) = cfg.screen {
+                let gpu = gpu
+                    .as_mut()
+                    .context("--screened needs the default GPU path")?;
+                let start = Instant::now();
+                let sample = gpu.sched.as_mut().context("scheduler")?.evaluate_single(
+                    &population,
+                    &indices,
+                    &cfg,
+                )?;
+                let first: Vec<f32> = sample.iter().map(|m| m.screen_x).collect();
+                let second: Vec<f32> = sample.iter().map(|m| m.screen2_x).collect();
+                let (bar, late) = evolution_simulator::physics::screen_bars(&first, &second);
+                let passed = first.iter().filter(|&&x| x >= bar).count();
+                let kept = first
+                    .iter()
+                    .zip(&second)
+                    .filter(|&(&x, &y)| x >= bar && y >= late)
+                    .count();
+                eprintln!(
+                    "Screen bars from a {:.3} s pass: {bar:.3} m at {} s ({passed} pass), second rung {:?} ({kept} pass both)",
+                    start.elapsed().as_secs_f64(),
+                    screen.seconds,
+                    screen.second.map(|rung| (rung.seconds, late)),
+                );
+                // How well the bars keep the creatures that end best in the
+                // full trials of this pass.
+                let mut order: Vec<usize> = (0..sample.len()).collect();
+                order.sort_by(|&a, &b| sample[b].fitness.total_cmp(&sample[a].fitness));
+                for share in [0.001, 0.01, 0.1] {
+                    let top = &order[..((sample.len() as f64 * share) as usize).max(1)];
+                    let first_kept = top.iter().filter(|&&i| first[i] >= bar).count();
+                    let both_kept = top
+                        .iter()
+                        .filter(|&&i| first[i] >= bar && second[i] >= late)
+                        .count();
+                    eprintln!(
+                        "Final top {:.1}% ({} creatures): {first_kept} pass the first bar, {both_kept} pass both",
+                        share * 100.0,
+                        top.len()
+                    );
+                }
+                cfg.screen = Some(evolution_simulator::physics::Screen {
+                    bar,
+                    second: screen
+                        .second
+                        .map(|rung| evolution_simulator::physics::Rung { bar: late, ..rung }),
+                    ..screen
+                });
+            }
             let batch = cfg.batch_size();
             let mut out = Vec::new();
             for r in 0..repeat {

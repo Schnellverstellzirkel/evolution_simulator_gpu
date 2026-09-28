@@ -6,15 +6,26 @@
 //! environment flag can be measured with the same command before and after.
 //!
 //! Usage:
-//!   cargo run --release --example search_ab -- [generations] [population] [duration] [seed,seed,...] [--tag NAME]
+//!   cargo run --release --example search_ab -- [generations] [population] [duration] [seed,seed,...] [--tag NAME] [--checks]
 //!   cargo run --release --example search_ab -- <tag> [generations] [population] [duration] [seed,seed,...]
 //! Defaults: 2 generations, 64 creatures, 1.0 s trials, seeds 38,39.
 //! Wall time goes to stderr so stdout is deterministic and diffable.
+//!
+//! `--checks` adds the game's contender check: creatures that could enter an
+//! archive run a second trial from a perturbed pose at
+//! `scheduler::check_config` physics on the CPU, one per archive cell at a
+//! time as in the scheduler, and `scheduler::check_verdict` decides their
+//! score. Without it no creature is checked, as in the earlier search
+//! measurements.
 use anyhow::{Context, Result};
 use evolution_simulator::{
-    config::Config, cpu_engine, engine, physics, scheduler, storage::Experiment,
+    config::Config, cpu_engine, engine, evolution::Population, physics, qd::EvaluationMetrics,
+    scheduler, storage::Experiment,
 };
-use std::{collections::BTreeMap, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Instant,
+};
 
 const DEFAULT_GENERATIONS: u32 = 2;
 const DEFAULT_POPULATION: usize = 64;
@@ -28,18 +39,22 @@ struct Options {
     duration: f32,
     seeds: Vec<u64>,
     tag: Option<String>,
+    checks: bool,
 }
 
 fn usage() -> &'static str {
-    "usage: search_ab [tag] [generations] [population] [duration_seconds] [seed,seed,...] [--tag NAME]"
+    "usage: search_ab [tag] [generations] [population] [duration_seconds] [seed,seed,...] [--tag NAME] [--checks]"
 }
 
 fn options() -> Result<Options> {
     let mut positionals: Vec<String> = Vec::new();
     let mut tag = None;
+    let mut checks = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        if arg == "--tag" {
+        if arg == "--checks" {
+            checks = true;
+        } else if arg == "--tag" {
             tag = Some(args.next().context("--tag needs a name")?);
         } else if arg == "--help" || arg == "-h" {
             println!("{}", usage());
@@ -87,6 +102,7 @@ fn options() -> Result<Options> {
         duration,
         seeds,
         tag,
+        checks,
     })
 }
 
@@ -114,22 +130,150 @@ fn main() -> Result<()> {
     println!("{scope} seed generation best_m qd_score cells mean_nodes mean_muscles");
     let started = Instant::now();
     let (mut distances, mut scores) = (Vec::new(), Vec::new());
+    let mut checks = CheckCounts::default();
     for &seed in &options.seeds {
-        let (best, qd) = run_seed(seed, &options, scope)?;
+        let seed_started = Instant::now();
+        let (best, qd) = run_seed(seed, &options, scope, &mut checks)?;
+        eprintln!(
+            "search_ab: seed {seed} in {:.1} s wall, {:.1} s CPU so far",
+            seed_started.elapsed().as_secs_f64(),
+            cpu_seconds()
+        );
         distances.push(best);
         scores.push(qd as f32);
     }
     paired_summary(&mut distances, &mut scores);
+    if options.checks {
+        println!(
+            "{scope} checks: {} checked, {} lowered by more than 1 cm, {} kept out by the screen, {} dropped (their cell's best verdict beat them)",
+            checks.checked, checks.lowered, checks.kept_out, checks.unchecked
+        );
+    }
     eprintln!(
-        "search_ab: {} seeds in {:.1} s wall",
+        "search_ab: {} seeds in {:.1} s wall, {:.1} s CPU, checks {:.1} s wall",
         options.seeds.len(),
-        started.elapsed().as_secs_f64()
+        started.elapsed().as_secs_f64(),
+        cpu_seconds(),
+        checks.seconds
     );
     Ok(())
 }
 
+/// Processor time of this process (user and system), which other work on a
+/// shared machine disturbs less than the wall clock.
+fn cpu_seconds() -> f64 {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: getrusage fills the struct it is given.
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    let seconds = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 * 1e-6;
+    seconds(usage.ru_utime) + seconds(usage.ru_stime)
+}
+
+#[derive(Default)]
+struct CheckCounts {
+    checked: u64,
+    lowered: u64,
+    kept_out: u64,
+    unchecked: u64,
+    seconds: f64,
+}
+
+/// The game's contender check on one evaluated generation. Creatures that
+/// could enter an archive (against the start-of-generation archives) wait
+/// by archive cell, fastest first. Each round checks the fastest waiter of
+/// every cell, plus every contender that shares no cell, with a perturbed
+/// trial and `scheduler::check_verdict`. As in the scheduler, a cell's
+/// remaining waiters are then decided again: those whose standard score no
+/// longer beats the best verdict of that cell enter no archive this
+/// generation, and the rest wait for the next round.
+fn check_contenders(
+    experiment: &Experiment,
+    metrics: &mut [EvaluationMetrics],
+    counts: &mut CheckCounts,
+) {
+    let started = Instant::now();
+    let mut round: Vec<usize> = Vec::new();
+    let mut waiting: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (i, metric) in metrics.iter().enumerate() {
+        match experiment.check_need(i, metric) {
+            scheduler::CheckNeed::Release => {}
+            scheduler::CheckNeed::Check { cell: None, .. } => round.push(i),
+            scheduler::CheckNeed::Check {
+                cell: Some(cell), ..
+            } => waiting.entry(cell).or_default().push(i),
+        }
+    }
+    // Fastest last, so each round pops a cell's fastest waiter.
+    for list in waiting.values_mut() {
+        list.sort_by(|&a, &b| {
+            metrics[a]
+                .fitness
+                .total_cmp(&metrics[b].fitness)
+                .then(b.cmp(&a))
+        });
+    }
+    let mut cells: Vec<u64> = waiting.keys().copied().collect();
+    cells.sort_unstable();
+    let mut bar: HashMap<u64, f32> = HashMap::new();
+    let check_cfg = scheduler::check_config(&experiment.config);
+    loop {
+        let mut cell_of: HashMap<usize, u64> = HashMap::new();
+        for &cell in &cells {
+            let list = waiting.get_mut(&cell).expect("waiting cell");
+            if let Some(i) = list.pop() {
+                cell_of.insert(i, cell);
+                round.push(i);
+            }
+        }
+        if round.is_empty() {
+            break;
+        }
+        round.sort_unstable();
+        let mut unit = Population::default();
+        for &i in &round {
+            let mut creature = experiment.population.creature(i);
+            scheduler::perturb(&mut creature);
+            unit.push(creature);
+        }
+        let results = cpu_engine::evaluate(&unit, &check_cfg);
+        for (&i, result) in round.iter().zip(&results) {
+            let before = metrics[i].fitness;
+            let (fitness, unchecked) = scheduler::check_verdict(&metrics[i], result);
+            metrics[i].fitness = fitness;
+            metrics[i].unchecked |= unchecked;
+            counts.checked += 1;
+            counts.lowered += u64::from(fitness < before - 0.01);
+            counts.kept_out += u64::from(unchecked);
+            if let Some(&cell) = cell_of.get(&i)
+                && !unchecked
+            {
+                let best = bar.entry(cell).or_insert(f32::NEG_INFINITY);
+                *best = best.max(fitness);
+            }
+        }
+        round.clear();
+        for &cell in &cells {
+            let Some(&best) = bar.get(&cell) else {
+                continue;
+            };
+            let list = waiting.get_mut(&cell).expect("waiting cell");
+            while list.first().is_some_and(|&i| metrics[i].fitness <= best) {
+                let i = list.remove(0);
+                metrics[i].unchecked = true;
+                counts.unchecked += 1;
+            }
+        }
+    }
+    counts.seconds += started.elapsed().as_secs_f64();
+}
+
 /// Runs the game's loop for one seed and returns its archive best and QD score.
-fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
+fn run_seed(
+    seed: u64,
+    options: &Options,
+    scope: &str,
+    counts: &mut CheckCounts,
+) -> Result<(f32, f64)> {
     let cfg = Config {
         population: options.population,
         duration: options.duration,
@@ -144,10 +288,18 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
     let mut top = Vec::new();
     for generation in 0..options.generations {
         let results = cpu_engine::evaluate(&experiment.population, &experiment.config);
-        for (index, result) in results.iter().enumerate() {
-            let metrics =
-                scheduler::to_metrics(&experiment.population, index, result, &experiment.config);
-            experiment.record_result(index, &metrics);
+        let mut metrics: Vec<EvaluationMetrics> = results
+            .iter()
+            .enumerate()
+            .map(|(index, result)| {
+                scheduler::to_metrics(&experiment.population, index, result, &experiment.config)
+            })
+            .collect();
+        if options.checks {
+            check_contenders(&experiment, &mut metrics, counts);
+        }
+        for (index, metric) in metrics.iter().enumerate() {
+            experiment.record_result(index, metric);
         }
         experiment.evaluated = experiment.config.population;
         experiment
@@ -178,6 +330,7 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             .iter()
             .map(|elite| elite.fitness)
             .fold(best, f32::max);
+        println!("{scope} seed {seed} generation {generation} archive best {best:.2} m");
         top = top_bodies(&experiment, TOP_BODIES);
         experiment
             .prepare_next_batch()
@@ -191,7 +344,53 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
         println!("{scope} seed {seed} summary: archive empty, qd {qd:.2}, cells {cells}");
     }
     print_body_mix(scope, seed, &top);
+    print_robustness(scope, seed, &experiment);
     Ok((best, qd))
+}
+
+/// How much of their archive distance the 50 best global elites keep under
+/// the game's fine check (4x rate and solver passes, full trial, no screen)
+/// from a perturbed pose that no run's own check used, whatever check the
+/// run itself used.
+fn print_robustness(scope: &str, seed: u64, experiment: &Experiment) {
+    let mut elites: Vec<_> = experiment
+        .archive
+        .entries
+        .iter()
+        .filter(|elite| elite.fitness.is_finite() && elite.fitness > 0.0)
+        .collect();
+    elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
+    elites.truncate(TOP_BODIES);
+    if elites.is_empty() {
+        return;
+    }
+    let mut unit = Population::default();
+    for elite in &elites {
+        let mut creature = elite.creature.clone();
+        // A second pose from the same rule: the id seeds the perturbation.
+        creature.id ^= 0x9e37_79b9;
+        scheduler::perturb(&mut creature);
+        creature.id ^= 0x9e37_79b9;
+        unit.push(creature);
+    }
+    let cfg = Config {
+        fidelity: Some(physics::Fidelity::fine()),
+        screen: None,
+        population: elites.len(),
+        ..experiment.config.clone()
+    };
+    let results = cpu_engine::evaluate(&unit, &cfg);
+    let mut kept: Vec<f32> = elites
+        .iter()
+        .zip(&results)
+        .map(|(elite, result)| result.fitness.max(0.0) / elite.fitness)
+        .collect();
+    let halved = kept.iter().filter(|&&k| k < 0.5).count();
+    println!(
+        "{scope} seed {seed} top-{TOP_BODIES} elites under the fine check: median share kept {:.2}, below half {halved} of {}",
+        median(&mut kept),
+        elites.len()
+    );
 }
 
 struct BodySize {

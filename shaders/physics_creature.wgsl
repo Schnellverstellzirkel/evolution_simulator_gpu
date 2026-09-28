@@ -65,6 +65,12 @@ struct Params {
     // creature needs there to run the full trial (physics::Screen).
     screen_tick: u32,
     screen_bar: f32,
+    // Step of the second screening rung (0 for none) and its bar, for the
+    // creatures that passed the first screen.
+    screen2_tick: u32,
+    screen2_bar: f32,
+    pad0: u32,
+    pad1: u32,
 }
 struct Result {
     fitness: f32,
@@ -96,6 +102,8 @@ struct Result {
     screen_x: f32,
     // Seconds into the trial when the screen stopped the creature, or 0.
     screened: f32,
+    // Distance at the second screening rung, or at an earlier fall.
+    screen2_x: f32,
 }
 @group(0) @binding(0) var<storage, read_write> nodes: array<Node>;
 // Muscle genes plus per-muscle state (rhythm offset and energy), which the
@@ -411,7 +419,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         bone_cos_half[j] = bone_data[field + 4u * TILE];
         bone_break[j] = bone_cos_half[j] * JOINT_BREAK_COS - bone_data[field + 5u * TILE] * JOINT_BREAK_SIN;
     }
-    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     if p.tick > 0u {
         metrics = results[creature];
     }
@@ -1055,6 +1063,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if tick <= p.screen_tick {
                     metrics.screen_x = metrics.fitness;
                 }
+                if tick <= p.screen2_tick {
+                    metrics.screen2_x = metrics.fitness;
+                }
                 fell_now = true;
             }
             metrics.ground_contact += contacts;
@@ -1096,7 +1107,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             // only if it has come far enough; otherwise the trial ends here
             // like a fall, keeping this distance.
             var screened_now = false;
-            if tick == p.screen_tick && !fell_now {
+            if (tick == p.screen_tick || tick == p.screen2_tick) && !fell_now {
                 var screen_x = 0.0;
                 var failures = 0.0;
                 for (var j = 0u; j < MAXN; j++) {
@@ -1104,10 +1115,19 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                     screen_x += pos[node_k(j, lane)].x * mass[j];
                     failures += failed[j];
                 }
-                metrics.screen_x = screen_x * inv_total_mass;
-                if metrics.screen_x < p.screen_bar {
+                let x = screen_x * inv_total_mass;
+                var bar = p.screen_bar;
+                if tick == p.screen_tick {
+                    metrics.screen_x = x;
+                } else {
+                    // The second rung: only creatures that passed the first
+                    // screen are still running here.
+                    metrics.screen2_x = x;
+                    bar = p.screen2_bar;
+                }
+                if x < bar {
                     metrics.screened = time + DT;
-                    metrics.fitness = select(metrics.screen_x, -1e20, failures > 0.0);
+                    metrics.fitness = select(x, -1e20, failures > 0.0);
                     screened_now = true;
                 }
             }

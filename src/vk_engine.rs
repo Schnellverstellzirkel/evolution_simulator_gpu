@@ -819,6 +819,15 @@ impl VkEngine {
                     quake: if cfg.ground { cfg.quake } else { 0.0 },
                     screen_tick: cfg.screen.map_or(0, |screen| screen.tick(fidelity)),
                     screen_bar: cfg.screen.map_or(f32::NEG_INFINITY, |screen| screen.bar),
+                    screen2_tick: cfg
+                        .screen
+                        .and_then(|screen| screen.second_tick(fidelity))
+                        .unwrap_or(0),
+                    screen2_bar: cfg
+                        .screen
+                        .and_then(|screen| screen.second)
+                        .map_or(f32::NEG_INFINITY, |rung| rung.bar),
+                    pad: [0; 2],
                 };
                 param_data[offset..offset + std::mem::size_of::<Params>()]
                     .copy_from_slice(bytemuck::bytes_of(&p));

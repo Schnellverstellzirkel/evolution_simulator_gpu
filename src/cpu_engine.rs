@@ -518,6 +518,15 @@ impl Group {
         // earlier fall.
         let screen_tick = cfg.screen.map(|screen| screen.tick(fidelity));
         let screen_bar = F::splat(cfg.screen.map_or(f32::NEG_INFINITY, |screen| screen.bar));
+        // The second rung stops lanes that passed the first screen; its
+        // distance (or an earlier fall's) sets the next generation's bar.
+        let screen2_tick = cfg.screen.and_then(|screen| screen.second_tick(fidelity));
+        let screen2_bar = F::splat(
+            cfg.screen
+                .and_then(|screen| screen.second)
+                .map_or(f32::NEG_INFINITY, |rung| rung.bar),
+        );
+        let mut screen2_x = zero;
         let mut screen_x = zero;
         let mut screened = zero;
         let mut screen_fit = zero;
@@ -1159,6 +1168,11 @@ impl Group {
                             F::select(failures.gt(zero), F::splat(-1e20), x * inv_total_mass);
                         screen_x = F::select(falls, score, screen_x);
                     }
+                    if screen2_tick.is_some_and(|screen| tick <= screen) {
+                        let score =
+                            F::select(failures.gt(zero), F::splat(-1e20), x * inv_total_mass);
+                        screen2_x = F::select(falls, score, screen2_x);
+                    }
                     fall_time = F::select(falls, F::splat(time_now + dt), fall_time);
                     if early_exit {
                         fell_this_tick = F::select(falls, one, zero);
@@ -1209,7 +1223,8 @@ impl Group {
                     }
                 }
             }
-            if screen_tick == Some(tick) {
+            let second = screen2_tick == Some(tick);
+            if screen_tick == Some(tick) || second {
                 let standing = fall_time.le(zero) & screened.le(zero);
                 let mut x = zero;
                 let mut failures = zero;
@@ -1218,8 +1233,14 @@ impl Group {
                     failures += failed[j];
                 }
                 let x = x * inv_total_mass;
-                screen_x = F::select(standing, x, screen_x);
-                let below = standing & x.lt(screen_bar);
+                let bar = if second {
+                    screen2_x = F::select(standing, x, screen2_x);
+                    screen2_bar
+                } else {
+                    screen_x = F::select(standing, x, screen_x);
+                    screen_bar
+                };
+                let below = standing & x.lt(bar);
                 screened = F::select(below, F::splat(time_now + dt), screened);
                 screen_fit = F::select(below, x, screen_fit);
                 screen_failed = F::select(below, failures, screen_failed);
@@ -1271,6 +1292,7 @@ impl Group {
         let fall_x = fall_x.to_array();
         let fall_failed = fall_failed.to_array();
         let screen_x = screen_x.to_array();
+        let screen2_x = screen2_x.to_array();
         let screened = screened.to_array();
         let screen_fit = screen_fit.to_array();
         let screen_failed = screen_failed.to_array();
@@ -1337,6 +1359,7 @@ impl Group {
                     head_shake: head_shake[l],
                     screen_x: screen_x[l],
                     screened: screened[l],
+                    screen2_x: screen2_x[l],
                 }
             })
             .collect()

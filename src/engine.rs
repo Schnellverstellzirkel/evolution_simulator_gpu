@@ -210,8 +210,13 @@ fn segment_ends(cfg: &Config) -> Vec<u32> {
     let mut ends: Vec<u32> = seconds
         .into_iter()
         .map(|s| fidelity.settle() + (s * fidelity.rate as f32).round() as u32)
-        // Screened creatures leave right after the screen step.
+        // Screened creatures leave right after each screen step.
         .chain(cfg.screen.map(|screen| screen.tick(fidelity) + 1))
+        .chain(
+            cfg.screen
+                .and_then(|screen| screen.second_tick(fidelity))
+                .map(|tick| tick + 1),
+        )
         .filter(|&tick| tick < total)
         .collect();
     ends.sort_unstable();
