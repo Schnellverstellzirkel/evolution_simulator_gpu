@@ -2,8 +2,9 @@
 //! muscles together: copy, grow, fuse, reconnect and retime whole limbs, so a
 //! child keeps more of its parent's gait than a single random edit allows.
 //!
-//! Every operator is on by default (docs/anatomy-operators.md has the search
-//! A/B). `EVOLUTION_ANATOMY=0` turns them off for comparisons, and a
+//! Every operator except `OFF_BY_DEFAULT` is on by default
+//! (docs/anatomy-operators.md has the audit and the search A/B).
+//! `EVOLUTION_ANATOMY=0` turns them off for comparisons, and a
 //! comma-separated list of operator names enables only those. The
 //! structural emitter picks uniformly among the classic operators and the
 //! enabled ones below, and tries up to four times when the chosen operator
@@ -92,15 +93,11 @@ const OFF_BY_DEFAULT: &[&str] = &[
     "mirror_limb_timing",
     "swap_limb_programs",
     "copy_muscle_to_partner",
-    "twin_limb",
-    "grow_matching_tips",
     "nudge_limb_phase",
     "cadence_stride_trade",
     "scale_muscle_leverage",
     "scale_limb_strength",
     "prune_weakest_muscle",
-    "prune_idle_limb",
-    "merge_leaf_bones",
 ];
 
 /// The operators `EVOLUTION_ANATOMY` enables, as indices into `OPERATORS`.
@@ -426,7 +423,13 @@ mod tests {
     #[test]
     fn operator_names_parse_and_are_unique() {
         let defaults = OPERATORS.len() - OFF_BY_DEFAULT.len();
-        assert_eq!(parse(None), (0..defaults).collect::<Vec<_>>());
+        let on = parse(None);
+        assert_eq!(on.len(), defaults);
+        assert!(on.windows(2).all(|w| w[0] < w[1]), "table order");
+        assert!(
+            on.iter()
+                .all(|&i| !OFF_BY_DEFAULT.contains(&OPERATORS[i].0))
+        );
         assert_eq!(parse(Some("")).len(), defaults);
         assert!(parse(Some("0")).is_empty());
         assert!(parse(Some("off")).is_empty());
