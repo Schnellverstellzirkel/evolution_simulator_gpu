@@ -185,6 +185,7 @@ fn apply_style(ctx: &egui::Context, dark: bool) {
     let mut style = (*ctx.global_style()).clone();
     style.spacing.item_spacing = Vec2::new(10.0, 10.0);
     style.spacing.button_padding = Vec2::new(12.0, 8.0);
+    style.spacing.slider_width = 120.0;
     let mut visuals = if dark {
         egui::Visuals::dark()
     } else {
@@ -205,12 +206,18 @@ fn apply_style(ctx: &egui::Context, dark: bool) {
     visuals.selection.stroke = Stroke::new(1.0, theme.accent);
     visuals.hyperlink_color = theme.accent;
     style.visuals = visuals;
-    style
-        .text_styles
-        .insert(egui::TextStyle::Body, FontId::proportional(14.0));
-    style
-        .text_styles
-        .insert(egui::TextStyle::Heading, FontId::proportional(23.0));
+    // Type scale: small print 13 px, body and buttons 16 px, headings 26 px.
+    for (style_name, size) in [
+        (egui::TextStyle::Small, 13.0),
+        (egui::TextStyle::Body, 16.0),
+        (egui::TextStyle::Button, 16.0),
+        (egui::TextStyle::Monospace, 14.0),
+        (egui::TextStyle::Heading, 26.0),
+    ] {
+        style
+            .text_styles
+            .insert(style_name, FontId::proportional(size));
+    }
     ctx.set_global_style(style);
 }
 pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
@@ -967,7 +974,7 @@ fn paint_archive_map(
             Pos2::new(x, plot.bottom() + 4.),
             Align2::CENTER_TOP,
             format!("{:.0}%", column as f32 / columns as f32 * 100.),
-            FontId::proportional(10.),
+            FontId::proportional(13.),
             theme.muted,
         );
     }
@@ -981,7 +988,7 @@ fn paint_archive_map(
             Pos2::new(plot.left() - 6., y),
             Align2::RIGHT_CENTER,
             format!("{:.2}", row as f32 / rows as f32 * 6.),
-            FontId::proportional(10.),
+            FontId::proportional(13.),
             theme.muted,
         );
     }
@@ -989,14 +996,14 @@ fn paint_archive_map(
         Pos2::new(plot.center().x, plot.bottom() + 24.),
         Align2::CENTER_TOP,
         "Share of the trial on the ground",
-        FontId::proportional(11.),
+        FontId::proportional(14.),
         theme.ink,
     );
     painter.text(
         Pos2::new(rect.left() + 4., plot.top() - 16.),
         Align2::LEFT_BOTTOM,
         "Strides per second",
-        FontId::proportional(11.),
+        FontId::proportional(14.),
         theme.ink,
     );
     if !cells.is_empty() {
@@ -1026,14 +1033,14 @@ fn paint_archive_map(
             Pos2::new(legend.left() - 6., legend.center().y),
             Align2::RIGHT_CENTER,
             format!("{min:.2} m"),
-            FontId::proportional(10.),
+            FontId::proportional(13.),
             theme.muted,
         );
         painter.text(
             Pos2::new(legend.right() + 6., legend.center().y),
             Align2::LEFT_CENTER,
             format!("{max:.2} m"),
-            FontId::proportional(10.),
+            FontId::proportional(13.),
             theme.muted,
         );
     }
@@ -1046,7 +1053,7 @@ fn paint_archive_map(
             } else {
                 "No creatures with this height and these feet. Try All."
             },
-            FontId::proportional(13.),
+            FontId::proportional(16.),
             theme.muted,
         );
     }
@@ -1072,7 +1079,7 @@ fn paint_archive_map(
                 inner.center(),
                 Align2::CENTER_CENTER,
                 format!("{:.1}", cell.score),
-                FontId::proportional(11.),
+                FontId::proportional(14.),
                 ink,
             );
         }
@@ -1150,21 +1157,21 @@ fn paint_lineage_tile(
         Pos2::new(text_x, rect.top() + 8.),
         Align2::LEFT_TOP,
         format!("Generation {}", step.generation),
-        FontId::proportional(12.),
+        FontId::proportional(15.),
         theme.muted,
     );
     painter.text(
-        Pos2::new(text_x, rect.top() + 24.),
+        Pos2::new(text_x, rect.top() + 28.),
         Align2::LEFT_TOP,
         format!("{:.2} m", step.fitness),
-        FontId::proportional(16.),
+        FontId::proportional(19.),
         if big { theme.accent } else { theme.ink },
     );
     painter.text(
-        Pos2::new(text_x, rect.top() + 46.),
+        Pos2::new(text_x, rect.top() + 54.),
         Align2::LEFT_TOP,
         format!("{:+.2} m", step.gain),
-        FontId::proportional(12.),
+        FontId::proportional(15.),
         if step.gain >= 0. {
             theme.accent
         } else {
@@ -1175,7 +1182,7 @@ fn paint_lineage_tile(
         rect.right_bottom() + Vec2::new(-8., -6.),
         Align2::RIGHT_BOTTOM,
         species_name(&step.creature),
-        FontId::proportional(10.),
+        FontId::proportional(13.),
         theme.muted,
     );
     if current {
@@ -1183,7 +1190,7 @@ fn paint_lineage_tile(
             rect.right_bottom() + Vec2::new(-8., -20.),
             Align2::RIGHT_BOTTOM,
             "selected",
-            FontId::proportional(10.),
+            FontId::proportional(13.),
             theme.accent,
         );
     }
@@ -1192,7 +1199,7 @@ fn paint_lineage_tile(
             rect.right_top() + Vec2::new(-8., 6.),
             Align2::RIGHT_TOP,
             "BODY PLAN",
-            FontId::proportional(9.),
+            FontId::proportional(12.),
             theme.accent,
         );
     }
@@ -1568,7 +1575,7 @@ impl App {
                     .line_segment([points[i], points[(i + 1) % 3]], Stroke::new(2., MINT));
                 ui.painter().circle_filled(points[i], 3., MINT);
             }
-            ui.label(RichText::new("EVOLUTION").size(22.).strong());
+            ui.label(RichText::new("EVOLUTION").size(24.).strong());
             ui.add_space(12.);
             let running = self.active();
             let (text, fill, ink, why) = if running {
@@ -1821,8 +1828,9 @@ impl App {
         let theme = self.theme();
         let mut back = false;
         let mut play_next = false;
-        ui.checkbox(&mut self.follow, "Follow");
-        if ui.small_button("Reset camera").clicked() {
+        ui.checkbox(&mut self.follow, "Follow")
+            .on_hover_text("Keep the camera on the creature");
+        if ui.button("Reset camera").clicked() {
             self.zoom = DEFAULT_CAMERA_ZOOM;
             self.camera = [0.; 2];
             self.follow = true;
@@ -1832,22 +1840,18 @@ impl App {
                 .button(RichText::new("Back to champion").color(theme.accent))
                 .clicked();
         } else if let Some((next, _)) = &self.next_champion {
+            let best = self
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.history.last())
+                .map_or_else(String::new, |stats| format!(" {:.2} m", stats.best));
             play_next = ui
-                .small_button("Play now")
-                .on_hover_text("Show the new champion without waiting")
-                .clicked();
-            ui.label(
-                RichText::new(format!(
-                    "New champion {}{} plays next",
-                    species_name(next),
-                    self.snapshot
-                        .as_ref()
-                        .and_then(|s| s.history.last())
-                        .map_or_else(String::new, |stats| format!(" ({:.2} m)", stats.best))
+                .button(RichText::new(format!("New champion{best}")).color(theme.accent))
+                .on_hover_text(format!(
+                    "{} plays when this replay ends. Click to show it now.",
+                    species_name(next)
                 ))
-                .small()
-                .color(theme.accent),
-            );
+                .clicked();
         }
         (back, play_next)
     }
@@ -1890,18 +1894,17 @@ impl App {
             )
             .on_hover_text(why);
             if let Some(p) = &self.playback {
-                ui.label(format!(
-                    "{} · {:.2} m · {} nodes, {} bones, {} muscles · {:.2} m/s",
-                    species_name(&p.creature),
-                    p.distance,
+                ui.label(
+                    RichText::new(format!("{} · {:.2} m", species_name(&p.creature), p.distance))
+                        .strong(),
+                )
+                .on_hover_text(format!(
+                    "{} nodes, {} bones, {} muscles. Creature {}. {:.2} m is the distance this CPU playback reaches, and m/s its speed over the last fifth of a second. The GPU archive score comes from the GPU trial and its fine check; CPU playback can differ and does not change that score.",
                     p.nodes.len(),
                     p.creature.bones.len(),
                     p.creature.muscles.len(),
-                    p.speed(),
-                ))
-                .on_hover_text(format!(
-                    "Creature {}. {:.2} m is the distance this CPU playback reaches, and m/s its speed over the last fifth of a second. The GPU archive score comes from the GPU trial and its fine check; CPU playback can differ and does not change that score.",
-                    p.creature.id, p.distance
+                    p.creature.id,
+                    p.distance
                 ));
             }
             if wide {
@@ -1935,6 +1938,8 @@ impl App {
         if response.clicked() {
             self.playing = !self.playing;
         }
+        let response =
+            response.on_hover_text("Click to pause or play · drag to pan · scroll to zoom");
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             self.zoom = (self.zoom * (scroll * 0.002).exp()).clamp(30., 1200.);
@@ -1974,7 +1979,7 @@ impl App {
                 Pos2::new(pos.x + 5., origin.y + 16.),
                 Align2::LEFT_TOP,
                 format!("{x} m"),
-                FontId::proportional(11.),
+                FontId::proportional(14.),
                 MUTED,
             );
         }
@@ -2063,13 +2068,13 @@ impl App {
         }
         for x in left..=right {
             let pos = world(x as f32, 0.);
-            painter.line_segment([pos, pos + Vec2::new(0., 6.)], Stroke::new(1., MUTED));
+            painter.line_segment([pos, pos + Vec2::new(0., 6.)], Stroke::new(1., GROUND_EDGE));
             painter.text(
-                pos + Vec2::new(5., 12.),
+                pos + Vec2::new(5., 6.),
                 Align2::LEFT_TOP,
                 format!("{x} m"),
-                FontId::proportional(11.),
-                MUTED,
+                FontId::proportional(14.),
+                GROUND_EDGE,
             );
         }
         if let Some(p) = &self.playback {
@@ -2119,16 +2124,16 @@ impl App {
                         rect.left_top() + Vec2::new(18., 16.),
                         Align2::LEFT_TOP,
                         format!("{distance:.2} m"),
-                        FontId::proportional(24.),
+                        FontId::proportional(30.),
                         FALLEN,
                     );
                     painter.text(
-                        rect.left_top() + Vec2::new(18., 46.),
+                        rect.left_top() + Vec2::new(18., 52.),
                         Align2::LEFT_TOP,
                         p.ending.sentence(
                             tick.saturating_sub(physics::settle()) as f32 * physics::dt(),
                         ),
-                        FontId::proportional(13.),
+                        FontId::proportional(16.),
                         FALLEN,
                     );
                 }
@@ -2137,8 +2142,15 @@ impl App {
                         rect.left_top() + Vec2::new(18., 16.),
                         Align2::LEFT_TOP,
                         format!("{:.2} m", physics::fitness(&p.nodes)),
-                        FontId::proportional(24.),
+                        FontId::proportional(30.),
                         MINT,
+                    );
+                    painter.text(
+                        rect.left_top() + Vec2::new(18., 52.),
+                        Align2::LEFT_TOP,
+                        format!("{:.2} m/s", p.speed()),
+                        FontId::proportional(16.),
+                        INK,
                     );
                 }
             }
@@ -2147,7 +2159,7 @@ impl App {
                 rect.center(),
                 Align2::CENTER_CENTER,
                 "Preparing your first population…",
-                FontId::proportional(20.),
+                FontId::proportional(22.),
                 MUTED,
             );
         }
@@ -2162,17 +2174,10 @@ impl App {
                 } else {
                     world_summary(&p.config)
                 },
-                FontId::proportional(13.),
+                FontId::proportional(16.),
                 INK,
             );
         }
-        painter.text(
-            rect.left_bottom() + Vec2::new(14., -12.),
-            Align2::LEFT_BOTTOM,
-            "Click to pause · drag to pan · scroll to zoom",
-            FontId::proportional(11.),
-            MUTED,
-        );
         let mut sought = false;
         let mut race_it = None;
         if let Some(p) = &mut self.playback {
@@ -2265,12 +2270,7 @@ impl App {
             {
                 self.file("Export creature JSON");
             }
-            ui.add(
-                egui::Slider::new(&mut self.speed, 0.25..=4.0)
-                    .logarithmic(true)
-                    .suffix("× speed"),
-            )
-            .on_hover_text("Playback speed, from quarter speed to four times speed.");
+            speed_picker(ui, &mut self.speed, "replay_speed");
         });
         if sought {
             self.playing = false;
@@ -2358,10 +2358,8 @@ impl App {
                         ui.set_min_width(ui.available_width());
                         ui.label(RichText::new(name).small().color(theme.muted))
                             .on_hover_text(why);
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(value).size(22.).color(color));
-                            ui.label(RichText::new(note).small().color(theme.muted));
-                        });
+                        ui.label(RichText::new(value).size(34.).strong().color(color));
+                        ui.label(RichText::new(note).small().color(theme.muted));
                     });
             }
         });
@@ -2374,10 +2372,11 @@ impl App {
         let mut last: Option<f64> = None;
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("Drag to pan · double-click or Reset to fit again")
+                RichText::new("BEST DISTANCE OVER TIME")
                     .small()
                     .color(theme.muted),
-            );
+            )
+            .on_hover_text("Drag to pan. Double-click or Reset view fits the chart again.");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .small_button("Reset view")
@@ -2410,7 +2409,11 @@ impl App {
         });
         let mut plot = Plot::new("fitness_history")
             .height(height)
-            .legend(Legend::default())
+            .legend(
+                Legend::default()
+                    .position(egui_plot::Corner::LeftTop)
+                    .text_style(egui::TextStyle::Small),
+            )
             .x_axis_label("Generation")
             .y_axis_label("Distance (m)")
             .allow_scroll(false);
@@ -2655,7 +2658,7 @@ impl App {
             let cells = snapshot.map.as_deref().unwrap_or(&empty);
             map_click = paint_archive_map(ui, cells, self.map_height, self.map_feet, theme);
         } else {
-            let columns = (ui.available_width() / 155.).floor().max(2.) as usize;
+            let columns = (ui.available_width() / 190.).floor().max(2.) as usize;
             let width = (ui.available_width() - (columns - 1) as f32 * 10.) / columns as f32;
             let progress = (self.sort_started.elapsed().as_secs_f32() * SORT_SPEED / 3.).min(1.);
             let animating = snapshot.stage == Stage::Archived && progress < 1.;
@@ -2664,7 +2667,7 @@ impl App {
             let shown = self.playback.as_ref().map(|p| p.creature.id);
             let mut positions = std::collections::HashMap::new();
             egui::ScrollArea::vertical().id_salt("population_grid").show_rows(
-                ui, 137., item_count.div_ceil(columns), |ui, rows| {
+                ui, 162., item_count.div_ceil(columns), |ui, rows| {
                     let start = rows.start * columns;
                     if start != self.last_page { requested = Some(start); }
                     for row in rows {
@@ -2672,7 +2675,7 @@ impl App {
                             for column in 0..columns {
                                 let rank = row * columns + column;
                                 if rank >= item_count { break; }
-                                let (destination, response) = ui.allocate_exact_size(Vec2::new(width, 127.), Sense::click());
+                                let (destination, response) = ui.allocate_exact_size(Vec2::new(width, 152.), Sense::click());
                                 if let Some(card) = snapshot.page.iter().find(|c| c.rank == rank) {
                                     positions.insert(card.creature.id, destination.min);
                                     let mut rect = destination;
@@ -2697,7 +2700,7 @@ impl App {
                                     ));
                                 } else {
                                     ui.painter().rect_filled(destination, 8, theme.card);
-                                    ui.painter().text(destination.center(), Align2::CENTER_CENTER, "Loading…", FontId::proportional(12.), theme.muted);
+                                    ui.painter().text(destination.center(), Align2::CENTER_CENTER, "Loading…", FontId::proportional(15.), theme.muted);
                                 }
                             }
                         });
@@ -3064,7 +3067,7 @@ impl App {
                         true,
                         shown == Some(step.creature.id),
                         theme,
-                        Vec2::new(ui.available_width(), 104.),
+                        Vec2::new(ui.available_width(), 120.),
                     ) {
                         chosen = Some(k);
                     }
@@ -3131,13 +3134,7 @@ impl App {
                 }
                 self.race_camera = 0.0;
             }
-            ui.add(
-                egui::Slider::new(&mut self.speed, 0.25..=4.0)
-                    .logarithmic(true)
-                    .suffix("×")
-                    .text("Playback speed"),
-            )
-            .on_hover_text("Shared with the single-creature replay.");
+            speed_picker(ui, &mut self.speed, "race_speed");
         });
         if self.race.is_empty() {
             ui.add_space(12.);
@@ -3244,7 +3241,7 @@ impl App {
                         Pos2::new(px + 3., ground - 2.),
                         Align2::LEFT_BOTTOM,
                         format!("{x:.0} m"),
-                        FontId::proportional(10.),
+                        FontId::proportional(13.),
                         theme.muted,
                     );
                 }
@@ -3265,32 +3262,32 @@ impl App {
                 lane_rect.left_top() + Vec2::new(8., 6.),
                 Align2::LEFT_TOP,
                 format!("{}. {}", i + 1, species_name(&lane.playback.creature)),
-                FontId::proportional(13.),
+                FontId::proportional(16.),
                 if is_leader { theme.accent } else { theme.ink },
             );
             painter.text(
-                lane_rect.left_top() + Vec2::new(8., 23.),
+                lane_rect.left_top() + Vec2::new(8., 28.),
                 Align2::LEFT_TOP,
                 format!(
                     "finishes at {:.2} m · {}",
                     lane.playback.distance, lane.label
                 ),
-                FontId::proportional(11.),
+                FontId::proportional(14.),
                 theme.muted,
             );
             painter.text(
                 lane_rect.right_top() + Vec2::new(-8., 6.),
                 Align2::RIGHT_TOP,
                 format!("{:.2} m", distances[i]),
-                FontId::proportional(15.),
+                FontId::proportional(18.),
                 if is_leader { theme.accent } else { theme.ink },
             );
             if playback.fallen().is_some() {
                 painter.text(
-                    lane_rect.right_top() + Vec2::new(-8., 26.),
+                    lane_rect.right_top() + Vec2::new(-8., 30.),
                     Align2::RIGHT_TOP,
                     playback.ending.short(),
-                    FontId::proportional(11.),
+                    FontId::proportional(14.),
                     theme.danger,
                 );
             }
@@ -3310,7 +3307,7 @@ impl App {
             board.left_top() + Vec2::new(10., 8.),
             Align2::LEFT_TOP,
             "STANDINGS",
-            FontId::proportional(11.),
+            FontId::proportional(14.),
             theme.muted,
         );
         let mut order: Vec<usize> = (0..self.race.len()).collect();
@@ -3325,14 +3322,14 @@ impl App {
                 Pos2::new(board.left() + 10., y),
                 Align2::LEFT_CENTER,
                 format!("{}. {}", place + 1, species_name(&lane.playback.creature)),
-                FontId::proportional(12.),
+                FontId::proportional(15.),
                 if place == 0 { theme.accent } else { theme.ink },
             );
             painter.text(
                 Pos2::new(board.right() - 10., y),
                 Align2::RIGHT_CENTER,
                 format!("{:.1} m", distances[i]),
-                FontId::proportional(12.),
+                FontId::proportional(15.),
                 if place == 0 {
                     theme.accent
                 } else {
@@ -3344,7 +3341,7 @@ impl App {
             board.left_bottom() + Vec2::new(10., -8.),
             Align2::LEFT_BOTTOM,
             "Live distance",
-            FontId::proportional(10.),
+            FontId::proportional(13.),
             theme.muted,
         );
     }
@@ -4218,9 +4215,9 @@ impl eframe::App for App {
             }
         });
         egui::Panel::left("controls")
-            .default_size(350.)
-            .min_size(280.)
-            .max_size(440.)
+            .default_size(400.)
+            .min_size(300.)
+            .max_size(480.)
             .resizable(true)
             .frame(egui::Frame::new().fill(theme.panel).inner_margin(16))
             .show(ui, |ui| self.controls(ui));
@@ -4236,7 +4233,7 @@ impl eframe::App for App {
                         (Tab::Race, "Race"),
                         (Tab::Lineage, "Lineage"),
                     ] {
-                        ui.selectable_value(&mut self.tab, tab, RichText::new(label).size(15.));
+                        ui.selectable_value(&mut self.tab, tab, RichText::new(label).size(18.));
                     }
                 });
                 if self.tab == Tab::Race && before != Tab::Race {
@@ -4249,7 +4246,7 @@ impl eframe::App for App {
                         ui.add_space(8.);
                         // The chart keeps a fixed height below the replay and
                         // its controls; the replay takes the rest.
-                        const CHART: f32 = 160.;
+                        const CHART: f32 = 200.;
                         const REPLAY_CONTROLS: f32 = 120.;
                         self.viewport(
                             ui,
@@ -4436,7 +4433,14 @@ fn paint_card(
         Stroke::new(1., theme.card_border),
         egui::StrokeKind::Inside,
     );
-    thumbnail(painter, &card.creature, rect.shrink2(Vec2::new(10., 23.)));
+    thumbnail(
+        painter,
+        &card.creature,
+        Rect::from_min_max(
+            rect.left_top() + Vec2::new(12., 46.),
+            rect.right_bottom() - Vec2::new(12., 30.),
+        ),
+    );
     painter.text(
         rect.left_top() + Vec2::new(9., 8.),
         Align2::LEFT_TOP,
@@ -4445,14 +4449,14 @@ fn paint_card(
         } else {
             format!("ID {}", card.creature.id)
         },
-        FontId::proportional(11.),
+        FontId::proportional(14.),
         theme.muted,
     );
     painter.text(
-        rect.left_top() + Vec2::new(9., 22.),
+        rect.left_top() + Vec2::new(9., 26.),
         Align2::LEFT_TOP,
         species_name(&card.creature),
-        FontId::proportional(10.),
+        FontId::proportional(13.),
         theme.ink,
     );
     if card.plan_count > 1 {
@@ -4460,7 +4464,7 @@ fn paint_card(
             rect.right_top() + Vec2::new(-9., 8.),
             Align2::RIGHT_TOP,
             format!("{} like it", card.plan_count),
-            FontId::proportional(9.),
+            FontId::proportional(12.),
             theme.accent,
         );
     } else if card.innovation_reserve {
@@ -4468,7 +4472,7 @@ fn paint_card(
             rect.right_top() + Vec2::new(-9., 8.),
             Align2::RIGHT_TOP,
             "NEW BODY",
-            FontId::proportional(9.),
+            FontId::proportional(12.),
             theme.accent,
         );
     }
@@ -4496,7 +4500,7 @@ fn paint_card(
         rect.left_bottom() + Vec2::new(9., -9.),
         Align2::LEFT_BOTTOM,
         label,
-        FontId::proportional(12.),
+        FontId::proportional(15.),
         score_color,
     );
     if stage == Stage::Selected {
@@ -4508,7 +4512,7 @@ fn paint_card(
             } else {
                 "Replaced"
             },
-            FontId::proportional(10.),
+            FontId::proportional(13.),
             if card.survivor {
                 theme.accent
             } else {
@@ -4619,6 +4623,26 @@ fn effect_row(
         effect.set_level(config, i);
     }
     picked.is_some()
+}
+/// Playback speed as one compact menu of five speeds, the height of a
+/// button, so a row of replay controls stays one line.
+fn speed_picker(ui: &mut egui::Ui, speed: &mut f32, id: &str) {
+    let label = |value: f32| {
+        if value < 1.0 {
+            format!("Speed {value}×")
+        } else {
+            format!("Speed {value:.0}×")
+        }
+    };
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(label(*speed))
+        .show_ui(ui, |ui| {
+            for value in [0.25, 0.5, 1.0, 2.0, 4.0] {
+                ui.selectable_value(speed, value, label(value));
+            }
+        })
+        .response
+        .on_hover_text("Playback speed of the replay");
 }
 /// A short duration for people: "8 s", "3 min", "2 h".
 fn seconds_text(seconds: f64) -> String {
