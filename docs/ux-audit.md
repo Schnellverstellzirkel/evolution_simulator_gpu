@@ -21,7 +21,7 @@ Screenshots, all in [ux-audit/](ux-audit/):
 
 ## 1. Who plays and what they come to do
 
-The player is the owner and people like him. They enjoy watching a simulation discover movement, they poke the world to see what evolution does next, and they want to show a strange walker to someone else. They are not tuning a search algorithm. The search internals (MAP-Elites, emitters, islands, contender checks) exist so that the player gets good and varied creatures. The player does not need to operate them.
+The player is the owner and people like them. They enjoy watching a simulation discover movement, they poke the world to see what evolution does next, and they want to show a strange walker to someone else. They are not tuning a search algorithm. The search internals (MAP-Elites, emitters, islands, contender checks) exist so that the player gets good and varied creatures. The player does not need to operate them.
 
 A session is long and mostly spent waiting. A 3M generation takes about 15 s at 200,000 creatures/s, and more than a minute late in a long session: AGENTS.md records 38,615 creatures/s at generation 70. The player looks at the screen far more often than they click. So the main screen has to reward watching, and every change the player did not cause (a new record, a season step, a re-test) has to explain itself.
 
