@@ -1123,6 +1123,14 @@ struct App {
     lineage_requested: Option<u64>,
     /// A lineage request is in flight.
     lineage_pending: bool,
+    /// The player picked the creature on screen, so the theater stops
+    /// following the champion until they go back to it.
+    pinned: bool,
+    /// The creature on screen is the champion of a finished generation (or
+    /// the best elite of a loaded game), not a random first creature.
+    champion_shown: bool,
+    /// A newer champion that replaces the one on screen when its replay loops.
+    next_champion: Option<(Creature, Config)>,
     /// Behavior archive map: occupied cells keyed by their niche bytes.
     map_cells: HashMap<[u8; 6], MapCell>,
     map_scan: Option<MapScan>,
@@ -1236,6 +1244,9 @@ impl App {
             lineage: Vec::new(),
             lineage_requested: None,
             lineage_pending: false,
+            pinned: false,
+            champion_shown: false,
+            next_champion: None,
             map_cells: HashMap::new(),
             map_scan: None,
             map_generation: u32::MAX,
@@ -1303,6 +1314,70 @@ impl App {
         self.follow = true;
         self.zoom = DEFAULT_CAMERA_ZOOM;
         self.camera = [0.; 2];
+    }
+    /// Shows a creature the player picked. The theater keeps it until the
+    /// player goes back to the champion.
+    fn select(&mut self, creature: Creature, config: Config) {
+        self.pinned = true;
+        self.next_champion = None;
+        self.set_preview(creature, config);
+        self.lineage.clear();
+    }
+    /// Shows an ancestor from the lineage the player is browsing, keeping the
+    /// lineage on screen.
+    fn select_ancestor(&mut self, creature: Creature, config: Config) {
+        self.pinned = true;
+        self.next_champion = None;
+        self.set_preview(creature, config);
+    }
+    /// Shows a champion and follows new ones from now on.
+    fn show_champion(&mut self, creature: Creature, config: Config) {
+        self.pinned = false;
+        self.champion_shown = true;
+        self.next_champion = None;
+        self.set_preview(creature, config);
+        self.lineage.clear();
+    }
+    /// The best elite of the newest finished generation, and the world it was
+    /// scored in.
+    fn champion(&self) -> Option<(Creature, Config)> {
+        let stats = self.snapshot.as_ref()?.history.last()?;
+        Some((stats.representatives.last()?.clone(), stats.config.clone()))
+    }
+    /// Keeps the theater on the champion unless the player pinned a creature.
+    /// A new champion waits until the replay on screen loops, so the player
+    /// sees the whole trial, unless the screen shows no champion yet.
+    fn follow_champion(&mut self) {
+        if self.pinned {
+            return;
+        }
+        let Some((creature, config)) = self.champion() else {
+            return;
+        };
+        let showing = self.playback.as_ref().map(|p| p.creature.id);
+        if showing == Some(creature.id) {
+            self.next_champion = None;
+            return;
+        }
+        if self
+            .next_champion
+            .as_ref()
+            .is_some_and(|(queued, _)| queued.id == creature.id)
+        {
+            return;
+        }
+        if showing.is_none() || !self.champion_shown {
+            self.show_champion(creature, config);
+        } else {
+            self.next_champion = Some((creature, config));
+        }
+    }
+    /// Stops watching a picked creature and shows the champion now.
+    fn back_to_champion(&mut self) {
+        self.pinned = false;
+        if let Some((creature, config)) = self.champion() {
+            self.show_champion(creature, config);
+        }
     }
     fn top(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
@@ -1722,21 +1797,44 @@ impl App {
     }
     fn viewport(&mut self, ui: &mut egui::Ui, height: f32) {
         let theme = self.theme();
+        let mut back = false;
+        let mut play_next = false;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("LIVE CREATURE").small().color(theme.muted));
+            let (mode, color, why) = if self.pinned {
+                (
+                    "WATCHING",
+                    theme.ink,
+                    "A creature you picked. Back to champion shows the best creature again.",
+                )
+            } else if self.champion_shown {
+                (
+                    "CHAMPION",
+                    theme.accent,
+                    "The best creature so far. The view switches to each new champion when the replay on screen ends.",
+                )
+            } else {
+                (
+                    "FIRST GENERATION",
+                    theme.muted,
+                    "A random creature of the first generation. The champion takes over when the first generation ends.",
+                )
+            };
+            ui.label(RichText::new(mode).small().strong().color(color))
+                .on_hover_text(why);
             if let Some(p) = &self.playback {
                 ui.label(format!(
-                    "#{} · {} nodes / {} bones / {} muscles · replay distance {:.1} m · {:.2} m/s",
-                    p.creature.id,
+                    "{} · {:.2} m · {} nodes, {} bones, {} muscles · {:.2} m/s",
+                    species_name(&p.creature),
+                    p.distance,
                     p.nodes.len(),
                     p.creature.bones.len(),
                     p.creature.muscles.len(),
-                    p.distance,
-                    p.speed()
+                    p.speed(),
                 ))
-                .on_hover_text(
-                    "The distance this replay reaches, and its mass-weighted center-of-mass speed over the last fifth of a second of recorded frames. An archive score is the worse of this trial and a check from a slightly shifted pose at four times the physics rate, so it is never higher.",
-                );
+                .on_hover_text(format!(
+                    "Creature {}. {:.2} m is the distance this replay reaches, and m/s its speed over the last fifth of a second. The archive keeps the worse of this trial and a check from a slightly shifted pose at four times the physics rate, so its score is never higher.",
+                    p.creature.id, p.distance
+                ));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.checkbox(&mut self.follow, "Follow");
@@ -1745,8 +1843,29 @@ impl App {
                     self.camera = [0.; 2];
                     self.follow = true;
                 }
+                if self.pinned {
+                    back = ui
+                        .button(RichText::new("Back to champion").color(theme.accent))
+                        .clicked();
+                } else if let Some((next, _)) = &self.next_champion {
+                    play_next = ui
+                        .small_button("Play now")
+                        .on_hover_text("Show the new champion without waiting")
+                        .clicked();
+                    ui.label(
+                        RichText::new(format!("New champion {} plays next", species_name(next)))
+                            .small()
+                            .color(theme.accent),
+                    );
+                }
             });
         });
+        if back {
+            self.back_to_champion();
+        }
+        if play_next && let Some((creature, config)) = self.next_champion.take() {
+            self.show_champion(creature, config);
+        }
         let (rect, response) = ui.allocate_exact_size(
             Vec2::new(ui.available_width(), height.max(120.)),
             Sense::drag(),
@@ -2452,7 +2571,7 @@ impl App {
             self.last_page = start;
         }
         if let Some((creature, config)) = selected {
-            self.worker.send(Command::Preview { creature, config });
+            self.select(creature, config);
             self.tab = Tab::Overview;
         }
     }
@@ -2560,7 +2679,7 @@ impl App {
         }) else {
             return;
         };
-        self.worker.send(Command::Preview { creature, config });
+        self.select(creature, config);
         self.tab = Tab::Overview;
     }
     /// Compact timeline of every new all-time best, newest first. Clicking one
@@ -2656,7 +2775,7 @@ impl App {
                 .snapshot
                 .as_ref()
                 .map_or_else(Config::default, |s| s.config.clone());
-            self.worker.send(Command::Preview { creature, config });
+            self.select(creature, config);
             self.tab = Tab::Overview;
         }
     }
@@ -2725,6 +2844,7 @@ impl App {
             .small()
             .color(theme.muted),
         );
+        let shown = self.playback.as_ref().map(|p| p.creature.id);
         let mut chosen = None;
         egui::ScrollArea::horizontal()
             .id_salt("lineage")
@@ -2737,7 +2857,7 @@ impl App {
                             step,
                             self.lineage.get(k + 1),
                             step.gain >= highlight,
-                            k == 0,
+                            shown == Some(step.creature.id),
                             theme,
                             Vec2::new(176., 88.),
                         ) {
@@ -2751,7 +2871,7 @@ impl App {
                 .snapshot
                 .as_ref()
                 .map_or_else(Config::default, |s| s.config.clone());
-            self.set_preview(self.lineage[k].creature.clone(), config);
+            self.select_ancestor(self.lineage[k].creature.clone(), config);
         }
         ui.add_space(6.);
     }
@@ -2791,6 +2911,7 @@ impl App {
                 self.lineage.len()
             ));
         }
+        let shown = self.playback.as_ref().map(|p| p.creature.id);
         let mut chosen = None;
         egui::ScrollArea::vertical()
             .id_salt("lineage_view")
@@ -2802,7 +2923,7 @@ impl App {
                         step,
                         self.lineage.get(k + 1),
                         true,
-                        k == 0,
+                        shown == Some(step.creature.id),
                         theme,
                         Vec2::new(ui.available_width(), 104.),
                     ) {
@@ -2816,7 +2937,7 @@ impl App {
                 .snapshot
                 .as_ref()
                 .map_or_else(Config::default, |s| s.config.clone());
-            self.set_preview(self.lineage[k].creature.clone(), config);
+            self.select_ancestor(self.lineage[k].creature.clone(), config);
             self.tab = Tab::Overview;
         }
     }
@@ -3224,7 +3345,7 @@ impl App {
             }
         });
         if let Some(c) = selection {
-            self.set_preview(c, stats.config);
+            self.select(c, stats.config);
             self.tab = Tab::Overview;
         }
     }
@@ -3438,7 +3559,7 @@ impl App {
                                     })();
                                     match result {
                                         Ok(creature) => {
-                                            self.worker.send(Command::Preview { creature, config });
+                                            self.select(creature, config);
                                             self.tab = Tab::Overview;
                                             self.message =
                                                 Some(format!("Opened {}", path.display()));
@@ -3545,29 +3666,35 @@ impl eframe::App for App {
                 self.config = next.config.clone();
             }
             if let Some((c, cfg)) = next.preview.take() {
-                self.set_preview(c, cfg);
-                self.lineage.clear();
+                // The worker picks the creature of a new game (a random one)
+                // and of a loaded game (its best elite).
+                let loaded = !next.history.is_empty();
+                self.show_champion(c, cfg);
+                self.champion_shown = loaded;
             }
-            if let Some(lineage) = next.lineage.take() {
-                self.lineage = lineage;
+            if let Some((id, lineage)) = next.lineage.take() {
+                if self.playback.as_ref().is_some_and(|p| p.creature.id == id) {
+                    self.lineage = lineage;
+                }
                 self.lineage_pending = false;
             }
             self.snapshot = Some(next);
+            self.follow_champion();
             self.maybe_build_race();
         }
         let lineage_request =
             if (self.tab == Tab::Overview || self.tab == Tab::Lineage) && self.lineage.is_empty() {
                 self.playback
                     .as_ref()
-                    .filter(|p| self.lineage_requested != Some(p.creature.id))
-                    .map(|p| (p.creature.clone(), p.config.clone()))
+                    .map(|p| p.creature.id)
+                    .filter(|&id| self.lineage_requested != Some(id))
             } else {
                 None
             };
-        if let Some((creature, config)) = lineage_request {
-            self.lineage_requested = Some(creature.id);
+        if let Some(id) = lineage_request {
+            self.lineage_requested = Some(id);
             self.lineage_pending = true;
-            self.worker.send(Command::Preview { creature, config });
+            self.worker.send(Command::Lineage(id));
         }
         if !ctx.egui_wants_keyboard_input() {
             let pressed = |key| ctx.input(|i| i.key_pressed(key));
@@ -3620,20 +3747,31 @@ impl eframe::App for App {
             let frame_dt = physics::dt();
             if frame_dt.is_finite() && frame_dt > 0.0 {
                 let speed = self.speed;
+                // Returns whether the replay reached its end and started over.
                 let advance = |p: &mut Playback| {
                     p.accumulator = (p.accumulator + dt.clamp(0.0, 0.1) * speed).min(1.0);
                     let start = Instant::now();
+                    let mut looped = false;
                     while p.accumulator >= frame_dt && start.elapsed() < Duration::from_millis(5) {
                         if p.tick >= p.last_frame() {
                             p.reset();
+                            looped = true;
                         }
                         p.advance();
                         p.accumulator -= frame_dt;
                     }
+                    looped
                 };
+                let mut looped = false;
                 if let Some(p) = &mut self.playback {
-                    advance(p);
+                    looped = advance(p);
                     p.show_between();
+                }
+                if looped
+                    && !self.pinned
+                    && let Some((creature, config)) = self.next_champion.take()
+                {
+                    self.show_champion(creature, config);
                 }
                 if self.tab == Tab::Race {
                     for lane in &mut self.race {
