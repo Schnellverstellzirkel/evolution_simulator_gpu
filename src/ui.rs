@@ -5790,7 +5790,12 @@ fn write_creature_gif(
     fall: Option<(u32, f32)>,
     path: &std::path::Path,
 ) -> anyhow::Result<usize> {
-    let camera = GifCamera::fit(nodes, frames);
+    // The camera fits the frames the GIF shows.
+    let shown: Vec<Vec<[f32; 2]>> = ticks
+        .iter()
+        .filter_map(|&tick| frames.get(tick as usize).cloned())
+        .collect();
+    let camera = GifCamera::fit(nodes, &shown);
     let scene = GifScene {
         creature,
         config,
@@ -5828,6 +5833,35 @@ fn write_creature_gif(
     // Dropping the encoder writes the GIF trailer and flushes the writer.
     drop(encoder);
     Ok(written)
+}
+/// Replays a creature (`cpu_engine::replay`, so under physics v2 when
+/// `EVOLUTION_PHYSICS=2`) and animates `seconds` of its trial from `from`
+/// seconds in, at `fps` frames per second of trial time, playing at the
+/// speed it was simulated. Returns the frame count.
+pub fn creature_gif(
+    creature: &Creature,
+    config: &Config,
+    from: f32,
+    seconds: f32,
+    fps: f32,
+    path: &std::path::Path,
+) -> anyhow::Result<usize> {
+    let (frames, result) = crate::cpu_engine::replay(creature, config);
+    let nodes = physics::nodes(creature);
+    let rate = config.fidelity().rate as f32;
+    let start = physics::settle();
+    let last_frame = frames.len().saturating_sub(1) as u32;
+    let first = (start + (from * rate).round() as u32).min(last_frame);
+    let last = (start + ((from + seconds) * rate).round() as u32).min(last_frame);
+    let stride = ((rate / fps.max(1.0)).round() as usize).max(1);
+    let ticks: Vec<u32> = (first..=last).step_by(stride).collect();
+    let fall = (result.fall_time > 0.0).then(|| {
+        (
+            start + (result.fall_time * rate).round() as u32,
+            result.fitness,
+        )
+    });
+    write_creature_gif(creature, config, &nodes, &frames, &ticks, fall, path)
 }
 /// Samples a playback into at most `GIF_MAX_FRAMES` frames and animates them.
 fn export_creature_gif(playback: &Playback, path: &std::path::Path) -> anyhow::Result<usize> {

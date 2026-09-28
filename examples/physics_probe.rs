@@ -1,0 +1,83 @@
+//! How a fresh random population fares under the selected physics
+//! (`EVOLUTION_PHYSICS=2` for the v2 prototype): how many fall and when,
+//! how far the survivors get, and the evaluation rate.
+//! Usage: cargo run --release --example physics_probe [count] [seconds]
+use evolution_simulator::{config::Config, cpu_engine, evolution};
+
+fn main() -> anyhow::Result<()> {
+    let count: usize = std::env::args()
+        .nth(1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    let seconds: f32 = std::env::args()
+        .nth(2)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20.0);
+    let cfg = Config {
+        population: count,
+        duration: seconds,
+        random_seed: false,
+        screen: None,
+        ..Config::default()
+    };
+    let mut pop = evolution::create(&cfg)?;
+    // Extra creatures from JSON files (arguments after the first two), and
+    // `EVOLUTION_PROBE_DUMP=<path>` writes (distance, fall time) per creature
+    // as little-endian f32 pairs, to compare two runs.
+    for path in std::env::args().skip(3) {
+        pop.push(serde_json::from_str(&std::fs::read_to_string(path)?)?);
+    }
+    let start = std::time::Instant::now();
+    let results = cpu_engine::evaluate(&pop, &cfg);
+    let wall = start.elapsed().as_secs_f64();
+    if let Ok(path) = std::env::var("EVOLUTION_PROBE_DUMP") {
+        let pairs: Vec<f32> = results
+            .iter()
+            .flat_map(|r| [r.fitness, r.fall_time])
+            .collect();
+        std::fs::write(path, bytemuck::cast_slice(&pairs))?;
+    }
+    let mut falls: Vec<f32> = results
+        .iter()
+        .filter(|r| r.fall_time > 0.0)
+        .map(|r| r.fall_time)
+        .collect();
+    falls.sort_by(f32::total_cmp);
+    let mut standing: Vec<f32> = results
+        .iter()
+        .filter(|r| r.fall_time == 0.0)
+        .map(|r| r.fitness)
+        .collect();
+    standing.sort_by(f32::total_cmp);
+    let q = |v: &[f32], p: f32| {
+        if v.is_empty() {
+            f32::NAN
+        } else {
+            v[((v.len() - 1) as f32 * p) as usize]
+        }
+    };
+    let steps: f32 = results
+        .iter()
+        .map(|r| {
+            if r.fall_time > 0.0 {
+                r.fall_time
+            } else {
+                seconds
+            }
+        })
+        .sum::<f32>()
+        * cfg.fidelity().rate as f32;
+    println!(
+        "{count} bodies, {seconds} s: {} fell (fall time p10 {:.2} s, median {:.2} s, p90 {:.2} s); {} stood, distance median {:.2} m, p90 {:.2} m, best {:.2} m; {:.0} creature-steps/s",
+        falls.len(),
+        q(&falls, 0.1),
+        q(&falls, 0.5),
+        q(&falls, 0.9),
+        standing.len(),
+        q(&standing, 0.5),
+        q(&standing, 0.9),
+        q(&standing, 1.0),
+        steps as f64 / wall,
+    );
+    Ok(())
+}

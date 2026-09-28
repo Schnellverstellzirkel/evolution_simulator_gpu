@@ -7,6 +7,7 @@ pub mod environment;
 pub mod evolution;
 pub mod gpu;
 pub mod physics;
+pub mod physics2;
 pub mod qd;
 pub mod scheduler;
 pub mod search_benchmark;

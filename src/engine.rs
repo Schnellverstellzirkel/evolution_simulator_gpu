@@ -689,7 +689,12 @@ fn run_segments<D: SegmentDevice>(
                 Some(unit) => Some(Ok(unit)),
                 None => pending.take().map(|(ticket, unit, cfg)| {
                     let indices: Vec<usize> = (0..unit.genomes.len()).collect();
-                    creature_kernel::pack(&unit, &indices).map(|batches| SegmentedUnit {
+                    let packed = if crate::physics2::enabled() {
+                        crate::physics2::pack(&unit, &indices, &cfg)
+                    } else {
+                        creature_kernel::pack(&unit, &indices)
+                    };
+                    packed.map(|batches| SegmentedUnit {
                         ticket,
                         results: vec![GpuResult::default(); indices.len()],
                         ends: segment_ends(&cfg),
@@ -709,7 +714,14 @@ fn run_segments<D: SegmentDevice>(
                     }
                 };
                 let total = *unit.ends.last().expect("segment ends");
-                let start = unit.segment.checked_sub(1).map_or(0, |s| unit.ends[s]);
+                // Physics v2 has no settling phase: its trials start at the
+                // settling tick.
+                let first = if crate::physics2::enabled() {
+                    unit.cfg.fidelity().settle()
+                } else {
+                    0
+                };
+                let start = unit.segment.checked_sub(1).map_or(first, |s| unit.ends[s]);
                 let end = unit.ends[unit.segment];
                 match engine.submit(
                     &unit.batches,

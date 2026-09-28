@@ -1385,6 +1385,9 @@ pub fn replay(
     creature: &crate::evolution::Creature,
     cfg: &Config,
 ) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
+    if crate::physics2::enabled() {
+        return crate::physics2::replay(creature, cfg);
+    }
     let mut pop = Population::default();
     pop.push(creature.clone());
     let group = Group::build(&pop, &[0], &[0]);
@@ -1400,6 +1403,9 @@ pub fn replay(
 
 /// Evaluates every creature of `unit` and returns results in unit order.
 pub fn evaluate(unit: &Population, cfg: &Config) -> Vec<GpuResult> {
+    if crate::physics2::enabled() {
+        return crate::physics2::evaluate(unit, cfg);
+    }
     let indices: Vec<usize> = (0..unit.genomes.len()).collect();
     let groups = build_groups(unit, &indices);
     let per_group: Vec<Vec<GpuResult>> = groups.par_iter().map(|g| g.simulate(cfg)).collect();

@@ -768,7 +768,11 @@ impl VkEngine {
             pipelines.push(Self::compile(
                 device,
                 layout,
-                &creature_kernel::shader_source(capacity, workgroup, fidelity),
+                &if crate::physics2::enabled() {
+                    crate::physics2::shader_source(capacity, workgroup, fidelity)
+                } else {
+                    creature_kernel::shader_source(capacity, workgroup, fidelity)
+                },
             )?);
         }
         Ok(pipelines)
