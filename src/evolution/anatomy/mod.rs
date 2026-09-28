@@ -2,11 +2,12 @@
 //! muscles together: copy, grow, fuse, reconnect and retime whole limbs, so a
 //! child keeps more of its parent's gait than a single random edit allows.
 //!
-//! The operators are an experiment (`EVOLUTION_ANATOMY`): off by default,
-//! `all` or `1` for every operator, or a comma-separated list of operator
-//! names. With it on, the structural emitter picks uniformly among the
-//! classic operators and the enabled ones below, and tries up to four times
-//! when the chosen operator does not apply to the body.
+//! Every operator is on by default (docs/anatomy-operators.md has the search
+//! A/B). `EVOLUTION_ANATOMY=0` turns them off for comparisons, and a
+//! comma-separated list of operator names enables only those. The
+//! structural emitter picks uniformly among the classic operators and the
+//! enabled ones below, and tries up to four times when the chosen operator
+//! does not apply to the body.
 //!
 //! Conventions every operator follows:
 //! - The creature arrives repaired, so its bones are in canonical order:
@@ -80,10 +81,13 @@ pub(super) fn enabled() -> &'static [usize] {
 
 fn parse(value: Option<&str>) -> Vec<usize> {
     let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
-        return Vec::new();
+        return (0..OPERATORS.len()).collect();
     };
     if matches!(value, "1" | "all" | "on" | "true") {
         return (0..OPERATORS.len()).collect();
+    }
+    if matches!(value, "0" | "off" | "none" | "false") {
+        return Vec::new();
     }
     value
         .split(',')
@@ -381,8 +385,10 @@ mod tests {
 
     #[test]
     fn operator_names_parse_and_are_unique() {
-        assert!(parse(None).is_empty());
-        assert!(parse(Some("")).is_empty());
+        assert_eq!(parse(None).len(), OPERATORS.len());
+        assert_eq!(parse(Some("")).len(), OPERATORS.len());
+        assert!(parse(Some("0")).is_empty());
+        assert!(parse(Some("off")).is_empty());
         assert_eq!(parse(Some("all")).len(), OPERATORS.len());
         assert_eq!(parse(Some("1")).len(), OPERATORS.len());
         assert_eq!(parse(Some("fuse_bones, copy_limb")), vec![3, 0]);

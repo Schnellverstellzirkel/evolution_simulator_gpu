@@ -1776,9 +1776,9 @@ pub fn grow_for_benchmark(creature: &mut Creature, cfg: &Config, seed: u64, targ
     repair(creature, cfg, &mut rng);
 }
 
-/// `structural_mutation_in_place` for a child bred from `archive`. With
-/// `EVOLUTION_ANATOMY` on, the anatomy operators join the classic ones (and
-/// graft limbs from another elite of the archive); off, it is exactly the
+/// `structural_mutation_in_place` for a child bred from `archive`. The
+/// anatomy operators join the classic ones (and graft limbs from another
+/// elite of the archive); with `EVOLUTION_ANATOMY=0` it is exactly the
 /// classic mutation.
 fn structural_mutation_from(
     creature: &mut Creature,
