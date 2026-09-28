@@ -15,6 +15,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// velocity-pass speed cap, velocity-pass constraints, projection/rebuild
 /// center-of-mass shift x mass / dt, muscle forces].
 pub static LEDGER: std::sync::Mutex<[f64; 6]> = std::sync::Mutex::new([0.0; 6]);
+/// Energy and friction ledger of lane 0, enabled by `EVOLUTION_LEDGER`, for
+/// the physics v2 comparison: [muscle work (force times length change),
+/// mechanical energy gained beyond it, lost, contact friction impulse,
+/// friction impulse that pushed a node along the slip it had after the step].
+pub static ENERGY_LEDGER: std::sync::Mutex<[f64; 5]> = std::sync::Mutex::new([0.0; 5]);
 
 /// Diagnostic counters for `EVOLUTION_EARLY_EXIT`: groups that stopped as
 /// soon as every real lane had finished, groups run with the flag set, and
@@ -364,12 +369,19 @@ impl Group {
 
     /// Runs the full trial and returns one result per real lane.
     fn simulate(&self, cfg: &Config) -> Vec<GpuResult> {
-        self.run(cfg, None)
+        self.run(cfg, None, None)
     }
 
     /// Runs the trial; `record` receives lane 0's node positions before every
     /// step and after the last one (index = steps completed).
-    fn run(&self, cfg: &Config, mut record: Option<&mut Vec<Vec<[f32; 2]>>>) -> Vec<GpuResult> {
+    /// `work`, when given, receives each lane's muscle work in joules: the
+    /// sum of |force x relative speed| x dt over the trial. A diagnostic only.
+    fn run(
+        &self,
+        cfg: &Config,
+        mut record: Option<&mut Vec<Vec<[f32; 2]>>>,
+        work: Option<&mut [f32; L]>,
+    ) -> Vec<GpuResult> {
         let n = self.nodes;
         let exact = std::env::var_os("EVOLUTION_EXACT_COS").is_some();
         let fidelity = cfg.fidelity();
@@ -446,7 +458,13 @@ impl Group {
                 .map(|(x, m)| x.to_array()[0] * m)
                 .sum()
         };
+        let mut work_used = F::splat(0.0);
         let mut ledger = [0.0f64; 6];
+        let mut energy_ledger = [0.0f64; 5];
+        let mut prev_force = vec![0.0f32; self.muscles.len()];
+        let mut prev_len = vec![0.0f32; self.muscles.len()];
+        let mut prev_energy: Option<f64> = None;
+        let mut node_friction = vec![0.0f32; n];
         let rate = fidelity.rate as f32;
         let muscles: Vec<MuscleF> = self
             .lanes
@@ -576,6 +594,20 @@ impl Group {
 
             let time_now = (tick.max(settle) - settle) as f32 * dt;
             let time = F::splat(time_now);
+            let energy_now: f64 = if ledger_on {
+                (0..n)
+                    .map(|j| {
+                        let (x, y) = (vx[j].to_array()[0], vy[j].to_array()[0]);
+                        f64::from(
+                            lane0_mass[j]
+                                * (0.5 * (x * x + y * y) + cfg.gravity * py[j].to_array()[0]),
+                        )
+                    })
+                    .sum()
+            } else {
+                0.0
+            };
+            let mut step_work = 0.0f64;
             let previous_time = F::splat((time_now - dt).max(0.0));
             for (index, (shape, m)) in self.muscles.iter().zip(&muscles).enumerate() {
                 if tick == settle {
@@ -600,6 +632,11 @@ impl Group {
                 let dir_x = dx * inv_distance;
                 let dir_y = dy * inv_distance;
                 let relative = (vbx - vax) * dir_x + (vby - vay) * dir_y;
+                if ledger_on {
+                    let len_now = (dx * dx + dy * dy).sqrt().to_array()[0];
+                    step_work += f64::from(prev_force[index] * (prev_len[index] - len_now));
+                    prev_len[index] = len_now;
+                }
                 // The rhythm clock stands at zero until settling ends, so the
                 // target does not move.
                 let target_speed = if tick > settle {
@@ -617,8 +654,16 @@ impl Group {
                     .max(-max_force)
                     .min(max_force);
                 let magnitude = F::select(fall_time.gt(zero), zero, magnitude);
+                if ledger_on {
+                    prev_force[index] = if tick >= settle {
+                        magnitude.to_array()[0]
+                    } else {
+                        0.0
+                    };
+                }
                 if tick >= settle {
                     let work = (magnitude * relative).abs() * dt;
+                    work_used += work;
                     energies[index] = (energies[index] - work * (1.0 / muscle_energy)
                         + (one - energies[index]) * (muscle_recovery * dt))
                         .max(zero)
@@ -635,6 +680,18 @@ impl Group {
                 }
             }
 
+            if ledger_on
+                && tick > settle
+                && let Some(before) = prev_energy
+            {
+                let residual = energy_now - before - step_work;
+                energy_ledger[0] += step_work;
+                energy_ledger[if residual > 0.0 { 1 } else { 2 }] += residual.abs();
+            }
+            if ledger_on && tick >= settle {
+                prev_energy = Some(energy_now);
+            }
+            node_friction.fill(0.0);
             let gravity = if tick >= settle { cfg.gravity } else { 0.0 };
             // A steady wind is an acceleration on every node, like gravity but
             // horizontal. It is a force only, never a fitness term.
@@ -966,6 +1023,8 @@ impl Group {
                         let chosen = F::select(contact, reduced, F::select(muddy, stopped, vel_x));
                         ledger[1] +=
                             (f64::from(chosen.to_array()[0]) - f64::from(vel_x.to_array()[0])) * m;
+                        node_friction[j] +=
+                            (chosen.to_array()[0] - vel_x.to_array()[0]) * lane0_mass[j];
                     }
                     vel_x = F::select(contact, reduced, F::select(muddy, stopped, vel_x));
                     let counted = contact & alive;
@@ -999,6 +1058,8 @@ impl Group {
                     if ledger_on {
                         ledger[1] +=
                             f64::from(F::select(alive, change, zero).to_array()[0] * lane0_mass[j]);
+                        node_friction[j] +=
+                            F::select(alive, change, zero).to_array()[0] * lane0_mass[j];
                     }
                 }
             }
@@ -1050,6 +1111,15 @@ impl Group {
                 }
             }
 
+            if ledger_on && colliding {
+                for j in 0..n {
+                    let (impulse, slip) = (node_friction[j], vx[j].to_array()[0]);
+                    energy_ledger[3] += f64::from(impulse.abs());
+                    if impulse * slip > 0.0 && slip.abs() > 0.1 {
+                        energy_ledger[4] += f64::from(impulse.abs());
+                    }
+                }
+            }
             let mut grounded_now = [0u64; L];
             if tick >= settle {
                 // A fall or the screen ends the trial: lanes that stopped in
@@ -1259,6 +1329,13 @@ impl Group {
             for (t, v) in total.iter_mut().zip(ledger) {
                 *t += v;
             }
+            let mut total = ENERGY_LEDGER.lock().unwrap();
+            for (t, v) in total.iter_mut().zip(energy_ledger) {
+                *t += v;
+            }
+        }
+        if let Some(sink) = work {
+            *sink = work_used.to_array();
         }
         let timed = total_steps > settle;
         let px: Vec<[f32; L]> = px.iter().map(|v| v.to_array()).collect();
@@ -1394,8 +1471,26 @@ pub fn replay(
         screen: None,
         ..cfg.clone()
     };
-    let result = group.run(&cfg, Some(&mut frames))[0];
+    let result = group.run(&cfg, Some(&mut frames), None)[0];
     (frames, result)
+}
+
+/// Cost of transport of one creature over a full CPU trial: muscle work in
+/// joules per kilogram per meter (the work is the sum of |force x relative
+/// speed| x dt that drains the muscles' energy stores). Diagnostic only, never
+/// fitness. `None` when the creature did not move forward.
+pub fn transport_cost(creature: &crate::evolution::Creature, cfg: &Config) -> Option<f32> {
+    let mut pop = Population::default();
+    pop.push(creature.clone());
+    let group = Group::build(&pop, &[0], &[0]);
+    let cfg = Config {
+        screen: None,
+        ..cfg.clone()
+    };
+    let mut work = [0.0f32; L];
+    let result = group.run(&cfg, None, Some(&mut work))[0];
+    let mass: f32 = physics::nodes(creature).iter().map(|n| n.mass).sum();
+    (result.fitness > 0.01 && mass > 0.0).then(|| work[0] / (mass * result.fitness))
 }
 
 /// Evaluates every creature of `unit` and returns results in unit order.

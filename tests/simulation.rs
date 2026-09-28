@@ -1802,3 +1802,23 @@ fn random_bodies_get_no_free_propulsion() {
         .fold(f32::MIN, f32::max);
     assert!(best < 20.0, "a random body traveled {best} m in 10 s");
 }
+
+#[test]
+fn cost_of_transport_counts_muscle_work_per_kilogram_and_meter() {
+    let cfg = Config {
+        duration: 5.0,
+        ..config()
+    };
+    let walker = energy_dependent_walker();
+    let cost = evolution_simulator::cpu_engine::transport_cost(&walker, &cfg)
+        .expect("the walker moves forward");
+    assert!(cost.is_finite() && cost > 0.0, "cost {cost}");
+    // With no muscle drive only the dampers work, so the cost is far lower.
+    let mut still = walker.clone();
+    for muscle in &mut still.muscles {
+        muscle.short = muscle.long;
+    }
+    let idle = evolution_simulator::cpu_engine::transport_cost(&still, &cfg);
+    eprintln!("walker {cost}, without drive {idle:?}");
+    assert!(idle.is_none_or(|c| c < cost * 0.5));
+}

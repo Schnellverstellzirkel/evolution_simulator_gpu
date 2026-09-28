@@ -373,6 +373,9 @@ struct Playback {
     ending: Ending,
     /// The distance the engine scored for this very recording.
     distance: f32,
+    /// Muscle work per kilogram per meter (J/kg/m) of a CPU trial of this
+    /// creature. A diagnostic, never part of the score.
+    cost_of_transport: Option<f32>,
     /// Where the follow camera looks at each frame: the body's center of
     /// mass averaged over `CAMERA_WINDOW` seconds on either side. Every
     /// frame is recorded in advance, so the average cancels the swing of
@@ -449,6 +452,7 @@ impl Playback {
             ending,
             distance: result.fitness,
             height,
+            cost_of_transport: crate::cpu_engine::transport_cost(&normalized, &config),
             track,
             creature: normalized,
             config,
@@ -2020,12 +2024,14 @@ impl App {
                         .strong(),
                 )
                 .on_hover_text(format!(
-                    "{} nodes, {} bones, {} muscles. Creature {}. {:.2} m is the distance this CPU playback reaches, and m/s its speed over the last fifth of a second. The GPU archive score comes from the GPU trial and its fine check; CPU playback can differ and does not change that score.",
+                    "{} nodes, {} bones, {} muscles. Creature {}. {:.2} m is the distance this CPU playback reaches, and m/s its speed over the last fifth of a second. The GPU archive score comes from the GPU trial and its fine check; CPU playback can differ and does not change that score.\nCost of transport: {} (muscle work per kilogram per meter in a CPU trial; lower is more efficient; a diagnostic, never part of the score).",
                     p.nodes.len(),
                     p.creature.bones.len(),
                     p.creature.muscles.len(),
                     p.creature.id,
-                    p.distance
+                    p.distance,
+                    p.cost_of_transport
+                        .map_or("n/a".to_owned(), |c| format!("{c:.2} J/kg/m"))
                 ));
             }
             if wide {
