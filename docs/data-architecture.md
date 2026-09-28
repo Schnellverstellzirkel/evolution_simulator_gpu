@@ -513,10 +513,10 @@ Answered by the owner on 2026-09-28:
 4. Screen bar resolution of 1 cm. Yes.
 5. Slow muscle genes as f16. Yes.
 
-Open:
+Settled later:
 
 6. Muscle mass (section 10.2). The owner asked for it to be built and measured (2026-09-28), and accepts half the best distance if it stops muscle monsters. It does not. Muscles that weigh 1 or 4 kg per meter of span, with a 200 J per meter store or a flat 120 J store, leave the population's muscle count between 6% lower and 10% higher than today's after 80 generations, and the best bodies become heavier and more muscular. It is not adopted. Bounding per-creature cost in long sessions still needs a different physics lever or lower caps.
-7. The four decisions of the assessment (new physics formulation, NVIDIA-only fast path, search-side levers, clock pinning) are still open.
+7. The four decisions of the assessment: yes to all (2026-09-28). A new physics formulation, an NVIDIA-only CUDA path beside the portable engines, the search-side levers, and pinned clocks for benchmarks.
 
 ## References
 

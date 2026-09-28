@@ -343,6 +343,8 @@ Phases 0, 2 and 3 need no owner decision and are useful whether or not physics v
 3. Search-side levers: a second screening rung, cheaper fine checks, lower-rate behavior metrics (section 7.6).
 4. May benchmarks pin GPU clocks with root (`nvidia-smi -lgc`) for cleaner measurements?
 
+Answered by the owner on 2026-09-28: yes to all four. The physics may change to the reduced-coordinate formulation, an NVIDIA-only CUDA path may exist beside the portable engines, the three search levers are built and measured, and benchmarks may run with pinned clocks (the owner runs the root command).
+
 ## References
 
 - NVIDIA, [Ada Lovelace GPU architecture whitepaper v1.1](https://images.nvidia.com/aem-dam/en-zz/Solutions/technologies/NVIDIA-ADA-GPU-PROVIZ-Architecture-Whitepaper_1.1.pdf).
