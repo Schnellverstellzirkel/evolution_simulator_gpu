@@ -345,6 +345,7 @@ fn run_seed(
     }
     print_body_mix(scope, seed, &top);
     print_robustness(scope, seed, &experiment);
+    print_common_grid(scope, seed, &experiment);
     Ok((best, qd))
 }
 
@@ -390,6 +391,43 @@ fn print_robustness(scope: &str, seed: u64, experiment: &Experiment) {
         "{scope} seed {seed} top-{TOP_BODIES} elites under the fine check: median share kept {:.2}, below half {halved} of {}",
         median(&mut kept),
         elites.len()
+    );
+}
+
+/// QD score of the global archive's behavior elites re-binned on one fixed
+/// grid (the archive shape before any experiment: contact 6, cadence 8,
+/// height 6, feet 5), so runs whose archives have different shapes compare on
+/// the same ground. Also the reserve size and the distinct body plans held.
+fn print_common_grid(scope: &str, seed: u64, experiment: &Experiment) {
+    let mut cells: HashMap<[u8; 4], f32> = HashMap::new();
+    let mut plans = std::collections::HashSet::new();
+    for elite in &experiment.archive.entries {
+        plans.insert(&elite.topology);
+        if evolution_simulator::qd::is_morphology_niche(&elite.niche) || elite.fitness <= 0.0 {
+            continue;
+        }
+        let d = &elite.descriptor;
+        let bin = |v: f32, high: f32, n: f32| {
+            ((v.clamp(0.0, high) / high * n).floor().min(n - 1.0)) as u8
+        };
+        let low = 0.15f32;
+        let top = (0.6 * evolution_simulator::evolution::max_bone_length()).max(2.0 * low);
+        let height = ((d.mean_height.max(low) / low).ln() / (top / low).ln()).clamp(0.0, 1.0);
+        let key = [
+            bin(d.ground_contact, 1.0, 6.0),
+            bin(d.gait_frequency, 6.0, 8.0),
+            bin(height, 1.0, 6.0),
+            (d.feet.round() as i32).clamp(1, 5) as u8,
+        ];
+        let slot = cells.entry(key).or_insert(f32::MIN);
+        *slot = slot.max(elite.fitness);
+    }
+    let qd: f64 = cells.values().map(|&f| f as f64).sum();
+    println!(
+        "{scope} seed {seed} common grid: qd {qd:.2}, cells {}, reserve {}, body plans {}",
+        cells.len(),
+        experiment.archive.morphology_count(),
+        plans.len()
     );
 }
 
