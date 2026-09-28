@@ -193,6 +193,14 @@ pub(crate) fn fuse_bones(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &C
     let Some((upper, lower)) = pick(&pairs, rng) else {
         return false;
     };
+    fuse_pair(c, upper, lower);
+    true
+}
+
+/// Fuses bone `upper` and the one bone `lower` below it into one bone from
+/// the top of `upper` to the tip of `lower`. Muscles on either keep their
+/// place on the body, projected onto the fused bone.
+pub(super) fn fuse_pair(c: &mut Creature, upper: usize, lower: usize) {
     let joint = c.bones[upper].b as usize;
     let end = c.bones[lower].b;
     let start = c.nodes[c.bones[upper].a as usize];
@@ -229,7 +237,6 @@ pub(crate) fn fuse_bones(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &C
     // Muscles that joined the two bones now join the fused bone to itself,
     // and `remove_parts` drops them.
     remove_parts(c, &[lower], &[joint]);
-    true
 }
 
 /// Moves a branch, with its internal shape and muscles, to another node of
@@ -369,23 +376,23 @@ pub(crate) fn graft_donor_limb(
 }
 
 /// Bones that can start a limb: every bone but the neck.
-fn limb_roots(c: &Creature) -> Vec<usize> {
+pub(super) fn limb_roots(c: &Creature) -> Vec<usize> {
     (0..c.bones.len()).filter(|&b| !is_neck(c, b)).collect()
 }
 
 /// A random item of `items`, or `None` when there is none.
-fn pick<T: Copy>(items: &[T], rng: &mut Rng) -> Option<T> {
+pub(super) fn pick<T: Copy>(items: &[T], rng: &mut Rng) -> Option<T> {
     (!items.is_empty()).then(|| items[rng.index(items.len())])
 }
 
 /// A starting position moved inside the region where nodes may start.
-fn clamped(x: f32, y: f32) -> [f32; 2] {
+pub(super) fn clamped(x: f32, y: f32) -> [f32; 2] {
     let extent = body_extent();
     [x.clamp(-extent, extent), y.clamp(0.0, extent)]
 }
 
 /// Gives a new joint a narrow range around its starting angle.
-fn narrow(bone: &mut Bone, rng: &mut Rng) {
+pub(super) fn narrow(bone: &mut Bone, rng: &mut Rng) {
     bone.min_angle = -rng.range(0.15, 0.5);
     bone.max_angle = rng.range(0.15, 0.5);
 }

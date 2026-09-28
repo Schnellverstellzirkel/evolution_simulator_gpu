@@ -24,6 +24,7 @@
 use super::{Bone, Creature, Muscle, NodeGene, Rng, bone_point, neutralize};
 use crate::config::Config;
 
+mod extra;
 mod junctions;
 mod limbs;
 mod muscles;
@@ -40,7 +41,7 @@ pub(super) struct Context<'a> {
 pub(super) type Operator = fn(&mut Creature, &Config, &mut Rng, &Context) -> bool;
 
 /// Every operator, by name. The names are what `EVOLUTION_ANATOMY` lists.
-pub(super) const OPERATORS: [(&str, Operator); 30] = [
+pub(super) const OPERATORS: &[(&str, Operator)] = &[
     ("copy_limb", limbs::copy_limb),
     ("grow_actuated_tip", limbs::grow_actuated_tip),
     ("split_bone_actuated", limbs::split_bone_actuated),
@@ -71,6 +72,35 @@ pub(super) const OPERATORS: [(&str, Operator); 30] = [
     ("limb_duty_cycle", rhythm::limb_duty_cycle),
     ("touchdown_package", rhythm::touchdown_package),
     ("redistribute_organ_mass", rhythm::redistribute_organ_mass),
+    ("mirror_limb_timing", extra::mirror_limb_timing),
+    ("swap_limb_programs", extra::swap_limb_programs),
+    ("copy_muscle_to_partner", extra::copy_muscle_to_partner),
+    ("twin_limb", extra::twin_limb),
+    ("grow_matching_tips", extra::grow_matching_tips),
+    ("nudge_limb_phase", extra::nudge_limb_phase),
+    ("cadence_stride_trade", extra::cadence_stride_trade),
+    ("scale_muscle_leverage", extra::scale_muscle_leverage),
+    ("scale_limb_strength", extra::scale_limb_strength),
+    ("prune_weakest_muscle", extra::prune_weakest_muscle),
+    ("prune_idle_limb", extra::prune_idle_limb),
+    ("merge_leaf_bones", extra::merge_leaf_bones),
+];
+
+/// Operators in the table that are off unless `EVOLUTION_ANATOMY` names them
+/// (or says `all`).
+const OFF_BY_DEFAULT: &[&str] = &[
+    "mirror_limb_timing",
+    "swap_limb_programs",
+    "copy_muscle_to_partner",
+    "twin_limb",
+    "grow_matching_tips",
+    "nudge_limb_phase",
+    "cadence_stride_trade",
+    "scale_muscle_leverage",
+    "scale_limb_strength",
+    "prune_weakest_muscle",
+    "prune_idle_limb",
+    "merge_leaf_bones",
 ];
 
 /// The operators `EVOLUTION_ANATOMY` enables, as indices into `OPERATORS`.
@@ -81,9 +111,12 @@ pub(super) fn enabled() -> &'static [usize] {
 
 fn parse(value: Option<&str>) -> Vec<usize> {
     let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
-        return (0..OPERATORS.len()).collect();
+        return defaults();
     };
-    if matches!(value, "1" | "all" | "on" | "true") {
+    if matches!(value, "1" | "on" | "true") {
+        return defaults();
+    }
+    if value == "all" {
         return (0..OPERATORS.len()).collect();
     }
     if matches!(value, "0" | "off" | "none" | "false") {
@@ -92,6 +125,13 @@ fn parse(value: Option<&str>) -> Vec<usize> {
     value
         .split(',')
         .filter_map(|name| OPERATORS.iter().position(|(n, _)| *n == name.trim()))
+        .collect()
+}
+
+/// The operators on by default, as indices into `OPERATORS`.
+fn defaults() -> Vec<usize> {
+    (0..OPERATORS.len())
+        .filter(|&i| !OFF_BY_DEFAULT.contains(&OPERATORS[i].0))
         .collect()
 }
 
@@ -385,15 +425,19 @@ mod tests {
 
     #[test]
     fn operator_names_parse_and_are_unique() {
-        assert_eq!(parse(None).len(), OPERATORS.len());
-        assert_eq!(parse(Some("")).len(), OPERATORS.len());
+        let defaults = OPERATORS.len() - OFF_BY_DEFAULT.len();
+        assert_eq!(parse(None), (0..defaults).collect::<Vec<_>>());
+        assert_eq!(parse(Some("")).len(), defaults);
         assert!(parse(Some("0")).is_empty());
         assert!(parse(Some("off")).is_empty());
         assert_eq!(parse(Some("all")).len(), OPERATORS.len());
-        assert_eq!(parse(Some("1")).len(), OPERATORS.len());
+        assert_eq!(parse(Some("1")).len(), defaults);
         assert_eq!(parse(Some("fuse_bones, copy_limb")), vec![3, 0]);
         for (i, (name, _)) in OPERATORS.iter().enumerate() {
             assert_eq!(OPERATORS.iter().position(|(n, _)| n == name), Some(i));
+        }
+        for name in OFF_BY_DEFAULT {
+            assert!(OPERATORS.iter().any(|(n, _)| n == name), "{name}");
         }
     }
 
