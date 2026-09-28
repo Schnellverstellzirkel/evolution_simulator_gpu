@@ -37,6 +37,15 @@ const MUSCLE_ACTIVE: Color32 = Color32::from_rgb(146, 16, 28);
 /// Ring around every node touching the ground in the current frame.
 const TOUCHDOWN: Color32 = Color32::from_rgb(255, 196, 64);
 const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
+/// The spacing scale: every gap, margin and padding is one of these.
+const GAP_S: f32 = 4.0;
+const GAP_M: f32 = 8.0;
+const GAP_L: f32 = 16.0;
+/// Height of every button, menu and selectable in a row, and the starting
+/// height of a row, so a row's items share one center line.
+const CONTROL_HEIGHT: f32 = 34.0;
+/// Height of an effect's level buttons: every effect row is this tall.
+const LEVEL_HEIGHT: f32 = 26.0;
 /// How long the UI's own messages hold the status line.
 const MESSAGE_SECONDS: f32 = 8.0;
 /// How fast archive cards glide to their new places after a re-sort.
@@ -183,9 +192,12 @@ fn apply_style(ctx: &egui::Context, dark: bool) {
         egui::Theme::Light
     });
     let mut style = (*ctx.global_style()).clone();
-    style.spacing.item_spacing = Vec2::new(10.0, 10.0);
-    style.spacing.button_padding = Vec2::new(12.0, 8.0);
+    style.spacing.item_spacing = Vec2::new(GAP_M, GAP_M);
+    style.spacing.button_padding = Vec2::new(12.0, 7.0);
+    style.spacing.interact_size = Vec2::new(40.0, CONTROL_HEIGHT);
     style.spacing.slider_width = 120.0;
+    style.spacing.window_margin = egui::Margin::same(GAP_L as i8);
+    style.spacing.menu_margin = egui::Margin::same(GAP_M as i8);
     let mut visuals = if dark {
         egui::Visuals::dark()
     } else {
@@ -260,7 +272,17 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([900.0, 620.0])
-            .with_title("Evolution · Creature Laboratory"),
+            .with_title(
+                // Agents take screenshots in real windows on the owner's
+                // desktop; the title says so.
+                if std::env::vars_os()
+                    .any(|(key, _)| key.to_string_lossy().starts_with("EVOLUTION_SMOKE_"))
+                {
+                    "Evolution Simulator: agent screenshot run, not your game"
+                } else {
+                    "Evolution · Creature Laboratory"
+                },
+            ),
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             wgpu_setup: setup.into(),
@@ -1563,7 +1585,7 @@ impl App {
     fn top(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
         ui.horizontal(|ui| {
-            ui.add_space(5.);
+            ui.add_space(GAP_S);
             let (logo, _) = ui.allocate_exact_size(Vec2::splat(28.), Sense::hover());
             let points = [
                 logo.center_top() + Vec2::new(0., 4.),
@@ -1576,7 +1598,7 @@ impl App {
                 ui.painter().circle_filled(points[i], 3., MINT);
             }
             ui.label(RichText::new("EVOLUTION").size(24.).strong());
-            ui.add_space(12.);
+            ui.add_space(GAP_L);
             let running = self.active();
             let (text, fill, ink, why) = if running {
                 (
@@ -1702,7 +1724,7 @@ impl App {
     }
     fn control_contents(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
-        ui.add_space(6.);
+        ui.add_space(GAP_M);
         let mut world_changed = false;
         ui.label(RichText::new("World").strong());
         let live = self.snapshot.as_ref().map(|s| s.config.clone());
@@ -1746,40 +1768,40 @@ impl App {
             .small()
             .color(theme.muted),
         );
-        egui::Grid::new("world_effects")
-            .num_columns(2)
-            .spacing([8., 6.])
-            .show(ui, |ui| {
-                for effect in crate::environment::EFFECTS
-                    .iter()
-                    .filter(|effect| effect.name != "Seasons")
-                {
-                    if effect_row(ui, effect, &mut self.config, live.as_ref(), theme) {
+        // One grid for every effect and the seasons, so the names share a
+        // column and the level buttons start on one line. Rows are the
+        // height of a level button.
+        ui.scope(|ui| {
+            ui.spacing_mut().interact_size.y = LEVEL_HEIGHT;
+            egui::Grid::new("world_effects")
+                .num_columns(2)
+                .spacing([GAP_M, GAP_S + 2.])
+                .show(ui, |ui| {
+                    for effect in crate::environment::EFFECTS
+                        .iter()
+                        .filter(|effect| effect.name != "Seasons")
+                    {
+                        if effect_row(ui, effect, &mut self.config, live.as_ref(), theme) {
+                            world_changed = true;
+                        }
+                        ui.end_row();
+                    }
+                    if let Some(seasons) = crate::environment::EFFECTS
+                        .iter()
+                        .find(|effect| effect.name == "Seasons")
+                        && effect_row(ui, seasons, &mut self.config, None, theme)
+                    {
                         world_changed = true;
                     }
                     ui.end_row();
-                }
-            });
-        ui.add_space(2.);
-        egui::Grid::new("world_seasons")
-            .num_columns(2)
-            .spacing([8., 6.])
-            .show(ui, |ui| {
-                if let Some(seasons) = crate::environment::EFFECTS
-                    .iter()
-                    .find(|effect| effect.name == "Seasons")
-                    && effect_row(ui, seasons, &mut self.config, None, theme)
-                {
-                    world_changed = true;
-                }
-                ui.end_row();
-            });
+                });
+        });
         let generation = self.snapshot.as_ref().map_or(0, |s| s.generation);
         if let Some(forecast) = season_forecast(&self.config, generation) {
             ui.label(RichText::new(forecast).small().color(theme.muted));
         }
         let fossils = self.snapshot.as_ref().map_or(0, |s| s.fossils);
-        ui.add_space(4.);
+        ui.add_space(GAP_S);
         ui.label(RichText::new("Catastrophes").strong()).on_hover_text(
             "A catastrophe wipes out creatures that evolution kept. Survivors and newcomers refill the empty places, which makes room for new ways of moving.",
         );
@@ -2187,6 +2209,8 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label("Time");
                 if trial_frames > 0 {
+                    // The scrubber takes the row, less room for the clock.
+                    ui.spacing_mut().slider_width = (ui.available_width() - 110.).max(120.);
                     let mut frame = p.tick.saturating_sub(trial_start).min(trial_frames);
                     let response = ui.add(
                         egui::Slider::new(&mut frame, 0..=trial_frames)
@@ -2353,7 +2377,7 @@ impl App {
                 egui::Frame::new()
                     .fill(theme.card)
                     .corner_radius(8)
-                    .inner_margin(12)
+                    .inner_margin(GAP_L as i8)
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.label(RichText::new(name).small().color(theme.muted))
@@ -2560,11 +2584,6 @@ impl App {
                             ui.selectable_value(&mut self.map_feet, Some(bin), feet_bin_label(bin));
                         }
                     });
-                ui.label(
-                    RichText::new("Click a cell to replay its creature.")
-                        .small()
-                        .color(theme.muted),
-                );
             });
         }
         let Some(snapshot) = &self.snapshot else {
@@ -2622,7 +2641,7 @@ impl App {
                         filter.feet = Some(bin);
                     }
                 }
-                ui.add_space(8.);
+                ui.add_space(GAP_M);
                 ui.label(RichText::new("Body").small().color(theme.muted));
                 for (size, label, why) in [
                     (None, "All", "Every body size"),
@@ -2638,7 +2657,7 @@ impl App {
                         filter.size = size;
                     }
                 }
-                ui.add_space(8.);
+                ui.add_space(GAP_M);
                 ui.checkbox(&mut filter.one_per_plan, "One per body plan")
                     .on_hover_text(
                         "Show only the fastest creature of each body plan, with how many share it",
@@ -3030,7 +3049,7 @@ impl App {
             );
         });
         if self.lineage.is_empty() {
-            ui.add_space(12.);
+            ui.add_space(GAP_L);
             ui.label(
                 RichText::new(if self.playback.is_none() {
                     "Pick a creature in Ways of moving to trace its ancestry."
@@ -3071,7 +3090,7 @@ impl App {
                     ) {
                         chosen = Some(k);
                     }
-                    ui.add_space(6.);
+                    ui.add_space(GAP_M);
                 }
             });
         if let Some(k) = chosen {
@@ -3086,7 +3105,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.heading("Race");
             ui.label(
-                RichText::new("The fastest archived creatures run their trials side by side.")
+                RichText::new("The fastest kept creatures run their trials side by side.")
                     .color(theme.muted),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3137,7 +3156,7 @@ impl App {
             speed_picker(ui, &mut self.speed, "race_speed");
         });
         if self.race.is_empty() {
-            ui.add_space(12.);
+            ui.add_space(GAP_L);
             let waiting = self.race_pending
                 && self
                     .snapshot
@@ -3174,15 +3193,26 @@ impl App {
             rect.min,
             Pos2::new(rect.right() - board_width - 12., rect.bottom()),
         );
-        let zoom = 34.0;
+        // Scale the track to the farthest finish, so short trials and slow
+        // creatures still fill the lanes, and fast ones stay in view.
+        let farthest = self
+            .race
+            .iter()
+            .map(|lane| lane.playback.distance)
+            .fold(0.0f32, f32::max);
+        // A lane holds about 1.4 m of height, so tall bodies stay inside it.
+        let lane_height = lanes_rect.height() / self.race.len().max(1) as f32;
+        let zoom = (lanes_rect.width() / (farthest * 1.3).max(3.0))
+            .min(lane_height / 1.4)
+            .clamp(34.0, 240.0);
         let visible = lanes_rect.width() / zoom;
         // The leader's averaged center of mass, so its stride does not shake
         // the view; the easing below smooths a change of leader.
-        let target = (self.race[leader].playback.camera_x() - visible * 0.6).max(0.0);
+        // The start line sits a little in from the lane's left edge.
+        let target = (self.race[leader].playback.camera_x() - visible * 0.6).max(-visible * 0.08);
         let dt = ui.ctx().input(|i| i.stable_dt).clamp(0.0, 0.1);
         self.race_camera += (target - self.race_camera) * (dt * 4.0).min(1.0);
         let camera = self.race_camera;
-        let lane_height = lanes_rect.height() / self.race.len() as f32;
         for (i, lane) in self.race.iter().enumerate() {
             let lane_rect = Rect::from_min_max(
                 Pos2::new(
@@ -3225,7 +3255,11 @@ impl App {
                 ],
                 Stroke::new(2., GROUND_EDGE),
             );
-            let step = 5.0;
+            // A tick about every 150 px: 0.5, 1, 2, 5 or 10 m.
+            let step = [0.5f32, 1.0, 2.0, 5.0, 10.0]
+                .into_iter()
+                .find(|step| step * zoom >= 150.0)
+                .unwrap_or(10.0);
             let mut x = (camera / step).ceil() * step;
             while x <= camera + visible {
                 let px = lane_rect.left() + (x - camera) * zoom;
@@ -3240,7 +3274,11 @@ impl App {
                     painter.text(
                         Pos2::new(px + 3., ground - 2.),
                         Align2::LEFT_BOTTOM,
-                        format!("{x:.0} m"),
+                        if step < 1.0 {
+                            format!("{x:.1} m")
+                        } else {
+                            format!("{x:.0} m")
+                        },
                         FontId::proportional(13.),
                         theme.muted,
                     );
@@ -3328,7 +3366,7 @@ impl App {
             painter.text(
                 Pos2::new(board.right() - 10., y),
                 Align2::RIGHT_CENTER,
-                format!("{:.1} m", distances[i]),
+                format!("{:.2} m", distances[i]),
                 FontId::proportional(15.),
                 if place == 0 {
                     theme.accent
@@ -3428,9 +3466,9 @@ impl App {
         ui.add(egui::Slider::new(&mut self.history_index, 0..=len - 1).text("Generation"))
             .on_hover_text("Disable Follow latest to keep a historical generation selected");
         self.trend(ui, 180.);
-        ui.add_space(6.);
+        ui.add_space(GAP_M);
         self.records_list(ui);
-        ui.add_space(6.);
+        ui.add_space(GAP_M);
         self.species_history(ui);
         let stats = self.snapshot.as_ref().unwrap().history[self.history_index].clone();
         let body_count = if stats.archive_cells > 0 {
@@ -3470,7 +3508,7 @@ impl App {
                     }
                 });
         });
-        ui.add_space(8.);
+        ui.add_space(GAP_M);
         let mut selection = None;
         ui.columns(3, |cols| {
             for (i, ui) in cols.iter_mut().enumerate() {
@@ -3613,7 +3651,7 @@ impl App {
                 ] {
                     ui.label(RichText::new(name).strong());
                     ui.label(RichText::new(why).color(theme.muted));
-                    ui.add_space(4.);
+                    ui.add_space(GAP_S);
                 }
             });
     }
@@ -4162,7 +4200,11 @@ impl eframe::App for App {
         let theme = self.theme();
         egui::Panel::top("top")
             .exact_size(64.)
-            .frame(egui::Frame::new().fill(theme.panel).inner_margin(12))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme.panel)
+                    .inner_margin(egui::Margin::symmetric(GAP_L as i8, 15)),
+            )
             .show(ui, |ui| self.top(ui));
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -4219,10 +4261,18 @@ impl eframe::App for App {
             .min_size(300.)
             .max_size(480.)
             .resizable(true)
-            .frame(egui::Frame::new().fill(theme.panel).inner_margin(16))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme.panel)
+                    .inner_margin(GAP_L as i8),
+            )
             .show(ui, |ui| self.controls(ui));
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme.canvas).inner_margin(20))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme.canvas)
+                    .inner_margin(GAP_L as i8),
+            )
             .show(ui, |ui| {
                 let before = self.tab;
                 ui.horizontal(|ui| {
@@ -4239,11 +4289,11 @@ impl eframe::App for App {
                 if self.tab == Tab::Race && before != Tab::Race {
                     self.restart_race();
                 }
-                ui.add_space(8.);
+                ui.add_space(GAP_M);
                 match self.tab {
                     Tab::Overview => {
                         self.metrics(ui);
-                        ui.add_space(8.);
+                        ui.add_space(GAP_M);
                         // The chart keeps a fixed height below the replay and
                         // its controls; the replay takes the rest.
                         const CHART: f32 = 200.;
@@ -4252,7 +4302,7 @@ impl eframe::App for App {
                             ui,
                             (ui.available_height() - CHART - REPLAY_CONTROLS).max(180.),
                         );
-                        ui.add_space(6.);
+                        ui.add_space(GAP_M);
                         // The chart and the event feed share the bottom row.
                         let height = (ui.available_height() - 34.).max(80.);
                         let width = ui.available_width();
@@ -4600,8 +4650,9 @@ fn effect_row(
     }
     let mut picked = None;
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(3., 3.);
-        ui.spacing_mut().button_padding = Vec2::new(6., 2.);
+        ui.spacing_mut().item_spacing = Vec2::new(GAP_S, GAP_S);
+        ui.spacing_mut().button_padding = Vec2::new(6., 3.);
+        ui.spacing_mut().interact_size.y = LEVEL_HEIGHT;
         for (i, text) in effect.levels.iter().enumerate() {
             let short = text.split(',').next().unwrap_or(text);
             let hover = if i == effect.calm {
