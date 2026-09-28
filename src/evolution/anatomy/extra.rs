@@ -10,7 +10,7 @@
 //! would get new random muscles that drive from the first step.
 use super::limbs::{clamped, fuse_pair, limb_roots, pick};
 use super::muscles::{actuation, ring, shared_node};
-use super::rhythm::matching_limbs;
+use super::rhythm::{leaf_limbs, matching_limbs};
 use super::{
     Context, branch, child_bones, copy_branch, degree, fit_stroke, is_neck, muscles_on, neutralize,
     new_muscle, parent_bones, remove_parts, room,
@@ -418,6 +418,156 @@ pub(crate) fn merge_leaf_bones(
     fuse_pair(c, upper, lower);
     passive_ring(c, cfg, rng);
     true
+}
+
+/// The owner saw evolution settle on one strong leg at one end of the body
+/// while the other end drags. Copies the working leg (the leg whose muscles
+/// drive most) to the other end of the body, mirrored front to back, half a
+/// cycle apart (gallop or bound) or in phase (hop). A weak leg already at
+/// that end goes first, so the body's mass stays about the same.
+pub(crate) fn leg_to_dragging_end(
+    c: &mut Creature,
+    cfg: &Config,
+    rng: &mut Rng,
+    cx: &Context,
+) -> bool {
+    let Some((working, dragging)) = drag_ends(c) else {
+        return false;
+    };
+    let root = c.bones[working[0]].a as usize;
+    let mut next = c.clone();
+    let (mut leg, mut at) = (working[0], dragging.node);
+    if let Some(weak) = dragging.weak_leg {
+        let nodes = super::branch_nodes(c, &weak);
+        remove_parts(&mut next, &weak, &nodes);
+        leg -= weak.iter().filter(|&&b| b < leg).count();
+        at -= nodes.iter().filter(|&&n| n < at).count();
+    }
+    let (from, to) = (c.nodes[root], next.nodes[at]);
+    let place = |[x, y]: [f32; 2]| [to.x - (x - from.x), to.y + y - from.y];
+    let phase = if rng.unit() < 0.5 { 0.5 } else { 0.0 };
+    if copy_branch(&mut next, cfg, leg, at, place, true, phase, cx.neutral).is_none() {
+        return false;
+    }
+    passive_ring(&mut next, cfg, rng);
+    *c = next;
+    true
+}
+
+/// Adds a muscle across the joint of the leg at the dragging end, from that
+/// leg's top bone to the bone above the joint, placed so its pull lifts the
+/// foot and timed like the working leg's strongest muscle: the dragging end
+/// lifts while the working leg pushes.
+pub(crate) fn lift_dragging_end(
+    c: &mut Creature,
+    cfg: &Config,
+    rng: &mut Rng,
+    cx: &Context,
+) -> bool {
+    if !room(c, cfg, 0, 1) {
+        return false;
+    }
+    let Some((working, dragging)) = drag_ends(c) else {
+        return false;
+    };
+    let Some(leg) = dragging.leg else {
+        return false;
+    };
+    let top = leg[0];
+    let joint = c.bones[top].a as usize;
+    let Some(above) = parent_bones(c)[joint] else {
+        return false;
+    };
+    let Some(&strongest) = muscles_on(c, &working, false)
+        .iter()
+        .max_by(|&&x, &&y| drive(&c.muscles[x]).total_cmp(&drive(&c.muscles[y])))
+    else {
+        return false;
+    };
+    // Turning the leg lifts its foot when the turn has the sign of the foot's
+    // horizontal offset from the joint.
+    let (j, foot) = (
+        c.nodes[joint],
+        c.nodes[c.bones[leg[leg.len() - 1]].b as usize],
+    );
+    let side = (foot.x - j.x).signum();
+    let at = rng.range(0.5, 1.0);
+    let p = crate::evolution::bone_point(c.bones[top], &c.nodes, at);
+    let lift = |anchor: f32| {
+        let q = crate::evolution::bone_point(c.bones[above], &c.nodes, anchor);
+        let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
+        let length = dx.hypot(dy).max(1e-6);
+        side * ((p[0] - j.x) * dy - (p[1] - j.y) * dx) / length
+    };
+    let best = [0.0, 0.25, 0.5, 0.75, 1.0]
+        .into_iter()
+        .max_by(|&x, &y| lift(x).total_cmp(&lift(y)))
+        .expect("five anchors");
+    if lift(best) < 1e-3 {
+        return false;
+    }
+    let template = c.muscles[strongest];
+    let m = new_muscle(c, top, above, (at, best), Some(&template), rng, cx.neutral);
+    c.muscles.push(m);
+    true
+}
+
+/// The other end of the body from the working leg.
+struct DraggingEnd {
+    /// The node a leg copied there hangs from.
+    node: usize,
+    /// The leg already at that end, if any.
+    leg: Option<Vec<usize>>,
+    /// That leg, when its muscles drive less than a quarter of the working
+    /// leg's: the copy replaces it.
+    weak_leg: Option<Vec<usize>>,
+}
+
+/// The working leg (the leg, from `leaf_limbs`, whose muscles drive most)
+/// and the other end of the body: the leg whose foot lies farthest from the
+/// working leg's top joint along x in the rest pose, or without another leg
+/// the node farthest along x (not the head, not in the working leg).
+fn drag_ends(c: &Creature) -> Option<(Vec<usize>, DraggingEnd)> {
+    let legs = leaf_limbs(c);
+    let work = |leg: &Vec<usize>| -> f32 {
+        muscles_on(c, leg, false)
+            .iter()
+            .map(|&i| drive(&c.muscles[i]))
+            .sum()
+    };
+    let working = legs
+        .iter()
+        .max_by(|x, y| work(x).total_cmp(&work(y)))?
+        .clone();
+    if work(&working) <= 0.0 {
+        return None;
+    }
+    let x = c.nodes[c.bones[working[0]].a as usize].x;
+    let away = |node: usize| (c.nodes[node].x - x).abs();
+    let foot = |leg: &Vec<usize>| c.bones[leg[leg.len() - 1]].b as usize;
+    let other = legs
+        .iter()
+        .filter(|leg| **leg != working)
+        .max_by(|p, q| away(foot(p)).total_cmp(&away(foot(q))));
+    let end = match other {
+        Some(leg) => DraggingEnd {
+            node: c.bones[leg[0]].a as usize,
+            leg: Some(leg.clone()),
+            weak_leg: (work(leg) < 0.25 * work(&working)).then(|| leg.clone()),
+        },
+        None => {
+            let inside = super::branch_nodes(c, &working);
+            let node = (1..c.nodes.len())
+                .filter(|n| !inside.contains(n))
+                .max_by(|&p, &q| away(p).total_cmp(&away(q)))?;
+            DraggingEnd {
+                node,
+                leg: None,
+                weak_leg: None,
+            }
+        }
+    };
+    Some((working, end))
 }
 
 /// A muscle's drive: stiffness times stroke. Zero for a passive muscle.
@@ -952,5 +1102,80 @@ mod tests {
             assert!(ring_is_closed(after));
         });
         assert!(applied >= 80, "applied {applied}");
+    }
+
+    #[test]
+    fn leg_to_dragging_end_copies_the_working_leg_mirrored_to_the_other_end() {
+        let bodies = grown();
+        let (replaced, added) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+        let applied = run(leg_to_dragging_end, &bodies, |before, after| {
+            let (working, end) = drag_ends(before).unwrap();
+            let gone = end.weak_leg.as_ref().map_or(0, Vec::len);
+            if gone > 0 {
+                replaced.set(replaced.get() + 1);
+            } else {
+                added.set(added.get() + 1);
+            }
+            assert_eq!(after.nodes.len(), before.nodes.len() - gone + working.len());
+            assert_eq!(after.bones.len(), before.bones.len() - gone + working.len());
+            // The copy is appended: the working leg's bones, mirrored front to
+            // back about its top joint and moved to the other end.
+            let copy = &after.bones[after.bones.len() - working.len()..];
+            let root = before.nodes[before.bones[working[0]].a as usize];
+            let at = after.nodes[copy[0].a as usize];
+            let extent = crate::evolution::body_extent();
+            for (&b, new) in working.iter().zip(copy) {
+                let old = before.bones[b];
+                assert_eq!(old.rest_length, new.rest_length);
+                assert_eq!(
+                    (new.min_angle, new.max_angle),
+                    (-old.max_angle, -old.min_angle)
+                );
+                let (p, q) = (before.nodes[old.b as usize], after.nodes[new.b as usize]);
+                if q.x.abs() < extent - 1e-4 {
+                    assert!((q.x - at.x + (p.x - root.x)).abs() < 1e-4);
+                }
+            }
+            if gone == 0 {
+                assert_eq!(&after.bones[..before.bones.len()], &before.bones[..]);
+            }
+        });
+        assert!(applied >= 150, "applied {applied}");
+        assert!(
+            replaced.get() > 0 && added.get() > 0,
+            "{replaced:?} {added:?}"
+        );
+    }
+
+    #[test]
+    fn lift_dragging_end_adds_a_lifting_muscle_timed_with_the_working_leg() {
+        let bodies = grown();
+        let applied = run(lift_dragging_end, &bodies, |before, after| {
+            assert_eq!(after.muscles.len(), before.muscles.len() + 1);
+            assert_eq!(&after.muscles[..before.muscles.len()], &before.muscles[..]);
+            let m = *after.muscles.last().unwrap();
+            let (working, end) = drag_ends(before).unwrap();
+            let leg = end.leg.unwrap();
+            let joint = before.bones[leg[0]].a as usize;
+            assert_eq!(m.bone_a as usize, leg[0]);
+            assert_eq!(Some(m.bone_b as usize), parent_bones(before)[joint]);
+            // Timed like a working-leg muscle.
+            assert!(muscles_on(before, &working, false).iter().any(|&i| {
+                let w = before.muscles[i];
+                (w.phase, w.duty, w.period) == (m.phase, m.duty, m.period)
+            }));
+            // Its pull turns the leg so the foot rises.
+            let j = before.nodes[joint];
+            let foot = before.nodes[before.bones[leg[leg.len() - 1]].b as usize];
+            let p = crate::evolution::bone_point(before.bones[leg[0]], &before.nodes, m.anchor_a);
+            let q = crate::evolution::bone_point(
+                before.bones[m.bone_b as usize],
+                &before.nodes,
+                m.anchor_b,
+            );
+            let torque = (p[0] - j.x) * (q[1] - p[1]) - (p[1] - j.y) * (q[0] - p[0]);
+            assert!(torque * (foot.x - j.x).signum() > 0.0);
+        });
+        assert!(applied >= 50, "applied {applied}");
     }
 }

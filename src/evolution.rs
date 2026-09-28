@@ -1797,12 +1797,17 @@ fn structural_mutation_from(
     let classic = classic_operators();
     // An operator that does not fit this body leaves it unchanged; try
     // another, a few times.
+    // The shared operators together take one slot, drawn after the others.
+    let slots = classic + extra.single.len() + usize::from(!extra.shared.is_empty());
     for _ in 0..4 {
-        let pick = rng.index(classic + extra.len());
+        let pick = rng.index(slots);
         let changed = if pick < classic {
             classic_operator(pick, creature, cfg, rng, neutral)
+        } else if let Some(&index) = extra.single.get(pick - classic) {
+            anatomy::apply(index, creature, cfg, rng, &cx)
         } else {
-            anatomy::apply(extra[pick - classic], creature, cfg, rng, &cx)
+            let index = extra.shared[rng.index(extra.shared.len())];
+            anatomy::apply(index, creature, cfg, rng, &cx)
         };
         if changed {
             return true;
