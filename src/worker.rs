@@ -34,10 +34,8 @@ pub enum Command {
     Load(PathBuf),
     Export(PathBuf),
     Page(usize),
-    Preview {
-        creature: Creature,
-        config: Config,
-    },
+    /// Ancestors of the creature with this id, answered in `Snapshot::lineage`.
+    Lineage(u64),
     /// Benchmark probe: the UI send time, used to measure how long queued controls wait.
     Ping(Instant),
     /// Benchmark probe: re-applies the current settings like an environment
@@ -88,8 +86,9 @@ pub struct Snapshot {
     pub page: Vec<Card>,
     pub page_start: usize,
     pub preview: Option<(Creature, Config)>,
-    /// Ancestor chain of the selected elite, newest first; sent once per selection.
-    pub lineage: Option<Vec<LineageStep>>,
+    /// Ancestor chain of a requested creature (its id first), newest first;
+    /// sent once per request.
+    pub lineage: Option<(u64, Vec<LineageStep>)>,
     pub gpu: String,
     /// Evaluation engines: name, measured creatures/s, creatures evaluated.
     pub engines: Vec<(String, f64, u64)>,
@@ -231,7 +230,7 @@ fn run(
     let mut guided = false;
     let mut page = 0usize;
     let mut preview = None;
-    let mut lineage: Option<Vec<LineageStep>> = None;
+    let mut lineage: Option<(u64, Vec<LineageStep>)> = None;
     let mut status = gpu
         .startup_warning
         .clone()
@@ -305,7 +304,7 @@ fn run(
                     command,
                     Command::Ping(_)
                         | Command::Page(_)
-                        | Command::Preview { .. }
+                        | Command::Lineage(_)
                         | Command::Pause
                         | Command::Run { .. }
                         | Command::Next
@@ -448,12 +447,11 @@ fn run(
                     Command::Page(start) => {
                         page = start;
                     }
-                    Command::Preview { creature, config } => {
+                    Command::Lineage(id) => {
                         if let Some(e) = &exp {
-                            let id = creature.id;
-                            preview = Some((creature, config));
                             let chain = e.ancestry(id, 400);
-                            lineage = Some(
+                            lineage = Some((
+                                id,
                                 chain
                                     .iter()
                                     .enumerate()
@@ -467,7 +465,7 @@ fn run(
                                         creature: a.creature.clone(),
                                     })
                                     .collect(),
-                            );
+                            ));
                         }
                     }
                 }
