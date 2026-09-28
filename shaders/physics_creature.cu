@@ -20,6 +20,13 @@
 //   stay in registers.
 // - Every float literal carries an f suffix, so no expression runs in double
 //   precision.
+//
+// With RECORD 1 this file is the recording kernel of
+// creature_kernel::record_source: it also writes every creature's node
+// positions before each step and after the last to `frames`, and after the
+// trial ends the body keeps moving, limp, while the result stays the one at
+// the end of the trial. The scoring kernels compile with RECORD 0, so the
+// recording code is not in them.
 
 struct Node {
     float2 pos;
@@ -279,7 +286,13 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
     // (nodes, bones, muscles, quake seed) per creature.
     const uint4* __restrict__ creature_info,
     // (muscle base, bone base, unused, unused) per 32-creature tile.
-    const uint4* __restrict__ tile_info) {
+    const uint4* __restrict__ tile_info
+#if RECORD
+    ,
+    // Node positions as [creature][frame][node], with the node stride.
+    float2* __restrict__ frames
+#endif
+    ) {
     __shared__ float2 pos[SHAREDLEN];
     __shared__ float2 vel[SHAREDLEN];
     __shared__ float2 old[SHAREDLEN];
@@ -358,12 +371,30 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
         metrics = results[creature];
     }
 
+#if RECORD
+    // The result at the end of the trial; the body keeps moving after it.
+    Result kept = metrics;
+    bool ended = metrics.fall_time > 0.0f || metrics.screened > 0.0f;
+#endif
     for (unsigned s = 0u; s < p.steps; s++) {
+#if RECORD
+        const unsigned tick = p.tick + s;
+        if (!ended && (metrics.fall_time > 0.0f || metrics.screened > 0.0f)) {
+            kept = metrics;
+            ended = true;
+        }
+        const unsigned frame = (creature * (p.total_steps + 1u) + tick) * STRIDE;
+        for (unsigned j = 0u; j < NODE_BOUND; j++) {
+            if (j >= body_nodes) { break; }
+            frames[frame + j] = pos[node_k(j, lane)];
+        }
+#else
         // A fall or the screen ends the trial.
         if (metrics.fall_time > 0.0f || metrics.screened > 0.0f) {
             break;
         }
         const unsigned tick = p.tick + s;
+#endif
         // The head's velocity before this step, for the head shaking limit.
         const float2 head_start = vel[node_k(0u, lane)];
         if (tick == SETTLE) {
@@ -1059,7 +1090,21 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
             }
         }
     }
+#if RECORD
+    if (!ended) {
+        kept = metrics;
+    }
+    results[creature] = kept;
+    if (p.tick + p.steps >= p.total_steps) {
+        const unsigned frame = (creature * (p.total_steps + 1u) + p.total_steps) * STRIDE;
+        for (unsigned j = 0u; j < NODE_BOUND; j++) {
+            if (j >= body_nodes) { break; }
+            frames[frame + j] = pos[node_k(j, lane)];
+        }
+    }
+#else
     results[creature] = metrics;
+#endif
     UNROLL
     for (unsigned j = 0u; j < NODE_BOUND; j++) {
         if (j >= body_nodes) { break; }

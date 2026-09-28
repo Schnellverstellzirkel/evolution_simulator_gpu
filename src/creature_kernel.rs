@@ -526,6 +526,28 @@ pub fn cuda_source(
     fidelity: crate::physics::Fidelity,
     launch_bounds: bool,
 ) -> String {
+    cuda_source_variant(capacity, workgroup, fidelity, launch_bounds, false)
+}
+
+/// The CUDA recording kernel, the counterpart of `record_source`: the
+/// scoring kernel of `cuda_source` plus the frame output in an eighth
+/// argument. It computes exactly what the scoring kernel computes.
+pub fn cuda_record_source(
+    capacity: usize,
+    workgroup: u32,
+    fidelity: crate::physics::Fidelity,
+    launch_bounds: bool,
+) -> String {
+    cuda_source_variant(capacity, workgroup, fidelity, launch_bounds, true)
+}
+
+fn cuda_source_variant(
+    capacity: usize,
+    workgroup: u32,
+    fidelity: crate::physics::Fidelity,
+    launch_bounds: bool,
+    record: bool,
+) -> String {
     let limits = crate::physics::limits();
     // Large bodies loop to their runtime size, as in base_source.
     let large = capacity >= 24;
@@ -584,6 +606,7 @@ pub fn cuda_source(
         ("HURDLE_TOP", float(physics::HURDLE_TOP)),
         ("HURDLE_RUN", float(physics::HURDLE_RUN)),
         ("LIFT_CLEARANCE", "0.01f".into()),
+        ("RECORD", (if record { "1" } else { "0" }).into()),
         (
             "BONE_SOLVE_ITERATIONS",
             format!("{}u", fidelity.bone_passes),
@@ -965,6 +988,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cuda_recording_kernel_differs_only_in_its_switch() {
+        let fidelity = Fidelity::standard();
+        let scoring = cuda_source(6, 128, fidelity, false);
+        let recording = cuda_record_source(6, 128, fidelity, false);
+        assert!(scoring.contains("#define RECORD 0\n"));
+        assert_eq!(
+            recording,
+            scoring.replace("#define RECORD 0\n", "#define RECORD 1\n")
+        );
     }
 
     #[test]

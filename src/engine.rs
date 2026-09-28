@@ -385,16 +385,16 @@ impl SegmentDevice for CudaEngine {
         self.allocated_bytes
     }
     fn replay_free(&self) -> bool {
-        false
+        CudaEngine::replay_free(self)
     }
     fn record(
         &mut self,
-        _batch: &creature_kernel::LaneBatch,
-        _cfg: &Config,
-        _total: u32,
-        _chunk: u32,
+        batch: &creature_kernel::LaneBatch,
+        cfg: &Config,
+        total: u32,
+        chunk: u32,
     ) -> Result<u64> {
-        anyhow::bail!("the CUDA engine does not record replays yet")
+        CudaEngine::record(self, batch, cfg, total, chunk)
     }
 }
 
@@ -522,7 +522,7 @@ impl MemoryBackoff {
 
 /// The GPU a `gpu_engine` thread runs on.
 enum Backend {
-    Cuda(CudaEngine),
+    Cuda(Box<CudaEngine>),
     Vulkan(Box<VkEngine>),
 }
 
@@ -534,7 +534,7 @@ fn open_backend(name: &str, max_nodes: usize) -> Result<(Backend, String)> {
         match CudaEngine::new(name, max_nodes) {
             Ok(engine) => {
                 let name = engine.name.clone();
-                return Ok((Backend::Cuda(engine), name));
+                return Ok((Backend::Cuda(Box::new(engine)), name));
             }
             Err(error) => eprintln!("CUDA not used ({error:#}); running on Vulkan"),
         }
@@ -571,22 +571,18 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
             let memory =
                 MemoryBackoff::new(slots, Duration::from_millis(500), Duration::from_secs(60));
             match engine {
-                // Replays are recorded by the Vulkan kernel only; with CUDA
-                // scoring, the replay request channel closes and replays run
-                // on the CPU engine at once.
-                Backend::Cuda(engine) => {
-                    drop(replay_rx);
-                    run_segments(
-                        engine,
-                        &name,
-                        job_rx,
-                        done_tx,
-                        None,
-                        &thread_allocated,
-                        step_range,
-                        memory,
-                    )
-                }
+                // Each backend records replays with the recording variant of
+                // the kernel that scores.
+                Backend::Cuda(engine) => run_segments(
+                    *engine,
+                    &name,
+                    job_rx,
+                    done_tx,
+                    Some(replay_rx),
+                    &thread_allocated,
+                    step_range,
+                    memory,
+                ),
                 Backend::Vulkan(engine) => run_segments(
                     *engine,
                     &name,
