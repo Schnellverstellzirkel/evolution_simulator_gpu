@@ -8,9 +8,9 @@
 //! tests' worlds (16 copies, 5 s trials), and the first one that loses enough
 //! distance to every effect is printed, with a margin over the tests'
 //! thresholds. It also reports how far a 10 um nudge of the pose moves a
-//! fine-fidelity trial. Evolved fast gaits are chaotic there, which is why the
-//! CPU/GPU agreement tests keep their own steady fixture
-//! (`steady_walker` in `tests/engine_agreement.rs`).
+//! fine-fidelity trial. Evolved fast gaits are chaotic there; GPU acceptance
+//! now uses repeatability on the GPU rather than this CPU-evolved fixture.
+//! See `tests/gpu_repeatability.rs`.
 //!
 //! Usage: cargo run --release --example evolve_walker -- [generations] [population] [seed]
 //! (defaults 30, 2048, 38)
@@ -23,7 +23,7 @@ use evolution_simulator::{
     storage::Experiment,
 };
 
-/// `scheduler::perturb`, as copied in `tests/engine_agreement.rs`.
+/// Applies the same pose and grip perturbation used for scheduler checks.
 fn perturb(creature: &mut Creature) {
     let mut rng = Rng::new(creature.id ^ 0x5eed_7a11, 0, 0);
     for node in &mut creature.nodes {

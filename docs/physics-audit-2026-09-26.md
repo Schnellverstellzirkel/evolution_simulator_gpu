@@ -2,6 +2,8 @@
 
 This is a historical source inspection of parent revision `bd41746` (QD version 16), not a measurement of current physics. Foundation follow-ups were captured in `250ad82`. The later merge of `abb00cb` brings QD version 19, load-aware friction, capped planted feet, head-shaking termination, CPU global-archive validation, and the combined replay/result API. The contact findings below describe the earlier implementation and must be re-audited against those changes; they are not a current defect list.
 
+Current acceptance policy (2026-09-28): GPU results own GPU-run scores. CPU/GPU agreement recommendations below are historical and do not constrain GPU physics; use same-GPU repeatability and equal-budget search outcomes.
+
 This was a source inspection, not a measurement. No physics runs or benchmarks
 were performed for this audit. References describe the code inspected before
 the platform/default-device changes in this session.
@@ -53,7 +55,7 @@ Useful fixtures: a heavy body supported by a light foot; zero grip; no ground;
 zero gravity; mirrored sliding; and friction that cannot increase kinetic
 energy in an isolated passive contact. Verify CPU/GPU parity at both fidelities
 and bump `qd::VERSION` for any physics change. Re-measure seed 38 with 100,000
-creatures for 20 generations before claiming a size or slip improvement.
+creatures for 20 generations before claiming a size or slip improvement. Use GPU-focused regression tests and same-GPU repeatability; CPU comparisons are optional diagnostics, not acceptance gates. Compare equal-budget search runs before claiming a search improvement.
 
 ## Muscle energy
 

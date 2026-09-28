@@ -2,9 +2,12 @@
 
 Target: 2,000,000 evaluated creatures/s in the graphical game with fixed 60 s
 trials, 3 million creatures per generation, and the UI at 60 FPS. The last
-measured production point is 45,373 creatures/s end to end at 3M with 60 s
-trials, so the gap is about 44x. This document is measurement and planning
-only. No optimization has landed here.
+reported 3M GUI run is 185,000 to 205,000 creatures/s at 60 Hz, around 10x
+below target; a later generation-70 run fell to 38,600/s as bodies grew. The
+45,373/s measurement below is an earlier baseline, not the latest result. This
+document records the baseline and architecture plan; the current work starts
+removing CPU archive rescoring and reducing host packing allocations. Neither
+change has a throughput measurement in this environment.
 
 Measured on the worktree at revision 2b1014c plus an in-flight profiling edit
 to `src/storage.rs` from a concurrent worker. Later edits to `src/evolution.rs`
@@ -51,8 +54,8 @@ of 27x is not reachable with one lever. A plausible stack is check policy
 two creatures per lane for the small buckets (about 2x), and CPU overlap that
 removes the 21.5 s serial block. Those together are about 10 to 16x, so the
 plan needs at least one structural change beyond tuning: fewer solver passes
-at equal agreement, a descriptor pass that does not live in the physics
-kernel, or f16 or fixed-point state for the small buckets.
+that preserve search quality in GPU A/B runs, a descriptor pass that does not
+live in the physics kernel, or f16 or fixed-point state for the small buckets.
 
 The 5 s GUI runs show the same shape at a smaller scale. Archive and breeding
 cost about 3 to 4 us per creature at 1M and do not depend on trial length. The
@@ -270,12 +273,12 @@ from the backlog list in `AGENTS.md`.
    Measure: rate and registers. Size: L.
 9. Replace per-pass shared-memory barriers with subgroup operations. Measure:
    rate at grow 16 and shader stats. Size: M.
-10. Fuse the bone passes into one sweep with fewer barriers. Measure: rate
-    plus `tests/engine_agreement.rs`. Size: M.
-11. Try one bone pass instead of the default two at equal agreement. Measure:
-    rate plus agreement tolerance. Size: M.
-12. Retune velocity passes and `dt` against the agreement bound. Measure:
-    rate plus agreement. Size: M.
+10. Fuse the bone passes into one sweep with fewer barriers. Measure: rate,
+    GPU stability and `examples/first_generation.rs`. Size: M.
+11. Try one bone pass instead of the default two. Measure: GPU rate and
+    equal-budget search A/B. Size: M.
+12. Retune velocity passes and `dt` against GPU stability and search quality.
+    Measure: rate plus paired-seed A/B. Size: M.
 13. Replace the cosine polynomial with a shared lookup table. Measure:
     `EVOLUTION_EXACT_COS` as the control and rate. Size: S.
 14. Use 32-bit indices throughout the inner loop. Measure: registers and
@@ -297,9 +300,10 @@ from the backlog list in `AGENTS.md`.
 
 21. Compact fallen lanes between dispatches (AGENTS 47). Measure: GPU busy
     seconds and rate on a 60 s evolved population. Size: L.
-22. Freeze terminal descriptor state in both engines so compaction cannot
-    change a score (AGENTS 48 prerequisite). Measure: bit-compare dumps and
-    `tests/early_exit.rs`. Size: M.
+22. Freeze terminal score and descriptor state in the GPU engine so
+    compaction preserves that GPU trial's completed result (AGENTS 48).
+    Measure: GPU repeatability and equal-budget search outcomes; CPU
+    comparisons are optional diagnostics. Size: M.
 23. Compact per capacity bucket instead of per dispatch. Measure: rate on the
     3M evolved mix. Size: M.
 24. Skip lanes whose body has fallen with a live-lane mask, without moving
@@ -361,10 +365,10 @@ from the backlog list in `AGENTS.md`.
     count and QD. Size: M.
 49. Escalate to the fine check only when the standard score is close to an
     elite. Measure: check share and QD. Size: M.
-50. Warm-start the fine check from the standard trajectory. Measure:
-    agreement and cost. Size: M.
-51. Shrink the check perturbation to the smallest that agreement tolerates.
-    Measure: `tests/engine_agreement.rs` and check count. Size: S.
+50. Warm-start the fine check from the standard trajectory. Measure: GPU rank
+    stability and cost. Size: M.
+51. Shrink the check perturbation to the smallest that preserves the search
+    benefit. Measure: paired-seed A/B and check count. Size: S.
 52. Try a 2x rate, 2x pass fine check with a measured rank correlation.
     Measure: paired best and QD. Size: M.
 53. Deduplicate identical creatures before checking. Measure: check count.

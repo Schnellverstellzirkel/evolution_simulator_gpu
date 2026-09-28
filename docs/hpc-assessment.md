@@ -173,7 +173,7 @@ Screening at 5 s is successive halving with one rung. The hyperparameter-search 
 
 ### 5.7 Determinism across devices
 
-SPIR-V lets drivers fuse a multiply and an add into one FMA unless the NoContraction decoration is set, and NVIDIA does fuse them ([SPIR-V specification](https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html); [Slang issue on `precise` and NoContraction](https://github.com/shader-slang/slang/issues/12198)). That is one reason our GPU and CPU engines differ in the last bits. Those bits diverge chaotically over a trial, and that forces the CPU replay check before global-archive admission. A single physics source compiled for both targets with contraction disabled and identical operation order would make replays bit-exact. The replay verification step, and the separate CPU reference implementation in `src/physics.rs`, could then go.
+SPIR-V lets drivers fuse a multiply and an add into one FMA unless the NoContraction decoration is set, and NVIDIA does fuse them ([SPIR-V specification](https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html); [Slang issue on `precise` and NoContraction](https://github.com/shader-slang/slang/issues/12198)). CPU and GPU results can therefore diverge during long trials. That divergence is accepted: the GPU kernel is the scoring authority, and neither archive admission nor GPU physics is constrained to reproduce CPU bits. CPU comparison remains useful for diagnosis, while GPU-only repeatability and equal-budget search tests validate changes.
 
 ### 5.8 General engines are not the answer
 
@@ -202,7 +202,7 @@ What limits it, from most to least expensive:
 2. Recomputing constants every step: muscle endpoint weights, packed node indices, joint break thresholds (the last one was fixed on 2026-09-27).
 3. Execution granularity. Each dispatch runs 64 steps and then reloads and stores the creature state. Lanes of fallen or screened creatures idle until the next segment boundary. Compaction needs a GPU-to-host readback and a host repack.
 4. No control over registers or shared-memory carveout, and no instruction-level profiler in our current toolchain (WGSL through naga to SPIR-V).
-5. Three physics implementations (GPU kernel, AVX-512 CPU engine, older CPU reference) that differ in the last bits. That costs a CPU replay for every global-archive contender, triple maintenance for every physics change, and uncertainty in every agreement test.
+5. Three physics implementations (GPU kernel, AVX-512 CPU engine, older CPU reference). Maintaining all three is costly, but CPU/GPU parity is no longer a product requirement; CPU implementations can be simplified or removed as GPU-only physics develops.
 6. A CPU-resident population. Breeding, packing and archive insertion run on the CPU, with about 10 GB peak RAM at 3M. At the target rate they would be on the critical path.
 
 ## 7. Recommendations
@@ -225,9 +225,9 @@ Risks and open questions:
 
 - It is new physics. Gaits evolved so far would not transfer, and `qd::VERSION` must change. The owner has said the old gameplay is not a reference, but this needs an explicit yes.
 - Contact is the hard part. Compliant contact needs small enough steps to stay stable against a stiff ground. Stiffness and damping must be tuned so that feet do not sink or bounce, and the "only planted feet push" rule must be re-established from first principles. The free-propulsion test (`examples/first_generation.rs`) and the momentum ledger must pass before anything lands.
-- A fallback within the current physics exists and is worth prototyping in parallel: the same formulation with every constant precomputed, node-count-specialized kernels that keep node state in registers, and fewer and fused passes. Most of that can stay bit-exact. Estimated 1.5 to 2.5x fewer instructions, with no change for the player.
+- A fallback within the current physics exists and is worth prototyping in parallel: precompute constants, specialize by node count, keep node state in registers, and fuse passes. It can change GPU results; judge it by stability, GPU repeatability, and search outcomes rather than CPU agreement. Estimated 1.5 to 2.5x fewer instructions.
 
-Gate: a CPU prototype that reproduces walking, falling and gait variety on the first-generation population, passes the free-propulsion and energy tests, and measures at most 1,700 instructions per creature-step on the GPU.
+Gate: the GPU prototype produces walking, falling and gait variety on a first-generation population, passes GPU-focused free-propulsion and energy diagnostics, and measures at most 1,700 instructions per creature-step. Check repeatability on the target GPU and compare equal-budget search outcomes; CPU agreement is optional diagnostic data.
 
 ### 7.3 Persistent lanes with regeneration
 
@@ -241,15 +241,15 @@ Expected: 1.3 to 2x on its own. It works with today's physics too, so it can lan
 
 Risks: warps then hold creatures at different ticks. Tick-dependent branches (settling, screen tick, gait sampling) diverge. That is small if those branches are cheap, and path tracers live with far worse. Long-running kernels need care with the display watchdog. The RTX does not drive the display here, so the risk is lower than usual.
 
-Gate: an eval-bench with the same population and the same results bit for bit (fall, screen and final distance), at a higher creature rate.
+Gate: a higher eval-bench rate on a fixed population, repeatable GPU results for identical settings, and acceptable equal-budget search outcomes. Compaction may change scores relative to the segment engine; CPU bit agreement is not required.
 
 ### 7.4 A toolchain that gives us control
 
 Options, in order of preference:
 
-1. [Slang](https://docs.shader-slang.org/en/latest/external/slang/docs/user-guide/09-targets.html), one source compiled to SPIR-V for Vulkan, to CUDA, and to scalar C++ for the CPU. Nsight Graphics profiles Slang shaders. The CUDA target gives access to Nsight Compute, launch bounds and carveout control. The C++ target gives a CPU reference from the same source (section 5.7). Cost: a new build dependency and porting about 1,150 lines of WGSL.
+1. [Slang](https://docs.shader-slang.org/en/latest/external/slang/docs/user-guide/09-targets.html), one source compiled to SPIR-V for Vulkan, to CUDA, and optionally to scalar C++ for CPU diagnostics. Nsight Graphics profiles Slang shaders. The CUDA target gives access to Nsight Compute, launch bounds and carveout control. Cost: a new build dependency and porting about 1,150 lines of WGSL.
 2. CUDA C++ through NVRTC from Rust (for example with the `cudarc` crate), with the CPU engine kept in Rust. Best profiling and control. It ties the fast path to NVIDIA, with the CPU engine as the fallback that exists anyway.
-3. Stay on WGSL and naga and use Nsight Graphics for profiling. The cheapest option, but occupancy stays in the driver's hands and CPU-GPU bit-exactness stays out of reach.
+3. Stay on WGSL and naga and use Nsight Graphics for profiling. The cheapest option, but occupancy stays in the driver's hands.
 
 Expected: 1.2 to 1.8x from register and occupancy control alone, plus much shorter measure-change-measure cycles.
 
@@ -261,7 +261,7 @@ The detailed design (genome records, plan records, archive tables, per-epoch ker
 
 Proposal: genomes live in GPU memory in structure-of-arrays form. Parametric mutation (the CMA, gaussian and crossover emitters) runs on the GPU. Archive insertion is a parallel per-cell reduction, which QDax does. Results never leave the GPU except for the UI's snapshot and the elites the player looks at. Structural mutations (adding or removing nodes, bones, muscles) can stay on the CPU at first. They change body sizes and are a minority of offspring.
 
-What it removes: packing (2 to 8 s per 3-generation run), per-unit PCIe traffic, the CPU replay if 7.4 makes engines bit-exact, most of the 10 GB of host memory, and breeding as the next wall after the GPU.
+What it removes: packing (2 to 8 s per 3-generation run), per-unit PCIe traffic, most of the 10 GB of host memory, and breeding as the next wall after the GPU. CPU replay validation is already removed from archive admission.
 
 Expected: it does not raise the kernel's rate. It stops the host from becoming the bottleneck once the kernel is 5 to 10x faster, and it frees CPU power for the GPU's budget.
 
@@ -296,7 +296,7 @@ The factors are estimates and they multiply only if each holds. Conservative use
 | more screening rungs (7.6) | 1x | 1.3x | yes |
 | **end to end** | **about 0.85M creatures/s** | **about 3M creatures/s** | |
 
-The fallback without new physics (bit-exact restructuring plus 7.3 and 7.4) is about 1.5 to 2.5 times 1.3 to 2 times 1.2 to 1.8. That is 2.3x to 9x in theory. Given how much has already been taken, I would expect it to land near the low end, so 300,000 to 450,000/s.
+The fallback without new physics (kernel restructuring plus 7.3 and 7.4) is about 1.5 to 2.5 times 1.3 to 2 times 1.2 to 1.8. That is 2.3x to 9x in theory. Given how much has already been taken, I would expect it to land near the low end, so 300,000 to 450,000/s.
 
 Hardware scales almost linearly for this workload, because it is compute-bound, embarrassingly parallel and fits in cache. An RTX 4090 has 128 SMs and an RTX 5090 has 170 ([RTX 5090 specs](https://videocardz.net/nvidia-geforce-rtx-5090)), against 24 here, at similar clocks and without a laptop power cap. That is roughly 5x and 7x on top of any software gain. Two million creatures/s on a desktop GPU needs only the fallback path. On this laptop it needs the new physics.
 
@@ -321,7 +321,7 @@ Method:
 - Keep the two benchmark levels separate. eval-bench on fixed checkpoints measures the kernel. The GUI benchmark measures the system.
 - Interleave A and B runs, repeat each at least twice (three times for small effects), and report medians and spread. Single GUI runs vary by about 10%.
 - Warm up to a steady clock and temperature before measuring. Pin GPU clocks (`nvidia-smi -lgc`, which needs root) if the owner allows it.
-- Every physics change keeps the existing gates: engine agreement tests, the free-propulsion check, and search A/B over 10 seeds.
+- Every physics change uses GPU-focused regression tests, the free-propulsion diagnostic, and search A/B over 10 seeds. CPU comparisons are optional diagnostics, never a pass/fail gate.
 
 ## 10. Roadmap with decision gates
 
@@ -329,9 +329,9 @@ Method:
 |---|---|---|---|
 | 0 | profiling plan above; microbenchmarks; instruction counts by phase | 1 to 2 days | measured instructions per step and stall profile |
 | 1 | CPU prototype of physics v2 (scalar Rust, then SIMD); behavior and exploit tests; cost count | 1 to 2 weeks | owner approves the feel of the new physics; under 1,500 instructions per step projected |
-| 2 | persistent-lane kernel with regeneration, first on today's physics | 1 week | bit-exact results, higher rate on eval-bench |
+| 2 | persistent-lane kernel with regeneration, starting from today's GPU physics | 1 week | higher GPU rate on eval-bench, GPU repeatability, equal-budget search check |
 | 3 | toolchain decision (Slang or CUDA) and port of the kernel | 1 week | profiler access; equal or better rate |
-| 4 | physics v2 kernel on the persistent-lane framework; engine agreement; search A/B | 2 to 3 weeks | agreement tests and search quality at equal time |
+| 4 | physics v2 kernel on the persistent-lane framework; GPU regression tests; search A/B | 2 to 3 weeks | GPU stability and search quality at equal time |
 | 5 | GPU-resident genomes, breeding and archive | 2 to 3 weeks | host no longer on the critical path |
 
 Phases 0, 2 and 3 need no owner decision and are useful whether or not physics v2 happens. Phase 1 is where the owner decides.

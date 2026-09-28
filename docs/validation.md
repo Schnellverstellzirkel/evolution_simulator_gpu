@@ -1,18 +1,14 @@
 # Validation results
 
-## Evolved-creature fine-fidelity agreement (2026-09-26)
+## GPU score authority and repeatability (2026-09-28)
 
-`tests/engine_agreement.rs` adds the evolved-creature coverage the earlier random-population comparisons left open (AGENTS.md items 110 and 111). It is a local, ignored GPU suite:
+For GPU runs, the GPU standard trial and GPU fine check define fitness and behavior. CPU fallback runs are separate CPU evaluations; after GPU failure, queued work may move to the CPU. CPU playback and optional CPU/GPU comparisons do not validate or change a GPU score.
 
-    cargo test --release --test engine_agreement -- --ignored
+`tests/gpu_repeatability.rs` contains an ignored GPU repeatability check:
 
-Both tests open the primary RTX 4060 and fail if it did not open, instead of silently comparing the CPU engine with itself. They run `Fidelity::fine()` (four times the rate and the solver passes) and compare with `cpu_engine::evaluate`.
+    cargo test --release --test gpu_repeatability -- --ignored
 
-`evolved_creatures_agree_at_fine_fidelity` (item 110) runs one 5-second fine trial each for the six-node evolved walker and the four-node sled exploit copied from `tests/simulation.rs`. The fitness tolerance is 0.5 m. The measured gaps were 0.15 m for the walker and 0.000 m for the sled. The tolerance is wider than the 0.05 m used for the 0.2 to 0.5 s random-body fine checks because contacts are chaotic: a footfall lands on a different step, the contact sequence diverges, and five seconds gives that divergence many more chances to compound than half a second. The test also asserts that the engines agree on the broken-joint sentinel, and compares the normalized ground-contact, mean-height, and foot-count behavior metrics within coarse bounds. It does not require identical fall times.
-
-`perturbed_contenders_agree_at_fine_fidelity` (item 111) reproduces the production contender check deterministically. It copies the same two fixtures, applies the exact `scheduler::perturb` logic (a per-creature `Rng` seeded from `id ^ 0x5eed_7a11`, node offsets up to 2 cm, grip scaled by plus or minus 10 percent), runs one 1-second fine trial per copy on both engines, and compares with the existing 0.05 m fine-check tolerance. The measured gaps were 0.002 m for the perturbed walker and 0.000 m for the sled.
-
-Decision and limits for the contender check: fall and joint-break decisions can flip on rounding, and no test can make the chaotic contact sequence bit-identical between the AVX-512 CPU engine and the GPU kernel. The regression therefore allows a flip only while both engines' distances stay within the tolerance of each other, which is the fitness assertion itself. A fall at the trailing edge of a trial can pass that way. A joint-break flip cannot: one engine returns the `FAILED` sentinel, which is outside any finite distance, so it fails the test instead of passing unnoticed. The regression is deliberately a short trial. Production runs the check for the full configured duration, and over that much simulated time the same contact chaos makes cross-engine score agreement meaningless. The test covers two fixtures only, and not longer trials, environment effects, other GPU drivers, or the historical rank-21 replay outlier, which predates the CPU archive-admission check. The fixtures are deterministic, so repeated runs of the two tests on this workstation compare identical trials.
+It runs the same fixed population and settings twice on the primary RTX 4060 and compares the GPU fitness, behavior metrics, and screening results bit-for-bit. A missing primary GPU fails the test instead of silently using the CPU. `gpu_cpu_diagnostic_*` tests in `tests/simulation.rs` remain optional CPU/GPU diagnostics; their tolerance checks are not physics-change acceptance gates. Run GPU repeatability and equal-budget search comparisons on the target hardware when validating GPU physics changes.
 
 ## Version-20 integration checks (2026-09-26)
 
@@ -71,7 +67,7 @@ Checkpoint format V4 persists island optimizer progress that V3 omitted; V3 rema
 
 The checks above were run by the coordinator on foundation commit `250ad82`, before merging the later physics. Two test-only comparison failures were resolved by treating empty-archive cached QD scores of `+0.0` and `-0.0` as numerically equal; exact elite, population, and CMA comparisons remain. No active stepping change was needed.
 
-The local GPU suite covers partial workgroups/body buckets, rough ground, and narrow joints. Its standard/fine comparisons do not establish full-trial agreement for every evolved elite or resolve the rank-21 replay outlier. The later `tests/engine_agreement.rs` suite covers an evolved-creature fine-fidelity fixture and records the decision for threshold-sensitive contender outcomes; see the newest section at the top.
+The older local GPU suite covers partial workgroups/body buckets, rough ground, and narrow joints. Its CPU comparisons are optional diagnostics; the historical evolved-creature comparison suite was replaced by the GPU repeatability check described at the top.
 
 ### Historical contact audit correction (version 16)
 

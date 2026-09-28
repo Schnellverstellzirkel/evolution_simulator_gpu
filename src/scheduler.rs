@@ -1,12 +1,12 @@
-//! Spreads a generation's evaluations across the primary GPU and CPU SIMD cores.
-//! Additional GPUs require an explicit `EVOLUTION_DEVICES` selection.
+//! Routes a generation to the selected GPU devices. Additional GPUs require
+//! an explicit `EVOLUTION_DEVICES` selection; CPU evaluation is reserved for
+//! CPU-only runs or GPU failover.
 //!
 //! Work is handed out in body-size order so GPU units fill few, large buckets.
 //! Each engine keeps up to two units queued; unit sizes follow each engine's
-//! measured rate so that all engines finish a generation together. Bodies
-//! larger than an engine supports go to one that supports them. Results differ
-//! slightly by engine (floating-point rounding), so `EVOLUTION_DEVICES=primary`
-//! and `EVOLUTION_CPU_THREADS=0` give a single-device, bit-reproducible setup.
+//! measured rate so that all engines finish a generation together. The
+//! selected evaluation engine defines fitness; CPU/GPU comparisons are only
+//! diagnostics, and CPU output never validates or lowers a GPU score.
 use crate::{
     config::Config,
     creature_kernel::{self, GpuResult},
@@ -28,9 +28,6 @@ enum Trial {
     Standard,
     /// Perturbed copies of contenders, at the fine physics.
     Check,
-    /// Exact copies of global-archive contenders at the standard physics, on
-    /// the CPU engine that replays archive creatures to players.
-    Replay,
 }
 
 /// Standard trials one fine check costs (four times the steps at four
@@ -61,9 +58,8 @@ pub enum CheckNeed {
     /// A check trial. Contenders for the same archive `cell` share it: only
     /// the best waiting one is checked while no check for that cell is in
     /// flight, and the rest are decided again once it lands. `None` never
-    /// shares. With `replay`, the CPU engine also replays the standard trial
-    /// (the global archive only admits scores its replay reproduces).
-    Check { cell: Option<u64>, replay: bool },
+    /// shares.
+    Check { cell: Option<u64> },
 }
 
 /// Which engine backs a device. A failed GPU can hand its work to the CPU;
@@ -111,8 +107,8 @@ pub struct Device {
     min_unit: usize,
     /// Seconds of work per unit; short on a GPU that also drives the display.
     unit_seconds: f64,
-    /// A reserve engine only runs CPU replays while another engine is
-    /// healthy, and takes over the rest of the work when none is.
+    /// A reserve engine takes over evaluation work only when no primary
+    /// engine remains healthy.
     reserve: bool,
 }
 
@@ -201,13 +197,12 @@ pub struct Scheduler {
     checks_since: Option<Instant>,
     /// Standard-trial results of contenders whose check is pending.
     held: HashMap<usize, EvaluationMetrics>,
-    /// Archive cell claimed by each contender that is ready or being
-    /// checked, and the claimed cells.
+    /// Archive cell claimed by each contender being checked, and the claimed
+    /// cells.
     checking: HashMap<usize, u64>,
     busy_cells: std::collections::HashSet<u64>,
-    /// Decided contenders waiting for a check unit, with whether they also
-    /// need a CPU replay.
-    ready: Vec<(usize, bool)>,
+    /// Decided contenders waiting for a check unit.
+    ready: Vec<usize>,
 
     /// Standard work has stopped (a pause, a save, the end of a run): every
     /// waiting contender goes out for its check at once instead of one per
@@ -215,13 +210,6 @@ pub struct Scheduler {
     draining: bool,
     /// Waiting contenders that no longer need a check, with their final result.
     released: Vec<(usize, EvaluationMetrics)>,
-    /// Trials still running for each held contender that has left the
-    /// waiting list (its check, plus its CPU replay when asked for).
-    outstanding: HashMap<usize, u8>,
-    /// Checked contenders waiting for a CPU replay slot.
-    replays: Vec<usize>,
-    /// Totals since start: CPU replays submitted with checks.
-    pub replays_submitted: u64,
     /// Totals since start: check trials submitted, and contenders released
     /// without one.
     pub checks_submitted: u64,
@@ -241,6 +229,16 @@ fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+fn reserve_cpu_when_gpu_available(devices: &mut [Device]) {
+    if devices.iter().any(|device| device.kind == DeviceKind::Gpu) {
+        for device in devices {
+            if device.kind == DeviceKind::Cpu {
+                device.reserve = true;
+            }
+        }
+    }
 }
 
 /// Parses `EVOLUTION_CHECK_TERRAIN`: `1`, `true`, or `on` (trimmed, case
@@ -341,10 +339,8 @@ impl Scheduler {
             ));
         } else {
             // Without a separate CPU pool the CPU engine shares the general
-            // pool. Beside a GPU it only replays global-archive contenders
-            // (their breeding and archive work need those threads more than
-            // evaluation does) and stands by for a GPU failure; alone, it
-            // evaluates everything.
+            // pool. When a GPU is available it stands by for GPU failure;
+            // without a GPU it evaluates the whole run.
             let mut shared = Device::new(
                 Box::new(engine::cpu_engine_shared()?),
                 DeviceKind::Cpu,
@@ -355,6 +351,10 @@ impl Scheduler {
             shared.reserve = !devices.is_empty();
             devices.push(shared);
         }
+        // A configured CPU pool also stays idle while any GPU is healthy.
+        // This keeps every score in a GPU run on the GPU path; CPU results
+        // enter only a CPU-only run or an explicit failover after GPU loss.
+        reserve_cpu_when_gpu_available(&mut devices);
         Ok(Self {
             devices,
             round: None,
@@ -368,9 +368,6 @@ impl Scheduler {
             ready: Vec::new(),
             draining: false,
             released: Vec::new(),
-            outstanding: HashMap::new(),
-            replays: Vec::new(),
-            replays_submitted: 0,
             checks_submitted: 0,
             check_busy_seconds: 0.0,
             checks_released: 0,
@@ -402,9 +399,6 @@ impl Scheduler {
             ready: Vec::new(),
             draining: false,
             released: Vec::new(),
-            outstanding: HashMap::new(),
-            replays: Vec::new(),
-            replays_submitted: 0,
             checks_submitted: 0,
             check_busy_seconds: 0.0,
             checks_released: 0,
@@ -484,7 +478,7 @@ impl Scheduler {
                     self.released.push((i, metric));
                     self.checks_released += 1;
                 }
-                CheckNeed::Check { cell, replay } => {
+                CheckNeed::Check { cell } => {
                     // While draining, every contender still held is checked.
                     let cell = cell.filter(|_| !self.draining);
                     if let Some(cell) = cell
@@ -495,22 +489,17 @@ impl Scheduler {
                             *entry = (metric.fitness, i);
                         }
                     }
-                    decided.push((i, cell, replay));
+                    decided.push((i, cell));
                 }
             }
         }
-        let has_cpu = self
-            .devices
-            .iter()
-            .any(|d| d.kind == DeviceKind::Cpu && d.failure.is_none());
-        for (i, cell, wants_replay) in decided {
-            let replay = wants_replay && has_cpu;
+        for (i, cell) in decided {
             match cell {
-                None => self.ready.push((i, replay)),
+                None => self.ready.push(i),
                 Some(cell) if champions.get(&cell).is_some_and(|&(_, c)| c == i) => {
                     self.busy_cells.insert(cell);
                     self.checking.insert(i, cell);
-                    self.ready.push((i, replay));
+                    self.ready.push(i);
                 }
                 Some(_) => {
                     let mut metric = self.held.remove(&i).expect("held contender");
@@ -522,7 +511,6 @@ impl Scheduler {
         }
         if self.ready.is_empty() {
             self.checks_since = None;
-            self.pump_replays(pop, cfg);
             return Ok(());
         }
         let waited = *self.checks_since.get_or_insert_with(Instant::now);
@@ -571,21 +559,19 @@ impl Scheduler {
                 let level = if terrain_checks {
                     self.ready
                         .first()
-                        .map(|&(i, _)| check_terrain(cfg.terrain, pop.genomes[i].id))
+                        .map(|&i| check_terrain(cfg.terrain, pop.genomes[i].id))
                 } else {
                     None
                 };
                 let mut indices = Vec::with_capacity(size.min(self.ready.len()));
-                let mut replays = Vec::new();
                 let mut rest = Vec::new();
-                for (i, replay) in self.ready.drain(..) {
+                for i in self.ready.drain(..) {
                     let same_level = !terrain_checks
                         || Some(check_terrain(cfg.terrain, pop.genomes[i].id)) == level;
                     if indices.len() < size && pop.genomes[i].node_count <= capacity && same_level {
                         indices.push(i);
-                        replays.push(replay);
                     } else {
-                        rest.push((i, replay));
+                        rest.push(i);
                     }
                 }
                 self.ready = rest;
@@ -616,15 +602,6 @@ impl Scheduler {
                         self.packing_seconds += started.elapsed().as_secs_f64();
                         self.checks_submitted += indices.len() as u64;
                         self.check_units += 1;
-                        for (&i, &replay) in indices.iter().zip(&replays) {
-                            let trials = if replay {
-                                self.replays.push(i);
-                                2
-                            } else {
-                                1
-                            };
-                            self.outstanding.insert(i, trials);
-                        }
                         self.checks_since = Some(Instant::now());
                         device.queued.push_back(QueuedUnit {
                             ticket,
@@ -637,8 +614,7 @@ impl Scheduler {
                     }
                     Err(error) => {
                         // The checks stay ready for another engine.
-                        let back: Vec<(usize, bool)> = indices.into_iter().zip(replays).collect();
-                        self.ready.splice(0..0, back);
+                        self.ready.splice(0..0, indices);
                         device.failure =
                             Some(format!("{} failed: {error:#}", device.engine.name()));
                         break;
@@ -649,7 +625,6 @@ impl Scheduler {
         if self.ready.is_empty() {
             self.checks_since = None;
         }
-        self.pump_replays(pop, cfg);
         Ok(())
     }
 
@@ -663,54 +638,6 @@ impl Scheduler {
         self.devices
             .iter()
             .any(|d| !d.reserve && d.failure.is_none())
-    }
-
-    /// Sends waiting CPU replays of checked global contenders to a CPU engine
-    /// with a free slot. They go ahead of standard work, which is why checks
-    /// are pumped before it.
-    fn pump_replays(&mut self, pop: &Population, cfg: &Config) {
-        if self.replays.is_empty() {
-            return;
-        }
-        // A replay reproduces the full trial the player will watch.
-        let standard = Config {
-            fidelity: None,
-            screen: None,
-            ..cfg.clone()
-        };
-        for device in &mut self.devices {
-            if device.kind != DeviceKind::Cpu
-                || device.failure.is_some()
-                || device.engine.free_slots() == 0
-            {
-                continue;
-            }
-            let indices = std::mem::take(&mut self.replays);
-            let started = Instant::now();
-            let population = Arc::new(pop.subset(&indices));
-            match device
-                .engine
-                .submit_shared(Arc::clone(&population), &standard)
-            {
-                Ok(ticket) => {
-                    self.packing_seconds += started.elapsed().as_secs_f64();
-                    self.replays_submitted += indices.len() as u64;
-                    device.queued.push_back(QueuedUnit {
-                        ticket,
-                        indices,
-                        trial: Trial::Replay,
-                        population,
-                        config: standard.clone(),
-                        retries: 0,
-                    });
-                }
-                Err(error) => {
-                    self.replays = indices;
-                    device.failure = Some(format!("{} failed: {error:#}", device.engine.name()));
-                }
-            }
-            return;
-        }
     }
 
     pub fn allocated_bytes(&self) -> u64 {
@@ -1000,24 +927,17 @@ impl Scheduler {
                                         }
                                     }
                                 }
-                                Trial::Check | Trial::Replay => {
+                                Trial::Check => {
                                     // The rate counts standard-trial equivalents,
-                                    // so a device busy with checks and replays
-                                    // still shows its capacity.
-                                    let cost = if trial == Trial::Check {
-                                        CHECK_COST
-                                    } else {
-                                        1.0
-                                    };
+                                    // so a device busy with checks still shows
+                                    // its capacity.
                                     device.update_rate(
                                         Instant::now(),
                                         true,
-                                        (indices.len() as f64 * cost) as usize,
+                                        (indices.len() as f64 * CHECK_COST) as usize,
                                     );
                                     for (k, &i) in indices.iter().enumerate() {
-                                        if trial == Trial::Check
-                                            && let Some(cell) = self.checking.remove(&i)
-                                        {
+                                        if let Some(cell) = self.checking.remove(&i) {
                                             // The cell is free: its waiters are
                                             // decided again on the next pump.
                                             self.busy_cells.remove(&cell);
@@ -1027,45 +947,20 @@ impl Scheduler {
                                             continue;
                                         };
                                         // Reliable motion only: keep the worse of all trials.
-                                        if trial == Trial::Check {
-                                            let (fitness, unchecked) =
-                                                check_verdict(metric, &done.results[k]);
-                                            metric.fitness = fitness;
-                                            // A check stopped by the screen:
-                                            // the creature enters no archive.
-                                            metric.unchecked |= unchecked;
-                                        } else {
-                                            metric.fitness =
-                                                metric.fitness.min(done.results[k].fitness);
-                                        }
+                                        let (fitness, unchecked) =
+                                            check_verdict(metric, &done.results[k]);
+                                        metric.fitness = fitness;
+                                        // A check stopped by the screen:
+                                        // the creature enters no archive.
+                                        metric.unchecked |= unchecked;
                                         if stale {
                                             // The check ran under the old physics:
                                             // the whole evaluation is stale.
                                             metric.unchecked = true;
                                         }
-                                        if trial == Trial::Replay {
-                                            // The cell comes from the replayed behavior.
-                                            metric.behavior = to_metrics(
-                                                &population,
-                                                k,
-                                                &done.results[k],
-                                                &config,
-                                            )
-                                            .behavior;
-                                            // A replay from the old world does not
-                                            // verify the live one; the archive
-                                            // replays the creature again instead.
-                                            metric.replayed = !stale;
-                                        }
-                                        let left = self.outstanding.entry(i).or_insert(1);
-                                        *left = left.saturating_sub(1);
-                                        if *left == 0 {
-                                            self.outstanding.remove(&i);
-                                            let metric =
-                                                self.held.remove(&i).expect("held contender");
-                                            finals.push(i);
-                                            metrics.push(metric);
-                                        }
+                                        let metric = self.held.remove(&i).expect("held contender");
+                                        finals.push(i);
+                                        metrics.push(metric);
                                     }
                                 }
                             }
@@ -1176,7 +1071,8 @@ impl Scheduler {
         true
     }
 
-    /// Evaluates `indices` on every engine and returns metrics in the same order.
+    /// Evaluates `indices` on the active engine path and returns metrics in
+    /// the same order. Healthy GPU devices own all scores in a GPU run.
     pub fn evaluate(
         &mut self,
         pop: &Population,
@@ -1205,10 +1101,7 @@ impl Scheduler {
         // Finish anything left from an interrupted round first.
         self.stop();
         while self.in_flight() > 0 {
-            self.pump_checks(pop, cfg, |_, _| CheckNeed::Check {
-                cell: None,
-                replay: false,
-            })?;
+            self.pump_checks(pop, cfg, |_, _| CheckNeed::Check { cell: None })?;
             self.collect(pop, cfg, Duration::from_secs(1), |_, _| false)?;
         }
         let mut position = std::collections::HashMap::with_capacity(indices.len());
@@ -1219,10 +1112,7 @@ impl Scheduler {
         let mut remaining = indices.len();
         self.begin(pop, indices.iter().copied());
         while remaining > 0 {
-            self.pump(pop, cfg, &[], |_, _| CheckNeed::Check {
-                cell: None,
-                replay: false,
-            })?;
+            self.pump(pop, cfg, &[], |_, _| CheckNeed::Check { cell: None })?;
             for (unit, metrics) in self.collect(pop, cfg, Duration::from_millis(50), |_, m| {
                 check && !m.screened
             })? {
@@ -1297,7 +1187,6 @@ pub fn to_metrics(
             mean_height: (r.height_sum / steps as f32).max(0.0),
             feet: r.feet() as f32,
         },
-        replayed: false,
         unchecked: false,
         screened: r.screened > 0.0,
         screen_x: r.screen_x,
@@ -1315,10 +1204,7 @@ mod tests {
     use super::*;
 
     fn unshared(_: usize, _: &EvaluationMetrics) -> CheckNeed {
-        CheckNeed::Check {
-            cell: None,
-            replay: false,
-        }
+        CheckNeed::Check { cell: None }
     }
     use crate::engine::Finished;
     use std::sync::{Arc, Mutex};
@@ -1418,9 +1304,6 @@ mod tests {
             ready: Vec::new(),
             draining: false,
             released: Vec::new(),
-            outstanding: HashMap::new(),
-            replays: Vec::new(),
-            replays_submitted: 0,
             checks_submitted: 0,
             check_busy_seconds: 0.0,
             checks_released: 0,
@@ -1451,9 +1334,6 @@ mod tests {
             ready: Vec::new(),
             draining: false,
             released: Vec::new(),
-            outstanding: HashMap::new(),
-            replays: Vec::new(),
-            replays_submitted: 0,
             checks_submitted: 0,
             check_busy_seconds: 0.0,
             checks_released: 0,
@@ -1774,7 +1654,8 @@ mod tests {
         let cfg = submission_config();
         let pop = crate::evolution::create(&cfg).unwrap();
         let (mut scheduler, gpu, cpu) = mixed_scheduler();
-        scheduler.devices[1].reserve = true;
+        reserve_cpu_when_gpu_available(&mut scheduler.devices);
+        assert!(scheduler.devices[1].reserve);
         scheduler.begin(&pop, 0..cfg.population);
         scheduler.pump(&pop, &cfg, &[], unshared).unwrap();
         let gpu_units = gpu.lock().unwrap().submissions.len();
@@ -2071,10 +1952,7 @@ mod tests {
         while got.iter().any(Option::is_none) {
             assert!(Instant::now() < deadline, "evaluation stalled");
             sched
-                .pump(&pop, &cfg, &[], |_, _| CheckNeed::Check {
-                    cell: Some(7),
-                    replay: false,
-                })
+                .pump(&pop, &cfg, &[], |_, _| CheckNeed::Check { cell: Some(7) })
                 .unwrap();
             for (indices, metrics) in sched
                 .collect(&pop, &cfg, Duration::from_millis(20), |_, _| true)
@@ -2115,7 +1993,7 @@ mod tests {
     }
 
     #[test]
-    fn global_contenders_fold_in_a_cpu_replay_next_to_their_check() {
+    fn contender_fitness_comes_from_the_selected_engine_and_its_check() {
         let cfg = Config {
             population: 4,
             duration: 1.0,
@@ -2130,10 +2008,7 @@ mod tests {
         while got.iter().any(Option::is_none) {
             assert!(Instant::now() < deadline, "evaluation stalled");
             sched
-                .pump(&pop, &cfg, &[], |i, _| CheckNeed::Check {
-                    cell: None,
-                    replay: i % 2 == 0,
-                })
+                .pump(&pop, &cfg, &[], |_, _| CheckNeed::Check { cell: None })
                 .unwrap();
             for (indices, metrics) in sched
                 .collect(&pop, &cfg, Duration::from_millis(20), |_, _| true)
@@ -2146,11 +2021,9 @@ mod tests {
             }
         }
         assert_eq!(sched.in_flight(), 0);
-        assert_eq!(sched.replays_submitted, 2);
         let (standard, check) = standard_and_check(&pop, &cfg);
         for (i, metric) in got.into_iter().enumerate() {
             let metric = metric.unwrap();
-            assert_eq!(metric.replayed, i % 2 == 0, "creature {i}");
             let expected = standard[i].min(check[i]);
             assert!(
                 (metric.fitness - expected).abs() <= 1e-4 * expected.abs().max(1.0),
@@ -2175,25 +2048,21 @@ mod tests {
         let pop = crate::evolution::create(&calm).unwrap();
         let mut sched = Scheduler::cpu_only(2).unwrap();
         sched.begin(&pop, 0..calm.population);
-        let global = |_: usize, _: &EvaluationMetrics| CheckNeed::Check {
-            cell: None,
-            replay: true,
-        };
+        let global = |_: usize, _: &EvaluationMetrics| CheckNeed::Check { cell: None };
         let deadline = Instant::now() + Duration::from_secs(120);
-        // Calm-world standards finish, then their checks and replays are
-        // queued; the replay is not collected yet.
-        while sched.replays_submitted == 0 {
+        // Calm-world standards finish, then at least one check is queued.
+        while sched.check_units == 0 {
             assert!(Instant::now() < deadline, "evaluation stalled");
             sched.pump(&pop, &calm, &[], global).unwrap();
-            if sched.replays_submitted > 0 {
+            if sched.check_units > 0 {
                 break;
             }
             sched
                 .collect(&pop, &calm, Duration::from_millis(20), |_, _| true)
                 .unwrap();
         }
-        // The world changes while that check and replay are in flight. Their
-        // results must not claim the new world.
+        // The world changes while that check is in flight. Its results must
+        // not claim the new world.
         let mut finals = 0;
         while sched.in_flight() > 0 {
             assert!(Instant::now() < deadline, "evaluation stalled");
@@ -2205,10 +2074,6 @@ mod tests {
                     assert!(
                         metric.unchecked,
                         "old-world result {i} would enter an archive"
-                    );
-                    assert!(
-                        !metric.replayed,
-                        "old-world result {i} claimed a live replay"
                     );
                     finals += 1;
                 }
@@ -2284,10 +2149,7 @@ mod tests {
         };
         let pop = crate::evolution::create(&cfg).unwrap();
         let mut sched = Scheduler::cpu_only(2).unwrap();
-        let shared = |_: usize, _: &EvaluationMetrics| CheckNeed::Check {
-            cell: Some(7),
-            replay: false,
-        };
+        let shared = |_: usize, _: &EvaluationMetrics| CheckNeed::Check { cell: Some(7) };
         sched.begin(&pop, 0..cfg.population);
         let deadline = Instant::now() + Duration::from_secs(120);
         // Run until every standard result is held.

@@ -2,7 +2,7 @@
 
 A Rust game in which 2D creatures made of bones, joints, and muscles evolve to travel as far as possible. The graphical game starts with **3 million creatures per generation** and **60-second trials**. Fitness is horizontal center-of-mass distance in meters. Gait, height, and ground contact describe archive niches; they do not multiply or penalize the score.
 
-The search combines MAP-Elites, CMA optimizers, structural mutations, novelty search, and immigrants across four island archives. Vulkan compute evaluates creatures alongside a CPU engine. An egui dashboard shows the archive, history, lineage, and CPU-recorded replays.
+The search combines MAP-Elites, CMA optimizers, structural mutations, novelty search, and immigrants across four island archives. Vulkan compute is the scoring authority in the full-performance run; the CPU engine remains available for fallback, diagnostics, and recorded playback. An egui dashboard shows the archive, history, lineage, and replays.
 
 ## Original work and license
 
@@ -33,7 +33,7 @@ export EVOLUTION_DEVICES=primary
 nice -n 10 cargo run --release
 ```
 
-The default compute adapter name is `RTX 4060`; `--gpu NAME` selects another primary adapter. Secondary GPUs are off by default; `EVOLUTION_DEVICES=radeon` opts the integrated Radeon into evaluation. `EVOLUTION_DEVICES=primary` prevents adding secondary evaluation devices. Keep that setting on this workstation: the Radeon drives the desktop and must not evaluate creatures. Evaluation and general Rayon workers share a budget of half the available logical CPUs, capped at eight. By default the GPU evaluates and all eight go to general workers (archive insertion, breeding, packing): at 3M creatures a separate six-thread CPU evaluation pool made the game slower. The CPU engine then runs on the general pool, replays global-archive contenders, and stands by for a GPU failure. `EVOLUTION_CPU_THREADS=N` still reserves a separate CPU evaluation pool of N workers, and `RAYON_NUM_THREADS` is limited to the remaining budget.
+The default compute adapter name is `RTX 4060`; `--gpu NAME` selects another primary adapter. Secondary GPUs are off by default; `EVOLUTION_DEVICES=radeon` opts the integrated Radeon into evaluation. `EVOLUTION_DEVICES=primary` prevents adding secondary evaluation devices. Keep that setting on this workstation: the Radeon drives the desktop and must not evaluate creatures. Evaluation and general Rayon workers share a budget of half the available logical CPUs, capped at eight. By default the GPU evaluates and all eight go to general workers (archive insertion, breeding, packing). In a GPU run, CPU engines stand by for GPU failure and never contribute scores while a GPU is healthy. `EVOLUTION_CPU_THREADS=N` sizes that failover pool; `RAYON_NUM_THREADS` is limited to the remaining budget.
 
 If the primary GPU cannot open, evaluation falls back to the CPU and reports why once; without a separate CPU pool that fallback shares the general Rayon pool. A GPU that fails during a run is retired and its unfinished units, including pending fine checks, are retried on the CPU with the same creatures and settings. A failed CPU stops the session with a persistent error after completed results are stored.
 
@@ -82,9 +82,9 @@ Grounded nodes resist movement during bone and velocity constraints, so the body
 
 Each behavior archive has 1,440 possible niches for ground contact, gait cadence, mean body height, and feet that touch down and lift off. Vertical oscillation is recorded but has one archive bin. A separate 64-entry morphology reserve gives new topologies offspring opportunities without adding to behavior coverage or QD score. Four islands retain separate parent pools and exchange their fastest tenth of elites every 25 generations. CMA, structural, and novelty emitter shares adapt to archive discoveries and improvements; immigrants seed empty archives.
 
-Potential archive entrants receive a perturbed trial at four times the standard physics rate and solver passes. Before admission to the global archive shown in the dashboard, the best candidates for behavior cells and new body plans also repeat the standard trial on the CPU engine. Their score keeps the lowest distance, and their global archive cell uses the CPU behavior.
+Potential archive entrants receive a perturbed trial at four times the standard physics rate and solver passes. The selected evaluation engine's standard result and this check determine archive fitness and behavior. In the full-performance run, both are GPU evaluations; CPU playback or comparison never edits the score or descriptor.
 
-Replays return the recorded frames and engine result together through `cpu_engine::replay`. The viewport displays that recording's distance and terminal event; the conservative archive score can be lower. See [architecture](docs/architecture.md) for the execution paths and remaining legacy-physics limitations.
+Replays still use `cpu_engine::replay` to produce frames and a CPU playback result. That result is for the viewer; it can differ from the GPU-scored archive and never changes it. Cross-engine comparisons are optional diagnostics, not a physics-change acceptance gate. See [architecture](docs/architecture.md) for the execution paths.
 
 ## Headless experiments and diagnostics
 
@@ -132,6 +132,6 @@ RUST_TEST_THREADS=1 nice -n 10 cargo test --locked --release
 RUST_TEST_THREADS=1 nice -n 10 cargo test --locked --release --test simulation -- --ignored
 ```
 
-GitHub Actions runs formatting, clippy, and release CPU tests on Ubuntu, with the portable CPU vector implementation. GPU tests remain ignored during CI and must be run explicitly on the workstation. No GPU agreement result follows from a passing CPU workflow. Physics changes also require the random-population propulsion diagnostic, `nice -n 10 cargo run --release --example first_generation`, with the same workstation environment. This is a diagnostic against solver-created propulsion, not a proof of energy conservation.
+GitHub Actions runs formatting, clippy, and release CPU tests on Ubuntu, with the portable CPU vector implementation. GPU tests remain ignored during CI and must be run explicitly on the workstation. CPU/GPU comparisons are optional diagnostics, not a GPU physics gate. Physics changes also require the random-population propulsion diagnostic, `nice -n 10 cargo run --release --example first_generation`, with the same workstation environment. This is a diagnostic against solver-created propulsion, not a proof of energy conservation.
 
 See [architecture](docs/architecture.md), [validation](docs/validation.md), [performance log](docs/performance-log.md), and the owner's current [agent notes](AGENTS.md) for implementation details, measured results, and open work.

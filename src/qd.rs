@@ -17,7 +17,9 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // over the steps walked.
 // 27: every node the ground pushes feels friction, and the lift's friction
 // may only slow the body (sliders).
-pub const VERSION: u32 = 27;
+// 28: selected-engine scores and descriptors own archive admission; GPU
+//     results are no longer rescored through CPU playback.
+pub const VERSION: u32 = 28;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
@@ -51,9 +53,6 @@ pub struct TrialMetrics {
 pub struct EvaluationMetrics {
     pub fitness: f32,
     pub behavior: TrialMetrics,
-    /// The fitness already folds in a CPU-engine replay of the standard trial
-    /// and `behavior` comes from it, so archive insertion need not replay it.
-    pub replayed: bool,
     /// The early screen stopped the trial (`physics::Screen`): the creature
     /// never enters an archive.
     pub screened: bool,

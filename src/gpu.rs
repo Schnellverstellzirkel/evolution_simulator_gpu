@@ -1,5 +1,6 @@
 //! Evaluation front end. All creature evaluation runs through the scheduler,
-//! which spreads work across the Vulkan GPUs and the CPU SIMD engine.
+//! which routes work to Vulkan GPUs and keeps CPU evaluation for CPU-only runs
+//! or failover after GPU loss.
 use crate::{config::Config, evolution::Population, qd::EvaluationMetrics, scheduler::Scheduler};
 use anyhow::{Result, ensure};
 

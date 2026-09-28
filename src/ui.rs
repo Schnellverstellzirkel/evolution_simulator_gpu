@@ -1880,7 +1880,7 @@ impl App {
                     p.speed(),
                 ))
                 .on_hover_text(format!(
-                    "Creature {}. {:.2} m is the distance this replay reaches, and m/s its speed over the last fifth of a second. The archive keeps the worse of this trial and a check from a slightly shifted pose at four times the physics rate, so its score is never higher.",
+                    "Creature {}. {:.2} m is the distance this CPU playback reaches, and m/s its speed over the last fifth of a second. The GPU archive score comes from the GPU trial and its fine check; CPU playback can differ and does not change that score.",
                     p.creature.id, p.distance
                 ));
             }

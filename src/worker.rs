@@ -762,14 +762,13 @@ fn run(
                                         );
                                     }
                                     eprintln!(
-                                        "Native benchmark packing {:.3} s, checks {} submitted in {} units (busy {:.3} s), {} released, {} dropped for a shared cell, {} CPU replays with checks (totals since start)",
+                                        "Native benchmark packing {:.3} s, checks {} submitted in {} units (busy {:.3} s), {} released, {} dropped for a shared cell (totals since start)",
                                         sched.packing_seconds,
                                         sched.checks_submitted,
                                         sched.check_units,
                                         sched.check_busy_seconds,
                                         sched.checks_released,
-                                        sched.checks_dropped,
-                                        sched.replays_submitted
+                                        sched.checks_dropped
                                     );
                                 }
                                 running = false;

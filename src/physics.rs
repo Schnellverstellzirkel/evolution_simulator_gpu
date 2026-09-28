@@ -212,6 +212,22 @@ pub fn node(gene: &NodeGene) -> Node {
 /// center of mass is exact, and the organ never touches the ground.
 pub fn body(genes: &[NodeGene], bones: &[Bone]) -> Vec<Node> {
     let mut nodes: Vec<Node> = genes.iter().map(node).collect();
+    add_bone_masses(bones, &mut nodes);
+    nodes
+}
+
+/// Writes a body's initial node state into caller-owned storage. GPU packing
+/// processes millions of small bodies, so this avoids one heap allocation per
+/// creature while preserving the same mass calculation as `body`.
+pub fn body_into(genes: &[NodeGene], bones: &[Bone], nodes: &mut [Node]) {
+    assert_eq!(nodes.len(), genes.len(), "body output length must match genes");
+    for (dst, gene) in nodes.iter_mut().zip(genes) {
+        *dst = node(gene);
+    }
+    add_bone_masses(bones, nodes);
+}
+
+fn add_bone_masses(bones: &[Bone], nodes: &mut [Node]) {
     let density = limits().bone_density;
     for bone in bones {
         let (a, b) = (bone.a as usize, bone.b as usize);
@@ -226,7 +242,6 @@ pub fn body(genes: &[NodeGene], bones: &[Bone]) -> Vec<Node> {
             nodes[b].mass += bone.organ_mass * bone.organ_at;
         }
     }
-    nodes
 }
 pub fn nodes(c: &Creature) -> Vec<Node> {
     body(&c.nodes, &c.bones)
@@ -783,34 +798,47 @@ pub fn joint_reference(bones: &[Bone], index: usize) -> Option<usize> {
 }
 pub fn joints(genes: &[NodeGene], bones: &[Bone]) -> Vec<Joint> {
     let state = body(genes, bones);
-    bones
-        .iter()
-        .enumerate()
-        .map(|(index, bone)| {
-            let pivot = bone.a as usize;
-            let child = bone.b as usize;
-            let Some(reference) = joint_reference(bones, index) else {
-                return Joint::FREE;
-            };
-            let at = |i: usize| [genes[i].x - genes[pivot].x, genes[i].y - genes[pivot].y];
-            let (u, v) = (at(reference), at(child));
-            let rest = (u[0] * v[1] - u[1] * v[0]).atan2(u[0] * v[0] + u[1] * v[1]);
-            let middle = rest + 0.5 * (bone.min_angle + bone.max_angle);
-            let half = 0.5 * (bone.max_angle - bone.min_angle);
-            let length = |d: [f32; 2]| d[0].hypot(d[1]).max(0.01);
-            let inertia_child = state[child].mass * length(v).powi(2);
-            let inertia_reference = state[reference].mass * length(u).powi(2);
-            let total = state[pivot].mass + state[child].mass + state[reference].mass;
-            Joint {
-                reference: Some(reference),
-                center: [snorm16(middle.cos()), snorm16(middle.sin())],
-                half: [half.cos(), half.sin()],
-                child_share: inertia_reference / (inertia_child + inertia_reference),
-                child_mass: state[child].mass / total,
-                reference_mass: state[reference].mass / total,
-            }
-        })
-        .collect()
+    let mut out = vec![Joint::FREE; bones.len()];
+    joints_from_body(genes, bones, &state, &mut out);
+    out
+}
+
+/// Writes joint constants using an already computed body state. Callers that
+/// pack many bodies can reuse the output slice and avoid allocating both the
+/// body nodes and the joint vector for every creature.
+pub fn joints_from_body(
+    genes: &[NodeGene],
+    bones: &[Bone],
+    state: &[Node],
+    out: &mut [Joint],
+) {
+    assert_eq!(state.len(), genes.len(), "joint state length must match genes");
+    assert_eq!(out.len(), bones.len(), "joint output length must match bones");
+    for (index, bone) in bones.iter().enumerate() {
+        let pivot = bone.a as usize;
+        let child = bone.b as usize;
+        let Some(reference) = joint_reference(bones, index) else {
+            out[index] = Joint::FREE;
+            continue;
+        };
+        let at = |i: usize| [genes[i].x - genes[pivot].x, genes[i].y - genes[pivot].y];
+        let (u, v) = (at(reference), at(child));
+        let rest = (u[0] * v[1] - u[1] * v[0]).atan2(u[0] * v[0] + u[1] * v[1]);
+        let middle = rest + 0.5 * (bone.min_angle + bone.max_angle);
+        let half = 0.5 * (bone.max_angle - bone.min_angle);
+        let length = |d: [f32; 2]| d[0].hypot(d[1]).max(0.01);
+        let inertia_child = state[child].mass * length(v).powi(2);
+        let inertia_reference = state[reference].mass * length(u).powi(2);
+        let total = state[pivot].mass + state[child].mass + state[reference].mass;
+        out[index] = Joint {
+            reference: Some(reference),
+            center: [snorm16(middle.cos()), snorm16(middle.sin())],
+            half: [half.cos(), half.sin()],
+            child_share: inertia_reference / (inertia_child + inertia_reference),
+            child_mass: state[child].mass / total,
+            reference_mass: state[reference].mass / total,
+        };
+    }
 }
 /// Ground heights (m) of the bumps added by each roughness level.
 pub const TERRAIN_AMPLITUDES: [f32; 5] = [0.0, 0.03, 0.08, 0.15, 0.25];
@@ -939,7 +967,8 @@ pub fn quake_hash(id: u64) -> u32 {
     x
 }
 /// Phase (wave turns, 0 to 1) of a creature's earthquake bumps, from its
-/// hash. The exact 16-bit fraction keeps CPU and GPU bit for bit equal.
+/// hash. A 16-bit fraction is exactly representable in f32, so every engine
+/// gets a stable phase value without requiring matching trajectories.
 pub fn quake_phase(hash: u32) -> f32 {
     (hash & 0xffff) as f32 * (1.0 / 65536.0)
 }
@@ -1005,6 +1034,66 @@ mod tests {
             radius: 0.03,
             mass: 1.0,
             ..Node::default()
+        }
+    }
+
+    #[test]
+    fn reusable_body_and_joint_outputs_match_allocating_wrappers() {
+        let genes = [
+            NodeGene {
+                x: 0.0,
+                y: 1.0,
+                diameter: 0.08,
+                friction: 0.7,
+            },
+            NodeGene {
+                x: 0.7,
+                y: 1.2,
+                diameter: 0.10,
+                friction: 0.9,
+            },
+            NodeGene {
+                x: 1.1,
+                y: 1.0,
+                diameter: 0.06,
+                friction: 0.5,
+            },
+        ];
+        let mut first = Bone::new(0, 1, 0.73);
+        first.organ_mass = 0.2;
+        first.organ_at = 0.3;
+        let mut second = Bone::new(1, 2, 0.45);
+        second.min_angle = -0.4;
+        second.max_angle = 0.6;
+        let bones = [first, second];
+
+        let expected_body = body(&genes, &bones);
+        let mut reused_body = vec![Node::default(); genes.len()];
+        body_into(&genes, &bones, &mut reused_body);
+        assert_eq!(
+            bytemuck::cast_slice::<Node, u8>(&reused_body),
+            bytemuck::cast_slice::<Node, u8>(&expected_body)
+        );
+
+        let expected_joints = joints(&genes, &bones);
+        let mut reused_joints = vec![Joint::FREE; bones.len()];
+        joints_from_body(&genes, &bones, &reused_body, &mut reused_joints);
+        for (expected, actual) in expected_joints.iter().zip(&reused_joints) {
+            assert_eq!(actual.reference, expected.reference);
+            assert_eq!(
+                actual.center.map(f32::to_bits),
+                expected.center.map(f32::to_bits)
+            );
+            assert_eq!(
+                actual.half.map(f32::to_bits),
+                expected.half.map(f32::to_bits)
+            );
+            assert_eq!(actual.child_share.to_bits(), expected.child_share.to_bits());
+            assert_eq!(actual.child_mass.to_bits(), expected.child_mass.to_bits());
+            assert_eq!(
+                actual.reference_mass.to_bits(),
+                expected.reference_mass.to_bits()
+            );
         }
     }
 

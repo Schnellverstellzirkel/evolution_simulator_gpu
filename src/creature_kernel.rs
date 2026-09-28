@@ -356,17 +356,17 @@ fn build_batch(
             let mut info = Vec::with_capacity(count);
             let mut muscles = vec![0f32; muscle_len.max(1)];
             let mut bones = vec![0f32; bone_len.max(1)];
-
+            // Reuse one scratch vector for every creature in this batch. The
+            // old path allocated body nodes and joint constants per creature,
+            // producing millions of tiny allocations during a generation.
+            let mut joints = vec![physics::Joint::FREE; capacity.saturating_sub(1)];
             for (j, &(_, i)) in members.iter().enumerate() {
                 let g = &pop.genomes[i];
                 let genes = &pop.nodes[g.node_start..g.node_start + g.node_count];
                 let body_bones = &pop.bones[g.bone_start..g.bone_start + g.bone_count];
-                for (dst, state) in nodes[j * capacity..]
-                    .iter_mut()
-                    .zip(physics::body(genes, body_bones))
-                {
-                    *dst = state;
-                }
+                let node_start = j * capacity;
+                let body_state = &mut nodes[node_start..node_start + genes.len()];
+                physics::body_into(genes, body_bones, body_state);
                 info.push([
                     g.node_count as u32,
                     g.bone_count as u32,
@@ -379,8 +379,10 @@ fn build_batch(
                 let tile = tiles[j / TILE];
                 let lane = j % TILE;
                 let source_bones = &pop.bones[g.bone_start..g.bone_start + g.bone_count];
-                let joints = physics::joints(genes, source_bones);
-                for (b, (bone, joint)) in source_bones.iter().zip(&joints).enumerate() {
+                let body_state = &nodes[node_start..node_start + genes.len()];
+                let joints = &mut joints[..source_bones.len()];
+                physics::joints_from_body(genes, source_bones, body_state, joints);
+                for (b, (bone, joint)) in source_bones.iter().zip(joints.iter()).enumerate() {
                     let field = tile[1] as usize + b * BONE_FIELDS * TILE + lane;
                     // A free joint points its reference at its own pivot; the
                     // kernel skips it because its half range cosine is -1.

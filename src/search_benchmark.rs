@@ -388,7 +388,7 @@ pub fn run(options: RunOptions<'_>) -> Result<()> {
         generations,
         candidate_evaluation_budget_per_seed: config.population as u64 * generations as u64,
         config: config.clone(),
-        notes: "The candidate evaluation budget is population * generations: one standard trial for every candidate slot. GPU evaluation retains the scheduler contender-check behavior, which can add check trials (controlled by EVOLUTION_ROBUST_TRIALS). CPU evaluation uses one standard trial per candidate. Archive admission can also replay candidates through production CPU validation; those replays are outside the candidate budget and vary with contenders. Compare variants using the same backend and environment. CPU mode honors EVOLUTION_CPU_THREADS. CPU/GPU floating-point behavior can differ slightly.",
+        notes: "The candidate evaluation budget is population * generations: one standard trial for every candidate slot. GPU evaluation retains the scheduler contender-check behavior, which can add check trials (controlled by EVOLUTION_ROBUST_TRIALS). CPU evaluation uses one standard trial per candidate. GPU archive admission uses the GPU standard and fine-check results; it does not replay candidates through CPU validation. Compare variants using the same backend and environment. CPU mode honors EVOLUTION_CPU_THREADS. GPU results are authoritative in GPU runs; CPU/GPU comparisons are optional diagnostics.",
     };
     write_json(&output_dir.join("metadata.json"), &metadata)?;
 

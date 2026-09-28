@@ -140,10 +140,6 @@ pub struct Experiment {
     pub protected_until: Vec<u32>,
     #[serde(default)]
     pub trial_metrics: Vec<TrialMetrics>,
-    /// Per slot: the stored result already folds in the CPU replay that the
-    /// global archive requires (set by `record_result`, cleared on insertion).
-    #[serde(skip)]
-    pub replayed: Vec<bool>,
     /// Per slot: the result is never offered to an archive (the early screen
     /// stopped it, or another contender took its cell's check), and its
     /// distance at the screen or an earlier fall.
@@ -350,7 +346,6 @@ impl Experiment {
             morphology_reserve_override: None,
             protected_until: vec![0; population_count],
             trial_metrics: vec![TrialMetrics::default(); population_count],
-            replayed: Vec::new(),
             screened: Vec::new(),
             screen_distance: Vec::new(),
             screen2_distance: Vec::new(),
@@ -460,41 +455,13 @@ impl Experiment {
     pub fn check_need(&self, i: usize, metric: &qd::EvaluationMetrics) -> CheckNeed {
         match self.contender_reason(i, metric) {
             (ContenderReason::Rejected, _) => CheckNeed::Release,
-            (reason, cell) => CheckNeed::Check {
-                cell,
-                // Global contenders also get their CPU replay now, in parallel
-                // with the check, instead of on the worker during insertion.
-                replay: match reason {
-                    ContenderReason::Global | ContenderReason::Reserve => true,
-                    ContenderReason::Optimizer => self.beats_global(i, metric),
-                    _ => false,
-                },
-            },
-        }
-    }
-    /// Whether `metric` would take or open a cell of the global archive.
-    fn beats_global(&self, i: usize, metric: &qd::EvaluationMetrics) -> bool {
-        let Some(genome) = self.population.genomes.get(i) else {
-            return false;
-        };
-        let nodes =
-            &self.population.nodes[genome.node_start..genome.node_start + genome.node_count];
-        let muscles = &self.population.muscles
-            [genome.muscle_start..genome.muscle_start + genome.muscle_count];
-        let niche = qd::descriptor(nodes, muscles, metric.behavior).niche();
-        match self.archive.slot_for(&niche) {
-            Some(slot) => metric.fitness > self.archive.entries[slot].fitness,
-            None => self.archive.behavior_count() < qd::ARCHIVE_LIMIT,
+            (_, cell) => CheckNeed::Check { cell },
         }
     }
     /// Stores creature `i`'s final evaluation result.
     pub fn record_result(&mut self, i: usize, metric: &qd::EvaluationMetrics) {
         self.scores[i] = metric.fitness;
         self.trial_metrics[i] = metric.behavior;
-        if self.replayed.len() < self.scores.len() {
-            self.replayed.resize(self.scores.len(), false);
-        }
-        self.replayed[i] = metric.replayed;
         if self.screened.len() < self.scores.len() {
             self.screened.resize(self.scores.len(), false);
             self.screen_distance.resize(self.scores.len(), f32::NAN);
@@ -629,7 +596,7 @@ impl Experiment {
     /// many trials failed.
     pub fn archive_slots(&mut self, slots: &[usize]) -> usize {
         let profile = std::env::var_os("EVOLUTION_PROFILE_BREED").is_some();
-        let mut timings = [0.0f64; 8];
+        let mut timings = [0.0f64; 7];
         let mut section = std::time::Instant::now();
         self.ensure_islands();
         let mut entered: Vec<usize> = Vec::new();
@@ -676,12 +643,7 @@ impl Experiment {
         let reserve_enabled = self.morphology_reserve_override != Some(false);
         // Reserve admission needs a score above the best behavior elite and
         // the reserve entry of the same body plan, or above the reserve's
-        // floor once it is full (`QdArchive::offer_morphology`). The CPU
-        // replay only lowers a score, so a candidate below these bars in the
-        // batch-start archive is not offered and skips its replay. (Rarely,
-        // offers earlier in the same batch lower a bar, when a body plan loses
-        // its behavior cell or reserve entry; such a candidate now waits for a
-        // later batch instead.)
+        // floor once it is full (`QdArchive::offer_morphology`).
         let mut reserve_bars: HashMap<&qd::Topology, (f32, f32)> = HashMap::new();
         if reserve_enabled {
             for elite in &self.archive.entries {
@@ -826,13 +788,9 @@ impl Experiment {
         }
         timings[1] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
-        // Players browse this archive and replay its creatures with the CPU
-        // engine, so it only admits scores the replay reproduces. The best
-        // candidate for each behavior cell and each new body plan in this batch
-        // (only it can end up as the elite) runs its standard trial again on
-        // the CPU engine; its score becomes the worse of all its trials, and
-        // its cell comes from the replayed behavior. A gait that only works
-        // through one engine's rounding loses its advantage here.
+        // The selected evaluation engine owns the score and behavior. CPU
+        // playback and cross-engine comparisons are diagnostics only; they do
+        // not edit archive fitness or descriptors.
         let mut prep = prep;
         let mut best_by_niche: HashMap<qd::Niche, usize> = HashMap::new();
         let mut best_by_topology: HashMap<qd::Topology, usize> = HashMap::new();
@@ -854,60 +812,12 @@ impl Experiment {
             best_by_niche.values().copied().collect();
         let topology_best: std::collections::HashSet<usize> =
             best_by_topology.values().copied().collect();
-        let mut verify: Vec<usize> = behavior_best.union(&topology_best).copied().collect();
-        verify.sort_unstable();
         for (k, p) in prep.iter_mut().enumerate() {
             p.behavior_candidate &= behavior_best.contains(&k);
             if !topology_best.contains(&k) {
                 p.morphology_topology = None;
             }
         }
-        // Results that already fold in their CPU replay (it ran next to the
-        // check) are final; only the rest replay here.
-        let verify_before = verify.len();
-        verify.retain(|&k| !self.replayed.get(slots[k]).copied().unwrap_or(false));
-        let verify_inline = verify.len();
-        for &i in slots {
-            if let Some(flag) = self.replayed.get_mut(i) {
-                *flag = false;
-            }
-        }
-        if !verify.is_empty() {
-            let indices: Vec<usize> = verify.iter().map(|&k| slots[k]).collect();
-            let subset = self.population.subset(&indices);
-            // The full trial the player will replay; no screen.
-            let replay_cfg = Config {
-                fidelity: None,
-                screen: None,
-                ..self.config.clone()
-            };
-            let results = crate::cpu_engine::evaluate(&subset, &replay_cfg);
-            for (n, &k) in verify.iter().enumerate() {
-                let i = slots[k];
-                let replayed = crate::scheduler::to_metrics(&subset, n, &results[n], &replay_cfg);
-                let score = prep[k].score.min(replayed.fitness);
-                let genome = &self.population.genomes[i];
-                let nodes = &self.population.nodes
-                    [genome.node_start..genome.node_start + genome.node_count];
-                let muscles = &self.population.muscles
-                    [genome.muscle_start..genome.muscle_start + genome.muscle_count];
-                let descriptor = qd::descriptor(nodes, muscles, replayed.behavior);
-                self.scores[i] = score;
-                self.trial_metrics[i] = replayed.behavior;
-                let p = &mut prep[k];
-                p.score = score;
-                p.descriptor = descriptor;
-                if p.behavior_candidate {
-                    p.behavior_candidate = score.is_finite()
-                        && score > FAILED
-                        && match self.archive.slot_for(&descriptor.niche()) {
-                            Some(slot) => score > self.archive.entries[slot].fitness,
-                            None => self.archive.behavior_count() < qd::ARCHIVE_LIMIT,
-                        };
-                }
-            }
-        }
-        timings[3] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
         let mut attempts = [0u64; qd::EMITTER_COUNT];
         let mut failed = 0usize;
@@ -986,7 +896,7 @@ impl Experiment {
                 }
             }
         }
-        timings[4] = section.elapsed().as_secs_f64();
+        timings[3] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
         for (emitter, samples) in self.cma_emitters.iter_mut().zip(&mut cma_samples) {
             emitter.tell(&self.population, samples);
@@ -1008,10 +918,10 @@ impl Experiment {
         for (stats, parent_id) in self.emitter_stats.iter_mut().zip(previous_parent_ids) {
             stats.last_parent = parent_id.and_then(|id| parent_index_by_id.get(&id).copied());
         }
-        timings[5] = section.elapsed().as_secs_f64();
+        timings[4] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
         self.archive.refresh_behavior_scores();
-        timings[6] = section.elapsed().as_secs_f64();
+        timings[5] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
         entered.sort_unstable();
         entered.dedup();
@@ -1019,10 +929,10 @@ impl Experiment {
         for i in entered {
             self.record_ancestor(i);
         }
-        timings[7] = section.elapsed().as_secs_f64();
+        timings[6] = section.elapsed().as_secs_f64();
         if profile {
             eprintln!(
-                "Archive profile: generation {}, slots {}, verify candidates {verify_before} inline {verify_inline}, island offers {:.6} s, island refresh {:.6} s, prefilter {:.6} s, verify {:.6} s, global offers {:.6} s, cma tell {:.6} s, archive refresh {:.6} s, lineage {:.6} s, entered {}",
+                "Archive profile: generation {}, slots {}, island offers {:.6} s, island refresh {:.6} s, prefilter {:.6} s, global offers {:.6} s, cma tell {:.6} s, archive refresh {:.6} s, lineage {:.6} s, entered {}",
                 self.generation,
                 slots.len(),
                 timings[0],
@@ -1032,7 +942,6 @@ impl Experiment {
                 timings[4],
                 timings[5],
                 timings[6],
-                timings[7],
                 entered_count
             );
         }
@@ -2600,7 +2509,6 @@ impl From<V2Experiment> for Experiment {
             morphology_reserve_override: None,
             protected_until: vec![0; population],
             trial_metrics: vec![TrialMetrics::default(); population],
-            replayed: Vec::new(),
             screened: Vec::new(),
             screen_distance: Vec::new(),
             screen2_distance: Vec::new(),
@@ -2647,7 +2555,6 @@ impl From<LegacyExperiment> for Experiment {
             morphology_reserve_override: None,
             protected_until: vec![0; population],
             trial_metrics: vec![TrialMetrics::default(); population],
-            replayed: Vec::new(),
             screened: Vec::new(),
             screen_distance: Vec::new(),
             screen2_distance: Vec::new(),
