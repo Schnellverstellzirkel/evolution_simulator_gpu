@@ -1490,6 +1490,20 @@ pub fn shader_source(capacity: usize, workgroup: u32, fidelity: physics::Fidelit
         source.replace(from, &to)
     };
     let mut source = include_str!("../shaders/physics2_creature.wgsl").to_owned();
+    // Workgroup memory holds 48 KB: bodies above 32 nodes keep their table
+    // in private (local) memory instead.
+    if capacity > 32 {
+        source = replace(
+            source,
+            "var<workgroup> tab: array<f32, TABF * WG>;",
+            "var<private> tab: array<f32, TABF>;".into(),
+        );
+        source = replace(
+            source,
+            "    return f * WG + lane_id;",
+            "    return f;".into(),
+        );
+    }
     for (from, to) in [
         (
             "const MUSCLE_CAPACITY: f32 = 120.0;",
@@ -1599,11 +1613,6 @@ pub fn shader_source(capacity: usize, workgroup: u32, fidelity: physics::Fidelit
             format!("{}u", fidelity.sample_interval()),
         ),
         ("MAXCONTACTSu", format!("{}u", capacity.min(max_contacts()))),
-        (
-            "SELECTTREE",
-            (capacity <= 8 && std::env::var("EVOLUTION_P2_SELECT").is_ok_and(|v| v == "1"))
-                .to_string(),
-        ),
         ("WGSIZEu", format!("{workgroup}u")),
         ("STRIDE", format!("{capacity}u")),
         ("MAXNODESu", format!("{capacity}u")),
@@ -1713,9 +1722,24 @@ pub fn pack(
                 }
                 for (k, m) in model.muscles.iter().enumerate() {
                     let field = tile[0] as usize + k * MUSCLE_FIELDS * TILE + lane;
-                    let sensor = m.sensor.map_or(NO_SENSOR, |n| n as u32);
+                    // The four endpoint nodes, 6 bits each, and which of
+                    // them senses touchdowns (7 for none).
+                    let ends = [
+                        model.pivot[m.bone_a],
+                        m.bone_a + 1,
+                        model.pivot[m.bone_b],
+                        m.bone_b + 1,
+                    ];
+                    let sensor = m
+                        .sensor
+                        .and_then(|n| ends.iter().position(|&e| e == n))
+                        .map_or(7, |e| e as u32);
+                    let nodes = ends
+                        .iter()
+                        .enumerate()
+                        .fold(sensor << 24, |w, (e, &n)| w | (n as u32) << (6 * e));
                     let values = [
-                        f32::from_bits(m.bone_a as u32 | (m.bone_b as u32) << 8 | sensor << 16),
+                        f32::from_bits(nodes),
                         m.anchor_a,
                         m.anchor_b,
                         m.amplitude,
@@ -2463,8 +2487,9 @@ mod tests {
                 for (k, m) in model.muscles.iter().enumerate() {
                     let field = tile[0] as usize + k * MUSCLE_FIELDS * TILE + lane;
                     let packed = batch.muscles[field].to_bits();
-                    assert_eq!(packed & 0xff, m.bone_a as u32);
-                    assert_eq!((packed >> 8) & 0xff, m.bone_b as u32);
+                    assert_eq!((packed >> 6) & 63, m.bone_a as u32 + 1);
+                    assert_eq!((packed >> 18) & 63, m.bone_b as u32 + 1);
+                    assert_eq!(packed & 63, model.pivot[m.bone_a] as u32);
                     assert_eq!(batch.muscles[field + 14 * TILE], 1.0);
                 }
             }

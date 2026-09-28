@@ -5,9 +5,17 @@
 // one angle and rate per other bone relative to its parent bone. Nodes are
 // packed so that bone j ends at node j + 1 (node 0 is the head), and every
 // bone's parent bone has a smaller index, so passes over the bones run
-// parents first or children first by index. The step mirrors
-// `physics2::simulate_step_inner` expression by expression, and the CPU keeps
-// the same order of operations, so the two drift apart only by rounding.
+// parents first or children first by index. The step follows
+// `physics2::simulate_step_inner`.
+//
+// Memory. Every private array is indexed only by loop counters, so with the
+// loops unrolled it can live in registers. Everything a creature reaches
+// through data (a bone's pivot or parent, a muscle's nodes, a contact's
+// node) goes through a per-lane table in workgroup memory, laid out
+// [field][lane]: every node's position and velocity, then six scratch
+// fields per bone whose use changes through the step. A bone's parent
+// receives its articulated inertia through selects over the bones before
+// it, so that pass stays in registers too.
 //
 // Per creature and node record (8 floats, `STRIDE` records per creature):
 //   record 0: head position, head velocity, the head's contact force of the
@@ -19,9 +27,10 @@
 //   friction, and on bone 0 the head's mass, radius (fields 7, 8) and
 //   friction (field 2; the neck has no range).
 // Muscle constants and state (`MUSCLE_FIELDS` per muscle, same tiling):
-//   bones (a | b << 8 | sensor node << 16), anchors, waveform amplitude, long
-//   length, 1/period, phase, duty, stiffness, 1/duty, 1/(1 - duty), the
-//   step's force (scratch), reset phase, rhythm offset (state), energy (state).
+//   nodes (a0 | a1 << 6 | b0 << 12 | b1 << 18, the sensor's endpoint << 24
+//   or 7 for none), anchors, waveform amplitude, Hill factor, 1/period,
+//   phase, duty, stiffness, 1/duty, 1/(1 - duty), the step's force
+//   (scratch), reset phase, rhythm offset (state), energy (state).
 struct Record {
     a: vec2f,
     b: vec2f,
@@ -88,14 +97,7 @@ const MAXR: u32 = 2u * MAXC;
 const TILE: u32 = 32u;
 const MUSCLE_FIELDS: u32 = 15u;
 const BONE_FIELDS: u32 = 9u;
-const NO_SENSOR: u32 = 255u;
-// Small bodies keep every per-bone array in registers and reach a parent
-// or pivot through a chain of selects; large bodies index memory.
-const SELECT: bool = SELECTTREE;
-// Per-lane table in workgroup memory for the muscles, which name their
-// bones by data: per bone its pivot's and child's positions and velocities
-// and the force collected on it. Laid out [field][bone][lane].
-const TABLE_FIELDS: u32 = 11u;
+const NO_SENSOR: u32 = 7u;
 
 const RATE: f32 = PHYSICSRATE;
 const DT: f32 = 1.0 / RATE;
@@ -126,57 +128,51 @@ const HURDLE_RUN: f32 = 0.2;
 const PI: f32 = 3.14159265359;
 const TAU: f32 = 6.28318530718;
 
-// This lane's creature: constants.
+// The per-lane table: 4 fields per node (position, velocity), then 6 per
+// bone (two scratch vectors).
+const TN: u32 = 0u;
+const TB: u32 = 4u * MAXN;
+const TABF: u32 = 4u * MAXN + 6u * MAXB;
+var<workgroup> tab: array<f32, TABF * WG>;
+
+var<private> lane_id: u32;
+var<private> bone_base: u32;
+var<private> record_base: u32;
 var<private> nn: u32;
 var<private> nb: u32;
 var<private> mass: array<f32, MAXN>;
-var<private> radius: array<f32, MAXN>;
-var<private> fric: array<f32, MAXN>;
 var<private> pivot: array<u32, MAXB>;
-var<private> parent: array<u32, MAXB>;
 var<private> len: array<f32, MAXB>;
-var<private> lo: array<f32, MAXB>;
-var<private> hi: array<f32, MAXB>;
 var<private> total_mass: f32;
 var<private> inv_mass: f32;
 var<private> phase_q: f32;
 var<private> amplitude: f32;
 var<private> rough: bool;
-// State: head position and velocity, joint angles and rates (bone 0: the
-// neck's absolute angle and rate), contact forces of the last step.
+// State.
 var<private> x0: vec2f;
 var<private> v0: vec2f;
 var<private> q: array<f32, MAXB>;
 var<private> qd: array<f32, MAXB>;
-var<private> warm: array<vec2f, MAXN>;
-// Kinematics: absolute angles and rates, node positions and velocities.
-var<private> th: array<f32, MAXB>;
+// Absolute turning rates, from the kinematics.
 var<private> om: array<f32, MAXB>;
-var<private> pos: array<vec2f, MAXN>;
-var<private> vel: array<vec2f, MAXN>;
 // The articulated-body pass: inertias as (ww, wx, wy) and (xx, xy, yy),
-// bias forces, spatial velocities, velocity products, pivot arms (the joint
-// axis is (1, arm.y, -arm.x)), U, 1/D and u of each joint, accelerations.
+// bias forces, pivot arms (the joint axis is (1, arm.y, -arm.x)), U, 1/D and
+// u of each joint, accelerations.
 var<private> i0: array<vec3f, MAXB>;
 var<private> i1: array<vec3f, MAXB>;
 var<private> bias: array<vec3f, MAXB>;
-var<private> sv: array<vec3f, MAXB>;
-var<private> cvel: array<vec3f, MAXB>;
 var<private> arm: array<vec2f, MAXB>;
 var<private> uvec: array<vec3f, MAXB>;
 var<private> dinv: array<f32, MAXB>;
 var<private> uu: array<f32, MAXB>;
 var<private> acc: array<vec3f, MAXB>;
 var<private> qdd: array<f32, MAXB>;
+var<private> dq: array<f32, MAXB>;
 var<private> root0: vec3f;
 var<private> root1: vec3f;
-// Scratch for responses to forces: forces passed up the tree, and the
-// resulting accelerations.
-var<private> pp: array<vec3f, MAXB>;
-var<private> da: array<vec3f, MAXB>;
-var<private> dq: array<f32, MAXB>;
-// Contacts of this step.
+// Contacts of this step, in slots.
 var<private> nc: u32;
+var<private> c_on: array<bool, MAXC>;
 var<private> c_node: array<u32, MAXC>;
 var<private> c_dn: array<vec3f, MAXC>;
 var<private> c_dt: array<vec3f, MAXC>;
@@ -186,75 +182,67 @@ var<private> c_goal: array<f32, MAXC>;
 var<private> c_mu: array<f32, MAXC>;
 var<private> reach: array<f32, MAXN>;
 var<private> kmat: array<f32, MAXR * (MAXR + 1u) / 2u>;
-var<private> c_on: array<bool, MAXC>;
 var<private> lambda: array<f32, MAXR>;
 var<private> old: array<f32, MAXR>;
 var<private> vrow: array<f32, MAXR>;
-var<workgroup> table: array<f32, TABLE_FIELDS * MAXB * WG>;
-var<private> lane_id: u32;
-fn tab(field: u32, bone: u32) -> u32 {
-    return (field * MAXB + bone) * WG + lane_id;
-}
 
-// Element `i` of a per-bone or per-node array, reached through selects for
-// small bodies (the arrays then stay in registers).
-fn get_f(a: ptr<private, array<f32, MAXB>>, i: u32) -> f32 {
-    if SELECT {
-        var r = (*a)[0];
-        for (var k = 1u; k < MAXB; k++) {
-            if k == i {
-                r = (*a)[k];
-            }
-        }
-        return r;
-    }
-    return (*a)[i];
+fn ti(f: u32) -> u32 {
+    return f * WG + lane_id;
 }
-fn get_b3(a: ptr<private, array<vec3f, MAXB>>, i: u32) -> vec3f {
-    if SELECT {
-        var r = (*a)[0];
-        for (var k = 1u; k < MAXB; k++) {
-            if k == i {
-                r = (*a)[k];
-            }
-        }
-        return r;
-    }
-    return (*a)[i];
+fn node_pos(i: u32) -> vec2f {
+    let f = TN + 4u * i;
+    return vec2f(tab[ti(f)], tab[ti(f + 1u)]);
 }
-fn add_b3(a: ptr<private, array<vec3f, MAXB>>, i: u32, v: vec3f) {
-    if SELECT {
-        for (var k = 0u; k < MAXB; k++) {
-            if k == i {
-                (*a)[k] += v;
-            }
-        }
-        return;
-    }
-    (*a)[i] += v;
+fn node_vel(i: u32) -> vec2f {
+    let f = TN + 4u * i + 2u;
+    return vec2f(tab[ti(f)], tab[ti(f + 1u)]);
 }
-fn get_n2(a: ptr<private, array<vec2f, MAXN>>, i: u32) -> vec2f {
-    if SELECT {
-        var r = (*a)[0];
-        for (var k = 1u; k < MAXN; k++) {
-            if k == i {
-                r = (*a)[k];
-            }
-        }
-        return r;
-    }
-    return (*a)[i];
+fn set_pos(i: u32, v: vec2f) {
+    let f = TN + 4u * i;
+    tab[ti(f)] = v.x;
+    tab[ti(f + 1u)] = v.y;
 }
-fn set_n2(a: ptr<private, array<vec2f, MAXN>>, i: u32, v: vec2f) {
-    if SELECT {
-        for (var k = 0u; k < MAXN; k++) {
-            if k == i {
-                (*a)[k] = v;
-            }
-        }
-        return;
+fn set_vel(i: u32, v: vec2f) {
+    let f = TN + 4u * i + 2u;
+    tab[ti(f)] = v.x;
+    tab[ti(f + 1u)] = v.y;
+}
+fn body_get(j: u32, s: u32) -> vec3f {
+    let f = TB + 6u * j + 3u * s;
+    return vec3f(tab[ti(f)], tab[ti(f + 1u)], tab[ti(f + 2u)]);
+}
+fn body_set(j: u32, s: u32, v: vec3f) {
+    let f = TB + 6u * j + 3u * s;
+    tab[ti(f)] = v.x;
+    tab[ti(f + 1u)] = v.y;
+    tab[ti(f + 2u)] = v.z;
+}
+fn body_add(j: u32, s: u32, v: vec3f) {
+    let f = TB + 6u * j + 3u * s;
+    tab[ti(f)] += v.x;
+    tab[ti(f + 1u)] += v.y;
+    tab[ti(f + 2u)] += v.z;
+}
+fn bone_field(j: u32, f: u32) -> f32 {
+    return bone_data[bone_base + (j * BONE_FIELDS + f) * TILE];
+}
+fn node_radius(i: u32) -> f32 {
+    if i == 0u {
+        return bone_field(0u, 8u);
     }
-    (*a)[i] = v;
+    return bone_field(i - 1u, 5u);
+}
+fn node_fric(i: u32) -> f32 {
+    if i == 0u {
+        return bone_field(0u, 2u);
+    }
+    return bone_field(i - 1u, 6u);
+}
+fn body_of(i: u32) -> u32 {
+    return select(i - 1u, 0u, i == 0u);
+}
+fn parent_of(j: u32) -> u32 {
+    return body_of(pivot[j]);
 }
 
 fn quake_phase(seed: u32) -> f32 {
@@ -356,9 +344,6 @@ fn sdot(a: vec3f, b: vec3f) -> f32 {
 fn axis_of(j: u32) -> vec3f {
     return vec3f(1.0, arm[j].y, -arm[j].x);
 }
-fn body_of(i: u32) -> u32 {
-    return select(i - 1u, 0u, i == 0u);
-}
 fn wrap(a: f32) -> f32 {
     return a - TAU * floor((a + PI) / TAU);
 }
@@ -372,50 +357,44 @@ fn wave(t: f32, inv_period: f32, phase: f32, offset: f32, duty: f32, inv_duty: f
     }
     return 0.5 - 0.5 * cos(PI * ((ph - duty) * inv_complement));
 }
-
-// Absolute angles and rates and node velocities from the state, for the
-// planting pass, which needs no positions.
-fn velocities() {
-    vel[0] = v0;
-    for (var j = 0u; j < MAXB; j++) {
-        if j >= nb { break; }
-        var t = q[0];
-        var w = qd[0];
-        if j > 0u {
-            t = get_f(&th, parent[j]) + q[j];
-            w = get_f(&om, parent[j]) + qd[j];
-        }
-        th[j] = t;
-        om[j] = w;
-        let sn = sin(t);
-        let cs = cos(t);
-        let l = len[j];
-        let pv0 = get_n2(&vel, pivot[j]);
-        vel[j + 1u] = vec2f(pv0.x - l * w * sn, pv0.y + l * w * cs);
-    }
+// Body j's velocity-product acceleration, from its pivot's velocity in the
+// table (the spatial velocity's linear part is the velocity of the body
+// point at the origin).
+fn cvel_of(j: u32) -> vec3f {
+    let vp = node_vel(pivot[j]);
+    let w = om[j];
+    let sv = vec3f(w, vp.x + w * arm[j].y, vp.y - w * arm[j].x);
+    return crm(sv, axis_of(j)) * qd[j];
 }
 
-// Absolute angles and rates, node positions and velocities, from the state.
-fn kinematics() {
-    pos[0] = x0;
-    vel[0] = v0;
+// Absolute angles and rates, node velocities and, with `positions`, node
+// positions, from the state. A bone's parent's angle and rate come from the
+// table.
+fn kinematics(positions: bool) {
+    if positions {
+        set_pos(0u, x0);
+    }
+    set_vel(0u, v0);
     for (var j = 0u; j < MAXB; j++) {
         if j >= nb { break; }
         var t = q[0];
         var w = qd[0];
         if j > 0u {
-            t = get_f(&th, parent[j]) + q[j];
-            w = get_f(&om, parent[j]) + qd[j];
+            let up = body_get(parent_of(j), 0u);
+            t = up.x + q[j];
+            w = up.y + qd[j];
         }
-        th[j] = t;
         om[j] = w;
+        body_set(j, 0u, vec3f(t, w, 0.0));
         let sn = sin(t);
         let cs = cos(t);
         let l = len[j];
-        let pp0 = get_n2(&pos, pivot[j]);
-        let pv0 = get_n2(&vel, pivot[j]);
-        pos[j + 1u] = vec2f(pp0.x + l * cs, pp0.y + l * sn);
-        vel[j + 1u] = vec2f(pv0.x - l * w * sn, pv0.y + l * w * cs);
+        let pv0 = node_vel(pivot[j]);
+        set_vel(j + 1u, vec2f(pv0.x - l * w * sn, pv0.y + l * w * cs));
+        if positions {
+            let pp0 = node_pos(pivot[j]);
+            set_pos(j + 1u, vec2f(pp0.x + l * cs, pp0.y + l * sn));
+        }
     }
 }
 
@@ -423,7 +402,7 @@ fn momentum() -> vec2f {
     var m = vec2f(0.0);
     for (var i = 0u; i < MAXN; i++) {
         if i >= nn { break; }
-        m += vel[i] * mass[i];
+        m += node_vel(i) * mass[i];
     }
     return m;
 }
@@ -445,32 +424,34 @@ fn integrate_state(air: f32) -> vec2f {
     return head;
 }
 
-// The accelerations (`da`, `dq`) that the spatial forces in `pp` cause,
-// through the articulated inertias of the last `solve` (children first,
-// then parents first). Clears nothing: the caller fills `pp`.
+// The accelerations that the spatial forces in the table's first scratch
+// vector of every bone cause, through the articulated inertias of this
+// step: children first, then parents first. Leaves them in the second
+// scratch vector and the joint accelerations in `dq`.
 fn response() {
     for (var i = 1u; i < MAXB; i++) {
         let j = MAXB - i;
         if j >= nb { continue; }
-        let t = -sdot(axis_of(j), pp[j]);
+        let pj = body_get(j, 0u);
+        let t = -sdot(axis_of(j), pj);
         dq[j] = t;
-        add_b3(&pp, parent[j], pp[j] + uvec[j] * (t * dinv[j]));
+        body_add(parent_of(j), 0u, pj + uvec[j] * (t * dinv[j]));
     }
-    da[0] = -sym_mul(root0, root1, pp[0]);
+    body_set(0u, 1u, -sym_mul(root0, root1, body_get(0u, 0u)));
     dq[0] = 0.0;
     for (var j = 1u; j < MAXB; j++) {
         if j >= nb { break; }
-        let a = get_b3(&da, parent[j]);
+        let a = body_get(parent_of(j), 1u);
         let t = (dq[j] - sdot(uvec[j], a)) * dinv[j];
         dq[j] = t;
-        da[j] = a + axis_of(j) * t;
+        body_set(j, 1u, a + axis_of(j) * t);
     }
 }
 
 fn clear_forces() {
     for (var j = 0u; j < MAXB; j++) {
         if j >= nb { break; }
-        pp[j] = vec3f(0.0);
+        body_set(j, 0u, vec3f(0.0));
     }
 }
 
@@ -486,13 +467,12 @@ fn apply_contacts(f: ptr<private, array<f32, MAXR>>) {
     clear_forces();
     for (var ci = 0u; ci < MAXC; ci++) {
         if !c_on[ci] { continue; }
-        let cb = body_of(c_node[ci]);
-        add_b3(&pp, cb, -(c_dn[ci] * (*f)[2u * ci] + c_dt[ci] * (*f)[2u * ci + 1u]));
+        body_add(body_of(c_node[ci]), 0u, -(c_dn[ci] * (*f)[2u * ci] + c_dt[ci] * (*f)[2u * ci + 1u]));
     }
     response();
     for (var j = 0u; j < MAXB; j++) {
         if j >= nb { break; }
-        acc[j] += da[j];
+        acc[j] += body_get(j, 1u);
         qdd[j] += dq[j];
     }
 }
@@ -500,8 +480,7 @@ fn apply_contacts(f: ptr<private, array<f32, MAXR>>) {
 // Projected Gauss-Seidel on the contact impulses: a touching node may
 // approach the ground only as fast as its goal allows, normal forces only
 // push, and friction stays within mu times the normal force and opposes the
-// slip. Every row's velocity (`vrow`) is kept current as the forces change,
-// so an update reads one number instead of a sum.
+// slip. Every row's velocity (`vrow`) is kept current as the forces change.
 fn pgs(sweeps: u32) {
     for (var row = 0u; row < MAXR; row++) {
         if !c_on[row / 2u] { continue; }
@@ -539,51 +518,25 @@ fn pgs(sweeps: u32) {
     }
 }
 
-// Fills contact slot `ci` for node `i`.
-fn fill_contact(ci: u32, i: u32, origin: vec2f) {
-    let g = terrain(pos[i].x);
-    let secant = sqrt(1.0 + g.y * g.y);
-    let normal = vec2f(-g.y / secant, 1.0 / secant);
-    let tangent = vec2f(normal.y, -normal.x);
-    let gap = (pos[i].y - g.x) / secant - radius[i];
-    let body = body_of(i);
-    let r = pos[i] - origin;
-    let v = vel[i];
-    let w = om[body];
-    let dn = force_at(r, normal);
-    let dtan = force_at(r, tangent);
-    let a = acc[body];
-    c_node[ci] = i;
-    c_dn[ci] = dn;
-    c_dt[ci] = dtan;
-    c_vn[ci] = v.x * normal.x + v.y * normal.y
-        + DT * (sdot(dn, a) + w * (-v.y * normal.x + v.x * normal.y));
-    c_vt[ci] = v.x * tangent.x + v.y * tangent.y
-        + DT * (sdot(dtan, a) + w * (-v.y * tangent.x + v.x * tangent.y));
-    c_goal[ci] = select(-gap * PUSH_OUT * RATE, -gap * RATE, gap >= 0.0);
-    c_mu[ci] = fric[i] * p.friction;
-}
-
 // Ground contacts at velocity level, solved together (physics2's contact
-// section): detection of the deepest MAXC nodes, the contact-space matrix,
-// Gauss-Seidel, the forces' response, and one pass that plants the contacts
-// against the step's end pose. Returns `outside` (the step's impulse from
-// gravity and wind) plus the ground's impulse. Small bodies
-// give every node its own slot (MAXC is then their node count), so every
-// index stays static; large ones pack the chosen nodes in node order.
+// section): detection, the deepest MAXC nodes into slots, the contact-space
+// matrix, Gauss-Seidel, the forces' response, and one pass that plants the
+// contacts against the step's end pose. Returns `outside` (the step's
+// impulse from gravity and wind) plus the ground's impulse.
 fn contacts(origin: vec2f, before: vec2f, outside: vec2f) -> vec2f {
     nc = 0u;
     var candidates = 0u;
     for (var i = 0u; i < MAXN; i++) {
         reach[i] = 1e30;
         if i >= nn { continue; }
-        let g = terrain(pos[i].x);
+        let pn = node_pos(i);
+        let g = terrain(pn.x);
         let secant = sqrt(1.0 + g.y * g.y);
         let normal = vec2f(-g.y / secant, 1.0 / secant);
-        let gap = (pos[i].y - g.x) / secant - radius[i];
+        let gap = (pn.y - g.x) / secant - node_radius(i);
         let body = body_of(i);
-        let r = pos[i] - origin;
-        let v = vel[i];
+        let r = pn - origin;
+        let v = node_vel(i);
         let w = om[body];
         let dn = force_at(r, normal);
         let vn_free = v.x * normal.x + v.y * normal.y
@@ -600,70 +553,86 @@ fn contacts(origin: vec2f, before: vec2f, outside: vec2f) -> vec2f {
     if candidates == 0u {
         return outside;
     }
-    if MAXC == MAXN {
-        for (var i = 0u; i < MAXN; i++) {
-            if reach[i] > 1e29 { continue; }
-            c_on[i] = true;
-            fill_contact(i, i, origin);
-        }
-        nc = candidates;
-    } else {
-        // The deepest MAXC nodes, in node order; small bodies write their
-        // slots through selects so the indices stay static.
-        for (var i = 0u; i < MAXN; i++) {
-            if i >= nn { break; }
-            if reach[i] > 1e29 { continue; }
-            if candidates > MAXC {
-                var rank = 0u;
-                for (var j = 0u; j < MAXN; j++) {
-                    if j >= nn { break; }
-                    if reach[j] < reach[i] || (reach[j] == reach[i] && j < i) {
-                        rank += 1u;
-                    }
-                }
-                if rank >= MAXC { continue; }
+    // The deepest MAXC nodes take part, in node order.
+    var chosen: array<bool, MAXN>;
+    for (var i = 0u; i < MAXN; i++) {
+        chosen[i] = reach[i] < 1e29;
+        if !chosen[i] || candidates <= MAXC { continue; }
+        var deeper = 0u;
+        for (var j = 0u; j < MAXN; j++) {
+            if reach[j] < reach[i] || (reach[j] == reach[i] && j < i) {
+                deeper += 1u;
             }
-            if SELECT {
-                for (var k = 0u; k < MAXC; k++) {
-                    if k == nc {
-                        c_on[k] = true;
-                        fill_contact(k, i, origin);
-                    }
-                }
-            } else {
-                c_on[nc] = true;
-                fill_contact(nc, i, origin);
-            }
-            nc += 1u;
         }
+        chosen[i] = deeper < MAXC;
+    }
+    for (var ci = 0u; ci < MAXC; ci++) {
+        if ci >= candidates { break; }
+        var node = 0u;
+        var seen = 0u;
+        for (var i = 0u; i < MAXN; i++) {
+            if chosen[i] {
+                if seen == ci {
+                    node = i;
+                }
+                seen += 1u;
+            }
+        }
+        let pn = node_pos(node);
+        let g = terrain(pn.x);
+        let secant = sqrt(1.0 + g.y * g.y);
+        let normal = vec2f(-g.y / secant, 1.0 / secant);
+        let tangent = vec2f(normal.y, -normal.x);
+        let gap = (pn.y - g.x) / secant - node_radius(node);
+        let body = body_of(node);
+        let r = pn - origin;
+        let v = node_vel(node);
+        // The body's acceleration and turning rate, from the table.
+        let a = body_get(body, 0u);
+        let w = body_get(body, 1u).x;
+        let dn = force_at(r, normal);
+        let dtan = force_at(r, tangent);
+        c_on[ci] = true;
+        c_node[ci] = node;
+        c_dn[ci] = dn;
+        c_dt[ci] = dtan;
+        c_vn[ci] = v.x * normal.x + v.y * normal.y
+            + DT * (sdot(dn, a) + w * (-v.y * normal.x + v.x * normal.y));
+        c_vt[ci] = v.x * tangent.x + v.y * tangent.y
+            + DT * (sdot(dtan, a) + w * (-v.y * tangent.x + v.x * tangent.y));
+        c_goal[ci] = select(-gap * PUSH_OUT * RATE, -gap * RATE, gap >= 0.0);
+        c_mu[ci] = node_fric(node) * p.friction;
+        nc += 1u;
     }
     // Contact-space matrix, column by column from each unit force's
     // response; symmetric, the lower triangle kept.
     for (var col = 0u; col < MAXR; col++) {
-        if !c_on[col / 2u] { continue; }
         let ci = col / 2u;
+        if !c_on[ci] { continue; }
         var fdir = c_dn[ci];
         if (col & 1u) == 1u {
             fdir = c_dt[ci];
         }
         clear_forces();
-        add_b3(&pp, body_of(c_node[ci]), -fdir);
+        body_add(body_of(c_node[ci]), 0u, -fdir);
         response();
         for (var row = 0u; row < MAXR; row++) {
-            if row < col || !c_on[row / 2u] { continue; }
             let ri = row / 2u;
+            if row < col || !c_on[ri] { continue; }
             var rdir = c_dn[ri];
             if (row & 1u) == 1u {
                 rdir = c_dt[ri];
             }
-            kmat[tri(row, col)] = DT * sdot(rdir, get_b3(&da, body_of(c_node[ri])));
+            kmat[tri(row, col)] = DT * sdot(rdir, body_get(body_of(c_node[ri]), 1u));
         }
     }
     for (var ci = 0u; ci < MAXC; ci++) {
         var ln = 0.0;
         var lt = 0.0;
         if WARM && c_on[ci] {
-            let w = get_n2(&warm, c_node[ci]);
+            let node = c_node[ci];
+            let rec = records[record_base + node];
+            let w = select(rec.b, rec.c, node == 0u);
             ln = w.x;
             lt = clamp(w.y, -c_mu[ci] * ln, c_mu[ci] * ln);
         }
@@ -685,7 +654,7 @@ fn contacts(origin: vec2f, before: vec2f, outside: vec2f) -> vec2f {
             sqd[j] = qd[j];
         }
         integrate_state(1.0);
-        velocities();
+        kinematics(false);
         var ground = vec2f(0.0);
         for (var ci = 0u; ci < MAXC; ci++) {
             if !c_on[ci] { continue; }
@@ -703,7 +672,7 @@ fn contacts(origin: vec2f, before: vec2f, outside: vec2f) -> vec2f {
             if !c_on[ci] { continue; }
             let rn = 2u * ci;
             let rt = rn + 1u;
-            let v = get_n2(&vel, c_node[ci]) + shift;
+            let v = node_vel(c_node[ci]) + shift;
             let normal = c_dn[ci].yz;
             c_vn[ci] += v.x * normal.x + v.y * normal.y - vrow[rn];
             c_vt[ci] += v.x * normal.y + v.y * -normal.x - vrow[rt];
@@ -726,7 +695,6 @@ fn contacts(origin: vec2f, before: vec2f, outside: vec2f) -> vec2f {
     var impulse = outside;
     for (var ci = 0u; ci < MAXC; ci++) {
         if !c_on[ci] { continue; }
-        set_n2(&warm, c_node[ci], vec2f(lambda[2u * ci], lambda[2u * ci + 1u]));
         impulse += vec2f(
             (lambda[2u * ci] * c_dn[ci].y + lambda[2u * ci + 1u] * c_dt[ci].y) * DT,
             (lambda[2u * ci] * c_dn[ci].z + lambda[2u * ci + 1u] * c_dt[ci].z) * DT,
@@ -752,38 +720,28 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
     rough = amplitude != 0.0 || p.slope != 0.0 || p.gaps > 0.0 || p.hurdles > 0.0;
     let tile = tile_info[creature / TILE];
     let tl = creature % TILE;
-    let base = creature * STRIDE;
+    bone_base = tile.y + tl;
+    record_base = creature * STRIDE;
 
-    let head = records[base];
+    let head = records[record_base];
     x0 = head.a;
     v0 = head.b;
-    warm[0] = head.c;
-    mass[0] = bone_data[tile.y + tl + 7u * TILE];
-    radius[0] = bone_data[tile.y + tl + 8u * TILE];
-    fric[0] = bone_data[tile.y + tl + 2u * TILE];
+    mass[0] = bone_field(0u, 7u);
     total_mass = mass[0];
     for (var j = 0u; j < MAXB; j++) {
         if j >= nb { break; }
-        let field = tile.y + j * BONE_FIELDS * TILE + tl;
-        let pv = bitcast<u32>(bone_data[field]);
-        pivot[j] = pv;
-        parent[j] = body_of(pv);
-        len[j] = bone_data[field + TILE];
-        lo[j] = bone_data[field + 2u * TILE];
-        hi[j] = bone_data[field + 3u * TILE];
-        mass[j + 1u] = bone_data[field + 4u * TILE];
-        radius[j + 1u] = bone_data[field + 5u * TILE];
-        fric[j + 1u] = bone_data[field + 6u * TILE];
+        pivot[j] = bitcast<u32>(bone_field(j, 0u));
+        len[j] = bone_field(j, 1u);
+        mass[j + 1u] = bone_field(j, 4u);
         total_mass += mass[j + 1u];
-        let r = records[base + j + 1u];
+        let r = records[record_base + j + 1u];
         q[j] = r.a.x;
         qd[j] = r.a.y;
-        warm[j + 1u] = r.b;
     }
     inv_mass = 1.0 / total_mass;
     let inv_nodes = 1.0 / f32(nn);
     let inv_capacity = 1.0 / (MUSCLE_CAPACITY * p.muscle_energy);
-    kinematics();
+    kinematics(true);
 
     var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     if p.tick > SETTLE {
@@ -802,8 +760,8 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         }
         let step = tick - SETTLE;
         let time = f32(step) * DT;
-        let head_before = vel[0];
-        let origin = pos[0];
+        let head_before = v0;
+        let origin = x0;
         let before = momentum();
         // For the first-law check in flight.
         var energy_start = 0.0;
@@ -811,67 +769,50 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         var mass_x_start = 0.0;
         for (var i = 0u; i < MAXN; i++) {
             if i >= nn { break; }
-            let kinetic = 0.5 * mass[i] * (vel[i].x * vel[i].x + vel[i].y * vel[i].y);
-            let potential = mass[i] * p.gravity * pos[i].y;
+            let pi = node_pos(i);
+            let vi = node_vel(i);
+            let kinetic = 0.5 * mass[i] * (vi.x * vi.x + vi.y * vi.y);
+            let potential = mass[i] * p.gravity * pi.y;
             energy_start += kinetic + potential;
             energy_scale += kinetic + abs(potential);
-            mass_x_start += pos[i].x * mass[i];
+            mass_x_start += pi.x * mass[i];
         }
         var muscle_start = 0.0;
-        // Body inertias (true, for the velocity products) and forces, which
-        // `bias` collects with the opposite sign at the end.
-        var force: array<vec3f, MAXB>;
+        // Body inertias (true, for the velocity products), pivot arms, and
+        // the velocity-product forces; the forces below go in with the
+        // opposite sign.
         for (var j = 0u; j < MAXB; j++) {
             if j >= nb { break; }
             let m = mass[j + 1u];
-            let r = pos[j + 1u] - origin;
+            let r = node_pos(j + 1u) - origin;
             i0[j] = vec3f(m * (r.x * r.x + r.y * r.y), -m * r.y, m * r.x);
             i1[j] = vec3f(m, 0.0, m);
-            force[j] = vec3f(0.0);
+            arm[j] = node_pos(pivot[j]) - origin;
         }
         i1[0] += vec3f(mass[0], 0.0, mass[0]);
-        sv[0] = vec3f(qd[0], v0.x, v0.y);
-        for (var j = 1u; j < MAXB; j++) {
-            if j >= nb { break; }
-            arm[j] = get_n2(&pos, pivot[j]) - origin;
-            let axis = axis_of(j);
-            sv[j] = get_b3(&sv, parent[j]) + axis * qd[j];
-            cvel[j] = crm(sv[j], axis) * qd[j];
-        }
         for (var j = 0u; j < MAXB; j++) {
             if j >= nb { break; }
-            bias[j] = crf(sv[j], sym_mul(i0[j], i1[j], sv[j]));
+            let vp = node_vel(pivot[j]);
+            let w = om[j];
+            let sv = vec3f(w, vp.x + w * arm[j].y, vp.y - w * arm[j].x);
+            bias[j] = crf(sv, sym_mul(i0[j], i1[j], sv));
         }
         // Gravity and wind on every node.
         for (var i = 0u; i < MAXN; i++) {
             if i >= nn { break; }
             let m = mass[i];
-            let f = vec2f(p.wind * m, -p.gravity * m);
-            force[body_of(i)] += force_at(pos[i] - origin, f);
+            bias[body_of(i)] -= force_at(node_pos(i) - origin, vec2f(p.wind * m, -p.gravity * m));
         }
-        // Muscles, through the per-lane table: each bone's end positions and
-        // velocities, and the forces so far.
-        for (var j = 0u; j < MAXB; j++) {
-            if j >= nb { break; }
-            let pp0 = get_n2(&pos, pivot[j]);
-            let pv0 = get_n2(&vel, pivot[j]);
-            table[tab(0u, j)] = pp0.x;
-            table[tab(1u, j)] = pp0.y;
-            table[tab(2u, j)] = pv0.x;
-            table[tab(3u, j)] = pv0.y;
-            table[tab(4u, j)] = pos[j + 1u].x;
-            table[tab(5u, j)] = pos[j + 1u].y;
-            table[tab(6u, j)] = vel[j + 1u].x;
-            table[tab(7u, j)] = vel[j + 1u].y;
-            table[tab(8u, j)] = force[j].x;
-            table[tab(9u, j)] = force[j].y;
-            table[tab(10u, j)] = force[j].z;
-        }
+        // Muscles pull between points on two bones; the forces collect in
+        // the table.
+        clear_forces();
         for (var k = 0u; k < muscle_count; k++) {
             let field = tile.x + k * MUSCLE_FIELDS * TILE + tl;
             let packed = bitcast<u32>(muscle_data[field]);
-            let ba = packed & 0xffu;
-            let bb = (packed >> 8u) & 0xffu;
+            let a0 = packed & 63u;
+            let a1 = (packed >> 6u) & 63u;
+            let b0 = (packed >> 12u) & 63u;
+            let b1 = (packed >> 18u) & 63u;
             let anchor_a = muscle_data[field + TILE];
             let anchor_b = muscle_data[field + 2u * TILE];
             let amp = muscle_data[field + 3u * TILE];
@@ -884,14 +825,14 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             let inv_complement = muscle_data[field + 10u * TILE];
             let offset = muscle_data[field + 13u * TILE];
             let energy = muscle_data[field + 14u * TILE];
-            let pa0 = vec2f(table[tab(0u, ba)], table[tab(1u, ba)]);
-            let va0 = vec2f(table[tab(2u, ba)], table[tab(3u, ba)]);
-            let pa1 = vec2f(table[tab(4u, ba)], table[tab(5u, ba)]);
-            let va1 = vec2f(table[tab(6u, ba)], table[tab(7u, ba)]);
-            let pb0 = vec2f(table[tab(0u, bb)], table[tab(1u, bb)]);
-            let vb0 = vec2f(table[tab(2u, bb)], table[tab(3u, bb)]);
-            let pb1 = vec2f(table[tab(4u, bb)], table[tab(5u, bb)]);
-            let vb1 = vec2f(table[tab(6u, bb)], table[tab(7u, bb)]);
+            let pa0 = node_pos(a0);
+            let pa1 = node_pos(a1);
+            let pb0 = node_pos(b0);
+            let pb1 = node_pos(b1);
+            let va0 = node_vel(a0);
+            let va1 = node_vel(a1);
+            let vb0 = node_vel(b0);
+            let vb1 = node_vel(b1);
             let pa = vec2f(pa0.x + (pa1.x - pa0.x) * anchor_a, pa0.y + (pa1.y - pa0.y) * anchor_a);
             let va = vec2f(va0.x + (va1.x - va0.x) * anchor_a, va0.y + (va1.y - va0.y) * anchor_a);
             let pb = vec2f(pb0.x + (pb1.x - pb0.x) * anchor_b, pb0.y + (pb1.y - pb0.y) * anchor_b);
@@ -921,18 +862,12 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             muscle_data[field + 11u * TILE] = magnitude;
             muscle_start += magnitude * length_m;
             let f = dir * magnitude;
-            let fa = force_at(pa - origin, f);
-            table[tab(8u, ba)] += fa.x;
-            table[tab(9u, ba)] += fa.y;
-            table[tab(10u, ba)] += fa.z;
-            let fb = force_at(pb - origin, f);
-            table[tab(8u, bb)] -= fb.x;
-            table[tab(9u, bb)] -= fb.y;
-            table[tab(10u, bb)] -= fb.z;
+            body_add(a1 - 1u, 0u, force_at(pa - origin, f));
+            body_add(b1 - 1u, 0u, -force_at(pb - origin, f));
         }
         for (var j = 0u; j < MAXB; j++) {
             if j >= nb { break; }
-            force[j] = vec3f(table[tab(8u, j)], table[tab(9u, j)], table[tab(10u, j)]);
+            bias[j] -= body_get(j, 0u);
         }
         // Spin cap: rotational drag past the cap, implicit, toward rest.
         for (var j = 0u; j < MAXB; j++) {
@@ -942,15 +877,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let l = len[j];
                 let drag = SPIN_HARDNESS * mass[j + 1u] * l * l * (abs(w) * INV_SPIN_CAP - 1.0);
                 i0[j].x += drag;
-                force[j].x += -drag * RATE * w;
+                bias[j].x += drag * RATE * w;
             }
         }
-        for (var j = 0u; j < MAXB; j++) {
-            if j >= nb { break; }
-            bias[j] -= force[j];
-        }
         // Articulated-body pass, children first, with joint damping and the
-        // joint limits' inelastic stops implicit in each joint's inertia.
+        // joint limits' inelastic stops implicit in each joint's inertia. A
+        // bone hands its articulated inertia to its parent through selects
+        // over the bones before it.
         for (var i = 1u; i < MAXB; i++) {
             let j = MAXB - i;
             if j >= nb { continue; }
@@ -963,10 +896,12 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             d += c * DT;
             let qj = q[j];
             let qdj = qd[j];
+            let lo = bone_field(j, 2u);
+            let hi = bone_field(j, 3u);
             let predicted = qj + DT * qdj;
-            let upper = predicted > hi[j];
-            if upper || predicted < lo[j] {
-                let room = select(lo[j] - qj, hi[j] - qj, upper);
+            let upper = predicted > hi;
+            if upper || predicted < lo {
+                let room = select(lo - qj, hi - qj, upper);
                 let past = (room < 0.0) == upper;
                 let goal = select(room, room * PUSH_OUT, past) * RATE;
                 if (qdj > goal) == upper {
@@ -983,11 +918,16 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             let k = -di;
             let a0 = i0[j] + vec3f(k * uv.x * uv.x, k * uv.x * uv.y, k * uv.x * uv.z);
             let a1 = i1[j] + vec3f(k * uv.y * uv.y, k * uv.y * uv.z, k * uv.z * uv.z);
-            let pa = bias[j] + sym_mul(a0, a1, cvel[j]) + uv * (u * di);
-            let pr = parent[j];
-            add_b3(&i0, pr, a0);
-            add_b3(&i1, pr, a1);
-            add_b3(&bias, pr, pa);
+            let pa = bias[j] + sym_mul(a0, a1, cvel_of(j)) + uv * (u * di);
+            let pr = parent_of(j);
+            for (var up = 0u; up < MAXB; up++) {
+                if up >= j { break; }
+                if pr == up {
+                    i0[up] += a0;
+                    i1[up] += a1;
+                    bias[up] += pa;
+                }
+            }
         }
         // The neck body floats freely: the root's inverse inertia.
         {
@@ -1005,11 +945,17 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         }
         acc[0] = -sym_mul(root0, root1, bias[0]);
         qdd[0] = 0.0;
+        // Parents first; each bone leaves its acceleration and turning rate
+        // in the table for its children and the contacts.
+        body_set(0u, 0u, acc[0]);
+        body_set(0u, 1u, vec3f(om[0], 0.0, 0.0));
         for (var j = 1u; j < MAXB; j++) {
             if j >= nb { break; }
-            let a = get_b3(&acc, parent[j]) + cvel[j];
+            let a = body_get(parent_of(j), 0u) + cvel_of(j);
             qdd[j] = (uu[j] - sdot(uvec[j], a)) * dinv[j];
             acc[j] = a + axis_of(j) * qdd[j];
+            body_set(j, 0u, acc[j]);
+            body_set(j, 1u, vec3f(om[j], 0.0, 0.0));
         }
 
         var impulse = vec2f(p.wind * total_mass * DT, -p.gravity * total_mass * DT);
@@ -1017,27 +963,25 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         if grounded {
             impulse = contacts(origin, before, impulse);
         }
-        if nc == 0u {
+        // Each node's contact force starts the next step's solve.
+        if WARM && grounded {
             for (var i = 0u; i < MAXN; i++) {
                 if i >= nn { break; }
-                warm[i] = vec2f(0.0);
-            }
-        } else {
-            for (var i = 0u; i < MAXN; i++) {
-                if i >= nn { break; }
-                var used = false;
+                var w = vec2f(0.0);
                 for (var ci = 0u; ci < MAXC; ci++) {
                     if c_on[ci] && c_node[ci] == i {
-                        used = true;
+                        w = vec2f(lambda[2u * ci], lambda[2u * ci + 1u]);
                     }
                 }
-                if !used {
-                    warm[i] = vec2f(0.0);
+                if i == 0u {
+                    records[record_base].c = w;
+                } else {
+                    records[record_base + i].b = w;
                 }
             }
         }
         integrate_state(p.air);
-        kinematics();
+        kinematics(true);
         // Momentum balance.
         let after = momentum();
         let expected = vec2f((before.x + impulse.x) * p.air, (before.y + impulse.y) * p.air);
@@ -1045,30 +989,20 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         v0 += shift;
         for (var i = 0u; i < MAXN; i++) {
             if i >= nn { break; }
-            vel[i] += shift;
+            set_vel(i, node_vel(i) + shift);
         }
         // First law in flight.
         if nc == 0u {
             var muscle_end = 0.0;
-            for (var j = 0u; j < MAXB; j++) {
-                if j >= nb { break; }
-                let pp0 = get_n2(&pos, pivot[j]);
-                table[tab(0u, j)] = pp0.x;
-                table[tab(1u, j)] = pp0.y;
-                table[tab(4u, j)] = pos[j + 1u].x;
-                table[tab(5u, j)] = pos[j + 1u].y;
-            }
             for (var k = 0u; k < muscle_count; k++) {
                 let field = tile.x + k * MUSCLE_FIELDS * TILE + tl;
                 let packed = bitcast<u32>(muscle_data[field]);
-                let ba = packed & 0xffu;
-                let bb = (packed >> 8u) & 0xffu;
                 let anchor_a = muscle_data[field + TILE];
                 let anchor_b = muscle_data[field + 2u * TILE];
-                let pa0 = vec2f(table[tab(0u, ba)], table[tab(1u, ba)]);
-                let pa1 = vec2f(table[tab(4u, ba)], table[tab(5u, ba)]);
-                let pb0 = vec2f(table[tab(0u, bb)], table[tab(1u, bb)]);
-                let pb1 = vec2f(table[tab(4u, bb)], table[tab(5u, bb)]);
+                let pa0 = node_pos(packed & 63u);
+                let pa1 = node_pos((packed >> 6u) & 63u);
+                let pb0 = node_pos((packed >> 12u) & 63u);
+                let pb1 = node_pos((packed >> 18u) & 63u);
                 let pa = vec2f(pa0.x + (pa1.x - pa0.x) * anchor_a, pa0.y + (pa1.y - pa0.y) * anchor_a);
                 let pb = vec2f(pb0.x + (pb1.x - pb0.x) * anchor_b, pb0.y + (pb1.y - pb0.y) * anchor_b);
                 let d = pb - pa;
@@ -1078,9 +1012,10 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             var mass_x_end = 0.0;
             for (var i = 0u; i < MAXN; i++) {
                 if i >= nn { break; }
-                let kinetic = 0.5 * mass[i] * (vel[i].x * vel[i].x + vel[i].y * vel[i].y);
-                energy_end += kinetic + mass[i] * p.gravity * pos[i].y;
-                mass_x_end += pos[i].x * mass[i];
+                let pi = node_pos(i);
+                let vi = node_vel(i);
+                energy_end += 0.5 * mass[i] * (vi.x * vi.x + vi.y * vi.y) + mass[i] * p.gravity * pi.y;
+                mass_x_end += pi.x * mass[i];
             }
             let work = (muscle_start - muscle_end) + p.wind * (mass_x_end - mass_x_start);
             let excess = energy_end - energy_start - work - (1e-4 + 1e-5 * energy_scale);
@@ -1089,8 +1024,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 var internal = 0.0;
                 for (var i = 0u; i < MAXN; i++) {
                     if i >= nn { break; }
-                    let x = vel[i].x - center.x;
-                    let y = vel[i].y - center.y;
+                    let vi = node_vel(i);
+                    let x = vi.x - center.x;
+                    let y = vi.y - center.y;
                     internal += 0.5 * mass[i] * (x * x + y * y);
                 }
                 var keep = 0.0;
@@ -1105,7 +1041,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 v0 = vec2f(center.x + keep * (v0.x - center.x), center.y + keep * (v0.y - center.y));
                 for (var i = 0u; i < MAXN; i++) {
                     if i >= nn { break; }
-                    vel[i] = vec2f(center.x + keep * (vel[i].x - center.x), center.y + keep * (vel[i].y - center.y));
+                    let vi = node_vel(i);
+                    set_vel(i, vec2f(center.x + keep * (vi.x - center.x), center.y + keep * (vi.y - center.y)));
+                }
+                // The absolute rates scale with the joint rates.
+                for (var j = 0u; j < MAXB; j++) {
+                    if j >= nb { break; }
+                    om[j] *= keep;
                 }
             }
         }
@@ -1126,12 +1068,13 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         var com_x = 0.0;
         for (var i = 0u; i < MAXN; i++) {
             if i >= nn { break; }
-            let x = pos[i].x;
-            let y = pos[i].y;
+            let pi = node_pos(i);
+            let x = pi.x;
+            let y = pi.y;
             if !(abs(x) <= 1e6) || !(abs(y) <= 1e6) {
                 failed = true;
             }
-            let r = radius[i];
+            let r = node_radius(i);
             center_y += y;
             low = min(low, y - r);
             high = max(high, y + r);
@@ -1171,10 +1114,12 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             let next = time + DT;
             for (var k = 0u; k < muscle_count; k++) {
                 let field = tile.x + k * MUSCLE_FIELDS * TILE + tl;
-                let sensor = (bitcast<u32>(muscle_data[field]) >> 16u) & 0xffu;
-                if sensor == NO_SENSOR {
+                let packed = bitcast<u32>(muscle_data[field]);
+                let end = (packed >> 24u) & 7u;
+                if end == NO_SENSOR {
                     continue;
                 }
+                let sensor = (packed >> (6u * end)) & 63u;
                 let touched = select((down_hi >> (sensor - 32u)) & 1u, (down_lo >> sensor) & 1u, sensor < 32u);
                 if touched == 1u {
                     let clock = next * muscle_data[field + 5u * TILE] + muscle_data[field + 6u * TILE];
@@ -1184,7 +1129,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             }
         }
         if time >= HEAD_SHAKE_WINDOW {
-            let dv = vel[0] - head_before;
+            let dv = v0 - head_before;
             let accel = sqrt(dv.x * dv.x + dv.y * dv.y) * RATE;
             head_shake += (accel - head_shake) * min(1.0 / (HEAD_SHAKE_WINDOW * RATE), 1.0);
         }
@@ -1192,11 +1137,11 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
         var broken = false;
         for (var j = 1u; j < MAXB; j++) {
             if j >= nb { break; }
-            if q[j] < lo[j] - JOINT_BREAK || q[j] > hi[j] + JOINT_BREAK {
+            if q[j] < bone_field(j, 2u) - JOINT_BREAK || q[j] > bone_field(j, 3u) + JOINT_BREAK {
                 broken = true;
             }
         }
-        let fell = pos[0].y < pos[1].y || broken || head_shake > HEAD_SHAKE_LIMIT || failed;
+        let fell = x0.y < node_pos(1u).y || broken || head_shake > HEAD_SHAKE_LIMIT || failed;
         var ended = false;
         if fell {
             metrics.fall_time = time + DT;
@@ -1260,9 +1205,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
     }
     metrics.head_shake = head_shake;
     results[creature] = metrics;
-    records[base] = Record(x0, v0, warm[0], vec2f(0.0));
+    records[record_base] = Record(x0, v0, records[record_base].c, vec2f(0.0));
     for (var j = 0u; j < MAXB; j++) {
         if j >= nb { break; }
-        records[base + j + 1u] = Record(vec2f(q[j], qd[j]), warm[j + 1u], vec2f(0.0), vec2f(0.0));
+        records[record_base + j + 1u] = Record(vec2f(q[j], qd[j]), records[record_base + j + 1u].b, vec2f(0.0), vec2f(0.0));
     }
 }

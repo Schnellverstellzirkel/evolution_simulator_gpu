@@ -493,7 +493,7 @@ fn main() -> Result<()> {
                 }
                 Some(name) => Some(Box::new(evolution_simulator::engine::gpu_engine(
                     &name,
-                    16,
+                    64,
                     evolution_simulator::gpu::DEFAULT_STEP_RANGE,
                 )?)),
                 None => None,

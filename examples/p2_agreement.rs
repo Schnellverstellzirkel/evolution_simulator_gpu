@@ -15,7 +15,7 @@ use evolution_simulator::{
 use std::time::{Duration, Instant};
 
 fn gpu(pop: &Population, cfg: &Config, device: &str) -> anyhow::Result<(Vec<f32>, Vec<f32>, f64)> {
-    let mut engine = engine::gpu_engine(device, 16, evolution_simulator::gpu::DEFAULT_STEP_RANGE)?;
+    let mut engine = engine::gpu_engine(device, 64, evolution_simulator::gpu::DEFAULT_STEP_RANGE)?;
     // A first run builds the pipelines.
     engine.submit(pop.clone(), cfg)?;
     loop {
