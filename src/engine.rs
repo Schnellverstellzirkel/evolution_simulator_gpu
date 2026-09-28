@@ -7,7 +7,7 @@
 use crate::{
     config::Config,
     creature_kernel::{self, GpuResult},
-    evolution::Population,
+    evolution::{Creature, Population},
     vk_engine::{Completed, VkEngine},
 };
 use anyhow::{Context, Result};
@@ -27,6 +27,65 @@ pub struct Finished {
     pub results: Vec<GpuResult>,
     /// Device time spent on this unit.
     pub busy_seconds: f64,
+}
+
+/// A creature's trial recorded on the GPU for a replay: node positions
+/// before every step and after the last, and the result the kernel scored in
+/// the same run.
+pub struct Recording {
+    pub frames: Vec<Vec<[f32; 2]>>,
+    pub result: GpuResult,
+}
+
+struct ReplayRequest {
+    creature: Creature,
+    cfg: Config,
+    reply: mpsc::Sender<Result<Recording, String>>,
+}
+
+/// The GPU engine that records replays: the primary GPU, which scores the
+/// archive's creatures.
+static REPLAYS: std::sync::Mutex<Option<mpsc::Sender<ReplayRequest>>> = std::sync::Mutex::new(None);
+
+/// Records `creature`'s trial on the GPU whose scores the archive holds,
+/// with the kernel that scores evolution, waiting up to `timeout`. None
+/// when no GPU evaluates or it cannot answer in time.
+pub fn record_on_gpu(creature: &Creature, cfg: &Config, timeout: Duration) -> Option<Recording> {
+    let sender = REPLAYS.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+    let (reply, answer) = mpsc::channel();
+    sender
+        .send(ReplayRequest {
+            creature: creature.clone(),
+            cfg: cfg.clone(),
+            reply,
+        })
+        .ok()?;
+    match answer.recv_timeout(timeout) {
+        Ok(Ok(recording)) => Some(recording),
+        Ok(Err(error)) => {
+            eprintln!("GPU replay failed, the CPU replays instead: {error}");
+            None
+        }
+        Err(_) => {
+            eprintln!("GPU replay did not answer in time; the CPU replays instead");
+            None
+        }
+    }
+}
+
+/// A creature's full trial for the replay viewer and the result scored in
+/// the same run, from the engine that scores the archive: the GPU when one
+/// evaluates, the CPU engine in a CPU-only game. A replay runs the full
+/// trial, without the early screen.
+pub fn replay(creature: &Creature, cfg: &Config) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
+    let cfg = Config {
+        screen: None,
+        ..cfg.clone()
+    };
+    if let Some(recording) = record_on_gpu(creature, &cfg, Duration::from_secs(3)) {
+        return (recording.frames, recording.result);
+    }
+    crate::cpu_engine::replay(creature, &cfg)
 }
 
 pub trait Engine: Send {
@@ -65,9 +124,18 @@ pub struct ThreadedEngine {
     failure: Option<String>,
     next_ticket: u64,
     allocated: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Where a GPU engine takes replay requests.
+    replays: Option<mpsc::Sender<ReplayRequest>>,
 }
 
 impl ThreadedEngine {
+    /// Makes this GPU the one that records replays (`replay`).
+    pub fn publish_replays(&self) {
+        if let Some(sender) = &self.replays {
+            *REPLAYS.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender.clone());
+        }
+    }
+
     fn fail(&mut self, reason: &str) {
         self.failure
             .get_or_insert_with(|| format!("{} failed: {reason}", self.name));
@@ -239,6 +307,16 @@ trait SegmentDevice {
     /// Frees buffers kept for reuse by slots with nothing in flight.
     fn release_idle(&mut self) -> u64;
     fn allocated_bytes(&self) -> u64;
+    /// Whether a replay can be recorded now.
+    fn replay_free(&self) -> bool;
+    /// Queues a whole recorded trial of one batch (`VkEngine::record`).
+    fn record(
+        &mut self,
+        batch: &creature_kernel::LaneBatch,
+        cfg: &Config,
+        total: u32,
+        chunk: u32,
+    ) -> Result<u64>;
 }
 
 impl SegmentDevice for VkEngine {
@@ -265,6 +343,18 @@ impl SegmentDevice for VkEngine {
     }
     fn allocated_bytes(&self) -> u64 {
         self.allocated_bytes
+    }
+    fn replay_free(&self) -> bool {
+        VkEngine::replay_free(self)
+    }
+    fn record(
+        &mut self,
+        batch: &creature_kernel::LaneBatch,
+        cfg: &Config,
+        total: u32,
+        chunk: u32,
+    ) -> Result<u64> {
+        VkEngine::record(self, batch, cfg, total, chunk)
     }
 }
 
@@ -396,6 +486,7 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
     let (ready_tx, ready_rx) = mpsc::channel();
     let (jobs, job_rx) = mpsc::channel::<(u64, Arc<Population>, Config)>();
     let (done_tx, done) = mpsc::channel();
+    let (replays, replay_rx) = mpsc::channel::<ReplayRequest>();
     let allocated = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let thread_allocated = allocated.clone();
     let device_name = name.to_owned();
@@ -421,6 +512,7 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
                 &name,
                 job_rx,
                 done_tx,
+                Some(replay_rx),
                 &thread_allocated,
                 step_range,
                 memory,
@@ -441,20 +533,24 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
         failure: None,
         next_ticket: 0,
         allocated,
+        replays: Some(replays),
     })
 }
 
 /// The GPU engine thread: packs jobs, runs them in trial segments, and
 /// returns finished units until the job channel closes.
+#[allow(clippy::too_many_arguments)]
 fn run_segments<D: SegmentDevice>(
     mut engine: D,
     name: &str,
     job_rx: mpsc::Receiver<(u64, Arc<Population>, Config)>,
     done_tx: mpsc::Sender<Result<Finished, String>>,
+    replays: Option<mpsc::Receiver<ReplayRequest>>,
     allocated: &AtomicU64,
     step_range: u32,
     mut memory: MemoryBackoff,
 ) {
+    let mut recording: Option<InFlightReplay> = None;
     // Units whose next trial segment waits for a free slot (they go before
     // new jobs), and submitted segments by device ticket.
     let mut waiting: VecDeque<SegmentedUnit> = VecDeque::new();
@@ -463,19 +559,53 @@ fn run_segments<D: SegmentDevice>(
     let mut open = true;
     loop {
         if pending.is_none() && open {
-            let job = if running.is_empty() && waiting.is_empty() {
-                job_rx.recv().map_err(|_| ())
-            } else {
-                job_rx.try_recv().map_err(|_| ())
+            let idle = running.is_empty() && waiting.is_empty() && recording.is_none();
+            // While idle, wake every few milliseconds for replay requests.
+            let job = match (idle, &replays) {
+                (true, Some(_)) => job_rx.recv_timeout(Duration::from_millis(5)),
+                (true, None) => job_rx
+                    .recv()
+                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+                (false, _) => job_rx.try_recv().map_err(|error| match error {
+                    mpsc::TryRecvError::Empty => mpsc::RecvTimeoutError::Timeout,
+                    mpsc::TryRecvError::Disconnected => mpsc::RecvTimeoutError::Disconnected,
+                }),
             };
             match job {
                 Ok(job) => pending = Some(job),
-                Err(()) if running.is_empty() && waiting.is_empty() => open = false,
-                Err(()) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) if idle => open = false,
+                Err(_) => {}
             }
         }
-        if !open && running.is_empty() && waiting.is_empty() && pending.is_none() {
+        if !open
+            && running.is_empty()
+            && waiting.is_empty()
+            && pending.is_none()
+            && recording.is_none()
+        {
             break;
+        }
+        // Replays have their own slot and queue, so they never wait behind
+        // evaluation.
+        if recording.is_none()
+            && engine.replay_free()
+            && let Some(request) = replays.as_ref().and_then(|rx| rx.try_recv().ok())
+        {
+            match start_recording(&mut engine, &request, step_range) {
+                Ok((ticket, nodes, stride, total)) => {
+                    recording = Some(InFlightReplay {
+                        ticket,
+                        reply: request.reply,
+                        nodes,
+                        stride,
+                        total,
+                    });
+                }
+                Err(error) => {
+                    let _ = request.reply.send(Err(format!("{error:#}")));
+                }
+            }
+            allocated.store(engine.allocated_bytes(), Ordering::Relaxed);
         }
         if engine.free_slots() > 0 && memory.may_submit(Instant::now(), running.len()) {
             let next = match waiting.pop_front() {
@@ -550,7 +680,7 @@ fn run_segments<D: SegmentDevice>(
                 continue;
             }
         }
-        if running.is_empty() {
+        if running.is_empty() && recording.is_none() {
             // Nothing in flight: a unit may be waiting out a memory shortage.
             if let Some(pause) = memory.pause(Instant::now()) {
                 std::thread::sleep(pause.min(Duration::from_millis(50)));
@@ -559,6 +689,19 @@ fn run_segments<D: SegmentDevice>(
         }
         // Wait briefly for any submission, then check for new jobs.
         match engine.poll(Duration::from_millis(1)) {
+            Ok(Some(finished))
+                if recording
+                    .as_ref()
+                    .is_some_and(|replay| replay.ticket == finished.ticket) =>
+            {
+                let replay = recording.take().expect("a recording");
+                let _ = replay.reply.send(recorded(
+                    &finished,
+                    replay.nodes,
+                    replay.stride,
+                    replay.total,
+                ));
+            }
             Ok(Some(finished)) => {
                 // Units on separate queues can finish out of order.
                 let Some(position) = running
@@ -615,6 +758,61 @@ fn run_segments<D: SegmentDevice>(
             }
         }
     }
+}
+
+/// A replay being recorded: its device ticket, where the answer goes, and
+/// the body's node count, node stride and trial length.
+struct InFlightReplay {
+    ticket: u64,
+    reply: mpsc::Sender<Result<Recording, String>>,
+    nodes: usize,
+    stride: usize,
+    total: u32,
+}
+
+/// Packs a replay request's creature and queues its recording. Returns the
+/// device ticket, the body's node count and node stride, and the trial length.
+fn start_recording<D: SegmentDevice>(
+    engine: &mut D,
+    request: &ReplayRequest,
+    step_range: u32,
+) -> Result<(u64, usize, usize, u32)> {
+    let mut population = Population::default();
+    population.push(request.creature.clone());
+    let batches = creature_kernel::pack(&population, &[0])?;
+    anyhow::ensure!(batches.len() == 1, "A replay packs into one batch");
+    let fidelity = request.cfg.fidelity();
+    let total = fidelity.settle() + request.cfg.steps();
+    let batch = &batches[0];
+    let ticket = engine.record(batch, &request.cfg, total, step_range)?;
+    Ok((ticket, request.creature.nodes.len(), batch.capacity, total))
+}
+
+/// The replay in a finished recording: one frame per step and one after the
+/// last, each with the body's node positions.
+fn recorded(
+    finished: &Completed,
+    nodes: usize,
+    stride: usize,
+    total: u32,
+) -> Result<Recording, String> {
+    let flat = finished
+        .frames
+        .as_ref()
+        .ok_or("the recording returned no frames")?;
+    let result = *finished
+        .batches
+        .first()
+        .and_then(|(_, _, results)| results.first())
+        .ok_or("the recording returned no result")?;
+    let count = total as usize + 1;
+    if flat.len() < count * stride {
+        return Err("the recording returned too few frames".into());
+    }
+    let frames = (0..count)
+        .map(|t| flat[t * stride..t * stride + nodes].to_vec())
+        .collect();
+    Ok(Recording { frames, result })
 }
 
 fn worker_budget(logical: usize) -> usize {
@@ -733,6 +931,7 @@ pub fn cpu_engine_shared() -> Result<ThreadedEngine> {
         failure: None,
         next_ticket: 0,
         allocated: Default::default(),
+        replays: None,
     })
 }
 
@@ -779,6 +978,7 @@ pub fn cpu_engine(threads: usize) -> Result<ThreadedEngine> {
         failure: None,
         next_ticket: 0,
         allocated: Default::default(),
+        replays: None,
     })
 }
 
@@ -809,6 +1009,7 @@ mod tests {
                     failure: None,
                     next_ticket: 0,
                     allocated: Default::default(),
+                    replays: None,
                 },
                 jobs: job_rx,
                 done: done_tx,
@@ -1047,13 +1248,16 @@ mod tests {
 
     /// Slice positions and population indices of each submitted batch.
     type Layout = Vec<(Vec<usize>, Vec<usize>)>;
+    /// Node stride and trial length of a recording.
+    type Stretch = (usize, u32);
 
     /// A device that runs every unit at once and can fail submissions for
     /// lack of memory, following `script` (true fails; missing entries succeed).
     struct FakeDevice {
         slots: usize,
         script: VecDeque<bool>,
-        in_flight: VecDeque<(u64, Layout)>,
+        /// Submissions in order, with (node stride, trial length) for a recording.
+        in_flight: VecDeque<(u64, Layout, Option<Stretch>)>,
         next: u64,
         released: Arc<AtomicU64>,
         most_in_flight: Arc<AtomicU64>,
@@ -1098,7 +1302,7 @@ mod tests {
                 .iter()
                 .map(|b| (b.slots.clone(), b.creatures.clone()))
                 .collect();
-            self.in_flight.push_back((ticket, layout));
+            self.in_flight.push_back((ticket, layout, None));
             self.most_in_flight
                 .fetch_max(self.in_flight.len() as u64, Ordering::Relaxed);
             Ok(ticket)
@@ -1108,7 +1312,7 @@ mod tests {
             Ok(self
                 .in_flight
                 .pop_front()
-                .map(|(ticket, layout)| Completed {
+                .map(|(ticket, layout, recorded)| Completed {
                     ticket,
                     batches: layout
                         .into_iter()
@@ -1125,6 +1329,12 @@ mod tests {
                         })
                         .collect(),
                     state: None,
+                    // Frame t puts node j at (t, j).
+                    frames: recorded.map(|(stride, total)| {
+                        (0..=total)
+                            .flat_map(|t| (0..stride).map(move |j| [t as f32, j as f32]))
+                            .collect()
+                    }),
                     gpu_seconds: 0.001,
                 }))
         }
@@ -1134,6 +1344,26 @@ mod tests {
         }
         fn allocated_bytes(&self) -> u64 {
             0
+        }
+        fn replay_free(&self) -> bool {
+            !self
+                .in_flight
+                .iter()
+                .any(|(_, _, recorded)| recorded.is_some())
+        }
+        fn record(
+            &mut self,
+            batch: &creature_kernel::LaneBatch,
+            _cfg: &Config,
+            total: u32,
+            _chunk: u32,
+        ) -> Result<u64> {
+            let ticket = self.next;
+            self.next += 1;
+            let layout = vec![(batch.slots.clone(), batch.creatures.clone())];
+            self.in_flight
+                .push_back((ticket, layout, Some((batch.capacity, total))));
+            Ok(ticket)
         }
     }
 
@@ -1164,11 +1394,66 @@ mod tests {
             "fake GPU",
             job_rx,
             done_tx,
+            None,
             &AtomicU64::new(0),
             64,
             memory,
         );
         done.try_iter().collect()
+    }
+
+    #[test]
+    fn the_gpu_thread_records_replays_beside_evaluation() {
+        let (jobs, job_rx) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let (replays, replay_rx) = mpsc::channel();
+        let cfg = Config {
+            population: 8,
+            duration: 1.0,
+            random_seed: false,
+            ..Config::default()
+        };
+        let pop = Arc::new(crate::evolution::create(&cfg).unwrap());
+        let creature = pop.creature(3);
+        let thread = std::thread::spawn(move || {
+            let memory = MemoryBackoff::new(2, Duration::from_millis(2), Duration::from_secs(10));
+            run_segments(
+                FakeDevice::new(2, &[]),
+                "fake GPU",
+                job_rx,
+                done_tx,
+                Some(replay_rx),
+                &AtomicU64::new(0),
+                64,
+                memory,
+            );
+        });
+        jobs.send((0, Arc::clone(&pop), cfg.clone())).unwrap();
+        let (reply, answer) = mpsc::channel();
+        replays
+            .send(ReplayRequest {
+                creature: creature.clone(),
+                cfg: cfg.clone(),
+                reply,
+            })
+            .unwrap();
+        let recording = answer
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        let total = cfg.fidelity().settle() + cfg.steps();
+        assert_eq!(recording.frames.len(), total as usize + 1);
+        for (t, frame) in recording.frames.iter().enumerate() {
+            assert_eq!(frame.len(), creature.nodes.len());
+            for (j, position) in frame.iter().enumerate() {
+                assert_eq!(*position, [t as f32, j as f32]);
+            }
+        }
+        assert_eq!(recording.result.fall_time, 1.0);
+        let finished = done.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+        assert_eq!(finished.ticket, 0);
+        drop(jobs);
+        thread.join().unwrap();
     }
 
     #[test]

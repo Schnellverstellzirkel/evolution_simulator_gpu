@@ -84,7 +84,7 @@ Each behavior archive has 1,440 possible niches for ground contact, gait cadence
 
 Potential archive entrants receive a perturbed trial at four times the standard physics rate and solver passes. The selected evaluation engine's standard result and this check determine archive fitness and behavior. In the full-performance run, both are GPU evaluations; CPU playback or comparison never edits the score or descriptor.
 
-Replays still use `cpu_engine::replay` to produce frames and a CPU playback result. That result is for the viewer; it can differ from the GPU-scored archive and never changes it. Cross-engine comparisons are optional diagnostics, not a physics-change acceptance gate. See [architecture](docs/architecture.md) for the execution paths.
+Replays are recorded by the GPU that scores the archive (`engine::replay`): the scoring kernel with a frame output, on a submission slot and queue of its own, so the replay shows the trial and the distance the archive holds. A CPU-only game replays on the CPU engine (`cpu_engine::replay`). Cross-engine comparisons are optional diagnostics, not a physics-change acceptance gate. See [architecture](docs/architecture.md) for the execution paths.
 
 ## Headless experiments and diagnostics
 

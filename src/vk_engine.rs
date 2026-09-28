@@ -39,6 +39,8 @@ struct Slot {
     groups: Vec<Option<GroupRes>>,
     params: Option<Buf>,
     readback: Option<Buf>,
+    /// Recorded replay frames (binding 7); only the replay slot has one.
+    frames: Option<Buf>,
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
     query_pool: vk::QueryPool,
@@ -53,6 +55,9 @@ struct Pending {
     /// Per batch: node count and muscle buffer length read back after the
     /// results, when the trial continues in a later segment.
     state: Option<Vec<(usize, usize)>>,
+    /// Recorded frames: their byte offset in the readback buffer and their
+    /// count of node positions.
+    frames: Option<(u64, usize)>,
 }
 
 /// Results of one completed submission: per batch, the slice positions, the
@@ -63,6 +68,9 @@ pub struct Completed {
     /// Per batch, when asked for: node state and muscle buffer at the end of
     /// the segment, for `LaneBatch::repack`.
     pub state: Option<Vec<(Vec<crate::physics::Node>, Vec<f32>)>>,
+    /// For a recording (`VkEngine::record`): node positions as
+    /// `[creature][frame][node]`, with the batch's node stride.
+    pub frames: Option<Vec<[f32; 2]>>,
     pub gpu_seconds: f64,
 }
 
@@ -82,8 +90,13 @@ pub struct VkEngine {
         (creature_kernel::Plan, usize, crate::physics::Fidelity),
         vk::Pipeline,
     >,
+    /// Recording kernels (`creature_kernel::record_source`) by fidelity and
+    /// node capacity, built on first use.
+    recording: std::collections::HashMap<(crate::physics::Fidelity, usize), vk::Pipeline>,
     descriptor_pool: vk::DescriptorPool,
     command_pool: vk::CommandPool,
+    /// Submission slots. The last one is kept for replays, on its own queue
+    /// when the device has one, so a replay never waits behind evaluation.
     slots: Vec<Slot>,
     next_ticket: u64,
     params_stride: u64,
@@ -102,6 +115,9 @@ unsafe impl Send for VkEngine {}
 /// Descriptor sets the pool holds: one per batch of each submission slot
 /// (body-size buckets plus body-plan batches).
 const MAX_SETS: u32 = 1024;
+/// Descriptor bindings: six storage buffers and the parameters (3) for
+/// scoring, and the recorded frames (7) for replays.
+const BINDINGS: u32 = 8;
 
 /// Submission slots per GPU (`EVOLUTION_GPU_SLOTS`, 1 to 8, default 4), each
 /// on its own queue when the device offers enough.
@@ -203,7 +219,8 @@ impl VkEngine {
                         .position(|f| f.queue_flags.contains(vk::QueueFlags::COMPUTE))
                 })
                 .context("No compute queue")? as u32;
-            let slot_count = gpu_slots();
+            // Evaluation slots plus one for replays.
+            let slot_count = gpu_slots() + 1;
             let queue_count = families[family as usize].queue_count.clamp(1, slot_count);
             let priorities = vec![1.0; queue_count as usize];
             let queue_info = [vk::DeviceQueueCreateInfo::default()
@@ -221,7 +238,7 @@ impl VkEngine {
                 .collect();
             let memory_properties = instance.get_physical_device_memory_properties(physical);
 
-            let bindings: Vec<_> = (0..7u32)
+            let bindings: Vec<_> = (0..BINDINGS)
                 .map(|b| {
                     vk::DescriptorSetLayoutBinding::default()
                         .binding(b)
@@ -256,7 +273,7 @@ impl VkEngine {
             let pool_sizes = [
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
-                    descriptor_count: 6 * MAX_SETS,
+                    descriptor_count: (BINDINGS - 1) * MAX_SETS,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
@@ -288,6 +305,7 @@ impl VkEngine {
                     groups: (0..CAPACITIES.len()).map(|_| None).collect(),
                     params: None,
                     readback: None,
+                    frames: None,
                     command_buffer,
                     fence: device.create_fence(&vk::FenceCreateInfo::default(), None)?,
                     query_pool: device.create_query_pool(
@@ -310,6 +328,7 @@ impl VkEngine {
                 pipeline_layout,
                 pipelines,
                 specialized: Default::default(),
+                recording: Default::default(),
                 descriptor_pool,
                 command_pool,
                 slots,
@@ -431,6 +450,7 @@ impl VkEngine {
         batches: &[LaneBatch],
         dispatches: u64,
         read_state: bool,
+        frame_bytes: u64,
     ) -> Result<()> {
         let params_bytes = dispatches * self.params_stride;
         if self.slots[slot]
@@ -462,6 +482,23 @@ impl VkEngine {
                         + std::mem::size_of_val(b.muscles.as_slice())) as u64
                 })
                 .sum::<u64>();
+        }
+        result_bytes += frame_bytes;
+        if frame_bytes > 0
+            && self.slots[slot]
+                .frames
+                .as_ref()
+                .is_none_or(|b| b.size < frame_bytes)
+        {
+            if let Some(old) = self.slots[slot].frames.take() {
+                self.destroy_buffer(old);
+            }
+            let frames = self.create_buffer(
+                frame_bytes,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
+                false,
+            )?;
+            self.slots[slot].frames = Some(frames);
         }
         if self.slots[slot]
             .readback
@@ -580,6 +617,26 @@ impl VkEngine {
             unsafe { self.device.update_descriptor_sets(&writes, &[]) };
             self.slots[slot].groups[group] = Some(res);
         }
+        // A recording writes its frames through binding 7. Scoring kernels
+        // never use it, so their sets leave it unset.
+        if frame_bytes > 0 {
+            let frames = self.slots[slot].frames.as_ref().expect("frames buffer");
+            let info = [vk::DescriptorBufferInfo::default()
+                .buffer(frames.buffer)
+                .range(vk::WHOLE_SIZE)];
+            let writes: Vec<_> = self.slots[slot].groups[..batches.len()]
+                .iter()
+                .flatten()
+                .map(|group| {
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(group.set)
+                        .dst_binding(BINDINGS - 1)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(&info)
+                })
+                .collect();
+            unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+        }
         Ok(())
     }
 
@@ -599,6 +656,7 @@ impl VkEngine {
             .sum::<u64>()
             + slot.params.as_ref().map_or(0, |b| b.size)
             + slot.readback.as_ref().map_or(0, |b| b.size)
+            + slot.frames.as_ref().map_or(0, |b| b.size)
     }
 
     fn recount_allocated(&mut self) {
@@ -621,6 +679,9 @@ impl VkEngine {
                 self.destroy_buffer(b);
             }
             if let Some(b) = self.slots[slot].readback.take() {
+                self.destroy_buffer(b);
+            }
+            if let Some(b) = self.slots[slot].frames.take() {
                 self.destroy_buffer(b);
             }
         }
@@ -648,13 +709,47 @@ impl VkEngine {
         }
     }
 
-    /// Number of submissions that can be queued without waiting.
+    /// Number of evaluation submissions that can be queued without waiting.
     pub fn free_slots(&self) -> usize {
-        self.slots.iter().filter(|s| s.pending.is_none()).count()
+        self.evaluation_slots()
+            .filter(|&i| self.slots[i].pending.is_none())
+            .count()
     }
 
+    /// Submissions in flight, replays included.
     pub fn in_flight(&self) -> usize {
-        self.slots.len() - self.free_slots()
+        self.slots.iter().filter(|s| s.pending.is_some()).count()
+    }
+
+    fn evaluation_slots(&self) -> std::ops::Range<usize> {
+        0..self.slots.len() - 1
+    }
+
+    fn replay_slot(&self) -> usize {
+        self.slots.len() - 1
+    }
+
+    /// Whether a replay can be recorded now.
+    pub fn replay_free(&self) -> bool {
+        self.slots[self.replay_slot()].pending.is_none()
+    }
+
+    /// The recording kernel for `capacity`-node buckets, built on first use.
+    fn recording_pipeline(
+        &mut self,
+        capacity: usize,
+        fidelity: crate::physics::Fidelity,
+    ) -> Result<vk::Pipeline> {
+        if let Some(&pipeline) = self.recording.get(&(fidelity, capacity)) {
+            return Ok(pipeline);
+        }
+        let pipeline = Self::compile(
+            &self.device,
+            self.pipeline_layout,
+            &creature_kernel::record_source(capacity, self.workgroup, fidelity),
+        )?;
+        self.recording.insert((fidelity, capacity), pipeline);
+        Ok(pipeline)
     }
 
     /// Compiles the kernel for every node capacity up to `max_capacity`.
@@ -752,6 +847,45 @@ impl VkEngine {
         chunk: u32,
         read_state: bool,
     ) -> Result<u64> {
+        self.submit_as(batches, cfg, start, end, total, chunk, read_state, false)
+    }
+
+    /// Queues a whole trial of one batch on the replay slot with the
+    /// recording kernel, which writes every creature's frames. The result
+    /// arrives through `poll` with `Completed::frames`. The trial is the one
+    /// `submit` scores, computed the same way.
+    pub fn record(
+        &mut self,
+        batch: &LaneBatch,
+        cfg: &Config,
+        total: u32,
+        chunk: u32,
+    ) -> Result<u64> {
+        ensure!(self.replay_free(), "A replay is already being recorded");
+        self.submit_as(
+            std::slice::from_ref(batch),
+            cfg,
+            0,
+            total,
+            total,
+            chunk,
+            false,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_as(
+        &mut self,
+        batches: &[LaneBatch],
+        cfg: &Config,
+        start: u32,
+        end: u32,
+        total: u32,
+        chunk: u32,
+        read_state: bool,
+        record: bool,
+    ) -> Result<u64> {
         ensure!(
             !batches.is_empty() && start < end && end <= total,
             "Empty GPU batch"
@@ -764,29 +898,41 @@ impl VkEngine {
         let pipeline_set = self.pipeline_set(fidelity)?;
         // The free slot with the most buffers to reuse: when memory is short,
         // a new allocation may fail where reuse does not.
-        let slot = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.pending.is_none())
-            .max_by_key(|&(i, s)| (Self::slot_bytes(s), std::cmp::Reverse(i)))
-            .map(|(i, _)| i)
-            .context("No free GPU submission slot")?;
+        let slot = if record {
+            self.replay_slot()
+        } else {
+            self.evaluation_slots()
+                .filter(|&i| self.slots[i].pending.is_none())
+                .max_by_key(|&i| (Self::slot_bytes(&self.slots[i]), std::cmp::Reverse(i)))
+                .context("No free GPU submission slot")?
+        };
         let ranges = (end - start).div_ceil(chunk);
         let kernels: Vec<vk::Pipeline> =
             batches
                 .iter()
                 .map(|batch| match &batch.plan {
+                    _ if record => self.recording_pipeline(batch.capacity, fidelity),
                     Some(plan) => self.specialized_pipeline(plan, batch.capacity, fidelity),
                     None => Ok(self.pipelines[pipeline_set].1
                         [creature_kernel::capacity_index(batch.capacity)]),
                 })
                 .collect::<Result<_>>()?;
+        // Node positions for every creature, before each step and after the last.
+        let frame_count: usize = if record {
+            batches
+                .iter()
+                .map(|b| b.info.len() * b.capacity * (total as usize + 1))
+                .sum()
+        } else {
+            0
+        };
+        let frame_bytes = (frame_count * std::mem::size_of::<[f32; 2]>()) as u64;
         let buffers = self.ensure_buffers(
             slot,
             batches,
             u64::from(ranges) * batches.len() as u64,
             read_state,
+            frame_bytes,
         );
         self.recount_allocated();
         buffers?;
@@ -840,6 +986,7 @@ impl VkEngine {
         let device = &self.device;
         let cb = resources.command_buffer;
         let result_count: usize = batches.iter().map(|b| b.info.len()).sum();
+        let mut frames_offset = 0u64;
         unsafe {
             device.reset_command_buffer(cb, vk::CommandBufferResetFlags::empty())?;
             device.begin_command_buffer(
@@ -944,6 +1091,17 @@ impl VkEngine {
                     }
                 }
             }
+            if record {
+                frames_offset = offset;
+                device.cmd_copy_buffer(
+                    cb,
+                    resources.frames.as_ref().expect("frames buffer").buffer,
+                    readback.buffer,
+                    &[vk::BufferCopy::default()
+                        .dst_offset(offset)
+                        .size(frame_bytes)],
+                );
+            }
             let to_host = vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                 .dst_access_mask(vk::AccessFlags::HOST_READ);
@@ -979,6 +1137,7 @@ impl VkEngine {
                     .map(|b| (b.nodes.len(), b.muscles.len()))
                     .collect()
             }),
+            frames: record.then_some((frames_offset, frame_count)),
         });
         Ok(ticket)
     }
@@ -1085,11 +1244,19 @@ impl VkEngine {
                     })
                     .collect()
             });
+            let frames = pending.frames.map(|(offset, count)| {
+                std::slice::from_raw_parts(
+                    readback.ptr.add(offset as usize) as *const [f32; 2],
+                    count,
+                )
+                .to_vec()
+            });
             self.last_gpu_seconds = gpu_seconds;
             Ok(Some(Completed {
                 ticket: pending.ticket,
                 batches,
                 state,
+                frames,
                 gpu_seconds,
             }))
         }
@@ -1154,6 +1321,9 @@ impl Drop for VkEngine {
             if let Some(b) = self.slots[slot].readback.take() {
                 self.destroy_buffer(b);
             }
+            if let Some(b) = self.slots[slot].frames.take() {
+                self.destroy_buffer(b);
+            }
         }
         unsafe {
             for slot in &self.slots {
@@ -1168,7 +1338,7 @@ impl Drop for VkEngine {
                     self.device.destroy_pipeline(p, None);
                 }
             }
-            for &p in self.specialized.values() {
+            for &p in self.specialized.values().chain(self.recording.values()) {
                 self.device.destroy_pipeline(p, None);
             }
             self.device

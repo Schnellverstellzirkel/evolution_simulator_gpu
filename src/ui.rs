@@ -347,7 +347,7 @@ struct Playback {
     fall: Option<(u32, f32)>,
     /// Which of the three events ended the trial, when one did.
     ending: Ending,
-    /// The distance the CPU engine scored for this very recording.
+    /// The distance the engine scored for this very recording.
     distance: f32,
     /// Where the follow camera looks at each frame: the body's center of
     /// mass averaged over `CAMERA_WINDOW` seconds on either side. Every
@@ -386,8 +386,9 @@ impl Playback {
         let mut normalized = creature.clone();
         crate::evolution::canonicalize_bone_order(&mut normalized);
         // The engine that recorded the frames also decides when the trial
-        // ended and how far it got, so the replay shows exactly its score.
-        let (frames, result) = crate::cpu_engine::replay(&normalized, &config);
+        // ended and how far it got, so the replay shows exactly its score:
+        // the GPU that scores the archive, or the CPU in a CPU-only game.
+        let (frames, result) = crate::engine::replay(&normalized, &config);
         let nodes = physics::nodes(&normalized);
         let joints = physics::joints(&normalized.nodes, &normalized.bones);
         let last_frame = frames.len().saturating_sub(1).min(u32::MAX as usize) as u32;

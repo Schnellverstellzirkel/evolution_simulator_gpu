@@ -297,13 +297,17 @@ impl Scheduler {
             // With screening and segments at 3M: 0.5 s units measured 165k
             // creatures/s end to end, 1 s 187k (12.5 GB peak RSS), 2 s 177k,
             // 3 s 169k (15.0 GB).
-            Ok(gpu) => devices.push(Device::new(
-                Box::new(gpu),
-                DeviceKind::Gpu,
-                180_000.0,
-                8192,
-                env_or("EVOLUTION_UNIT_SECONDS", 1.0),
-            )),
+            Ok(gpu) => {
+                // The primary GPU scores the archive, so it records replays.
+                gpu.publish_replays();
+                devices.push(Device::new(
+                    Box::new(gpu),
+                    DeviceKind::Gpu,
+                    180_000.0,
+                    8192,
+                    env_or("EVOLUTION_UNIT_SECONDS", 1.0),
+                ))
+            }
             Err(error) => {
                 let message = format!("Primary GPU {primary:?} unavailable: {error:#}");
                 eprintln!("{message}; evaluating on the CPU");

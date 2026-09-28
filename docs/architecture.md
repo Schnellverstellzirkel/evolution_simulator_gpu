@@ -17,7 +17,7 @@
 | `worker` | Background evolution, command handling, snapshots, and autosaves |
 | `ui` | egui dashboard and creature playback |
 
-The production scoring path is `shaders/physics_creature.wgsl`. In a GPU run, its result and the GPU fine check own fitness and behavior descriptors; CPU evaluation never validates, caps, or relocates a GPU score. `cpu_engine` and `simd` remain available for CPU-only operation, failover, diagnostics, and replay playback. They may differ from the GPU and are not an oracle for GPU changes. Replay calls `cpu_engine::replay`, which returns recorded frames and a CPU playback result from one stepping loop; `cpu_engine::trajectory` is the frames-only wrapper. `physics::evaluate` is a CPU compatibility wrapper. The older `physics::step` loop remains for direct tests and the legacy momentum ledger.
+The production scoring path is `shaders/physics_creature.wgsl`. In a GPU run, its result and the GPU fine check own fitness and behavior descriptors; CPU evaluation never validates, caps, or relocates a GPU score. `cpu_engine` and `simd` remain available for CPU-only operation, failover and diagnostics. They may differ from the GPU and are not an oracle for GPU changes. Replay calls `engine::replay`. With a GPU it sends the creature to the primary GPU's engine thread, which runs the recording kernel (`creature_kernel::record_source`: the scoring kernel plus a frame output in binding 7) on a submission slot and queue kept for replays, and returns the frames and the result of that same run. Without a GPU, or when the GPU does not answer within 3 s, it falls back to `cpu_engine::replay`, which returns recorded frames and a CPU result from one stepping loop; `cpu_engine::trajectory` is the frames-only wrapper. `physics::evaluate` is a CPU compatibility wrapper. The older `physics::step` loop remains for direct tests and the legacy momentum ledger.
 
 ## Physics and scoring
 
@@ -62,7 +62,7 @@ The blocking `Gpu::evaluate_with_metrics` path, used by the headless CLI, has no
 
 Archive admission uses the selected evaluator's result. A normal GPU run keeps the GPU standard score and behavior descriptors, then applies the GPU fine check to eligible contenders. Archive insertion does not run a CPU replay or adjust those values afterward.
 
-`cpu_engine::replay` returns `(frames, result)` for playback at the supplied configuration's fidelity. Its displayed playback result can differ from the GPU archive score; it does not change that score. Cross-engine comparisons remain optional diagnostics, not acceptance gates.
+`engine::replay` returns `(frames, result)` for playback at the supplied configuration's fidelity. On the GPU the result is bit for bit the standard trial the archive scored (test `gpu_replays_show_the_gpu_score`). The CPU fallback's result can differ from a GPU archive score; it does not change that score. Cross-engine comparisons remain optional diagnostics, not acceptance gates.
 
 ## GPU and CPU scheduling
 

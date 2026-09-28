@@ -486,6 +486,65 @@ pub fn shader_source(
     base_source(capacity, capacity, workgroup, fidelity).replace("MUSCLE_LOOP", "muscle_count")
 }
 
+/// The creature kernel that also records every creature's trial for a
+/// replay: node positions before each step and after the last, in binding 7
+/// as `[creature][frame][node]` with the bucket's node stride. It computes
+/// exactly what `shader_source` computes. Its only other change: a creature
+/// keeps moving after its trial ends (limp after a fall), as the CPU replay
+/// shows it, while its result stays the one at the end of the trial.
+pub fn record_source(
+    capacity: usize,
+    workgroup: u32,
+    fidelity: crate::physics::Fidelity,
+) -> String {
+    base_source_from(recording_text(), capacity, capacity, workgroup, fidelity)
+        .replace("MUSCLE_LOOP", "muscle_count")
+}
+
+/// The changes `record_source` makes to the kernel text, applied before the
+/// constants are filled in. Each must match exactly once.
+const RECORD_EDITS: [(&str, &str); 4] = [
+    (
+        "@group(0) @binding(6) var<storage, read> tile_info: array<vec4u>;\n",
+        "@group(0) @binding(6) var<storage, read> tile_info: array<vec4u>;\n\
+         @group(0) @binding(7) var<storage, read_write> frames: array<vec2f>;\n",
+    ),
+    (
+        "    for (var s = 0u; s < p.steps; s++) {\n",
+        "    // The result at the end of the trial; the body keeps moving after it.\n\
+         var kept = metrics;\n\
+         var ended = metrics.fall_time > 0.0 || metrics.screened > 0.0;\n\
+         for (var s = 0u; s < p.steps; s++) {\n",
+    ),
+    (
+        "        if metrics.fall_time > 0.0 || metrics.screened > 0.0 {\n            break;\n        }\n        let tick = p.tick + s;\n",
+        "        let tick = p.tick + s;\n\
+         if !ended && (metrics.fall_time > 0.0 || metrics.screened > 0.0) {\n\
+             kept = metrics;\n\
+             ended = true;\n\
+         }\n\
+         let frame = (creature * (p.total_steps + 1u) + tick) * STRIDE;\n\
+         for (var j = 0u; j < MAXN; j++) {\n\
+             if j >= body_nodes { break; }\n\
+             frames[frame + j] = pos[node_k(j, lane)];\n\
+         }\n",
+    ),
+    (
+        "    results[creature] = metrics;\n",
+        "    if !ended {\n\
+             kept = metrics;\n\
+         }\n\
+         results[creature] = kept;\n\
+         if p.tick + p.steps >= p.total_steps {\n\
+             let frame = (creature * (p.total_steps + 1u) + p.total_steps) * STRIDE;\n\
+             for (var j = 0u; j < MAXN; j++) {\n\
+                 if j >= body_nodes { break; }\n\
+                 frames[frame + j] = pos[node_k(j, lane)];\n\
+             }\n\
+         }\n",
+    ),
+];
+
 /// The creature kernel for one body plan, in a bucket of node stride
 /// `capacity`. Node, bone and muscle endpoints are constants, so every node
 /// and bone loop unrolls with fixed indices and node state lives in
@@ -556,7 +615,32 @@ fn base_source(
     workgroup: u32,
     fidelity: crate::physics::Fidelity,
 ) -> String {
+    base_source_from(
+        include_str!("../shaders/physics_creature.wgsl").to_owned(),
+        capacity,
+        stride,
+        workgroup,
+        fidelity,
+    )
+}
+
+/// The kernel text with `RECORD_EDITS` applied.
+fn recording_text() -> String {
     let mut source = include_str!("../shaders/physics_creature.wgsl").to_owned();
+    for (from, to) in RECORD_EDITS {
+        assert_eq!(source.matches(from).count(), 1, "record edit {from:?}");
+        source = source.replace(from, to);
+    }
+    source
+}
+
+fn base_source_from(
+    mut source: String,
+    capacity: usize,
+    stride: usize,
+    workgroup: u32,
+    fidelity: crate::physics::Fidelity,
+) -> String {
     if capacity >= 24 {
         // Constant bounds let compilers unroll every node and bone loop. That
         // keeps small bodies in registers, but RADV's compile time explodes for
@@ -742,6 +826,19 @@ mod tests {
                     crate::physics::quake_hash(pop.genomes[i].id),
                     "packed creature {i} must carry its own quake seed"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn recording_kernels_compile() {
+        for fidelity in [Fidelity::standard(), Fidelity::fine()] {
+            for capacity in [3, 8, 24, 64] {
+                let source = record_source(capacity, 32, fidelity);
+                assert!(source.contains("frames[frame + j]"));
+                crate::vk_engine::spirv(&source).unwrap_or_else(|e| {
+                    panic!("{capacity}-node recording kernel at {fidelity:?}: {e:#}")
+                });
             }
         }
     }
