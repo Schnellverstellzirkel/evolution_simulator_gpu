@@ -61,6 +61,7 @@ Physics exists in three places; only the GPU path defines scores in a GPU run:
 - the GPU kernel: `shaders/physics_creature.wgsl`, driven by `src/gpu.rs` and `src/vk_engine.rs`
 - the AVX-512 CPU engine: `src/cpu_engine.rs` and `src/simd.rs`
 - the older CPU reference: `src/physics.rs`
+- the CUDA port of the GPU kernel, which the game uses on NVIDIA GPUs whenever the driver and NVRTC load: `shaders/physics_creature.cu`, driven by `src/cuda_engine.rs`. It mirrors the WGSL kernel section for section; change both together.
 
 The replay viewport plays frames from the CPU engine (`cpu_engine::replay`); its result may differ from a GPU archive score. `src/creature_kernel.rs` packs creatures for the GPU. `src/scheduler.rs` routes work to healthy GPUs and uses the CPU as a separate fallback. `physics::body()` computes node masses for CPU callers; GPU packing uses `body_into()` with reused storage.
 

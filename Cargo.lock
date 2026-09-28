@@ -1174,6 +1174,7 @@ dependencies = [
  "egui_plot",
  "image",
  "libc",
+ "libloading",
  "naga",
  "pollster 0.4.0",
  "rayon",

@@ -477,6 +477,143 @@ pub fn plan_of(pop: &Population, index: usize) -> Plan {
     }
 }
 
+/// Kernel parameters for ticks `tick..tick + steps` of a `total`-tick trial
+/// of `count` creatures in `capacity`-node buckets. Both GPU backends use it.
+pub fn launch_params(
+    cfg: &crate::config::Config,
+    capacity: usize,
+    count: usize,
+    tick: u32,
+    steps: u32,
+    total: u32,
+) -> Params {
+    let fidelity = cfg.fidelity();
+    Params {
+        tick,
+        steps,
+        stride: capacity as u32,
+        count: count as u32,
+        gravity: cfg.gravity,
+        air: fidelity.air_per_step(cfg.air_retention),
+        friction: cfg.ground_friction,
+        ground: if cfg.ground { 1.0 } else { 0.0 },
+        total_steps: total,
+        terrain: crate::physics::terrain_amplitude(cfg.terrain),
+        muscle_energy: cfg.muscle_energy,
+        muscle_recovery: cfg.muscle_recovery,
+        // A disabled ground ignores the slope effect, as on the CPU.
+        slope: if cfg.ground { cfg.slope } else { 0.0 },
+        wind: cfg.wind,
+        // A disabled ground also ignores mud, gaps, hurdles, and the earthquake.
+        mud: if cfg.ground { cfg.mud } else { 0.0 },
+        gaps: if cfg.ground { cfg.gaps } else { 0.0 },
+        hurdles: if cfg.ground { cfg.hurdles } else { 0.0 },
+        quake: if cfg.ground { cfg.quake } else { 0.0 },
+        screen_tick: cfg.screen.map_or(0, |screen| screen.tick(fidelity)),
+        screen_bar: cfg.screen.map_or(f32::NEG_INFINITY, |screen| screen.bar),
+    }
+}
+
+/// The CUDA C++ creature kernel (`shaders/physics_creature.cu`) for
+/// `capacity`-node buckets. It prepends, as `#define` lines, the same
+/// constants `base_source` writes into the WGSL kernel. With
+/// `launch_bounds`, the kernel declares its block size and the compiler may
+/// use up to 255 registers per thread. Without, NVRTC's `--maxrregcount`
+/// caps them (launch bounds would override it).
+pub fn cuda_source(
+    capacity: usize,
+    workgroup: u32,
+    fidelity: crate::physics::Fidelity,
+    launch_bounds: bool,
+) -> String {
+    let limits = crate::physics::limits();
+    // Large bodies loop to their runtime size, as in base_source.
+    let large = capacity >= 24;
+    let float = |value: f32| format!("{value:?}f");
+    let (turn_cos, turn_tan) = fidelity.turn_limits();
+    let defines = [
+        ("WG", format!("{workgroup}u")),
+        ("MAXN", format!("{capacity}u")),
+        ("STRIDE", format!("{capacity}u")),
+        ("SHAREDLEN", (capacity * workgroup as usize).to_string()),
+        (
+            "NODE_BOUND",
+            (if large { "body_nodes" } else { "MAXN" }).into(),
+        ),
+        (
+            "BONE_BOUND",
+            (if large { "bone_count" } else { "MAXB" }).into(),
+        ),
+        (
+            "UNROLL",
+            (if large { "" } else { "_Pragma(\"unroll\")" }).into(),
+        ),
+        (
+            "LAUNCH_BOUNDS",
+            if launch_bounds {
+                format!("__launch_bounds__({workgroup})")
+            } else {
+                String::new()
+            },
+        ),
+        (
+            "EXACT_COS",
+            (if std::env::var_os("EVOLUTION_EXACT_COS").is_some() {
+                "1"
+            } else {
+                "0"
+            })
+            .into(),
+        ),
+        ("MUSCLE_CAPACITY", float(limits.muscle_energy)),
+        ("MUSCLE_RECOVERY", float(limits.muscle_recovery)),
+        ("MAX_MUSCLE_FORCE", float(limits.muscle_force)),
+        ("MAX_NODE_SPEED", float(limits.node_speed)),
+        ("MAX_BONE_ANGULAR_SPEED", float(limits.bone_spin)),
+        ("PLANTED_SPEED", float(physics::PLANTED_SPEED)),
+        ("STANCE_GRIP", float(physics::stance_grip())),
+        ("HEAD_SHAKE_LIMIT", float(physics::HEAD_SHAKE_LIMIT)),
+        ("HEAD_SHAKE_WINDOW", float(physics::HEAD_SHAKE_WINDOW)),
+        ("MUD_NORMAL", float(physics::MUD_NORMAL)),
+        ("MUD_GRIP", float(physics::MUD_GRIP)),
+        ("MUD_DRAG", float(physics::MUD_DRAG)),
+        ("MUD_FULL_DEPTH", float(physics::MUD_FULL_DEPTH)),
+        ("GAP_DEPTH", float(physics::GAP_DEPTH)),
+        ("GAP_RUN", float(physics::GAP_RUN)),
+        ("HURDLE_SPACING", float(physics::HURDLE_SPACING)),
+        ("HURDLE_TOP", float(physics::HURDLE_TOP)),
+        ("HURDLE_RUN", float(physics::HURDLE_RUN)),
+        ("LIFT_CLEARANCE", "0.01f".into()),
+        (
+            "BONE_SOLVE_ITERATIONS",
+            format!("{}u", fidelity.bone_passes),
+        ),
+        (
+            "VELOCITY_SOLVE_ITERATIONS",
+            format!("{}u", fidelity.velocity_passes),
+        ),
+        ("RATE", format!("{:.1}f", fidelity.rate as f32)),
+        ("SETTLE", format!("{}u", fidelity.settle())),
+        ("SAMPLE", format!("{}u", fidelity.sample_interval())),
+        (
+            "JOINT_BREAK_COS",
+            format!("{:.9}f", physics::JOINT_BREAK.cos()),
+        ),
+        (
+            "JOINT_BREAK_SIN",
+            format!("{:.9}f", physics::JOINT_BREAK.sin()),
+        ),
+        ("MAX_BONE_TURN_COS", format!("{turn_cos:.9}f")),
+        ("MAX_BONE_TURN_TAN", format!("{turn_tan:.9}f")),
+    ];
+    let mut source = String::new();
+    for (name, value) in defines {
+        source.push_str(&format!("#define {name} {value}\n"));
+    }
+    source.push_str(include_str!("../shaders/physics_creature.cu"));
+    source
+}
+
 /// The creature kernel for `capacity`-node buckets.
 pub fn shader_source(
     capacity: usize,
