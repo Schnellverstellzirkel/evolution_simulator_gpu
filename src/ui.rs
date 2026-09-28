@@ -677,39 +677,28 @@ const SPECIES_STEMS: [&str; 16] = [
     "Vex", "Tor", "Quil", "Nym", "Zeb", "Cro", "Fen", "Lum", "Tar", "Wisp", "Brak", "Ovi", "Pyr",
     "Sable", "Dro", "Ril",
 ];
-/// Short deterministic species name from body counts, a body-plan hash and
-/// the muscles' commanded rhythm. It uses only creature data, so archive
-/// cards, lineage tiles and race lanes agree without asking the worker.
+/// Syllables between the stem and the size word.
+const SPECIES_LINKS: [&str; 8] = ["a", "o", "i", "u", "e", "y", "ar", "en"];
+/// Short deterministic species name from the body plan (see
+/// `worker::body_plan`) and a gait word from the muscles' rhythm. It uses
+/// only creature data, so archive cards, lineage tiles and race lanes agree
+/// without asking the worker.
 fn species_name(creature: &Creature) -> String {
-    let (nodes, bones, muscles) = body_counts(creature);
-    // Order-independent sums keep the name stable across bone reordering
-    // (playbacks canonicalize their copy of the creature).
-    let mut plan = ((nodes as u64) << 42) ^ ((bones as u64) << 21) ^ muscles as u64;
-    for bone in &creature.bones {
-        plan = plan.wrapping_add(
-            (bone.a as u64)
-                .wrapping_mul(0x9e3779b97f4a7c15)
-                .wrapping_add(bone.b as u64)
-                .wrapping_add(((bone.rest_length * 100.0) as u64).wrapping_mul(0xbf58476d1ce4e5b9)),
-        );
-    }
-    for muscle in &creature.muscles {
-        plan = plan.wrapping_add(
-            (muscle.bone_a as u64)
-                .wrapping_mul(0x94d049bb133111eb)
-                .wrapping_add(muscle.bone_b as u64)
-                .wrapping_add(((muscle.period * 100.0) as u64).wrapping_mul(0x2545f4914f6cdd1d)),
-        );
-    }
-    let stem = SPECIES_STEMS[(plan % SPECIES_STEMS.len() as u64) as usize];
-    let form = match bones {
+    // The body plan decides the name, so a creature keeps it through the
+    // small mutations that tune lengths and rhythms. A stem and a linking
+    // syllable give 128 names per size class.
+    let plan = crate::worker::body_plan(creature);
+    let mixed = plan ^ (plan >> 29) ^ (plan >> 47);
+    let stem = SPECIES_STEMS[(mixed % SPECIES_STEMS.len() as u64) as usize];
+    let link = SPECIES_LINKS[((mixed >> 8) % SPECIES_LINKS.len() as u64) as usize];
+    let form = match creature.bones.len() {
         0..=2 => "ling",
         3..=4 => "pod",
         5..=7 => "form",
         8..=11 => "morph",
         _ => "titan",
     };
-    format!("{stem}{form} {}", gait_word(creature))
+    format!("{stem}{link}{form} {}", gait_word(creature))
 }
 /// Cadence bucket from the muscles' rhythm periods, in cycles per second.
 fn gait_word(creature: &Creature) -> &'static str {
@@ -5129,6 +5118,10 @@ mod tests {
         });
         longer.bones.push(Bone::new(2, 3, 0.5));
         assert_ne!(name, species_name(&longer));
+        let mut tuned = creature.clone();
+        tuned.bones[1].rest_length = 0.8;
+        tuned.muscles[0].phase = 0.4;
+        assert_eq!(name, species_name(&tuned), "tuning keeps the name");
     }
     #[test]
     fn gif_export_encodes_three_synthetic_frames() {
