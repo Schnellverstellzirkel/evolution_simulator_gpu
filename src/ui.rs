@@ -240,6 +240,35 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
+/// How a trial ended early. The engines stop scoring at the first of three
+/// events; the replay names the one that happened.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Ending {
+    /// The head dropped below its neck.
+    Fell,
+    /// A joint was forced past its break angle.
+    Broke,
+    /// The head's averaged acceleration passed the 8 g limit.
+    Shook,
+}
+impl Ending {
+    /// Sentence for the replay, given the time of the event in seconds.
+    fn sentence(self, seconds: f32) -> String {
+        match self {
+            Self::Fell => format!("Fell over at {seconds:.1} s: head below its neck"),
+            Self::Broke => format!("Broke a joint at {seconds:.1} s"),
+            Self::Shook => format!("Shook its head too hard at {seconds:.1} s (over 8 g)"),
+        }
+    }
+    /// A word or two for a race lane.
+    fn short(self) -> &'static str {
+        match self {
+            Self::Fell => "fell",
+            Self::Broke => "broke a joint",
+            Self::Shook => "shook too hard",
+        }
+    }
+}
 /// Replays a creature's trial as simulated by the evaluation engines.
 struct Playback {
     creature: Creature,
@@ -254,6 +283,8 @@ struct Playback {
     /// Frame at which the trial ended early (a fall, a broken joint, or a
     /// shaken head), and the distance the trial kept from that moment.
     fall: Option<(u32, f32)>,
+    /// Which of the three events ended the trial, when one did.
+    ending: Ending,
     /// The distance the CPU engine scored for this very recording.
     distance: f32,
     /// Where the follow camera looks at each frame: the body's center of
@@ -304,10 +335,28 @@ impl Playback {
             (tick.min(last_frame), result.fitness)
         });
         let track = camera_track(&frames, &nodes);
+        // The head-shake average stops updating when the trial ends, so it
+        // still holds the value that ended it. A broken joint shows in the
+        // recorded pose at the end (the engine tests the pose after the step).
+        let ending = match fall {
+            _ if result.head_shake > physics::HEAD_SHAKE_LIMIT => Ending::Shook,
+            Some((tick, _)) => {
+                let mut broken = vec![false; nodes.len()];
+                let broke = [tick, tick.saturating_sub(1)].iter().any(|&t| {
+                    frames.get(t as usize).is_some_and(|frame| {
+                        broken_nodes(&normalized, frame, &joints, &mut broken);
+                        broken.iter().any(|&b| b)
+                    })
+                });
+                if broke { Ending::Broke } else { Ending::Fell }
+            }
+            None => Ending::Fell,
+        };
         let mut playback = Self {
             nodes,
             joints,
             fall,
+            ending,
             distance: result.fitness,
             track,
             creature: normalized,
@@ -2060,9 +2109,8 @@ impl App {
                     painter.text(
                         rect.left_top() + Vec2::new(18., 46.),
                         Align2::LEFT_TOP,
-                        format!(
-                            "Fell over at {:.1} s: head below its neck",
-                            tick.saturating_sub(physics::settle()) as f32 * physics::dt()
+                        p.ending.sentence(
+                            tick.saturating_sub(physics::settle()) as f32 * physics::dt(),
                         ),
                         FontId::proportional(13.),
                         FALLEN,
@@ -3133,7 +3181,7 @@ impl App {
                 painter.text(
                     lane_rect.right_top() + Vec2::new(-8., 26.),
                     Align2::RIGHT_TOP,
-                    "fell",
+                    playback.ending.short(),
                     FontId::proportional(11.),
                     FALLEN,
                 );
