@@ -1463,13 +1463,13 @@ impl App {
             let running = self.active();
             let (text, fill, why) = if running {
                 (
-                    "Pause evolution",
+                    "Pause evolution  (Space)",
                     Color32::from_rgb(255, 239, 216),
                     "Stop after the work in flight. The replay keeps playing.",
                 )
             } else {
                 (
-                    "Evolve",
+                    "Evolve  (Space)",
                     Color32::from_rgb(222, 241, 229),
                     "Run generation after generation until you pause.",
                 )
@@ -1759,8 +1759,11 @@ impl App {
         }
         let (rect, response) = ui.allocate_exact_size(
             Vec2::new(ui.available_width(), height.max(120.)),
-            Sense::drag(),
+            Sense::click_and_drag(),
         );
+        if response.clicked() {
+            self.playing = !self.playing;
+        }
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             self.zoom = (self.zoom * (scroll * 0.002).exp()).clamp(30., 1200.);
@@ -1995,7 +1998,7 @@ impl App {
         painter.text(
             rect.left_bottom() + Vec2::new(14., -12.),
             Align2::LEFT_BOTTOM,
-            "Drag to pan · scroll to zoom",
+            "Click to pause · drag to pan · scroll to zoom",
             FontId::proportional(11.),
             MUTED,
         );
@@ -2044,8 +2047,12 @@ impl App {
         }
         ui.horizontal(|ui| {
             if ui
-                .button(if self.playing { "Pause" } else { "Play" })
-                .on_hover_text("Pause / play creature")
+                .button(if self.playing {
+                    "Pause  (K)"
+                } else {
+                    "Play  (K)"
+                })
+                .on_hover_text("Pause or play the replay. A click on the replay does the same.")
                 .clicked()
             {
                 self.playing = !self.playing;
@@ -2816,7 +2823,11 @@ impl App {
         });
         ui.horizontal(|ui| {
             if ui
-                .button(if self.playing { "Pause" } else { "Play" })
+                .button(if self.playing {
+                    "Pause  (K)"
+                } else {
+                    "Play  (K)"
+                })
                 .clicked()
             {
                 self.playing = !self.playing;
@@ -3281,11 +3292,9 @@ impl App {
                                 "1 to 5",
                                 "Overview · Behavior archive · History · Race · Lineage",
                             ),
-                            (
-                                "Space",
-                                "Play or pause the replay. Without a replay it pauses or resumes evolution.",
-                            ),
-                            ("← / →", "Seek one replay frame"),
+                            ("Space", "Evolve, or pause evolution"),
+                            ("K or a click on the replay", "Play or pause the replay"),
+                            ("← / →", "Step the replay one frame"),
                             ("F1 or ?", "Toggle this help"),
                             ("Ctrl+S", "Save the experiment"),
                             ("Drag / scroll", "Pan and zoom the viewport"),
@@ -3606,13 +3615,14 @@ impl eframe::App for App {
                 self.show_help = !self.show_help;
             }
             if pressed(egui::Key::Space) {
-                if self.playback.is_some() || (self.tab == Tab::Race && !self.race.is_empty()) {
-                    self.playing = !self.playing;
-                } else if self.active() {
+                if self.active() {
                     self.pause();
                 } else {
                     self.run(true, false);
                 }
+            }
+            if pressed(egui::Key::K) {
+                self.playing = !self.playing;
             }
             if let Some(p) = &mut self.playback {
                 let elapsed = p.tick.saturating_sub(p.trial_start());
