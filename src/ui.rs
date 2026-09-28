@@ -62,6 +62,19 @@ struct Theme {
     ink: Color32,
     muted: Color32,
     accent: Color32,
+    /// Text for things that wait or warn (a pending world change, a failed
+    /// trial, the median curve), readable on the panel and card colors.
+    warn: Color32,
+    /// Text for a fall or an error.
+    danger: Color32,
+    /// Record markers on the charts.
+    record: Color32,
+    /// The Evolve button: fill and text.
+    go_fill: Color32,
+    go_text: Color32,
+    /// The Pause evolution button: fill and text.
+    stop_fill: Color32,
+    stop_text: Color32,
 }
 impl Theme {
     fn of(dark: bool) -> Self {
@@ -73,8 +86,15 @@ impl Theme {
                 card_hover: Color32::from_rgb(48, 57, 52),
                 card_border: Color32::from_rgb(62, 73, 67),
                 ink: Color32::from_rgb(228, 234, 229),
-                muted: Color32::from_rgb(150, 163, 155),
+                muted: Color32::from_rgb(160, 173, 165),
                 accent: Color32::from_rgb(88, 205, 155),
+                warn: Color32::from_rgb(242, 178, 96),
+                danger: Color32::from_rgb(244, 120, 104),
+                record: Color32::from_rgb(186, 156, 255),
+                go_fill: Color32::from_rgb(30, 110, 78),
+                go_text: Color32::WHITE,
+                stop_fill: Color32::from_rgb(150, 84, 20),
+                stop_text: Color32::WHITE,
             }
         } else {
             Self {
@@ -86,6 +106,13 @@ impl Theme {
                 ink: INK,
                 muted: MUTED,
                 accent: MINT,
+                warn: AMBER,
+                danger: FALLEN,
+                record: Color32::from_rgb(117, 76, 210),
+                go_fill: Color32::from_rgb(222, 241, 229),
+                go_text: INK,
+                stop_fill: Color32::from_rgb(255, 232, 204),
+                stop_text: INK,
             }
         }
     }
@@ -1138,7 +1165,11 @@ fn paint_lineage_tile(
         Align2::LEFT_TOP,
         format!("{:+.2} m", step.gain),
         FontId::proportional(12.),
-        if step.gain >= 0. { theme.accent } else { AMBER },
+        if step.gain >= 0. {
+            theme.accent
+        } else {
+            theme.warn
+        },
     );
     painter.text(
         rect.right_bottom() + Vec2::new(-8., -6.),
@@ -1308,6 +1339,20 @@ impl App {
             initial_config.throughput = false;
         }
         let smoke_start_pending = std::env::var_os("EVOLUTION_SMOKE_POPULATION").is_some();
+        // Developer screenshots: EVOLUTION_SMOKE_DARK=1 opens in the dark
+        // theme, EVOLUTION_SMOKE_ZOOM=0.75 lays a 1440 px window out like a
+        // 1920 px one.
+        let smoke_dark = std::env::var_os("EVOLUTION_SMOKE_DARK").is_some();
+        if smoke_dark {
+            apply_style(ctx, true);
+        }
+        let smoke_zoom = std::env::var("EVOLUTION_SMOKE_ZOOM")
+            .ok()
+            .and_then(|zoom| zoom.parse::<f32>().ok())
+            .filter(|zoom| (0.5..=2.0).contains(zoom));
+        if let Some(zoom) = smoke_zoom {
+            ctx.set_zoom_factor(zoom);
+        }
         let smoke_tab = std::env::var("EVOLUTION_SMOKE_TAB").unwrap_or_default();
         if let Some(path) = std::env::var_os("EVOLUTION_SMOKE_CHECKPOINT") {
             worker.send(Command::Load(PathBuf::from(path)));
@@ -1348,7 +1393,7 @@ impl App {
             frame_times: Default::default(),
             last_page: usize::MAX,
             show_perf: false,
-            ui_scale: 1.0,
+            ui_scale: smoke_zoom.unwrap_or(1.0),
             initial: true,
             smoke_start_pending,
             started: Instant::now(),
@@ -1379,7 +1424,7 @@ impl App {
             bench_last_ping: Instant::now(),
             bench_pings: 0,
             card_positions: Default::default(),
-            dark: false,
+            dark: smoke_dark,
             show_help: false,
             runs_bytes: 0,
             runs_checked: Instant::now() - RUNS_REFRESH,
@@ -1526,22 +1571,24 @@ impl App {
             ui.label(RichText::new("EVOLUTION").size(22.).strong());
             ui.add_space(12.);
             let running = self.active();
-            let (text, fill, why) = if running {
+            let (text, fill, ink, why) = if running {
                 (
                     "Pause evolution  (Space)",
-                    Color32::from_rgb(255, 239, 216),
+                    theme.stop_fill,
+                    theme.stop_text,
                     "Stop after the work in flight. The replay keeps playing.",
                 )
             } else {
                 (
                     "Evolve  (Space)",
-                    Color32::from_rgb(222, 241, 229),
+                    theme.go_fill,
+                    theme.go_text,
                     "Run generation after generation until you pause.",
                 )
             };
             if ui
                 .add(
-                    egui::Button::new(RichText::new(text).strong().color(INK))
+                    egui::Button::new(RichText::new(text).strong().color(ink))
                         .fill(fill)
                         .min_size(Vec2::new(150., 34.)),
                 )
@@ -1682,7 +1729,7 @@ impl App {
                     world_summary(live)
                 ))
                 .small()
-                .color(AMBER),
+                .color(theme.warn),
             );
         }
         ui.label(
@@ -1812,27 +1859,36 @@ impl App {
         // line of their own.
         let wide = ui.available_width() > 900.;
         let mut header = |ui: &mut egui::Ui| {
-            let (mode, color, why) = if self.pinned {
+            let (mode, fill, color, why) = if self.pinned {
                 (
-                    "WATCHING",
+                    " WATCHING ",
+                    theme.card_hover,
                     theme.ink,
                     "A creature you picked. Back to champion shows the best creature again.",
                 )
             } else if self.champion_shown {
                 (
-                    "CHAMPION",
-                    theme.accent,
+                    " CHAMPION ",
+                    theme.go_fill,
+                    theme.go_text,
                     "The best creature so far. The view switches to each new champion when the replay on screen ends.",
                 )
             } else {
                 (
-                    "FIRST GENERATION",
+                    " FIRST GENERATION ",
+                    theme.card,
                     theme.muted,
                     "A random creature of the first generation. The champion takes over when the first generation ends.",
                 )
             };
-            ui.label(RichText::new(mode).small().strong().color(color))
-                .on_hover_text(why);
+            ui.label(
+                RichText::new(mode)
+                    .small()
+                    .strong()
+                    .color(color)
+                    .background_color(fill),
+            )
+            .on_hover_text(why);
             if let Some(p) = &self.playback {
                 ui.label(format!(
                     "{} · {:.2} m · {} nodes, {} bones, {} muscles · {:.2} m/s",
@@ -2374,7 +2430,7 @@ impl App {
             }
             // The best creature and the typical kept one; the percentile
             // index follows `storage::PERCENTILES` (28 is 100, 14 is 50).
-            for (i, name, color) in [(28, "Best", theme.accent), (14, "Median", AMBER)] {
+            for (i, name, color) in [(28, "Best", theme.accent), (14, "Median", theme.warn)] {
                 let values: Vec<[f64; 2]> = s
                     .history
                     .iter()
@@ -2393,7 +2449,7 @@ impl App {
                             if season { "Season" } else { "World change" },
                             pair[1].generation as f64 - 0.5,
                         )
-                        .color(AMBER)
+                        .color(theme.warn)
                         .width(1.5),
                     );
                 }
@@ -2407,7 +2463,7 @@ impl App {
             if !records.is_empty() {
                 plot.points(
                     Points::new("Record", records)
-                        .color(Color32::from_rgb(117, 76, 210))
+                        .color(theme.record)
                         .filled(true)
                         .radius(3.5),
                 );
@@ -2690,9 +2746,10 @@ impl App {
         for event in snapshot.events.iter() {
             let mut text = event.text.clone();
             let (color, action) = match event.kind {
-                EventKind::Catastrophe => {
-                    (AMBER, (snapshot.fossils > 0).then_some(FeedAction::Undo))
-                }
+                EventKind::Catastrophe => (
+                    theme.warn,
+                    (snapshot.fossils > 0).then_some(FeedAction::Undo),
+                ),
                 EventKind::World | EventKind::Season => {
                     if let (Some(before), Some(after)) = (
                         event.generation.checked_sub(1).and_then(row),
@@ -3234,7 +3291,7 @@ impl App {
                     Align2::RIGHT_TOP,
                     playback.ending.short(),
                     FontId::proportional(11.),
-                    FALLEN,
+                    theme.danger,
                 );
             }
         }
@@ -3716,6 +3773,7 @@ impl App {
         }
     }
     fn dialogs(&mut self, ctx: &egui::Context) {
+        let theme = self.theme();
         self.open_window(ctx);
         if let Some(path) = self.overwrite.clone() {
             let mut answer = None;
@@ -3772,8 +3830,10 @@ impl App {
                         if ui
                             .add_enabled(
                                 self.config.validate().is_ok(),
-                                egui::Button::new("Create population")
-                                    .fill(Color32::from_rgb(222, 241, 229)),
+                                egui::Button::new(
+                                    RichText::new("Create population").color(theme.go_text),
+                                )
+                                .fill(theme.go_fill),
                             )
                             .clicked()
                         {
@@ -4129,7 +4189,7 @@ impl eframe::App for App {
                         ui.ctx().request_repaint_after(Duration::from_millis(500));
                     }
                     if let Some(error) = &s.error {
-                        ui.colored_label(AMBER, error);
+                        ui.colored_label(theme.danger, error);
                     }
                     ui.label(
                         RichText::new(format!("{:.0} creatures/s", s.end_to_end))
@@ -4416,12 +4476,12 @@ fn paint_card(
         if card.parent_score.is_finite() && card.parent_score > FAILED {
             (format!("Parent {:.3} m", card.parent_score), theme.muted)
         } else if card.parent_score.is_finite() {
-            ("Parent failed".into(), AMBER)
+            ("Parent failed".into(), theme.warn)
         } else {
             ("Trial pending".into(), theme.muted)
         }
     } else if card.score <= FAILED {
-        ("Failed trial".into(), AMBER)
+        ("Failed trial".into(), theme.warn)
     } else {
         (
             format!("{:.3} m", card.score),
@@ -4449,7 +4509,11 @@ fn paint_card(
                 "Replaced"
             },
             FontId::proportional(10.),
-            if card.survivor { theme.accent } else { AMBER },
+            if card.survivor {
+                theme.accent
+            } else {
+                theme.warn
+            },
         );
     }
 }
@@ -4514,7 +4578,7 @@ fn effect_row(
     let away = level != effect.calm;
     let waiting = live.is_some_and(|live| effect.level(live) != level);
     let color = if waiting {
-        AMBER
+        theme.warn
     } else if away {
         theme.accent
     } else {
