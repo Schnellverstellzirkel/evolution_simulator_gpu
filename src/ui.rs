@@ -1454,9 +1454,33 @@ impl App {
         for effect in &crate::environment::EFFECTS {
             let level = effect.level(&self.config);
             let top = effect.levels.len() - 1;
+            let label = format!("{}: {}", effect.name, effect.levels[level]);
+            let why = format!("{label}. {}", effect.why);
+            // The label and both buttons on one line when they fit; on a
+            // narrow panel the label gets its own line above the buttons.
+            let width = |ui: &egui::Ui, text: &str| {
+                egui::WidgetText::from(text)
+                    .into_galley(
+                        ui,
+                        Some(egui::TextWrapMode::Extend),
+                        f32::INFINITY,
+                        egui::TextStyle::Body,
+                    )
+                    .size()
+                    .x
+            };
+            let spacing = ui.spacing().item_spacing.x;
+            let button =
+                |ui: &egui::Ui, text: &str| width(ui, text) + 2.0 * ui.spacing().button_padding.x;
+            let fits = width(ui, &label)
+                + button(ui, effect.raise)
+                + button(ui, effect.lower)
+                + 3.0 * spacing
+                <= ui.available_width();
+            if !fits {
+                ui.label(&label).on_hover_text(&why);
+            }
             ui.horizontal(|ui| {
-                ui.label(format!("{}: {}", effect.name, effect.levels[level]))
-                    .on_hover_text(effect.why);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .add_enabled(level < top, egui::Button::new(effect.raise).small())
@@ -1482,6 +1506,12 @@ impl App {
                     {
                         effect.set_level(&mut self.config, level - 1);
                         world_changed = true;
+                    }
+                    if fits {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add(egui::Label::new(&label).truncate())
+                                .on_hover_text(&why);
+                        });
                     }
                 });
             });
@@ -4472,7 +4502,10 @@ mod tests {
         let margin = (CAMERA_WINDOW * rate) as usize;
         for (i, x) in track.iter().enumerate().skip(margin).take(600 - 2 * margin) {
             let walk = 2.0 * i as f32 / rate;
-            assert!((x - walk).abs() < 0.02, "frame {i}: camera {x}, walk {walk}");
+            assert!(
+                (x - walk).abs() < 0.02,
+                "frame {i}: camera {x}, walk {walk}"
+            );
         }
     }
     #[test]
