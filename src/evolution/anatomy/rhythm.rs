@@ -207,7 +207,7 @@ pub(crate) fn limb_phase_pattern(
 
 /// Every limb that ends in a foot: the bones from a leaf node up to the node
 /// where the body branches, or up to the neck.
-fn leaf_limbs(c: &Creature) -> Vec<Vec<usize>> {
+pub(super) fn leaf_limbs(c: &Creature) -> Vec<Vec<usize>> {
     let parents = parent_bones(c);
     let children = child_bones(c);
     (1..c.nodes.len())
