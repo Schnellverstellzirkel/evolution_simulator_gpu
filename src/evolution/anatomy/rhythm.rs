@@ -103,7 +103,7 @@ pub(crate) fn mutate_matching_limbs(
 
 /// Pairs of branches of the same shape: apart from each other, with the same
 /// bone count and bone lengths within 25% of each other, position by position.
-fn matching_limbs(c: &Creature) -> Vec<(Vec<usize>, Vec<usize>)> {
+pub(super) fn matching_limbs(c: &Creature) -> Vec<(Vec<usize>, Vec<usize>)> {
     let limbs: Vec<Vec<usize>> = (0..c.bones.len())
         .filter(|&b| !is_neck(c, b))
         .map(|b| branch(c, b))

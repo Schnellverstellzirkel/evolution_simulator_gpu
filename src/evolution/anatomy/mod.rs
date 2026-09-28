@@ -1,10 +1,9 @@
 //! Structural mutations that change a working assembly of bones, joints and
-//! muscles together: copy, grow, fuse, rewire and retime whole limbs, so a
+//! muscles together: copy, grow, fuse, reconnect and retime whole limbs, so a
 //! child keeps more of its parent's gait than a single random edit allows.
 //!
-//! Every operator is on by default (docs/anatomy-operators.md has the audit
-//! and the search A/B that chose this set; operators that lost there were
-//! deleted). `EVOLUTION_ANATOMY=0` turns them off for comparisons, and a
+//! Every operator is on by default (docs/anatomy-operators.md has the search
+//! A/B). `EVOLUTION_ANATOMY=0` turns them off for comparisons, and a
 //! comma-separated list of operator names enables only those. The
 //! structural emitter picks uniformly among the classic operators and the
 //! enabled ones below, and tries up to four times when the chosen operator
@@ -25,6 +24,8 @@
 use super::{Bone, Creature, Muscle, NodeGene, Rng, bone_point, neutralize};
 use crate::config::Config;
 
+mod extra;
+mod junctions;
 mod limbs;
 mod muscles;
 mod rhythm;
@@ -40,13 +41,20 @@ pub(super) struct Context<'a> {
 pub(super) type Operator = fn(&mut Creature, &Config, &mut Rng, &Context) -> bool;
 
 /// Every operator, by name. The names are what `EVOLUTION_ANATOMY` lists.
-pub(super) const OPERATORS: [(&str, Operator); 23] = [
+pub(super) const OPERATORS: &[(&str, Operator)] = &[
     ("copy_limb", limbs::copy_limb),
     ("grow_actuated_tip", limbs::grow_actuated_tip),
     ("split_bone_actuated", limbs::split_bone_actuated),
     ("fuse_bones", limbs::fuse_bones),
+    ("relocate_limb", limbs::relocate_limb),
     ("reshape_limb", limbs::reshape_limb),
     ("graft_donor_limb", limbs::graft_donor_limb),
+    ("split_crowded_joint", junctions::split_crowded_joint),
+    ("merge_branch_joints", junctions::merge_branch_joints),
+    ("repeat_body_segment", junctions::repeat_body_segment),
+    ("grow_heel_toe", junctions::grow_heel_toe),
+    ("grow_lever_spur", junctions::grow_lever_spur),
+    ("reverse_bend", junctions::reverse_bend),
     ("add_biarticular_muscle", muscles::add_biarticular_muscle),
     ("move_muscle_to_neighbor", muscles::move_muscle_to_neighbor),
     ("split_muscle", muscles::split_muscle),
@@ -64,6 +72,35 @@ pub(super) const OPERATORS: [(&str, Operator); 23] = [
     ("limb_duty_cycle", rhythm::limb_duty_cycle),
     ("touchdown_package", rhythm::touchdown_package),
     ("redistribute_organ_mass", rhythm::redistribute_organ_mass),
+    ("mirror_limb_timing", extra::mirror_limb_timing),
+    ("swap_limb_programs", extra::swap_limb_programs),
+    ("copy_muscle_to_partner", extra::copy_muscle_to_partner),
+    ("twin_limb", extra::twin_limb),
+    ("grow_matching_tips", extra::grow_matching_tips),
+    ("nudge_limb_phase", extra::nudge_limb_phase),
+    ("cadence_stride_trade", extra::cadence_stride_trade),
+    ("scale_muscle_leverage", extra::scale_muscle_leverage),
+    ("scale_limb_strength", extra::scale_limb_strength),
+    ("prune_weakest_muscle", extra::prune_weakest_muscle),
+    ("prune_idle_limb", extra::prune_idle_limb),
+    ("merge_leaf_bones", extra::merge_leaf_bones),
+];
+
+/// Operators in the table that are off unless `EVOLUTION_ANATOMY` names them
+/// (or says `all`).
+const OFF_BY_DEFAULT: &[&str] = &[
+    "mirror_limb_timing",
+    "swap_limb_programs",
+    "copy_muscle_to_partner",
+    "twin_limb",
+    "grow_matching_tips",
+    "nudge_limb_phase",
+    "cadence_stride_trade",
+    "scale_muscle_leverage",
+    "scale_limb_strength",
+    "prune_weakest_muscle",
+    "prune_idle_limb",
+    "merge_leaf_bones",
 ];
 
 /// The operators `EVOLUTION_ANATOMY` enables, as indices into `OPERATORS`.
@@ -74,9 +111,12 @@ pub(super) fn enabled() -> &'static [usize] {
 
 fn parse(value: Option<&str>) -> Vec<usize> {
     let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
-        return (0..OPERATORS.len()).collect();
+        return defaults();
     };
-    if matches!(value, "1" | "all" | "on" | "true") {
+    if matches!(value, "1" | "on" | "true") {
+        return defaults();
+    }
+    if value == "all" {
         return (0..OPERATORS.len()).collect();
     }
     if matches!(value, "0" | "off" | "none" | "false") {
@@ -85,6 +125,13 @@ fn parse(value: Option<&str>) -> Vec<usize> {
     value
         .split(',')
         .filter_map(|name| OPERATORS.iter().position(|(n, _)| *n == name.trim()))
+        .collect()
+}
+
+/// The operators on by default, as indices into `OPERATORS`.
+fn defaults() -> Vec<usize> {
+    (0..OPERATORS.len())
+        .filter(|&i| !OFF_BY_DEFAULT.contains(&OPERATORS[i].0))
         .collect()
 }
 
@@ -378,15 +425,19 @@ mod tests {
 
     #[test]
     fn operator_names_parse_and_are_unique() {
-        assert_eq!(parse(None).len(), OPERATORS.len());
-        assert_eq!(parse(Some("")).len(), OPERATORS.len());
+        let defaults = OPERATORS.len() - OFF_BY_DEFAULT.len();
+        assert_eq!(parse(None), (0..defaults).collect::<Vec<_>>());
+        assert_eq!(parse(Some("")).len(), defaults);
         assert!(parse(Some("0")).is_empty());
         assert!(parse(Some("off")).is_empty());
         assert_eq!(parse(Some("all")).len(), OPERATORS.len());
-        assert_eq!(parse(Some("1")).len(), OPERATORS.len());
+        assert_eq!(parse(Some("1")).len(), defaults);
         assert_eq!(parse(Some("fuse_bones, copy_limb")), vec![3, 0]);
         for (i, (name, _)) in OPERATORS.iter().enumerate() {
             assert_eq!(OPERATORS.iter().position(|(n, _)| n == name), Some(i));
+        }
+        for name in OFF_BY_DEFAULT {
+            assert!(OPERATORS.iter().any(|(n, _)| n == name), "{name}");
         }
     }
 

@@ -1,4 +1,4 @@
-//! Operators that copy, grow, fuse and reshape whole limbs.
+//! Operators that copy, grow, fuse, move and reshape whole limbs.
 use super::{
     Context, branch, branch_nodes, child_bones, copy_branch, is_neck, muscles_on, new_muscle,
     parent_bones, remove_parts, room,
@@ -193,6 +193,14 @@ pub(crate) fn fuse_bones(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &C
     let Some((upper, lower)) = pick(&pairs, rng) else {
         return false;
     };
+    fuse_pair(c, upper, lower);
+    true
+}
+
+/// Fuses bone `upper` and the one bone `lower` below it into one bone from
+/// the top of `upper` to the tip of `lower`. Muscles on either keep their
+/// place on the body, projected onto the fused bone.
+pub(super) fn fuse_pair(c: &mut Creature, upper: usize, lower: usize) {
     let joint = c.bones[upper].b as usize;
     let end = c.bones[lower].b;
     let start = c.nodes[c.bones[upper].a as usize];
@@ -229,6 +237,46 @@ pub(crate) fn fuse_bones(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &C
     // Muscles that joined the two bones now join the fused bone to itself,
     // and `remove_parts` drops them.
     remove_parts(c, &[lower], &[joint]);
+}
+
+/// Moves a branch, with its internal shape and muscles, to another node of
+/// the body (not inside the branch, not the head). Muscles from the branch
+/// root to the old bone above move to the bone above the new node.
+pub(crate) fn relocate_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
+    let moves: Vec<(usize, usize)> = limb_roots(c)
+        .into_iter()
+        .flat_map(|root| {
+            let inside = branch_nodes(c, &branch(c, root));
+            let from = c.bones[root].a as usize;
+            (1..c.nodes.len())
+                .filter(move |n| *n != from && !inside.contains(n))
+                .map(move |n| (root, n))
+        })
+        .collect();
+    let Some((root, at)) = pick(&moves, rng) else {
+        return false;
+    };
+    let from = c.bones[root].a as usize;
+    let parents = parent_bones(c);
+    let offset = [
+        c.nodes[at].x - c.nodes[from].x,
+        c.nodes[at].y - c.nodes[from].y,
+    ];
+    for n in branch_nodes(c, &branch(c, root)) {
+        let node = &mut c.nodes[n];
+        [node.x, node.y] = clamped(node.x + offset[0], node.y + offset[1]);
+    }
+    c.bones[root].a = at as u32;
+    if let (Some(old), Some(new)) = (parents[from], parents[at]) {
+        for m in &mut c.muscles {
+            let (x, y) = (m.bone_a as usize, m.bone_b as usize);
+            if (x, y) == (root, old) {
+                m.bone_b = new as u32;
+            } else if (x, y) == (old, root) {
+                m.bone_a = new as u32;
+            }
+        }
+    }
     true
 }
 
@@ -328,23 +376,23 @@ pub(crate) fn graft_donor_limb(
 }
 
 /// Bones that can start a limb: every bone but the neck.
-fn limb_roots(c: &Creature) -> Vec<usize> {
+pub(super) fn limb_roots(c: &Creature) -> Vec<usize> {
     (0..c.bones.len()).filter(|&b| !is_neck(c, b)).collect()
 }
 
 /// A random item of `items`, or `None` when there is none.
-fn pick<T: Copy>(items: &[T], rng: &mut Rng) -> Option<T> {
+pub(super) fn pick<T: Copy>(items: &[T], rng: &mut Rng) -> Option<T> {
     (!items.is_empty()).then(|| items[rng.index(items.len())])
 }
 
 /// A starting position moved inside the region where nodes may start.
-fn clamped(x: f32, y: f32) -> [f32; 2] {
+pub(super) fn clamped(x: f32, y: f32) -> [f32; 2] {
     let extent = body_extent();
     [x.clamp(-extent, extent), y.clamp(0.0, extent)]
 }
 
 /// Gives a new joint a narrow range around its starting angle.
-fn narrow(bone: &mut Bone, rng: &mut Rng) {
+pub(super) fn narrow(bone: &mut Bone, rng: &mut Rng) {
     bone.min_angle = -rng.range(0.15, 0.5);
     bone.max_angle = rng.range(0.15, 0.5);
 }
@@ -485,6 +533,25 @@ mod tests {
             assert!(total(after) >= 0.95 * total(before));
         });
         assert!(n >= 8, "fuse_bones applied to {n} of 80");
+    }
+
+    #[test]
+    fn relocate_limb_moves_one_branch_root_and_keeps_its_parts() {
+        let n = applied(relocate_limb, false, |before, after| {
+            assert_eq!(after.nodes.len(), before.nodes.len());
+            assert_eq!(after.muscles.len(), before.muscles.len());
+            let moved: Vec<usize> = (0..before.bones.len())
+                .filter(|&b| after.bones[b].a != before.bones[b].a)
+                .collect();
+            assert_eq!(moved.len(), 1);
+            let root = moved[0];
+            let at = after.bones[root].a as usize;
+            assert!(at != 0 && !branch_nodes(before, &branch(before, root)).contains(&at));
+            for (x, y) in before.bones.iter().zip(&after.bones) {
+                assert_eq!((x.b, x.rest_length), (y.b, y.rest_length));
+            }
+        });
+        assert!(n >= 8, "relocate_limb applied to {n} of 80");
     }
 
     #[test]

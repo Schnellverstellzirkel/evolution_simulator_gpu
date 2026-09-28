@@ -494,14 +494,14 @@ fn turn(from: f32, to: f32) -> f32 {
 /// Whether a muscle joins consecutively numbered bones. `repair_with` keeps
 /// a muscle on each such pair, so rerouting one would only make repair add a
 /// random muscle in its place.
-fn ring(c: &Creature, m: &Muscle) -> bool {
+pub(super) fn ring(c: &Creature, m: &Muscle) -> bool {
     let n = c.bones.len();
     let (x, y) = (m.bone_a as usize, m.bone_b as usize);
     (x + 1) % n == y || (y + 1) % n == x
 }
 
 /// The node bones `x` and `y` share, if any.
-fn shared_node(c: &Creature, x: usize, y: usize) -> Option<u32> {
+pub(super) fn shared_node(c: &Creature, x: usize, y: usize) -> Option<u32> {
     let (p, q) = (c.bones[x], c.bones[y]);
     [p.a, p.b].into_iter().find(|&n| n == q.a || n == q.b)
 }
@@ -539,7 +539,7 @@ fn path_between(c: &Creature, x: usize, z: usize) -> Vec<usize> {
 
 /// The bones of the limb that starts at `root` followed by the bone above
 /// it, and the muscles with both ends on those bones.
-fn actuation(c: &Creature, root: usize) -> (Vec<usize>, Vec<usize>) {
+pub(super) fn actuation(c: &Creature, root: usize) -> (Vec<usize>, Vec<usize>) {
     let mut bones = branch(c, root);
     bones.extend(parent_bones(c)[c.bones[root].a as usize]);
     let muscles = muscles_on(c, &bones, true);
