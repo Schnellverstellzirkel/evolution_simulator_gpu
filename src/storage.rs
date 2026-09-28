@@ -1929,6 +1929,7 @@ impl Experiment {
         self.archive = QdArchive::default();
         self.islands.clear();
         self.island_progress.clear();
+        self.last_migration = None;
         self.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
         self.cma_emitters.clear();
         // Distances measured in the old world say nothing about the new one.
