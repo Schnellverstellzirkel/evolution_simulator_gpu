@@ -559,3 +559,36 @@ Measured and not adopted: removal operators (`EVOLUTION_SHRINK=1`: `remove_limb`
 | with removal | 6.41 / 10.31 | 275 m (278) | 21,329 (18,111) | 182 s |
 
 Removal slows growth by about a quarter. Medians tie, and the means favour the current operators because of one or two strong seeds. Growth is selected for: a muscle has no mass and brings its own energy store and force. The design response is in `docs/data-architecture.md` section 10.
+
+## Muscle mass: measured, not adopted (2026-09-28)
+
+The owner asked for muscle mass to be built and measured, as the physics lever against free body growth (`docs/data-architecture.md` section 10.2, decision 6). The implementation is on branch `claude/muscle-mass` and is not merged. It is in all three engines:
+
+- A muscle's span is the distance between its two attachment points in the starting pose, at least 5 cm (`physics::muscle_span`).
+- A muscle weighs `muscle_density` times its span (`EVOLUTION_MUSCLE_DENSITY`, default 1 kg/m). Half of that mass sits at each attachment point and is shared by that bone's two nodes like an organ, so the center of mass is exact (`physics::body`).
+- A muscle's energy store is `muscle_energy` times its span: 200 J/m instead of a flat 120 J per muscle (`physics::muscle_capacity`). The heat wave scales it as before. The GPU kernel reads the store as a 16th muscle field.
+- `qd::VERSION` 27. The effect-test walker was evolved again with `examples/evolve_walker.rs`. The CPU/GPU agreement tests use the old walker, which moves only 0.66 m at fine fidelity under the new physics but has a steady trajectory there.
+
+200 J/m keeps the median store near today's. `examples/muscle_mass_probe.rs` on the generation-9 3M checkpoint (first 300,000 creatures) gives a median span of 0.53 m (p10 0.13 m, p90 1.23 m), so the median store is about 105 J. At 1 kg/m the median body mass rises from 9.9 kg to 16.3 kg.
+
+Checks on the branch: formatting, all-target clippy, 149 CPU tests and nine report tests pass. The two engine agreement tests and the three GPU simulation tests pass. The agreement gaps are 0.0065 m for the walker at fine fidelity and 0.042 m for its perturbed contender, against tolerances of 0.5 m and 0.05 m. `first_generation 20000 20` gives median -0.06 m, p99 0.27 m, best 4.04 m at 1 kg/m and median -0.05 m, p99 0.26 m, best 2.78 m at 4 kg/m, against median -0.07 m, p99 0.34 m, best 11.03 m without muscle mass. No free propulsion.
+
+Search A/B: `examples/search_ab.rs` with 40 generations, 5,000 creatures, 60 s trials and seeds 38 to 47, CPU only, 4 threads. The baseline arm is cb5119e and reproduces the removal-operator table above exactly.
+
+| | nodes / muscles at generation 39 | top-50 mean nodes | top-50 bone length, median of seeds | best, mean (median) | QD, mean (median) | cells, mean | CPU wall |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| massless muscles, 120 J each | 7.31 / 13.61 | 7.44 | 2.00 m | 346 m (280) | 30,075 (17,768) | 1,018 | 187 s |
+| 1 kg/m, 200 J/m | 7.47 / 13.60 | 7.74 | 4.01 m | 155 m (133) | 16,007 (12,648) | 957 | 202 s |
+| 4 kg/m, 200 J/m | 7.51 / 14.21 | 8.73 | 5.58 m | 144 m (121) | 15,707 (13,343) | 830 | 245 s |
+
+Mean nodes / muscles of the population by generation, averaged over the ten seeds:
+
+| generation | 0 | 10 | 20 | 30 | 39 |
+|---|---:|---:|---:|---:|---:|
+| massless | 4.01 / 3.68 | 5.98 / 8.93 | 6.58 / 11.18 | 6.92 / 12.24 | 7.31 / 13.61 |
+| 1 kg/m | 4.01 / 3.68 | 6.19 / 9.27 | 6.77 / 11.01 | 7.02 / 11.91 | 7.47 / 13.60 |
+| 4 kg/m | 4.01 / 3.68 | 6.32 / 9.87 | 6.80 / 11.40 | 7.32 / 13.48 | 7.51 / 14.21 |
+
+Best distance per seed (38 to 47): massless 238, 214, 321, 778, 353, 227, 378, 617, 152, 184 m. At 1 kg/m: 57, 80, 57, 162, 128, 421, 139, 255, 152, 103 m. At 4 kg/m: 216, 53, 69, 384, 77, 126, 153, 152, 93, 117 m.
+
+Muscle mass does not stop body growth. At 1 kg/m the population grows at the same rate as without it. The second setting, 4 kg/m, was tried because at 1 kg/m a typical 0.5 m muscle weighs about 5 N against the 100 N a muscle may pull, so the cost might have been too small to matter. At 4 kg/m the population grows faster and the top 50 are larger. Best distance and QD fall by about half at both settings, and archive coverage falls. Two causes are likely and neither was tested. A store that grows with span rewards long muscles, and long muscles need large bodies. Grip grows with the load a foot carries (97e3e9a), so extra weight helps traction. Not measured: the GPU cost of the 16th muscle field.

@@ -433,7 +433,7 @@ The slowdown is work per creature, not heat. The clock held at 2,502 MHz. Memory
 
 - Structural mutation had three operators that add parts (split a bone, mirror a node, duplicate a limb) and none that removes them.
 - Repair keeps a muscle between every pair of consecutive bones, so the muscle count rises with the bone count.
-- In today's physics a muscle has no mass, and each one brings its own 15 J energy store and up to 5 N of force. More muscles are free work capacity.
+- In today's physics a muscle has no mass, and each one brings its own 120 J energy store and up to 100 N of force. More muscles are free work capacity.
 
 Removal operators were measured as a test of the first cause. `EVOLUTION_SHRINK=1` adds `remove_limb` (a leaf node with its bone and muscles) and `remove_muscle` (one muscle outside the consecutive-bone ring), at the same rate as the operators that add nodes. `examples/search_ab.rs` ran 10 seeds (38 to 47), 40 generations and 5,000 creatures, with 60 s trials:
 
@@ -442,7 +442,17 @@ Removal operators were measured as a test of the first cause. `EVOLUTION_SHRINK=
 | current operators | 7.31 / 13.61 | 346 m (280) | 30,100 (17,800) | 196 s |
 | with removal | 6.41 / 10.31 | 275 m (278) | 21,300 (18,100) | 182 s |
 
-Removal slows growth by about a quarter. Medians tie, and the means favour the current operators because of one or two strong seeds. So growth is selected for, not only drift, and removal alone does not fix it without a cost. The flag stays off. The lever that fits the owner's rules is the third cause. If muscles weigh something and their energy scales with that weight, each muscle must pay for itself (section 12, decision 6).
+Removal slows growth by about a quarter. Medians tie, and the means favour the current operators because of one or two strong seeds. So growth is selected for, not only drift, and removal alone does not fix it without a cost. The flag stays off.
+
+Muscle mass was measured next as a test of the third cause (section 12, decision 6). A muscle weighs `muscle_density` kg per meter of its span in the starting pose, half at each attachment point, and its energy store is 200 J per meter of span instead of a flat 120 J. At the generation-9 3M checkpoint the median span is 0.53 m, so the median store stays near 105 J, and at 1 kg/m muscles raise the median body mass from 9.9 kg to 16.3 kg. Same seeds and settings as the table above:
+
+| | nodes / muscles at generation 39 | top-50 mean nodes | best, mean (median) | QD, mean (median) | cells, mean |
+|---|---:|---:|---:|---:|---:|
+| massless muscles, 120 J each | 7.31 / 13.61 | 7.44 | 346 m (280) | 30,075 (17,768) | 1,018 |
+| 1 kg/m, 200 J/m | 7.47 / 13.60 | 7.74 | 155 m (133) | 16,007 (12,648) | 957 |
+| 4 kg/m, 200 J/m | 7.51 / 14.21 | 8.73 | 144 m (121) | 15,707 (13,343) | 830 |
+
+Muscle mass does not stop growth. At 1 kg/m the population grows at the same rate. At 4 kg/m it grows faster and the top 50 are larger (median total bone length 5.6 m against 2.0 m). Distance and QD fall by about half in both. Two causes are likely and neither is tested. A store that grows with span rewards long muscles, which need large bodies. Grip grows with the load a foot carries, so weight helps traction. The implementation stays on branch `claude/muscle-mass` and is not merged. Details are in `docs/performance-log.md`, section "Muscle mass".
 
 ### 10.3 Architecture rules for long sessions
 
@@ -489,7 +499,7 @@ Answered by the owner on 2026-09-28:
 
 Open:
 
-6. Muscle mass (section 10.2). Give muscles weight and an energy store that scales with it, so a muscle pays for itself and body growth stops being free. This is backlog item 4 in `AGENTS.md`, and it is a physics change for all engines. It is the lever that bounds per-creature cost in long sessions within the rule that pressure comes from physics, not scoring.
+6. Muscle mass (section 10.2). The owner asked for it to be built and measured (2026-09-28). Muscles that weigh 1 or 4 kg per meter of span, with a 200 J per meter store, do not stop body growth and halve best distance and QD over 10 seeds. It is not adopted. Bounding per-creature cost in long sessions still needs a physics lever or lower caps. Untested candidates are a flat store with muscle mass, and a store that does not grow with span.
 7. The four decisions of the assessment (new physics formulation, NVIDIA-only fast path, search-side levers, clock pinning) are still open.
 
 ## References
