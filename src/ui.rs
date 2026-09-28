@@ -2973,11 +2973,11 @@ impl App {
             ui.add_space(12.);
             ui.label(
                 RichText::new(if self.playback.is_none() {
-                    "Select a creature in the Behavior archive to trace its ancestry."
+                    "Pick a creature in Ways of moving to trace its ancestry."
                 } else if self.lineage_pending {
                     "Requesting ancestors…"
                 } else {
-                    "No recorded ancestors for this creature yet. Evolve a few generations or pick an archive elite."
+                    "No recorded ancestors for this creature yet. Evolve a few generations or pick a kept creature."
                 })
                 .color(theme.muted),
             );
@@ -3091,7 +3091,7 @@ impl App {
                     .is_some_and(|snapshot| snapshot.archive_size > 0);
             ui.label(
                 RichText::new(if waiting {
-                    "Loading the top archive elites…"
+                    "Loading the fastest kept creatures…"
                 } else {
                     "No archived creatures yet. Run a generation, then start a new race."
                 })
@@ -3519,7 +3519,7 @@ impl App {
                         for (keys, action) in [
                             (
                                 "1 to 5",
-                                "Overview · Behavior archive · History · Race · Lineage",
+                                "Overview · Ways of moving · History · Race · Lineage",
                             ),
                             ("Space", "Evolve, or pause evolution"),
                             ("K or a click on the replay", "Play or pause the replay"),
@@ -3541,11 +3541,11 @@ impl App {
                         "The champion's replay (or the creature you picked), its playback controls, lineage and the best distance over time.",
                     ),
                     (
-                        "Behavior archive",
+                        "Ways of moving",
                         "The best creature for every way of moving, as cards or as a map. Click a creature or a map cell to replay it.",
                     ),
                     (
-                        "History & statistics",
+                        "History",
                         "The best and median distance over time with world changes marked, every record with a replay, the mix of body types, and the distances of one generation.",
                     ),
                     (
@@ -4171,8 +4171,8 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     for (tab, label) in [
                         (Tab::Overview, "Overview"),
-                        (Tab::Population, "Behavior archive"),
-                        (Tab::History, "History & statistics"),
+                        (Tab::Population, "Ways of moving"),
+                        (Tab::History, "History"),
                         (Tab::Race, "Race"),
                         (Tab::Lineage, "Lineage"),
                     ] {
