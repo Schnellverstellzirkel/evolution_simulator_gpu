@@ -1310,8 +1310,6 @@ struct App {
     /// The creature on screen is the champion of a finished generation (or
     /// the best elite of a loaded game), not a random first creature.
     champion_shown: bool,
-    /// A newer champion that replaces the one on screen when its replay loops.
-    next_champion: Option<(Creature, Config)>,
     /// Behavior archive map: occupied cells keyed by their niche bytes.
     /// Map filters; None shows every bin.
     map_height: Option<usize>,
@@ -1435,7 +1433,6 @@ impl App {
             lineage_pending: false,
             pinned: false,
             champion_shown: false,
-            next_champion: None,
             map_height: None,
             map_feet: None,
             map_sent: false,
@@ -1509,7 +1506,6 @@ impl App {
     /// player goes back to the champion.
     fn select(&mut self, creature: Creature, config: Config) {
         self.pinned = true;
-        self.next_champion = None;
         self.set_preview(creature, config);
         self.lineage.clear();
     }
@@ -1517,14 +1513,12 @@ impl App {
     /// lineage on screen.
     fn select_ancestor(&mut self, creature: Creature, config: Config) {
         self.pinned = true;
-        self.next_champion = None;
         self.set_preview(creature, config);
     }
     /// Shows a champion and follows new ones from now on.
     fn show_champion(&mut self, creature: Creature, config: Config) {
         self.pinned = false;
         self.champion_shown = true;
-        self.next_champion = None;
         self.set_preview(creature, config);
         self.lineage.clear();
     }
@@ -1534,33 +1528,19 @@ impl App {
         let stats = self.snapshot.as_ref()?.history.last()?;
         Some((stats.representatives.last()?.clone(), stats.config.clone()))
     }
-    /// Keeps the theater on the champion unless the player pinned a creature.
-    /// A new champion waits until the replay on screen loops, so the player
-    /// sees the whole trial, unless the screen shows no champion yet.
+    /// Keeps the theater (on the Overview and docked beside Ways of moving)
+    /// on the champion unless the player pinned a creature. A new champion,
+    /// which a new distance record brings, replaces the one on screen at
+    /// once.
     fn follow_champion(&mut self) {
-        if self.pinned {
-            return;
-        }
         let Some((creature, config)) = self.champion() else {
             return;
         };
         let showing = self.playback.as_ref().map(|p| p.creature.id);
-        if showing == Some(creature.id) {
-            self.champion_shown = true;
-            self.next_champion = None;
-            return;
-        }
-        if self
-            .next_champion
-            .as_ref()
-            .is_some_and(|(queued, _)| queued.id == creature.id)
-        {
-            return;
-        }
-        if showing.is_none() || !self.champion_shown {
+        if follows_champion(self.pinned, showing, Some(creature.id)) {
             self.show_champion(creature, config);
-        } else {
-            self.next_champion = Some((creature, config));
+        } else if !self.pinned && showing == Some(creature.id) {
+            self.champion_shown = true;
         }
     }
     /// The world a generation ran in: the settings its history row kept, or
@@ -1847,10 +1827,9 @@ impl App {
     }
     /// The replay header's buttons: follow, reset camera, and back to the
     /// champion or play the next one. Returns (back, play next).
-    fn viewport_buttons(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
+    fn viewport_buttons(&mut self, ui: &mut egui::Ui) -> bool {
         let theme = self.theme();
         let mut back = false;
-        let mut play_next = false;
         ui.checkbox(&mut self.follow, "Follow")
             .on_hover_text("Keep the camera on the creature");
         if ui.button("Reset camera").clicked() {
@@ -1862,26 +1841,12 @@ impl App {
             back = ui
                 .button(RichText::new("Back to champion").color(theme.accent))
                 .clicked();
-        } else if let Some((next, _)) = &self.next_champion {
-            let best = self
-                .snapshot
-                .as_ref()
-                .and_then(|s| s.history.last())
-                .map_or_else(String::new, |stats| format!(" {:.2} m", stats.best));
-            play_next = ui
-                .button(RichText::new(format!("New champion{best}")).color(theme.accent))
-                .on_hover_text(format!(
-                    "{} plays when this replay ends. Click to show it now.",
-                    species_name(next)
-                ))
-                .clicked();
         }
-        (back, play_next)
+        back
     }
     fn viewport(&mut self, ui: &mut egui::Ui, height: f32) {
         let theme = self.theme();
         let mut back = false;
-        let mut play_next = false;
         // A narrow replay (docked beside the archive) puts its buttons on a
         // line of their own.
         let wide = ui.available_width() > 900.;
@@ -1898,7 +1863,7 @@ impl App {
                     " CHAMPION ",
                     theme.go_fill,
                     theme.go_text,
-                    "The best creature so far. The view switches to each new champion when the replay on screen ends.",
+                    "The best creature so far. The view switches to each new champion as soon as it sets a record.",
                 )
             } else {
                 (
@@ -1932,8 +1897,7 @@ impl App {
             }
             if wide {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (b, p) = self.viewport_buttons(ui);
-                    (back, play_next) = (b, p);
+                    back = self.viewport_buttons(ui);
                 });
             }
         };
@@ -1944,15 +1908,11 @@ impl App {
         }
         if !wide {
             ui.horizontal_wrapped(|ui| {
-                let (b, p) = self.viewport_buttons(ui);
-                (back, play_next) = (b, p);
+                back = self.viewport_buttons(ui);
             });
         }
         if back {
             self.back_to_champion();
-        }
-        if play_next && let Some((creature, config)) = self.next_champion.take() {
-            self.show_champion(creature, config);
         }
         let (rect, response) = ui.allocate_exact_size(
             Vec2::new(ui.available_width(), height.max(120.)),
@@ -4157,31 +4117,20 @@ impl eframe::App for App {
             let frame_dt = physics::dt();
             if frame_dt.is_finite() && frame_dt > 0.0 {
                 let speed = self.speed;
-                // Returns whether the replay reached its end and started over.
                 let advance = |p: &mut Playback| {
                     p.accumulator = (p.accumulator + dt.clamp(0.0, 0.1) * speed).min(1.0);
                     let start = Instant::now();
-                    let mut looped = false;
                     while p.accumulator >= frame_dt && start.elapsed() < Duration::from_millis(5) {
                         if p.tick >= p.last_frame() {
                             p.reset();
-                            looped = true;
                         }
                         p.advance();
                         p.accumulator -= frame_dt;
                     }
-                    looped
                 };
-                let mut looped = false;
                 if let Some(p) = &mut self.playback {
-                    looped = advance(p);
+                    advance(p);
                     p.show_between();
-                }
-                if looped
-                    && !self.pinned
-                    && let Some((creature, config)) = self.next_champion.take()
-                {
-                    self.show_champion(creature, config);
                 }
                 if self.tab == Tab::Race {
                     for lane in &mut self.race {
@@ -4597,6 +4546,13 @@ fn season_forecast(config: &Config, generation: u32) -> Option<String> {
         "Next change at generation {at}: {} to {}",
         effect.name, effect.levels[level]
     ))
+}
+/// Whether the theater switches to the champion: only when the player has
+/// not pinned a creature, a champion exists, and a different creature is on
+/// screen. A new distance record makes a new champion, so the switch happens
+/// as soon as the record lands.
+fn follows_champion(pinned: bool, showing: Option<u64>, champion: Option<u64>) -> bool {
+    !pinned && champion.is_some() && showing != champion
 }
 /// Whether every effect except the seasons schedule sits at its calm level.
 fn world_is_calm(config: &Config) -> bool {
@@ -5313,6 +5269,20 @@ mod tests {
         assert!(imported_creature(&mut loaded).is_ok());
         loaded.bones[0].b = 9;
         assert!(imported_creature(&mut loaded).is_err());
+    }
+    #[test]
+    fn a_new_champion_replaces_the_old_one_at_once_unless_pinned() {
+        // A record at generation 12 makes creature 42 the champion while 7,
+        // the previous champion, plays: the view switches right away.
+        assert!(follows_champion(false, Some(7), Some(42)));
+        // Nothing on screen yet: the champion shows.
+        assert!(follows_champion(false, None, Some(42)));
+        // Already showing the champion: nothing to do.
+        assert!(!follows_champion(false, Some(42), Some(42)));
+        // A creature the player picked stays until Back to champion.
+        assert!(!follows_champion(true, Some(7), Some(42)));
+        // No finished generation, no champion.
+        assert!(!follows_champion(false, Some(7), None));
     }
     #[test]
     fn the_season_forecast_names_the_next_step() {

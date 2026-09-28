@@ -48,7 +48,7 @@ nice -n 10 cargo run --profile release-fast
 
 ## Playing
 
-Press **Evolve** in the top bar, or Space, to run generation after generation; Space or **Pause evolution** stops. The replay follows the champion: the best creature of the newest generation, which the view switches to each time the replay on screen ends. Pick any creature (an archive card, a map cell, a record, an ancestor) to watch it instead, and **Back to champion** returns. K or a click on the replay pauses it, the arrow keys step one frame, drag pans and scroll zooms. Ctrl+S opens Save, F1 opens help.
+Press **Evolve** in the top bar, or Space, to run generation after generation; Space or **Pause evolution** stops. The replay follows the champion: the best creature of the newest generation. When a new record makes a new champion, the view switches to it at once, on the Overview and in the player beside Ways of moving. Pick any creature (an archive card, a map cell, a record, an ancestor) to watch it instead, and **Back to champion** returns. K or a click on the replay pauses it, the arrow keys step one frame, drag pans and scroll zooms. Ctrl+S opens Save, F1 opens help.
 
 The top bar shows the population and trial length; the game keeps them at three million and 20 seconds, with no mutation controls. Diagnostic CLI runs and JSON presets can use other sizes or durations. The File menu opens, saves and exports; the New experiment dialog takes a seed; the View menu holds the dark theme and UI scale. **Diagnostics** in the status line opens a drawer with search and machine numbers and the step-by-step **One generation** and **Guided step** buttons; guided mode pauses between evaluation, archive insertion, and breeding.
 
