@@ -1684,7 +1684,161 @@ pub fn shader_source(capacity: usize, workgroup: u32, fidelity: physics::Fidelit
     ] {
         source = replace(source, from, to);
     }
-    source
+    // TEMPORARY timing experiments, not physics (EVOLUTION_P2_TIMING).
+    let timing = std::env::var("EVOLUTION_P2_TIMING").unwrap_or_default();
+    if timing.contains("noground") {
+        source = source.replace("let grounded = p.ground > 0.0;", "let grounded = false;");
+    }
+    if timing.contains("noplant") {
+        source = source.replace(
+            "        integrate_state(1.0);\n        kinematics(false);",
+            "        if false { integrate_state(1.0); }\n        if false { kinematics(false); }",
+        );
+        source = source.replace(
+            "        pgs(PLANT_SWEEPS);",
+            "        if false { pgs(PLANT_SWEEPS); }",
+        );
+    }
+    if timing.contains("nomuscle") {
+        source = source.replace(
+            "for (var k = 0u; k < muscle_count; k++) {",
+            "for (var k = 0u; k < 0u; k++) {",
+        );
+    }
+    if timing.contains("rolled") {
+        return source;
+    }
+    let contacts = capacity.min(max_contacts());
+    // Unrolled, the largest bodies' kernels take the driver very long to
+    // build; they are rare and keep their loops.
+    if capacity > 16 {
+        return source;
+    }
+    unroll_loops(
+        &source,
+        &[
+            ("MAXN", capacity),
+            ("MAXB", capacity - 1),
+            ("MAXC", contacts),
+            ("MAXR", 2 * contacts),
+        ],
+    )
+}
+
+/// Unrolls every loop of `source` that runs a variable from a literal start
+/// to one of the size constants in `bounds` (`for (var j = 0u; j < MAXB;
+/// j++) {`): each pass becomes `loop { let j = 3u; <body> break; }`, with
+/// the body's own `break` and `continue` statements (those not inside a loop
+/// of their own) turned into `break`. That keeps `continue`, and keeps
+/// `break` for the kernel's guards, which are monotonic (`if j >= nb {
+/// break; }`: once one pass stops, every later one stops too). With every
+/// index a constant, the driver can keep the arrays in registers; it keeps
+/// them in memory for loops it does not unroll.
+fn unroll_loops(source: &str, bounds: &[(&str, usize)]) -> String {
+    let mut text = source.to_owned();
+    loop {
+        let Some((start, var, from, to)) = find_unrollable(&text, bounds) else {
+            return text;
+        };
+        let open = start + text[start..].find('{').expect("loop body");
+        let close = matching_brace(&text, open);
+        let body = loop_level_breaks(&text[open + 1..close]);
+        let mut out = String::from("{\n");
+        for value in from..to {
+            out.push_str(&format!(
+                "loop {{\nlet {var} = {value}u;\n{body}\nbreak;\n}}\n"
+            ));
+        }
+        out.push('}');
+        text.replace_range(start..=close, &out);
+    }
+}
+
+/// The first loop `unroll_loops` expands: its start, variable and range.
+fn find_unrollable(text: &str, bounds: &[(&str, usize)]) -> Option<(usize, String, usize, usize)> {
+    let mut at = 0;
+    while let Some(found) = text[at..].find("for (var ") {
+        let start = at + found;
+        at = start + 9;
+        let header_end = start + text[start..].find(')')?;
+        let header = &text[start + 9..header_end];
+        // "j = 0u; j < MAXB; j++"
+        let parts: Vec<&str> = header.split(';').map(str::trim).collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let Some((var, from)) = parts[0].split_once('=') else {
+            continue;
+        };
+        let (var, from) = (var.trim(), from.trim().trim_end_matches('u'));
+        let Ok(from) = from.parse::<usize>() else {
+            continue;
+        };
+        let Some((cmp_var, limit)) = parts[1].split_once('<') else {
+            continue;
+        };
+        if cmp_var.trim() != var || parts[2] != format!("{var}++") {
+            continue;
+        }
+        let Some(&(_, to)) = bounds.iter().find(|(name, _)| *name == limit.trim()) else {
+            continue;
+        };
+        return Some((start, var.to_owned(), from, to));
+    }
+    None
+}
+
+fn matching_brace(text: &str, open: usize) -> usize {
+    let mut depth = 0usize;
+    for (i, c) in text[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return open + i;
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced braces in the kernel");
+}
+
+/// `body` with its `continue;` statements, and `break;` statements not
+/// inside a nested loop, replaced by `break;` (for `unroll_loops`).
+fn loop_level_breaks(body: &str) -> String {
+    // A stack of open braces: whether each belongs to a loop.
+    let mut stack: Vec<bool> = Vec::new();
+    let mut out = String::with_capacity(body.len());
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    let mut pending_loop = false;
+    while i < bytes.len() {
+        let rest = &body[i..];
+        if rest.starts_with("for (") || rest.starts_with("loop {") || rest.starts_with("while ") {
+            pending_loop = true;
+        }
+        match bytes[i] {
+            b'{' => {
+                stack.push(pending_loop);
+                pending_loop = false;
+            }
+            b'}' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+        let in_loop = stack.iter().any(|&l| l);
+        if !in_loop && rest.starts_with("continue;") {
+            out.push_str("break;");
+            i += "continue;".len();
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
 }
 
 /// Packs creatures for the v2 kernel, grouped by node capacity as the

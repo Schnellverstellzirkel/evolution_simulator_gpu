@@ -1108,17 +1108,17 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 if y <= floor_y + CONTACT_SLACK {
                     touching += 1.0;
                     if i < 32u {
-                        contact_lo |= 1u << i;
-                        now_lo |= 1u << i;
+                        contact_lo |= 1u << (i & 31u);
+                        now_lo |= 1u << (i & 31u);
                     } else {
-                        contact_hi |= 1u << (i - 32u);
-                        now_hi |= 1u << (i - 32u);
+                        contact_hi |= 1u << ((i - 32u) & 31u);
+                        now_hi |= 1u << ((i - 32u) & 31u);
                     }
                 } else if y > floor_y + LIFT_CLEARANCE {
                     if i < 32u {
-                        lift_lo |= contact_lo & (1u << i);
+                        lift_lo |= contact_lo & (1u << (i & 31u));
                     } else {
-                        lift_hi |= contact_hi & (1u << (i - 32u));
+                        lift_hi |= contact_hi & (1u << ((i - 32u) & 31u));
                     }
                 }
             }
