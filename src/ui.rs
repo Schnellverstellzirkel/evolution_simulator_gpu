@@ -1642,6 +1642,10 @@ impl App {
                 }
                 ui.end_row();
             });
+        let generation = self.snapshot.as_ref().map_or(0, |s| s.generation);
+        if let Some(forecast) = season_forecast(&self.config, generation) {
+            ui.label(RichText::new(forecast).small().color(theme.muted));
+        }
         let fossils = self.snapshot.as_ref().map_or(0, |s| s.fossils);
         ui.add_space(4.);
         ui.label(RichText::new("Catastrophes").strong()).on_hover_text(
@@ -3993,6 +3997,23 @@ fn origin_words(emitter: crate::qd::Emitter) -> &'static str {
         crate::qd::Emitter::Restart => "as a new random body",
     }
 }
+/// The next season step while seasons are on: "Next change at generation 60:
+/// Wind to Breeze". The worker applies step `season_step` when a generation
+/// that is a multiple of the interval begins.
+fn season_forecast(config: &Config, generation: u32) -> Option<String> {
+    let interval = *crate::environment::SEASON_INTERVALS.get(usize::from(config.seasons))?;
+    if interval == 0 {
+        return None;
+    }
+    let at = (generation / interval + 1) * interval;
+    let rotation = crate::environment::season_rotation();
+    let &(index, level) = rotation.get(usize::from(config.season_step) % rotation.len())?;
+    let effect = &crate::environment::EFFECTS[index];
+    Some(format!(
+        "Next change at generation {at}: {} to {}",
+        effect.name, effect.levels[level]
+    ))
+}
 /// Whether every effect except the seasons schedule sits at its calm level.
 fn world_is_calm(config: &Config) -> bool {
     crate::environment::EFFECTS
@@ -4687,6 +4708,23 @@ mod tests {
         assert!(imported_creature(&mut loaded).is_ok());
         loaded.bones[0].b = 9;
         assert!(imported_creature(&mut loaded).is_err());
+    }
+    #[test]
+    fn the_season_forecast_names_the_next_step() {
+        let mut config = Config {
+            seasons: 2,
+            ..Config::default()
+        };
+        assert_eq!(
+            season_forecast(&config, 7).as_deref(),
+            Some("Next change at generation 10: Wind to Breeze")
+        );
+        assert_eq!(
+            season_forecast(&config, 10).as_deref(),
+            Some("Next change at generation 20: Wind to Breeze")
+        );
+        config.seasons = 0;
+        assert_eq!(season_forecast(&config, 7), None);
     }
     #[test]
     fn species_names_follow_the_body_plan() {
