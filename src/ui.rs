@@ -2217,45 +2217,80 @@ impl App {
     }
     fn metrics(&self, ui: &mut egui::Ui) {
         let theme = self.theme();
-        // Live creatures/s over complete generations; the last generation's own
-        // figure until enough generations have finished.
-        let live_rate = self.snapshot.as_ref().map_or(0.0, |s| s.end_to_end);
-        if let Some(s) = self.snapshot.as_ref().and_then(|s| s.history.last()) {
-            ui.columns(4, |cols| {
-                for (ui, (name, value, color)) in cols.iter_mut().zip([
-                    ("BEST GAIT SCORE", format!("{:.3} m", s.best), theme.accent),
-                    ("QD SCORE", format!("{:.2}", s.qd_score), theme.accent),
-                    ("NICHES", number(s.archive_cells), theme.ink),
-                    (
-                        "EVALUATIONS / SEC",
-                        format!(
-                            "{:.0}",
-                            if live_rate > 0.0 {
-                                live_rate
-                            } else {
-                                s.population as f64 / s.seconds.max(0.001)
-                            }
-                        ),
-                        theme.ink,
-                    ),
-                ]) {
-                    egui::Frame::new()
-                        .fill(theme.card)
-                        .corner_radius(8)
-                        .inner_margin(12)
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            ui.label(RichText::new(name).small().color(theme.muted));
-                            ui.label(RichText::new(value).size(22.).color(color));
-                        });
-                }
-            });
-        } else {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let Some(s) = snapshot.history.last() else {
             ui.label(
-                RichText::new("Run a generation to see how far your creatures can travel.")
-                    .color(theme.muted),
+                RichText::new(
+                    "The first generation is running. Its best creature appears here when it ends.",
+                )
+                .color(theme.muted),
             );
-        }
+            return;
+        };
+        let history = &snapshot.history;
+        let gain = history
+            .len()
+            .checked_sub(11)
+            .map(|earlier| s.best - history[earlier].best);
+        let population = snapshot.config.population.max(1);
+        let share = snapshot.completed.min(population) as f64 / population as f64;
+        let rate = snapshot.end_to_end;
+        let progress = if snapshot.running && rate > 0.0 {
+            let left = (population - snapshot.completed.min(population)) as f64 / rate;
+            format!(
+                "{:.0}% done · about {} left",
+                share * 100.0,
+                seconds_text(left)
+            )
+        } else if snapshot.running {
+            format!("{:.0}% done", share * 100.0)
+        } else {
+            "Paused".to_owned()
+        };
+        ui.columns(3, |cols| {
+            for (ui, (name, value, color, note, why)) in cols.iter_mut().zip([
+                (
+                    "BEST DISTANCE",
+                    format!("{:.2} m", s.best),
+                    theme.accent,
+                    gain.map_or_else(
+                        || "so far".to_owned(),
+                        |gain| format!("{gain:+.2} m in the last 10 generations"),
+                    ),
+                    "How far the best creature travels in its 60 s trial. Distance is the only score.",
+                ),
+                (
+                    "GENERATION",
+                    snapshot.generation.to_string(),
+                    theme.ink,
+                    progress,
+                    "Every generation tries a whole population of new creatures.",
+                ),
+                (
+                    "KINDS OF MOVEMENT",
+                    number(s.archive_cells),
+                    theme.ink,
+                    "different ways of moving kept".to_owned(),
+                    "Evolution keeps the best creature for each way of moving: how much of the time it touches the ground, its stride rate, its height and how many feet it uses.",
+                ),
+            ]) {
+                egui::Frame::new()
+                    .fill(theme.card)
+                    .corner_radius(8)
+                    .inner_margin(12)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.label(RichText::new(name).small().color(theme.muted))
+                            .on_hover_text(why);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(value).size(22.).color(color));
+                            ui.label(RichText::new(note).small().color(theme.muted));
+                        });
+                    });
+            }
+        });
     }
     fn trend(&self, ui: &mut egui::Ui, height: f32) {
         let Some(s) = &self.snapshot else { return };
@@ -2272,7 +2307,7 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .small_button("Reset view")
-                    .on_hover_text("Fit every generation and gait score again")
+                    .on_hover_text("Fit every generation and distance again")
                     .clicked()
                 {
                     reset = true;
@@ -2303,7 +2338,7 @@ impl App {
             .height(height)
             .legend(Legend::default())
             .x_axis_label("Generation")
-            .y_axis_label("Gait score (m)")
+            .y_axis_label("Distance (m)")
             .allow_scroll(false);
         if reset {
             plot = plot.reset();
@@ -2401,7 +2436,7 @@ impl App {
         });
         let mut plot = Plot::new("histogram")
             .height(height)
-            .x_axis_label("Gait score (m)")
+            .x_axis_label("Distance (m)")
             .allow_scroll(false);
         if reset {
             plot = plot.reset();
@@ -2429,7 +2464,7 @@ impl App {
                 if ui
                     .selectable_value(&mut self.archive_view, ArchiveView::Map, "Map")
                     .on_hover_text(
-                        "Watch the search fill behavior space. Cells are colored by gait score.",
+                        "Watch evolution fill the ways of moving. Cells are colored by distance.",
                     )
                     .clicked()
                 {
@@ -3303,7 +3338,7 @@ impl App {
         let len = s.history.len();
         if len == 0 {
             ui.heading("A history waiting to happen");
-            ui.label("Run your first generation to build fitness curves and creature replays.");
+            ui.label("Run your first generation to build distance curves and creature replays.");
             return;
         }
         ui.horizontal(|ui| {
@@ -3437,7 +3472,7 @@ impl App {
                 for (name, why) in [
                     (
                         "Overview",
-                        "The replay of the selected creature, its playback controls, lineage and fitness trend.",
+                        "The champion's replay (or the creature you picked), its playback controls, lineage and the best distance over time.",
                     ),
                     (
                         "Behavior archive",
@@ -3445,7 +3480,7 @@ impl App {
                     ),
                     (
                         "History & statistics",
-                        "Per-generation curves, every new record with a replay, the session hall of fame, the mix of body types, and the distribution of gait scores.",
+                        "Per-generation curves, every new record with a replay, the session hall of fame, the mix of body types, and the distribution of distances.",
                     ),
                     (
                         "Race",
@@ -3453,7 +3488,7 @@ impl App {
                     ),
                     (
                         "Lineage",
-                        "Ancestors of the selected creature with thumbnails, fitness gains and body plan changes.",
+                        "Ancestors of the creature on screen with thumbnails, distance gains and body plan changes.",
                     ),
                 ] {
                     ui.label(RichText::new(name).strong());
@@ -4138,6 +4173,18 @@ fn paint_card(
             FontId::proportional(10.),
             if card.survivor { theme.accent } else { AMBER },
         );
+    }
+}
+/// A short duration for people: "8 s", "3 min", "2 h".
+fn seconds_text(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds < 0.0 {
+        "a while".to_owned()
+    } else if seconds < 90.0 {
+        format!("{:.0} s", seconds.max(1.0))
+    } else if seconds < 90.0 * 60.0 {
+        format!("{:.0} min", seconds / 60.0)
+    } else {
+        format!("{:.0} h", seconds / 3600.0)
     }
 }
 fn matches_search(q: &str, terms: &str) -> bool {
