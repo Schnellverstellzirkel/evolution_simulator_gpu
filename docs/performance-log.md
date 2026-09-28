@@ -649,3 +649,74 @@ Why it is slower:
 - Lockstep epochs were a suspect but not the cause: a shared budget of lane chunks, so costly warps run fewer steps and every warp stops at the same time, changed the checked rate by less than 10%.
 
 What stage 1 would need to win: a kernel at 128 registers or fewer, and GPU-side compaction that moves running creatures into dense warps between epochs. Both are open. The segment engine stays the default.
+
+## Search-side shortcuts: a second screen, cheaper checks, sampled metrics (2026-09-28)
+
+The owner approved the three search-side levers of `docs/hpc-assessment.md` section 7.6 for building and measuring, with one rule: a shortcut that wins at equal wall time without costing search quality per evaluation becomes the plain default, and one that does not is removed. The second screen won and is the default. Cheaper checks and sampled behavior metrics lost and are gone from the code; their numbers are below.
+
+Setup. Rates: `eval-bench` on the first 500,000 creatures of `runs/evolved-3m-v26.evo`, GPU only (`EVOLUTION_CPU_THREADS=0`), with the new `--screened` option (a first pass of standard trials sets the bars the game would use, then every repeat runs screened), and the 3M GUI benchmark with one warm-up and two measured generations. Four agents shared the machine (load average 9 to 18), so single GUI runs spread by up to 40% and only the eval-bench rates separate the arms cleanly. Search: `examples/search_ab.rs`, seeds 38 to 47, 5,000 creatures, 60 s trials, 40 generations, 3 threads. `search_ab` gained `--checks`, which runs the game's contender check (one contender per archive cell at a time, perturbed pose, 4x physics, the worse trial counts, exactly `scheduler::check_verdict`), and every run now reports how much of its archive distance the 50 best global elites keep in a fine trial from a second perturbed pose that no run's check used.
+
+### Second screening rung (default)
+
+A creature that passes the 5 s screen faces a second bar 30 s after settling. The bar is the distance there that the best 60% of the first screen's survivors reached (`physics::SCREEN2_SECONDS`, `physics::SCREEN2_KEEP`). The rules are the first screen's: the bar comes from the previous generation or, in a generation that starts without one, from its first quarter; a creature stopped there keeps its distance at 30 s and enters no archive; a creature that fell earlier counts with its fall distance; a fine check faces both bars. It lives in the kernel (`screen2_tick`, `screen2_bar`, result field `screen2_x`), the CPU engine, the GPU segments (a segment ends after the second rung), `scheduler::to_metrics`, and `Experiment::next_screen`. A rung without a bar changes nothing: 200,000 of 200,000 GPU scores were bit-identical with and without it, and the kernel without a rung was bit-identical to main on 300,000 evolved creatures. No archive or physics meaning changed, so `qd::VERSION` stays 26. Tests: `tests/second_rung.rs`, `tests/screening.rs` (CPU and GPU).
+
+Rate, eval-bench, two interleaved rounds of three repeats:
+
+| rung | keep | creatures/s | vs one screen |
+|---|---:|---:|---:|
+| none (one screen) | | 128,600 to 133,900 | |
+| 10 s | 50% | 151,500 to 164,100 | +20% |
+| 15 s | 50% | 145,900 to 155,700 | +17% |
+| 20 s | 50% | 152,300 to 157,500 | +19% |
+| 20 s | 60% | 142,100 to 151,600 | +15% |
+| 30 s | 50% | 142,400 to 150,700 | +14% |
+| 30 s | 60% | 138,500 to 145,300 | +10% |
+
+Selection, same 500,000 creatures with full trials: the first bar keeps 500 of the final top 500 (0.1%), 4,996 of the top 5,000 and 48,084 of the top 50,000. Every second rung keeps all of the top 0.1% and 1% that the first bar keeps; of the top 10% it keeps 42,905 (10 s, 50%) to 47,974 (30 s, 60%).
+
+Search per evaluation, 40 generations, no checks (the earlier search tables' setting):
+
+| arm | best, mean (median) | QD, mean (median) | cells | seeds with higher best / QD | top-50 muscles, mean (most) |
+|---|---:|---:|---:|---:|---:|
+| one screen | 436 m (349) | 38,568 (39,126) | 1,007 | | 12.3 (26) |
+| 10 s, 50% | 415 m (334) | 26,738 (26,802) | 922 | 4 / 3 | 11.4 (28) |
+| 15 s, 50% | 415 m (449) | 26,639 (27,468) | 938 | 6 / 4 | 14.9 (33) |
+| 20 s, 50% | 313 m (349) | 24,853 (24,008) | 963 | 5 / 3 | 10.7 (23) |
+| 20 s, 60% | 325 m (319) | 34,993 (37,376) | 945 | 4 / 4 | 11.7 (22) |
+| 30 s, 50% | 345 m (365) | 32,250 (33,362) | 937 | 5 / 5 | 11.5 (25) |
+| 30 s, 60% | 457 m (385) | 39,877 (33,046) | 950 | 7 / 5 | 14.1 (26) |
+
+The early rungs cost about a third of the QD per evaluation, because the creatures they stop no longer fill archive cells. Only 30 s keeping 60% holds best distance and QD. At equal GPU time (+10%, so 44 generations against 40) it reaches best 476 m (386) and QD 47,082 (36,540), with a higher best on 7 of 10 seeds and a higher QD on 6 of 10. The CPU engine gains more than the GPU from the rung (its 16-lane groups stop when every lane has stopped): at 40 generations `search_ab` took 772 CPU seconds against 1,074 to 1,143 for one screen.
+
+The same comparison with the game's contender check (`--checks`) on seeds 38 to 46 (the owner asked to stop the run after nine seeds): one screen at 40 generations best 61.3 m (37.4), QD 3,538 (2,752), 997 cells. With the rung at 40 generations best 82.0 m (61.6), QD 4,141 (3,582), 934 cells, higher best on 6 of 9 seeds; at 44 generations best 90.5 m (61.6), QD 4,638 (3,863), higher best and QD on 6 of 9. The top 50 keep a median 48% of their distance from an unseen pose, against 44% with one screen.
+
+3M GUI benchmark, end to end: one screen 163,800 to 225,900/s over six runs (mean 198,800); 30 s at 60% 199,600 and 233,500 (mean 216,600, +9%). The other rungs: 10 s 233,600 and 273,100; 20 s 221,900 and 235,700; 30 s at 50% 186,700 to 254,400 over four runs. Checks took 20% to 28% of GPU busy time in these runs.
+
+### Cheaper contender checks (measured, removed)
+
+Variants: the check at 2x or 3x instead of 4x the standard rate and solver passes, and checks that end at 20 or 30 s and compare with the standard trial's distance at that moment (the standard score loses what the check fell behind by then; a check that falls counts its fall distance).
+
+Verdict study, 100,000 creatures of a population evolved 15 generations with checks (seed 38, 100k, headless), the top 10% as contenders, GPU only, no screening:
+
+| check | GPU cost | median share of the score kept | lowered by more than 50% | same verdict as the game's check (within 5% or 10 cm) | game's >50% cuts it also makes | Spearman with the game's check |
+|---|---:|---:|---:|---:|---:|---:|
+| 4x, 60 s (game) | 1.00 | 0.45 | 51.6% | 100% | 100% | 1.000 |
+| 4x, 60 s, another pose | 1.01 | 0.44 | 51.8% | 32.0% | 59.9% | 0.129 |
+| 3x, 60 s | 0.65 | 0.58 | 45.7% | 59.7% | 76.7% | 0.666 |
+| 2x, 60 s | 0.40 | 0.74 | 37.1% | 41.0% | 58.1% | 0.460 |
+| 4x, 30 s | 0.51 | 0.72 | 37.7% | 56.5% | 72.6% | 0.858 |
+| 4x, 20 s | 0.36 | 0.82 | 32.8% | 53.3% | 63.1% | 0.810 |
+| 2x, 30 s | 0.21 | 0.87 | 26.0% | 33.5% | 41.8% | 0.415 |
+| 2x, 20 s | 0.15 | 0.91 | 22.8% | 33.0% | 36.6% | 0.391 |
+
+The game's check agrees with itself from another pose on only 32% of verdicts, so the verdict is mostly the pose. Every cheaper check is more lenient: it keeps more of the score and cuts fewer creatures by half. On the unchecked evolved 3M checkpoint every variant cut 99 to 100% of the top 5% by more than 10%.
+
+eval-bench with every screened survivor checked (warm repeats): 4x 42,300 and 48,200/s, 3x 56,100 and 57,700, 2x 65,200 and 67,400, 4x to 20 s 69,600 and 70,700, 2x to 20 s 87,800 and 91,100, no checks 121,000 and 126,100. In the game only contenders are checked and checks took 21% to 28% of GPU busy time, so the most a check can give back is about a quarter. The GUI did not show it: one screen 219,100 and 225,900/s in the same session, 2x 217,600 (a second 2x run hung with the GPU idle and was killed after 44 minutes; not reproduced), 4x to 20 s 236,000 and 210,400, 2x to 20 s 206,800 and 147,300 (that run checked 217,492 contenders and spent 15.6 s on one archive stage).
+
+Search per evaluation with `--checks`, 40 generations: the 4x check gives best 64 m (48) and QD 3,518 (2,822); the 2x check gives 165 m (129) and 8,579 (5,380), but its top 50 keep a median 12% of their distance from an unseen pose (364 of 500 below half) against 44% (243 of 500) with the 4x check. A 2x check lets integrator exploits through, which is what the check is for, so it lost. The shorter checks were not run through the search; they are as lenient as 2x in the verdict study.
+
+A finding for every search table in this log: without checks, the 50 best elites of `search_ab` keep a median 0% of their distance in a fine trial from a perturbed pose (497 of 500 below half). The earlier search A/Bs, which ran without checks, measured evolution with no robustness filter. The game checks every contender, and with `--checks` the best distance after 40 generations falls from 436 m to 64 m.
+
+### Behavior metrics every 2 or 4 steps (measured, removed)
+
+Ground contact, height, bounce and lifted feet were sampled every 2 or 4 standard steps, each sample counting for the steps it stands for; falls, joint breaks, head shaking and touchdown sensors stayed per step, so no score changed (0 of 5,000 and 0 of 500,000). eval-bench, GPU only, no checks, interleaved: every step 69,100 to 74,600/s, every 2 steps 68,100 to 70,500, every 4 steps 67,100 to 71,000. No gain: the per-node sums the sampling skips are a few instructions next to the joint break and fall checks, which must run every step. On 5,000 evolved creatures it moved 6.8% of creatures to another archive cell at every 2 steps (3.9% of those that walked more than 5 s) and 46% at every 4 steps (the gait sampling falls to 15 per second). It was removed.
