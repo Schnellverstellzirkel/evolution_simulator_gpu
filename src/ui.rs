@@ -621,10 +621,13 @@ enum ArchiveView {
 }
 /// One archive elite running in the race view.
 struct RaceLane {
-    /// Place in the archive ranking.
-    rank: usize,
+    /// Why the creature runs: its archive rank, "champion" or "your pick".
+    label: String,
     playback: Playback,
 }
+/// Creatures the player sends to the race with "Race it", at most this many
+/// beside the champion.
+const RACE_PICKS: usize = 4;
 /// Cold-to-hot color for a normalized map value.
 fn heat_color(t: f32) -> Color32 {
     let cold = Color32::from_rgb(64, 98, 168);
@@ -1238,6 +1241,8 @@ struct App {
     race_pending: bool,
     race_page_requested: bool,
     race_camera: f32,
+    /// Creatures the player sent to the race, oldest first, with their worlds.
+    race_picks: Vec<(Creature, Config)>,
     /// Native benchmark frame intervals and the last control probe time.
     bench_frames: Vec<f32>,
     bench_last_ping: Instant,
@@ -1345,6 +1350,7 @@ impl App {
             race_pending: smoke_tab == "race",
             race_page_requested: false,
             race_camera: 0.0,
+            race_picks: Vec::new(),
             bench_frames: Vec::new(),
             bench_last_ping: Instant::now(),
             bench_pings: 0,
@@ -2054,6 +2060,7 @@ impl App {
             MUTED,
         );
         let mut sought = false;
+        let mut race_it = None;
         if let Some(p) = &mut self.playback {
             let last_frame = p.last_frame();
             let trial_start = p.trial_start();
@@ -2121,6 +2128,14 @@ impl App {
                 self.tab = Tab::Lineage;
             }
             if ui
+                .add_enabled(self.playback.is_some(), egui::Button::new("Race it"))
+                .on_hover_text("Race this creature against the champion")
+                .clicked()
+                && let Some(p) = &self.playback
+            {
+                race_it = Some((p.creature.clone(), p.config.clone()));
+            }
+            if ui
                 .add_enabled(self.playback.is_some(), egui::Button::new("Export GIF"))
                 .on_hover_text("Save an animated GIF of this replay under runs/")
                 .clicked()
@@ -2146,6 +2161,15 @@ impl App {
         });
         if sought {
             self.playing = false;
+        }
+        if let Some((creature, config)) = race_it {
+            self.race_picks.retain(|(pick, _)| pick.id != creature.id);
+            self.race_picks.push((creature, config));
+            if self.race_picks.len() > RACE_PICKS {
+                self.race_picks.remove(0);
+            }
+            self.tab = Tab::Race;
+            self.restart_race();
         }
     }
     fn metrics(&self, ui: &mut egui::Ui) {
@@ -2783,6 +2807,33 @@ impl App {
         if !self.race_pending {
             return;
         }
+        if !self.race_picks.is_empty() {
+            // The player's picks against the champion.
+            let mut lanes: Vec<RaceLane> = Vec::new();
+            if let Some((creature, config)) = self.champion()
+                && self
+                    .race_picks
+                    .iter()
+                    .all(|(pick, _)| pick.id != creature.id)
+            {
+                lanes.push(RaceLane {
+                    label: "champion".to_owned(),
+                    playback: Playback::new(creature, config),
+                });
+            }
+            for (creature, config) in &self.race_picks {
+                lanes.push(RaceLane {
+                    label: "your pick".to_owned(),
+                    playback: Playback::new(creature.clone(), config.clone()),
+                });
+            }
+            lanes.sort_by(|a, b| b.playback.distance.total_cmp(&a.playback.distance));
+            self.race = lanes;
+            self.race_pending = false;
+            self.race_page_requested = false;
+            self.race_camera = 0.0;
+            return;
+        }
         let Some(snapshot) = &self.snapshot else {
             return;
         };
@@ -2804,7 +2855,7 @@ impl App {
             .filter(|card| card.descriptor.is_some() && card.score.is_finite())
             .take(5)
             .map(|card| RaceLane {
-                rank: card.rank,
+                label: format!("archive rank {}", card.rank + 1),
                 playback: Playback::new(card.creature.clone(), config.clone()),
             })
             .collect();
@@ -2899,12 +2950,30 @@ impl App {
                     .color(theme.muted),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button("New race")
-                    .on_hover_text("Take the current top five archived creatures")
-                    .clicked()
-                {
-                    self.restart_race();
+                if self.race_picks.is_empty() {
+                    if ui
+                        .button("New race")
+                        .on_hover_text("Take the current top five kept creatures")
+                        .clicked()
+                    {
+                        self.restart_race();
+                    }
+                } else {
+                    if ui
+                        .button("Top five")
+                        .on_hover_text("Forget your picks and race the top five kept creatures")
+                        .clicked()
+                    {
+                        self.race_picks.clear();
+                        self.restart_race();
+                    }
+                    ui.label(
+                        RichText::new(
+                            "Your picks against the champion. Race it under any replay adds one.",
+                        )
+                        .small()
+                        .color(theme.muted),
+                    );
                 }
             });
         });
@@ -3066,9 +3135,8 @@ impl App {
                 lane_rect.left_top() + Vec2::new(8., 23.),
                 Align2::LEFT_TOP,
                 format!(
-                    "finishes at {:.2} m · archive rank {}",
-                    lane.playback.distance,
-                    lane.rank + 1
+                    "finishes at {:.2} m · {}",
+                    lane.playback.distance, lane.label
                 ),
                 FontId::proportional(11.),
                 theme.muted,
