@@ -150,7 +150,7 @@ fn log_event(events: &mut Arc<Vec<Event>>, generation: u32, kind: EventKind, tex
     });
 }
 /// The effects that differ between two worlds, as "Ground Flat to Rough, 8 cm".
-fn world_change_text(before: &Config, after: &Config) -> Option<String> {
+pub fn world_change_text(before: &Config, after: &Config) -> Option<String> {
     let parts: Vec<String> = crate::environment::EFFECTS
         .iter()
         .filter(|effect| effect.name != "Seasons")
@@ -190,6 +190,17 @@ fn log_world_change(
         EventKind::World
     };
     log_event(events, generation, kind, text);
+}
+/// Logs the world changes a history records, so a loaded game's feed still
+/// shows them. Saves keep each generation's world in its statistics, which is
+/// all this needs.
+fn log_history_world_changes(events: &mut Arc<Vec<Event>>, history: &[Stats]) {
+    for pair in history.windows(2) {
+        let (before, after) = (&pair[0].config, &pair[1].config);
+        if before.physics_differs(after) {
+            log_world_change(events, before, after, pair[1].generation, 0);
+        }
+    }
 }
 /// One occupied behavior cell of the global archive, for the map. The table
 /// is small (one row per elite) and carries no body, so it can follow every
@@ -804,6 +815,7 @@ fn run(
                             );
                         preview = Some((creature, next.config.clone()));
                         events = Arc::new(Vec::new());
+                        log_history_world_changes(&mut events, &next.history);
                         log_event(
                             &mut events,
                             next.generation,
@@ -1598,6 +1610,45 @@ fn steady_absorb(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_loaded_history_rebuilds_its_world_changes() {
+        let stats = |generation: u32, wind: f32| {
+            let config = Config {
+                wind,
+                ..Config::default()
+            };
+            Stats {
+                generation,
+                best: 0.0,
+                median: 0.0,
+                worst: 0.0,
+                mean: 0.0,
+                failed: 0,
+                seconds: 0.0,
+                population: 1,
+                percentiles: vec![0.0; 29],
+                histogram: vec![],
+                species: vec![],
+                representatives: vec![],
+                config,
+                archive_cells: 0,
+                qd_score: 0.0,
+                archive_coverage: 0.0,
+                emitters: Default::default(),
+            }
+        };
+        let history = vec![stats(0, 0.0), stats(1, -3.0), stats(2, -3.0)];
+        let mut events = Arc::new(Vec::new());
+        log_history_world_changes(&mut events, &history);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].generation, 1);
+        assert!(
+            events[0].text.starts_with("Wind Calm to Strong"),
+            "{}",
+            events[0].text
+        );
+    }
 
     #[test]
     fn stage_log_writes_one_csv_row_per_generation() {
