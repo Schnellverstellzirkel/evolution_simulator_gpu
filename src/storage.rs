@@ -705,7 +705,10 @@ impl Experiment {
         let generation = self.generation;
         let parent_ids = &self.candidate_parent_ids;
         let island_total = self.islands.len().max(1);
-        let island_results: Vec<(Vec<usize>, Vec<(usize, qd::Offer)>)> = self
+        // Per island: the slots that entered, and the emitter and offer of
+        // each reserve entry.
+        type IslandResult = (Vec<usize>, Vec<(usize, qd::Offer)>);
+        let island_results: Vec<IslandResult> = self
             .islands
             .par_iter_mut()
             .enumerate()
@@ -1876,9 +1879,9 @@ impl Experiment {
         self.fossils.extend(fossils);
         lost
     }
-    /// An extinction wipes out the island whose best creature is slowest. Its
-    /// cells refill from its own survivors' offspring and from migrants, so a
-    /// stalled island starts over from new designs (Lehman and Miikkulainen,
+    /// An extinction wipes out the island whose best creature is slowest. An
+    /// isolated island starts over from new random bodies, and the hub from
+    /// its next copies, so a stalled island starts over from new designs (Lehman and Miikkulainen,
     /// 2015). The lost elites become fossils, so it can be undone. Returns how
     /// many elites were lost.
     pub fn extinction(&mut self) -> usize {

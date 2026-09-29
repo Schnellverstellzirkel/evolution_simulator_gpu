@@ -659,7 +659,11 @@ fn print_common_grid(scope: &str, seed: u64, experiment: &Experiment) {
     println!(
         "{scope} seed {seed} common grid: qd {qd:.2}, cells {}, reserve {}, body plans {}",
         cells.len(),
-        experiment.archive.morphology_count(),
+        experiment
+            .islands
+            .iter()
+            .map(|island| island.morphology_count())
+            .sum::<usize>(),
         plans.len()
     );
 }

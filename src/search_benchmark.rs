@@ -763,7 +763,7 @@ fn run_seed(
         let archive_morphology = archive_morphology(&experiment.archive.entries);
         let top50_body_sizes = top_elite_body_sizes(&experiment.archive.entries, 50);
         let innovation_reserve_morphology =
-            innovation_reserve_morphology(&experiment.archive.entries);
+            innovation_reserve_morphology(&island_entries(&experiment));
         let population_morphology = population_morphology(&experiment.population);
         let best = stats.best;
         let is_record = best > previous_best;
@@ -966,7 +966,7 @@ pub fn analyze_checkpoint(path: &Path) -> Result<(CheckpointAnalysis, Option<Cre
         qd_score: experiment.archive.qd_score,
         archive_coverage: experiment.archive.coverage(),
         archive_morphology: archive_morphology(&experiment.archive.entries),
-        innovation_reserve_morphology: innovation_reserve_morphology(&experiment.archive.entries),
+        innovation_reserve_morphology: innovation_reserve_morphology(&island_entries(&experiment)),
         champion: champion.map_or(
             ChampionSummary {
                 id: 0,
@@ -1095,6 +1095,15 @@ fn top_elite_body_sizes(entries: &[Elite], limit: usize) -> Vec<TopEliteBodySize
                 },
             }
         })
+        .collect()
+}
+
+/// Every island's elites: the morphology reserves live in the islands.
+fn island_entries(experiment: &Experiment) -> Vec<Elite> {
+    experiment
+        .islands
+        .iter()
+        .flat_map(|island| island.entries.iter().cloned())
         .collect()
 }
 

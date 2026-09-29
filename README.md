@@ -2,7 +2,7 @@
 
 A Rust game in which 2D creatures made of bones, joints, and muscles evolve to travel as far as possible. The graphical game starts with **3 million creatures per generation** and **20-second trials**. Fitness is horizontal center-of-mass distance in meters. Gait, height, and ground contact describe archive niches; they do not multiply or penalize the score.
 
-The search combines MAP-Elites, CMA optimizers, structural mutations, novelty search, and immigrants across four island archives. Vulkan compute is the scoring authority in the full-performance run; the CPU engine remains available for fallback, diagnostics, and recorded playback. An egui dashboard shows the archive, history, lineage, and replays.
+The search combines MAP-Elites, CMA optimizers, structural mutations, novelty search, and immigrants across four isolated island archives and a hub. Vulkan compute is the scoring authority in the full-performance run; the CPU engine remains available for fallback, diagnostics, and recorded playback. An egui dashboard shows the archive, history, lineage, and replays.
 
 ## Original work and license
 
@@ -72,7 +72,7 @@ Each environment effect is a row with one button per level. A click sets that le
 
 Hurdles raise periodic steps that a gait must climb or leap. The earthquake gives every creature its own bump phase and height, derived from its id, so no gait can memorize one pattern. The seasons alternate the world on schedule: every 20, 10, or 5 generations, exactly one effect advances one level, walking through wind, ground, grip, mud, and slope first and then the rest, with every effect's cycle returning the world to calm. The rotation step is saved with the experiment, so a resumed run continues mid-cycle, and Off is the default. A world change invalidates the old scores and queues archive elites for evaluation under the new conditions. Effects change the physics; the objective remains distance.
 
-The **Catastrophe** row adds **Meteor strike**, which removes about half the elites at random from each archive, and **Extinction**, which clears the island with the slowest best creature. **Undo** restores saved fossils where their cells are empty or hold slower elites. Fossils are kept in memory for the current session; catastrophe undo history is not saved in checkpoints.
+The **Catastrophe** row adds **Meteor strike**, which removes about half the elites at random from each archive, and **Extinction**, which clears the island with the slowest best creature. An isolated island restarts from new random bodies, and the hub refills from its next copies. **Undo** restores saved fossils where their cells are empty or hold slower elites. Fossils are kept in memory for the current session; catastrophe undo history is not saved in checkpoints.
 
 ## Creatures and search
 
@@ -80,7 +80,7 @@ Bodies begin with 3–5 nodes connected by a tree of bones. Defaults allow growt
 
 Grounded nodes resist movement during bone and velocity constraints, so the body can pivot over planted feet. A friction cap limits the center-of-mass displacement this can produce, and ground support includes floor clamps and whole-body lift. A fall, a joint driven too far past its range, or head acceleration averaged over about 0.1 seconds exceeding 8 g ends scoring at the distance reached. These physical limits leave distance as the sole objective.
 
-Each behavior archive has 1,440 possible niches for ground contact, gait cadence, mean body height, and feet that touch down and lift off. Vertical oscillation is recorded but has one archive bin. A separate 64-entry morphology reserve gives new topologies offspring opportunities without adding to behavior coverage or QD score. Four islands retain separate parent pools and exchange their fastest tenth of elites every 25 generations. CMA, structural, and novelty emitter shares adapt to archive discoveries and improvements; immigrants seed empty archives.
+Each behavior archive has 1,440 possible niches for ground contact, gait cadence, mean body height, and feet that touch down and lift off. Vertical oscillation is recorded but has one archive bin. Each island keeps a separate 64-entry morphology reserve that gives its new topologies offspring opportunities without adding to behavior coverage or QD score. Four islands are fully isolated: they never receive migrants, and their children take parents and mates only from their own archive. Every 25 generations a fifth island, the hub, receives copies of each isolated island's fastest tenth of elites and breeds from them with its own. Nothing flows from the hub back. The global archive records every island's elites for display and saves, and no parent comes from it. CMA, structural, and novelty emitter shares adapt to archive discoveries and improvements; immigrants seed empty archives.
 
 Potential archive entrants receive a perturbed trial at four times the standard physics rate and solver passes. The selected evaluation engine's standard result and this check determine archive fitness and behavior. In the full-performance run, both are GPU evaluations; CPU playback or comparison never edits the score or descriptor.
 

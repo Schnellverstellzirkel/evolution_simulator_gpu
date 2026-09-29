@@ -4,7 +4,7 @@ Read this before you change the code. It covers the game, the owner's rules, how
 
 ## The game
 
-Evolution Simulator is a Rust game. 2D creatures made of bones, joints and pull-only muscles evolve to travel as far as possible in 20 s trials. Each generation has 3 million creatures, and the GPU scores all of them. The search is MAP-Elites with four emitters (CMA tuning, anatomy mutations, novelty, immigrants) over 4 island archives in a ring plus one global archive. The player watches evolution and changes the world with environment buttons.
+Evolution Simulator is a Rust game. 2D creatures made of bones, joints and pull-only muscles evolve to travel as far as possible in 20 s trials. Each generation has 3 million creatures, and the GPU scores all of them. The search is MAP-Elites with four emitters (CMA tuning, anatomy mutations, novelty, immigrants) over 4 isolated island archives, one hub island that receives copies of their best elites, and one global archive that records everything and is never a parent source. The player watches evolution and changes the world with environment buttons.
 
 `cargo run --release` on `main` is the current game. It must be the best game with no flags.
 
