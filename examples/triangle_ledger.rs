@@ -70,7 +70,6 @@ fn triangle(u: &[f32; GENES]) -> Creature {
         bones,
         muscles,
         id: 0,
-        mutability: 1.0,
     }
 }
 

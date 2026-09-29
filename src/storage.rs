@@ -2742,17 +2742,13 @@ fn migrate_legacy_population(old: V2Population, cfg: &Config) -> Population {
         let nodes = old.nodes[genome.node_start..genome.node_start + genome.node_count].to_vec();
         let muscles = &old.muscles[genome.muscle_start..genome.muscle_start + genome.muscle_count];
         population.push(evolution::migrate_legacy_creature(
-            nodes,
-            muscles,
-            genome.id,
-            genome.mutability,
-            cfg,
+            nodes, muscles, genome.id, cfg,
         ));
     }
     population
 }
 fn migrate_legacy_creature(old: V2Creature, cfg: &Config) -> Creature {
-    evolution::migrate_legacy_creature(old.nodes, &old.muscles, old.id, old.mutability, cfg)
+    evolution::migrate_legacy_creature(old.nodes, &old.muscles, old.id, cfg)
 }
 fn migrate_legacy_stats(old: LegacyStats) -> Stats {
     let cfg = old.config.clone();
@@ -3509,7 +3505,6 @@ mod breeding_tests {
                 (x.muscle_start, x.muscle_count, x.id),
                 (y.muscle_start, y.muscle_count, y.id)
             );
-            assert_eq!(x.mutability, y.mutability);
         }
         assert_eq!(a.candidate_emitters, b.candidate_emitters);
         assert_eq!(a.candidate_parent_ids, b.candidate_parent_ids);

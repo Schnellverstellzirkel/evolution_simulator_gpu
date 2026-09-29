@@ -12,7 +12,6 @@ Open work only. Delete an item when it is merged into `main` or measured and rej
 
 ## Interface
 
-- The wet grip level is barely visible in the world view, and the effect label repeats the effect name ("Heat wave: Heat wave").
 
 ## Speed toward 2M and 4M creatures/s
 
@@ -25,7 +24,6 @@ Open work only. Delete an item when it is merged into `main` or measured and rej
 
 Each item is an A/B over 3 seeds. Winners go on by default and losers are deleted.
 
-- `Creature.mutability` is mutated but unused. Self-adapted mutation scale tied over 18 seeds, so delete the gene once fewer branches are open (it touches the save format and about 32 sites).
 - The emitter shares barely move: the weight formula adds a constant 0.55 to a mean reward near 0.002, so shares stay at the 35/35/30 prior. A reward-following bandit tied in the A/B.
 - Archive and selection, after v2 lands and on the GPU at larger populations (CPU A/Bs at 2k to 16k creatures were ties or losses, see `docs/search-research.md` section 11): age layers (ALPS), deep grids, racing, dominated novelty search, the migration interval and which elites migrate [claude/archive].
 - v2 solves only the 4 deepest contacts per step, so a fifth touching node can sink up to 1.25 cm before it joins. Revisit with the contact solve.

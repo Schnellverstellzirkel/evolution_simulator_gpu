@@ -25,7 +25,8 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 32: air drag on bones.
 // 33: evolvable elastic tendons.
 // 34: the world gains Water and Ice patches (the saved settings changed).
-pub const VERSION: u32 = 34;
+// 35: creatures lose the unused mutability gene (the save format changed).
+pub const VERSION: u32 = 35;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and

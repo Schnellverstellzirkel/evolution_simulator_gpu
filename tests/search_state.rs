@@ -290,7 +290,6 @@ fn assert_same_population(a: &Population, b: &Population) {
         let a = a.creature(index);
         let b = b.creature(index);
         assert_eq!(a.id, b.id, "creature {index} identity");
-        assert_eq!(a.mutability, b.mutability, "creature {index} mutability");
         assert_eq!(a.nodes, b.nodes, "creature {index} nodes");
         assert_eq!(a.bones, b.bones, "creature {index} bones");
         assert_eq!(a.muscles, b.muscles, "creature {index} muscles");

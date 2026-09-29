@@ -2447,7 +2447,6 @@ mod tests {
             bones,
             muscles: Vec::new(),
             id: 1,
-            mutability: 1.0,
         };
         if !muscles {
             c.muscles.clear();
