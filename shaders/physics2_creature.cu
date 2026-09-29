@@ -742,6 +742,27 @@ struct Lane {
     }
 };
 
+#if RECORD
+// The recorded frame is `p.stride` float2 long: the node positions (STRIDE of
+// them), then one (energy, force) pair per muscle, then one (normal, friction)
+// contact force per node. The forces of a frame are those of the step that led
+// to it; the energy is the state it starts from.
+__device__ __forceinline__ void record_extras(
+    float2* __restrict__ frames, unsigned base, unsigned muscle_count, unsigned tile_x, unsigned tl,
+    const float* __restrict__ muscle_data, const Record* __restrict__ records, unsigned record_base, unsigned nn) {
+    for (unsigned k = 0u; k < muscle_count; k++) {
+        const unsigned field = tile_x + k * MUSCLE_FIELDS * TILE + tl;
+        frames[base + STRIDE + k] = v2(muscle_data[field + 14u * TILE], muscle_data[field + 11u * TILE]);
+    }
+    UNROLL
+    for (unsigned i = 0u; i < MAXN; i++) {
+        if (i >= nn) { break; }
+        float2 w = i == 0u ? records[record_base].c : records[record_base + i].b;
+        frames[base + STRIDE + muscle_count + i] = w;
+    }
+}
+#endif
+
 extern "C" __global__ void LAUNCH_BOUNDS advance(
     Record* __restrict__ records,
     float* __restrict__ muscle_data,
@@ -838,20 +859,22 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
             done = true;
         }
         {
-            const unsigned frame = (creature * (p.total_steps + 1u) + tick) * STRIDE;
+            const unsigned frame = (creature * (p.total_steps + 1u) + tick) * p.stride;
             UNROLL
             for (unsigned j = 0u; j < MAXN; j++) {
                 if (j >= nn) { break; }
                 frames[frame + j] = L.node_pos(j);
             }
+            record_extras(frames, frame, muscle_count, tile.x, tl, muscle_data, records, record_base, nn);
             if (s == 0u && p.tick == SETTLE) {
                 for (unsigned t = 0u; t < SETTLE; t++) {
-                    const unsigned before_frame = (creature * (p.total_steps + 1u) + t) * STRIDE;
+                    const unsigned before_frame = (creature * (p.total_steps + 1u) + t) * p.stride;
                     UNROLL
                     for (unsigned j = 0u; j < MAXN; j++) {
                         if (j >= nn) { break; }
                         frames[before_frame + j] = L.node_pos(j);
                     }
+                    record_extras(frames, before_frame, muscle_count, tile.x, tl, muscle_data, records, record_base, nn);
                 }
             }
         }
@@ -1340,12 +1363,13 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
     }
     results[creature] = kept;
     if (p.tick + p.steps >= p.total_steps) {
-        const unsigned frame = (creature * (p.total_steps + 1u) + p.total_steps) * STRIDE;
+        const unsigned frame = (creature * (p.total_steps + 1u) + p.total_steps) * p.stride;
         UNROLL
         for (unsigned j = 0u; j < MAXN; j++) {
             if (j >= nn) { break; }
             frames[frame + j] = L.node_pos(j);
         }
+        record_extras(frames, frame, muscle_count, tile.x, tl, muscle_data, records, record_base, nn);
     }
 #else
     results[creature] = metrics;

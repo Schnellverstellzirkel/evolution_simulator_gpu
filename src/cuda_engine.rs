@@ -1582,7 +1582,7 @@ impl CudaEngine {
         let frame_count: usize = if record {
             batches
                 .iter()
-                .map(|b| b.info.len() * b.capacity * (total as usize + 1))
+                .map(|b| b.info.len() * creature_kernel::frame_stride(b) * (total as usize + 1))
                 .sum()
         } else {
             0
@@ -1670,6 +1670,9 @@ impl CudaEngine {
                         steps,
                         total,
                     );
+                    if record {
+                        params.stride = creature_kernel::frame_stride(batch) as u32;
+                    }
                     let mut pointers = [
                         res.nodes.ptr,
                         res.muscles.ptr,

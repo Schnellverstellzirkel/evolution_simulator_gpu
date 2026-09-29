@@ -509,6 +509,20 @@ pub fn plan_of(pop: &Population, index: usize) -> Plan {
 
 /// Kernel parameters for ticks `tick..tick + steps` of a `total`-tick trial
 /// of `count` creatures in `capacity`-node buckets. Both GPU backends use it.
+/// Length in `[f32; 2]` slots of one recorded frame of `batch`. Physics v1
+/// records only the node positions (`capacity` slots). Physics v2 adds an
+/// (energy, force) pair per muscle and a (normal, friction) contact force per
+/// node after them: `2 * capacity + muscles` slots, the muscle count being the
+/// batch's largest (a replay batch holds one creature).
+pub fn frame_stride(batch: &LaneBatch) -> usize {
+    if crate::physics2::enabled() {
+        let muscles = batch.info.iter().map(|i| i[2] as usize).max().unwrap_or(0);
+        2 * batch.capacity + muscles
+    } else {
+        batch.capacity
+    }
+}
+
 pub fn launch_params(
     cfg: &crate::config::Config,
     capacity: usize,

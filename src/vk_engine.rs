@@ -955,7 +955,7 @@ impl VkEngine {
         let frame_count: usize = if record {
             batches
                 .iter()
-                .map(|b| b.info.len() * b.capacity * (total as usize + 1))
+                .map(|b| b.info.len() * creature_kernel::frame_stride(b) * (total as usize + 1))
                 .sum()
         } else {
             0
@@ -975,7 +975,7 @@ impl VkEngine {
         for (r, &(tick, steps)) in spans.iter().enumerate() {
             for (b, batch) in batches.iter().enumerate() {
                 let offset = ((r * batches.len() + b) as u64 * self.params_stride) as usize;
-                let p = creature_kernel::launch_params(
+                let mut p = creature_kernel::launch_params(
                     cfg,
                     batch.capacity,
                     batch.info.len(),
@@ -983,6 +983,9 @@ impl VkEngine {
                     steps,
                     total,
                 );
+                if record {
+                    p.stride = creature_kernel::frame_stride(batch) as u32;
+                }
                 param_data[offset..offset + std::mem::size_of::<Params>()]
                     .copy_from_slice(bytemuck::bytes_of(&p));
             }

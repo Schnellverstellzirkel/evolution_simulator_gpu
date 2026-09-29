@@ -405,7 +405,8 @@ struct Playback {
     height: f32,
     /// Highest point of the body over the recording (m).
     peak: f32,
-    /// Muscle energy, muscle force and ground push per frame, rebuilt from the frames.
+    /// Muscle energy, muscle force and ground push per frame: recorded by the
+    /// engine, or rebuilt from the frames when it recorded none.
     forces: crate::replay_forces::Forces,
 }
 /// Half-width of the follow camera's average of the center of mass (s).
@@ -441,7 +442,7 @@ impl Playback {
         // The engine that recorded the frames also decides when the trial
         // ended and how far it got, so the replay shows exactly its score:
         // the GPU that scores the archive, or the CPU in a CPU-only game.
-        let (frames, result) = crate::engine::replay(&normalized, &config);
+        let (frames, result, recorded_forces) = crate::engine::replay_forces(&normalized, &config);
         let nodes = physics::nodes(&normalized);
         let joints = physics::joints(&normalized.nodes, &normalized.bones);
         let last_frame = frames.len().saturating_sub(1).min(u32::MAX as usize) as u32;
@@ -467,14 +468,17 @@ impl Playback {
                 down
             })
             .collect();
-        let forces = crate::replay_forces::analyze(
-            &normalized,
-            &nodes,
-            &frames,
-            &contact,
-            fall.map(|(tick, _)| tick),
-            &config,
-        );
+        // The values the engine recorded, else an estimate from the frames.
+        let forces = recorded_forces.unwrap_or_else(|| {
+            crate::replay_forces::analyze(
+                &normalized,
+                &nodes,
+                &frames,
+                &contact,
+                fall.map(|(tick, _)| tick),
+                &config,
+            )
+        });
         // The head-shake average stops updating when the trial ends, so it
         // still holds the value that ended it. A broken joint shows in the
         // recorded pose at the end (the engine tests the pose after the step).

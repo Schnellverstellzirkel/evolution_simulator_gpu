@@ -20,6 +20,9 @@ pub struct Forces {
     pub muscle: Vec<Vec<f32>>,
     /// `[frame][node]`: estimated ground push on the node (N), 0 in the air.
     pub ground: Vec<Vec<f32>>,
+    /// `[frame][node]`: friction force on the node (N) when the frames carry
+    /// the recorded contact forces; empty for an estimate.
+    pub friction: Vec<Vec<f32>>,
 }
 
 fn along_bone(frame: &[[f32; 2]], bone: &crate::evolution::Bone, t: f32) -> [f32; 2] {
