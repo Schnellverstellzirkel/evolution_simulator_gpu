@@ -575,49 +575,102 @@ impl Population {
     /// Copies `indices` into a standalone population; creature `k` of the
     /// result is `indices[k]` of `self`.
     pub fn subset(&self, indices: &[usize]) -> Population {
-        let parts: Vec<Population> = indices
-            .par_chunks(4096)
+        const CHUNK: usize = 4096;
+        // Gene counts per run of creatures, then every run copies its genes
+        // straight into its own part of the output arenas, in parallel.
+        let sizes: Vec<[usize; 3]> = indices
+            .par_chunks(CHUNK)
             .map(|chunk| {
-                let mut part = Population {
-                    genomes: Vec::with_capacity(chunk.len()),
-                    ..Default::default()
-                };
-                for &i in chunk {
+                chunk.iter().fold([0; 3], |t, &i| {
                     let g = &self.genomes[i];
-                    part.genomes.push(Genome {
-                        node_start: part.nodes.len(),
-                        bone_start: part.bones.len(),
-                        muscle_start: part.muscles.len(),
-                        ..g.clone()
-                    });
-                    part.nodes
-                        .extend_from_slice(&self.nodes[g.node_start..g.node_start + g.node_count]);
-                    part.bones
-                        .extend_from_slice(&self.bones[g.bone_start..g.bone_start + g.bone_count]);
-                    part.muscles.extend_from_slice(
-                        &self.muscles[g.muscle_start..g.muscle_start + g.muscle_count],
-                    );
-                }
-                part
+                    [
+                        t[0] + g.node_count,
+                        t[1] + g.bone_count,
+                        t[2] + g.muscle_count,
+                    ]
+                })
             })
             .collect();
+        let total = sizes
+            .iter()
+            .fold([0; 3], |t, s| [t[0] + s[0], t[1] + s[1], t[2] + s[2]]);
         let mut out = Population {
             genomes: Vec::with_capacity(indices.len()),
-            nodes: Vec::with_capacity(parts.iter().map(|p| p.nodes.len()).sum()),
-            bones: Vec::with_capacity(parts.iter().map(|p| p.bones.len()).sum()),
-            muscles: Vec::with_capacity(parts.iter().map(|p| p.muscles.len()).sum()),
+            nodes: Vec::with_capacity(total[0]),
+            bones: Vec::with_capacity(total[1]),
+            muscles: Vec::with_capacity(total[2]),
         };
-        for mut part in parts {
-            let (ns, bs, ms) = (out.nodes.len(), out.bones.len(), out.muscles.len());
-            for g in &mut part.genomes {
-                g.node_start += ns;
-                g.bone_start += bs;
-                g.muscle_start += ms;
-            }
-            out.genomes.extend(part.genomes);
-            out.nodes.extend(part.nodes);
-            out.bones.extend(part.bones);
-            out.muscles.extend(part.muscles);
+        let mut starts = Vec::with_capacity(sizes.len());
+        let mut at = [0usize; 3];
+        for s in &sizes {
+            starts.push(at);
+            at = [at[0] + s[0], at[1] + s[1], at[2] + s[2]];
+        }
+        let genome_parts = split(
+            &mut out.genomes.spare_capacity_mut()[..indices.len()],
+            indices.chunks(CHUNK).map(<[usize]>::len),
+        );
+        let node_parts = split(
+            &mut out.nodes.spare_capacity_mut()[..total[0]],
+            sizes.iter().map(|s| s[0]),
+        );
+        let bone_parts = split(
+            &mut out.bones.spare_capacity_mut()[..total[1]],
+            sizes.iter().map(|s| s[1]),
+        );
+        let muscle_parts = split(
+            &mut out.muscles.spare_capacity_mut()[..total[2]],
+            sizes.iter().map(|s| s[2]),
+        );
+        indices
+            .par_chunks(CHUNK)
+            .zip(genome_parts)
+            .zip(node_parts)
+            .zip(bone_parts)
+            .zip(muscle_parts)
+            .zip(starts)
+            .for_each(|(((((chunk, genomes), nodes), bones), muscles), start)| {
+                let mut at = [0usize; 3];
+                for (&i, genome) in chunk.iter().zip(genomes) {
+                    let g = &self.genomes[i];
+                    genome.write(Genome {
+                        node_start: start[0] + at[0],
+                        bone_start: start[1] + at[1],
+                        muscle_start: start[2] + at[2],
+                        ..g.clone()
+                    });
+                    for (dst, src) in nodes[at[0]..]
+                        .iter_mut()
+                        .zip(&self.nodes[g.node_start..g.node_start + g.node_count])
+                    {
+                        dst.write(*src);
+                    }
+                    for (dst, src) in bones[at[1]..]
+                        .iter_mut()
+                        .zip(&self.bones[g.bone_start..g.bone_start + g.bone_count])
+                    {
+                        dst.write(*src);
+                    }
+                    for (dst, src) in muscles[at[2]..]
+                        .iter_mut()
+                        .zip(&self.muscles[g.muscle_start..g.muscle_start + g.muscle_count])
+                    {
+                        dst.write(*src);
+                    }
+                    at = [
+                        at[0] + g.node_count,
+                        at[1] + g.bone_count,
+                        at[2] + g.muscle_count,
+                    ];
+                }
+            });
+        // SAFETY: the parts cover the first elements of each arena, and every
+        // run wrote all of its part.
+        unsafe {
+            out.genomes.set_len(indices.len());
+            out.nodes.set_len(total[0]);
+            out.bones.set_len(total[1]);
+            out.muscles.set_len(total[2]);
         }
         out
     }
@@ -2000,6 +2053,29 @@ pub fn ranking(scores: &[f32]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subset_copies_each_creature_in_index_order() {
+        let cfg = Config {
+            population: 10_000,
+            random_seed: false,
+            seed: 9,
+            ..Config::default()
+        };
+        let population = create(&cfg).unwrap();
+        // Scrambled order with repeats, longer than one copy chunk.
+        let indices: Vec<usize> = (0..9_000).map(|k| (k * 7919 + 13) % 10_000).collect();
+        let subset = population.subset(&indices);
+        assert_eq!(subset.genomes.len(), indices.len());
+        for (k, &i) in indices.iter().enumerate() {
+            let (a, b) = (subset.creature(k), population.creature(i));
+            assert_eq!(a.nodes, b.nodes);
+            assert_eq!(a.bones, b.bones);
+            assert_eq!(a.muscles, b.muscles);
+            assert_eq!(a.id, b.id);
+        }
+        assert!(population.subset(&[]).genomes.is_empty());
+    }
 
     #[test]
     fn compaction_leaves_room_for_a_generation_and_keeps_a_small_spare() {
