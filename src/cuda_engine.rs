@@ -763,7 +763,9 @@ impl CudaEngine {
                 engine.build_kernels(Fidelity::standard(), false)?;
                 // Replays run at the standard fidelity. Building their kernels
                 // now keeps the first replay inside the viewer's wait.
-                engine.build_kernels(Fidelity::standard(), true)?;
+                if !physics2() {
+                    engine.build_kernels(Fidelity::standard(), true)?;
+                }
             }
             Ok(engine)
         }

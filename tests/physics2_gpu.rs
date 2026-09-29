@@ -66,33 +66,45 @@ fn agree(mud: f32) {
     };
     pop.push(chain(&[[0.0, 0.6], [0.0, 0.3], [0.3, 0.3], [0.6, 0.05]]));
     let cpu = physics2::evaluate(&pop, &cfg);
-    let mut gpu = engine::gpu_engine("RTX 4060", 16, 64).expect("GPU");
-    gpu.submit(pop.clone(), &cfg).unwrap();
-    let done = loop {
-        if let Some(done) = gpu.poll().unwrap() {
-            break done;
-        }
-        gpu.wait(Duration::from_millis(20));
-    };
-    let mut worst = 0.0f32;
-    let mut close = 0usize;
-    for (a, b) in cpu.iter().zip(&done.results) {
-        assert_eq!(
-            a.fitness <= -1e19,
-            b.fitness <= -1e19,
-            "failed trials must agree"
+    // Both GPU backends: Vulkan first, then CUDA. The variable is read when
+    // an engine opens; this test binary has one test, so nothing else reads
+    // the environment meanwhile.
+    for (setting, expect) in [("0", "Vulkan"), ("1", "CUDA")] {
+        // SAFETY: see above.
+        unsafe { std::env::set_var("EVOLUTION_CUDA", setting) };
+        let mut gpu = engine::gpu_engine("RTX 4060", 16, 64).expect("GPU");
+        let name = gpu.name();
+        assert!(
+            expect == "Vulkan" || name.contains(expect),
+            "expected {expect}, opened {name}"
         );
-        let gap = (a.fitness - b.fitness).abs();
-        worst = worst.max(gap);
-        close += usize::from(gap <= 0.005);
+        gpu.submit(pop.clone(), &cfg).unwrap();
+        let done = loop {
+            if let Some(done) = gpu.poll().unwrap() {
+                break done;
+            }
+            gpu.wait(Duration::from_millis(20));
+        };
+        let mut worst = 0.0f32;
+        let mut close = 0usize;
+        for (a, b) in cpu.iter().zip(&done.results) {
+            assert_eq!(
+                a.fitness <= -1e19,
+                b.fitness <= -1e19,
+                "failed trials must agree"
+            );
+            let gap = (a.fitness - b.fitness).abs();
+            worst = worst.max(gap);
+            close += usize::from(gap <= 0.005);
+        }
+        eprintln!(
+            "{name}: {} creatures, 1 s: worst distance gap {worst:.4} m, {close} within 5 mm",
+            cpu.len()
+        );
+        assert!(
+            close * 100 >= cpu.len() * 99,
+            "{name}: only {close} of {} within 5 mm",
+            cpu.len()
+        );
     }
-    eprintln!(
-        "{} creatures, mud {mud}, 1 s: worst distance gap {worst:.4} m, {close} within 5 mm",
-        cpu.len()
-    );
-    assert!(
-        close * 100 >= cpu.len() * 99,
-        "only {close} of {} within 5 mm",
-        cpu.len()
-    );
 }
