@@ -551,6 +551,7 @@ fn run_seed(
         );
     }
     print_common_grid(scope, seed, &experiment);
+    print_island_diversity(scope, seed, &experiment);
     let weights = evolution_simulator::qd::emitter_weights(&experiment.emitter_stats);
     println!(
         "{scope} seed {seed} emitter shares: {}",
@@ -642,6 +643,100 @@ fn print_common_grid(scope: &str, seed: u64, experiment: &Experiment) {
         cells.len(),
         experiment.archive.morphology_count(),
         plans.len()
+    );
+}
+
+/// Top elites per island for the diversity report.
+const ISLAND_TOP: usize = 20;
+
+/// How much the islands' best elites have in common. For each island's
+/// fastest `ISLAND_TOP` behavior elites: how many distinct body plans they
+/// hold, the share whose body plan is also among another island's top
+/// elites, the share that is the same creature (a migrant copy), and the
+/// share whose oldest recorded ancestor is also an oldest ancestor of
+/// another island's top elites (common descent). The hub, when there is
+/// one, is compared with the others but left out of the means, because it
+/// holds copies of the other islands' elites by design.
+fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
+    use std::collections::HashSet;
+    let hub: Option<usize> = None;
+    let tops: Vec<Vec<&evolution_simulator::qd::Elite>> = experiment
+        .islands
+        .iter()
+        .map(|island| {
+            let mut elites: Vec<_> = island
+                .entries
+                .iter()
+                .filter(|e| !evolution_simulator::qd::is_morphology_niche(&e.niche))
+                .collect();
+            elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
+            elites.truncate(ISLAND_TOP);
+            elites
+        })
+        .collect();
+    let root = |id: u64| {
+        experiment
+            .ancestry(id, usize::MAX)
+            .last()
+            .map(|a| a.creature.id)
+            .unwrap_or(id)
+    };
+    let plans: Vec<HashSet<&evolution_simulator::qd::Topology>> = tops
+        .iter()
+        .map(|top| top.iter().map(|e| &e.topology).collect())
+        .collect();
+    let ids: Vec<HashSet<u64>> = tops
+        .iter()
+        .map(|top| top.iter().map(|e| e.creature.id).collect())
+        .collect();
+    let roots: Vec<HashSet<u64>> = tops
+        .iter()
+        .map(|top| top.iter().map(|e| root(e.creature.id)).collect())
+        .collect();
+    let mut rows = Vec::new();
+    let (mut plan_sum, mut shared_sum, mut copy_sum, mut kin_sum, mut counted) =
+        (0.0, 0.0, 0.0, 0.0, 0usize);
+    for (k, top) in tops.iter().enumerate() {
+        if top.is_empty() {
+            continue;
+        }
+        // Compare with the other isolated islands (all islands without a hub).
+        let others: Vec<usize> = (0..tops.len())
+            .filter(|&o| o != k && Some(o) != hub)
+            .collect();
+        let share = |hit: &dyn Fn(&evolution_simulator::qd::Elite) -> bool| {
+            top.iter().filter(|e| hit(e)).count() as f64 / top.len() as f64
+        };
+        let shared = share(&|e| others.iter().any(|&o| plans[o].contains(&e.topology)));
+        let copies = share(&|e| others.iter().any(|&o| ids[o].contains(&e.creature.id)));
+        let kin = share(&|e| {
+            let r = root(e.creature.id);
+            others.iter().any(|&o| roots[o].contains(&r))
+        });
+        rows.push(format!(
+            "{}{k}: plans {} shared {:.2} copies {:.2} kin {:.2}",
+            if Some(k) == hub { "hub " } else { "" },
+            plans[k].len(),
+            shared,
+            copies,
+            kin
+        ));
+        if Some(k) != hub {
+            plan_sum += plans[k].len() as f64;
+            shared_sum += shared;
+            copy_sum += copies;
+            kin_sum += kin;
+            counted += 1;
+        }
+    }
+    let n = counted.max(1) as f64;
+    println!(
+        "{scope} seed {seed} island diversity (top {ISLAND_TOP}): {}; mean plans {:.1} shared {:.2} copies {:.2} kin {:.2}",
+        rows.join(", "),
+        plan_sum / n,
+        shared_sum / n,
+        copy_sum / n,
+        kin_sum / n
     );
 }
 
