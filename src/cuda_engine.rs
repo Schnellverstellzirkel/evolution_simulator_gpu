@@ -32,10 +32,10 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     ffi::{CStr, CString, c_char, c_int, c_uint, c_void},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
 
@@ -657,6 +657,8 @@ pub struct CudaEngine {
     /// Recording kernels (`creature_kernel::cuda_record_source`) by fidelity
     /// and node capacity.
     recording: HashMap<(Fidelity, usize), Kernel>,
+    /// Kernels compiling on background threads.
+    prefetch: Arc<Prefetch>,
     /// Submission slots. The last one is kept for replays, with streams of
     /// its own, so a replay never waits behind evaluation.
     slots: Vec<Slot>,
@@ -676,6 +678,196 @@ unsafe impl Send for CudaEngine {}
 /// across units of slightly different sizes.
 fn buffer_size(bytes: usize) -> usize {
     crate::vk_engine::padded_size(bytes as u64) as usize
+}
+
+/// A kernel to compile: recording or scoring, fidelity, node capacity.
+type KernelKey = (bool, Fidelity, usize);
+
+/// NVRTC's source for one kernel, compiled to a cubin. It needs no CUDA
+/// context, so any thread may run it. Compiled kernels are kept on disk
+/// (`kernel_cache_dir`), keyed by a hash of the source, the options, the
+/// NVRTC version and the GPU's architecture, so a later start loads them in
+/// milliseconds. With `use_cache` false the compile ignores an entry (it
+/// may be damaged) and writes a fresh one.
+fn compile_kernel(
+    api: &Api,
+    options: &[String],
+    (record, fidelity, capacity): KernelKey,
+    threads: u32,
+    launch_bounds: bool,
+    use_cache: bool,
+) -> Result<Vec<u8>> {
+    let source = if record {
+        recording_source(capacity, threads, fidelity, launch_bounds)
+    } else {
+        scoring_source(capacity, threads, fidelity, launch_bounds)
+    };
+    let path = kernel_cache_dir().map(|dir| {
+        use std::hash::{Hash, Hasher};
+        let mut halves = [0u64; 2];
+        for (i, half) in halves.iter_mut().enumerate() {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (i, &source, options, api.nvrtc.version_string()).hash(&mut hasher);
+            *half = hasher.finish();
+        }
+        dir.join(format!("{:016x}{:016x}.cubin", halves[0], halves[1]))
+    });
+    if use_cache
+        && let Some(bytes) = path.as_ref().and_then(|p| std::fs::read(p).ok())
+        && !bytes.is_empty()
+    {
+        return Ok(bytes);
+    }
+    let cubin = api
+        .nvrtc
+        .compile(&source, options)
+        .with_context(|| format!("{capacity}-node CUDA kernel"))
+        .map(|(cubin, _)| cubin)?;
+    if let Some(path) = path {
+        // Through a temporary file and a rename, so a reader never sees a
+        // half-written kernel. A failed write only costs the next start.
+        let temporary = path.with_extension(format!("tmp{}", std::process::id()));
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&temporary, &cubin))
+            .and_then(|()| std::fs::rename(&temporary, &path));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+    }
+    Ok(cubin)
+}
+
+/// Where compiled kernels are kept: `EVOLUTION_KERNEL_CACHE`, else the
+/// user's cache directory, else nowhere.
+fn kernel_cache_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("EVOLUTION_KERNEL_CACHE") {
+        return Some(PathBuf::from(dir));
+    }
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+    Some(base.join("evolution-simulator").join("cuda"))
+}
+
+/// Kernels that background threads compile, in the order they are wanted.
+/// Compiling from a cold compiler cache takes seconds for a 3 to 8 node
+/// kernel, 25 s for 16 nodes, and much more above that.
+#[derive(Default)]
+struct Prefetch {
+    state: Mutex<PrefetchState>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct PrefetchState {
+    queue: VecDeque<(KernelKey, u32)>,
+    running: HashSet<KernelKey>,
+    done: HashMap<KernelKey, std::result::Result<Vec<u8>, String>>,
+    /// Background threads alive.
+    workers: usize,
+    closed: bool,
+}
+
+impl Prefetch {
+    /// Compiles queued kernels until the queue is empty or the engine closes.
+    fn work(&self, api: &Api, options: &[String], launch_bounds: bool) {
+        loop {
+            let (key, threads) = {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state.closed {
+                    state.workers -= 1;
+                    self.ready.notify_all();
+                    return;
+                }
+                let Some(job) = state.queue.pop_front() else {
+                    state.workers -= 1;
+                    self.ready.notify_all();
+                    return;
+                };
+                state.running.insert(job.0);
+                job
+            };
+            let result = compile_kernel(api, options, key, threads, launch_bounds, true)
+                .map_err(|e| format!("{e:#}"));
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.running.remove(&key);
+            state.done.insert(key, result);
+            self.ready.notify_all();
+        }
+    }
+
+    /// The compiled kernel, waiting if a thread is on it. None when nobody
+    /// is: the caller compiles it (a queued job is taken off the queue).
+    fn take(&self, key: KernelKey) -> Option<Result<Vec<u8>>> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(result) = state.done.remove(&key) {
+                return Some(result.map_err(|e| anyhow::anyhow!(e)));
+            }
+            if state.running.contains(&key) {
+                state = self.ready.wait(state).unwrap_or_else(|e| e.into_inner());
+                continue;
+            }
+            state.queue.retain(|(k, _)| *k != key);
+            return None;
+        }
+    }
+
+    /// Queues `jobs` not already queued, running or done, and starts
+    /// threads (at most three at a time) to compile them.
+    fn enqueue(
+        self: &Arc<Self>,
+        jobs: Vec<(KernelKey, u32)>,
+        api: &Arc<Api>,
+        options: &Arc<Vec<String>>,
+        launch_bounds: bool,
+    ) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closed {
+            return;
+        }
+        for (key, threads) in jobs {
+            let known = state.done.contains_key(&key)
+                || state.running.contains(&key)
+                || state.queue.iter().any(|(k, _)| *k == key);
+            if !known {
+                state.queue.push_back((key, threads));
+            }
+        }
+        while state.workers < 3 && state.workers < state.queue.len() + state.running.len() {
+            let (prefetch, api, options) = (self.clone(), api.clone(), options.clone());
+            let spawned = std::thread::Builder::new()
+                .name("cuda-compile".into())
+                .spawn(move || prefetch.work(&api, &options, launch_bounds));
+            if spawned.is_err() {
+                break;
+            }
+            state.workers += 1;
+        }
+    }
+
+    /// Stops the background threads once their current kernels finish, and
+    /// waits for them, at most `patience`: a compiler thread still inside
+    /// NVRTC when the process exits crashes it.
+    fn close(&self, patience: Duration) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.closed = true;
+        state.queue.clear();
+        let deadline = Instant::now() + patience;
+        while state.workers > 0 {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            state = self
+                .ready
+                .wait_timeout(state, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
 }
 
 impl CudaEngine {
@@ -755,6 +947,7 @@ impl CudaEngine {
                 multiprocessors,
                 kernels: HashMap::new(),
                 recording: HashMap::new(),
+                prefetch: Arc::new(Prefetch::default()),
                 slots: Vec::new(),
                 next_ticket: 0,
                 workgroup,
@@ -774,10 +967,7 @@ impl CudaEngine {
                 engine.slots.push(slot);
             }
             if build {
-                engine.build_kernels(Fidelity::standard(), false)?;
-                // Replays run at the standard fidelity. Building their kernels
-                // now keeps the first replay inside the viewer's wait.
-                engine.build_kernels(Fidelity::standard(), true)?;
+                engine.start_prefetch();
             }
             Ok(engine)
         }
@@ -876,71 +1066,96 @@ impl CudaEngine {
         Ok(blocks * (kernel.threads as i32 / 32))
     }
 
-    /// Builds the scoring kernels, or with `record` the recording kernels, for
-    /// every capacity up to `max_capacity` at `fidelity`, compiling on a few
-    /// threads at once.
-    fn build_kernels(&mut self, fidelity: Fidelity, record: bool) -> Result<()> {
-        let max_registers = self.max_registers;
-        let built = if record {
-            &self.recording
-        } else {
-            &self.kernels
-        };
-        let jobs: Vec<(usize, u32)> = CAPACITIES
+    /// The compile jobs for `capacities`, in the order they are wanted: the
+    /// scoring kernels at the standard fidelity, the recording kernels for
+    /// replays, then the fine-check kernels.
+    fn jobs_for(&self, capacities: &[usize]) -> Vec<(KernelKey, u32)> {
+        let mut jobs = Vec::new();
+        for (record, fidelity) in [
+            (false, Fidelity::standard()),
+            (true, Fidelity::standard()),
+            (false, Fidelity::fine()),
+        ] {
+            for &capacity in capacities {
+                let built = if record {
+                    self.recording.contains_key(&(fidelity, capacity))
+                } else {
+                    self.kernels.contains_key(&(fidelity, capacity))
+                };
+                if !built {
+                    let threads = block_size(capacity, self.workgroup, self.max_registers);
+                    jobs.push(((record, fidelity, capacity), threads));
+                }
+            }
+        }
+        jobs
+    }
+
+    /// Queues `capacities` on the background compiler.
+    fn prefetch_capacities(&self, capacities: &[usize]) {
+        let jobs = self.jobs_for(capacities);
+        let options = Arc::new(self.options(self.max_registers));
+        self.prefetch
+            .enqueue(jobs, &self.api, &options, self.max_registers.is_none());
+    }
+
+    /// Starts compiling the small bodies' kernels (up to 8 nodes) on
+    /// background threads, so the first units wait for what they need and
+    /// no more: from a cold compiler cache a 3 to 8 node kernel takes 2 to 7
+    /// s, 16 nodes 25 s, and more above. Larger kernels start when the
+    /// next size below them is first used (`build_kernel`), or on demand.
+    fn start_prefetch(&self) {
+        let small: Vec<usize> = CAPACITIES
             .iter()
             .copied()
-            .filter(|&c| c <= self.max_capacity && !built.contains_key(&(fidelity, c)))
-            .map(|c| (c, block_size(c, self.workgroup, max_registers)))
+            .filter(|&c| c <= 8 && c <= self.max_capacity)
             .collect();
-        let options = self.options(max_registers);
-        let api = self.api.clone();
+        self.prefetch_capacities(&small);
+    }
+
+    /// Builds the kernel for `capacity` at `fidelity` (scoring, or with
+    /// `record` recording): from the background compiler if it has it or is
+    /// on it, else here.
+    fn build_kernel(&mut self, fidelity: Fidelity, capacity: usize, record: bool) -> Result<()> {
+        let max_registers = self.max_registers;
+        let threads = block_size(capacity, self.workgroup, max_registers);
         let started = Instant::now();
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let mut compiled: Vec<(usize, Result<Vec<u8>>)> = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..jobs.len().clamp(1, 4))
-                .map(|_| {
-                    scope.spawn(|| {
-                        let mut out = Vec::new();
-                        loop {
-                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let Some(&(capacity, threads)) = jobs.get(i) else {
-                                break;
-                            };
-                            let variant = if record {
-                                recording_source
-                            } else {
-                                scoring_source
-                            };
-                            let source =
-                                variant(capacity, threads, fidelity, max_registers.is_none());
-                            let result = Self::compile(&api, &source, &options)
-                                .with_context(|| format!("{capacity}-node CUDA kernel"))
-                                .map(|(cubin, _)| cubin);
-                            out.push((i, result));
-                        }
-                        out
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .flat_map(|h| h.join().expect("CUDA compile thread"))
-                .collect()
-        });
-        compiled.sort_by_key(|(i, _)| *i);
-        for (i, result) in compiled {
-            let (capacity, threads) = jobs[i];
-            let kernel = self.load(&result?, threads)?;
-            if record {
-                self.recording.insert((fidelity, capacity), kernel);
-            } else {
-                self.kernels.insert((fidelity, capacity), kernel);
-            }
+        let key = (record, fidelity, capacity);
+        let compile = |engine: &Self, use_cache: bool| {
+            compile_kernel(
+                &engine.api,
+                &engine.options(max_registers),
+                key,
+                threads,
+                max_registers.is_none(),
+                use_cache,
+            )
+        };
+        let cubin = match self.prefetch.take(key) {
+            Some(result) => result?,
+            None => compile(self, true)?,
+        };
+        // A damaged cache entry fails to load: compile it again.
+        let kernel = match self.load(&cubin, threads) {
+            Ok(kernel) => kernel,
+            Err(_) => self.load(&compile(self, false)?, threads)?,
+        };
+        if record {
+            self.recording.insert((fidelity, capacity), kernel);
+        } else {
+            self.kernels.insert((fidelity, capacity), kernel);
+        }
+        // Bodies grow: start the next size up in the background.
+        if capacity >= 8
+            && let Some(&next) = CAPACITIES
+                .iter()
+                .find(|&&c| c > capacity && c <= self.max_capacity)
+        {
+            self.prefetch_capacities(&[next]);
         }
         if std::env::var_os("EVOLUTION_CUDA_VERBOSE").is_some() {
             eprintln!(
-                "CUDA: compiled {} {} kernels at {fidelity:?} in {:.2} s with NVRTC {} ({}); (capacity, block threads) {jobs:?}",
-                jobs.len(),
+                "CUDA: {} kernel for {capacity} nodes at {fidelity:?} ready after {:.2} s with NVRTC {} ({})",
                 if record { "recording" } else { "scoring" },
                 started.elapsed().as_secs_f64(),
                 self.api.nvrtc.version_string(),
@@ -1012,7 +1227,7 @@ impl CudaEngine {
             !self.kernels.contains_key(&key)
         };
         if missing {
-            self.build_kernels(fidelity, record)?;
+            self.build_kernel(fidelity, capacity, record)?;
         }
         let kernel = if record {
             self.recording.get(&key)
@@ -1671,6 +1886,7 @@ impl CudaEngine {
 
 impl Drop for CudaEngine {
     fn drop(&mut self) {
+        self.prefetch.close(Duration::from_secs(30));
         let api = self.api.clone();
         let cu = &api.cu;
         unsafe {
