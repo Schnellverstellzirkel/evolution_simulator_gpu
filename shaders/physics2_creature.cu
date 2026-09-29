@@ -937,6 +937,22 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
             }
             L.bias[L.body_of(i)] -= force_at(L.node_pos(i) - origin, v2(fx, -p.gravity * m));
         }
+        // Air drag on every bone, at its midpoint, limited so a step of drag
+        // never more than halves the speed it acts on.
+        float2 air_impulse = v2(0.0f, 0.0f);
+        UNROLL
+        for (unsigned j = 0u; j < MAXB; j++) {
+            if (j >= nb) { break; }
+            const unsigned pv = L.pivot[j];
+            const float2 mid = (L.node_pos(pv) + L.node_pos(j + 1u)) * 0.5f;
+            const float2 v = (L.node_vel(pv) + L.node_vel(j + 1u)) * 0.5f;
+            const float speed = sqrtf(v.x * v.x + v.y * v.y);
+            const float width = L.node_radius(pv) + L.node_radius(j + 1u);
+            const float strength = fmaxf(fminf(AIR_DRAG * L.len[j] * width * speed, 0.5f * L.mass[j + 1u] * RATE), 0.0f);
+            const float2 f = v * -strength;
+            L.bias[j] -= force_at(mid - origin, f);
+            air_impulse = air_impulse + f * DT;
+        }
         // Muscles pull between points on two bones; the forces collect in
         // the table.
         L.clear_forces();
@@ -1100,7 +1116,7 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
             L.body_set(j, 1u, v3(L.om[j], 0.0f, 0.0f));
         }
 
-        float2 impulse = v2(p.wind * total_mass * DT + mud_impulse, -p.gravity * total_mass * DT);
+        float2 impulse = v2(p.wind * total_mass * DT + mud_impulse, -p.gravity * total_mass * DT) + air_impulse;
         L.nc = 0u;
         if (grounded) {
             impulse = L.contacts(origin, before, impulse);
