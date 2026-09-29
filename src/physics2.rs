@@ -1168,7 +1168,10 @@ fn simulate_step_inner(
         contacts.truncate(MAX_CONTACTS);
         contacts.sort_by_key(|c| c.node);
     }
-    let mut ground_log: Vec<(usize, f32, f32, [f32; 2], [f32; 2])> = Vec::new();
+    /// One contact's final impulses, for the ground work ledger: node, normal
+    /// and friction impulse, normal and tangent.
+    type Logged = (usize, f32, f32, [f32; 2], [f32; 2]);
+    let mut ground_log: Vec<Logged> = Vec::new();
     let mut impulse = cfg.wind * model.total_mass * dt + mud_impulse;
     let mut impulse_y = -cfg.gravity * model.total_mass * dt;
     if !contacts.is_empty() {
@@ -1245,7 +1248,15 @@ fn simulate_step_inner(
         ground_log = contacts
             .iter()
             .enumerate()
-            .map(|(i, c)| (c.node, lambda[2 * i] * dt, lambda[2 * i + 1] * dt, c.normal, c.tangent))
+            .map(|(i, c)| {
+                (
+                    c.node,
+                    lambda[2 * i] * dt,
+                    lambda[2 * i + 1] * dt,
+                    c.normal,
+                    c.tangent,
+                )
+            })
             .collect();
         for (i, c) in contacts.iter().enumerate() {
             sc.friction
@@ -2174,6 +2185,8 @@ mod tests {
             first_law: 0.0,
             contacts: 0,
             friction: Vec::new(),
+            work_total: 0.0,
+            ground_work: [0.0; 4],
         };
         let limits = physics::limits();
         for step in 0..600 {
@@ -2267,6 +2280,8 @@ mod tests {
             first_law: 0.0,
             contacts: 0,
             friction: Vec::new(),
+            work_total: 0.0,
+            ground_work: [0.0; 4],
         }
     }
 
