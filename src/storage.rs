@@ -3365,6 +3365,39 @@ mod migration_tests {
         assert_eq!(loaded.config.wind, experiment.config.wind);
     }
 
+    /// The Seasons button at each speed: set while a generation runs, the
+    /// level must survive the generation boundary and keep stepping.
+    #[test]
+    fn a_seasons_level_set_mid_generation_stays_and_steps() {
+        for level in 1u8..=3 {
+            let interval = crate::environment::SEASON_INTERVALS[usize::from(level)];
+            let config = Config {
+                population: 4,
+                random_seed: false,
+                ..Config::default()
+            };
+            let mut experiment = Experiment::new(config).unwrap();
+            for generation in 1..=interval * 2 {
+                experiment.scores.fill(1.0);
+                experiment.evaluated = experiment.config.population;
+                experiment.stage = Stage::Evaluated;
+                experiment.archive_batch().unwrap();
+                if generation == 2 {
+                    // The panel sends its whole config, as the game does.
+                    let mut cfg = experiment.config.clone();
+                    cfg.seasons = level;
+                    experiment.update_config(cfg).unwrap();
+                }
+                experiment.prepare_next_batch().unwrap();
+                if generation >= 2 {
+                    assert_eq!(experiment.config.seasons, level, "generation {generation}");
+                }
+                assert!(experiment.pending.is_none());
+            }
+            assert!(experiment.config.season_step >= 1, "level {level}");
+        }
+    }
+
     #[test]
     fn generation_boundaries_advance_the_seasons() {
         let interval = crate::environment::SEASON_INTERVALS[2];

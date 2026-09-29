@@ -15,3 +15,4 @@ pub mod storage;
 pub mod ui;
 pub mod vk_engine;
 pub mod worker;
+pub mod world_fx;

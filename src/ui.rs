@@ -1421,6 +1421,20 @@ impl App {
         if std::env::var_os("EVOLUTION_BENCH_RESPONSIVE").is_some() {
             initial_config.throughput = false;
         }
+        // Screenshot runs: EVOLUTION_SMOKE_WORLD="Wind=2,Mud=3" starts the
+        // game with those effect levels.
+        if let Ok(list) = std::env::var("EVOLUTION_SMOKE_WORLD") {
+            for pair in list.split(',') {
+                if let Some((name, level)) = pair.split_once('=')
+                    && let Ok(level) = level.trim().parse::<usize>()
+                    && let Some(effect) = crate::environment::EFFECTS
+                        .iter()
+                        .find(|e| e.name.eq_ignore_ascii_case(name.trim()))
+                {
+                    effect.set_level(&mut initial_config, level);
+                }
+            }
+        }
         let smoke_start_pending = std::env::var_os("EVOLUTION_SMOKE_POPULATION").is_some();
         // Developer screenshots: EVOLUTION_SMOKE_DARK=1 opens in the dark
         // theme, EVOLUTION_SMOKE_ZOOM=0.75 lays a 1440 px window out like a
@@ -2088,6 +2102,13 @@ impl App {
             .as_ref()
             .map(|p| &p.config)
             .unwrap_or(&self.config);
+        // The replay clock, so effects animate with the replay and hold
+        // still when it is paused.
+        let clock = self
+            .playback
+            .as_ref()
+            .map_or(0.0, |p| p.tick as f32 / physics::rate() as f32);
+        crate::world_fx::sky(&painter, rect, cfg, clock);
         let left = ((rect.left() - origin.x) / self.zoom).floor() as i32;
         let right = ((rect.right() - origin.x) / self.zoom).ceil() as i32;
         for x in left..=right {
@@ -2188,6 +2209,54 @@ impl App {
                     Pos2::new(rect.right(), origin.y),
                 ],
                 Stroke::new(2., GROUND_EDGE),
+            );
+        }
+        if cfg.ground {
+            let surface = |sx: f32| {
+                let x = (sx - origin.x) / self.zoom;
+                world(
+                    x,
+                    crate::physics::ground(x, amplitude, slope, gaps, hurdles, phase).0,
+                )
+                .y
+            };
+            let feet: Vec<crate::world_fx::Foot> = self
+                .playback
+                .as_ref()
+                .map(|p| {
+                    let rate = physics::rate() as f32;
+                    let before = p.frames.get((p.tick as usize).saturating_sub(1));
+                    p.nodes
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(id, n)| {
+                            let ground_y = crate::physics::ground(
+                                n.pos[0], amplitude, slope, gaps, hurdles, phase,
+                            )
+                            .0;
+                            (n.pos[1] - n.radius - ground_y < 0.06 + mud).then(|| {
+                                let dx = before
+                                    .and_then(|f| f.get(id))
+                                    .map_or(0.0, |b| n.pos[0] - b[0]);
+                                crate::world_fx::Foot {
+                                    at: world(n.pos[0], ground_y),
+                                    speed: dx.abs() * rate * self.zoom,
+                                    id,
+                                }
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            crate::world_fx::ground(
+                &painter,
+                rect,
+                cfg,
+                clock,
+                &surface,
+                &|sx| (sx - origin.x) / self.zoom,
+                self.zoom,
+                &feet,
             );
         }
         for x in left..=right {
@@ -4294,13 +4363,20 @@ impl eframe::App for App {
             {
                 self.config = next.config.clone();
                 self.initial = false;
-            } else if self
-                .config_sent
-                .is_none_or(|sent| sent.elapsed() > Duration::from_secs(2))
-                && self
-                    .snapshot
-                    .as_ref()
-                    .is_none_or(|old| old.epoch == next.epoch)
+            } else if self.config_sent.is_none_or(|sent| {
+                // A click is acknowledged once the worker's world shows it.
+                // A snapshot published before the worker read the click must
+                // not put the panel back (Seasons would flip to Off), so wait
+                // for the match, and give up after a while.
+                let acknowledged = worlds_match(
+                    &next.pending.clone().unwrap_or_else(|| next.config.clone()),
+                    &self.config,
+                );
+                sent.elapsed() > Duration::from_secs(if acknowledged { 2 } else { 15 })
+            }) && self
+                .snapshot
+                .as_ref()
+                .is_none_or(|old| old.epoch == next.epoch)
             {
                 // The worker owns the world: seasons advance it, and a change
                 // waits in `pending` until the next generation. The panel
@@ -5105,6 +5181,12 @@ fn world_marks(events: &[crate::worker::Event], history: &[Stats]) -> Vec<WorldM
     }
     marks.sort_by_key(|m| m.generation);
     marks
+}
+/// Whether two configs have every effect, including Seasons, at the same level.
+fn worlds_match(a: &Config, b: &Config) -> bool {
+    crate::environment::EFFECTS
+        .iter()
+        .all(|effect| effect.level(a) == effect.level(b))
 }
 /// The Generation tile's second line. Percent rounds down, so "100%" only
 /// shows when every creature has a result, and while finalists still wait for
