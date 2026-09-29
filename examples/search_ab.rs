@@ -314,6 +314,25 @@ fn probe_gpu(sched: &mut scheduler::Scheduler, experiment: &Experiment) -> Resul
             }
         }
     }
+    // The same for check trials: perturbed copies at fine physics.
+    let fine = scheduler::check_config(cfg);
+    let mut perturbed = Population::default();
+    for &i in &indices {
+        let mut c = experiment.population.creature(i);
+        scheduler::perturb(&mut c);
+        perturbed.push(c);
+    }
+    let whole_fine = sched.evaluate_single(&perturbed, &indices, &fine)?;
+    let mut fine_diff = 0;
+    for chunk in order.chunks(2999) {
+        let part = sched.evaluate_single(&perturbed, chunk, &fine)?;
+        for (&i, m) in chunk.iter().zip(&part) {
+            if m.fitness.to_bits() != whole_fine[i].fitness.to_bits() {
+                fine_diff += 1;
+            }
+        }
+    }
+    println!("probe fine checks: {fine_diff} fitness bits differ");
     println!(
         "probe: {n} creatures, {mismatched} fitness bits differ, {behavior} behavior bits differ"
     );
@@ -371,7 +390,7 @@ fn run_seed(
                     }
                 }
             }
-            if options.probe && generation >= 3 {
+            if options.probe && std::env::var_os("PROBE_GPU").is_some() && generation >= 3 {
                 probe_gpu(sched, &experiment)?;
             }
         } else {
@@ -391,9 +410,37 @@ fn run_seed(
             }
         }
         experiment.evaluated = experiment.config.population;
+        if options.probe {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for v in &experiment.scores {
+                v.to_bits().hash(&mut h);
+            }
+            let scores = h.finish();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for g in &experiment.population.genomes {
+                g.id.hash(&mut h);
+            }
+            for n in &experiment.population.nodes {
+                n.x.to_bits().hash(&mut h);
+            }
+            println!(
+                "trace gen {generation}: population {:016x} scores {scores:016x}",
+                h.finish()
+            );
+        }
         experiment
             .archive_batch()
             .with_context(|| format!("seed {seed} generation {generation} archive"))?;
+        if options.probe {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for e in &experiment.archive.entries {
+                e.fitness.to_bits().hash(&mut h);
+                e.creature.id.hash(&mut h);
+            }
+            println!("trace gen {generation}: archive {:016x}", h.finish());
+        }
         let generation_best = experiment
             .scores
             .iter()
@@ -421,9 +468,41 @@ fn run_seed(
             .fold(best, f32::max);
         println!("{scope} seed {seed} generation {generation} archive best {best:.2} m");
         top = top_bodies(&experiment, TOP_BODIES);
+        if options.probe {
+            let h = |bytes: Vec<u8>| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                bytes.hash(&mut h);
+                h.finish()
+            };
+            println!(
+                "trace gen {generation}: before breeding islands {:016x} cma {:016x} stats {:016x}",
+                h(bincode::serialize(&experiment.islands).unwrap()),
+                h(bincode::serialize(&experiment.cma_emitters).unwrap()),
+                h(bincode::serialize(&experiment.emitter_stats).unwrap())
+            );
+        }
         experiment
             .prepare_next_batch()
             .with_context(|| format!("seed {seed} generation {generation} breeding"))?;
+        if options.probe {
+            let h = |bytes: Vec<u8>| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                bytes.hash(&mut h);
+                h.finish()
+            };
+            println!(
+                "trace gen {generation}: after breeding plan {:016x} cma {:016x}",
+                h(bincode::serialize(&(
+                    &experiment.candidate_emitters,
+                    &experiment.candidate_cma,
+                    &experiment.candidate_parent_ids
+                ))
+                .unwrap()),
+                h(bincode::serialize(&experiment.cma_emitters).unwrap())
+            );
+        }
     }
     // `EVOLUTION_AB_SAVE=<dir>` writes each seed's final experiment as
     // `<dir>/seed-<seed>.evo`, for `physics_audit` and `size_report`.

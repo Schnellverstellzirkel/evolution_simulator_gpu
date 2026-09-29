@@ -364,9 +364,14 @@ impl Scheduler {
             }
             let block = self.ordered.blocks.pop_front().expect("front block");
             self.ordered.returned = block.seq + 1;
-            self.ordered
-                .claimed
-                .retain(|_, &mut (seq, _)| seq != block.seq);
+            // Without gating the archives hold still for the whole round, so
+            // a claim stands until then; retiring it on return would make
+            // decisions depend on when blocks come back.
+            if gated {
+                self.ordered
+                    .claimed
+                    .retain(|_, &mut (seq, _)| seq != block.seq);
+            }
             let mut members = Vec::with_capacity(block.members.len());
             let mut metrics = Vec::with_capacity(block.members.len());
             for (i, slot) in block.members.iter().zip(block.slots) {
