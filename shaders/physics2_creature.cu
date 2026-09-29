@@ -966,7 +966,7 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
                 drive *= clampf(1.0f + relative * hill, 0.0f, 1.0f);
             }
             const float magnitude = clampf(drive + relative * 0.15f, -cap, cap);
-            const float work = fabsf(magnitude * relative) * DT;
+            const float work = fminf(drive, cap) * fmaxf(-relative, 0.0f) * DT;
             muscle_data[field + 14u * TILE] = clampf(
                 energy - work * inv_capacity
                     + MUSCLE_RECOVERY * p.muscle_recovery * DT * (1.0f - energy),

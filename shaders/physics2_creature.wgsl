@@ -917,7 +917,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 drive *= clamp(1.0 + relative * hill, 0.0, 1.0);
             }
             let magnitude = clamp(drive + relative * 0.15, -cap, cap);
-            let work = abs(magnitude * relative) * DT;
+            let work = min(drive, cap) * max(-relative, 0.0) * DT;
             muscle_data[field + 14u * TILE] = clamp(
                 energy - work * inv_capacity
                     + MUSCLE_RECOVERY * p.muscle_recovery * DT * (1.0 - energy),

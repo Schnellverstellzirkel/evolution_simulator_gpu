@@ -1111,7 +1111,10 @@ fn simulate_step_inner(
         if limp {
             magnitude = 0.0;
         }
-        let work = (magnitude * relative).abs() * dt;
+        // Only active contraction costs energy: the drive against a shortening
+        // muscle. The passive damper (0.15 per m/s) and a muscle that is
+        // stretched or held cost nothing.
+        let work = drive.min(cap) * (-relative).max(0.0) * dt;
         sc.work_total += f64::from(work);
         s.energy[k] = (energy - work * inv_capacity
             + limits.muscle_recovery * cfg.muscle_recovery * dt * (1.0 - energy))

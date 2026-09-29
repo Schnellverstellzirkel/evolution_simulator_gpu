@@ -130,3 +130,7 @@ The same GPU evolution (seed 40, 100k, 30 generations, 20 s, Vulkan), with the f
 | muscle size too | 43.9 m | 8,746 | 3.39 m | 4 nodes, 1.67 m of bone, 4.2 kg |
 
 `v2-muscle-size-gpu-seed40-best.gif` is the champion of the second run: 4 nodes, 9 muscles, 4.1 kg, 43.9 m in 20 s (2.2 m/s). Its ledger: muscle drain 2,400 J, energy the solver added 0.0 J, lost 3,258 J, momentum balance +103 J and -106 J, friction work +0.0 J. No elite of the run has unpaid energy (60 elites: gained 1,040 J against 37,637 J of muscle work) or friction that does positive work (14 J in total).
+
+## Muscle energy is charged for active contraction only
+
+A muscle's energy store paid `|force x length rate| x dt`, which also charged the passive damper (0.15 N per m/s) and the stretching of a muscle under load. It now pays only for active contraction: the drive force (up to the cap) times the shortening speed. A stretched or held muscle, and the damper, cost nothing. `qd::VERSION` 31. GPU evolution (seed 40, 100k, 30 generations, 20 s), against the run before the change: best 38.6 m (43.9), QD 6,437 (8,746), median 2.30 m (3.39); top-50 median body 8 nodes, 1.98 m of bone, 3.7 kg (4 nodes, 1.67 m, 4.2 kg). Both are inside the A/A single-seed noise (factor 1.9 on best, 1.4 on QD). No elite has unpaid energy (61 elites: 3,045 J gained against 27,083 J of muscle work) or positive friction work beyond 38 J in total. `v2-active-work-gpu-seed40-best.gif`: 6 nodes, 16 muscles, 3.3 kg, 38.6 m archive (36.8 m on the CPU replay), muscle work 1,740 J.

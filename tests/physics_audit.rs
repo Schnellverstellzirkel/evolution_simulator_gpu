@@ -211,3 +211,28 @@ fn a_muscle_is_as_strong_as_the_mass_it_drives() {
     assert!(strengths.iter().all(|s| (0.0..=1.0).contains(s)));
     assert!(strengths.iter().any(|&s| s < 0.5), "{strengths:?}");
 }
+
+#[test]
+fn passive_damping_costs_no_muscle_energy() {
+    // A body whose muscles never change length has no drive, so its muscles
+    // only damp. The damper is passive tissue: it dissipates energy but the
+    // muscle stores are not charged for it.
+    let mut creature: Creature =
+        serde_json::from_str(include_str!("fixtures/p2_muscle_champion.json")).unwrap();
+    for muscle in &mut creature.muscles {
+        muscle.short = muscle.long;
+    }
+    let cfg = Config {
+        duration: 5.0,
+        random_seed: false,
+        screen: None,
+        ..Config::default()
+    };
+    let (_, work) = physics2::trial_work(&creature, &cfg);
+    assert_eq!(work, 0.0, "muscle energy charged for damping: {work} J");
+    // And a driven muscle still pays for its contraction.
+    let driven: Creature =
+        serde_json::from_str(include_str!("fixtures/p2_muscle_champion.json")).unwrap();
+    let (_, work) = physics2::trial_work(&driven, &cfg);
+    assert!(work > 10.0, "a driven body did {work} J of work");
+}
