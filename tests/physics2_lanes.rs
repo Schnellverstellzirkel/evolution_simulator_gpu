@@ -20,7 +20,7 @@ fn population(cfg: &Config, tendons: bool) -> Population {
             let mut c = pop.creature(i);
             c.id = c.id.wrapping_add(1000 * u64::from(copy));
             for (k, m) in c.muscles.iter_mut().enumerate() {
-                if tendons && (i + k + copy as usize) % 3 == 0 {
+                if tendons && (i + k + copy as usize).is_multiple_of(3) {
                     // A tendon, and a shorter longest length so that the
                     // body's own stretching engages it.
                     m.tendon = 0.2 + 0.25 * ((i + k) % 4) as f32;
