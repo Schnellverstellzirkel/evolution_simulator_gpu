@@ -47,6 +47,23 @@ const FIT_HEIGHT_SHARE: f32 = 0.42;
 fn fit_zoom(body_height: f32, view_height: f32) -> f32 {
     (FIT_HEIGHT_SHARE * view_height / body_height.max(0.05)).clamp(40.0, 450.0)
 }
+/// The highest point the body reaches in a recording (m above the ground).
+fn body_peak(frames: &[Vec<[f32; 2]>], nodes: &[Node]) -> f32 {
+    frames
+        .iter()
+        .flat_map(|frame| frame.iter().zip(nodes).map(|(p, n)| p[1] + n.radius))
+        .fold(0.1f32, f32::max)
+}
+/// The player's default zoom: the typical height fills its share of the
+/// viewport, and the highest point of the recording stays in view (the ground
+/// sits 22% up from the bottom) unless that would shrink the body to less than
+/// 60% of the typical fit. A creature that leaps far higher than it stands
+/// keeps that 60% and clips its peak instead of becoming tiny.
+fn player_zoom(height: f32, peak: f32, view_height: f32) -> f32 {
+    let typical = fit_zoom(height, view_height);
+    let whole = 0.72 * view_height / peak.max(0.05);
+    whole.min(typical).max(typical * 0.6).clamp(20.0, 450.0)
+}
 /// A creature's typical height over a recording (m above the ground): the
 /// 90th percentile of the top of the body, so one leap does not shrink it.
 fn body_height(frames: &[Vec<[f32; 2]>], nodes: &[Node]) -> f32 {
@@ -386,6 +403,8 @@ struct Playback {
     track: Vec<f32>,
     /// Typical body height over the recording (m), for the default zoom.
     height: f32,
+    /// Highest point of the body over the recording (m).
+    peak: f32,
     /// Muscle energy, muscle force and ground push per frame, rebuilt from the frames.
     forces: crate::replay_forces::Forces,
 }
@@ -432,7 +451,14 @@ impl Playback {
             (tick.min(last_frame), result.fitness)
         });
         let track = camera_track(&frames, &nodes);
-        let height = body_height(&frames, &nodes);
+        // Frames after the trial ended keep moving (a fallen body tumbles), so
+        // the zoom looks only at the scored part.
+        let scored = &frames[(physics::settle() as usize).min(frames.len().saturating_sub(1))
+            ..fall.map_or(frames.len(), |(tick, _)| {
+                (tick as usize + 1).min(frames.len())
+            })];
+        let height = body_height(scored, &nodes);
+        let peak = body_peak(scored, &nodes);
         let contact: Vec<Vec<bool>> = frames
             .iter()
             .map(|frame| {
@@ -474,6 +500,7 @@ impl Playback {
             distance: result.fitness,
             height,
             cost_of_transport: crate::cpu_engine::transport_cost(&normalized, &config),
+            peak,
             forces,
             track,
             creature: normalized,
@@ -729,6 +756,13 @@ impl FrameMarks {
                 .unwrap_or_default(),
             arrows: false,
         };
+        // Developer screenshots: EVOLUTION_SMOKE_ENERGY=0.15 draws every muscle at that store.
+        if let Some(level) = std::env::var("EVOLUTION_SMOKE_ENERGY")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+        {
+            marks.energy.fill(level);
+        }
         if let Some(frame) = playback.frames.get(playback.tick as usize) {
             node_contact(
                 &playback.nodes,
@@ -2149,7 +2183,7 @@ impl App {
         if !self.zoom_user
             && let Some(p) = &self.playback
         {
-            self.zoom = fit_zoom(p.height, rect.height());
+            self.zoom = player_zoom(p.height, p.peak, rect.height());
         }
         let painter = ui.painter_at(rect);
         // All scene primitives are tessellated into egui's batched wgpu render pass.
@@ -4744,6 +4778,16 @@ impl eframe::App for App {
                 ScreenshotRequest,
             )));
         }
+        // Developer screenshots: EVOLUTION_SMOKE_SEEK=<seconds> holds the replay at that time.
+        if self.capture_path.is_some()
+            && let Some(seconds) = std::env::var("EVOLUTION_SMOKE_SEEK")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+            && let Some(p) = self.playback.as_mut()
+        {
+            p.seek((seconds * physics::rate() as f32) as u32);
+            self.playing = false;
+        }
         // Explicit opt-in capture hook for repeatable native rendering/performance checks.
         if self.capture_path.is_some()
             && self.started.elapsed() > smoke_capture_delay()
@@ -5543,7 +5587,7 @@ fn draw_creature(
         {
             let along = (b - a).normalized();
             if along.x.is_finite() {
-                let len = (force / 100.0).abs().min(1.0) * scale * 0.5;
+                let len = (force / 100.0).abs().min(1.0) * scale * 0.3;
                 let sign = if force >= 0. { 1. } else { -1. };
                 draw_arrow(p, a, along * sign * len, FORCE_MUSCLE);
                 draw_arrow(p, b, -along * sign * len, FORCE_MUSCLE);
@@ -6010,6 +6054,54 @@ mod tests {
         assert_eq!(out.energy.len(), frames.len());
         assert!(out.energy.iter().flatten().all(|e| (0.0..=1.0).contains(e)));
         assert!(out.muscle.iter().flatten().any(|f| *f != 0.0));
+    }
+    #[test]
+    fn estimated_muscle_energy_falls_with_work_and_recovers() {
+        let config = Config {
+            population: 200,
+            random_seed: false,
+            ..Config::default()
+        };
+        let pop = crate::evolution::create(&config).unwrap();
+        let (mut fell, mut recovered) = (0, 0);
+        let mut lowest = 1.0f32;
+        for i in 0..pop.genomes.len() {
+            let creature = pop.creature(i);
+            let (frames, _) = crate::cpu_engine::replay(&creature, &config);
+            let nodes = physics::nodes(&creature);
+            let contact = vec![vec![false; nodes.len()]; frames.len()];
+            let out =
+                crate::replay_forces::analyze(&creature, &nodes, &frames, &contact, None, &config);
+            for j in 0..creature.muscles.len() {
+                let series: Vec<f32> = out.energy.iter().map(|e| e[j]).collect();
+                let (at, low) = series
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .fold((0, 1.0f32), |b, (t, e)| if e < b.1 { (t, e) } else { b });
+                lowest = lowest.min(low);
+                if low < 0.9 {
+                    fell += 1;
+                    if series[at..].iter().any(|&e| e > low + 0.05) {
+                        recovered += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("muscles that fell below 0.9: {fell}, recovered: {recovered}, lowest {lowest}");
+        assert!(fell > 0, "no muscle ever tired, lowest {lowest}");
+        assert!(recovered > 0, "no tired muscle ever recovered");
+    }
+    #[test]
+    fn a_leaper_keeps_its_peak_in_view_without_shrinking_the_body_too_far() {
+        let typical = fit_zoom(0.5, 260.0);
+        // A mild jump fits whole.
+        assert!(player_zoom(0.5, 1.0, 260.0) < typical);
+        assert!(player_zoom(0.5, 1.0, 260.0) * 1.0 <= 0.72 * 260.0 + 0.01);
+        // A huge leap stops at 60% of the typical zoom.
+        assert!((player_zoom(0.5, 30.0, 260.0) - typical * 0.6).abs() < 0.01);
+        // A body that never leaves the ground keeps the typical fit.
+        assert_eq!(player_zoom(0.5, 0.5, 260.0), typical);
     }
     #[test]
     fn default_zoom_follows_body_height() {
