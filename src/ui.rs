@@ -1043,6 +1043,8 @@ fn ago(time: Option<std::time::SystemTime>) -> String {
 enum FeedAction {
     /// Replay the best creature of this history row.
     Replay(usize),
+    /// Replay the champion now, whose record no history row holds yet.
+    ReplayChampion,
     /// Bring back creatures lost to catastrophes.
     Undo,
     /// Set this effect (index into `EFFECTS`) to this level.
@@ -1105,6 +1107,56 @@ fn world_records(history: &[Stats]) -> Vec<(usize, f32, bool)> {
         }
     }
     records
+}
+/// A record set in the generation that is running, before its history row
+/// exists.
+struct LiveRecord {
+    best: f32,
+    /// The first best in a world the history has no row for yet.
+    first_in_world: bool,
+    /// No generation has finished at all.
+    first_ever: bool,
+}
+/// The running generation's best and median when its row is not written yet:
+/// (generation, best, median).
+fn live_point(snapshot: &Snapshot) -> Option<(u32, f32, f32)> {
+    let behind = snapshot
+        .history
+        .last()
+        .is_none_or(|last| snapshot.generation > last.generation);
+    (behind && snapshot.live_best.is_finite()).then_some((
+        snapshot.generation,
+        snapshot.live_best,
+        snapshot.live_median,
+    ))
+}
+/// The champion's record, when it beats the last record of this world by a
+/// record step. `snapshot.champion` holds its creature.
+fn live_record(snapshot: &Snapshot) -> Option<LiveRecord> {
+    let (_, best, _) = live_point(snapshot)?;
+    snapshot.champion.as_ref()?;
+    let Some(last) = snapshot.history.last() else {
+        return Some(LiveRecord {
+            best,
+            first_in_world: false,
+            first_ever: true,
+        });
+    };
+    if snapshot.config.physics_differs(&last.config) {
+        return Some(LiveRecord {
+            best,
+            first_in_world: true,
+            first_ever: false,
+        });
+    }
+    let held = world_records(&snapshot.history)
+        .last()
+        .map_or(f32::NEG_INFINITY, |&(_, b, _)| b);
+    (best >= held + RECORD_STEP).then_some(LiveRecord {
+        best,
+        first_in_world: false,
+        first_ever: false,
+    })
 }
 /// Heat map of the archive: for each ground contact and cadence pair, the
 /// best creature among the height and feet bins the filters let through.
@@ -2175,7 +2227,7 @@ impl App {
                     " FIRST GENERATION ",
                     theme.card,
                     theme.muted,
-                    "A random creature of the first generation. The champion takes over when the first generation ends.",
+                    "A random creature of the first generation. The champion takes over as soon as the first creature is kept.",
                 )
             };
             ui.label(
@@ -2809,6 +2861,7 @@ impl App {
         if reset {
             plot = plot.reset();
         }
+        let live = live_point(s);
         plot.show(ui, |plot| {
             if zoom != 1.0 {
                 let bounds = plot.plot_bounds();
@@ -2816,18 +2869,28 @@ impl App {
                 plot.set_plot_bounds_y(scaled_range(bounds.range_y(), zoom));
             }
             if let Some(generations) = last {
-                let end = s.history.last().map_or(1.0, |h| h.generation as f64 + 0.5);
+                let end = live.map_or_else(
+                    || s.history.last().map_or(1.0, |h| h.generation as f64 + 0.5),
+                    |(generation, ..)| generation as f64 + 0.5,
+                );
                 plot.set_plot_bounds_x((end - generations).max(0.0)..=end);
                 plot.set_auto_bounds(egui::Vec2b::new(false, true));
             }
             // The best creature and the typical kept one; the percentile
             // index follows `storage::PERCENTILES` (28 is 100, 14 is 50).
             for (i, name, color) in [(28, "Best", theme.accent), (14, "Median", theme.warn)] {
-                let values: Vec<[f64; 2]> = s
+                let mut values: Vec<[f64; 2]> = s
                     .history
                     .iter()
                     .map(|h| [h.generation as f64, h.percentiles[i] as f64])
                     .collect();
+                // The running generation's point moves as results arrive.
+                if let Some((generation, best, median)) = live {
+                    let value = if i == 28 { best } else { median };
+                    if value.is_finite() {
+                        values.push([generation as f64, value as f64]);
+                    }
+                }
                 plot.line(Line::new(name, values).color(color).width(2.5));
             }
             // A vertical line and a short label where the world changed: the
@@ -2838,6 +2901,7 @@ impl App {
                 .history
                 .iter()
                 .map(|h| h.percentiles[28] as f64)
+                .chain(live.map(|(_, best, _)| best as f64))
                 .fold(1.0, f64::max);
             for mark in world_marks(&s.events, &s.history) {
                 plot.vline(
@@ -2865,10 +2929,13 @@ impl App {
             }
             // Record markers extend the best line instead of duplicating it.
             // Records count again after a world change.
-            let records: Vec<[f64; 2]> = world_records(&s.history)
+            let mut records: Vec<[f64; 2]> = world_records(&s.history)
                 .into_iter()
                 .map(|(index, best, _)| [s.history[index].generation as f64, best as f64])
                 .collect();
+            if let Some(record) = live_record(s) {
+                records.push([s.generation as f64, record.best as f64]);
+            }
             if !records.is_empty() {
                 plot.points(
                     Points::new("Record", records)
@@ -3091,7 +3158,7 @@ impl App {
             ui.add_space(8.);
             ui.label(
                 RichText::new(
-                    "The islands fill as the first generation ends. Their creatures appear here.",
+                    "The islands fill as the first creatures are kept. Their creatures appear here.",
                 )
                 .color(theme.muted),
             );
@@ -3158,7 +3225,7 @@ impl App {
         let Some(list) = self.cards.clone() else {
             ui.label(
                 RichText::new(
-                    "The first generation is running. Its creatures appear here when it ends.",
+                    "The first generation is running. Its creatures appear here as they are kept.",
                 )
                 .color(theme.muted),
             );
@@ -3259,6 +3326,13 @@ impl App {
         self.select(creature, config);
         self.tab = Tab::Overview;
     }
+    /// Replays the champion now, like a record's Replay button.
+    fn replay_champion(&mut self) {
+        if let Some((creature, config)) = self.champion() {
+            self.select(creature, config);
+            self.tab = Tab::Overview;
+        }
+    }
     /// The lines of the event feed, newest first: the worker's events (world
     /// changes, seasons, catastrophes, saves) and the records in the history.
     fn feed_items(&self) -> Vec<FeedItem> {
@@ -3277,14 +3351,20 @@ impl App {
                     (snapshot.fossils > 0).then_some(FeedAction::Undo),
                 ),
                 EventKind::World | EventKind::Season => {
-                    if let (Some(before), Some(after)) = (
-                        event.generation.checked_sub(1).and_then(row),
-                        row(event.generation),
-                    ) {
-                        text.push_str(&format!(
-                            " Best {:.2} m before, {:.2} m after one generation.",
-                            before.best, after.best
-                        ));
+                    if let Some(before) = event.generation.checked_sub(1).and_then(row) {
+                        if let Some(after) = row(event.generation) {
+                            text.push_str(&format!(
+                                " Best {:.2} m before, {:.2} m after one generation.",
+                                before.best, after.best
+                            ));
+                        } else if event.generation == snapshot.generation
+                            && snapshot.live_best.is_finite()
+                        {
+                            text.push_str(&format!(
+                                " Best {:.2} m before, {:.2} m so far in this generation.",
+                                before.best, snapshot.live_best
+                            ));
+                        }
                     }
                     if event.kind == EventKind::Season {
                         text.insert_str(0, "Season: ");
@@ -3323,11 +3403,32 @@ impl App {
                 action: Some(FeedAction::Replay(index)),
             });
         }
+        if let Some(record) = live_record(snapshot) {
+            let name = snapshot
+                .champion
+                .as_ref()
+                .map(|champion| species_name(&champion.0))
+                .unwrap_or_default();
+            let best = record.best;
+            items.push(FeedItem {
+                generation: snapshot.generation,
+                text: if record.first_ever {
+                    format!("First generation: best {best:.2} m, {name}.")
+                } else if record.first_in_world {
+                    format!("Best in the new world: {best:.2} m, {name}.")
+                } else {
+                    format!("New record: {best:.2} m, {name}.")
+                },
+                color: theme.ink,
+                action: Some(FeedAction::ReplayChampion),
+            });
+        }
         // A stall: no record in this world for a while. The feed suggests a
         // harder world instead of changing the search silently.
         if let (Some(last), Some(&(index, _, _))) = (history.last(), records.last()) {
             let since = last.generation.saturating_sub(history[index].generation);
             if since >= STALL_GENERATIONS
+                && live_record(snapshot).is_none()
                 && let Some((effect, level)) = stall_suggestion(&self.config)
             {
                 let effect_ref = &crate::environment::EFFECTS[effect];
@@ -3379,7 +3480,7 @@ impl App {
                         ui.label(RichText::new(&item.text).small().color(item.color));
                         if let Some(action) = item.action {
                             let label = match action {
-                                FeedAction::Replay(_) => "Replay",
+                                FeedAction::Replay(_) | FeedAction::ReplayChampion => "Replay",
                                 FeedAction::Undo => "Undo",
                                 FeedAction::Try(..) => "Try it",
                             };
@@ -3392,6 +3493,7 @@ impl App {
             });
         match chosen {
             Some(FeedAction::Replay(index)) => self.replay_history_holder(index),
+            Some(FeedAction::ReplayChampion) => self.replay_champion(),
             Some(FeedAction::Undo) => self.worker.send(Command::UndoMeteor),
             Some(FeedAction::Try(effect, level)) => {
                 crate::environment::EFFECTS[effect].set_level(&mut self.config, level);
@@ -3410,16 +3512,18 @@ impl App {
         };
         let theme = self.theme();
         let records = world_records(&snapshot.history);
+        let live = live_record(snapshot);
         ui.label(RichText::new("RECORDS").small().color(theme.muted));
-        if records.is_empty() {
+        if records.is_empty() && live.is_none() {
             ui.label(
-                RichText::new("No records yet. The first generation's best lands here.")
+                RichText::new("No records yet. The first best creature lands here.")
                     .small()
                     .color(theme.muted),
             );
             return;
         }
         let mut chosen = None;
+        let mut chosen_live = false;
         egui::ScrollArea::vertical()
             .id_salt("records_list")
             .max_height(200.)
@@ -3429,6 +3533,36 @@ impl App {
                     .spacing([14., 4.])
                     .striped(true)
                     .show(ui, |ui| {
+                        if let Some(record) = &live {
+                            ui.label(
+                                RichText::new(format!("Gen {}", snapshot.generation))
+                                    .small()
+                                    .color(theme.muted),
+                            );
+                            ui.label(RichText::new(format!("{:.2} m", record.best)).strong());
+                            let name = snapshot
+                                .champion
+                                .as_ref()
+                                .map(|champion| species_name(&champion.0))
+                                .unwrap_or_default();
+                            ui.label(
+                                RichText::new(format!(
+                                    "{name} · {}{}",
+                                    world_summary(&snapshot.config),
+                                    if record.first_in_world {
+                                        " (new world)"
+                                    } else {
+                                        ""
+                                    }
+                                ))
+                                .small()
+                                .color(theme.muted),
+                            );
+                            if ui.small_button("Replay").clicked() {
+                                chosen_live = true;
+                            }
+                            ui.end_row();
+                        }
                         for &(index, best, first) in records.iter().rev() {
                             let stats = &snapshot.history[index];
                             ui.label(
@@ -3462,7 +3596,9 @@ impl App {
                         }
                     });
             });
-        if let Some(index) = chosen {
+        if chosen_live {
+            self.replay_champion();
+        } else if let Some(index) = chosen {
             self.replay_history_holder(index);
         }
     }
