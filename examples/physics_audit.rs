@@ -47,14 +47,14 @@ fn main() {
         elites.len()
     );
     println!(
-        "rank  archive_m replay_m nodes muscles kg  work_J  gained_J lost_J  bal+J bal-J  firstlaw_J  contact_free%  fric_push%  cost_J/kg/m  fell_s"
+        "rank  archive_m replay_m nodes muscles kg  work_J  gained_J lost_J  bal+J bal-J  firstlaw_J  contact_free%  fric_push%  cost_J/kg/m  fell_s  Nwork+  Nwork-  Fwork+  Fwork-"
     );
-    let mut total = [0.0f64; 12];
+    let mut total = [0.0f64; 16];
     let mut with_muscles = 0usize;
     for k in 0..count {
         let rank = (elites.len() - 1) * k / (count - 1).max(1);
         let (archive_m, c) = &elites[rank];
-        let (frames, result) = cpu_engine::replay(c, &cfg);
+        let (_frames, result) = cpu_engine::replay(c, &cfg);
         let energy = physics2::ENERGY.with(|l| l.get());
         let mass: f32 = physics::nodes(c).iter().map(|n| n.mass).sum();
         let cost = cpu_engine::transport_cost(c, &cfg);
@@ -65,7 +65,7 @@ fn main() {
             0.0
         };
         println!(
-            "{rank:5} {:9.2} {:8.2} {:5} {:7} {:5.1} {:7.1} {:8.1} {:7.1} {:6.2} {:5.2} {:11.2} {:13.1} {:11.1} {:12} {:7.2}  ({} frames)",
+            "{rank:5} {:9.2} {:8.2} {:5} {:7} {:5.1} {:7.1} {:8.1} {:7.1} {:6.2} {:5.2} {:11.2} {:13.1} {:11.1} {:12} {:7.2} {:7.1} {:7.1} {:7.1} {:7.1}",
             archive_m,
             result.fitness,
             c.nodes.len(),
@@ -81,7 +81,10 @@ fn main() {
             fric,
             cost.map_or("n/a".into(), |v| format!("{v:.1}")),
             result.fall_time,
-            frames.len()
+            energy[12],
+            energy[13],
+            energy[14],
+            energy[15]
         );
         for (t, v) in total.iter_mut().zip(energy) {
             *t += v;

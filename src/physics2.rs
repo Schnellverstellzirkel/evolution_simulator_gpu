@@ -601,6 +601,9 @@ struct Scratch {
     /// Muscle work so far in this trial (J): the sum of |force x relative
     /// speed| x dt that drains the muscle stores, for the cost of transport.
     work_total: f64,
+    /// Ground work of the step (J): normal positive, normal negative,
+    /// friction positive, friction negative.
+    ground_work: [f64; 4],
 }
 
 thread_local! {
@@ -618,8 +621,11 @@ thread_local! {
     /// removed; 5 steps without ground contact; 6 steps; 7 and 8 columns 1
     /// and 2 in steps without contact; 9 friction impulse that pushed a node
     /// the way it slid after the step, of 10 all friction impulse (N s); 11
-    /// the energy the first-law check took away.
-    pub static ENERGY: std::cell::Cell<[f64; 12]> = const { std::cell::Cell::new([0.0; 12]) };
+    /// the energy the first-law check took away; 12 and 13 the work the
+    /// ground's normal impulses did on the nodes (impulse times the mean of
+    /// the node's speed along the normal before and after the step), positive
+    /// and negative; 14 and 15 the same for friction.
+    pub static ENERGY: std::cell::Cell<[f64; 16]> = const { std::cell::Cell::new([0.0; 16]) };
     /// Steps of the last replay on this thread by how many nodes took part
     /// in the contact solve (0 to `MAX_CONTACTS`).
     pub static CONTACT_COUNTS: std::cell::Cell<[u32; MAX_CONTACTS + 1]> =
@@ -675,6 +681,7 @@ pub fn run(model: &Model, cfg: &Config, mut frames: Option<&mut Vec<Vec<[f32; 2]
         contacts: 0,
         friction: Vec::new(),
         work_total: 0.0,
+        ground_work: [0.0; 4],
     };
     if let Some(frames) = frames.as_deref_mut() {
         for _ in 0..=fidelity.settle() {
@@ -693,7 +700,7 @@ pub fn run(model: &Model, cfg: &Config, mut frames: Option<&mut Vec<Vec<[f32; 2]
     };
     let mut ledger = [0.0f64; 2];
     let diagnose = frames.is_some();
-    let mut energy = [0.0f64; 12];
+    let mut energy = [0.0f64; 16];
     let mut counts = [0u32; MAX_CONTACTS + 1];
     for step in 0..steps {
         let energy_before = if diagnose {
@@ -738,6 +745,9 @@ pub fn run(model: &Model, cfg: &Config, mut frames: Option<&mut Vec<Vec<[f32; 2]
                 }
             }
             energy[11] += f64::from(sc.first_law);
+            for (e, g) in energy[12..].iter_mut().zip(sc.ground_work) {
+                *e += g;
+            }
             energy[5] += f64::from(u8::from(sc.contacts == 0));
             counts[(sc.contacts as usize).min(MAX_CONTACTS)] += 1;
             CONTACT_COUNTS.with(|c| c.set(counts));
@@ -963,6 +973,8 @@ fn simulate_step_inner(
         p
     };
     let before = momentum(s);
+    let vel_start = s.vel.clone();
+    sc.ground_work = [0.0; 4];
     sc.friction.clear();
     // For the first-law check at the end of the step.
     let (energy_start, energy_scale) = model.energy(s, cfg.gravity);
@@ -1156,6 +1168,7 @@ fn simulate_step_inner(
         contacts.truncate(MAX_CONTACTS);
         contacts.sort_by_key(|c| c.node);
     }
+    let mut ground_log: Vec<(usize, f32, f32, [f32; 2], [f32; 2])> = Vec::new();
     let mut impulse = cfg.wind * model.total_mass * dt + mud_impulse;
     let mut impulse_y = -cfg.gravity * model.total_mass * dt;
     if !contacts.is_empty() {
@@ -1229,6 +1242,11 @@ fn simulate_step_inner(
         for (i, c) in contacts.iter().enumerate() {
             s.warm[c.node] = [lambda[2 * i], lambda[2 * i + 1]];
         }
+        ground_log = contacts
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.node, lambda[2 * i] * dt, lambda[2 * i + 1] * dt, c.normal, c.tangent))
+            .collect();
         for (i, c) in contacts.iter().enumerate() {
             sc.friction
                 .push((c.node, lambda[2 * i + 1] * dt, c.tangent));
@@ -1242,6 +1260,16 @@ fn simulate_step_inner(
     sc.impulse_x = impulse;
     sc.contacts = contacts.len() as u32;
     let head = integrate(model, s, sc, dt, air);
+    for &(node, jn, jt, normal, tangent) in &ground_log {
+        let mean = [
+            0.5 * (vel_start[node][0] + s.vel[node][0]),
+            0.5 * (vel_start[node][1] + s.vel[node][1]),
+        ];
+        let wn = f64::from(jn * (mean[0] * normal[0] + mean[1] * normal[1]));
+        let wt = f64::from(jt * (mean[0] * tangent[0] + mean[1] * tangent[1]));
+        sc.ground_work[if wn > 0.0 { 0 } else { 1 }] += wn;
+        sc.ground_work[if wt > 0.0 { 2 } else { 3 }] += wt;
+    }
     // Momentum balance: the body's momentum changes only by the external
     // impulses (gravity, wind, the ground) and the air. First-order
     // integration in joint coordinates misses that by a little each step,
