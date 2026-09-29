@@ -22,7 +22,7 @@ Product:
 - Saves are small (archives and search state), and the game writes as few files as possible. Autosave is off. Breaking old saves is fine: bump `qd::VERSION` when archive or physics semantics change, and the save header turns older saves down with a message.
 - Speed matters. The goal is 2M, then 4M, evaluated creatures per second in the graphical game at 60 FPS.
 - Search changes rest on evidence (papers and practice) and must not break the search. Test each one with a paired A/B at equal evaluation budgets over 3 seeds, and report best distance, QD score and the top-50 body mix.
-- Physics v2 is becoming the game (decided 2026-09-29). New physics features go into v2, not v1. A physics change updates every GPU kernel, WGSL and CUDA together. CPU ports may differ.
+- Physics v2 is the game (since 2026-09-29). New physics features go into v2. A physics change updates every GPU kernel, WGSL and CUDA together. CPU ports may differ.
 - Posture rules (for example what counts as a fall) need the owner's approval.
 
 Working:
@@ -61,14 +61,14 @@ Use absolute paths, because `git -C` resolves a relative worktree path against t
 
 ## Code map
 
-Physics v1, the game until v2 lands on `main`:
+Physics v2 is the game's physics:
 
-- `shaders/physics_creature.wgsl` is the GPU kernel, driven by `src/gpu.rs` and `src/vk_engine.rs`.
-- `shaders/physics_creature.cu` is its CUDA mirror, used on NVIDIA when the driver and NVRTC load, driven by `src/cuda_engine.rs`. It mirrors the WGSL section by section.
-- `src/engine.rs` picks the backend and records replays on the GPU. `src/creature_kernel.rs` packs creatures for the GPU.
-- The CPU fallback is `src/cpu_engine.rs` with `src/simd.rs` (AVX-512), plus the older `src/physics.rs` (`physics::body()` computes node masses).
-
-Physics v2 (branch `claude/physics2`, landing): `shaders/physics2_creature.wgsl`, a CUDA mirror in progress, and `src/physics2.rs` (CPU prototype). See `docs/physics-v2.md` on that branch.
+- `shaders/physics2_creature.wgsl` is the GPU kernel for Vulkan, driven by `src/vk_engine.rs` and `src/gpu.rs`.
+- `shaders/physics2_creature.cu` is its CUDA mirror, used on NVIDIA when the driver and NVRTC load, driven by `src/cuda_engine.rs`. It mirrors the WGSL section by section; change both together.
+- `src/physics2.rs` is the CPU prototype (the CPU fallback and the reference the GPU kernels are tested against), with the kernel source builders and the recording edits for replays.
+- `src/engine.rs` picks the backend and records replays with the scoring kernel. `src/creature_kernel.rs` packs creatures for the GPU and builds the CUDA sources.
+- `docs/physics-v2.md` describes the model: contacts (the deepest 4 per step), friction that may never do positive work, the plant pass, and muscle strength scaled to the mass a muscle moves.
+- The old physics (v1: `shaders/physics_creature.*`, `src/cpu_engine.rs`, `src/simd.rs`, `src/physics.rs`) stays as a developer diagnostic behind `EVOLUTION_PHYSICS=1` until v2's CPU fallback is fast; then it is deleted.
 
 Search and game state:
 
@@ -82,10 +82,11 @@ Search and game state:
 
 ## Measurement tools
 
-- `examples/search_ab.rs`: paired fixed-seed search runs through the production archive and breeding path. `src/search_benchmark.rs`: equal-budget comparisons.
+- `examples/search_ab.rs`: paired fixed-seed search runs through the production archive and breeding path, on the CPU or with `--gpu` through the game's GPU path. At 100k creatures a 6-seed mean detects only about 30% in QD; use 12 or more seeds for smaller effects (`docs/search-research.md` section 15).
 - `EVOLUTION_STAGE_LOG=<path>`: one CSV row per generation (evaluation, archive and breeding seconds, end-to-end rate).
 - `examples/size_report.rs <save> [count]`: body length, mass and foot slip for the best elites. `EVOLUTION_LEDGER=1` adds where forward momentum comes from.
 - `examples/mutation_audit.rs`: how much of its parent's distance each operator's child keeps.
+- `examples/physics_audit.rs`: energy, friction and momentum ledgers per elite under v2. `tests/physics_audit.rs` guards against solver-made energy and friction exploits.
 - `examples/effect_cost.rs`, `examples/mem_report.rs`, `examples/body_stats.rs`, `examples/momentum_ledger.rs`.
 
 ## Docs

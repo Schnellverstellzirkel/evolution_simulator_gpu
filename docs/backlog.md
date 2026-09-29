@@ -2,21 +2,19 @@
 
 Open work only. Delete an item when it is merged into `main` or measured and rejected (record the numbers in `docs/search-research.md` or `docs/performance-log.md`). Delete this file when it is empty. The branch in brackets is where the item is in progress.
 
-## Physics v2 becomes the game
+## Physics v2
 
-- Land v2 as the game's physics: switches fixed, mud, `qd::VERSION` 30, GPU tests and thresholds, `first_generation` [claude/physics2].
-- v2 CUDA kernel, mirroring `shaders/physics2_creature.wgsl` [claude/p2-cuda].
-- v2 replays recorded by the scoring kernel, so a replay matches its score [claude/p2-replay].
-- v2 audit tools and momentum and energy tests [claude/physdiag2, merging into claude/physics2].
-- Fix v2 friction that does positive work (one evolved champion got 2.3x its muscle work from it) and the unpaid energy of light bodies that fall within 1 s [claude/p2-friction].
+- Muscle strength scaled to the mass a muscle moves, with the CUDA mirror [claude/p2-muscle, claude/p2-muscle-cuda].
+- The first launch after a kernel change compiles for minutes (about 4 minutes measured on Vulkan).
+- v2 runs at about 0.2x of v1's creature-steps per second; CUDA is 1.8x Vulkan. Occupancy is 4 warps at 16 nodes [claude/p2-cuda-speed].
 - A fast v2 CPU fallback (today the scalar prototype runs about 1,000 creatures/s on 2 threads), then remove the v1 kernels and CPU engine.
-- A faster v2 contact solve (v2 runs about 0.27x of v1's creature-steps per second, and contacts are three quarters of its cost). Ideas are in `docs/research-2026-09-29.md`.
-- Realism physics in v2: muscle force scaled to muscle size, bones that break under load, static and kinetic friction, ground contact along bones, air drag by bone length times speed squared, energy charged only for contraction work, elastic tendons. The earlier walking levers are on `claude/physics2-levers`.
+- A faster v2 contact solve (contacts are about three quarters of v2's cost). Ideas are in `docs/research-2026-09-29.md`.
+- Realism physics in v2: bones that break under load, static and kinetic friction, ground contact along bones, air drag by bone length times speed squared, energy charged only for contraction work, elastic tendons. The earlier walking levers are on `claude/physics2-levers`.
 - Owner question: in evolved bodies 39% have their head more than 5 cm below the highest node. Should the fall rule (head below neck) change for them?
 
 ## Interface
 
-- Replay muscle energy and forces are estimates rebuilt from recorded positions. Record the exact values in the v2 kernel's frames once v2 is on main.
+- Replay muscle energy and forces are estimates rebuilt from recorded positions. Record the exact values in the v2 kernel's frames.
 - The wet grip level is barely visible in the world view, and the effect label repeats the effect name ("Heat wave: Heat wave").
 - The Islands view does not save the last migration, so a loaded game shows none until the next one.
 
