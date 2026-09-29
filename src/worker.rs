@@ -135,6 +135,8 @@ pub enum EventKind {
     Undo,
     /// The experiment was saved.
     Saved,
+    /// The GPU failed and was opened again, or could not be.
+    Gpu,
 }
 /// Events kept per experiment; older ones drop off.
 const EVENT_LOG: usize = 200;
@@ -1333,6 +1335,14 @@ fn run(
             }
             if sched.in_flight() == 0 {
                 steady.active = false;
+            }
+        }
+        // A GPU that was lost and reopened is told to the player.
+        if let Some(sched) = gpu.sched.as_mut() {
+            for notice in sched.take_notices() {
+                let generation = exp.as_ref().map_or(0, |e| e.generation);
+                log_event(&mut events, generation, EventKind::Gpu, notice);
+                changed = true;
             }
         }
         // A finished autosave goes into the event log, so the UI can say

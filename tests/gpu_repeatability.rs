@@ -284,3 +284,46 @@ fn recorded_forces_match_the_prototype_on_each_backend() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires a GPU; run alone: --ignored a_lost_gpu (other GPU tests in parallel change its results)"]
+fn a_lost_gpu_is_reopened_and_gives_the_same_results() {
+    let cfg = Config {
+        population: 30_000,
+        random_seed: false,
+        duration: 2.0,
+        ..Config::default()
+    };
+    let pop = evolution::create(&cfg).expect("population");
+    let indices: Vec<usize> = (0..pop.genomes.len()).collect();
+    let mut gpu = Gpu::new("RTX 4060").expect("GPU scheduler");
+    assert!(gpu.startup_warning.is_none(), "the GPU did not open");
+    let scheduler = gpu.sched.as_mut().expect("scheduler");
+    let undisturbed = scheduler
+        .evaluate_single(&pop, &indices, &cfg)
+        .expect("undisturbed run");
+    // The GPU is lost while its first units are in flight; the game must reopen it
+    // and finish the run on it.
+    scheduler.simulate_gpu_loss_after(0);
+    let disturbed = scheduler
+        .evaluate_single(&pop, &indices, &cfg)
+        .expect("run with a lost GPU");
+    let notices = scheduler.take_notices();
+    assert!(
+        notices.iter().any(|n| n.contains("GPU is back")),
+        "the GPU was not reopened: {notices:?}"
+    );
+    assert!(
+        scheduler.devices.iter().any(|d| d.engine.max_nodes() >= 64),
+        "the run must still have its GPU: {}",
+        scheduler.names()
+    );
+    for (i, (a, b)) in undisturbed.iter().zip(&disturbed).enumerate() {
+        assert_eq!(a.fitness.to_bits(), b.fitness.to_bits(), "creature {i}");
+        assert_eq!(
+            a.behavior.ground_contact.to_bits(),
+            b.behavior.ground_contact.to_bits(),
+            "creature {i}"
+        );
+    }
+}

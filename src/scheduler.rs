@@ -70,6 +70,7 @@ enum DeviceKind {
     Cpu,
 }
 
+#[derive(Clone)]
 struct QueuedUnit {
     ticket: u64,
     indices: Vec<usize>,
@@ -80,8 +81,42 @@ struct QueuedUnit {
     retries: u8,
 }
 
+/// How to open a GPU engine again after it failed, and how long to wait
+/// before each attempt.
+pub struct Reopen {
+    open: Box<dyn FnMut() -> Result<Box<dyn Engine>> + Send>,
+    backoff: Vec<Duration>,
+}
+
+/// Stands in for a failed engine while its replacement opens. It holds no
+/// device, so the driver can release the old one.
+struct RetiredEngine;
+
+impl Engine for RetiredEngine {
+    fn name(&self) -> String {
+        "retired GPU".into()
+    }
+    fn max_nodes(&self) -> usize {
+        0
+    }
+    fn free_slots(&self) -> usize {
+        0
+    }
+    fn submit_shared(&mut self, _: Arc<Population>, _: &Config) -> Result<u64> {
+        anyhow::bail!("The GPU engine was retired")
+    }
+    fn poll(&mut self) -> Result<Option<crate::engine::Finished>> {
+        Ok(None)
+    }
+    fn wait(&mut self, _: Duration) {}
+}
+
 pub struct Device {
     pub engine: Box<dyn Engine>,
+    /// Set for a GPU that can be opened again after a failure.
+    reopen: Option<Reopen>,
+    /// Reopens since the last unit finished on this device.
+    recoveries: usize,
     kind: DeviceKind,
     /// Set when the engine reported a failure. A failed GPU is retired and its
     /// unfinished units move to the CPU; a failed CPU stops the scheduler.
@@ -122,6 +157,8 @@ impl Device {
     ) -> Self {
         Self {
             engine,
+            reopen: None,
+            recoveries: 0,
             kind,
             failure: None,
             queued: VecDeque::new(),
@@ -222,6 +259,12 @@ pub struct Scheduler {
     pub check_busy_seconds: f64,
     /// Why the primary GPU was not used, reported once at startup.
     startup_failure: Option<String>,
+    /// Messages for the player (a GPU lost and reopened), taken by the worker.
+    notices: Vec<String>,
+    /// Developer hook (`EVOLUTION_SIMULATE_GPU_LOSS=N`): the GPU fails once,
+    /// after N units of its results were collected.
+    simulate_loss_after: Option<u64>,
+    collected_units: u64,
 }
 
 fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -283,13 +326,23 @@ impl Scheduler {
             Ok(gpu) => {
                 // The primary GPU scores the archive, so it records replays.
                 gpu.publish_replays();
-                devices.push(Device::new(
+                let mut device = Device::new(
                     Box::new(gpu),
                     DeviceKind::Gpu,
                     180_000.0,
                     8192,
                     env_or("EVOLUTION_UNIT_SECONDS", 1.0),
-                ))
+                );
+                let name = primary.to_owned();
+                device.reopen = Some(Reopen {
+                    open: Box::new(move || {
+                        let gpu = engine::gpu_engine(&name, 64, step_range)?;
+                        gpu.publish_replays();
+                        Ok(Box::new(gpu) as Box<dyn Engine>)
+                    }),
+                    backoff: [1u64, 4, 10].map(Duration::from_secs).to_vec(),
+                });
+                devices.push(device)
             }
             Err(error) => {
                 let message = format!("Primary GPU {primary:?} unavailable: {error:#}");
@@ -361,6 +414,11 @@ impl Scheduler {
             check_units: 0,
             checks_dropped: 0,
             startup_failure,
+            notices: Vec::new(),
+            simulate_loss_after: std::env::var("EVOLUTION_SIMULATE_GPU_LOSS")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+            collected_units: 0,
         })
     }
 
@@ -392,6 +450,9 @@ impl Scheduler {
             check_units: 0,
             checks_dropped: 0,
             startup_failure: None,
+            notices: Vec::new(),
+            simulate_loss_after: None,
+            collected_units: 0,
         })
     }
 
@@ -807,9 +868,18 @@ impl Scheduler {
                     if out.len() >= limit {
                         break 'devices;
                     }
+                    if device.kind == DeviceKind::Gpu
+                        && self.simulate_loss_after == Some(self.collected_units)
+                    {
+                        self.simulate_loss_after = None;
+                        device.failure = Some("simulated device loss".into());
+                        break;
+                    }
                     match device.engine.poll() {
                         Ok(None) => break,
                         Ok(Some(done)) => {
+                            self.collected_units += 1;
+                            device.recoveries = 0;
                             // Engines with several queues finish units in any order.
                             let position = device
                                 .queued
@@ -974,6 +1044,9 @@ impl Scheduler {
         if self.devices[index].kind == DeviceKind::Cpu {
             return false;
         }
+        if self.devices[index].reopen.is_some() && self.recover(index, &reason) {
+            return true;
+        }
         let Some(cpu) = self
             .devices
             .iter()
@@ -1007,6 +1080,83 @@ impl Scheduler {
         self.devices.remove(index);
         eprintln!("{reason}; retried {count} units on the CPU");
         true
+    }
+
+    /// Developer hook: the GPU fails once, after `units` units of results were
+    /// collected (`EVOLUTION_SIMULATE_GPU_LOSS` sets it at start).
+    pub fn simulate_gpu_loss_after(&mut self, units: u64) {
+        self.simulate_loss_after = Some(self.collected_units + units);
+    }
+
+    /// Messages for the player since the last call.
+    pub fn take_notices(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notices)
+    }
+
+    /// Opens a failed GPU again: the broken engine is dropped, the scheduler
+    /// waits (a little longer after each failed attempt), opens a new engine
+    /// and submits the unfinished units again with their exact inputs, so
+    /// they give the same results. Returns false when every attempt failed;
+    /// the units stay queued for the CPU.
+    fn recover(&mut self, index: usize, reason: &str) -> bool {
+        let Some(mut reopen) = self.devices[index].reopen.take() else {
+            return false;
+        };
+        let units: Vec<QueuedUnit> = self.devices[index].queued.drain(..).collect();
+        self.devices[index].engine = Box::new(RetiredEngine);
+        let total = reopen.backoff.len();
+        let first = self.devices[index].recoveries.min(total);
+        for attempt in first..total {
+            self.notices.push(format!(
+                "The GPU failed ({reason}). Reopening it, attempt {} of {total}.",
+                attempt + 1
+            ));
+            std::thread::sleep(reopen.backoff[attempt]);
+            let mut engine = match (reopen.open)() {
+                Ok(engine) => engine,
+                Err(error) => {
+                    self.notices
+                        .push(format!("The GPU did not open again: {error:#}"));
+                    continue;
+                }
+            };
+            let mut queued = VecDeque::with_capacity(units.len());
+            let mut failed = None;
+            for unit in &units {
+                match engine.submit_shared(Arc::clone(&unit.population), &unit.config) {
+                    Ok(ticket) => queued.push_back(QueuedUnit {
+                        ticket,
+                        retries: unit.retries.saturating_add(1),
+                        ..unit.clone()
+                    }),
+                    Err(error) => {
+                        failed = Some(error);
+                        break;
+                    }
+                }
+            }
+            if let Some(error) = failed {
+                self.notices
+                    .push(format!("The reopened GPU rejected its work: {error:#}"));
+                continue;
+            }
+            let device = &mut self.devices[index];
+            device.engine = engine;
+            device.queued = queued;
+            device.failure = None;
+            device.recoveries = attempt + 1;
+            device.reopen = Some(reopen);
+            self.notices.push(format!(
+                "The GPU is back. {} units started again.",
+                units.len()
+            ));
+            eprintln!("{reason}; GPU reopened, {} units resubmitted", units.len());
+            return true;
+        }
+        self.notices
+            .push("The GPU could not be reopened. Continuing on the CPU.".into());
+        self.devices[index].queued = units.into_iter().collect();
+        false
     }
 
     /// Evaluates `indices` on the active engine path and returns metrics in
@@ -1229,6 +1379,9 @@ mod tests {
             check_units: 0,
             checks_dropped: 0,
             startup_failure: None,
+            notices: Vec::new(),
+            simulate_loss_after: None,
+            collected_units: 0,
         };
         (scheduler, state)
     }
@@ -1259,6 +1412,9 @@ mod tests {
             check_units: 0,
             checks_dropped: 0,
             startup_failure: None,
+            notices: Vec::new(),
+            simulate_loss_after: None,
+            collected_units: 0,
         };
         (scheduler, gpu, cpu)
     }
@@ -1507,6 +1663,101 @@ mod tests {
         }
         seen.sort_unstable();
         seen
+    }
+
+    #[test]
+    fn a_lost_gpu_is_reopened_and_gets_its_units_again() {
+        let cfg = submission_config();
+        let pop = crate::evolution::create(&cfg).unwrap();
+        let (mut scheduler, gpu, cpu) = mixed_scheduler();
+        let reopened = Arc::new(Mutex::new(FakeState::default()));
+        let engine_state = Arc::clone(&reopened);
+        let mut attempts = 0;
+        scheduler.devices[0].reopen = Some(Reopen {
+            open: Box::new(move || {
+                attempts += 1;
+                // The first attempt finds no device, the second one opens.
+                if attempts == 1 {
+                    anyhow::bail!("device not ready");
+                }
+                Ok(Box::new(FakeEngine {
+                    name: "reopened gpu",
+                    state: Arc::clone(&engine_state),
+                }) as Box<dyn Engine>)
+            }),
+            backoff: vec![Duration::ZERO; 3],
+        });
+        scheduler.begin(&pop, 0..cfg.population);
+        scheduler.pump(&pop, &cfg, &[], unshared).unwrap();
+        let (gpu_units, gpu_populations, cpu_units) = {
+            let gpu = gpu.lock().unwrap();
+            assert!(!gpu.submissions.is_empty(), "the GPU took no work");
+            (
+                gpu.submissions.len(),
+                gpu.submissions
+                    .iter()
+                    .map(|s| Arc::clone(&s.population))
+                    .collect::<Vec<_>>(),
+                cpu.lock().unwrap().submissions.len(),
+            )
+        };
+        gpu.lock().unwrap().poll_failure = Some("device lost".into());
+        let first = scheduler
+            .collect(&pop, &cfg, Duration::ZERO, |_, _| false)
+            .unwrap();
+        assert!(first.is_empty());
+        assert!(
+            scheduler.devices.iter().any(|d| d.kind == DeviceKind::Gpu),
+            "the GPU must stay"
+        );
+        assert_eq!(scheduler.devices[0].engine.name(), "reopened gpu");
+        {
+            let state = reopened.lock().unwrap();
+            assert_eq!(state.submissions.len(), gpu_units);
+            for (again, original) in state.submissions.iter().zip(&gpu_populations) {
+                assert!(
+                    Arc::ptr_eq(&again.population, original),
+                    "the resubmitted unit must keep the exact creatures"
+                );
+                assert_eq!(again.config, cfg);
+            }
+        }
+        assert_eq!(
+            cpu.lock().unwrap().submissions.len(),
+            cpu_units,
+            "no work moves to the CPU"
+        );
+        let notices = scheduler.take_notices();
+        assert!(
+            notices.iter().any(|n| n.contains("GPU is back")),
+            "{notices:?}"
+        );
+        assert!(scheduler.devices[0].queued.iter().all(|u| u.retries == 1));
+    }
+
+    #[test]
+    fn a_gpu_that_never_reopens_falls_back_to_the_cpu() {
+        let cfg = submission_config();
+        let pop = crate::evolution::create(&cfg).unwrap();
+        let (mut scheduler, gpu, cpu) = mixed_scheduler();
+        scheduler.devices[0].reopen = Some(Reopen {
+            open: Box::new(|| anyhow::bail!("no device")),
+            backoff: vec![Duration::ZERO; 3],
+        });
+        scheduler.begin(&pop, 0..cfg.population);
+        scheduler.pump(&pop, &cfg, &[], unshared).unwrap();
+        let (gpu_units, cpu_units) = (
+            gpu.lock().unwrap().submissions.len(),
+            cpu.lock().unwrap().submissions.len(),
+        );
+        gpu.lock().unwrap().poll_failure = Some("device lost".into());
+        scheduler
+            .collect(&pop, &cfg, Duration::ZERO, |_, _| false)
+            .unwrap();
+        assert!(scheduler.devices.iter().all(|d| d.kind != DeviceKind::Gpu));
+        assert_eq!(cpu.lock().unwrap().submissions.len(), cpu_units + gpu_units);
+        let notices = scheduler.take_notices();
+        assert!(notices.iter().any(|n| n.contains("Continuing on the CPU")));
     }
 
     #[test]
