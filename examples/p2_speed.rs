@@ -53,7 +53,8 @@ fn main() -> anyhow::Result<()> {
     for i in 0..count.min(e.population.genomes.len()) {
         pop.push(e.population.creature(i));
     }
-    let mut engine = engine::gpu_engine("RTX 4060", 64, evolution_simulator::gpu::DEFAULT_STEP_RANGE)?;
+    let mut engine =
+        engine::gpu_engine("RTX 4060", 64, evolution_simulator::gpu::DEFAULT_STEP_RANGE)?;
     eprintln!("engine: {}", engine.name());
     run(&mut engine, &pop, &cfg)?;
     for _ in 0..repeats {

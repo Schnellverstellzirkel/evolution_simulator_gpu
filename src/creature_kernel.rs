@@ -726,7 +726,10 @@ fn cuda_source2_variant(
             "UNROLL",
             (if unroll { "_Pragma(\"unroll\")" } else { "" }).into(),
         ),
-        ("TAB_LOCAL", (if cuda_table_local(capacity) { "1" } else { "0" }).into()),
+        (
+            "TAB_LOCAL",
+            (if cuda_table_local(capacity) { "1" } else { "0" }).into(),
+        ),
         (
             "LAUNCH_BOUNDS",
             if launch_bounds {
