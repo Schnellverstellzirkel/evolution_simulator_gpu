@@ -109,6 +109,29 @@ fn lanes_equal_the_reference_in_rough_worlds() {
             },
         ),
         (
+            "water",
+            Config {
+                water: 0.35,
+                ..base()
+            },
+        ),
+        (
+            "deep water and ice patches",
+            Config {
+                water: 0.9,
+                patches: 0.8,
+                ..base()
+            },
+        ),
+        (
+            "ice patches on bumps",
+            Config {
+                terrain: 1,
+                patches: 0.95,
+                ..base()
+            },
+        ),
+        (
             "gaps and hurdles",
             Config {
                 gaps: 0.6,

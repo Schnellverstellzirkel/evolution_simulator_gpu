@@ -61,6 +61,10 @@ struct Params {
     quake: f32,
     screen_tick: u32,
     screen_bar: f32,
+    water: f32,
+    patches: f32,
+    spare0: f32,
+    spare1: f32,
 }
 struct Result {
     fitness: f32,
@@ -119,6 +123,10 @@ const PGS_SWEEPS: u32 = 20u;
 const PLANT_SWEEPS: u32 = 20u;
 const PLANT_ROUNDS: u32 = 2u;
 const AIR_DRAG: f32 = 0.6;
+const WATER_DRAG: f32 = 100.0;
+const WATER_ALONG: f32 = 0.25;
+const WATER_BUOYANCY: f32 = 0.7;
+const ICE_INV: f32 = 0.16666667;
 const WARM: bool = false;
 const PUSH_OUT: f32 = 0.2;
 const MUD_NORMAL: f32 = 2.0;
@@ -265,6 +273,14 @@ fn parent_of(j: u32) -> u32 {
     return body_of(pivot[j]);
 }
 
+// How icy the ground is at x, 0 (dry) to 1 (ice): physics::ice.
+fn ice(x: f32) -> f32 {
+    let u = x * ICE_INV;
+    let w = u - floor(u);
+    let t = abs(w - 0.5) * 2.0;
+    let s = clamp((0.7 - t) * 2.5, 0.0, 1.0);
+    return s * s * (3.0 - 2.0 * s);
+}
 fn quake_phase(seed: u32) -> f32 {
     return f32(seed & 0xffffu) * (1.0 / 65536.0);
 }
@@ -657,6 +673,9 @@ fn contacts(origin: vec2f, before: vec2f, outside: vec2f) -> vec2f {
         c_vs[ci] = v.x * tangent.x + v.y * tangent.y;
         c_goal[ci] = select(-gap * PUSH_OUT * RATE, -gap * RATE, gap >= 0.0);
         c_mu[ci] = node_fric(node) * p.friction * (1.0 + MUD_GRIP * sink) * (1.0 + MUD_NORMAL * sink);
+        if p.patches > 0.0 {
+            c_mu[ci] = c_mu[ci] * (1.0 - p.patches * ice(pn.x));
+        }
         nc += 1u;
     }
     // Contact-space matrix, column by column from each unit force's
@@ -881,6 +900,42 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             bias[j] -= force_at(mid - origin, f);
             air_impulse += f * DT;
         }
+        // Water below the waterline: buoyancy on every node and anisotropic
+        // drag on every bone (physics2::simulate_step_inner).
+        var buoy: array<f32, MAXN>;
+        var water_y0: array<f32, MAXN>;
+        if p.water > 0.0 {
+            var submerged: array<f32, MAXN>;
+            for (var i = 0u; i < MAXN; i++) {
+                if i >= nn { break; }
+                let r = node_radius(i);
+                let y = node_pos(i).y;
+                submerged[i] = clamp((p.water - (y - r)) / (2.0 * r), 0.0, 1.0);
+                buoy[i] = WATER_BUOYANCY * mass[i] * p.gravity * submerged[i];
+                water_y0[i] = y;
+                bias[body_of(i)] -= force_at(node_pos(i) - origin, vec2f(0.0, buoy[i]));
+                air_impulse.y += buoy[i] * DT;
+            }
+            for (var j = 0u; j < MAXB; j++) {
+                if j >= nb { break; }
+                let pv = pivot[j];
+                let wet = 0.5 * (submerged[pv] + submerged[j + 1u]);
+                let mid = 0.5 * (node_pos(pv) + node_pos(j + 1u));
+                let v = 0.5 * (node_vel(pv) + node_vel(j + 1u));
+                let inverse = 1.0 / len[j];
+                let axis = (node_pos(j + 1u) - node_pos(pv)) * inverse;
+                let along = v.x * axis.x + v.y * axis.y;
+                let lengthwise = axis * along;
+                let sideways = v - lengthwise;
+                let speed = sqrt(v.x * v.x + v.y * v.y);
+                let width = node_radius(pv) + node_radius(j + 1u);
+                let strength = max(min(WATER_DRAG * wet * len[j] * width * speed, 0.5 * mass[j + 1u] * RATE), 0.0);
+                let weak = strength * WATER_ALONG;
+                let f = -(sideways * strength + lengthwise * weak);
+                bias[j] -= force_at(mid - origin, f);
+                air_impulse += f * DT;
+            }
+        }
         // Muscles pull between points on two bones; the forces collect in
         // the table.
         clear_forces();
@@ -1101,7 +1156,16 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 energy_end += 0.5 * mass[i] * (vi.x * vi.x + vi.y * vi.y) + mass[i] * p.gravity * pi.y;
                 mass_x_end += pi.x * mass[i];
             }
-            let work = (muscle_start - muscle_end) + p.wind * (mass_x_end - mass_x_start);
+            var work = (muscle_start - muscle_end) + p.wind * (mass_x_end - mass_x_start);
+            if p.water > 0.0 {
+                // Buoyancy lifts the body: its work is the force times the rise.
+                var lift = 0.0;
+                for (var i = 0u; i < MAXN; i++) {
+                    if i >= nn { break; }
+                    lift += buoy[i] * (node_pos(i).y - water_y0[i]);
+                }
+                work += lift;
+            }
             let excess = energy_end - energy_start - work - (1e-4 + 1e-5 * energy_scale);
             if excess > 0.0 {
                 let center = vec2f(expected.x * inv_mass, expected.y * inv_mass);

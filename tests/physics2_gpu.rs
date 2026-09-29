@@ -19,23 +19,49 @@ use std::time::Duration;
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn the_v2_kernel_agrees_with_the_cpu_prototype() {
-    agree(0.0);
+    agree(Config::default());
 }
 
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn the_v2_kernel_agrees_with_the_cpu_prototype_in_mud() {
-    agree(0.06);
+    agree(Config {
+        mud: 0.06,
+        ..Config::default()
+    });
 }
 
-fn agree(mud: f32) {
+#[test]
+#[ignore = "needs the RTX 4060"]
+fn the_v2_kernel_agrees_with_the_cpu_prototype_in_water() {
+    agree(Config {
+        water: 0.35,
+        ..Config::default()
+    });
+}
+
+#[test]
+#[ignore = "needs the RTX 4060"]
+fn the_v2_kernel_agrees_with_the_cpu_prototype_on_ice_patches() {
+    // Long enough for the walkers to reach the first band (1.8 m out).
+    agree(Config {
+        patches: 0.95,
+        duration: 4.0,
+        ..Config::default()
+    });
+}
+
+fn agree(effects: Config) {
     let cfg = Config {
         population: 512,
-        duration: 1.0,
         random_seed: false,
         screen: None,
-        mud,
-        ..Config::default()
+        duration: if effects.duration == Config::default().duration {
+            1.0
+        } else {
+            effects.duration
+        },
+        ..effects
     };
     let mut pop = evolution::create(&cfg).unwrap();
     // A body that falls over and one with a bone at the head.
@@ -64,7 +90,28 @@ fn agree(mud: f32) {
         }
     };
     pop.push(chain(&[[0.0, 0.6], [0.0, 0.3], [0.3, 0.3], [0.6, 0.05]]));
+    // Walkers that move, so that an effect changes distances.
+    let first_hopper = pop.genomes.len();
+    for id in 0..8u64 {
+        let mut hopper: Creature =
+            serde_json::from_str(include_str!("fixtures/v2_hopper.json")).unwrap();
+        hopper.id = id;
+        pop.push(hopper);
+    }
     let cpu = physics2::evaluate(&pop, &cfg);
+    let effect_changes_something = Config {
+        water: 0.0,
+        patches: 0.0,
+        mud: 0.0,
+        ..cfg.clone()
+    };
+    if effect_changes_something.physics_differs(&cfg) {
+        let calm = physics2::evaluate(&pop, &effect_changes_something);
+        assert!(
+            (first_hopper..cpu.len()).any(|i| (calm[i].fitness - cpu[i].fitness).abs() > 0.005),
+            "the effect must change a moving walker's distance"
+        );
+    }
     // Both GPU backends: Vulkan first, then CUDA. The variable is read when
     // an engine opens; this test binary has one test, so nothing else reads
     // the environment meanwhile.
@@ -86,7 +133,14 @@ fn agree(mud: f32) {
         };
         let mut worst = 0.0f32;
         let mut close = 0usize;
-        for (a, b) in cpu.iter().zip(&done.results) {
+        // The walkers' contact sequences are chaotic over seconds: they only
+        // have to stay within 0.25 m; the rest of the population within 5 mm.
+        let mut hopper_worst = 0.0f32;
+        for (i, (a, b)) in cpu.iter().zip(&done.results).enumerate() {
+            if i >= first_hopper {
+                hopper_worst = hopper_worst.max((a.fitness - b.fitness).abs());
+                continue;
+            }
             assert_eq!(
                 a.fitness <= -1e19,
                 b.fitness <= -1e19,
@@ -97,13 +151,17 @@ fn agree(mud: f32) {
             close += usize::from(gap <= 0.005);
         }
         eprintln!(
-            "{name}: {} creatures, 1 s: worst distance gap {worst:.4} m, {close} within 5 mm",
-            cpu.len()
+            "{name}: {} creatures, {} s: worst distance gap {worst:.4} m, {close} within 5 mm, walkers {hopper_worst:.4} m",
+            cpu.len(),
+            cfg.duration
         );
         assert!(
-            close * 100 >= cpu.len() * 99,
-            "{name}: only {close} of {} within 5 mm",
-            cpu.len()
+            close * 100 >= first_hopper * 99,
+            "{name}: only {close} of {first_hopper} within 5 mm"
+        );
+        assert!(
+            hopper_worst <= 0.25,
+            "{name}: a walker's distance is {hopper_worst} m off the prototype's"
         );
     }
 }

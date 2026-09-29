@@ -584,6 +584,18 @@ pub const MUD_DRAG: f32 = 2.0;
 /// Sink depth (m) at which the mud multipliers reach their full value, i.e.
 /// the deepest mud level. Shallower mud drags proportionally less.
 pub const MUD_FULL_DEPTH: f32 = 0.10;
+/// Distance (m) between the starts of two ice patches.
+pub const ICE_SPACING: f32 = 6.0;
+/// How icy the ground is at `x`, from 0 (dry) to 1 (ice): bands about 2.4 m
+/// wide in the middle of every `ICE_SPACING`, with smooth 0.8 m edges. Only
+/// IEEE arithmetic, so the kernels compute it bit for bit the same.
+pub fn ice(x: f32) -> f32 {
+    let u = x * (1.0 / ICE_SPACING);
+    let w = u - u.floor();
+    let t = (w - 0.5).abs() * 2.0;
+    let s = ((0.7 - t) * 2.5).clamp(0.0, 1.0);
+    s * s * (3.0 - 2.0 * s)
+}
 pub fn fitness(n: &[Node]) -> f32 {
     if n.iter().any(|n| n.failed != 0.0) {
         FAILED

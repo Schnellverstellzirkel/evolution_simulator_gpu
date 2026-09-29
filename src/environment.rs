@@ -108,6 +108,14 @@ pub const SLOPE: [f32; 5] = [0.0, 0.03, 0.08, 0.15, 0.25];
 pub const WIND: [f32; 4] = [0.0, -1.0, -3.0, -6.0];
 /// Mud sink depth (m) at each level, from dry ground to deep mud.
 pub const MUD: [f32; 4] = [0.0, 0.02, 0.05, 0.10];
+/// Water line height (m) at each level: dry, ankle-deep puddles, shallows
+/// that cover the legs of a small body, and deep water that swallows most
+/// bodies.
+pub const WATER: [f32; 4] = [0.0, 0.12, 0.35, 0.9];
+/// Friction lost on ice patches at each level (share of the calm friction):
+/// none, a thin frost, ice, and nearly frictionless black ice. The bands sit
+/// every `physics::ICE_SPACING` meters.
+pub const PATCHES: [f32; 4] = [0.0, 0.5, 0.8, 0.95];
 /// Pit opening width (m) at each level, from solid ground to chasms. The pit
 /// spacing grows with the width (`physics::gap_spacing`).
 pub const GAPS: [f32; 4] = [0.0, 0.35, 0.8, 1.5];
@@ -133,7 +141,7 @@ fn nearest(table: &[f32], value: f32) -> usize {
         .map_or(0, |(i, _)| i)
 }
 
-pub const EFFECTS: [Effect; 13] = [
+pub const EFFECTS: [Effect; 15] = [
     Effect {
         name: "Seasons",
         levels: &["Off", "Slow", "Normal", "Fast"],
@@ -205,7 +213,7 @@ pub const EFFECTS: [Effect; 13] = [
         levels: &["Normal", "Dry", "Parched", "Drought"],
         calm: 0,
         raise: "Dry out",
-        lower: "Water",
+        lower: "Rain",
         why: "Energy returns slowly, so bursts fail and steady, well-paced gaits win.",
         get: |c| nearest(&DROUGHT, c.muscle_recovery),
         set: |c, level| c.muscle_recovery = DROUGHT[level],
@@ -239,6 +247,26 @@ pub const EFFECTS: [Effect; 13] = [
         why: "Sunk feet drag through the mud, so every stroke pays for the ground it scrapes. Lifted feet and real steps come out ahead.",
         get: |c| nearest(&MUD, c.mud),
         set: |c, level| c.mud = MUD[level],
+    },
+    Effect {
+        name: "Water",
+        levels: &["Dry", "Puddles", "Shallows", "Deep water"],
+        calm: 0,
+        raise: "Raise the water",
+        lower: "Lower the water",
+        why: "Below the waterline every node floats and every bone pushes against a thick medium that resists sideways motion far more than lengthwise motion. Stepping is slow, and strokes that flex and paddle win, so swimmers can beat walkers.",
+        get: |c| nearest(&WATER, c.water),
+        set: |c, level| c.water = WATER[level],
+    },
+    Effect {
+        name: "Ice patches",
+        levels: &["None", "Frost", "Ice", "Black ice"],
+        calm: 0,
+        raise: "Freeze patches",
+        lower: "Thaw patches",
+        why: "Bands of slick ground every six meters take the friction a foot needs to push. A gait must keep momentum across each band and plant only where the ground holds, so smooth, steady strokes beat ones that lean on every step.",
+        get: |c| nearest(&PATCHES, c.patches),
+        set: |c, level| c.patches = PATCHES[level],
     },
     Effect {
         name: "Gaps",
@@ -356,6 +384,19 @@ mod tests {
                 assert_eq!(effect.level(&cfg), level, "{}", preset.name);
             }
         }
+    }
+
+    #[test]
+    fn water_rises_from_a_dry_world() {
+        assert_eq!(WATER[0], 0.0);
+        assert!(
+            WATER.windows(2).all(|w| w[0] < w[1]),
+            "water levels must rise from dry ground"
+        );
+        let water = EFFECTS.iter().find(|e| e.name == "Water").unwrap();
+        let mut cfg = Config::default();
+        water.set_level(&mut cfg, water.levels.len() - 1);
+        assert!(cfg.water > 0.0, "deep water must lift the waterline");
     }
 
     #[test]

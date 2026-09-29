@@ -48,6 +48,12 @@ pub struct Params {
     /// for no screen, and the distance a creature needs there to continue.
     pub screen_tick: u32,
     pub screen_bar: f32,
+    /// Water line height (m) above the flat ground; 0.0 is dry.
+    pub water: f32,
+    /// Friction lost on ice patches (share of the calm friction); 0.0 is none.
+    pub patches: f32,
+    /// Room for the next effects; keeps the struct a multiple of 16 bytes.
+    pub spare: [f32; 2],
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -236,6 +242,10 @@ pub fn launch_params(
         quake: if cfg.ground { cfg.quake } else { 0.0 },
         screen_tick: cfg.screen.map_or(0, |screen| screen.tick(fidelity)),
         screen_bar: cfg.screen.map_or(f32::NEG_INFINITY, |screen| screen.bar),
+        water: cfg.water,
+        // A disabled ground has no ice.
+        patches: if cfg.ground { cfg.patches } else { 0.0 },
+        spare: [0.0; 2],
     }
 }
 
@@ -337,6 +347,10 @@ fn cuda_source_variant(
         ("WARM", "1".into()),
         ("PUSH_OUT", float(p2::PUSH_OUT)),
         ("AIR_DRAG", float(p2::AIR_DRAG)),
+        ("WATER_DRAG", float(p2::WATER_DRAG)),
+        ("WATER_ALONG", float(p2::WATER_ALONG)),
+        ("WATER_BUOYANCY", float(p2::WATER_BUOYANCY)),
+        ("ICE_INV", float(1.0 / physics::ICE_SPACING)),
         ("HEAD_SHAKE_LIMIT", float(physics::HEAD_SHAKE_LIMIT)),
         ("HEAD_SHAKE_WINDOW", float(physics::HEAD_SHAKE_WINDOW)),
         ("CONTACT_SLACK", float(p2::CONTACT_SLACK)),
