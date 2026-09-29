@@ -12,14 +12,20 @@ use evolution_simulator::{
 
 /// A population in which many creatures share a skeleton: the random
 /// population, plus mutated copies of its bodies that keep the bones.
-fn population(cfg: &Config) -> Population {
+fn population(cfg: &Config, tendons: bool) -> Population {
     let mut pop = evolution::create(cfg).unwrap();
     let n = pop.genomes.len();
     for i in 0..n {
         for copy in 1..4u32 {
             let mut c = pop.creature(i);
             c.id = c.id.wrapping_add(1000 * u64::from(copy));
-            for m in &mut c.muscles {
+            for (k, m) in c.muscles.iter_mut().enumerate() {
+                if tendons && (i + k + copy as usize) % 3 == 0 {
+                    // A tendon, and a shorter longest length so that the
+                    // body's own stretching engages it.
+                    m.tendon = 0.2 + 0.25 * ((i + k) % 4) as f32;
+                    m.long = m.short + 0.3 * (m.long - m.short);
+                }
                 m.phase = (m.phase + 0.13 * copy as f32).fract();
                 m.stiffness *= 1.0 + 0.1 * copy as f32;
             }
@@ -33,7 +39,11 @@ fn population(cfg: &Config) -> Population {
 }
 
 fn compare(cfg: &Config, what: &str) {
-    let pop = population(cfg);
+    compare_with(cfg, what, false);
+}
+
+fn compare_with(cfg: &Config, what: &str, tendons: bool) {
+    let pop = population(cfg, tendons);
     let reference = physics2::evaluate(&pop, cfg);
     let lanes = cpu_v2::evaluate(&pop, cfg);
     assert_eq!(reference.len(), lanes.len());
@@ -129,4 +139,19 @@ fn lanes_equal_the_reference_in_rough_worlds() {
     ] {
         compare(&cfg, what);
     }
+}
+
+#[test]
+fn lanes_equal_the_reference_with_tendons() {
+    compare_with(&base(), "tendons", true);
+    // The tendons matter: the same bodies without them score differently.
+    let cfg = base();
+    let with = physics2::evaluate(&population(&cfg, true), &cfg);
+    let without = physics2::evaluate(&population(&cfg, false), &cfg);
+    let moved = with
+        .iter()
+        .zip(&without)
+        .filter(|(a, b)| (a.fitness - b.fitness).abs() > 1e-3)
+        .count();
+    assert!(moved > 20, "only {moved} bodies felt their tendons");
 }
