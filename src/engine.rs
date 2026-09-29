@@ -549,15 +549,19 @@ enum Backend {
 /// RTX 4060, docs/performance-log.md), and through Vulkan otherwise.
 fn open_backend(name: &str, max_nodes: usize) -> Result<(Backend, String)> {
     if crate::cuda_engine::enabled() {
+        let task = crate::loading::start(format!("Opening {name} with CUDA"));
         match CudaEngine::new(name, max_nodes) {
             Ok(engine) => {
+                task.finish(false);
                 let name = engine.name.clone();
                 return Ok((Backend::Cuda(Box::new(engine)), name));
             }
             Err(error) => eprintln!("CUDA not used ({error:#}); running on Vulkan"),
         }
     }
+    let task = crate::loading::start(format!("Opening {name} with Vulkan"));
     let engine = VkEngine::new(name, max_nodes)?;
+    task.finish(false);
     let name = engine.name.clone();
     Ok((Backend::Vulkan(Box::new(engine)), name))
 }

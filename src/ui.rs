@@ -1,11 +1,12 @@
 use crate::{
     config::Config,
     evolution::{Creature, FAILED},
-    gpu::Gpu,
     physics::{self, Node},
     storage::{Stage, Stats},
     worker::{Command, EventKind, Snapshot, Worker},
 };
+mod loading;
+
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points, VLine};
 use image::{
@@ -339,9 +340,13 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
         "Evolution Laboratory",
         options,
         Box::new(|cc| {
-            // Evaluation opens its own Vulkan devices; the render device only draws.
-            let gpu = Gpu::new(&compute_name)?;
-            Ok(Box::new(App::new(cc, gpu)))
+            // Evaluation opens its own devices, on the worker thread, while
+            // the window shows the loading screen; the render device only
+            // draws.
+            Ok(Box::new(App::new(
+                cc,
+                Worker::open(compute_name, cc.egui_ctx.clone()),
+            )))
         }),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
@@ -1486,12 +1491,15 @@ struct App {
     runs_checked: Instant,
     screenshot_pending: bool,
     screenshot_waiting: bool,
+    /// When the first generation last waited for a kernel; the loading
+    /// screen stays up a moment after, so it does not blink between two
+    /// kernels.
+    compiling_seen: Option<Instant>,
 }
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, gpu: Gpu) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, worker: Worker) -> Self {
         let ctx = &cc.egui_ctx;
         apply_style(ctx, false);
-        let worker = Worker::spawn(gpu, ctx.clone());
         let mut initial_config = Config::default();
         if let Ok(n) = std::env::var("EVOLUTION_SMOKE_POPULATION")
             && let Ok(n) = n.parse()
@@ -1628,6 +1636,39 @@ impl App {
             runs_checked: Instant::now() - RUNS_REFRESH,
             screenshot_pending: false,
             screenshot_waiting: false,
+            compiling_seen: None,
+        }
+    }
+    /// The loading screen while the devices open or the first generation
+    /// waits for its kernels; a corner note while larger kernels compile in
+    /// the background.
+    fn loading_screen(&mut self, ctx: &egui::Context) {
+        let theme = self.theme();
+        let failed = self.worker.failed.lock().unwrap().clone();
+        let first = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.running && s.history.is_empty() && s.completed == 0);
+        if !first {
+            self.compiling_seen = None;
+        } else if crate::loading::progress().busy() {
+            self.compiling_seen = Some(Instant::now());
+        }
+        let wait = if let Some(error) = &failed {
+            Some(loading::Wait::Failed(error))
+        } else if !self.worker.opened.load(Ordering::Relaxed) {
+            Some(loading::Wait::Opening)
+        } else if self
+            .compiling_seen
+            .is_some_and(|seen| seen.elapsed() < Duration::from_millis(1500))
+        {
+            Some(loading::Wait::Compiling)
+        } else {
+            None
+        };
+        match wait {
+            Some(wait) => loading::screen(ctx, &theme, wait, self.started),
+            None => loading::toast(ctx, &theme),
         }
     }
     fn theme(&self) -> Theme {
@@ -4784,6 +4825,7 @@ impl eframe::App for App {
             });
         self.dialogs(&ctx);
         self.help_window(&ctx);
+        self.loading_screen(&ctx);
         crate::schematic::show(&ctx, self.snapshot.as_ref(), &mut self.schematic_open);
         if self.playing || self.active() {
             // Playback and live evolution redraw at the frame cap; the rest of

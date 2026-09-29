@@ -682,6 +682,7 @@ fn compile_kernel(
     launch_bounds: bool,
     use_cache: bool,
 ) -> Result<Vec<u8>> {
+    let task = crate::loading::start(kernel_label("CUDA", record, fidelity, capacity));
     let source = if record {
         recording_source(capacity, threads, fidelity, launch_bounds)
     } else {
@@ -701,6 +702,7 @@ fn compile_kernel(
         && let Some(bytes) = path.as_ref().and_then(|p| std::fs::read(p).ok())
         && !bytes.is_empty()
     {
+        task.finish(true);
         return Ok(bytes);
     }
     let cubin = api
@@ -721,7 +723,22 @@ fn compile_kernel(
             let _ = std::fs::remove_file(&temporary);
         }
     }
+    task.finish(false);
     Ok(cubin)
+}
+
+/// The loading screen's name for a kernel.
+pub(crate) fn kernel_label(
+    backend: &str,
+    record: bool,
+    fidelity: Fidelity,
+    capacity: usize,
+) -> String {
+    format!(
+        "{backend} {} kernel, bodies up to {capacity} nodes, {} Hz",
+        if record { "replay" } else { "scoring" },
+        fidelity.rate
+    )
 }
 
 /// Where compiled kernels are kept: `EVOLUTION_KERNEL_CACHE`, else the
@@ -819,6 +836,8 @@ impl Prefetch {
                 || state.running.contains(&key)
                 || state.queue.iter().any(|(k, _)| *k == key);
             if !known {
+                let (record, fidelity, capacity) = key;
+                crate::loading::queued(&kernel_label("CUDA", record, fidelity, capacity));
                 state.queue.push_back((key, threads));
             }
         }
@@ -840,7 +859,9 @@ impl Prefetch {
     fn close(&self, patience: Duration) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.closed = true;
-        state.queue.clear();
+        for ((record, fidelity, capacity), _) in state.queue.drain(..) {
+            crate::loading::cancel(&kernel_label("CUDA", record, fidelity, capacity));
+        }
         let deadline = Instant::now() + patience;
         while state.workers > 0 {
             let Some(left) = deadline.checked_duration_since(Instant::now()) else {

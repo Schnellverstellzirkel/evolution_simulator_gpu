@@ -347,10 +347,23 @@ pub struct Worker {
     pub pause: Arc<AtomicBool>,
     /// True while a native benchmark is inside its measured window (after warm-up).
     pub measuring: Arc<AtomicBool>,
+    /// Set once the evaluation devices are open; see `Worker::open`.
+    pub opened: Arc<AtomicBool>,
+    /// Why the devices could not open, when they could not.
+    pub failed: Arc<Mutex<Option<String>>>,
     join: Option<std::thread::JoinHandle<()>>,
 }
 impl Worker {
-    pub fn spawn(gpu: Gpu, ctx: eframe::egui::Context) -> Self {
+    /// Opens the evaluation devices on the worker thread, so the window
+    /// draws (and shows the loading screen) while they open. Commands sent
+    /// before then wait in the channel.
+    pub fn open(primary: String, ctx: eframe::egui::Context) -> Self {
+        Self::start(ctx, move || Gpu::new(&primary))
+    }
+    fn start(
+        ctx: eframe::egui::Context,
+        open: impl FnOnce() -> anyhow::Result<Gpu> + Send + 'static,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         let view = Arc::new(Mutex::new(None));
         let output = view.clone();
@@ -358,17 +371,36 @@ impl Worker {
         let paused = pause.clone();
         let measuring = Arc::new(AtomicBool::new(false));
         let bench_measuring = measuring.clone();
+        let opened = Arc::new(AtomicBool::new(false));
+        let failed = Arc::new(Mutex::new(None));
+        let (open_flag, open_error) = (opened.clone(), failed.clone());
         let join = std::thread::Builder::new()
             .name("evolution".into())
-            .spawn(move || run(gpu, rx, output, paused, bench_measuring, ctx))
+            .spawn(move || {
+                let gpu = open();
+                open_flag.store(true, Ordering::Relaxed);
+                match gpu {
+                    Ok(gpu) => run(gpu, rx, output, paused, bench_measuring, ctx),
+                    Err(error) => {
+                        *open_error.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(format!("{error:#}"));
+                        ctx.request_repaint();
+                    }
+                }
+            })
             .expect("Start simulation worker");
         Self {
             tx,
             view,
             pause,
             measuring,
+            opened,
+            failed,
             join: Some(join),
         }
+    }
+    pub fn spawn(gpu: Gpu, ctx: eframe::egui::Context) -> Self {
+        Self::start(ctx, move || Ok(gpu))
     }
     pub fn send(&self, c: Command) {
         let _ = self.tx.send(c);

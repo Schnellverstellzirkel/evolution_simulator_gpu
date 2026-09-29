@@ -736,11 +736,15 @@ impl VkEngine {
         if let Some(&pipeline) = self.recording.get(&(fidelity, capacity)) {
             return Ok(pipeline);
         }
+        let task = crate::loading::start(crate::cuda_engine::kernel_label(
+            "Vulkan", true, fidelity, capacity,
+        ));
         let pipeline = Self::compile(
             &self.device,
             self.pipeline_layout,
             &crate::physics2::record_source(capacity, self.workgroup, fidelity),
         )?;
+        task.finish(false);
         self.recording.insert((fidelity, capacity), pipeline);
         Ok(pipeline)
     }
@@ -780,11 +784,15 @@ impl VkEngine {
             return Ok(pipeline);
         }
         let started = std::time::Instant::now();
+        let task = crate::loading::start(crate::cuda_engine::kernel_label(
+            "Vulkan", false, fidelity, capacity,
+        ));
         let pipeline = Self::compile(
             &self.device,
             self.pipeline_layout,
             &crate::physics2::shader_source(capacity, self.workgroup, fidelity),
         )?;
+        task.finish(false);
         if std::env::var_os("EVOLUTION_VK_VERBOSE").is_some() {
             eprintln!(
                 "Vulkan: kernel for {capacity} nodes at {fidelity:?} ready after {:.2} s",
