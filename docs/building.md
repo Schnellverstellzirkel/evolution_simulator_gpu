@@ -80,3 +80,13 @@ A pause lasts at most 5 minutes from when it began, even if the request stays. A
 
 While paused the game window shows "Paused for a developer measurement, resumes in m:ss" and a Resume now button. The replay keeps playing. A new replay records on the CPU. Save, open and new game wait until the pause ends. The pause does not change the search: work is held back, never dropped, so a paused run of a fixed seed matches an undisturbed one (`tests/dev_pause.rs`). The code is in `src/dev_pause.rs` and `src/scheduler/suspend.rs`.
 
+
+## Environment variables
+
+`cargo run --release` is the whole game and needs none of these. Every `EVOLUTION_*` variable is a developer diagnostic or a measuring control. Read the code (`grep -rn EVOLUTION_ src`) for the exact list. The groups are:
+
+- Devices and threads: `EVOLUTION_DEVICES` (`primary` on this machine, never the Radeon), `EVOLUTION_CPU_THREADS` (size of the CPU failover pool, 0 turns it off), `EVOLUTION_RENDER_GPU` (adapter for drawing the window), `EVOLUTION_UI_FPS` (frame rate cap, 0 follows vsync).
+- CUDA: `EVOLUTION_CUDA`, `EVOLUTION_NVRTC`, `EVOLUTION_CUDA_MAXREG`, `EVOLUTION_CUDA_WG`, `EVOLUTION_CUDA_STREAMS`, `EVOLUTION_CUDA_FLAGS`, `EVOLUTION_CUDA_VERBOSE` (see the CUDA section).
+- Scheduling and kernel tuning (they change speed, not results): the `EVOLUTION_GPU_*`, `EVOLUTION_*_UNIT_SECONDS`, `EVOLUTION_CHECK_UNITS`, `EVOLUTION_LANE_WG` and `EVOLUTION_SEGMENTS` settings.
+- Measuring: `EVOLUTION_STAGE_LOG=<path>` writes one CSV row per generation. `EVOLUTION_PROFILE_BREED` prints archive and breeding timings. `EVOLUTION_SCREEN` sets the screen length in seconds.
+- Benchmarks, tests and screenshots: `EVOLUTION_BENCH_*` drives the graphical benchmark mode (generations, duration, warm-up). `EVOLUTION_TEST_*` sizes the ignored GPU tests. `EVOLUTION_SMOKE_*` starts short screenshot runs, and their windows show on the desktop.
