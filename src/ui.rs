@@ -1,5 +1,6 @@
 use crate::{
     config::Config,
+    creature_kernel,
     evolution::{Creature, FAILED},
     gpu::Gpu,
     physics::{self, Node},
@@ -15,7 +16,7 @@ use image::{
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, atomic::Ordering},
+    sync::{Arc, atomic::Ordering, mpsc},
     time::{Duration, Instant},
 };
 const MINT: Color32 = Color32::from_rgb(22, 122, 91);
@@ -408,6 +409,8 @@ struct Playback {
     /// Muscle energy, muscle force and ground push per frame: recorded by the
     /// engine, or rebuilt from the frames when it recorded none.
     forces: crate::replay_forces::Forces,
+    /// A still first pose while the recording runs.
+    preparing: bool,
 }
 /// Half-width of the follow camera's average of the center of mass (s).
 const CAMERA_WINDOW: f32 = 1.0;
@@ -436,13 +439,47 @@ fn camera_track(frames: &[Vec<[f32; 2]>], nodes: &[Node]) -> Vec<f32> {
         .collect()
 }
 impl Playback {
+    /// A replay that waits only a few seconds for the GPU (race lanes are
+    /// built in one go on the UI thread).
     fn new(creature: Creature, config: Config) -> Self {
+        Self::recorded(creature, config, Duration::from_secs(3))
+    }
+    /// A replay that waits `patience` for the GPU's recording, then falls
+    /// back to the CPU.
+    fn recorded(creature: Creature, config: Config, patience: Duration) -> Self {
         let mut normalized = creature.clone();
         crate::evolution::canonicalize_bone_order(&mut normalized);
         // The engine that recorded the frames also decides when the trial
         // ended and how far it got, so the replay shows exactly its score:
         // the GPU that scores the archive, or the CPU in a CPU-only game.
-        let (frames, result, recorded_forces) = crate::engine::replay_forces(&normalized, &config);
+        let (frames, result, recorded_forces) =
+            crate::engine::replay_forces(&normalized, &config, patience);
+        Self::from_recording(normalized, config, frames, result, recorded_forces, true)
+    }
+    /// The creature's first pose, held still while its replay is recorded.
+    fn preparing(creature: Creature, config: Config) -> Self {
+        let mut normalized = creature;
+        crate::evolution::canonicalize_bone_order(&mut normalized);
+        let start: Vec<[f32; 2]> = physics::nodes(&normalized).iter().map(|n| n.pos).collect();
+        let mut playback = Self::from_recording(
+            normalized,
+            config,
+            vec![start],
+            creature_kernel::GpuResult::default(),
+            None,
+            false,
+        );
+        playback.preparing = true;
+        playback
+    }
+    fn from_recording(
+        normalized: Creature,
+        config: Config,
+        frames: Vec<Vec<[f32; 2]>>,
+        result: creature_kernel::GpuResult,
+        recorded_forces: Option<crate::replay_forces::Forces>,
+        transport: bool,
+    ) -> Self {
         let nodes = physics::nodes(&normalized);
         let joints = physics::joints(&normalized.nodes, &normalized.bones);
         let last_frame = frames.len().saturating_sub(1).min(u32::MAX as usize) as u32;
@@ -503,7 +540,9 @@ impl Playback {
             ending,
             distance: result.fitness,
             height,
-            cost_of_transport: crate::cpu_engine::transport_cost(&normalized, &config),
+            cost_of_transport: transport
+                .then(|| crate::cpu_engine::transport_cost(&normalized, &config))
+                .flatten(),
             peak,
             forces,
             track,
@@ -515,6 +554,7 @@ impl Playback {
                 .min(last_frame),
             frames,
             accumulator: 0.0,
+            preparing: false,
         };
         playback.show();
         playback
@@ -1394,6 +1434,12 @@ struct App {
     snapshot: Option<Snapshot>,
     config: Config,
     playback: Option<Playback>,
+    /// The replay being recorded for `playback`, and when it was asked for.
+    replay_wait: Option<(mpsc::Receiver<Playback>, Instant)>,
+    /// Seconds the last replay took to appear, for benchmarks.
+    replay_seconds: Vec<f32>,
+    bench_last_replay: Instant,
+    ctx: egui::Context,
     tab: Tab,
     speed: f32,
     playing: bool,
@@ -1619,6 +1665,10 @@ impl App {
             race_camera: 0.0,
             race_picks: Vec::new(),
             bench_frames: Vec::new(),
+            replay_wait: None,
+            replay_seconds: Vec::new(),
+            bench_last_replay: Instant::now(),
+            ctx: ctx.clone(),
             bench_last_ping: Instant::now(),
             bench_pings: 0,
             dark: smoke_dark,
@@ -1668,7 +1718,18 @@ impl App {
         };
     }
     fn set_preview(&mut self, c: Creature, cfg: Config) {
-        self.playback = Some(Playback::new(c, cfg));
+        // The replay is recorded off the UI thread: the player shows the
+        // creature's first pose meanwhile, and the recording replaces it.
+        self.playback = Some(Playback::preparing(c.clone(), cfg.clone()));
+        let (tx, rx) = mpsc::channel();
+        let ctx = self.ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("replay".into())
+            .spawn(move || {
+                let _ = tx.send(Playback::recorded(c, cfg, Duration::from_secs(60)));
+                ctx.request_repaint();
+            });
+        self.replay_wait = spawned.is_ok().then(|| (rx, Instant::now()));
         self.follow = true;
         self.zoom = DEFAULT_CAMERA_ZOOM;
         self.zoom_user = false;
@@ -2190,6 +2251,16 @@ impl App {
             self.zoom = player_zoom(p.height, p.peak, rect.height());
         }
         let painter = ui.painter_at(rect);
+        if self.playback.as_ref().is_some_and(|p| p.preparing) {
+            let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("preparing"));
+            ui.ctx().layer_painter(layer).with_clip_rect(rect).text(
+                Pos2::new(rect.center().x, rect.top() + 26.),
+                Align2::CENTER_CENTER,
+                "Preparing replay...",
+                FontId::proportional(18.),
+                theme.muted,
+            );
+        }
         // All scene primitives are tessellated into egui's batched wgpu render pass.
         painter.rect_filled(rect, 12, VIEWPORT);
         draw_clouds(&painter, rect, self.camera[0] * self.zoom);
@@ -4397,6 +4468,16 @@ impl eframe::App for App {
         if self.bench_frames.is_empty() {
             return;
         }
+        if !self.replay_seconds.is_empty() {
+            let mut times = self.replay_seconds.clone();
+            times.sort_by(f32::total_cmp);
+            eprintln!(
+                "Native benchmark replays: {} replays, median {:.2} s, max {:.2} s",
+                times.len(),
+                times[times.len() / 2],
+                times[times.len() - 1]
+            );
+        }
         let mut frames = self.bench_frames.clone();
         frames.sort_by(f32::total_cmp);
         let pct = |q: usize| frames[(frames.len() * q / 100).min(frames.len() - 1)] * 1000.;
@@ -4444,6 +4525,16 @@ impl eframe::App for App {
         }
         if self.worker.measuring.load(Ordering::Relaxed) {
             self.bench_frames.push(dt);
+            // EVOLUTION_BENCH_REPLAY: ask for the champion's replay every 6 s
+            // and time how long it takes to appear.
+            if std::env::var_os("EVOLUTION_BENCH_REPLAY").is_some()
+                && self.bench_last_replay.elapsed() >= Duration::from_secs(6)
+                && self.replay_wait.is_none()
+                && let Some((creature, config)) = self.champion()
+            {
+                self.bench_last_replay = now;
+                self.set_preview(creature, config);
+            }
             if self.bench_last_ping.elapsed() >= Duration::from_millis(500) {
                 self.bench_last_ping = now;
                 self.bench_pings += 1;
@@ -4457,6 +4548,13 @@ impl eframe::App for App {
                     self.worker.send(Command::Ping(now));
                 }
             }
+        }
+        if let Some((rx, asked)) = &self.replay_wait
+            && let Ok(ready) = rx.try_recv()
+        {
+            self.replay_seconds.push(asked.elapsed().as_secs_f32());
+            self.playback = Some(ready);
+            self.replay_wait = None;
         }
         let next = self.worker.view.lock().unwrap().take();
         if let Some(mut next) = next {
@@ -6307,6 +6405,16 @@ mod tests {
         tuned.bones[1].rest_length = 0.8;
         tuned.muscles[0].phase = 0.4;
         assert_eq!(name, species_name(&tuned), "tuning keeps the name");
+    }
+    #[test]
+    fn a_preparing_replay_holds_the_first_pose_and_survives_playback() {
+        let mut playback = Playback::preparing(test_creature(), Config::default());
+        assert!(playback.preparing);
+        assert_eq!(playback.frames.len(), 1);
+        playback.advance();
+        playback.reset();
+        playback.seek(5);
+        assert_eq!(playback.tick, 0);
     }
     #[test]
     fn gif_export_encodes_three_synthetic_frames() {

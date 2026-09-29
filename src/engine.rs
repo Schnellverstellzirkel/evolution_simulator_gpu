@@ -77,20 +77,37 @@ pub fn record_on_gpu(creature: &Creature, cfg: &Config, timeout: Duration) -> Op
     }
 }
 
+/// How long a replay waits for the GPU before the CPU replays instead. The
+/// GPU is busy with scoring at 3M creatures, and only its recording matches
+/// the creature's score, so the wait is long.
+const REPLAY_PATIENCE: Duration = Duration::from_secs(60);
+
 /// A creature's full trial for the replay viewer and the result scored in
 /// the same run, from the engine that scores the archive: the GPU when one
 /// evaluates, the CPU engine in a CPU-only game. A replay runs the full
 /// trial, without the early screen.
 pub fn replay(creature: &Creature, cfg: &Config) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
-    let (frames, result, _) = replay_forces(creature, cfg);
+    let (frames, result, _) = replay_forces(creature, cfg, REPLAY_PATIENCE);
+    (frames, result)
+}
+
+/// `replay`, giving up on the GPU after `patience`. For callers that cannot
+/// wait a minute.
+pub fn replay_within(
+    creature: &Creature,
+    cfg: &Config,
+    patience: Duration,
+) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
+    let (frames, result, _) = replay_forces(creature, cfg, patience);
     (frames, result)
 }
 
 /// `replay` with the muscle energy, muscle force and ground contact forces
-/// the engine recorded with each frame.
+/// the engine recorded with each frame, waiting up to `patience` for the GPU.
 pub fn replay_forces(
     creature: &Creature,
     cfg: &Config,
+    patience: Duration,
 ) -> (
     Vec<Vec<[f32; 2]>>,
     GpuResult,
@@ -100,7 +117,7 @@ pub fn replay_forces(
         screen: None,
         ..cfg.clone()
     };
-    if let Some(recording) = record_on_gpu(creature, &cfg, Duration::from_secs(3)) {
+    if let Some(recording) = record_on_gpu(creature, &cfg, patience) {
         return (recording.frames, recording.result, recording.forces);
     }
     let (frames, result, forces) = crate::physics2::replay_forces(creature, &cfg);

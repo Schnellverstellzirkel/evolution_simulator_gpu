@@ -7,9 +7,14 @@
 //!     cargo test --release --test gpu_repeatability -- --ignored
 use evolution_simulator::{config::Config, evolution, gpu::Gpu};
 
+/// The GPU tests run one at a time: the replay GPU is published in a
+/// process-wide slot, so a second test's GPU would take it over.
+static ONE_GPU_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 #[ignore = "requires a Vulkan GPU; run explicitly on the workstation"]
 fn gpu_repeats_scores_for_identical_trials() {
+    let _one_gpu_test = ONE_GPU_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let cfg = Config {
         population: 32,
         random_seed: false,
@@ -75,6 +80,7 @@ fn gpu_repeats_scores_for_identical_trials() {
 #[test]
 #[ignore = "requires a Vulkan GPU; run explicitly on the workstation"]
 fn gpu_replays_show_the_gpu_score() {
+    let _one_gpu_test = ONE_GPU_TEST.lock().unwrap_or_else(|e| e.into_inner());
     use evolution_simulator::{engine, physics};
     // Full trials: a replay never stops at the screen.
     let cfg = Config {
@@ -146,6 +152,7 @@ fn gpu_replays_show_the_gpu_score() {
 #[test]
 #[ignore = "requires a GPU; run explicitly on the workstation"]
 fn each_backend_repeats_v2_scores() {
+    let _one_gpu_test = ONE_GPU_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let cfg = Config {
         population: 256,
         random_seed: false,

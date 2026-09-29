@@ -985,3 +985,16 @@ Rates, `examples/p2_cpu_speed.rs`, an evolved 100k-creature v2 population (20 s 
 | every group full (each creature 16 times) | 7,800/s | 12,000/s |
 
 The lane fill is what limits it: skeletons repeat less in a small unit than in a 3M generation (3.4 creatures per plan when muscle attachments must match, 9.5 per skeleton at 100k), and a group runs until its longest trial ends. Profile at full lanes: muscles (per-lane bone selection, 30%), the Gauss-Seidel solve (13%), libm cosine and sine (18%), the contact matrix and response passes (19%).
+
+
+## Replays during a busy 3M run (2026-09-29)
+
+`EVOLUTION_BENCH_REPLAY=1` asks for the champion's replay every 6 s of a GUI benchmark and reports how long it took to appear (`Native benchmark replays`). 3M creatures, v2 physics, CUDA, the exclusive GPU lock, but the machine shared with other agents (rates 80k to 196k creatures/s, so read the numbers as under contention). Two runs per arm, 14 to 31 replays each:
+
+| arm | replay appears, median (max) | UI frame max | FPS |
+| --- | --- | --- | --- |
+| before: replay on the UI thread, 3 s wait | 0.98 s (2.07), 0.95 s (3.07) | 3.2 s, 5.9 s | 94, 84 |
+| async, no stream priority | 0.94 s (2.47) | 24 ms | 120 |
+| async plus highest-priority replay streams | 0.80 s (1.80), 0.78 s (1.67) | 23 ms, 56 ms | 120, 104 |
+
+The replay took about a second in every arm, so the 3 s fallback was rarely hit in these runs. The gain is that the UI thread no longer blocks (frame max 3 to 6 s down to about 25 ms), and stream priority cuts the wait by about 15%. The player shows the creature's first pose and "Preparing replay..." meanwhile, and the GPU wait is 60 s before the CPU replays instead.

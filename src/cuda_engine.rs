@@ -53,6 +53,10 @@ const CUDA_SUCCESS: CuResult = 0;
 const CUDA_ERROR_OUT_OF_MEMORY: CuResult = 2;
 const CUDA_ERROR_NOT_READY: CuResult = 600;
 const CU_STREAM_NON_BLOCKING: c_uint = 1;
+/// CUDA stream priority: lower numbers run first, 0 is the default.
+fn stream_priority(replay: bool) -> c_int {
+    if replay { -100 } else { 0 }
+}
 const CU_EVENT_DISABLE_TIMING: c_uint = 2;
 const CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT: c_int = 16;
 const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR: c_int = 75;
@@ -84,7 +88,7 @@ struct Driver {
     memcpy_htod_async:
         unsafe extern "C" fn(CuDevicePtr, *const c_void, usize, CuStream) -> CuResult,
     memcpy_dtoh_async: unsafe extern "C" fn(*mut c_void, CuDevicePtr, usize, CuStream) -> CuResult,
-    stream_create: unsafe extern "C" fn(*mut CuStream, c_uint) -> CuResult,
+    stream_create: unsafe extern "C" fn(*mut CuStream, c_uint, c_int) -> CuResult,
     stream_destroy: unsafe extern "C" fn(CuStream) -> CuResult,
     stream_wait_event: unsafe extern "C" fn(CuStream, CuEvent, c_uint) -> CuResult,
     event_create: unsafe extern "C" fn(*mut CuEvent, c_uint) -> CuResult,
@@ -183,7 +187,7 @@ impl Driver {
                 mem_free_host: symbol!(library, "cuMemFreeHost"),
                 memcpy_htod_async: symbol!(library, "cuMemcpyHtoDAsync_v2"),
                 memcpy_dtoh_async: symbol!(library, "cuMemcpyDtoHAsync_v2"),
-                stream_create: symbol!(library, "cuStreamCreate"),
+                stream_create: symbol!(library, "cuStreamCreateWithPriority"),
                 stream_destroy: symbol!(library, "cuStreamDestroy_v2"),
                 stream_wait_event: symbol!(library, "cuStreamWaitEvent"),
                 event_create: symbol!(library, "cuEventCreate"),
@@ -947,8 +951,9 @@ impl CudaEngine {
                 None => format!("{device_name} (CUDA, blocks {threads})"),
             };
             // Evaluation slots plus one for replays.
-            for _ in 0..crate::vk_engine::gpu_slots() + 1 {
-                let slot = engine.create_slot()?;
+            let slots = crate::vk_engine::gpu_slots() + 1;
+            for index in 0..slots {
+                let slot = engine.create_slot(index + 1 == slots)?;
                 engine.slots.push(slot);
             }
             if build {
@@ -958,13 +963,16 @@ impl CudaEngine {
         }
     }
 
-    fn create_slot(&self) -> Result<Slot> {
+    /// A slot's streams. The replay slot's streams have the highest
+    /// priority, so a recording gets the GPU's blocks ahead of queued scoring
+    /// work (priorities out of range are clamped to the greatest one).
+    fn create_slot(&self, replay: bool) -> Result<Slot> {
         let cu = &self.api.cu;
         unsafe {
             let mut main = std::ptr::null_mut();
             cu.check(
-                (cu.stream_create)(&mut main, CU_STREAM_NON_BLOCKING),
-                "cuStreamCreate",
+                (cu.stream_create)(&mut main, CU_STREAM_NON_BLOCKING, stream_priority(replay)),
+                "cuStreamCreateWithPriority",
             )?;
             let event = |flags| -> Result<CuEvent> {
                 let mut event = std::ptr::null_mut();
@@ -1284,8 +1292,12 @@ impl CudaEngine {
             unsafe {
                 let mut stream = std::ptr::null_mut();
                 cu.check(
-                    (cu.stream_create)(&mut stream, CU_STREAM_NON_BLOCKING),
-                    "cuStreamCreate",
+                    (cu.stream_create)(
+                        &mut stream,
+                        CU_STREAM_NON_BLOCKING,
+                        stream_priority(slot == self.slots.len() - 1),
+                    ),
+                    "cuStreamCreateWithPriority",
                 )?;
                 let mut event = std::ptr::null_mut();
                 cu.check(
