@@ -248,21 +248,6 @@ fn split<T>(mut all: &mut [T], sizes: impl Iterator<Item = usize>) -> Vec<&mut [
     }
     out
 }
-/// Gene counts (nodes, bones, muscles) of each run of `chunk` creatures.
-fn chunk_sizes(creatures: &[Creature], chunk: usize) -> Vec<[usize; 3]> {
-    creatures
-        .par_chunks(chunk)
-        .map(|part| {
-            part.iter().fold([0; 3], |t, c| {
-                [
-                    t[0] + c.nodes.len(),
-                    t[1] + c.bones.len(),
-                    t[2] + c.muscles.len(),
-                ]
-            })
-        })
-        .collect()
-}
 /// Spare gene arenas that `Population::compact_with` fills and swaps in.
 #[derive(Default)]
 pub struct Arena {
@@ -497,80 +482,100 @@ impl Population {
     /// exactly as after replacing the slots one by one.
     pub fn replace_many(&mut self, slots: &[usize], mut creatures: Vec<Creature>) {
         const CHUNK: usize = 4096;
-        creatures.par_iter_mut().for_each(|c| {
-            canonicalize_bone_order(c);
-        });
-        let sizes = chunk_sizes(&creatures, CHUNK);
+        let counts: Vec<[u32; 3]> = creatures
+            .par_iter()
+            .map(|c| {
+                [
+                    c.nodes.len() as u32,
+                    c.bones.len() as u32,
+                    c.muscles.len() as u32,
+                ]
+            })
+            .collect();
+        let sizes: Vec<[usize; 3]> = counts
+            .par_chunks(CHUNK)
+            .map(|part| {
+                part.iter().fold([0; 3], |t, c| {
+                    [
+                        t[0] + c[0] as usize,
+                        t[1] + c[1] as usize,
+                        t[2] + c[2] as usize,
+                    ]
+                })
+            })
+            .collect();
         let added = sizes
             .iter()
             .fold([0; 3], |t, s| [t[0] + s[0], t[1] + s[1], t[2] + s[2]]);
-        // Each run of children writes its genes into its own part of the
-        // arenas' spare room, in parallel: the first touch of fresh memory is
-        // most of the cost, and one thread paid all of it before.
-        fn fill<T: Copy + Send + Sync>(
-            arena: &mut Vec<T>,
-            added: usize,
-            sizes: impl Iterator<Item = usize>,
-            creatures: &[Creature],
-            genes: impl Fn(&Creature) -> &[T] + Sync,
-        ) {
-            arena.reserve(added);
-            let parts = split(&mut arena.spare_capacity_mut()[..added], sizes);
-            creatures
-                .par_chunks(CHUNK)
-                .zip(parts)
-                .for_each(|(chunk, part)| {
-                    let mut at = 0;
-                    for c in chunk {
-                        for (dst, &src) in part[at..].iter_mut().zip(genes(c)) {
-                            dst.write(src);
-                        }
-                        at += genes(c).len();
-                    }
-                });
-            let len = arena.len() + added;
-            // SAFETY: the parts cover the first `added` spare elements, and
-            // every run wrote all of its part.
-            unsafe { arena.set_len(len) };
-        }
-        let mut at = [self.nodes.len(), self.bones.len(), self.muscles.len()];
-        fill(
-            &mut self.nodes,
-            added[0],
+        // One pass: each run of children puts its bones in canonical order,
+        // writes its genes into its own part of the arenas' spare room and
+        // frees the children while they are still in cache. The first touch
+        // of fresh memory is most of the cost, so all threads share it.
+        self.nodes.reserve(added[0]);
+        self.bones.reserve(added[1]);
+        self.muscles.reserve(added[2]);
+        let node_parts = split(
+            &mut self.nodes.spare_capacity_mut()[..added[0]],
             sizes.iter().map(|s| s[0]),
-            &creatures,
-            |c| &c.nodes,
         );
-        fill(
-            &mut self.bones,
-            added[1],
+        let bone_parts = split(
+            &mut self.bones.spare_capacity_mut()[..added[1]],
             sizes.iter().map(|s| s[1]),
-            &creatures,
-            |c| &c.bones,
         );
-        fill(
-            &mut self.muscles,
-            added[2],
+        let muscle_parts = split(
+            &mut self.muscles.spare_capacity_mut()[..added[2]],
             sizes.iter().map(|s| s[2]),
-            &creatures,
-            |c| &c.muscles,
         );
-        for (&slot, c) in slots.iter().zip(&creatures) {
+        creatures
+            .par_chunks_mut(CHUNK)
+            .zip(node_parts)
+            .zip(bone_parts)
+            .zip(muscle_parts)
+            .for_each(|(((chunk, nodes), bones), muscles)| {
+                let mut at = [0; 3];
+                for c in chunk {
+                    canonicalize_bone_order(c);
+                    for (dst, &src) in nodes[at[0]..].iter_mut().zip(&c.nodes) {
+                        dst.write(src);
+                    }
+                    for (dst, &src) in bones[at[1]..].iter_mut().zip(&c.bones) {
+                        dst.write(src);
+                    }
+                    for (dst, &src) in muscles[at[2]..].iter_mut().zip(&c.muscles) {
+                        dst.write(src);
+                    }
+                    at = [
+                        at[0] + c.nodes.len(),
+                        at[1] + c.bones.len(),
+                        at[2] + c.muscles.len(),
+                    ];
+                    drop(std::mem::take(&mut c.nodes));
+                    drop(std::mem::take(&mut c.bones));
+                    drop(std::mem::take(&mut c.muscles));
+                }
+            });
+        let mut at = [self.nodes.len(), self.bones.len(), self.muscles.len()];
+        // SAFETY: the parts cover the first `added` spare elements of each
+        // arena, and every run wrote all of its part.
+        unsafe {
+            self.nodes.set_len(at[0] + added[0]);
+            self.bones.set_len(at[1] + added[1]);
+            self.muscles.set_len(at[2] + added[2]);
+        }
+        for ((&slot, c), count) in slots.iter().zip(&creatures).zip(&counts) {
+            let (n, b, m) = (count[0] as usize, count[1] as usize, count[2] as usize);
             self.genomes[slot] = Genome {
                 node_start: at[0],
-                node_count: c.nodes.len(),
+                node_count: n,
                 bone_start: at[1],
-                bone_count: c.bones.len(),
+                bone_count: b,
                 muscle_start: at[2],
-                muscle_count: c.muscles.len(),
+                muscle_count: m,
                 id: c.id,
                 mutability: c.mutability,
             };
-            at[0] += c.nodes.len();
-            at[1] += c.bones.len();
-            at[2] += c.muscles.len();
+            at = [at[0] + n, at[1] + b, at[2] + m];
         }
-        creatures.into_par_iter().for_each(drop);
     }
     /// Copies `indices` into a standalone population; creature `k` of the
     /// result is `indices[k]` of `self`.
