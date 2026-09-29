@@ -544,7 +544,7 @@ enum Backend {
 
 /// Opens the GPU named `name` through CUDA when it is an NVIDIA GPU whose
 /// driver and NVRTC load (1.6 to 1.8 times Vulkan's kernel rate on the
-/// RTX 4060, docs/performance-log.md), and through Vulkan otherwise.
+/// RTX 4060), and through Vulkan otherwise.
 fn open_backend(name: &str, max_nodes: usize) -> Result<(Backend, String)> {
     if crate::cuda_engine::enabled() {
         match CudaEngine::new(name, max_nodes) {

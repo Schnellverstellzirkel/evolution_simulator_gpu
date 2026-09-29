@@ -1,6 +1,4 @@
-//! Physics v2 prototype: a planar articulated tree in reduced coordinates
-//! (`docs/hpc-assessment.md` section 7.2, `docs/data-architecture.md`
-//! section 8).
+//! Physics v2 prototype: a planar articulated tree in reduced coordinates.
 //!
 //! A creature is a tree of point masses (its nodes) joined by rigid,
 //! massless bones. The state is the head's position and velocity, the neck's
@@ -58,7 +56,7 @@ pub fn hill_speed() -> f32 {
 /// `Limits` cap, and its energy store scales the same way (a muscle's store
 /// is its own mass). Before, a 100 N muscle drove a 0.05 kg limb at 2,000
 /// m/s^2, turned a bone about a radian in one step and made momentum and
-/// energy the integrator did not pay for (docs/physics-v2.md).
+/// energy the integrator did not pay for (docs/physics.md).
 pub const DRIVEN_ACCELERATION: f32 = 100.0;
 /// Air drag on bones (N per m^3/s^2 of length x width): every bone feels
 /// `AIR_DRAG x length x width x speed x velocity` against its midpoint's
@@ -589,7 +587,7 @@ struct Contact {
 /// about the square of the turn per step: at the current physics's 40 rad/s
 /// (0.67 rad per step) evolution whipped a short bone into the ground, the
 /// solve planted its tip, and the next pose had the tip sliding forward with
-/// the friction that planted it still pushing (docs/physics-v2.md).
+/// the friction that planted it still pushing (docs/physics.md).
 pub const SPIN_CAP: f32 = 15.0;
 /// How firmly the spin cap holds: its damper weighs this many times the
 /// bone's rotational inertia about its pivot.

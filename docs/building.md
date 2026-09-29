@@ -54,17 +54,10 @@ check kernels on first use), about 2 s per kernel the first time. NVIDIA's
 compute cache (`~/.nv/ComputeCache`) keeps them, so later starts take about
 0.3 s.
 
-Developer overrides, never needed to play: `EVOLUTION_CUDA=0` runs on
+Developer diagnostics, never needed to play: `EVOLUTION_CUDA=0` runs on
 Vulkan, `EVOLUTION_CUDA=1` makes the GPU tests refuse a Vulkan fallback,
-`EVOLUTION_NVRTC=/path/to/libnvrtc.so.13` names another NVRTC,
-`EVOLUTION_CUDA_MAXREG` sets the register cap (default 128, 0 for the
-compiler's choice), `EVOLUTION_CUDA_WG` fixes threads per block (32, 64 or
-128), `EVOLUTION_CUDA_STREAMS` limits streams per unit,
-`EVOLUTION_CUDA_FLAGS` adds NVRTC options, and `EVOLUTION_CUDA_VERBOSE=1`
-reports compile times. `examples/cuda_stats.rs` prints registers, spills,
-shared memory and resident warps per node capacity; run it with
-`CUDA_CACHE_DISABLE=1` to get the spill counts, which a cached compile does
-not report.
+`EVOLUTION_NVRTC=/path/to/libnvrtc.so.13` names another NVRTC, and
+`EVOLUTION_CUDA_VERBOSE=1` reports compile times.
 
 ## Pausing the game for a measurement
 
@@ -83,10 +76,9 @@ While paused the game window shows "Paused for a developer measurement, resumes 
 
 ## Environment variables
 
-`cargo run --release` is the whole game and needs none of these. Every `EVOLUTION_*` variable is a developer diagnostic or a measuring control. Read the code (`grep -rn EVOLUTION_ src`) for the exact list. The groups are:
+`cargo run --release` is the whole game and needs none of these. Every `EVOLUTION_*` variable is a developer diagnostic or a measuring control. Speed and search settings (GPU slots, batch and unit sizes, workgroup sizes, screening, the anatomy operators, joint damping, Hill speed) are fixed in the code and have no switch. Read the code (`grep -rn EVOLUTION_ src`) for the exact list. The groups are:
 
 - Devices and threads: `EVOLUTION_DEVICES` (`primary` on this machine, never the Radeon), `EVOLUTION_CPU_THREADS` (size of the CPU failover pool, 0 turns it off), `EVOLUTION_RENDER_GPU` (adapter for drawing the window), `EVOLUTION_UI_FPS` (frame rate cap, 0 follows vsync).
-- CUDA: `EVOLUTION_CUDA`, `EVOLUTION_NVRTC`, `EVOLUTION_CUDA_MAXREG`, `EVOLUTION_CUDA_WG`, `EVOLUTION_CUDA_STREAMS`, `EVOLUTION_CUDA_FLAGS`, `EVOLUTION_CUDA_VERBOSE` (see the CUDA section).
-- Scheduling and kernel tuning (they change speed, not results): the `EVOLUTION_GPU_*`, `EVOLUTION_*_UNIT_SECONDS`, `EVOLUTION_CHECK_UNITS`, `EVOLUTION_LANE_WG` and `EVOLUTION_SEGMENTS` settings.
-- Measuring: `EVOLUTION_STAGE_LOG=<path>` writes one CSV row per generation. `EVOLUTION_PROFILE_BREED` prints archive and breeding timings. `EVOLUTION_SCREEN` sets the screen length in seconds.
+- CUDA: `EVOLUTION_CUDA`, `EVOLUTION_NVRTC`, `EVOLUTION_CUDA_VERBOSE` (see the CUDA section).
+- Measuring: `EVOLUTION_STAGE_LOG=<path>` writes one CSV row per generation. `EVOLUTION_PROFILE_BREED` prints archive and breeding timings.
 - Benchmarks, tests and screenshots: `EVOLUTION_BENCH_*` drives the graphical benchmark mode (generations, duration, warm-up). `EVOLUTION_TEST_*` sizes the ignored GPU tests. `EVOLUTION_SMOKE_*` starts short screenshot runs, and their windows show on the desktop.

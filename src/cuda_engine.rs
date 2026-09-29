@@ -5,7 +5,7 @@
 //! segments as `VkEngine`, and it keeps `VkEngine`'s submit and poll contract.
 //! The reason for it is register control: Vulkan offers no way to cap
 //! registers per thread, and above 128 registers an SM holds 12 one-warp
-//! workgroups instead of 16 (`docs/phase0-measurements.md`).
+//! workgroups instead of 16.
 //!
 //! Nothing CUDA is linked at build time. The driver API (`libcuda`) and NVRTC
 //! (`libnvrtc`) are loaded when the engine opens, so the game builds and runs
@@ -478,8 +478,7 @@ fn scoring_source(capacity: usize, threads: u32, fidelity: Fidelity) -> String {
 }
 
 /// Resident warps per SM for `capacity`-node kernels in `threads`-thread
-/// blocks at `registers` per thread, by the occupancy rule measured in
-/// `docs/phase0-measurements.md` plus the 1 KB of shared memory CUDA reserves
+/// blocks at `registers` per thread, by the measured occupancy rule plus the 1 KB of shared memory CUDA reserves
 /// per block.
 fn predicted_warps(capacity: usize, threads: u32, registers: u32) -> u32 {
     let warps_per_block = threads / 32;
@@ -493,8 +492,8 @@ fn predicted_warps(capacity: usize, threads: u32, registers: u32) -> u32 {
 }
 
 /// Threads per block for `capacity`-node kernels: the block size with the
-/// most resident warps, and the largest of equals. At 128 registers, 128-thread blocks measured faster
-/// than 32-thread blocks at equal occupancy (docs/performance-log.md).
+/// most resident warps, and the largest of equals. At 128 registers, 128-thread
+/// blocks measured faster than 32-thread blocks at equal occupancy.
 fn block_size(capacity: usize) -> u32 {
     // The v2 kernels use 222 to 255 registers up to 32 nodes.
     let registers = 255;

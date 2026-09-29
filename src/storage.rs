@@ -2123,7 +2123,7 @@ impl Experiment {
 // (`SaveHeader`), so the game can turn down a save it cannot use before it
 // reads gigabytes. The body keeps only the archives and the search state
 // (`SmallSave`). A loaded game breeds its population from the archives again
-// (docs/data-architecture.md section 12). Any other magic is an older format
+// Any other magic is an older format
 // and is turned down.
 const MAGIC: &[u8; 8] = b"EVORUST8";
 

@@ -6,7 +6,7 @@ pub const EMITTER_COUNT: usize = 4;
 /// Archive grid: ground contact, gait cadence, vertical bounce, mean body
 /// height, and feet (distinct nodes that touched the ground). Bounce keeps a
 /// single bin: fewer cells give each one more offspring, which found faster
-/// creatures in fixed-seed tests (docs/search-research.md).
+/// creatures in fixed-seed tests.
 const BINS: [u8; 5] = [6, 8, 1, 6, 5];
 pub(crate) const ARCHIVE_LIMIT: usize = 6 * 8 * 6 * 5;
 pub(crate) const MORPHOLOGY_LIMIT: usize = 64;
