@@ -526,6 +526,16 @@ Setup: `search_ab` with `--checks`, population 5000, 60 generations, 20 s trials
 
 Notes. The current emitter weights are inert: the mean reward per attempt is about 0.002 while the formula adds a constant 0.55 and an exploration bonus, so the shares stay at the 0.35/0.35/0.30 prior. The first bandit arm looked positive only because its exploration term still dominated, so its shares stayed near the prior. The second arm made the shares follow reward (morphology 0.52) and lost the gain. The best-distance means are pulled by single seeds (for example 53 m on one line-variation seed). The mutability result did not survive nine more seeds (second batch: best x1.00, QD x0.98). `Creature.mutability` is still mutated but unused; deleting it touches the save format and 32 sites, so it was left for the owner. The bandit was rewarded per evaluation, not per GPU-second, because the CPU harness has no GPU time.
 
+## 12. Varied first bodies and a grammar source (measured 2026-09-29, both deleted)
+
+Setup: `examples/search_ab`, 24 seeds (100 to 123), 2,048 creatures, 60 generations, 20 s trials, CPU only. The baseline is main (3 to 5 node chains). Best distance varies a lot between seeds, so counts of paired wins matter more than means.
+
+Varied first population (also used by immigrants). Shares: 40% the old chain, 20% chains of 6 to 9 nodes, 30% bilateral bodies (a spine with one or two mirrored leg pairs of 1 to 2 segments, twin legs sharing muscle timing together or half a cycle apart), 10% random branching trees of 5 to 9 nodes. Result: QD mean 1,620 against 1,848 (median 1,535 against 1,823, the variant won QD on 5 of 24 seeds), best distance mean 30.6 m against 21.9 m (median 13.3 against 15.6, the variant won 9 of 24; the mean comes from a few outlier seeds). A loss on QD, so it was deleted.
+
+Grammar source: a random L-system per body (one rule rewriting X into bones, turns, branches and mirrored branch pairs, three rewrites, node budget 4 to 9), used for 20% of structural children (about 7% of each generation). Result: QD mean ratio 0.98 (won 8 of 24), best distance median 16.5 m against 15.6 (won 10 of 24). A tie or slightly worse, so it was deleted. Rule-level mutation was not built, because a rule set is not stored with the creature and adding that to archives and saves was not worth it for a tie.
+
+Repetition and symmetry: already present. `copy_limb`, `twin_limb`, `repeat_body_segment`, `duplicate_mirrored_node`, `reverse_bend`, `grow_matching_tips`, `mutate_matching_limbs`, `copy_actuation_to_limb` and `mirror_limb_timing` cover copying and mirroring limbs, so nothing was added.
+
 ## Sources
 
 - Arza, Le Goff, Hart (2024). [Generalized Early Stopping in Evolutionary Direct Policy Search](https://arxiv.org/abs/2308.03574). ACM TELO.
@@ -584,3 +594,14 @@ Not adopted, deleted:
 Not possible: stopping a trial when it can no longer beat its cell's elite. The cell comes from behavior measured over the whole trial (contact, cadence, height, feet), so it is unknown until the end. The 5 s screen already stops hopeless creatures.
 
 Not tried: age-layered populations, deep grids, Hoeffding racing, dominated novelty search. The contender check already races one contender per cell.
+
+## 12. GPU A/B harness and its noise floor (2026-09-29, physics v1)
+
+`examples/search_ab --gpu` runs the game's generational path (scheduler, 5 s screen, contender checks, GPU score final) and prints the same report as the CPU runs: best distance, QD, QD on the fixed grid, reserve size, body plans, top-50 body mix, emitter shares. `--seed-offset N` shifts every seed, so two arms of identical code give independent runs. Run it under `flock -s .../target/gpu.lock`, with `EVOLUTION_DEVICES=primary`. An arm pair differs by a developer-only environment switch on the experiment branch.
+
+A/A on main at 571b17c: 6 seeds (38 to 43), 100k creatures, 30 generations, 20 s trials, RTX 4060 with other jobs sharing it. One seed takes 50 to 80 s on an idle GPU.
+- Two identical arms (same seeds): 3 of 6 seeds reproduced bit for bit in best and QD, 3 diverged (best ratios 1.48, 0.85, 1.00, 1.00, 1.00, 0.94). GPU scheduling order (which contender takes a shared cell check) is not deterministic, so a run can branch from a small difference. Geometric mean best ratio 1.03, QD 1.07.
+- Identical code, seeds shifted by 1000: per seed best ratios 1.12, 1.83, 0.79, 0.55, 1.29, 3.31 and QD ratios 0.95, 1.03, 1.01, 0.67, 1.30, 1.86. The standard deviation of the log ratio is 0.63 for best distance (a factor 1.9) and 0.34 for QD (a factor 1.4). The mean over 6 seeds carries a standard error of 0.26 in log units for best distance (plus or minus 30%) and 0.14 for QD (plus or minus 15%).
+- Means: best 20.7, 21.7 and 28.8 m; fixed-grid QD 3894, 4171 and 4294; 1290 cells; 650 to 700 body plans.
+
+So at 100k and 30 generations a 6-seed A/B detects a QD change only above about 30% and a best-distance change only above about 50%. Best distance is the noisier metric, because it is a maximum of one run. Use QD on the fixed grid as the main number, keep best distance as a check, and use 12 or more seeds for effects under 30%.

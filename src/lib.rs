@@ -9,6 +9,7 @@ pub mod gpu;
 pub mod physics;
 pub mod physics2;
 pub mod qd;
+pub mod replay_forces;
 pub mod scheduler;
 pub mod schematic;
 pub mod search_benchmark;

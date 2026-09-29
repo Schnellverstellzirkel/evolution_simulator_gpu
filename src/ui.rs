@@ -34,6 +34,9 @@ const GROUND: Color32 = Color32::from_rgb(121, 176, 89);
 const GROUND_EDGE: Color32 = Color32::from_rgb(66, 118, 55);
 const MUSCLE_REST: Color32 = Color32::from_rgb(249, 168, 191);
 const MUSCLE_ACTIVE: Color32 = Color32::from_rgb(146, 16, 28);
+const MUSCLE_TIRED: Color32 = Color32::from_rgb(150, 150, 150);
+const FORCE_MUSCLE: Color32 = Color32::from_rgb(230, 120, 20);
+const FORCE_GROUND: Color32 = Color32::from_rgb(30, 100, 220);
 /// Ring around every node touching the ground in the current frame.
 const TOUCHDOWN: Color32 = Color32::from_rgb(255, 196, 64);
 const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
@@ -43,6 +46,23 @@ const FIT_HEIGHT_SHARE: f32 = 0.42;
 /// `FIT_HEIGHT_SHARE` of the viewport, clamped for tiny and huge bodies.
 fn fit_zoom(body_height: f32, view_height: f32) -> f32 {
     (FIT_HEIGHT_SHARE * view_height / body_height.max(0.05)).clamp(40.0, 450.0)
+}
+/// The highest point the body reaches in a recording (m above the ground).
+fn body_peak(frames: &[Vec<[f32; 2]>], nodes: &[Node]) -> f32 {
+    frames
+        .iter()
+        .flat_map(|frame| frame.iter().zip(nodes).map(|(p, n)| p[1] + n.radius))
+        .fold(0.1f32, f32::max)
+}
+/// The player's default zoom: the typical height fills its share of the
+/// viewport, and the highest point of the recording stays in view (the ground
+/// sits 22% up from the bottom) unless that would shrink the body to less than
+/// 60% of the typical fit. A creature that leaps far higher than it stands
+/// keeps that 60% and clips its peak instead of becoming tiny.
+fn player_zoom(height: f32, peak: f32, view_height: f32) -> f32 {
+    let typical = fit_zoom(height, view_height);
+    let whole = 0.72 * view_height / peak.max(0.05);
+    whole.min(typical).max(typical * 0.6).clamp(20.0, 450.0)
 }
 /// A creature's typical height over a recording (m above the ground): the
 /// 90th percentile of the top of the body, so one leap does not shrink it.
@@ -383,6 +403,10 @@ struct Playback {
     track: Vec<f32>,
     /// Typical body height over the recording (m), for the default zoom.
     height: f32,
+    /// Highest point of the body over the recording (m).
+    peak: f32,
+    /// Muscle energy, muscle force and ground push per frame, rebuilt from the frames.
+    forces: crate::replay_forces::Forces,
 }
 /// Half-width of the follow camera's average of the center of mass (s).
 const CAMERA_WINDOW: f32 = 1.0;
@@ -427,7 +451,30 @@ impl Playback {
             (tick.min(last_frame), result.fitness)
         });
         let track = camera_track(&frames, &nodes);
-        let height = body_height(&frames, &nodes);
+        // Frames after the trial ended keep moving (a fallen body tumbles), so
+        // the zoom looks only at the scored part.
+        let scored = &frames[(physics::settle() as usize).min(frames.len().saturating_sub(1))
+            ..fall.map_or(frames.len(), |(tick, _)| {
+                (tick as usize + 1).min(frames.len())
+            })];
+        let height = body_height(scored, &nodes);
+        let peak = body_peak(scored, &nodes);
+        let contact: Vec<Vec<bool>> = frames
+            .iter()
+            .map(|frame| {
+                let mut down = vec![false; nodes.len()];
+                node_contact(&nodes, frame, &normalized, &config, &mut down);
+                down
+            })
+            .collect();
+        let forces = crate::replay_forces::analyze(
+            &normalized,
+            &nodes,
+            &frames,
+            &contact,
+            fall.map(|(tick, _)| tick),
+            &config,
+        );
         // The head-shake average stops updating when the trial ends, so it
         // still holds the value that ended it. A broken joint shows in the
         // recorded pose at the end (the engine tests the pose after the step).
@@ -453,6 +500,8 @@ impl Playback {
             distance: result.fitness,
             height,
             cost_of_transport: crate::cpu_engine::transport_cost(&normalized, &config),
+            peak,
+            forces,
             track,
             creature: normalized,
             config,
@@ -671,6 +720,13 @@ struct FrameMarks {
     fallen: bool,
     contact: Vec<bool>,
     broken: Vec<bool>,
+    /// Stored energy per muscle (1 is rested), for fading tired muscles.
+    energy: Vec<f32>,
+    /// Muscle force per muscle (N) and ground push per node (N), drawn as
+    /// arrows when `arrows` is on.
+    muscle_force: Vec<f32>,
+    ground_force: Vec<f32>,
+    arrows: bool,
 }
 impl FrameMarks {
     /// Contact and broken-joint marks of a playback's current frame.
@@ -680,7 +736,33 @@ impl FrameMarks {
             fallen: playback.fallen().is_some(),
             contact: vec![false; playback.nodes.len()],
             broken: vec![false; playback.nodes.len()],
+            energy: playback
+                .forces
+                .energy
+                .get(playback.tick as usize)
+                .cloned()
+                .unwrap_or_default(),
+            muscle_force: playback
+                .forces
+                .muscle
+                .get(playback.tick as usize)
+                .cloned()
+                .unwrap_or_default(),
+            ground_force: playback
+                .forces
+                .ground
+                .get(playback.tick as usize)
+                .cloned()
+                .unwrap_or_default(),
+            arrows: false,
         };
+        // Developer screenshots: EVOLUTION_SMOKE_ENERGY=0.15 draws every muscle at that store.
+        if let Some(level) = std::env::var("EVOLUTION_SMOKE_ENERGY")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+        {
+            marks.energy.fill(level);
+        }
         if let Some(frame) = playback.frames.get(playback.tick as usize) {
             node_contact(
                 &playback.nodes,
@@ -1314,6 +1396,8 @@ struct App {
     zoom: f32,
     /// True once the user zoomed by hand; until then the zoom fits the creature.
     zoom_user: bool,
+    /// Player view option: draw muscle forces and ground pushes.
+    show_forces: bool,
     camera: [f32; 2],
     follow: bool,
     history_index: usize,
@@ -1478,6 +1562,7 @@ impl App {
             playing: true,
             zoom: DEFAULT_CAMERA_ZOOM,
             zoom_user: false,
+            show_forces: std::env::var_os("EVOLUTION_SMOKE_FORCES").is_some(),
             camera: [0.0, 0.0],
             follow: true,
             history_index: 0,
@@ -1985,6 +2070,9 @@ impl App {
         let mut back = false;
         ui.checkbox(&mut self.follow, "Follow")
             .on_hover_text("Keep the camera on the creature");
+        ui.checkbox(&mut self.show_forces, "Forces").on_hover_text(
+            "Draw muscle forces (orange) and ground pushes (blue), estimated from the recording",
+        );
         if ui.button("Reset camera").clicked() {
             self.zoom = DEFAULT_CAMERA_ZOOM;
             self.zoom_user = false;
@@ -2095,7 +2183,7 @@ impl App {
         if !self.zoom_user
             && let Some(p) = &self.playback
         {
-            self.zoom = fit_zoom(p.height, rect.height());
+            self.zoom = player_zoom(p.height, p.peak, rect.height());
         }
         let painter = ui.painter_at(rect);
         // All scene primitives are tessellated into egui's batched wgpu render pass.
@@ -2318,7 +2406,8 @@ impl App {
                     Color32::from_black_alpha(30),
                 ));
             }
-            let marks = FrameMarks::of(p);
+            let mut marks = FrameMarks::of(p);
+            marks.arrows = self.show_forces;
             draw_creature(&painter, &p.nodes, &p.creature, origin, self.zoom, &marks);
             match p.fallen() {
                 Some((tick, distance)) => {
@@ -4689,6 +4778,16 @@ impl eframe::App for App {
                 ScreenshotRequest,
             )));
         }
+        // Developer screenshots: EVOLUTION_SMOKE_SEEK=<seconds> holds the replay at that time.
+        if self.capture_path.is_some()
+            && let Some(seconds) = std::env::var("EVOLUTION_SMOKE_SEEK")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+            && let Some(p) = self.playback.as_mut()
+        {
+            p.seek((seconds * physics::rate() as f32) as u32);
+            self.playing = false;
+        }
         // Explicit opt-in capture hook for repeatable native rendering/performance checks.
         if self.capture_path.is_some()
             && self.started.elapsed() > smoke_capture_delay()
@@ -5387,6 +5486,25 @@ fn mix_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
 }
+/// An arrow starting at `from` and pointing along `delta`.
+fn draw_arrow(p: &egui::Painter, from: Pos2, delta: Vec2, color: Color32) {
+    if delta.length() < 3.0 {
+        return;
+    }
+    let tip = from + delta;
+    let dir = delta.normalized();
+    let side = Vec2::new(-dir.y, dir.x) * 4.0;
+    p.line_segment([from, tip], Stroke::new(2.5, color));
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            tip + dir * 3.0,
+            tip - dir * 6.0 + side,
+            tip - dir * 6.0 - side,
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}
 fn draw_creature(
     p: &egui::Painter,
     nodes: &[Node],
@@ -5425,7 +5543,7 @@ fn draw_creature(
             Color32::from_white_alpha(40),
         );
     }
-    for m in &c.muscles {
+    for (mi, m) in c.muscles.iter().enumerate() {
         let bone_a = c.bones[m.bone_a as usize];
         let bone_b = c.bones[m.bone_b as usize];
         let point = |bone: crate::evolution::Bone, t: f32| {
@@ -5445,16 +5563,52 @@ fn draw_creature(
         } else {
             1. - ((physics::target(m, marks.time) - m.short) / (m.long - m.short).max(1e-5))
         };
-        let width = (scale * 0.017 * (1. + 0.45 * contraction)).max(2.);
+        // A tired muscle thins and goes grey.
+        let energy = marks.energy.get(mi).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+        let width = (scale * 0.017 * (1. + 0.45 * contraction) * (0.45 + 0.55 * energy)).max(2.);
         p.line_segment(
             [a, b],
             Stroke::new(width + 3., Color32::from_rgb(10, 15, 19)),
         );
-        // Pink at rest, deep red at full contraction.
+        // Pink at rest, deep red at full contraction, grey when spent.
         p.line_segment(
             [a, b],
-            Stroke::new(width, mix_color(MUSCLE_REST, MUSCLE_ACTIVE, contraction)),
+            Stroke::new(
+                width,
+                mix_color(
+                    MUSCLE_TIRED,
+                    mix_color(MUSCLE_REST, MUSCLE_ACTIVE, contraction),
+                    energy,
+                ),
+            ),
         );
+        if marks.arrows
+            && let Some(&force) = marks.muscle_force.get(mi)
+        {
+            let along = (b - a).normalized();
+            if along.x.is_finite() {
+                let len = (force / 100.0).abs().min(1.0) * scale * 0.3;
+                let sign = if force >= 0. { 1. } else { -1. };
+                draw_arrow(p, a, along * sign * len, FORCE_MUSCLE);
+                draw_arrow(p, b, -along * sign * len, FORCE_MUSCLE);
+            }
+        }
+    }
+    if marks.arrows {
+        let weight: f32 = nodes.iter().map(|n| n.mass).sum::<f32>() * 9.81;
+        for (i, n) in nodes.iter().enumerate() {
+            let push = marks.ground_force.get(i).copied().unwrap_or(0.0);
+            if push > 0.0 {
+                let len = (push / weight.max(1e-3)).min(2.0) * scale * 0.6;
+                let foot = position(n) + Vec2::new(0., n.radius * scale);
+                draw_arrow(
+                    p,
+                    foot + Vec2::new(0., len),
+                    Vec2::new(0., -len),
+                    FORCE_GROUND,
+                );
+            }
+        }
     }
     for (i, n) in nodes.iter().enumerate() {
         let center = position(n);
@@ -5921,6 +6075,67 @@ mod tests {
                 "frame {i}: camera {x}, walk {walk}"
             );
         }
+    }
+    #[test]
+    fn replay_forces_stay_in_range() {
+        let creature = test_creature();
+        let config = Config::default();
+        let (frames, _) = crate::cpu_engine::replay(&creature, &config);
+        let nodes = physics::nodes(&creature);
+        let contact = vec![vec![false; nodes.len()]; frames.len()];
+        let out =
+            crate::replay_forces::analyze(&creature, &nodes, &frames, &contact, None, &config);
+        assert_eq!(out.energy.len(), frames.len());
+        assert!(out.energy.iter().flatten().all(|e| (0.0..=1.0).contains(e)));
+        assert!(out.muscle.iter().flatten().any(|f| *f != 0.0));
+    }
+    #[test]
+    fn estimated_muscle_energy_falls_with_work_and_recovers() {
+        let config = Config {
+            population: 200,
+            random_seed: false,
+            ..Config::default()
+        };
+        let pop = crate::evolution::create(&config).unwrap();
+        let (mut fell, mut recovered) = (0, 0);
+        let mut lowest = 1.0f32;
+        for i in 0..pop.genomes.len() {
+            let creature = pop.creature(i);
+            let (frames, _) = crate::cpu_engine::replay(&creature, &config);
+            let nodes = physics::nodes(&creature);
+            let contact = vec![vec![false; nodes.len()]; frames.len()];
+            let out =
+                crate::replay_forces::analyze(&creature, &nodes, &frames, &contact, None, &config);
+            for j in 0..creature.muscles.len() {
+                let series: Vec<f32> = out.energy.iter().map(|e| e[j]).collect();
+                let (at, low) = series
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .fold((0, 1.0f32), |b, (t, e)| if e < b.1 { (t, e) } else { b });
+                lowest = lowest.min(low);
+                if low < 0.9 {
+                    fell += 1;
+                    if series[at..].iter().any(|&e| e > low + 0.05) {
+                        recovered += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("muscles that fell below 0.9: {fell}, recovered: {recovered}, lowest {lowest}");
+        assert!(fell > 0, "no muscle ever tired, lowest {lowest}");
+        assert!(recovered > 0, "no tired muscle ever recovered");
+    }
+    #[test]
+    fn a_leaper_keeps_its_peak_in_view_without_shrinking_the_body_too_far() {
+        let typical = fit_zoom(0.5, 260.0);
+        // A mild jump fits whole.
+        assert!(player_zoom(0.5, 1.0, 260.0) < typical);
+        assert!(player_zoom(0.5, 1.0, 260.0) * 1.0 <= 0.72 * 260.0 + 0.01);
+        // A huge leap stops at 60% of the typical zoom.
+        assert!((player_zoom(0.5, 30.0, 260.0) - typical * 0.6).abs() < 0.01);
+        // A body that never leaves the ground keeps the typical fit.
+        assert_eq!(player_zoom(0.5, 0.5, 260.0), typical);
     }
     #[test]
     fn default_zoom_follows_body_height() {
