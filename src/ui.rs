@@ -2809,8 +2809,7 @@ impl App {
                     .on_hover_text("Shows how the islands, the emitters and migration fit together")
                     .clicked()
                 {
-                    // The schematic is not merged yet; the Help overlay stands in.
-                    self.show_help = true;
+                    self.schematic_open = true;
                 }
             });
         });
