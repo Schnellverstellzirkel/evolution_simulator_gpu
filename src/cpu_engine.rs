@@ -1511,7 +1511,7 @@ pub fn transport_cost(creature: &crate::evolution::Creature, cfg: &Config) -> Op
 /// Evaluates every creature of `unit` and returns results in unit order.
 pub fn evaluate(unit: &Population, cfg: &Config) -> Vec<GpuResult> {
     if crate::physics2::enabled() {
-        return crate::physics2::evaluate(unit, cfg);
+        return crate::cpu_v2::evaluate(unit, cfg);
     }
     evaluate_v1(unit, cfg)
 }

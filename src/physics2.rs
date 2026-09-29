@@ -201,28 +201,28 @@ impl Sym {
 
 /// One muscle's constants.
 #[derive(Clone, Debug)]
-struct MuscleModel {
-    bone_a: usize,
-    bone_b: usize,
-    anchor_a: f32,
-    anchor_b: f32,
+pub(crate) struct MuscleModel {
+    pub(crate) bone_a: usize,
+    pub(crate) bone_b: usize,
+    pub(crate) anchor_a: f32,
+    pub(crate) anchor_b: f32,
     /// Hill's relation as a factor on the shortening speed: 1 / (v_max
     /// times the muscle's length, at least 5 cm).
-    hill: f32,
+    pub(crate) hill: f32,
     /// Longest length (m).
-    amplitude: f32,
-    inv_period: f32,
-    phase: f32,
-    duty: f32,
-    inv_duty: f32,
-    inv_complement: f32,
-    stiffness: f32,
+    pub(crate) amplitude: f32,
+    pub(crate) inv_period: f32,
+    pub(crate) phase: f32,
+    pub(crate) duty: f32,
+    pub(crate) inv_duty: f32,
+    pub(crate) inv_complement: f32,
+    pub(crate) stiffness: f32,
     /// Force cap and energy store over the fixed `Limits` ones (at most 1):
     /// see `DRIVEN_ACCELERATION`.
-    strength: f32,
+    pub(crate) strength: f32,
     /// Node whose touchdown restarts the rhythm, if any.
-    sensor: Option<usize>,
-    reset: f32,
+    pub(crate) sensor: Option<usize>,
+    pub(crate) reset: f32,
 }
 
 /// A creature's constants for the v2 physics. Nodes are renumbered so that
@@ -230,58 +230,58 @@ struct MuscleModel {
 /// them; `order` maps them back to the creature's own numbering.
 #[derive(Clone, Debug)]
 pub struct Model {
-    order: Vec<usize>,
-    mass: Vec<f32>,
-    radius: Vec<f32>,
-    friction: Vec<f32>,
-    total_mass: f32,
-    inv_mass: f32,
+    pub(crate) order: Vec<usize>,
+    pub(crate) mass: Vec<f32>,
+    pub(crate) radius: Vec<f32>,
+    pub(crate) friction: Vec<f32>,
+    pub(crate) total_mass: f32,
+    pub(crate) inv_mass: f32,
     /// Per bone: pivot node, child node (always the bone's index plus one),
     /// length, parent bone (`None` for the neck), and the relative-angle
     /// range.
-    pivot: Vec<usize>,
-    child: Vec<usize>,
-    length: Vec<f32>,
-    parent: Vec<Option<usize>>,
-    lo: Vec<f32>,
-    hi: Vec<f32>,
+    pub(crate) pivot: Vec<usize>,
+    pub(crate) child: Vec<usize>,
+    pub(crate) length: Vec<f32>,
+    pub(crate) parent: Vec<Option<usize>>,
+    pub(crate) lo: Vec<f32>,
+    pub(crate) hi: Vec<f32>,
     /// Starting relative angle of every bone (the neck: its absolute angle).
-    rest: Vec<f32>,
-    muscles: Vec<MuscleModel>,
+    pub(crate) rest: Vec<f32>,
+    pub(crate) muscles: Vec<MuscleModel>,
     /// Each muscle's force cap and energy store as multiples of the fixed
     /// `Limits` ones (1 unless muscle strength scales with the body).
-    muscle_scale: f32,
+    pub(crate) muscle_scale: f32,
     /// Air drag coefficient (`AIR_DRAG`); tests of conservation set it to 0.
     pub(crate) air_drag: f32,
     /// Earthquake bump phase and ground amplitude for this creature.
-    quake_phase: f32,
-    amplitude: f32,
-    start: Vec<[f32; 2]>,
+    pub(crate) quake_phase: f32,
+    pub(crate) amplitude: f32,
+    pub(crate) start: Vec<[f32; 2]>,
 }
 
 /// A creature's state: the head and the neck, then relative joint angles.
 #[derive(Clone, Debug)]
 pub struct State {
-    x0: [f32; 2],
-    v0: [f32; 2],
-    th0: f32,
-    w0: f32,
-    q: Vec<f32>,
-    qd: Vec<f32>,
-    energy: Vec<f32>,
-    offset: Vec<f32>,
+    pub(crate) x0: [f32; 2],
+    pub(crate) v0: [f32; 2],
+    pub(crate) th0: f32,
+    pub(crate) w0: f32,
+    pub(crate) q: Vec<f32>,
+    pub(crate) qd: Vec<f32>,
+    pub(crate) energy: Vec<f32>,
+    pub(crate) offset: Vec<f32>,
     /// Each node's contact force (normal, friction) of the last step, which
     /// starts the next step's contact solve.
-    warm: Vec<[f32; 2]>,
+    pub(crate) warm: Vec<[f32; 2]>,
     /// Derived by `kinematics`: absolute bone angles and rates, node
     /// positions and velocities.
-    th: Vec<f32>,
-    om: Vec<f32>,
-    pos: Vec<[f32; 2]>,
-    vel: Vec<[f32; 2]>,
+    pub(crate) th: Vec<f32>,
+    pub(crate) om: Vec<f32>,
+    pub(crate) pos: Vec<[f32; 2]>,
+    pub(crate) vel: Vec<[f32; 2]>,
 }
 
-fn wrap(a: f32) -> f32 {
+pub(crate) fn wrap(a: f32) -> f32 {
     let t = std::f32::consts::TAU;
     a - t * ((a + std::f32::consts::PI) / t).floor()
 }
@@ -681,7 +681,7 @@ thread_local! {
 }
 
 /// Per-trial totals, as the GPU kernel keeps them (`GpuResult`).
-fn fresh_metrics() -> GpuResult {
+pub(crate) fn fresh_metrics() -> GpuResult {
     GpuResult {
         vertical_oscillation: 1e20,
         gait_frequency: -1e20,
@@ -974,7 +974,7 @@ pub fn run_recorded(
     metrics
 }
 
-fn gait_sample(metrics: &mut GpuResult, center_y: f32) {
+pub(crate) fn gait_sample(metrics: &mut GpuResult, center_y: f32) {
     let delta = center_y - metrics.previous_center_y;
     if metrics.vertical_trend == 0.0 {
         if delta.abs() > 0.0005 {

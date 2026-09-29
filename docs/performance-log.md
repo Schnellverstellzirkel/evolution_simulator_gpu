@@ -971,3 +971,17 @@ More resident warps do not pay: the v2 kernel is limited by instruction latency 
 Change. Physics v2 kernels compile without a register cap by default and the block size is chosen for 255 registers (`EVOLUTION_CUDA_MAXREG` still overrides; v1 keeps 128). No kernel arithmetic changed, so results are the same: prototype agreement on 513 creatures over 1 s has a worst gap of 0 m (0.0030 m in mud on Vulkan, 0.0024 m on CUDA) and the GPU repeatability tests pass. `EVOLUTION_CUDA_TABLE_LOCAL=N` (a developer diagnostic) moves bodies above N nodes to a local-memory table.
 
 Paired confirmation on main 7767bd8 (exclusive lock, GPU window clear, same 60,000 evolved creatures, three rounds of two repeats each, creatures/s): 128-register cap 91,200 (89,600 to 93,000), no cap (the new default) 93,900 (90,000 to 95,600), no cap with 64-thread blocks 90,400, Vulkan 51,300. The uncapped default is 3% faster than the 128 cap, which is inside the spread of single runs (5 of 6 pairs favor it), and much less than the 7 to 11% of the earlier loaded-GPU sweeps. CUDA is 1.8x Vulkan on this population. Keep the uncapped default (it is not slower); the register cap is not a lever worth more work.
+
+## 2026-09-30: the CPU engine of physics v2 runs 16 creatures per SIMD group (`src/cpu_v2.rs`)
+
+The CPU path of v2 (CPU-only games, GPU failover, the CPU side of `search_ab`) was the scalar reference `physics2::run`, about 1,000 creatures/s on 4 threads. `cpu_v2` puts 16 creatures with the same skeleton (bones and pivots) in one group, one lane each, and does every operation of `simulate_step_inner` on all lanes with `simd::F`. Muscle attachments, contacts, joint limits, the first-law check and falls differ per lane and run as masks and selects. Each lane's arithmetic is the reference's operation for operation (no fused multiply-add, the same libm sine and cosine per lane), so results equal the reference bit for bit: `tests/physics2_lanes.rs` compares every result field of about 1,200 creatures in calm, muddy, windy, bumpy, sloped, quaking, gapped, hurdled, heavy and screened worlds, and the 20,000 evolved creatures of `p2_cpu_speed` (P2_CMP=1) give identical results. `physics2::evaluate` stays the scalar reference (the GPU kernels are tested against it); `cpu_engine::evaluate` calls `cpu_v2::evaluate`.
+
+Rates, `examples/p2_cpu_speed.rs`, an evolved 100k-creature v2 population (20 s trials, no screen), busy machine (load average 10):
+
+| creatures per group | 4 threads | 8 threads |
+|---|---:|---:|
+| scalar reference (1 per group) | 1,000/s | about 2,000/s |
+| evolved population, 7.5 lanes filled per group (20,000 creatures) | 2,000/s | 3,700/s |
+| every group full (each creature 16 times) | 7,800/s | 12,000/s |
+
+The lane fill is what limits it: skeletons repeat less in a small unit than in a 3M generation (3.4 creatures per plan when muscle attachments must match, 9.5 per skeleton at 100k), and a group runs until its longest trial ends. Profile at full lanes: muscles (per-lane bone selection, 30%), the Gauss-Seidel solve (13%), libm cosine and sine (18%), the contact matrix and response passes (19%).

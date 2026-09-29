@@ -280,7 +280,8 @@ impl Neg for F {
     type Output = F;
     #[inline(always)]
     fn neg(self) -> F {
-        F::splat(0.0) - self
+        // Exact, as `-x` is on a scalar: a positive zero becomes negative.
+        self * F::splat(-1.0)
     }
 }
 impl AddAssign for F {

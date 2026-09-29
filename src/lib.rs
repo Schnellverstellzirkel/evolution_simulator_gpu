@@ -1,5 +1,6 @@
 pub mod config;
 pub mod cpu_engine;
+pub mod cpu_v2;
 pub mod creature_kernel;
 pub mod cuda_engine;
 pub mod engine;
