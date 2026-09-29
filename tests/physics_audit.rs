@@ -116,12 +116,13 @@ fn a_hopper_does_not_turn_the_ground_into_a_motor() {
     );
 }
 
-/// The seed 40 champion of a 40-generation v2 evolution (5,000 bodies, 20 s
-/// trials, 63.4 m): a 5-node hopper that reached that distance because
-/// friction pushed its foot the way the foot moved. Before the fix friction
-/// did +1,725 J of work on its nodes (37% of its friction impulse) against
-/// 739 J of muscle work, and removing the planting pass cut its distance to
-/// 1.3 m.
+/// The friction exploit, found again under the muscle-size rule: the seed 41
+/// champion of a 40-generation evolution (5,000 bodies, 20 s trials) run with
+/// the old friction. It reaches 12.8 m on 20 J of muscle drain because
+/// friction pushed its feet the way they moved: +5,369 J of friction work on
+/// its nodes. (The first exploit fixture, a 63.4 m hopper, is in
+/// `p2_friction_champion.json` and moves 0.08 m with muscle strength scaled
+/// to mass, so it guards little now.)
 #[test]
 fn friction_never_does_positive_work_on_the_exploiting_hopper() {
     let creature: Creature =
@@ -143,4 +144,70 @@ fn friction_never_does_positive_work_on_the_exploiting_hopper() {
         "friction did {:.1} J of positive work on the nodes",
         e[14]
     );
+}
+
+#[test]
+fn friction_never_does_positive_work_on_the_strong_muscle_exploit() {
+    let creature: Creature = serde_json::from_str(include_str!(
+        "fixtures/p2_friction_exploit_strong_muscles.json"
+    ))
+    .unwrap();
+    let cfg = Config {
+        duration: 20.0,
+        random_seed: false,
+        screen: None,
+        ..Config::default()
+    };
+    let (_, result) = physics2::replay(&creature, &cfg);
+    let e = physics2::ENERGY.with(|l| l.get());
+    eprintln!(
+        "distance {:.2} m, friction work +{:.1} J -{:.1} J, muscle work {:.1} J",
+        result.fitness, e[14], e[15], e[0]
+    );
+    assert!(
+        e[14] < 50.0,
+        "friction did {:.1} J of positive work on the nodes",
+        e[14]
+    );
+}
+
+/// Rank 881 of a seed 40 evolution: a 1.3 kg body whose capped 100 N muscles
+/// turned light limbs about a radian in one step. The integrator then made
+/// momentum (18 N s on a body that should hold 1.2) and the momentum balance
+/// turned it into kinetic energy: +338 J gained against 26 J of muscle drain,
+/// 287 J of it removed again by the balance. With muscle force scaled to the
+/// mass a muscle drives, it gains 9 J and the balance removes 0.1 J.
+#[test]
+fn a_light_body_gains_no_unpaid_energy() {
+    let creature: Creature =
+        serde_json::from_str(include_str!("fixtures/p2_light_body_r881.json")).unwrap();
+    let cfg = Config {
+        duration: 20.0,
+        random_seed: false,
+        screen: None,
+        ..Config::default()
+    };
+    let _ = physics2::replay(&creature, &cfg);
+    let e = physics2::ENERGY.with(|l| l.get());
+    eprintln!(
+        "gained {:.1} J lost {:.1} J, balance +{:.1} -{:.1} J",
+        e[1], e[2], e[3], e[4]
+    );
+    assert!(e[1] - e[2] < 20.0, "net solver energy {:.1} J", e[1] - e[2]);
+    assert!(e[4] < 20.0, "the balance removed {:.1} J", e[4]);
+}
+
+#[test]
+fn a_muscle_is_as_strong_as_the_mass_it_drives() {
+    // A muscle between two light limbs gets a small force cap; one that
+    // drives a heavy subtree keeps the full cap.
+    let cfg = Config {
+        random_seed: false,
+        ..Config::default()
+    };
+    let light: Creature =
+        serde_json::from_str(include_str!("fixtures/p2_light_body_r881.json")).unwrap();
+    let strengths = physics2::Model::new(&light, &cfg).muscle_strengths();
+    assert!(strengths.iter().all(|s| (0.0..=1.0).contains(s)));
+    assert!(strengths.iter().any(|&s| s < 0.5), "{strengths:?}");
 }

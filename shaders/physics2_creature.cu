@@ -810,8 +810,6 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
     const float inv_mass = L.inv_mass;
     const float inv_nodes = 1.0f / (float)nn;
     const float muscle_scale = L.bone_field(0u, 3u);
-    const float inv_capacity = 1.0f / (MUSCLE_CAPACITY * p.muscle_energy * muscle_scale);
-    const float cap = MAX_MUSCLE_FORCE * muscle_scale;
     L.kinematics(true);
 
     Result metrics = {0.0f, 0.0f, 1e20f, -1e20f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
@@ -938,6 +936,9 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
             const float inv_complement = muscle_data[field + 10u * TILE];
             const float offset = muscle_data[field + 13u * TILE];
             const float energy = muscle_data[field + 14u * TILE];
+            const float strength = muscle_data[field + 15u * TILE] * muscle_scale;
+            const float cap = MAX_MUSCLE_FORCE * strength;
+            const float inv_capacity = 1.0f / (MUSCLE_CAPACITY * p.muscle_energy * strength);
             const float2 pa0 = L.node_pos(a0);
             const float2 pa1 = L.node_pos(a1);
             const float2 pb0 = L.node_pos(b0);

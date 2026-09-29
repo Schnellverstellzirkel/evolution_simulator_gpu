@@ -31,7 +31,7 @@
 //   or 7 for none), anchors, waveform amplitude, Hill factor, 1/period,
 //   phase, duty, stiffness, 1/duty, 1/(1 - duty), the step's force
 //   (scratch), reset phase, rhythm offset (state), energy (state), longest
-//   length (where the tendon starts to pull).
+//   strength (the muscle's force cap and energy store over the fixed ones).
 // Bone 0's joint range high (the neck has none) holds the creature's muscle
 // scale: each muscle's force cap and energy store over the fixed ones.
 struct Record {
@@ -796,8 +796,6 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
     inv_mass = 1.0 / total_mass;
     let inv_nodes = 1.0 / f32(nn);
     let muscle_scale = bone_field(0u, 3u);
-    let inv_capacity = 1.0 / (MUSCLE_CAPACITY * p.muscle_energy * muscle_scale);
-    let cap = MAX_MUSCLE_FORCE * muscle_scale;
     kinematics(true);
 
     var metrics = Result(0.0, 0.0, 1e20, -1e20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
@@ -889,6 +887,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             let inv_complement = muscle_data[field + 10u * TILE];
             let offset = muscle_data[field + 13u * TILE];
             let energy = muscle_data[field + 14u * TILE];
+            let strength = muscle_data[field + 15u * TILE] * muscle_scale;
+            let cap = MAX_MUSCLE_FORCE * strength;
+            let inv_capacity = 1.0 / (MUSCLE_CAPACITY * p.muscle_energy * strength);
             let pa0 = node_pos(a0);
             let pa1 = node_pos(a1);
             let pb0 = node_pos(b0);

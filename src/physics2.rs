@@ -76,6 +76,15 @@ pub fn hill_speed() -> f32 {
             .unwrap_or(8.0)
     })
 }
+/// The largest acceleration (m/s^2) a muscle can give the mass it drives.
+/// A muscle's cross-section, and so its force, grows with the mass it moves:
+/// force cap = `DRIVEN_ACCELERATION` x the lighter of the two subtrees it
+/// pulls together (a bone and everything it carries), never above the fixed
+/// `Limits` cap, and its energy store scales the same way (a muscle's store
+/// is its own mass). Before, a 100 N muscle drove a 0.05 kg limb at 2,000
+/// m/s^2, turned a bone about a radian in one step and made momentum and
+/// energy the integrator did not pay for (docs/physics-v2.md).
+pub const DRIVEN_ACCELERATION: f32 = 100.0;
 /// Fields per muscle in the v2 kernel's muscle buffer.
 pub const MUSCLE_FIELDS: usize = 16;
 /// Sliding speed (m/s) below which friction holds a foot (as
@@ -195,7 +204,6 @@ struct MuscleModel {
     /// times the muscle's length, at least 5 cm).
     hill: f32,
     /// Longest length (m).
-    long: f32,
     amplitude: f32,
     inv_period: f32,
     phase: f32,
@@ -203,6 +211,9 @@ struct MuscleModel {
     inv_duty: f32,
     inv_complement: f32,
     stiffness: f32,
+    /// Force cap and energy store over the fixed `Limits` ones (at most 1):
+    /// see `DRIVEN_ACCELERATION`.
+    strength: f32,
     /// Node whose touchdown restarts the rhythm, if any.
     sensor: Option<usize>,
     reset: f32,
@@ -270,6 +281,10 @@ fn wrap(a: f32) -> f32 {
 impl Model {
     /// The model of a repaired creature (canonical bone order: bone `j`
     /// joins its parent node `a` to its child node `b`, bone 0 is the neck).
+    /// Each muscle's force cap and energy store over the fixed `Limits` ones.
+    pub fn muscle_strengths(&self) -> Vec<f32> {
+        self.muscles.iter().map(|m| m.strength).collect()
+    }
     pub fn new(c: &Creature, cfg: &Config) -> Model {
         let nodes = physics::body(&c.nodes, &c.bones);
         let n = nodes.len();
@@ -324,7 +339,6 @@ impl Model {
                     } else {
                         0.0
                     },
-                    long: m.long,
                     amplitude: (m.long - m.short).min(
                         2.0 * limits.muscle_speed * m.period * m.duty.min(1.0 - m.duty)
                             / std::f32::consts::PI,
@@ -335,12 +349,28 @@ impl Model {
                     inv_duty: 1.0 / m.duty,
                     inv_complement: 1.0 / (1.0 - m.duty),
                     stiffness: m.stiffness,
+                    strength: 1.0,
                     sensor: (m.sensor != NO_SENSOR)
                         .then(|| record[ends[m.sensor as usize] as usize]),
                     reset: m.reset,
                 }
             })
             .collect();
+        // Muscle strength follows the mass a muscle drives: the lighter of the
+        // two subtrees (a bone with everything it carries) it pulls together.
+        let mut muscles: Vec<MuscleModel> = muscles;
+        let mut subtree: Vec<f32> = (0..c.bones.len())
+            .map(|j| nodes[order[j + 1]].mass + if j == 0 { nodes[order[0]].mass } else { 0.0 })
+            .collect();
+        for j in (1..c.bones.len()).rev() {
+            if let Some(p) = parent[j] {
+                subtree[p] += subtree[j];
+            }
+        }
+        for m in &mut muscles {
+            let driven = subtree[m.bone_a].min(subtree[m.bone_b]);
+            m.strength = (DRIVEN_ACCELERATION * driven / limits.muscle_force).min(1.0);
+        }
         let quake = crate::physics::quake_hash(c.id);
         let still = cfg.quake <= 0.0 || !cfg.ground;
         // Muscle strength over the fixed limits; 1 for every body today.
@@ -1047,8 +1077,6 @@ fn simulate_step_inner(
             m.amplitude * (wave(settle_free) - wave((settle_free - dt).max(0.0))) * rate
         }
     };
-    let inv_capacity = 1.0 / (limits.muscle_energy * cfg.muscle_energy * model.muscle_scale);
-    let cap = limits.muscle_force * model.muscle_scale;
     for (k, m) in model.muscles.iter().enumerate() {
         let point = |bone: usize, t: f32| {
             let (p, c) = (model.pivot[bone], model.child[bone]);
@@ -1076,6 +1104,9 @@ fn simulate_step_inner(
             // Shortening is a negative `relative`.
             drive *= (1.0 + relative * m.hill).clamp(0.0, 1.0);
         }
+        let cap = limits.muscle_force * m.strength * model.muscle_scale;
+        let inv_capacity =
+            1.0 / (limits.muscle_energy * cfg.muscle_energy * m.strength * model.muscle_scale);
         let mut magnitude = (drive + relative * 0.15).clamp(-cap, cap);
         if limp {
             magnitude = 0.0;
@@ -2091,7 +2122,7 @@ pub fn pack(
                         m.reset,
                         0.0,
                         1.0,
-                        m.long,
+                        m.strength,
                     ];
                     for (f, value) in values.into_iter().enumerate() {
                         muscles[field + f * TILE] = value;

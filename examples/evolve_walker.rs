@@ -7,7 +7,7 @@
 //! engine. The archive's elites are then tried in order of fitness in the
 //! tests' worlds (16 copies, 5 s trials), and the first one that loses enough
 //! distance to every effect is printed, with a margin over the tests'
-//! thresholds. It also reports how far a 10 um nudge of the pose moves a
+//! thresholds (losses are shares of the calm distance). It also reports how far a 10 um nudge of the pose moves a
 //! fine-fidelity trial. Evolved fast gaits are chaotic there; GPU acceptance
 //! now uses repeatability on the GPU rather than this CPU-evolved fixture.
 //! See `tests/gpu_repeatability.rs`.
@@ -128,17 +128,17 @@ fn main() -> anyhow::Result<()> {
         cfg
     };
     let worlds = [
-        ("heat", world(|c| c.muscle_energy = 0.35), 1.5),
-        ("drought", world(|c| c.muscle_recovery = 0.1), 1.5),
-        ("uphill", world(|c| c.slope = 0.25), 0.75),
-        ("headwind", world(|c| c.wind = -6.0), 0.75),
-        ("chasms", world(|c| c.gaps = 1.5), 2.5),
-        ("low hurdles", world(|c| c.hurdles = 0.08), 0.75),
-        ("high hurdles", world(|c| c.hurdles = 0.20), 0.75),
-        ("walls", world(|c| c.hurdles = 0.35), 0.75),
+        ("heat", world(|c| c.muscle_energy = 0.35), 0.25),
+        ("drought", world(|c| c.muscle_recovery = 0.1), 0.25),
+        ("uphill", world(|c| c.slope = 0.25), 0.12),
+        ("headwind", world(|c| c.wind = -6.0), 0.12),
+        ("chasms", world(|c| c.gaps = 1.5), 0.45),
+        ("low hurdles", world(|c| c.hurdles = 0.08), 0.12),
+        ("high hurdles", world(|c| c.hurdles = 0.20), 0.12),
+        ("walls", world(|c| c.hurdles = 0.35), 0.12),
         ("damp", world(|c| c.mud = 0.02), 0.0),
         ("muddy", world(|c| c.mud = 0.05), 0.0),
-        ("deep mud", world(|c| c.mud = 0.10), 0.75),
+        ("deep mud", world(|c| c.mud = 0.10), 0.12),
     ];
     for elite in elites.iter().take(400) {
         let creature = &elite.creature;
@@ -146,17 +146,39 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
         let calm = mean_distance(creature, &base);
-        if calm < 4.0 {
+        if calm < 1.5 {
             continue;
         }
+        // The chasms' first pit is far off, so that world runs 12 s.
+        let long = Config {
+            duration: 12.0,
+            ..base.clone()
+        };
+        let solid = mean_distance(creature, &long);
         let losses: Vec<(&str, f32)> = worlds
             .iter()
-            .map(|(name, cfg, _)| (*name, calm - mean_distance(creature, cfg)))
+            .map(|(name, cfg, _)| {
+                if *name == "chasms" {
+                    let over = Config {
+                        gaps: 1.5,
+                        ..long.clone()
+                    };
+                    (
+                        *name,
+                        (solid - mean_distance(creature, &over)) / solid * calm,
+                    )
+                } else {
+                    (*name, calm - mean_distance(creature, cfg))
+                }
+            })
             .collect();
+        if std::env::var_os("WALKER_VERBOSE").is_some() {
+            eprintln!("calm {calm:.2} m, losses {losses:?}");
+        }
         if !worlds
             .iter()
             .zip(&losses)
-            .all(|((_, _, need), (_, loss))| loss >= need)
+            .all(|((_, _, need), (_, loss))| *loss >= need * calm)
         {
             continue;
         }
@@ -170,7 +192,7 @@ fn main() -> anyhow::Result<()> {
             creature.muscles.len(),
             elite.fitness
         );
-        println!("{creature:#?}");
+        println!("{}", serde_json::to_string(creature)?);
         return Ok(());
     }
     anyhow::bail!("no elite loses enough distance to every effect")

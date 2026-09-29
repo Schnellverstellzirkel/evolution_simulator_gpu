@@ -1134,11 +1134,11 @@ fn heat_wave_and_drought_reduce_distance() {
     );
     eprintln!("mean distance: calm {calm} m, heat wave {heat} m, drought {drought} m");
     assert!(
-        heat < calm - 1.0,
+        heat < calm * 0.75,
         "heat wave must cost distance: {heat} m vs {calm} m"
     );
     assert!(
-        drought < calm - 1.0,
+        drought < calm * 0.75,
         "drought must cost distance: {drought} m vs {calm} m"
     );
 }
@@ -1176,11 +1176,11 @@ fn uphill_slope_and_headwind_reduce_distance() {
     );
     eprintln!("mean distance: calm {calm} m, 25% uphill {uphill} m, gale {headwind} m");
     assert!(
-        uphill < calm - 0.5,
+        uphill < calm * 0.9,
         "uphill must cost distance: {uphill} m vs {calm} m"
     );
     assert!(
-        headwind < calm - 0.5,
+        headwind < calm * 0.9,
         "a headwind must cost distance: {headwind} m vs {calm} m"
     );
     // With the ground disabled the slope must not act at all, so both
@@ -1246,7 +1246,7 @@ fn mud_reduces_distance_and_spares_a_groundless_run() {
     );
     eprintln!("mean distance: dry {dry} m, damp {damp} m, muddy {muddy} m, deep {deep} m");
     assert!(
-        deep < dry - 0.5,
+        deep < dry * 0.9,
         "deep mud must cost distance: {deep} m vs {dry} m"
     );
     assert!(
@@ -1279,7 +1279,7 @@ fn gaps_stop_a_walker_where_solid_ground_lets_it_run() {
     // where the walker would otherwise run, so it must fall or stop early.
     let base = Config {
         population: 16,
-        duration: 5.0,
+        duration: 12.0,
         ..config()
     };
     let mut pop = evolution::Population::default();
@@ -1298,7 +1298,7 @@ fn gaps_stop_a_walker_where_solid_ground_lets_it_run() {
     );
     eprintln!("mean distance: solid {solid} m, chasms {chasms} m");
     assert!(
-        chasms < solid - 2.0,
+        chasms < solid * 0.6,
         "chasms must stop the walker: {chasms} m vs {solid} m"
     );
     let free = mean_distance(
@@ -1358,15 +1358,15 @@ fn hurdles_reduce_distance_and_spare_a_groundless_run() {
     );
     eprintln!("mean distance: clear {clear} m, low {low} m, high {high} m, walls {walls} m");
     assert!(
-        low < clear - 0.5,
+        low < clear * 0.9,
         "low hurdles must cost distance: {low} m vs {clear} m"
     );
     assert!(
-        high < clear - 0.5,
+        high < clear * 0.9,
         "high hurdles must cost distance: {high} m vs {clear} m"
     );
     assert!(
-        walls < clear - 0.5,
+        walls < clear * 0.9,
         "walls must cost distance: {walls} m vs {clear} m"
     );
     // With the ground off the steps cannot act at all.
@@ -1544,20 +1544,25 @@ fn random_bodies_get_no_free_propulsion() {
 
 #[test]
 fn cost_of_transport_counts_muscle_work_per_kilogram_and_meter() {
+    // The seed 40 champion of a GPU evolution under physics v2 (43.9 m in
+    // 20 s, 4.1 kg, muscle drain about 2,400 J).
     let cfg = Config {
-        duration: 5.0,
+        duration: 20.0,
         ..config()
     };
-    let walker = energy_dependent_walker();
-    let cost = evolution_simulator::cpu_engine::transport_cost(&walker, &cfg)
-        .expect("the walker moves forward");
-    assert!(cost.is_finite() && cost > 0.0, "cost {cost}");
+    let hopper: Creature =
+        serde_json::from_str(include_str!("fixtures/p2_muscle_champion.json")).unwrap();
+    let cost = evolution_simulator::cpu_engine::transport_cost(&hopper, &cfg)
+        .expect("the champion moves forward");
+    assert!(cost.is_finite() && cost > 5.0 && cost < 40.0, "cost {cost}");
     // With no muscle drive only the dampers work, so the cost is far lower.
-    let mut still = walker.clone();
+    let mut still = hopper.clone();
     for muscle in &mut still.muscles {
         muscle.short = muscle.long;
     }
     let idle = evolution_simulator::cpu_engine::transport_cost(&still, &cfg);
-    eprintln!("walker {cost}, without drive {idle:?}");
-    assert!(idle.is_none_or(|c| c < cost * 0.5));
+    assert!(
+        idle.is_none_or(|c| c < cost * 0.5),
+        "{idle:?} against {cost}"
+    );
 }
