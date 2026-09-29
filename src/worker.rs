@@ -309,6 +309,10 @@ pub struct Snapshot {
     /// The archive ranked by distance, sent once per `Command::Cards`.
     pub cards: Option<CardList>,
     pub preview: Option<(Creature, Config)>,
+    /// The best elite of the global archive now, and the world it is scored
+    /// in. It changes as soon as a new record is absorbed, mid-generation
+    /// too, so the world view can switch to it at once.
+    pub champion: Option<Arc<(Creature, Config)>>,
     /// What happened to this experiment, oldest first.
     pub events: Arc<Vec<Event>>,
     /// The archive map table while the UI asks for it.
@@ -388,6 +392,9 @@ struct StageLog {
     file: std::fs::File,
     started: Instant,
     seconds: [f64; 3],
+    /// Scheduler totals at the last row: checks submitted, check busy
+    /// seconds, device busy seconds, device idle seconds.
+    totals: [f64; 4],
 }
 impl StageLog {
     fn open() -> Option<Self> {
@@ -406,13 +413,14 @@ impl StageLog {
         if file.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
             let _ = writeln!(
                 file,
-                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second"
+                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second,checks,check_busy_seconds,device_busy_seconds,device_idle_seconds,mean_nodes"
             );
         }
         Some(Self {
             file,
             started: Instant::now(),
             seconds: [0.0; 3],
+            totals: [0.0; 4],
         })
     }
     fn add(&mut self, stage: usize, seconds: f64) {
@@ -422,8 +430,24 @@ impl StageLog {
         self.started = Instant::now();
         self.seconds = [0.0; 3];
     }
-    fn write_row(&mut self, generation: u32, population: usize) {
+    fn write_row(
+        &mut self,
+        generation: u32,
+        population: usize,
+        sched: Option<&crate::scheduler::Scheduler>,
+        mean_nodes: f64,
+    ) {
         let seconds = self.started.elapsed().as_secs_f64().max(1e-9);
+        let totals = sched.map_or([0.0; 4], |s| {
+            [
+                s.checks_submitted as f64,
+                s.check_busy_seconds,
+                s.devices.iter().map(|d| d.busy_seconds).sum(),
+                s.devices.iter().map(|d| d.idle_seconds).sum(),
+            ]
+        });
+        let delta: [f64; 4] = std::array::from_fn(|k| totals[k] - self.totals[k]);
+        self.totals = totals;
         if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
             let [rejected, optimizer, global, island, reserve] =
                 crate::storage::take_contender_counts();
@@ -440,11 +464,15 @@ impl StageLog {
         }
         let _ = writeln!(
             self.file,
-            "{generation},{:.6},{:.6},{:.6},{:.3}",
+            "{generation},{:.6},{:.6},{:.6},{:.3},{:.0},{:.3},{:.3},{:.3},{mean_nodes:.3}",
             self.seconds[0],
             self.seconds[1],
             self.seconds[2],
-            population as f64 / seconds
+            population as f64 / seconds,
+            delta[0],
+            delta[1],
+            delta[2],
+            delta[3],
         );
         let _ = self.file.flush();
         self.reset();
@@ -473,6 +501,9 @@ fn run(
     // The UI asked for the ranked archive (`Command::Cards`).
     let mut send_cards = false;
     let mut preview = None;
+    // The live champion sent with snapshots, and the (epoch, id) it is for.
+    let mut champion: Option<Arc<(Creature, Config)>> = None;
+    let mut champion_key: Option<(u64, u64)> = None;
     let mut lineage: Option<(u64, Vec<LineageStep>)> = None;
     let mut status = gpu
         .startup_warning
@@ -1133,7 +1164,16 @@ fn run(
                             }
                             if let Some(log) = &mut stage_log {
                                 log.add(2, breeding_seconds);
-                                log.write_row(e.generation.saturating_sub(1), e.config.population);
+                                let genomes = &e.population.genomes;
+                                let mean_nodes =
+                                    genomes.iter().map(|g| g.node_count as f64).sum::<f64>()
+                                        / genomes.len().max(1) as f64;
+                                log.write_row(
+                                    e.generation.saturating_sub(1),
+                                    e.config.population,
+                                    gpu.sched.as_ref(),
+                                    mean_nodes,
+                                );
                             }
                             generation_marks.push_back((Instant::now(), e.config.population));
                             while generation_marks.len() > 2
@@ -1408,6 +1448,20 @@ fn run(
                         ));
                     }
                 }
+                // The best elite by distance, the first one on a tie. Only a
+                // new record clones a creature.
+                let best = e
+                    .archive
+                    .entries
+                    .iter()
+                    .filter(|elite| elite.fitness.is_finite())
+                    .reduce(|a, b| if b.fitness > a.fitness { b } else { a });
+                let key = best.map(|elite| (epoch, elite.creature.id));
+                if key != champion_key {
+                    champion_key = key;
+                    champion =
+                        best.map(|elite| Arc::new((elite.creature.clone(), e.config.clone())));
+                }
                 let archive_count = e.archive.entries.len();
                 // The ranked archive, built only when the UI asks: one sort
                 // and one copy of each kept creature (about 1,500 at 3M).
@@ -1470,6 +1524,7 @@ fn run(
                     selected: selected.take(),
                     cards,
                     preview: preview.take(),
+                    champion: champion.clone(),
                     lineage: lineage.take(),
                     gpu: gpu.names(),
                     engines: engine_rows(&gpu),
@@ -1528,6 +1583,7 @@ fn run(
                     selected: selected.take(),
                     cards: None,
                     preview: None,
+                    champion: None,
                     lineage: None,
                     gpu: gpu.names(),
                     engines: engine_rows(&gpu),
@@ -1779,10 +1835,11 @@ mod tests {
             file: std::fs::File::create(&path).unwrap(),
             started: Instant::now(),
             seconds: [1.0, 2.0, 3.0],
+            totals: [0.0; 4],
         };
-        log.write_row(5, 1000);
+        log.write_row(5, 1000, None, 4.0);
         log.add(0, 4.0);
-        log.write_row(6, 1000);
+        log.write_row(6, 1000, None, 4.0);
         drop(log);
         let text = std::fs::read_to_string(&path).unwrap();
         let rows: Vec<&str> = text.lines().collect();
