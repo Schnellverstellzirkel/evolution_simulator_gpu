@@ -249,6 +249,14 @@ struct Lane {
     __device__ __forceinline__ float bone_field(unsigned j, unsigned f) const {
         return bone_data[bone_base + (j * BONE_FIELDS + f) * TILE];
     }
+    // How deep node `i` sits in the mud, as a share of the deepest mud.
+    __device__ __forceinline__ float mud_sink(unsigned i) const {
+        float2 pn = node_pos(i);
+        float2 g = terrain(pn.x);
+        float secant = sqrtf(1.0f + g.y * g.y);
+        float dry = (pn.y - g.x) / secant - node_radius(i);
+        return clampf(-dry, 0.0f, p.mud) * (1.0f / MUD_FULL_DEPTH);
+    }
     __device__ __forceinline__ float node_radius(unsigned i) const {
         if (i == 0u) {
             return bone_field(0u, 8u);
@@ -510,7 +518,8 @@ struct Lane {
             float2 g = terrain(pn.x);
             float secant = sqrtf(1.0f + g.y * g.y);
             float2 normal = v2(-g.y / secant, 1.0f / secant);
-            float gap = (pn.y - g.x) / secant - node_radius(i);
+            float mud = p.ground > 0.0f ? p.mud : 0.0f;
+            float gap = (pn.y - g.x) / secant - node_radius(i) + mud;
             unsigned body = body_of(i);
             float2 r = pn - origin;
             float2 v = node_vel(i);
@@ -565,7 +574,10 @@ struct Lane {
             float secant = sqrtf(1.0f + g.y * g.y);
             float2 normal = v2(-g.y / secant, 1.0f / secant);
             float2 tangent = v2(normal.y, -normal.x);
-            float gap = (pn.y - g.x) / secant - node_radius(node);
+            float mud = p.ground > 0.0f ? p.mud : 0.0f;
+            float dry = (pn.y - g.x) / secant - node_radius(node);
+            float gap = dry + mud;
+            float sink = clampf(-dry, 0.0f, mud) * (1.0f / MUD_FULL_DEPTH);
             unsigned body = body_of(node);
             float2 r = pn - origin;
             float2 v = node_vel(node);
@@ -583,7 +595,7 @@ struct Lane {
             c_vt[ci] = v.x * tangent.x + v.y * tangent.y
                 + DT * (sdot(dtan, a) + w * (-v.y * tangent.x + v.x * tangent.y));
             c_goal[ci] = gap >= 0.0f ? -gap * RATE : -gap * PUSH_OUT * RATE;
-            c_mu[ci] = node_fric(node) * p.friction;
+            c_mu[ci] = node_fric(node) * p.friction * (1.0f + MUD_GRIP * sink) * (1.0f + MUD_NORMAL * sink);
             nc += 1u;
         }
         // Contact-space matrix, column by column from each unit force's
@@ -821,12 +833,19 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
             vec3 sv = v3(w, vp.x + w * L.arm[j].y, vp.y - w * L.arm[j].x);
             L.bias[j] = crf(sv, sym_mul(L.i0[j], L.i1[j], sv));
         }
-        // Gravity and wind on every node.
+        // Gravity, wind and mud drag on every node.
+        float mud_impulse = 0.0f;
         UNROLL
         for (unsigned i = 0u; i < MAXN; i++) {
             if (i >= nn) { break; }
             float m = L.mass[i];
-            L.bias[L.body_of(i)] -= force_at(L.node_pos(i) - origin, v2(p.wind * m, -p.gravity * m));
+            float fx = p.wind * m;
+            if (p.mud > 0.0f && p.ground > 0.0f) {
+                float drag = -m * MUD_DRAG * L.mud_sink(i) * L.node_vel(i).x;
+                fx += drag;
+                mud_impulse += drag * DT;
+            }
+            L.bias[L.body_of(i)] -= force_at(L.node_pos(i) - origin, v2(fx, -p.gravity * m));
         }
         // Muscles pull between points on two bones; the forces collect in
         // the table.
@@ -885,16 +904,7 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
                 1.0f);
             muscle_data[field + 11u * TILE] = magnitude;
             muscle_start += magnitude * length_m;
-            // The tendon pulls too, passively; its energy counts as stored.
-            float pull = magnitude;
-            if (TENDON > 0.0f) {
-                const float long_length = muscle_data[field + 15u * TILE];
-                const float stretch = fmaxf(length_m - long_length, 0.0f);
-                const float k_t = TENDON * cap / fmaxf(long_length, 0.05f);
-                pull += k_t * stretch;
-                energy_start += 0.5f * k_t * stretch * stretch;
-                energy_scale += 0.5f * k_t * stretch * stretch;
-            }
+            const float pull = magnitude;
             const float2 f = dir * pull;
             L.body_add(a1 - 1u, 0u, force_at(pa - origin, f));
             L.body_add(b1 - 1u, 0u, -force_at(pb - origin, f));
@@ -997,7 +1007,7 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
             L.body_set(j, 1u, v3(L.om[j], 0.0f, 0.0f));
         }
 
-        float2 impulse = v2(p.wind * total_mass * DT, -p.gravity * total_mass * DT);
+        float2 impulse = v2(p.wind * total_mass * DT + mud_impulse, -p.gravity * total_mass * DT);
         L.nc = 0u;
         if (grounded) {
             impulse = L.contacts(origin, before, impulse);
@@ -1036,8 +1046,7 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
         // First law in flight.
         if (L.nc == 0u) {
             float muscle_end = 0.0f;
-            float stored_end = 0.0f;
-            for (unsigned k = 0u; k < muscle_count; k++) {
+                        for (unsigned k = 0u; k < muscle_count; k++) {
                 const unsigned field = tile.x + k * MUSCLE_FIELDS * TILE + tl;
                 const unsigned packed = __float_as_uint(muscle_data[field]);
                 const float anchor_a = muscle_data[field + TILE];
@@ -1051,13 +1060,8 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
                 const float2 d = pb - pa;
                 const float length_m = sqrtf(d.x * d.x + d.y * d.y);
                 muscle_end += muscle_data[field + 11u * TILE] * length_m;
-                if (TENDON > 0.0f) {
-                    const float long_length = muscle_data[field + 15u * TILE];
-                    const float stretch = fmaxf(fmaxf(length_m, 1e-6f) - long_length, 0.0f);
-                    stored_end += 0.5f * TENDON * cap / fmaxf(long_length, 0.05f) * stretch * stretch;
-                }
             }
-            float energy_end = stored_end;
+            float energy_end = 0.0f;
             float mass_x_end = 0.0f;
             UNROLL
             for (unsigned i = 0u; i < MAXN; i++) {
