@@ -7,7 +7,6 @@ Open work only. Delete an item when it is merged into `main` or measured and rej
 - If the game loses its GPU (device lost), it falls back to the CPU (3,700 to 12,000 creatures/s at 8 threads) for the rest of the session [claude/gpu-recover]. Reopen the GPU after a device loss instead, or make the CPU fallback fast. Agent benchmarks beside the owner's game have caused device-lost errors in the benchmark process.
 - The walking levers (tendons, joint damping) are on `claude/physics2-levers` and need a port onto v2 and one GPU evolution each.
 - v2 runs at about 0.2x of v1's creature-steps per second; CUDA is 1.8x Vulkan. Occupancy is 4 warps at 16 nodes [claude/p2-cuda-speed].
-- Remove the v1 kernels and CPU engine now that the v2 CPU engine is fast (3,700 to 12,000 creatures/s at 8 threads, bit-equal to the prototype) [claude/p2-cpu].
 - A faster v2 contact solve (contacts are about three quarters of v2's cost). Ideas are in `docs/research-2026-09-29.md`.
 - Realism physics in v2: bones that break under load, static and kinetic friction, ground contact along bones, elastic tendons. The earlier walking levers are on `claude/physics2-levers`.
 - Owner question: in evolved bodies 39% have their head more than 5 cm below the highest node. Should the fall rule (head below neck) change for them?
