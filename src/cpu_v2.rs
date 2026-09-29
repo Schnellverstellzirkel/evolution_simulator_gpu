@@ -1086,11 +1086,15 @@ impl Sim<'_> {
                         * (sp(1.0) + sp(physics::MUD_GRIP) * sink)
                         * (sp(1.0) + sp(physics::MUD_NORMAL) * sink);
                     // Ice patches take a share of the friction.
-                    if cfg.patches > 0.0 {
+                    let mu = if cfg.patches > 0.0 {
                         mu * (sp(1.0) - sp(cfg.patches) * ice(x))
                     } else {
                         mu
-                    }
+                    };
+                    // Static friction: a foot that barely slides holds harder.
+                    let slide = (v[0] * tangent[0] + v[1] * tangent[1]).abs();
+                    mu * (sp(1.0)
+                        + sp(0.25) * clamp((sp(0.02) - slide) * sp(100.0), zero(), sp(1.0)))
                 },
                 // `continue` when `gap + dt * vn_free > 0`.
                 candidate: !reach.gt(zero()) & self.active,

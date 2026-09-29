@@ -1363,11 +1363,13 @@ fn simulate_step_inner(
                         * (1.0 + physics::MUD_GRIP * sink)
                         * (1.0 + physics::MUD_NORMAL * sink);
                     // Ice patches take a share of the friction.
-                    if cfg.patches > 0.0 {
+                    let mu = if cfg.patches > 0.0 {
                         mu * (1.0 - cfg.patches * physics::ice(x))
                     } else {
                         mu
-                    }
+                    };
+                    // Static friction: a foot that barely slides holds harder.
+                    mu * physics::static_factor(v[0] * tangent[0] + v[1] * tangent[1])
                 },
             });
         }

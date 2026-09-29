@@ -648,6 +648,8 @@ struct Lane {
             if (p.patches > 0.0f) {
                 c_mu[ci] = c_mu[ci] * (1.0f - p.patches * ice_at(pn.x));
             }
+            // Static friction: a foot that barely slides holds harder.
+            c_mu[ci] = c_mu[ci] * (1.0f + 0.25f * fminf(fmaxf((0.02f - fabsf(c_vs[ci])) * 100.0f, 0.0f), 1.0f));
             nc += 1u;
         }
         // Contact-space matrix, column by column from each unit force's

@@ -262,6 +262,17 @@ pub const STANCE_GRIP: f32 = 10.0;
 /// as planted, so friction may push the body forward from them. Faster, the
 /// feet slide and friction can only oppose the slide.
 pub const PLANTED_SPEED: f32 = 0.01;
+/// Static friction: a foot that barely slides can take `1 + STATIC_EXTRA`
+/// times the kinetic friction bound. The extra fades linearly to nothing
+/// between 1 cm/s and 2 cm/s of slide, so no step chatters across a switch.
+/// The kernels write the same numbers as literals (0.25, 0.02, 100.0).
+pub const STATIC_EXTRA: f32 = 0.25;
+/// Slide speed (m/s) at which the static extra is gone.
+pub const STATIC_FADE_END: f32 = 0.02;
+/// The static factor, `1 + STATIC_EXTRA * clamp((STATIC_FADE_END - |v|) * 100, 0, 1)`.
+pub fn static_factor(slide: f32) -> f32 {
+    1.0 + 0.25 * ((0.02 - slide.abs()) * 100.0).clamp(0.0, 1.0)
+}
 /// Grip of a planted stance (`STANCE_GRIP`).
 pub fn stance_grip() -> f32 {
     STANCE_GRIP
