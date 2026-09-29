@@ -592,6 +592,9 @@ impl Experiment {
             morphology_topology: Option<qd::Topology>,
             /// Stopped by the early screen: offered to no archive.
             screened: bool,
+            /// Fitness of the global archive's elite in this creature's
+            /// cell at the start of the batch, for a CMA sample.
+            elite_before: Option<f32>,
         }
         let reserve_enabled = self.morphology_reserve_override != Some(false);
         // Reserve admission needs a score above the best behavior elite and
@@ -677,6 +680,12 @@ impl Experiment {
                 } else {
                     None
                 };
+                let elite_before = (emitter == Emitter::Cma)
+                    .then(|| self.candidate_cma.get(i).copied().flatten())
+                    .flatten()
+                    .filter(|_| score.is_finite() && score > FAILED)
+                    .and_then(|_| self.archive.slot_for(&descriptor.niche()))
+                    .map(|slot| self.archive.entries[slot].fitness);
                 Prep {
                     descriptor,
                     emitter,
@@ -685,6 +694,7 @@ impl Experiment {
                     behavior_candidate,
                     morphology_topology,
                     screened,
+                    elite_before,
                 }
             })
             .collect();
@@ -731,13 +741,18 @@ impl Experiment {
                 entered
             })
             .collect();
+        let island_changed: Vec<bool> = island_entered.iter().map(|g| !g.is_empty()).collect();
         for group in island_entered {
             entered.extend(group);
         }
         timings[0] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
-        for island in &mut self.islands {
-            island.refresh_behavior_scores();
+        // The scores depend only on the archive's elites, so an island that
+        // took no offer keeps the ones it has.
+        for (island, changed) in self.islands.iter_mut().zip(island_changed) {
+            if changed || !island.scores_current() {
+                island.refresh_behavior_scores();
+            }
         }
         timings[1] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
@@ -775,6 +790,8 @@ impl Experiment {
         section = std::time::Instant::now();
         let mut attempts = [0u64; qd::EMITTER_COUNT];
         let mut failed = 0usize;
+        let mut global_changed = false;
+        let mut behavior_inserted = false;
         for (&i, prep) in slots.iter().zip(prep) {
             if !prep.score.is_finite() || prep.score <= FAILED {
                 failed += 1;
@@ -783,12 +800,18 @@ impl Experiment {
             attempts[emitter_index] += 1;
             // The CMA improvement key needs the cell's fitness before the
             // offers; only CMA samples use it.
-            let elite_before = (prep.emitter == Emitter::Cma)
-                .then(|| self.candidate_cma.get(i).copied().flatten())
-                .flatten()
-                .filter(|_| prep.score.is_finite() && prep.score > FAILED)
-                .and_then(|_| self.archive.slot_for(&prep.descriptor.niche()))
-                .map(|slot| self.archive.entries[slot].fitness);
+            // The prefilter read the cell's elite before any offer of this
+            // batch; after the first insertion a new read keeps the order.
+            let elite_before = if !behavior_inserted {
+                prep.elite_before
+            } else {
+                (prep.emitter == Emitter::Cma)
+                    .then(|| self.candidate_cma.get(i).copied().flatten())
+                    .flatten()
+                    .filter(|_| prep.score.is_finite() && prep.score > FAILED)
+                    .and_then(|_| self.archive.slot_for(&prep.descriptor.niche()))
+                    .map(|slot| self.archive.entries[slot].fitness)
+            };
             let behavior_offer = if prep.behavior_candidate {
                 self.archive.offer(
                     &self.population,
@@ -818,6 +841,7 @@ impl Experiment {
             } else {
                 qd::Offer::default()
             };
+            behavior_inserted |= behavior_offer.inserted;
             let offer = if behavior_offer.inserted {
                 behavior_offer
             } else {
@@ -841,6 +865,7 @@ impl Experiment {
                 samples.push((i, key));
             }
             if offer.inserted {
+                global_changed = true;
                 entered.push(i);
                 rewards[emitter_index] += offer.reward;
                 if offer.new_niche {
@@ -874,7 +899,9 @@ impl Experiment {
         }
         timings[4] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
-        self.archive.refresh_behavior_scores();
+        if global_changed || !self.archive.scores_current() {
+            self.archive.refresh_behavior_scores();
+        }
         timings[5] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
         entered.sort_unstable();
