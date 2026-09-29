@@ -509,6 +509,23 @@ correction. The neutral-splits flag changes which offspring get evaluated, so
 its comparison is a genuine search A/B. Neither variant shows a gain that
 survives the seed spread.
 
+## 11. Emitter and variation experiments, 2026-09-29 (all ties, none kept)
+
+Setup: `search_ab` with `--checks`, population 5000, 60 generations, 20 s trials, CPU. Nine paired seeds (38 to 46) per arm, all against the same base run. Ratios are geometric means of arm over base, and "wins" counts seeds where the arm beat the base. Per-seed spread is large (base best distance 4.9 to 19.7 m, QD 1428 to 2363), so a ratio inside about 1.10 is noise.
+
+| Experiment | best distance | QD | wins (best, QD) |
+|---|---|---|---|
+| CMA-MAE thresholds, rate 0.1 | x1.07 | x0.98 | 6, 3 |
+| CMA-MAE thresholds, rate 0.02 | x0.82 | x1.04 | 3, 6 |
+| UCB bandit shares, 30% fixed floor (shares moved to 0.33/0.39/0.28) | x1.09 | x1.08 | 6, 6 |
+| UCB bandit shares, 10% floor, small exploration (morphology share 0.52) | x0.96 | x0.98 | 5, 6 |
+| Iso+line variation between same-plan elites (half of the mated children) | x1.32 | x0.99 | 4, 4 |
+| Mating rate of structural and novelty children 0.2 to 0.5 | x1.18 | x1.06 | 5, 4 |
+| Self-adapted mutation scale (`Creature.mutability` scales local mutation, log-normal step 0.2), 18 seeds | x1.23 | x1.03 | 11, 10 |
+| Exploring CMA also searches joint ranges and touchdown reset phases | x1.22 | x1.02 | 6, 6 |
+
+Notes. The current emitter weights are inert: the mean reward per attempt is about 0.002 while the formula adds a constant 0.55 and an exploration bonus, so the shares stay at the 0.35/0.35/0.30 prior. The first bandit arm looked positive only because its exploration term still dominated, so its shares stayed near the prior. The second arm made the shares follow reward (morphology 0.52) and lost the gain. The best-distance means are pulled by single seeds (for example 53 m on one line-variation seed). The mutability result did not survive nine more seeds (second batch: best x1.00, QD x0.98). `Creature.mutability` is still mutated but unused; deleting it touches the save format and 32 sites, so it was left for the owner. The bandit was rewarded per evaluation, not per GPU-second, because the CPU harness has no GPU time.
+
 ## Sources
 
 - Arza, Le Goff, Hart (2024). [Generalized Early Stopping in Evolutionary Direct Policy Search](https://arxiv.org/abs/2308.03574). ACM TELO.

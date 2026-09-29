@@ -344,6 +344,25 @@ fn run_seed(
         println!("{scope} seed {seed} summary: archive empty, qd {qd:.2}, cells {cells}");
     }
     print_body_mix(scope, seed, &top);
+    let weights = evolution_simulator::qd::emitter_weights(&experiment.emitter_stats);
+    println!(
+        "{scope} seed {seed} emitters (share, recent reward per attempt, improvements, discoveries): {}",
+        evolution_simulator::qd::Emitter::ALL
+            .iter()
+            .map(|e| {
+                let s = &experiment.emitter_stats[e.index()];
+                format!(
+                    "{} {:.2} {:.3} {} {}",
+                    e.label(),
+                    weights[e.index()],
+                    s.reward,
+                    s.improvements,
+                    s.discoveries
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
     print_robustness(scope, seed, &experiment);
     print_common_grid(scope, seed, &experiment);
     Ok((best, qd))
