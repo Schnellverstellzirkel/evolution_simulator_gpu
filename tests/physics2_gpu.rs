@@ -60,7 +60,6 @@ fn agree(mud: f32) {
             bones,
             muscles: Vec::new(),
             id: 7,
-            mutability: 1.0,
         }
     };
     pop.push(chain(&[[0.0, 0.6], [0.0, 0.3], [0.3, 0.3], [0.6, 0.05]]));

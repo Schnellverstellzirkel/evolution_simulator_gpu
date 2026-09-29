@@ -80,7 +80,6 @@ fn passive_triangle(fallen: bool) -> Creature {
         bones,
         muscles: Vec::new(),
         id: 0,
-        mutability: 1.0,
     }
 }
 
@@ -220,7 +219,6 @@ fn extending_a_broken_joints_trial_keeps_its_score_at_the_break() {
         bones,
         muscles,
         id: 0,
-        mutability: 1.0,
     };
     let cfg = Config {
         duration: 3.0,

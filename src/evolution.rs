@@ -228,7 +228,6 @@ pub struct Genome {
     pub muscle_start: usize,
     pub muscle_count: usize,
     pub id: u64,
-    pub mutability: f32,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Creature {
@@ -236,7 +235,6 @@ pub struct Creature {
     pub bones: Vec<Bone>,
     pub muscles: Vec<Muscle>,
     pub id: u64,
-    pub mutability: f32,
 }
 /// Splits `all` into consecutive parts of the given sizes.
 fn split<T>(mut all: &mut [T], sizes: impl Iterator<Item = usize>) -> Vec<&mut [T]> {
@@ -315,7 +313,6 @@ impl Population {
             bones: self.bones[g.bone_start..g.bone_start + g.bone_count].to_vec(),
             muscles: self.muscles[g.muscle_start..g.muscle_start + g.muscle_count].to_vec(),
             id: g.id,
-            mutability: g.mutability,
         }
     }
     pub fn push(&mut self, c: Creature) {
@@ -329,7 +326,6 @@ impl Population {
             muscle_start: self.muscles.len(),
             muscle_count: c.muscles.len(),
             id: c.id,
-            mutability: c.mutability,
         });
         self.nodes.extend(c.nodes);
         self.bones.extend(c.bones);
@@ -381,7 +377,6 @@ impl Population {
             muscle_start: self.muscles.len(),
             muscle_count: c.muscles.len(),
             id: c.id,
-            mutability: c.mutability,
         };
         self.nodes.extend(c.nodes);
         self.bones.extend(c.bones);
@@ -572,7 +567,6 @@ impl Population {
                 muscle_start: at[2],
                 muscle_count: m,
                 id: c.id,
-                mutability: c.mutability,
             };
             at = [at[0] + n, at[1] + b, at[2] + m];
         }
@@ -638,7 +632,6 @@ impl Population {
                 muscle_start: at[2],
                 muscle_count: m,
                 id: meta.id,
-                mutability: meta.mutability,
             };
             at = [at[0] + n, at[1] + b, at[2] + m];
         }
@@ -782,10 +775,6 @@ impl Population {
                         .checked_add(g.muscle_count)
                         .is_some_and(|x| x <= self.muscles.len()),
                 "Invalid genome offset"
-            );
-            ensure!(
-                g.mutability.is_finite() && (0.0..=2.0).contains(&g.mutability),
-                "Invalid mutability"
             );
             for n in &self.nodes[g.node_start..g.node_start + g.node_count] {
                 ensure!(
@@ -1113,7 +1102,6 @@ pub(crate) fn migrate_legacy_creature(
     nodes: Vec<NodeGene>,
     legacy_muscles: &[LegacyMuscle],
     id: u64,
-    mutability: f32,
     cfg: &Config,
 ) -> Creature {
     let mut creature = Creature {
@@ -1123,7 +1111,6 @@ pub(crate) fn migrate_legacy_creature(
         nodes,
         muscles: Vec::with_capacity(legacy_muscles.len()),
         id,
-        mutability,
     };
     let mut rng = Rng::new(cfg.seed, 0, id as usize);
     for old in legacy_muscles {
@@ -1389,7 +1376,6 @@ fn random_creature_from(cfg: &Config, rng: &mut Rng) -> Creature {
         bones: Vec::with_capacity(n - 1),
         muscles: vec![],
         id: 0,
-        mutability: 1.0,
     };
     for i in 0..n - 1 {
         let mut b = bone(i, i + 1, &c.nodes);
@@ -1808,7 +1794,6 @@ pub struct ChildBatch {
 
 struct ChildMeta {
     id: u64,
-    mutability: f32,
     counts: [u32; 3],
 }
 
@@ -1819,7 +1804,6 @@ impl ChildBatch {
         canonicalize_bone_order(&mut child);
         self.meta.push(ChildMeta {
             id: child.id,
-            mutability: child.mutability,
             counts: [
                 child.nodes.len() as u32,
                 child.bones.len() as u32,
@@ -1948,7 +1932,6 @@ fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
             };
         }
     }
-    creature.mutability = (creature.mutability * (qd::gaussian(rng) * 0.05).exp()).clamp(0.05, 2.0);
     creature
 }
 
@@ -2345,7 +2328,6 @@ mod tests {
             bones: vec![Bone::new(0, 1, 9.6)],
             muscles: vec![],
             id: 0,
-            mutability: 1.0,
         };
         normalize_bone_lengths(&mut creature);
         assert_eq!(creature.bones[0].rest_length, 0.625);
@@ -2381,7 +2363,6 @@ mod tests {
             bones: vec![Bone::new(0, 1, 2.0), Bone::new(1, 2, 2.0)],
             muscles: vec![],
             id: 0,
-            mutability: 1.0,
         };
         repair(&mut creature, &cfg, &mut Rng::new(42, 0, 0));
         for node in &creature.nodes {
@@ -2469,7 +2450,6 @@ mod tests {
                     },
                 ],
                 id: 1,
-                mutability: 1.0,
             };
             let old_points: Vec<_> = creature
                 .muscles
@@ -2531,7 +2511,6 @@ mod tests {
                 reset: 0.0,
             }],
             id: 1,
-            mutability: 1.0,
         };
         let before = [
             muscle_point(

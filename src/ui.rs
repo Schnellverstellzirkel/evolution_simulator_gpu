@@ -6197,7 +6197,6 @@ mod tests {
                 reset: 0.0,
             }],
             id: 7,
-            mutability: 1.0,
         }
     }
     #[test]

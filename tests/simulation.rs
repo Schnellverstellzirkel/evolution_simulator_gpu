@@ -212,7 +212,6 @@ fn overlapping_nodes_remain_finite() {
             reset: 0.0,
         }],
         id: 1,
-        mutability: 1.,
     };
     assert!(evaluate_one(&c, &config()).is_finite());
 }
@@ -477,7 +476,6 @@ fn gpu_cpu_diagnostic_handles_partial_workgroups() {
             bones,
             muscles,
             id: i as u64,
-            mutability: 1.,
         });
     }
     mixed.validate(&cfg).unwrap();
@@ -1334,7 +1332,6 @@ fn sled_creature() -> Creature {
         bones,
         muscles,
         id: 0,
-        mutability: 1.0,
     }
 }
 
