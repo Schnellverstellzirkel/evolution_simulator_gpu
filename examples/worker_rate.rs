@@ -17,7 +17,10 @@ fn main() -> anyhow::Result<()> {
     let generations = arg(2, 12) as usize;
     let seed = arg(3, 38);
     let gpu = Gpu::new("RTX 4060")?;
-    let worker = Worker::spawn(gpu, eframe::egui::Context::default());
+    // A measurement must not pause itself when it runs under
+    // tools/pause-game.sh, so it watches a private pause directory.
+    let pause_dir = std::env::temp_dir().join(format!("worker-rate-{}", std::process::id()));
+    let worker = Worker::spawn_with_pause_dir(gpu, eframe::egui::Context::default(), pause_dir);
     worker.send(Command::New(Config {
         population,
         seed,
