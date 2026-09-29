@@ -246,12 +246,39 @@ fn recorded_forces_match_the_prototype_on_each_backend() {
             if creature.muscles.is_empty() || score.fitness <= -1e10 {
                 continue;
             }
+            // Number the nodes other than the head backwards. Bone `j` then
+            // no longer ends at node `j + 1`, as in most evolved bodies, but
+            // the kernel sees the same body and scores it the same.
+            let n = creature.nodes.len();
+            let relabel = |k: u32| if k == 0 { 0 } else { n as u32 - k };
+            let mut nodes = creature.nodes.clone();
+            for (k, node) in creature.nodes.iter().enumerate() {
+                nodes[relabel(k as u32) as usize] = *node;
+            }
+            creature.nodes = nodes;
+            for bone in &mut creature.bones {
+                bone.a = relabel(bone.a);
+                bone.b = relabel(bone.b);
+            }
             let recording =
                 engine::record_on_gpu(&creature, &cfg, std::time::Duration::from_secs(30))
                     .expect("a GPU replay");
             assert_eq!(recording.result.fitness.to_bits(), score.fitness.to_bits());
             let forces = recording.forces.expect("recorded forces");
             let (frames, _, cpu) = physics2::replay_forces(&creature, &cfg);
+            // The GPU frames are in the creature's node numbering, as the
+            // prototype's: the start poses agree node by node.
+            let settle = evolution_simulator::physics::settle() as usize;
+            for (n, (gpu, cpu)) in recording.frames[settle]
+                .iter()
+                .zip(&frames[settle])
+                .enumerate()
+            {
+                assert!(
+                    (gpu[0] - cpu[0]).abs() < 1e-4 && (gpu[1] - cpu[1]).abs() < 1e-4,
+                    "{name}: creature {i} node {n} starts at {gpu:?} on the GPU, {cpu:?} on the CPU"
+                );
+            }
             assert_eq!(forces.energy.len(), frames.len());
             assert_eq!(forces.muscle.len(), frames.len());
             assert_eq!(forces.ground.len(), frames.len());

@@ -882,10 +882,11 @@ struct InFlightReplay {
 /// How one recorded frame is laid out (`creature_kernel::frame_stride`): the
 /// body's `nodes` positions at the start of `stride` slots, then, when
 /// `stride` is longer than `capacity`, an (energy, force) pair per muscle and
-/// a (normal, friction) contact force per node.
-#[derive(Clone, Copy)]
+/// a (normal, friction) contact force per node. The kernel numbers nodes so
+/// that bone `j` ends at node `j + 1`; `order[k]` is the creature's own number
+/// of kernel node `k`, as in `physics2::Model`.
 struct FrameLayout {
-    nodes: usize,
+    order: Vec<usize>,
     capacity: usize,
     muscles: usize,
     stride: usize,
@@ -906,8 +907,13 @@ fn start_recording<D: SegmentDevice>(
     let total = fidelity.settle() + request.cfg.steps();
     let batch = &batches[0];
     let ticket = engine.record(batch, &request.cfg, total, step_range)?;
+    // The kernel's node numbering, from the bone order `pack` gave it.
+    let mut creature = request.creature.clone();
+    crate::evolution::canonicalize_bone_order(&mut creature);
     let layout = FrameLayout {
-        nodes: request.creature.nodes.len(),
+        order: std::iter::once(0)
+            .chain(creature.bones.iter().map(|b| b.b as usize))
+            .collect(),
         capacity: batch.capacity,
         muscles: batch.info.first().map_or(0, |i| i[2] as usize),
         stride: creature_kernel::frame_stride(batch),
@@ -919,11 +925,20 @@ fn start_recording<D: SegmentDevice>(
 /// last, each with the body's node positions.
 fn recorded(finished: &Completed, layout: FrameLayout, total: u32) -> Result<Recording, String> {
     let FrameLayout {
-        nodes,
+        order,
         capacity,
         muscles,
         stride,
     } = layout;
+    let nodes = order.len();
+    // Values per kernel node, put back in the creature's node numbering.
+    let renumber = |value: &dyn Fn(usize) -> f32| {
+        let mut out = vec![0.0; nodes];
+        for (k, &node) in order.iter().enumerate() {
+            out[node] = value(k);
+        }
+        out
+    };
     let flat = finished
         .frames
         .as_ref()
@@ -938,7 +953,13 @@ fn recorded(finished: &Completed, layout: FrameLayout, total: u32) -> Result<Rec
         return Err("the recording returned too few frames".into());
     }
     let frames = (0..count)
-        .map(|t| flat[t * stride..t * stride + nodes].to_vec())
+        .map(|t| {
+            let mut frame = vec![[0.0; 2]; nodes];
+            for (k, &node) in order.iter().enumerate() {
+                frame[node] = flat[t * stride + k];
+            }
+            frame
+        })
         .collect();
     let forces = (stride >= capacity + muscles + nodes && stride > capacity).then(|| {
         let slot = |t: usize, k: usize| flat[t * stride + capacity + k];
@@ -950,10 +971,10 @@ fn recorded(finished: &Completed, layout: FrameLayout, total: u32) -> Result<Rec
                 .map(|t| (0..muscles).map(|k| slot(t, k)[1]).collect())
                 .collect(),
             ground: (0..count)
-                .map(|t| (0..nodes).map(|i| slot(t, muscles + i)[0]).collect())
+                .map(|t| renumber(&|k| slot(t, muscles + k)[0]))
                 .collect(),
             friction: (0..count)
-                .map(|t| (0..nodes).map(|i| slot(t, muscles + i)[1]).collect())
+                .map(|t| renumber(&|k| slot(t, muscles + k)[1]))
                 .collect(),
         }
     });
