@@ -972,6 +972,36 @@ fn bone(a: usize, b: usize, nodes: &[NodeGene]) -> Bone {
         dx.hypot(dy).clamp(0.03, max_bone_length()),
     )
 }
+/// The period ratios a limb may run at against the body's base clock (the
+/// first muscle's period). Simple ratios keep the whole gait exactly
+/// periodic, repeating every few base cycles.
+pub const CLOCK_RATIOS: [f32; 5] = [0.5, 2.0 / 3.0, 1.0, 1.5, 2.0];
+
+/// Every muscle runs on the body's base clock, set by the first muscle, or on
+/// a simple multiple of it (`CLOCK_RATIOS`): a period equal to a ratio (to
+/// 0.3%, so ratios survive the arithmetic of mutation) keeps it, and any other
+/// period falls back to the base, so muscles that repair or an operator adds
+/// with a random period join the body's clock.
+fn snap_clock_ratios(c: &mut Creature) {
+    let Some(base) = c.muscles.first().map(|m| m.period) else {
+        return;
+    };
+    let (low, high) = (min_muscle_period(), 10.0);
+    for m in &mut c.muscles {
+        let log = (m.period / base).ln();
+        let best = CLOCK_RATIOS
+            .iter()
+            .copied()
+            .min_by(|a, b| (a.ln() - log).abs().total_cmp(&(b.ln() - log).abs()))
+            .unwrap_or(1.0);
+        let ratio = if (best.ln() - log).abs() < 0.003 && (low..=high).contains(&(base * best)) {
+            best
+        } else {
+            1.0
+        };
+        m.period = base * ratio;
+    }
+}
 pub(crate) fn normalize_bone_lengths(c: &mut Creature) {
     for bone in &mut c.bones {
         let a = c.nodes[bone.a as usize];
@@ -1244,13 +1274,7 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
             }
         }
     }
-    // Every muscle runs on the body's one clock, set by the first muscle.
-    // Muscles differ only in phase, so every gait repeats exactly.
-    if let Some(first) = c.muscles.first().map(|m| m.period) {
-        for m in &mut c.muscles {
-            m.period = first;
-        }
-    }
+    snap_clock_ratios(c);
     normalize_bone_lengths(c);
     canonicalize_bone_order(c);
     align_nodes_with_bones(c);

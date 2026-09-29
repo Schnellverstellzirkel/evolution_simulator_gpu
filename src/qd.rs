@@ -1647,9 +1647,12 @@ fn apply_parameters(creature: &mut Creature, values: &[f32]) {
         bone.organ_at = values[i + 4].clamp(0.0, 1.0);
         i += BONE_FIELDS;
     }
-    let period = values[i]
+    // One log period scales the whole body clock; limbs keep their ratios.
+    let base = creature.muscles.first().map_or(1.0, |m| m.period).max(1e-3);
+    let scale = values[i]
         .exp()
-        .clamp(crate::evolution::min_muscle_period(), 10.0);
+        .clamp(crate::evolution::min_muscle_period(), 10.0)
+        / base;
     i += 1;
     let stroke = crate::evolution::max_stroke();
     for m in &mut creature.muscles {
@@ -1657,7 +1660,7 @@ fn apply_parameters(creature: &mut Creature, values: &[f32]) {
         m.anchor_b = values[i + 1].clamp(0.0, 1.0);
         m.short = values[i + 2].clamp(0.01, 0.8 * stroke);
         m.long = values[i + 3].clamp(m.short, stroke);
-        m.period = period;
+        m.period = (m.period * scale).clamp(crate::evolution::min_muscle_period(), 10.0);
         m.phase = values[i + 4].rem_euclid(1.0);
         m.duty = values[i + 5].clamp(0.05, 0.95);
         m.stiffness = values[i + 6].exp().clamp(1.0, 120.0);

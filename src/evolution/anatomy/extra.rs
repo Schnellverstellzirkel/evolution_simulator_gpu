@@ -229,7 +229,7 @@ pub(crate) fn cadence_stride_trade(
         return false;
     }
     for m in &mut c.muscles {
-        m.period = period * factor;
+        m.period *= factor;
         m.short = (m.long - (m.long - m.short) * factor).clamp(0.01, m.long);
     }
     true

@@ -89,6 +89,11 @@ pub(super) const OPERATORS: &[(&str, Operator)] = &[
     ("retune_muscle_pair", controller::retune_muscle_pair),
     ("release_touchdown", controller::release_touchdown),
     ("snap_limb_phases", controller::snap_limb_phases),
+    ("limb_clock_ratio", controller::limb_clock_ratio),
+    ("limb_clock_lock", controller::limb_clock_lock),
+    ("reflex_on_muscle", controller::reflex_on_muscle),
+    ("reflex_all_feet", controller::reflex_all_feet),
+    ("reflex_reset_shift", controller::reflex_reset_shift),
 ];
 
 /// Operators that share one pick slot: together they are as likely as one
@@ -123,6 +128,11 @@ const CONTROLLER_SLOT: &[&str] = &[
     "retune_muscle_pair",
     "release_touchdown",
     "snap_limb_phases",
+    "limb_clock_ratio",
+    "limb_clock_lock",
+    "reflex_on_muscle",
+    "reflex_all_feet",
+    "reflex_reset_shift",
 ];
 
 /// The enabled operators, as indices into `OPERATORS`.
