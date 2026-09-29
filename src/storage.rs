@@ -31,12 +31,14 @@ pub enum ContenderReason {
 /// `ContenderReason` (a diagnostic for the check cost).
 pub static CONTENDER_COUNTS: [std::sync::atomic::AtomicU64; 5] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 5];
-/// Key of one behavior cell in one archive (0 is the global archive, 1 + k
-/// island k), for sharing checks between contenders for the same cell.
-fn cell_key(archive: u64, niche: &qd::Niche) -> u64 {
+/// Key of one behavior cell of one island, for sharing checks between
+/// contenders for the same cell. A contender for a global cell uses its own
+/// island's key too, so contenders from different islands never drop each
+/// other.
+fn cell_key(island: u64, niche: &qd::Niche) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    archive.hash(&mut hasher);
+    island.hash(&mut hasher);
     niche.hash(&mut hasher);
     hasher.finish()
 }
@@ -158,8 +160,9 @@ pub struct Experiment {
     /// Steady-state breeding rounds so far; salts offspring random streams.
     #[serde(default)]
     pub breed_round: u64,
-    /// Island archives. Slot `i` breeds from island `i % island_count()`; the global
-    /// `archive` collects every island's elites for display and statistics.
+    /// Island archives. Slot `i` breeds from island `qd::island_of_slot(i, island_count())`; the global
+    /// `archive` collects every island's elites for display and statistics
+    /// and is never a parent source.
     #[serde(default)]
     pub islands: Vec<QdArchive>,
     /// Every creature that entered an archive, keyed by creature id, with its
@@ -173,19 +176,58 @@ pub struct Experiment {
     /// Stored separately in V4 checkpoints to keep the V3 payload readable.
     #[serde(skip)]
     pub island_progress: Vec<(f32, u32)>,
-    /// The last island migration this session: its generation, and per
-    /// island how many elites it sent and how many of those the neighbor
-    /// kept. Saved after the body of a small save.
+    /// The last migration to the hub this session: its generation, and per
+    /// island how many elites it sent and how many of those the hub kept
+    /// (the hub's own entry is zero). Saved after the body of a small save.
     #[serde(skip)] // the full V7 format does not carry it
     pub last_migration: Option<(u32, Vec<(usize, usize)>)>,
     /// Elites from before an environment change, waiting to be evaluated again
-    /// in the new world. Breeding hands them out before new offspring.
+    /// in the new world, each queued for its own island. Breeding hands them
+    /// out before new offspring.
     #[serde(default)]
-    pub reseed: Vec<evolution::Creature>,
+    pub reseed: Reseed,
     /// Elites a meteor wiped out, with their island (None for the global
     /// archive), kept so the strike can be undone. Not saved in checkpoints.
     #[serde(skip)]
     pub fossils: Vec<(Option<usize>, qd::Elite)>,
+}
+
+/// Elites waiting to be evaluated again after a world change, one queue per
+/// island. Each returns in a slot of its own island, so a world change mixes
+/// no island's creatures into another.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Reseed {
+    queues: Vec<Vec<Creature>>,
+}
+
+impl Reseed {
+    pub fn len(&self) -> usize {
+        self.queues.iter().map(Vec::len).sum()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.queues.iter().all(Vec::is_empty)
+    }
+    pub fn clear(&mut self) {
+        self.queues.clear();
+    }
+    /// Queues `creature` for a slot of `island`.
+    pub fn push(&mut self, island: usize, creature: Creature) {
+        if self.queues.len() <= island {
+            self.queues.resize_with(island + 1, Vec::new);
+        }
+        self.queues[island].push(creature);
+    }
+    /// The next creature queued for `island`.
+    pub fn pop(&mut self, island: usize) -> Option<Creature> {
+        self.queues.get_mut(island)?.pop()
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &Creature> {
+        self.queues.iter().flatten()
+    }
+    /// Whether every queue belongs to an existing island.
+    fn fits(&self, islands: usize) -> bool {
+        self.queues.len() <= islands
+    }
 }
 
 /// One recorded creature in an elite's ancestry.
@@ -248,9 +290,19 @@ fn describe_change(
     parts.join(", ")
 }
 
-/// Independent parent pools; elites migrate between neighbors periodically.
+/// Island archives: `ISOLATED_ISLANDS` isolated islands, then the hub.
+/// Slot `i` breeds from and competes in island `qd::island_of_slot`.
 pub fn island_count() -> usize {
-    4
+    ISOLATED_ISLANDS + 1
+}
+/// Islands that never receive immigrants and breed only from their own
+/// elites, so each one evolves its own designs.
+pub const ISOLATED_ISLANDS: usize = 4;
+/// The hub island: every `MIGRATION_INTERVAL` generations it receives copies
+/// of each isolated island's best elites, and it breeds from its own archive
+/// like any island. Nothing flows from the hub back.
+pub fn hub_island() -> usize {
+    ISOLATED_ISLANDS
 }
 /// Share of CMA offspring whose parent is one of its island's fastest 1% of
 /// elites; the rest sample by local competition. Spending more on the best
@@ -262,9 +314,8 @@ const CROSS_PLAN_MATE_SHARE: f32 = 0.15;
 /// Share of those top-elite CMA offspring bred by an island optimizer
 /// (separable CMA-ES in physical units) on one of its fastest designs.
 const OPTIMIZER_SHARE: f32 = 0.5;
-/// Generations between migrations, and the share of elites that migrate.
-/// Rare migration lets each island settle on and refine its own design
-/// instead of all islands polishing the same one.
+/// Generations between migrations to the hub, and the share of each
+/// isolated island's elites copied to it.
 pub const MIGRATION_INTERVAL: u32 = 25;
 /// Generations without a new island record before the island's optimizer
 /// turns to its next fastest design.
@@ -324,7 +375,7 @@ impl Experiment {
             candidate_mates: Vec::new(),
             island_progress: Vec::new(),
             last_migration: None,
-            reseed: Vec::new(),
+            reseed: Reseed::default(),
             fossils: Vec::new(),
         })
     }
@@ -510,14 +561,17 @@ impl Experiment {
             Some(slot) => metric.fitness > archive.entries[slot].fitness,
             None => archive.behavior_count() < qd::ARCHIVE_LIMIT,
         };
+        let island = qd::island_of_slot(i, island_count());
         if beats(&self.archive) {
-            return (ContenderReason::Global, Some(cell_key(0, &niche)));
+            return (
+                ContenderReason::Global,
+                Some(cell_key(island as u64, &niche)),
+            );
         }
-        let island = i % island_count();
         if self.islands.get(island).is_some_and(beats) {
             return (
                 ContenderReason::Island,
-                Some(cell_key(1 + island as u64, &niche)),
+                Some(cell_key(island as u64, &niche)),
             );
         }
         let reserve_candidate = self.morphology_reserve_override != Some(false)
@@ -527,8 +581,9 @@ impl Experiment {
             );
         if reserve_candidate
             && self
-                .archive
-                .morphology_floor()
+                .islands
+                .get(island)
+                .and_then(QdArchive::morphology_floor)
                 .is_none_or(|floor| metric.fitness > floor)
         {
             return (ContenderReason::Reserve, None);
@@ -567,32 +622,20 @@ impl Experiment {
         let mut rewards = [0.0f64; qd::EMITTER_COUNT];
         let mut cma_samples = vec![Vec::<(usize, f32)>::new(); self.cma_emitters.len()];
         let optimizers: Vec<bool> = self.cma_emitters.iter().map(|c| c.optimizing()).collect();
-        let parent_morphologies: HashMap<_, _> = self
-            .archive
-            .entries
-            .iter()
-            .map(|elite| {
-                (
-                    elite.creature.id,
-                    (
-                        elite.topology.clone(),
-                        qd::is_morphology_niche(&elite.niche),
-                    ),
-                )
-            })
-            .collect();
-        // Parallel prefilter: descriptors, behavior-offer eligibility against the
-        // start-of-batch archive, and static morphology-offer eligibility. Occupant
-        // fitness only ever rises, so a snapshot reject stays a live reject. Inserts
-        // still commit sequentially in index order so niche races resolve exactly
-        // like the old single loop.
+        // Parallel prefilter: descriptors and behavior-offer eligibility against
+        // the start-of-batch global archive. Occupant fitness only ever rises,
+        // so a snapshot reject stays a live reject. Inserts still commit
+        // sequentially in index order so niche races resolve exactly like the
+        // old single loop.
         struct Prep {
             descriptor: qd::Descriptor,
             emitter: Emitter,
             score: f32,
             protection: u32,
             behavior_candidate: bool,
-            morphology_topology: Option<qd::Topology>,
+            /// Body plan of a structural or novelty child, for its island's
+            /// morphology reserve.
+            topology: Option<qd::Topology>,
             /// Stopped by the early screen: offered to no archive.
             screened: bool,
             /// Fitness of the global archive's elite in this creature's
@@ -600,37 +643,6 @@ impl Experiment {
             elite_before: Option<f32>,
         }
         let reserve_enabled = self.morphology_reserve_override != Some(false);
-        // Reserve admission needs a score above the best behavior elite and
-        // the reserve entry of the same body plan, or above the reserve's
-        // floor once it is full (`QdArchive::offer_morphology`).
-        let mut reserve_bars: HashMap<&qd::Topology, (f32, f32)> = HashMap::new();
-        if reserve_enabled {
-            for elite in &self.archive.entries {
-                let bars = reserve_bars
-                    .entry(&elite.topology)
-                    .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
-                if qd::is_morphology_niche(&elite.niche) {
-                    bars.1 = bars.1.max(elite.fitness);
-                } else {
-                    bars.0 = bars.0.max(elite.fitness);
-                }
-            }
-        }
-        let reserve_floor = self.archive.morphology_floor();
-        let reserve_admits = |topology: &qd::Topology, score: f32| {
-            if !score.is_finite() || score <= FAILED {
-                return false;
-            }
-            match reserve_bars.get(topology) {
-                Some(&(behavior, reserve)) if reserve > f32::NEG_INFINITY => {
-                    score > behavior && score > reserve
-                }
-                Some(&(behavior, _)) => {
-                    score > behavior && reserve_floor.is_none_or(|floor| score > floor)
-                }
-                None => reserve_floor.is_none_or(|floor| score > floor),
-            }
-        };
         let prep: Vec<Prep> = slots
             .par_iter()
             .map(|&i| {
@@ -658,31 +670,12 @@ impl Experiment {
                 } else {
                     false
                 };
-                let morphology_topology = if reserve_enabled
+                let topology = (reserve_enabled
                     && !screened
-                    && matches!(emitter, Emitter::Structural | Emitter::Novelty)
-                {
-                    let topology = qd::topology_of_population(&self.population, i);
-                    let parent = self
-                        .candidate_parent_ids
-                        .get(i)
-                        .copied()
-                        .flatten()
-                        .and_then(|id| parent_morphologies.get(&id));
-                    let topology_changed = parent.is_some_and(|(parent_topology, _)| {
-                        !qd::topology_equivalent_for_archive(&topology, parent_topology)
-                    });
-                    let descended_from_reserve =
-                        parent.is_some_and(|(parent_topology, morphology)| {
-                            *morphology
-                                && qd::topology_equivalent_for_archive(&topology, parent_topology)
-                        });
-                    ((descended_from_reserve || topology_changed)
-                        && reserve_admits(&topology, score))
-                    .then_some(topology)
-                } else {
-                    None
-                };
+                    && score.is_finite()
+                    && score > FAILED
+                    && matches!(emitter, Emitter::Structural | Emitter::Novelty))
+                .then(|| qd::topology_of_population(&self.population, i));
                 let elite_before = (emitter == Emitter::Cma)
                     .then(|| self.candidate_cma.get(i).copied().flatten())
                     .flatten()
@@ -695,7 +688,7 @@ impl Experiment {
                     score,
                     protection,
                     behavior_candidate,
-                    morphology_topology,
+                    topology,
                     screened,
                     elite_before,
                 }
@@ -703,20 +696,44 @@ impl Experiment {
             .collect();
         timings[2] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
-        // Every creature also competes in its own island's archive. Each
-        // island's offers resolve in slot order and the islands are
-        // independent, so the four streams run in parallel.
+        // Every creature also competes in its own island's archive, and a
+        // new body plan that does not take a behavior cell may enter the
+        // island's morphology reserve. Each island's offers resolve in slot
+        // order and the islands are independent, so the streams run in
+        // parallel.
         let population = &self.population;
         let generation = self.generation;
+        let parent_ids = &self.candidate_parent_ids;
         let island_total = self.islands.len().max(1);
-        let island_entered: Vec<Vec<usize>> = self
+        let island_results: Vec<(Vec<usize>, Vec<(usize, qd::Offer)>)> = self
             .islands
             .par_iter_mut()
             .enumerate()
             .map(|(island, archive)| {
                 let mut entered = Vec::new();
+                let mut reserve_offers = Vec::new();
+                // Reserve admission needs a score above the island's best
+                // behavior elite and reserve entry of the same body plan, or
+                // above the reserve's floor once it is full
+                // (`QdArchive::offer_morphology` makes the final check).
+                let mut parents: HashMap<u64, (qd::Topology, bool)> = HashMap::new();
+                let mut bars: HashMap<qd::Topology, (f32, f32)> = HashMap::new();
+                if reserve_enabled {
+                    for elite in &archive.entries {
+                        let morphology = qd::is_morphology_niche(&elite.niche);
+                        parents.insert(elite.creature.id, (elite.topology.clone(), morphology));
+                        let bar = bars
+                            .entry(elite.topology.clone())
+                            .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
+                        if morphology {
+                            bar.1 = bar.1.max(elite.fitness);
+                        } else {
+                            bar.0 = bar.0.max(elite.fitness);
+                        }
+                    }
+                }
                 for (k, &i) in slots.iter().enumerate() {
-                    if i % island_total != island {
+                    if qd::island_of_slot(i, island_total) != island {
                         continue;
                     }
                     let p = &prep[k];
@@ -726,27 +743,87 @@ impl Experiment {
                     if p.screened {
                         continue;
                     }
-                    if archive
-                        .offer(
-                            population,
-                            i,
-                            p.descriptor,
-                            p.score,
-                            p.emitter,
-                            generation,
-                            p.protection,
-                        )
-                        .inserted
-                    {
+                    let behavior = archive.offer(
+                        population,
+                        i,
+                        p.descriptor,
+                        p.score,
+                        p.emitter,
+                        generation,
+                        p.protection,
+                    );
+                    if behavior.inserted {
                         entered.push(i);
+                        if let Some(topology) = &p.topology {
+                            let bar = bars
+                                .entry(topology.clone())
+                                .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
+                            bar.0 = bar.0.max(p.score);
+                        }
+                        continue;
+                    }
+                    let Some(topology) = &p.topology else {
+                        continue;
+                    };
+                    // A reserve place goes to a new body plan, or to a better
+                    // child of a reserve entry with the same plan.
+                    let parent = parent_ids
+                        .get(i)
+                        .copied()
+                        .flatten()
+                        .and_then(|id| parents.get(&id));
+                    let changed = parent.is_some_and(|(plan, _)| {
+                        !qd::topology_equivalent_for_archive(topology, plan)
+                    });
+                    let from_reserve = parent.is_some_and(|(plan, morphology)| {
+                        *morphology && qd::topology_equivalent_for_archive(topology, plan)
+                    });
+                    if !(changed || from_reserve) {
+                        continue;
+                    }
+                    let floor = archive.morphology_floor();
+                    let admits = match bars.get(topology) {
+                        Some(&(behavior, reserve)) if reserve > f32::NEG_INFINITY => {
+                            p.score > behavior && p.score > reserve
+                        }
+                        Some(&(behavior, _)) => {
+                            p.score > behavior && floor.is_none_or(|floor| p.score > floor)
+                        }
+                        None => floor.is_none_or(|floor| p.score > floor),
+                    };
+                    if !admits {
+                        continue;
+                    }
+                    let offer = archive.offer_morphology(
+                        population,
+                        i,
+                        p.descriptor,
+                        topology.clone(),
+                        p.score,
+                        p.emitter,
+                        generation,
+                        p.protection,
+                    );
+                    if offer.inserted {
+                        entered.push(i);
+                        let bar = bars
+                            .entry(topology.clone())
+                            .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
+                        bar.1 = bar.1.max(p.score);
+                        reserve_offers.push((p.emitter.index(), offer));
                     }
                 }
-                entered
+                (entered, reserve_offers)
             })
             .collect();
-        let island_changed: Vec<bool> = island_entered.iter().map(|g| !g.is_empty()).collect();
-        for group in island_entered {
+        let island_changed: Vec<bool> = island_results
+            .iter()
+            .map(|(group, _)| !group.is_empty())
+            .collect();
+        let mut reserve_offers = Vec::new();
+        for (group, offers) in island_results {
             entered.extend(group);
+            reserve_offers.extend(offers);
         }
         timings[0] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
@@ -764,7 +841,6 @@ impl Experiment {
         // not edit archive fitness or descriptors.
         let mut prep = prep;
         let mut best_by_niche: HashMap<qd::Niche, usize> = HashMap::new();
-        let mut best_by_topology: HashMap<qd::Topology, usize> = HashMap::new();
         for (k, p) in prep.iter().enumerate() {
             if p.behavior_candidate {
                 let best = best_by_niche.entry(p.descriptor.niche()).or_insert(k);
@@ -772,22 +848,11 @@ impl Experiment {
                     *best = k;
                 }
             }
-            if let Some(topology) = &p.morphology_topology {
-                let best = best_by_topology.entry(topology.clone()).or_insert(k);
-                if prep[*best].score < p.score {
-                    *best = k;
-                }
-            }
         }
         let behavior_best: std::collections::HashSet<usize> =
             best_by_niche.values().copied().collect();
-        let topology_best: std::collections::HashSet<usize> =
-            best_by_topology.values().copied().collect();
         for (k, p) in prep.iter_mut().enumerate() {
             p.behavior_candidate &= behavior_best.contains(&k);
-            if !topology_best.contains(&k) {
-                p.morphology_topology = None;
-            }
         }
         timings[2] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
@@ -828,28 +893,8 @@ impl Experiment {
             } else {
                 qd::Offer::default()
             };
-            let morphology_offer = if !behavior_offer.inserted
-                && let Some(topology) = prep.morphology_topology
-            {
-                self.archive.offer_morphology(
-                    &self.population,
-                    i,
-                    prep.descriptor,
-                    topology,
-                    prep.score,
-                    prep.emitter,
-                    self.generation,
-                    prep.protection,
-                )
-            } else {
-                qd::Offer::default()
-            };
             behavior_inserted |= behavior_offer.inserted;
-            let offer = if behavior_offer.inserted {
-                behavior_offer
-            } else {
-                morphology_offer
-            };
+            let offer = behavior_offer;
             // CMA-ME improvement ranking: new niches first, then improvement over
             // the niche's elite, then how far short of it a sample fell.
             if prep.emitter == Emitter::Cma
@@ -876,6 +921,15 @@ impl Experiment {
                 } else {
                     improvements[emitter_index] += 1;
                 }
+            }
+        }
+        // Island reserve entries count for their emitters like archive entries.
+        for (emitter_index, offer) in reserve_offers {
+            rewards[emitter_index] += offer.reward;
+            if offer.new_niche {
+                discoveries[emitter_index] += 1;
+            } else {
+                improvements[emitter_index] += 1;
             }
         }
         timings[3] = section.elapsed().as_secs_f64();
@@ -1101,13 +1155,13 @@ impl Experiment {
         let protections: Vec<u32> = planned.iter().map(|p| p.protection).collect();
         let plan_seconds = plan_started.elapsed().as_secs_f64();
         let emission_started = std::time::Instant::now();
-        // Elites queued by a world change take the first slots. No slice is
-        // handed over until they are placed, so every device sees them.
+        // Elites queued by a world change take the first slots of their own
+        // islands. No slice is handed over until they are placed, so every
+        // device sees them.
         let reseeding = !self.reseed.is_empty();
         let next = evolution::emit_archive_batch_streaming(
             &self.population,
             &self.islands,
-            &self.archive,
             &self.cma_emitters,
             &plans,
             &cfg,
@@ -1131,9 +1185,13 @@ impl Experiment {
         self.candidate_mates = planned.iter().map(|p| p.plan.mate.is_some()).collect();
         self.protected_until = protections;
         if reseeding {
+            let islands = island_count();
             for slot in 0..self.config.population {
-                let Some(elite) = self.reseed.pop() else {
+                if self.reseed.is_empty() {
                     break;
+                }
+                let Some(elite) = self.reseed.pop(qd::island_of_slot(slot, islands)) else {
+                    continue;
                 };
                 self.population.replace(slot, elite);
                 self.candidate_emitters[slot] = Emitter::Restart;
@@ -1166,31 +1224,28 @@ impl Experiment {
         }
         Ok(())
     }
-    /// Creates the island archives if missing, seeding them from the global
-    /// archive's elites.
+    /// Creates empty island archives if they are missing. They fill from
+    /// their own slots' offspring (and queued reseeds). The global archive
+    /// is never split among them, because that would mix the islands.
     fn ensure_islands(&mut self) {
         if self.islands.len() == island_count() {
             return;
         }
         self.islands = vec![QdArchive::default(); island_count()];
         self.island_progress.clear();
-        for (index, elite) in self.archive.entries.iter().enumerate() {
-            self.islands[index % island_count()].absorb(elite);
-        }
-        for island in &mut self.islands {
-            island.refresh_behavior_scores();
-        }
+        self.last_migration = None;
     }
-    /// Every few generations each island receives the best share of its
-    /// neighbor's elites.
+    /// Every `MIGRATION_INTERVAL` generations the hub receives copies of the
+    /// best share of each isolated island's elites. The isolated islands
+    /// never receive any.
     fn migrate_islands(&mut self) {
         if self.islands.len() != island_count()
             || !self.generation.is_multiple_of(MIGRATION_INTERVAL)
         {
             return;
         }
-        let migrants: Vec<Vec<qd::Elite>> = self
-            .islands
+        let hub = hub_island();
+        let migrants: Vec<Vec<qd::Elite>> = self.islands[..ISOLATED_ISLANDS]
             .iter()
             .map(|island| {
                 let mut elites: Vec<&qd::Elite> = island
@@ -1206,14 +1261,12 @@ impl Experiment {
             .collect();
         let mut exchange = vec![(0, 0); self.islands.len()];
         for (from, group) in migrants.into_iter().enumerate() {
-            let to = &mut self.islands[(from + 1) % island_count()];
+            let to = &mut self.islands[hub];
             let kept = group.iter().filter(|elite| to.absorb(elite)).count();
             exchange[from] = (group.len(), kept);
         }
         self.last_migration = Some((self.generation, exchange));
-        for island in &mut self.islands {
-            island.refresh_behavior_scores();
-        }
+        self.islands[hub].refresh_behavior_scores();
     }
     /// Chooses emitters, parents, and CMA slots for offspring in `slots`.
     /// Round 0 reproduces the generational random streams; other rounds salt
@@ -1233,56 +1286,61 @@ impl Experiment {
             island.ensure_least_visited();
         }
         let weights = qd::emitter_weights(&self.emitter_stats);
-        let mut reset_cma = HashMap::<(qd::Niche, qd::Topology), usize>::new();
-        // CMA slot lookup keyed by (niche, body plan). The bucket stores the
-        // full key, so the per-offspring probe hashes and compares without
-        // cloning the topology vector; clones are only paid when a slot is
-        // created or replaced.
+        let mut reset_cma = HashMap::<(usize, qd::Niche, qd::Topology), usize>::new();
+        // CMA slot lookup keyed by (island, niche, body plan): an emitter
+        // samples around one island's elite, so it serves only that island.
+        // The bucket stores the full key, so the per-offspring probe hashes
+        // and compares without cloning the topology vector; clones are only
+        // paid when a slot is created or replaced.
+        type CmaKey = (usize, qd::Niche, qd::Topology);
         struct CmaLookup {
-            buckets: HashMap<u64, Vec<(qd::Niche, qd::Topology, usize)>>,
+            buckets: HashMap<u64, Vec<(CmaKey, usize)>>,
         }
         impl CmaLookup {
-            fn hash(niche: &qd::Niche, topology: &qd::Topology) -> u64 {
+            fn hash(island: usize, niche: &qd::Niche, topology: &qd::Topology) -> u64 {
                 use std::hash::{Hash, Hasher};
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                island.hash(&mut hasher);
                 niche.hash(&mut hasher);
                 topology.hash(&mut hasher);
                 hasher.finish()
             }
-            fn get(&self, niche: &qd::Niche, topology: &qd::Topology) -> Option<usize> {
+            fn get(
+                &self,
+                island: usize,
+                niche: &qd::Niche,
+                topology: &qd::Topology,
+            ) -> Option<usize> {
                 self.buckets
-                    .get(&Self::hash(niche, topology))?
+                    .get(&Self::hash(island, niche, topology))?
                     .iter()
-                    .find(|(stored_niche, stored_topology, _)| {
-                        stored_niche == niche && stored_topology == topology
-                    })
-                    .map(|(_, _, index)| *index)
+                    .find(|((i, n, t), _)| *i == island && n == niche && t == topology)
+                    .map(|(_, index)| *index)
             }
-            fn insert(&mut self, niche: qd::Niche, topology: qd::Topology, index: usize) {
+            fn insert(&mut self, key: CmaKey, index: usize) {
                 let bucket = self
                     .buckets
-                    .entry(Self::hash(&niche, &topology))
+                    .entry(Self::hash(key.0, &key.1, &key.2))
                     .or_default();
-                if let Some(entry) = bucket
-                    .iter_mut()
-                    .find(|(stored_niche, stored_topology, _)| {
-                        stored_niche == &niche && stored_topology == &topology
-                    })
-                {
-                    entry.2 = index;
+                if let Some(entry) = bucket.iter_mut().find(|(stored, _)| *stored == key) {
+                    entry.1 = index;
                 } else {
-                    bucket.push((niche, topology, index));
+                    bucket.push((key, index));
                 }
             }
-            fn remove(&mut self, niche: &qd::Niche, topology: &qd::Topology, index: usize) {
-                let hash = Self::hash(niche, topology);
+            fn remove(
+                &mut self,
+                island: usize,
+                niche: &qd::Niche,
+                topology: &qd::Topology,
+                index: usize,
+            ) {
+                let hash = Self::hash(island, niche, topology);
                 let Some(bucket) = self.buckets.get_mut(&hash) else {
                     return;
                 };
-                bucket.retain(|(stored_niche, stored_topology, stored_index)| {
-                    !(stored_niche == niche
-                        && stored_topology == topology
-                        && *stored_index == index)
+                bucket.retain(|((i, n, t), stored_index)| {
+                    !(*i == island && n == niche && t == topology && *stored_index == index)
                 });
                 if bucket.is_empty() {
                     self.buckets.remove(&hash);
@@ -1293,7 +1351,7 @@ impl Experiment {
             buckets: HashMap::new(),
         };
         for (index, cma) in self.cma_emitters.iter().enumerate() {
-            cma_lookup.insert(cma.niche.clone(), cma.topology.clone(), index);
+            cma_lookup.insert((cma.island, cma.niche.clone(), cma.topology.clone()), index);
         }
         let mut used_cma = vec![false; self.cma_emitters.len()];
         let mut out = Vec::with_capacity(slots.len());
@@ -1309,7 +1367,6 @@ impl Experiment {
             protection: u32,
             emitter_stale: bool,
             mate: Option<usize>,
-            from_reserve: bool,
             island: usize,
             /// A fast elite whose design's optimizer breeds this offspring.
             optimize: bool,
@@ -1390,7 +1447,7 @@ impl Experiment {
             .par_iter()
             .map(|&i| {
                 let mut rng = Rng::new(seed, generation, i);
-                let island = i % island_count();
+                let island = qd::island_of_slot(i, island_count());
                 let archive = &self.islands[island];
                 let archive_empty = archive.entries.is_empty();
                 let emitter = if archive_empty {
@@ -1408,8 +1465,8 @@ impl Experiment {
                     && emitter == Emitter::Structural
                     && rng.unit() < qd::MORPHOLOGY_PARENT_FRACTION
                 {
-                    // The reserve lives in the global archive only.
-                    let drawn = self.archive.sample_morphology(&mut rng, avoid);
+                    // Each island keeps its own morphology reserve.
+                    let drawn = archive.sample_morphology(&mut rng, avoid);
                     from_reserve = drawn.is_some();
                     drawn.or_else(|| archive.sample_local_competitive(&mut rng, avoid))
                 } else if emitter == Emitter::Novelty || emitter_stale {
@@ -1430,13 +1487,12 @@ impl Experiment {
                 } else {
                     archive.sample_local_competitive(&mut rng, avoid)
                 };
-                let parent_archive = if from_reserve { &self.archive } else { archive };
-                let parent_id = parent.map(|index| parent_archive.entries[index].creature.id);
+                let parent_id = parent.map(|index| archive.entries[index].creature.id);
                 let protection = if matches!(emitter, Emitter::Structural | Emitter::Novelty) {
                     generation.saturating_add(3)
                 } else {
                     parent
-                        .map(|index| parent_archive.entries[index].protected_until)
+                        .map(|index| archive.entries[index].protected_until)
                         .unwrap_or(0)
                 };
                 let mate = match (emitter, parent) {
@@ -1471,7 +1527,6 @@ impl Experiment {
                     protection,
                     emitter_stale,
                     mate,
-                    from_reserve,
                     island,
                     optimize,
                 }
@@ -1487,7 +1542,6 @@ impl Experiment {
                 protection,
                 emitter_stale,
                 mate,
-                from_reserve,
                 island,
                 optimize,
             } = prep;
@@ -1508,17 +1562,19 @@ impl Experiment {
                     let converged = |i: &usize| self.cma_emitters[*i].converged() && !used_cma[*i];
                     let mut index = if optimize {
                         cma_lookup
-                            .get(&lookup_niche, topology)
+                            .get(island, &lookup_niche, topology)
                             .filter(|i| !converged(i))
                     } else if emitter_stale {
                         reset_cma
-                            .get(&(lookup_niche.clone(), topology.clone()))
+                            .get(&(island, lookup_niche.clone(), topology.clone()))
                             .copied()
                     } else {
-                        cma_lookup.get(&lookup_niche, topology)
+                        cma_lookup.get(island, &lookup_niche, topology)
                     };
                     if index.is_none() {
-                        let restart = cma_lookup.get(&lookup_niche, topology).filter(|_| optimize);
+                        let restart = cma_lookup
+                            .get(island, &lookup_niche, topology)
+                            .filter(|_| optimize);
                         let replacement = if restart.is_some() {
                             restart
                         } else if self.cma_emitters.len() < qd::CMA_LIMIT {
@@ -1532,14 +1588,19 @@ impl Experiment {
                                 .map(|(i, _)| i)
                         };
                         if let Some(slot) = replacement {
-                            let new = if optimize {
-                                // Another island's optimizer for the same plan
-                                // lends its learned step sizes, unless this is
-                                // a restart after converging.
+                            let mut new = if optimize {
+                                // Another optimizer of this island for the
+                                // same plan lends its learned step sizes,
+                                // unless this is a restart after converging.
+                                // Other islands never lend: their step sizes
+                                // carry what their search learned.
                                 self.cma_emitters
                                     .iter()
                                     .filter(|c| {
-                                        c.optimizing() && c.topology == *topology && !c.converged()
+                                        c.optimizing()
+                                            && c.island == island
+                                            && c.topology == *topology
+                                            && !c.converged()
                                     })
                                     .max_by_key(|c| c.last_used_generation)
                                     .map_or_else(
@@ -1561,23 +1622,28 @@ impl Experiment {
                             } else {
                                 CmaEmitter::new(template.clone(), elite.niche.clone(), generation)
                             };
+                            new.island = island;
                             if slot == self.cma_emitters.len() {
                                 self.cma_emitters.push(new);
                                 used_cma.push(false);
                             } else {
-                                let old_niche = self.cma_emitters[slot].niche.clone();
-                                let old_topology = self.cma_emitters[slot].topology.clone();
-                                if cma_lookup.get(&old_niche, &old_topology) == Some(slot) {
-                                    cma_lookup.remove(&old_niche, &old_topology, slot);
+                                let old = &self.cma_emitters[slot];
+                                let (old_island, old_niche, old_topology) =
+                                    (old.island, old.niche.clone(), old.topology.clone());
+                                if cma_lookup.get(old_island, &old_niche, &old_topology)
+                                    == Some(slot)
+                                {
+                                    cma_lookup.remove(old_island, &old_niche, &old_topology, slot);
                                 }
                                 reset_cma.retain(|_, index| *index != slot);
                                 self.cma_emitters[slot] = new;
                             }
                             let new_niche = self.cma_emitters[slot].niche.clone();
                             let new_topology = self.cma_emitters[slot].topology.clone();
-                            cma_lookup.insert(new_niche, new_topology, slot);
+                            cma_lookup.insert((island, new_niche, new_topology), slot);
                             if emitter_stale && !optimize {
-                                reset_cma.insert((lookup_niche.clone(), topology.clone()), slot);
+                                reset_cma
+                                    .insert((island, lookup_niche.clone(), topology.clone()), slot);
                             }
                             index = Some(slot);
                         }
@@ -1594,11 +1660,7 @@ impl Experiment {
                 None
             };
             if let Some(parent_index) = parent {
-                if from_reserve {
-                    self.archive.visit(parent_index);
-                } else {
-                    self.islands[island].visit(parent_index);
-                }
+                self.islands[island].visit(parent_index);
             }
             out.push(OffspringPlan {
                 plan: CandidatePlan {
@@ -1606,7 +1668,6 @@ impl Experiment {
                     parent,
                     cma: cma_index,
                     mate,
-                    reserve: from_reserve,
                 },
                 parent_id,
                 protection,
@@ -1640,30 +1701,42 @@ impl Experiment {
         let planned = self.plan_offspring(&cfg, self.generation, self.breed_round, slots);
         let plans: Vec<CandidatePlan> = planned.iter().map(|p| p.plan).collect();
         let planned_at = started.elapsed();
-        // Reseeded elites take the first slots; the rest are emitted straight
-        // into batches, so no child is alive after it is copied.
-        let reseeded = self.reseed.len().min(slots.len());
+        // Reseeded elites take the slots of their own islands first; the rest
+        // are emitted straight into batches, so no child is alive after it is
+        // copied.
+        let islands = island_count();
+        let mut lead = evolution::ChildBatch::default();
+        let mut order: Vec<usize> = Vec::with_capacity(slots.len());
+        let mut reseeded_slot = vec![false; slots.len()];
+        if !self.reseed.is_empty() {
+            for (k, &slot) in slots.iter().enumerate() {
+                if let Some(elite) = self.reseed.pop(qd::island_of_slot(slot, islands)) {
+                    lead.push(elite);
+                    order.push(k);
+                    reseeded_slot[k] = true;
+                }
+            }
+        }
+        let reseeded = order.len();
+        order.extend((0..slots.len()).filter(|&k| !reseeded_slot[k]));
+        let ordered_slots: Vec<usize> = order.iter().map(|&k| slots[k]).collect();
+        let bred_plans: Vec<CandidatePlan> = order[reseeded..].iter().map(|&k| plans[k]).collect();
         let mut batches = Vec::new();
         if reseeded > 0 {
-            let mut lead = evolution::ChildBatch::default();
-            for _ in 0..reseeded {
-                lead.push(self.reseed.pop().expect("reseed elite"));
-            }
             batches.push(lead);
         }
         batches.extend(evolution::emit_offspring_batches(
             &self.islands,
-            &self.archive,
             &self.cma_emitters,
-            &plans[reseeded..],
-            &slots[reseeded..],
+            &bred_plans,
+            &ordered_slots[reseeded..],
             &cfg,
             self.generation,
             self.breed_round,
         ));
         let emitted_at = started.elapsed();
         for (k, (&slot, plan)) in slots.iter().zip(&planned).enumerate() {
-            if k < reseeded {
+            if reseeded_slot[k] {
                 self.candidate_emitters[slot] = Emitter::Restart;
                 self.candidate_cma[slot] = None;
                 self.candidate_parent_ids[slot] = None;
@@ -1680,7 +1753,7 @@ impl Experiment {
             self.scores[slot] = f32::NAN;
             self.trial_metrics[slot] = TrialMetrics::default();
         }
-        self.population.append_batches(slots, batches);
+        self.population.append_batches(&ordered_slots, batches);
         let total = started.elapsed();
         let add = |k: usize, d: std::time::Duration| {
             BREED_NANOS[k].fetch_add(d.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -1861,13 +1934,16 @@ impl Experiment {
         }
         restored
     }
-    /// Clears the archive after the world changed. Its scores no longer hold,
-    /// but its creatures are queued to compete again under the new physics.
+    /// Clears the archives after the world changed. Their scores no longer
+    /// hold, but each island's creatures are queued to compete again under
+    /// the new physics in that island's own slots.
     fn reset_search_context(&mut self) {
-        self.reseed = std::mem::take(&mut self.archive.entries)
-            .into_iter()
-            .map(|elite| elite.creature)
-            .collect();
+        self.reseed.clear();
+        for (index, island) in self.islands.iter_mut().enumerate() {
+            for elite in std::mem::take(&mut island.entries) {
+                self.reseed.push(index, elite.creature);
+            }
+        }
         self.archive = QdArchive::default();
         self.islands.clear();
         self.island_progress.clear();
@@ -1968,6 +2044,12 @@ impl Experiment {
                     .all(|elite| elite.fitness.is_finite() && elite.fitness > FAILED),
             "Invalid QD archive state"
         );
+        ensure!(
+            (self.islands.is_empty() || self.islands.len() == island_count())
+                && self.reseed.fits(island_count())
+                && self.cma_emitters.iter().all(|c| c.island < island_count()),
+            "Invalid island state"
+        );
         for (index, stats) in self.history.iter().enumerate() {
             stats.config.validate()?;
             ensure!(
@@ -2059,7 +2141,7 @@ struct SmallSave<'a> {
     islands: &'a [QdArchive],
     lineage: &'a HashMap<u64, Ancestor>,
     island_progress: &'a [(f32, u32)],
-    reseed: &'a [Creature],
+    reseed: &'a Reseed,
 }
 #[derive(Deserialize)]
 struct SmallLoad {
@@ -2075,7 +2157,7 @@ struct SmallLoad {
     islands: Vec<QdArchive>,
     lineage: HashMap<u64, Ancestor>,
     island_progress: Vec<(f32, u32)>,
-    reseed: Vec<Creature>,
+    reseed: Reseed,
 }
 impl<'a> SmallSave<'a> {
     fn of(e: &'a Experiment) -> Self {
@@ -2839,7 +2921,7 @@ impl From<V2Experiment> for Experiment {
             candidate_mates: Vec::new(),
             island_progress: Vec::new(),
             last_migration: None,
-            reseed: Vec::new(),
+            reseed: Reseed::default(),
             fossils: Vec::new(),
         }
     }
@@ -2885,7 +2967,7 @@ impl From<LegacyExperiment> for Experiment {
             candidate_mates: Vec::new(),
             island_progress: Vec::new(),
             last_migration: None,
-            reseed: Vec::new(),
+            reseed: Reseed::default(),
             fossils: Vec::new(),
         }
     }
@@ -3431,7 +3513,6 @@ mod breeding_tests {
         let plans: Vec<CandidatePlan> = planned.iter().map(|p| p.plan).collect();
         let children = evolution::emit_offspring(
             &e.islands,
-            &e.archive,
             &e.cma_emitters,
             &plans,
             slots,
@@ -3441,7 +3522,7 @@ mod breeding_tests {
         );
         let mut creatures = Vec::new();
         for ((&slot, child), plan) in slots.iter().zip(children).zip(&planned) {
-            if let Some(elite) = e.reseed.pop() {
+            if let Some(elite) = e.reseed.pop(qd::island_of_slot(slot, island_count())) {
                 creatures.push(elite);
                 e.candidate_emitters[slot] = Emitter::Restart;
                 e.candidate_cma[slot] = None;
@@ -3485,26 +3566,26 @@ mod breeding_tests {
         }
         let all: Vec<usize> = (0..a.config.population).collect();
         a.archive_slots(&all);
-        for k in 0..5 {
-            a.reseed.push(a.population.creature(k));
+        for k in 0..12 {
+            a.reseed.push(
+                qd::island_of_slot(k, island_count()),
+                a.population.creature(k),
+            );
         }
         let mut b = a.clone();
         let slots: Vec<usize> = (0..a.config.population).rev().step_by(1).collect();
         a.breed_slots(&slots).unwrap();
         breed_slots_by_creature(&mut b, &slots);
-        assert_eq!(a.population.nodes, b.population.nodes);
-        assert_eq!(a.population.bones, b.population.bones);
-        assert_eq!(a.population.muscles, b.population.muscles);
+        // Reseeded elites sit in their islands' slots, so the arenas hold
+        // the same creatures in another order: compare slot by slot.
         assert_eq!(a.population.genomes.len(), b.population.genomes.len());
-        for (x, y) in a.population.genomes.iter().zip(&b.population.genomes) {
-            assert_eq!(
-                (x.node_start, x.node_count, x.bone_start, x.bone_count),
-                (y.node_start, y.node_count, y.bone_start, y.bone_count)
-            );
-            assert_eq!(
-                (x.muscle_start, x.muscle_count, x.id),
-                (y.muscle_start, y.muscle_count, y.id)
-            );
+        assert_eq!(a.population.nodes.len(), b.population.nodes.len());
+        for slot in 0..a.population.genomes.len() {
+            let (x, y) = (a.population.creature(slot), b.population.creature(slot));
+            assert_eq!(x.id, y.id);
+            assert_eq!(x.nodes, y.nodes);
+            assert_eq!(x.bones, y.bones);
+            assert_eq!(x.muscles, y.muscles);
         }
         assert_eq!(a.candidate_emitters, b.candidate_emitters);
         assert_eq!(a.candidate_parent_ids, b.candidate_parent_ids);

@@ -379,6 +379,8 @@ fn run_seed(
     let mut experiment = Experiment::new(cfg).with_context(|| format!("seed {seed} experiment"))?;
     let mut best = f32::NAN;
     let mut top = Vec::new();
+    // Generations whose global best elite was born in a hub slot.
+    let mut hub_best: Vec<u32> = Vec::new();
     for generation in 0..options.generations {
         if let Some(gpu) = gpu.as_mut() {
             // The game's generational path: the scheduler runs the standard
@@ -483,6 +485,21 @@ fn run_seed(
             .map(|elite| elite.fitness)
             .fold(best, f32::max);
         println!("{scope} seed {seed} generation {generation} archive best {best:.2} m");
+        if let Some(elite) = experiment
+            .archive
+            .entries
+            .iter()
+            .max_by(|a, b| a.fitness.total_cmp(&b.fitness))
+        {
+            let slot = (elite.creature.id - 1) as usize % experiment.config.population;
+            let born = evolution_simulator::qd::island_of_slot(
+                slot,
+                evolution_simulator::storage::island_count(),
+            );
+            if born == evolution_simulator::storage::hub_island() {
+                hub_best.push(generation);
+            }
+        }
         top = top_bodies(&experiment, TOP_BODIES);
         if options.probe {
             let h = |bytes: Vec<u8>| {
@@ -552,6 +569,7 @@ fn run_seed(
     }
     print_common_grid(scope, seed, &experiment);
     print_island_diversity(scope, seed, &experiment);
+    print_islands(scope, seed, &experiment, &hub_best, options.generations);
     let weights = evolution_simulator::qd::emitter_weights(&experiment.emitter_stats);
     println!(
         "{scope} seed {seed} emitter shares: {}",
@@ -646,6 +664,39 @@ fn print_common_grid(scope: &str, seed: u64, experiment: &Experiment) {
     );
 }
 
+/// Each island's best distance and QD score, and when the global best
+/// first came from the hub (was born in a hub slot).
+fn print_islands(
+    scope: &str,
+    seed: u64,
+    experiment: &Experiment,
+    hub_best: &[u32],
+    generations: u32,
+) {
+    let hub = evolution_simulator::storage::hub_island();
+    let rows: Vec<String> = experiment
+        .islands
+        .iter()
+        .enumerate()
+        .map(|(k, island)| {
+            format!(
+                "{}{k} best {:.2} qd {:.0}",
+                if k == hub { "hub " } else { "" },
+                island.best_fitness(),
+                island.qd_score
+            )
+        })
+        .collect();
+    println!("{scope} seed {seed} islands: {}", rows.join(", "));
+    match hub_best.first() {
+        Some(first) => println!(
+            "{scope} seed {seed} global best from the hub: first at generation {first}, {} of {generations} generations",
+            hub_best.len()
+        ),
+        None => println!("{scope} seed {seed} global best from the hub: never"),
+    }
+}
+
 /// Top elites per island for the diversity report.
 const ISLAND_TOP: usize = 20;
 
@@ -659,7 +710,7 @@ const ISLAND_TOP: usize = 20;
 /// holds copies of the other islands' elites by design.
 fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
     use std::collections::HashSet;
-    let hub: Option<usize> = None;
+    let hub: Option<usize> = Some(evolution_simulator::storage::hub_island());
     let tops: Vec<Vec<&evolution_simulator::qd::Elite>> = experiment
         .islands
         .iter()

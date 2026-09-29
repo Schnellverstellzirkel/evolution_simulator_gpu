@@ -27,7 +27,9 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 34: the world gains Water and Ice patches (the saved settings changed).
 // 35: creatures lose the unused mutability gene (the save format changed).
 // 36: static friction: a foot that barely slides holds 25% harder.
-pub const VERSION: u32 = 36;
+// 37: four isolated islands and a hub; each island keeps its own morphology
+//     reserve, CMA emitters and reseed queue (the save format changed).
+pub const VERSION: u32 = 37;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
@@ -35,6 +37,10 @@ const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 const OPTIMIZER_NICHE_MARKER: u8 = 254;
 /// The niche key of an island's optimizers for one gait cadence band;
 /// together with the body plan it identifies one optimizer.
+/// The island that population slot `slot` breeds for, among `islands`.
+pub fn island_of_slot(slot: usize, islands: usize) -> usize {
+    slot % islands.max(1)
+}
 pub fn optimizer_niche(island: usize, cadence: u8) -> Niche {
     let b = (island as u32).to_le_bytes();
     Niche([OPTIMIZER_NICHE_MARKER, b[0], b[1], b[2], b[3], cadence])
@@ -182,6 +188,9 @@ pub struct EmitterStats {
 pub struct CmaEmitter {
     pub niche: Niche,
     pub topology: Topology,
+    /// The island whose elites this emitter samples around. Its children go
+    /// only to that island's slots.
+    pub island: usize,
     template: Creature,
     mean: Vec<f32>,
     covariance: Vec<f32>,
@@ -996,6 +1005,7 @@ impl CmaEmitter {
         Self {
             niche,
             topology: Topology::of(&template),
+            island: 0,
             template,
             mean,
             covariance: vec![1.0; dimensions],
@@ -1014,6 +1024,7 @@ impl CmaEmitter {
         Self {
             niche,
             topology: Topology::of(&template),
+            island: 0,
             template,
             mean,
             covariance: vec![1.0; dimensions],
@@ -1023,10 +1034,11 @@ impl CmaEmitter {
             last_used_generation: generation,
         }
     }
-    /// A new optimizer starting from `template` that keeps the step sizes
-    /// this one has learned for the same body plan.
+    /// A new optimizer on this one's island, starting from `template`, that
+    /// keeps the step sizes this one has learned for the same body plan.
     pub fn recentered(&self, template: Creature, niche: Niche, generation: u32) -> Self {
         let mut next = Self::optimizer(template, niche, generation);
+        next.island = self.island;
         if next.topology == self.topology && next.mean.len() == self.mean.len() {
             next.covariance.clone_from(&self.covariance);
             next.path_c.clone_from(&self.path_c);

@@ -2915,7 +2915,7 @@ impl App {
                 ui.selectable_value(&mut self.archive_view, ArchiveView::Cards, "Cards");
                 ui.selectable_value(&mut self.archive_view, ArchiveView::Islands, "Islands")
                     .on_hover_text(
-                        "The four island archives, each with its best creature, its top elites and its migrants.",
+                        "The four isolated islands and the hub, each with its best creature, its top elites and its migrants.",
                     );
             });
         });
@@ -3039,14 +3039,15 @@ impl App {
             self.select(creature, config);
         }
     }
-    /// The four island archives in a 2x2 grid. Each card has a fixed size and
+    /// The island archives (four isolated islands, then the hub) in two
+    /// columns. Each card has a fixed size and
     /// fixed places for its parts, so numbers change without moving anything.
     fn islands_view(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!(
-                    "Every {} generations each island sends its fastest tenth to the next one.",
+                    "Islands never mix. The hub gets copies every {} generations.",
                     crate::storage::MIGRATION_INTERVAL
                 ))
                 .small()
@@ -5119,26 +5120,35 @@ fn migration_lines(
 ) -> [String; 2] {
     let next =
         (generation / crate::storage::MIGRATION_INTERVAL + 1) * crate::storage::MIGRATION_INTERVAL;
-    let count = migration.map_or(0, |m| m.exchange.len());
-    match migration.filter(|_| count > 0) {
-        Some(m) => {
-            let (sent, kept_by_next) = m.exchange[island];
-            let (got, kept) = m.received(island).unwrap_or((0, 0));
+    let hub = island == crate::storage::hub_island();
+    match migration.filter(|m| !m.exchange.is_empty()) {
+        Some(m) if hub => {
+            let (got, kept) = m.hub_received();
             [
                 format!(
-                    "Gen {}: sent {sent} to island {}, it kept {kept_by_next}",
-                    m.generation,
-                    (island + 1) % count + 1
+                    "Gen {}: got {got} copies from the islands, kept {kept}",
+                    m.generation
                 ),
-                format!(
-                    "Received {got} from island {}, kept {kept}. Next: gen {next}",
-                    (island + count - 1) % count + 1
-                ),
+                format!("Sends nothing back. Next: gen {next}"),
             ]
         }
+        Some(m) => {
+            let (sent, kept) = m.exchange.get(island).copied().unwrap_or((0, 0));
+            [
+                format!(
+                    "Gen {}: copied {sent} to the hub, it kept {kept}",
+                    m.generation
+                ),
+                format!("Receives no migrants. Next: gen {next}"),
+            ]
+        }
+        None if hub => [
+            "No copies yet this session".to_owned(),
+            format!("Copies arrive at generation {next}"),
+        ],
         None => [
-            "No migration yet this session".to_owned(),
-            format!("Next migration at generation {next}"),
+            "Isolated: receives no migrants".to_owned(),
+            format!("Copies go to the hub at generation {next}"),
         ],
     }
 }
@@ -5157,6 +5167,14 @@ fn percent_shares(counts: &[usize]) -> Vec<usize> {
         shares[i] += 1;
     }
     shares
+}
+/// "Island 1" to "Island 4" for the isolated islands, "Hub" for the hub.
+pub(crate) fn island_name(index: usize) -> String {
+    if index == crate::storage::hub_island() {
+        "Hub".to_owned()
+    } else {
+        format!("Island {}", index + 1)
+    }
 }
 /// Paints one island card and returns the creature the player clicked.
 #[allow(clippy::too_many_arguments)]
@@ -5182,7 +5200,7 @@ fn paint_island(
     painter.text(
         at(12., 10.),
         Align2::LEFT_TOP,
-        format!("Island {}", index + 1),
+        island_name(index),
         FontId::proportional(16.),
         theme.ink,
     );
@@ -6496,19 +6514,26 @@ mod island_view_tests {
     }
 
     #[test]
-    fn migration_lines_name_the_neighbors_and_the_next_date() {
+    fn migration_lines_name_the_hub_and_the_next_date() {
         let next = crate::storage::MIGRATION_INTERVAL;
+        let hub = crate::storage::hub_island();
         let none = migration_lines(None, 0, 3);
-        assert!(none[0].contains("No migration"));
+        assert!(none[0].contains("receives no migrants"));
         assert!(none[1].contains(&format!("generation {next}")));
+        assert!(migration_lines(None, hub, 3)[0].contains("No copies yet"));
         let migration = MigrationSummary {
             generation: next,
-            exchange: vec![(4, 1), (4, 2), (4, 3), (4, 4)],
+            exchange: vec![(4, 1), (4, 2), (4, 3), (4, 4), (0, 0)],
         };
         let lines = migration_lines(Some(&migration), 0, next + 2);
-        assert!(lines[0].contains(&format!("Gen {next}: sent 4 to island 2, it kept 1")));
-        assert!(lines[1].contains("Received 4 from island 4, kept 4"));
+        assert!(lines[0].contains(&format!("Gen {next}: copied 4 to the hub, it kept 1")));
+        assert!(lines[1].contains("Receives no migrants"));
         assert!(lines[1].contains(&format!("gen {}", next * 2)));
+        let lines = migration_lines(Some(&migration), hub, next + 2);
+        assert!(lines[0].contains("got 16 copies from the islands, kept 10"));
+        assert!(lines[1].contains("Sends nothing back"));
+        assert_eq!(island_name(0), "Island 1");
+        assert_eq!(island_name(hub), "Hub");
     }
 }
 /// How long a screenshot run waits before it captures: 8 s, or

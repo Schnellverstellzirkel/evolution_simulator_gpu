@@ -376,7 +376,7 @@ fn archive_breeding_is_repeatable_and_valid_across_streaming_slice_sizes() {
 }
 
 #[test]
-fn the_global_reserve_breeds_and_counts_its_visits() {
+fn the_island_reserves_breed_and_count_their_visits() {
     let mut experiment = Experiment::new(Config {
         population: 512,
         ..config(38)
@@ -387,11 +387,13 @@ fn the_global_reserve_breeds_and_counts_its_visits() {
         experiment.prepare_next_batch().unwrap();
     }
     let reserve: Vec<_> = experiment
-        .archive
-        .entries
+        .islands
         .iter()
+        .flat_map(|island| &island.entries)
         .filter(|elite| evolution_simulator::qd::is_morphology_niche(&elite.niche))
         .collect();
+    // The global archive holds behavior elites only.
+    assert_eq!(experiment.archive.morphology_count(), 0);
     assert!(
         !reserve.is_empty(),
         "the synthetic run must fill the reserve"
@@ -587,7 +589,7 @@ fn old_physics_checkpoint_clears_stale_islands_and_queued_reseeds() {
     archive_synthetic_results(&mut experiment);
     experiment
         .reseed
-        .push(experiment.archive.entries[0].creature.clone());
+        .push(0, experiment.archive.entries[0].creature.clone());
     experiment.qd_version -= 1;
     assert!(!experiment.cma_emitters.is_empty());
     assert!(
@@ -697,7 +699,7 @@ fn steady_environment_change_checkpoint_keeps_boundary_state_valid() {
     assert!(restored.archive.entries.is_empty());
     assert!(restored.cma_emitters.is_empty());
     // The queued elites are bred back into the loaded generation first.
-    for elite in &uninterrupted.reseed {
+    for elite in uninterrupted.reseed.iter() {
         assert!(
             restored
                 .population
@@ -792,8 +794,8 @@ fn rebuilding_islands_resets_records_from_the_previous_partition() {
     let mut experiment = Experiment::new(config(38)).unwrap();
     archive_synthetic_results(&mut experiment);
     experiment.prepare_next_batch().unwrap();
-    // A checkpoint saved with a different island count is repartitioned on
-    // the next planning pass. Its previous partition's records cannot apply.
+    // A checkpoint saved with a different island count gets new, empty
+    // islands on the next planning pass. Its previous records cannot apply.
     experiment.islands.pop();
     experiment.island_progress = vec![(1.0e9, 0); experiment.islands.len()];
     let slots: Vec<_> = (0..experiment.config.population).collect();
@@ -820,17 +822,22 @@ fn an_island_migration_is_recorded_and_summarized() {
     let (generation, exchange) = experiment.last_migration.clone().unwrap();
     assert_eq!(generation, storage::MIGRATION_INTERVAL);
     assert_eq!(exchange.len(), storage::island_count());
-    for &(sent, kept) in &exchange {
-        assert!(sent > 0);
-        assert!(kept <= sent);
+    // Every isolated island sends to the hub; the hub sends nothing.
+    for (island, &(sent, kept)) in exchange.iter().enumerate() {
+        if island == storage::hub_island() {
+            assert_eq!((sent, kept), (0, 0));
+        } else {
+            assert!(sent > 0);
+            assert!(kept <= sent);
+        }
     }
     let migration = MigrationSummary {
         generation,
         exchange: exchange.clone(),
     };
-    // Island 0 receives what the last island sent.
-    assert_eq!(migration.received(0), exchange.last().copied());
-    assert_eq!(migration.received(1), exchange.first().copied());
+    let (sent, kept) = migration.hub_received();
+    assert_eq!(sent, exchange.iter().map(|e| e.0).sum::<usize>());
+    assert_eq!(kept, exchange.iter().map(|e| e.1).sum::<usize>());
 
     for island in &experiment.islands {
         let summary = IslandSummary::of(island);
@@ -844,4 +851,59 @@ fn an_island_migration_is_recorded_and_summarized() {
     }
     let empty = IslandSummary::of(&QdArchive::default());
     assert!(empty.best.is_nan() && empty.leader.is_none() && empty.cells == 0);
+}
+
+/// The island a creature was born in: every id comes from its slot.
+fn birth_island(id: u64, population: usize) -> usize {
+    evolution_simulator::qd::island_of_slot((id - 1) as usize % population, storage::island_count())
+}
+
+#[test]
+fn isolated_islands_only_hold_their_own_descendants() {
+    let mut experiment = Experiment::new(Config {
+        population: 500,
+        ..config(38)
+    })
+    .unwrap();
+    let population = experiment.config.population;
+    let hub = storage::hub_island();
+    let check = |experiment: &Experiment| {
+        for (index, island) in experiment.islands.iter().enumerate() {
+            if index == hub {
+                continue;
+            }
+            for elite in &island.entries {
+                // The elite and every recorded ancestor were born here.
+                for ancestor in experiment.ancestry(elite.creature.id, usize::MAX) {
+                    assert_eq!(
+                        birth_island(ancestor.creature.id, population),
+                        index,
+                        "island {index} holds a creature from another island"
+                    );
+                }
+                assert_eq!(birth_island(elite.creature.id, population), index);
+            }
+        }
+        for cma in &experiment.cma_emitters {
+            assert!(cma.island < storage::island_count());
+        }
+    };
+    for generation in 0..2 * storage::MIGRATION_INTERVAL + 3 {
+        archive_synthetic_results(&mut experiment);
+        check(&experiment);
+        if generation == storage::MIGRATION_INTERVAL + 5 {
+            // A world change queues each island's elites for its own slots.
+            let mut changed = experiment.config.clone();
+            changed.gravity += 1.0;
+            experiment.update_config(changed).unwrap();
+        }
+        experiment.prepare_next_batch().unwrap();
+    }
+    // The isolated islands sent copies to the hub.
+    let (_, exchange) = experiment.last_migration.clone().unwrap();
+    assert!(
+        exchange[..storage::ISOLATED_ISLANDS]
+            .iter()
+            .all(|&(sent, _)| sent > 0)
+    );
 }

@@ -269,21 +269,21 @@ impl IslandSummary {
         }
     }
 }
-/// The last island migration of this session: the generation it happened at
-/// and, per island, the elites it sent and how many its neighbor kept.
+/// The last migration to the hub this session: the generation it happened
+/// at and, per island, the elites it sent and how many the hub kept (zero for
+/// the hub itself).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MigrationSummary {
     pub generation: u32,
     pub exchange: Vec<(usize, usize)>,
 }
 impl MigrationSummary {
-    /// Elites island `island` received from the previous island in the ring,
-    /// and how many it kept.
-    pub fn received(&self, island: usize) -> Option<(usize, usize)> {
-        let count = self.exchange.len();
-        (count > 0)
-            .then(|| self.exchange.get((island + count - 1) % count).copied())
-            .flatten()
+    /// Elites the hub received from all isolated islands, and how many it
+    /// kept.
+    pub fn hub_received(&self) -> (usize, usize) {
+        self.exchange
+            .iter()
+            .fold((0, 0), |(sent, kept), &(s, k)| (sent + s, kept + k))
     }
 }
 #[derive(Clone)]

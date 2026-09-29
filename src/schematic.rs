@@ -5,7 +5,7 @@
 //! so it reads the same in light and dark mode.
 
 use crate::qd::Emitter;
-use crate::storage::{MIGRATION_INTERVAL, MIGRATION_SHARE};
+use crate::storage::{MIGRATION_INTERVAL, MIGRATION_SHARE, hub_island};
 use crate::ui::thumbnail;
 use crate::worker::Snapshot;
 use eframe::egui::{
@@ -205,6 +205,33 @@ const ISLAND_TINT: [Color32; 4] = [
     Color32::from_rgb(140, 84, 200),
     Color32::from_rgb(232, 150, 30),
 ];
+
+/// The hub: a smaller island in the middle that receives copies of every
+/// isolated island's best elites.
+fn hub(s: &Scene, snap: Option<&Snapshot>) {
+    let (cx, cy) = (500.0, 322.0);
+    s.poly(
+        &[
+            (cx - 62.0, cy + 6.0),
+            (cx + 62.0, cy + 6.0),
+            (cx + 36.0, cy + 30.0),
+            (cx, cy + 44.0),
+            (cx - 36.0, cy + 30.0),
+        ],
+        ROCK,
+        3.0,
+    );
+    s.ellipse(cx, cy, 66.0, 28.0, GRASS);
+    s.ellipse(cx, cy - 3.0, 52.0, 19.0, GRASS_LIGHT);
+    let summary = snap.and_then(|snap| snap.islands.get(hub_island()));
+    if let Some(creature) = summary.and_then(|i| i.leader.as_ref()) {
+        thumbnail(s.p, creature, s.rect(cx - 20.0, cy - 40.0, 40.0, 40.0));
+    }
+    let best = summary.map_or(f32::NAN, |i| i.best);
+    let plate = s.rect(cx - 54.0, cy + 8.0, 108.0, 20.0);
+    s.block(plate, CREAM, 5.0, 2.0);
+    s.label(cx, cy + 18.0, &format!("Hub  {}", meters(best)), 11.5, INK);
+}
 
 fn island(s: &Scene, snap: Option<&Snapshot>, index: usize) {
     let (cx, cy) = ISLAND_CENTERS[index];
@@ -422,19 +449,18 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
         CREAM,
     );
 
-    // Islands, then the arrows and boats between them.
-    let ring_color = [ROOF[0], ROOF[1], ROOF[2], ROOF[3]];
-    s.arrow((480.0, 190.0), (520.0, 190.0), WOOD_DARK);
-    s.arrow((615.0, 290.0), (615.0, 366.0), WOOD_DARK);
-    s.arrow((520.0, 462.0), (480.0, 462.0), WOOD_DARK);
-    s.arrow((385.0, 366.0), (385.0, 290.0), WOOD_DARK);
+    // The four isolated islands, the hub between them, and the boats that
+    // carry copies to the hub. Nothing sails back.
     for i in 0..4 {
         island(&s, snap, i);
     }
-    boat(&s, 500.0, 232.0, ring_color[0]);
-    boat(&s, 645.0, 336.0, ring_color[1]);
-    boat(&s, 500.0, 502.0, ring_color[2]);
-    boat(&s, 355.0, 336.0, ring_color[3]);
+    s.arrow((440.0, 262.0), (452.0, 296.0), WOOD_DARK);
+    s.arrow((560.0, 262.0), (548.0, 296.0), WOOD_DARK);
+    s.arrow((462.0, 396.0), (470.0, 362.0), WOOD_DARK);
+    s.arrow((538.0, 396.0), (530.0, 362.0), WOOD_DARK);
+    hub(&s, snap);
+    boat(&s, 398.0, 322.0, ROOF[0]);
+    boat(&s, 602.0, 322.0, ROOF[1]);
     let next = until_migration(generation);
     let when = if next == 0 {
         "The boats sail after this generation".to_owned()
@@ -442,9 +468,9 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
         format!("Boats sail in {next} generations")
     };
     s.text(
-        s.rect(410.0, 282.0, 180.0, 62.0),
+        s.rect(300.0, 52.0, 400.0, 30.0),
         &format!(
-            "Every {MIGRATION_INTERVAL} generations each island sends its fastest {:.0}% of elites to the next. A migrant stays only in an empty niche or if it wins. {when}.",
+            "The four islands never mix. Every {MIGRATION_INTERVAL} generations the hub gets a copy of each island's fastest {:.0}% of elites and breeds from them. {when}.",
             MIGRATION_SHARE * 100.0
         ),
         10.5,
@@ -490,7 +516,7 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
     s.text(
         hall.shrink(9.0 * s.k),
         &format!(
-            "Global archive\n{cells} behavior niches filled, {size_now} elites.\nEvery evaluated creature is offered to it and the best one in each niche stays. When the world changes, its elites are tested again and the islands, emitter stats and CMA state start over."
+            "Global archive\n{cells} behavior niches filled, {size_now} elites.\nEvery evaluated creature is offered to it and the best one in each niche stays. It is the record: no parent comes from it. When the world changes, each island's elites are tested again on their own island, and the emitter stats and CMA state start over."
         ),
         12.0,
         INK,
@@ -520,7 +546,7 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
         (14.0, 534.0, 232.0, 170.0),
         4,
         "How a child is made",
-        "One: pick a parent from an island archive. Two: a workshop changes it. Three: it runs the 20 s trial. Four: a contender gets the fine check. Five: it is offered to the archives. Islands keep creatures apart until the boats sail.",
+        "One: pick a parent from an island archive. Two: a workshop changes it. Three: it runs the 20 s trial. Four: a contender gets the fine check. Five: it is offered to the archives. The four islands never share creatures. Only the hub gets copies, when the boats sail.",
     );
 }
 
