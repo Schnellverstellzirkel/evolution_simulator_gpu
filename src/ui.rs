@@ -37,6 +37,32 @@ const MUSCLE_ACTIVE: Color32 = Color32::from_rgb(146, 16, 28);
 /// Ring around every node touching the ground in the current frame.
 const TOUCHDOWN: Color32 = Color32::from_rgb(255, 196, 64);
 const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
+/// Share of the viewport height a creature fills at the default zoom.
+const FIT_HEIGHT_SHARE: f32 = 0.42;
+/// Pixels per meter of the default zoom: the creature's height fills
+/// `FIT_HEIGHT_SHARE` of the viewport, clamped for tiny and huge bodies.
+fn fit_zoom(body_height: f32, view_height: f32) -> f32 {
+    (FIT_HEIGHT_SHARE * view_height / body_height.max(0.05)).clamp(40.0, 450.0)
+}
+/// A creature's typical height over a recording (m above the ground): the
+/// 90th percentile of the top of the body, so one leap does not shrink it.
+fn body_height(frames: &[Vec<[f32; 2]>], nodes: &[Node]) -> f32 {
+    let mut tops: Vec<f32> = frames
+        .iter()
+        .map(|frame| {
+            frame
+                .iter()
+                .zip(nodes)
+                .map(|(p, n)| p[1] + n.radius)
+                .fold(0.0f32, f32::max)
+        })
+        .collect();
+    if tops.is_empty() {
+        return 1.0;
+    }
+    tops.sort_by(f32::total_cmp);
+    tops[(tops.len() - 1) * 9 / 10].max(0.1)
+}
 /// The spacing scale: every gap, margin and padding is one of these.
 const GAP_S: f32 = 4.0;
 const GAP_M: f32 = 8.0;
@@ -352,6 +378,8 @@ struct Playback {
     /// frame is recorded in advance, so the average cancels the swing of
     /// each stride without lagging behind a steady walk.
     track: Vec<f32>,
+    /// Typical body height over the recording (m), for the default zoom.
+    height: f32,
 }
 /// Half-width of the follow camera's average of the center of mass (s).
 const CAMERA_WINDOW: f32 = 1.0;
@@ -396,6 +424,7 @@ impl Playback {
             (tick.min(last_frame), result.fitness)
         });
         let track = camera_track(&frames, &nodes);
+        let height = body_height(&frames, &nodes);
         // The head-shake average stops updating when the trial ends, so it
         // still holds the value that ended it. A broken joint shows in the
         // recorded pose at the end (the engine tests the pose after the step).
@@ -419,6 +448,7 @@ impl Playback {
             fall,
             ending,
             distance: result.fitness,
+            height,
             track,
             creature: normalized,
             config,
@@ -1277,6 +1307,8 @@ struct App {
     speed: f32,
     playing: bool,
     zoom: f32,
+    /// True once the user zoomed by hand; until then the zoom fits the creature.
+    zoom_user: bool,
     camera: [f32; 2],
     follow: bool,
     history_index: usize,
@@ -1424,6 +1456,7 @@ impl App {
             speed: 1.0,
             playing: true,
             zoom: DEFAULT_CAMERA_ZOOM,
+            zoom_user: false,
             camera: [0.0, 0.0],
             follow: true,
             history_index: 0,
@@ -1525,6 +1558,7 @@ impl App {
         self.playback = Some(Playback::new(c, cfg));
         self.follow = true;
         self.zoom = DEFAULT_CAMERA_ZOOM;
+        self.zoom_user = false;
         self.camera = [0.; 2];
     }
     /// Shows a creature the player picked. The theater keeps it until the
@@ -1929,6 +1963,7 @@ impl App {
             .on_hover_text("Keep the camera on the creature");
         if ui.button("Reset camera").clicked() {
             self.zoom = DEFAULT_CAMERA_ZOOM;
+            self.zoom_user = false;
             self.camera = [0.; 2];
             self.follow = true;
         }
@@ -2020,6 +2055,9 @@ impl App {
             response.on_hover_text("Click to pause or play · drag to pan · scroll to zoom");
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                self.zoom_user = true;
+            }
             self.zoom = (self.zoom * (scroll * 0.002).exp()).clamp(30., 1200.);
         }
         if response.dragged() {
@@ -2027,6 +2065,11 @@ impl App {
             self.camera[0] -= delta.x / self.zoom;
             self.camera[1] += delta.y / self.zoom;
             self.follow = false;
+        }
+        if !self.zoom_user
+            && let Some(p) = &self.playback
+        {
+            self.zoom = fit_zoom(p.height, rect.height());
         }
         let painter = ui.painter_at(rect);
         // All scene primitives are tessellated into egui's batched wgpu render pass.
@@ -3303,18 +3346,16 @@ impl App {
             rect.min,
             Pos2::new(rect.right() - board_width - 12., rect.bottom()),
         );
-        // Scale the track to the farthest finish, so short trials and slow
-        // creatures still fill the lanes, and fast ones stay in view.
-        let farthest = self
-            .race
-            .iter()
-            .map(|lane| lane.playback.distance)
-            .fold(0.0f32, f32::max);
-        // A lane holds about 1.4 m of height, so tall bodies stay inside it.
+        // The default zoom follows the lanes' median body height, and the
+        // tallest body still has to fit its lane.
         let lane_height = lanes_rect.height() / self.race.len().max(1) as f32;
-        let zoom = (lanes_rect.width() / (farthest * 1.3).max(3.0))
-            .min(lane_height / 1.4)
-            .clamp(34.0, 240.0);
+        let mut heights: Vec<f32> = self.race.iter().map(|lane| lane.playback.height).collect();
+        heights.sort_by(f32::total_cmp);
+        let median = heights.get(heights.len() / 2).copied().unwrap_or(1.0);
+        let tallest = heights.last().copied().unwrap_or(1.0);
+        let zoom = fit_zoom(median, lane_height)
+            .min(lane_height * 0.8 / tallest.max(0.1))
+            .clamp(34.0, 300.0);
         let visible = lanes_rect.width() / zoom;
         // The leader's averaged center of mass, so its stride does not shake
         // the view; the easing below smooths a change of leader.
@@ -5434,6 +5475,15 @@ mod tests {
                 "frame {i}: camera {x}, walk {walk}"
             );
         }
+    }
+    #[test]
+    fn default_zoom_follows_body_height() {
+        let small = fit_zoom(0.3, 260.0);
+        let tall = fit_zoom(1.5, 260.0);
+        assert!(small > tall);
+        assert!((tall * 1.5 / 260.0 - FIT_HEIGHT_SHARE).abs() < 0.01);
+        assert_eq!(fit_zoom(0.001, 260.0), 450.0);
+        assert_eq!(fit_zoom(100.0, 260.0), 40.0);
     }
     #[test]
     fn zoom_scales_a_plot_range_around_its_center() {
