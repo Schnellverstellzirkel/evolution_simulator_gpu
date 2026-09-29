@@ -4,7 +4,6 @@ Open work only. Delete an item when it is merged into `main` or measured and rej
 
 ## Physics v2
 
-- Muscle strength scaled to the mass a muscle moves, with the CUDA mirror [claude/p2-muscle, claude/p2-muscle-cuda].
 - If the game loses its GPU (device lost), it falls back to the scalar v2 CPU prototype at about 1,000 creatures/s. Reopen the GPU after a device loss instead, or make the CPU fallback fast. Agent benchmarks beside the owner's game have caused device-lost errors in the benchmark process.
 - The walking levers (tendons, joint damping) are on `claude/physics2-levers` and need a port onto v2 and one GPU evolution each.
 - v2 runs at about 0.2x of v1's creature-steps per second; CUDA is 1.8x Vulkan. Occupancy is 4 warps at 16 nodes [claude/p2-cuda-speed].
