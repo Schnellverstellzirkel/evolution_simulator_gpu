@@ -1,305 +1,110 @@
-# Agent notes
+# Agent guide
 
-Read this before changing the code. It lists the owner's rules, how to work on this machine, and the open work.
-
-## Handoff: where Claude stopped (2026-09-29)
-
-The owner closed the orchestrating Claude session here. Main is at 0a38d09 plus this note, and `cargo run --release` on main is the current game. Four tracks were in progress, each on its own branch and worktree. Each agent was asked to push a WIP commit before the session closed. Check each branch's last commit message for its state, and check the worktree for uncommitted changes before you resume.
-
-What the game on main has (added 2026-09-28 and 29, details in the entries below): 20 s trials with only the 5 s screen, the slider fix, GPU out-of-memory recovery, 44 anatomy mutation operators, the GPU score as final (Codex), CUDA as the automatic engine on NVIDIA with Vulkan as the fallback, replays recorded by the scoring kernel (CUDA and Vulkan) so a replay matches its score, small saves (archives and search state, a few MB, load in seconds; older saves are turned down with a message), and the UX overhaul from `docs/ux-audit.md` with the owner's readability fixes. The champion view switches to a new record at once, and archive cards hold still.
-
-Owner decisions and working rules from this session (they extend the product rules below):
-- Trials last 20 s. The 5 s first screen stays; the second screening rung is gone.
-- The GPU score is final. CPU/GPU agreement is a diagnostic, not a gate. The gates are `tests/gpu_repeatability.rs` (bit for bit on one GPU) and the GPU tests in `screening` and `simulation`.
-- Physics v2: keep v1 as the game. v2 continues on `claude/physics2` and becomes the game once it runs within about 2x of v1's creatures/s.
-- Mutations: the owner wants more operator types, never fewer. Never remove a shipped operator or feature the owner did not ask to remove. "Losers are removed" applies only to new experiments.
-- No knobs: finished work is on by default, losing experiments are deleted, unfinished work stays on its branch. An environment variable may stay only as a developer diagnostic.
-- Testing economy: the owner lost patience with repeated test batteries. Run the full suite once per push. Stop an A/B once 3 seeds decide it. Push mergeable pieces often (about every 20 minutes of work) instead of finishing a whole track first.
-- The owner's game comes first. Before any GPU run, check `nvidia-smi --query-compute-apps` and wait while `target/release/evolution-simulator` from this directory runs. Take `flock target/gpu.lock` for GPU runs. Screenshot (smoke) windows show on the owner's desktop, so keep them short; they are titled "agent screenshot run, not your game".
-
-Tracks in progress:
-1. Islands view (`claude/ux` at eba6927, worktree `../evolutionSimulator-ux`, clean). The owner asked for the individual islands in the Ways of moving tab, in place of the body-plan filter, which is now removed. Spec: the 4 island archives side by side or 2x2, each with its best creature (a click plays it in the docked player), cell count, best distance, its top elites or a best-per-cell mini map, its emitter mix, and when it last sent or received migrants. Leave a "How evolution works" button for the schematic. State: eba6927 (WIP, cargo check passes, no tests run) only records each island migration in the experiment (generation, elites sent and kept); nothing reads it yet. Still to do: the per-island summary from the worker (reuse `IslandSummary` from `claude/schematic`, see item 2), the 2x2 view with click-to-play, unit tests, and screenshots.
-2. Dofus-style schematic (`claude/schematic`, worktree `../evolutionSimulator-schematic`, new file `src/schematic.rs`). The owner asked for "a schematic somewhere drawn in dofus style showing how the evolution algorithm between islands etc works and how the species reproduce". Plan: painted with egui (warm saturated colors, thick dark outlines, floating grassy islands, parchment panel), showing the 4 islands with creatures on niche plots, the emitters as workshops (CMA tuning, anatomy mutations, novelty, immigrants), the trial arena with the 5 s gate and 20 s track, the fine check, migration boats every 25 generations, and the global archive and champion. It shows live numbers on its signs and opens from Help and from the Islands view. State: f476417 (WIP; it builds, but clippy and the tests have not run) adds `islands: Vec<IslandSummary>` to the worker snapshot (each island's best distance, filled niches and fastest elite) and makes `MIGRATION_INTERVAL` (25) and `MIGRATION_SHARE` (0.1) in `storage.rs` public. `src/schematic.rs`, the Help button and the screenshots are not started. What the code does, as read by that agent: the screen stops a creature at 5 s below the top-20% bar; a contender gets a nudged copy (2 cm pose, ±10% grip) at 4x physics rate and the worse distance counts; emitter shares start at CMA 35%, structural 35%, novelty 30%, immigrant 0% (immigrants fill empty islands and bring re-tested elites after a world change); structural and novelty children sometimes cross with a same-plan mate and are protected for 3 generations; every 25 generations each island sends its fastest tenth of niche elites to the next island in a ring (1 to 2 to 3 to 4 to 1), and a migrant stays only where its niche is empty or it wins; every evaluated creature is offered to its island's archive and the global archive; a world change re-tests the global elites and clears the islands, emitter stats and CMA state.
-3. Speed toward 4M creatures/s (`claude/speed`, worktree `../evolutionSimulator-cuda`). The owner allowed it after playing the 2026-09-29 build. First step: make an evolved save in the current format (about 40 generations at 3M), then measure a fresh game and that save end to end with `EVOLUTION_STAGE_LOG`. A fresh game is bound by breeding on the CPU (3M GUI 360k/s on CUDA and 357k/s on Vulkan), and an evolved one by the GPU (CUDA 1.37x Vulkan). Attack the biggest wall and re-measure after each step. The old benchmark checkpoints (`runs/evolved-3m-v26.evo` and others) are refused by the current game. State: 5918d48 adds only a developer hook, `EVOLUTION_BENCH_SAVE`, which saves the game when a GUI benchmark ends. Baseline on a fresh 3M game with CUDA: about 9.5 s per generation, 300k to 395k creatures/s end to end. The worker waits about 4.4 s per generation for GPU results, archives for 1 s and breeds for 3.5 s, and the GPU is busy only 47% of the time. So the wall is the serial worker (archive insertion and breeding), not the kernel: overlap them with GPU work and parallelize them first. The 40-generation run for an evolved save stopped at generation 12 when the owner's game started.
-4. Physics v2 speed (`claude/physics2`, worktree `../evolutionSimulator-physics2`). The v2 kernel runs at 30k creatures/s against v1's 170k (20 s trials). The contact solve is most of the cost, and the kernel needs 168 registers. Target: at least 0.5x of v1. Then try the physics levers for walking, one at a time: muscle power scaled to body size, elastic tendons, less joint damping. Each lever gets one GPU evolution (seed 40, 100k, 30 generations, 20 s) and a GIF with the ledgers. No posture rule without asking the owner. The `EVOLUTION_P2_*` measuring switches must go before v2 is proposed for main. The same-run comparison (seed 40, 100k, 30 generations): v1 best 17.2 m and QD 3,495 at 1.8 s per generation; v2 best 36.2 m and QD 6,489 at 11.0 s per generation. Neither physics produced a walker. GIFs are in `docs/physics-v2/` on that branch. State at handoff: 9e7338d (WIP, rebased onto ae7b653, not yet onto current main). The rewritten kernel (a per-lane table) matches the CPU prototype and runs 24.7M creature-steps/s against v1's 90.8M on the same population, about 0.27x, so the 0.5x target is not met. Without ground contact v2 runs 97M steps/s, so contacts are about three quarters of the cost; the next step is a contact solve without the dense matrix. The walking levers (muscle power scaled to size, tendons, joint damping) are coded behind temporary switches and not run yet. Temporary switches to remove before proposing v2 for main: `EVOLUTION_P2_PGS`, `_WARM`, `_CONTACTS`, `_PLANT_SWEEPS`, `_MUSCLE_KG`, `_TENDON` and `_TIMING`. The pre-rebase history is in the local ref `physics2-pre-rebase` in that worktree, and the lever run script `target/p2/gpu/lever.sh` is local only. The full release suite last passed on 71dffd8; the later commits ran only the physics2 unit tests (and clippy on 528e25d).
-
-Known issues:
-- Morphology reserve: the 64-place reserve exists only in the global archive, and parents are always drawn from the islands. So the structural emitter's 10% reserve-parent draw always falls back to normal sampling, and reserve creatures never become parents, although README says the reserve gives new body plans breeding chances. Not fixed; decide with the owner whether islands should hold reserves.
-- The Generation tile can read "100% done" while the last checks still run.
-- The feed and chart mark a world change only after the first generation in the new world ends.
-- CUDA costs 1.2 to 1.6 GB more peak RSS (pinned buffers).
-- v1 physics: the planted-feet rule uses the mass-weighted mean slide of the touching nodes, so feet sliding in opposite directions can average to "planted". In the v1 comparison run, the median elite (a plank) got 761 J from the position solver against 9 J of muscle work. That is jitter, not propulsion, but it is visible.
-- The replay distance and archive score now come from the same GPU kernel. Only a CPU-only game replays on the CPU.
-
-Other branches: `claude/lanes` (persistent lanes, parked), `claude/muscle-mass` (measured, not adopted), and `claude/mutations`, `claude/fixes`, `claude/trial20` and `claude/shortcuts` (all merged). `../evolutionSimulator-v1cmp` holds unpushed v1 ledger tools (a lane-0 energy and friction ledger, `examples/v1_ledger.rs`). Two stash entries in this directory predate the session.
-
-## Live status (updated with each push)
-
-- 2026-09-27, Codex handoff (c176652): live backend names in worker snapshots and refreshed backend/allocation status after blocking evaluation. Claude verified it afterwards: all-target clippy and 149 release tests pass on a894038.
-
-Other agent sessions (Codex, OpenCode) sometimes work in this tree too. Before editing, check `git status` for changes you did not make, and work in a separate `git worktree` when another session is active. Pull before you start, commit small, push often, and update this section when you take or finish an item.
-
-- 2026-09-29 early, Claude (orchestrator): merged small saves (archives and search state only; 3M save 0.06 s and 3.4 MB, load 3.8 s), GPU-recorded replays (the replay comes from the scoring kernel with a frame output, so it matches the archive score), and CUDA as the automatic default on NVIDIA (kernel 1.6 to 1.8x Vulkan, 3M GUI 1.37x on an evolved population, a tie on a fresh game; Vulkan when the driver or NVRTC is missing). The CUDA engine records replays with the same kernel it scores with (b98499f), so `gpu_replays_show_the_gpu_score` passes with CUDA as the default. Owner decision on physics v2: keep v1 as the game; v2 continues on `claude/physics2` and becomes the game once it runs within about 2x of v1 (now 5.4x slower per step).
-- 2026-09-28 night, Claude (orchestrator), pushed after a full test run (226 tests, all 7 GPU tests included): the Codex change that makes the GPU score final (no CPU replay step in archive admission; the CPU stands by for failover), 20 s trials with only the 5 s screen (`qd::VERSION` 29), saves with a header that turns down older physics at once and load on their own thread with progress, the whole UX overhaul from `docs/ux-audit.md` (event feed, level buttons, knobs in a closed Diagnostics drawer, live archive map, saves list in File > Open, explore with a docked player, Race it, species by body plan, theme-aware button contrast), and a mutation repair fix (at the muscle limit, repair could leave the muscle ring split). Known gap: replays still run on the CPU, so a replay can differ from its GPU score. In progress: UX readability (`claude/ux`), CUDA as default (`claude/cuda`), small checkpoints (`claude/fixes`), physics v2 GPU kernel (`claude/physics2`).
-- 2026-09-28 evening, Claude (orchestrating subagents, each on its own branch and worktree). Merged to main:
-  - GPU memory (2c1c3e6): a submission that runs out of GPU memory no longer retires the GPU for the session. The GPU thread frees cached buffers, waits, runs fewer units at once, and retries (up to 60 s with nothing in flight). Buffers above 1 MiB get 25% headroom; peak GPU memory on the evolved 3M save fell from 2,253 to 1,920 MiB.
-  - Sliders (80fc7c2, `qd::VERSION` 27): every node the ground pushed feels friction, even when the rebuild and the lift leave it above the floor, and the whole-body lift friction may only slow the body. 33 of 40 top elites on the old physics slid; rescored, none goes past 21 m. `first_generation` best 0.97 m (was 11.03). GPU-focused regression tests still to run; CPU parity is not a gate.
-  - The replay follows the champion (df4a279, first batch of the UX overhaul from `docs/ux-audit.md`).
-  - Mutations: the owner wants more operator types, never fewer; the original 30 stay. 44 anatomy operators, all on by default, none removed (owner). Twelve second-round operators: the four skeletal ones have a pick slot each (neutral over 10 seeds at 80 generations), and the eight gentle ones share one slot (3 seeds at 40 generations: QD x1.28, best x1.10; with a slot each they lost clearly). Two owner-requested operators for a creature whose other end drags: `leg_to_dragging_end` and `lift_dragging_end` (3 seeds: QD x1.05, best x0.71 within noise, bodies a node larger). Details: `docs/anatomy-operators.md`.
-  - A second screening rung, later removed with the move to 20 s trials.
-- 2026-09-28 night, Claude (branch `claude/trial20`): trials last 20 s instead of 60 s (owner), `qd::VERSION` 28, and older games continue with 20 s trials on load. The second screening rung is gone (the owner: screening makes less sense with 20 s trials); only the 5 s screen remains, and it may go too.
-- 2026-09-28 evening, Claude (branch `claude/shortcuts`): a second screening rung became the default (30 s after settling, keeps the best 60% of the 5 s survivors; GPU rate +10%, search per evaluation and per GPU time as good or better); removed again with the move to 20 s trials. Cheaper fine checks (2x, 3x, 20 or 30 s) and behavior metrics every 2 or 4 steps were measured and removed. `search_ab --checks` now models the game's contender check, and without it the top elites keep about 0% of their distance in a fine trial. Numbers: `docs/performance-log.md`.
-- 2026-09-28 afternoon, Claude:
-  - Landed: old-world results (units in flight when the world changes) stay out of every archive, and History plot zoom controls (36e7c7b, written by an OpenCode session and finished by Claude). Phase 0 GPU measurements (`docs/phase0-measurements.md`, `tools/gpu-micro/`): L2 1.6 TB/s (twice the design estimate), shared memory 127 B per cycle per SM, and any kernel above 128 registers runs 12 resident warps instead of 16, so today's kernels at 7 or more nodes already run at 12.
-  - Measured and not adopted: muscle mass, five variants over 80 generations (`docs/performance-log.md`). None holds muscle counts down; the best bodies get heavier and more muscular, and best distance falls by half or more. Tools: `examples/monster_check.rs`, and `search_ab` now reports top-50 muscles. The implementation is on branch `claude/muscle-mass`.
-  - Parked: the first persistent-lane engine (stage 1 of the v2 design), on branch `claude/lanes`. It matched the old path bit-for-bit but was slower (148k against 244k creatures/s in the GUI), because its kernel needs 155 to 168 registers and nothing compacts sparse warps. That match is historical, not a requirement for the next design. See `docs/performance-log.md`.
-  - Landed, on by default: 30 anatomy mutation operators (`src/evolution/anatomy/`, ideas from a Codex session) that copy, grow, fuse, move and retime whole limbs and muscles. 10 seeds at 40 and 80 generations: best distance +21 to 26% on average, QD +16 to 28%, top-50 muscles about 28% fewer; breeding about 5% slower at 3M. `EVOLUTION_ANATOMY=0` restores the classic mutation. `examples/mutation_audit.rs` measures how much of its parent's distance each operator's child keeps. Details: `docs/anatomy-operators.md`.
-  - Replay: the camera follows a center of mass averaged over 1 s on each side, and the body is drawn between recorded frames, so the view no longer jitters. Environment panel labels no longer run under their buttons.
-
-- 2026-09-27, Claude is working on: the 2M evaluated creatures/s goal, measured end to end in the full graphical game at 3M creatures and 60 s trials. Plan and baseline: `docs/performance-campaign.md`.
-- Historical 2M/s campaign snapshot (2026-09-27; CPU replay scoring was removed 2026-09-28): the 3M GUI rate on the evolved checkpoint was 36,381 -> about 130,000 creatures/s end to end at 60 Hz (about 214,000 with `EVOLUTION_PHYSICS_RATE=30`, measured and not adopted: its elites do not hold up at 60 Hz). In order: fine checks one per archive cell per round (other contenders for the cell are dropped unchecked, which fixed a stall after world changes), global-archive CPU replays next to the check, four GPU queues and 1 s units, GPU trials in segments that drop fallen creatures, a fall ends the trial (behavior totals freeze, `qd::VERSION` 26), early screening at 5 s with the bar set within the first generation, parallel breeding and compaction. Measurements: `docs/performance-log.md`. Open: the GPU kernel (about 9,000 warp instructions per creature-step), breeding (3.6 to 3.8 s per 3M generation, next wall after the GPU).
-- 2026-09-28: `docs/hpc-assessment.md` is a research assessment of how to go much faster (hardware limits, instruction budget for 2M/s, literature, a v2 architecture with persistent lanes and a reduced-coordinate physics, profiling plan, roadmap). It lists four owner decisions. No code changed for it.
-- 2026-09-28: `docs/data-architecture.md` is the detailed v2 design behind that assessment: an inventory of every byte per creature (PCIe, host memory, DRAM, L2, shared memory, registers), a performance model calibrated on the measurements, the ceilings of today's layout (shared-memory bandwidth caps it near 0.8M creatures/s and L2 near 1.15M at any occupancy), genome, plan, lane, result and archive layouts, per-epoch data volumes, and the orchestration (persistent class kernels with per-lane queues, step-budgeted 100 ms epochs with device-side suspend, deterministic absorption). It adds five owner decisions and corrects two assessment estimates. `examples/body_stats.rs` reads only a checkpoint's genome table (safe beside the game at 3M) and reports body sizes and warp loop efficiency by size class.
-- 2026-09-28: owner decision: the GPU is the scoring authority for GPU runs. CPU/GPU bit matching is not required; CPU results must not cap or relocate GPU scores. Keep CPU comparisons as optional diagnostics only. GPU repeatability for the same hardware/settings and equal-budget search results are the relevant gates. CPU playback and fallback remain separate paths.
-- 2026-09-28, Codex: GPU runs now route standard and fine-check work only to healthy GPUs; CPU engines stay reserved for failover. GPU archive admission no longer runs CPU rescoring. GPU packing reuses node/joint scratch instead of allocating per creature. Build and benchmark verification still need a Rust toolchain and the workstation GPU.
-- Just pushed (2026-09-28): long sessions. The owner's 3M session at generation 70 runs 5 times slower than at generation 9 (38,615 against about 200,000 creatures/s) because bodies grew from 6 nodes and 9 muscles to 10.6 and 34, which is 4.2 times the GPU work per creature. The GPU clock was steady, so it is not heat. Peak RSS was 22 GB, and the old default autosave cloned about 6 GB more. Fixed: autosaves of a continuous run can be loaded again, and autosave is off by default and after loading (owner: as stateless as possible). Measured and not adopted: `EVOLUTION_SHRINK=1` removal operators (bodies 24% fewer muscles, search medians tie, means lower). Growth is selected for because muscles are massless and each has its own energy store, so muscle mass is an open owner decision. Owner decisions recorded in `docs/data-architecture.md` section 12: deterministic search, small checkpoints, 1 cm screen bar, f16 slow muscle genes. The design now covers long sessions (section 10).
-- Just pushed (2026-09-27 evening): the 3M GUI benchmark runs at 185,000 to 205,000 creatures/s end to end (one-run spread about 10%), peak RSS about 10 GB (was 18.3 GB), control p99 0.23 to 0.39 s (was 1.2 s), and an environment button answers in about 25 ms (was 3 to 9 s). Changes: the kernel's fourth shared node array is gone (bit-exact, +7.5% kernel rate), 1 s GPU units (+11% over 3 s), gene arenas sized for one generation of children and filled in parallel, packed GPU batches freed after upload, one finished unit per worker pass, and no GPU drain for settings changes in a steady run. Measured and not adopted: 30 Hz physics (its elites keep a median 38% of their distance at 60 Hz), a muscle waveform cache and a branch-free waveform on the GPU (both slower). `examples/mem_report.rs` reports checkpoint memory; `EVOLUTION_BENCH_SETTINGS_PROBE=1` measures settings latency. Benchmarks that load a checkpoint no longer autosave into `runs/`.
-- Earlier: archive and breeding CPU cuts between batches (search output byte-identical to 2b1014c), the performance campaign baseline, and the Codex search-benchmark CPU backend.
-- Done earlier (Codex): device recovery (see `docs/superpowers/plans/2026-09-26-device-recovery.md`). A failed GPU is retired and its unfinished units are retried on the CPU; a failed CPU is terminal after completed output; a primary GPU that cannot open falls back to the CPU.
-- 2026-09-26 18:xx, Claude pushed a backlog sweep: legacy `mutate`/`reproduce` removed with the obstacle config slot (checkpoint magic EVORUST5); `EVOLUTION_STAGE_LOG` CSV rows; `runs/` disk use, replay speed and center-of-mass trail, help overlay, screenshot button, dark theme, archive map, race view and lineage view in the UI; heat wave, drought, slope, wind, mud and gap effects in both engines with archive re-testing (qd::VERSION 23); `examples/search_ab.rs`; `examples/effect_cost.rs` with the measured per-effect cost; and `tests/engine_agreement.rs` with fine-fidelity evolved-creature checks.
-- Just pushed: hurdles and per-creature earthquake terrain, near-neutral structural splits, and a fresh-perturbation elite refresh (both search flags measured and left default off), plus the 3M memory and check-cost measurements in docs/performance-log.md. `qd::VERSION` 24, checkpoint magic EVORUST6, 121 CPU tests, nine report tests, five RTX/agreement tests; `first_generation` unchanged at median -0.07 m, p99 0.34 m, best 11.03 m. 3M peak RSS 5.61 GiB; the fine contender check is 53.9% of check-on GPU busy time.
-- Just pushed: mud and gap terrain effects, an opt-in bounded elite-refresh flag (measured byte-identical on paired seeds), and `tests/engine_agreement.rs` with fine-fidelity evolved-creature and perturbed-check agreement. `qd::VERSION` 23, archive re-tests on mud/gap changes, 112 CPU tests, nine report tests, five RTX/agreement tests; `first_generation` unchanged. Mud and Gaps sit in the effect-cost noise floor.
-- Just pushed: slope and wind effects, the History records timeline, creature JSON export/open, species names, a hall of fame, and `examples/effect_cost.rs`. 104 CPU tests, nine report tests, three RTX agreement tests; `first_generation` stays at median -0.07 m, p99 0.34 m, best 11.03 m with the calm defaults. The UI smoke capture still runs; screenshots under /tmp/opencode.
-- Just pushed: the backlog wave above. 100 CPU tests, nine report tests, three RTX agreement tests, and `first_generation` at the same numbers as before the energy effects (median -0.07 m, p99 0.34 m, best 11.03 m). The two new effects are neutral at their calm defaults, and changing either re-tests the archive. `search_ab` tiny runs are byte-identical across repeats. UI features were smoke-run with screenshots under /tmp/opencode.
-- 2026-09-26 22:xx, Claude pushed: seasons that cycle the world effect by effect (default off), an opt-in whole-group CPU early exit with measurements, and the terrain-effects physics audit. Still open after this wave: the full backlog below, including water and curriculum effects, GPU lane compaction and register pressure, checkpoint shrinking, and the owner's search-algorithm items.
-- Just pushed: a failed GPU is retired and its unfinished units, including pending fine checks, are re-submitted to a healthy CPU with their exact creatures and settings; a failed CPU is terminal and delivers completed output before its persistent error. Rejected submissions keep their creatures in the round. 94 CPU tests, nine report tests, three RTX agreement tests.
-- Just pushed: a primary GPU that cannot open no longer stops the game. Evaluation falls back to the CPU and reports the original failure once; with the separate CPU pool disabled, it shares the general Rayon pool. Explicit GPU constructors stay strict. 96 CPU tests, nine report tests, three RTX agreement tests.
-- Just pushed: a `fast` Cargo profile and machine-safe build/run instructions in `docs/building.md`.
-- Just pushed: replay scrubber and fall marker on the timeline, with seeking paused safely at the selected frame.
-- Just pushed: secondary GPU evaluation is opt-in; the default uses the primary GPU and CPU only. `EVOLUTION_DEVICES` can select extra devices explicitly.
-- Just pushed: the search benchmark can use the production CPU engine without Vulkan and reports fixed candidate budgets plus top-50 body sizes. Smoke runs covered behavior-only and morphology-reserve across seeds 38–42: 80 candidates each and finite body-size rows; repeating behavior-only seed 38 reproduced the same score, QD, coverage, and body mix.
-- Just pushed: only planted feet may push the body forward (5905316). The capped version still let evolution build a sled: four nodes sliding on the ground all trial reached 2,267 m in 60 s. Friction may now push forward only while the feet on the ground slide slower than 1 cm/s; while they slide it can only oppose the slide. Also fixed a clippy error in the replay clock (`src/ui.rs`).
-- Just pushed: planted feet with a friction cap. b57f756 alone was an exploit (random bodies reached 224 m in 20 s because weighting grounded nodes broke momentum conservation). The fix limits the center-of-mass shift from the bone passes to mu times the ground's normal push; random bodies now reach 9.8 m at best (6.7 m without planted feet). `examples/first_generation` checks any physics change for free propulsion this way; run it before pushing physics changes.
-- Just pushed: undoable meteor strike (Environment panel, Catastrophe row).
-- Superseded 2026-09-28: an earlier change made the global archive admit only scores reproduced by the CPU replay (7f3f3a3; test `archive_scores_never_exceed_the_replayed_distance`). The replay still records its own CPU result for playback; GPU scores now own GPU-run archive admission. Head shaking limit: a creature dies if its head's mean acceleration over 0.1 s passes 8 g (a08fdc4). Friction counts a foot's load (97e3e9a). README rewrite (a41e9df).
-- Measured with the 2 m bone cap (100k creatures, 20 generations, seed 38): the fastest bodies are 8 nodes, about 1.15 m of bone, 2.3 kg, 175 to 289 m in 60 s, and slip 0.12 to 0.29 m per meter. Giants are gone. The owner still sees glitchy gaits, for example a tall pyramid that jiggles at the simulation step rate.
+Read this before you change the code. It covers the game, the owner's rules, how work is organized, and how to build, test and measure on this machine. Open work is listed in `docs/backlog.md`.
 
 ## The game
 
-Evolution Simulator is a Rust game. 2D creatures made of bones, joints and muscles evolve to travel as far as possible in 20 s trials. The search is MAP-Elites with CMA, structural, novelty and immigrant emitters over 4 island archives, with 3 million creatures per generation.
+Evolution Simulator is a Rust game. 2D creatures made of bones, joints and pull-only muscles evolve to travel as far as possible in 20 s trials. Each generation has 3 million creatures, and the GPU scores all of them. The search is MAP-Elites with four emitters (CMA tuning, anatomy mutations, novelty, immigrants) over 4 island archives in a ring plus one global archive. The player watches evolution and changes the world with environment buttons.
 
-Physics exists in three places; only the GPU path defines scores in a GPU run:
+`cargo run --release` on `main` is the current game. It must be the best game with no flags.
 
-- the GPU kernel: `shaders/physics_creature.wgsl`, driven by `src/gpu.rs` and `src/vk_engine.rs`
-- the AVX-512 CPU engine: `src/cpu_engine.rs` and `src/simd.rs`
-- the older CPU reference: `src/physics.rs`
-- the CUDA port of the GPU kernel, which the game uses on NVIDIA GPUs whenever the driver and NVRTC load: `shaders/physics_creature.cu`, driven by `src/cuda_engine.rs`. It mirrors the WGSL kernel section for section; change both together.
+## Owner's rules
 
-The replay viewport plays frames from the CPU engine (`cpu_engine::replay`); its result may differ from a GPU archive score. `src/creature_kernel.rs` packs creatures for the GPU. `src/scheduler.rs` routes work to healthy GPUs and uses the CPU as a separate fallback. `physics::body()` computes node masses for CPU callers; GPU packing uses `body_into()` with reused storage.
+Product:
 
-## Owner's product rules
+- Fitness is horizontal distance only. Never add fitness terms, penalties or multipliers, and ask the owner before proposing one. Pressure on behavior comes from physics or environment effects.
+- Keep settings few. Trials last 20 s, a generation has 3M creatures, and there are no mutation controls. Environment effects are buttons. The game never changes the world by itself. It may suggest an effect.
+- No knobs. Finished work is on by default. A losing experiment is deleted, code and switch. Unfinished work stays on its branch. An environment variable may exist only as a developer diagnostic that a player never needs.
+- Never remove a shipped feature or mutation operator unless the owner asks. The owner wants more mutation operator types, never fewer.
+- Early screening: a standard trial stops at 5 s when the creature is below the bar, which is the 5 s distance the top 20% reached. A screened creature enters no archive. Replays and elite re-tests run full trials.
+- The GPU score is final. CPU and GPU agreement is a diagnostic, not a gate. A replay comes from the scoring kernel, so it matches its score.
+- The search is deterministic for a fixed seed on one GPU.
+- Saves are small (archives and search state), and the game writes as few files as possible. Autosave is off. Breaking old saves is fine: bump `qd::VERSION` when archive or physics semantics change, and the save header turns older saves down with a message.
+- Speed matters. The goal is 2M, then 4M, evaluated creatures per second in the graphical game at 60 FPS.
+- Search changes rest on evidence (papers and practice) and must not break the search. Test each one with a paired A/B at equal evaluation budgets over 3 seeds, and report best distance, QD score and the top-50 body mix.
+- Physics v2 is becoming the game (decided 2026-09-29). New physics features go into v2, not v1. A physics change updates every GPU kernel, WGSL and CUDA together. CPU ports may differ.
+- Posture rules (for example what counts as a fall) need the owner's approval.
 
-- Fitness is horizontal distance only. Never add fitness terms, penalties or multipliers. Ask the owner before proposing one.
-- Pressure on behavior comes from physics or environment effects, never from scoring.
-- Keep settings few. The owner wants fixed 20 s trials (changed from 60 s on 2026-09-28), 3M creatures, and no mutation controls. Environment effects are buttons.
-- Early screening (owner, 2026-09-27): a standard trial stops at 5 s when the creature is below the bar, the distance at 5 s that the top 20% reached (the previous generation, or the first quarter of a generation that starts without a bar: a new game, a load, a world change); survivors run the full 20 s. A screened creature enters no archive. A fine check faces the same screen, and a contender whose check stops there enters no archive. CPU replays and elite re-tests run full trials. `EVOLUTION_SCREEN=0` turns screening off for comparisons.
-- 30 Hz physics (owner, 2026-09-27): try it and measure evolution before deciding the default. Measured: at equal wall time 30 Hz search finds +37% best distance and +93% QD over 10 seeds, but its elites keep a median 38% of their distance when replayed at 60 Hz (12 of 36 fall below 10%), while 60 Hz elites keep 90% at 120 Hz (1 of 36). The gain is mostly integrator exploits, so 60 Hz stays the default (docs/performance-log.md) unless the owner decides otherwise.
-- Breaking old checkpoints is fine. Bump `qd::VERSION` when archive or physics semantics change.
-- The old gameplay is not a reference. Speed matters. The long-term goal is 2M evaluated creatures per second in the graphical game at 60 FPS.
-- A physics change must update the GPU implementation. CPU fallback/diagnostic ports may differ; CPU/GPU parity is not an acceptance gate.
-- Commit and push to `main` often, with plain commit messages that explain what changed, why, and what was measured.
+Working:
 
-## Working on this machine
+- Commit small and push often, about every 20 minutes of work. Plain commit messages say what changed, why, and what was measured.
+- Run the full test suite once per push, not after every edit. Stop an A/B once 3 seeds decide it.
+- Write plainly in commits, docs and reports.
 
-- The laptop has 16 threads, an RTX 4060 for compute, and a Radeon 780M that drives the desktop.
-- Use at most half the machine for builds, tests and runs: 8 build jobs and 8 rayon threads, at low priority (`nice`). The owner allows the game itself the whole machine (2026-09-27), but it measured no faster at 3M (16 general workers 129.8k, 8 general plus 8 CPU evaluation workers 121.3k, 8 general 137.8k creatures/s): the GPU bounds the game and busy CPU cores slow it, so the game keeps the 8-worker budget.
-- Never evaluate creatures on the Radeon. Set `EVOLUTION_DEVICES=primary` for every run of the game, the tests, and benchmarks. The default thread split (no separate CPU evaluation pool, eight general workers) stays inside half the machine; set `EVOLUTION_CPU_THREADS=6` only for CPU-only tools such as `search-benchmark --cpu`. Heavy Radeon use crashed the desktop (mutter/Wayland) once.
-- Keep subagent fan-outs small for the same reason. The session limit is 20 concurrent subagents, and 20 at once also ran out the owner's token budget.
-- Fast iteration build: `cargo build --profile release-fast` inherits release optimization with LTO disabled, 256 codegen units, and incremental compilation. It adds no platform-specific linker requirement. Use the normal thin-LTO release profile for comparable performance measurements.
-- GPU tests are `#[ignore]`d. Run them with `cargo test --release --test simulation -- --ignored`.
-- `examples/size_report.rs <checkpoint> [count]` prints body length, mass and foot slip for the best elites. With `EVOLUTION_LEDGER=1` it also prints where their forward momentum comes from.
+## How work is organized
+
+One orchestrator session plans, writes briefs, reviews and merges. Worker agents each take one track in their own worktree and branch:
+
+```
+git -C /home/amipo/workspace/evolutionSimulator fetch
+git -C /home/amipo/workspace/evolutionSimulator worktree add /home/amipo/workspace/evolutionSimulator-<track> -b claude/<track> origin/main
+mkdir -p /home/amipo/workspace/evolutionSimulator-<track>/target
+cp -a --reflink=auto /home/amipo/workspace/evolutionSimulator/target/release-fast /home/amipo/workspace/evolutionSimulator-<track>/target/
+```
+
+Use absolute paths, because `git -C` resolves a relative worktree path against the repository. Copying `target/release-fast` (or `target/release`) seeds the build cache so dependencies do not rebuild. Never build in the main directory, because the owner's game runs from its `target/release`. Before you edit, check `git status` for changes you did not make. Rebase onto `origin/main` before each push, push your branch, and tell the orchestrator the hash. Only the orchestrator merges into `main`.
+
+## This machine
+
+- 16 threads, an RTX 4060 laptop GPU for compute, and a Radeon 780M that drives the desktop. Never evaluate creatures on the Radeon, because heavy Radeon use once crashed the desktop. Set `EVOLUTION_DEVICES=primary` for every run of the game, the tests and benchmarks.
+- Agents share at most half the machine. Build with `nice -n 19` and `CARGO_BUILD_JOBS=2`. Run long CPU jobs (the full test suite, A/B runs, benchmarks) through `tools/cpu-slot.sh <command>`, which waits for one of two shared 4-thread slots. The game itself may use the whole machine.
+- GPU runs take `flock /home/amipo/workspace/evolutionSimulator/target/gpu.lock`, so agents do not overlap. Since 2026-09-29 the owner allows agent GPU work while their game runs: keep GPU memory low, and retry smaller after an out-of-memory error. `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv` shows who is on the GPU.
+- Screenshot runs (`EVOLUTION_SMOKE_*`, see `src/ui.rs`) open real windows on the owner's desktop titled "agent screenshot run, not your game". Keep them to seconds and look at every screenshot yourself.
+
+## Build, test, run
+
+- Iteration build: `cargo build --profile release-fast` (LTO off, 256 codegen units, incremental). Use the normal release profile (thin LTO) for performance measurements.
 - Before committing: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test --release`.
+- GPU tests are `#[ignore]`d. Run them with `cargo test --release --test simulation -- --ignored`, plus `tests/gpu_repeatability.rs` and the ignored tests in `tests/screening.rs`.
+- Run `examples/first_generation` before pushing any physics change. It reports random-population distances (median, p99, best) and catches free propulsion.
+- `docs/building.md` has the build details and the list of environment variables.
 
-## Done in the 2026-09-26 session
+## Code map
 
-- The GPU and CPU engine disagreed at 4x physics fidelity. The CPU engine applied joint limits inside every bone pass, while the GPU applied them once per step. Fixed in the CPU engine, and the GPU tests now compare like with like (b4f6e20).
-- Bones now have mass: bone density times length squared, split between the two joints (`Limits::bone_density`, `EVOLUTION_BONE_DENSITY`). Feet slid 0.43 m per meter traveled before and 0.02 m after.
-- Muscles only pull: the drive term cannot push. Exhausted muscles have no drive (`TIRED_DRIVE = 0`), so all work comes from each muscle's energy store.
-- Later the same day (commits b8ee76f to d47b2b1): the ground-lift glitch is fixed, the generational path re-tests elites after a world change, environment effects are undoable with gravity, air and grip added, and bones are capped at 2 m. See the items marked Done below.
-- Historical result before the lift fix and 2 m bone cap: a 20-generation run (100k creatures, seed 38) produced roughly 20 m, 750–800 kg bodies and an 801 m archive champion that replayed at only 90 m. Its low slip measurements did not establish grounded traction. The baseline below is a separate historical measurement before the newer contact and replay-admission fixes.
+Physics v1, the game until v2 lands on `main`:
 
-### Historical bd41746 physics baseline and Codex foundations
+- `shaders/physics_creature.wgsl` is the GPU kernel, driven by `src/gpu.rs` and `src/vk_engine.rs`.
+- `shaders/physics_creature.cu` is its CUDA mirror, used on NVIDIA when the driver and NVRTC load, driven by `src/cuda_engine.rs`. It mirrors the WGSL section by section.
+- `src/engine.rs` picks the backend and records replays on the GPU. `src/creature_kernel.rs` packs creatures for the GPU.
+- The CPU fallback is `src/cpu_engine.rs` with `src/simd.rs` (AVX-512), plus the older `src/physics.rs` (`physics::body()` computes node masses).
 
-- Seed 38, 100k candidates, 20 generations, 60 s trials: final best 165.5846 m, 1,374 behavior cells, QD score 23,060.27. Top-50 median total bone length is 2.23 m; maximum individual bone is 1.81 m. No pile-up at the cap appeared in this sample.
-- Historical CPU playback: the champion stored 165.6 m and replayed at 157.3 m; rank 21 stored 111.2 m and replayed at 6.4 m. The CPU archive-admission check (7f3f3a3) was removed on 2026-09-28; these values do not constrain GPU scoring. Updated scored-interval slip reported a median 0.89 m per replay meter; old ratios are not directly comparable.
-- Public CPU evaluation now uses the replay engine. Checkpoint V4 preserves island optimizer progress, while V3 remains readable; stale island/reseed state is cleared on physics-version migration. The foundation commit 250ad82 changed no production stepping equations; the concurrent changes now merged advance qd::VERSION from 16 to 19.
-- Resource defaults exclude Radeon compute and share eight workers across the two CPU pools. CPU CI, regression coverage, current docs, and a named fast profile are in place. Before merging concurrent physics work, local checks passed: formatting, all-target clippy, 68 CPU tests, seven size-report tests, and three explicit GPU agreement tests (3.32 s). Merged verification passed: 72 CPU tests, nine size-report tests, three RTX agreement tests (14.36 s), formatting and Clippy. The 20k-body, 20 s random-population check measured median -0.07 m, p99 1.85 m, best 9.81 m. Four GPU tests remain ignored in the default suite. Remote CI execution remains unverified; see docs/validation.md.
-- Sanitized baseline data: docs/results/2026-09-26-bone-cap-seed-38/. No checkpoint is committed.
+Physics v2 (branch `claude/physics2`, landing): `shaders/physics2_creature.wgsl`, a CUDA mirror in progress, and `src/physics2.rs` (CPU prototype). See `docs/physics-v2.md` on that branch.
 
-## Next steps
+Search and game state:
 
-Items marked (owner) were requested by the owner. The rest are suggestions, in rough priority order within each group.
+- `src/qd.rs`: archives, niches, behavior descriptors, the morphology reserve, `qd::VERSION`.
+- `src/storage.rs`: the `Experiment` with its islands, emitters, breeding, migration, fine checks, and saves.
+- `src/evolution.rs` and `src/evolution/anatomy/`: the genome and the mutation operators (see `docs/anatomy-operators.md`).
+- `src/scheduler.rs`: routes work to healthy GPUs, with the CPU as failover.
+- `src/worker.rs`: the worker thread and the snapshot the UI draws.
+- `src/environment.rs`: environment effects and presets. Add new effects here.
+- `src/ui.rs`: the egui interface. `src/config.rs`: settings.
 
-### Creature size and movement realism
+## Measurement tools
 
-1. Done: (owner) the glitched jump. The whole-body lift after the parent-first rebuild is now a position-only correction in both engines (b8ee76f). Archive and CPU replay distances agree again (236 m vs 231 m; before, 90 m vs 801 m).
-2. Measured under the planted-feet physics: (owner) stop evolution from favoring huge creatures. Two 20-generation, 100k, 60 s runs at 614e04a (checkpoints local under `runs/`, not committed). Seed 38 ended at best 117.2584 m, QD 20600.92, top-50 median total bone length 2.69 m with longest individual bone 1.74 m; its champion is 4.14 m and 19.14 kg with slip 2.05 m per replay meter, and several top ranks are 7-node, 4 to 5 m, 19 to 24 kg bodies. Seed 39 ended at best 192.9634 m, QD 30914.45, top-50 median length 2.02 m; its champion is 1.53 m and 3.20 kg with slip 0.52, and its largest top-50 body is 2.81 m and 6.63 kg. Size pressure is not consistently removed, because one seed still rewards 4 m, 19 kg bodies. Two seeds and 20 generations do not settle it; broader seeds and longer runs remain open. See docs/results/2026-09-26-planted-feet-seed-38/ and docs/results/2026-09-26-planted-feet-seed-39/.
-3. Implemented and measured: (owner) feet grip with the load they carry (97e3e9a), with planted feet (b57f756) and a friction cap on projection-induced propulsion (8572d32). Under the merged physics the corrected scored-interval size_report gives a top-50 median slip of 1.34 m per replay meter for seed 38 and 0.53 for seed 39, with champions at 2.05 and 0.52. The historical bd41746 median of 0.89 is superseded and not directly comparable. The earlier source audit is preserved as historical evidence only.
-4. Scale muscle force with muscle size. A longer or thicker muscle should be stronger and heavier, so a giant needs heavy muscles.
-5. Let bones break under load. Bone strength grows with cross-section while load grows with mass, so oversized bones fail like real ones.
-6. Done: bones and muscle strokes are capped at 2 m again (d47b2b1). Physics alone did not stop giants: after the lift fix, 16 to 22 m bodies still won.
-7. Review the whole-body rescale mutation. It exists to grow giants and may no longer be needed.
-8. Review the log-scale height archive axis. It gives giants their own cells and protects them.
-9. Measure where a triangle's (2 bones, 1 muscle) forward motion comes from with the momentum ledger. It moves in ways the owner thinks should be impossible.
-10. Remove or justify the rebuild step that lifts the whole body when a node sinks into the ground. It adds potential energy that no force paid for.
-11. Done: tests `a_passive_body_never_rises_above_its_start` and `a_body_without_drive_does_not_travel` guard against solver-made energy and propulsion. `examples/first_generation` compares random-population distances across physics changes.
-12. Add a momentum test: the projection and rebuild center-of-mass shift in the ledger should stay near zero.
-13. Charge muscle energy only for active contraction work, not for passive damping.
-14. Add passive elastic tendons as an evolvable part, so gaits can store and return energy honestly.
-15. Add static and kinetic friction (a higher coefficient to start sliding than to keep sliding).
-16. Give bones ground contact along their length, not only at the joints, so a bone cannot pass through the ground between two nodes.
-17. Done: `physics::evaluate` now delegates to the production CPU engine, including configured fidelity, joint limits, fatigue, and fall/break scoring. Standard/fine replay regression coverage was added. The lower-level legacy `physics::step` remains; consolidation is still item 18.
-18. Consolidate the CPU engine and the old CPU reference into one CPU implementation.
-19. Review the fall rule (head below neck) for bodies without a clear head.
-20. Add air drag that scales with bone length times speed squared, so large fast bodies pay for moving air.
-21. Report cost of transport (energy used per kg per meter) in the UI and in `size_report`, as a diagnostic only, never as fitness.
+- `examples/search_ab.rs`: paired fixed-seed search runs through the production archive and breeding path. `src/search_benchmark.rs`: equal-budget comparisons.
+- `EVOLUTION_STAGE_LOG=<path>`: one CSV row per generation (evaluation, archive and breeding seconds, end-to-end rate).
+- `examples/size_report.rs <save> [count]`: body length, mass and foot slip for the best elites. `EVOLUTION_LEDGER=1` adds where forward momentum comes from.
+- `examples/mutation_audit.rs`: how much of its parent's distance each operator's child keeps.
+- `examples/effect_cost.rs`, `examples/mem_report.rs`, `examples/body_stats.rs`, `examples/momentum_ledger.rs`.
 
-### Environment effects and catastrophes
+## Docs
 
-22. Done: (owner) every environment effect has raise and lower buttons, and every change re-tests the archive (b82ff21). Effects live in `src/environment.rs`. Add new effects there.
-23. (owner) Add more environment effects and catastrophes that create biodiversity and push toward complex, efficient movement.
-24. Done: the generational path now puts queued elites back after a world change, before any slice reaches a device (1214bd0). A test guards it.
-25. Done: hurdle levels add periodic raised steps to the ground in both engines; the viewport draws them.
-26. Done: slope levels tilt the ground uphill in both engines; the replay viewport draws the tilted ground.
-27. Done: air drag levels (Thin, Breezy, Thick, Syrup).
-28. Done: gravity levels (Earth, 1.5 g, 2 g, 3 g).
-29. Done: grip levels (Grippy, Firm, Wet, Ice).
-30. Done: mud levels sink contacting nodes and raise their friction budget and drag; a dragged foot pays, a lifted foot does not. Both engines and the replay ground agree.
-31. Done: gap levels cut periodic trapezoid pits with bounded depth into the ground in both engines; the viewport draws them.
-32. Water: a viscous medium that favors swimming strokes.
-33. Done: wind levels apply a steady headwind acceleration to every live node in both engines.
-34. Done: drought levels slow muscle energy recovery (`Config::muscle_recovery`, 1.0 down to 0.1) in both engines.
-35. Done: heat wave levels shrink the muscle energy store (`Config::muscle_energy`, 1.0 down to 0.35) in both engines.
-36. Done: meteor strike wipes out half of every archive's elites; Undo returns the fossils (`Experiment::meteor`, `undo_meteor`).
-37. Done: Extinction wipes out the slowest island (`Experiment::extinction`), undoable with the same fossils as the meteor.
-38. Done: quake levels give each creature its own deterministic terrain phase and amplitude jitter, seeded from its id, in both engines.
-39. Done (default off): seasons levels step the world one effect at a time on a deterministic schedule (Off/Slow/Normal/Fast = 20/10/5 generations); the step index is stored in checkpoints and every lap returns to calm.
-40. A curriculum that raises difficulty when the archive stalls, as in POET (Wang et al., 2019).
-41. Implemented (default off): `EVOLUTION_CHECK_TERRAIN=1` replaces the 2 cm pose shift with the contender's own nearby terrain (id-hashed level offset), still at fine fidelity with the held standard result and min-of-two rule; four scheduler tests cover on/off, determinism and input retention.
-42. An environment panel that lists active effects with their levels, undo buttons, and short explanations.
-43. A timeline of effects on the history chart.
-44. Save the effect history in checkpoints.
-45. Presets that combine effects ("rough hills", "icy slope").
-46. Done: `examples/effect_cost.rs` measures CPU creatures/s per effect level; every effect stays within about 8% of calm, i.e. inside the run-to-run noise (see docs/performance-log.md).
+- `README.md`: for players.
+- `docs/architecture.md`, `docs/building.md`, `docs/validation.md`.
+- `docs/search-research.md`: every search experiment and its numbers. Add yours.
+- `docs/performance-log.md`: every performance measurement, including rejected ideas. Add yours.
+- `docs/research-2026-09-29.md`: literature survey with ranked ideas for search quality and throughput.
+- `docs/hpc-assessment.md`, `docs/data-architecture.md`, `docs/phase0-measurements.md`: GPU limits and the v2 data design.
+- `docs/anatomy-operators.md`, `docs/ux-audit.md`.
+- `docs/backlog.md`: open work.
 
-### Performance
+## Measured and rejected
 
-47. Stop simulating fallen creatures on the GPU (lane compaction at dispatch boundaries). Research ranks it first: 43 to 55% of simulated time comes after a fall.
-48. CPU group early exit is implemented behind `EVOLUTION_EARLY_EXIT=1`. Future GPU lane compaction must freeze that GPU trial's own score and descriptors; CPU/GPU result matching is not required. GPU acceptance uses repeatability and equal-budget search outcomes.
-49. Reduce GPU kernel register pressure (about 120 registers per thread, about 30% occupancy).
-50. Cut CPU time between batches: archive insertion, emitter feedback, CMA updates, offspring creation.
-51. Keep the worker responsive: controls should never wait behind archive insertion or breeding (about 1 s at 1M creatures).
-52. Keep the GUI at 60+ FPS during evolution at 3M creatures.
-53. Add a persistent Vulkan pipeline cache and compile pipelines in the background.
-54. Successive halving: short trials first, full trials for survivors (10 s ranks predict 60 s ranks with Spearman 0.89 to 0.94).
-55. Done: secondary GPUs are opt-in; the scheduler defaults to `primary`. General and CPU evaluation pools share a budget of at most eight threads and half the logical CPUs. Since 2026-09-27 the default gives all eight to general workers and keeps the CPU engine on that pool as a failover reserve; GPU runs now route all score work to healthy GPUs.
-56. Size work units per device from measured rates, and re-measure after each engine change.
-57. Baseline measured: 3M peak RSS 5.61 GiB, checkpoint 942 MiB, population arena 408 to 522 B/creature, marginal fit 1.88 KB/creature plus 213 MiB base; see docs/performance-log.md. Shrinking storage remains open.
-58. Send only snapshot changes from worker to UI, not full copies.
-59. Done: a 3M GUI run recorded 45,373 creatures/s end to end with stage seconds, GPU/CPU busy split, 116.6 FPS and peak RSS in docs/performance-log.md.
-60. Done: the paired robust-trials A/B attributes 53.9% of check-on GPU busy time (51.1% of generation wall) to the contender checks; docs/performance-log.md.
+Do not redo these without a new reason. The numbers are in `docs/performance-log.md` and `docs/search-research.md`.
 
-### Checkpoints and storage
-
-61. Done: autosave rotation keeps the three newest `seed-*-auto.evo` files and removes stale `.evo.tmp` files (`storage::rotate_autosaves`).
-62. Shrink checkpoints (1 to 1.5 GB at 3M creatures): store the population compactly and drop data that can be regenerated.
-63. Done (existing implementation): autosave serialization and writes use a background thread. Snapshot-copy cost on the worker still needs measurement before claiming stall-free autosaves.
-64. Done: the performance line shows the total size of `runs/`, refreshed at most every five seconds.
-65. Done: regression tests compare next-generation genomes, archive/CMA state, and offspring metadata after checkpoint round trips, including stalled island optimizers, steady breeding, and environment changes. V4 checkpoints now persist optimizer progress; V3 remains readable. Final integrated checks are recorded in docs/validation.md.
-
-### Search
-
-66. Implemented (measured no gain): EVOLUTION_NEUTRAL_SPLITS makes every added muscle passive (zero stroke, stiffness 5). Paired 60-generation, 10-seed runs showed no best/QD improvement, so it stays default off; splits remain broken and a rigid new joint is the next candidate, per docs/search-research.md.
-67. Implemented (mixed result): EVOLUTION_ELITE_REFRESH=N now re-scores a bounded rotating elite subset from a fresh deterministic perturbation and keeps the worse score. It lowered about 5 entries per cycle and caught exact-pose accidents, but the 10-seed best-distance effect was mixed, so it stays default off and the game is the place to re-measure.
-68. Spend more evaluations on the best elites (CMA-MAE thresholds, curiosity-based parent choice).
-69. Let CMA respect the configured body bounds and vary joint ranges, sensors and reset phases (F6).
-70. Use or remove `Creature.mutability` (mutated but unused, F8).
-71. Add body size or limb count as an archive axis (research: +24% with body size).
-72. Tune new bodies for a few generations before they compete (research B2, B3).
-73. Encode repetition and symmetry, so limbs can be copied as modules.
-74. Give each limb its own rhythm controller.
-75. Add a mutation that creates antagonist muscle pairs, now that muscles only pull.
-76. Crossover between different body plans.
-77. Periodic extinctions per island (Lehman and Miikkulainen, 2015).
-78. Age-layered populations (ALPS) so new bodies compete with their own age group.
-79. Reflexes built on the touchdown sensors (a muscle that fires when its foot lands).
-80. Re-run the GA research lab ablations under the new physics before drawing conclusions from old results.
-81. (owner) Improve the evolution algorithm itself. The items below are candidates. Test each with paired runs at equal evaluation budgets over at least 5 seeds, and report best distance, QD score, and the body-size mix of the top 50.
-82. Done: `search-benchmark --cpu` runs fixed-seed, equal-candidate-budget CPU comparisons with top-50 body sizes, and `examples/search_ab.rs` runs fixed-seed CPU-only generations through the production archive/breeding path and reports best distance, QD score, archive cells, top-50 body mix, and paired seed summaries; see docs/search-research.md.
-83. Done (measured no effect): `EVOLUTION_ELITE_REFRESH=N` re-evaluates a bounded rotating elite subset and keeps the worse score. Paired 5-seed runs are byte-identical because archive admission already folds in the deterministic CPU trial; the flag stays default off as a safety net. Catching lucky elites needs fresh perturbations, per docs/search-research.md.
-84. Deep grids for noisy fitness: keep several candidates per cell and let the steady ones win (Flageat and Cully, 2020).
-85. Racing: spend extra trials only on creatures whose rank is still uncertain (Hoeffding races, Heidrich-Meisner and Igel, 2009).
-86. Generalized early stopping: end any trial that can no longer beat its cell's elite, not only fallen ones (Arza et al., 2024).
-87. CMA-MAE annealing thresholds, so emitters keep improving cells that already have elites (Fontaine and Nikolaidis, 2023).
-88. Choose emitter shares with a bandit that rewards archive improvement per evaluation.
-89. Directional variation: mutate along the difference between two elites with the same body plan (Vassiliades and Mouret, 2018).
-90. Discrete gene crossover between elites (Hutchinson et al., 2026).
-91. Dominated novelty search as the local competition rule (Bahlous-Boldi et al., 2025).
-92. Self-adapt mutation step sizes per lineage (1/5 success rule or log-normal self-adaptation).
-93. Protect morphological innovations: lower selection pressure on new bodies for a few generations (Cheney et al., 2018).
-94. Controller distillation, so a good gait can move to a different body (Mertan and Cheney, 2025).
-95. Lamarckian inheritance: children inherit their parent's tuned controller after a short local search.
-96. Review the behavior descriptors (ground contact, cadence, height). Candidates: number of feet in use, gait symmetry, body size.
-97. Tune the archive size: fewer, coarser cells give each cell more offspring (research: +27% from dropping one axis).
-98. Tune the island model: island count, migration interval, and which elites migrate.
-99. Seed the first population with more varied bodies (bilateral, longer chains), not only 3 to 5 node chains.
-100. A generative body encoding (grammar or L-system) so larger bodies stay coherent.
-101. An optional neural controller: a small network driven by rhythm and touchdown sensors, as an alternative to fixed waveforms.
-102. When the archive stalls, suggest an environment effect in the UI instead of changing the search silently.
-103. Re-run every research conclusion under the new physics (bone mass, pull-only muscles). All numbers in docs/search-research.md predate it.
-
-### Correctness and tests
-
-104. Done for the terrain-effects wave: docs/physics-audit-2026-09-26-effects.md finds no free propulsion or inflated stored scores in the audited rows. The strongest anomaly is exact-pose fine-fidelity sensitivity: one calm champion stores 24.6 m but falls at 0.6 s at 4x fidelity while its perturbed check scores 25.7 m; the default-off fresh-perturbation refresh is designed for exactly this.
-105. Historical CPU validation: standard/fine CPU scores were compared with mass-weighted terminal replay frames, including partial SIMD groups. Cross-engine agreement is not a product requirement.
-106. Done: archive insertion and island migration regression tests cover unique cells and rejection of slower candidates.
-107. Done: configuration regression tests cover defaults, float/integer boundaries, ordered bounds, and the population RAM limit.
-108. Done: modern archive-breeding tests compare valid offspring across fixed seeds and streaming slice sizes, including CMA, structural, and novelty output.
-109. Done: standard/fine regression fixtures verify frozen scores at falls and joint breaks while replay motion continues.
-110–111. Superseded 2026-09-28: CPU/GPU fixture comparisons were removed as test gates. `tests/gpu_repeatability.rs` checks repeatability on the GPU; optional cross-engine diagnostics do not constrain GPU results.
-112. Configured: GitHub Actions runs formatting, all-target clippy, and release CPU tests with resource limits and the portable SIMD path. GPU tests remain local and ignored by default. Remote workflow execution is not yet verified.
-
-### Interface
-
-113. Done: replay viewer has a follow camera, distance ruler, speed readout (m/s), center-of-mass trail, playback speed (0.25x to 4x), scrubber and fall marker.
-114. Done: the Behavior archive tab has a Cards/Map selector with a heatmap slice of the archive, a fitness legend, axis selectors, and click-to-replay.
-115. Done: the History tab plots best distance with record markers and a clickable records timeline that replays each holder.
-116. Done: a Race tab replays the top five elites in parallel lanes with live standings and a leader highlight.
-117. Done: drawing adds touchdown contact rings and broken-joint marks; activation colors, head and organs were already in. Replay GIFs use the same scene renderer.
-118. Done: F1 or `?` opens a help overlay, 1/2/3 switch tabs, space toggles replay play/pause, arrow keys seek, and the status line shows creatures per second.
-119. Done: JSON export/open and an animated GIF export (offscreen renderer, 3 to 360 sampled frames) with a status path.
-120. Done: a Lineage tab and an Overview strip show ancestor thumbnails, generation, gains, mutation text, and a BODY PLAN badge when part counts change.
-121. Show each muscle's energy during replay, to make fatigue visible.
-122. A debug overlay for forces and ground reactions.
-123. Done: a deterministic species name derived from morphology and cadence appears on cards, map hovers, lineage tiles, race lanes, and hall rows.
-124. Done: an in-memory hall of fame lists each new record with a replay button and resets per experiment.
-125. Done: histogram controls, budgets and performance details moved to Advanced > Debug; run/checkpoint settings stay in Performance & checkpoints.
-126. Done: the archive axis labels carry one-sentence hover explanations.
-127. Done: a Screenshot button saves a timestamped PNG under `runs/` and reports the path.
-128. Done: an Advanced > Display toggle switches light/dark egui visuals; the viewport scene keeps fixed colors.
-
-### Code health and docs
-
-129. Done: README describes current 60 s / 3M defaults, distance-only scoring, archive/search behavior, safe runs, environment buttons, diagnostics, and save/resume.
-130. Done: architecture updated from source, including masses, pull-only active drive, fatigue, standard/fine checks, replay semantics, scheduler, and checkpoint state.
-131. Done: validation records the local three-test GPU pass and the new 20-generation baseline, with historical workloads clearly separated. Final local checks passed: 68 CPU, seven example, and three explicit GPU tests; remote CI remains unverified.
-132. Done: removed `mutate`, `survivors`, `reproduce`, and `Experiment::reproduce`/`select`; tests now exercise archive-batch breeding.
-133. Done: removed the `obstacles` config slot; the checkpoint magic is EVORUST5, so old V4 files are rejected cleanly.
-134. Done: audited every EVOLUTION_* read; all remain reachable. Fixed the stale `EVOLUTION_WORKGROUP64` mention in docs/validation.md to `EVOLUTION_LANE_WG`.
-135. Done: `research/` is ignored (its nested worktrees broke `git add -A`); see `.gitignore`.
-136. Done: both stray `.deb` files are deleted.
-137. Done: deleted the local `wip/cpu-finalist-validation` branch; its CPU-finalist check is replaced by the contender check in 71e9088.
-138. Done: `.claude/` is in `.gitignore`.
-139. Done: worker failures/disconnections persist through wait/poll without losing completed results; a failed GPU retries its unfinished units on the CPU, a failed CPU is terminal after completed output, and a primary GPU that cannot open falls back to the CPU. See `docs/superpowers/plans/2026-09-26-device-recovery.md`.
-140. Done: `EVOLUTION_STAGE_LOG=<path>` appends a CSV row per generation (evaluation, archive, breeding seconds, end-to-end rate).
-141. Done: `release-fast` is the named incremental release profile (LTO off, 256 codegen units); normal release retains thin LTO. No build-speed measurement is claimed.
+- 30 Hz physics: the search gains were integrator exploits. 60 Hz stays.
+- Muscle mass (5 variants): none held muscle counts down, and best distance fell by half.
+- The first persistent-lane engine (`claude/lanes`): slower, because of register pressure.
+- A muscle waveform cache and a branch-free waveform on the GPU: both slower.
+- A second screening rung, cheaper fine checks, and behavior metrics every 2 or 4 steps: removed.
