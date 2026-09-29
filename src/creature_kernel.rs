@@ -667,6 +667,82 @@ fn cuda_source_variant(
     source
 }
 
+/// The physics v2 CUDA kernel (`shaders/physics2_creature.cu`) for
+/// `capacity`-node buckets: the counterpart of `physics2::shader_source`,
+/// with the same constants as `#define` lines. Bodies of up to 16 nodes
+/// unroll their node and bone loops (private arrays in registers); bodies
+/// above 32 nodes keep the per-lane table in local memory.
+pub fn cuda_source2(
+    capacity: usize,
+    workgroup: u32,
+    fidelity: crate::physics::Fidelity,
+    launch_bounds: bool,
+) -> String {
+    use crate::physics2 as p2;
+    let limits = crate::physics::limits();
+    let float = |value: f32| format!("{value:?}f");
+    let unroll = capacity <= 16;
+    let defines = [
+        ("WG", format!("{workgroup}u")),
+        ("MAXN", format!("{capacity}u")),
+        ("STRIDE", format!("{capacity}u")),
+        ("MAXC", format!("{}u", capacity.min(p2::max_contacts()))),
+        (
+            "UNROLL",
+            (if unroll { "_Pragma(\"unroll\")" } else { "" }).into(),
+        ),
+        ("TAB_LOCAL", (if capacity > 32 { "1" } else { "0" }).into()),
+        (
+            "LAUNCH_BOUNDS",
+            if launch_bounds {
+                format!("__launch_bounds__({workgroup})")
+            } else {
+                String::new()
+            },
+        ),
+        ("RECORD", "0".into()),
+        ("MUSCLE_CAPACITY", float(limits.muscle_energy)),
+        ("MUSCLE_RECOVERY", float(limits.muscle_recovery)),
+        ("MAX_MUSCLE_FORCE", float(limits.muscle_force)),
+        (
+            "INV_JOINT_DAMPING",
+            float(if p2::joint_damping() > 0.0 {
+                1.0 / p2::joint_damping()
+            } else {
+                0.0
+            }),
+        ),
+        ("LIMIT_HARDNESS", float(p2::LIMIT_HARDNESS)),
+        ("JOINT_BREAK", float(physics::JOINT_BREAK)),
+        ("TENDON", float(p2::tendon())),
+        ("SPIN_CAP", float(p2::SPIN_CAP)),
+        ("INV_SPIN_CAP", float(1.0 / p2::SPIN_CAP)),
+        ("SPIN_HARDNESS", float(p2::SPIN_HARDNESS)),
+        ("PGS_SWEEPS", format!("{}u", p2::pgs_iterations())),
+        ("PLANT_SWEEPS", format!("{}u", p2::plant_sweeps())),
+        ("WARM", (if p2::warm_start() { "1" } else { "0" }).into()),
+        ("PUSH_OUT", float(p2::PUSH_OUT)),
+        ("HEAD_SHAKE_LIMIT", float(physics::HEAD_SHAKE_LIMIT)),
+        ("HEAD_SHAKE_WINDOW", float(physics::HEAD_SHAKE_WINDOW)),
+        ("CONTACT_SLACK", float(p2::CONTACT_SLACK)),
+        ("LIFT_CLEARANCE", float(p2::LIFT_CLEARANCE)),
+        ("GAP_DEPTH", float(physics::GAP_DEPTH)),
+        ("GAP_RUN", float(physics::GAP_RUN)),
+        ("HURDLE_SPACING", float(physics::HURDLE_SPACING)),
+        ("HURDLE_TOP", float(physics::HURDLE_TOP)),
+        ("HURDLE_RUN", float(physics::HURDLE_RUN)),
+        ("RATE", format!("{:.1}f", fidelity.rate as f32)),
+        ("SETTLE", format!("{}u", fidelity.settle())),
+        ("SAMPLE", format!("{}u", fidelity.sample_interval())),
+    ];
+    let mut source = String::new();
+    for (name, value) in defines {
+        source.push_str(&format!("#define {name} {value}\n"));
+    }
+    source.push_str(include_str!("../shaders/physics2_creature.cu"));
+    source
+}
+
 /// The creature kernel for `capacity`-node buckets.
 pub fn shader_source(
     capacity: usize,

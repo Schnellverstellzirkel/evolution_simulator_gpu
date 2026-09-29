@@ -492,7 +492,38 @@ fn stream_limit() -> usize {
 /// Whether the three shared node arrays of a `threads`-thread block fit the
 /// 48 KB a block may declare statically.
 fn fits(capacity: usize, threads: u32) -> bool {
-    threads == 32 || 3 * 8 * capacity * threads as usize <= 48 * 1024
+    threads == 32 || shared_per_thread(capacity) * threads as usize <= 48 * 1024
+}
+
+/// Whether the kernels in use are physics v2's.
+fn physics2() -> bool {
+    crate::physics2::enabled()
+}
+
+/// Shared memory per thread in bytes: v1's three node arrays, or v2's
+/// per-lane table (bodies above 32 nodes keep it in local memory).
+fn shared_per_thread(capacity: usize) -> usize {
+    if !physics2() {
+        24 * capacity
+    } else if capacity > 32 {
+        0
+    } else {
+        4 * (10 * capacity - 6)
+    }
+}
+
+/// The scoring kernel's source for `capacity` nodes.
+fn scoring_source(
+    capacity: usize,
+    threads: u32,
+    fidelity: Fidelity,
+    launch_bounds: bool,
+) -> String {
+    if physics2() {
+        creature_kernel::cuda_source2(capacity, threads, fidelity, launch_bounds)
+    } else {
+        creature_kernel::cuda_source(capacity, threads, fidelity, launch_bounds)
+    }
 }
 
 /// Resident warps per SM for `capacity`-node kernels in `threads`-thread
@@ -503,7 +534,7 @@ fn fits(capacity: usize, threads: u32) -> bool {
 fn predicted_warps(capacity: usize, threads: u32, registers: u32) -> u32 {
     let warps_per_block = threads / 32;
     let register_warps = 4 * (16_384 / (32 * registers.next_multiple_of(8)));
-    let shared_blocks = 102_400 / (24 * capacity as u32 * threads + 1024);
+    let shared_blocks = 102_400 / (shared_per_thread(capacity) as u32 * threads + 1024);
     let blocks = (register_warps / warps_per_block)
         .min(shared_blocks)
         .min(24)
@@ -864,7 +895,7 @@ impl CudaEngine {
                             let variant = if record {
                                 creature_kernel::cuda_record_source
                             } else {
-                                creature_kernel::cuda_source
+                                scoring_source
                             };
                             let source =
                                 variant(capacity, threads, fidelity, max_registers.is_none());
@@ -915,8 +946,7 @@ impl CudaEngine {
         max_registers: Option<u32>,
     ) -> Result<KernelStats> {
         let threads = block_size(capacity, self.workgroup, max_registers);
-        let source =
-            creature_kernel::cuda_source(capacity, threads, fidelity, max_registers.is_none());
+        let source = scoring_source(capacity, threads, fidelity, max_registers.is_none());
         let (cubin, log) = Self::compile(&self.api, &source, &self.options(max_registers))?;
         let kernel = self.load(&cubin, threads)?;
         let cu = &self.api.cu;
@@ -1279,6 +1309,10 @@ impl CudaEngine {
         ensure!(
             !batches.is_empty() && start < end && end <= total,
             "Empty GPU batch"
+        );
+        ensure!(
+            !(record && physics2()),
+            "The CUDA recording kernel of physics v2 is not ported yet"
         );
         ensure!(
             batches.iter().all(|b| b.capacity <= self.max_capacity),
