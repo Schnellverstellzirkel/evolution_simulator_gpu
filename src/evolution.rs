@@ -216,17 +216,6 @@ pub const NO_SENSOR: u32 = 255;
 fn no_sensor() -> u32 {
     NO_SENSOR
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub(crate) struct LegacyMuscle {
-    pub a: u32,
-    pub b: u32,
-    pub short: f32,
-    pub long: f32,
-    pub period: f32,
-    pub phase: f32,
-    pub duty: f32,
-    pub stiffness: f32,
-}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Genome {
     pub node_start: usize,
@@ -338,39 +327,6 @@ impl Population {
         self.nodes.extend(c.nodes);
         self.bones.extend(c.bones);
         self.muscles.extend(c.muscles);
-    }
-    pub(crate) fn canonicalize_bones(&mut self) -> Result<()> {
-        for index in 0..self.genomes.len() {
-            let genome = &self.genomes[index];
-            let node_end = genome.node_start.checked_add(genome.node_count);
-            let bone_end = genome.bone_start.checked_add(genome.bone_count);
-            let muscle_end = genome.muscle_start.checked_add(genome.muscle_count);
-            ensure!(
-                node_end.is_some_and(|end| end <= self.nodes.len())
-                    && bone_end.is_some_and(|end| end <= self.bones.len())
-                    && muscle_end.is_some_and(|end| end <= self.muscles.len()),
-                "Invalid genome offset"
-            );
-            let mut creature = self.creature(index);
-            if canonicalize_bone_order(&mut creature) {
-                let genome = &self.genomes[index];
-                self.bones[genome.bone_start..genome.bone_start + genome.bone_count]
-                    .copy_from_slice(&creature.bones);
-                self.muscles[genome.muscle_start..genome.muscle_start + genome.muscle_count]
-                    .copy_from_slice(&creature.muscles);
-            }
-        }
-        Ok(())
-    }
-    pub(crate) fn migrate_actuator_geometry(&mut self, cfg: &Config) {
-        let mut migrated = Population::default();
-        for index in 0..self.genomes.len() {
-            let mut creature = self.creature(index);
-            let mut rng = Rng::new(cfg.seed, 0, index);
-            repair(&mut creature, cfg, &mut rng);
-            migrated.push(creature);
-        }
-        *self = migrated;
     }
     /// Puts `c` into population slot `slot`. Its genes are appended to the
     /// arenas; `compact` later drops the replaced genes.
@@ -1108,76 +1064,6 @@ fn muscle(
         reset: rng.unit(),
         tendon: 0.0,
     }
-}
-pub(crate) fn migrate_legacy_creature(
-    nodes: Vec<NodeGene>,
-    legacy_muscles: &[LegacyMuscle],
-    id: u64,
-    cfg: &Config,
-) -> Creature {
-    let mut creature = Creature {
-        bones: (0..nodes.len().saturating_sub(1))
-            .map(|i| bone(i, i + 1, &nodes))
-            .collect(),
-        nodes,
-        muscles: Vec::with_capacity(legacy_muscles.len()),
-        id,
-    };
-    let mut rng = Rng::new(cfg.seed, 0, id as usize);
-    for old in legacy_muscles {
-        let a = old.a as usize;
-        let b = old.b as usize;
-        if a >= creature.nodes.len() || b >= creature.nodes.len() || a == b {
-            continue;
-        }
-        let mut choices = Vec::new();
-        for (bone_a, bone) in creature.bones.iter().enumerate() {
-            let anchor_a = if bone.a as usize == a {
-                Some(0.0)
-            } else if bone.b as usize == a {
-                Some(1.0)
-            } else {
-                None
-            };
-            let Some(anchor_a) = anchor_a else { continue };
-            for (bone_b, other) in creature.bones.iter().enumerate() {
-                if bone_a == bone_b {
-                    continue;
-                }
-                let anchor_b = if other.a as usize == b {
-                    Some(0.0)
-                } else if other.b as usize == b {
-                    Some(1.0)
-                } else {
-                    None
-                };
-                if let Some(anchor_b) = anchor_b {
-                    choices.push((bone_a, bone_b, anchor_a, anchor_b));
-                }
-            }
-        }
-        if choices.is_empty() {
-            continue;
-        }
-        let (bone_a, bone_b, anchor_a, anchor_b) = choices[rng.index(choices.len())];
-        creature.muscles.push(Muscle {
-            bone_a: bone_a as u32,
-            bone_b: bone_b as u32,
-            anchor_a,
-            anchor_b,
-            short: old.short,
-            long: old.long,
-            period: old.period,
-            phase: old.phase,
-            duty: old.duty,
-            stiffness: old.stiffness,
-            sensor: NO_SENSOR,
-            reset: 0.0,
-            tendon: 0.0,
-        });
-    }
-    repair(&mut creature, cfg, &mut rng);
-    creature
 }
 
 /// Largest tilt of the neck from vertical in the starting pose.

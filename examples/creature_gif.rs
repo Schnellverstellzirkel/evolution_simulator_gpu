@@ -1,7 +1,6 @@
 //! Writes an animated GIF of one creature's trial (a JSON file from
-//! `filmstrip` with EVOLUTION_FILM_DUMP, or a creature exported from the
-//! game), replayed under physics v2 (
-//! the v2 prototype).
+//! `export_best` or a creature exported from the game), replayed under
+//! physics v2.
 //!
 //! Usage: cargo run --release --example creature_gif -- <creature.json> <out.gif> [from s] [seconds] [fps]
 use evolution_simulator::{config::Config, evolution::Creature, ui};

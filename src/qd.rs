@@ -412,10 +412,6 @@ impl QdArchive {
     pub fn coverage(&self) -> f32 {
         self.behavior_count() as f32 / ARCHIVE_LIMIT as f32
     }
-    pub fn sample_uniform(&self, rng: &mut Rng) -> Option<usize> {
-        (!self.behavior_indices.is_empty())
-            .then(|| self.behavior_indices[rng.index(self.behavior_indices.len())])
-    }
     pub fn sample_novel(&self, rng: &mut Rng, avoid: Option<usize>) -> Option<usize> {
         if self.behavior_count() == 0 {
             return None;

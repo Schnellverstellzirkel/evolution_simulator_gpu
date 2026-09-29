@@ -91,17 +91,6 @@ pub fn replay(creature: &Creature, cfg: &Config) -> (Vec<Vec<[f32; 2]>>, GpuResu
     (frames, result)
 }
 
-/// `replay`, giving up on the GPU after `patience`. For callers that cannot
-/// wait a minute.
-pub fn replay_within(
-    creature: &Creature,
-    cfg: &Config,
-    patience: Duration,
-) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
-    let (frames, result, _) = replay_forces(creature, cfg, patience);
-    (frames, result)
-}
-
 /// `replay` with the muscle energy, muscle force and ground contact forces
 /// the engine recorded with each frame, waiting up to `patience` for the GPU.
 pub fn replay_forces(

@@ -94,9 +94,6 @@ pub const WATER_ALONG: f32 = 0.25;
 pub const WATER_BUOYANCY: f32 = 0.7;
 /// Fields per muscle in the v2 kernel's muscle buffer.
 pub const MUSCLE_FIELDS: usize = 19;
-/// Sliding speed (m/s) below which friction holds a foot (as
-/// `physics::PLANTED_SPEED`).
-pub const STICK_SPEED: f32 = physics::PLANTED_SPEED;
 /// Contact tolerance for the behavior metrics (m), as the current engine.
 pub(crate) const CONTACT_SLACK: f32 = 0.002;
 pub(crate) const LIFT_CLEARANCE: f32 = 0.01;

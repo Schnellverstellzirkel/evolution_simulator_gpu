@@ -61,9 +61,6 @@ const CU_EVENT_DISABLE_TIMING: c_uint = 2;
 const CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT: c_int = 16;
 const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR: c_int = 75;
 const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR: c_int = 76;
-const CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES: c_int = 1;
-const CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES: c_int = 3;
-const CU_FUNC_ATTRIBUTE_NUM_REGS: c_int = 4;
 
 /// The CUDA driver API functions the engine uses.
 struct Driver {
@@ -79,8 +76,6 @@ struct Driver {
     module_load_data: unsafe extern "C" fn(*mut CuModule, *const c_void) -> CuResult,
     module_unload: unsafe extern "C" fn(CuModule) -> CuResult,
     module_get_function: unsafe extern "C" fn(*mut CuFunction, CuModule, *const c_char) -> CuResult,
-    func_get_attribute: unsafe extern "C" fn(*mut c_int, c_int, CuFunction) -> CuResult,
-    occupancy: unsafe extern "C" fn(*mut c_int, CuFunction, c_int, usize) -> CuResult,
     mem_alloc: unsafe extern "C" fn(*mut CuDevicePtr, usize) -> CuResult,
     mem_free: unsafe extern "C" fn(CuDevicePtr) -> CuResult,
     mem_alloc_host: unsafe extern "C" fn(*mut *mut c_void, usize) -> CuResult,
@@ -179,8 +174,6 @@ impl Driver {
                 module_load_data: symbol!(library, "cuModuleLoadData"),
                 module_unload: symbol!(library, "cuModuleUnload"),
                 module_get_function: symbol!(library, "cuModuleGetFunction"),
-                func_get_attribute: symbol!(library, "cuFuncGetAttribute"),
-                occupancy: symbol!(library, "cuOccupancyMaxActiveBlocksPerMultiprocessor"),
                 mem_alloc: symbol!(library, "cuMemAlloc_v2"),
                 mem_free: symbol!(library, "cuMemFree_v2"),
                 mem_alloc_host: symbol!(library, "cuMemAllocHost_v2"),
@@ -531,8 +524,7 @@ fn scoring_source(
 /// Resident warps per SM for `capacity`-node kernels in `threads`-thread
 /// blocks at `registers` per thread, by the occupancy rule measured in
 /// `docs/phase0-measurements.md` plus the 1 KB of shared memory CUDA reserves
-/// per block. It matches the driver's occupancy calculator for every kernel
-/// `examples/cuda_stats.rs` reports.
+/// per block.
 fn predicted_warps(capacity: usize, threads: u32, registers: u32) -> u32 {
     let warps_per_block = threads / 32;
     let register_warps = 4 * (16_384 / (32 * registers.next_multiple_of(8)));
@@ -562,21 +554,6 @@ fn block_size(capacity: usize, requested: Option<u32>, registers: Option<u32>) -
         .filter(|&t| fits(capacity, t))
         .max_by_key(|&t| (predicted_warps(capacity, t, registers), t))
         .unwrap_or(32)
-}
-
-/// What the compiler made of one kernel, for `examples/cuda_stats.rs`.
-#[derive(Clone, Debug)]
-pub struct KernelStats {
-    pub registers: i32,
-    /// Local memory per thread in bytes (stack frame and spills).
-    pub local_bytes: i32,
-    pub shared_bytes: i32,
-    /// Threads per block.
-    pub threads: u32,
-    /// Resident warps per SM by the driver's occupancy calculator.
-    pub warps_per_sm: i32,
-    /// The ptxas lines of the compiler log.
-    pub log: String,
 }
 
 struct Kernel {
@@ -867,11 +844,6 @@ impl CudaEngine {
         Self::open(name, max_capacity, register_cap(), true)
     }
 
-    /// Opens the device without compiling kernels, for statistics.
-    pub fn open_for_stats(name: &str) -> Result<Self> {
-        Self::open(name, 64, None, false)
-    }
-
     fn open(
         name: &str,
         max_capacity: usize,
@@ -1016,11 +988,6 @@ impl CudaEngine {
         options
     }
 
-    /// Compiles `source` in NVRTC (no context needed).
-    fn compile(api: &Api, source: &str, options: &[String]) -> Result<(Vec<u8>, String)> {
-        api.nvrtc.compile(source, options)
-    }
-
     /// Loads a cubin, built for `threads`-thread blocks, into this engine's
     /// context.
     fn load(&self, cubin: &[u8], threads: u32) -> Result<Kernel> {
@@ -1046,17 +1013,6 @@ impl CudaEngine {
                 threads,
             })
         }
-    }
-
-    /// Resident warps per SM of `kernel`, by the driver's occupancy calculator.
-    fn resident_warps(&self, kernel: &Kernel) -> Result<i32> {
-        let cu = &self.api.cu;
-        let mut blocks = 0;
-        cu.check(
-            unsafe { (cu.occupancy)(&mut blocks, kernel.function, kernel.threads as c_int, 0) },
-            "cuOccupancyMaxActiveBlocksPerMultiprocessor",
-        )?;
-        Ok(blocks * (kernel.threads as i32 / 32))
     }
 
     /// The compile jobs for `capacities`, in the order they are wanted: the
@@ -1156,48 +1112,6 @@ impl CudaEngine {
             );
         }
         Ok(())
-    }
-
-    /// Compiles the kernel for `capacity` at `fidelity` with `max_registers`,
-    /// in the block size the engine would use, and reports what the compiler
-    /// made of it. The kernel is not kept.
-    pub fn kernel_stats(
-        &self,
-        capacity: usize,
-        fidelity: Fidelity,
-        max_registers: Option<u32>,
-    ) -> Result<KernelStats> {
-        let threads = block_size(capacity, self.workgroup, max_registers);
-        let source = scoring_source(capacity, threads, fidelity, max_registers.is_none());
-        let (cubin, log) = Self::compile(&self.api, &source, &self.options(max_registers))?;
-        let kernel = self.load(&cubin, threads)?;
-        let cu = &self.api.cu;
-        let attribute = |attribute| -> Result<i32> {
-            let mut value = 0;
-            cu.check(
-                unsafe { (cu.func_get_attribute)(&mut value, attribute, kernel.function) },
-                "cuFuncGetAttribute",
-            )?;
-            Ok(value)
-        };
-        let stats = (|| -> Result<KernelStats> {
-            let warps = self.resident_warps(&kernel)?;
-            Ok(KernelStats {
-                registers: attribute(CU_FUNC_ATTRIBUTE_NUM_REGS)?,
-                local_bytes: attribute(CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES)?,
-                shared_bytes: attribute(CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)?,
-                threads: kernel.threads,
-                warps_per_sm: warps,
-                log: log
-                    .lines()
-                    .filter(|l| l.contains("ptxas"))
-                    .map(|l| l.trim().to_owned())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            })
-        })();
-        unsafe { (cu.module_unload)(kernel.module) };
-        stats
     }
 
     /// Streaming multiprocessors on the device.

@@ -215,13 +215,6 @@ pub(crate) fn limited_target(m: &Muscle, time: f32) -> f32 {
     limited.short = m.long - amplitude;
     target(&limited, time)
 }
-thread_local! {
-    /// Diagnostic ledger of horizontal momentum changes by source:
-    /// [integration speed cap, ground contact, velocity-pass speed cap,
-    ///  velocity-pass constraints, projection/rebuild center-of-mass shift x mass].
-    pub static MOMENTUM_LEDGER: std::cell::Cell<[f64; 5]> = const { std::cell::Cell::new([0.0; 5]) };
-}
-
 /// Joint range constraint for one bone, precomputed from the genome. The bone
 /// turns about its parent node `a` against a reference bone that shares that
 /// node: the parent's own bone, or for bones leaving the root, the first root
@@ -272,10 +265,6 @@ pub const STATIC_FADE_END: f32 = 0.02;
 /// The static factor, `1 + STATIC_EXTRA * clamp((STATIC_FADE_END - |v|) * 100, 0, 1)`.
 pub fn static_factor(slide: f32) -> f32 {
     1.0 + 0.25 * ((0.02 - slide.abs()) * 100.0).clamp(0.0, 1.0)
-}
-/// Grip of a planted stance (`STANCE_GRIP`).
-pub fn stance_grip() -> f32 {
-    STANCE_GRIP
 }
 /// Head shaking limit: the head's acceleration, averaged over about
 /// `HEAD_SHAKE_WINDOW` seconds, may not pass 8 g (m/s^2). A creature that

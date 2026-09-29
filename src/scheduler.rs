@@ -933,18 +933,6 @@ impl Scheduler {
     ) -> Result<Vec<(Vec<usize>, Vec<EvaluationMetrics>)>> {
         self.collect_up_to(pop, cfg, timeout, usize::MAX, contender)
     }
-    /// `collect` that stops after the first unit with final results, so a
-    /// caller that archives and breeds each unit can answer controls between
-    /// units. Later units wait in their engines.
-    pub fn collect_one(
-        &mut self,
-        pop: &Population,
-        cfg: &Config,
-        timeout: Duration,
-        contender: impl FnMut(usize, &EvaluationMetrics) -> bool,
-    ) -> Result<Vec<(Vec<usize>, Vec<EvaluationMetrics>)>> {
-        self.collect_up_to(pop, cfg, timeout, 1, contender)
-    }
     fn collect_up_to(
         &mut self,
         _pop: &Population,

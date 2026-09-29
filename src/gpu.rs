@@ -29,10 +29,6 @@ impl Gpu {
             startup_warning,
         })
     }
-    /// The UI passes its render device; evaluation opens its own devices.
-    pub fn from_device(_device: wgpu::Device, _queue: wgpu::Queue, name: String) -> Result<Self> {
-        Self::new(&name)
-    }
     /// Current evaluation backends, including changes after device recovery.
     pub fn names(&self) -> String {
         self.sched

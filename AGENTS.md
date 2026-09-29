@@ -84,7 +84,12 @@ Search and game state:
 - `EVOLUTION_STAGE_LOG=<path>`: one CSV row per generation (evaluation, archive and breeding seconds, end-to-end rate).
 - `examples/size_report.rs <save> [count]`: body length, mass and foot slip for the best elites.
 - `examples/mutation_audit.rs`: how much of its parent's distance each operator's child keeps.
-- `examples/physics_audit.rs`: energy, friction and momentum ledgers per elite. `examples/first_generation.rs`: random-population distances, which show free propulsion.
+- `examples/physics_audit.rs`: energy, friction and momentum ledgers per elite.
+- `examples/first_generation.rs`: random-population distances on the CPU engine.
+- `examples/p2_speed.rs`, `examples/p2_cpu_speed.rs`, `examples/worker_rate.rs`: GPU, CPU and worker throughput.
+- `examples/p2_agreement.rs`: GPU against CPU prototype distances.
+- `examples/effect_cost.rs`, `examples/mem_report.rs`, `examples/body_stats.rs`, `examples/load_profile.rs` (save load time).
+- `examples/export_best.rs` and `examples/creature_gif.rs`: export an elite from a save and render its trial as a GIF.
 - `tools/pause-game.sh`: pauses the owner's game for a speed measurement (`docs/building.md`).
 
 ## Docs

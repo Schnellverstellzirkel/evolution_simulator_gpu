@@ -1,4 +1,3 @@
-use bincode::Options;
 use evolution_simulator::{
     config::Config,
     evolution::{self, Population},
@@ -517,40 +516,6 @@ fn checkpoint_preserves_stalled_island_optimizer_next_generation() {
 }
 
 #[test]
-fn v3_checkpoint_keeps_current_archives_and_can_continue_breeding() {
-    let mut experiment = Experiment::new(config(38)).unwrap();
-    archive_synthetic_results(&mut experiment);
-    experiment.prepare_next_batch().unwrap();
-    archive_synthetic_results(&mut experiment);
-    // V3 serialized only Experiment. Keep a fixture using that exact payload,
-    // independent of the format emitted by the current save implementation.
-    let payload = bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .serialize(&experiment)
-        .unwrap();
-    let mut bytes = b"EVORUST3".to_vec();
-    bytes.extend(zstd::stream::encode_all(payload.as_slice(), 3).unwrap());
-    let checkpoint = Checkpoint::new("v3-resume");
-    std::fs::write(&checkpoint.0, bytes).unwrap();
-
-    let mut restored = storage::load(&checkpoint.0).unwrap();
-    assert_eq!(restored.qd_version, experiment.qd_version);
-    assert_eq!(restored.stage, Stage::Archived);
-    assert_eq!(restored.generation, experiment.generation);
-    assert_eq!(restored.scores, experiment.scores);
-    assert_same_population(&restored.population, &experiment.population);
-    assert!(encoded(&restored.archive) == encoded(&experiment.archive));
-    assert!(encoded(&restored.islands) == encoded(&experiment.islands));
-    assert!(encoded(&restored.cma_emitters) == encoded(&experiment.cma_emitters));
-    assert_eq!(restored.history.len(), experiment.history.len());
-    // V3 did not save record ages, so exact stalled continuation is available
-    // only for V4; old files must still load without discarding valid archives.
-    assert!(restored.island_progress.is_empty());
-    restored.prepare_next_batch().unwrap();
-    restored.validate().unwrap();
-}
-
-#[test]
 fn checkpoint_rejects_invalid_optimizer_resume_metadata() {
     let mut experiment = Experiment::new(config(38)).unwrap();
     archive_synthetic_results(&mut experiment);
@@ -568,7 +533,7 @@ fn checkpoint_rejects_invalid_optimizer_resume_metadata() {
         storage::save(&checkpoint.0, &experiment).unwrap();
         assert!(storage::load(&checkpoint.0).is_err());
     }
-    // No planning pass has run yet after loading a V3 save or after an empty
+    // No planning pass has run yet after loading a save or after an empty
     // island receives its first elite. Both forms are valid resume states.
     for progress in [Vec::new(), vec![(f32::NEG_INFINITY, 0); islands]] {
         experiment.island_progress = progress;
@@ -582,53 +547,13 @@ fn checkpoint_rejects_invalid_optimizer_resume_metadata() {
 }
 
 #[test]
-fn old_physics_checkpoint_clears_stale_islands_and_queued_reseeds() {
+fn a_save_from_other_physics_is_turned_down() {
     let mut experiment = Experiment::new(config(38)).unwrap();
-    archive_synthetic_results(&mut experiment);
-    experiment.prepare_next_batch().unwrap();
-    archive_synthetic_results(&mut experiment);
-    experiment
-        .reseed
-        .push(0, experiment.archive.entries[0].creature.clone());
     experiment.qd_version -= 1;
-    assert!(!experiment.cma_emitters.is_empty());
-    assert!(
-        experiment
-            .islands
-            .iter()
-            .all(|island| !island.entries.is_empty())
-    );
-    let historical_representatives = encoded(&experiment.history[0].representatives);
-    let checkpoint = Checkpoint::new("old-physics-islands");
+    let checkpoint = Checkpoint::new("old-physics");
     storage::save(&checkpoint.0, &experiment).unwrap();
-
-    let mut restored = storage::load(&checkpoint.0).unwrap();
-    assert_eq!(restored.qd_version, evolution_simulator::qd::VERSION);
-    assert_eq!(restored.stage, Stage::Ready);
-    assert_eq!(restored.evaluated, 0);
-    assert!(restored.scores.iter().all(|score| score.is_nan()));
-    assert!(restored.archive.entries.is_empty());
-    assert!(restored.islands.is_empty());
-    assert!(restored.island_progress.is_empty());
-    assert!(restored.cma_emitters.is_empty());
-    assert!(restored.reseed.is_empty());
-    assert_eq!(restored.history.len(), 1);
-    assert_eq!(
-        encoded(&restored.history[0].representatives),
-        historical_representatives
-    );
-    restored.validate().unwrap();
-
-    let slots: Vec<_> = (0..restored.config.population).collect();
-    restored.breed_slots(&slots).unwrap();
-    assert!(
-        restored
-            .candidate_emitters
-            .iter()
-            .all(|&emitter| emitter == Emitter::Restart)
-    );
-    assert!(restored.candidate_parent_ids.iter().all(Option::is_none));
-    restored.validate().unwrap();
+    let error = storage::load(&checkpoint.0).err().unwrap().to_string();
+    assert!(error.contains("physics version"), "{error}");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use crate::scheduler::CheckNeed;
 use crate::{
     config::Config,
-    evolution::{self, CandidatePlan, Creature, FAILED, LegacyMuscle, Population, Rng},
+    evolution::{self, CandidatePlan, Creature, FAILED, Population, Rng},
     qd::{self, CmaEmitter, Emitter, EmitterStats, QdArchive, TrialMetrics},
 };
 use anyhow::{Context, Result, ensure};
@@ -2116,17 +2116,13 @@ impl Experiment {
         Ok(())
     }
 }
-// V5 dropped the unused obstacle slot and V6 added the environment-effect
-// multipliers to the binary configuration. Older files cannot decode the new
-// layout and are rejected cleanly instead of failing mid-stream. V7 puts a
-// small uncompressed header (`SaveHeader`) before the stream, so the game can
-// turn down a save it cannot use before it reads gigabytes. V8 keeps only the
-// archives and the search state (`SmallSave`); a loaded game breeds its
-// population from the archives again (owner decision, docs/data-architecture.md
-// section 12).
+// The file starts with the magic, then a small uncompressed header
+// (`SaveHeader`), so the game can turn down a save it cannot use before it
+// reads gigabytes. The body keeps only the archives and the search state
+// (`SmallSave`). A loaded game breeds its population from the archives again
+// (docs/data-architecture.md section 12). Any other magic is an older format
+// and is turned down.
 const MAGIC: &[u8; 8] = b"EVORUST8";
-const V7_MAGIC: &[u8; 8] = b"EVORUST7";
-const V6_MAGIC: &[u8; 8] = b"EVORUST6";
 
 /// What a save holds: the archives and the search state, without the
 /// population, its scores, or anything bred for the generation in progress.
@@ -2238,34 +2234,10 @@ impl SmallLoad {
         }
         let elites =
             e.archive.entries.len() + e.islands.iter().map(|i| i.entries.len()).sum::<usize>();
-        if e.qd_version != qd::VERSION || (elites == 0 && e.reseed.is_empty()) {
+        if elites == 0 && e.reseed.is_empty() {
             // Nothing valid to breed from: a random population, as in a new game.
             e.population = evolution::create(&e.config)?;
             e.stage = Stage::Ready;
-            if e.qd_version != qd::VERSION {
-                // The saved generation's statistics describe scores that no
-                // longer hold; its population is scored again.
-                if e.history
-                    .last()
-                    .is_some_and(|s| s.generation == e.generation)
-                {
-                    e.history.pop();
-                }
-                // Version 28 made trials 20 s long; a game saved with longer
-                // trials continues with the fixed length.
-                let duration = Config::default().duration;
-                e.config.duration = duration;
-                if let Some(pending) = e.pending.as_mut() {
-                    pending.duration = duration;
-                }
-                e.qd_version = qd::VERSION;
-                e.archive = QdArchive::default();
-                e.islands.clear();
-                e.island_progress.clear();
-                e.reseed.clear();
-                e.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
-                e.cma_emitters.clear();
-            }
         } else {
             e.prepare_next_batch()?;
         }
@@ -2275,17 +2247,6 @@ impl SmallLoad {
         e.validate()?;
         Ok(e)
     }
-}
-const V3_MAGIC: &[u8; 8] = b"EVORUST3";
-const V2_MAGIC: &[u8; 8] = b"EVORUST2";
-const LEGACY_MAGIC: &[u8; 8] = b"EVORUST1";
-
-/// Search state omitted by Experiment's original serialized representation.
-/// V4 and later append it inside the same checksummed stream, preserving V3
-/// decoding for the legacy conversion.
-#[derive(Serialize, Deserialize)]
-struct CheckpointResume {
-    island_progress: Vec<(f32, u32)>,
 }
 
 fn fitness_context_changed(old: &Config, new: &Config) -> bool {
@@ -2411,26 +2372,37 @@ pub fn peek(path: &Path) -> Result<SaveHeader> {
     let mut magic = [0; 8];
     file.read_exact(&mut magic)
         .with_context(|| format!("{} is not a save of this game", path.display()))?;
-    if &magic == V6_MAGIC || &magic == V3_MAGIC || &magic == V2_MAGIC || &magic == LEGACY_MAGIC {
-        anyhow::bail!(
-            "{} was saved by an older version of the game, under older physics. It cannot be loaded; start a new population instead.",
-            path.display()
-        );
-    }
-    ensure!(
-        &magic == MAGIC || &magic == V7_MAGIC,
-        "{} is not a save of this game",
-        path.display()
-    );
+    reject_other_formats(path, &magic)?;
     let mut header = [0; SaveHeader::BYTES];
     file.read_exact(&mut header)
         .with_context(|| format!("{} is cut short", path.display()))?;
     Ok(SaveHeader::from_bytes(header))
 }
 
+/// Turns down a file that is not a save in the current format.
+fn reject_other_formats(path: &Path, magic: &[u8; 8]) -> Result<()> {
+    if magic == MAGIC {
+        return Ok(());
+    }
+    ensure!(
+        magic.starts_with(b"EVORUST"),
+        "{} is not a save of this game",
+        path.display()
+    );
+    anyhow::bail!(
+        "{} was saved by an older version of the game, under older physics. It cannot be loaded; start a new population instead.",
+        path.display()
+    )
+}
+
 /// The header of a save the game can load now, or a message saying why not.
 pub fn check(path: &Path) -> Result<SaveHeader> {
     let header = peek(path)?;
+    ensure_current_version(path, &header)?;
+    Ok(header)
+}
+
+fn ensure_current_version(path: &Path, header: &SaveHeader) -> Result<()> {
     ensure!(
         header.qd_version == qd::VERSION,
         "{} was saved under physics version {}, and this game uses version {}. Its scores no longer hold, so it cannot be loaded; start a new population instead.",
@@ -2438,7 +2410,7 @@ pub fn check(path: &Path) -> Result<SaveHeader> {
         header.qd_version,
         qd::VERSION
     );
-    Ok(header)
+    Ok(())
 }
 
 pub fn save(path: &Path, experiment: &Experiment) -> Result<()> {
@@ -2472,7 +2444,6 @@ pub fn save_with_progress(
         bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .serialize_into(&mut buffered, &SmallSave::of(experiment))?;
-        // After the body, so saves from before it was stored still load.
         bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .serialize_into(&mut buffered, &experiment.last_migration)?;
@@ -2515,9 +2486,7 @@ pub fn summary(path: &Path) -> Option<SaveSummary> {
     let mut file = BufReader::new(File::open(path).ok()?);
     let mut magic = [0; 8];
     file.read_exact(&mut magic).ok()?;
-    // Both the small saves and the full V7 saves begin with the settings,
-    // the pending settings and the generation.
-    if &magic != MAGIC && &magic != V7_MAGIC {
+    if &magic != MAGIC {
         return None;
     }
     let mut header = [0; SaveHeader::BYTES];
@@ -2554,427 +2523,37 @@ pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Ex
         progress,
     });
     let mut magic = [0; 8];
-    file.read_exact(&mut magic)?;
-    ensure!(
-        &magic == MAGIC
-            || &magic == V7_MAGIC
-            || &magic == V6_MAGIC
-            || &magic == V3_MAGIC
-            || &magic == V2_MAGIC
-            || &magic == LEGACY_MAGIC,
-        "Unsupported checkpoint format/version"
-    );
-    if &magic == MAGIC || &magic == V7_MAGIC {
-        let mut header = [0; SaveHeader::BYTES];
-        file.read_exact(&mut header)?;
-    }
+    file.read_exact(&mut magic)
+        .with_context(|| format!("{} is not a save of this game", path.display()))?;
+    reject_other_formats(path, &magic)?;
+    let mut header = [0; SaveHeader::BYTES];
+    file.read_exact(&mut header)
+        .with_context(|| format!("{} is cut short", path.display()))?;
+    ensure_current_version(path, &SaveHeader::from_bytes(header))?;
     // bincode reads field by field; a buffer turns each read into a copy
     // instead of a call into the decompressor (18 s to 5 s at 3M).
     let mut decoder =
         BufReader::with_capacity(1 << 20, zstd::stream::read::Decoder::with_buffer(file)?);
-    if &magic == MAGIC {
-        let small: SmallLoad = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit(24 * 1024 * 1024 * 1024)
-            .deserialize_from(&mut decoder)?;
-        // The last island migration follows the body; older saves end
-        // before it.
-        let migration: Option<(u32, Vec<(usize, usize)>)> = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit(8 + 64 * 16)
-            .deserialize_from(&mut decoder)
-            .unwrap_or(None);
-        let mut trailing = [0u8; 1];
-        ensure!(
-            decoder.read(&mut trailing)? == 0,
-            "Unexpected trailing checkpoint data"
-        );
-        let mut experiment = small.into_experiment()?;
-        experiment.last_migration = migration.filter(|(generation, exchange)| {
-            *generation <= experiment.generation
-                && exchange.len() == experiment.islands.len()
-                && experiment.qd_version == qd::VERSION
-        });
-        return Ok(experiment);
-    }
-    let mut experiment: Experiment = if &magic == LEGACY_MAGIC {
-        let legacy: LegacyExperiment = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit(24 * 1024 * 1024 * 1024)
-            .deserialize_from(&mut decoder)?;
-        legacy.into()
-    } else if &magic == V2_MAGIC {
-        let previous: V2Experiment = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit(24 * 1024 * 1024 * 1024)
-            .deserialize_from(&mut decoder)?;
-        previous.into()
-    } else {
-        bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit(24 * 1024 * 1024 * 1024)
-            .deserialize_from(&mut decoder)?
-    };
-    if &magic == V7_MAGIC || &magic == V6_MAGIC {
-        let resume: CheckpointResume = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            // A fixed-width vector length plus at most 64 (fitness, generation)
-            // pairs. Bound corrupt metadata independently of the large body data.
-            .with_limit(8 + 64 * 8)
-            .deserialize_from(&mut decoder)?;
-        ensure!(
-            resume.island_progress.len() <= 64
-                && (resume.island_progress.is_empty()
-                    || resume.island_progress.len() == experiment.islands.len())
-                && resume.island_progress.iter().all(|&(fitness, generation)| {
-                    (fitness.is_finite() || fitness == f32::NEG_INFINITY)
-                        && generation <= experiment.generation
-                }),
-            "Invalid checkpoint optimizer progress"
-        );
-        experiment.island_progress = resume.island_progress;
-    }
+    let small: SmallLoad = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(24 * 1024 * 1024 * 1024)
+        .deserialize_from(&mut decoder)?;
+    let migration: Option<(u32, Vec<(usize, usize)>)> = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(8 + 64 * 16)
+        .deserialize_from(&mut decoder)?;
     let mut trailing = [0u8; 1];
     ensure!(
         decoder.read(&mut trailing)? == 0,
         "Unexpected trailing checkpoint data"
     );
-    // Bone projection now walks the skeleton parent-first. Normalize trees in
-    // checkpoints written before that invariant was introduced.
-    experiment.population.canonicalize_bones()?;
-    if experiment.qd_version < qd::VERSION {
-        // Older archives used prior descriptors, obstacle physics, bone
-        // contact rules, or positional corrections as velocity. Reevaluate
-        // their current populations under the current fitness criteria
-        // instead of retaining incomparable elites.
-        if experiment
-            .history
-            .last()
-            .is_some_and(|s| s.generation == experiment.generation)
-        {
-            experiment.history.pop();
-        }
-        experiment
-            .population
-            .migrate_actuator_geometry(&experiment.config);
-        // Version 28 made trials 20 s long; a game saved with longer trials
-        // continues with the fixed length.
-        let duration = Config::default().duration;
-        experiment.config.duration = duration;
-        if let Some(pending) = experiment.pending.as_mut() {
-            pending.duration = duration;
-        }
-        experiment.qd_version = qd::VERSION;
-        experiment.archive = QdArchive::default();
-        experiment.islands.clear();
-        experiment.island_progress.clear();
-        experiment.reseed.clear();
-        experiment.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
-        experiment.cma_emitters.clear();
-        experiment.candidate_emitters = vec![Emitter::Restart; experiment.config.population];
-        experiment.candidate_cma = vec![None; experiment.config.population];
-        experiment.protected_until = vec![0; experiment.config.population];
-        experiment.trial_metrics = vec![TrialMetrics::default(); experiment.config.population];
-        experiment.scores.fill(f32::NAN);
-        experiment.evaluated = 0;
-        experiment.stage = Stage::Ready;
-        experiment.ranks.clear();
-        experiment.parents.clear();
-        experiment.evaluation_seconds = 0.0;
-    }
-    experiment.parent_scores = vec![f32::NAN; experiment.config.population];
-    // The screen bar is not saved: the first resumed generation runs every
-    // trial in full and sets a new one.
-    experiment.config.screen = experiment.next_screen(true, experiment.config.duration);
-    experiment.archive.rebuild_indices();
-    for island in &mut experiment.islands {
-        island.rebuild_indices();
-    }
-    experiment.validate()?;
+    let mut experiment = small.into_experiment()?;
+    experiment.last_migration = migration.filter(|(generation, exchange)| {
+        *generation <= experiment.generation && exchange.len() == experiment.islands.len()
+    });
     Ok(experiment)
 }
 
-#[derive(Serialize, Deserialize)]
-struct V2Genome {
-    node_start: usize,
-    node_count: usize,
-    muscle_start: usize,
-    muscle_count: usize,
-    id: u64,
-    mutability: f32,
-}
-#[derive(Serialize, Deserialize)]
-struct V2Creature {
-    nodes: Vec<crate::evolution::NodeGene>,
-    muscles: Vec<LegacyMuscle>,
-    id: u64,
-    mutability: f32,
-}
-#[derive(Serialize, Deserialize)]
-struct V2Population {
-    genomes: Vec<V2Genome>,
-    nodes: Vec<crate::evolution::NodeGene>,
-    muscles: Vec<LegacyMuscle>,
-}
-#[derive(Serialize, Deserialize)]
-struct V2Stats {
-    generation: u32,
-    best: f32,
-    median: f32,
-    worst: f32,
-    mean: f32,
-    failed: usize,
-    seconds: f64,
-    population: usize,
-    percentiles: Vec<f32>,
-    histogram: Vec<(i32, u32)>,
-    species: Vec<(usize, usize, u32)>,
-    representatives: Vec<V2Creature>,
-    config: Config,
-    archive_cells: usize,
-    qd_score: f64,
-    archive_coverage: f32,
-    emitters: [EmitterStats; qd::EMITTER_COUNT],
-}
-#[allow(dead_code)]
-#[derive(Serialize, Deserialize)]
-struct V2Elite {
-    niche: qd::Niche,
-    descriptor: qd::Descriptor,
-    creature: V2Creature,
-    fitness: f32,
-    emitter: Emitter,
-    improved_generation: u32,
-    protected_until: u32,
-    visits: u64,
-    topology: qd::Topology,
-}
-#[allow(dead_code)]
-#[derive(Serialize, Deserialize)]
-struct V2QdArchive {
-    entries: Vec<V2Elite>,
-    qd_score: f64,
-}
-#[allow(dead_code)]
-#[derive(Serialize, Deserialize)]
-struct V2CmaEmitter {
-    niche: qd::Niche,
-    topology: qd::Topology,
-    template: V2Creature,
-    mean: Vec<f32>,
-    covariance: Vec<f32>,
-    path_c: Vec<f32>,
-    path_sigma: Vec<f32>,
-    sigma: f32,
-    last_used_generation: u32,
-}
-#[allow(dead_code)]
-#[derive(Serialize, Deserialize)]
-struct V2Experiment {
-    config: Config,
-    pending: Option<Config>,
-    generation: u32,
-    population: V2Population,
-    scores: Vec<f32>,
-    evaluated: usize,
-    stage: Stage,
-    ranks: Vec<usize>,
-    parents: Vec<usize>,
-    history: Vec<V2Stats>,
-    evaluation_seconds: f64,
-    archive: V2QdArchive,
-    emitter_stats: [EmitterStats; qd::EMITTER_COUNT],
-    cma_emitters: Vec<V2CmaEmitter>,
-    candidate_emitters: Vec<Emitter>,
-    candidate_cma: Vec<Option<usize>>,
-    protected_until: Vec<u32>,
-    trial_metrics: Vec<TrialMetrics>,
-    qd_version: u32,
-}
-#[derive(Serialize, Deserialize)]
-struct LegacyStats {
-    generation: u32,
-    best: f32,
-    median: f32,
-    worst: f32,
-    mean: f32,
-    failed: usize,
-    seconds: f64,
-    population: usize,
-    percentiles: Vec<f32>,
-    histogram: Vec<(i32, u32)>,
-    species: Vec<(usize, usize, u32)>,
-    representatives: Vec<V2Creature>,
-    config: Config,
-}
-#[derive(Serialize, Deserialize)]
-struct LegacyExperiment {
-    config: Config,
-    pending: Option<Config>,
-    generation: u32,
-    population: V2Population,
-    scores: Vec<f32>,
-    evaluated: usize,
-    stage: Stage,
-    ranks: Vec<usize>,
-    parents: Vec<usize>,
-    history: Vec<LegacyStats>,
-    evaluation_seconds: f64,
-}
-fn migrate_legacy_population(old: V2Population, cfg: &Config) -> Population {
-    let mut population = Population::default();
-    for genome in old.genomes {
-        let nodes = old.nodes[genome.node_start..genome.node_start + genome.node_count].to_vec();
-        let muscles = &old.muscles[genome.muscle_start..genome.muscle_start + genome.muscle_count];
-        population.push(evolution::migrate_legacy_creature(
-            nodes, muscles, genome.id, cfg,
-        ));
-    }
-    population
-}
-fn migrate_legacy_creature(old: V2Creature, cfg: &Config) -> Creature {
-    evolution::migrate_legacy_creature(old.nodes, &old.muscles, old.id, cfg)
-}
-fn migrate_legacy_stats(old: LegacyStats) -> Stats {
-    let cfg = old.config.clone();
-    Stats {
-        generation: old.generation,
-        best: old.best,
-        median: old.median,
-        worst: old.worst,
-        mean: old.mean,
-        failed: old.failed,
-        seconds: old.seconds,
-        population: old.population,
-        percentiles: old.percentiles,
-        histogram: old.histogram,
-        species: old.species,
-        representatives: old
-            .representatives
-            .into_iter()
-            .map(|creature| migrate_legacy_creature(creature, &cfg))
-            .collect(),
-        config: old.config,
-        archive_cells: 0,
-        qd_score: 0.0,
-        archive_coverage: 0.0,
-        emitters: [EmitterStats::default(); qd::EMITTER_COUNT],
-    }
-}
-fn migrate_v2_stats(old: V2Stats) -> Stats {
-    let cfg = old.config.clone();
-    Stats {
-        generation: old.generation,
-        best: old.best,
-        median: old.median,
-        worst: old.worst,
-        mean: old.mean,
-        failed: old.failed,
-        seconds: old.seconds,
-        population: old.population,
-        percentiles: old.percentiles,
-        histogram: old.histogram,
-        species: old.species,
-        representatives: old
-            .representatives
-            .into_iter()
-            .map(|creature| migrate_legacy_creature(creature, &cfg))
-            .collect(),
-        config: old.config,
-        archive_cells: old.archive_cells,
-        qd_score: old.qd_score,
-        archive_coverage: old.archive_coverage,
-        emitters: old.emitters,
-    }
-}
-impl From<V2Experiment> for Experiment {
-    fn from(old: V2Experiment) -> Self {
-        let population = old.config.population;
-        let config = old.config;
-        Self {
-            population: migrate_legacy_population(old.population, &config),
-            history: old.history.into_iter().map(migrate_v2_stats).collect(),
-            config,
-            pending: old.pending,
-            generation: old.generation,
-            scores: old.scores,
-            parent_scores: vec![f32::NAN; population],
-            evaluated: old.evaluated,
-            stage: old.stage,
-            ranks: old.ranks,
-            parents: old.parents,
-            evaluation_seconds: old.evaluation_seconds,
-            archive: QdArchive::default(),
-            emitter_stats: [EmitterStats::default(); qd::EMITTER_COUNT],
-            cma_emitters: vec![],
-            candidate_emitters: vec![Emitter::Restart; population],
-            candidate_cma: vec![None; population],
-            candidate_parent_ids: vec![None; population],
-            morphology_reserve_override: None,
-            protected_until: vec![0; population],
-            trial_metrics: vec![TrialMetrics::default(); population],
-            screened: Vec::new(),
-            screen_distance: Vec::new(),
-            arena_spare: evolution::Arena::default(),
-            screen_samples: 0,
-            qd_version: 0,
-            breed_round: 0,
-            islands: Vec::new(),
-            lineage: HashMap::new(),
-            candidate_mates: Vec::new(),
-            island_progress: Vec::new(),
-            last_migration: None,
-            reseed: Reseed::default(),
-            fossils: Vec::new(),
-        }
-    }
-}
-impl From<LegacyExperiment> for Experiment {
-    fn from(legacy: LegacyExperiment) -> Self {
-        let population = legacy.config.population;
-        let config = legacy.config;
-        Self {
-            config: config.clone(),
-            pending: legacy.pending,
-            generation: legacy.generation,
-            population: migrate_legacy_population(legacy.population, &config),
-            scores: legacy.scores,
-            parent_scores: vec![f32::NAN; population],
-            evaluated: legacy.evaluated,
-            stage: legacy.stage,
-            ranks: legacy.ranks,
-            parents: legacy.parents,
-            history: legacy
-                .history
-                .into_iter()
-                .map(migrate_legacy_stats)
-                .collect(),
-            evaluation_seconds: legacy.evaluation_seconds,
-            archive: QdArchive::default(),
-            emitter_stats: [EmitterStats::default(); qd::EMITTER_COUNT],
-            cma_emitters: vec![],
-            candidate_emitters: vec![Emitter::Restart; population],
-            candidate_cma: vec![None; population],
-            candidate_parent_ids: vec![None; population],
-            morphology_reserve_override: None,
-            protected_until: vec![0; population],
-            trial_metrics: vec![TrialMetrics::default(); population],
-            screened: Vec::new(),
-            screen_distance: Vec::new(),
-            arena_spare: evolution::Arena::default(),
-            screen_samples: 0,
-            qd_version: 0,
-            breed_round: 0,
-            islands: Vec::new(),
-            lineage: HashMap::new(),
-            candidate_mates: Vec::new(),
-            island_progress: Vec::new(),
-            last_migration: None,
-            reseed: Reseed::default(),
-            fossils: Vec::new(),
-        }
-    }
-}
 pub fn export_csv(path: &Path, history: &[Stats]) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
@@ -3045,24 +2624,6 @@ mod peek_tests {
 mod migration_tests {
     use super::*;
 
-    /// Writes `experiment` as a full V7 save, the format before small saves,
-    /// which still loads (and migrates) through `load`.
-    fn write_v7(path: &Path, experiment: &Experiment) {
-        let options = bincode::DefaultOptions::new().with_fixint_encoding();
-        let mut payload = options.serialize(experiment).unwrap();
-        payload.extend(
-            options
-                .serialize(&CheckpointResume {
-                    island_progress: experiment.island_progress.clone(),
-                })
-                .unwrap(),
-        );
-        let mut bytes = V7_MAGIC.to_vec();
-        bytes.extend(SaveHeader::of(experiment).to_bytes());
-        bytes.extend(zstd::stream::encode_all(payload.as_slice(), 3).unwrap());
-        std::fs::write(path, bytes).unwrap();
-    }
-
     #[test]
     fn the_header_turns_down_old_saves_before_reading_them() {
         let config = Config {
@@ -3093,7 +2654,7 @@ mod migration_tests {
 
         // Before the header: only the magic is read.
         let old = dir.join(format!("evolution-header-v6-{}.evo", std::process::id()));
-        let mut bytes = V6_MAGIC.to_vec();
+        let mut bytes = b"EVORUST6".to_vec();
         bytes.extend([0u8; 64]);
         std::fs::write(&old, bytes).unwrap();
         let error = check(&old).unwrap_err().to_string();
@@ -3124,239 +2685,6 @@ mod migration_tests {
     }
 
     #[test]
-    fn v2_checkpoint_migrates_node_muscles_to_bones() {
-        let config = Config {
-            population: 2,
-            random_seed: false,
-            ..Config::default()
-        };
-        let nodes = vec![
-            crate::evolution::NodeGene {
-                x: 0.0,
-                y: 0.0,
-                diameter: 0.08,
-                friction: 0.5,
-            },
-            crate::evolution::NodeGene {
-                x: 0.3,
-                y: 0.0,
-                diameter: 0.08,
-                friction: 0.5,
-            },
-            crate::evolution::NodeGene {
-                x: 0.15,
-                y: 0.25,
-                diameter: 0.08,
-                friction: 0.5,
-            },
-        ];
-        let muscles = vec![
-            LegacyMuscle {
-                a: 0,
-                b: 1,
-                short: 0.1,
-                long: 0.2,
-                period: 1.0,
-                phase: 0.0,
-                duty: 0.5,
-                stiffness: 40.0,
-            },
-            LegacyMuscle {
-                a: 1,
-                b: 2,
-                short: 0.1,
-                long: 0.2,
-                period: 1.0,
-                phase: 0.2,
-                duty: 0.5,
-                stiffness: 40.0,
-            },
-            LegacyMuscle {
-                a: 2,
-                b: 0,
-                short: 0.1,
-                long: 0.2,
-                period: 1.0,
-                phase: 0.4,
-                duty: 0.5,
-                stiffness: 40.0,
-            },
-        ];
-        let mut old_population = V2Population {
-            genomes: Vec::new(),
-            nodes: Vec::new(),
-            muscles: Vec::new(),
-        };
-        for id in 1..=2 {
-            let node_start = old_population.nodes.len();
-            let muscle_start = old_population.muscles.len();
-            old_population.nodes.extend_from_slice(&nodes);
-            old_population.muscles.extend_from_slice(&muscles);
-            old_population.genomes.push(V2Genome {
-                node_start,
-                node_count: nodes.len(),
-                muscle_start,
-                muscle_count: muscles.len(),
-                id,
-                mutability: 1.0,
-            });
-        }
-        let old = V2Experiment {
-            config: config.clone(),
-            pending: None,
-            generation: 5,
-            population: old_population,
-            scores: vec![1.0, 1.0],
-            evaluated: 2,
-            stage: Stage::Evaluated,
-            ranks: vec![],
-            parents: vec![],
-            history: vec![],
-            evaluation_seconds: 1.0,
-            archive: V2QdArchive {
-                entries: vec![],
-                qd_score: 0.0,
-            },
-            emitter_stats: [EmitterStats::default(); qd::EMITTER_COUNT],
-            cma_emitters: vec![],
-            candidate_emitters: vec![Emitter::Cma; 2],
-            candidate_cma: vec![None; 2],
-            protected_until: vec![0; 2],
-            trial_metrics: vec![TrialMetrics::default(); 2],
-            qd_version: qd::VERSION - 1,
-        };
-        let payload = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .serialize(&old)
-            .unwrap();
-        let compressed = zstd::stream::encode_all(payload.as_slice(), 3).unwrap();
-        let mut bytes = V2_MAGIC.to_vec();
-        bytes.extend(compressed);
-        let checkpoint =
-            std::env::temp_dir().join(format!("evolution-v2-migration-{}.evo", std::process::id()));
-        std::fs::write(&checkpoint, bytes).unwrap();
-        let loaded = load(&checkpoint).unwrap();
-        let _ = std::fs::remove_file(checkpoint);
-
-        assert_eq!(loaded.qd_version, qd::VERSION);
-        assert_eq!(loaded.stage, Stage::Ready);
-        assert!(loaded.scores.iter().all(|score| score.is_nan()));
-        assert_eq!(loaded.population.genomes.len(), 2);
-        loaded.population.validate(&config).unwrap();
-        for genome in &loaded.population.genomes {
-            assert_eq!(genome.bone_count, genome.node_count - 1);
-        }
-    }
-
-    #[test]
-    fn old_checkpoint_keeps_historical_representatives_with_missing_muscles() {
-        let config = Config {
-            population: 4,
-            random_seed: false,
-            ..Config::default()
-        };
-        let mut experiment = Experiment::new(config).unwrap();
-        experiment.scores.fill(1.0);
-        experiment.evaluated = experiment.config.population;
-        experiment.stage = Stage::Evaluated;
-        experiment.archive_batch().unwrap();
-        experiment.prepare_next_batch().unwrap();
-        experiment.history[0].representatives[0].muscles.clear();
-        experiment.qd_version = qd::VERSION - 1;
-        let checkpoint = std::env::temp_dir().join(format!(
-            "evolution-disconnected-history-{}.evo",
-            std::process::id()
-        ));
-        save(&checkpoint, &experiment).unwrap();
-        let loaded = load(&checkpoint).unwrap();
-        let _ = std::fs::remove_file(checkpoint);
-        assert_eq!(loaded.generation, 1);
-        assert_eq!(loaded.history.len(), 1);
-        assert!(loaded.history[0].representatives[0].muscles.is_empty());
-        loaded.validate().unwrap();
-    }
-
-    #[test]
-    fn an_older_game_continues_with_20_s_trials() {
-        assert_eq!(Config::default().duration, 20.0);
-        let config = Config {
-            population: 64,
-            duration: 60.0,
-            random_seed: false,
-            ..Config::default()
-        };
-        let mut experiment = Experiment::new(config).unwrap();
-        experiment.pending = Some(experiment.config.clone());
-        experiment.qd_version = qd::VERSION - 1;
-        let checkpoint = std::env::temp_dir().join(format!(
-            "evolution-60-second-game-{}.evo",
-            std::process::id()
-        ));
-        save(&checkpoint, &experiment).unwrap();
-        let loaded = load(&checkpoint).unwrap();
-        let _ = std::fs::remove_file(checkpoint);
-        assert_eq!(loaded.config.duration, 20.0);
-        assert_eq!(loaded.pending.as_ref().unwrap().duration, 20.0);
-        loaded.validate().unwrap();
-    }
-
-    #[test]
-    fn current_checkpoint_normalizes_bone_order_and_keeps_attachments_in_place() {
-        let config = Config {
-            population: 2,
-            random_seed: false,
-            ..Config::default()
-        };
-        let mut experiment = Experiment::new(config.clone()).unwrap();
-        let genome = experiment.population.genomes[0].clone();
-        let bone_range = genome.bone_start..genome.bone_start + genome.bone_count;
-        experiment.population.bones[bone_range.clone()].reverse();
-        for bone in &mut experiment.population.bones[bone_range] {
-            std::mem::swap(&mut bone.a, &mut bone.b);
-        }
-        let old_creature = experiment.population.creature(0);
-        let point = |creature: &crate::evolution::Creature, bone_id: u32, t: f32| {
-            let bone = creature.bones[bone_id as usize];
-            let a = creature.nodes[bone.a as usize];
-            let b = creature.nodes[bone.b as usize];
-            [a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t]
-        };
-        let old_points: Vec<_> = old_creature
-            .muscles
-            .iter()
-            .map(|muscle| {
-                [
-                    point(&old_creature, muscle.bone_a, muscle.anchor_a),
-                    point(&old_creature, muscle.bone_b, muscle.anchor_b),
-                ]
-            })
-            .collect();
-        experiment.qd_version = qd::VERSION - 1;
-        let checkpoint = std::env::temp_dir().join(format!(
-            "evolution-v3-bone-order-{}.evo",
-            std::process::id()
-        ));
-        write_v7(&checkpoint, &experiment);
-        let loaded = load(&checkpoint).unwrap();
-        let _ = std::fs::remove_file(checkpoint);
-
-        assert_eq!(loaded.qd_version, qd::VERSION);
-        assert!(loaded.scores.iter().all(|score| score.is_nan()));
-        loaded.population.validate(&config).unwrap();
-        let new_creature = loaded.population.creature(0);
-        for (muscle, points) in new_creature.muscles.iter().zip(old_points) {
-            let actual = [
-                point(&new_creature, muscle.bone_a, muscle.anchor_a),
-                point(&new_creature, muscle.bone_b, muscle.anchor_b),
-            ];
-            for side in 0..2 {
-                assert!((actual[side][0] - points[side][0]).abs() < 1e-6);
-                assert!((actual[side][1] - points[side][1]).abs() < 1e-6);
-            }
-        }
-    }
-
-    #[test]
     fn a_continuous_run_checkpoint_with_scattered_scores_loads() {
         // A steady run's autosave: the generation's count is complete, but
         // slots re-bred during it hold new, unevaluated children.
@@ -3371,11 +2699,7 @@ mod migration_tests {
         experiment.stage = Stage::Archived;
         let checkpoint =
             std::env::temp_dir().join(format!("evolution-steady-{}.evo", std::process::id()));
-        write_v7(&checkpoint, &experiment);
-        let loaded = load(&checkpoint).unwrap();
-        assert_eq!(loaded.scores[1], 2.0);
-        assert!(loaded.scores[0].is_nan());
-        // A small save keeps no scores: the loaded game starts a fresh
+        // A save keeps no scores: the loaded game starts a fresh
         // generation from its (here empty) archives.
         save(&checkpoint, &experiment).unwrap();
         let loaded = load(&checkpoint).unwrap();
