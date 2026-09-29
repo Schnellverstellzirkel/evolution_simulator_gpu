@@ -98,11 +98,19 @@ fn main() {
             .map(|&capacity| {
                 (
                     format!("capacity {capacity:2}"),
-                    evolution_simulator::creature_kernel::shader_source(
-                        capacity,
-                        workgroup,
-                        evolution_simulator::physics::Fidelity::standard(),
-                    ),
+                    if evolution_simulator::physics2::enabled() {
+                        evolution_simulator::physics2::shader_source(
+                            capacity,
+                            workgroup,
+                            evolution_simulator::physics::Fidelity::standard(),
+                        )
+                    } else {
+                        evolution_simulator::creature_kernel::shader_source(
+                            capacity,
+                            workgroup,
+                            evolution_simulator::physics::Fidelity::standard(),
+                        )
+                    },
                 )
             })
             .collect();

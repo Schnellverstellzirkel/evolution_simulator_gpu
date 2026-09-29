@@ -140,3 +140,60 @@ fn gpu_replays_show_the_gpu_score() {
         started.elapsed().as_secs_f64()
     );
 }
+
+/// Physics v2 repeats bit for bit on one GPU, on each backend: Vulkan and
+/// CUDA each score the same population twice.
+#[test]
+#[ignore = "requires a GPU; run explicitly on the workstation"]
+fn each_backend_repeats_v2_scores() {
+    let cfg = Config {
+        population: 256,
+        random_seed: false,
+        duration: 3.0,
+        screen: None,
+        ..Config::default()
+    };
+    let pop = evolution::create(&cfg).expect("population");
+    let indices: Vec<usize> = (0..pop.genomes.len()).collect();
+    for setting in ["0", "1"] {
+        // SAFETY: the variable is read when a GPU opens; this test runs its
+        // backends one after another and no other thread reads it.
+        unsafe { std::env::set_var("EVOLUTION_CUDA", setting) };
+        let mut gpu = Gpu::new("RTX 4060").expect("GPU scheduler");
+        assert!(
+            gpu.startup_warning.is_none(),
+            "the primary GPU did not open"
+        );
+        eprintln!("GPU engine: {}", gpu.names());
+        if setting == "1" {
+            assert!(gpu.names().contains("CUDA"), "opened {}", gpu.names());
+        }
+        let scheduler = gpu.sched.as_mut().expect("scheduler");
+        let first = scheduler
+            .evaluate_single(&pop, &indices, &cfg)
+            .expect("first");
+        let second = scheduler
+            .evaluate_single(&pop, &indices, &cfg)
+            .expect("second");
+        for (i, (a, b)) in first.iter().zip(&second).enumerate() {
+            assert_eq!(a.fitness.to_bits(), b.fitness.to_bits(), "creature {i}");
+            assert_eq!(
+                (
+                    a.behavior.ground_contact.to_bits(),
+                    a.behavior.vertical_oscillation.to_bits(),
+                    a.behavior.gait_frequency.to_bits(),
+                    a.behavior.mean_height.to_bits(),
+                    a.behavior.feet.to_bits()
+                ),
+                (
+                    b.behavior.ground_contact.to_bits(),
+                    b.behavior.vertical_oscillation.to_bits(),
+                    b.behavior.gait_frequency.to_bits(),
+                    b.behavior.mean_height.to_bits(),
+                    b.behavior.feet.to_bits()
+                ),
+                "creature {i}"
+            );
+        }
+    }
+}

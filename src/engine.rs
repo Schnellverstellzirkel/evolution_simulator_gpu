@@ -265,7 +265,7 @@ struct SegmentedUnit {
 /// seconds after settling (default `2,10`; empty or `0` for none). On an
 /// evolved 3M population 38% of creatures fall, most within a second, and
 /// pauses at 2 s and 10 s skip 34% of all steps.
-fn segment_ends(cfg: &Config) -> Vec<u32> {
+pub(crate) fn segment_ends(cfg: &Config) -> Vec<u32> {
     let fidelity = cfg.fidelity();
     let total = fidelity.settle() + cfg.steps();
     let seconds: Vec<f32> = match std::env::var("EVOLUTION_SEGMENTS") {
@@ -689,7 +689,12 @@ fn run_segments<D: SegmentDevice>(
                 Some(unit) => Some(Ok(unit)),
                 None => pending.take().map(|(ticket, unit, cfg)| {
                     let indices: Vec<usize> = (0..unit.genomes.len()).collect();
-                    creature_kernel::pack(&unit, &indices).map(|batches| SegmentedUnit {
+                    let packed = if crate::physics2::enabled() {
+                        crate::physics2::pack(&unit, &indices, &cfg)
+                    } else {
+                        creature_kernel::pack(&unit, &indices)
+                    };
+                    packed.map(|batches| SegmentedUnit {
                         ticket,
                         results: vec![GpuResult::default(); indices.len()],
                         ends: segment_ends(&cfg),
@@ -709,7 +714,14 @@ fn run_segments<D: SegmentDevice>(
                     }
                 };
                 let total = *unit.ends.last().expect("segment ends");
-                let start = unit.segment.checked_sub(1).map_or(0, |s| unit.ends[s]);
+                // Physics v2 has no settling phase: its trials start at the
+                // settling tick.
+                let first = if crate::physics2::enabled() {
+                    unit.cfg.fidelity().settle()
+                } else {
+                    0
+                };
+                let start = unit.segment.checked_sub(1).map_or(first, |s| unit.ends[s]);
                 let end = unit.ends[unit.segment];
                 match engine.submit(
                     &unit.batches,
@@ -856,7 +868,11 @@ fn start_recording<D: SegmentDevice>(
 ) -> Result<(u64, usize, usize, u32)> {
     let mut population = Population::default();
     population.push(request.creature.clone());
-    let batches = creature_kernel::pack(&population, &[0])?;
+    let batches = if crate::physics2::enabled() {
+        crate::physics2::pack(&population, &[0], &request.cfg)?
+    } else {
+        creature_kernel::pack(&population, &[0])?
+    };
     anyhow::ensure!(batches.len() == 1, "A replay packs into one batch");
     let fidelity = request.cfg.fidelity();
     let total = fidelity.settle() + request.cfg.steps();

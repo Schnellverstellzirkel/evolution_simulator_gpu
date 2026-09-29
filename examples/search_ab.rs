@@ -383,6 +383,12 @@ fn run_seed(
             .prepare_next_batch()
             .with_context(|| format!("seed {seed} generation {generation} breeding"))?;
     }
+    // `EVOLUTION_AB_SAVE=<dir>` writes each seed's final experiment as
+    // `<dir>/seed-<seed>.evo`, for `physics_audit` and `size_report`.
+    if let Some(dir) = std::env::var_os("EVOLUTION_AB_SAVE") {
+        let path = std::path::Path::new(&dir).join(format!("seed-{seed}.evo"));
+        evolution_simulator::storage::save(&path, &experiment)?;
+    }
     let qd = experiment.archive.qd_score;
     let cells = experiment.archive.behavior_count();
     if best.is_finite() {

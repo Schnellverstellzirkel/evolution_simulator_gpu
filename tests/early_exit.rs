@@ -80,7 +80,7 @@ fn population(creatures: impl IntoIterator<Item = Creature>) -> Population {
 /// The full run of every creature: a recorded replay never exits early.
 fn full_run(pop: &Population, cfg: &Config) -> Vec<GpuResult> {
     (0..pop.genomes.len())
-        .map(|i| cpu_engine::replay(&pop.creature(i), cfg).1)
+        .map(|i| cpu_engine::replay_v1(&pop.creature(i), cfg).1)
         .collect()
 }
 
@@ -89,7 +89,7 @@ fn full_run(pop: &Population, cfg: &Config) -> Vec<GpuResult> {
 fn evaluate_counted(pop: &Population, cfg: &Config) -> (Vec<GpuResult>, u64, u64) {
     EARLY_EXIT_GROUPS.store(0, Ordering::Relaxed);
     EARLY_EXIT_GROUPS_TOTAL.store(0, Ordering::Relaxed);
-    let results = cpu_engine::evaluate(pop, cfg);
+    let results = cpu_engine::evaluate_v1(pop, cfg);
     (
         results,
         EARLY_EXIT_GROUPS.load(Ordering::Relaxed),
@@ -182,7 +182,7 @@ fn a_mixed_group_with_a_live_lane_is_unchanged() {
     EARLY_EXIT_GROUPS.store(0, Ordering::Relaxed);
     EARLY_EXIT_GROUPS_TOTAL.store(0, Ordering::Relaxed);
     let full = full_run(&pop, &cfg);
-    let early = cpu_engine::evaluate(&pop, &cfg);
+    let early = cpu_engine::evaluate_v1(&pop, &cfg);
     assert_eq!(full[0].fall_time, 0.0, "fixture: lane 0 must stay upright");
     assert_eq!(
         EARLY_EXIT_GROUPS.load(Ordering::Relaxed),

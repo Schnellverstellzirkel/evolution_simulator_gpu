@@ -1460,6 +1460,18 @@ pub fn replay(
     creature: &crate::evolution::Creature,
     cfg: &Config,
 ) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
+    if crate::physics2::enabled() {
+        return crate::physics2::replay(creature, cfg);
+    }
+    replay_v1(creature, cfg)
+}
+
+/// `replay` on the AVX-512 engine of the older physics (v1), whatever the
+/// game's physics is.
+pub fn replay_v1(
+    creature: &crate::evolution::Creature,
+    cfg: &Config,
+) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
     let mut pop = Population::default();
     pop.push(creature.clone());
     let group = Group::build(&pop, &[0], &[0]);
@@ -1478,6 +1490,11 @@ pub fn replay(
 /// speed| x dt that drains the muscles' energy stores). Diagnostic only, never
 /// fitness. `None` when the creature did not move forward.
 pub fn transport_cost(creature: &crate::evolution::Creature, cfg: &Config) -> Option<f32> {
+    if crate::physics2::enabled() {
+        let (distance, work) = crate::physics2::trial_work(creature, cfg);
+        let mass: f32 = physics::nodes(creature).iter().map(|n| n.mass).sum();
+        return (distance > 0.01 && mass > 0.0).then(|| work as f32 / (mass * distance));
+    }
     let mut pop = Population::default();
     pop.push(creature.clone());
     let group = Group::build(&pop, &[0], &[0]);
@@ -1493,6 +1510,15 @@ pub fn transport_cost(creature: &crate::evolution::Creature, cfg: &Config) -> Op
 
 /// Evaluates every creature of `unit` and returns results in unit order.
 pub fn evaluate(unit: &Population, cfg: &Config) -> Vec<GpuResult> {
+    if crate::physics2::enabled() {
+        return crate::physics2::evaluate(unit, cfg);
+    }
+    evaluate_v1(unit, cfg)
+}
+
+/// Evaluates on the AVX-512 engine of the older physics (v1), whatever the
+/// game's physics is: its early-exit tests and comparisons use it.
+pub fn evaluate_v1(unit: &Population, cfg: &Config) -> Vec<GpuResult> {
     let indices: Vec<usize> = (0..unit.genomes.len()).collect();
     let groups = build_groups(unit, &indices);
     let per_group: Vec<Vec<GpuResult>> = groups.par_iter().map(|g| g.simulate(cfg)).collect();

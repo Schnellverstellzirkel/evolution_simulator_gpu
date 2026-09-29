@@ -126,6 +126,10 @@ enum Action {
         /// runs with that bar.
         #[arg(long)]
         screened: bool,
+        /// Keep only creatures of at most this many nodes (a small kernel
+        /// class, for benchmarks beside another program on the GPU).
+        #[arg(long)]
+        max_nodes: Option<usize>,
     },
     /// Summarize an existing checkpoint's record curve and archive morphology.
     Analyze {
@@ -434,6 +438,7 @@ fn main() -> Result<()> {
             engine,
             plan_rank,
             screened,
+            max_nodes,
         }) => {
             let e = storage::load(&checkpoint)?;
             let mut cfg = e.config.clone();
@@ -460,6 +465,9 @@ fn main() -> Result<()> {
                     plan.muscles.len()
                 );
                 source.retain(|&i| plan_of(&e.population, i) == plan);
+            }
+            if let Some(max) = max_nodes {
+                source.retain(|&i| e.population.genomes[i].node_count as usize <= max);
             }
             let count = limit.unwrap_or(source.len()).min(source.len());
             let mut population = evolution_simulator::evolution::Population::default();
@@ -493,7 +501,7 @@ fn main() -> Result<()> {
                 }
                 Some(name) => Some(Box::new(evolution_simulator::engine::gpu_engine(
                     &name,
-                    16,
+                    64,
                     evolution_simulator::gpu::DEFAULT_STEP_RANGE,
                 )?)),
                 None => None,
@@ -542,9 +550,17 @@ fn main() -> Result<()> {
             }
             let batch = cfg.batch_size();
             let mut out = Vec::new();
+            let rate = cfg.fidelity().rate as f64;
+            // Settling steps the kernel runs before a trial (none in physics v2).
+            let settle = if evolution_simulator::physics2::enabled() {
+                0.0
+            } else {
+                f64::from(cfg.fidelity().settle())
+            };
             for r in 0..repeat {
                 let start = Instant::now();
                 out.clear();
+                let mut steps = 0f64;
                 for chunk in indices.chunks(batch) {
                     if let Some(engine) = engine.as_mut() {
                         engine.submit(population.subset(chunk), &cfg)?;
@@ -554,6 +570,16 @@ fn main() -> Result<()> {
                             }
                             engine.wait(std::time::Duration::from_millis(50));
                         };
+                        for r in &done.results {
+                            let ended = if r.fall_time > 0.0 {
+                                r.fall_time
+                            } else if r.screened > 0.0 {
+                                r.screened
+                            } else {
+                                cfg.duration
+                            };
+                            steps += settle + f64::from(ended) * rate;
+                        }
                         out.extend(chunk.iter().zip(&done.results).map(|(&i, r)| {
                             evolution_simulator::scheduler::to_metrics(&population, i, r, &cfg)
                         }));
@@ -570,6 +596,13 @@ fn main() -> Result<()> {
                     "Repeat {r}: {count} creatures in {seconds:.3} s, {:.0} creatures/s",
                     count as f64 / seconds
                 );
+                if steps > 0.0 {
+                    eprintln!(
+                        "  {:.0} creature-steps/s ({:.0} steps per creature, settling included)",
+                        steps / seconds,
+                        steps / count as f64
+                    );
+                }
             }
             let records: Vec<f32> = out
                 .iter()
