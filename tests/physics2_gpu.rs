@@ -19,16 +19,22 @@ use std::time::Duration;
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn the_v2_kernel_agrees_with_the_cpu_prototype() {
-    agree(0.0);
+    agree(0.0, false);
 }
 
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn the_v2_kernel_agrees_with_the_cpu_prototype_in_mud() {
-    agree(0.06);
+    agree(0.06, false);
 }
 
-fn agree(mud: f32) {
+#[test]
+#[ignore = "needs the RTX 4060"]
+fn the_v2_kernel_agrees_with_the_cpu_prototype_with_tendons() {
+    agree(0.0, true);
+}
+
+fn agree(mud: f32, tendons: bool) {
     let cfg = Config {
         population: 512,
         duration: 1.0,
@@ -38,6 +44,16 @@ fn agree(mud: f32) {
         ..Config::default()
     };
     let mut pop = evolution::create(&cfg).unwrap();
+    if tendons {
+        // A third of the muscles get a tendon, and a shorter longest length so
+        // the body's own stretching engages it at once.
+        for (i, m) in pop.muscles.iter_mut().enumerate() {
+            if i % 3 == 0 {
+                m.tendon = 0.2 + 0.2 * ((i / 3) % 4) as f32;
+                m.long = m.short + 0.3 * (m.long - m.short);
+            }
+        }
+    }
     // A body that falls over and one with a bone at the head.
     let chain = |nodes: &[[f32; 2]]| {
         let genes: Vec<evolution::NodeGene> = nodes

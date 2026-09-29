@@ -159,6 +159,7 @@ fn muscle_cycle_is_continuous_and_periodic() {
         stiffness: 30.,
         sensor: 255,
         reset: 0.0,
+        tendon: 0.0,
     };
     assert!((physics::target(&m, 0.) - 0.3).abs() < 1e-6);
     assert!((physics::target(&m, 0.8) - 0.1).abs() < 1e-6);
@@ -210,6 +211,7 @@ fn overlapping_nodes_remain_finite() {
             stiffness: 80.,
             sensor: 255,
             reset: 0.0,
+            tendon: 0.0,
         }],
         id: 1,
         mutability: 1.,
@@ -470,6 +472,7 @@ fn gpu_cpu_diagnostic_handles_partial_workgroups() {
                 stiffness: 20.,
                 sensor: 255,
                 reset: 0.0,
+                tendon: 0.0,
             })
             .collect();
         mixed.push(Creature {
@@ -1327,6 +1330,7 @@ fn sled_creature() -> Creature {
             stiffness: 120.0,
             sensor: 255,
             reset: 0.0,
+            tendon: 0.0,
         })
         .collect();
     Creature {

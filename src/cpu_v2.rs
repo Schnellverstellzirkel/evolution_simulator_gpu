@@ -189,6 +189,8 @@ struct Mus {
     anchor_a: F,
     anchor_b: F,
     hill: F,
+    long: F,
+    tendon_k: F,
     amplitude: F,
     inv_period: F,
     phase: F,
@@ -362,6 +364,8 @@ impl Group {
                         anchor_a: mus(k, 0.0, &|m| m.anchor_a),
                         anchor_b: mus(k, 0.0, &|m| m.anchor_b),
                         hill: mus(k, 0.0, &|m| m.hill),
+                        long: mus(k, 0.0, &|m| m.long),
+                        tendon_k: mus(k, 0.0, &|m| m.tendon_k),
                         amplitude: mus(k, 0.0, &|m| m.amplitude),
                         inv_period: mus(k, 1.0, &|m| m.inv_period),
                         phase: mus(k, 0.0, &|m| m.phase),
@@ -509,6 +513,13 @@ impl<'a> Sim<'a> {
             let potential = self.g.mass[i] * gravity * self.s.pos[i][1];
             total += kinetic + potential;
             scale += kinetic + potential.abs();
+        }
+        // Elastic energy stored in the tendons (zero on lanes without one).
+        for (k, m) in self.g.muscles.iter().enumerate() {
+            let stretch = (self.muscle_length(k) - m.long).max(zero());
+            let stored = sp(0.5) * m.tendon_k * stretch * stretch;
+            total += stored;
+            scale += stored;
         }
         (total, scale)
     }
@@ -840,7 +851,11 @@ impl Sim<'_> {
             self.s.energy[k] = sel(m.exists, new_energy, energy);
             self.sc.muscle_force[k] = sel(m.exists, magnitude, zero());
             muscle_start = sel(m.exists, muscle_start + magnitude * len, muscle_start);
-            let f = [dir[0] * magnitude, dir[1] * magnitude];
+            // The tendon pulls back passively once the muscle is stretched past
+            // its longest length.
+            let tendon_pull = m.tendon_k * (len - m.long).max(zero());
+            let pull = magnitude + tendon_pull;
+            let f = [dir[0] * pull, dir[1] * pull];
             let fa = force_at(rel(pa), f);
             let fb = force_at(rel(pb), f);
             for j in 0..b {

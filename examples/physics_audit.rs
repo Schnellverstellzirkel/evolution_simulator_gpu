@@ -49,6 +49,7 @@ fn main() {
         "rank  archive_m replay_m nodes muscles kg  work_J  gained_J lost_J  bal+J bal-J  firstlaw_J  contact_free%  fric_push%  cost_J/kg/m  fell_s  Nwork+  Nwork-  Fwork+  Fwork-"
     );
     let mut total = [0.0f64; 16];
+    let (mut tendon_muscles, mut all_muscles) = (0usize, 0usize);
     let mut with_muscles = 0usize;
     for k in 0..count {
         let rank = (elites.len() - 1) * k / (count - 1).max(1);
@@ -56,6 +57,8 @@ fn main() {
         let (_frames, result) = cpu_engine::replay(c, &cfg);
         let energy = physics2::ENERGY.with(|l| l.get());
         let mass: f32 = physics::nodes(c).iter().map(|n| n.mass).sum();
+        all_muscles += c.muscles.len();
+        tendon_muscles += c.muscles.iter().filter(|m| m.tendon > 0.0).count();
         let cost = cpu_engine::transport_cost(c, &cfg);
         let steps = energy[6].max(1.0);
         let fric = if energy[10] > 0.0 {
@@ -104,5 +107,9 @@ fn main() {
             0.0
         },
         total[10]
+    );
+    println!(
+        "muscles with an elastic tendon: {tendon_muscles} of {all_muscles} ({:.0}%)",
+        100.0 * tendon_muscles as f64 / all_muscles.max(1) as f64
     );
 }

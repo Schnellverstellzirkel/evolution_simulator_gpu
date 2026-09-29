@@ -81,7 +81,7 @@ pub const DRIVEN_ACCELERATION: f32 = 100.0;
 /// of 1). Large fast bodies pay for moving air; it only takes energy away.
 pub const AIR_DRAG: f32 = 0.6;
 /// Fields per muscle in the v2 kernel's muscle buffer.
-pub const MUSCLE_FIELDS: usize = 16;
+pub const MUSCLE_FIELDS: usize = 19;
 /// Sliding speed (m/s) below which friction holds a foot (as
 /// `physics::PLANTED_SPEED`).
 pub const STICK_SPEED: f32 = physics::PLANTED_SPEED;
@@ -198,7 +198,10 @@ pub(crate) struct MuscleModel {
     /// Hill's relation as a factor on the shortening speed: 1 / (v_max
     /// times the muscle's length, at least 5 cm).
     pub(crate) hill: f32,
-    /// Longest length (m).
+    /// Longest length (m), where the elastic tendon starts to pull, and the
+    /// tendon's stiffness (N/m; 0 without one).
+    pub(crate) long: f32,
+    pub(crate) tendon_k: f32,
     pub(crate) amplitude: f32,
     pub(crate) inv_period: f32,
     pub(crate) phase: f32,
@@ -336,6 +339,8 @@ impl Model {
                     } else {
                         0.0
                     },
+                    long: m.long,
+                    tendon_k: 0.0,
                     amplitude: (m.long - m.short).min(
                         2.0 * limits.muscle_speed * m.period * m.duty.min(1.0 - m.duty)
                             / std::f32::consts::PI,
@@ -364,9 +369,13 @@ impl Model {
                 subtree[p] += subtree[j];
             }
         }
-        for m in &mut muscles {
+        for (m, gene) in muscles.iter_mut().zip(&c.muscles) {
             let driven = subtree[m.bone_a].min(subtree[m.bone_b]);
             m.strength = (DRIVEN_ACCELERATION * driven / limits.muscle_force).min(1.0);
+            // The tendon reaches the muscle's force cap when stretched by
+            // `TENDON_STRETCH` of its longest length (at the stiffest gene).
+            m.tendon_k = gene.tendon * limits.muscle_force * m.strength
+                / (crate::evolution::TENDON_STRETCH * m.long.max(0.05));
         }
         let quake = crate::physics::quake_hash(c.id);
         let still = cfg.quake <= 0.0 || !cfg.ground;
@@ -509,6 +518,15 @@ impl Model {
             total += kinetic + potential;
             scale += kinetic + potential.abs();
         }
+        // Elastic energy stored in the tendons.
+        for (m, len) in self.muscles.iter().zip(self.muscle_lengths(s)) {
+            if m.tendon_k > 0.0 {
+                let stretch = (len - m.long).max(0.0);
+                let stored = 0.5 * m.tendon_k * stretch * stretch;
+                total += stored;
+                scale += stored;
+            }
+        }
         (total, scale)
     }
 
@@ -620,6 +638,8 @@ struct Scratch {
     acc: Vec<V3>,
     body_of: Vec<usize>,
     muscle_force: Vec<f32>,
+    /// Each tendon's pull in the step (N), for the recorded force.
+    tendon_pull: Vec<f32>,
     qdd: Vec<f32>,
     /// Horizontal impulse the ground and wind gave this step (N s), for the
     /// momentum ledger.
@@ -691,7 +711,14 @@ pub fn run(model: &Model, cfg: &Config, frames: Option<&mut Vec<Vec<[f32; 2]>>>)
 /// the forces are those of the step that led to it.
 fn push_extras(forces: &mut crate::replay_forces::Forces, model: &Model, s: &State, sc: &Scratch) {
     forces.energy.push(s.energy.clone());
-    forces.muscle.push(sc.muscle_force.clone());
+    // The recorded force includes the tendon's pull.
+    forces.muscle.push(
+        sc.muscle_force
+            .iter()
+            .zip(&sc.tendon_pull)
+            .map(|(f, t)| f + t)
+            .collect(),
+    );
     // Contact forces in the creature's own node numbering, as the frames.
     let mut ground = vec![0.0; s.warm.len()];
     let mut friction = vec![0.0; s.warm.len()];
@@ -738,6 +765,7 @@ pub fn run_recorded(
         acc: vec![V3::default(); b],
         body_of: (0..n).map(|i| model.body_of(i)).collect(),
         muscle_force: vec![0.0; model.muscles.len()],
+        tendon_pull: vec![0.0; model.muscles.len()],
         qdd: vec![0.0; b],
         impulse_x: 0.0,
         muscle_length: vec![0.0; model.muscles.len()],
@@ -1181,7 +1209,11 @@ fn simulate_step_inner(
         sc.muscle_length[k] = len;
         muscle_start += magnitude * len;
         // A positive magnitude pulls the two points together.
-        let pull = magnitude;
+        // The tendon pulls back passively once the muscle is stretched past
+        // its longest length (its energy is in `Model::energy`).
+        let tendon_pull = m.tendon_k * (len - m.long).max(0.0);
+        sc.tendon_pull[k] = tendon_pull;
+        let pull = magnitude + tendon_pull;
         let f = [dir[0] * pull, dir[1] * pull];
         sc.force[m.bone_a] = sc.force[m.bone_a].add(force_at(rel(pa), f));
         sc.force[m.bone_b] = sc.force[m.bone_b].sub(force_at(rel(pb), f));
@@ -1722,7 +1754,7 @@ const RECORD_EDITS: [(&str, &str); 4] = [
         "fn record_extras(base: u32, muscle_count: u32, tile_x: u32, tl: u32, record_base: u32, nn: u32) {\n\
              for (var k = 0u; k < muscle_count; k++) {\n\
                  let field = tile_x + k * MUSCLE_FIELDS * TILE + tl;\n\
-                 frames[base + STRIDE + k] = vec2f(muscle_data[field + 14u * TILE], muscle_data[field + 11u * TILE]);\n\
+                 frames[base + STRIDE + k] = vec2f(muscle_data[field + 14u * TILE], muscle_data[field + 11u * TILE] + muscle_data[field + 18u * TILE]);\n\
              }\n\
              for (var i = 0u; i < MAXN; i++) {\n\
                  if i >= nn { break; }\n\
@@ -2216,6 +2248,9 @@ pub fn pack(
                         0.0,
                         1.0,
                         m.strength,
+                        m.tendon_k,
+                        m.long,
+                        0.0,
                     ];
                     for (f, value) in values.into_iter().enumerate() {
                         muscles[field + f * TILE] = value;
@@ -2373,6 +2408,7 @@ mod tests {
             acc: vec![V3::default(); 3],
             body_of: (0..4).map(|i| model.body_of(i)).collect(),
             muscle_force: Vec::new(),
+            tendon_pull: Vec::new(),
             qdd: vec![0.0; 3],
             impulse_x: 0.0,
             muscle_length: vec![0.0; model.muscles.len()],
@@ -2469,6 +2505,7 @@ mod tests {
             acc: vec![V3::default(); b],
             body_of: (0..model.mass.len()).map(|i| model.body_of(i)).collect(),
             muscle_force: vec![0.0; model.muscles.len()],
+            tendon_pull: vec![0.0; model.muscles.len()],
             qdd: vec![0.0; b],
             impulse_x: 0.0,
             muscle_length: vec![0.0; model.muscles.len()],
@@ -2554,6 +2591,92 @@ mod tests {
     }
 
     #[test]
+    fn a_tendon_pulls_a_stretched_muscle_back_and_adds_no_energy() {
+        use crate::evolution::Muscle;
+        let cfg = Config {
+            ground: false,
+            gravity: 0.0,
+            ..calm()
+        };
+        let body = |tendon: f32| {
+            let mut c = chain(&[[0.0, 1.0], [0.0, 0.6], [0.4, 0.6]], false);
+            c.bones[1].min_angle = -2.5;
+            c.bones[1].max_angle = 2.5;
+            // A muscle from the head to the end of the leg, stretched well past
+            // its longest length, with no drive of its own.
+            c.muscles.push(Muscle {
+                bone_a: 0,
+                bone_b: 1,
+                anchor_a: 0.0,
+                anchor_b: 1.0,
+                short: 0.3,
+                long: 0.3,
+                period: 1.0,
+                phase: 0.0,
+                duty: 0.5,
+                stiffness: 60.0,
+                sensor: NO_SENSOR,
+                reset: 0.0,
+                tendon,
+            });
+            let model = Model::new(&c, &cfg);
+            let mut s = model.start(&cfg);
+            model.kinematics(&mut s);
+            let mut sc = scratch(&model);
+            let limits = physics::limits();
+            let dt = 1.0 / 60.0;
+            let length = |model: &Model, s: &State| model.muscle_lengths(s).next().unwrap();
+            let start = length(&model, &s);
+            let start_energy = model.energy(&s, 0.0).0;
+            let mut shortest = start;
+            let mut worst_gain = 0.0f32;
+            let mut previous = start_energy;
+            for step in 0..120 {
+                simulate_step(
+                    &model,
+                    &cfg,
+                    &mut s,
+                    &mut sc,
+                    step as f32 * dt,
+                    dt,
+                    1.0,
+                    &limits,
+                );
+                model.kinematics(&mut s);
+                let e = model.energy(&s, 0.0).0;
+                worst_gain = worst_gain.max(e - previous);
+                previous = e;
+                shortest = shortest.min(length(&model, &s));
+            }
+            (
+                start,
+                shortest,
+                start_energy,
+                worst_gain,
+                model.muscles[0].tendon_k,
+            )
+        };
+        let (start, shortest, stored, gain, k) = body(1.0);
+        eprintln!(
+            "tendon k {k}: length {start} -> {shortest}, stored {stored} J, worst gain {gain} J"
+        );
+        assert!(
+            k > 0.0 && stored > 0.05,
+            "the stretched tendon must store energy: {stored}"
+        );
+        assert!(
+            shortest < start - 0.05,
+            "the tendon must pull the muscle back"
+        );
+        assert!(gain < 0.02 * stored, "a step gained {gain} J of {stored} J");
+        let (start, shortest, ..) = body(0.0);
+        assert!(
+            (start - shortest).abs() < 1e-3,
+            "without a tendon nothing moves"
+        );
+    }
+
+    #[test]
     fn a_pulling_muscle_closes_its_joint() {
         use crate::evolution::Muscle;
         let cfg = Config {
@@ -2579,6 +2702,7 @@ mod tests {
             stiffness: 60.0,
             sensor: NO_SENSOR,
             reset: 0.0,
+            tendon: 0.0,
         });
         let model = Model::new(&c, &cfg);
         let mut frames = Vec::new();

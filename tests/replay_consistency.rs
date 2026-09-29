@@ -213,6 +213,7 @@ fn extending_a_broken_joints_trial_keeps_its_score_at_the_break() {
             stiffness: 120.0,
             sensor: evolution::NO_SENSOR,
             reset: 0.0,
+            tendon: 0.0,
         })
         .collect();
     let creature = Creature {

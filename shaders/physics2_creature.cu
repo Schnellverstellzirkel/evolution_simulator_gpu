@@ -72,7 +72,7 @@ struct Result {
 };
 
 #define TILE 32u
-#define MUSCLE_FIELDS 16u
+#define MUSCLE_FIELDS 19u
 #define BONE_FIELDS 9u
 #define NO_SENSOR 7u
 #define MAXB (MAXN - 1u)
@@ -752,7 +752,7 @@ __device__ __forceinline__ void record_extras(
     const float* __restrict__ muscle_data, const Record* __restrict__ records, unsigned record_base, unsigned nn) {
     for (unsigned k = 0u; k < muscle_count; k++) {
         const unsigned field = tile_x + k * MUSCLE_FIELDS * TILE + tl;
-        frames[base + STRIDE + k] = v2(muscle_data[field + 14u * TILE], muscle_data[field + 11u * TILE]);
+        frames[base + STRIDE + k] = v2(muscle_data[field + 14u * TILE], muscle_data[field + 11u * TILE] + muscle_data[field + 18u * TILE]);
     }
     UNROLL
     for (unsigned i = 0u; i < MAXN; i++) {
@@ -1013,7 +1013,13 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
                 1.0f);
             muscle_data[field + 11u * TILE] = magnitude;
             muscle_start += magnitude * length_m;
-            const float pull = magnitude;
+            const float stretch_start = fmaxf(length_m - muscle_data[field + 17u * TILE], 0.0f);
+            const float stored_start = 0.5f * muscle_data[field + 16u * TILE] * stretch_start * stretch_start;
+            energy_start += stored_start;
+            energy_scale += stored_start;
+            const float tendon_pull = muscle_data[field + 16u * TILE] * fmaxf(length_m - muscle_data[field + 17u * TILE], 0.0f);
+            muscle_data[field + 18u * TILE] = tendon_pull;
+            const float pull = magnitude + tendon_pull;
             const float2 f = dir * pull;
             L.body_add(a1 - 1u, 0u, force_at(pa - origin, f));
             L.body_add(b1 - 1u, 0u, -force_at(pb - origin, f));
@@ -1155,6 +1161,7 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
         // First law in flight.
         if (L.nc == 0u) {
             float muscle_end = 0.0f;
+            float stored_end = 0.0f;
                         for (unsigned k = 0u; k < muscle_count; k++) {
                 const unsigned field = tile.x + k * MUSCLE_FIELDS * TILE + tl;
                 const unsigned packed = __float_as_uint(muscle_data[field]);
@@ -1169,8 +1176,10 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
                 const float2 d = pb - pa;
                 const float length_m = sqrtf(d.x * d.x + d.y * d.y);
                 muscle_end += muscle_data[field + 11u * TILE] * length_m;
+                const float stretch_end = fmaxf(length_m - muscle_data[field + 17u * TILE], 0.0f);
+                stored_end += 0.5f * muscle_data[field + 16u * TILE] * stretch_end * stretch_end;
             }
-            float energy_end = 0.0f;
+            float energy_end = stored_end;
             float mass_x_end = 0.0f;
             UNROLL
             for (unsigned i = 0u; i < MAXN; i++) {

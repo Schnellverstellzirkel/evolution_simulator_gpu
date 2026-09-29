@@ -672,6 +672,7 @@ mod tests {
             stiffness: 20.0,
             sensor: 255,
             reset: 0.0,
+            tendon: 0.0,
         };
         for time in [0.025, 0.075] {
             assert!(

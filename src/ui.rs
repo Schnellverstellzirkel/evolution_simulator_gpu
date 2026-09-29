@@ -6192,6 +6192,7 @@ mod tests {
                 stiffness: 10.0,
                 sensor: crate::evolution::NO_SENSOR,
                 reset: 0.0,
+                tendon: 0.0,
             }],
             id: 7,
             mutability: 1.0,
