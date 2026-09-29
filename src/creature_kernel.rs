@@ -244,6 +244,10 @@ pub fn pack(pop: &Population, indices: &[usize]) -> Result<Vec<LaneBatch>> {
             let mut parts: Vec<(Option<Plan>, Members)> = Vec::new();
             let mut rest = Vec::new();
             let mut start = 0;
+            if plan_batch == 0 || capacity >= 24 {
+                // No run can get its own batch: skip comparing plans.
+                rest = std::mem::take(&mut members);
+            }
             while start < members.len() {
                 let first = members[start].1;
                 let end = start
