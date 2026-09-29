@@ -1544,20 +1544,25 @@ fn random_bodies_get_no_free_propulsion() {
 
 #[test]
 fn cost_of_transport_counts_muscle_work_per_kilogram_and_meter() {
+    // The seed 40 champion of a GPU evolution under physics v2 (43.9 m in
+    // 20 s, 4.1 kg, muscle drain about 2,400 J).
     let cfg = Config {
-        duration: 5.0,
+        duration: 20.0,
         ..config()
     };
-    let walker = energy_dependent_walker();
-    let cost = evolution_simulator::cpu_engine::transport_cost(&walker, &cfg)
-        .expect("the walker moves forward");
-    assert!(cost.is_finite() && cost > 0.0, "cost {cost}");
+    let hopper: Creature =
+        serde_json::from_str(include_str!("fixtures/p2_muscle_champion.json")).unwrap();
+    let cost = evolution_simulator::cpu_engine::transport_cost(&hopper, &cfg)
+        .expect("the champion moves forward");
+    assert!(cost.is_finite() && cost > 5.0 && cost < 40.0, "cost {cost}");
     // With no muscle drive only the dampers work, so the cost is far lower.
-    let mut still = walker.clone();
+    let mut still = hopper.clone();
     for muscle in &mut still.muscles {
         muscle.short = muscle.long;
     }
     let idle = evolution_simulator::cpu_engine::transport_cost(&still, &cfg);
-    eprintln!("walker {cost}, without drive {idle:?}");
-    assert!(idle.is_none_or(|c| c < cost * 0.5));
+    assert!(
+        idle.is_none_or(|c| c < cost * 0.5),
+        "{idle:?} against {cost}"
+    );
 }

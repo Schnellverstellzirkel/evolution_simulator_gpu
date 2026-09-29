@@ -117,3 +117,16 @@ Seed 40, 100,000 creatures, 30 generations, 20 s trials, on the GPU with the pro
 - `physics-v2/v2-gpu-seed40-mid.gif`: the median elite (rank 678 of 1,357), 10 nodes, 24 muscles, 45 kg, 2.5 m in 20 s. A flat plank that lies on the ground and inches forward. Ground impulse -0.01 N s against -0.01 N s; muscles did 45 J and 88 J came from elsewhere, 43 J with six contacts and 23 J with eight: nodes left out of the four-contact solve sink and are pushed out. Its distance is the same at every contact bound, so this is resting jitter, not propulsion.
 
 Tests in `src/physics2.rs`: bones keep their length; a free body keeps its momentum at 60 and 600 Hz; a pulling muscle closes its joint; a second bone at the head turns on its own joint; a passive body lands, rests, never rises above its start and does not travel; a passive body never gains energy on the ground; 400 random passive bodies with every bone at the spin cap gain at most 0.2% of their energy in any step; a limb whipped into the ground adds no energy; the GPU packing holds each creature's starting state; the kernel compiles for every capacity at standard and fine fidelity. `tests/physics2_gpu.rs` (ignored, needs the RTX 4060) compares the kernel with the prototype on 1 s trials.
+
+## Muscle force scaled to the mass a muscle drives
+
+A muscle's force cap and energy store now scale with its size: cap = 100 m/s^2 x the lighter of the two subtrees (a bone and everything it carries) that the muscle pulls together, never above the fixed 100 N, and the store scales the same way. A muscle's cross-section, and so its strength, follows the mass it moves. Before, a 100 N muscle drove a 0.05 kg limb at 2,000 m/s^2, turned a bone about a radian in one step and made momentum and energy the first-order integrator did not pay for: rank 881 of a seed 40 evolution gained 338 J against 26 J of muscle drain, and the momentum balance took 287 J of it back. With the scaling it gains 9 J and the balance removes 0.1 J.
+
+The same GPU evolution (seed 40, 100k, 30 generations, 20 s, Vulkan), with the friction fix and without/with the scaling:
+
+| | best | QD | median | top-50 median body |
+|---|---|---|---|---|
+| friction fix only | 63.5 m | 13,960 | 4.47 m | 5 nodes, 1.38 m of bone, 2.6 kg |
+| muscle size too | 43.9 m | 8,746 | 3.39 m | 4 nodes, 1.67 m of bone, 4.2 kg |
+
+`v2-muscle-size-gpu-seed40-best.gif` is the champion of the second run: 4 nodes, 9 muscles, 4.1 kg, 43.9 m in 20 s (2.2 m/s). Its ledger: muscle drain 2,400 J, energy the solver added 0.0 J, lost 3,258 J, momentum balance +103 J and -106 J, friction work +0.0 J. No elite of the run has unpaid energy (60 elites: gained 1,040 J against 37,637 J of muscle work) or friction that does positive work (14 J in total).

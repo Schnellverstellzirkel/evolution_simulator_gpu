@@ -144,3 +144,44 @@ fn friction_never_does_positive_work_on_the_exploiting_hopper() {
         e[14]
     );
 }
+
+/// Rank 881 of a seed 40 evolution: a 1.3 kg body whose capped 100 N muscles
+/// turned light limbs about a radian in one step. The integrator then made
+/// momentum (18 N s on a body that should hold 1.2) and the momentum balance
+/// turned it into kinetic energy: +338 J gained against 26 J of muscle drain,
+/// 287 J of it removed again by the balance. With muscle force scaled to the
+/// mass a muscle drives, it gains 9 J and the balance removes 0.1 J.
+#[test]
+fn a_light_body_gains_no_unpaid_energy() {
+    let creature: Creature =
+        serde_json::from_str(include_str!("fixtures/p2_light_body_r881.json")).unwrap();
+    let cfg = Config {
+        duration: 20.0,
+        random_seed: false,
+        screen: None,
+        ..Config::default()
+    };
+    let _ = physics2::replay(&creature, &cfg);
+    let e = physics2::ENERGY.with(|l| l.get());
+    eprintln!(
+        "gained {:.1} J lost {:.1} J, balance +{:.1} -{:.1} J",
+        e[1], e[2], e[3], e[4]
+    );
+    assert!(e[1] - e[2] < 20.0, "net solver energy {:.1} J", e[1] - e[2]);
+    assert!(e[4] < 20.0, "the balance removed {:.1} J", e[4]);
+}
+
+#[test]
+fn a_muscle_is_as_strong_as_the_mass_it_drives() {
+    // A muscle between two light limbs gets a small force cap; one that
+    // drives a heavy subtree keeps the full cap.
+    let cfg = Config {
+        random_seed: false,
+        ..Config::default()
+    };
+    let light: Creature =
+        serde_json::from_str(include_str!("fixtures/p2_light_body_r881.json")).unwrap();
+    let strengths = physics2::Model::new(&light, &cfg).muscle_strengths();
+    assert!(strengths.iter().all(|s| (0.0..=1.0).contains(s)));
+    assert!(strengths.iter().any(|&s| s < 0.5), "{strengths:?}");
+}
