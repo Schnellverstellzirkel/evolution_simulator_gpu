@@ -1086,6 +1086,7 @@ fn island_entries(experiment: &Experiment) -> Vec<Elite> {
     experiment
         .islands
         .iter()
+        .take(crate::storage::island_count())
         .flat_map(|island| island.entries.iter().cloned())
         .collect()
 }

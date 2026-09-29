@@ -1425,7 +1425,7 @@ pub fn emit_archive_batch_streaming(
             let mut rng = Rng::new(cfg.seed, generation, i);
             let id = (generation as u64) * cfg.population as u64 + i as u64 + 1;
             offspring(
-                &archive[qd::island_of_slot(i, archive.len())],
+                &archive[qd::arena_of_slot(i, archive.len())],
                 cma_emitters,
                 plans[i],
                 cfg,
@@ -1663,7 +1663,7 @@ pub fn emit_offspring(
             let mut rng = Rng::new(seed, generation, slot);
             let id = (round << 32) ^ ((generation as u64) << 24) ^ slot as u64 ^ (1 << 63);
             offspring(
-                &archive[qd::island_of_slot(slot, archive.len())],
+                &archive[qd::arena_of_slot(slot, archive.len())],
                 cma_emitters,
                 plan,
                 cfg,
@@ -1738,7 +1738,7 @@ pub fn emit_offspring_batches(
                 let mut rng = Rng::new(seed, generation, slot);
                 let id = (round << 32) ^ ((generation as u64) << 24) ^ slot as u64 ^ (1 << 63);
                 batch.push(offspring(
-                    &archive[qd::island_of_slot(slot, archive.len())],
+                    &archive[qd::arena_of_slot(slot, archive.len())],
                     cma_emitters,
                     plan,
                     cfg,

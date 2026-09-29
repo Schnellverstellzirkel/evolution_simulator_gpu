@@ -337,7 +337,7 @@ fn workshop(s: &Scene, index: usize, snap: Option<&Snapshot>) {
         ),
         Emitter::Restart => (
             "Immigrants",
-            "Fresh newcomers for empty islands and re-tested elites after a world change.",
+            "New random bodies. Each island keeps a nursery of them for 10 generations, then the survivors compete with its elites. Also fills empty islands and re-tests elites after a world change.",
         ),
     };
     let share = snap.map_or(

@@ -29,7 +29,9 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 36: static friction: a foot that barely slides holds 25% harder.
 // 37: four isolated islands and a hub; each island keeps its own morphology
 //     reserve, CMA emitters and reseed queue (the save format changed).
-pub const VERSION: u32 = 37;
+// 38: every island has a nursery archive for new random bodies (the save
+//     format changed).
+pub const VERSION: u32 = 38;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
@@ -41,13 +43,40 @@ const OPTIMIZER_NICHE_MARKER: u8 = 254;
 pub fn island_of_slot(slot: usize, islands: usize) -> usize {
     slot % islands.max(1)
 }
+/// One slot in `NURSERY_PERIOD` of each island's slots belongs to the
+/// island's nursery.
+pub const NURSERY_PERIOD: usize = 10;
+/// Generations a nursery cohort develops on its own before its survivors
+/// enter the island archive.
+pub const NURSERY_GENERATIONS: u32 = 10;
+/// Share of nursery slots that hold a fresh random body once the nursery has
+/// members. The rest breed from the nursery's own members.
+pub const NURSERY_FRESH_SHARE: f32 = 0.5;
+/// Whether `slot` belongs to its island's nursery.
+pub fn is_nursery_slot(slot: usize, islands: usize) -> bool {
+    (slot / islands.max(1)).is_multiple_of(NURSERY_PERIOD)
+}
+/// The archive that population slot `slot` breeds for and competes in, among
+/// `arenas`: the islands first, then one nursery per island in the same order.
+pub fn arena_of_slot(slot: usize, arenas: usize) -> usize {
+    if arenas < 2 {
+        return 0;
+    }
+    let islands = arenas / 2;
+    let island = slot % islands;
+    if is_nursery_slot(slot, islands) {
+        islands + island
+    } else {
+        island
+    }
+}
 pub fn optimizer_niche(island: usize, cadence: u8) -> Niche {
     let b = (island as u32).to_le_bytes();
     Niche([OPTIMIZER_NICHE_MARKER, b[0], b[1], b[2], b[3], cadence])
 }
 pub(crate) const MIN_MORPHOLOGY_DESCENDANTS: u64 = 8;
 pub(crate) const MORPHOLOGY_PARENT_FRACTION: f32 = 0.10;
-// Random immigrants only seed an empty archive: against evolved elites they
+// Random bodies only seed an empty archive: against evolved elites they
 // almost never enter it (0.03-0.06% of attempts in fixed-seed tests).
 const INITIAL_EMITTER_MIX: [f64; EMITTER_COUNT] = [0.35, 0.35, 0.30, 0.0];
 
@@ -110,6 +139,9 @@ pub struct Elite {
     pub protected_until: u32,
     pub visits: u64,
     pub topology: Topology,
+    /// The elite, or its ancestor, grew up in its island's nursery.
+    #[serde(default)]
+    pub graduate: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -665,6 +697,7 @@ impl QdArchive {
                 protected_until: protected_until.max(old_protection),
                 visits,
                 topology: candidate_topology.clone(),
+                graduate: false,
             };
             self.qd_score += fitness.max(0.0) as f64 - previous_fitness.max(0.0) as f64;
             self.note_changed_cell(self.entries[slot].niche.clone());
@@ -693,6 +726,7 @@ impl QdArchive {
             protected_until,
             visits: 0,
             topology: topology.clone(),
+            graduate: false,
         });
         let slot = self.entries.len() - 1;
         self.lookup.insert(niche, slot);
@@ -753,6 +787,7 @@ impl QdArchive {
                 protected_until: protected_until.max(current.protected_until),
                 visits,
                 topology,
+                graduate: false,
             };
             return Offer {
                 inserted: true,
@@ -801,6 +836,7 @@ impl QdArchive {
             protected_until,
             visits: 0,
             topology,
+            graduate: false,
         };
         self.entries.push(elite);
         let slot = self.entries.len() - 1;

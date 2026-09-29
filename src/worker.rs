@@ -240,19 +240,37 @@ pub struct IslandSummary {
     /// leader is the first).
     pub top: Vec<(f32, Creature)>,
     /// How many of its behavior elites each emitter bred, in `Emitter::ALL`
-    /// order.
+    /// order. Elites that grew up in the island's nursery count as new
+    /// random bodies, whatever emitter bred them last.
     pub origins: [usize; qd::EMITTER_COUNT],
+    /// Bodies in the island's nursery now.
+    pub nursery: usize,
+    /// The nursery's fastest distance (NaN while it is empty).
+    pub nursery_best: f32,
+    /// What the nursery graduated this session.
+    pub graduation: crate::storage::Graduation,
 }
 /// How many top elites an island summary carries.
 pub const ISLAND_TOP: usize = 3;
 impl IslandSummary {
-    pub fn of(island: &qd::QdArchive) -> Self {
+    pub fn of(
+        island: &qd::QdArchive,
+        nursery: &qd::QdArchive,
+        graduation: crate::storage::Graduation,
+    ) -> Self {
         let mut origins = [0; qd::EMITTER_COUNT];
         let mut ranked: Vec<&qd::Elite> = island
             .entries
             .iter()
             .filter(|elite| !qd::is_morphology_niche(&elite.niche))
-            .inspect(|elite| origins[elite.emitter.index()] += 1)
+            .inspect(|elite| {
+                let origin = if elite.graduate {
+                    qd::Emitter::Restart
+                } else {
+                    elite.emitter
+                };
+                origins[origin.index()] += 1;
+            })
             .collect();
         ranked.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
         ranked.truncate(ISLAND_TOP);
@@ -266,6 +284,13 @@ impl IslandSummary {
             leader: top.first().map(|t| t.1.clone()),
             top,
             origins,
+            nursery: nursery.behavior_count(),
+            nursery_best: if nursery.entries.is_empty() {
+                f32::NAN
+            } else {
+                nursery.best_fitness()
+            },
+            graduation,
         }
     }
 }
@@ -1610,7 +1635,15 @@ fn run(
                     qd_score: e.archive.qd_score,
                     emitters: e.emitter_stats,
                     emitter_weights: qd::emitter_weights(&e.emitter_stats),
-                    islands: e.islands.iter().map(IslandSummary::of).collect(),
+                    islands: (0..crate::storage::island_count())
+                        .filter_map(|i| {
+                            Some(IslandSummary::of(
+                                e.islands.get(i)?,
+                                e.islands.get(crate::storage::nursery_of(i))?,
+                                e.graduations.get(i).copied().unwrap_or_default(),
+                            ))
+                        })
+                        .collect(),
                     migration: e.last_migration.clone().map(|(generation, exchange)| {
                         MigrationSummary {
                             generation,

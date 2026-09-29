@@ -662,6 +662,7 @@ fn print_common_grid(scope: &str, seed: u64, experiment: &Experiment) {
         experiment
             .islands
             .iter()
+            .take(evolution_simulator::storage::island_count())
             .map(|island| island.morphology_count())
             .sum::<usize>(),
         plans.len()
@@ -681,6 +682,7 @@ fn print_islands(
     let rows: Vec<String> = experiment
         .islands
         .iter()
+        .take(evolution_simulator::storage::island_count())
         .enumerate()
         .map(|(k, island)| {
             format!(
@@ -718,6 +720,7 @@ fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
     let tops: Vec<Vec<&evolution_simulator::qd::Elite>> = experiment
         .islands
         .iter()
+        .take(evolution_simulator::storage::island_count())
         .map(|island| {
             let mut elites: Vec<_> = island
                 .entries

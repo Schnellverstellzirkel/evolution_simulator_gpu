@@ -6,7 +6,7 @@ What the game does in search, physics and speed, and the number that decided eac
 
 Fitness is horizontal center-of-mass distance and nothing else. Behavior (ground contact, cadence, body height, lifted feet) picks the archive niche and never changes the score. The physics rules that end a trial (a fall, a broken joint, head shaking above 8 g) keep distance the only objective.
 
-The search is MAP-Elites with four emitters: CMA tuning, anatomy mutations, novelty and random immigrants. Immigrants only seed empty archives. The emitter shares stay at the 35% CMA, 35% structural, 30% novelty prior. A reward-following bandit tied with the fixed shares.
+The search is MAP-Elites with four emitters: CMA tuning, anatomy mutations, novelty and random immigrants. Immigrants only seed empty archives. Each island also keeps a nursery: 10% of its slots hold new random bodies and the bodies bred from them, which compete only against each other for 10 generations. Then the survivors enter the island archive and compete on distance alone. The emitter shares stay at the 35% CMA, 35% structural, 30% novelty prior. A reward-following bandit tied with the fixed shares.
 
 Four islands are fully isolated and a fifth hub island receives copies of each isolated island's fastest tenth every 25 generations. Islands that exchanged their best tenth every 5 generations converged on one design within about 15 generations. At 241 generations one seed reached 847 m with migration every 5 generations, 1,243 m with none and 1,556 m every 25.
 

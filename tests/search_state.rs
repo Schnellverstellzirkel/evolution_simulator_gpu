@@ -725,7 +725,7 @@ fn rebuilding_islands_resets_records_from_the_previous_partition() {
     experiment.island_progress = vec![(1.0e9, 0); experiment.islands.len()];
     let slots: Vec<_> = (0..experiment.config.population).collect();
     experiment.breed_slots(&slots).unwrap();
-    assert_eq!(experiment.islands.len(), storage::island_count());
+    assert_eq!(experiment.islands.len(), storage::arena_count());
     assert_eq!(experiment.island_progress.len(), experiment.islands.len());
     for (island, &(record, generation)) in
         experiment.islands.iter().zip(&experiment.island_progress)
@@ -764,8 +764,12 @@ fn an_island_migration_is_recorded_and_summarized() {
     assert_eq!(sent, exchange.iter().map(|e| e.0).sum::<usize>());
     assert_eq!(kept, exchange.iter().map(|e| e.1).sum::<usize>());
 
-    for island in &experiment.islands {
-        let summary = IslandSummary::of(island);
+    for (index, island) in experiment.islands[..storage::island_count()]
+        .iter()
+        .enumerate()
+    {
+        let nursery = &experiment.islands[storage::nursery_of(index)];
+        let summary = IslandSummary::of(island, nursery, Default::default());
         assert_eq!(summary.cells, island.behavior_count());
         assert_eq!(summary.origins.iter().sum::<usize>(), summary.cells);
         assert!(!summary.top.is_empty() && summary.top.len() <= 3);
@@ -774,7 +778,11 @@ fn an_island_migration_is_recorded_and_summarized() {
         assert_eq!(summary.leader.as_ref().unwrap().id, summary.top[0].1.id);
         assert_eq!(summary.best, island.best_fitness());
     }
-    let empty = IslandSummary::of(&QdArchive::default());
+    let empty = IslandSummary::of(
+        &QdArchive::default(),
+        &QdArchive::default(),
+        Default::default(),
+    );
     assert!(empty.best.is_nan() && empty.leader.is_none() && empty.cells == 0);
 }
 
@@ -793,11 +801,23 @@ fn isolated_islands_only_hold_their_own_descendants() {
     let population = experiment.config.population;
     let hub = storage::hub_island();
     let check = |experiment: &Experiment| {
-        for (index, island) in experiment.islands.iter().enumerate() {
+        for (arena, island) in experiment.islands.iter().enumerate() {
+            // A nursery belongs to one island like the island's archive.
+            let index = arena % storage::island_count();
             if index == hub {
                 continue;
             }
             for elite in &island.entries {
+                // Only nursery slots fill a nursery, and an island archive
+                // holds nursery bodies only as marked graduates.
+                let slot = (elite.creature.id - 1) as usize % population;
+                let nursery_slot =
+                    evolution_simulator::qd::is_nursery_slot(slot, storage::island_count());
+                if arena >= storage::island_count() {
+                    assert!(nursery_slot && !elite.graduate);
+                } else if !elite.graduate {
+                    assert!(!nursery_slot);
+                }
                 // The elite and every recorded ancestor were born here.
                 for ancestor in experiment.ancestry(elite.creature.id, usize::MAX) {
                     assert_eq!(
@@ -810,7 +830,7 @@ fn isolated_islands_only_hold_their_own_descendants() {
             }
         }
         for cma in &experiment.cma_emitters {
-            assert!(cma.island < storage::island_count());
+            assert!(cma.island < storage::arena_count());
         }
     };
     for generation in 0..2 * storage::MIGRATION_INTERVAL + 3 {
@@ -824,6 +844,8 @@ fn isolated_islands_only_hold_their_own_descendants() {
         }
         experiment.prepare_next_batch().unwrap();
     }
+    // The nurseries sent cohorts to their islands.
+    assert!(experiment.graduations.iter().any(|g| g.sent > 0));
     // The isolated islands sent copies to the hub.
     let (_, exchange) = experiment.last_migration.clone().unwrap();
     assert!(

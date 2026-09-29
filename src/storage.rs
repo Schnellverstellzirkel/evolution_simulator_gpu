@@ -182,6 +182,9 @@ pub struct Experiment {
     /// Stored separately in V4 checkpoints to keep the V3 payload readable.
     #[serde(skip)]
     pub island_progress: Vec<(f32, u32)>,
+    /// Per island, what its nursery graduated this session.
+    #[serde(skip)]
+    pub graduations: Vec<Graduation>,
     /// The last migration to the hub this session: its generation, and per
     /// island how many elites it sent and how many of those the hub kept
     /// (the hub's own entry is zero). Saved after the body of a small save.
@@ -234,6 +237,18 @@ impl Reseed {
     fn fits(&self, islands: usize) -> bool {
         self.queues.len() <= islands
     }
+}
+
+/// What one island's nursery graduated this session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Graduation {
+    /// Generation of the last graduation (0 before the first).
+    pub generation: u32,
+    /// Bodies in the last graduating cohort, and how many the island kept.
+    pub sent: usize,
+    pub kept: usize,
+    /// Bodies the island kept over all graduations this session.
+    pub kept_total: usize,
 }
 
 /// One recorded creature in an elite's ancestry.
@@ -300,6 +315,15 @@ fn describe_change(
 /// Slot `i` breeds from and competes in island `qd::island_of_slot`.
 pub fn island_count() -> usize {
     ISOLATED_ISLANDS + 1
+}
+/// Archives that creatures breed for and compete in: the islands, then one
+/// nursery per island. `Experiment::islands` holds them in this order.
+pub fn arena_count() -> usize {
+    island_count() * 2
+}
+/// The nursery archive of `island` in `Experiment::islands`.
+pub fn nursery_of(island: usize) -> usize {
+    island_count() + island
 }
 /// Islands that never receive immigrants and breed only from their own
 /// elites, so each one evolves its own designs.
@@ -379,6 +403,7 @@ impl Experiment {
             lineage: HashMap::new(),
             candidate_mates: Vec::new(),
             island_progress: Vec::new(),
+            graduations: Vec::new(),
             last_migration: None,
             reseed: Reseed::default(),
             fossils: Vec::new(),
@@ -568,8 +593,10 @@ impl Experiment {
             Some(slot) => metric.fitness > archive.entries[slot].fitness,
             None => archive.behavior_count() < qd::ARCHIVE_LIMIT,
         };
-        let island = qd::island_of_slot(i, island_count());
-        if beats(&self.archive) {
+        // A nursery creature competes only in its nursery until it graduates.
+        let island = qd::arena_of_slot(i, self.islands.len().max(arena_count()));
+        let nursery = island >= island_count();
+        if !nursery && beats(&self.archive) {
             return (
                 ContenderReason::Global,
                 Some(cell_key(island as u64, &niche)),
@@ -651,6 +678,7 @@ impl Experiment {
             /// cell at the start of the batch, for a CMA sample.
             elite_before: Option<f32>,
         }
+        let arenas = self.islands.len().max(arena_count());
         let prep: Vec<Prep> = slots
             .par_iter()
             .map(|&i| {
@@ -669,15 +697,18 @@ impl Experiment {
                 let protection = self.protected_until.get(i).copied().unwrap_or(0);
                 let screened = self.screened.get(i).copied().unwrap_or(false);
                 // A screened creature enters no archive.
-                let behavior_candidate = if score.is_finite() && score > FAILED && !screened {
-                    let niche = descriptor.niche();
-                    match self.archive.slot_for(&niche) {
-                        Some(slot) => score > self.archive.entries[slot].fitness,
-                        None => self.archive.behavior_count() < qd::ARCHIVE_LIMIT,
-                    }
-                } else {
-                    false
-                };
+                // A nursery creature is offered to its nursery only.
+                let nursery = qd::arena_of_slot(i, arenas) >= island_count();
+                let behavior_candidate =
+                    if score.is_finite() && score > FAILED && !screened && !nursery {
+                        let niche = descriptor.niche();
+                        match self.archive.slot_for(&niche) {
+                            Some(slot) => score > self.archive.entries[slot].fitness,
+                            None => self.archive.behavior_count() < qd::ARCHIVE_LIMIT,
+                        }
+                    } else {
+                        false
+                    };
                 let topology = (!screened
                     && score.is_finite()
                     && score > FAILED
@@ -711,7 +742,6 @@ impl Experiment {
         let population = &self.population;
         let generation = self.generation;
         let parent_ids = &self.candidate_parent_ids;
-        let island_total = self.islands.len().max(1);
         // Per island: the slots that entered, and the emitter and offer of
         // each reserve entry.
         type IslandResult = (Vec<usize>, Vec<(usize, qd::Offer)>);
@@ -741,7 +771,7 @@ impl Experiment {
                     }
                 }
                 for (k, &i) in slots.iter().enumerate() {
-                    if qd::island_of_slot(i, island_total) != island {
+                    if qd::arena_of_slot(i, arenas) != island {
                         continue;
                     }
                     let p = &prep[k];
@@ -829,9 +859,13 @@ impl Experiment {
             .map(|(group, _)| !group.is_empty())
             .collect();
         let mut reserve_offers = Vec::new();
-        for (group, offers) in island_results {
+        for (arena, (group, offers)) in island_results.into_iter().enumerate() {
             entered.extend(group);
-            reserve_offers.extend(offers);
+            // Nursery entries count for no emitter: the emitter statistics
+            // describe the islands' search.
+            if arena < island_count() {
+                reserve_offers.extend(offers);
+            }
         }
         timings[0] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
@@ -871,6 +905,18 @@ impl Experiment {
         for (&i, prep) in slots.iter().zip(prep) {
             if !prep.score.is_finite() || prep.score <= FAILED {
                 failed += 1;
+            }
+            if qd::arena_of_slot(i, arenas) >= island_count() {
+                // Nursery samples rank by distance alone.
+                if prep.emitter == Emitter::Cma
+                    && let Some(cma) = self.candidate_cma.get(i).copied().flatten()
+                    && let Some(samples) = cma_samples.get_mut(cma)
+                    && prep.score.is_finite()
+                    && prep.score > FAILED
+                {
+                    samples.push((i, prep.score));
+                }
+                continue;
             }
             let emitter_index = prep.emitter.index();
             attempts[emitter_index] += 1;
@@ -1193,12 +1239,11 @@ impl Experiment {
         self.candidate_mates = planned.iter().map(|p| p.plan.mate.is_some()).collect();
         self.protected_until = protections;
         if reseeding {
-            let islands = island_count();
             for slot in 0..self.config.population {
                 if self.reseed.is_empty() {
                     break;
                 }
-                let Some(elite) = self.reseed.pop(qd::island_of_slot(slot, islands)) else {
+                let Some(elite) = self.reseed_for_slot(slot) else {
                     continue;
                 };
                 self.population.replace(slot, elite);
@@ -1212,6 +1257,7 @@ impl Experiment {
         }
         self.parent_scores.fill(f32::NAN);
         self.generation = generation;
+        self.graduate_nurseries();
         self.migrate_islands();
         self.stage = Stage::Ready;
         self.evaluated = 0;
@@ -1232,22 +1278,81 @@ impl Experiment {
         }
         Ok(())
     }
+    /// The next elite queued for the island of `slot`. A nursery slot takes
+    /// none, so a re-tested elite competes in its island's archive.
+    fn reseed_for_slot(&mut self, slot: usize) -> Option<Creature> {
+        let islands = island_count();
+        if qd::is_nursery_slot(slot, islands) {
+            return None;
+        }
+        self.reseed.pop(qd::island_of_slot(slot, islands))
+    }
     /// Creates empty island archives if they are missing. They fill from
     /// their own slots' offspring (and queued reseeds). The global archive
     /// is never split among them, because that would mix the islands.
     fn ensure_islands(&mut self) {
-        if self.islands.len() == island_count() {
+        if self.islands.len() == arena_count() {
             return;
         }
-        self.islands = vec![QdArchive::default(); island_count()];
+        self.islands = vec![QdArchive::default(); arena_count()];
         self.island_progress.clear();
+        self.graduations.clear();
         self.last_migration = None;
+    }
+    /// Every `NURSERY_GENERATIONS` generations each nursery's survivors
+    /// compete with their island's elites on distance alone, and the global
+    /// archive takes those the island kept. Then the nursery starts over
+    /// with new random bodies.
+    fn graduate_nurseries(&mut self) {
+        if self.islands.len() != arena_count()
+            || self.generation == 0
+            || !self.generation.is_multiple_of(qd::NURSERY_GENERATIONS)
+        {
+            return;
+        }
+        self.graduations
+            .resize(island_count(), Graduation::default());
+        for island in 0..island_count() {
+            let nursery = nursery_of(island);
+            let mut cohort: Vec<qd::Elite> = std::mem::take(&mut self.islands[nursery].entries)
+                .into_iter()
+                .filter(|e| !qd::is_morphology_niche(&e.niche))
+                .collect();
+            self.islands[nursery].rebuild_indices();
+            cohort.sort_unstable_by(|a, b| {
+                b.fitness
+                    .total_cmp(&a.fitness)
+                    .then_with(|| a.niche.cmp(&b.niche))
+            });
+            let mut kept = 0;
+            for mut elite in cohort.iter().cloned() {
+                elite.graduate = true;
+                if self.islands[island].absorb(&elite) {
+                    kept += 1;
+                    self.archive.absorb(&elite);
+                }
+            }
+            self.islands[island].refresh_behavior_scores();
+            if kept > 0 {
+                self.archive.refresh_behavior_scores();
+            }
+            let log = &mut self.graduations[island];
+            *log = Graduation {
+                generation: self.generation,
+                sent: cohort.len(),
+                kept,
+                kept_total: log.kept_total + kept,
+            };
+            if let Some(progress) = self.island_progress.get_mut(nursery) {
+                *progress = (f32::NEG_INFINITY, self.generation);
+            }
+        }
     }
     /// Every `MIGRATION_INTERVAL` generations the hub receives copies of the
     /// best share of each isolated island's elites. The isolated islands
     /// never receive any.
     fn migrate_islands(&mut self) {
-        if self.islands.len() != island_count()
+        if self.islands.len() != arena_count()
             || !self.generation.is_multiple_of(MIGRATION_INTERVAL)
         {
             return;
@@ -1267,7 +1372,7 @@ impl Experiment {
                 elites[..take].iter().map(|e| (*e).clone()).collect()
             })
             .collect();
-        let mut exchange = vec![(0, 0); self.islands.len()];
+        let mut exchange = vec![(0, 0); island_count()];
         for (from, group) in migrants.into_iter().enumerate() {
             let to = &mut self.islands[hub];
             let kept = group.iter().filter(|elite| to.absorb(elite)).count();
@@ -1454,10 +1559,12 @@ impl Experiment {
             .par_iter()
             .map(|&i| {
                 let mut rng = Rng::new(seed, generation, i);
-                let island = qd::island_of_slot(i, island_count());
+                let island = qd::arena_of_slot(i, self.islands.len());
                 let archive = &self.islands[island];
                 let archive_empty = archive.entries.is_empty();
-                let emitter = if archive_empty {
+                let emitter = if archive_empty
+                    || (island >= island_count() && rng.unit() < qd::NURSERY_FRESH_SHARE)
+                {
                     Emitter::Restart
                 } else {
                     qd::choose_emitter(&mut rng, &weights)
@@ -1710,13 +1817,12 @@ impl Experiment {
         // Reseeded elites take the slots of their own islands first; the rest
         // are emitted straight into batches, so no child is alive after it is
         // copied.
-        let islands = island_count();
         let mut lead = evolution::ChildBatch::default();
         let mut order: Vec<usize> = Vec::with_capacity(slots.len());
         let mut reseeded_slot = vec![false; slots.len()];
         if !self.reseed.is_empty() {
             for (k, &slot) in slots.iter().enumerate() {
-                if let Some(elite) = self.reseed.pop(qd::island_of_slot(slot, islands)) {
+                if let Some(elite) = self.reseed_for_slot(slot) {
                     lead.push(elite);
                     order.push(k);
                     reseeded_slot[k] = true;
@@ -1778,6 +1884,7 @@ impl Experiment {
         self.prune_lineage();
         let lineage = started.elapsed();
         self.generation += 1;
+        self.graduate_nurseries();
         self.migrate_islands();
         let migrated = started.elapsed();
         let mut cfg = self.pending.take().unwrap_or_else(|| self.config.clone());
@@ -1892,6 +1999,7 @@ impl Experiment {
             .islands
             .iter()
             .enumerate()
+            .take(island_count())
             .filter(|(_, island)| !island.entries.is_empty())
             .min_by(|a, b| a.1.best_fitness().total_cmp(&b.1.best_fitness()))
             .map(|(index, _)| index);
@@ -1945,7 +2053,8 @@ impl Experiment {
     /// the new physics in that island's own slots.
     fn reset_search_context(&mut self) {
         self.reseed.clear();
-        for (index, island) in self.islands.iter_mut().enumerate() {
+        // The nurseries start over; only the islands' creatures are re-tested.
+        for (index, island) in self.islands.iter_mut().take(island_count()).enumerate() {
             for elite in std::mem::take(&mut island.entries) {
                 self.reseed.push(index, elite.creature);
             }
@@ -1953,6 +2062,7 @@ impl Experiment {
         self.archive = QdArchive::default();
         self.islands.clear();
         self.island_progress.clear();
+        self.graduations.clear();
         self.last_migration = None;
         self.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
         self.cma_emitters.clear();
@@ -2051,9 +2161,9 @@ impl Experiment {
             "Invalid QD archive state"
         );
         ensure!(
-            (self.islands.is_empty() || self.islands.len() == island_count())
+            (self.islands.is_empty() || self.islands.len() == arena_count())
                 && self.reseed.fits(island_count())
-                && self.cma_emitters.iter().all(|c| c.island < island_count()),
+                && self.cma_emitters.iter().all(|c| c.island < arena_count()),
             "Invalid island state"
         );
         for (index, stats) in self.history.iter().enumerate() {
@@ -2217,6 +2327,7 @@ impl SmallLoad {
             lineage: self.lineage,
             candidate_mates: Vec::new(),
             island_progress: self.island_progress,
+            graduations: Vec::new(),
             last_migration: None,
             reseed: self.reseed,
             fossils: Vec::new(),
@@ -2551,7 +2662,7 @@ pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Ex
     );
     let mut experiment = small.into_experiment()?;
     experiment.last_migration = migration.filter(|(generation, exchange)| {
-        *generation <= experiment.generation && exchange.len() == experiment.islands.len()
+        *generation <= experiment.generation && exchange.len() == island_count()
     });
     Ok(experiment)
 }
@@ -2747,9 +2858,7 @@ mod migration_tests {
         experiment.evaluated = experiment.config.population;
         experiment.stage = Stage::Evaluated;
         experiment.archive_batch().unwrap();
-        let exchange: Vec<(usize, usize)> = (0..experiment.islands.len())
-            .map(|i| (i + 2, i + 1))
-            .collect();
+        let exchange: Vec<(usize, usize)> = (0..island_count()).map(|i| (i + 2, i + 1)).collect();
         assert!(!exchange.is_empty());
         experiment.last_migration = Some((experiment.generation, exchange.clone()));
         let checkpoint =
@@ -2851,7 +2960,7 @@ mod breeding_tests {
         );
         let mut creatures = Vec::new();
         for ((&slot, child), plan) in slots.iter().zip(children).zip(&planned) {
-            if let Some(elite) = e.reseed.pop(qd::island_of_slot(slot, island_count())) {
+            if let Some(elite) = e.reseed_for_slot(slot) {
                 creatures.push(elite);
                 e.candidate_emitters[slot] = Emitter::Restart;
                 e.candidate_cma[slot] = None;

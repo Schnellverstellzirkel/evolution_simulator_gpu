@@ -5279,9 +5279,33 @@ fn paint_card(
 /// How a creature came to be, in the words the lineage uses.
 /// Space between island cards, and a card's height.
 const ISLAND_GAP: f32 = 10.;
-const ISLAND_HEIGHT: f32 = 268.;
+const ISLAND_HEIGHT: f32 = 300.;
 /// Words for the emitter shares of an island's elites, in `Emitter::ALL` order.
 const ORIGIN_SHORT: [&str; 4] = ["Tuned", "Reshaped", "Novel", "New"];
+/// What an island card says about its nursery: its size and best distance,
+/// when it graduates next, and what the last graduation kept.
+fn nursery_lines(island: &crate::worker::IslandSummary, generation: u32) -> [String; 2] {
+    let every = crate::qd::NURSERY_GENERATIONS;
+    let next = (generation / every + 1) * every;
+    let first = if island.nursery == 0 {
+        format!("Nursery empty. Graduates at gen {next}")
+    } else {
+        format!(
+            "Nursery {} bodies, best {:.1} m. Graduates at gen {next}",
+            island.nursery, island.nursery_best
+        )
+    };
+    let g = island.graduation;
+    let second = if g.generation == 0 {
+        "No graduates yet this session".to_owned()
+    } else {
+        format!(
+            "Gen {}: {} of {} graduates kept, {} in all",
+            g.generation, g.kept, g.sent, g.kept_total
+        )
+    };
+    [first, second]
+}
 /// What an island card says about migration: the last exchange, or when the
 /// next one comes.
 fn migration_lines(
@@ -5506,7 +5530,10 @@ fn paint_island(
             theme.ink,
         );
     }
-    let lines = migration_lines(migration, index, generation);
+    let lines: Vec<String> = nursery_lines(island, generation)
+        .into_iter()
+        .chain(migration_lines(migration, index, generation))
+        .collect();
     for (i, line) in lines.iter().enumerate() {
         painter.text(
             at(12., 236. + i as f32 * 14.),
