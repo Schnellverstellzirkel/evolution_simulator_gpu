@@ -239,13 +239,56 @@ pub fn ground(
         } else {
             (140, 190, 235)
         };
-        band(
-            painter,
-            &line,
-            if ice { 16.0 } else { 10.0 },
-            alpha(color, 0.25 + 0.45 * s),
-            alpha(color, 0.05),
-        );
+        if !ice {
+            // Wet: the ground darkens, a bright film runs along it, and puddles
+            // with slow ripples lie in the dips.
+            band(
+                painter,
+                &line,
+                28.0,
+                alpha((20, 50, 110), 0.40 + 0.25 * s),
+                alpha((25, 55, 100), 0.05),
+            );
+            let first = (world_x(rect.left()) / 1.3).floor() as i64;
+            let last = (world_x(rect.right()) / 1.3).ceil() as i64;
+            for k in first..=last {
+                let meters = (k as f32 + hash(k * 11)) * 1.3;
+                let cx = rect.left() + (meters - world_x(rect.left())) * pixels_per_meter;
+                let half = 26.0 + 30.0 * hash(k * 13);
+                let mut lens = Vec::new();
+                for step in -4..=4_i32 {
+                    let t = step as f32 / 4.0;
+                    let x = cx + t * half;
+                    lens.push(Pos2::new(x, surface(x) + 1.0));
+                }
+                for step in (-4..=4_i32).rev() {
+                    let t = step as f32 / 4.0;
+                    let x = cx + t * half;
+                    lens.push(Pos2::new(x, surface(x) + 2.0 + 9.0 * (1.0 - t * t)));
+                }
+                painter.add(egui::Shape::convex_polygon(
+                    lens,
+                    alpha((90, 170, 245), 0.75 + 0.2 * s),
+                    Stroke::new(1.5, alpha((240, 250, 255), 0.95)),
+                ));
+                // A ripple widens and fades on each puddle.
+                let age = (time * 0.5 + hash(k * 17)).fract();
+                let r = half * (0.2 + 0.7 * age);
+                let y = surface(cx) + 4.0;
+                painter.line_segment(
+                    [Pos2::new(cx - r, y), Pos2::new(cx + r, y)],
+                    Stroke::new(1.2, alpha((255, 255, 255), 0.7 * (1.0 - age))),
+                );
+            }
+        } else {
+            band(
+                painter,
+                &line,
+                16.0,
+                alpha(color, 0.25 + 0.45 * s),
+                alpha(color, 0.05),
+            );
+        }
         let shine: Vec<Pos2> = line.iter().map(|p| *p + Vec2::new(0.0, 3.0)).collect();
         painter.add(egui::Shape::line(
             shine,

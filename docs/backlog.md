@@ -12,7 +12,6 @@ Open work only. Delete an item when it is merged into `main` or measured and rej
 
 ## Interface
 
-- The wet grip level is barely visible in the world view, and the effect label repeats the effect name ("Heat wave: Heat wave").
 
 ## Speed toward 2M and 4M creatures/s
 

@@ -1926,14 +1926,7 @@ impl App {
             .filter(|(_, effect)| effect.level(&self.config) != effect.calm)
         {
             ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "{}: {}",
-                        effect.name,
-                        effect.levels[effect.level(&self.config)]
-                    ))
-                    .color(theme.accent),
-                );
+                ui.label(RichText::new(effect_text(effect, &self.config)).color(theme.accent));
                 if ui
                     .small_button("Undo")
                     .on_hover_text("Set this effect back to calm")
@@ -5340,6 +5333,16 @@ fn world_is_calm(config: &Config) -> bool {
         .filter(|effect| effect.name != "Seasons")
         .all(|effect| effect.level(config) == effect.calm)
 }
+/// An effect and its level in a few words: "Mud: Deep", or just "Heat wave"
+/// when the level carries the effect's own name.
+fn effect_text(effect: &crate::environment::Effect, config: &Config) -> String {
+    let level = effect.levels[effect.level(config)];
+    if level == effect.name {
+        level.to_owned()
+    } else {
+        format!("{}: {}", effect.name, level)
+    }
+}
 /// The world in a few words: "Calm world", or the effects away from calm,
 /// such as "Ground: Rough, 8 cm · Hurdles: Low".
 fn world_summary(config: &Config) -> String {
@@ -5347,7 +5350,7 @@ fn world_summary(config: &Config) -> String {
         .iter()
         .filter(|effect| effect.name != "Seasons")
         .filter(|effect| effect.level(config) != effect.calm)
-        .map(|effect| format!("{}: {}", effect.name, effect.levels[effect.level(config)]))
+        .map(|effect| effect_text(effect, config))
         .collect();
     if parts.is_empty() {
         "Calm world".to_owned()
