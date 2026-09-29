@@ -42,6 +42,7 @@ struct Options {
     checks: bool,
     gpu: bool,
     seed_offset: u64,
+    probe: bool,
     save: Option<String>,
 }
 
@@ -54,12 +55,15 @@ fn options() -> Result<Options> {
     let mut tag = None;
     let mut checks = false;
     let mut gpu = false;
+    let mut probe = false;
     let mut seed_offset = 0u64;
     let mut save = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--checks" {
             checks = true;
+        } else if arg == "--probe" {
+            probe = true;
         } else if arg == "--gpu" {
             gpu = true;
         } else if arg == "--seed-offset" {
@@ -121,6 +125,7 @@ fn options() -> Result<Options> {
         checks,
         gpu,
         seed_offset,
+        probe,
         save,
     })
 }
@@ -286,6 +291,35 @@ fn check_contenders(
     counts.seconds += started.elapsed().as_secs_f64();
 }
 
+/// Scores the first 20,000 creatures of the generation whole and in odd
+/// shuffled chunks, and reports creatures whose result differs by a bit.
+fn probe_gpu(sched: &mut scheduler::Scheduler, experiment: &Experiment) -> Result<()> {
+    let n = experiment.config.population.min(20_000);
+    let indices: Vec<usize> = (0..n).collect();
+    let cfg = &experiment.config;
+    let whole = sched.evaluate_single(&experiment.population, &indices, cfg)?;
+    let mut order: Vec<usize> = indices.clone();
+    order.sort_by_key(|&i| (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 7);
+    let mut mismatched = 0;
+    let mut behavior = 0;
+    for chunk in order.chunks(2999) {
+        let part = sched.evaluate_single(&experiment.population, chunk, cfg)?;
+        for (&i, m) in chunk.iter().zip(&part) {
+            if m.fitness.to_bits() != whole[i].fitness.to_bits() {
+                mismatched += 1;
+            } else if m.behavior.mean_height.to_bits() != whole[i].behavior.mean_height.to_bits()
+                || m.behavior.ground_contact.to_bits() != whole[i].behavior.ground_contact.to_bits()
+            {
+                behavior += 1;
+            }
+        }
+    }
+    println!(
+        "probe: {n} creatures, {mismatched} fitness bits differ, {behavior} behavior bits differ"
+    );
+    Ok(())
+}
+
 /// Runs the game's loop for one seed and returns its archive best and QD score.
 fn run_seed(
     seed: u64,
@@ -336,6 +370,9 @@ fn run_seed(
                         stored += 1;
                     }
                 }
+            }
+            if options.probe && generation >= 3 {
+                probe_gpu(sched, &experiment)?;
             }
         } else {
             let results = cpu_engine::evaluate(&experiment.population, &experiment.config);
@@ -406,6 +443,18 @@ fn run_seed(
     }
     print_body_mix(scope, seed, &top);
     print_robustness(scope, seed, &experiment);
+    if let Some(gpu) = gpu.as_ref()
+        && let Some(sched) = gpu.sched.as_ref()
+    {
+        println!(
+            "{scope} seed {seed} checks: {} submitted, {} released, {} dropped, per evaluated creature {:.4}",
+            sched.checks_submitted,
+            sched.checks_released,
+            sched.checks_dropped,
+            sched.checks_submitted as f64
+                / (options.generations as f64 * options.population as f64)
+        );
+    }
     print_common_grid(scope, seed, &experiment);
     let weights = evolution_simulator::qd::emitter_weights(&experiment.emitter_stats);
     println!(
