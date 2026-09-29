@@ -6,8 +6,7 @@
 //!
 //! Trials are short, because contact sequences are chaotic: a footfall that
 //! lands one step apart in the two engines sends the trials apart, and that
-//! grows with time. `examples/p2_agreement.rs` reports the distributions over
-//! long trials.
+//! grows with time.
 use evolution_simulator::{
     config::Config,
     engine::{self, Engine},

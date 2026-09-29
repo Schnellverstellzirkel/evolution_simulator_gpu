@@ -86,10 +86,8 @@ Search and game state:
 - `examples/mutation_audit.rs`: how much of its parent's distance each operator's child keeps.
 - `examples/physics_audit.rs`: energy, friction and momentum ledgers per elite.
 - `examples/first_generation.rs`: random-population distances on the CPU engine.
+- `examples/replay_match.rs <save>`: the best elites' archive distance beside their replay's.
 - `examples/p2_speed.rs`, `examples/p2_cpu_speed.rs`, `examples/worker_rate.rs`: GPU, CPU and worker throughput.
-- `examples/p2_agreement.rs`: GPU against CPU prototype distances.
-- `examples/effect_cost.rs`, `examples/mem_report.rs`, `examples/body_stats.rs`, `examples/load_profile.rs` (save load time).
-- `examples/export_best.rs` and `examples/creature_gif.rs`: export an elite from a save and render its trial as a GIF.
 - `tools/pause-game.sh`: pauses the owner's game for a speed measurement (`docs/building.md`).
 
 ## Docs
