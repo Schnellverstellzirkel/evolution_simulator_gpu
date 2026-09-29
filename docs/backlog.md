@@ -32,7 +32,8 @@ Open work only. Delete an item when it is merged into `main` or measured and rej
 
 Each item is an A/B over 3 seeds. Winners go on by default and losers are deleted.
 
-- Emitters: bandit emitter shares, line variation between same-plan elites, CMA-MAE thresholds, discrete crossover, self-adapted step sizes (use or remove `Creature.mutability`), CMA over body bounds, joint ranges, sensors and reset phases [claude/emitters].
+- `Creature.mutability` is mutated but unused. Self-adapted mutation scale tied over 18 seeds, so delete the gene once fewer branches are open (it touches the save format and about 32 sites).
+- The emitter shares barely move: the weight formula adds a constant 0.55 to a mean reward near 0.002, so shares stay at the 35/35/30 prior. A reward-following bandit tied in the A/B.
 - Archive and selection: a finer archive, body size or limb count as an axis, descriptor review, island model tuning, periodic island extinctions, age layers (ALPS), deep grids, racing, dominated novelty search, generalized early stopping [claude/archive].
 - Body encoding: a more varied first population, repeated and mirrored limbs, a generative body grammar [claude/encoding, paused].
 - Controller transfer: crossover between body plans, controller distillation, Lamarckian inheritance [claude/transfer, paused].
