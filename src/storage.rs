@@ -175,8 +175,8 @@ pub struct Experiment {
     pub island_progress: Vec<(f32, u32)>,
     /// The last island migration this session: its generation, and per
     /// island how many elites it sent and how many of those the neighbor
-    /// kept. Not saved; the schedule tells a loaded game when it was.
-    #[serde(skip)]
+    /// kept. Saved after the body of a small save.
+    #[serde(skip)] // the full V7 format does not carry it
     pub last_migration: Option<(u32, Vec<(usize, usize)>)>,
     /// Elites from before an environment change, waiting to be evaluated again
     /// in the new world. Breeding hands them out before new offspring.
@@ -2387,6 +2387,10 @@ pub fn save_with_progress(
         bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .serialize_into(&mut buffered, &SmallSave::of(experiment))?;
+        // After the body, so saves from before it was stored still load.
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .serialize_into(&mut buffered, &experiment.last_migration)?;
         let encoder = buffered.into_inner().map_err(|error| error.into_error())?;
         let mut out = encoder.finish()?;
         out.flush()?;
@@ -2488,12 +2492,25 @@ pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Ex
             .with_fixint_encoding()
             .with_limit(24 * 1024 * 1024 * 1024)
             .deserialize_from(&mut decoder)?;
+        // The last island migration follows the body; older saves end
+        // before it.
+        let migration: Option<(u32, Vec<(usize, usize)>)> = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(8 + 64 * 16)
+            .deserialize_from(&mut decoder)
+            .unwrap_or(None);
         let mut trailing = [0u8; 1];
         ensure!(
             decoder.read(&mut trailing)? == 0,
             "Unexpected trailing checkpoint data"
         );
-        return small.into_experiment();
+        let mut experiment = small.into_experiment()?;
+        experiment.last_migration = migration.filter(|(generation, exchange)| {
+            *generation <= experiment.generation
+                && exchange.len() == experiment.islands.len()
+                && experiment.qd_version == qd::VERSION
+        });
+        return Ok(experiment);
     }
     let mut experiment: Experiment = if &magic == LEGACY_MAGIC {
         let legacy: LegacyExperiment = bincode::DefaultOptions::new()
@@ -3305,6 +3322,38 @@ mod migration_tests {
         assert_eq!(loaded.config.seasons, 2);
         assert_eq!(loaded.config.season_step, 7);
         assert_eq!(loaded.config.wind, experiment.config.wind);
+    }
+
+    #[test]
+    fn a_saved_game_keeps_its_last_migration() {
+        let config = Config {
+            population: 64,
+            random_seed: false,
+            ..Config::default()
+        };
+        let mut experiment = Experiment::new(config).unwrap();
+        experiment
+            .scores
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, s)| *s = 1.0 + i as f32);
+        experiment.evaluated = experiment.config.population;
+        experiment.stage = Stage::Evaluated;
+        experiment.archive_batch().unwrap();
+        let exchange: Vec<(usize, usize)> = (0..experiment.islands.len())
+            .map(|i| (i + 2, i + 1))
+            .collect();
+        assert!(!exchange.is_empty());
+        experiment.last_migration = Some((experiment.generation, exchange.clone()));
+        let checkpoint =
+            std::env::temp_dir().join(format!("evolution-migration-{}.evo", std::process::id()));
+        save(&checkpoint, &experiment).unwrap();
+        let loaded = load(&checkpoint).unwrap();
+        let _ = std::fs::remove_file(checkpoint);
+        assert_eq!(
+            loaded.last_migration,
+            Some((experiment.generation, exchange))
+        );
     }
 
     /// The Seasons button at each speed: set while a generation runs, the
