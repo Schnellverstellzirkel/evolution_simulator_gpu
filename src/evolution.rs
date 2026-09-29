@@ -1493,6 +1493,7 @@ pub fn emit_archive_batch_streaming(
 /// Breeds one offspring from its plan with the given random stream. With
 /// `neutral` (from `neutral_splits_enabled`), structural emitters start the
 /// parts they add passive so the parent's gait survives.
+#[allow(clippy::too_many_arguments)]
 fn offspring(
     archive: &QdArchive,
     reserve: &QdArchive,
@@ -1676,6 +1677,7 @@ fn retime_rhythm(creature: &mut Creature, rng: &mut Rng) -> bool {
 
 /// Steady-state breeding: one offspring per plan, for population `slots`.
 /// `round` salts the random streams and keeps creature ids unique.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_offspring(
     archive: &[QdArchive],
     reserve: &QdArchive,
