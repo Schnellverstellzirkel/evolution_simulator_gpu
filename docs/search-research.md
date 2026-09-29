@@ -567,3 +567,20 @@ Notes. The current emitter weights are inert: the mean reward per attempt is abo
 - Wang, Lehman, Clune, Stanley (2019). [Paired Open-Ended Trailblazer (POET)](https://arxiv.org/abs/1901.01753).
 - Wang, Zhou, Fidler, Ba (2019). [Neural Graph Evolution: Towards Efficient Automatic Robot Design](http://www.cs.toronto.edu/~henryzhou/NGE/nge.pdf). ICLR.
 - Further reading: Wang et al. (2025). [Embodied Co-Design for Rapidly Evolving Agents: Taxonomy, Frontiers, and Challenges](https://arxiv.org/abs/2512.04770), a survey of more than 100 recent co-design studies.
+
+## 11. Archive shape, reserve size and island extinctions (2026-09-29, current physics)
+
+All runs use `examples/search_ab` with the contender checks, 5 s trials, on main plus the reserve fix (2178677). Rows compare best archive distance and QD re-binned on the old grid (contact 6, cadence 8, height 6, feet 5), paired by seed. Best distance varies 3 to 9 m between seeds, so only many seeds say anything.
+
+Reserve fix (structural reserve draws read the global archive, visits counted there), 9 seeds, population 2048, 60 generations: best 4.95 m before, 5.04 m after, QD 947 before, 909 after. Neutral, kept because it fixes a bug.
+
+Not adopted, deleted:
+- Node-count axis (bins 3-4, 5-6, 7-9, 10+) added as a sixth axis: 6 seeds gave best x1.10 and common-grid QD x0.90, but 8 fresh seeds gave best x0.77 (0 wins of 8) and QD x0.91. Three bins on 8 seeds: best x0.77, QD x0.95. It doubles the distinct body plans in the archive (1416 against 653) and costs distance.
+- Cadence 8 to 4 with a node axis: QD x0.73. Feet replaced by a node axis: QD x0.65.
+- Finer grid (contact 8, cadence 10, height 8) at population 16384, 40 generations, 3 seeds: best x0.86, QD x0.83. With the node axis added: best x1.26 on 3 seeds, QD x0.82.
+- Reserve of 256 instead of 64 places: best x1.17, QD x1.01 (3 of 6 wins). Reserve parent share 25% instead of 10%: best x1.02. Both together: best x1.04, QD x0.96. Ties.
+- Periodic island extinctions (every 15 generations one island, in turn, loses a random box covering 25% of its grid, the global archive keeps everything): best x0.97, QD x0.98 on 6 seeds. Every 8 generations with 50%: best x0.94, QD x0.99. No gain at this horizon.
+
+Not possible: stopping a trial when it can no longer beat its cell's elite. The cell comes from behavior measured over the whole trial (contact, cadence, height, feet), so it is unknown until the end. The 5 s screen already stops hopeless creatures.
+
+Not tried: age-layered populations, deep grids, Hoeffding racing, dominated novelty search. The contender check already races one contender per cell.
