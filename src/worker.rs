@@ -1676,13 +1676,23 @@ struct Steady {
 }
 
 /// Block size, release window and decision lag for a steady run. A block is
-/// an eighth of the population, so the archives change often enough and the
-/// engines always have a few blocks queued. With a single block per
-/// generation the decision cannot run ahead of the absorption.
+/// a sixteenth of the population (at least 8,192 creatures). A block is
+/// decided against the archives as they stood `lag` blocks earlier, and its
+/// checks must finish before it is absorbed, so a run absorbs about
+/// `lag + 1` blocks per check latency: the lag is three quarters of a
+/// generation, which keeps the check latency off the critical path. A block
+/// is released `lag + 2` blocks ahead of the next one to return, so the
+/// engines always have work queued. With a single block per generation the
+/// decision cannot run ahead of the absorption.
 fn steady_blocks(population: usize) -> (usize, usize, usize) {
-    let size = population.div_ceil(8).max(1);
+    let size = population.div_ceil(16).max(8192).min(population.max(1));
     let blocks = population.div_ceil(size);
-    (size, (blocks / 2).max(2), usize::from(blocks >= 2))
+    let lag = if blocks >= 2 {
+        (blocks * 3 / 4).clamp(1, blocks - 1)
+    } else {
+        0
+    };
+    (size, (lag + 2).min(blocks.max(2)), lag)
 }
 
 /// Stores a finished unit, offers it to the archive, breeds replacements into
