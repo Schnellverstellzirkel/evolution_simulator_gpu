@@ -21,14 +21,13 @@ Product:
 - The search is deterministic for a fixed seed on one GPU.
 - Saves are small (archives and search state), and the game writes as few files as possible. Autosave is off. Breaking old saves is fine: bump `qd::VERSION` when archive or physics semantics change, and the save header turns older saves down with a message.
 - Speed matters. The goal is 2M, then 4M, evaluated creatures per second in the graphical game at 60 FPS.
-- Search changes rest on evidence (papers and practice) and must not break the search. Test each one with a paired A/B at equal evaluation budgets over 3 seeds, and report best distance, QD score and the top-50 body mix.
-- Physics v2 is the game (since 2026-09-29). New physics features go into v2. A physics change updates every GPU kernel, WGSL and CUDA together. CPU ports may differ.
+- The current game is the reference, not the past. A change stays if the game is better or faster now, shown by a direct measurement of that change on its own. No comparison to an earlier version is needed, and nobody writes experiment reports. Search changes rest on papers and practice and must not break the search.
+- There is one physics (`docs/physics.md`). A physics change updates every GPU kernel, WGSL and CUDA together. CPU ports may differ.
 - Posture rules (for example what counts as a fall) need the owner's approval.
 
 Working:
 
 - Commit small and push often, about every 20 minutes of work. Plain commit messages say what changed, why, and what was measured.
-- Run the full test suite once per push, not after every edit. Stop an A/B once 3 seeds decide it.
 - Write plainly in commits, docs and reports.
 
 ## How work is organized
@@ -52,17 +51,14 @@ Use absolute paths, because `git -C` resolves a relative worktree path against t
 - Speed measurements pause the owner's game while they run: `flock -x target/gpu.lock tools/pause-game.sh tools/cpu-slot.sh <bench>`. The game stops evaluating and breeding and closes its GPU engines, so the GPU memory is free, and it resumes when the command ends. A pause lasts at most 5 minutes, so a measurement must fit in 5 minutes or be split. After a pause the game runs at least 2 minutes before it pauses again. `docs/building.md` has the details.
 - Screenshot runs (`EVOLUTION_SMOKE_*`, see `src/ui.rs`) open real windows on the owner's desktop titled "agent screenshot run, not your game". Keep them to seconds and look at every screenshot yourself.
 
-## Build, test, run
+## Build
 
 - Iteration build: `cargo build --profile release-fast` (LTO off, 256 codegen units, incremental). Use the normal release profile (thin LTO) for performance measurements.
-- Before committing: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test --release`.
-- GPU tests are `#[ignore]`d. Run them with `cargo test --release --test simulation -- --ignored`, plus `tests/gpu_repeatability.rs` and the ignored tests in `tests/screening.rs`.
-- Run `examples/first_generation` before pushing any physics change. It reports random-population distances (median, p99, best) and catches free propulsion.
-- `docs/building.md` has the build details and the list of environment variables.
+- GPU tests are `#[ignore]`d. `docs/building.md` has the build details and the environment variables.
 
 ## Code map
 
-Physics v2 is the game's physics:
+The physics:
 
 - `shaders/physics2_creature.wgsl` is the GPU kernel for Vulkan, driven by `src/vk_engine.rs` and `src/gpu.rs`.
 - `shaders/physics2_creature.cu` is its CUDA mirror, used on NVIDIA when the driver and NVRTC load, driven by `src/cuda_engine.rs`. It mirrors the WGSL section by section; change both together.
@@ -70,7 +66,7 @@ Physics v2 is the game's physics:
 - `src/cpu_v2.rs` is the fast CPU engine (16 creatures with one skeleton per SIMD group, `src/simd.rs`), bit-equal to the prototype (`tests/physics2_lanes.rs`). It scores CPU-only games and GPU failover. `src/cpu_engine.rs` is the thin front (`evaluate`, `replay`, `trajectory`, `transport_cost`).
 - `src/physics.rs` holds what the physics and the UI share: limits, fidelity, node and joint constants, the ground functions (bumps, slope, gaps, hurdles, quake), screening.
 - `src/engine.rs` picks the backend and records replays with the scoring kernel (frames carry the muscle energy, muscle force and contact forces). `src/creature_kernel.rs` holds the GPU data layout (`LaneBatch`, `Params`, `GpuResult`, `frame_stride`) and builds the CUDA sources.
-- `docs/physics-v2.md` describes the model: contacts (the deepest 4 per step), friction that may never do positive work, the plant pass, and muscle strength scaled to the mass a muscle moves.
+- `docs/physics.md` describes the model: contacts (the deepest 4 per step), friction that may never do positive work, the plant pass, and muscle strength scaled to the mass a muscle moves.
 
 Search and game state:
 
@@ -84,27 +80,24 @@ Search and game state:
 
 ## Measurement tools
 
-- `examples/search_ab.rs`: paired fixed-seed search runs through the production archive and breeding path, on the CPU or with `--gpu` through the game's GPU path. At 100k creatures a 6-seed mean detects only about 30% in QD; use 12 or more seeds for smaller effects (`docs/search-research.md` section 15).
+- `examples/search_ab.rs`: fixed-seed search runs through the production archive and breeding path, on the CPU or with `--gpu`.
 - `EVOLUTION_STAGE_LOG=<path>`: one CSV row per generation (evaluation, archive and breeding seconds, end-to-end rate).
-- `examples/size_report.rs <save> [count]`: body length, mass and foot slip for the best elites. `EVOLUTION_LEDGER=1` adds where forward momentum comes from.
+- `examples/size_report.rs <save> [count]`: body length, mass and foot slip for the best elites.
 - `examples/mutation_audit.rs`: how much of its parent's distance each operator's child keeps.
-- `examples/physics_audit.rs`: energy, friction and momentum ledgers per elite under v2. `tests/physics_audit.rs` guards against solver-made energy and friction exploits.
-- `examples/effect_cost.rs`, `examples/mem_report.rs`, `examples/body_stats.rs`, `examples/momentum_ledger.rs`.
+- `examples/physics_audit.rs`: energy, friction and momentum ledgers per elite. `examples/first_generation.rs`: random-population distances, which show free propulsion.
+- `tools/pause-game.sh`: pauses the owner's game for a speed measurement (`docs/building.md`).
 
 ## Docs
 
 - `README.md`: for players.
-- `docs/architecture.md`, `docs/building.md`, `docs/validation.md`.
-- `docs/search-research.md`: every search experiment and its numbers. Add yours.
-- `docs/performance-log.md`: every performance measurement, including rejected ideas. Add yours.
-- `docs/research-2026-09-29.md`: literature survey with ranked ideas for search quality and throughput.
-- `docs/hpc-assessment.md`, `docs/data-architecture.md`, `docs/phase0-measurements.md`: GPU limits and the v2 data design.
-- `docs/anatomy-operators.md`, `docs/ux-audit.md`.
+- `docs/architecture.md`, `docs/physics.md`, `docs/building.md`, `docs/anatomy-operators.md`.
+- `docs/design-decisions.md`: what the game does in search, physics and speed, and the number behind each choice.
+- `docs/rejected-ideas.md`: real dead ends with their numbers. Add one or two lines only when someone would retry the idea.
 - `docs/backlog.md`: open work.
 
 ## Measured and rejected
 
-Do not redo these without a new reason. The numbers are in `docs/performance-log.md` and `docs/search-research.md`.
+The full list is in `docs/rejected-ideas.md`. Do not redo these without a new reason:
 
 - 30 Hz physics: the search gains were integrator exploits. 60 Hz stays.
 - Muscle mass (5 variants): none held muscle counts down, and best distance fell by half.

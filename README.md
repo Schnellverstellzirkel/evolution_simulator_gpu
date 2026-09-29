@@ -76,15 +76,15 @@ The **Catastrophe** row adds **Meteor strike**, which removes about half the eli
 
 ## Creatures and search
 
-Bodies begin with 3–5 nodes connected by a tree of bones. Defaults allow growth to 32 nodes and 96 muscles; configuration supports up to 64 nodes and 256 muscles. Bones and muscle lengths are capped at 2 m by default. Muscles attach along bones, share a rhythm period, and provide active drive only while contracting. Their energy stores deplete with work and recover over time. Bone mass grows with length squared and is included in each engine's node masses. Touchdown sensors can reset muscle rhythms when a foot lands.
+Bodies begin with 3 to 5 nodes connected by a tree of bones. Bodies grow to 32 nodes and 96 muscles by default, and bones and muscles are at most 2 m long. Muscles attach along bones, share one rhythm period, and pull only while contracting. Their energy stores deplete with work and recover over time. Bone mass grows with length squared. Touchdown sensors can reset muscle rhythms when a foot lands. The physics is an articulated tree in reduced coordinates, so every bone keeps its exact length. See [physics](docs/physics.md).
 
-Grounded nodes resist movement during bone and velocity constraints, so the body can pivot over planted feet. A friction cap limits the center-of-mass displacement this can produce, and ground support includes floor clamps and whole-body lift. A fall, a joint driven too far past its range, or head acceleration averaged over about 0.1 seconds exceeding 8 g ends scoring at the distance reached. These physical limits leave distance as the sole objective.
+A fall, a joint driven too far past its range, or head acceleration above 8 g ends scoring at the distance reached. Distance is the only objective.
 
-Each behavior archive has 1,440 possible niches for ground contact, gait cadence, mean body height, and feet that touch down and lift off. Vertical oscillation is recorded but has one archive bin. Each island keeps a separate 64-entry morphology reserve that gives its new topologies offspring opportunities without adding to behavior coverage or QD score. Four islands are fully isolated: they never receive migrants, and their children take parents and mates only from their own archive. Every 25 generations a fifth island, the hub, receives copies of each isolated island's fastest tenth of elites and breeds from them with its own. Nothing flows from the hub back. The global archive records every island's elites for display and saves, and no parent comes from it. CMA, structural, and novelty emitter shares adapt to archive discoveries and improvements; immigrants seed empty archives.
+Each behavior archive has 1,440 niches for ground contact, gait cadence, body height and feet that touch down and lift off. Four islands are fully isolated: they never receive migrants and their children take parents and mates only from their own archive. Every 25 generations a fifth island, the hub, receives copies of each isolated island's fastest tenth of elites and breeds from them with its own. Nothing flows back. The global archive records every island's elites for display and saves, and no parent comes from it. Each island keeps a 64-entry reserve of new body plans. CMA, structural and novelty emitters share the offspring, and immigrants seed empty archives.
 
-Potential archive entrants receive a perturbed trial at four times the standard physics rate and solver passes. The selected evaluation engine's standard result and this check determine archive fitness and behavior. In the full-performance run, both are GPU evaluations; CPU playback or comparison never edits the score or descriptor.
+A standard trial stops at 5 s when the creature is below the bar, the 5 s distance the top 20% reached. A screened creature enters no archive. Every creature that could enter an archive also gets a check trial from a perturbed pose at four times the physics rate, and its fitness is the lower distance. Both are GPU evaluations and the GPU score is final.
 
-Replays are recorded by the GPU that scores the archive (`engine::replay`): the scoring kernel with a frame output, on a submission slot and queue of its own, so the replay shows the trial and the distance the archive holds. A CPU-only game replays on the CPU engine (`cpu_engine::replay`). Cross-engine comparisons are optional diagnostics, not a physics-change acceptance gate. See [architecture](docs/architecture.md) for the execution paths.
+Replays are recorded by the GPU that scores the archive (`engine::replay`): the scoring kernel with a frame output, so the replay shows the trial and the distance the archive holds. A CPU-only game replays on the CPU engine. See [architecture](docs/architecture.md) and [design decisions](docs/design-decisions.md).
 
 ## Headless experiments and diagnostics
 
@@ -98,14 +98,14 @@ nice -n 10 cargo run --release --example size_report -- runs/seed-38-100k.evo 10
 nice -n 10 cargo run --release --example search_ab -- 2 64 0.5 38,39 --tag baseline
 ```
 
-`--generations` counts additional generations when resuming. `--config PATH` loads a JSON preset, `--duration` overrides trial duration for a new experiment, and `--checkpoint PATH` chooses the save destination. Ctrl+C requests a stop and checkpoint after the current evaluation call returns. `size_report` reports elite geometry, mass, travel, and foot slip; `EVOLUTION_LEDGER=1` adds momentum diagnostics. `search_ab` runs fixed-seed CPU-only A/B generations and prints best distance, QD score, archive cells, and the top-50 body mix; see [search research](docs/search-research.md).
+`--generations` counts additional generations when resuming. `--config PATH` loads a JSON preset, `--duration` overrides trial duration for a new experiment, and `--checkpoint PATH` chooses the save destination. Ctrl+C requests a stop and checkpoint after the current evaluation call returns. `size_report` reports elite geometry, mass, travel, and foot slip; `EVOLUTION_LEDGER=1` adds momentum diagnostics. `search_ab` runs fixed-seed generations through the production archive and breeding path and prints best distance, QD score, archive cells, and the top-50 body mix.
 
 ```bash
 nice -n 10 cargo run --release -- benchmark --populations 1000,100000 --duration 60 --generations 3
 nice -n 10 cargo run --release -- analyze runs/seed-38-100k.evo --output runs/analysis.json --champion runs/champion.json
 ```
 
-`benchmark --cpu` adds CPU timings. `search-benchmark` supports fixed seeds and paired search variants; see [search benchmark notes](docs/search-benchmark.md). Historical results in that document and [search research](docs/search-research.md) predate the current physics and should be remeasured before drawing conclusions about today's search.
+`benchmark --cpu` adds CPU timings.
 
 For complete-generation timing in the graphical app:
 
@@ -117,21 +117,19 @@ This starts evolution, prints stage timings, and closes after the requested gene
 
 ## Save and resume
 
-Versioned `.evo` files store the current population, evaluation progress, archives, emitter and CMA state, settings, seed, lineage, and history using a compressed binary payload. Temporary writes are flushed and renamed. V4 checkpoints also retain island optimizer progress so continuation preserves its stall history; V3 files remain readable. Compatible older checkpoints can keep their population while obsolete archives are cleared and reevaluated. Current physics uses QD version 19, so archives from the earlier version-16 baseline are invalidated on load; not every historical format is guaranteed to load.
+A save holds the settings, generation, history, archives, emitter and CMA state and lineage. It holds no population, so it is small, and loading breeds the next generation from the archives. Each save starts with a header that carries the physics version, so an older save is turned down with a message before it loads.
 
-The dashboard writes no files on its own: autosave is off by default, and a loaded game starts with it off. When the player turns on File > Autosave every 10 generations, autosaves go to `runs/seed-<seed>-auto.evo` in a background thread, and the three newest experiment autosaves are kept. Manual saves can preserve partial-generation progress. Wait for a requested manual save to report completion before closing the app. Headless runs write to their chosen checkpoint path and also export history CSV.
+The dashboard writes no files on its own: autosave is off by default, and a loaded game starts with it off. When the player turns on File > Autosave every 10 generations, autosaves go to `runs/seed-<seed>-auto.evo` in a background thread, and the three newest experiment autosaves are kept. Wait for a requested manual save to report completion before closing the app. Headless runs write to their chosen checkpoint path and also export history CSV.
 
 ## Checks
 
-Use the workstation environment above, with serial test execution to avoid overlapping CPU evaluation pools:
+Use the workstation environment above:
 
 ```bash
 nice -n 10 cargo fmt --all --check
 nice -n 10 cargo clippy --locked --all-targets -- -D warnings
-RUST_TEST_THREADS=1 nice -n 10 cargo test --locked --release
-RUST_TEST_THREADS=1 nice -n 10 cargo test --locked --release --test simulation -- --ignored
+nice -n 10 cargo test --locked --release
 ```
 
-GitHub Actions runs formatting, clippy, and release CPU tests on Ubuntu, with the portable CPU vector implementation. GPU tests remain ignored during CI and must be run explicitly on the workstation. CPU/GPU comparisons are optional diagnostics, not a GPU physics gate. Physics changes also require the random-population propulsion diagnostic, `nice -n 10 cargo run --release --example first_generation`, with the same workstation environment. This is a diagnostic against solver-created propulsion, not a proof of energy conservation.
 
-See [architecture](docs/architecture.md), [validation](docs/validation.md), [performance log](docs/performance-log.md), and the owner's current [agent notes](AGENTS.md) for implementation details, measured results, and open work.
+See [architecture](docs/architecture.md), [physics](docs/physics.md), [building](docs/building.md), [design decisions](docs/design-decisions.md), [rejected ideas](docs/rejected-ideas.md), and the owner's [agent notes](AGENTS.md). Open work is in [backlog](docs/backlog.md).

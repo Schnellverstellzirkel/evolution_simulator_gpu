@@ -1,107 +1,59 @@
 # Architecture
 
-## Modules and execution paths
+## Modules
 
 | Module | Responsibility |
 | --- | --- |
-| `config` | Validated, serializable experiment settings; defaults are 3M creatures and 20 s trials |
-| `evolution` | Arena-packed genomes, deterministic creation and breeding, body repair |
-| `qd` | Behavior niches, elite archives, emitter allocation, diagonal CMA state |
-| `physics` | Shared masses, geometry, limits, and fidelity settings; also an older scalar simulator |
-| `cpu_engine`, `simd` | Production CPU evaluation and recorded replay trajectories, in groups of 16 creatures |
-| `creature_kernel` | Body-size buckets and packed GPU inputs |
-| `vk_engine` | Vulkan buffers, shader compilation, pipelines, and dispatch |
-| `engine`, `scheduler`, `gpu` | Threaded evaluation devices, work scheduling, and the evaluation front end |
-| `environment` | Reversible ground, gravity, air, grip, heat wave, drought, slope, wind, mud, gaps, hurdles, and earthquake levels, plus the Off/Slow/Normal/Fast seasons rotation |
-| `storage` | Experiment stages, GPU-result archive admission, islands, catastrophes, history, checkpoints, migrations |
-| `worker` | Background evolution, command handling, snapshots, and autosaves |
-| `ui` | egui dashboard and creature playback |
+| `config` | Validated, serializable experiment settings. The game runs 3M creatures and 20 s trials |
+| `evolution`, `evolution/anatomy` | Arena-packed genomes, deterministic creation and breeding, body repair, mutation operators |
+| `qd` | Behavior niches, elite archives, emitters, diagonal CMA state, the morphology reserve, `qd::VERSION` |
+| `physics` | Limits, node masses, joint constants, the ground functions, screening |
+| `physics2` | The scalar reference of the physics, the kernel source builders, the packing and the recording edits for replays |
+| `cpu_v2`, `cpu_engine`, `simd` | The fast CPU engine (16 creatures per SIMD group), and its front for evaluation, replays and trajectories |
+| `creature_kernel` | GPU data layout (`LaneBatch`, `Params`, `GpuResult`) and the CUDA source builders |
+| `vk_engine`, `cuda_engine`, `gpu` | The Vulkan and CUDA backends and the evaluation front end |
+| `engine`, `scheduler` | Device threads, replays, GPU failure and out-of-memory recovery, work units, contender checks |
+| `environment` | Environment effects, presets and the seasons rotation |
+| `storage` | The `Experiment`: islands, emitters, breeding, migration, contender checks, catastrophes, history, saves |
+| `worker` | The background evolution thread and the snapshot the UI draws |
+| `ui`, `dev_pause` | The egui dashboard and playback. The developer pause used by measurement tools |
 
-The production scoring path is `shaders/physics2_creature.wgsl` (Vulkan) and its CUDA mirror `shaders/physics2_creature.cu`. In a GPU run, its result and the GPU fine check own fitness and behavior descriptors; CPU evaluation never validates, caps, or relocates a GPU score. `cpu_v2` (16 creatures per SIMD group, bit-equal to the scalar reference `physics2::run`) remains for CPU-only operation and failover. Replay calls `engine::replay`. With a GPU it sends the creature to the primary GPU's engine thread, which runs the recording kernel (`physics2::record_source` or `creature_kernel::cuda_record_source`: the scoring kernel plus a frame output in binding 7 holding the node positions, the muscle energy and force, and the contact forces) on a submission slot and queue kept for replays, and returns the frames and the result of that same run. Without a GPU, or when the GPU does not answer within 3 s, it falls back to `physics2::replay_forces`, which returns recorded frames, forces and a CPU result from one stepping loop; `cpu_engine::trajectory` is the frames-only wrapper.
+## Scoring and replays
 
-## Physics and scoring
+The GPU scores every creature. `shaders/physics2_creature.wgsl` (Vulkan) and its CUDA mirror `shaders/physics2_creature.cu` run one creature per lane, bucketed by node capacity (3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48 and 64). CUDA is used on NVIDIA when the driver and NVRTC load. The GPU result and the GPU contender check are final: no CPU run validates, caps or moves a GPU score. The CPU engine scores CPU-only games and takes over units of a GPU that fails.
 
-Standard fidelity uses 60 steps/s, two bone position-projection passes, and one velocity-constraint pass. These are fixed in `physics::rate` and `physics::solver_passes`. Settling lasts about 1.67 s (100 standard steps), before the timed trial. Settling disables gravity and contacts; the body is then centered horizontally by mass, placed on the ground, and its velocities reset.
+`engine::replay` sends the creature to the primary GPU's engine thread. It runs the scoring kernel with a frame output (node positions, muscle energy and force, contact forces) on a slot and queue of its own, and returns the frames and the result of that same run. Without a GPU, or when the GPU does not answer in time, the replay runs on the CPU engine.
 
-A skeleton is a connected tree of rigid bones. Bone order is normalized parent-first and muscle anchors are remapped to preserve attachment positions. Each muscle joins two bones at normalized positions along them; forces distribute to the endpoints according to those positions. Joint ranges constrain bending. Bones can also carry organs, whose mass is distributed to their endpoint nodes according to attachment position.
+## Evaluation flow
 
-`physics::body` combines three mass contributions: a node's own mass, half of each incident bone's mass, and its share of organ mass. Node mass is `0.1 * (diameter / 0.08)^2` kg, clamped to 0.02–10 kg. Bone mass is `bone_density * rest_length^2`, with default density 4 kg/m². All packing and evaluation paths use these combined masses.
+A generation moves through `Ready`, `Evaluating`, `Evaluated`, `Archived` and back. The worker handles UI commands and evaluation results separately. The scheduler gives each healthy device bounded work units of about 1 s and sizes them from measured rates. Each device runs one contender-check unit at a time. Results arrive out of order, and the worker absorbs them in a fixed order so a fixed seed repeats.
 
-Default limits from `physics::Limits::DEFAULT` are:
+A standard trial stops at 5 s when the creature is below the bar, the 5 s distance the top 20% reached. A screened creature enters no archive. Every creature that could enter an archive or a reserve gets a check trial from a perturbed pose at four times the rate and solver passes, and its fitness is the lower distance. Screening and checks are in the kernel and the scheduler (`physics::screen_seconds`, `scheduler::check_verdict`).
 
-| Quantity | Default |
-| --- | --- |
-| Bone length and muscle long length | 2 m |
-| Muscle target speed | 24 m/s |
-| Muscle force magnitude | 100 N |
-| Node speed | 60 m/s |
-| Bone angular speed | 40 rad/s |
-| Minimum rhythm period | 0.2 s |
-| Muscle energy store | 120 J |
-| Recovery | 0.5 of missing energy per second |
+A failed GPU is retired and its unfinished units, including pending checks, run on the CPU engine with the same creatures and settings. A GPU out of memory keeps the unit, frees idle buffers and retries with fewer units in flight.
 
-The environment effects scale these two baselines per run: `Config::muscle_energy` multiplies the store (heat wave, 1.0 down to 0.35) and `Config::muscle_recovery` multiplies recovery (drought, 1.0 down to 0.1). Both default to 1.0, and every engine applies them to the shared `Limits` values. Six further effects change the world instead of the limits. `Config::slope` (0.0 flat, 0.03 to 0.25 uphill) adds the linear term `slope * x` to the terrain height and `slope` to its local slope; a disabled ground ignores it. `Config::wind` (0.0 calm, -1 to -6 m/s² headwind) adds a steady horizontal acceleration to every live node in the same integration step that applies gravity. `Config::mud` (0.0 dry to 0.10 m deep) lowers every contact floor by that sink depth. A contacting node then sinks below its dry floor by up to the local depth in meters; that sink, divided by `MUD_FULL_DEPTH = 0.10 m`, scales the effective normal push by `1 + MUD_NORMAL * sink`, scales the friction budget by `1 + MUD_GRIP * sink`, and removes a `MUD_DRAG * sink` share of horizontal velocity per second. A node clear of the surface reads zero, so a lifted foot pays nothing and shallower mud drags proportionally less. `Config::gaps` (0.0 solid to 1.5 m opening) cuts periodic trapezoidal pits of depth `GAP_DEPTH = 2 m` into the ground, with a short wall run of `GAP_RUN = 0.15 m` and a center spacing of `2 + 4 * width` meters; pit centers sit at odd multiples of half the spacing, so x = 0 is solid ground. `Config::hurdles` (0.0 clear to 0.35 m tall) raises periodic steps centered every `HURDLE_SPACING = 3 m`: a ramp up, a `HURDLE_TOP = 1.2 m` flat top, and a ramp down, with `HURDLE_RUN = 0.2 m` ramp walls so the floor never jumps. `Config::quake` (0.0 still to 0.25 m) gives every creature its own bumps: a hash of its id selects a phase in wave turns (a 16-bit fraction, exactly representable) and an amplitude jitter from 0.6 to 1.4, which scale `Config::quake` on top of the shared roughness. The phase and jitter are deterministic, so a replay and both engines give one creature one ground; the packed hash travels in the last word of the GPU `creature_info` record. `physics::ground` combines bumps, per-creature phase, slope, pits, and steps in one sample; `physics::gaps` and `physics::hurdles` define the pit and step profiles, and `physics::quake_hash`, `physics::quake_phase`, and `physics::quake_scale` define the per-creature stream. None of these is a fitness term.
+## Archives and breeding
 
-Touchdown sensors can restart a muscle's rhythm when its chosen node lands. The active muscle drive is nonnegative and acts only while the target shortens. Lengthening supplies no active push; exhausted muscles have zero active drive. Relative-velocity damping remains part of the force. The current energy debit uses the absolute work of the combined force, including damping; charging only active contraction work remains open work.
+Each behavior archive has `6 x 8 x 1 x 6 x 5 = 1,440` niches: ground contact, gait cadence, vertical oscillation (one bin), logarithmic body height and lifted feet. A niche keeps its fastest eligible creature. New body plans are protected against a different topology for three generations.
 
-Each step integrates forces into predicted positions, projects bone lengths and ground contact, applies joint limits once per step, and rebuilds the tree at exact bone lengths. Grounded nodes are weighted more heavily during the bone and velocity passes (`1 + STANCE_GRIP * node_grip * ground_friction`, with default `STANCE_GRIP = 10`), allowing the body to pivot over planted feet. Joint projection also favors a grounded side when only one side is grounded.
+There are five island archives and a global archive. Population slot `i` breeds for island `qd::island_of_slot(i, 5)`. Islands 1 to 4 are isolated: parents, mates, limb donors, reserve parents and CMA emitters all come from their own archive. Island 5 is the hub. Every 25 generations it receives copies of the fastest 10% of each isolated island's elites, and nothing flows back. The global archive collects every island's elites for display and saves, and no parent comes from it. Each island keeps a 64-entry morphology reserve of new body plans. It gets 10% of the island's structural-emitter trials and does not count toward coverage or QD score.
 
-The parent-first rebuild restores exact lengths and recenters by mass. If nodes penetrate the ground, it lifts the whole body; that lift is subtracted when reconstructing vertical velocity, making it a position-only correction. Floor clamps inside bone and joint passes accumulate into the per-node ground push. Per-node Coulomb friction uses that push, and the lift supplies an additional body-wide horizontal correction bounded by the contacting feet's weighted grip.
+Emitter shares start at 35% CMA, 35% structural and 30% novelty, and immigrants seed empty archives. Half the CMA parents come from the fastest 1% of their island. Each island also runs a separable CMA-ES on its fastest body plan and rotates to another fast design after 30 generations without an island record.
 
-Planting feet alone can create propulsion through weighted projections. The current solver caps the body's horizontal center-of-mass shift from the projection/rebuild stage to the grip coefficient times accumulated normal correction divided by body mass. It removes excess displacement with a rigid translation, so the feet slip when the budget is exhausted. Normal correction includes contacting-node pushes and the remaining body's share of whole-body lift. Velocity constraints then remove radial bone motion and bound rotation. This implementation is not a general proof of mechanical-energy conservation; `examples/first_generation` checks random bodies for excessive free propulsion after physics changes.
+Genomes live in contiguous arenas with per-creature offsets. Breeding writes children in batches straight into the arenas, and the generation boundary compacts them into a spare and swaps.
 
-The default environment has gravity 9.8 m/s², air velocity retention 1.0 per 1/60 s, ground-friction multiplier 1.5, node grip 0.65–1.0, node diameters 0.06–0.12 m, both muscle multipliers at 1.0, slope 0.0, wind 0.0, mud 0.0 m, gaps 0.0 m, hurdles 0.0 m, and quake 0.0 m. Terrain can add deterministic bumps, a linear climb, periodic pits, and periodic steps; the quake adds per-creature bumps on top. Creatures do not collide with one another.
+## Saves and catastrophes
 
-Fitness is horizontal center-of-mass displacement after centering the start pose. It has no posture factor, stepping multiplier, size penalty, or energy bonus. A head dropping below its neck base, a joint more than 0.5 rad beyond its range, or excessive head shaking records the distance at that event and disables muscle force. The shaking rule uses the magnitude of per-step head acceleration, exponentially averaged over about 0.1 seconds, with an 8 g limit (`HEAD_SHAKE_LIMIT = 78.4 m/s²`). Its accumulator starts after the initial 0.1 seconds of the timed trial; invalid/nonfinite states receive the failed-trial sentinel. Measured ground contact, vertical oscillation, cadence, body height, and lifted feet are behavior descriptors, separate from fitness.
+A save (magic header, then a compressed payload) holds the configuration, generation, history, archives, CMA and emitter state, lineage and the queued elites. It holds no population. Loading breeds the next generation from the archives. The header carries the physics version, so an older save is turned down before it loads. Autosave is off. Manual saves go through a temporary file that is flushed and renamed.
 
-## Contender checks and replay
+Meteor strike removes each elite with probability one half from every archive. Extinction clears the island with the slowest best elite. Both keep the removed entries as fossils in memory, and Undo returns them to empty cells or cells with a slower elite. Fossils are not saved.
 
-In the graphical worker, candidates that could enter the global archive, an island archive, or the topology reserve are held for a check. Optimizer offspring are also checked. The scheduler perturbs starting node positions by up to 2 cm and grip by ±10%, then evaluates at `Fidelity::fine()`: four times the standard rate and solver passes, with rate capped at 960 Hz. At the defaults this is 240 Hz, eight bone passes, and four velocity passes. The returned fitness is the lower distance from the standard and fine trials; descriptors remain from the standard trial.
+A world change collects pending work, invalidates old evaluations and queues each island's elites to be tested again under the new world in that island's own slots.
 
-The blocking `Gpu::evaluate_with_metrics` path, used by the headless CLI, has no archive callback and checks every evaluated candidate. `Scheduler::evaluate_single` explicitly bypasses the additional check for engine comparisons. The normal default is two trials for contenders.
+## Threads
 
-Archive admission uses the selected evaluator's result. A normal GPU run keeps the GPU standard score and behavior descriptors, then applies the GPU fine check to eligible contenders. Archive insertion does not run a CPU replay or adjust those values afterward.
+Evaluation and Rayon share a budget of half the logical CPUs, capped at eight. By default the GPU evaluates and all eight go to general workers (archive insertion, breeding, packing). CPU engines stand by for GPU failure and never score while a GPU is healthy. `EVOLUTION_DEVICES=primary` keeps evaluation off the desktop Radeon. The UI has its own render device and targets 60 FPS.
 
-`engine::replay` returns `(frames, result)` for playback at the supplied configuration's fidelity. On the GPU the result is bit for bit the standard trial the archive scored (test `gpu_replays_show_the_gpu_score`). The CPU fallback's result can differ from a GPU archive score; it does not change that score. Cross-engine comparisons remain optional diagnostics, not acceptance gates.
+## Checks
 
-## GPU and CPU scheduling
-
-The Vulkan kernel evaluates one creature per lane. Bodies are bucketed by node capacity: 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, and 64. Within each bucket, sorting by body size groups similar loop counts. Bones and muscles are packed as `[item][field][lane]` in 32-creature tiles. Each creature's `creature_info` record carries its node, bone, and muscle counts and, in the last word, the quake hash that selects its own ground phase and amplitude. Node state uses `[node][lane]` workgroup memory; node and bone constants use private arrays. Each muscle is evaluated once and scattered to its endpoint nodes in genome order.
-
-`vk_engine` uses ash and compiles WGSL through naga. It submits all independent bucket dispatches for a step range before inserting the next shared barrier. The default step range is 64. Two submission slots per device permit work to be queued while another unit runs. GPU allocation statistics count application buffers, not total driver VRAM.
-
-`Scheduler` gives devices bounded work units, uses measured rates to adjust their size, and handles node-capacity restrictions. In a GPU run it routes standard trials and fine checks to healthy GPU devices; CPU engines stand by for GPU failure. CPU-only runs use the CPU engine. Each device runs one fine-check unit at a time. Rates count standard-trial equivalents per busy wall second (a fine check counts eight), because units on the GPU's parallel queues overlap. Contenders for the same archive cell share one check at a time. Results can arrive out of order; the worker tracks completed flags and maintains a contiguous completed prefix for checkpointing. Contender checks are scheduled separately before their held standard results become final.
-
-Devices carry an explicit GPU or CPU kind and queued units carry a retry count. A GPU that reports a failure is retired, and every unfinished unit, including pending fine checks, is re-submitted to a healthy CPU engine with its exact population, configuration, trial kind and ticket order. A failed submission leaves its creatures in the round for the next engine. A failed CPU is terminal: results already completed are delivered first, then the error persists so no drain loop retries forever. If the primary GPU cannot open, `Scheduler::new` falls back to the CPU instead of failing; when `EVOLUTION_CPU_THREADS=0` disables the dedicated pool, the fallback evaluates on the general Rayon pool. Explicit `gpu_engine` constructors remain strict.
-
-On the owner's workstation, always set `EVOLUTION_DEVICES=primary`, which selects the primary compute GPU and excludes the desktop Radeon. Additional GPUs require an explicit `EVOLUTION_DEVICES` selection. Evaluation and global Rayon pools share one budget: half the available logical CPUs, capped at eight workers. By default no separate CPU evaluation pool exists: the eight workers serve archive insertion, breeding, and packing, while the reserve CPU engine stands by for failover. `EVOLUTION_CPU_THREADS=N` sizes a separate CPU failover pool, leaving at least one general worker; it does not score alongside a healthy GPU. Global workers honor `RAYON_NUM_THREADS` within the remainder, while `EVOLUTION_CPU_THREADS=0` releases the full budget to them. A one-worker budget disables scheduler CPU evaluation; an explicit CPU-only caller can still run one evaluation worker. The UI has its own wgpu render device and targets 60 FPS while evolving or playing back; `EVOLUTION_RENDER_GPU` and `EVOLUTION_UI_FPS` are diagnostic overrides.
-
-The CPU engine processes 16-lane groups. `simd` uses AVX-512 when enabled at compile time and a portable array implementation otherwise. Linux x86-64 builds select the local CPU through `.cargo/config.toml`; CI overrides that with a generic x86-64 target to exercise the fallback. CPU evaluation runs in a separate low-priority Rayon pool.
-
-## Archives, emitters, and memory
-
-Genomes are stored in contiguous arenas with per-creature offsets. Assembly and GPU upload use bounded chunks rather than retaining millions of separate heap-allocated creature objects. Defaults allow 32 nodes and 96 muscles per body; supported configuration maxima are 64 and 256.
-
-Each behavior archive has `6 × 8 × 1 × 6 × 5 = 1,440` cells: ground contact, gait cadence, vertical oscillation (one bin), logarithmic mean body height, and distinct nodes that touched down and subsequently lifted clear. The latter excludes continuously dragged nodes. A cell retains its highest-fitness eligible creature, with source, topology, protection period, and visit count. New morphologies receive three generations of protection against a different topology. Novelty uses normalized distance to nearby archived behaviors; local competition compares fitness with nearby cells.
-
-Each island has its own reserve of up to 64 new topologies, filled only by its own children. Reserve parents get 10% of the island's structural-emitter trials when available and at least eight selected offspring opportunities before ordinary eviction. Reserve entries do not contribute to behavior coverage or QD score.
-
-There are five island archives. Population slot `i` breeds for island `qd::island_of_slot(i, 5)`, which is `i % 5`. Islands 1 to 4 are isolated: they never receive migrants, and their parents, crossover mates, limb donors, reserve parents and CMA emitters all come from their own archive. Island 5 is the hub. Every 25 generations it receives copies of the fastest 10% of each isolated island's behavior elites, which stay only in an empty cell or if they beat its occupant, and it breeds from its own archive like any island. Nothing flows from the hub back. The global archive collects every creature's offers for display, statistics and saves; no parent comes from it. CMA emitters carry their island, and an optimizer lends learned step sizes only to a new optimizer on the same island. Contender checks share a cell only among contenders of the same island. A world change queues each island's elites to be retested in that island's own slots. Initial emitter shares are 35% CMA, 35% structural, 30% novelty, and no immigrants once the archive is established; random immigrants seed empty archives. Reward-based allocation adapts these shares. Structural mutations can split or duplicate limbs, retime oscillators, and rescale bodies. Half the CMA parents come from the fastest 1% of their island; half of those offspring use island optimizers. Optimizers search fixed body plans and rotate to other fast designs after 30 generations without an island record.
-
-History retains summary statistics, centimeter fitness bins, body-size counts, settings, and representative creatures. The current population, archive, islands, CMA state, lineage, and completed evaluation boundary are checkpointed. QD/physics semantics are currently version 19 in `qd::VERSION`; loading supported older states repairs their population and clears obsolete archives before reevaluation. Historical results remain records of their original rules.
-
-## Catastrophes
-
-`Experiment::meteor(0.5)` independently removes each elite with probability one half from the global archive and every island. `Experiment::extinction` clears the nonempty island with the slowest best elite. Both keep the removed entries as fossils with their archive identity. `undo_meteor` returns fossils only to empty cells or cells containing a slower elite, then rebuilds affected indices. The Environment panel exposes Meteor strike, Extinction, and Undo through worker commands. These operations open archive space; they do not change fitness. Fossils are runtime-only (`serde(skip)`), so undo history is not restored from a checkpoint.
-
-## State and storage
-
-The normal generation path is `Ready → Evaluating → Evaluated → Archived → Ready`. Guided mode pauses between evaluation, archive insertion, and offspring creation; continuous mode repeats them. The worker services UI commands and asynchronous evaluation completions separately. World changes collect pending work, invalidate old evaluations and archives, and queue each island's elites to be retested in its own slots. Generational breeding restores those queued elites before submitting slices to evaluation devices. When the Seasons level is on, a generation boundary that is a multiple of its interval (20, 10, or 5 generations) applies one deterministic step of `environment::season_rotation` to the next generation's config before breeding, so the normal world-change path re-tests the archive; `Config::season_step` records the rotation position and travels in checkpoints.
-
-V4 checkpoints use a versioned header, compressed binary payload, and checksum. The V4 resume record stores `island_progress`, preserving the optimizer's stall history; V3 remains readable without that metadata. Old QD-version loads clear obsolete global/island archives, optimizer progress, and queued reseeds before reevaluation. Version-16 baseline files therefore cannot preserve their archives under current version-19 physics. A temporary file is flushed and renamed into place. Dashboard autosaves are off by default (also after loading) and run in a background thread when the player sets an interval; rotation keeps the three newest `seed-*-auto.evo` files and clears stale autosave temporary files. The headless CLI saves to its selected checkpoint path. A save contains current progress, so resume avoids repeating completed evaluations when its semantics are still current.
-
-## Validation and build profiles
-
-`cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked --release` are the CPU CI gates. `.github/workflows/ci.yml` runs them on Ubuntu with eight build jobs, serial test execution, and low process priority. It requests up to eight global Rayon threads and six CPU evaluation threads; the game divides its shared CPU budget between the two pools. GPU tests remain ignored and run locally with `cargo test --release --test simulation -- --ignored` and the workstation environment above.
-
-The `release-fast` Cargo profile inherits release optimization but sets `lto = false`, `codegen-units = 256`, and `incremental = true`. It is intended for iteration, adds no linker requirement, and leaves the thin-LTO release profile unchanged. Use consistent profiles and physics settings when comparing measured performance. Current and historical measurements are recorded separately in [validation](validation.md) and the [performance log](performance-log.md).
+CI runs `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings` and the release CPU tests on Ubuntu with the portable SIMD fallback. GPU tests are ignored and run on the workstation.
