@@ -129,7 +129,11 @@ fn main() -> anyhow::Result<()> {
     };
     let worlds = [
         ("heat", world(|c| c.muscle_energy = 0.35), 0.25),
-        ("drought", world(|c| c.muscle_recovery = 0.1), 0.25),
+        (
+            "drought",
+            world(|c| c.muscle_recovery = evolution_simulator::environment::DROUGHT[3]),
+            0.25,
+        ),
         ("uphill", world(|c| c.slope = 0.25), 0.12),
         ("headwind", world(|c| c.wind = -6.0), 0.12),
         ("chasms", world(|c| c.gaps = 1.5), 0.45),
