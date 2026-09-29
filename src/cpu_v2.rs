@@ -272,6 +272,7 @@ pub struct Group {
     total_mass: F,
     inv_mass: F,
     muscle_scale: F,
+    air_drag: f32,
     muscles: Vec<Mus>,
     amplitude: [f32; L],
     quake_phase: [f32; L],
@@ -336,6 +337,7 @@ impl Group {
             total_mass: collect(&|m| m.total_mass),
             inv_mass: collect(&|m| m.inv_mass),
             muscle_scale: collect(&|m| m.muscle_scale),
+            air_drag: m0.air_drag,
             muscles: (0..kmax)
                 .map(|k| {
                     let has = |l: usize| l < real && models[l].muscles.len() > k;
@@ -769,6 +771,26 @@ impl Sim<'_> {
             let j = i.saturating_sub(1);
             self.sc.force[j] = self.sc.force[j].add(force_at(rel(self.s.pos[i]), f));
         }
+        // Air drag on every bone, at its midpoint. The push is limited so a
+        // step of drag never more than halves the speed it acts on.
+        let mut air_impulse = [zero(); 2];
+        for j in 0..b {
+            let (p, c) = (g.pivot[j], j + 1);
+            let (sp_, sc_) = (self.s.pos[p], self.s.pos[c]);
+            let (vp, vc) = (self.s.vel[p], self.s.vel[c]);
+            let half = sp(0.5);
+            let mid = [half * (sp_[0] + sc_[0]), half * (sp_[1] + sc_[1])];
+            let v = [half * (vp[0] + vc[0]), half * (vp[1] + vc[1])];
+            let speed = (v[0] * v[0] + v[1] * v[1]).sqrt();
+            let width = g.radius[p] + g.radius[c];
+            let strength = (sp(g.air_drag) * g.length[j] * width * speed)
+                .min(half * g.mass[c] * rate)
+                .max(zero());
+            let f = [-v[0] * strength, -v[1] * strength];
+            self.sc.force[j] = self.sc.force[j].add(force_at(rel(mid), f));
+            air_impulse[0] += f[0] * dt;
+            air_impulse[1] += f[1] * dt;
+        }
         // Muscles: the drive and damper, applied at the attachment points.
         for k in 0..g.muscles.len() {
             let m = &g.muscles[k];
@@ -852,8 +874,8 @@ impl Sim<'_> {
             self.sc.bias[j] = self.sc.bias[j].sub(self.sc.force[j]);
         }
         self.solve();
-        let mut impulse = sp(cfg.wind) * g.total_mass * dt + mud_impulse;
-        let mut impulse_y = sp(-cfg.gravity) * g.total_mass * dt;
+        let mut impulse = sp(cfg.wind) * g.total_mass * dt + mud_impulse + air_impulse[0];
+        let mut impulse_y = sp(-cfg.gravity) * g.total_mass * dt + air_impulse[1];
         let mut has_contact = M(0);
         if cfg.ground {
             has_contact = self.contacts(before, &mut impulse, &mut impulse_y, mud);
