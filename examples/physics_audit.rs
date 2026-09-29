@@ -51,6 +51,7 @@ fn main() {
     let mut total = [0.0f64; 16];
     let (mut tendon_muscles, mut all_muscles) = (0usize, 0usize);
     let mut with_muscles = 0usize;
+    let mut loads: Vec<(f32, [f32; 2])> = Vec::new();
     for k in 0..count {
         let rank = (elites.len() - 1) * k / (count - 1).max(1);
         let (archive_m, c) = &elites[rank];
@@ -59,6 +60,7 @@ fn main() {
         let mass: f32 = physics::nodes(c).iter().map(|n| n.mass).sum();
         all_muscles += c.muscles.len();
         tendon_muscles += c.muscles.iter().filter(|m| m.tendon > 0.0).count();
+        loads.push((mass, physics2::BONE_LOAD.with(|b| b.get())));
         let cost = cpu_engine::transport_cost(c, &cfg);
         let steps = energy[6].max(1.0);
         let fric = if energy[10] > 0.0 {
@@ -111,5 +113,20 @@ fn main() {
     println!(
         "muscles with an elastic tendon: {tendon_muscles} of {all_muscles} ({:.0}%)",
         100.0 * tendon_muscles as f64 / all_muscles.max(1) as f64
+    );
+    let quantile = |column: usize, q: f32| {
+        let mut v: Vec<f32> = loads.iter().map(|l| l.1[column]).collect();
+        v.sort_by(f32::total_cmp);
+        v[((v.len() - 1) as f32 * q) as usize]
+    };
+    println!(
+        "bone load over {} elites (max over steps and bones): force per section median {:.0} p90 {:.0} max {:.0} kN/m^2; moment per modulus median {:.0} p90 {:.0} max {:.0} kN/m^2",
+        loads.len(),
+        quantile(0, 0.5) / 1e3,
+        quantile(0, 0.9) / 1e3,
+        quantile(0, 1.0) / 1e3,
+        quantile(1, 0.5) / 1e3,
+        quantile(1, 0.9) / 1e3,
+        quantile(1, 1.0) / 1e3
     );
 }

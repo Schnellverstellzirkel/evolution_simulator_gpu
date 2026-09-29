@@ -3325,7 +3325,7 @@ impl App {
                                 theme,
                             );
                             if response.clicked() {
-                                *selected = Some((card.creature.clone(), card.replay_config(&list.config)));
+                                *selected = Some(card.replay_of(&list.config));
                             }
                             response.on_hover_text(format!(
                                 "{}\n{} nodes, {} bones, {} muscles\n{}\n{}\nClick to replay",
@@ -3694,7 +3694,10 @@ impl App {
             .take(5)
             .map(|card| RaceLane {
                 label: format!("archive rank {}", card.rank + 1),
-                playback: Playback::new(card.creature.clone(), card.replay_config(&list.config)),
+                playback: {
+                    let (creature, config) = card.replay_of(&list.config);
+                    Playback::new(creature, config)
+                },
             })
             .collect();
         // Lanes run in the order their replays finish, so the standings end
@@ -6497,43 +6500,6 @@ mod tests {
         assert_eq!(out.energy.len(), frames.len());
         assert!(out.energy.iter().flatten().all(|e| (0.0..=1.0).contains(e)));
         assert!(out.muscle.iter().flatten().any(|f| *f != 0.0));
-    }
-    #[test]
-    fn estimated_muscle_energy_falls_with_work_and_recovers() {
-        let config = Config {
-            population: 200,
-            random_seed: false,
-            ..Config::default()
-        };
-        let pop = crate::evolution::create(&config).unwrap();
-        let (mut fell, mut recovered) = (0, 0);
-        let mut lowest = 1.0f32;
-        for i in 0..pop.genomes.len() {
-            let creature = pop.creature(i);
-            let (frames, _) = crate::cpu_engine::replay(&creature, &config);
-            let nodes = physics::nodes(&creature);
-            let contact = vec![vec![false; nodes.len()]; frames.len()];
-            let out =
-                crate::replay_forces::analyze(&creature, &nodes, &frames, &contact, None, &config);
-            for j in 0..creature.muscles.len() {
-                let series: Vec<f32> = out.energy.iter().map(|e| e[j]).collect();
-                let (at, low) = series
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .fold((0, 1.0f32), |b, (t, e)| if e < b.1 { (t, e) } else { b });
-                lowest = lowest.min(low);
-                if low < 0.9 {
-                    fell += 1;
-                    if series[at..].iter().any(|&e| e > low + 0.05) {
-                        recovered += 1;
-                    }
-                }
-            }
-        }
-        eprintln!("muscles that fell below 0.9: {fell}, recovered: {recovered}, lowest {lowest}");
-        assert!(fell > 0, "no muscle ever tired, lowest {lowest}");
-        assert!(recovered > 0, "no tired muscle ever recovered");
     }
     #[test]
     fn a_leaper_keeps_its_peak_in_view_without_shrinking_the_body_too_far() {

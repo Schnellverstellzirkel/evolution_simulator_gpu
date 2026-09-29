@@ -555,6 +555,97 @@ impl Model {
     fn body_of(&self, n: usize) -> usize {
         n.saturating_sub(1)
     }
+
+    /// The largest load on any bone but the neck in one step, as force per
+    /// cross-section and bending moment per section modulus: what the bone
+    /// carries is the mass below its joint times its acceleration less every
+    /// external force on that part (gravity, wind, muscles across the boundary,
+    /// the ground), from the node accelerations of the step.
+    fn bone_loads(
+        &self,
+        pos: &[[f32; 2]],
+        vel: &[[f32; 2]],
+        s: &State,
+        sc: &Scratch,
+        cfg: &Config,
+        dt: f32,
+    ) -> [f32; 2] {
+        let n = self.mass.len();
+        let mut external = vec![[0.0f32; 2]; n];
+        for (i, f) in external.iter_mut().enumerate() {
+            f[0] += cfg.wind * self.mass[i];
+            f[1] -= cfg.gravity * self.mass[i];
+            // The ground's push on the node (flat ground).
+            f[0] += s.warm[i][1];
+            f[1] += s.warm[i][0];
+        }
+        for (k, m) in self.muscles.iter().enumerate() {
+            let point = |bone: usize, t: f32| {
+                let (p, c) = (self.pivot[bone], self.child[bone]);
+                (
+                    p,
+                    c,
+                    [
+                        pos[p][0] + (pos[c][0] - pos[p][0]) * t,
+                        pos[p][1] + (pos[c][1] - pos[p][1]) * t,
+                    ],
+                )
+            };
+            let (pa0, pa1, pa) = point(m.bone_a, m.anchor_a);
+            let (pb0, pb1, pb) = point(m.bone_b, m.anchor_b);
+            let d = [pb[0] - pa[0], pb[1] - pa[1]];
+            let len = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-6);
+            let pull = sc.muscle_force[k];
+            let f = [d[0] / len * pull, d[1] / len * pull];
+            for (node, w, sign) in [
+                (pa0, 1.0 - m.anchor_a, 1.0),
+                (pa1, m.anchor_a, 1.0),
+                (pb0, 1.0 - m.anchor_b, -1.0),
+                (pb1, m.anchor_b, -1.0),
+            ] {
+                external[node][0] += sign * w * f[0];
+                external[node][1] += sign * w * f[1];
+            }
+        }
+        let b = self.pivot.len();
+        let mut worst = [0.0f32; 2];
+        for j in 1..b {
+            // Nodes below the joint: the bone's child and its descendants.
+            let below = |i: usize| -> bool {
+                let mut bone = if i == 0 { return false } else { i - 1 };
+                loop {
+                    if bone == j {
+                        return true;
+                    }
+                    match self.parent[bone] {
+                        Some(p) if p != bone => bone = p,
+                        _ => return false,
+                    }
+                }
+            };
+            let pivot = pos[self.pivot[j]];
+            let (mut force, mut moment) = ([0.0f32; 2], 0.0f32);
+            for i in (1..n).filter(|&i| below(i)) {
+                let a = [
+                    (s.vel[i][0] - vel[i][0]) / dt,
+                    (s.vel[i][1] - vel[i][1]) / dt,
+                ];
+                let net = [
+                    self.mass[i] * a[0] - external[i][0],
+                    self.mass[i] * a[1] - external[i][1],
+                ];
+                force[0] += net[0];
+                force[1] += net[1];
+                let r = [pos[i][0] - pivot[0], pos[i][1] - pivot[1]];
+                moment += r[0] * net[1] - r[1] * net[0];
+            }
+            let width = self.radius[self.pivot[j]] + self.radius[self.child[j]];
+            let carried = (force[0] * force[0] + force[1] * force[1]).sqrt();
+            worst[0] = worst[0].max(carried / (width * width));
+            worst[1] = worst[1].max(moment.abs() / (width * width * width));
+        }
+        worst
+    }
 }
 
 /// A node that may touch the ground this step.
@@ -675,6 +766,11 @@ thread_local! {
     /// ground's normal impulses did on the nodes (impulse times the mean of
     /// the node's speed along the normal before and after the step), positive
     /// and negative; 14 and 15 the same for friction.
+    /// Largest bone loads of the last replay on this thread: force per
+    /// cross-section (N/m^2, force over the square of the bone's width) and
+    /// bending moment per section modulus (N/m^2, moment over the cube of the
+    /// width), over all steps and all bones but the neck (diagnostic).
+    pub static BONE_LOAD: std::cell::Cell<[f32; 2]> = const { std::cell::Cell::new([0.0; 2]) };
     pub static ENERGY: std::cell::Cell<[f64; 16]> = const { std::cell::Cell::new([0.0; 16]) };
     /// Steps of the last replay on this thread by how many nodes took part
     /// in the contact solve (0 to `MAX_CONTACTS`).
@@ -814,6 +910,11 @@ pub fn run_recorded(
         let time = step as f32 * dt;
         let head_before = s.vel[0];
         let before = momentum_x(&s);
+        let (pos_before, vel_before) = if diagnose {
+            (s.pos.clone(), s.vel.clone())
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let head_acc = simulate_step(model, cfg, &mut s, &mut sc, time, dt, air, &limits);
         let _ = head_acc;
         // The step leaves the node positions and velocities current; the
@@ -824,6 +925,16 @@ pub fn run_recorded(
         LEDGER.with(|l| l.set(ledger));
         WORK.with(|w| w.set(sc.work_total));
         if diagnose {
+            let loads = model.bone_loads(&pos_before, &vel_before, &s, &sc, cfg, dt);
+            BONE_LOAD.with(|b| {
+                let mut best = b.get();
+                if step == 0 {
+                    best = [0.0; 2];
+                }
+                best[0] = best[0].max(loads[0]);
+                best[1] = best[1].max(loads[1]);
+                b.set(best);
+            });
             let work: f64 = model
                 .muscle_lengths(&s)
                 .zip(&sc.muscle_length)

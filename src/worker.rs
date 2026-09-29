@@ -114,13 +114,9 @@ pub struct Card {
     pub fine: bool,
 }
 impl Card {
-    /// The world to replay this card in, from its list's world.
-    pub fn replay_config(&self, cfg: &Config) -> Config {
-        if self.fine {
-            crate::scheduler::check_config(cfg)
-        } else {
-            cfg.clone()
-        }
+    /// The creature and world of the trial this card's score came from.
+    pub fn replay_of(&self, cfg: &Config) -> (Creature, Config) {
+        qd::replay_of(&self.creature, self.fine, cfg)
     }
 }
 /// Something that happened to the experiment, for the UI's event feed.
@@ -917,7 +913,7 @@ fn run(
                                 .iter()
                                 .find(|elite| elite.creature.id == id)
                         {
-                            selected = Some((elite.creature.clone(), elite.replay_config(&e.config)));
+                            selected = Some(elite.replay_of(&e.config));
                         }
                     }
                     Command::Lineage(id) => {
@@ -1554,10 +1550,7 @@ fn run(
                 let key = best.map(|elite| (epoch, elite.creature.id));
                 if key != champion_key {
                     champion_key = key;
-                    champion =
-                        best.map(|elite| {
-                            Arc::new((elite.creature.clone(), elite.replay_config(&e.config)))
-                        });
+                    champion = best.map(|elite| Arc::new(elite.replay_of(&e.config)));
                 }
                 let live_best = best.map_or(f32::NAN, |elite| elite.fitness.max(0.0));
                 let live_median = {

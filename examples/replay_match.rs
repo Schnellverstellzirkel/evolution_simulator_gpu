@@ -1,5 +1,5 @@
-//! Prints the best elites' archive distance beside the distance of their
-//! replay, which must match. Usage: replay_match <save> [count]
+//! Prints the best elites' archive distance beside their GPU replay's, which
+//! must be equal. Usage: replay_match <save> [count]
 use anyhow::Result;
 use evolution_simulator::{gpu::Gpu, storage};
 
@@ -11,11 +11,16 @@ fn main() -> Result<()> {
     let _gpu = Gpu::new("RTX 4060")?;
     let mut elites: Vec<_> = experiment.archive.entries.iter().collect();
     elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
-    elites.truncate(count);
-    for (k, e) in elites.iter().enumerate() {
-        let cfg = e.replay_config(&experiment.config);
-        let (_, result) = evolution_simulator::engine::replay(&e.creature, &cfg);
-        println!("#{}: archive {:.4} replay {:.4} fine {}", k + 1, e.fitness, result.fitness, e.fine);
+    for (k, e) in elites.iter().take(count).enumerate() {
+        let (creature, cfg) = e.replay_of(&experiment.config);
+        let (_, result) = evolution_simulator::engine::replay(&creature, &cfg);
+        println!(
+            "#{}: archive {:.4} replay {:.4}{}",
+            k + 1,
+            e.fitness,
+            result.fitness,
+            if e.fine { " (fine check)" } else { "" }
+        );
     }
     Ok(())
 }

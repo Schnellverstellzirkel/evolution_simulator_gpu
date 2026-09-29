@@ -334,9 +334,10 @@ pub(crate) fn segment_ends(cfg: &Config) -> Vec<u32> {
         // Screened creatures leave right after the screen step. The cut is
         // there with or without a screen, so a replay (which has none) runs in
         // the same dispatches as the trial that scored it.
-        .chain(crate::physics::screen_seconds().map(|seconds| {
-            crate::physics::Screen { seconds, bar: 0.0 }.tick(fidelity) + 1
-        }))
+        .chain(
+            crate::physics::screen_seconds()
+                .map(|seconds| crate::physics::Screen { seconds, bar: 0.0 }.tick(fidelity) + 1),
+        )
         .filter(|&tick| tick < total)
         .collect();
     ends.sort_unstable();

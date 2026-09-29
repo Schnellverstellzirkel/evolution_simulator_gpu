@@ -151,14 +151,25 @@ pub struct Elite {
     #[serde(default)]
     pub fine: bool,
 }
+/// The creature and world of the trial a score came from (`Elite::replay_of`).
+pub fn replay_of(
+    creature: &Creature,
+    fine: bool,
+    cfg: &crate::config::Config,
+) -> (Creature, crate::config::Config) {
+    if fine {
+        let mut perturbed = creature.clone();
+        crate::scheduler::perturb(&mut perturbed);
+        (perturbed, crate::scheduler::check_config(cfg))
+    } else {
+        (creature.clone(), cfg.clone())
+    }
+}
 impl Elite {
-    /// The world to replay this elite in: the trial its fitness came from.
-    pub fn replay_config(&self, cfg: &crate::config::Config) -> crate::config::Config {
-        if self.fine {
-            crate::scheduler::check_config(cfg)
-        } else {
-            cfg.clone()
-        }
+    /// The creature and world of the trial this elite's fitness came from:
+    /// the standard trial, or the fine check of the perturbed body.
+    pub fn replay_of(&self, cfg: &crate::config::Config) -> (Creature, crate::config::Config) {
+        replay_of(&self.creature, self.fine, cfg)
     }
 }
 
