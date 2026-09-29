@@ -749,7 +749,11 @@ impl VkEngine {
         let pipeline = Self::compile(
             &self.device,
             self.pipeline_layout,
-            &creature_kernel::record_source(capacity, self.workgroup, fidelity),
+            &if crate::physics2::enabled() {
+                crate::physics2::record_source(capacity, self.workgroup, fidelity)
+            } else {
+                creature_kernel::record_source(capacity, self.workgroup, fidelity)
+            },
         )?;
         self.recording.insert((fidelity, capacity), pipeline);
         Ok(pipeline)
@@ -854,7 +858,17 @@ impl VkEngine {
         chunk: u32,
         read_state: bool,
     ) -> Result<u64> {
-        self.submit_as(batches, cfg, start, end, total, chunk, read_state, false)
+        self.submit_as(
+            batches,
+            cfg,
+            start,
+            end,
+            total,
+            chunk,
+            read_state,
+            false,
+            &[],
+        )
     }
 
     /// Queues a whole trial of one batch on the replay slot with the
@@ -869,15 +883,29 @@ impl VkEngine {
         chunk: u32,
     ) -> Result<u64> {
         ensure!(self.replay_free(), "A replay is already being recorded");
+        // Physics v2 trials start at the settling tick, as scoring does.
+        let start = if crate::physics2::enabled() {
+            cfg.fidelity().settle()
+        } else {
+            0
+        };
+        // Physics v2 rebuilds its node table from joint state at every
+        // dispatch, so bit-exact frames need scoring's dispatch boundaries.
+        let cuts = if crate::physics2::enabled() {
+            crate::engine::segment_ends(cfg)
+        } else {
+            Vec::new()
+        };
         self.submit_as(
             std::slice::from_ref(batch),
             cfg,
-            0,
+            start,
             total,
             total,
             chunk,
             false,
             true,
+            &cuts,
         )
     }
 
@@ -892,6 +920,7 @@ impl VkEngine {
         chunk: u32,
         read_state: bool,
         record: bool,
+        cuts: &[u32],
     ) -> Result<u64> {
         ensure!(
             !batches.is_empty() && start < end && end <= total,
@@ -913,7 +942,21 @@ impl VkEngine {
                 .max_by_key(|&i| (Self::slot_bytes(&self.slots[i]), std::cmp::Reverse(i)))
                 .context("No free GPU submission slot")?
         };
-        let ranges = (end - start).div_ceil(chunk);
+        // Dispatches: (first tick, steps), in `chunk`-tick pieces that never
+        // cross a cut.
+        let mut spans: Vec<(u32, u32)> = Vec::new();
+        let mut tick = start;
+        while tick < end {
+            let stop = cuts
+                .iter()
+                .copied()
+                .find(|&c| c > tick && c < end)
+                .unwrap_or(end);
+            let steps = (stop - tick).min(chunk);
+            spans.push((tick, steps));
+            tick += steps;
+        }
+        let ranges = spans.len() as u32;
         let kernels: Vec<vk::Pipeline> =
             batches
                 .iter()
@@ -945,7 +988,7 @@ impl VkEngine {
         buffers?;
         let mut param_data =
             vec![0u8; (u64::from(ranges) * batches.len() as u64 * self.params_stride) as usize];
-        for (r, tick) in (start..end).step_by(chunk as usize).enumerate() {
+        for (r, &(tick, steps)) in spans.iter().enumerate() {
             for (b, batch) in batches.iter().enumerate() {
                 let offset = ((r * batches.len() + b) as u64 * self.params_stride) as usize;
                 let p = creature_kernel::launch_params(
@@ -953,7 +996,7 @@ impl VkEngine {
                     batch.capacity,
                     batch.info.len(),
                     tick,
-                    (end - tick).min(chunk),
+                    steps,
                     total,
                 );
                 param_data[offset..offset + std::mem::size_of::<Params>()]

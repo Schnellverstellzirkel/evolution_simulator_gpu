@@ -52,10 +52,6 @@ static REPLAYS: std::sync::Mutex<Option<mpsc::Sender<ReplayRequest>>> = std::syn
 /// with the kernel that scores evolution, waiting up to `timeout`. None
 /// when no GPU evaluates or it cannot answer in time.
 pub fn record_on_gpu(creature: &Creature, cfg: &Config, timeout: Duration) -> Option<Recording> {
-    // The v2 kernel records no frames yet: the CPU replays.
-    if crate::physics2::enabled() {
-        return None;
-    }
     let sender = REPLAYS.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
     let (reply, answer) = mpsc::channel();
     sender
@@ -269,7 +265,7 @@ struct SegmentedUnit {
 /// seconds after settling (default `2,10`; empty or `0` for none). On an
 /// evolved 3M population 38% of creatures fall, most within a second, and
 /// pauses at 2 s and 10 s skip 34% of all steps.
-fn segment_ends(cfg: &Config) -> Vec<u32> {
+pub(crate) fn segment_ends(cfg: &Config) -> Vec<u32> {
     let fidelity = cfg.fidelity();
     let total = fidelity.settle() + cfg.steps();
     let seconds: Vec<f32> = match std::env::var("EVOLUTION_SEGMENTS") {
@@ -873,7 +869,11 @@ fn start_recording<D: SegmentDevice>(
 ) -> Result<(u64, usize, usize, u32)> {
     let mut population = Population::default();
     population.push(request.creature.clone());
-    let batches = creature_kernel::pack(&population, &[0])?;
+    let batches = if crate::physics2::enabled() {
+        crate::physics2::pack(&population, &[0], &request.cfg)?
+    } else {
+        creature_kernel::pack(&population, &[0])?
+    };
     anyhow::ensure!(batches.len() == 1, "A replay packs into one batch");
     let fidelity = request.cfg.fidelity();
     let total = fidelity.settle() + request.cfg.steps();

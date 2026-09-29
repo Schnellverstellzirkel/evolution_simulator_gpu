@@ -1488,12 +1488,94 @@ fn response(model: &Model, sc: &Scratch, forces: &[(usize, V3)], da: &mut [V3], 
 /// The v2 GPU kernel (`shaders/physics2_creature.wgsl`) for bodies of up to
 /// `capacity` nodes.
 pub fn shader_source(capacity: usize, workgroup: u32, fidelity: physics::Fidelity) -> String {
+    source_from(
+        include_str!("../shaders/physics2_creature.wgsl").to_owned(),
+        capacity,
+        workgroup,
+        fidelity,
+    )
+}
+
+/// The v2 kernel that also records every creature's trial for a replay, the
+/// counterpart of `creature_kernel::record_source`: node positions before
+/// each step and after the last, in binding 7 as `[creature][frame][node]`
+/// with the bucket's node stride. It computes what `shader_source` computes;
+/// its only other change is that a creature keeps moving after its trial
+/// ends (limp after a fall) while its result stays the one at the end. A
+/// trial starts at the settling tick, as scoring does (so chunk boundaries
+/// match), and the kernel fills the frames before it with the start pose.
+pub fn record_source(capacity: usize, workgroup: u32, fidelity: physics::Fidelity) -> String {
+    let mut source = include_str!("../shaders/physics2_creature.wgsl").to_owned();
+    for (from, to) in RECORD_EDITS {
+        assert_eq!(source.matches(from).count(), 1, "record edit {from:?}");
+        source = source.replace(from, to);
+    }
+    source_from(source, capacity, workgroup, fidelity)
+}
+
+/// The changes `record_source` makes to the kernel text. Each must match
+/// exactly once.
+const RECORD_EDITS: [(&str, &str); 3] = [
+    (
+        "@group(0) @binding(6) var<storage, read> tile_info: array<vec4u>;\n",
+        "@group(0) @binding(6) var<storage, read> tile_info: array<vec4u>;\n\
+         @group(0) @binding(7) var<storage, read_write> frames: array<vec2f>;\n",
+    ),
+    (
+        "    for (var s = 0u; s < p.steps; s++) {\n        if metrics.fall_time > 0.0 || metrics.screened > 0.0 {\n            break;\n        }\n        let tick = p.tick + s;\n",
+        "    // The result at the end of the trial; the body keeps moving after it.\n\
+         var kept = metrics;\n\
+         var done = metrics.fall_time > 0.0 || metrics.screened > 0.0;\n\
+         for (var s = 0u; s < p.steps; s++) {\n\
+         let tick = p.tick + s;\n\
+         if !done && (metrics.fall_time > 0.0 || metrics.screened > 0.0) {\n\
+             kept = metrics;\n\
+             kept.head_shake = head_shake;\n\
+             done = true;\n\
+         }\n\
+         let frame = (creature * (p.total_steps + 1u) + tick) * STRIDE;\n\
+         for (var j = 0u; j < MAXN; j++) {\n\
+             if j >= nn { break; }\n\
+             frames[frame + j] = node_pos(j);\n\
+         }\n\
+         if s == 0u && p.tick == SETTLE {\n\
+             for (var t = 0u; t < SETTLE; t++) {\n\
+                 let before = (creature * (p.total_steps + 1u) + t) * STRIDE;\n\
+                 for (var j = 0u; j < MAXN; j++) {\n\
+                     if j >= nn { break; }\n\
+                     frames[before + j] = node_pos(j);\n\
+                 }\n\
+             }\n\
+         }\n",
+    ),
+    (
+        "    metrics.head_shake = head_shake;\n    results[creature] = metrics;\n",
+        "    metrics.head_shake = head_shake;\n\
+         if !done {\n\
+             kept = metrics;\n\
+         }\n\
+         results[creature] = kept;\n\
+         if p.tick + p.steps >= p.total_steps {\n\
+             let frame = (creature * (p.total_steps + 1u) + p.total_steps) * STRIDE;\n\
+             for (var j = 0u; j < MAXN; j++) {\n\
+                 if j >= nn { break; }\n\
+                 frames[frame + j] = node_pos(j);\n\
+             }\n\
+         }\n",
+    ),
+];
+
+fn source_from(
+    mut source: String,
+    capacity: usize,
+    workgroup: u32,
+    fidelity: physics::Fidelity,
+) -> String {
     let limits = physics::limits();
     let replace = |source: String, from: &str, to: String| {
         assert!(source.contains(from), "kernel text {from:?} missing");
         source.replace(from, &to)
     };
-    let mut source = include_str!("../shaders/physics2_creature.wgsl").to_owned();
     // Workgroup memory holds 48 KB: bodies above 32 nodes keep their table
     // in private (local) memory instead.
     if capacity > 32 {
@@ -2661,6 +2743,18 @@ mod tests {
                 let source = shader_source(capacity, 32, fidelity);
                 crate::vk_engine::spirv(&source)
                     .unwrap_or_else(|e| panic!("{capacity}-node v2 kernel: {e:#}"));
+            }
+        }
+    }
+
+    #[test]
+    fn the_recording_kernel_compiles_for_every_capacity() {
+        use crate::physics::Fidelity;
+        for fidelity in [Fidelity::standard(), Fidelity::fine()] {
+            for capacity in crate::creature_kernel::CAPACITIES {
+                let source = record_source(capacity, 32, fidelity);
+                crate::vk_engine::spirv(&source)
+                    .unwrap_or_else(|e| panic!("{capacity}-node v2 recording kernel: {e:#}"));
             }
         }
     }
