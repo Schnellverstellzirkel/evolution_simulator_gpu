@@ -83,7 +83,7 @@ fn evaluate(early_exit: bool, pop: &Population, cfg: &Config) -> Vec<GpuResult> 
     unsafe {
         std::env::set_var("EVOLUTION_EARLY_EXIT", if early_exit { "1" } else { "0" });
     }
-    cpu_engine::evaluate(pop, cfg)
+    cpu_engine::evaluate_v1(pop, cfg)
 }
 
 /// Evaluates with the exit on and reports the two diagnostic counters. The

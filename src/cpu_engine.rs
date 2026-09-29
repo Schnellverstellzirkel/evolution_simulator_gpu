@@ -1406,6 +1406,12 @@ pub fn evaluate(unit: &Population, cfg: &Config) -> Vec<GpuResult> {
     if crate::physics2::enabled() {
         return crate::physics2::evaluate(unit, cfg);
     }
+    evaluate_v1(unit, cfg)
+}
+
+/// Evaluates on the AVX-512 engine of the older physics (v1), whatever the
+/// game's physics is: its early-exit tests and comparisons use it.
+pub fn evaluate_v1(unit: &Population, cfg: &Config) -> Vec<GpuResult> {
     let indices: Vec<usize> = (0..unit.genomes.len()).collect();
     let groups = build_groups(unit, &indices);
     let per_group: Vec<Vec<GpuResult>> = groups.par_iter().map(|g| g.simulate(cfg)).collect();
