@@ -530,8 +530,7 @@ enum Backend {
 /// driver and NVRTC load (1.6 to 1.8 times Vulkan's kernel rate on the
 /// RTX 4060, docs/performance-log.md), and through Vulkan otherwise.
 fn open_backend(name: &str, max_nodes: usize) -> Result<(Backend, String)> {
-    // The v2 kernel has no CUDA port yet: it runs on Vulkan.
-    if crate::cuda_engine::enabled() && !crate::physics2::enabled() {
+    if crate::cuda_engine::enabled() {
         match CudaEngine::new(name, max_nodes) {
             Ok(engine) => {
                 let name = engine.name.clone();

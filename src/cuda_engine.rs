@@ -512,6 +512,20 @@ fn shared_per_thread(capacity: usize) -> usize {
     }
 }
 
+/// The recording kernel's source for `capacity` nodes.
+fn recording_source(
+    capacity: usize,
+    threads: u32,
+    fidelity: Fidelity,
+    launch_bounds: bool,
+) -> String {
+    if physics2() {
+        creature_kernel::cuda_record_source2(capacity, threads, fidelity, launch_bounds)
+    } else {
+        creature_kernel::cuda_record_source(capacity, threads, fidelity, launch_bounds)
+    }
+}
+
 /// The scoring kernel's source for `capacity` nodes.
 fn scoring_source(
     capacity: usize,
@@ -763,9 +777,7 @@ impl CudaEngine {
                 engine.build_kernels(Fidelity::standard(), false)?;
                 // Replays run at the standard fidelity. Building their kernels
                 // now keeps the first replay inside the viewer's wait.
-                if !physics2() {
-                    engine.build_kernels(Fidelity::standard(), true)?;
-                }
+                engine.build_kernels(Fidelity::standard(), true)?;
             }
             Ok(engine)
         }
@@ -895,7 +907,7 @@ impl CudaEngine {
                                 break;
                             };
                             let variant = if record {
-                                creature_kernel::cuda_record_source
+                                recording_source
                             } else {
                                 scoring_source
                             };
@@ -1267,15 +1279,24 @@ impl CudaEngine {
         chunk: u32,
     ) -> Result<u64> {
         ensure!(self.replay_free(), "A replay is already being recorded");
+        // Physics v2 trials start at the settling tick, as scoring does, and
+        // rebuild their node table from joint state at every dispatch, so
+        // bit-exact frames need scoring's dispatch boundaries.
+        let (start, cuts) = if physics2() {
+            (cfg.fidelity().settle(), crate::engine::segment_ends(cfg))
+        } else {
+            (0, Vec::new())
+        };
         self.submit_as(
             std::slice::from_ref(batch),
             cfg,
-            0,
+            start,
             total,
             total,
             chunk,
             false,
             true,
+            &cuts,
         )
     }
 
@@ -1293,7 +1314,17 @@ impl CudaEngine {
         chunk: u32,
         read_state: bool,
     ) -> Result<u64> {
-        self.submit_as(batches, cfg, start, end, total, chunk, read_state, false)
+        self.submit_as(
+            batches,
+            cfg,
+            start,
+            end,
+            total,
+            chunk,
+            read_state,
+            false,
+            &[],
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1307,14 +1338,11 @@ impl CudaEngine {
         chunk: u32,
         read_state: bool,
         record: bool,
+        cuts: &[u32],
     ) -> Result<u64> {
         ensure!(
             !batches.is_empty() && start < end && end <= total,
             "Empty GPU batch"
-        );
-        ensure!(
-            !(record && physics2()),
-            "The CUDA recording kernel of physics v2 is not ported yet"
         );
         ensure!(
             batches.iter().all(|b| b.capacity <= self.max_capacity),
@@ -1401,7 +1429,21 @@ impl CudaEngine {
             // is queued before the next range of any.
             let mut order: Vec<usize> = (0..batches.len()).collect();
             order.sort_by_key(|&b| std::cmp::Reverse(batches[b].info.len() * batches[b].capacity));
-            for tick in (start..end).step_by(chunk as usize) {
+            // Dispatches: (first tick, steps), in `chunk`-tick pieces that
+            // never cross a cut.
+            let mut spans: Vec<(u32, u32)> = Vec::new();
+            let mut at = start;
+            while at < end {
+                let stop = cuts
+                    .iter()
+                    .copied()
+                    .find(|&c| c > at && c < end)
+                    .unwrap_or(end);
+                let steps = (stop - at).min(chunk);
+                spans.push((at, steps));
+                at += steps;
+            }
+            for (tick, steps) in spans {
                 for &b in &order {
                     let batch = &batches[b];
                     let res = resources.groups[b].as_ref().unwrap();
@@ -1410,7 +1452,7 @@ impl CudaEngine {
                         batch.capacity,
                         batch.info.len(),
                         tick,
-                        (end - tick).min(chunk),
+                        steps,
                         total,
                     );
                     let mut pointers = [

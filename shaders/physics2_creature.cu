@@ -195,6 +195,9 @@ struct Lane {
     vec3 c_dt[MAXC];
     float c_vn[MAXC];
     float c_vt[MAXC];
+    // The node's speed along the ground at the start of the step: friction
+    // may only push against the mean of this and the speed after the step.
+    float c_vs[MAXC];
     float c_goal[MAXC];
     float c_mu[MAXC];
     float reach[MAXN];
@@ -492,7 +495,39 @@ struct Lane {
                     vrow[j] += kmat[tri(j, rn)] * dn;
                 }
                 float bound = c_mu[ci] * lambda[rn];
-                float friction = clampf(lambda[rt] - vrow[rt] * (1.0f / kmat[tri(rt, rt)]), -bound, bound);
+                // Friction may not do positive work: it only opposes
+                // a = start speed + end speed without its own force, and only
+                // up to |a| / k.
+                float stiff = kmat[tri(rt, rt)];
+                float a = c_vs[ci] + vrow[rt] - stiff * lambda[rt];
+                float stop = fabsf(a) / stiff;
+                float cap = fminf(bound, stop);
+                float friction = clampf(lambda[rt] - vrow[rt] * (1.0f / stiff), a > 0.0f ? -cap : 0.0f, a > 0.0f ? 0.0f : cap);
+                float dt_ = friction - lambda[rt];
+                lambda[rt] = friction;
+                UNROLL_C
+                for (unsigned j = 0u; j < MAXR; j++) {
+                    if (!c_on[j / 2u]) { continue; }
+                    vrow[j] += kmat[tri(j, rt)] * dt_;
+                }
+            }
+        }
+    }
+
+    // Removes friction that would still do positive work after the solves:
+    // each contact's friction only opposes the mean of its node's speed before
+    // and after the step, up to the size that stops the node. Two sweeps.
+    __device__ __forceinline__ void clean_friction() {
+        for (unsigned sweep = 0u; sweep < 2u; sweep++) {
+            UNROLL_C
+            for (unsigned ci = 0u; ci < MAXC; ci++) {
+                if (!c_on[ci]) { continue; }
+                unsigned rn = 2u * ci;
+                unsigned rt = rn + 1u;
+                float stiff = kmat[tri(rt, rt)];
+                float a = c_vs[ci] + vrow[rt] - stiff * lambda[rt];
+                float cap = fminf(c_mu[ci] * lambda[rn], fabsf(a) / stiff);
+                float friction = clampf(lambda[rt], a > 0.0f ? -cap : 0.0f, a > 0.0f ? 0.0f : cap);
                 float dt_ = friction - lambda[rt];
                 lambda[rt] = friction;
                 UNROLL_C
@@ -594,6 +629,7 @@ struct Lane {
                 + DT * (sdot(dn, a) + w * (-v.y * normal.x + v.x * normal.y));
             c_vt[ci] = v.x * tangent.x + v.y * tangent.y
                 + DT * (sdot(dtan, a) + w * (-v.y * tangent.x + v.x * tangent.y));
+            c_vs[ci] = v.x * tangent.x + v.y * tangent.y;
             c_goal[ci] = gap >= 0.0f ? -gap * RATE : -gap * PUSH_OUT * RATE;
             c_mu[ci] = node_fric(node) * p.friction * (1.0f + MUD_GRIP * sink) * (1.0f + MUD_NORMAL * sink);
             nc += 1u;
@@ -641,7 +677,7 @@ struct Lane {
         // Plant against the end pose: take the step, measure each contact's
         // velocity in the end pose (after the momentum balance), and solve
         // again with the difference.
-        {
+        for (unsigned round = 0u; round < PLANT_ROUNDS; round++) {
             float2 sx0 = x0;
             float2 sv0 = v0;
             float sq[MAXB];
@@ -687,6 +723,7 @@ struct Lane {
                 old[j] = lambda[j];
             }
             pgs(PLANT_SWEEPS);
+            clean_friction();
             UNROLL_C
             for (unsigned j = 0u; j < MAXR; j++) {
                 old[j] = lambda[j] - old[j];
@@ -784,11 +821,43 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
     float head_shake = metrics.head_shake;
     const bool grounded = p.ground > 0.0f;
 
+#if RECORD
+    // The result at the end of the trial; the body keeps moving after it.
+    Result kept = metrics;
+    bool done = metrics.fall_time > 0.0f || metrics.screened > 0.0f;
+#endif
     for (unsigned s = 0u; s < p.steps; s++) {
+#if !RECORD
         if (metrics.fall_time > 0.0f || metrics.screened > 0.0f) {
             break;
         }
+#endif
         const unsigned tick = p.tick + s;
+#if RECORD
+        if (!done && (metrics.fall_time > 0.0f || metrics.screened > 0.0f)) {
+            kept = metrics;
+            kept.head_shake = head_shake;
+            done = true;
+        }
+        {
+            const unsigned frame = (creature * (p.total_steps + 1u) + tick) * STRIDE;
+            UNROLL
+            for (unsigned j = 0u; j < MAXN; j++) {
+                if (j >= nn) { break; }
+                frames[frame + j] = L.node_pos(j);
+            }
+            if (s == 0u && p.tick == SETTLE) {
+                for (unsigned t = 0u; t < SETTLE; t++) {
+                    const unsigned before_frame = (creature * (p.total_steps + 1u) + t) * STRIDE;
+                    UNROLL
+                    for (unsigned j = 0u; j < MAXN; j++) {
+                        if (j >= nn) { break; }
+                        frames[before_frame + j] = L.node_pos(j);
+                    }
+                }
+            }
+        }
+#endif
         if (tick < SETTLE) {
             continue;
         }
@@ -1264,7 +1333,22 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
         }
     }
     metrics.head_shake = head_shake;
+#if RECORD
+    if (!done) {
+        kept = metrics;
+    }
+    results[creature] = kept;
+    if (p.tick + p.steps >= p.total_steps) {
+        const unsigned frame = (creature * (p.total_steps + 1u) + p.total_steps) * STRIDE;
+        UNROLL
+        for (unsigned j = 0u; j < MAXN; j++) {
+            if (j >= nn) { break; }
+            frames[frame + j] = L.node_pos(j);
+        }
+    }
+#else
     results[creature] = metrics;
+#endif
     {
         Record h = records[record_base];
         h.a = L.x0;

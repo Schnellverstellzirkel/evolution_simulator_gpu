@@ -48,7 +48,7 @@ pub fn enabled() -> bool {
 
 /// How firmly a joint limit holds: its damper weighs this many times the
 /// joint's inertia per step.
-const LIMIT_HARDNESS: f32 = 20.0;
+pub(crate) const LIMIT_HARDNESS: f32 = 20.0;
 /// Passive joint damping as a time constant (s): every joint resists its
 /// relative rotation like tissue does, with a damper sized to the inertia the
 /// joint moves (`EVOLUTION_JOINT_DAMPING`, seconds; 0 turns it off).
@@ -82,8 +82,8 @@ pub const MUSCLE_FIELDS: usize = 16;
 /// `physics::PLANTED_SPEED`).
 pub const STICK_SPEED: f32 = physics::PLANTED_SPEED;
 /// Contact tolerance for the behavior metrics (m), as the current engine.
-const CONTACT_SLACK: f32 = 0.002;
-const LIFT_CLEARANCE: f32 = 0.01;
+pub(crate) const CONTACT_SLACK: f32 = 0.002;
+pub(crate) const LIFT_CLEARANCE: f32 = 0.01;
 
 /// Planar spatial vector: an angular part and a linear part. It is a motion
 /// (angular velocity, velocity of the body point at the origin) or a force
@@ -552,7 +552,7 @@ struct Contact {
 pub const SPIN_CAP: f32 = 15.0;
 /// How firmly the spin cap holds: its damper weighs this many times the
 /// bone's rotational inertia about its pivot.
-const SPIN_HARDNESS: f32 = 20.0;
+pub(crate) const SPIN_HARDNESS: f32 = 20.0;
 /// Most nodes in one step's contact solve: the deepest four. Each contact
 /// costs the GPU kernel two responses and two rows of Gauss-Seidel, so the
 /// bound sets most of its speed (20k evolved bodies: 22M creature-steps/s at
@@ -563,17 +563,17 @@ pub const MAX_CONTACTS: usize = 4;
 /// Gauss-Seidel sweeps over the contacts per step, warm-started from each
 /// node's contact force of the last step. Against 20 cold sweeps, 8 warm
 /// ones moved 1,000 random bodies by at most 0.1 m in 2 s (p99 0.8 mm).
-const PGS_ITERATIONS: usize = 8;
+pub(crate) const PGS_ITERATIONS: usize = 8;
 /// Sweeps of the planting pass, which starts from the first solve.
-const PLANT_SWEEPS: usize = 4;
+pub(crate) const PLANT_SWEEPS: usize = 4;
 /// Rounds of the planting pass. One round leaves friction doing positive
 /// work: the end pose it measures moves again when the solve changes the
 /// forces (through the momentum balance and the turning bones). Two rounds
 /// bring friction's positive work on an evolved hopper from 1,725 J to 5 J.
-const PLANT_ROUNDS: usize = 2;
+pub(crate) const PLANT_ROUNDS: usize = 2;
 /// Share of a node's depth inside the ground that the contact removes per
 /// step.
-const PUSH_OUT: f32 = 0.2;
+pub(crate) const PUSH_OUT: f32 = 0.2;
 
 /// Everything one trial needs besides the model and state.
 struct Scratch {

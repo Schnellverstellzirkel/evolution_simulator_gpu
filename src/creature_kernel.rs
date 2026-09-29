@@ -678,6 +678,28 @@ pub fn cuda_source2(
     fidelity: crate::physics::Fidelity,
     launch_bounds: bool,
 ) -> String {
+    cuda_source2_variant(capacity, workgroup, fidelity, launch_bounds, false)
+}
+
+/// The physics v2 CUDA recording kernel: the scoring kernel of `cuda_source2`
+/// plus the frame output in an eighth argument (the counterpart of
+/// `physics2::record_source`).
+pub fn cuda_record_source2(
+    capacity: usize,
+    workgroup: u32,
+    fidelity: crate::physics::Fidelity,
+    launch_bounds: bool,
+) -> String {
+    cuda_source2_variant(capacity, workgroup, fidelity, launch_bounds, true)
+}
+
+fn cuda_source2_variant(
+    capacity: usize,
+    workgroup: u32,
+    fidelity: crate::physics::Fidelity,
+    launch_bounds: bool,
+    record: bool,
+) -> String {
     use crate::physics2 as p2;
     let limits = crate::physics::limits();
     let float = |value: f32| format!("{value:?}f");
@@ -700,7 +722,7 @@ pub fn cuda_source2(
                 String::new()
             },
         ),
-        ("RECORD", "0".into()),
+        ("RECORD", (if record { "1" } else { "0" }).into()),
         ("MUSCLE_CAPACITY", float(limits.muscle_energy)),
         ("MUSCLE_RECOVERY", float(limits.muscle_recovery)),
         ("MAX_MUSCLE_FORCE", float(limits.muscle_force)),
@@ -723,6 +745,7 @@ pub fn cuda_source2(
         ("SPIN_HARDNESS", float(p2::SPIN_HARDNESS)),
         ("PGS_SWEEPS", format!("{}u", p2::PGS_ITERATIONS)),
         ("PLANT_SWEEPS", format!("{}u", p2::PLANT_SWEEPS)),
+        ("PLANT_ROUNDS", format!("{}u", p2::PLANT_ROUNDS)),
         ("WARM", "1".into()),
         ("PUSH_OUT", float(p2::PUSH_OUT)),
         ("HEAD_SHAKE_LIMIT", float(physics::HEAD_SHAKE_LIMIT)),
