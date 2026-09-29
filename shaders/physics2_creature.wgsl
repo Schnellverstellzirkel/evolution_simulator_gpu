@@ -118,6 +118,7 @@ const SPIN_HARDNESS: f32 = 20.0;
 const PGS_SWEEPS: u32 = 20u;
 const PLANT_SWEEPS: u32 = 20u;
 const PLANT_ROUNDS: u32 = 2u;
+const AIR_DRAG: f32 = 0.6;
 const WARM: bool = false;
 const PUSH_OUT: f32 = 0.2;
 const MUD_NORMAL: f32 = 2.0;
@@ -865,6 +866,21 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             }
             bias[body_of(i)] -= force_at(node_pos(i) - origin, vec2f(fx, -p.gravity * m));
         }
+        // Air drag on every bone, at its midpoint, limited so a step of drag
+        // never more than halves the speed it acts on.
+        var air_impulse = vec2f(0.0);
+        for (var j = 0u; j < MAXB; j++) {
+            if j >= nb { break; }
+            let pv = pivot[j];
+            let mid = 0.5 * (node_pos(pv) + node_pos(j + 1u));
+            let v = 0.5 * (node_vel(pv) + node_vel(j + 1u));
+            let speed = sqrt(v.x * v.x + v.y * v.y);
+            let width = node_radius(pv) + node_radius(j + 1u);
+            let strength = max(min(AIR_DRAG * len[j] * width * speed, 0.5 * mass[j + 1u] * RATE), 0.0);
+            let f = -v * strength;
+            bias[j] -= force_at(mid - origin, f);
+            air_impulse += f * DT;
+        }
         // Muscles pull between points on two bones; the forces collect in
         // the table.
         clear_forces();
@@ -1024,7 +1040,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             body_set(j, 1u, vec3f(om[j], 0.0, 0.0));
         }
 
-        var impulse = vec2f(p.wind * total_mass * DT + mud_impulse, -p.gravity * total_mass * DT);
+        var impulse = vec2f(p.wind * total_mass * DT + mud_impulse, -p.gravity * total_mass * DT) + air_impulse;
         nc = 0u;
         if grounded {
             impulse = contacts(origin, before, impulse);

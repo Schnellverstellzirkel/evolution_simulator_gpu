@@ -748,6 +748,7 @@ fn cuda_source2_variant(
         ("PLANT_ROUNDS", format!("{}u", p2::PLANT_ROUNDS)),
         ("WARM", "1".into()),
         ("PUSH_OUT", float(p2::PUSH_OUT)),
+        ("AIR_DRAG", float(p2::AIR_DRAG)),
         ("HEAD_SHAKE_LIMIT", float(physics::HEAD_SHAKE_LIMIT)),
         ("HEAD_SHAKE_WINDOW", float(physics::HEAD_SHAKE_WINDOW)),
         ("CONTACT_SLACK", float(p2::CONTACT_SLACK)),

@@ -85,6 +85,12 @@ pub fn hill_speed() -> f32 {
 /// m/s^2, turned a bone about a radian in one step and made momentum and
 /// energy the integrator did not pay for (docs/physics-v2.md).
 pub const DRIVEN_ACCELERATION: f32 = 100.0;
+/// Air drag on bones (N per m^3/s^2 of length x width): every bone feels
+/// `AIR_DRAG x length x width x speed x velocity` against its midpoint's
+/// velocity, with the width the mean diameter of its two nodes (a flat plate
+/// in the flow: half the air's density, 1.2 kg/m^3, times a drag coefficient
+/// of 1). Large fast bodies pay for moving air; it only takes energy away.
+pub const AIR_DRAG: f32 = 0.6;
 /// Fields per muscle in the v2 kernel's muscle buffer.
 pub const MUSCLE_FIELDS: usize = 16;
 /// Sliding speed (m/s) below which friction holds a foot (as
@@ -245,6 +251,8 @@ pub struct Model {
     /// Each muscle's force cap and energy store as multiples of the fixed
     /// `Limits` ones (1 unless muscle strength scales with the body).
     muscle_scale: f32,
+    /// Air drag coefficient (`AIR_DRAG`); tests of conservation set it to 0.
+    pub(crate) air_drag: f32,
     /// Earthquake bump phase and ground amplitude for this creature.
     quake_phase: f32,
     amplitude: f32,
@@ -390,6 +398,7 @@ impl Model {
             rest,
             muscles,
             muscle_scale,
+            air_drag: AIR_DRAG,
             quake_phase: if still {
                 0.0
             } else {
@@ -1058,6 +1067,29 @@ fn simulate_step_inner(
         let j = sc.body_of[i];
         sc.force[j] = sc.force[j].add(force_at(rel(s.pos[i]), f));
     }
+    // Air drag on every bone, at its midpoint. The push is limited so a step
+    // of drag never more than halves the speed it acts on.
+    let mut air_impulse = [0.0f32; 2];
+    for j in 0..b {
+        let (p, c) = (model.pivot[j], model.child[j]);
+        let mid = [
+            0.5 * (s.pos[p][0] + s.pos[c][0]),
+            0.5 * (s.pos[p][1] + s.pos[c][1]),
+        ];
+        let v = [
+            0.5 * (s.vel[p][0] + s.vel[c][0]),
+            0.5 * (s.vel[p][1] + s.vel[c][1]),
+        ];
+        let speed = (v[0] * v[0] + v[1] * v[1]).sqrt();
+        let width = model.radius[p] + model.radius[c];
+        let strength = (model.air_drag * model.length[j] * width * speed)
+            .min(0.5 * model.mass[c] * rate)
+            .max(0.0);
+        let f = [-v[0] * strength, -v[1] * strength];
+        sc.force[j] = sc.force[j].add(force_at(rel(mid), f));
+        air_impulse[0] += f[0] * dt;
+        air_impulse[1] += f[1] * dt;
+    }
     // Muscles: today's drive and damper, applied at the attachment points.
     let settle_free = time; // No settling: the rhythm starts at once.
     // The waveform's target length is `long - amplitude * (1 - w)`; its
@@ -1216,8 +1248,8 @@ fn simulate_step_inner(
     /// and friction impulse, normal and tangent.
     type Logged = (usize, f32, f32, [f32; 2], [f32; 2]);
     let mut ground_log: Vec<Logged> = Vec::new();
-    let mut impulse = cfg.wind * model.total_mass * dt + mud_impulse;
-    let mut impulse_y = -cfg.gravity * model.total_mass * dt;
+    let mut impulse = cfg.wind * model.total_mass * dt + mud_impulse + air_impulse[0];
+    let mut impulse_y = -cfg.gravity * model.total_mass * dt + air_impulse[1];
     if !contacts.is_empty() {
         // Each contact direction's response: the change of every body's
         // acceleration under a unit force there.
@@ -1798,6 +1830,10 @@ fn source_from(
             "const WARM: bool = true;".to_string(),
         ),
         (
+            "const AIR_DRAG: f32 = 0.6;",
+            format!("const AIR_DRAG: f32 = {AIR_DRAG:?};"),
+        ),
+        (
             "const PUSH_OUT: f32 = 0.2;",
             format!("const PUSH_OUT: f32 = {PUSH_OUT:?};"),
         ),
@@ -2245,7 +2281,8 @@ mod tests {
             ..calm()
         };
         let c = chain(&[[0.0, 1.0], [0.0, 0.7], [0.3, 0.6], [0.5, 0.3]], false);
-        let model = Model::new(&c, &cfg);
+        let mut model = Model::new(&c, &cfg);
+        model.air_drag = 0.0;
         let mut s = model.start(&cfg);
         s.w0 = 1.5;
         s.qd[1] = -3.0;
@@ -2318,7 +2355,8 @@ mod tests {
             ..calm()
         };
         let c = chain(&[[0.0, 1.0], [0.0, 0.7], [0.3, 0.6], [0.5, 0.3]], false);
-        let model = Model::new(&c, &cfg);
+        let mut model = Model::new(&c, &cfg);
+        model.air_drag = 0.0;
         let mut s = model.start(&cfg);
         s.w0 = 1.5;
         s.qd[1] = -3.0;
@@ -2384,6 +2422,66 @@ mod tests {
             coarse < 1e-4 && fine < 1e-4,
             "drift {coarse} at 60 Hz, {fine} at 600 Hz"
         );
+    }
+
+    #[test]
+    fn air_drag_only_slows_a_body_and_scales_with_length_and_speed() {
+        // A thrown body in still air, with no gravity and no ground: the
+        // drag takes kinetic energy and momentum away and never adds any.
+        let cfg = Config {
+            ground: false,
+            gravity: 0.0,
+            ..calm()
+        };
+        let run_body = |scale: f32, speed: f32| {
+            let c = chain(
+                &[
+                    [0.0, 1.0],
+                    [0.0, 1.0 - 0.5 * scale],
+                    [0.5 * scale, 1.0 - 0.5 * scale],
+                ],
+                false,
+            );
+            let model = Model::new(&c, &cfg);
+            let mut s = model.start(&cfg);
+            s.v0 = [speed, 0.0];
+            model.kinematics(&mut s);
+            let mut sc = scratch(&model);
+            let limits = physics::limits();
+            let dt = 1.0 / 60.0;
+            let start_momentum: f32 = s.vel.iter().zip(&model.mass).map(|(v, m)| v[0] * m).sum();
+            let mut previous = energy(&model, &s, cfg.gravity);
+            for step in 0..60 {
+                simulate_step(
+                    &model,
+                    &cfg,
+                    &mut s,
+                    &mut sc,
+                    step as f32 * dt,
+                    dt,
+                    1.0,
+                    &limits,
+                );
+                model.kinematics(&mut s);
+                let e = energy(&model, &s, cfg.gravity);
+                assert!(
+                    e <= previous + 1e-4,
+                    "drag added energy: {previous} -> {e} J"
+                );
+                previous = e;
+            }
+            let end_momentum: f32 = s.vel.iter().zip(&model.mass).map(|(v, m)| v[0] * m).sum();
+            start_momentum - end_momentum
+        };
+        let slow = run_body(1.0, 4.0);
+        let fast = run_body(1.0, 8.0);
+        let long = run_body(2.0, 4.0);
+        eprintln!("momentum lost in 1 s: slow {slow}, fast {fast}, long {long}");
+        assert!(slow > 0.0, "a thrown body must slow down");
+        // Twice the speed loses about four times the momentum (the drag
+        // grows with speed squared); longer bones pay for more air.
+        assert!(fast > 3.0 * slow, "{fast} against {slow}");
+        assert!(long > 1.5 * slow, "{long} against {slow}");
     }
 
     #[test]
@@ -2502,7 +2600,8 @@ mod tests {
                 ]);
             }
             let c = chain(&nodes, false);
-            let model = Model::new(&c, &cfg);
+            let mut model = Model::new(&c, &cfg);
+            model.air_drag = 0.0;
             let mut s = model.start(&cfg);
             s.v0 = [rng.range(-2.0, 8.0), rng.range(-2.0, 0.5)];
             // Every bone turns at up to the cap, in either direction.
