@@ -16,7 +16,7 @@ Open work only. Delete an item when it is merged into `main` or measured and rej
 
 ## Interface
 
-- Evolution schematic in a Dofus style, opened from Help and from the Islands view [claude/schematic].
+- Schematic polish: badges overlap titles, and a dark screenshot [claude/schematic].
 - Muscle energy and a force overlay in the replay [claude/camera].
 - The wet grip level is barely visible in the world view, and the effect label repeats the effect name ("Heat wave: Heat wave").
 - The Islands view does not save the last migration, so a loaded game shows none until the next one.
@@ -33,7 +33,7 @@ Open work only. Delete an item when it is merged into `main` or measured and rej
 Each item is an A/B over 3 seeds. Winners go on by default and losers are deleted.
 
 - Emitters: bandit emitter shares, line variation between same-plan elites, CMA-MAE thresholds, discrete crossover, self-adapted step sizes (use or remove `Creature.mutability`), CMA over body bounds, joint ranges, sensors and reset phases [claude/emitters].
-- Archive and selection: fix the morphology reserve (draw parents from the global reserve and count their visits), a finer archive, body size or limb count as an axis, descriptor review, island model tuning, periodic island extinctions, age layers (ALPS), deep grids, racing, dominated novelty search, generalized early stopping [claude/archive].
+- Archive and selection: a finer archive, body size or limb count as an axis, descriptor review, island model tuning, periodic island extinctions, age layers (ALPS), deep grids, racing, dominated novelty search, generalized early stopping [claude/archive].
 - Body encoding: a more varied first population, repeated and mirrored limbs, a generative body grammar [claude/encoding, paused].
 - Controller transfer: crossover between body plans, controller distillation, Lamarckian inheritance [claude/transfer, paused].
 - Controllers, after v2 lands: an optional neural controller driven by rhythm and touchdown sensors, a rhythm controller per limb, touchdown reflexes, and a mutation that adds antagonist muscle pairs.
