@@ -22,7 +22,7 @@ fn run(engine: &mut impl Engine, pop: &Population, cfg: &Config) -> anyhow::Resu
         engine.wait(Duration::from_millis(5));
     };
     let seconds = start.elapsed().as_secs_f64();
-    let rate = f64::from(cfg.fidelity().rate as u32);
+    let rate = f64::from(cfg.fidelity().rate);
     let total = f64::from(cfg.duration) * rate;
     let steps: f64 = done
         .results
