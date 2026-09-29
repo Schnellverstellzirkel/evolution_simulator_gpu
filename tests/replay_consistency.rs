@@ -247,26 +247,3 @@ fn extending_a_broken_joints_trial_keeps_its_score_at_the_break() {
     assert_eq!(shorter_result.fitness, result.fitness);
     assert!((center_x(&creature, frame) - result.fitness).abs() < 1e-5);
 }
-
-#[test]
-fn public_physics_evaluation_uses_the_same_physics_as_cpu_replay() {
-    for fidelity in [Fidelity::standard(), Fidelity::fine()] {
-        for terrain in [0, 3] {
-            let cfg = Config {
-                population: 4,
-                terrain,
-                ..config(fidelity)
-            };
-            let population = evolution::create(&cfg).unwrap();
-            let results = cpu_engine::evaluate(&population, &cfg);
-            for (slot, result) in results.iter().enumerate() {
-                let legacy = physics::evaluate(&population.creature(slot), &cfg);
-                assert!(
-                    (legacy - result.fitness).abs() < 1e-5,
-                    "{fidelity:?}, terrain {terrain}, creature {slot}: physics::evaluate {legacy}, CPU {}",
-                    result.fitness
-                );
-            }
-        }
-    }
-}

@@ -455,15 +455,14 @@ pub fn forced() -> bool {
 }
 
 /// Register cap per thread: `EVOLUTION_CUDA_MAXREG`, 0 for the compiler's
-/// choice, default 128 (physics v2: 0, see docs/performance-log.md). At 128 registers an SM holds 16 warps of every
-/// kernel up to 8 nodes. The compiler's own choice is 155 to 255 registers
-/// (8 to 12 warps) and measured slower, and caps of 80 and 96 add spills that
-/// cost more than their extra warps gain (docs/performance-log.md).
+/// choice, which is the default: the v2 kernels use 222 to 255 registers up
+/// to 32 nodes, and caps of 96 to 168 measured no faster
+/// (docs/performance-log.md).
 pub fn register_cap() -> Option<u32> {
     let cap = std::env::var("EVOLUTION_CUDA_MAXREG")
         .ok()
         .and_then(|v| v.trim().parse::<u32>().ok())
-        .unwrap_or(if physics2() { 0 } else { 128 });
+        .unwrap_or(0);
     (cap > 0).then(|| cap.clamp(24, 255))
 }
 
@@ -495,17 +494,10 @@ fn fits(capacity: usize, threads: u32) -> bool {
     threads == 32 || shared_per_thread(capacity) * threads as usize <= 48 * 1024
 }
 
-/// Whether the kernels in use are physics v2's.
-fn physics2() -> bool {
-    crate::physics2::enabled()
-}
-
-/// Shared memory per thread in bytes: v1's three node arrays, or v2's
-/// per-lane table (bodies above 32 nodes keep it in local memory).
+/// Shared memory per thread in bytes: the per-lane table (bodies above 32
+/// nodes keep it in local memory).
 fn shared_per_thread(capacity: usize) -> usize {
-    if !physics2() {
-        24 * capacity
-    } else if creature_kernel::cuda_table_local(capacity) {
+    if creature_kernel::cuda_table_local(capacity) {
         0
     } else {
         4 * (10 * capacity - 6)
@@ -519,11 +511,7 @@ fn recording_source(
     fidelity: Fidelity,
     launch_bounds: bool,
 ) -> String {
-    if physics2() {
-        creature_kernel::cuda_record_source2(capacity, threads, fidelity, launch_bounds)
-    } else {
-        creature_kernel::cuda_record_source(capacity, threads, fidelity, launch_bounds)
-    }
+    creature_kernel::cuda_record_source(capacity, threads, fidelity, launch_bounds)
 }
 
 /// The scoring kernel's source for `capacity` nodes.
@@ -533,11 +521,7 @@ fn scoring_source(
     fidelity: Fidelity,
     launch_bounds: bool,
 ) -> String {
-    if physics2() {
-        creature_kernel::cuda_source2(capacity, threads, fidelity, launch_bounds)
-    } else {
-        creature_kernel::cuda_source(capacity, threads, fidelity, launch_bounds)
-    }
+    creature_kernel::cuda_source(capacity, threads, fidelity, launch_bounds)
 }
 
 /// Resident warps per SM for `capacity`-node kernels in `threads`-thread
@@ -568,7 +552,7 @@ fn block_size(capacity: usize, requested: Option<u32>, registers: Option<u32>) -
         return threads;
     }
     // Uncapped, the v2 kernels use 222 to 255 registers up to 32 nodes.
-    let registers = registers.unwrap_or(if physics2() { 255 } else { 128 });
+    let registers = registers.unwrap_or(255);
     [128, 64, 32]
         .into_iter()
         .filter(|&t| fits(capacity, t))
@@ -1498,11 +1482,7 @@ impl CudaEngine {
         // Physics v2 trials start at the settling tick, as scoring does, and
         // rebuild their node table from joint state at every dispatch, so
         // bit-exact frames need scoring's dispatch boundaries.
-        let (start, cuts) = if physics2() {
-            (cfg.fidelity().settle(), crate::engine::segment_ends(cfg))
-        } else {
-            (0, Vec::new())
-        };
+        let (start, cuts) = (cfg.fidelity().settle(), crate::engine::segment_ends(cfg));
         self.submit_as(
             std::slice::from_ref(batch),
             cfg,

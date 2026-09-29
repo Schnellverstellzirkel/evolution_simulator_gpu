@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
             subset += t.elapsed().as_secs_f64();
             let t = Instant::now();
             let idx: Vec<usize> = (0..chunk.len()).collect();
-            let batches = evolution_simulator::creature_kernel::pack(&unit_pop, &idx)?;
+            let batches = evolution_simulator::physics2::pack(&unit_pop, &idx, &e.config)?;
             pack += t.elapsed().as_secs_f64();
             drop(batches);
             let t = Instant::now();

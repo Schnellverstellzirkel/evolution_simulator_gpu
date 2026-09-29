@@ -82,22 +82,11 @@ fn main() {
         .nth(2)
         .and_then(|v| v.parse().ok())
         .unwrap_or(7);
-    // SAFETY: set before any other thread starts.
-    unsafe { std::env::set_var("EVOLUTION_LEDGER", "1") };
     let cfg = Config {
         random_seed: false,
         duration: 20.0,
         ..Config::default()
     };
-    let v2 = evolution_simulator::physics2::enabled();
-    let names = [
-        "integration speed cap",
-        "ground contact",
-        "velocity-pass speed cap",
-        "velocity-pass constraints",
-        "projection COM shift",
-        "muscle forces",
-    ];
     let v2_names = [
         "ground and wind impulse (N s)",
         "body momentum change (N s)",
@@ -171,25 +160,14 @@ fn main() {
     let mut rows: Vec<Row> = Vec::new();
     for (genes, _) in pool.iter().take(20) {
         let creature = triangle(genes);
-        *cpu_engine::LEDGER.lock().unwrap() = [0.0; 6];
-        *cpu_engine::ENERGY_LEDGER.lock().unwrap() = [0.0; 5];
         let (_, result) = cpu_engine::replay(&creature, &cfg);
         let mass: f32 = physics::nodes(&creature).iter().map(|n| n.mass).sum();
-        let (momentum, energy) = if v2 {
-            (
-                evolution_simulator::physics2::LEDGER
-                    .with(|l| l.get())
-                    .to_vec(),
-                evolution_simulator::physics2::ENERGY
-                    .with(|l| l.get())
-                    .to_vec(),
-            )
-        } else {
-            (
-                cpu_engine::LEDGER.lock().unwrap().to_vec(),
-                cpu_engine::ENERGY_LEDGER.lock().unwrap().to_vec(),
-            )
-        };
+        let momentum = evolution_simulator::physics2::LEDGER
+            .with(|l| l.get())
+            .to_vec();
+        let energy = evolution_simulator::physics2::ENERGY
+            .with(|l| l.get())
+            .to_vec();
         let cost = cpu_engine::transport_cost(&creature, &cfg);
         rows.push((
             result.fitness,
@@ -200,11 +178,10 @@ fn main() {
             cost,
         ));
     }
-    let mnames: &[&str] = if v2 { &v2_names } else { &names };
+    let mnames: &[&str] = &v2_names;
     rows.sort_by(|a, b| b.0.total_cmp(&a.0));
     println!(
-        "{samples} random triangles then {generations} generations of hill-climbing, 20 s, physics {}: top 20 best {:.2} m, 20th {:.2} m",
-        if v2 { "v2" } else { "v1" },
+        "{samples} random triangles then {generations} generations of hill-climbing, 20 s, physics v2: top 20 best {:.2} m, 20th {:.2} m",
         rows[0].0,
         rows[rows.len() - 1].0
     );
@@ -216,15 +193,8 @@ fn main() {
         for (name, v) in mnames.iter().zip(l) {
             println!("    {name:52} {v:+10.2}");
         }
-        if v2 {
-            for (name, v) in energy_names.iter().zip(e) {
-                println!("    {name:52} {v:+10.2}");
-            }
-        } else {
-            println!(
-                "    muscle work {:.1} J, gained otherwise {:.1} J, lost {:.1} J",
-                e[0], e[1], e[2]
-            );
+        for (name, v) in energy_names.iter().zip(e) {
+            println!("    {name:52} {v:+10.2}");
         }
     }
     let top = &rows[..5];

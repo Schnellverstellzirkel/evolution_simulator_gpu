@@ -86,12 +86,7 @@ pub struct VkEngine {
     /// use: a cold driver takes seconds for a small body's kernel and much
     /// longer for a large one, so a start compiles only what its bodies need.
     pipelines: std::collections::HashMap<(crate::physics::Fidelity, usize), vk::Pipeline>,
-    /// Kernels specialized for one body plan, by plan, bucket and fidelity.
-    specialized: std::collections::HashMap<
-        (creature_kernel::Plan, usize, crate::physics::Fidelity),
-        vk::Pipeline,
-    >,
-    /// Recording kernels (`creature_kernel::record_source`) by fidelity and
+    /// Recording kernels (`physics2::record_source`) by fidelity and
     /// node capacity, built on first use.
     recording: std::collections::HashMap<(crate::physics::Fidelity, usize), vk::Pipeline>,
     descriptor_pool: vk::DescriptorPool,
@@ -326,7 +321,6 @@ impl VkEngine {
                 set_layout,
                 pipeline_layout,
                 pipelines: Default::default(),
-                specialized: Default::default(),
                 recording: Default::default(),
                 descriptor_pool,
                 command_pool,
@@ -745,11 +739,7 @@ impl VkEngine {
         let pipeline = Self::compile(
             &self.device,
             self.pipeline_layout,
-            &if crate::physics2::enabled() {
-                crate::physics2::record_source(capacity, self.workgroup, fidelity)
-            } else {
-                creature_kernel::record_source(capacity, self.workgroup, fidelity)
-            },
+            &crate::physics2::record_source(capacity, self.workgroup, fidelity),
         )?;
         self.recording.insert((fidelity, capacity), pipeline);
         Ok(pipeline)
@@ -779,26 +769,6 @@ impl VkEngine {
         }
     }
 
-    /// The kernel specialized for `plan` in `capacity` buckets, built on first use.
-    fn specialized_pipeline(
-        &mut self,
-        plan: &creature_kernel::Plan,
-        capacity: usize,
-        fidelity: crate::physics::Fidelity,
-    ) -> Result<vk::Pipeline> {
-        let key = (plan.clone(), capacity, fidelity);
-        if let Some(&pipeline) = self.specialized.get(&key) {
-            return Ok(pipeline);
-        }
-        let pipeline = Self::compile(
-            &self.device,
-            self.pipeline_layout,
-            &creature_kernel::specialized_source(plan, capacity, self.workgroup, fidelity),
-        )?;
-        self.specialized.insert(key, pipeline);
-        Ok(pipeline)
-    }
-
     /// The scoring kernel for `capacity`-node buckets at `fidelity`, built
     /// on first use.
     fn standard_pipeline(
@@ -813,11 +783,7 @@ impl VkEngine {
         let pipeline = Self::compile(
             &self.device,
             self.pipeline_layout,
-            &if crate::physics2::enabled() {
-                crate::physics2::shader_source(capacity, self.workgroup, fidelity)
-            } else {
-                creature_kernel::shader_source(capacity, self.workgroup, fidelity)
-            },
+            &crate::physics2::shader_source(capacity, self.workgroup, fidelity),
         )?;
         if std::env::var_os("EVOLUTION_VK_VERBOSE").is_some() {
             eprintln!(
@@ -870,19 +836,11 @@ impl VkEngine {
         chunk: u32,
     ) -> Result<u64> {
         ensure!(self.replay_free(), "A replay is already being recorded");
-        // Physics v2 trials start at the settling tick, as scoring does.
-        let start = if crate::physics2::enabled() {
-            cfg.fidelity().settle()
-        } else {
-            0
-        };
-        // Physics v2 rebuilds its node table from joint state at every
+        // Trials start at the settling tick, as scoring does.
+        let start = cfg.fidelity().settle();
+        // The kernel rebuilds its node table from joint state at every
         // dispatch, so bit-exact frames need scoring's dispatch boundaries.
-        let cuts = if crate::physics2::enabled() {
-            crate::engine::segment_ends(cfg)
-        } else {
-            Vec::new()
-        };
+        let cuts = crate::engine::segment_ends(cfg);
         self.submit_as(
             std::slice::from_ref(batch),
             cfg,
@@ -945,10 +903,12 @@ impl VkEngine {
         let ranges = spans.len() as u32;
         let kernels: Vec<vk::Pipeline> = batches
             .iter()
-            .map(|batch| match &batch.plan {
-                _ if record => self.recording_pipeline(batch.capacity, fidelity),
-                Some(plan) => self.specialized_pipeline(plan, batch.capacity, fidelity),
-                None => self.standard_pipeline(batch.capacity, fidelity),
+            .map(|batch| {
+                if record {
+                    self.recording_pipeline(batch.capacity, fidelity)
+                } else {
+                    self.standard_pipeline(batch.capacity, fidelity)
+                }
             })
             .collect::<Result<_>>()?;
         // Node positions for every creature, before each step and after the last.
@@ -1353,12 +1313,7 @@ impl Drop for VkEngine {
             self.device.destroy_command_pool(self.command_pool, None);
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
-            for &p in self
-                .pipelines
-                .values()
-                .chain(self.specialized.values())
-                .chain(self.recording.values())
-            {
+            for &p in self.pipelines.values().chain(self.recording.values()) {
                 self.device.destroy_pipeline(p, None);
             }
             self.device

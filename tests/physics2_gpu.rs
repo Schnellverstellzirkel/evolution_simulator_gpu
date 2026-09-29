@@ -29,7 +29,6 @@ fn the_v2_kernel_agrees_with_the_cpu_prototype_in_mud() {
 }
 
 fn agree(mud: f32) {
-    assert!(physics2::enabled());
     let cfg = Config {
         population: 512,
         duration: 1.0,
