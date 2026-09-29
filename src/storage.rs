@@ -519,10 +519,12 @@ impl Experiment {
         // Screened and unchecked results are both kept out of the archives.
         self.screened[i] = metric.screened || metric.unchecked;
         self.screen_distance[i] = metric.screen_x;
-        if self
-            .config
-            .screen
-            .is_some_and(|screen| screen.bar == f32::NEG_INFINITY)
+        // A result from a world that has since changed carries no distance.
+        if metric.screen_x.is_finite()
+            && self
+                .config
+                .screen
+                .is_some_and(|screen| screen.bar == f32::NEG_INFINITY)
         {
             self.screen_samples += 1;
         }
@@ -1921,7 +1923,18 @@ impl Experiment {
         self.evaluated = 0;
         Ok(())
     }
-    pub fn update_config(&mut self, mut cfg: Config) -> Result<()> {
+    /// Applies settings when the experiment is idle, and otherwise at the
+    /// next generation boundary.
+    pub fn update_config(&mut self, cfg: Config) -> Result<()> {
+        self.update_config_at(cfg, self.stage == Stage::Ready)
+    }
+    /// Applies settings now, in the middle of a steady run. A world change
+    /// resets the search context at once. Trials in flight from the old world
+    /// are recognized by their own settings and enter no archive.
+    pub fn update_config_now(&mut self, cfg: Config) -> Result<()> {
+        self.update_config_at(cfg, true)
+    }
+    fn update_config_at(&mut self, mut cfg: Config, now: bool) -> Result<()> {
         cfg.validate()?;
         // The season step advances in the worker, so a settings update must
         // never rewind a checkpoint-carrying counter to its stale copy.
@@ -1946,7 +1959,8 @@ impl Experiment {
             }),
             "Archived bodies exceed these limits; start a new experiment"
         );
-        if self.stage == Stage::Ready {
+        if now {
+            self.pending = None;
             let world_changed = fitness_context_changed(&self.config, &cfg);
             if world_changed {
                 self.reset_search_context();
@@ -2060,6 +2074,9 @@ impl Experiment {
             }
         }
         self.archive = QdArchive::default();
+        // Fossils are old-world elites: undoing a meteor must not bring them
+        // back into the new world's archives.
+        self.fossils.clear();
         self.islands.clear();
         self.island_progress.clear();
         self.graduations.clear();

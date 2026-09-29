@@ -749,10 +749,22 @@ fn run(
                     Command::Configure(cfg) => {
                         if let Some(e) = &mut exp {
                             let before = e.config.clone();
-                            e.update_config(cfg)?;
-                            // Between generations a change applies at once;
-                            // otherwise it waits in `pending` and is logged
-                            // when the next generation starts.
+                            if steady.active {
+                                // A steady run applies the change now. Work in
+                                // flight from the old world is discarded when
+                                // it returns.
+                                e.update_config_now(cfg)?;
+                                if before.physics_differs(&e.config)
+                                    && let Some(sched) = gpu.sched.as_mut()
+                                {
+                                    sched.discard_old_world(&e.config);
+                                }
+                            } else {
+                                e.update_config(cfg)?;
+                            }
+                            // Between generations and in a steady run a change
+                            // applies at once; otherwise it waits in `pending`
+                            // and is logged when the next generation starts.
                             log_world_change(
                                 &mut events,
                                 &before,
@@ -1185,6 +1197,11 @@ fn run(
                                 let failed = std::mem::take(&mut steady.failed);
                                 steady.count = steady.count.saturating_sub(e.config.population);
                                 e.finish_steady_generation(failed)?;
+                                if world_before.physics_differs(&e.config)
+                                    && let Some(sched) = gpu.sched.as_mut()
+                                {
+                                    sched.discard_old_world(&e.config);
+                                }
                                 e.stage = Stage::Evaluating;
                                 e.evaluated = steady.count.min(e.config.population);
                             } else if continuous

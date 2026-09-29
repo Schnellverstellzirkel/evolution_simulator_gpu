@@ -667,6 +667,23 @@ impl Scheduler {
         Ok(())
     }
 
+    /// A world change drops every contender still held for a check. Their
+    /// standard trials ran in the old world, so they enter no archive, and
+    /// their slots are re-bred. Check trials already running finish and are
+    /// ignored.
+    pub fn discard_held(&mut self) {
+        let mut held: Vec<_> = self.held.drain().collect();
+        held.sort_unstable_by_key(|&(i, _)| i);
+        for (i, mut metric) in held {
+            metric.unchecked = true;
+            self.released.push((i, metric));
+        }
+        self.checks.clear();
+        self.ready.clear();
+        self.checking.clear();
+        self.busy_cells.clear();
+        self.checks_since = None;
+    }
     /// Contenders held for their check (waiting, ready or running).
     pub fn holding(&self) -> usize {
         self.held.len()
@@ -999,6 +1016,9 @@ impl Scheduler {
                                             to_metrics(&population, k, &done.results[k], &config);
                                         if stale {
                                             metric.unchecked = true;
+                                            // Old-world distances must not
+                                            // set the new world's screen bar.
+                                            metric.screen_x = f32::NAN;
                                         }
                                         if self.robust_trials > 1 && contender(i, &metric) {
                                             self.held.insert(i, metric);

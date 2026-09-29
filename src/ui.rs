@@ -1072,20 +1072,31 @@ const RECORD_STEP: f32 = 0.01;
 /// world lowers the best, so records count again from its first generation.
 fn world_records(history: &[Stats]) -> Vec<(usize, f32, bool)> {
     let mut best = f32::NEG_INFINITY;
+    let mut fresh = false;
     let mut records = Vec::new();
     for (index, stats) in history.iter().enumerate() {
         if index > 0 && stats.config.physics_differs(&history[index - 1].config) {
             best = f32::NEG_INFINITY;
+            fresh = true;
         }
         // A record beats the last one by at least a centimeter, so two
-        // records never read the same.
-        if stats.best.is_finite() && stats.best >= best + RECORD_STEP {
-            let first = best == f32::NEG_INFINITY;
+        // records never read the same. A row with nothing kept has no best.
+        if stats.archive_cells > 0 && stats.best.is_finite() && stats.best >= best + RECORD_STEP {
             best = stats.best;
-            records.push((index, best, first && index > 0));
+            records.push((index, best, fresh));
+            fresh = false;
         }
     }
     records
+}
+/// The newest history row when it was measured in the world that is live now.
+/// After a world change the rows are from the old world, and nothing from
+/// them may stand for the current world.
+fn row_in_world(snapshot: &Snapshot) -> Option<&Stats> {
+    snapshot
+        .history
+        .last()
+        .filter(|row| !row.config.physics_differs(&snapshot.config))
 }
 /// A record set in the generation that is running, before its history row
 /// exists.
@@ -1794,8 +1805,15 @@ impl App {
         if let Some(live) = &snapshot.champion {
             return Some((live.0.clone(), live.1.clone()));
         }
-        let stats = snapshot.history.last()?;
+        // A row from before a world change is not this world's champion.
+        let stats = row_in_world(snapshot)?;
         Some((stats.representatives.last()?.clone(), stats.config.clone()))
+    }
+    /// The world changed and nothing measured in it is kept yet.
+    fn awaiting_new_world(&self) -> bool {
+        self.snapshot.as_ref().is_some_and(|s| {
+            !s.history.is_empty() && s.champion.is_none() && row_in_world(s).is_none()
+        })
     }
     /// Keeps the theater (on the Overview and docked beside Ways of moving)
     /// on the champion unless the player pinned a creature. A new champion,
@@ -1803,6 +1821,13 @@ impl App {
     /// once.
     fn follow_champion(&mut self) {
         let Some((creature, config)) = self.champion() else {
+            // The world changed and no creature is kept in it yet: the old
+            // champion does not stand for this world, so the view empties.
+            if !self.pinned && self.awaiting_new_world() && self.playback.is_some() {
+                self.playback = None;
+                self.replay_wait = None;
+                self.champion_shown = false;
+            }
             return;
         };
         let showing = self.playback.as_ref().map(|p| p.creature.id);
@@ -2300,6 +2325,15 @@ impl App {
         }
         // All scene primitives are tessellated into egui's batched wgpu render pass.
         painter.rect_filled(rect, 12, VIEWPORT);
+        if self.playback.is_none() && self.awaiting_new_world() {
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "Testing in the new world...",
+                FontId::proportional(20.),
+                theme.muted,
+            );
+        }
         draw_clouds(&painter, rect, self.camera[0] * self.zoom);
         let origin = Pos2::new(
             rect.center().x - self.camera[0] * self.zoom,
@@ -2711,8 +2745,16 @@ impl App {
         // stands in before the first snapshot has an elite.
         let best = if snapshot.live_best.is_finite() {
             snapshot.live_best
-        } else if let Some(s) = history.last() {
+        } else if let Some(s) = row_in_world(snapshot) {
             s.best
+        } else if !history.is_empty() {
+            ui.label(
+                RichText::new(
+                    "Testing in the new world... The kept creatures are running again under the new rules. The best distance appears here when one is kept.",
+                )
+                .color(theme.muted),
+            );
+            return;
         } else {
             ui.label(
                 RichText::new(
@@ -2725,11 +2767,13 @@ impl App {
         let cells = if snapshot.archive_cells > 0 {
             snapshot.archive_cells
         } else {
-            history.last().map_or(0, |s| s.archive_cells)
+            row_in_world(snapshot).map_or(0, |s| s.archive_cells)
         };
+        // Only rows of this world count toward the gain.
         let gain = history
             .len()
             .checked_sub(10)
+            .filter(|&earlier| !history[earlier].config.physics_differs(&snapshot.config))
             .map(|earlier| best - history[earlier].best);
         let population = snapshot.config.population.max(1);
         let progress = generation_progress(
@@ -3196,16 +3240,31 @@ impl App {
         let waiting = self
             .cards_requested
             .is_some_and(|at| at.elapsed() < Duration::from_secs(2));
+        // A list scored in an earlier world is never shown.
+        let world = self.snapshot.as_ref().map(|s| s.config.clone());
+        if self.cards.as_ref().is_some_and(|list| {
+            world
+                .as_ref()
+                .is_some_and(|w| list.config.physics_differs(w))
+        }) {
+            self.cards = None;
+        }
         let empty = self.cards.as_ref().is_none_or(|list| list.cards.is_empty());
         if empty && archive_size > 0 && !waiting {
             // Nothing held yet (or the request got lost): ask again.
             self.request_cards();
         }
         let Some(list) = self.cards.clone() else {
+            let changed = self
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| !s.history.is_empty() && row_in_world(s).is_none());
             ui.label(
-                RichText::new(
-                    "The first generation is running. Its creatures appear here as they are kept.",
-                )
+                RichText::new(if changed {
+                    "Testing in the new world... Creatures appear here as they are kept."
+                } else {
+                    "The first generation is running. Its creatures appear here as they are kept."
+                })
                 .color(theme.muted),
             );
             return;
@@ -3404,7 +3463,11 @@ impl App {
         }
         // A stall: no record in this world for a while. The feed suggests a
         // harder world instead of changing the search silently.
-        if let (Some(last), Some(&(index, _, _))) = (history.last(), records.last()) {
+        // Only a record of the live world counts: after a world change the old
+        // records say nothing about a stall.
+        if let (Some(last), Some(&(index, _, _))) = (history.last(), records.last())
+            && !history[index].config.physics_differs(&snapshot.config)
+        {
             let since = last.generation.saturating_sub(history[index].generation);
             if since >= STALL_GENERATIONS
                 && live_record(snapshot).is_none()

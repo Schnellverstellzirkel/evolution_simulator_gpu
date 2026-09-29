@@ -73,6 +73,21 @@ pub(super) struct Ordered {
 }
 
 impl Ordered {
+    /// A world change makes every result the blocks hold an old-world result:
+    /// results waiting for a decision and results already final but not yet
+    /// returned (a block is returned up to `lag` blocks late). None of them
+    /// may enter an archive or set the screen bar of the new world.
+    fn discard_results(&mut self) {
+        for block in &mut self.blocks {
+            for slot in &mut block.slots {
+                if let Slot::Standard(metric) | Slot::Final(metric) = slot {
+                    metric.unchecked = true;
+                    metric.screen_x = f32::NAN;
+                }
+            }
+        }
+        self.claimed.clear();
+    }
     fn block(&mut self, seq: u64) -> Option<&mut Block> {
         let front = self.blocks.front()?.seq;
         self.blocks.get_mut(seq.checked_sub(front)? as usize)
@@ -94,6 +109,20 @@ impl Scheduler {
         };
         o.lag = if gated { lag as u64 } else { 0 };
         o.draining = false;
+    }
+
+    /// The world changed in a steady run. Everything measured in the old
+    /// world that is still on its way to the archives is marked so no archive
+    /// takes it: results held in blocks, contenders held for a check, and
+    /// work not yet on an engine, which now runs in the new world. Trials on
+    /// an engine keep their own settings and are recognized when they return.
+    pub fn discard_old_world(&mut self, cfg: &Config) {
+        self.ordered.discard_results();
+        self.discard_held();
+        let fresh = Arc::new(cfg.clone());
+        for own in self.cfg_of.values_mut() {
+            *own = Arc::clone(&fresh);
+        }
     }
 
     /// Drops every block and queued round. Only for an idle scheduler.
@@ -387,5 +416,43 @@ impl Scheduler {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_world_change_marks_every_held_result_old() {
+        let metric = |fitness| EvaluationMetrics {
+            fitness,
+            screen_x: fitness,
+            ..EvaluationMetrics::default()
+        };
+        let mut ordered = Ordered::default();
+        ordered.blocks.push_back(Block {
+            seq: 0,
+            members: vec![0, 1, 2],
+            slots: vec![
+                Slot::Final(metric(88.0)),
+                Slot::Standard(metric(70.0)),
+                Slot::Pending,
+            ],
+            released: true,
+            decided: false,
+            pending: 1,
+            standard: 1,
+            checking: 0,
+        });
+        ordered.claimed.insert(7, (0, 70.0));
+        ordered.discard_results();
+        assert!(ordered.claimed.is_empty());
+        for slot in &ordered.blocks[0].slots[..2] {
+            let (Slot::Final(m) | Slot::Standard(m)) = slot else {
+                unreachable!()
+            };
+            assert!(m.unchecked && m.screen_x.is_nan());
+        }
     }
 }
