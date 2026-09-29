@@ -99,7 +99,8 @@ impl Scene<'_> {
         );
     }
     /// A cream sign with a title line and body text.
-    fn sign(&self, x: f32, y: f32, w: f32, h: f32, num: u32, title: &str, body: &str) {
+    fn sign(&self, area: (f32, f32, f32, f32), num: u32, title: &str, body: &str) {
+        let (x, y, w, h) = area;
         let r = self.rect(x, y, w, h);
         self.block(r, CREAM, 8.0, 3.0);
         let pad = 8.0 * self.k;
@@ -264,7 +265,7 @@ fn island(s: &Scene, snap: Option<&Snapshot>, index: usize) {
     let best = summary.map_or(f32::NAN, |i| i.best);
     let title = format!("Island {}", index + 1);
     let body = format!("best {}\n{} niches", meters(best), cells);
-    s.sign(cx - 66.0, cy - 106.0, 132.0, 56.0, 0, &title, &body);
+    s.sign((cx - 66.0, cy - 106.0, 132.0, 56.0), 0, &title, &body);
 }
 
 fn boat(s: &Scene, x: f32, y: f32, tint: Color32) {
@@ -343,7 +344,7 @@ fn workshop(s: &Scene, index: usize, snap: Option<&Snapshot>) {
 
 fn arena(s: &Scene) {
     // Track.
-    s.sign(770.0, 64.0, 222.0, 28.0, 3, "Trial arena", "");
+    s.sign((770.0, 64.0, 222.0, 28.0), 3, "Trial arena", "");
     let lane = s.rect(776.0, 130.0, 210.0, 34.0);
     s.block(lane, DIRT, 6.0, 3.0);
     for i in 0..9 {
@@ -380,10 +381,7 @@ fn arena(s: &Scene) {
     );
     // Fine check.
     s.sign(
-        770.0,
-        300.0,
-        222.0,
-        150.0,
+        (770.0, 300.0, 222.0, 150.0),
         5,
         "Fine check",
         "A contender for an archive cell runs again as a nudged copy: pose moved by up to 2 cm, grip changed by up to 10%, physics at 4x the step rate. The worse distance counts. A check that fails the 5 s gate keeps it out.",
@@ -519,10 +517,7 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
 
     // How one creature is made.
     s.sign(
-        14.0,
-        534.0,
-        232.0,
-        170.0,
+        (14.0, 534.0, 232.0, 170.0),
         4,
         "How a child is made",
         "One: pick a parent from an island archive. Two: a workshop changes it. Three: it runs the 20 s trial. Four: a contender gets the fine check. Five: it is offered to the archives. Islands keep creatures apart until the boats sail.",
