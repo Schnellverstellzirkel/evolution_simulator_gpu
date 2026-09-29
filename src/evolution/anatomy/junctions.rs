@@ -4,7 +4,7 @@ use super::{
     new_muscle, parent_bones, remove_parts, room, span,
 };
 use crate::config::Config;
-use crate::evolution::{Bone, Creature, Muscle, NodeGene, Rng, neutralize};
+use crate::evolution::{Bone, Creature, Muscle, NodeGene, Rng};
 
 /// Where three or more bones meet, puts a short new bone between the node
 /// and a new node, and moves some of the child branches to the new node, so
@@ -109,7 +109,7 @@ pub(crate) fn repeat_body_segment(
     c: &mut Creature,
     cfg: &Config,
     rng: &mut Rng,
-    cx: &Context,
+    _cx: &Context,
 ) -> bool {
     let children = child_bones(c);
     let parents = parent_bones(c);
@@ -169,9 +169,6 @@ pub(crate) fn repeat_body_segment(
             ..m
         };
         fit_stroke(c, &mut new, Some(&m));
-        if cx.neutral {
-            neutralize(&mut new);
-        }
         c.muscles.push(new);
     }
     // The rest of the body below the trunk now hangs from the copy, and the
@@ -192,16 +189,7 @@ pub(crate) fn repeat_body_segment(
         }
     }
     for &limb in &limbs {
-        copy_branch(
-            c,
-            cfg,
-            limb,
-            node,
-            |p| add(p, offset),
-            false,
-            phase,
-            cx.neutral,
-        );
+        copy_branch(c, cfg, limb, node, |p| add(p, offset), false, phase);
     }
     keep_strokes(c, &before);
     true
@@ -210,7 +198,7 @@ pub(crate) fn repeat_body_segment(
 /// Turns a limb tip into a heel and a toe: two short bones from the tip, one
 /// pointing forward and one back, with their own joint ranges and a muscle
 /// from each to the tip bone.
-pub(crate) fn grow_heel_toe(c: &mut Creature, cfg: &Config, rng: &mut Rng, cx: &Context) -> bool {
+pub(crate) fn grow_heel_toe(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let children = child_bones(c);
     let parents = parent_bones(c);
     let tips: Vec<usize> = (1..c.nodes.len())
@@ -232,7 +220,7 @@ pub(crate) fn grow_heel_toe(c: &mut Creature, cfg: &Config, rng: &mut Rng, cx: &
         let node = add_node(c, tip, at);
         let bone = add_narrow_bone(c, tip, node, rng);
         let anchors = (rng.range(0.3, 1.0), rng.range(0.3, 0.9));
-        let m = new_muscle(c, bone, leg, anchors, template.as_ref(), rng, cx.neutral);
+        let m = new_muscle(c, bone, leg, anchors, template.as_ref(), rng);
         c.muscles.push(m);
     }
     true
@@ -420,10 +408,7 @@ mod tests {
         for (i, body) in bodies(&cfg, 160).into_iter().enumerate() {
             let mut c = body.clone();
             let mut rng = Rng::new(21, 0, i);
-            let cx = Context {
-                neutral: false,
-                donor: None,
-            };
+            let cx = Context { donor: None };
             if op(&mut c, &cfg, &mut rng, &cx) {
                 applied += 1;
                 check(&body, &c);

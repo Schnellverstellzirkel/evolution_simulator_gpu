@@ -1,7 +1,5 @@
 //! Operators that add, move, split, fuse and retime muscles.
-use super::{
-    Context, branch, fit_stroke, is_neck, muscles_on, neutralize, new_muscle, parent_bones, room,
-};
+use super::{Context, branch, fit_stroke, is_neck, muscles_on, new_muscle, parent_bones, room};
 use crate::config::Config;
 use crate::evolution::{Creature, Muscle, Rng, bone_point};
 
@@ -12,7 +10,7 @@ pub(crate) fn add_biarticular_muscle(
     c: &mut Creature,
     cfg: &Config,
     rng: &mut Rng,
-    cx: &Context,
+    _cx: &Context,
 ) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -32,7 +30,7 @@ pub(crate) fn add_biarticular_muscle(
     }
     let template = c.muscles[timing[rng.index(timing.len())]];
     let anchors = (rng.unit(), rng.unit());
-    let m = new_muscle(c, x, z, anchors, Some(&template), rng, cx.neutral);
+    let m = new_muscle(c, x, z, anchors, Some(&template), rng);
     c.muscles.push(m);
     true
 }
@@ -89,7 +87,7 @@ pub(crate) fn move_muscle_to_neighbor(
 
 /// Duplicates a muscle; the copy moves one anchor or shifts its phase a
 /// little, so one connection can specialize into two.
-pub(crate) fn split_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, cx: &Context) -> bool {
+pub(crate) fn split_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if c.muscles.is_empty() || !room(c, cfg, 0, 1) {
         return false;
     }
@@ -105,9 +103,6 @@ pub(crate) fn split_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, cx: &C
         fit_stroke(c, &mut m, Some(&old));
     } else {
         m.phase = (m.phase + rng.range(-0.1, 0.1)).rem_euclid(1.0);
-    }
-    if cx.neutral {
-        neutralize(&mut m);
     }
     c.muscles.push(m);
     true
@@ -167,7 +162,7 @@ pub(crate) fn fuse_similar_muscles(
 /// to a bone outside the child's branch whose attachment point lies on the
 /// other side of the child's line in the pose. Bodies without such a bone
 /// are skipped.
-pub(crate) fn add_antagonist(c: &mut Creature, cfg: &Config, rng: &mut Rng, cx: &Context) -> bool {
+pub(crate) fn add_antagonist(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
     }
@@ -202,15 +197,7 @@ pub(crate) fn add_antagonist(c: &mut Creature, cfg: &Config, rng: &mut Rng, cx: 
     }
     let (closer, r, anchor) = options[rng.index(options.len())];
     let k = closer.bone_a as usize;
-    let mut m = new_muscle(
-        c,
-        k,
-        r,
-        (closer.anchor_a, anchor),
-        Some(&closer),
-        rng,
-        cx.neutral,
-    );
+    let mut m = new_muscle(c, k, r, (closer.anchor_a, anchor), Some(&closer), rng);
     m.phase = (closer.phase + 0.5).rem_euclid(1.0);
     c.muscles.push(m);
     true
@@ -307,7 +294,7 @@ pub(crate) fn fan_muscle_attachments(
 
 /// Replaces a muscle between two bones that are not neighbours with two
 /// muscles through a bone on the path between them, starting in phase.
-pub(crate) fn relay_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, cx: &Context) -> bool {
+pub(crate) fn relay_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
     }
@@ -340,7 +327,6 @@ pub(crate) fn relay_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, cx: &C
         (at, old.anchor_b),
         Some(&old),
         rng,
-        cx.neutral,
     );
     c.muscles[*i] = first;
     c.muscles.push(second);
@@ -353,12 +339,12 @@ pub(crate) fn relay_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, cx: &C
 ///
 /// A limb's pattern is every muscle among its bones and the bone above it.
 /// Bones map by their order in the branch. The recipient loses its own
-/// pattern, except the ring muscles that `repair_with` would put back.
+/// pattern, except the ring muscles that `repair` would put back.
 pub(crate) fn copy_actuation_to_limb(
     c: &mut Creature,
     cfg: &Config,
     rng: &mut Rng,
-    cx: &Context,
+    _cx: &Context,
 ) -> bool {
     let limbs: Vec<(usize, Vec<usize>, Vec<usize>)> = (0..c.bones.len())
         .filter(|&b| !is_neck(c, b))
@@ -409,9 +395,6 @@ pub(crate) fn copy_actuation_to_limb(
                 ..old
             };
             fit_stroke(c, &mut m, Some(&old));
-            if cx.neutral {
-                neutralize(&mut m);
-            }
             m
         })
         .collect();
@@ -491,7 +474,7 @@ fn turn(from: f32, to: f32) -> f32 {
     (to - from + 0.5).rem_euclid(1.0) - 0.5
 }
 
-/// Whether a muscle joins consecutively numbered bones. `repair_with` keeps
+/// Whether a muscle joins consecutively numbered bones. `repair` keeps
 /// a muscle on each such pair, so rerouting one would only make repair add a
 /// random muscle in its place.
 pub(super) fn ring(c: &Creature, m: &Muscle) -> bool {
@@ -551,20 +534,17 @@ mod tests {
     use super::super::{Operator, tests::bodies};
     use super::*;
 
-    /// Runs `op` on test bodies with and without `neutral`. A change must
+    /// Runs `op` on test bodies. A change must
     /// pass `check(before, after)`. No change must leave the body as it was.
     /// Returns how often the operator applied, out of 160 tries.
     fn each_change(op: Operator, check: impl Fn(&Creature, &Creature)) -> usize {
         let cfg = Config::default();
         let mut applied = 0;
         for (i, body) in bodies(&cfg, 80).iter().enumerate() {
-            for neutral in [false, true] {
+            for variant in 0..2u32 {
                 let mut c = body.clone();
-                let mut rng = Rng::new(21, neutral as u32, i);
-                let cx = Context {
-                    neutral,
-                    donor: None,
-                };
+                let mut rng = Rng::new(21, variant, i);
+                let cx = Context { donor: None };
                 if op(&mut c, &cfg, &mut rng, &cx) {
                     applied += 1;
                     assert!(c.muscles.len() <= cfg.max_muscles);
@@ -650,10 +630,7 @@ mod tests {
         assert!(applied > 0, "applied {applied}");
         // A split muscle can always fuse back.
         let cfg = Config::default();
-        let cx = Context {
-            neutral: false,
-            donor: None,
-        };
+        let cx = Context { donor: None };
         for (i, mut c) in bodies(&cfg, 40).into_iter().enumerate() {
             let mut rng = Rng::new(22, 0, i);
             if !split_muscle(&mut c, &cfg, &mut rng, &cx) {

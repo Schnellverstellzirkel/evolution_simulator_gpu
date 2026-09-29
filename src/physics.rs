@@ -2,17 +2,10 @@ use crate::{
     config::Config,
     evolution::{Bone, Creature, FAILED, Muscle, NodeGene},
 };
-/// Physics steps per second. `EVOLUTION_PHYSICS_RATE` overrides it for
-/// experiments; every engine, the replay, and trial lengths follow it.
+/// Physics steps per second. Every engine, the replay, and trial lengths
+/// follow it.
 pub fn rate() -> u32 {
-    static RATE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *RATE.get_or_init(|| {
-        std::env::var("EVOLUTION_PHYSICS_RATE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|&r: &u32| (15..=480).contains(&r))
-            .unwrap_or(60)
-    })
+    60
 }
 /// Seconds per physics step.
 pub fn dt() -> f32 {
@@ -44,8 +37,7 @@ pub struct Fidelity {
     pub velocity_passes: usize,
 }
 impl Fidelity {
-    /// The configured physics: `EVOLUTION_PHYSICS_RATE` and the solver pass
-    /// overrides, or their defaults.
+    /// The standard physics: 60 steps per second and `solver_passes`.
     pub fn standard() -> Self {
         let (bone_passes, velocity_passes) = solver_passes();
         Self {
@@ -86,22 +78,8 @@ impl Fidelity {
 }
 /// Position-projection and velocity-constraint passes per step. The rebuild
 /// after projection makes every bone exactly its rest length regardless.
-/// `EVOLUTION_BONE_PASSES` / `EVOLUTION_VELOCITY_PASSES` override them for
-/// solver experiments; every engine and the replay read the same values.
 pub fn solver_passes() -> (usize, usize) {
-    static PASSES: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
-    *PASSES.get_or_init(|| {
-        let read = |name: &str, default: usize| {
-            std::env::var(name)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(default)
-        };
-        (
-            read("EVOLUTION_BONE_PASSES", 2),
-            read("EVOLUTION_VELOCITY_PASSES", 1),
-        )
-    })
+    (2, 1)
 }
 /// Actuator and safety limits of the physics.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -144,39 +122,10 @@ impl Limits {
         bone_density: 4.0,
     };
 }
-/// The physics limits. `EVOLUTION_MAX_MUSCLE_SPEED`, `EVOLUTION_MAX_MUSCLE_FORCE`,
-/// `EVOLUTION_MAX_NODE_SPEED`, `EVOLUTION_MAX_BONE_SPIN`,
-/// `EVOLUTION_MIN_MUSCLE_PERIOD`, and `EVOLUTION_BONE_DENSITY` override them for experiments; every engine,
-/// the replay, and mutation read the same values.
+/// The physics limits. Every engine, the replay, and mutation read the same
+/// values.
 pub fn limits() -> Limits {
-    static LIMITS: std::sync::OnceLock<Limits> = std::sync::OnceLock::new();
-    *LIMITS.get_or_init(|| {
-        let read = |name: &str, default: f32| {
-            std::env::var(name)
-                .ok()
-                .and_then(|v| v.parse::<f32>().ok())
-                .filter(|v| v.is_finite() && *v > 0.0)
-                .unwrap_or(default)
-        };
-        let d = Limits::DEFAULT;
-        Limits {
-            muscle_speed: read("EVOLUTION_MAX_MUSCLE_SPEED", d.muscle_speed),
-            muscle_force: read("EVOLUTION_MAX_MUSCLE_FORCE", d.muscle_force),
-            node_speed: read("EVOLUTION_MAX_NODE_SPEED", d.node_speed),
-            bone_spin: read("EVOLUTION_MAX_BONE_SPIN", d.bone_spin),
-            min_period: read("EVOLUTION_MIN_MUSCLE_PERIOD", d.min_period).clamp(0.05, 10.0),
-            muscle_energy: read("EVOLUTION_MUSCLE_ENERGY", d.muscle_energy),
-            muscle_recovery: read("EVOLUTION_MUSCLE_RECOVERY", d.muscle_recovery),
-            max_bone: read("EVOLUTION_MAX_BONE_LENGTH", d.max_bone).clamp(0.1, 12.0),
-            max_stroke: read("EVOLUTION_MAX_STROKE", d.max_stroke).clamp(0.1, 12.0),
-            // Zero is allowed here: massless bones, as before.
-            bone_density: std::env::var("EVOLUTION_BONE_DENSITY")
-                .ok()
-                .and_then(|v| v.parse::<f32>().ok())
-                .filter(|v| v.is_finite() && *v >= 0.0)
-                .unwrap_or(d.bone_density),
-        }
-    })
+    Limits::DEFAULT
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -622,17 +571,9 @@ pub const STANCE_GRIP: f32 = 10.0;
 /// as planted, so friction may push the body forward from them. Faster, the
 /// feet slide and friction can only oppose the slide.
 pub const PLANTED_SPEED: f32 = 0.01;
-/// `STANCE_GRIP`, or `EVOLUTION_STANCE_GRIP` for experiments (0 turns planted
-/// feet off).
+/// Grip of a planted stance (`STANCE_GRIP`).
 pub fn stance_grip() -> f32 {
-    static GRIP: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *GRIP.get_or_init(|| {
-        std::env::var("EVOLUTION_STANCE_GRIP")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .filter(|v| v.is_finite() && *v >= 0.0)
-            .unwrap_or(STANCE_GRIP)
-    })
+    STANCE_GRIP
 }
 /// Head shaking limit: the head's acceleration, averaged over about
 /// `HEAD_SHAKE_WINDOW` seconds, may not pass 8 g (m/s^2). A creature that
@@ -665,16 +606,11 @@ pub fn screen_seconds() -> Option<f32> {
         .unwrap_or(5.0);
     (seconds > 0.0).then_some(seconds)
 }
-/// Share of creatures, by distance at the screen, that runs the full trial
-/// (`EVOLUTION_SCREEN_KEEP`, default 0.2). At 5 s the top 20% held every
-/// creature of the final top 1% and 96% of the final top 10% on an evolved
-/// 3M population.
+/// Share of creatures, by distance at the screen, that runs the full trial.
+/// At 5 s the top 20% held every creature of the final top 1% and 96% of the
+/// final top 10% on an evolved 3M population.
 pub fn screen_keep() -> f32 {
-    std::env::var("EVOLUTION_SCREEN_KEEP")
-        .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-        .filter(|k| (0.0..=1.0).contains(k))
-        .unwrap_or(0.2)
+    0.2
 }
 /// The distance that the best `keep` share of `distances` reached (NaN
 /// entries are ignored), or no bar when fewer than 64 distances are known.

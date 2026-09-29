@@ -185,7 +185,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 38. Done: quake levels give each creature its own deterministic terrain phase and amplitude jitter, seeded from its id, in both engines.
 39. Done (default off): seasons levels step the world one effect at a time on a deterministic schedule (Off/Slow/Normal/Fast = 20/10/5 generations); the step index is stored in checkpoints and every lap returns to calm.
 40. A curriculum that raises difficulty when the archive stalls, as in POET (Wang et al., 2019).
-41. Implemented (default off): `EVOLUTION_CHECK_TERRAIN=1` replaces the 2 cm pose shift with the contender's own nearby terrain (id-hashed level offset), still at fine fidelity with the held standard result and min-of-two rule; four scheduler tests cover on/off, determinism and input retention.
+41. Measured and deleted (2026-09-29): a contender check on its own nearby terrain instead of the pose shift. 3 seeds, 30 generations, 4,000 creatures, 20 s trials, `--checks`: best 4.03 m against 4.19 m, QD 1,007 against 1,062, mixed per seed.
 42. An environment panel that lists active effects with their levels, undo buttons, and short explanations.
 43. A timeline of effects on the history chart.
 44. Save the effect history in checkpoints.
@@ -195,7 +195,7 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 ### Performance
 
 47. Stop simulating fallen creatures on the GPU (lane compaction at dispatch boundaries). Research ranks it first: 43 to 55% of simulated time comes after a fall.
-48. CPU group early exit is implemented behind `EVOLUTION_EARLY_EXIT=1`. Future GPU lane compaction must freeze that GPU trial's own score and descriptors; CPU/GPU result matching is not required. GPU acceptance uses repeatability and equal-budget search outcomes.
+48. CPU group early exit is on by default and has no switch (a replay never exits early). Future GPU lane compaction must freeze that GPU trial's own score and descriptors; CPU/GPU result matching is not required. GPU acceptance uses repeatability and equal-budget search outcomes.
 49. Reduce GPU kernel register pressure (about 120 registers per thread, about 30% occupancy).
 50. Cut CPU time between batches: archive insertion, emitter feedback, CMA updates, offspring creation.
 51. Keep the worker responsive: controls should never wait behind archive insertion or breeding (about 1 s at 1M creatures).
@@ -219,8 +219,8 @@ Items marked (owner) were requested by the owner. The rest are suggestions, in r
 
 ### Search
 
-66. Implemented (measured no gain): EVOLUTION_NEUTRAL_SPLITS makes every added muscle passive (zero stroke, stiffness 5). Paired 60-generation, 10-seed runs showed no best/QD improvement, so it stays default off; splits remain broken and a rigid new joint is the next candidate, per docs/search-research.md.
-67. Implemented (mixed result): EVOLUTION_ELITE_REFRESH=N now re-scores a bounded rotating elite subset from a fresh deterministic perturbation and keeps the worse score. It lowered about 5 entries per cycle and caught exact-pose accidents, but the 10-seed best-distance effect was mixed, so it stays default off and the game is the place to re-measure.
+66. Measured and deleted (2026-09-29): `EVOLUTION_NEUTRAL_SPLITS` (every added muscle passive), no gain over 10 seeds. The removal operators behind `EVOLUTION_SHRINK` were deleted too (bodies 24% fewer muscles, search medians tie, means lower); the anatomy operators are untouched.
+67. Measured and deleted (2026-09-29): the fresh-perturbation elite refresh (`EVOLUTION_ELITE_REFRESH`), mixed over 10 seeds.
 68. Spend more evaluations on the best elites (CMA-MAE thresholds, curiosity-based parent choice).
 69. Let CMA respect the configured body bounds and vary joint ranges, sensors and reset phases (F6).
 70. Use or remove `Creature.mutability` (mutated but unused, F8).

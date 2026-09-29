@@ -17,12 +17,10 @@
 //!   that convention (`a` is the node already in the tree).
 //! - An operator returns whether it changed the creature. It keeps within
 //!   `cfg.max_nodes` and `cfg.max_muscles`, and it never removes the head or
-//!   the neck. `repair_with` runs after it (in `offspring`), which clamps
+//!   the neck. `repair` runs after it (in `offspring`), which clamps
 //!   genes, restores canonical order and the muscle ring, and lines the nodes
 //!   up with the bone lengths.
-//! - Muscles an operator adds start passive when `Context::neutral` is set
-//!   (`neutralize`), as the classic operators do.
-use super::{Bone, Creature, Muscle, NodeGene, Rng, bone_point, neutralize};
+use super::{Bone, Creature, Muscle, NodeGene, Rng, bone_point};
 use crate::config::Config;
 
 mod extra;
@@ -33,8 +31,6 @@ mod rhythm;
 
 /// What an operator may use besides the creature.
 pub(super) struct Context<'a> {
-    /// Added muscles start passive.
-    pub neutral: bool,
     /// Another archive elite, for operators that graft from a second body.
     pub donor: Option<&'a Creature>,
 }
@@ -306,7 +302,7 @@ pub(super) fn fit_stroke(c: &Creature, m: &mut Muscle, template: Option<&Muscle>
 
 /// A new muscle from `bone_a` to `bone_b` with the given anchors. Its rhythm
 /// (period, phase, duty, stiffness, sensor, reset) comes from `template`, or
-/// is random without one; its stroke fits its span. Passive with `neutral`.
+/// is random without one; its stroke fits its span.
 pub(super) fn new_muscle(
     c: &Creature,
     bone_a: usize,
@@ -314,7 +310,6 @@ pub(super) fn new_muscle(
     anchors: (f32, f32),
     template: Option<&Muscle>,
     rng: &mut Rng,
-    neutral: bool,
 ) -> Muscle {
     let mut m = match template {
         Some(t) => *t,
@@ -325,9 +320,6 @@ pub(super) fn new_muscle(
     m.anchor_a = anchors.0.clamp(0.0, 1.0);
     m.anchor_b = anchors.1.clamp(0.0, 1.0);
     fit_stroke(c, &mut m, template);
-    if neutral {
-        neutralize(&mut m);
-    }
     m
 }
 
@@ -336,7 +328,7 @@ pub(super) fn new_muscle(
 /// ranges (mirrored with `mirror`) and every muscle inside the branch, plus
 /// the muscles from the branch root to the bone above it, reattached to the
 /// bone above `at` when there is one. Copied muscles shift their phase by
-/// `phase` and start passive with `neutral`. Returns the new root bone, or
+/// `phase`. Returns the new root bone, or
 /// `None` without room.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn copy_branch(
@@ -347,7 +339,6 @@ pub(super) fn copy_branch(
     place: impl Fn([f32; 2]) -> [f32; 2],
     mirror: bool,
     phase: f32,
-    neutral: bool,
 ) -> Option<usize> {
     let bones = branch(c, bone);
     let parents = parent_bones(c);
@@ -410,9 +401,6 @@ pub(super) fn copy_branch(
             continue;
         }
         m.phase = (m.phase + phase).rem_euclid(1.0);
-        if neutral {
-            neutralize(&mut m);
-        }
         c.muscles.push(m);
     }
     Some(new_bone[&bone])
@@ -421,7 +409,7 @@ pub(super) fn copy_branch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::evolution::{Population, grow_for_benchmark, random_creature_from, repair_with};
+    use crate::evolution::{Population, grow_for_benchmark, random_creature_from, repair};
 
     /// Repaired bodies of 3 to 16 nodes grown with the classic operators.
     pub(super) fn bodies(cfg: &Config, count: usize) -> Vec<Creature> {
@@ -470,11 +458,10 @@ mod tests {
             for (index, (name, _)) in OPERATORS.iter().enumerate() {
                 let mut applied = 0;
                 for (i, body) in bodies.iter().enumerate() {
-                    for neutral in [false, true] {
+                    for variant in 0..2u32 {
                         let mut c = body.clone();
-                        let mut rng = Rng::new(13, index as u32, i);
+                        let mut rng = Rng::new(13, index as u32 + 1000 * variant, i);
                         let cx = Context {
-                            neutral,
                             donor: Some(&donor),
                         };
                         if !apply(index, &mut c, &cfg, &mut rng, &cx) {
@@ -486,7 +473,7 @@ mod tests {
                             c.muscles.len() <= cfg.max_muscles,
                             "{name} grew past max_muscles"
                         );
-                        repair_with(&mut c, &cfg, &mut rng, neutral);
+                        repair(&mut c, &cfg, &mut rng);
                         let mut pop = Population::default();
                         pop.push(c.clone());
                         let check = Config {
@@ -495,7 +482,7 @@ mod tests {
                         };
                         if let Err(error) = pop.validate(&check) {
                             panic!(
-                                "{name} on body {i} (neutral {neutral}, max_nodes {}, max_muscles {}): {error:#}\n{c:?}",
+                                "{name} on body {i} (max_nodes {}, max_muscles {}): {error:#}\n{c:?}",
                                 cfg.max_nodes, cfg.max_muscles
                             );
                         }
@@ -529,10 +516,7 @@ mod tests {
             let mut rng = Rng::new(17, 0, i);
             for step in 0..200 {
                 let donor = &bodies[rng.index(bodies.len())];
-                let cx = Context {
-                    neutral: false,
-                    donor: Some(donor),
-                };
+                let cx = Context { donor: Some(donor) };
                 let index = rng.index(OPERATORS.len());
                 if !apply(index, &mut c, &cfg, &mut rng, &cx) {
                     continue;
@@ -540,7 +524,7 @@ mod tests {
                 // Breeding follows with a parameter mutation; the game test
                 // at these limits uses mutation 5.
                 c = crate::evolution::local_mutation(c, &cfg, &mut rng, 0.175);
-                repair_with(&mut c, &cfg, &mut rng, false);
+                repair(&mut c, &cfg, &mut rng);
                 let mut pop = Population::default();
                 pop.push(c.clone());
                 if let Err(error) = pop.validate(&check) {
@@ -564,7 +548,7 @@ mod tests {
             let at = c.bones[leaf].a as usize;
             let inside = muscles_on(&c, &branch(&c, leaf), true).len();
             let before = (c.nodes.len(), c.bones.len(), c.muscles.len());
-            let Some(root) = copy_branch(&mut c, &cfg, leaf, at, |p| p, false, 0.5, false) else {
+            let Some(root) = copy_branch(&mut c, &cfg, leaf, at, |p| p, false, 0.5) else {
                 continue;
             };
             assert_eq!(c.nodes.len(), before.0 + 1);

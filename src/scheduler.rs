@@ -186,7 +186,7 @@ pub struct Scheduler {
     pub devices: Vec<Device>,
     round: Option<Round>,
     pub packing_seconds: f64,
-    /// Trials per creature (`EVOLUTION_ROBUST_TRIALS`, 1 or 2). With 2, a
+    /// Trials per creature (1 or 2, 2 in the game). With 2, a
     /// creature that could enter the archive also runs a slightly perturbed
     /// copy at four times the physics resolution, and its fitness is the
     /// lower of the two. Gaits that only work at the coarse standard physics,
@@ -239,23 +239,6 @@ fn reserve_cpu_when_gpu_available(devices: &mut [Device]) {
             }
         }
     }
-}
-
-/// Parses `EVOLUTION_CHECK_TERRAIN`: `1`, `true`, or `on` (trimmed, case
-/// insensitive) enable the different-ground check; everything else is off.
-fn check_terrain_flag(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on"
-        )
-    })
-}
-
-/// The check-terrain switch is the environment variable and nothing else.
-/// It is off by default, which keeps the shipped game unchanged.
-fn check_terrain_enabled() -> bool {
-    check_terrain_flag(std::env::var("EVOLUTION_CHECK_TERRAIN").ok().as_deref())
 }
 
 /// Returns explicitly requested secondary GPU names. The safe default is to
@@ -363,7 +346,7 @@ impl Scheduler {
             devices,
             round: None,
             packing_seconds: 0.0,
-            robust_trials: env_or("EVOLUTION_ROBUST_TRIALS", 2usize).clamp(1, 2),
+            robust_trials: 2,
             checks: Vec::new(),
             checks_since: None,
             held: HashMap::new(),
@@ -437,27 +420,10 @@ impl Scheduler {
 
     /// Queues check units for waiting contenders. Checks go first, but wait
     /// to fill a reasonable unit while standard work remains.
-    ///
-    /// `EVOLUTION_CHECK_TERRAIN` is read once here, per check batch, and is
-    /// off by default.
     pub fn pump_checks(
         &mut self,
         pop: &Population,
         cfg: &Config,
-        need: impl FnMut(usize, &EvaluationMetrics) -> CheckNeed,
-    ) -> Result<()> {
-        self.pump_checks_with(pop, cfg, check_terrain_enabled(), need)
-    }
-
-    /// Check batch body. With `terrain_checks` on, each contender is checked
-    /// on a nearby but different ground level instead of a shifted pose
-    /// (research note B7), so robustness means the ground, not one exact
-    /// starting pose. The creature itself is submitted exactly as scored.
-    fn pump_checks_with(
-        &mut self,
-        pop: &Population,
-        cfg: &Config,
-        terrain_checks: bool,
         mut need: impl FnMut(usize, &EvaluationMetrics) -> CheckNeed,
     ) -> Result<()> {
         // Decide new contenders against the live archives. Each archive cell
@@ -557,22 +523,10 @@ impl Scheduler {
                     break;
                 }
                 let capacity = device.engine.max_nodes();
-                // A Config carries one terrain level, so one submission serves
-                // one level. Take the level of the oldest waiting check; later
-                // passes pick up the other levels of the same batch.
-                let level = if terrain_checks {
-                    self.ready
-                        .first()
-                        .map(|&i| check_terrain(cfg.terrain, pop.genomes[i].id))
-                } else {
-                    None
-                };
                 let mut indices = Vec::with_capacity(size.min(self.ready.len()));
                 let mut rest = Vec::new();
                 for i in self.ready.drain(..) {
-                    let same_level = !terrain_checks
-                        || Some(check_terrain(cfg.terrain, pop.genomes[i].id)) == level;
-                    if indices.len() < size && pop.genomes[i].node_count <= capacity && same_level {
+                    if indices.len() < size && pop.genomes[i].node_count <= capacity {
                         indices.push(i);
                     } else {
                         rest.push(i);
@@ -582,19 +536,12 @@ impl Scheduler {
                 if indices.is_empty() {
                     break;
                 }
-                let mut check_config = fine.clone();
-                if let Some(level) = level {
-                    check_config.terrain = level;
-                }
+                let check_config = fine.clone();
                 let started = Instant::now();
                 let mut unit = Population::default();
                 for &i in &indices {
                     let mut creature = pop.creature(i);
-                    // B7: on a terrain check the ground changes instead of the
-                    // pose, so the creature is submitted exactly as scored.
-                    if !terrain_checks {
-                        perturb(&mut creature);
-                    }
+                    perturb(&mut creature);
                     unit.push(creature);
                 }
                 let population = Arc::new(unit);
@@ -823,14 +770,7 @@ impl Scheduler {
         timeout: Duration,
         contender: impl FnMut(usize, &EvaluationMetrics) -> bool,
     ) -> Result<Vec<(Vec<usize>, Vec<EvaluationMetrics>)>> {
-        self.collect_up_to(
-            pop,
-            cfg,
-            timeout,
-            usize::MAX,
-            check_terrain_enabled(),
-            contender,
-        )
+        self.collect_up_to(pop, cfg, timeout, usize::MAX, contender)
     }
     /// `collect` that stops after the first unit with final results, so a
     /// caller that archives and breeds each unit can answer controls between
@@ -842,7 +782,7 @@ impl Scheduler {
         timeout: Duration,
         contender: impl FnMut(usize, &EvaluationMetrics) -> bool,
     ) -> Result<Vec<(Vec<usize>, Vec<EvaluationMetrics>)>> {
-        self.collect_up_to(pop, cfg, timeout, 1, check_terrain_enabled(), contender)
+        self.collect_up_to(pop, cfg, timeout, 1, contender)
     }
     fn collect_up_to(
         &mut self,
@@ -850,7 +790,6 @@ impl Scheduler {
         cfg: &Config,
         timeout: Duration,
         limit: usize,
-        terrain_checks: bool,
         mut contender: impl FnMut(usize, &EvaluationMetrics) -> bool,
     ) -> Result<Vec<(Vec<usize>, Vec<EvaluationMetrics>)>> {
         let mut out = Vec::new();
@@ -898,13 +837,8 @@ impl Scheduler {
                             // physics in flight. Their results are not
                             // comparable with the live world, so they enter no
                             // archive and their slots are re-bred from the new
-                            // world's archive. The opt-in different-ground
-                            // check varies only the terrain on purpose.
-                            let stale = if trial == Trial::Check && terrain_checks {
-                                config.physics_differs_ignoring_terrain(cfg)
-                            } else {
-                                config.physics_differs(cfg)
-                            };
+                            // world's archive.
+                            let stale = config.physics_differs(cfg);
                             device.busy_seconds += done.busy_seconds;
                             if trial == Trial::Check {
                                 self.check_busy_seconds += done.busy_seconds;
@@ -1128,19 +1062,6 @@ impl Scheduler {
         }
         Ok(out)
     }
-}
-
-/// Terrain level (`Config::terrain`, 0..=4) of a contender's check trial when
-/// `EVOLUTION_CHECK_TERRAIN` is on. A bounded offset derived from the
-/// creature id keeps the check ground nearby but always different from the
-/// standard level. No new physics: the engines already sample
-/// `physics::terrain_amplitude` for the level.
-fn check_terrain(standard: u8, id: u64) -> u8 {
-    let levels = crate::physics::TERRAIN_AMPLITUDES.len() as u64;
-    let standard = u64::from(standard).min(levels - 1);
-    let mixed = id.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (id >> 29);
-    let offset = 1 + mixed % (levels - 1);
-    ((standard + offset) % levels) as u8
 }
 
 /// Small deterministic change to a creature's starting pose and grip, for the
@@ -2081,7 +2002,7 @@ mod tests {
     }
 
     #[test]
-    fn a_deliberate_terrain_check_is_not_an_old_world_result() {
+    fn a_check_in_the_same_world_is_not_an_old_world_result() {
         let cfg = Config {
             terrain: 2,
             ..submission_config()
@@ -2103,10 +2024,8 @@ mod tests {
         let mut metrics = Vec::new();
         let mut completed = 0usize;
         while scheduler.in_flight() > 0 {
-            assert!(Instant::now() < deadline, "terrain check stalled");
-            scheduler
-                .pump_checks_with(&pop, &cfg, true, unshared)
-                .unwrap();
+            assert!(Instant::now() < deadline, "check stalled");
+            scheduler.pump_checks(&pop, &cfg, unshared).unwrap();
             {
                 let mut state = state.lock().unwrap();
                 while completed < state.submissions.len() {
@@ -2126,14 +2045,14 @@ mod tests {
                 }
             }
             let out = scheduler
-                .collect_up_to(&pop, &cfg, Duration::ZERO, usize::MAX, true, |_, _| false)
+                .collect_up_to(&pop, &cfg, Duration::ZERO, usize::MAX, |_, _| false)
                 .unwrap();
             metrics.extend(out.into_iter().flat_map(|(_, batch)| batch));
         }
         assert_eq!(metrics.len(), 2);
         assert!(
             metrics.iter().all(|metric| !metric.unchecked),
-            "a deliberate terrain check was treated as an old-world result"
+            "a same-world check was treated as an old-world result"
         );
     }
 
@@ -2258,95 +2177,8 @@ mod tests {
         }
     }
 
-    /// Runs every pending check through the fake engine and returns each
-    /// submission's config and creatures, in submission order.
-    fn submitted_checks(
-        pop: &Population,
-        cfg: &Config,
-        indices: &[usize],
-        terrain_checks: bool,
-    ) -> Vec<(Config, Vec<crate::evolution::Creature>)> {
-        let (mut scheduler, state) = fake_scheduler();
-        scheduler.checks = indices.to_vec();
-        for &index in indices {
-            scheduler.held.insert(
-                index,
-                EvaluationMetrics {
-                    fitness: 10.0,
-                    ..EvaluationMetrics::default()
-                },
-            );
-        }
-        let mut out = Vec::new();
-        let mut completed = 0usize;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while scheduler.in_flight() > 0 {
-            assert!(Instant::now() < deadline, "check terrain stalled");
-            scheduler
-                .pump_checks_with(pop, cfg, terrain_checks, unshared)
-                .unwrap();
-            let (units, submissions) = {
-                let state = state.lock().unwrap();
-                let units: Vec<(Config, Vec<crate::evolution::Creature>)> = state.submissions
-                    [completed..]
-                    .iter()
-                    .map(|submission| {
-                        (
-                            submission.config.clone(),
-                            (0..submission.population.genomes.len())
-                                .map(|slot| submission.population.creature(slot))
-                                .collect(),
-                        )
-                    })
-                    .collect();
-                (units, state.submissions.len())
-            };
-            out.extend(units);
-            while completed < submissions {
-                let count = {
-                    let state = state.lock().unwrap();
-                    state.submissions[completed].population.genomes.len()
-                };
-                state.lock().unwrap().results.push_back(Finished {
-                    ticket: completed as u64 + 1,
-                    results: vec![
-                        GpuResult {
-                            fitness: 0.0,
-                            ..GpuResult::default()
-                        };
-                        count
-                    ],
-                    busy_seconds: 0.5,
-                });
-                completed += 1;
-            }
-            scheduler
-                .collect(pop, cfg, Duration::ZERO, |_, _| false)
-                .unwrap();
-        }
-        out
-    }
-
     #[test]
-    fn check_terrain_flag_comes_from_the_environment() {
-        assert!(!check_terrain_flag(None));
-        assert!(!check_terrain_flag(Some("")));
-        assert!(!check_terrain_flag(Some("0")));
-        assert!(!check_terrain_flag(Some("false")));
-        assert!(!check_terrain_flag(Some("off")));
-        assert!(!check_terrain_flag(Some("yes")));
-        assert!(check_terrain_flag(Some("1")));
-        assert!(check_terrain_flag(Some("true")));
-        assert!(check_terrain_flag(Some("on")));
-        assert!(check_terrain_flag(Some(" TRUE ")));
-        assert!(check_terrain_flag(Some("On")));
-        // `EVOLUTION_CHECK_TERRAIN` is the only switch and is unset in the
-        // test process, so the shipped default is off.
-        assert!(!check_terrain_enabled());
-    }
-
-    #[test]
-    fn check_terrain_off_keeps_the_standard_terrain_and_pose_perturbation() {
+    fn checks_keep_the_standard_terrain_and_perturb_the_pose() {
         let cfg = Config {
             terrain: 2,
             ..submission_config()
@@ -2383,79 +2215,6 @@ mod tests {
             assert_eq!(actual.nodes, expected.nodes);
             assert_eq!(actual.bones, expected.bones);
             assert_eq!(actual.muscles, expected.muscles);
-        }
-    }
-
-    #[test]
-    fn check_terrain_on_replaces_the_pose_shift_with_different_ground() {
-        let cfg = Config {
-            terrain: 2,
-            population: 48,
-            duration: 1.0,
-            random_seed: false,
-            ..Config::default()
-        };
-        let pop = crate::evolution::create(&cfg).unwrap();
-        let indices: Vec<usize> = (0..6).collect();
-        let submissions = submitted_checks(&pop, &cfg, &indices, true);
-        assert!(!submissions.is_empty());
-        let mut levels = Vec::new();
-        let mut checked = 0;
-        for (config, creatures) in &submissions {
-            assert_ne!(
-                config.terrain, cfg.terrain,
-                "the check must change the ground"
-            );
-            assert_eq!(config.fidelity, Some(crate::physics::Fidelity::fine()));
-            for creature in creatures {
-                // No pose shift: the check submits the scored contender exactly.
-                let index = indices
-                    .iter()
-                    .copied()
-                    .find(|&i| pop.genomes[i].id == creature.id)
-                    .expect("the check must keep the contender");
-                let original = pop.creature(index);
-                assert_eq!(creature.nodes, original.nodes);
-                assert_eq!(creature.bones, original.bones);
-                assert_eq!(creature.muscles, original.muscles);
-                assert_eq!(check_terrain(cfg.terrain, creature.id), config.terrain);
-                checked += 1;
-            }
-            levels.push(config.terrain);
-        }
-        assert_eq!(
-            checked,
-            indices.len(),
-            "each contender needs exactly one check"
-        );
-        levels.sort_unstable();
-        levels.dedup();
-        assert!(levels.len() > 1, "creatures should reach different ground");
-    }
-
-    #[test]
-    fn check_terrain_submissions_are_deterministic() {
-        let cfg = Config {
-            terrain: 1,
-            population: 48,
-            duration: 1.0,
-            random_seed: false,
-            ..Config::default()
-        };
-        let pop = crate::evolution::create(&cfg).unwrap();
-        let indices: Vec<usize> = (0..6).collect();
-        let first = submitted_checks(&pop, &cfg, &indices, true);
-        let second = submitted_checks(&pop, &cfg, &indices, true);
-        assert_eq!(first.len(), second.len());
-        for ((config_a, creatures_a), (config_b, creatures_b)) in first.iter().zip(&second) {
-            assert_eq!(config_a, config_b);
-            assert_eq!(creatures_a.len(), creatures_b.len());
-            for (a, b) in creatures_a.iter().zip(creatures_b) {
-                assert_eq!(a.id, b.id);
-                assert_eq!(a.nodes, b.nodes);
-                assert_eq!(a.bones, b.bones);
-                assert_eq!(a.muscles, b.muscles);
-            }
         }
     }
 }
