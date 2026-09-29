@@ -82,9 +82,10 @@ pub struct VkEngine {
     memory_properties: vk::PhysicalDeviceMemoryProperties,
     set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
-    /// One kernel per node capacity, for each physics fidelity in use. The
-    /// standard fidelity is built at startup; others on first use.
-    pipelines: Vec<(crate::physics::Fidelity, Vec<vk::Pipeline>)>,
+    /// Kernels by physics fidelity and node capacity, each built on first
+    /// use: a cold driver takes seconds for a small body's kernel and much
+    /// longer for a large one, so a start compiles only what its bodies need.
+    pipelines: std::collections::HashMap<(crate::physics::Fidelity, usize), vk::Pipeline>,
     /// Kernels specialized for one body plan, by plan, bucket and fidelity.
     specialized: std::collections::HashMap<
         (creature_kernel::Plan, usize, crate::physics::Fidelity),
@@ -268,11 +269,6 @@ impl VkEngine {
                 .and_then(|v| v.parse::<u32>().ok())
                 .filter(|v| *v == 32 || *v == 64)
                 .unwrap_or(32);
-            let standard = crate::physics::Fidelity::standard();
-            let pipelines = vec![(
-                standard,
-                Self::build_pipelines(&device, pipeline_layout, workgroup, max_capacity, standard)?,
-            )];
             let pool_sizes = [
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
@@ -329,7 +325,7 @@ impl VkEngine {
                 memory_properties,
                 set_layout,
                 pipeline_layout,
-                pipelines,
+                pipelines: Default::default(),
                 specialized: Default::default(),
                 recording: Default::default(),
                 descriptor_pool,
@@ -759,29 +755,6 @@ impl VkEngine {
         Ok(pipeline)
     }
 
-    /// Compiles the kernel for every node capacity up to `max_capacity`.
-    fn build_pipelines(
-        device: &ash::Device,
-        layout: vk::PipelineLayout,
-        workgroup: u32,
-        max_capacity: usize,
-        fidelity: crate::physics::Fidelity,
-    ) -> Result<Vec<vk::Pipeline>> {
-        let mut pipelines = Vec::with_capacity(CAPACITIES.len());
-        for &capacity in CAPACITIES.iter().filter(|&&c| c <= max_capacity) {
-            pipelines.push(Self::compile(
-                device,
-                layout,
-                &if crate::physics2::enabled() {
-                    crate::physics2::shader_source(capacity, workgroup, fidelity)
-                } else {
-                    creature_kernel::shader_source(capacity, workgroup, fidelity)
-                },
-            )?);
-        }
-        Ok(pipelines)
-    }
-
     fn compile(
         device: &ash::Device,
         layout: vk::PipelineLayout,
@@ -826,20 +799,34 @@ impl VkEngine {
         Ok(pipeline)
     }
 
-    /// Index of the kernel set for `fidelity`, building it on first use.
-    fn pipeline_set(&mut self, fidelity: crate::physics::Fidelity) -> Result<usize> {
-        if let Some(index) = self.pipelines.iter().position(|(f, _)| *f == fidelity) {
-            return Ok(index);
+    /// The scoring kernel for `capacity`-node buckets at `fidelity`, built
+    /// on first use.
+    fn standard_pipeline(
+        &mut self,
+        capacity: usize,
+        fidelity: crate::physics::Fidelity,
+    ) -> Result<vk::Pipeline> {
+        if let Some(&pipeline) = self.pipelines.get(&(fidelity, capacity)) {
+            return Ok(pipeline);
         }
-        let set = Self::build_pipelines(
+        let started = std::time::Instant::now();
+        let pipeline = Self::compile(
             &self.device,
             self.pipeline_layout,
-            self.workgroup,
-            self.max_capacity,
-            fidelity,
+            &if crate::physics2::enabled() {
+                crate::physics2::shader_source(capacity, self.workgroup, fidelity)
+            } else {
+                creature_kernel::shader_source(capacity, self.workgroup, fidelity)
+            },
         )?;
-        self.pipelines.push((fidelity, set));
-        Ok(self.pipelines.len() - 1)
+        if std::env::var_os("EVOLUTION_VK_VERBOSE").is_some() {
+            eprintln!(
+                "Vulkan: kernel for {capacity} nodes at {fidelity:?} ready after {:.2} s",
+                started.elapsed().as_secs_f64()
+            );
+        }
+        self.pipelines.insert((fidelity, capacity), pipeline);
+        Ok(pipeline)
     }
 
     /// Uploads the batches and queues ticks `start..end` of trials that last
@@ -931,7 +918,6 @@ impl VkEngine {
             "Body too large for this device's kernels"
         );
         let fidelity = cfg.fidelity();
-        let pipeline_set = self.pipeline_set(fidelity)?;
         // The free slot with the most buffers to reuse: when memory is short,
         // a new allocation may fail where reuse does not.
         let slot = if record {
@@ -957,16 +943,14 @@ impl VkEngine {
             tick += steps;
         }
         let ranges = spans.len() as u32;
-        let kernels: Vec<vk::Pipeline> =
-            batches
-                .iter()
-                .map(|batch| match &batch.plan {
-                    _ if record => self.recording_pipeline(batch.capacity, fidelity),
-                    Some(plan) => self.specialized_pipeline(plan, batch.capacity, fidelity),
-                    None => Ok(self.pipelines[pipeline_set].1
-                        [creature_kernel::capacity_index(batch.capacity)]),
-                })
-                .collect::<Result<_>>()?;
+        let kernels: Vec<vk::Pipeline> = batches
+            .iter()
+            .map(|batch| match &batch.plan {
+                _ if record => self.recording_pipeline(batch.capacity, fidelity),
+                Some(plan) => self.specialized_pipeline(plan, batch.capacity, fidelity),
+                None => self.standard_pipeline(batch.capacity, fidelity),
+            })
+            .collect::<Result<_>>()?;
         // Node positions for every creature, before each step and after the last.
         let frame_count: usize = if record {
             batches
@@ -1366,12 +1350,12 @@ impl Drop for VkEngine {
             self.device.destroy_command_pool(self.command_pool, None);
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
-            for (_, set) in &self.pipelines {
-                for &p in set {
-                    self.device.destroy_pipeline(p, None);
-                }
-            }
-            for &p in self.specialized.values().chain(self.recording.values()) {
+            for &p in self
+                .pipelines
+                .values()
+                .chain(self.specialized.values())
+                .chain(self.recording.values())
+            {
                 self.device.destroy_pipeline(p, None);
             }
             self.device
