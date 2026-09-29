@@ -964,6 +964,14 @@ fn run(
                                 Duration::from_millis(4),
                                 |i, m| e.contender(i, m),
                             )? {
+                                // Refill the freed slot before the CPU work.
+                                // Units that share the GPU finish together,
+                                // so waiting for the next pass would leave
+                                // the engines idle for all of this unit's
+                                // archiving and breeding.
+                                sched.pump(&e.population, &e.config, &[], |i, m| {
+                                    e.check_need(i, m)
+                                })?;
                                 steady_absorb(e, &mut steady, sched, &indices, &metrics, true)?;
                             }
                             status = format!("Evolving · generation {}", e.generation);
