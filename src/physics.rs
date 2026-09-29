@@ -208,7 +208,7 @@ pub fn target(m: &Muscle, time: f32) -> f32 {
     };
     m.short + (m.long - m.short) * wave
 }
-fn limited_target(m: &Muscle, time: f32) -> f32 {
+pub(crate) fn limited_target(m: &Muscle, time: f32) -> f32 {
     // Bound the slope of the entire waveform. Clamping each frame against the
     // previous *raw* target allowed the target to jump on the next frame.
     let amplitude = (m.long - m.short).min(

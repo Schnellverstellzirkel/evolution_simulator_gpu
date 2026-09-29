@@ -8,6 +8,7 @@ pub mod evolution;
 pub mod gpu;
 pub mod physics;
 pub mod qd;
+pub mod replay_forces;
 pub mod scheduler;
 pub mod schematic;
 pub mod search_benchmark;
