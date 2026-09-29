@@ -684,23 +684,72 @@ fn buffer_size(bytes: usize) -> usize {
 type KernelKey = (bool, Fidelity, usize);
 
 /// NVRTC's source for one kernel, compiled to a cubin. It needs no CUDA
-/// context, so any thread may run it.
+/// context, so any thread may run it. Compiled kernels are kept on disk
+/// (`kernel_cache_dir`), keyed by a hash of the source, the options, the
+/// NVRTC version and the GPU's architecture, so a later start loads them in
+/// milliseconds. With `use_cache` false the compile ignores an entry (it
+/// may be damaged) and writes a fresh one.
 fn compile_kernel(
     api: &Api,
     options: &[String],
     (record, fidelity, capacity): KernelKey,
     threads: u32,
     launch_bounds: bool,
+    use_cache: bool,
 ) -> Result<Vec<u8>> {
     let source = if record {
         recording_source(capacity, threads, fidelity, launch_bounds)
     } else {
         scoring_source(capacity, threads, fidelity, launch_bounds)
     };
-    api.nvrtc
+    let path = kernel_cache_dir().map(|dir| {
+        use std::hash::{Hash, Hasher};
+        let mut halves = [0u64; 2];
+        for (i, half) in halves.iter_mut().enumerate() {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (i, &source, options, api.nvrtc.version_string()).hash(&mut hasher);
+            *half = hasher.finish();
+        }
+        dir.join(format!("{:016x}{:016x}.cubin", halves[0], halves[1]))
+    });
+    if use_cache
+        && let Some(bytes) = path.as_ref().and_then(|p| std::fs::read(p).ok())
+        && !bytes.is_empty()
+    {
+        return Ok(bytes);
+    }
+    let cubin = api
+        .nvrtc
         .compile(&source, options)
         .with_context(|| format!("{capacity}-node CUDA kernel"))
-        .map(|(cubin, _)| cubin)
+        .map(|(cubin, _)| cubin)?;
+    if let Some(path) = path {
+        // Through a temporary file and a rename, so a reader never sees a
+        // half-written kernel. A failed write only costs the next start.
+        let temporary = path.with_extension(format!("tmp{}", std::process::id()));
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&temporary, &cubin))
+            .and_then(|()| std::fs::rename(&temporary, &path));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+    }
+    Ok(cubin)
+}
+
+/// Where compiled kernels are kept: `EVOLUTION_KERNEL_CACHE`, else the
+/// user's cache directory, else nowhere.
+fn kernel_cache_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("EVOLUTION_KERNEL_CACHE") {
+        return Some(PathBuf::from(dir));
+    }
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+    Some(base.join("evolution-simulator").join("cuda"))
 }
 
 /// Kernels that background threads compile, in the order they are wanted.
@@ -741,7 +790,7 @@ impl Prefetch {
                 state.running.insert(job.0);
                 job
             };
-            let result = compile_kernel(api, options, key, threads, launch_bounds)
+            let result = compile_kernel(api, options, key, threads, launch_bounds, true)
                 .map_err(|e| format!("{e:#}"));
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.running.remove(&key);
@@ -1071,17 +1120,26 @@ impl CudaEngine {
         let max_registers = self.max_registers;
         let threads = block_size(capacity, self.workgroup, max_registers);
         let started = Instant::now();
-        let cubin = match self.prefetch.take((record, fidelity, capacity)) {
-            Some(result) => result?,
-            None => compile_kernel(
-                &self.api,
-                &self.options(max_registers),
-                (record, fidelity, capacity),
+        let key = (record, fidelity, capacity);
+        let compile = |engine: &Self, use_cache: bool| {
+            compile_kernel(
+                &engine.api,
+                &engine.options(max_registers),
+                key,
                 threads,
                 max_registers.is_none(),
-            )?,
+                use_cache,
+            )
         };
-        let kernel = self.load(&cubin, threads)?;
+        let cubin = match self.prefetch.take(key) {
+            Some(result) => result?,
+            None => compile(self, true)?,
+        };
+        // A damaged cache entry fails to load: compile it again.
+        let kernel = match self.load(&cubin, threads) {
+            Ok(kernel) => kernel,
+            Err(_) => self.load(&compile(self, false)?, threads)?,
+        };
         if record {
             self.recording.insert((fidelity, capacity), kernel);
         } else {
