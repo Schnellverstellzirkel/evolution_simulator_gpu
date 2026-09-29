@@ -4033,6 +4033,44 @@ impl App {
             self.tab = Tab::Overview;
         }
     }
+    /// A bar across the window while a developer measurement pauses the
+    /// game (`dev_pause`), with the time left and Resume now.
+    fn dev_pause_bar(&self, ui: &mut egui::Ui) {
+        let Some(view) = self.worker.dev_pause.view() else {
+            return;
+        };
+        let theme = self.theme();
+        egui::Panel::bottom("dev-pause")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme.panel)
+                    .inner_margin(egui::Margin::symmetric(GAP_L as i8, 6)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let left = view.ends_at.saturating_duration_since(Instant::now()).as_secs();
+                    let text = if view.closed {
+                        format!(
+                            "Paused for a developer measurement, resumes in {}:{:02}",
+                            left / 60,
+                            left % 60
+                        )
+                    } else {
+                        "Pausing for a developer measurement: the last creatures finish their trials"
+                            .to_owned()
+                    };
+                    ui.colored_label(theme.warn, text);
+                    if ui
+                        .button("Resume now")
+                        .on_hover_text("End the developer pause and keep evolving")
+                        .clicked()
+                    {
+                        self.worker.dev_pause.resume_now();
+                    }
+                });
+            });
+        ui.ctx().request_repaint_after(Duration::from_millis(500));
+    }
     /// The closed-by-default drawer with search and machine numbers, and the
     /// step-by-step run buttons developers use.
     fn diagnostics(&self, ui: &mut egui::Ui, s: &Snapshot) {
@@ -4746,6 +4784,7 @@ impl eframe::App for App {
                     .inner_margin(egui::Margin::symmetric(GAP_L as i8, 15)),
             )
             .show(ui, |ui| self.top(ui));
+        self.dev_pause_bar(ui);
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if let Some(message) = self.message.take() {
