@@ -1122,6 +1122,9 @@ impl Experiment {
         chain
     }
     fn push_archive_stats(&mut self, failed: usize) {
+        if self.history.len() > self.generation as usize {
+            return;
+        }
         let mut elites: Vec<_> = self
             .archive
             .entries
@@ -1203,6 +1206,11 @@ impl Experiment {
             self.stage == Stage::Archived,
             "The archive must be updated before breeding"
         );
+        // A generation cut short by a load or a new steady run has no row yet.
+        self.history = repair_history(std::mem::take(&mut self.history), self.generation);
+        if self.history.len() == self.generation as usize {
+            self.push_archive_stats(0);
+        }
         let mut cfg = self.pending.clone().unwrap_or_else(|| self.config.clone());
         cfg.validate()?;
         let generation = self.generation + 1;
@@ -2337,7 +2345,7 @@ impl SmallLoad {
             stage: Stage::Archived,
             ranks: vec![],
             parents: vec![],
-            history: self.history,
+            history: repair_history(self.history, self.generation),
             evaluation_seconds: 0.0,
             archive: self.archive,
             emitter_stats: self.emitter_stats,
@@ -2654,6 +2662,29 @@ pub fn load(path: &Path) -> Result<Experiment> {
 }
 
 /// `load`, counting the file bytes read into `progress`.
+/// One row per generation, in order, up to `generation`: a skipped
+/// generation gets a copy of the row before it, and a repeated one is dropped.
+fn repair_history(history: Vec<Stats>, generation: u32) -> Vec<Stats> {
+    let mut out: Vec<Stats> = Vec::with_capacity(history.len());
+    for stats in history {
+        if stats.generation < out.len() as u32 || stats.generation > generation {
+            continue;
+        }
+        while (out.len() as u32) < stats.generation {
+            let mut fill = out.last().unwrap_or(&stats).clone();
+            fill.generation = out.len() as u32;
+            out.push(fill);
+        }
+        out.push(stats);
+    }
+    while !out.is_empty() && (out.len() as u32) < generation {
+        let mut fill = out[out.len() - 1].clone();
+        fill.generation = out.len() as u32;
+        out.push(fill);
+    }
+    out
+}
+
 pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Experiment> {
     let file = File::open(path).context("Cannot open checkpoint")?;
     if let Some(progress) = progress {
