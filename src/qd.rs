@@ -21,7 +21,11 @@ pub(crate) const CMA_LIMIT: usize = 96;
 //     results are no longer rescored through CPU playback.
 // 29: trials last 20 s instead of 60 s; older games move to 20 s on load.
 // 30: physics v2 (articulated tree in reduced coordinates) scores the game.
-pub const VERSION: u32 = 33;
+// 31: muscle energy pays for active contraction only.
+// 32: air drag on bones.
+// 33: evolvable elastic tendons.
+// 34: the world gains Water and Ice patches (the saved settings changed).
+pub const VERSION: u32 = 34;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and

@@ -47,6 +47,10 @@ struct Params {
     float quake;
     unsigned screen_tick;
     float screen_bar;
+    float water;
+    float patches;
+    float spare0;
+    float spare1;
 };
 // Same layout as creature_kernel::GpuResult and the WGSL Result.
 struct Result {
@@ -144,6 +148,15 @@ __device__ __forceinline__ float wave(float t, float inv_period, float phase, fl
 __device__ __forceinline__ unsigned tri(unsigned r, unsigned c) {
     unsigned hi_ = max(r, c);
     return hi_ * (hi_ + 1u) / 2u + min(r, c);
+}
+
+// How icy the ground is at x, 0 (dry) to 1 (ice): physics::ice.
+__device__ __forceinline__ float ice_at(float x) {
+    float u = x * ICE_INV;
+    float w = u - floorf(u);
+    float t = fabsf(w - 0.5f) * 2.0f;
+    float s = clampf((0.7f - t) * 2.5f, 0.0f, 1.0f);
+    return s * s * (3.0f - 2.0f * s);
 }
 
 struct Lane {
@@ -632,6 +645,9 @@ struct Lane {
             c_vs[ci] = v.x * tangent.x + v.y * tangent.y;
             c_goal[ci] = gap >= 0.0f ? -gap * RATE : -gap * PUSH_OUT * RATE;
             c_mu[ci] = node_fric(node) * p.friction * (1.0f + MUD_GRIP * sink) * (1.0f + MUD_NORMAL * sink);
+            if (p.patches > 0.0f) {
+                c_mu[ci] = c_mu[ci] * (1.0f - p.patches * ice_at(pn.x));
+            }
             nc += 1u;
         }
         // Contact-space matrix, column by column from each unit force's
@@ -953,6 +969,45 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
             L.bias[j] -= force_at(mid - origin, f);
             air_impulse = air_impulse + f * DT;
         }
+        // Water below the waterline: buoyancy on every node and anisotropic
+        // drag on every bone (physics2::simulate_step_inner).
+        float buoy[MAXN];
+        float water_y0[MAXN];
+        if (p.water > 0.0f) {
+            float submerged[MAXN];
+            UNROLL
+            for (unsigned i = 0u; i < MAXN; i++) {
+                if (i >= nn) { break; }
+                const float r = L.node_radius(i);
+                const float y = L.node_pos(i).y;
+                submerged[i] = clampf((p.water - (y - r)) / (2.0f * r), 0.0f, 1.0f);
+                buoy[i] = WATER_BUOYANCY * L.mass[i] * p.gravity * submerged[i];
+                water_y0[i] = y;
+                L.bias[L.body_of(i)] -= force_at(L.node_pos(i) - origin, v2(0.0f, buoy[i]));
+                air_impulse.y += buoy[i] * DT;
+            }
+            UNROLL
+            for (unsigned j = 0u; j < MAXB; j++) {
+                if (j >= nb) { break; }
+                const unsigned pv = L.pivot[j];
+                const float wet = 0.5f * (submerged[pv] + submerged[j + 1u]);
+                const float2 mid = (L.node_pos(pv) + L.node_pos(j + 1u)) * 0.5f;
+                const float2 v = (L.node_vel(pv) + L.node_vel(j + 1u)) * 0.5f;
+                const float inverse = 1.0f / L.len[j];
+                const float2 axis = (L.node_pos(j + 1u) - L.node_pos(pv)) * inverse;
+                const float along = v.x * axis.x + v.y * axis.y;
+                const float2 lengthwise = axis * along;
+                const float2 sideways = v - lengthwise;
+                const float speed = sqrtf(v.x * v.x + v.y * v.y);
+                const float width = L.node_radius(pv) + L.node_radius(j + 1u);
+                const float strength = fmaxf(fminf(WATER_DRAG * wet * L.len[j] * width * speed, 0.5f * L.mass[j + 1u] * RATE), 0.0f);
+                const float weak = strength * WATER_ALONG;
+                const float2 dragged = sideways * strength + lengthwise * weak;
+                const float2 f = v2(-dragged.x, -dragged.y);
+                L.bias[j] -= force_at(mid - origin, f);
+                air_impulse = air_impulse + f * DT;
+            }
+        }
         // Muscles pull between points on two bones; the forces collect in
         // the table.
         L.clear_forces();
@@ -1189,7 +1244,17 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
                 energy_end += 0.5f * L.mass[i] * (vi.x * vi.x + vi.y * vi.y) + L.mass[i] * p.gravity * pi_.y;
                 mass_x_end += pi_.x * L.mass[i];
             }
-            const float work = (muscle_start - muscle_end) + p.wind * (mass_x_end - mass_x_start);
+            float work = (muscle_start - muscle_end) + p.wind * (mass_x_end - mass_x_start);
+            if (p.water > 0.0f) {
+                // Buoyancy lifts the body: its work is the force times the rise.
+                float lift = 0.0f;
+                UNROLL
+                for (unsigned i = 0u; i < MAXN; i++) {
+                    if (i >= nn) { break; }
+                    lift += buoy[i] * (L.node_pos(i).y - water_y0[i]);
+                }
+                work += lift;
+            }
             const float excess = energy_end - energy_start - work - (1e-4f + 1e-5f * energy_scale);
             if (excess > 0.0f) {
                 const float2 center = v2(expected.x * inv_mass, expected.y * inv_mass);

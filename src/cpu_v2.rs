@@ -19,8 +19,8 @@ use crate::evolution::Population;
 use crate::physics::{self, Limits};
 use crate::physics2::{
     LIFT_CLEARANCE, LIMIT_HARDNESS, MAX_CONTACTS, Model, PGS_ITERATIONS, PLANT_ROUNDS,
-    PLANT_SWEEPS, PUSH_OUT, SPIN_CAP, SPIN_HARDNESS, State, fresh_metrics, gait_sample,
-    joint_damping,
+    PLANT_SWEEPS, PUSH_OUT, SPIN_CAP, SPIN_HARDNESS, State, WATER_ALONG, WATER_BUOYANCY,
+    WATER_DRAG, fresh_metrics, gait_sample, joint_damping,
 };
 use crate::simd::{F, M};
 use rayon::prelude::*;
@@ -72,6 +72,15 @@ fn rem1(x: F) -> F {
     let trunc = sel(x.lt(zero()), -(-x).floor(), x.floor());
     let r = x - trunc;
     sel(r.lt(zero()), r + sp(1.0), r)
+}
+
+/// `physics::ice` on every lane: how icy the ground is at `x`.
+fn ice(x: F) -> F {
+    let u = x * sp(1.0 / physics::ICE_SPACING);
+    let w = u - u.floor();
+    let t = (w - sp(0.5)).abs() * sp(2.0);
+    let s = clamp((sp(0.7) - t) * sp(2.5), zero(), sp(1.0));
+    s * s * (sp(3.0) - sp(2.0) * s)
 }
 
 /// A spatial vector (angular, x, y) on every lane.
@@ -802,6 +811,60 @@ impl Sim<'_> {
             air_impulse[0] += f[0] * dt;
             air_impulse[1] += f[1] * dt;
         }
+        // Water below the waterline: buoyancy on every node and anisotropic
+        // drag on every bone (`physics2::simulate_step_inner`).
+        let water = cfg.water;
+        let mut buoy: Vec<F> = Vec::new();
+        let mut water_y0: Vec<F> = Vec::new();
+        if water > 0.0 {
+            let submerged: Vec<F> = (0..n)
+                .map(|i| {
+                    clamp(
+                        (sp(water) - (self.s.pos[i][1] - g.radius[i])) / (sp(2.0) * g.radius[i]),
+                        zero(),
+                        sp(1.0),
+                    )
+                })
+                .collect();
+            buoy = (0..n)
+                .map(|i| sp(WATER_BUOYANCY) * g.mass[i] * sp(cfg.gravity) * submerged[i])
+                .collect();
+            water_y0 = (0..n).map(|i| self.s.pos[i][1]).collect();
+            #[allow(clippy::needless_range_loop)]
+            for i in 0..n {
+                let j = i.saturating_sub(1);
+                self.sc.force[j] =
+                    self.sc.force[j].add(force_at(rel(self.s.pos[i]), [zero(), buoy[i]]));
+                air_impulse[1] += buoy[i] * dt;
+            }
+            for j in 0..b {
+                let (p, c) = (g.pivot[j], j + 1);
+                let (sp_, sc_) = (self.s.pos[p], self.s.pos[c]);
+                let (vp, vc) = (self.s.vel[p], self.s.vel[c]);
+                let half = sp(0.5);
+                let wet = half * (submerged[p] + submerged[c]);
+                let mid = [half * (sp_[0] + sc_[0]), half * (sp_[1] + sc_[1])];
+                let v = [half * (vp[0] + vc[0]), half * (vp[1] + vc[1])];
+                let inverse = sp(1.0) / g.length[j];
+                let axis = [(sc_[0] - sp_[0]) * inverse, (sc_[1] - sp_[1]) * inverse];
+                let along = v[0] * axis[0] + v[1] * axis[1];
+                let lengthwise = [axis[0] * along, axis[1] * along];
+                let sideways = [v[0] - lengthwise[0], v[1] - lengthwise[1]];
+                let speed = (v[0] * v[0] + v[1] * v[1]).sqrt();
+                let width = g.radius[p] + g.radius[c];
+                let strength = (sp(WATER_DRAG) * wet * g.length[j] * width * speed)
+                    .min(half * g.mass[c] * rate)
+                    .max(zero());
+                let weak = strength * sp(WATER_ALONG);
+                let f = [
+                    -(sideways[0] * strength + lengthwise[0] * weak),
+                    -(sideways[1] * strength + lengthwise[1] * weak),
+                ];
+                self.sc.force[j] = self.sc.force[j].add(force_at(rel(mid), f));
+                air_impulse[0] += f[0] * dt;
+                air_impulse[1] += f[1] * dt;
+            }
+        }
         // Muscles: the drive and damper, applied at the attachment points.
         for k in 0..g.muscles.len() {
             let m = &g.muscles[k];
@@ -917,7 +980,15 @@ impl Sim<'_> {
                 muscle_end,
             );
         }
-        let work = (muscle_start - muscle_end) + sp(cfg.wind) * (self.mass_x() - mass_x_start);
+        let mut work = (muscle_start - muscle_end) + sp(cfg.wind) * (self.mass_x() - mass_x_start);
+        if water > 0.0 {
+            // Buoyancy lifts the body: its work is the force times the rise.
+            let mut lift = zero();
+            for i in 0..n {
+                lift += buoy[i] * (self.s.pos[i][1] - water_y0[i]);
+            }
+            work += lift;
+        }
         let (energy_end, _) = self.energy();
         let excess = energy_end - energy_start - work - (sp(1e-4) + sp(1e-5) * energy_scale);
         let fix = excess.gt(zero()) & !has_contact;
@@ -1009,10 +1080,18 @@ impl Sim<'_> {
                 vt_free: v[0] * tangent[0] + v[1] * tangent[1] + dt * (dtan.dot(a) + beta(tangent)),
                 vt_start: v[0] * tangent[0] + v[1] * tangent[1],
                 target: sel(ge(gap, zero()), -gap * rate, -gap * sp(PUSH_OUT) * rate),
-                mu: g.friction[i]
-                    * sp(cfg.ground_friction)
-                    * (sp(1.0) + sp(physics::MUD_GRIP) * sink)
-                    * (sp(1.0) + sp(physics::MUD_NORMAL) * sink),
+                mu: {
+                    let mu = g.friction[i]
+                        * sp(cfg.ground_friction)
+                        * (sp(1.0) + sp(physics::MUD_GRIP) * sink)
+                        * (sp(1.0) + sp(physics::MUD_NORMAL) * sink);
+                    // Ice patches take a share of the friction.
+                    if cfg.patches > 0.0 {
+                        mu * (sp(1.0) - sp(cfg.patches) * ice(x))
+                    } else {
+                        mu
+                    }
+                },
                 // `continue` when `gap + dt * vn_free > 0`.
                 candidate: !reach.gt(zero()) & self.active,
             });

@@ -142,6 +142,95 @@ pub fn sky(painter: &Painter, rect: Rect, cfg: &Config, time: f32) {
     }
 }
 
+/// The water: a translucent blue body below the waterline at screen height
+/// `line_y`, a wavy surface, faint streaks and a few rising bubbles. The
+/// creature and the text are drawn after it, and the tint stays light enough
+/// to read them. `world_x` maps a screen x to meters, so the waves and bubbles
+/// scroll with the ground.
+pub fn water(
+    painter: &Painter,
+    rect: Rect,
+    cfg: &Config,
+    time: f32,
+    line_y: f32,
+    world_x: &dyn Fn(f32) -> f32,
+    pixels_per_meter: f32,
+) {
+    let level = amount(cfg, "Water");
+    if level <= 0.0 || line_y > rect.bottom() {
+        return;
+    }
+    let top = line_y.clamp(rect.top(), rect.bottom());
+    let body = alpha((40, 120, 210), 0.20 + 0.10 * level);
+    let deep = alpha((20, 70, 160), 0.30 + 0.12 * level);
+    let mut mesh = Mesh::default();
+    for (pos, color) in [
+        (Pos2::new(rect.left(), top), body),
+        (Pos2::new(rect.right(), top), body),
+        (Pos2::new(rect.right(), rect.bottom()), deep),
+        (Pos2::new(rect.left(), rect.bottom()), deep),
+    ] {
+        mesh.vertices.push(Vertex {
+            pos,
+            uv: egui::epaint::WHITE_UV,
+            color,
+        });
+    }
+    mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    painter.add(egui::Shape::mesh(mesh));
+    if line_y >= rect.top() {
+        // The surface: a wave that drifts with the clock.
+        let surface: Vec<Pos2> = (0..=(rect.width() / 6.0) as usize)
+            .map(|i| {
+                let x = rect.left() + i as f32 * 6.0;
+                let m = world_x(x);
+                let wave = (m * 2.6 + time * 2.0).sin() * 1.6 + (m * 6.1 - time * 3.1).sin() * 0.8;
+                Pos2::new(x, line_y + wave)
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            surface,
+            Stroke::new(2.0, alpha((200, 235, 255), 0.85)),
+        ));
+    }
+    // Faint horizontal streaks below the surface.
+    for k in 0..4 {
+        let y = top + 16.0 + 22.0 * k as f32 + 6.0 * (time * 0.8 + k as f32).sin();
+        if y > rect.bottom() {
+            break;
+        }
+        let points: Vec<Pos2> = (0..=40)
+            .map(|i| {
+                let x = rect.left() + rect.width() * i as f32 / 40.0;
+                let m = world_x(x);
+                Pos2::new(x, y + (m * 1.7 + time * 1.5 + k as f32 * 2.0).sin() * 2.5)
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            points,
+            Stroke::new(1.0, alpha((200, 230, 255), 0.13)),
+        ));
+    }
+    // Bubbles that rise from the depth and fade before they break the surface.
+    let first = (world_x(rect.left()) / 0.5).floor() as i64;
+    let last = (world_x(rect.right()) / 0.5).ceil() as i64;
+    let span = (rect.bottom() - top).max(1.0);
+    for k in first..=last {
+        if hash(k * 7) > 0.7 {
+            continue;
+        }
+        let meters = (k as f32 + hash(k * 3)) * 0.5;
+        let x = rect.left() + (meters - world_x(rect.left())) * pixels_per_meter;
+        let rise = (time * (0.10 + 0.10 * hash(k * 5)) + hash(k * 11)).fract();
+        let y = rect.bottom() - rise * span;
+        painter.circle_stroke(
+            Pos2::new(x, y),
+            1.5 + 2.5 * hash(k * 13),
+            Stroke::new(1.0, alpha((220, 240, 255), 0.45 * (1.0 - rise))),
+        );
+    }
+}
+
 /// One foot moving fast on the ground, for mud splashes.
 pub struct Foot {
     /// Where the foot meets the ground surface, in screen pixels.
@@ -261,6 +350,60 @@ pub fn ground(
                 painter.line_segment([c - Vec2::new(r, 0.0), c + Vec2::new(r, 0.0)], stroke);
                 painter.line_segment([c - Vec2::new(0.0, r), c + Vec2::new(0.0, r)], stroke);
             }
+        }
+    }
+    let frost = amount(cfg, "Ice patches");
+    if frost > 0.0 {
+        // Ice bands where the friction drops: a pale glaze that fades in and
+        // out with the patch (`physics::ice`), with a bright edge and a few
+        // glints. Dry stretches between them stay untouched.
+        let mut mesh = Mesh::default();
+        let mut shine: Vec<(Pos2, f32)> = Vec::new();
+        for p in &line {
+            let weight = crate::physics::ice(world_x(p.x));
+            let top = alpha((215, 240, 255), (0.40 + 0.50 * frost) * weight);
+            for (pos, color) in [
+                (*p, top),
+                (
+                    *p + Vec2::new(0.0, 14.0),
+                    alpha((205, 235, 255), 0.03 * weight),
+                ),
+            ] {
+                mesh.vertices.push(Vertex {
+                    pos,
+                    uv: egui::epaint::WHITE_UV,
+                    color,
+                });
+            }
+            let k = mesh.vertices.len() as u32;
+            if k >= 4 {
+                mesh.indices
+                    .extend_from_slice(&[k - 4, k - 3, k - 2, k - 3, k - 1, k - 2]);
+            }
+            shine.push((*p + Vec2::new(0.0, 2.5), weight));
+        }
+        painter.add(egui::Shape::mesh(mesh));
+        for pair in shine.windows(2) {
+            let weight = 0.5 * (pair[0].1 + pair[1].1);
+            if weight > 0.05 {
+                painter.line_segment(
+                    [pair[0].0, pair[1].0],
+                    Stroke::new(1.5, alpha((255, 255, 255), (0.25 + 0.5 * frost) * weight)),
+                );
+            }
+        }
+        let first = (world_x(rect.left()) / crate::physics::ICE_SPACING).floor() as i64;
+        let last = (world_x(rect.right()) / crate::physics::ICE_SPACING).ceil() as i64;
+        for k in first..=last {
+            // One glint at the middle of each patch.
+            let meters = (k as f32 + 0.5) * crate::physics::ICE_SPACING;
+            let x = rect.left() + (meters - world_x(rect.left())) * pixels_per_meter;
+            let twinkle = ((time * 2.0 + hash(k) * 6.0).sin() * 0.5 + 0.5).powi(3);
+            let c = Pos2::new(x, surface(x) + 6.0);
+            let r = 2.0 + 4.0 * twinkle;
+            let stroke = Stroke::new(1.0, alpha((255, 255, 255), 0.3 + 0.6 * twinkle));
+            painter.line_segment([c - Vec2::new(r, 0.0), c + Vec2::new(r, 0.0)], stroke);
+            painter.line_segment([c - Vec2::new(0.0, r), c + Vec2::new(0.0, r)], stroke);
         }
     }
     let quake = amount(cfg, "Earthquake");

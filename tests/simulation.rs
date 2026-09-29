@@ -935,6 +935,13 @@ fn mean_distance(pop: &evolution::Population, cfg: &Config) -> f32 {
     total / count.max(1.0)
 }
 
+/// Mean height of the first creature's nodes at the end of its replay.
+fn mean_height(pop: &evolution::Population, cfg: &Config) -> f32 {
+    let frames = evolution_simulator::cpu_engine::trajectory(&pop.creature(0), cfg);
+    let last = frames.last().expect("frames");
+    last.iter().map(|p| p[1]).sum::<f32>() / last.len() as f32
+}
+
 /// The best creature of a physics v2 evolution (seed 40, 100,000 creatures,
 /// 30 generations, 20 s trials): a 7-node hopper with 17 muscles that goes
 /// 36 m in 20 s. The tests below run it in worlds that differ by one effect.
@@ -1405,5 +1412,120 @@ fn cost_of_transport_counts_muscle_work_per_kilogram_and_meter() {
     assert!(
         idle.is_none_or(|c| c < cost * 0.5),
         "{idle:?} against {cost}"
+    );
+}
+
+#[test]
+fn water_slows_the_walker_and_lifts_a_falling_body() {
+    // The same walker on dry ground and in rising water. Water resists every
+    // stroke and floats the body, so a hopper made for dry land must lose
+    // real distance (a swimmer may do better in deep water, so the depths
+    // are not ordered). Water needs no ground: with the ground
+    // off a submerged body still feels it.
+    let base = Config {
+        population: 16,
+        duration: 5.0,
+        ..config()
+    };
+    let mut pop = evolution::Population::default();
+    for i in 0..16 {
+        let mut walker = energy_dependent_walker();
+        walker.id = i as u64;
+        pop.push(walker);
+    }
+    let dry = mean_distance(&pop, &base);
+    let shallow = mean_distance(
+        &pop,
+        &Config {
+            water: 0.35,
+            ..base.clone()
+        },
+    );
+    let deep = mean_distance(
+        &pop,
+        &Config {
+            water: 0.9,
+            ..base.clone()
+        },
+    );
+    eprintln!("mean distance: dry {dry} m, shallows {shallow} m, deep {deep} m");
+    assert!(
+        shallow < dry * 0.9,
+        "shallows must cost distance: {shallow} m vs {dry} m"
+    );
+    assert!(
+        deep < dry * 0.9,
+        "deep water must cost distance: {deep} m vs {dry} m"
+    );
+    let floating = Config {
+        ground: false,
+        gravity: 9.8,
+        ..base.clone()
+    };
+    let sunk = Config {
+        water: 0.9,
+        ..floating.clone()
+    };
+    let air = mean_height(&pop, &floating);
+    let wet = mean_height(&pop, &sunk);
+    eprintln!("mean height after 5 s without ground: air {air} m, water {wet} m");
+    assert!(
+        wet > air + 0.5,
+        "buoyancy must slow a falling body: {wet} m vs {air} m"
+    );
+}
+
+#[test]
+fn ice_patches_cost_the_walker_distance() {
+    // Bands of ice take the friction a walker's feet push with. The walker
+    // starts on dry ground and meets a band within a few meters of running.
+    let base = Config {
+        population: 16,
+        duration: 8.0,
+        ..config()
+    };
+    let mut pop = evolution::Population::default();
+    for i in 0..16 {
+        let mut walker = energy_dependent_walker();
+        walker.id = i as u64;
+        pop.push(walker);
+    }
+    let dry = mean_distance(&pop, &base);
+    let frost = mean_distance(
+        &pop,
+        &Config {
+            patches: 0.5,
+            ..base.clone()
+        },
+    );
+    let black = mean_distance(
+        &pop,
+        &Config {
+            patches: 0.95,
+            ..base.clone()
+        },
+    );
+    eprintln!("mean distance: dry {dry} m, frost {frost} m, black ice {black} m");
+    assert!(
+        black < dry * 0.9,
+        "black ice must cost distance: {black} m vs {dry} m"
+    );
+    assert!(
+        black <= frost,
+        "black ice must cost at least what frost does"
+    );
+    // A groundless run meets no ice.
+    let floating = Config {
+        ground: false,
+        ..base.clone()
+    };
+    let iced = Config {
+        patches: 0.95,
+        ..floating.clone()
+    };
+    assert_eq!(
+        mean_distance(&pop, &floating),
+        mean_distance(&pop, &iced),
+        "ice patches must change nothing without ground"
     );
 }

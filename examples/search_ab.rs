@@ -43,10 +43,12 @@ struct Options {
     gpu: bool,
     seed_offset: u64,
     save: Option<String>,
+    /// `--effect Name=level`: environment effects to apply (level index).
+    effects: Vec<(String, usize)>,
 }
 
 fn usage() -> &'static str {
-    "usage: search_ab [tag] [generations] [population] [duration_seconds] [seed,seed,...] [--tag NAME] [--checks] [--gpu] [--seed-offset N]"
+    "usage: search_ab [tag] [generations] [population] [duration_seconds] [seed,seed,...] [--tag NAME] [--checks] [--gpu] [--seed-offset N] [--effect Name=level]"
 }
 
 fn options() -> Result<Options> {
@@ -56,6 +58,7 @@ fn options() -> Result<Options> {
     let mut gpu = false;
     let mut seed_offset = 0u64;
     let mut save = None;
+    let mut effects: Vec<(String, usize)> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--checks" {
@@ -68,6 +71,10 @@ fn options() -> Result<Options> {
                 .context("--seed-offset needs a number")?
                 .parse()
                 .context("seed offset")?;
+        } else if arg == "--effect" {
+            let spec = args.next().context("--effect needs Name=level")?;
+            let (name, level) = spec.split_once('=').context("--effect needs Name=level")?;
+            effects.push((name.to_owned(), level.parse().context("effect level")?));
         } else if arg == "--save" {
             save = Some(args.next().context("--save needs a path")?);
         } else if arg == "--tag" {
@@ -122,6 +129,7 @@ fn options() -> Result<Options> {
         gpu,
         seed_offset,
         save,
+        effects,
     })
 }
 
@@ -300,6 +308,14 @@ fn run_seed(
         seed: seed + options.seed_offset,
         ..Config::default()
     };
+    let mut cfg = cfg;
+    for (name, level) in &options.effects {
+        let effect = evolution_simulator::environment::EFFECTS
+            .iter()
+            .find(|e| e.name.eq_ignore_ascii_case(name))
+            .with_context(|| format!("no effect named {name}"))?;
+        effect.set_level(&mut cfg, *level);
+    }
     cfg.validate()
         .with_context(|| format!("seed {seed} configuration"))?;
     let mut gpu = if options.gpu {

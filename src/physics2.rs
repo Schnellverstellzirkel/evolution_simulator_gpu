@@ -80,6 +80,18 @@ pub const DRIVEN_ACCELERATION: f32 = 100.0;
 /// in the flow: half the air's density, 1.2 kg/m^3, times a drag coefficient
 /// of 1). Large fast bodies pay for moving air; it only takes energy away.
 pub const AIR_DRAG: f32 = 0.6;
+/// Water drag on a submerged bone (N per m^3/s^2 of length x width): the same
+/// law as the air's, with a much thicker medium (about a third of half the
+/// water's density over the air's: water resists motion across a bone far
+/// more than a body's own bones resist air). A bone's sideways motion pays
+/// the full price, its lengthwise motion `WATER_ALONG` of it, so a stroke that
+/// pushes water sideways has a net reaction and a reciprocal stroke does not
+/// cancel itself (a fish tail). The push is limited like the air's.
+pub const WATER_DRAG: f32 = 100.0;
+/// The share of `WATER_DRAG` a bone meets moving along its own length.
+pub const WATER_ALONG: f32 = 0.25;
+/// A fully submerged node feels this share of its weight as buoyancy.
+pub const WATER_BUOYANCY: f32 = 0.7;
 /// Fields per muscle in the v2 kernel's muscle buffer.
 pub const MUSCLE_FIELDS: usize = 19;
 /// Sliding speed (m/s) below which friction holds a foot (as
@@ -1144,6 +1156,63 @@ fn simulate_step_inner(
         air_impulse[0] += f[0] * dt;
         air_impulse[1] += f[1] * dt;
     }
+    // Water below the waterline: buoyancy on every node by the share of its
+    // diameter that is submerged, and anisotropic drag on every bone by the
+    // share of it that is submerged (the mean of its two nodes').
+    let water = cfg.water;
+    let mut buoyancy: Vec<f32> = Vec::new();
+    let mut water_y0: Vec<f32> = Vec::new();
+    if water > 0.0 {
+        let submerged: Vec<f32> = (0..n)
+            .map(|i| {
+                ((water - (s.pos[i][1] - model.radius[i])) / (2.0 * model.radius[i]))
+                    .clamp(0.0, 1.0)
+            })
+            .collect();
+        buoyancy = (0..n)
+            .map(|i| WATER_BUOYANCY * model.mass[i] * cfg.gravity * submerged[i])
+            .collect();
+        water_y0 = (0..n).map(|i| s.pos[i][1]).collect();
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..n {
+            let j = sc.body_of[i];
+            sc.force[j] = sc.force[j].add(force_at(rel(s.pos[i]), [0.0, buoyancy[i]]));
+            air_impulse[1] += buoyancy[i] * dt;
+        }
+        for j in 0..b {
+            let (p, c) = (model.pivot[j], model.child[j]);
+            let wet = 0.5 * (submerged[p] + submerged[c]);
+            let mid = [
+                0.5 * (s.pos[p][0] + s.pos[c][0]),
+                0.5 * (s.pos[p][1] + s.pos[c][1]),
+            ];
+            let v = [
+                0.5 * (s.vel[p][0] + s.vel[c][0]),
+                0.5 * (s.vel[p][1] + s.vel[c][1]),
+            ];
+            let inverse = 1.0 / model.length[j];
+            let axis = [
+                (s.pos[c][0] - s.pos[p][0]) * inverse,
+                (s.pos[c][1] - s.pos[p][1]) * inverse,
+            ];
+            let along = v[0] * axis[0] + v[1] * axis[1];
+            let lengthwise = [axis[0] * along, axis[1] * along];
+            let sideways = [v[0] - lengthwise[0], v[1] - lengthwise[1]];
+            let speed = (v[0] * v[0] + v[1] * v[1]).sqrt();
+            let width = model.radius[p] + model.radius[c];
+            let strength = (WATER_DRAG * wet * model.length[j] * width * speed)
+                .min(0.5 * model.mass[c] * rate)
+                .max(0.0);
+            let weak = strength * WATER_ALONG;
+            let f = [
+                -(sideways[0] * strength + lengthwise[0] * weak),
+                -(sideways[1] * strength + lengthwise[1] * weak),
+            ];
+            sc.force[j] = sc.force[j].add(force_at(rel(mid), f));
+            air_impulse[0] += f[0] * dt;
+            air_impulse[1] += f[1] * dt;
+        }
+    }
     // Muscles: today's drive and damper, applied at the attachment points.
     let settle_free = time; // No settling: the rhythm starts at once.
     // The waveform's target length is `long - amplitude * (1 - w)`; its
@@ -1288,10 +1357,18 @@ fn simulate_step_inner(
                 } else {
                     -gap * PUSH_OUT * rate
                 },
-                mu: model.friction[i]
-                    * cfg.ground_friction
-                    * (1.0 + physics::MUD_GRIP * sink)
-                    * (1.0 + physics::MUD_NORMAL * sink),
+                mu: {
+                    let mu = model.friction[i]
+                        * cfg.ground_friction
+                        * (1.0 + physics::MUD_GRIP * sink)
+                        * (1.0 + physics::MUD_NORMAL * sink);
+                    // Ice patches take a share of the friction.
+                    if cfg.patches > 0.0 {
+                        mu * (1.0 - cfg.patches * physics::ice(x))
+                    } else {
+                        mu
+                    }
+                },
             });
         }
     }
@@ -1453,7 +1530,14 @@ fn simulate_step_inner(
         .zip(&sc.muscle_force)
         .map(|(length, force)| force * length)
         .sum();
-    let work = (muscle_start - muscle_end) + cfg.wind * (model.mass_x(s) - mass_x_start);
+    let mut work = (muscle_start - muscle_end) + cfg.wind * (model.mass_x(s) - mass_x_start);
+    if water > 0.0 {
+        // Buoyancy lifts the body: its work is the force times the rise.
+        let lift: f32 = (0..n)
+            .map(|i| buoyancy[i] * (s.pos[i][1] - water_y0[i]))
+            .sum();
+        work += lift;
+    }
     let (energy_end, _) = model.energy(s, cfg.gravity);
     let excess = energy_end - energy_start - work - (1e-4 + 1e-5 * energy_scale);
     sc.first_law = 0.0;
@@ -1918,6 +2002,22 @@ fn source_from(
         (
             "const AIR_DRAG: f32 = 0.6;",
             format!("const AIR_DRAG: f32 = {AIR_DRAG:?};"),
+        ),
+        (
+            "const WATER_DRAG: f32 = 100.0;",
+            format!("const WATER_DRAG: f32 = {WATER_DRAG:?};"),
+        ),
+        (
+            "const WATER_ALONG: f32 = 0.25;",
+            format!("const WATER_ALONG: f32 = {WATER_ALONG:?};"),
+        ),
+        (
+            "const WATER_BUOYANCY: f32 = 0.7;",
+            format!("const WATER_BUOYANCY: f32 = {WATER_BUOYANCY:?};"),
+        ),
+        (
+            "const ICE_INV: f32 = 0.16666667;",
+            format!("const ICE_INV: f32 = {:?};", 1.0 / physics::ICE_SPACING),
         ),
         (
             "const PUSH_OUT: f32 = 0.2;",

@@ -29,6 +29,13 @@ pub struct Config {
     /// this depth, which raises the effective normal push and multiplies the
     /// friction budget, so dragging feet cost more.
     pub mud: f32,
+    /// Water line height (m) above the flat ground; 0.0 is dry. Nodes below
+    /// it float and bones meet a viscous medium, so swimming strokes pay.
+    pub water: f32,
+    /// Ice patch strength; 0.0 is none. On periodic bands of ground the
+    /// friction is lowered by this share, so a foot that lands on ice cannot
+    /// push.
+    pub patches: f32,
     /// Pit opening width (m); 0.0 is solid ground. Pits are cut periodically
     /// into the ground with a fixed depth and a spacing that grows with the
     /// width.
@@ -84,6 +91,8 @@ impl Default for Config {
             slope: 0.0,
             wind: 0.0,
             mud: 0.0,
+            water: 0.0,
+            patches: 0.0,
             gaps: 0.0,
             hurdles: 0.0,
             quake: 0.0,
@@ -126,6 +135,8 @@ struct HumanConfig {
     slope: f32,
     wind: f32,
     mud: f32,
+    water: f32,
+    patches: f32,
     gaps: f32,
     hurdles: f32,
     quake: f32,
@@ -162,6 +173,8 @@ impl Default for HumanConfig {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            water: c.water,
+            patches: c.patches,
             gaps: c.gaps,
             hurdles: c.hurdles,
             quake: c.quake,
@@ -201,6 +214,8 @@ impl From<HumanConfig> for Config {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            water: c.water,
+            patches: c.patches,
             gaps: c.gaps,
             hurdles: c.hurdles,
             quake: c.quake,
@@ -238,6 +253,8 @@ impl From<&Config> for HumanConfig {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            water: c.water,
+            patches: c.patches,
             gaps: c.gaps,
             hurdles: c.hurdles,
             quake: c.quake,
@@ -274,6 +291,8 @@ struct BinaryConfig {
     slope: f32,
     wind: f32,
     mud: f32,
+    water: f32,
+    patches: f32,
     gaps: f32,
     hurdles: f32,
     quake: f32,
@@ -309,6 +328,8 @@ impl From<&Config> for BinaryConfig {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            water: c.water,
+            patches: c.patches,
             gaps: c.gaps,
             hurdles: c.hurdles,
             quake: c.quake,
@@ -347,6 +368,8 @@ impl From<BinaryConfig> for Config {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            water: c.water,
+            patches: c.patches,
             gaps: c.gaps,
             hurdles: c.hurdles,
             quake: c.quake,
@@ -444,6 +467,14 @@ impl Config {
             "Mud sink depth must be 0–0.5 m"
         );
         ensure!(
+            self.water.is_finite() && (0.0..=3.0).contains(&self.water),
+            "Water line must be 0–3 m"
+        );
+        ensure!(
+            self.patches.is_finite() && (0.0..=1.0).contains(&self.patches),
+            "Ice patch strength must be 0–1"
+        );
+        ensure!(
             self.gaps.is_finite() && (0.0..=3.0).contains(&self.gaps),
             "Gap width must be 0–3 m"
         );
@@ -510,6 +541,8 @@ impl Config {
             || self.slope != other.slope
             || self.wind != other.wind
             || self.mud != other.mud
+            || self.water != other.water
+            || self.patches != other.patches
             || self.gaps != other.gaps
             || self.hurdles != other.hurdles
             || self.quake != other.quake

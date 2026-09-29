@@ -2189,6 +2189,14 @@ impl App {
         {
             self.zoom = player_zoom(p.height, p.peak, rect.height());
         }
+        // Developer screenshots: EVOLUTION_SMOKE_VIEW_ZOOM=<pixels per meter>
+        // frames a wider stretch of the ground.
+        if let Some(zoom) = std::env::var("EVOLUTION_SMOKE_VIEW_ZOOM")
+            .ok()
+            .and_then(|z| z.parse::<f32>().ok())
+        {
+            self.zoom = zoom;
+        }
         let painter = ui.painter_at(rect);
         // All scene primitives are tessellated into egui's batched wgpu render pass.
         painter.rect_filled(rect, 12, VIEWPORT);
@@ -2360,6 +2368,15 @@ impl App {
                 &feet,
             );
         }
+        crate::world_fx::water(
+            &painter,
+            rect,
+            cfg,
+            clock,
+            world(0., cfg.water).y,
+            &|sx| (sx - origin.x) / self.zoom,
+            self.zoom,
+        );
         for x in left..=right {
             let pos = world(x as f32, 0.);
             painter.line_segment([pos, pos + Vec2::new(0., 6.)], Stroke::new(1., GROUND_EDGE));
