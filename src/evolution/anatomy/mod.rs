@@ -2,11 +2,9 @@
 //! muscles together: copy, grow, fuse, reconnect and retime whole limbs, so a
 //! child keeps more of its parent's gait than a single random edit allows.
 //!
-//! Every operator is on by default (docs/anatomy-operators.md has the audit
-//! and the search A/B). `EVOLUTION_ANATOMY=0` turns them off for
-//! comparisons, and a comma-separated list of operator names enables only
-//! those. The structural emitter picks uniformly among the classic
-//! operators, the enabled ones below, one slot that the `SHARED_SLOT`
+//! Every operator is on (docs/anatomy-operators.md has the audit and the
+//! search A/B). The structural emitter picks uniformly among the classic
+//! operators, the ones below, one slot that the `SHARED_SLOT`
 //! operators share and one for the `CONTROLLER_SLOT` operators, and tries up to four times when the chosen operator
 //! does not apply to the body.
 //!
@@ -38,7 +36,7 @@ pub(super) struct Context<'a> {
 
 pub(super) type Operator = fn(&mut Creature, &Config, &mut Rng, &Context) -> bool;
 
-/// Every operator, by name. The names are what `EVOLUTION_ANATOMY` lists.
+/// Every operator, by name.
 pub(super) const OPERATORS: &[(&str, Operator)] = &[
     ("copy_limb", limbs::copy_limb),
     ("grow_actuated_tip", limbs::grow_actuated_tip),
@@ -137,16 +135,10 @@ pub(super) struct Enabled {
     pub controller: Vec<usize>,
 }
 
-impl Enabled {
-    pub fn is_empty(&self) -> bool {
-        self.single.is_empty() && self.shared.is_empty() && self.controller.is_empty()
-    }
-}
-
-/// The operators `EVOLUTION_ANATOMY` enables.
+/// The operators, split by pick slot.
 pub(super) fn enabled() -> &'static Enabled {
     static ENABLED: std::sync::OnceLock<Enabled> = std::sync::OnceLock::new();
-    ENABLED.get_or_init(|| split(parse(std::env::var("EVOLUTION_ANATOMY").ok().as_deref())))
+    ENABLED.get_or_init(|| split((0..OPERATORS.len()).collect()))
 }
 
 fn split(indices: Vec<usize>) -> Enabled {
@@ -166,23 +158,6 @@ fn split(indices: Vec<usize>) -> Enabled {
         }
     }
     enabled
-}
-
-fn parse(value: Option<&str>) -> Vec<usize> {
-    let all = || (0..OPERATORS.len()).collect();
-    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
-        return all();
-    };
-    if matches!(value, "1" | "all" | "on" | "true") {
-        return all();
-    }
-    if matches!(value, "0" | "off" | "none" | "false") {
-        return Vec::new();
-    }
-    value
-        .split(',')
-        .filter_map(|name| OPERATORS.iter().position(|(n, _)| *n == name.trim()))
-        .collect()
 }
 
 /// Runs operator `index` of `OPERATORS`.
@@ -466,18 +441,11 @@ mod tests {
     }
 
     #[test]
-    fn operator_names_parse_and_are_unique() {
-        assert_eq!(parse(None).len(), OPERATORS.len());
-        assert_eq!(parse(Some("")).len(), OPERATORS.len());
-        assert!(parse(Some("0")).is_empty());
-        assert!(parse(Some("off")).is_empty());
-        assert_eq!(parse(Some("all")).len(), OPERATORS.len());
-        assert_eq!(parse(Some("1")).len(), OPERATORS.len());
-        assert_eq!(parse(Some("fuse_bones, copy_limb")), vec![3, 0]);
+    fn operator_names_are_unique() {
         for (i, (name, _)) in OPERATORS.iter().enumerate() {
             assert_eq!(OPERATORS.iter().position(|(n, _)| n == name), Some(i));
         }
-        let on = split(parse(None));
+        let on = enabled();
         assert_eq!(on.shared.len(), SHARED_SLOT.len());
         assert_eq!(on.controller.len(), CONTROLLER_SLOT.len());
         assert_eq!(
@@ -485,8 +453,6 @@ mod tests {
             OPERATORS.len()
         );
         assert!(on.single.windows(2).all(|w| w[0] < w[1]), "table order");
-        let some = split(parse(Some("copy_limb,nudge_limb_phase")));
-        assert_eq!((some.single.len(), some.shared.len()), (1, 1));
     }
 
     #[test]

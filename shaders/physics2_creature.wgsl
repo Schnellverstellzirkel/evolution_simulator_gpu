@@ -129,7 +129,6 @@ const WATER_DRAG: f32 = 100.0;
 const WATER_ALONG: f32 = 0.25;
 const WATER_BUOYANCY: f32 = 0.7;
 const ICE_INV: f32 = 0.16666667;
-const WARM: bool = false;
 const PUSH_OUT: f32 = 0.2;
 const MUD_NORMAL: f32 = 2.0;
 const MUD_GRIP: f32 = 2.0;
@@ -707,7 +706,7 @@ fn contacts(origin: vec2f, before: vec2f, outside: vec2f) -> vec2f {
     for (var ci = 0u; ci < MAXC; ci++) {
         var ln = 0.0;
         var lt = 0.0;
-        if WARM && c_on[ci] {
+        if c_on[ci] {
             let node = c_node[ci];
             let rec = records[record_base + node];
             let w = select(rec.b, rec.c, node == 0u);
@@ -1111,7 +1110,7 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             impulse = contacts(origin, before, impulse);
         }
         // Each node's contact force starts the next step's solve.
-        if WARM && grounded {
+        if grounded {
             for (var i = 0u; i < MAXN; i++) {
                 if i >= nn { break; }
                 var w = vec2f(0.0);

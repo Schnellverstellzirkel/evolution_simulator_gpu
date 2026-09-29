@@ -144,9 +144,6 @@ pub struct Experiment {
     /// analysis; lineage is intentionally not part of checkpoint state.
     #[serde(skip)]
     pub candidate_parent_ids: Vec<Option<u64>>,
-    /// Optional per-process override used by paired benchmark runs; checkpoints keep the default.
-    #[serde(skip)]
-    pub morphology_reserve_override: Option<bool>,
     #[serde(default)]
     pub protected_until: Vec<u32>,
     #[serde(default)]
@@ -370,7 +367,6 @@ impl Experiment {
             candidate_emitters: vec![Emitter::Restart; population_count],
             candidate_cma: vec![None; population_count],
             candidate_parent_ids: vec![None; population_count],
-            morphology_reserve_override: None,
             protected_until: vec![0; population_count],
             trial_metrics: vec![TrialMetrics::default(); population_count],
             screened: Vec::new(),
@@ -585,11 +581,10 @@ impl Experiment {
                 Some(cell_key(island as u64, &niche)),
             );
         }
-        let reserve_candidate = self.morphology_reserve_override != Some(false)
-            && matches!(
-                self.candidate_emitters.get(i),
-                Some(Emitter::Structural | Emitter::Novelty)
-            );
+        let reserve_candidate = matches!(
+            self.candidate_emitters.get(i),
+            Some(Emitter::Structural | Emitter::Novelty)
+        );
         if reserve_candidate
             && self
                 .islands
@@ -656,7 +651,6 @@ impl Experiment {
             /// cell at the start of the batch, for a CMA sample.
             elite_before: Option<f32>,
         }
-        let reserve_enabled = self.morphology_reserve_override != Some(false);
         let prep: Vec<Prep> = slots
             .par_iter()
             .map(|&i| {
@@ -684,8 +678,7 @@ impl Experiment {
                 } else {
                     false
                 };
-                let topology = (reserve_enabled
-                    && !screened
+                let topology = (!screened
                     && score.is_finite()
                     && score > FAILED
                     && matches!(emitter, Emitter::Structural | Emitter::Novelty))
@@ -735,18 +728,16 @@ impl Experiment {
                 // (`QdArchive::offer_morphology` makes the final check).
                 let mut parents: HashMap<u64, (qd::Topology, bool)> = HashMap::new();
                 let mut bars: HashMap<qd::Topology, (f32, f32)> = HashMap::new();
-                if reserve_enabled {
-                    for elite in &archive.entries {
-                        let morphology = qd::is_morphology_niche(&elite.niche);
-                        parents.insert(elite.creature.id, (elite.topology.clone(), morphology));
-                        let bar = bars
-                            .entry(elite.topology.clone())
-                            .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
-                        if morphology {
-                            bar.1 = bar.1.max(elite.fitness);
-                        } else {
-                            bar.0 = bar.0.max(elite.fitness);
-                        }
+                for elite in &archive.entries {
+                    let morphology = qd::is_morphology_niche(&elite.niche);
+                    parents.insert(elite.creature.id, (elite.topology.clone(), morphology));
+                    let bar = bars
+                        .entry(elite.topology.clone())
+                        .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
+                    if morphology {
+                        bar.1 = bar.1.max(elite.fitness);
+                    } else {
+                        bar.0 = bar.0.max(elite.fitness);
                     }
                 }
                 for (k, &i) in slots.iter().enumerate() {
@@ -1376,7 +1367,6 @@ impl Experiment {
         // archive. Each creature has its own deterministic RNG, so parallel order
         // does not change the draws. last_parent is snapshotted instead of updating
         // mid-loop; visit() and CMA slot allocation stay sequential below.
-        let reserve_enabled = self.morphology_reserve_override != Some(false);
         struct PlanPrep {
             emitter: Emitter,
             parent: Option<usize>,
@@ -1478,8 +1468,7 @@ impl Experiment {
                 let mut from_reserve = false;
                 let parent = if emitter == Emitter::Restart || archive_empty {
                     None
-                } else if reserve_enabled
-                    && emitter == Emitter::Structural
+                } else if emitter == Emitter::Structural
                     && rng.unit() < qd::MORPHOLOGY_PARENT_FRACTION
                 {
                     // Each island keeps its own morphology reserve.
@@ -2216,7 +2205,6 @@ impl SmallLoad {
             candidate_emitters: vec![Emitter::Restart; n],
             candidate_cma: vec![None; n],
             candidate_parent_ids: vec![None; n],
-            morphology_reserve_override: None,
             protected_until: vec![0; n],
             trial_metrics: vec![TrialMetrics::default(); n],
             screened: Vec::new(),

@@ -16,14 +16,10 @@
 //! use for other fidelities.
 //!
 //! It is the default on NVIDIA GPUs: `engine::gpu_engine` opens it whenever
-//! the driver and NVRTC load, and uses Vulkan otherwise. Developer overrides,
-//! never needed to play: `EVOLUTION_CUDA=0` keeps Vulkan,
-//! `EVOLUTION_CUDA_MAXREG` caps registers per thread (default 128, 0 for the
-//! compiler's choice), `EVOLUTION_CUDA_WG` fixes threads per block (by
-//! default each capacity gets the size with the most resident warps),
-//! `EVOLUTION_CUDA_STREAMS` limits streams per unit, `EVOLUTION_NVRTC` names
-//! the NVRTC library, `EVOLUTION_CUDA_FLAGS` adds NVRTC options, and
-//! `EVOLUTION_CUDA_VERBOSE` reports compile times.
+//! the driver and NVRTC load, and uses Vulkan otherwise. Developer
+//! diagnostics, never needed to play: `EVOLUTION_CUDA=0` keeps Vulkan,
+//! `EVOLUTION_NVRTC` names the NVRTC library, and `EVOLUTION_CUDA_VERBOSE`
+//! reports compile times.
 use crate::{
     config::Config,
     creature_kernel::{self, CAPACITIES, GpuResult, LaneBatch},
@@ -451,39 +447,9 @@ pub fn forced() -> bool {
     })
 }
 
-/// Register cap per thread: `EVOLUTION_CUDA_MAXREG`, 0 for the compiler's
-/// choice, which is the default: the v2 kernels use 222 to 255 registers up
-/// to 32 nodes, and caps of 96 to 168 measured no faster
-/// (docs/performance-log.md).
-pub fn register_cap() -> Option<u32> {
-    let cap = std::env::var("EVOLUTION_CUDA_MAXREG")
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .unwrap_or(0);
-    (cap > 0).then(|| cap.clamp(24, 255))
-}
-
-/// Threads per block (`EVOLUTION_CUDA_WG`: 32, 64 or 128), or `None` to
-/// choose per node capacity (the default). Each block holds one creature per
-/// thread, and CUDA reserves 1 KB of shared memory per block, which larger
-/// blocks share.
-pub fn workgroup_size() -> Option<u32> {
-    std::env::var("EVOLUTION_CUDA_WG")
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .filter(|v| matches!(v, 32 | 64 | 128))
-}
-
-/// Streams per submission slot (`EVOLUTION_CUDA_STREAMS`, default 16). Batch
-/// b of a unit runs on stream b modulo this; 1 runs a unit's batches one
-/// after another.
-fn stream_limit() -> usize {
-    std::env::var("EVOLUTION_CUDA_STREAMS")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(16)
-}
+/// Streams per submission slot. Batch b of a unit runs on stream b modulo
+/// this.
+const STREAM_LIMIT: usize = 16;
 
 /// Whether the three shared node arrays of a `threads`-thread block fit the
 /// 48 KB a block may declare statically.
@@ -502,23 +468,13 @@ fn shared_per_thread(capacity: usize) -> usize {
 }
 
 /// The recording kernel's source for `capacity` nodes.
-fn recording_source(
-    capacity: usize,
-    threads: u32,
-    fidelity: Fidelity,
-    launch_bounds: bool,
-) -> String {
-    creature_kernel::cuda_record_source(capacity, threads, fidelity, launch_bounds)
+fn recording_source(capacity: usize, threads: u32, fidelity: Fidelity) -> String {
+    creature_kernel::cuda_record_source(capacity, threads, fidelity)
 }
 
 /// The scoring kernel's source for `capacity` nodes.
-fn scoring_source(
-    capacity: usize,
-    threads: u32,
-    fidelity: Fidelity,
-    launch_bounds: bool,
-) -> String {
-    creature_kernel::cuda_source(capacity, threads, fidelity, launch_bounds)
+fn scoring_source(capacity: usize, threads: u32, fidelity: Fidelity) -> String {
+    creature_kernel::cuda_source(capacity, threads, fidelity)
 }
 
 /// Resident warps per SM for `capacity`-node kernels in `threads`-thread
@@ -536,19 +492,12 @@ fn predicted_warps(capacity: usize, threads: u32, registers: u32) -> u32 {
     blocks * warps_per_block
 }
 
-/// Threads per block for `capacity`-node kernels: `requested`, halved until
-/// it fits, or else the block size with the most resident warps, and the
-/// largest of equals. At 128 registers, 128-thread blocks measured faster
+/// Threads per block for `capacity`-node kernels: the block size with the
+/// most resident warps, and the largest of equals. At 128 registers, 128-thread blocks measured faster
 /// than 32-thread blocks at equal occupancy (docs/performance-log.md).
-fn block_size(capacity: usize, requested: Option<u32>, registers: Option<u32>) -> u32 {
-    if let Some(mut threads) = requested {
-        while !fits(capacity, threads) {
-            threads /= 2;
-        }
-        return threads;
-    }
-    // Uncapped, the v2 kernels use 222 to 255 registers up to 32 nodes.
-    let registers = registers.unwrap_or(255);
+fn block_size(capacity: usize) -> u32 {
+    // The v2 kernels use 222 to 255 registers up to 32 nodes.
+    let registers = 255;
     [128, 64, 32]
         .into_iter()
         .filter(|&t| fits(capacity, t))
@@ -629,8 +578,6 @@ pub struct CudaEngine {
     /// its own, so a replay never waits behind evaluation.
     slots: Vec<Slot>,
     next_ticket: u64,
-    workgroup: Option<u32>,
-    max_registers: Option<u32>,
     pub max_capacity: usize,
     pub allocated_bytes: u64,
     pub last_gpu_seconds: f64,
@@ -660,13 +607,12 @@ fn compile_kernel(
     options: &[String],
     (record, fidelity, capacity): KernelKey,
     threads: u32,
-    launch_bounds: bool,
     use_cache: bool,
 ) -> Result<Vec<u8>> {
     let source = if record {
-        recording_source(capacity, threads, fidelity, launch_bounds)
+        recording_source(capacity, threads, fidelity)
     } else {
-        scoring_source(capacity, threads, fidelity, launch_bounds)
+        scoring_source(capacity, threads, fidelity)
     };
     let path = kernel_cache_dir().map(|dir| {
         use std::hash::{Hash, Hasher};
@@ -739,7 +685,7 @@ struct PrefetchState {
 
 impl Prefetch {
     /// Compiles queued kernels until the queue is empty or the engine closes.
-    fn work(&self, api: &Api, options: &[String], launch_bounds: bool) {
+    fn work(&self, api: &Api, options: &[String]) {
         loop {
             let (key, threads) = {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -756,8 +702,8 @@ impl Prefetch {
                 state.running.insert(job.0);
                 job
             };
-            let result = compile_kernel(api, options, key, threads, launch_bounds, true)
-                .map_err(|e| format!("{e:#}"));
+            let result =
+                compile_kernel(api, options, key, threads, true).map_err(|e| format!("{e:#}"));
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.running.remove(&key);
             state.done.insert(key, result);
@@ -789,7 +735,6 @@ impl Prefetch {
         jobs: Vec<(KernelKey, u32)>,
         api: &Arc<Api>,
         options: &Arc<Vec<String>>,
-        launch_bounds: bool,
     ) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.closed {
@@ -807,7 +752,7 @@ impl Prefetch {
             let (prefetch, api, options) = (self.clone(), api.clone(), options.clone());
             let spawned = std::thread::Builder::new()
                 .name("cuda-compile".into())
-                .spawn(move || prefetch.work(&api, &options, launch_bounds));
+                .spawn(move || prefetch.work(&api, &options));
             if spawned.is_err() {
                 break;
             }
@@ -841,15 +786,10 @@ impl CudaEngine {
     /// (case-insensitive) and compiles the standard kernels for bodies up to
     /// `max_capacity` nodes.
     pub fn new(name: &str, max_capacity: usize) -> Result<Self> {
-        Self::open(name, max_capacity, register_cap(), true)
+        Self::open(name, max_capacity)
     }
 
-    fn open(
-        name: &str,
-        max_capacity: usize,
-        max_registers: Option<u32>,
-        build: bool,
-    ) -> Result<Self> {
+    fn open(name: &str, max_capacity: usize) -> Result<Self> {
         let api = api()?;
         let cu = &api.cu;
         unsafe {
@@ -898,7 +838,6 @@ impl CudaEngine {
                 (cu.primary_ctx_release)(device);
                 return Err(error);
             }
-            let workgroup = workgroup_size();
             let mut engine = Self {
                 name: String::new(),
                 api: api.clone(),
@@ -911,26 +850,18 @@ impl CudaEngine {
                 prefetch: Arc::new(Prefetch::default()),
                 slots: Vec::new(),
                 next_ticket: 0,
-                workgroup,
-                max_registers,
                 max_capacity,
                 allocated_bytes: 0,
                 last_gpu_seconds: 0.0,
             };
-            let threads = workgroup.map_or_else(|| "auto".into(), |n| n.to_string());
-            engine.name = match max_registers {
-                Some(n) => format!("{device_name} (CUDA, {n} registers, blocks {threads})"),
-                None => format!("{device_name} (CUDA, blocks {threads})"),
-            };
+            engine.name = format!("{device_name} (CUDA)");
             // Evaluation slots plus one for replays.
             let slots = crate::vk_engine::gpu_slots() + 1;
             for index in 0..slots {
                 let slot = engine.create_slot(index + 1 == slots)?;
                 engine.slots.push(slot);
             }
-            if build {
-                engine.start_prefetch();
-            }
+            engine.start_prefetch();
             Ok(engine)
         }
     }
@@ -967,9 +898,9 @@ impl CudaEngine {
         }
     }
 
-    /// NVRTC options for this device and register cap.
-    fn options(&self, max_registers: Option<u32>) -> Vec<String> {
-        let mut options = vec![
+    /// NVRTC options for this device.
+    fn options(&self) -> Vec<String> {
+        let options = vec![
             format!("--gpu-architecture={}", self.arch),
             "--std=c++17".into(),
             // Division and square roots as the Vulkan driver compiles WGSL:
@@ -979,12 +910,6 @@ impl CudaEngine {
             "--fmad=true".into(),
             "--ptxas-options=-v".into(),
         ];
-        if let Some(n) = max_registers {
-            options.push(format!("--maxrregcount={n}"));
-        }
-        if let Ok(extra) = std::env::var("EVOLUTION_CUDA_FLAGS") {
-            options.extend(extra.split_whitespace().map(str::to_owned));
-        }
         options
     }
 
@@ -1032,7 +957,7 @@ impl CudaEngine {
                     self.kernels.contains_key(&(fidelity, capacity))
                 };
                 if !built {
-                    let threads = block_size(capacity, self.workgroup, self.max_registers);
+                    let threads = block_size(capacity);
                     jobs.push(((record, fidelity, capacity), threads));
                 }
             }
@@ -1043,9 +968,8 @@ impl CudaEngine {
     /// Queues `capacities` on the background compiler.
     fn prefetch_capacities(&self, capacities: &[usize]) {
         let jobs = self.jobs_for(capacities);
-        let options = Arc::new(self.options(self.max_registers));
-        self.prefetch
-            .enqueue(jobs, &self.api, &options, self.max_registers.is_none());
+        let options = Arc::new(self.options());
+        self.prefetch.enqueue(jobs, &self.api, &options);
     }
 
     /// Starts compiling the small bodies' kernels (up to 8 nodes) on
@@ -1066,19 +990,11 @@ impl CudaEngine {
     /// `record` recording): from the background compiler if it has it or is
     /// on it, else here.
     fn build_kernel(&mut self, fidelity: Fidelity, capacity: usize, record: bool) -> Result<()> {
-        let max_registers = self.max_registers;
-        let threads = block_size(capacity, self.workgroup, max_registers);
+        let threads = block_size(capacity);
         let started = Instant::now();
         let key = (record, fidelity, capacity);
         let compile = |engine: &Self, use_cache: bool| {
-            compile_kernel(
-                &engine.api,
-                &engine.options(max_registers),
-                key,
-                threads,
-                max_registers.is_none(),
-                use_cache,
-            )
+            compile_kernel(&engine.api, &engine.options(), key, threads, use_cache)
         };
         let cubin = match self.prefetch.take(key) {
             Some(result) => result?,
@@ -1202,7 +1118,7 @@ impl CudaEngine {
     ) -> Result<usize> {
         let api = self.api.clone();
         let cu = &api.cu;
-        while self.slots[slot].streams.len() < batches.len().min(stream_limit()) {
+        while self.slots[slot].streams.len() < batches.len().min(STREAM_LIMIT) {
             unsafe {
                 let mut stream = std::ptr::null_mut();
                 cu.check(

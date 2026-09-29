@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use evolution_simulator::{
     config::Config,
     engine::{self, Engine},
@@ -86,8 +86,6 @@ enum Action {
         milestones: Vec<f32>,
         #[arg(long, default_value = "benchmarks/search-baseline")]
         output_dir: PathBuf,
-        #[arg(long, value_enum, default_value_t = SearchVariant::MorphologyReserve)]
-        variant: SearchVariant,
         /// Evaluate with the production CPU SIMD engine instead of initializing Vulkan.
         /// Thread count comes from EVOLUTION_CPU_THREADS (default: logical CPUs minus four).
         #[arg(long)]
@@ -135,12 +133,6 @@ enum Action {
         #[arg(long)]
         champion: Option<PathBuf>,
     },
-}
-#[derive(Clone, Copy, Debug, Default, ValueEnum)]
-enum SearchVariant {
-    BehaviorOnly,
-    #[default]
-    MorphologyReserve,
 }
 fn main() -> Result<()> {
     // Evaluation and general workers share half the logical CPUs, at most
@@ -400,7 +392,6 @@ fn main() -> Result<()> {
             duration,
             milestones,
             output_dir,
-            variant,
             cpu,
         }) => {
             let mut cfg: Config = if let Some(path) = config {
@@ -419,7 +410,6 @@ fn main() -> Result<()> {
                 generations,
                 milestones: &milestones,
                 output_dir: &output_dir,
-                morphology_reserve_enabled: matches!(variant, SearchVariant::MorphologyReserve),
                 cpu_only: cpu,
             })
         }

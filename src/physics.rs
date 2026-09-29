@@ -288,14 +288,9 @@ impl Screen {
         fidelity.settle() + ((self.seconds * fidelity.rate as f32).round() as u32).max(1) - 1
     }
 }
-/// Seconds after settling at which trials are screened
-/// (`EVOLUTION_SCREEN`, default 5; `0` turns screening off).
+/// Seconds after settling at which trials are screened.
 pub fn screen_seconds() -> Option<f32> {
-    let seconds = std::env::var("EVOLUTION_SCREEN")
-        .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(5.0);
-    (seconds > 0.0).then_some(seconds)
+    Some(5.0)
 }
 /// Share of creatures, by distance at the screen, that runs the full trial.
 /// At 5 s the top 20% held every creature of the final top 1% and 96% of the

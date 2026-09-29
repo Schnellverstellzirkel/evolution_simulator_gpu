@@ -680,7 +680,7 @@ struct Lane {
         for (unsigned ci = 0u; ci < MAXC; ci++) {
             float ln = 0.0f;
             float lt = 0.0f;
-            if (WARM && c_on[ci]) {
+            if (c_on[ci]) {
                 unsigned node = c_node[ci];
                 Record rec = records_in[record_base + node];
                 float2 w = node == 0u ? rec.c : rec.b;
@@ -1196,7 +1196,7 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
             impulse = L.contacts(origin, before, impulse);
         }
         // Each node's contact force starts the next step's solve.
-        if (WARM && grounded) {
+        if (grounded) {
             UNROLL
             for (unsigned i = 0u; i < MAXN; i++) {
                 if (i >= nn) { break; }

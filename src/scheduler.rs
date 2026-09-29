@@ -286,13 +286,6 @@ fn same_cfg(a: &Option<Arc<Config>>, b: &Option<Arc<Config>>) -> bool {
     }
 }
 
-fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
 fn reserve_cpu_when_gpu_available(devices: &mut [Device]) {
     if devices.iter().any(|device| device.kind == DeviceKind::Gpu) {
         for device in devices {
@@ -333,7 +326,7 @@ impl Scheduler {
     /// engine. If the primary GPU cannot open, evaluation falls back to the
     /// CPU; with the separate pool disabled, it shares the general Rayon pool.
     pub fn new(primary: &str) -> Result<Self> {
-        let step_range = env_or("EVOLUTION_GPU_CHUNK", crate::gpu::DEFAULT_STEP_RANGE);
+        let step_range = crate::gpu::DEFAULT_STEP_RANGE;
         let mut devices = Vec::new();
         let mut startup_failure = None;
         match engine::gpu_engine(primary, 64, step_range) {
@@ -345,13 +338,7 @@ impl Scheduler {
             Ok(gpu) => {
                 // The primary GPU scores the archive, so it records replays.
                 gpu.publish_replays();
-                let mut device = Device::new(
-                    Box::new(gpu),
-                    DeviceKind::Gpu,
-                    180_000.0,
-                    8192,
-                    env_or("EVOLUTION_UNIT_SECONDS", 1.0),
-                );
+                let mut device = Device::new(Box::new(gpu), DeviceKind::Gpu, 180_000.0, 8192, 1.0);
                 let name = primary.to_owned();
                 device.reopen = Some(Reopen {
                     open: Box::new(move || {
@@ -376,13 +363,13 @@ impl Scheduler {
             }
             // RADV compile time explodes for the largest bodies; those stay on the
             // primary GPU. Short dispatches let the desktop interleave its frames.
-            match engine::gpu_engine(name, 16, env_or("EVOLUTION_SECONDARY_CHUNK", 16)) {
+            match engine::gpu_engine(name, 16, 16) {
                 Ok(engine) => devices.push(Device::new(
                     Box::new(engine),
                     DeviceKind::Gpu,
                     40_000.0,
                     2048,
-                    env_or("EVOLUTION_SECONDARY_UNIT_SECONDS", 0.05),
+                    0.05,
                 )),
                 Err(err) => eprintln!("Evaluation device {name:?} unavailable: {err:#}"),
             }
@@ -394,7 +381,7 @@ impl Scheduler {
                 DeviceKind::Cpu,
                 30_000.0,
                 1024,
-                env_or("EVOLUTION_CPU_UNIT_SECONDS", 1.0),
+                1.0,
             ));
         } else {
             // Without a separate CPU pool the CPU engine shares the general
@@ -405,7 +392,7 @@ impl Scheduler {
                 DeviceKind::Cpu,
                 30_000.0,
                 64,
-                env_or("EVOLUTION_CPU_UNIT_SECONDS", 1.0),
+                1.0,
             );
             shared.reserve = !devices.is_empty();
             devices.push(shared);
@@ -580,7 +567,7 @@ impl Scheduler {
         }
         let standby = self.reserves_standing_by();
         let cfg_of = &self.cfg_of;
-        let max_check_units = env_or("EVOLUTION_CHECK_UNITS", 2usize).max(1);
+        let max_check_units = 2usize;
         for device in &mut self.devices {
             if standby && device.reserve {
                 continue;

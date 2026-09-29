@@ -301,7 +301,6 @@ pub struct RunOptions<'a> {
     pub generations: u32,
     pub milestones: &'a [f32],
     pub output_dir: &'a Path,
-    pub morphology_reserve_enabled: bool,
     pub cpu_only: bool,
 }
 
@@ -313,7 +312,6 @@ pub fn run(options: RunOptions<'_>) -> Result<()> {
         generations,
         milestones,
         output_dir,
-        morphology_reserve_enabled,
         cpu_only,
     } = options;
     ensure!(!seeds.is_empty(), "At least one fixed seed is required");
@@ -365,21 +363,9 @@ pub fn run(options: RunOptions<'_>) -> Result<()> {
         .unwrap_or_default()
         .as_secs();
     let metadata = RunMetadata {
-        algorithm_variant: if morphology_reserve_enabled {
-            "morphology-reserve"
-        } else {
-            "behavior-only"
-        },
-        morphology_parent_fraction: if morphology_reserve_enabled {
-            qd::MORPHOLOGY_PARENT_FRACTION
-        } else {
-            0.0
-        },
-        minimum_morphology_descendants_before_eviction: if morphology_reserve_enabled {
-            qd::MIN_MORPHOLOGY_DESCENDANTS
-        } else {
-            0
-        },
+        algorithm_variant: "morphology-reserve",
+        morphology_parent_fraction: qd::MORPHOLOGY_PARENT_FRACTION,
+        minimum_morphology_descendants_before_eviction: qd::MIN_MORPHOLOGY_DESCENDANTS,
         created_unix_seconds: created,
         backend: if cpu_only { "cpu" } else { "gpu" }.to_string(),
         evaluation_device: evaluator.name(),
@@ -388,7 +374,7 @@ pub fn run(options: RunOptions<'_>) -> Result<()> {
         generations,
         candidate_evaluation_budget_per_seed: config.population as u64 * generations as u64,
         config: config.clone(),
-        notes: "The candidate evaluation budget is population * generations: one standard trial for every candidate slot. GPU evaluation retains the scheduler contender-check behavior, which can add check trials. CPU evaluation uses one standard trial per candidate. GPU archive admission uses the GPU standard and fine-check results; it does not replay candidates through CPU validation. Compare variants using the same backend and environment. CPU mode honors EVOLUTION_CPU_THREADS. GPU results are authoritative in GPU runs; CPU/GPU comparisons are optional diagnostics.",
+        notes: "The candidate evaluation budget is population * generations: one standard trial for every candidate slot. GPU evaluation retains the scheduler contender-check behavior, which can add check trials. CPU evaluation uses one standard trial per candidate. GPU archive admission uses the GPU standard and fine-check results; it does not replay candidates through CPU validation. Compare runs using the same backend and environment. CPU mode honors EVOLUTION_CPU_THREADS. GPU results are authoritative in GPU runs; CPU/GPU comparisons are optional diagnostics.",
     };
     write_json(&output_dir.join("metadata.json"), &metadata)?;
 
@@ -403,7 +389,6 @@ pub fn run(options: RunOptions<'_>) -> Result<()> {
             generations,
             milestones,
             output_dir,
-            morphology_reserve_enabled,
             seed_index == 0,
         )?;
         println!(
@@ -431,7 +416,6 @@ fn run_seed(
     generations: u32,
     milestones: &[f32],
     output_dir: &Path,
-    morphology_reserve_enabled: bool,
     warm_up: bool,
 ) -> Result<SeedSummary> {
     let seed = config.seed;
@@ -440,7 +424,6 @@ fn run_seed(
     let benchmark_started = Instant::now();
     let creation_started = Instant::now();
     let mut experiment = Experiment::new(config.clone())?;
-    experiment.morphology_reserve_override = Some(morphology_reserve_enabled);
     let creation_seconds = creation_started.elapsed().as_secs_f64();
     let warmup_started = Instant::now();
     if warm_up && let Evaluator::Gpu(gpu) = evaluator {

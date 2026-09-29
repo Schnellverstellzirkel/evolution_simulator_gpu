@@ -40,30 +40,16 @@ use rayon::prelude::*;
 pub(crate) const LIMIT_HARDNESS: f32 = 20.0;
 /// Passive joint damping as a time constant (s): every joint resists its
 /// relative rotation like tissue does, with a damper sized to the inertia the
-/// joint moves (`EVOLUTION_JOINT_DAMPING`, seconds; 0 turns it off).
+/// joint moves.
 pub fn joint_damping() -> f32 {
-    static TAU: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *TAU.get_or_init(|| {
-        std::env::var("EVOLUTION_JOINT_DAMPING")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|v: &f32| v.is_finite() && *v >= 0.0)
-            .unwrap_or(0.1)
-    })
+    0.1
 }
 /// Hill's force-velocity relation: a muscle's active pull falls linearly
 /// with its shortening speed and vanishes at this many of its own lengths per
-/// second (`EVOLUTION_HILL`; 0 turns it off). It bounds a muscle's power the
-/// way real muscle does, so a body cannot catapult itself.
+/// second. It bounds a muscle's power the way real muscle does, so a body
+/// cannot catapult itself.
 pub fn hill_speed() -> f32 {
-    static HILL: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *HILL.get_or_init(|| {
-        std::env::var("EVOLUTION_HILL")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|v: &f32| v.is_finite() && *v >= 0.0)
-            .unwrap_or(8.0)
-    })
+    8.0
 }
 /// The largest acceleration (m/s^2) a muscle can give the mass it drives.
 /// A muscle's cross-section, and so its force, grows with the mass it moves:
@@ -2014,10 +2000,6 @@ fn source_from(
         (
             "const PLANT_ROUNDS: u32 = 2u;",
             format!("const PLANT_ROUNDS: u32 = {}u;", PLANT_ROUNDS),
-        ),
-        (
-            "const WARM: bool = false;",
-            "const WARM: bool = true;".to_string(),
         ),
         (
             "const AIR_DRAG: f32 = 0.6;",

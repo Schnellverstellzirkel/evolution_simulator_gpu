@@ -253,15 +253,9 @@ pub fn launch_params(
 
 /// Whether the v2 CUDA kernel of `capacity` nodes keeps its per-lane table in
 /// local memory (through L1 and L2) instead of shared memory. Above 32 nodes
-/// it does, because the table would not fit. `EVOLUTION_CUDA_TABLE_LOCAL=N`
-/// (a developer diagnostic) moves the limit down to bodies above N nodes.
+/// it does, because the table would not fit.
 pub fn cuda_table_local(capacity: usize) -> bool {
-    let above = std::env::var("EVOLUTION_CUDA_TABLE_LOCAL")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .unwrap_or(32)
-        .min(32);
-    capacity > above
+    capacity > 32
 }
 
 /// The physics v2 CUDA kernel (`shaders/physics2_creature.cu`) for
@@ -269,13 +263,8 @@ pub fn cuda_table_local(capacity: usize) -> bool {
 /// with the same constants as `#define` lines. Bodies of up to 16 nodes
 /// unroll their node and bone loops (private arrays in registers); bodies
 /// above 32 nodes keep the per-lane table in local memory.
-pub fn cuda_source(
-    capacity: usize,
-    workgroup: u32,
-    fidelity: crate::physics::Fidelity,
-    launch_bounds: bool,
-) -> String {
-    cuda_source_variant(capacity, workgroup, fidelity, launch_bounds, false)
+pub fn cuda_source(capacity: usize, workgroup: u32, fidelity: crate::physics::Fidelity) -> String {
+    cuda_source_variant(capacity, workgroup, fidelity, false)
 }
 
 /// The physics v2 CUDA recording kernel: the scoring kernel of `cuda_source`
@@ -285,16 +274,14 @@ pub fn cuda_record_source(
     capacity: usize,
     workgroup: u32,
     fidelity: crate::physics::Fidelity,
-    launch_bounds: bool,
 ) -> String {
-    cuda_source_variant(capacity, workgroup, fidelity, launch_bounds, true)
+    cuda_source_variant(capacity, workgroup, fidelity, true)
 }
 
 fn cuda_source_variant(
     capacity: usize,
     workgroup: u32,
     fidelity: crate::physics::Fidelity,
-    launch_bounds: bool,
     record: bool,
 ) -> String {
     use crate::physics2 as p2;
@@ -314,14 +301,7 @@ fn cuda_source_variant(
             "TAB_LOCAL",
             (if cuda_table_local(capacity) { "1" } else { "0" }).into(),
         ),
-        (
-            "LAUNCH_BOUNDS",
-            if launch_bounds {
-                format!("__launch_bounds__({workgroup})")
-            } else {
-                String::new()
-            },
-        ),
+        ("LAUNCH_BOUNDS", format!("__launch_bounds__({workgroup})")),
         ("RECORD", (if record { "1" } else { "0" }).into()),
         ("MUSCLE_CAPACITY", float(limits.muscle_energy)),
         ("MUSCLE_RECOVERY", float(limits.muscle_recovery)),
@@ -346,7 +326,6 @@ fn cuda_source_variant(
         ("PGS_SWEEPS", format!("{}u", p2::PGS_ITERATIONS)),
         ("PLANT_SWEEPS", format!("{}u", p2::PLANT_SWEEPS)),
         ("PLANT_ROUNDS", format!("{}u", p2::PLANT_ROUNDS)),
-        ("WARM", "1".into()),
         ("PUSH_OUT", float(p2::PUSH_OUT)),
         ("AIR_DRAG", float(p2::AIR_DRAG)),
         ("WATER_DRAG", float(p2::WATER_DRAG)),

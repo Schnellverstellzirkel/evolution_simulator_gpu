@@ -115,14 +115,10 @@ const MAX_SETS: u32 = 1024;
 /// scoring, and the recorded frames (7) for replays.
 const BINDINGS: u32 = 8;
 
-/// Submission slots per GPU (`EVOLUTION_GPU_SLOTS`, 1 to 8, default 4), each
-/// on its own queue when the device offers enough.
+/// Submission slots per GPU, each on its own queue when the device offers
+/// enough.
 pub fn gpu_slots() -> u32 {
-    std::env::var("EVOLUTION_GPU_SLOTS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|n: &u32| (1..=8).contains(n))
-        .unwrap_or(4)
+    4
 }
 
 /// Buffer size for `size` bytes of data. Small buffers round up to a power
@@ -259,11 +255,7 @@ impl VkEngine {
                 &vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts),
                 None,
             )?;
-            let workgroup = std::env::var("EVOLUTION_LANE_WG")
-                .ok()
-                .and_then(|v| v.parse::<u32>().ok())
-                .filter(|v| *v == 32 || *v == 64)
-                .unwrap_or(32);
+            let workgroup = 32;
             let pool_sizes = [
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_BUFFER,

@@ -1854,8 +1854,7 @@ pub fn grow_for_benchmark(creature: &mut Creature, cfg: &Config, seed: u64, targ
 
 /// `structural_mutation_in_place` for a child bred from `archive`. The
 /// anatomy operators join the classic ones (and graft limbs from another
-/// elite of the archive); with `EVOLUTION_ANATOMY=0` it is exactly the
-/// classic mutation.
+/// elite of the archive).
 fn structural_mutation_from(
     creature: &mut Creature,
     cfg: &Config,
@@ -1863,9 +1862,6 @@ fn structural_mutation_from(
     archive: &QdArchive,
 ) -> bool {
     let extra = anatomy::enabled();
-    if extra.is_empty() {
-        return structural_mutation_in_place(creature, cfg, rng);
-    }
     let donor = (!archive.entries.is_empty())
         .then(|| &archive.entries[rng.index(archive.entries.len())].creature);
     let cx = anatomy::Context { donor };
@@ -1945,11 +1941,6 @@ pub fn mutate_locally(creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
     let mut child = local_mutation(creature, cfg, rng, scale);
     repair(&mut child, cfg, rng);
     child
-}
-
-fn structural_mutation_in_place(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
-    let pick = rng.index(CLASSIC_COUNT);
-    classic_operator(pick, creature, cfg, rng)
 }
 
 fn classic_operator(pick: usize, creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
@@ -2477,7 +2468,8 @@ mod tests {
                 if rng.unit() < 0.5 {
                     change_organ(&mut creature, &mut rng);
                 }
-                let _ = structural_mutation_in_place(&mut creature, &cfg, &mut rng);
+                let pick = rng.index(CLASSIC_COUNT);
+                let _ = classic_operator(pick, &mut creature, &cfg, &mut rng);
                 creature = local_mutation(creature, &cfg, &mut rng, 0.75);
                 repair(&mut creature, &cfg, &mut rng);
                 let center = organ_center(&creature.nodes);

@@ -285,22 +285,14 @@ struct SegmentedUnit {
 /// Ticks at which a GPU trial pauses to drop fallen creatures, ending with
 /// the trial's last tick. A fall ends a trial, so every step a fallen
 /// creature would take after it is wasted; at a segment boundary the others
-/// are repacked into dense warps. `EVOLUTION_SEGMENTS` lists the pauses in
-/// seconds after settling (default `2,10`; empty or `0` for none). On an
+/// are repacked into dense warps. The pauses come 2 s and 10 s after
+/// settling. On an
 /// evolved 3M population 38% of creatures fall, most within a second, and
 /// pauses at 2 s and 10 s skip 34% of all steps.
 pub(crate) fn segment_ends(cfg: &Config) -> Vec<u32> {
     let fidelity = cfg.fidelity();
     let total = fidelity.settle() + cfg.steps();
-    let seconds: Vec<f32> = match std::env::var("EVOLUTION_SEGMENTS") {
-        Ok(list) => list
-            .split(',')
-            .filter_map(|v| v.trim().parse().ok())
-            .filter(|&v: &f32| v > 0.0)
-            .collect(),
-        Err(_) => vec![2.0, 10.0],
-    };
-    let mut ends: Vec<u32> = seconds
+    let mut ends: Vec<u32> = [2.0_f32, 10.0]
         .into_iter()
         .map(|s| fidelity.settle() + (s * fidelity.rate as f32).round() as u32)
         // Screened creatures leave right after the screen step.

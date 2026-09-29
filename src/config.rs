@@ -559,11 +559,7 @@ impl Config {
     pub fn batch_size(&self) -> usize {
         // Fewer readback fences keep the GPU busier. Responsive mode still stays
         // small enough that pausing and editing settings never feels delayed.
-        let maximum = std::env::var("EVOLUTION_GPU_BATCH")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|&value| value > 0)
-            .unwrap_or(if self.throughput { 100_000 } else { 8192 });
+        let maximum = if self.throughput { 100_000 } else { 8192 };
         // Leave space for power-of-two buffer growth and staging resources.
         let padded_nodes = self.max_nodes.next_power_of_two().max(8);
         // A muscle genome is stored once, with up to four u32 node references;
