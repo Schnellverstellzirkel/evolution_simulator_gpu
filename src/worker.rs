@@ -498,9 +498,6 @@ fn run(
     let mut checkpoint_thread: Option<std::thread::JoinHandle<Option<(PathBuf, u32)>>> = None;
     // Milliseconds each snapshot took to build, for the benchmark report.
     let mut snapshot_build_ms: Vec<f64> = Vec::new();
-    // Developer diagnostic: EVOLUTION_PASS_LOG=1 prints each archive and
-    // breeding pass of a steady run.
-    let pass_log = std::env::var_os("EVOLUTION_PASS_LOG").is_some();
     let benchmark_generations = std::env::var("EVOLUTION_BENCH_GENERATIONS")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -977,17 +974,7 @@ fn run(
                                 sched.pump(&e.population, &e.config, &[], |i, m| {
                                     e.check_need(i, m)
                                 })?;
-                                let absorb_started = Instant::now();
                                 steady_absorb(e, &mut steady, sched, &indices, &metrics, true)?;
-                                if pass_log {
-                                    eprintln!(
-                                        "pass: absorbed {} creatures in {:.0} ms (archive {:.0} ms, breeding {:.0} ms so far)",
-                                        indices.len(),
-                                        absorb_started.elapsed().as_secs_f64() * 1e3,
-                                        steady.stage_seconds[1] * 1e3,
-                                        steady.stage_seconds[2] * 1e3
-                                    );
-                                }
                             }
                             status = format!("Evolving · generation {}", e.generation);
                             let seconds = stage_start.elapsed().as_secs_f64();
