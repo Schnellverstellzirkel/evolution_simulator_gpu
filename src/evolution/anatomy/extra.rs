@@ -6,14 +6,14 @@
 //! that do the least.
 //!
 //! Operators here that add or remove bones close the motor ring themselves
-//! with passive muscles (`passive_ring`). Left to `repair_with`, the ring
+//! with passive muscles (`passive_ring`). Left to `repair`, the ring
 //! would get new random muscles that drive from the first step.
 use super::limbs::{clamped, fuse_pair, limb_roots, pick};
 use super::muscles::{actuation, ring, shared_node};
 use super::rhythm::{leaf_limbs, matching_limbs};
 use super::{
-    Context, branch, child_bones, copy_branch, degree, fit_stroke, is_neck, muscles_on, neutralize,
-    new_muscle, parent_bones, remove_parts, room,
+    Context, branch, child_bones, copy_branch, degree, fit_stroke, is_neck, muscles_on, new_muscle,
+    parent_bones, remove_parts, room,
 };
 use crate::config::Config;
 use crate::evolution::{Bone, Creature, Muscle, NodeGene, Rng, max_bone_length, min_muscle_period};
@@ -71,7 +71,7 @@ pub(crate) fn copy_muscle_to_partner(
     c: &mut Creature,
     cfg: &Config,
     rng: &mut Rng,
-    cx: &Context,
+    _cx: &Context,
 ) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -108,9 +108,6 @@ pub(crate) fn copy_muscle_to_partner(
         ..old
     };
     fit_stroke(c, &mut m, Some(&old));
-    if cx.neutral {
-        neutralize(&mut m);
-    }
     c.muscles.push(m);
     true
 }
@@ -118,7 +115,7 @@ pub(crate) fn copy_muscle_to_partner(
 /// Duplicates a limb in place: the copy hangs from the same joint in the
 /// same pose, with the same muscles at the same phase, so the child moves
 /// like its parent and later mutations can make the two limbs differ.
-pub(crate) fn twin_limb(c: &mut Creature, cfg: &Config, rng: &mut Rng, cx: &Context) -> bool {
+pub(crate) fn twin_limb(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let roots: Vec<usize> = limb_roots(c)
         .into_iter()
         .filter(|&b| room(c, cfg, branch(c, b).len(), 0))
@@ -127,7 +124,7 @@ pub(crate) fn twin_limb(c: &mut Creature, cfg: &Config, rng: &mut Rng, cx: &Cont
         return false;
     };
     let joint = c.bones[root].a as usize;
-    if copy_branch(c, cfg, root, joint, |p| p, false, 0.0, cx.neutral).is_none() {
+    if copy_branch(c, cfg, root, joint, |p| p, false, 0.0).is_none() {
         return false;
     }
     passive_ring(c, cfg, rng);
@@ -142,7 +139,7 @@ pub(crate) fn grow_matching_tips(
     c: &mut Creature,
     cfg: &Config,
     rng: &mut Rng,
-    cx: &Context,
+    _cx: &Context,
 ) -> bool {
     if !room(c, cfg, 2, 2) {
         return false;
@@ -181,15 +178,7 @@ pub(crate) fn grow_matching_tips(
         };
         c.bones.push(toe);
         let template = muscles_on(c, &[bone], false).first().map(|&i| c.muscles[i]);
-        let m = new_muscle(
-            c,
-            c.bones.len() - 1,
-            bone,
-            anchors,
-            template.as_ref(),
-            rng,
-            cx.neutral,
-        );
+        let m = new_muscle(c, c.bones.len() - 1, bone, anchors, template.as_ref(), rng);
         c.muscles.push(m);
     }
     passive_ring(c, cfg, rng);
@@ -429,7 +418,7 @@ pub(crate) fn leg_to_dragging_end(
     c: &mut Creature,
     cfg: &Config,
     rng: &mut Rng,
-    cx: &Context,
+    _cx: &Context,
 ) -> bool {
     let Some((working, dragging)) = drag_ends(c) else {
         return false;
@@ -446,7 +435,7 @@ pub(crate) fn leg_to_dragging_end(
     let (from, to) = (c.nodes[root], next.nodes[at]);
     let place = |[x, y]: [f32; 2]| [to.x - (x - from.x), to.y + y - from.y];
     let phase = if rng.unit() < 0.5 { 0.5 } else { 0.0 };
-    if copy_branch(&mut next, cfg, leg, at, place, true, phase, cx.neutral).is_none() {
+    if copy_branch(&mut next, cfg, leg, at, place, true, phase).is_none() {
         return false;
     }
     passive_ring(&mut next, cfg, rng);
@@ -462,7 +451,7 @@ pub(crate) fn lift_dragging_end(
     c: &mut Creature,
     cfg: &Config,
     rng: &mut Rng,
-    cx: &Context,
+    _cx: &Context,
 ) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -507,7 +496,7 @@ pub(crate) fn lift_dragging_end(
         return false;
     }
     let template = c.muscles[strongest];
-    let m = new_muscle(c, top, above, (at, best), Some(&template), rng, cx.neutral);
+    let m = new_muscle(c, top, above, (at, best), Some(&template), rng);
     c.muscles.push(m);
     true
 }
@@ -575,8 +564,11 @@ fn drive(m: &Muscle) -> f32 {
     m.stiffness * (m.long - m.short)
 }
 
+/// Spring stiffness of the passive muscles `passive_ring` adds.
+const PASSIVE_STIFFNESS: f32 = 5.0;
+
 /// Adds a passive muscle (random anchors, no stroke) on each pair of
-/// consecutively numbered bones that has no muscle, as `repair_with` would
+/// consecutively numbered bones that has no muscle, as `repair` would
 /// with an active one, while there is room.
 fn passive_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
     let n = c.bones.len();
@@ -588,7 +580,8 @@ fn passive_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
         });
         if (n > 2 || a < b) && !joined && c.muscles.len() < cfg.max_muscles {
             let mut m = crate::evolution::muscle(a, b, &c.bones, &c.nodes, rng);
-            neutralize(&mut m);
+            m.short = m.long;
+            m.stiffness = PASSIVE_STIFFNESS;
             c.muscles.push(m);
         }
     }
@@ -644,18 +637,14 @@ mod tests {
     use super::super::{Operator, tests::bodies};
     use super::*;
 
-    /// Runs `op` on 160 grown bodies (with and without `neutral` on
-    /// alternate bodies). A changed body must pass `check(before, after)`; an
+    /// Runs `op` on 160 grown bodies . A changed body must pass `check(before, after)`; an
     /// unchanged one must be as it was. Returns how many it changed.
     fn run(op: Operator, bodies: &[Creature], check: impl Fn(&Creature, &Creature)) -> usize {
         let cfg = Config::default();
         let mut applied = 0;
         for (i, body) in bodies.iter().enumerate() {
             let mut c = body.clone();
-            let cx = Context {
-                neutral: i % 2 == 1,
-                donor: None,
-            };
+            let cx = Context { donor: None };
             if op(&mut c, &cfg, &mut Rng::new(31, 0, i), &cx) {
                 applied += 1;
                 assert!(c.nodes.len() <= cfg.max_nodes && c.muscles.len() <= cfg.max_muscles);
@@ -689,7 +678,7 @@ mod tests {
                     .into_iter()
                     .find(|&b| !muscles_on(&c, &actuation(&c, b).0, true).is_empty())?;
                 let joint = c.bones[root].a as usize;
-                copy_branch(&mut c, &cfg, root, joint, |p| p, false, phase, false)?;
+                copy_branch(&mut c, &cfg, root, joint, |p| p, false, phase)?;
                 crate::evolution::repair(&mut c, &cfg, &mut Rng::new(3, 0, 0));
                 Some(c)
             })
@@ -799,7 +788,6 @@ mod tests {
                     (0.5, 0.5),
                     None,
                     &mut Rng::new(4, 0, i),
-                    false,
                 );
                 c.muscles.push(m);
                 Some(c)

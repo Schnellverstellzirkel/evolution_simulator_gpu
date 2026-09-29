@@ -249,44 +249,8 @@ fn describe_change(
 }
 
 /// Independent parent pools; elites migrate between neighbors periodically.
-/// `EVOLUTION_ISLANDS` overrides the count (1 disables islands).
 pub fn island_count() -> usize {
-    static COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *COUNT.get_or_init(|| {
-        std::env::var("EVOLUTION_ISLANDS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|&n: &usize| (1..=64).contains(&n))
-            .unwrap_or(4)
-    })
-}
-/// Generations between bounded archive-elite refreshes, read from
-/// `EVOLUTION_ELITE_REFRESH`. Unset, zero, or unparsable means off, which is
-/// the default. Read on every call so a running game and the measurement
-/// harness agree without a restart.
-pub fn elite_refresh_interval() -> u64 {
-    std::env::var("EVOLUTION_ELITE_REFRESH")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0)
-}
-/// Most elites one refresh cycle re-tests: a small, bounded cost next to the
-/// generation's own evaluation. The subset rotates, so every elite is reached
-/// after enough cycles.
-const ELITE_REFRESH_BATCH: usize = 4;
-/// Deterministic pose and grip perturbation for the fresh-perturbation elite
-/// refresh. It mirrors the contender robustness check in `scheduler::perturb`:
-/// node x and y move by up to 2 cm and grip varies by ±10%, seeded from the
-/// creature id alone so the same elite always gets the same fresh trial. The
-/// stored score already folded in the unperturbed standard trial, so only a
-/// different nearby pose can disprove it.
-pub fn perturb_elite(creature: &mut Creature) {
-    let mut rng = Rng::new(creature.id ^ 0x5eed_7a11, 0, 0);
-    for node in &mut creature.nodes {
-        node.x += rng.range(-0.02, 0.02);
-        node.y += rng.range(0.0, 0.02);
-        node.friction = (node.friction * rng.range(0.9, 1.1)).clamp(0.0, 1.0);
-    }
+    4
 }
 /// Share of CMA offspring whose parent is one of its island's fastest 1% of
 /// elites; the rest sample by local competition. Spending more on the best
@@ -1005,7 +969,6 @@ impl Experiment {
         chain
     }
     fn push_archive_stats(&mut self, failed: usize) {
-        self.refresh_elites_from_env();
         let mut elites: Vec<_> = self
             .archive
             .entries
@@ -1071,93 +1034,6 @@ impl Experiment {
             emitters: self.emitter_stats,
         });
     }
-    /// Periodic bounded refresh of archive elites. Every `interval`
-    /// generations a rotating, deterministic subset of at most
-    /// `ELITE_REFRESH_BATCH` elites re-runs its standard trial on the CPU
-    /// engine from a fresh deterministic perturbation (`perturb_elite`, the
-    /// contender check's pose and grip shift), and the archive keeps the lower
-    /// of the stored and re-evaluated fitness. The stored score already folded
-    /// in the unperturbed standard trial, so the perturbation is what can
-    /// catch a fragile elite that got lucky on its own exact pose. The cell,
-    /// creature, and descriptor never change. `interval == 0` disables it.
-    /// Returns how many elites were lowered.
-    pub fn refresh_elites(&mut self, interval: u64) -> usize {
-        let completed = self.generation as u64 + 1;
-        if interval == 0 || !completed.is_multiple_of(interval) {
-            return 0;
-        }
-        let cycle = completed / interval;
-        self.refresh_elite_batch(cycle)
-    }
-    /// `refresh_elites` with the interval read from `EVOLUTION_ELITE_REFRESH`
-    /// (generations; unset or 0 disables it, the default).
-    pub fn refresh_elites_from_env(&mut self) -> usize {
-        self.refresh_elites(elite_refresh_interval())
-    }
-    fn refresh_elite_batch(&mut self, cycle: u64) -> usize {
-        let batch = ELITE_REFRESH_BATCH.min(self.archive.entries.len());
-        if batch == 0 {
-            return 0;
-        }
-        // Sorting by creature id makes the rotating window independent of the
-        // archive's internal entry order, so the selection is deterministic
-        // even after insertions and removals reorder the arena.
-        let mut ids: Vec<u64> = self
-            .archive
-            .entries
-            .iter()
-            .map(|elite| elite.creature.id)
-            .collect();
-        ids.sort_unstable();
-        let start = ((cycle - 1).wrapping_mul(batch as u64) % ids.len() as u64) as usize;
-        let mut unit = Population::default();
-        for k in 0..batch {
-            let id = ids[(start + k) % ids.len()];
-            if let Some(elite) = self.archive.entries.iter().find(|e| e.creature.id == id) {
-                let mut creature = elite.creature.clone();
-                perturb_elite(&mut creature);
-                unit.push(creature);
-            }
-        }
-        if unit.genomes.is_empty() {
-            return 0;
-        }
-        // The standard configuration, exactly as the archive-admission check
-        // runs it (no fine-fidelity override).
-        let cfg = Config {
-            fidelity: None,
-            screen: None,
-            ..self.config.clone()
-        };
-        let results = crate::cpu_engine::evaluate(&unit, &cfg);
-        let mut lowered = 0;
-        for (index, result) in results.iter().enumerate() {
-            let metrics = crate::scheduler::to_metrics(&unit, index, result, &cfg);
-            if !metrics.fitness.is_finite() || metrics.fitness <= FAILED {
-                // A failed re-test says nothing about the stored score.
-                continue;
-            }
-            let id = unit.genomes[index].id;
-            for archive in std::iter::once(&mut self.archive).chain(self.islands.iter_mut()) {
-                let slot = archive
-                    .entries
-                    .iter()
-                    .position(|elite| elite.creature.id == id);
-                if let Some(slot) = slot
-                    && archive.lower_fitness(slot, metrics.fitness)
-                {
-                    lowered += 1;
-                }
-            }
-        }
-        if lowered > 0 {
-            self.archive.refresh_behavior_scores();
-            for island in &mut self.islands {
-                island.refresh_behavior_scores();
-            }
-        }
-        lowered
-    }
     pub fn prepare_next_batch(&mut self) -> Result<()> {
         self.prepare_next_batch_streaming(usize::MAX, |_, _, _| Ok(()))
     }
@@ -1201,6 +1077,7 @@ impl Experiment {
         let next = evolution::emit_archive_batch_streaming(
             &self.population,
             &self.islands,
+            &self.archive,
             &self.cma_emitters,
             &plans,
             &cfg,
@@ -1402,6 +1279,7 @@ impl Experiment {
             protection: u32,
             emitter_stale: bool,
             mate: Option<usize>,
+            from_reserve: bool,
             island: usize,
             /// A fast elite whose design's optimizer breeds this offspring.
             optimize: bool,
@@ -1493,15 +1371,17 @@ impl Experiment {
                 let emitter_stale = self.emitter_stats[emitter.index()].stale();
                 let avoid = None;
                 let mut optimize = false;
+                let mut from_reserve = false;
                 let parent = if emitter == Emitter::Restart || archive_empty {
                     None
                 } else if reserve_enabled
                     && emitter == Emitter::Structural
                     && rng.unit() < qd::MORPHOLOGY_PARENT_FRACTION
                 {
-                    archive
-                        .sample_morphology(&mut rng, avoid)
-                        .or_else(|| archive.sample_local_competitive(&mut rng, avoid))
+                    // The reserve lives in the global archive only.
+                    let drawn = self.archive.sample_morphology(&mut rng, avoid);
+                    from_reserve = drawn.is_some();
+                    drawn.or_else(|| archive.sample_local_competitive(&mut rng, avoid))
                 } else if emitter == Emitter::Novelty || emitter_stale {
                     archive.sample_novel(&mut rng, avoid)
                 } else if emitter == Emitter::Cma
@@ -1520,16 +1400,19 @@ impl Experiment {
                 } else {
                     archive.sample_local_competitive(&mut rng, avoid)
                 };
-                let parent_id = parent.map(|index| archive.entries[index].creature.id);
+                let parent_archive = if from_reserve { &self.archive } else { archive };
+                let parent_id = parent.map(|index| parent_archive.entries[index].creature.id);
                 let protection = if matches!(emitter, Emitter::Structural | Emitter::Novelty) {
                     generation.saturating_add(3)
                 } else {
                     parent
-                        .map(|index| archive.entries[index].protected_until)
+                        .map(|index| parent_archive.entries[index].protected_until)
                         .unwrap_or(0)
                 };
                 let mate = match (emitter, parent) {
-                    (Emitter::Structural | Emitter::Novelty, Some(p)) if rng.unit() < 0.2 => {
+                    (Emitter::Structural | Emitter::Novelty, Some(p))
+                        if !from_reserve && rng.unit() < 0.2 =>
+                    {
                         by_plan[island]
                             .get(&archive.entries[p].topology)
                             .filter(|group| group.len() > 1)
@@ -1545,6 +1428,7 @@ impl Experiment {
                     protection,
                     emitter_stale,
                     mate,
+                    from_reserve,
                     island,
                     optimize,
                 }
@@ -1560,6 +1444,7 @@ impl Experiment {
                 protection,
                 emitter_stale,
                 mate,
+                from_reserve,
                 island,
                 optimize,
             } = prep;
@@ -1666,7 +1551,11 @@ impl Experiment {
                 None
             };
             if let Some(parent_index) = parent {
-                self.islands[island].visit(parent_index);
+                if from_reserve {
+                    self.archive.visit(parent_index);
+                } else {
+                    self.islands[island].visit(parent_index);
+                }
             }
             out.push(OffspringPlan {
                 plan: CandidatePlan {
@@ -1674,6 +1563,7 @@ impl Experiment {
                     parent,
                     cma: cma_index,
                     mate,
+                    reserve: from_reserve,
                 },
                 parent_id,
                 protection,
@@ -1709,6 +1599,7 @@ impl Experiment {
         let planned_at = started.elapsed();
         let children = evolution::emit_offspring(
             &self.islands,
+            &self.archive,
             &self.cma_emitters,
             &plans,
             slots,

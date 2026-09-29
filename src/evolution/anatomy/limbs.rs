@@ -5,7 +5,7 @@ use super::{
 };
 use crate::config::Config;
 use crate::evolution::{
-    Bone, Creature, Muscle, NodeGene, Rng, body_extent, bone_point, max_bone_length, neutralize,
+    Bone, Creature, Muscle, NodeGene, Rng, body_extent, bone_point, max_bone_length,
 };
 
 /// Two bones count as nearly aligned when the cosine of the angle between
@@ -16,7 +16,7 @@ const ALIGNED: f32 = 0.9;
 /// it and the muscles from its root to the bone above) onto the same joint or
 /// another joint, mirrored or not, with the copied muscles shifted by one of
 /// 0, 1/4, 1/2 or 3/4 of a cycle. A working bent leg becomes a second leg.
-pub(crate) fn copy_limb(c: &mut Creature, cfg: &Config, rng: &mut Rng, cx: &Context) -> bool {
+pub(crate) fn copy_limb(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let roots: Vec<usize> = limb_roots(c)
         .into_iter()
         .filter(|&b| room(c, cfg, branch(c, b).len(), 0))
@@ -35,7 +35,7 @@ pub(crate) fn copy_limb(c: &mut Creature, cfg: &Config, rng: &mut Rng, cx: &Cont
     let (from, to) = (c.nodes[joint], c.nodes[at]);
     let side = if mirror { -1.0 } else { 1.0 };
     let place = |[x, y]: [f32; 2]| [to.x + side * (x - from.x), to.y + y - from.y];
-    copy_branch(c, cfg, root, at, place, mirror, phase, cx.neutral).is_some()
+    copy_branch(c, cfg, root, at, place, mirror, phase).is_some()
 }
 
 /// Extends a limb tip with a short bone (a fraction of the tip bone), a joint
@@ -45,7 +45,7 @@ pub(crate) fn grow_actuated_tip(
     c: &mut Creature,
     cfg: &Config,
     rng: &mut Rng,
-    cx: &Context,
+    _cx: &Context,
 ) -> bool {
     if !room(c, cfg, 1, 1) {
         return false;
@@ -69,15 +69,7 @@ pub(crate) fn grow_actuated_tip(
     c.bones.push(toe);
     let template = nearby_muscle(c, &[tip], rng);
     let anchors = (rng.range(0.3, 1.0), rng.range(0.2, 0.8));
-    let m = new_muscle(
-        c,
-        c.bones.len() - 1,
-        tip,
-        anchors,
-        template.as_ref(),
-        rng,
-        cx.neutral,
-    );
+    let m = new_muscle(c, c.bones.len() - 1, tip, anchors, template.as_ref(), rng);
     c.muscles.push(m);
     true
 }
@@ -90,7 +82,7 @@ pub(crate) fn split_bone_actuated(
     c: &mut Creature,
     cfg: &Config,
     rng: &mut Rng,
-    cx: &Context,
+    _cx: &Context,
 ) -> bool {
     if !room(c, cfg, 1, 1) {
         return false;
@@ -153,15 +145,7 @@ pub(crate) fn split_bone_actuated(
     }
     let template = nearby_muscle(c, &[first, second], rng);
     let anchors = (rng.range(0.2, 0.8), rng.range(0.2, 0.8));
-    let m = new_muscle(
-        c,
-        first,
-        second,
-        anchors,
-        template.as_ref(),
-        rng,
-        cx.neutral,
-    );
+    let m = new_muscle(c, first, second, anchors, template.as_ref(), rng);
     c.muscles.push(m);
     true
 }
@@ -367,9 +351,6 @@ pub(crate) fn graft_donor_limb(
         let mut m = donor.muscles[i];
         m.bone_a = bone_of[m.bone_a as usize] as u32;
         m.bone_b = bone_of[m.bone_b as usize] as u32;
-        if cx.neutral {
-            neutralize(&mut m);
-        }
         c.muscles.push(m);
     }
     true
@@ -417,12 +398,11 @@ mod tests {
     /// Runs `op` on 80 test bodies, checks each changed body with `check`
     /// (before, after) and each unchanged one for equality, and returns how
     /// many it changed.
-    fn applied(op: Operator, neutral: bool, mut check: impl FnMut(&Creature, &Creature)) -> usize {
+    fn applied(op: Operator, mut check: impl FnMut(&Creature, &Creature)) -> usize {
         let cfg = Config::default();
         let bodies = bodies(&cfg, 80);
         let donor = bodies[40].clone();
         let cx = Context {
-            neutral,
             donor: Some(&donor),
         };
         let mut count = 0;
@@ -447,7 +427,7 @@ mod tests {
 
     #[test]
     fn copy_limb_adds_as_many_bones_as_the_branch_has() {
-        let n = applied(copy_limb, false, |before, after| {
+        let n = applied(copy_limb, |before, after| {
             let added = after.bones.len() - before.bones.len();
             assert!(added >= 1);
             assert_eq!(after.nodes.len() - before.nodes.len(), added);
@@ -467,7 +447,7 @@ mod tests {
 
     #[test]
     fn grow_actuated_tip_adds_a_short_actuated_bone_at_a_tip() {
-        let n = applied(grow_actuated_tip, false, |before, after| {
+        let n = applied(grow_actuated_tip, |before, after| {
             assert_eq!(after.nodes.len(), before.nodes.len() + 1);
             assert_eq!(after.bones.len(), before.bones.len() + 1);
             assert_eq!(after.muscles.len(), before.muscles.len() + 1);
@@ -485,7 +465,7 @@ mod tests {
 
     #[test]
     fn split_bone_actuated_keeps_attachments_and_adds_a_muscle_across() {
-        let n = applied(split_bone_actuated, false, |before, after| {
+        let n = applied(split_bone_actuated, |before, after| {
             assert_eq!(after.nodes.len(), before.nodes.len() + 1);
             assert_eq!(after.bones.len(), before.bones.len() + 1);
             assert_eq!(after.muscles.len(), before.muscles.len() + 1);
@@ -524,7 +504,7 @@ mod tests {
 
     #[test]
     fn fuse_bones_removes_one_node_and_one_bone() {
-        let n = applied(fuse_bones, false, |before, after| {
+        let n = applied(fuse_bones, |before, after| {
             assert_eq!(after.nodes.len(), before.nodes.len() - 1);
             assert_eq!(after.bones.len(), before.bones.len() - 1);
             assert!(after.muscles.len() <= before.muscles.len());
@@ -537,7 +517,7 @@ mod tests {
 
     #[test]
     fn relocate_limb_moves_one_branch_root_and_keeps_its_parts() {
-        let n = applied(relocate_limb, false, |before, after| {
+        let n = applied(relocate_limb, |before, after| {
             assert_eq!(after.nodes.len(), before.nodes.len());
             assert_eq!(after.muscles.len(), before.muscles.len());
             let moved: Vec<usize> = (0..before.bones.len())
@@ -556,7 +536,7 @@ mod tests {
 
     #[test]
     fn reshape_limb_scales_a_branch_by_one_factor() {
-        let n = applied(reshape_limb, false, |before, after| {
+        let n = applied(reshape_limb, |before, after| {
             let changed: Vec<usize> = (0..before.bones.len())
                 .filter(|&b| after.bones[b].rest_length != before.bones[b].rest_length)
                 .collect();
@@ -581,7 +561,7 @@ mod tests {
         let cfg = Config::default();
         let donor = bodies(&cfg, 80)[40].clone();
         let (mut added, mut replaced) = (0, 0);
-        applied(graft_donor_limb, false, |before, after| {
+        applied(graft_donor_limb, |before, after| {
             // The body ends with a copy of a whole donor branch.
             let limb = limb_roots(&donor)
                 .into_iter()
@@ -608,23 +588,8 @@ mod tests {
             added >= 8 && replaced >= 8,
             "added {added}, replaced {replaced} of 80"
         );
-        let cx = Context {
-            neutral: false,
-            donor: None,
-        };
+        let cx = Context { donor: None };
         let mut c = donor.clone();
         assert!(!graft_donor_limb(&mut c, &cfg, &mut Rng::new(1, 0, 0), &cx));
-    }
-
-    #[test]
-    fn added_muscles_start_passive_when_neutral() {
-        let ops: [Operator; 3] = [copy_limb, grow_actuated_tip, split_bone_actuated];
-        for op in ops {
-            applied(op, true, |before, after| {
-                for m in &after.muscles[before.muscles.len()..] {
-                    assert_eq!(m.short, m.long);
-                }
-            });
-        }
     }
 }

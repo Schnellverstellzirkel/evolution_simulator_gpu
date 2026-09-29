@@ -239,7 +239,7 @@ pub fn pack(pop: &Population, indices: &[usize]) -> Result<Vec<LaneBatch>> {
         .flat_map_iter(|(group, mut members)| {
             let capacity = CAPACITIES[group];
             // Identical body plans share a warp: same loop counts and index patterns.
-            members.sort_by_cached_key(|&(_, i)| {
+            members.par_sort_by_cached_key(|&(_, i)| {
                 let g = &pop.genomes[i];
                 (g.node_count, g.muscle_count, plan_hash(pop, i), i)
             });
@@ -247,6 +247,10 @@ pub fn pack(pop: &Population, indices: &[usize]) -> Result<Vec<LaneBatch>> {
             let mut parts: Vec<(Option<Plan>, Members)> = Vec::new();
             let mut rest = Vec::new();
             let mut start = 0;
+            if plan_batch == 0 || capacity >= 24 {
+                // No run can get its own batch: skip comparing plans.
+                rest = std::mem::take(&mut members);
+            }
             while start < members.len() {
                 let first = members[start].1;
                 let end = start
@@ -313,55 +317,81 @@ fn same_plan(pop: &Population, a: usize, b: usize) -> bool {
             .all(|(x, y)| x.bone_a == y.bone_a && x.bone_b == y.bone_b)
 }
 
+/// Splits `all` into consecutive parts of the given sizes.
+fn split_parts<T>(mut all: &mut [T], sizes: impl Iterator<Item = usize>) -> Vec<&mut [T]> {
+    let mut out = Vec::new();
+    for size in sizes {
+        let (head, tail) = std::mem::take(&mut all).split_at_mut(size);
+        out.push(head);
+        all = tail;
+    }
+    out
+}
+
+/// Packs `members` into one batch. Each tile of `TILE` creatures owns its own
+/// stretch of every buffer, so the tiles fill in parallel.
 fn build_batch(
     pop: &Population,
     capacity: usize,
     plan: Option<Plan>,
     members: &[(usize, usize)],
 ) -> LaneBatch {
-    {
-        {
-            let count = members.len();
-            let tile_count = count.div_ceil(TILE);
-            let mut tiles = Vec::with_capacity(tile_count);
-            let mut muscle_len = 0usize;
-            let mut bone_len = 0usize;
-            for tile in members.chunks(TILE) {
-                let max_muscles = tile
-                    .iter()
-                    .map(|&(_, i)| pop.genomes[i].muscle_count)
-                    .max()
-                    .unwrap_or(0);
-                let max_bones = tile
-                    .iter()
-                    .map(|&(_, i)| pop.genomes[i].bone_count)
-                    .max()
-                    .unwrap_or(0);
-                tiles.push([
-                    muscle_len as u32,
-                    bone_len as u32,
-                    max_muscles as u32,
-                    max_bones as u32,
-                ]);
-                muscle_len += max_muscles * MUSCLE_FIELDS * TILE;
-                bone_len += max_bones * BONE_FIELDS * TILE;
-            }
-            let mut nodes = vec![Node::default(); count * capacity];
-            let mut info = Vec::with_capacity(count);
-            let mut muscles = vec![0f32; muscle_len.max(1)];
-            let mut bones = vec![0f32; bone_len.max(1)];
-            // Reuse one scratch vector for every creature in this batch. The
-            // old path allocated body nodes and joint constants per creature,
-            // producing millions of tiny allocations during a generation.
+    let count = members.len();
+    let tile_count = count.div_ceil(TILE);
+    let mut tiles = Vec::with_capacity(tile_count);
+    let mut muscle_len = 0usize;
+    let mut bone_len = 0usize;
+    for tile in members.chunks(TILE) {
+        let max_muscles = tile
+            .iter()
+            .map(|&(_, i)| pop.genomes[i].muscle_count)
+            .max()
+            .unwrap_or(0);
+        let max_bones = tile
+            .iter()
+            .map(|&(_, i)| pop.genomes[i].bone_count)
+            .max()
+            .unwrap_or(0);
+        tiles.push([
+            muscle_len as u32,
+            bone_len as u32,
+            max_muscles as u32,
+            max_bones as u32,
+        ]);
+        muscle_len += max_muscles * MUSCLE_FIELDS * TILE;
+        bone_len += max_bones * BONE_FIELDS * TILE;
+    }
+    let mut nodes = vec![Node::default(); count * capacity];
+    let mut info = vec![[0u32; 4]; count];
+    let mut muscles = vec![0f32; muscle_len.max(1)];
+    let mut bones = vec![0f32; bone_len.max(1)];
+    let node_parts: Vec<&mut [Node]> = nodes.chunks_mut((TILE * capacity).max(1)).collect();
+    let info_parts: Vec<&mut [[u32; 4]]> = info.chunks_mut(TILE).collect();
+    let muscle_parts = split_parts(
+        &mut muscles[..muscle_len],
+        tiles.iter().map(|t| t[2] as usize * MUSCLE_FIELDS * TILE),
+    );
+    let bone_parts = split_parts(
+        &mut bones[..bone_len],
+        tiles.iter().map(|t| t[3] as usize * BONE_FIELDS * TILE),
+    );
+    members
+        .par_chunks(TILE)
+        .zip(node_parts)
+        .zip(info_parts)
+        .zip(muscle_parts)
+        .zip(bone_parts)
+        .for_each(|((((tile, nodes), info), muscles), bones)| {
+            // Reuse one scratch vector for every creature in this tile.
             let mut joints = vec![physics::Joint::FREE; capacity.saturating_sub(1)];
-            for (j, &(_, i)) in members.iter().enumerate() {
+            for (lane, &(_, i)) in tile.iter().enumerate() {
                 let g = &pop.genomes[i];
                 let genes = &pop.nodes[g.node_start..g.node_start + g.node_count];
-                let body_bones = &pop.bones[g.bone_start..g.bone_start + g.bone_count];
-                let node_start = j * capacity;
+                let source_bones = &pop.bones[g.bone_start..g.bone_start + g.bone_count];
+                let node_start = lane * capacity;
                 let body_state = &mut nodes[node_start..node_start + genes.len()];
-                physics::body_into(genes, body_bones, body_state);
-                info.push([
+                physics::body_into(genes, source_bones, body_state);
+                info[lane] = [
                     g.node_count as u32,
                     g.bone_count as u32,
                     g.muscle_count as u32,
@@ -369,15 +399,12 @@ fn build_batch(
                     // phase and height jitter from it, so it never needs to
                     // compute the hash itself.
                     crate::physics::quake_hash(g.id),
-                ]);
-                let tile = tiles[j / TILE];
-                let lane = j % TILE;
-                let source_bones = &pop.bones[g.bone_start..g.bone_start + g.bone_count];
+                ];
                 let body_state = &nodes[node_start..node_start + genes.len()];
                 let joints = &mut joints[..source_bones.len()];
                 physics::joints_from_body(genes, source_bones, body_state, joints);
                 for (b, (bone, joint)) in source_bones.iter().zip(joints.iter()).enumerate() {
-                    let field = tile[1] as usize + b * BONE_FIELDS * TILE + lane;
+                    let field = b * BONE_FIELDS * TILE + lane;
                     // A free joint points its reference at its own pivot; the
                     // kernel skips it because its half range cosine is -1.
                     let reference = joint.reference.unwrap_or(bone.a as usize) as u32;
@@ -400,7 +427,7 @@ fn build_batch(
                 for (m, muscle) in source.iter().enumerate() {
                     let bone_a = source_bones[muscle.bone_a as usize];
                     let bone_b = source_bones[muscle.bone_b as usize];
-                    let field = tile[0] as usize + m * MUSCLE_FIELDS * TILE + lane;
+                    let field = m * MUSCLE_FIELDS * TILE + lane;
                     let values = [
                         f32::from_bits(
                             bone_a.a | (bone_a.b << 8) | (bone_b.a << 16) | (bone_b.b << 24),
@@ -425,20 +452,19 @@ fn build_batch(
                     }
                 }
             }
-            LaneBatch {
-                capacity,
-                plan,
-                slots: members.iter().map(|&(slot, _)| slot).collect(),
-                creatures: members.iter().map(|&(_, i)| i).collect(),
-                nodes,
-                info,
-                tiles,
-                muscles,
-                muscle_fields: MUSCLE_FIELDS,
-                bones,
-                results: None,
-            }
-        }
+        });
+    LaneBatch {
+        capacity,
+        plan,
+        slots: members.iter().map(|&(slot, _)| slot).collect(),
+        creatures: members.iter().map(|&(_, i)| i).collect(),
+        nodes,
+        info,
+        tiles,
+        muscles,
+        muscle_fields: MUSCLE_FIELDS,
+        bones,
+        results: None,
     }
 }
 
@@ -952,6 +978,172 @@ fn base_source_from(
 mod tests {
     use super::*;
     use crate::physics::Fidelity;
+
+    /// The serial packer the parallel `build_batch` replaced.
+    fn build_batch_reference(
+        pop: &Population,
+        capacity: usize,
+        plan: Option<Plan>,
+        members: &[(usize, usize)],
+    ) -> LaneBatch {
+        {
+            {
+                let count = members.len();
+                let tile_count = count.div_ceil(TILE);
+                let mut tiles = Vec::with_capacity(tile_count);
+                let mut muscle_len = 0usize;
+                let mut bone_len = 0usize;
+                for tile in members.chunks(TILE) {
+                    let max_muscles = tile
+                        .iter()
+                        .map(|&(_, i)| pop.genomes[i].muscle_count)
+                        .max()
+                        .unwrap_or(0);
+                    let max_bones = tile
+                        .iter()
+                        .map(|&(_, i)| pop.genomes[i].bone_count)
+                        .max()
+                        .unwrap_or(0);
+                    tiles.push([
+                        muscle_len as u32,
+                        bone_len as u32,
+                        max_muscles as u32,
+                        max_bones as u32,
+                    ]);
+                    muscle_len += max_muscles * MUSCLE_FIELDS * TILE;
+                    bone_len += max_bones * BONE_FIELDS * TILE;
+                }
+                let mut nodes = vec![Node::default(); count * capacity];
+                let mut info = Vec::with_capacity(count);
+                let mut muscles = vec![0f32; muscle_len.max(1)];
+                let mut bones = vec![0f32; bone_len.max(1)];
+                // Reuse one scratch vector for every creature in this batch. The
+                // old path allocated body nodes and joint constants per creature,
+                // producing millions of tiny allocations during a generation.
+                let mut joints = vec![physics::Joint::FREE; capacity.saturating_sub(1)];
+                for (j, &(_, i)) in members.iter().enumerate() {
+                    let g = &pop.genomes[i];
+                    let genes = &pop.nodes[g.node_start..g.node_start + g.node_count];
+                    let body_bones = &pop.bones[g.bone_start..g.bone_start + g.bone_count];
+                    let node_start = j * capacity;
+                    let body_state = &mut nodes[node_start..node_start + genes.len()];
+                    physics::body_into(genes, body_bones, body_state);
+                    info.push([
+                        g.node_count as u32,
+                        g.bone_count as u32,
+                        g.muscle_count as u32,
+                        // Earthquake seed: the kernel derives this creature's bump
+                        // phase and height jitter from it, so it never needs to
+                        // compute the hash itself.
+                        crate::physics::quake_hash(g.id),
+                    ]);
+                    let tile = tiles[j / TILE];
+                    let lane = j % TILE;
+                    let source_bones = &pop.bones[g.bone_start..g.bone_start + g.bone_count];
+                    let body_state = &nodes[node_start..node_start + genes.len()];
+                    let joints = &mut joints[..source_bones.len()];
+                    physics::joints_from_body(genes, source_bones, body_state, joints);
+                    for (b, (bone, joint)) in source_bones.iter().zip(joints.iter()).enumerate() {
+                        let field = tile[1] as usize + b * BONE_FIELDS * TILE + lane;
+                        // A free joint points its reference at its own pivot; the
+                        // kernel skips it because its half range cosine is -1.
+                        let reference = joint.reference.unwrap_or(bone.a as usize) as u32;
+                        let values = [
+                            f32::from_bits(bone.a | (bone.b << 8) | (reference << 16)),
+                            bone.rest_length,
+                            joint.center[0],
+                            joint.center[1],
+                            joint.half[0],
+                            joint.half[1],
+                            joint.child_share,
+                            joint.child_mass,
+                            joint.reference_mass,
+                        ];
+                        for (f, value) in values.into_iter().enumerate() {
+                            bones[field + f * TILE] = value;
+                        }
+                    }
+                    let source = &pop.muscles[g.muscle_start..g.muscle_start + g.muscle_count];
+                    for (m, muscle) in source.iter().enumerate() {
+                        let bone_a = source_bones[muscle.bone_a as usize];
+                        let bone_b = source_bones[muscle.bone_b as usize];
+                        let field = tile[0] as usize + m * MUSCLE_FIELDS * TILE + lane;
+                        let values = [
+                            f32::from_bits(
+                                bone_a.a | (bone_a.b << 8) | (bone_b.a << 16) | (bone_b.b << 24),
+                            ),
+                            muscle.anchor_a,
+                            muscle.anchor_b,
+                            muscle_amplitude(muscle),
+                            muscle.long,
+                            1.0 / muscle.period,
+                            muscle.phase,
+                            muscle.duty,
+                            muscle.stiffness,
+                            1.0 / muscle.duty,
+                            1.0 / (1.0 - muscle.duty),
+                            f32::from_bits(muscle.sensor),
+                            muscle.reset,
+                            0.0,
+                            1.0,
+                        ];
+                        for (f, value) in values.into_iter().enumerate() {
+                            muscles[field + f * TILE] = value;
+                        }
+                    }
+                }
+                LaneBatch {
+                    capacity,
+                    plan,
+                    slots: members.iter().map(|&(slot, _)| slot).collect(),
+                    creatures: members.iter().map(|&(_, i)| i).collect(),
+                    nodes,
+                    info,
+                    tiles,
+                    muscles,
+                    muscle_fields: MUSCLE_FIELDS,
+                    bones,
+                    results: None,
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_packing_matches_the_serial_packer() {
+        let cfg = crate::config::Config {
+            population: 3_000,
+            random_seed: false,
+            seed: 4,
+            ..Default::default()
+        };
+        let pop = crate::evolution::create(&cfg).unwrap();
+        for capacity in [8usize, 16] {
+            let members: Vec<(usize, usize)> = (0..2_500)
+                .map(|k| (k, (k * 31 + 7) % 3_000))
+                .filter(|&(_, i)| pop.genomes[i].node_count <= capacity)
+                .collect();
+            assert!(members.len() > 2 * TILE);
+            let a = build_batch(&pop, capacity, None, &members);
+            let b = build_batch_reference(&pop, capacity, None, &members);
+            assert_eq!(a.slots, b.slots);
+            assert_eq!(a.creatures, b.creatures);
+            assert_eq!(a.info, b.info);
+            assert_eq!(a.tiles, b.tiles);
+            assert_eq!(
+                bytemuck::cast_slice::<_, u8>(&a.nodes),
+                bytemuck::cast_slice::<_, u8>(&b.nodes)
+            );
+            assert_eq!(
+                a.muscles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                b.muscles.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                a.bones.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                b.bones.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
 
     #[test]
     fn params_layout_matches_the_kernel_uniform() {

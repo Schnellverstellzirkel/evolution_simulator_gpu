@@ -21,7 +21,7 @@ pub static LEDGER: std::sync::Mutex<[f64; 6]> = std::sync::Mutex::new([0.0; 6]);
 /// friction impulse that pushed a node along the slip it had after the step].
 pub static ENERGY_LEDGER: std::sync::Mutex<[f64; 5]> = std::sync::Mutex::new([0.0; 5]);
 
-/// Diagnostic counters for `EVOLUTION_EARLY_EXIT`: groups that stopped as
+/// Diagnostic counters for the whole-group early exit: groups that stopped as
 /// soon as every real lane had finished, groups run with the flag set, and
 /// the physics steps those groups actually ran against a full trial.
 pub static EARLY_EXIT_GROUPS: AtomicU64 = AtomicU64::new(0);
@@ -440,11 +440,9 @@ impl Group {
         let ledger_on = std::env::var_os("EVOLUTION_LEDGER").is_some();
         // Whole-group exit: a fallen lane's fitness and behavior totals are
         // frozen at its fall, so once every real lane has fallen no later
-        // step can change any result. `EVOLUTION_EARLY_EXIT=0` turns it off
-        // for comparisons. A recorded trial never exits early, so the replay
-        // keeps every frame.
-        let early_exit =
-            record.is_none() && std::env::var("EVOLUTION_EARLY_EXIT").map_or(true, |v| v != "0");
+        // step can change any result. A recorded trial never exits early, so the
+        // replay keeps every frame.
+        let early_exit = record.is_none();
         let lane0_mass: Vec<f32> = mass.iter().map(|m| m.to_array()[0]).collect();
         let momentum = |v: &[F]| -> f32 {
             v.iter()
@@ -1465,6 +1463,15 @@ pub fn replay(
     if crate::physics2::enabled() {
         return crate::physics2::replay(creature, cfg);
     }
+    replay_v1(creature, cfg)
+}
+
+/// `replay` on the AVX-512 engine of the older physics (v1), whatever the
+/// game's physics is.
+pub fn replay_v1(
+    creature: &crate::evolution::Creature,
+    cfg: &Config,
+) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
     let mut pop = Population::default();
     pop.push(creature.clone());
     let group = Group::build(&pop, &[0], &[0]);

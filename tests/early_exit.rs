@@ -1,5 +1,5 @@
-//! Backlog item 48: the CPU engine's whole-group early exit, on by default
-//! (`EVOLUTION_EARLY_EXIT=0` turns it off).
+//! The CPU engine's whole-group early exit. A recorded trial (`replay`) never
+//! exits early, so it is the full run the tests compare against.
 //!
 //! A fall ends a trial: the lane's fitness and every behavior total (ground
 //! contact, height, gait turns, contact bitsets) freeze at its fall. Stopping
@@ -12,9 +12,7 @@
 //!   (including the live one) is unchanged;
 //! - a short (partial) group exits once its real lanes have finished.
 //!
-//! The flag is read from the environment per group, so a comparison test can
-//! toggle it. All tests here share one lock because the variable is
-//! process-wide.
+//! All tests here share one lock because the exit counters are process-wide.
 use evolution_simulator::{
     config::Config,
     cpu_engine::{self, EARLY_EXIT_GROUPS, EARLY_EXIT_GROUPS_TOTAL},
@@ -24,8 +22,8 @@ use evolution_simulator::{
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
-/// Toggling a process-wide variable while other tests evaluate in parallel
-/// would leak into their runs, so every test in this file holds this lock.
+/// The exit counters are process-wide, so every test in this file holds this
+/// lock.
 static ENV: Mutex<()> = Mutex::new(());
 
 /// A two-node, one-bone body with no muscles. Both variants share the body
@@ -79,11 +77,11 @@ fn population(creatures: impl IntoIterator<Item = Creature>) -> Population {
     pop
 }
 
-fn evaluate(early_exit: bool, pop: &Population, cfg: &Config) -> Vec<GpuResult> {
-    unsafe {
-        std::env::set_var("EVOLUTION_EARLY_EXIT", if early_exit { "1" } else { "0" });
-    }
-    cpu_engine::evaluate_v1(pop, cfg)
+/// The full run of every creature: a recorded replay never exits early.
+fn full_run(pop: &Population, cfg: &Config) -> Vec<GpuResult> {
+    (0..pop.genomes.len())
+        .map(|i| cpu_engine::replay_v1(&pop.creature(i), cfg).1)
+        .collect()
 }
 
 /// Evaluates with the exit on and reports the two diagnostic counters. The
@@ -91,7 +89,7 @@ fn evaluate(early_exit: bool, pop: &Population, cfg: &Config) -> Vec<GpuResult> 
 fn evaluate_counted(pop: &Population, cfg: &Config) -> (Vec<GpuResult>, u64, u64) {
     EARLY_EXIT_GROUPS.store(0, Ordering::Relaxed);
     EARLY_EXIT_GROUPS_TOTAL.store(0, Ordering::Relaxed);
-    let results = evaluate(true, pop, cfg);
+    let results = cpu_engine::evaluate_v1(pop, cfg);
     (
         results,
         EARLY_EXIT_GROUPS.load(Ordering::Relaxed),
@@ -140,7 +138,7 @@ fn every_fallen_group_stops_early_and_keeps_every_score() {
     let cfg = test_config();
     let pop = population((0..16).map(|i| two_node_body(100 + i, false)));
 
-    let full = evaluate(false, &pop, &cfg);
+    let full = full_run(&pop, &cfg);
     assert!(
         full.iter().all(|r| r.fall_time > 0.0),
         "fixture: every lane must fall; got {:?}",
@@ -175,7 +173,7 @@ fn a_mixed_group_with_a_live_lane_is_unchanged() {
     }
 
     let solo = population([two_node_body(1, true)]);
-    let solo_result = evaluate(false, &solo, &cfg)[0];
+    let solo_result = full_run(&solo, &cfg)[0];
     assert_eq!(
         solo_result.fall_time, 0.0,
         "fixture: the live lane must not fall"
@@ -183,8 +181,8 @@ fn a_mixed_group_with_a_live_lane_is_unchanged() {
 
     EARLY_EXIT_GROUPS.store(0, Ordering::Relaxed);
     EARLY_EXIT_GROUPS_TOTAL.store(0, Ordering::Relaxed);
-    let full = evaluate(false, &pop, &cfg);
-    let early = evaluate(true, &pop, &cfg);
+    let full = full_run(&pop, &cfg);
+    let early = cpu_engine::evaluate(&pop, &cfg);
     assert_eq!(full[0].fall_time, 0.0, "fixture: lane 0 must stay upright");
     assert_eq!(
         EARLY_EXIT_GROUPS.load(Ordering::Relaxed),
@@ -210,7 +208,7 @@ fn a_partial_group_exits_on_its_real_lanes() {
     // step, so without the exit the run would be nearly a full trial longer.
     let pop = population((0..5).map(|i| two_node_body(300 + i, false)));
 
-    let full = evaluate(false, &pop, &cfg);
+    let full = full_run(&pop, &cfg);
     let (early, exit_groups, total_groups) = evaluate_counted(&pop, &cfg);
     assert_eq!(total_groups, 1);
     assert_eq!(exit_groups, 1, "the real five lanes must finish the group");

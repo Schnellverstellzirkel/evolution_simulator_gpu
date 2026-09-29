@@ -376,6 +376,33 @@ fn archive_breeding_is_repeatable_and_valid_across_streaming_slice_sizes() {
     }
 }
 
+#[test]
+fn the_global_reserve_breeds_and_counts_its_visits() {
+    let mut experiment = Experiment::new(Config {
+        population: 512,
+        ..config(38)
+    })
+    .unwrap();
+    for _ in 0..12 {
+        archive_synthetic_results(&mut experiment);
+        experiment.prepare_next_batch().unwrap();
+    }
+    let reserve: Vec<_> = experiment
+        .archive
+        .entries
+        .iter()
+        .filter(|elite| evolution_simulator::qd::is_morphology_niche(&elite.niche))
+        .collect();
+    assert!(
+        !reserve.is_empty(),
+        "the synthetic run must fill the reserve"
+    );
+    assert!(
+        reserve.iter().any(|elite| elite.visits > 0),
+        "reserve entries never became parents"
+    );
+}
+
 struct Checkpoint(PathBuf);
 
 impl Checkpoint {

@@ -10,6 +10,7 @@ pub mod physics;
 pub mod physics2;
 pub mod qd;
 pub mod scheduler;
+pub mod schematic;
 pub mod search_benchmark;
 pub mod simd;
 pub mod storage;
