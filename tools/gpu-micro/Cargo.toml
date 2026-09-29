@@ -1,4 +1,4 @@
-# Standalone GPU microbenchmarks (docs/phase0-measurements.md). Not part of
+# Standalone GPU microbenchmarks. Not part of
 # the game's build: the empty [workspace] makes this its own workspace root.
 [package]
 name = "gpu-micro"

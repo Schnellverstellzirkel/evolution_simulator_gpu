@@ -1,4 +1,4 @@
-//! GPU microbenchmarks for the RTX 4060 Laptop GPU (docs/phase0-measurements.md).
+//! GPU microbenchmarks for the RTX 4060 Laptop GPU.
 //!
 //! Kernels are WGSL compiled to SPIR-V with naga, as in the game, and timed
 //! with Vulkan timestamp queries around each dispatch. A child `nvidia-smi`
