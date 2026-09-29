@@ -40,20 +40,32 @@ struct Options {
     seeds: Vec<u64>,
     tag: Option<String>,
     checks: bool,
+    gpu: bool,
+    seed_offset: u64,
 }
 
 fn usage() -> &'static str {
-    "usage: search_ab [tag] [generations] [population] [duration_seconds] [seed,seed,...] [--tag NAME] [--checks]"
+    "usage: search_ab [tag] [generations] [population] [duration_seconds] [seed,seed,...] [--tag NAME] [--checks] [--gpu] [--seed-offset N]"
 }
 
 fn options() -> Result<Options> {
     let mut positionals: Vec<String> = Vec::new();
     let mut tag = None;
     let mut checks = false;
+    let mut gpu = false;
+    let mut seed_offset = 0u64;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--checks" {
             checks = true;
+        } else if arg == "--gpu" {
+            gpu = true;
+        } else if arg == "--seed-offset" {
+            seed_offset = args
+                .next()
+                .context("--seed-offset needs a number")?
+                .parse()
+                .context("seed offset")?;
         } else if arg == "--tag" {
             tag = Some(args.next().context("--tag needs a name")?);
         } else if arg == "--help" || arg == "-h" {
@@ -103,6 +115,8 @@ fn options() -> Result<Options> {
         seeds,
         tag,
         checks,
+        gpu,
+        seed_offset,
     })
 }
 
@@ -278,28 +292,61 @@ fn run_seed(
         population: options.population,
         duration: options.duration,
         random_seed: false,
-        seed,
+        seed: seed + options.seed_offset,
         ..Config::default()
     };
     cfg.validate()
         .with_context(|| format!("seed {seed} configuration"))?;
+    let mut gpu = if options.gpu {
+        Some(evolution_simulator::gpu::Gpu::new("RTX 4060")?)
+    } else {
+        None
+    };
     let mut experiment = Experiment::new(cfg).with_context(|| format!("seed {seed} experiment"))?;
     let mut best = f32::NAN;
     let mut top = Vec::new();
     for generation in 0..options.generations {
-        let results = cpu_engine::evaluate(&experiment.population, &experiment.config);
-        let mut metrics: Vec<EvaluationMetrics> = results
-            .iter()
-            .enumerate()
-            .map(|(index, result)| {
-                scheduler::to_metrics(&experiment.population, index, result, &experiment.config)
-            })
-            .collect();
-        if options.checks {
-            check_contenders(&experiment, &mut metrics, counts);
-        }
-        for (index, metric) in metrics.iter().enumerate() {
-            experiment.record_result(index, metric);
+        if let Some(gpu) = gpu.as_mut() {
+            // The game's generational path: the scheduler runs the standard
+            // trials with the early screen and the contender checks, and the
+            // GPU score is final.
+            let sched = gpu.sched.as_mut().expect("scheduler");
+            let population = experiment.config.population;
+            let mut done = vec![false; population];
+            sched.begin(&experiment.population, 0..population);
+            let mut stored = 0;
+            while stored < population {
+                sched.pump(&experiment.population, &experiment.config, &done, |i, m| {
+                    experiment.check_need(i, m)
+                })?;
+                for (indices, metrics) in sched.collect(
+                    &experiment.population,
+                    &experiment.config,
+                    std::time::Duration::from_millis(4),
+                    |i, m| experiment.contender(i, m),
+                )? {
+                    for (&i, m) in indices.iter().zip(&metrics) {
+                        experiment.record_result(i, m);
+                        done[i] = true;
+                        stored += 1;
+                    }
+                }
+            }
+        } else {
+            let results = cpu_engine::evaluate(&experiment.population, &experiment.config);
+            let mut metrics: Vec<EvaluationMetrics> = results
+                .iter()
+                .enumerate()
+                .map(|(index, result)| {
+                    scheduler::to_metrics(&experiment.population, index, result, &experiment.config)
+                })
+                .collect();
+            if options.checks {
+                check_contenders(&experiment, &mut metrics, counts);
+            }
+            for (index, metric) in metrics.iter().enumerate() {
+                experiment.record_result(index, metric);
+            }
         }
         experiment.evaluated = experiment.config.population;
         experiment
@@ -344,27 +391,17 @@ fn run_seed(
         println!("{scope} seed {seed} summary: archive empty, qd {qd:.2}, cells {cells}");
     }
     print_body_mix(scope, seed, &top);
-    let weights = evolution_simulator::qd::emitter_weights(&experiment.emitter_stats);
-    println!(
-        "{scope} seed {seed} emitters (share, recent reward per attempt, improvements, discoveries): {}",
-        evolution_simulator::qd::Emitter::ALL
-            .iter()
-            .map(|e| {
-                let s = &experiment.emitter_stats[e.index()];
-                format!(
-                    "{} {:.2} {:.3} {} {}",
-                    e.label(),
-                    weights[e.index()],
-                    s.reward,
-                    s.improvements,
-                    s.discoveries
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" | ")
-    );
     print_robustness(scope, seed, &experiment);
     print_common_grid(scope, seed, &experiment);
+    let weights = evolution_simulator::qd::emitter_weights(&experiment.emitter_stats);
+    println!(
+        "{scope} seed {seed} emitter shares: {}",
+        evolution_simulator::qd::Emitter::ALL
+            .iter()
+            .map(|e| format!("{} {:.2}", e.label(), weights[e.index()]))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     Ok((best, qd))
 }
 
