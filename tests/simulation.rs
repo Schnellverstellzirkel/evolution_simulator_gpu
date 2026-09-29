@@ -602,19 +602,17 @@ fn joints_stay_within_their_evolved_range() {
         }
         let joints = physics::joints(&creature.nodes, &creature.bones);
         let start: Vec<[f32; 2]> = creature.nodes.iter().map(|n| [n.x, n.y]).collect();
-        let frames = evolution_simulator::cpu_engine::trajectory(&creature, &cfg);
+        let (frames, result) = evolution_simulator::cpu_engine::replay(&creature, &cfg);
         // The trial ends when the head falls or a joint breaks; a limp body
         // may fold any way afterwards.
-        let base = creature.bones[0].b as usize;
-        let end = frames
-            .iter()
-            .enumerate()
-            .skip(physics::settle() as usize + 1)
-            .find(|(_, frame)| {
-                frame[0][1] < frame[base][1]
-                    || physics::broken_joint(frame, &creature.bones, &joints)
-            })
-            .map_or(frames.len(), |(tick, _)| tick + 1);
+        let end = if result.fall_time > 0.0 {
+            physics::settle() as usize
+                + (result.fall_time * physics::rate() as f32).round() as usize
+                + 1
+        } else {
+            frames.len()
+        }
+        .min(frames.len());
         for (bone, joint) in creature.bones.iter().zip(&joints) {
             let Some(reference) = joint.reference else {
                 continue;

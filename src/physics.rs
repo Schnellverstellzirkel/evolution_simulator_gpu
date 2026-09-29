@@ -328,31 +328,6 @@ pub fn screen_bar(distances: impl Iterator<Item = f32>, keep: f32) -> f32 {
 /// broken joint ends the trial like a fall, so no gait can profit from
 /// muscles forcing joints round like wheels.
 pub const JOINT_BREAK: f32 = 0.5;
-/// Cosine of the angle from the middle of a joint's range at which it
-/// breaks, from the cosine and sine of half its range.
-pub fn joint_break_cos(half: [f32; 2]) -> f32 {
-    let (sin, cos) = JOINT_BREAK.sin_cos();
-    half[0] * cos - half[1] * sin
-}
-/// Whether a joint in `positions` is forced past its range by more than
-/// `JOINT_BREAK`.
-pub fn broken_joint(positions: &[[f32; 2]], bones: &[Bone], joints: &[Joint]) -> bool {
-    bones.iter().zip(joints).any(|(bone, joint)| {
-        let Some(reference) = joint.reference else {
-            return false;
-        };
-        let pivot = positions[bone.a as usize];
-        let at = |i: usize| [positions[i][0] - pivot[0], positions[i][1] - pivot[1]];
-        let (u, v) = (at(reference), at(bone.b as usize));
-        let norm = ((u[0] * u[0] + u[1] * u[1]) * (v[0] * v[0] + v[1] * v[1])).sqrt();
-        if norm < 1e-12 {
-            return false;
-        }
-        let cos = (u[0] * v[0] + u[1] * v[1]) / norm;
-        let sin = (u[0] * v[1] - u[1] * v[0]) / norm;
-        cos * joint.center[0] + sin * joint.center[1] < joint_break_cos(joint.half)
-    })
-}
 /// Joint constraints for a canonical (parent-first) skeleton.
 /// Reference node of bone `index`'s joint: its parent bone's pivot, or for a
 /// bone at the root the first root bone's child. `None` for a free joint. It
@@ -865,31 +840,6 @@ mod tests {
                 - ground(x - h, 0.03, 0.05, 0.0, 0.25, 0.37).0)
                 / (2.0 * h);
             assert!((slope - numeric).abs() < 1e-2, "{x}: {slope} vs {numeric}");
-        }
-    }
-
-    #[test]
-    fn joints_break_only_well_past_their_range() {
-        let genes: Vec<NodeGene> = [[0.0, 1.0], [1.0, 1.0], [2.0, 1.0]]
-            .iter()
-            .map(|p| NodeGene {
-                x: p[0],
-                y: p[1],
-                diameter: 0.1,
-                friction: 1.0,
-            })
-            .collect();
-        let mut bones = vec![Bone::new(0, 1, 1.0), Bone::new(1, 2, 1.0)];
-        bones[1].min_angle = -0.3;
-        bones[1].max_angle = 0.3;
-        let joints = joints(&genes, &bones);
-        // Bend the second bone by `turn` from its starting direction.
-        let bent = |turn: f32| vec![[0.0, 1.0], [1.0, 1.0], [1.0 + turn.cos(), 1.0 + turn.sin()]];
-        for turn in [0.0, 0.3, -0.3, 0.7, -0.7] {
-            assert!(!broken_joint(&bent(turn), &bones, &joints), "turn {turn}");
-        }
-        for turn in [0.9, -0.9, 2.0, -3.0] {
-            assert!(broken_joint(&bent(turn), &bones, &joints), "turn {turn}");
         }
     }
 

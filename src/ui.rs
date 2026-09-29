@@ -381,8 +381,6 @@ struct Playback {
     creature: Creature,
     config: Config,
     nodes: Vec<Node>,
-    /// Joint ranges of the creature, for spotting broken joints per frame.
-    joints: Vec<physics::Joint>,
     /// Node positions after each step, from the CPU evaluation engine.
     frames: Vec<Vec<[f32; 2]>>,
     tick: u32,
@@ -481,7 +479,6 @@ impl Playback {
         transport: bool,
     ) -> Self {
         let nodes = physics::nodes(&normalized);
-        let joints = physics::joints(&normalized.nodes, &normalized.bones);
         let last_frame = frames.len().saturating_sub(1).min(u32::MAX as usize) as u32;
         let fall = (result.fall_time > 0.0).then(|| {
             let tick = physics::settle()
@@ -517,25 +514,20 @@ impl Playback {
             )
         });
         // The head-shake average stops updating when the trial ends, so it
-        // still holds the value that ended it. A broken joint shows in the
-        // recorded pose at the end (the engine tests the pose after the step).
+        // still holds the value that ended it. The engine tests the joints on
+        // the pose after the step and records what it found with that pose.
         let ending = match fall {
             _ if result.head_shake > physics::HEAD_SHAKE_LIMIT => Ending::Shook,
             Some((tick, _)) => {
-                let mut broken = vec![false; nodes.len()];
-                let broke = [tick, tick.saturating_sub(1)].iter().any(|&t| {
-                    frames.get(t as usize).is_some_and(|frame| {
-                        broken_nodes(&normalized, frame, &joints, &mut broken);
-                        broken.iter().any(|&b| b)
-                    })
-                });
+                let broke = [tick, tick.saturating_sub(1)]
+                    .iter()
+                    .any(|&t| forces.broken.get(t as usize).is_some_and(|&b| b != 0));
                 if broke { Ending::Broke } else { Ending::Fell }
             }
             None => Ending::Fell,
         };
         let mut playback = Self {
             nodes,
-            joints,
             fall,
             ending,
             distance: result.fitness,
@@ -712,30 +704,13 @@ fn node_contact(
         *down = position[1] <= floor + 0.002;
     }
 }
-/// Marks both ends of every bone whose joint is forced past its break angle in
-/// `positions`. Mirrors `physics::broken_joint`, one bone at a time, so the
-/// drawing can point at the joint that actually broke.
-fn broken_nodes(
-    creature: &Creature,
-    positions: &[[f32; 2]],
-    joints: &[physics::Joint],
-    out: &mut [bool],
-) {
+/// Marks both ends of every bone in `broken`, the bits of the bones whose
+/// joint the scoring engine found past its break angle in a recorded frame
+/// (`replay_forces::Forces::broken`).
+fn broken_nodes(creature: &Creature, broken: u64, out: &mut [bool]) {
     out.fill(false);
-    for (bone, joint) in creature.bones.iter().zip(joints) {
-        let Some(reference) = joint.reference else {
-            continue;
-        };
-        let pivot = positions[bone.a as usize];
-        let at = |i: usize| [positions[i][0] - pivot[0], positions[i][1] - pivot[1]];
-        let (u, v) = (at(reference), at(bone.b as usize));
-        let norm = ((u[0] * u[0] + u[1] * u[1]) * (v[0] * v[0] + v[1] * v[1])).sqrt();
-        if norm < 1e-12 {
-            continue;
-        }
-        let cos = (u[0] * v[0] + u[1] * v[1]) / norm;
-        let sin = (u[0] * v[1] - u[1] * v[0]) / norm;
-        if cos * joint.center[0] + sin * joint.center[1] < physics::joint_break_cos(joint.half) {
+    for (j, bone) in creature.bones.iter().enumerate().take(64) {
+        if broken & (1 << j) != 0 {
             out[bone.a as usize] = true;
             out[bone.b as usize] = true;
         }
@@ -817,8 +792,12 @@ impl FrameMarks {
             );
             broken_nodes(
                 &playback.creature,
-                frame,
-                &playback.joints,
+                playback
+                    .forces
+                    .broken
+                    .get(playback.tick as usize)
+                    .copied()
+                    .unwrap_or(0),
                 &mut marks.broken,
             );
         }
@@ -6138,6 +6117,7 @@ fn write_creature_gif(
     config: &Config,
     nodes: &[Node],
     frames: &[Vec<[f32; 2]>],
+    broken_joints: &[u64],
     ticks: &[u32],
     fall: Option<(u32, f32)>,
     path: &std::path::Path,
@@ -6165,7 +6145,6 @@ fn write_creature_gif(
     let file = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut encoder = GifEncoder::new_with_speed(file, 30);
     encoder.set_repeat(GifRepeat::Infinite)?;
-    let joints = physics::joints(&creature.nodes, &creature.bones);
     let mut buffer = RgbaImage::new(GIF_WIDTH, GIF_HEIGHT);
     let mut contact = vec![false; nodes.len()];
     let mut broken = vec![false; nodes.len()];
@@ -6175,7 +6154,8 @@ fn write_creature_gif(
             break;
         };
         node_contact(nodes, frame, creature, config, &mut contact);
-        broken_nodes(creature, frame, &joints, &mut broken);
+        let bits = broken_joints.get(tick as usize).copied().unwrap_or(0);
+        broken_nodes(creature, bits, &mut broken);
         let time = tick.saturating_sub(physics::settle()) as f32 * physics::dt();
         let fallen = fall.is_some_and(|(fall_tick, _)| tick >= fall_tick);
         scene.render(&mut buffer, frame, time, fallen, &contact, &broken);
@@ -6186,7 +6166,7 @@ fn write_creature_gif(
     drop(encoder);
     Ok(written)
 }
-/// Replays a creature (`cpu_engine::replay`) and animates `seconds` of its trial from `from`
+/// Replays a creature (`physics2::replay_forces`) and animates `seconds` of its trial from `from`
 /// seconds in, at `fps` frames per second of trial time, playing at the
 /// speed it was simulated. Returns the frame count.
 pub fn creature_gif(
@@ -6197,7 +6177,7 @@ pub fn creature_gif(
     fps: f32,
     path: &std::path::Path,
 ) -> anyhow::Result<usize> {
-    let (frames, result) = crate::cpu_engine::replay(creature, config);
+    let (frames, result, forces) = crate::physics2::replay_forces(creature, config);
     let nodes = physics::nodes(creature);
     let rate = config.fidelity().rate as f32;
     let start = physics::settle();
@@ -6212,7 +6192,16 @@ pub fn creature_gif(
             result.fitness,
         )
     });
-    write_creature_gif(creature, config, &nodes, &frames, &ticks, fall, path)
+    write_creature_gif(
+        creature,
+        config,
+        &nodes,
+        &frames,
+        &forces.broken,
+        &ticks,
+        fall,
+        path,
+    )
 }
 /// Samples a playback into at most `GIF_MAX_FRAMES` frames and animates them.
 fn export_creature_gif(playback: &Playback, path: &std::path::Path) -> anyhow::Result<usize> {
@@ -6226,6 +6215,7 @@ fn export_creature_gif(playback: &Playback, path: &std::path::Path) -> anyhow::R
         &playback.config,
         &playback.nodes,
         &playback.frames,
+        &playback.forces.broken,
         &ticks,
         playback.fall,
         path,
@@ -6513,9 +6503,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("evolution-gif-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("creature.gif");
-        let written =
-            write_creature_gif(&creature, &config, &nodes, &frames, &[0, 1, 2], None, &path)
-                .unwrap();
+        let written = write_creature_gif(
+            &creature,
+            &config,
+            &nodes,
+            &frames,
+            &[],
+            &[0, 1, 2],
+            None,
+            &path,
+        )
+        .unwrap();
         assert_eq!(written, 3);
         // image::open proves the file is a decodable GIF.
         let first = image::open(&path).unwrap();

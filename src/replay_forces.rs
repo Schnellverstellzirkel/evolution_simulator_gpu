@@ -23,6 +23,10 @@ pub struct Forces {
     /// `[frame][node]`: friction force on the node (N) when the frames carry
     /// the recorded contact forces; empty for an estimate.
     pub friction: Vec<Vec<f32>>,
+    /// `[frame]`: bit `j` set when bone `j`'s joint is past its break angle
+    /// by the scoring kernel's test (`physics2::broken_joints`); empty for an
+    /// estimate.
+    pub broken: Vec<u64>,
 }
 
 fn along_bone(frame: &[[f32; 2]], bone: &crate::evolution::Bone, t: f32) -> [f32; 2] {

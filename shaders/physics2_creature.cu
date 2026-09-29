@@ -763,11 +763,13 @@ struct Lane {
 #if RECORD
 // The recorded frame is `p.stride` float2 long: the node positions (STRIDE of
 // them), then one (energy, force) pair per muscle, then one (normal, friction)
-// contact force per node. The forces of a frame are those of the step that led
-// to it; the energy is the state it starts from.
+// contact force per node, and last the bits of the bones whose joint the
+// scoring test finds broken in this pose. The forces of a frame are those of
+// the step that led to it; the energy is the state it starts from.
 __device__ __forceinline__ void record_extras(
     float2* __restrict__ frames, unsigned base, unsigned muscle_count, unsigned tile_x, unsigned tl,
-    const float* __restrict__ muscle_data, const Record* __restrict__ records, unsigned record_base, unsigned nn) {
+    const float* __restrict__ muscle_data, const Record* __restrict__ records, unsigned record_base, unsigned nn,
+    const Lane& L, unsigned stride) {
     for (unsigned k = 0u; k < muscle_count; k++) {
         const unsigned field = tile_x + k * MUSCLE_FIELDS * TILE + tl;
         frames[base + STRIDE + k] = v2(muscle_data[field + 14u * TILE], muscle_data[field + 11u * TILE] + muscle_data[field + 18u * TILE]);
@@ -778,6 +780,15 @@ __device__ __forceinline__ void record_extras(
         float2 w = i == 0u ? records[record_base].c : records[record_base + i].b;
         frames[base + STRIDE + muscle_count + i] = w;
     }
+    unsigned broken_lo = 0u, broken_hi = 0u;
+    UNROLL
+    for (unsigned j = 1u; j < MAXB; j++) {
+        if (j >= L.nb) { break; }
+        if (L.q[j] < L.bone_field(j, 2u) - JOINT_BREAK || L.q[j] > L.bone_field(j, 3u) + JOINT_BREAK) {
+            if (j < 32u) { broken_lo |= 1u << j; } else { broken_hi |= 1u << (j - 32u); }
+        }
+    }
+    frames[base + stride - 1u] = v2(__uint_as_float(broken_lo), __uint_as_float(broken_hi));
 }
 #endif
 
@@ -883,7 +894,7 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
                 if (j >= nn) { break; }
                 frames[frame + j] = L.node_pos(j);
             }
-            record_extras(frames, frame, muscle_count, tile.x, tl, muscle_data, records, record_base, nn);
+            record_extras(frames, frame, muscle_count, tile.x, tl, muscle_data, records, record_base, nn, L, p.stride);
             if (s == 0u && p.tick == SETTLE) {
                 for (unsigned t = 0u; t < SETTLE; t++) {
                     const unsigned before_frame = (creature * (p.total_steps + 1u) + t) * p.stride;
@@ -892,7 +903,7 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
                         if (j >= nn) { break; }
                         frames[before_frame + j] = L.node_pos(j);
                     }
-                    record_extras(frames, before_frame, muscle_count, tile.x, tl, muscle_data, records, record_base, nn);
+                    record_extras(frames, before_frame, muscle_count, tile.x, tl, muscle_data, records, record_base, nn, L, p.stride);
                 }
             }
         }
@@ -1461,7 +1472,7 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
             if (j >= nn) { break; }
             frames[frame + j] = L.node_pos(j);
         }
-        record_extras(frames, frame, muscle_count, tile.x, tl, muscle_data, records, record_base, nn);
+        record_extras(frames, frame, muscle_count, tile.x, tl, muscle_data, records, record_base, nn, L, p.stride);
     }
 #else
     results[creature] = metrics;
