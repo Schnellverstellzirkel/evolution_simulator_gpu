@@ -550,6 +550,34 @@ Cross-plan crossover: a second batch of 9 seeds (47 to 55) gave best x1.04 and Q
 
 Distillation and Lamarckian tuning tie or lose. Distillation is mostly present already, because the anatomy operators copy rhythms with their limbs. Lamarckian tuning is mostly present already too: each design gets its own CMA optimizer, and structural children stay protected for 3 generations, so a new body is tuned by the next generation's emitters. The tuning evaluations here came out of the CMA share, so the budget was equal.
 
+## 14. Archive shape, reserve size and island extinctions (2026-09-29, current physics)
+
+All runs use `examples/search_ab` with the contender checks, 5 s trials, on main plus the reserve fix (2178677). Rows compare best archive distance and QD re-binned on the old grid (contact 6, cadence 8, height 6, feet 5), paired by seed. Best distance varies 3 to 9 m between seeds, so only many seeds say anything.
+
+Reserve fix (structural reserve draws read the global archive, visits counted there), 9 seeds, population 2048, 60 generations: best 4.95 m before, 5.04 m after, QD 947 before, 909 after. Neutral, kept because it fixes a bug.
+
+Not adopted, deleted:
+- Node-count axis (bins 3-4, 5-6, 7-9, 10+) added as a sixth axis: 6 seeds gave best x1.10 and common-grid QD x0.90, but 8 fresh seeds gave best x0.77 (0 wins of 8) and QD x0.91. Three bins on 8 seeds: best x0.77, QD x0.95. It doubles the distinct body plans in the archive (1416 against 653) and costs distance.
+- Cadence 8 to 4 with a node axis: QD x0.73. Feet replaced by a node axis: QD x0.65.
+- Finer grid (contact 8, cadence 10, height 8) at population 16384, 40 generations, 3 seeds: best x0.86, QD x0.83. With the node axis added: best x1.26 on 3 seeds, QD x0.82.
+- Reserve of 256 instead of 64 places: best x1.17, QD x1.01 (3 of 6 wins). Reserve parent share 25% instead of 10%: best x1.02. Both together: best x1.04, QD x0.96. Ties.
+- Periodic island extinctions (every 15 generations one island, in turn, loses a random box covering 25% of its grid, the global archive keeps everything): best x0.97, QD x0.98 on 6 seeds. Every 8 generations with 50%: best x0.94, QD x0.99. No gain at this horizon.
+
+Not possible: stopping a trial when it can no longer beat its cell's elite. The cell comes from behavior measured over the whole trial (contact, cadence, height, feet), so it is unknown until the end. The 5 s screen already stops hopeless creatures.
+
+Not tried: age-layered populations, deep grids, Hoeffding racing, dominated novelty search. The contender check already races one contender per cell.
+
+## 15. GPU A/B harness and its noise floor (2026-09-29, physics v1)
+
+`examples/search_ab --gpu` runs the game's generational path (scheduler, 5 s screen, contender checks, GPU score final) and prints the same report as the CPU runs: best distance, QD, QD on the fixed grid, reserve size, body plans, top-50 body mix, emitter shares. `--seed-offset N` shifts every seed, so two arms of identical code give independent runs. Run it under `flock -s .../target/gpu.lock`, with `EVOLUTION_DEVICES=primary`. An arm pair differs by a developer-only environment switch on the experiment branch.
+
+A/A on main at 571b17c: 6 seeds (38 to 43), 100k creatures, 30 generations, 20 s trials, RTX 4060 with other jobs sharing it. One seed takes 50 to 80 s on an idle GPU.
+- Two identical arms (same seeds): 3 of 6 seeds reproduced bit for bit in best and QD, 3 diverged (best ratios 1.48, 0.85, 1.00, 1.00, 1.00, 0.94). GPU scheduling order (which contender takes a shared cell check) is not deterministic, so a run can branch from a small difference. Geometric mean best ratio 1.03, QD 1.07.
+- Identical code, seeds shifted by 1000: per seed best ratios 1.12, 1.83, 0.79, 0.55, 1.29, 3.31 and QD ratios 0.95, 1.03, 1.01, 0.67, 1.30, 1.86. The standard deviation of the log ratio is 0.63 for best distance (a factor 1.9) and 0.34 for QD (a factor 1.4). The mean over 6 seeds carries a standard error of 0.26 in log units for best distance (plus or minus 30%) and 0.14 for QD (plus or minus 15%).
+- Means: best 20.7, 21.7 and 28.8 m; fixed-grid QD 3894, 4171 and 4294; 1290 cells; 650 to 700 body plans.
+
+So at 100k and 30 generations a 6-seed A/B detects a QD change only above about 30% and a best-distance change only above about 50%. Best distance is the noisier metric, because it is a maximum of one run. Use QD on the fixed grid as the main number, keep best distance as a check, and use 12 or more seeds for effects under 30%.
+
 ## Sources
 
 - Arza, Le Goff, Hart (2024). [Generalized Early Stopping in Evolutionary Direct Policy Search](https://arxiv.org/abs/2308.03574). ACM TELO.
@@ -591,31 +619,3 @@ Distillation and Lamarckian tuning tie or lose. Distillation is mostly present a
 - Wang, Lehman, Clune, Stanley (2019). [Paired Open-Ended Trailblazer (POET)](https://arxiv.org/abs/1901.01753).
 - Wang, Zhou, Fidler, Ba (2019). [Neural Graph Evolution: Towards Efficient Automatic Robot Design](http://www.cs.toronto.edu/~henryzhou/NGE/nge.pdf). ICLR.
 - Further reading: Wang et al. (2025). [Embodied Co-Design for Rapidly Evolving Agents: Taxonomy, Frontiers, and Challenges](https://arxiv.org/abs/2512.04770), a survey of more than 100 recent co-design studies.
-
-## 11. Archive shape, reserve size and island extinctions (2026-09-29, current physics)
-
-All runs use `examples/search_ab` with the contender checks, 5 s trials, on main plus the reserve fix (2178677). Rows compare best archive distance and QD re-binned on the old grid (contact 6, cadence 8, height 6, feet 5), paired by seed. Best distance varies 3 to 9 m between seeds, so only many seeds say anything.
-
-Reserve fix (structural reserve draws read the global archive, visits counted there), 9 seeds, population 2048, 60 generations: best 4.95 m before, 5.04 m after, QD 947 before, 909 after. Neutral, kept because it fixes a bug.
-
-Not adopted, deleted:
-- Node-count axis (bins 3-4, 5-6, 7-9, 10+) added as a sixth axis: 6 seeds gave best x1.10 and common-grid QD x0.90, but 8 fresh seeds gave best x0.77 (0 wins of 8) and QD x0.91. Three bins on 8 seeds: best x0.77, QD x0.95. It doubles the distinct body plans in the archive (1416 against 653) and costs distance.
-- Cadence 8 to 4 with a node axis: QD x0.73. Feet replaced by a node axis: QD x0.65.
-- Finer grid (contact 8, cadence 10, height 8) at population 16384, 40 generations, 3 seeds: best x0.86, QD x0.83. With the node axis added: best x1.26 on 3 seeds, QD x0.82.
-- Reserve of 256 instead of 64 places: best x1.17, QD x1.01 (3 of 6 wins). Reserve parent share 25% instead of 10%: best x1.02. Both together: best x1.04, QD x0.96. Ties.
-- Periodic island extinctions (every 15 generations one island, in turn, loses a random box covering 25% of its grid, the global archive keeps everything): best x0.97, QD x0.98 on 6 seeds. Every 8 generations with 50%: best x0.94, QD x0.99. No gain at this horizon.
-
-Not possible: stopping a trial when it can no longer beat its cell's elite. The cell comes from behavior measured over the whole trial (contact, cadence, height, feet), so it is unknown until the end. The 5 s screen already stops hopeless creatures.
-
-Not tried: age-layered populations, deep grids, Hoeffding racing, dominated novelty search. The contender check already races one contender per cell.
-
-## 12. GPU A/B harness and its noise floor (2026-09-29, physics v1)
-
-`examples/search_ab --gpu` runs the game's generational path (scheduler, 5 s screen, contender checks, GPU score final) and prints the same report as the CPU runs: best distance, QD, QD on the fixed grid, reserve size, body plans, top-50 body mix, emitter shares. `--seed-offset N` shifts every seed, so two arms of identical code give independent runs. Run it under `flock -s .../target/gpu.lock`, with `EVOLUTION_DEVICES=primary`. An arm pair differs by a developer-only environment switch on the experiment branch.
-
-A/A on main at 571b17c: 6 seeds (38 to 43), 100k creatures, 30 generations, 20 s trials, RTX 4060 with other jobs sharing it. One seed takes 50 to 80 s on an idle GPU.
-- Two identical arms (same seeds): 3 of 6 seeds reproduced bit for bit in best and QD, 3 diverged (best ratios 1.48, 0.85, 1.00, 1.00, 1.00, 0.94). GPU scheduling order (which contender takes a shared cell check) is not deterministic, so a run can branch from a small difference. Geometric mean best ratio 1.03, QD 1.07.
-- Identical code, seeds shifted by 1000: per seed best ratios 1.12, 1.83, 0.79, 0.55, 1.29, 3.31 and QD ratios 0.95, 1.03, 1.01, 0.67, 1.30, 1.86. The standard deviation of the log ratio is 0.63 for best distance (a factor 1.9) and 0.34 for QD (a factor 1.4). The mean over 6 seeds carries a standard error of 0.26 in log units for best distance (plus or minus 30%) and 0.14 for QD (plus or minus 15%).
-- Means: best 20.7, 21.7 and 28.8 m; fixed-grid QD 3894, 4171 and 4294; 1290 cells; 650 to 700 body plans.
-
-So at 100k and 30 generations a 6-seed A/B detects a QD change only above about 30% and a best-distance change only above about 50%. Best distance is the noisier metric, because it is a maximum of one run. Use QD on the fixed grid as the main number, keep best distance as a check, and use 12 or more seeds for effects under 30%.
