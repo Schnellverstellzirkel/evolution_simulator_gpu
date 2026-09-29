@@ -1145,6 +1145,7 @@ fn simulate_step_inner(
             .map(|i| WATER_BUOYANCY * model.mass[i] * cfg.gravity * submerged[i])
             .collect();
         water_y0 = (0..n).map(|i| s.pos[i][1]).collect();
+        #[allow(clippy::needless_range_loop)]
         for i in 0..n {
             let j = sc.body_of[i];
             sc.force[j] = sc.force[j].add(force_at(rel(s.pos[i]), [0.0, buoyancy[i]]));

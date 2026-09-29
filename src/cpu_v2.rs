@@ -819,6 +819,7 @@ impl Sim<'_> {
                 .map(|i| sp(WATER_BUOYANCY) * g.mass[i] * sp(cfg.gravity) * submerged[i])
                 .collect();
             water_y0 = (0..n).map(|i| self.s.pos[i][1]).collect();
+            #[allow(clippy::needless_range_loop)]
             for i in 0..n {
                 let j = i.saturating_sub(1);
                 self.sc.force[j] =

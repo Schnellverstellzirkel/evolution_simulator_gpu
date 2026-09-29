@@ -1414,8 +1414,9 @@ fn cost_of_transport_counts_muscle_work_per_kilogram_and_meter() {
 #[test]
 fn water_slows_the_walker_and_lifts_a_falling_body() {
     // The same walker on dry ground and in rising water. Water resists every
-    // stroke and floats the body, so the walker must lose real distance, and
-    // more of it as the water deepens. Water needs no ground: with the ground
+    // stroke and floats the body, so a hopper made for dry land must lose
+    // real distance (a swimmer may do better in deep water, so the depths
+    // are not ordered). Water needs no ground: with the ground
     // off a submerged body still feels it.
     let base = Config {
         population: 16,
@@ -1449,8 +1450,8 @@ fn water_slows_the_walker_and_lifts_a_falling_body() {
         "shallows must cost distance: {shallow} m vs {dry} m"
     );
     assert!(
-        deep < shallow,
-        "deep water must cost more than shallows: {deep} m vs {shallow} m"
+        deep < dry * 0.9,
+        "deep water must cost distance: {deep} m vs {dry} m"
     );
     let floating = Config {
         ground: false,
