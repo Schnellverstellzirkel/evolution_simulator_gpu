@@ -455,7 +455,7 @@ pub fn forced() -> bool {
 }
 
 /// Register cap per thread: `EVOLUTION_CUDA_MAXREG`, 0 for the compiler's
-/// choice, default 128. At 128 registers an SM holds 16 warps of every
+/// choice, default 128 (physics v2: 0, see docs/performance-log.md). At 128 registers an SM holds 16 warps of every
 /// kernel up to 8 nodes. The compiler's own choice is 155 to 255 registers
 /// (8 to 12 warps) and measured slower, and caps of 80 and 96 add spills that
 /// cost more than their extra warps gain (docs/performance-log.md).
@@ -463,7 +463,7 @@ pub fn register_cap() -> Option<u32> {
     let cap = std::env::var("EVOLUTION_CUDA_MAXREG")
         .ok()
         .and_then(|v| v.trim().parse::<u32>().ok())
-        .unwrap_or(128);
+        .unwrap_or(if physics2() { 0 } else { 128 });
     (cap > 0).then(|| cap.clamp(24, 255))
 }
 
@@ -505,7 +505,7 @@ fn physics2() -> bool {
 fn shared_per_thread(capacity: usize) -> usize {
     if !physics2() {
         24 * capacity
-    } else if capacity > 32 {
+    } else if creature_kernel::cuda_table_local(capacity) {
         0
     } else {
         4 * (10 * capacity - 6)
@@ -567,7 +567,8 @@ fn block_size(capacity: usize, requested: Option<u32>, registers: Option<u32>) -
         }
         return threads;
     }
-    let registers = registers.unwrap_or(128);
+    // Uncapped, the v2 kernels use 222 to 255 registers up to 32 nodes.
+    let registers = registers.unwrap_or(if physics2() { 255 } else { 128 });
     [128, 64, 32]
         .into_iter()
         .filter(|&t| fits(capacity, t))

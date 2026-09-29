@@ -939,3 +939,35 @@ Not built: the measured ceiling is small and the checks are the larger GPU cost.
 ## 3M end to end on main with physics v2: the GPU is the wall (2026-09-29, claude/speed)
 
 Fresh 3M game on CUDA, `EVOLUTION_BENCH_GENERATIONS=4` with 1 warm-up, exclusive lock (`bench.sh` waits for `flock` on `target/gpu.lock`), main with v2 physics and the breeding batches. Two runs, the second on ad617e4 (lazy CUDA builds). Stage seconds per generation, archive plus breeding: 0.4 to 0.6 s plus 2.2 to 2.9 s (plan 0.35, emit 1.0, write 0.45). Evaluation, which is the worker waiting for the GPU: 9.9 to 15.7 s in the first run (194,250 creatures/s end to end, device rate 349k/s, 1.29M contender checks) and 13.9 to 39.9 s in the second (98,689/s end to end; other agents' shared-lock GPU jobs were running, so treat that rate as low). `nvidia-smi` utilization sampled every 250 ms was 100% for the whole second run. The CPU chain is now under a quarter of a generation, so more breeding work would not raise the rate: the next gain is on the GPU (contact solve of v2).
+## 2026-09-30: physics v2 on CUDA, evolved population, and what limits occupancy
+
+Workload. An evolved v2 population: `search_ab --gpu`, seed 40, 100,000 creatures, 20 generations, 20 s trials (best 29.4 m, QD 7,899, mean body 7.2 nodes and 12 muscles), saved and scored again with `examples/p2_speed.rs` (first N creatures, one warm-up pass, no screen, creature-steps are the steps each creature simulated before it fell or finished). Exclusive GPU lock. The owner's game and other agents' GPU jobs ran between the measurements at times, so absolute rates move by 2x from run to run. Only rates measured in the same quiet window compare.
+
+CUDA against Vulkan, 100,000 creatures, three repeats each, same window:
+
+| backend | creatures/s | creature-steps/s |
+|---|---:|---:|
+| Vulkan | 23,300 | 18.6M |
+| CUDA (128 registers) | 49,600 | 39.4M |
+
+CUDA is 2.1x Vulkan on the evolved population (1.8x on 30,000 random bodies).
+
+What limits occupancy at 8 and 16 nodes. At the 128-register cap the kernel holds 16 warps per SM at 4 nodes, 10 at 8 nodes and 4 at 16. Registers allow 16 warps at every size. Shared memory does the limiting: the per-lane table is 10 N - 6 floats, 296 B per lane at 8 nodes and 616 B at 16, and an SM has 100 KB. Block size does not move it (32, 64 and 128 threads all give 9 to 10 warps at 8 nodes; the 1 KB per block reserve is small).
+
+Launch and layout variants, 60,000 evolved creatures, two repeats each, quiet window, rate in creatures/s:
+
+| variant | rate | against 128-register default |
+|---|---:|---:|
+| default (128 registers, auto blocks) | 53,300 | 1.00 |
+| table in local memory above 8 nodes | 47,400 | 0.89 |
+| table in local memory at every size | 45,500 | 0.85 |
+| blocks of 32 / 64 / 128 threads | 49,500 / 52,300 / 50,400 | 0.93 / 0.98 / 0.95 |
+| 96 registers | 49,200 | 0.92 |
+| 168 registers | 52,600 | 0.99 |
+| no register cap (222 to 255 registers, 8 warps) | 56,900 | 1.07 |
+
+More resident warps do not pay: the v2 kernel is limited by instruction latency inside a lane, so the register cap that helps is the one that removes spills, not the one that adds warps. The local table loses because the loads cost more than the extra occupancy gains. A second window (a loaded GPU, rates halved) had no register cap 1.11x and no cap with 64-thread blocks 1.17x over the 128 cap.
+
+Change. Physics v2 kernels compile without a register cap by default and the block size is chosen for 255 registers (`EVOLUTION_CUDA_MAXREG` still overrides; v1 keeps 128). No kernel arithmetic changed, so results are the same: prototype agreement on 513 creatures over 1 s has a worst gap of 0 m (0.0030 m in mud on Vulkan, 0.0024 m on CUDA) and the GPU repeatability tests pass. `EVOLUTION_CUDA_TABLE_LOCAL=N` (a developer diagnostic) moves bodies above N nodes to a local-memory table.
+
+Paired confirmation on main 7767bd8 (exclusive lock, GPU window clear, same 60,000 evolved creatures, three rounds of two repeats each, creatures/s): 128-register cap 91,200 (89,600 to 93,000), no cap (the new default) 93,900 (90,000 to 95,600), no cap with 64-thread blocks 90,400, Vulkan 51,300. The uncapped default is 3% faster than the 128 cap, which is inside the spread of single runs (5 of 6 pairs favor it), and much less than the 7 to 11% of the earlier loaded-GPU sweeps. CUDA is 1.8x Vulkan on this population. Keep the uncapped default (it is not slower); the register cap is not a lever worth more work.
