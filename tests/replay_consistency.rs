@@ -227,16 +227,18 @@ fn extending_a_broken_joints_trial_keeps_its_score_at_the_break() {
     };
     let result = evaluate(&creature, &cfg);
     assert!(result.fall_time > 0.0 && result.fall_time < cfg.duration - 0.25);
-    let frames = cpu_engine::trajectory(&creature, &cfg);
+    let (frames, _, forces) = evolution_simulator::physics2::replay_forces(&creature, &cfg);
     let terminal = terminal_frame(&result, &cfg);
     let frame = &frames[terminal];
     let neck = creature.bones[0].b as usize;
-    let joints = physics::joints(&creature.nodes, &creature.bones);
     assert!(
         frame[0][1] >= frame[neck][1],
         "the head must remain upright"
     );
-    assert!(physics::broken_joint(frame, &creature.bones, &joints));
+    // The recorded frame names the broken joint, and no joint was broken
+    // before it.
+    assert_ne!(forces.broken[terminal], 0);
+    assert!(forces.broken[..terminal].iter().all(|&b| b == 0));
     let shorter = Config {
         duration: result.fall_time + 0.1,
         ..cfg.clone()

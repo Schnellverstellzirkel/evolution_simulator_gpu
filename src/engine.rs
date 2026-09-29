@@ -871,7 +871,8 @@ struct InFlightReplay {
 /// How one recorded frame is laid out (`creature_kernel::frame_stride`): the
 /// body's `nodes` positions at the start of `stride` slots, then, when
 /// `stride` is longer than `capacity`, an (energy, force) pair per muscle and
-/// a (normal, friction) contact force per node. The kernel numbers nodes so
+/// a (normal, friction) contact force per node, and last the bits of the
+/// broken joints. The kernel numbers nodes so
 /// that bone `j` ends at node `j + 1`; `order[k]` is the creature's own number
 /// of kernel node `k`, as in `physics2::Model`.
 struct FrameLayout {
@@ -950,7 +951,7 @@ fn recorded(finished: &Completed, layout: FrameLayout, total: u32) -> Result<Rec
             frame
         })
         .collect();
-    let forces = (stride >= capacity + muscles + nodes && stride > capacity).then(|| {
+    let forces = (stride > capacity + muscles + nodes).then(|| {
         let slot = |t: usize, k: usize| flat[t * stride + capacity + k];
         crate::replay_forces::Forces {
             energy: (0..count)
@@ -964,6 +965,12 @@ fn recorded(finished: &Completed, layout: FrameLayout, total: u32) -> Result<Rec
                 .collect(),
             friction: (0..count)
                 .map(|t| renumber(&|k| slot(t, muscles + k)[1]))
+                .collect(),
+            broken: (0..count)
+                .map(|t| {
+                    let [lo, hi] = flat[t * stride + stride - 1];
+                    u64::from(lo.to_bits()) | u64::from(hi.to_bits()) << 32
+                })
                 .collect(),
         }
     });

@@ -200,12 +200,14 @@ pub fn capacity_index(nodes: usize) -> usize {
 
 /// Length in `[f32; 2]` slots of one recorded frame of `batch`: the node
 /// positions (`capacity` slots), then an (energy, force) pair per muscle and a
-/// (normal, friction) contact force per node: `2 * capacity + muscles` slots,
-/// the muscle count being the batch's largest (a replay batch holds one
-/// creature).
+/// (normal, friction) contact force per node, and last the broken joints:
+/// `2 * capacity + muscles + 1` slots, the muscle count being the batch's
+/// largest (a replay batch holds one creature). The last slot holds the bits
+/// of the bones whose joint is past its break angle (the kernel's rule), bones
+/// 0 to 31 in the first word and 32 to 63 in the second, as `f32` bits.
 pub fn frame_stride(batch: &LaneBatch) -> usize {
     let muscles = batch.info.iter().map(|i| i[2] as usize).max().unwrap_or(0);
-    2 * batch.capacity + muscles
+    2 * batch.capacity + muscles + 1
 }
 
 /// Kernel parameters for ticks `tick..tick + steps` of a `total`-tick trial

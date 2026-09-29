@@ -239,6 +239,7 @@ fn recorded_forces_match_the_prototype_on_each_backend() {
             (0usize, 0usize, 0usize, 0usize);
         let mut ground_close = 0usize;
         let mut live = 0usize;
+        let (mut broken_entries, mut broken_same) = (0usize, 0usize);
         let mut checked = 0;
         for (i, score) in scores.iter().enumerate() {
             let mut creature = pop.creature(i);
@@ -282,6 +283,19 @@ fn recorded_forces_match_the_prototype_on_each_backend() {
             assert_eq!(forces.energy.len(), frames.len());
             assert_eq!(forces.muscle.len(), frames.len());
             assert_eq!(forces.ground.len(), frames.len());
+            assert_eq!(forces.broken.len(), frames.len());
+            // The recorded broken joints are the scoring test's: none before
+            // the trial ended, since a break ends it.
+            let fidelity = cfg.fidelity();
+            let terminal = if recording.result.fall_time > 0.0 {
+                settle + (recording.result.fall_time * fidelity.rate as f32).round() as usize
+            } else {
+                frames.len() - 1
+            };
+            assert!(
+                forces.broken[..terminal].iter().all(|&b| b == 0),
+                "{name}: creature {i} shows a broken joint before its trial ended"
+            );
             // Only the first second and a bit after settling: contact
             // sequences drift apart later.
             let start = evolution_simulator::physics::settle() as usize;
@@ -293,6 +307,8 @@ fn recorded_forces_match_the_prototype_on_each_backend() {
                     close_force +=
                         usize::from((forces.muscle[t][k] - cpu.muscle[t][k]).abs() < 0.5);
                 }
+                broken_entries += 1;
+                broken_same += usize::from(forces.broken[t] == cpu.broken[t]);
                 for n in 0..creature.nodes.len() {
                     ground_entries += 1;
                     live += usize::from(forces.ground[t][n] > 0.0);
@@ -308,7 +324,12 @@ fn recorded_forces_match_the_prototype_on_each_backend() {
         eprintln!(
             "{name}: {checked} creatures, energy {close_energy}/{entries}, force {close_force}/{entries}, ground {ground_close}/{ground_entries} close to the prototype ({live} recorded contact forces above zero)"
         );
+        eprintln!("{name}: broken joints {broken_same}/{broken_entries} frames as the prototype");
         assert!(checked >= 10, "too few creatures with muscles");
+        assert!(
+            broken_same * 100 >= broken_entries * 99,
+            "{name}: broken joints"
+        );
         assert!(live > 0, "{name}: no contact force was recorded");
         assert!(close_energy * 100 >= entries * 99, "{name}: energy");
         assert!(close_force * 100 >= entries * 98, "{name}: muscle force");
@@ -359,5 +380,122 @@ fn a_lost_gpu_is_reopened_and_gives_the_same_results() {
             b.behavior.ground_contact.to_bits(),
             "creature {i}"
         );
+    }
+}
+
+/// A chain whose joints may not bend, pulled by long-range muscles, as in
+/// `tests/replay_consistency.rs`: it breaks a joint within a few seconds.
+/// `variant` changes the muscle rhythm.
+fn breaking_chain(variant: usize) -> evolution::Creature {
+    use evolution::{Bone, Creature, Muscle, NodeGene};
+    let node_count = 16;
+    let nodes: Vec<_> = (0..node_count)
+        .map(|i| {
+            let [x, y] = match i {
+                0 => [-0.2, 0.8],
+                1 => [-0.15, 0.6],
+                _ => [(i - 2) as f32 * 0.08, 0.08 + (i % 2) as f32 * 0.04],
+            };
+            NodeGene {
+                x,
+                y,
+                diameter: 0.08,
+                friction: 0.8,
+            }
+        })
+        .collect();
+    let bones: Vec<_> = (0..node_count - 1)
+        .map(|i| {
+            let (a, b) = (nodes[i], nodes[i + 1]);
+            let mut bone = Bone::new(i as u32, (i + 1) as u32, (a.x - b.x).hypot(a.y - b.y));
+            bone.min_angle = 0.0;
+            bone.max_angle = 0.0;
+            bone
+        })
+        .collect();
+    let muscles = (1..bones.len())
+        .map(|i| Muscle {
+            bone_a: i as u32,
+            bone_b: ((i + node_count / 2) % bones.len()) as u32,
+            anchor_a: 1.0,
+            anchor_b: 0.0,
+            short: 0.1,
+            long: 0.3,
+            period: 0.2 + ((i + variant) % 3) as f32 * 0.05,
+            phase: ((i + variant) % 7) as f32 / 7.0,
+            duty: 0.5,
+            stiffness: 120.0,
+            sensor: evolution::NO_SENSOR,
+            reset: 0.0,
+            tendon: 0.0,
+        })
+        .collect();
+    Creature {
+        nodes,
+        bones,
+        muscles,
+        id: variant as u64,
+    }
+}
+
+/// A v2 recording marks the joints the scoring kernel breaks: the recorded
+/// bits appear at the frame where the trial ended and not before. (The CPU
+/// prototype drifts from the GPU within a second, so it breaks at other
+/// times; `tests/replay_consistency.rs` checks its own bits.)
+#[test]
+#[ignore = "requires a GPU; run explicitly on the workstation"]
+fn recorded_broken_joints_are_the_kernels() {
+    use evolution_simulator::engine;
+    let cfg = Config {
+        random_seed: false,
+        duration: 3.0,
+        screen: None,
+        ..Config::default()
+    };
+    let mut pop = evolution::Population::default();
+    for variant in 0..8 {
+        pop.push(breaking_chain(variant));
+    }
+    let indices: Vec<usize> = (0..pop.genomes.len()).collect();
+    for setting in ["0", "1"] {
+        // SAFETY: the variable is read when a GPU opens; the backends run one
+        // after another and no other thread reads it.
+        unsafe { std::env::set_var("EVOLUTION_CUDA", setting) };
+        let mut gpu = Gpu::new("RTX 4060").expect("GPU scheduler");
+        assert!(
+            gpu.startup_warning.is_none(),
+            "the primary GPU did not open"
+        );
+        let name = gpu.names();
+        let scheduler = gpu.sched.as_mut().expect("scheduler");
+        let scores = scheduler
+            .evaluate_single(&pop, &indices, &cfg)
+            .expect("GPU trials");
+        let fidelity = cfg.fidelity();
+        let settle = fidelity.settle() as usize;
+        let mut breaks = 0usize;
+        for (i, score) in scores.iter().enumerate() {
+            let creature = pop.creature(i);
+            let recording =
+                engine::record_on_gpu(&creature, &cfg, std::time::Duration::from_secs(120))
+                    .expect("a GPU replay");
+            assert_eq!(recording.result.fitness.to_bits(), score.fitness.to_bits());
+            let broken = recording.forces.expect("recorded forces").broken;
+            let terminal = if recording.result.fall_time > 0.0 {
+                settle + (recording.result.fall_time * fidelity.rate as f32).round() as usize
+            } else {
+                broken.len() - 1
+            };
+            assert!(
+                broken[..terminal].iter().all(|&b| b == 0),
+                "{name}: creature {i} shows a broken joint before its trial ended"
+            );
+            breaks += usize::from(broken[terminal] != 0);
+        }
+        eprintln!(
+            "{name}: {breaks} of {} trials ended on a recorded broken joint",
+            scores.len()
+        );
+        assert!(breaks * 2 >= scores.len(), "{name}: too few breaks");
     }
 }

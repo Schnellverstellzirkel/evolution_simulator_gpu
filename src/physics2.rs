@@ -718,8 +718,22 @@ pub fn run(model: &Model, cfg: &Config, frames: Option<&mut Vec<Vec<[f32; 2]>>>)
 /// The muscle state and contact forces one recorded frame carries, in the
 /// GPU kernels' convention: the energy is the state the frame starts from,
 /// the forces are those of the step that led to it.
+/// Bit `j` set for each bone `j` whose joint is forced more than
+/// `physics::JOINT_BREAK` past its evolved range, which ends the trial. The
+/// neck turns freely and never breaks.
+pub(crate) fn broken_joints(model: &Model, s: &State) -> u64 {
+    (1..model.pivot.len())
+        .filter(|&j| {
+            model.parent[j].is_some()
+                && (s.q[j] < model.lo[j] - physics::JOINT_BREAK
+                    || s.q[j] > model.hi[j] + physics::JOINT_BREAK)
+        })
+        .fold(0, |bits, j| bits | 1 << j)
+}
+
 fn push_extras(forces: &mut crate::replay_forces::Forces, model: &Model, s: &State, sc: &Scratch) {
     forces.energy.push(s.energy.clone());
+    forces.broken.push(broken_joints(model, s));
     // The recorded force includes the tendon's pull.
     forces.muscle.push(
         sc.muscle_force
@@ -918,11 +932,7 @@ pub fn run_recorded(
                 (accel - head_shake) * (1.0 / (physics::HEAD_SHAKE_WINDOW * rate)).min(1.0);
         }
         metrics.head_shake = head_shake;
-        let broken = (1..b).any(|j| {
-            model.parent[j].is_some()
-                && (s.q[j] < model.lo[j] - physics::JOINT_BREAK
-                    || s.q[j] > model.hi[j] + physics::JOINT_BREAK)
-        });
+        let broken = broken_joints(model, &s) != 0;
         let neck_base = model.child[0];
         let fell = s.pos[0][1] < s.pos[neck_base][1]
             || broken
@@ -1805,7 +1815,8 @@ pub fn shader_source(capacity: usize, workgroup: u32, fidelity: physics::Fidelit
 /// each step and after the last, in binding 7 as `[creature][frame][slot]`.
 /// A frame is `p.stride` vec2f long: the node positions (`STRIDE` slots),
 /// then an (energy, force) pair per muscle, then a (normal, friction) contact
-/// force per node (`creature_kernel::frame_stride`). It computes what
+/// force per node, and in the last slot the bits of the broken joints
+/// (`creature_kernel::frame_stride`). It computes what
 /// `shader_source` computes;
 /// its only other change is that a creature keeps moving after its trial
 /// ends (limp after a fall) while its result stays the one at the end. A
@@ -1830,8 +1841,10 @@ const RECORD_EDITS: [(&str, &str); 4] = [
     ),
     // The recorded frame is `p.stride` vec2f long: the node positions (`STRIDE`
     // of them), then one (energy, force) pair per muscle, then one (normal,
-    // friction) contact force per node. The forces of a frame are those of the
-    // step that led to it; the energy is the state it starts from.
+    // friction) contact force per node, and last the bits of the bones whose
+    // joint the scoring test finds broken in this pose. The forces of a frame
+    // are those of the step that led to it; the energy is the state it starts
+    // from.
     (
         "@compute @workgroup_size(WG)\nfn advance(",
         "fn record_extras(base: u32, muscle_count: u32, tile_x: u32, tl: u32, record_base: u32, nn: u32) {\n\
@@ -1847,6 +1860,14 @@ const RECORD_EDITS: [(&str, &str); 4] = [
                  }\n\
                  frames[base + STRIDE + muscle_count + i] = w;\n\
              }\n\
+             var broken = vec2u(0u);\n\
+             for (var j = 1u; j < MAXB; j++) {\n\
+                 if j >= nb { break; }\n\
+                 if q[j] < bone_field(j, 2u) - JOINT_BREAK || q[j] > bone_field(j, 3u) + JOINT_BREAK {\n\
+                     if j < 32u { broken.x |= 1u << j; } else { broken.y |= 1u << (j - 32u); }\n\
+                 }\n\
+             }\n\
+             frames[base + p.stride - 1u] = bitcast<vec2f>(broken);\n\
          }\n\
          @compute @workgroup_size(WG)\nfn advance(",
     ),
