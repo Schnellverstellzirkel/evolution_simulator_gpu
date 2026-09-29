@@ -536,6 +536,20 @@ Grammar source: a random L-system per body (one rule rewriting X into bones, tur
 
 Repetition and symmetry: already present. `copy_limb`, `twin_limb`, `repeat_body_segment`, `duplicate_mirrored_node`, `reverse_bend`, `grow_matching_tips`, `mutate_matching_limbs`, `copy_actuation_to_limb` and `mirror_limb_timing` cover copying and mirroring limbs, so nothing was added.
 
+## 13. Crossover between body plans, distillation, Lamarckian tuning (2026-09-29)
+
+`examples/search_ab.rs`, 5,000 creatures, 60 generations, 20 s trials, CPU only, 9 seeds (38 to 46), paired against current main. Ratios are geometric means of arm over main with the standard error of the mean log ratio.
+
+| experiment | paired best | paired QD | seeds better (best / QD) | result |
+| --- | --- | --- | --- | --- |
+| cross-plan graft (15% of structural and novelty children get a limb, with its muscles and rhythm, from an elite of another body plan on the island, through `graft_donor_limb`) | x1.13 (+-0.29) | x1.25 (+-0.19) | 4 / 5 | kept after a second batch |
+| distillation (a muscle that a structural operator made new takes the period, duty and phase of the nearest kept muscle) | x0.95 (+-0.18) | x0.91 (+-0.05) | 4 / 3 | deleted |
+| Lamarckian tuning (30% of CMA parents are freshly admitted structural children, so the design's optimizer tunes a new body before it competes) | x0.87 (+-0.21) | x1.02 (+-0.06) | 3 / 4 | deleted |
+
+Cross-plan crossover: a second batch of 9 seeds (47 to 55) gave best x1.04 and QD x1.26. Over all 18 seeds best is x1.08 (+-0.16, 9 wins) and QD x1.25 (+-0.12, 11 wins). Best distance is inside the seed noise, and QD is the gain. Bodies at the last generation are about 5% larger (8.6 against 8.2 nodes, 17.6 against 16.7 muscles). Before this, children crossed only with a mate of the same body plan, and `graft_donor_limb` drew its donor at random with one pick slot among the structural operators. The graft now also runs on a chosen mate at a fixed share. On by default, no switch.
+
+Distillation and Lamarckian tuning tie or lose. Distillation is mostly present already, because the anatomy operators copy rhythms with their limbs. Lamarckian tuning is mostly present already too: each design gets its own CMA optimizer, and structural children stay protected for 3 generations, so a new body is tuned by the next generation's emitters. The tuning evaluations here came out of the CMA share, so the budget was equal.
+
 ## Sources
 
 - Arza, Le Goff, Hart (2024). [Generalized Early Stopping in Evolutionary Direct Policy Search](https://arxiv.org/abs/2308.03574). ACM TELO.

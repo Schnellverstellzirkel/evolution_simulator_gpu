@@ -1510,13 +1510,13 @@ fn offspring(
             }
         }
         Emitter::Structural => {
-            let parent = mated(if plan.reserve { reserve } else { archive }, plan, rng);
+            let parent = mated(if plan.reserve { reserve } else { archive }, plan, cfg, rng);
             let mut child = parent;
             let _ = structural_mutation_from(&mut child, cfg, rng, archive);
             local_mutation(child, cfg, rng, 0.035)
         }
         Emitter::Novelty => {
-            let parent = mated(if plan.reserve { reserve } else { archive }, plan, rng);
+            let parent = mated(if plan.reserve { reserve } else { archive }, plan, cfg, rng);
             // Occasional large jumps help lineages cross fitness valleys.
             let scale = if rng.unit() < 0.05 { 2.25 } else { 0.75 };
             let mut child = local_mutation(parent, cfg, rng, scale);
@@ -1532,12 +1532,43 @@ fn offspring(
 }
 
 /// The plan's parent, crossed with its mate when it has one.
-fn mated(archive: &QdArchive, plan: CandidatePlan, rng: &mut Rng) -> Creature {
+fn mated(archive: &QdArchive, plan: CandidatePlan, cfg: &Config, rng: &mut Rng) -> Creature {
     let parent = &archive.entries[plan.parent.expect("archive parent")].creature;
     match plan.mate {
-        Some(mate) => crossover(parent, &archive.entries[mate].creature, rng),
+        Some(mate) => {
+            let mate = &archive.entries[mate].creature;
+            if same_shape(parent, mate) {
+                crossover(parent, mate, rng)
+            } else {
+                // Different body plans: graft one of the mate's limbs, with
+                // its muscles and rhythm, onto a copy of the parent.
+                let mut child = parent.clone();
+                for _ in 0..4 {
+                    if anatomy::graft_from(&mut child, cfg, rng, mate) {
+                        break;
+                    }
+                }
+                child
+            }
+        }
         None => parent.clone(),
     }
+}
+
+/// Whether two creatures have the same nodes, bones and muscle pairs, so
+/// `crossover` can pair their genes.
+fn same_shape(a: &Creature, b: &Creature) -> bool {
+    a.nodes.len() == b.nodes.len()
+        && a.bones.len() == b.bones.len()
+        && a.muscles.len() == b.muscles.len()
+        && a.bones
+            .iter()
+            .zip(&b.bones)
+            .all(|(x, y)| (x.a, x.b) == (y.a, y.b))
+        && a.muscles
+            .iter()
+            .zip(&b.muscles)
+            .all(|(x, y)| (x.bone_a, x.bone_b) == (y.bone_a, y.bone_b))
 }
 
 /// Uniform crossover of two creatures with the same body plan: each node,
@@ -2576,5 +2607,28 @@ mod tests {
             })
             .collect();
         assert!((mass(&doubled) - nodes_only - 4.0 * expected).abs() < 1e-3);
+    }
+
+    #[test]
+    fn crossing_different_body_plans_grafts_a_limb_and_stays_valid() {
+        let cfg = Config::default();
+        let mut parent = random_creature_from(&cfg, &mut Rng::new(1, 0, 0));
+        grow_for_benchmark(&mut parent, &cfg, 3, 5);
+        let mut mate = random_creature_from(&cfg, &mut Rng::new(1, 0, 1));
+        grow_for_benchmark(&mut mate, &cfg, 4, 9);
+        assert!(!same_shape(&parent, &mate));
+        assert!(same_shape(&parent, &parent));
+        let mut grafted = 0;
+        for i in 0..40 {
+            let mut child = parent.clone();
+            let mut rng = Rng::new(5, 0, i);
+            if anatomy::graft_from(&mut child, &cfg, &mut rng, &mate) {
+                grafted += 1;
+                repair(&mut child, &cfg, &mut rng);
+                assert!(child.nodes.len() <= cfg.max_nodes);
+                assert!(child.muscles.len() <= cfg.max_muscles);
+            }
+        }
+        assert!(grafted >= 10, "grafted {grafted} of 40");
     }
 }

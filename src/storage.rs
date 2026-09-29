@@ -256,6 +256,9 @@ pub fn island_count() -> usize {
 /// elites; the rest sample by local competition. Spending more on the best
 /// elites raised the best distance by about half in fixed-seed tests.
 const TOP_PARENT_SHARE: f32 = 0.5;
+/// Share of structural and novelty children that graft a limb from an elite
+/// with a different body plan.
+const CROSS_PLAN_MATE_SHARE: f32 = 0.15;
 /// Share of those top-elite CMA offspring bred by an island optimizer
 /// (separable CMA-ES in physical units) on one of its fastest designs.
 const OPTIMIZER_SHARE: f32 = 0.5;
@@ -1421,6 +1424,19 @@ impl Experiment {
                     }
                     _ => None,
                 };
+                // Sometimes the mate has another body plan: the child gets one of
+                // its limbs grafted on (see `evolution::mated`).
+                let mate = mate.or_else(|| match (emitter, parent) {
+                    (Emitter::Structural | Emitter::Novelty, Some(p))
+                        if !from_reserve && rng.unit() < CROSS_PLAN_MATE_SHARE =>
+                    {
+                        let other = rng.index(archive.entries.len());
+                        (other != p
+                            && archive.entries[other].topology != archive.entries[p].topology)
+                            .then_some(other)
+                    }
+                    _ => None,
+                });
                 PlanPrep {
                     emitter,
                     parent,

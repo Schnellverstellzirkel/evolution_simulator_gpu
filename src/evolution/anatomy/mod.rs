@@ -100,6 +100,13 @@ const SHARED_SLOT: &[&str] = &[
     "prune_weakest_muscle",
 ];
 
+/// Grafts a limb of `donor` onto `c` (`graft_donor_limb`), for crossover
+/// between different body plans.
+pub(super) fn graft_from(c: &mut Creature, cfg: &Config, rng: &mut Rng, donor: &Creature) -> bool {
+    let cx = Context { donor: Some(donor) };
+    limbs::graft_donor_limb(c, cfg, rng, &cx)
+}
+
 /// The enabled operators, as indices into `OPERATORS`.
 pub(super) struct Enabled {
     /// Operators with a pick slot each.
