@@ -6115,13 +6115,13 @@ impl GifScene<'_> {
 fn write_creature_gif(
     creature: &Creature,
     config: &Config,
-    nodes: &[Node],
     frames: &[Vec<[f32; 2]>],
     broken_joints: &[u64],
     ticks: &[u32],
     fall: Option<(u32, f32)>,
     path: &std::path::Path,
 ) -> anyhow::Result<usize> {
+    let nodes = &physics::nodes(creature);
     // The camera fits the frames the GIF shows.
     let shown: Vec<Vec<[f32; 2]>> = ticks
         .iter()
@@ -6178,7 +6178,6 @@ pub fn creature_gif(
     path: &std::path::Path,
 ) -> anyhow::Result<usize> {
     let (frames, result, forces) = crate::physics2::replay_forces(creature, config);
-    let nodes = physics::nodes(creature);
     let rate = config.fidelity().rate as f32;
     let start = physics::settle();
     let last_frame = frames.len().saturating_sub(1) as u32;
@@ -6195,7 +6194,6 @@ pub fn creature_gif(
     write_creature_gif(
         creature,
         config,
-        &nodes,
         &frames,
         &forces.broken,
         &ticks,
@@ -6213,7 +6211,6 @@ fn export_creature_gif(playback: &Playback, path: &std::path::Path) -> anyhow::R
     write_creature_gif(
         &playback.creature,
         &playback.config,
-        &playback.nodes,
         &playback.frames,
         &playback.forces.broken,
         &ticks,
@@ -6494,7 +6491,6 @@ mod tests {
         use image::codecs::gif::GifDecoder;
         let creature = test_creature();
         let config = Config::default();
-        let nodes = physics::nodes(&creature);
         let frames: Vec<Vec<[f32; 2]>> = vec![
             vec![[0.0, 0.10], [0.5, 0.10], [1.0, 0.10]],
             vec![[0.1, 0.20], [0.6, 0.20], [1.1, 0.20]],
@@ -6503,17 +6499,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("evolution-gif-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("creature.gif");
-        let written = write_creature_gif(
-            &creature,
-            &config,
-            &nodes,
-            &frames,
-            &[],
-            &[0, 1, 2],
-            None,
-            &path,
-        )
-        .unwrap();
+        let written =
+            write_creature_gif(&creature, &config, &frames, &[], &[0, 1, 2], None, &path).unwrap();
         assert_eq!(written, 3);
         // image::open proves the file is a decodable GIF.
         let first = image::open(&path).unwrap();
