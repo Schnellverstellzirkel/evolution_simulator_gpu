@@ -16,7 +16,6 @@ Open work only. Delete an item when it is merged into `main` or measured and rej
 
 ## Interface
 
-- Schematic polish: badges overlap titles, and a dark screenshot [claude/schematic].
 - Muscle energy and a force overlay in the replay [claude/camera].
 - The wet grip level is barely visible in the world view, and the effect label repeats the effect name ("Heat wave: Heat wave").
 - The Islands view does not save the last migration, so a loaded game shows none until the next one.
@@ -36,7 +35,7 @@ Each item is an A/B over 3 seeds. Winners go on by default and losers are delete
 - The emitter shares barely move: the weight formula adds a constant 0.55 to a mean reward near 0.002, so shares stay at the 35/35/30 prior. A reward-following bandit tied in the A/B.
 - Archive and selection, after v2 lands and on the GPU at larger populations (CPU A/Bs at 2k to 16k creatures were ties or losses, see `docs/search-research.md` section 11): age layers (ALPS), deep grids, racing, dominated novelty search, the migration interval and which elites migrate [claude/archive].
 - v2 solves only the 4 deepest contacts per step, so a fifth touching node can sink up to 1.25 cm before it joins. Revisit with the contact solve.
-- Body encoding: a more varied first population, repeated and mirrored limbs, a generative body grammar [claude/encoding, paused].
+- A generative body grammar whose rules children inherit and mutate, tested on the GPU at 100k (a grammar used only as a seed source tied, and a varied first population lost; see `docs/search-research.md` section 12) [claude/encoding].
 - Controller transfer: crossover between body plans, controller distillation, Lamarckian inheritance [claude/transfer, paused].
 - Controllers, after v2 lands: an optional neural controller driven by rhythm and touchdown sensors, a rhythm controller per limb, touchdown reflexes, and a mutation that adds antagonist muscle pairs.
 
