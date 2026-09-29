@@ -72,7 +72,7 @@ struct Result {
 };
 
 #define TILE 32u
-#define MUSCLE_FIELDS 18u
+#define MUSCLE_FIELDS 19u
 #define BONE_FIELDS 9u
 #define NO_SENSOR 7u
 #define MAXB (MAXN - 1u)
@@ -752,7 +752,7 @@ __device__ __forceinline__ void record_extras(
     const float* __restrict__ muscle_data, const Record* __restrict__ records, unsigned record_base, unsigned nn) {
     for (unsigned k = 0u; k < muscle_count; k++) {
         const unsigned field = tile_x + k * MUSCLE_FIELDS * TILE + tl;
-        frames[base + STRIDE + k] = v2(muscle_data[field + 14u * TILE], muscle_data[field + 11u * TILE]);
+        frames[base + STRIDE + k] = v2(muscle_data[field + 14u * TILE], muscle_data[field + 11u * TILE] + muscle_data[field + 18u * TILE]);
     }
     UNROLL
     for (unsigned i = 0u; i < MAXN; i++) {
@@ -1017,7 +1017,9 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
             const float stored_start = 0.5f * muscle_data[field + 16u * TILE] * stretch_start * stretch_start;
             energy_start += stored_start;
             energy_scale += stored_start;
-            const float pull = magnitude + muscle_data[field + 16u * TILE] * fmaxf(length_m - muscle_data[field + 17u * TILE], 0.0f);
+            const float tendon_pull = muscle_data[field + 16u * TILE] * fmaxf(length_m - muscle_data[field + 17u * TILE], 0.0f);
+            muscle_data[field + 18u * TILE] = tendon_pull;
+            const float pull = magnitude + tendon_pull;
             const float2 f = dir * pull;
             L.body_add(a1 - 1u, 0u, force_at(pa - origin, f));
             L.body_add(b1 - 1u, 0u, -force_at(pb - origin, f));

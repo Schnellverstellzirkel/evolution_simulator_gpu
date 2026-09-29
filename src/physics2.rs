@@ -92,7 +92,7 @@ pub const DRIVEN_ACCELERATION: f32 = 100.0;
 /// of 1). Large fast bodies pay for moving air; it only takes energy away.
 pub const AIR_DRAG: f32 = 0.6;
 /// Fields per muscle in the v2 kernel's muscle buffer.
-pub const MUSCLE_FIELDS: usize = 18;
+pub const MUSCLE_FIELDS: usize = 19;
 /// Sliding speed (m/s) below which friction holds a foot (as
 /// `physics::PLANTED_SPEED`).
 pub const STICK_SPEED: f32 = physics::PLANTED_SPEED;
@@ -649,6 +649,8 @@ struct Scratch {
     acc: Vec<V3>,
     body_of: Vec<usize>,
     muscle_force: Vec<f32>,
+    /// Each tendon's pull in the step (N), for the recorded force.
+    tendon_pull: Vec<f32>,
     qdd: Vec<f32>,
     /// Horizontal impulse the ground and wind gave this step (N s), for the
     /// momentum ledger.
@@ -720,7 +722,14 @@ pub fn run(model: &Model, cfg: &Config, frames: Option<&mut Vec<Vec<[f32; 2]>>>)
 /// the forces are those of the step that led to it.
 fn push_extras(forces: &mut crate::replay_forces::Forces, model: &Model, s: &State, sc: &Scratch) {
     forces.energy.push(s.energy.clone());
-    forces.muscle.push(sc.muscle_force.clone());
+    // The recorded force includes the tendon's pull.
+    forces.muscle.push(
+        sc.muscle_force
+            .iter()
+            .zip(&sc.tendon_pull)
+            .map(|(f, t)| f + t)
+            .collect(),
+    );
     // Contact forces in the creature's own node numbering, as the frames.
     let mut ground = vec![0.0; s.warm.len()];
     let mut friction = vec![0.0; s.warm.len()];
@@ -767,6 +776,7 @@ pub fn run_recorded(
         acc: vec![V3::default(); b],
         body_of: (0..n).map(|i| model.body_of(i)).collect(),
         muscle_force: vec![0.0; model.muscles.len()],
+        tendon_pull: vec![0.0; model.muscles.len()],
         qdd: vec![0.0; b],
         impulse_x: 0.0,
         muscle_length: vec![0.0; model.muscles.len()],
@@ -1212,7 +1222,9 @@ fn simulate_step_inner(
         // A positive magnitude pulls the two points together.
         // The tendon pulls back passively once the muscle is stretched past
         // its longest length (its energy is in `Model::energy`).
-        let pull = magnitude + m.tendon_k * (len - m.long).max(0.0);
+        let tendon_pull = m.tendon_k * (len - m.long).max(0.0);
+        sc.tendon_pull[k] = tendon_pull;
+        let pull = magnitude + tendon_pull;
         let f = [dir[0] * pull, dir[1] * pull];
         sc.force[m.bone_a] = sc.force[m.bone_a].add(force_at(rel(pa), f));
         sc.force[m.bone_b] = sc.force[m.bone_b].sub(force_at(rel(pb), f));
@@ -1753,7 +1765,7 @@ const RECORD_EDITS: [(&str, &str); 4] = [
         "fn record_extras(base: u32, muscle_count: u32, tile_x: u32, tl: u32, record_base: u32, nn: u32) {\n\
              for (var k = 0u; k < muscle_count; k++) {\n\
                  let field = tile_x + k * MUSCLE_FIELDS * TILE + tl;\n\
-                 frames[base + STRIDE + k] = vec2f(muscle_data[field + 14u * TILE], muscle_data[field + 11u * TILE]);\n\
+                 frames[base + STRIDE + k] = vec2f(muscle_data[field + 14u * TILE], muscle_data[field + 11u * TILE] + muscle_data[field + 18u * TILE]);\n\
              }\n\
              for (var i = 0u; i < MAXN; i++) {\n\
                  if i >= nn { break; }\n\
@@ -2249,6 +2261,7 @@ pub fn pack(
                         m.strength,
                         m.tendon_k,
                         m.long,
+                        0.0,
                     ];
                     for (f, value) in values.into_iter().enumerate() {
                         muscles[field + f * TILE] = value;
@@ -2407,6 +2420,7 @@ mod tests {
             acc: vec![V3::default(); 3],
             body_of: (0..4).map(|i| model.body_of(i)).collect(),
             muscle_force: Vec::new(),
+            tendon_pull: Vec::new(),
             qdd: vec![0.0; 3],
             impulse_x: 0.0,
             muscle_length: vec![0.0; model.muscles.len()],
@@ -2503,6 +2517,7 @@ mod tests {
             acc: vec![V3::default(); b],
             body_of: (0..model.mass.len()).map(|i| model.body_of(i)).collect(),
             muscle_force: vec![0.0; model.muscles.len()],
+            tendon_pull: vec![0.0; model.muscles.len()],
             qdd: vec![0.0; b],
             impulse_x: 0.0,
             muscle_length: vec![0.0; model.muscles.len()],

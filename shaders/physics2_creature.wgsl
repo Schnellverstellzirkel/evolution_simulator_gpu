@@ -32,7 +32,8 @@
 //   phase, duty, stiffness, 1/duty, 1/(1 - duty), the step's force
 //   (scratch), reset phase, rhythm offset (state), energy (state), longest
 //   strength (the muscle's force cap and energy store over the fixed ones),
-//   tendon stiffness (N/m), longest length (where the tendon starts to pull).
+//   tendon stiffness (N/m), longest length (where the tendon starts to pull),
+//   the tendon's pull in the step (scratch, for the recorded force).
 // Bone 0's joint range high (the neck has none) holds the creature's muscle
 // scale: each muscle's force cap and energy store over the fixed ones.
 struct Record {
@@ -99,7 +100,7 @@ const MAXB: u32 = MAXN - 1u;
 const MAXC: u32 = MAXCONTACTSu;
 const MAXR: u32 = 2u * MAXC;
 const TILE: u32 = 32u;
-const MUSCLE_FIELDS: u32 = 18u;
+const MUSCLE_FIELDS: u32 = 19u;
 const BONE_FIELDS: u32 = 9u;
 const NO_SENSOR: u32 = 7u;
 
@@ -947,7 +948,9 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             let stored_start = 0.5 * muscle_data[field + 16u * TILE] * stretch_start * stretch_start;
             energy_start += stored_start;
             energy_scale += stored_start;
-            let pull = magnitude + muscle_data[field + 16u * TILE] * max(length_m - muscle_data[field + 17u * TILE], 0.0);
+            let tendon_pull = muscle_data[field + 16u * TILE] * max(length_m - muscle_data[field + 17u * TILE], 0.0);
+            muscle_data[field + 18u * TILE] = tendon_pull;
+            let pull = magnitude + tendon_pull;
             let f = dir * pull;
             body_add(a1 - 1u, 0u, force_at(pa - origin, f));
             body_add(b1 - 1u, 0u, -force_at(pb - origin, f));
