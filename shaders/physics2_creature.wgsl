@@ -678,6 +678,8 @@ fn contacts(origin: vec2f, before: vec2f, outside: vec2f) -> vec2f {
         if p.patches > 0.0 {
             c_mu[ci] = c_mu[ci] * (1.0 - p.patches * ice(pn.x));
         }
+        // Static friction: a foot that barely slides holds harder.
+        c_mu[ci] = c_mu[ci] * (1.0 + 0.25 * clamp((0.02 - abs(c_vs[ci])) * 100.0, 0.0, 1.0));
         nc += 1u;
     }
     // Contact-space matrix, column by column from each unit force's
