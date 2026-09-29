@@ -105,6 +105,7 @@ pub(crate) fn copy_muscle_to_partner(
         bone_b: at(old.bone_b),
         phase: (old.phase + offset).rem_euclid(1.0),
         reset: (old.reset + offset).rem_euclid(1.0),
+        tendon: 0.0,
         ..old
     };
     fit_stroke(c, &mut m, Some(&old));

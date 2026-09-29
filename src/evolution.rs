@@ -202,7 +202,15 @@ pub struct Muscle {
     /// Rhythm phase the muscle jumps to when its sensor touches down.
     #[serde(default)]
     pub reset: f32,
+    /// Elastic tendon in parallel with the muscle, 0 (none) to 1 (stiffest):
+    /// once the muscle is stretched past its longest length the tendon pulls
+    /// back like a spring, storing the energy of the stretch and returning it.
+    #[serde(default)]
+    pub tendon: f32,
 }
+/// Stiffest tendon: it reaches the muscle's force cap when stretched by this
+/// share of the muscle's longest length.
+pub const TENDON_STRETCH: f32 = 0.25;
 /// A muscle without a touchdown sensor.
 pub const NO_SENSOR: u32 = 255;
 fn no_sensor() -> u32 {
@@ -874,9 +882,11 @@ impl Population {
                             m.phase,
                             m.duty,
                             m.stiffness,
+                            m.tendon,
                         ]
                         .iter()
                         .all(|x| x.is_finite())
+                        && (0.0..=1.0).contains(&m.tendon)
                         && m.short >= 0.01
                         && m.long >= m.short
                         && m.period >= if historical { 0.1 } else { min_muscle_period() }
@@ -1107,6 +1117,7 @@ fn muscle(
             NO_SENSOR
         },
         reset: rng.unit(),
+        tendon: 0.0,
     }
 }
 pub(crate) fn migrate_legacy_creature(
@@ -1175,6 +1186,7 @@ pub(crate) fn migrate_legacy_creature(
             stiffness: old.stiffness,
             sensor: NO_SENSOR,
             reset: 0.0,
+            tendon: 0.0,
         });
     }
     repair(&mut creature, cfg, &mut rng);
@@ -1306,6 +1318,11 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
             m.stiffness.clamp(1.0, 120.0)
         } else {
             40.0
+        };
+        m.tendon = if m.tendon.is_finite() {
+            m.tendon.clamp(0.0, 1.0)
+        } else {
+            0.0
         };
         true
     });
@@ -1941,6 +1958,16 @@ fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
         muscle.stiffness =
             (muscle.stiffness * (qd::gaussian(rng) * 0.10 * scale).exp()).clamp(1.0, 120.0);
         muscle.reset = (muscle.reset + qd::gaussian(rng) * 0.12 * scale).rem_euclid(1.0);
+        // The elastic tendon grows in, tunes, or drops out.
+        if rng.unit() < 0.10 * scale.min(1.0) {
+            muscle.tendon = if muscle.tendon == 0.0 {
+                rng.range(0.05, 0.5)
+            } else if rng.unit() < 0.2 {
+                0.0
+            } else {
+                (muscle.tendon + qd::gaussian(rng) * 0.2).clamp(0.0, 1.0)
+            };
+        }
         if rng.unit() < 0.05 * scale.min(1.0) {
             muscle.sensor = match rng.index(5) {
                 4 => NO_SENSOR,
@@ -2452,6 +2479,7 @@ mod tests {
                         stiffness: 40.0,
                         sensor: 255,
                         reset: 0.0,
+                        tendon: 0.0,
                     },
                     Muscle {
                         bone_a: 0,
@@ -2466,6 +2494,7 @@ mod tests {
                         stiffness: 40.0,
                         sensor: 255,
                         reset: 0.0,
+                        tendon: 0.0,
                     },
                 ],
                 id: 1,
@@ -2529,6 +2558,7 @@ mod tests {
                 stiffness: 40.0,
                 sensor: 255,
                 reset: 0.0,
+                tendon: 0.0,
             }],
             id: 1,
             mutability: 1.0,
@@ -2667,6 +2697,29 @@ mod tests {
             assert!((after[0] - before[0]).abs() < 1e-5 && (after[1] - before[1]).abs() < 1e-5);
         }
         assert!(grown > 100, "only {grown} creatures could grow an organ");
+    }
+
+    #[test]
+    fn tuning_grows_tendons_and_keeps_them_valid() {
+        let cfg = Config::default();
+        let mut with_tendon = 0;
+        let mut total = 0;
+        for index in 0..300 {
+            let mut rng = Rng::new(21, 0, index);
+            let mut creature = random_creature_from(&cfg, &mut rng);
+            assert!(creature.muscles.iter().all(|m| m.tendon == 0.0));
+            for _ in 0..10 {
+                creature = local_mutation(creature, &cfg, &mut rng, 1.0);
+            }
+            for m in &creature.muscles {
+                assert!((0.0..=1.0).contains(&m.tendon), "tendon {}", m.tendon);
+                total += 1;
+                with_tendon += usize::from(m.tendon > 0.0);
+            }
+        }
+        // Ten tuning steps at a 10% rate per muscle: a few in ten muscles.
+        let share = with_tendon as f32 / total as f32;
+        assert!((0.15..0.75).contains(&share), "share with a tendon {share}");
     }
 
     #[test]

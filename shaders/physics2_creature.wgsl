@@ -31,7 +31,8 @@
 //   or 7 for none), anchors, waveform amplitude, Hill factor, 1/period,
 //   phase, duty, stiffness, 1/duty, 1/(1 - duty), the step's force
 //   (scratch), reset phase, rhythm offset (state), energy (state), longest
-//   strength (the muscle's force cap and energy store over the fixed ones).
+//   strength (the muscle's force cap and energy store over the fixed ones),
+//   tendon stiffness (N/m), longest length (where the tendon starts to pull).
 // Bone 0's joint range high (the neck has none) holds the creature's muscle
 // scale: each muscle's force cap and energy store over the fixed ones.
 struct Record {
@@ -98,7 +99,7 @@ const MAXB: u32 = MAXN - 1u;
 const MAXC: u32 = MAXCONTACTSu;
 const MAXR: u32 = 2u * MAXC;
 const TILE: u32 = 32u;
-const MUSCLE_FIELDS: u32 = 16u;
+const MUSCLE_FIELDS: u32 = 18u;
 const BONE_FIELDS: u32 = 9u;
 const NO_SENSOR: u32 = 7u;
 
@@ -942,7 +943,11 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
             );
             muscle_data[field + 11u * TILE] = magnitude;
             muscle_start += magnitude * length_m;
-            let pull = magnitude;
+            let stretch_start = max(length_m - muscle_data[field + 17u * TILE], 0.0);
+            let stored_start = 0.5 * muscle_data[field + 16u * TILE] * stretch_start * stretch_start;
+            energy_start += stored_start;
+            energy_scale += stored_start;
+            let pull = magnitude + muscle_data[field + 16u * TILE] * max(length_m - muscle_data[field + 17u * TILE], 0.0);
             let f = dir * pull;
             body_add(a1 - 1u, 0u, force_at(pa - origin, f));
             body_add(b1 - 1u, 0u, -force_at(pb - origin, f));
@@ -1091,6 +1096,8 @@ fn advance(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) gr
                 let d = pb - pa;
                 let length_m = sqrt(d.x * d.x + d.y * d.y);
                 muscle_end += muscle_data[field + 11u * TILE] * length_m;
+                let stretch_end = max(length_m - muscle_data[field + 17u * TILE], 0.0);
+                stored_end += 0.5 * muscle_data[field + 16u * TILE] * stretch_end * stretch_end;
             }
             var energy_end = stored_end;
             var mass_x_end = 0.0;

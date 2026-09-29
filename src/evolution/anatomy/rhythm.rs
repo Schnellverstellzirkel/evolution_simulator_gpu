@@ -591,6 +591,7 @@ mod tests {
                     let sensor_only = Muscle {
                         sensor: before.sensor,
                         reset: before.reset,
+                        tendon: 0.0,
                         ..*after
                     };
                     assert_eq!(sensor_only, *before);

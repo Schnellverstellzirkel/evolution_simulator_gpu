@@ -63,6 +63,7 @@ fn triangle(u: &[f32; GENES]) -> Creature {
         stiffness: 60.0 + 100.0 * u[9],
         sensor: 255,
         reset: 0.0,
+        tendon: 0.0,
     }];
     Creature {
         nodes,

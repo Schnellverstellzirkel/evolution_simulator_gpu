@@ -347,6 +347,7 @@ mod tests {
                         phase: x.phase,
                         duty: x.duty,
                         reset: x.reset,
+                        tendon: 0.0,
                         ..y
                     },
                     x
