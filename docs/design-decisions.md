@@ -18,7 +18,7 @@ The CMA emitter explores in normalized units with a large step (sigma 0.12). Eac
 
 Whole-body rescaling is a structural mutation, so evolution can grow bodies from 0.25 m bones to giants. Together with the log height axis it took one seed from 304 m to 856 m.
 
-There are 51 anatomy operators on top of the 7 classic ones (`docs/anatomy-operators.md`). The first 30 gained 21 to 26% best distance and 16 to 28% QD over 10 seeds at equal evaluations, and the top 50 carried 28% fewer muscles. The owner wants more operator types and never fewer.
+There are 57 anatomy operators on top of the 7 classic ones (`docs/anatomy-operators.md`). The first 30 gained 21 to 26% best distance and 16 to 28% QD over 10 seeds at equal evaluations, and the top 50 carried 28% fewer muscles. The owner wants more operator types and never fewer.
 
 Cross-plan crossover grafts a limb with its muscles and rhythm from an elite of another body plan on the same island. Over 18 seeds it gave QD x1.25 and best distance x1.08.
 

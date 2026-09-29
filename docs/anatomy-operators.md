@@ -11,9 +11,13 @@ Every operator keeps the body limits and never touches the head or the neck. A p
 | muscles (`muscles.rs`) | add a muscle across two joints; move a muscle end to a neighbouring bone; split a muscle; fuse two similar muscles; add an antagonist (opposite torque about the joint, half a cycle apart); swap two muscles' destinations; fan clustered anchors along a bone; replace a long muscle with a relay through a middle bone; copy one limb's actuation onto another limb; quiet a branch's strokes |
 | rhythm (`rhythm.rs`) | move joint range from one joint to its neighbour; apply one change to two matching limbs; a phase wave down a chain; limb phase patterns (together, alternating, staggered); a limb's duty cycle around each contraction's middle; a coordinated touchdown reset; move organ mass between bones |
 | extra (`extra.rs`) | copy a leg to the dragging end of the body; lift the dragging end; twin a limb in place; the same tip on two matching limbs; remove the idlest limb tip; merge the last two bones of a limb; and, sharing one pick slot, eight gentle operators that copy, swap or shift limb programs, trade cadence against stride, and change leverage, strength or the weakest muscle |
-| controller (`controller.rs`) | limb stroke scale; limb posture shift; taper limb strength; copy limb rhythm; retune a muscle pair; release touchdown; snap limb phases. All share one pick slot |
+| controller (`controller.rs`) | limb stroke scale; limb posture shift; taper limb strength; copy limb rhythm; retune a muscle pair; release touchdown; snap limb phases; put a limb on another clock ratio; lock a limb back on the base clock; reflexes on a muscle, on all feet, and a shifted reflex reset. These share one pick slot. Starting the gait at another point of its cycle has its own slot |
 
-The muscle clock is shared by every muscle (`repair` copies the first muscle's period to all), so a limb cannot run at its own period. Operators change stroke, posture, duty and phase instead.
+A limb may run on its own clock at a ratio of the base clock (1/2, 2/3, 1, 3/2 or 2), so the whole gait still repeats.
+
+## Where big jumps come from
+
+On the best 300 elites of a 120-generation save, rescored in one world, most jumps of 1.5x and 10 m or more changed no structure, and nearly any single gene group of the child gave most of the gain alone. 83 of 124 such parents reached 90% of their child's distance just by starting their own gait at another point of its cycle, and a start offset left the top 100 at a median 8% of their distance. Whether a gait catches depends on how it starts, so `shift_gait_start` moves every clock ahead by one common time.
 
 ## Audit
 
