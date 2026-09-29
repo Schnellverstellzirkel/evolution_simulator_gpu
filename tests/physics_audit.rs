@@ -115,3 +115,32 @@ fn a_hopper_does_not_turn_the_ground_into_a_motor() {
         "ground added {added:.1} J, removed {removed:.1} J"
     );
 }
+
+/// The seed 40 champion of a 40-generation v2 evolution (5,000 bodies, 20 s
+/// trials, 63.4 m): a 5-node hopper that reached that distance because
+/// friction pushed its foot the way the foot moved. Before the fix friction
+/// did +1,725 J of work on its nodes (37% of its friction impulse) against
+/// 739 J of muscle work, and removing the planting pass cut its distance to
+/// 1.3 m.
+#[test]
+fn friction_never_does_positive_work_on_the_exploiting_hopper() {
+    let creature: Creature =
+        serde_json::from_str(include_str!("fixtures/p2_friction_champion.json")).unwrap();
+    let cfg = Config {
+        duration: 20.0,
+        random_seed: false,
+        screen: None,
+        ..Config::default()
+    };
+    let (_, result) = physics2::replay(&creature, &cfg);
+    let e = physics2::ENERGY.with(|l| l.get());
+    eprintln!(
+        "distance {:.2} m, friction work +{:.1} J -{:.1} J, muscle work {:.1} J",
+        result.fitness, e[14], e[15], e[0]
+    );
+    assert!(
+        e[14] < 20.0,
+        "friction did {:.1} J of positive work on the nodes",
+        e[14]
+    );
+}

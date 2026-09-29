@@ -117,6 +117,7 @@ const INV_SPIN_CAP: f32 = 0.06666667;
 const SPIN_HARDNESS: f32 = 20.0;
 const PGS_SWEEPS: u32 = 20u;
 const PLANT_SWEEPS: u32 = 20u;
+const PLANT_ROUNDS: u32 = 2u;
 const WARM: bool = false;
 const PUSH_OUT: f32 = 0.2;
 const MUD_NORMAL: f32 = 2.0;
@@ -185,6 +186,9 @@ var<private> c_dn: array<vec3f, MAXC>;
 var<private> c_dt: array<vec3f, MAXC>;
 var<private> c_vn: array<f32, MAXC>;
 var<private> c_vt: array<f32, MAXC>;
+// The node's speed along the ground at the start of the step: friction may
+// only push against the mean of this and the speed after the step.
+var<private> c_vs: array<f32, MAXC>;
 var<private> c_goal: array<f32, MAXC>;
 var<private> c_mu: array<f32, MAXC>;
 var<private> reach: array<f32, MAXN>;
@@ -522,7 +526,37 @@ fn pgs(sweeps: u32) {
                 vrow[j] += kmat[tri(j, rn)] * dn;
             }
             let bound = c_mu[ci] * lambda[rn];
-            let friction = clamp(lambda[rt] - vrow[rt] * (1.0 / kmat[tri(rt, rt)]), -bound, bound);
+            // Friction may not do positive work: it only opposes
+            // a = start speed + end speed without its own force, and only up
+            // to |a| / k (see physics2.rs).
+            let stiff = kmat[tri(rt, rt)];
+            let a = c_vs[ci] + vrow[rt] - stiff * lambda[rt];
+            let reach = abs(a) / stiff;
+            let cap = min(bound, reach);
+            let friction = clamp(lambda[rt] - vrow[rt] * (1.0 / stiff), select(0.0, -cap, a > 0.0), select(cap, 0.0, a > 0.0));
+            let dt_ = friction - lambda[rt];
+            lambda[rt] = friction;
+            for (var j = 0u; j < MAXR; j++) {
+                if !c_on[j / 2u] { continue; }
+                vrow[j] += kmat[tri(j, rt)] * dt_;
+            }
+        }
+    }
+}
+
+// Removes friction that would still do positive work after the solves: each
+// contact's friction only opposes the mean of its node's speed before and
+// after the step, up to the size that stops the node. Two sweeps.
+fn clean_friction() {
+    for (var sweep = 0u; sweep < 2u; sweep++) {
+        for (var ci = 0u; ci < MAXC; ci++) {
+            if !c_on[ci] { continue; }
+            let rn = 2u * ci;
+            let rt = rn + 1u;
+            let stiff = kmat[tri(rt, rt)];
+            let a = c_vs[ci] + vrow[rt] - stiff * lambda[rt];
+            let cap = min(c_mu[ci] * lambda[rn], abs(a) / stiff);
+            let friction = clamp(lambda[rt], select(0.0, -cap, a > 0.0), select(cap, 0.0, a > 0.0));
             let dt_ = friction - lambda[rt];
             lambda[rt] = friction;
             for (var j = 0u; j < MAXR; j++) {
@@ -619,6 +653,7 @@ fn contacts(origin: vec2f, before: vec2f, outside: vec2f) -> vec2f {
             + DT * (sdot(dn, a) + w * (-v.y * normal.x + v.x * normal.y));
         c_vt[ci] = v.x * tangent.x + v.y * tangent.y
             + DT * (sdot(dtan, a) + w * (-v.y * tangent.x + v.x * tangent.y));
+        c_vs[ci] = v.x * tangent.x + v.y * tangent.y;
         c_goal[ci] = select(-gap * PUSH_OUT * RATE, -gap * RATE, gap >= 0.0);
         c_mu[ci] = node_fric(node) * p.friction * (1.0 + MUD_GRIP * sink) * (1.0 + MUD_NORMAL * sink);
         nc += 1u;
@@ -663,7 +698,7 @@ fn contacts(origin: vec2f, before: vec2f, outside: vec2f) -> vec2f {
     // Plant against the end pose: take the step, measure each contact's
     // velocity in the end pose (after the momentum balance), and solve again
     // with the difference.
-    {
+    for (var round = 0u; round < PLANT_ROUNDS; round++) {
         let sx0 = x0;
         let sv0 = v0;
         var sq: array<f32, MAXB>;
@@ -706,6 +741,7 @@ fn contacts(origin: vec2f, before: vec2f, outside: vec2f) -> vec2f {
             old[j] = lambda[j];
         }
         pgs(PLANT_SWEEPS);
+        clean_friction();
         for (var j = 0u; j < MAXR; j++) {
             old[j] = lambda[j] - old[j];
         }

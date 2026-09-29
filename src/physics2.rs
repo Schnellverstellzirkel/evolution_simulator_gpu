@@ -534,6 +534,10 @@ struct Contact {
     /// without the ground.
     vn_free: f32,
     vt_free: f32,
+    /// The node's speed along the ground at the start of the step. Friction
+    /// may not do positive work: it may only push against the mean of this
+    /// and the speed after the step.
+    vt_start: f32,
     /// Slowest allowed speed along the normal (negative: approaching).
     target: f32,
     mu: f32,
@@ -562,6 +566,11 @@ pub const MAX_CONTACTS: usize = 4;
 const PGS_ITERATIONS: usize = 8;
 /// Sweeps of the planting pass, which starts from the first solve.
 const PLANT_SWEEPS: usize = 4;
+/// Rounds of the planting pass. One round leaves friction doing positive
+/// work: the end pose it measures moves again when the solve changes the
+/// forces (through the momentum balance and the turning bones). Two rounds
+/// bring friction's positive work on an evolved hopper from 1,725 J to 5 J.
+const PLANT_ROUNDS: usize = 2;
 /// Share of a node's depth inside the ground that the contact removes per
 /// step.
 const PUSH_OUT: f32 = 0.2;
@@ -1149,6 +1158,7 @@ fn simulate_step_inner(
                 dt: dtan,
                 vn_free,
                 vt_free: v[0] * tangent[0] + v[1] * tangent[1] + dt * (dtan.dot(a) + beta(tangent)),
+                vt_start: v[0] * tangent[0] + v[1] * tangent[1],
                 target: if gap >= 0.0 {
                     -gap * rate
                 } else {
@@ -1213,7 +1223,8 @@ fn simulate_step_inner(
         // the friction that planted it keeps pushing. So the step is taken,
         // each contact's velocity measured in the end pose (after the
         // momentum balance), and the solve repeated with the difference.
-        {
+        let mut predicted = predicted;
+        for _ in 0..PLANT_ROUNDS {
             let saved = (s.x0, s.v0, s.w0, s.th0, s.q.clone(), s.qd.clone());
             integrate(model, s, sc, dt, 1.0);
             let ground: [f32; 2] = contacts.iter().enumerate().fold([0.0; 2], |g, (i, c)| {
@@ -1237,9 +1248,11 @@ fn simulate_step_inner(
             s.q = saved.4;
             s.qd = saved.5;
             let old = lambda.clone();
-            pgs(&contacts, &k, &mut lambda, PLANT_SWEEPS);
+            let mut ends = pgs(&contacts, &k, &mut lambda, PLANT_SWEEPS);
+            clean_friction(&contacts, &k, &mut lambda, &mut ends);
             let change: Vec<f32> = lambda.iter().zip(&old).map(|(a, b)| a - b).collect();
             apply_contacts(model, sc, &contacts, &change, &mut da, &mut dq);
+            predicted = ends;
         }
         s.warm.iter_mut().for_each(|w| *w = [0.0; 2]);
         for (i, c) in contacts.iter().enumerate() {
@@ -1401,7 +1414,20 @@ fn pgs(contacts: &[Contact], k: &[f32], lambda: &mut [f32], sweeps: usize) -> Ve
                 *v += k[j * m + rn] * change;
             }
             let bound = c.mu * lambda[rn];
-            let friction = (lambda[rt] - v[rt] * (1.0 / k[rt * m + rt])).clamp(-bound, bound);
+            // Friction does work `lambda * (vt_start + vt_end) / 2`, which may
+            // not be positive. The speed after the step without this row's own
+            // force is `v - k * lambda`, so the force may only oppose
+            // `a = vt_start + that`, and only up to `|a| / k` (past that it
+            // would reverse the node and push it the way it now moves).
+            let stiff = k[rt * m + rt];
+            let a = c.vt_start + v[rt] - stiff * lambda[rt];
+            let reach = a.abs() / stiff;
+            let (low, high) = if a > 0.0 {
+                (-bound.min(reach), 0.0)
+            } else {
+                (0.0, bound.min(reach))
+            };
+            let friction = (lambda[rt] - v[rt] * (1.0 / stiff)).clamp(low, high);
             let change = friction - lambda[rt];
             lambda[rt] = friction;
             for (j, v) in v.iter_mut().enumerate() {
@@ -1410,6 +1436,31 @@ fn pgs(contacts: &[Contact], k: &[f32], lambda: &mut [f32], sweeps: usize) -> Ve
         }
     }
     v
+}
+
+/// Removes friction that would do positive work: after the solves, each
+/// contact's friction force may only oppose the mean of its node's speed
+/// before and after the step, and only up to the size that stops the node.
+/// The rows share `v`, so a change is passed on to the other rows, and two
+/// sweeps let the contacts settle.
+fn clean_friction(contacts: &[Contact], k: &[f32], lambda: &mut [f32], v: &mut [f32]) {
+    let m = lambda.len();
+    for _ in 0..2 {
+        for (i, c) in contacts.iter().enumerate() {
+            let rt = 2 * i + 1;
+            let stiff = k[rt * m + rt];
+            let a = c.vt_start + v[rt] - stiff * lambda[rt];
+            let reach = a.abs() / stiff;
+            let bound = (c.mu * lambda[2 * i]).min(reach);
+            let (low, high) = if a > 0.0 { (-bound, 0.0) } else { (0.0, bound) };
+            let friction = lambda[rt].clamp(low, high);
+            let change = friction - lambda[rt];
+            lambda[rt] = friction;
+            for (j, v) in v.iter_mut().enumerate() {
+                *v += k[j * m + rt] * change;
+            }
+        }
+    }
 }
 
 /// Adds the accelerations that contact forces `lambda` cause, through one
@@ -1703,6 +1754,10 @@ fn source_from(
         (
             "const PLANT_SWEEPS: u32 = 20u;",
             format!("const PLANT_SWEEPS: u32 = {}u;", PLANT_SWEEPS),
+        ),
+        (
+            "const PLANT_ROUNDS: u32 = 2u;",
+            format!("const PLANT_ROUNDS: u32 = {}u;", PLANT_ROUNDS),
         ),
         (
             "const WARM: bool = false;",
