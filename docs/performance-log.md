@@ -998,3 +998,34 @@ The lane fill is what limits it: skeletons repeat less in a small unit than in a
 | async plus highest-priority replay streams | 0.80 s (1.80), 0.78 s (1.67) | 23 ms, 56 ms | 120, 104 |
 
 The replay took about a second in every arm, so the 3 s fallback was rarely hit in these runs. The gain is that the UI thread no longer blocks (frame max 3 to 6 s down to about 25 ms), and stream priority cuts the wait by about 15%. The player shows the creature's first pose and "Preparing replay..." meanwhile, and the GPU wait is 60 s before the CPU replays instead.
+
+
+## 2026-09-30: where the physics v2 contact solve spends its time, and what did not help
+
+Workload for everything below: `eval-bench` on the first 20,000 creatures of `target/p2/bench-s40.evo` with at most 16 nodes (mostly 3 to 5 nodes), 20 s trials, no screen, CUDA, kernels at the 128-register cap (before the no-cap default), commit ad617e4. Runs were interleaved under the exclusive GPU lock. The owner's game was on the GPU for the first measurements, so absolute rates carry about 10% noise (v2 read 84M creature-steps/s with the game running, 135 to 165M without); ratios between interleaved runs are what count. Timing-only hacks were applied to the CUDA source text at run time and never committed. They change the physics, so only their speed means anything.
+
+v1 against v2 on the same population, game running: v1 about 280M, v2 84M creature-steps/s (0.30x).
+
+Removing one part of the contact solve at a time (v2 = 84M):
+
+| removed | rate |
+|---|---:|
+| dense matrix build (8 tree passes and 8 velocity reads per step) | 120M |
+| the planting rounds | 105M |
+| the Gauss-Seidel sweeps, initial and planting | 112M |
+| all three | 185M |
+| the whole contact section | 190M |
+
+So the contact section is about 55% of a v2 step. Detection, selection and the first apply cost almost nothing; the matrix build, the sweeps and the planting rounds each cost a quarter to a third. A v2 step with no contact solve would run at about 0.68x of v1.
+
+Changes that did not help, all interleaved, all within noise:
+
+- Sweep counts. Sweeps 8, 4, 2 with planting sweeps 4, 2, 1 all read 84 to 86M. Sweeps are not the cost. `PLANT_ROUNDS` has to stay at 2: with one round the friction audit in `tests/physics_audit.rs` fails (152 J of positive friction work on the hopper fixture); 2 sweeps with 1 planting sweep pass the audit and buy nothing.
+- One children-first pass per direction for the matrix (c20cab8, branch `claude/p2-onepass`): entry = dt * (p0_row . Root p0_col + sum_j t_row[j] t_col[j] / d_j) from the articulated-body factorization, no parents-first passes and no velocity reads. Same matrix to rounding (checked entry by entry in the prototype), 13 physics2 tests, 4 audit tests, gpu_repeatability and physics2_gpu passed. Speed: base 133, 143, 135M against 136, 130, 131M in the exclusive run, and 164, 164, 176M against 160, 151M in a later one. No gain.
+- The same pass in registers only: each joint gathers its children's contributions with selects instead of scattering into the parent's table slot, sums in the scatter's order, so the eight direction passes can overlap. Bit-identical results. Speed against base and onepass: within noise (base 164M, gather 160M, 161M).
+
+Reading. The removal test says the whole matrix build costs about 30%, and neither halving its passes nor moving them out of shared memory changed the rate. What is left is per-step work that is spread thin over many small dependent operations in an already register-limited kernel, not one pass that can be deleted. Substeps with one sweep (Macklin et al. 2019) would multiply the tree passes and the sweeps are not the cost, so it was not built.
+
+Contact bound, timing only (the physics changes, bodies with more feet down than the bound leave nodes out and sink): MAXC 4, 3, 2, 1 read 85, 105, 112, 140M. Two contacts is +33%, one is +65%. Not adopted; an owner decision.
+
+What would still move the number: a different solver (fewer, larger operations per step), or accepting fewer contacts. A note on measuring: under a saturated shared lock (other agents' jobs), base and variants read the same 34M whatever they were, so speed A/B runs need the exclusive lock.
