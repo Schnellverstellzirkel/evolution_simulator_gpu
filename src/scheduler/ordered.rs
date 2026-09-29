@@ -66,6 +66,10 @@ pub(super) struct Ordered {
     draining: bool,
     /// Creature index to its block's sequence number and slot.
     owner: HashMap<usize, (u64, usize)>,
+    /// Archive cells whose check is claimed by a block that has not come back
+    /// yet: the claiming block and the claimant's standard score. Later
+    /// blocks check a contender for such a cell only if it scores higher.
+    claimed: HashMap<u64, (u64, f32)>,
 }
 
 impl Ordered {
@@ -98,6 +102,7 @@ impl Scheduler {
         self.draining = false;
         self.ordered.blocks.clear();
         self.ordered.owner.clear();
+        self.ordered.claimed.clear();
         self.ordered.created = 0;
         self.ordered.returned = 0;
         self.ordered.draining = false;
@@ -173,6 +178,7 @@ impl Scheduler {
         let draining = self.ordered.draining;
         let (gated, lag, returned) = (self.ordered.gated, self.ordered.lag, self.ordered.returned);
         let mut sends: Vec<(usize, EvaluationMetrics)> = Vec::new();
+        let mut claimed = std::mem::take(&mut self.ordered.claimed);
         let mut dropped = 0u64;
         let mut released = 0u64;
         for block in &mut self.ordered.blocks {
@@ -195,16 +201,30 @@ impl Scheduler {
                 let Slot::Standard(metric) = slot else {
                     continue;
                 };
-                let n = need(block.members[pos], metric);
+                let mut n = need(block.members[pos], metric);
                 if let CheckNeed::Check { cell: Some(cell) } = n
                     && !draining
                 {
-                    let entry = champion.entry(cell).or_insert((metric.fitness, pos));
-                    if metric.fitness > entry.0 {
-                        *entry = (metric.fitness, pos);
+                    // A cell claimed by an earlier block waits for that
+                    // check: only a better contender is worth another.
+                    if claimed
+                        .get(&cell)
+                        .is_some_and(|&(_, bar)| metric.fitness <= bar)
+                    {
+                        n = CheckNeed::Check {
+                            cell: Some(u64::MAX),
+                        };
+                    } else {
+                        let entry = champion.entry(cell).or_insert((metric.fitness, pos));
+                        if metric.fitness > entry.0 {
+                            *entry = (metric.fitness, pos);
+                        }
                     }
                 }
                 needs.push((pos, n));
+            }
+            for (&cell, &(fitness, _)) in &champion {
+                claimed.insert(cell, (block.seq, fitness));
             }
             for (pos, n) in needs {
                 let Slot::Standard(mut metric) =
@@ -219,7 +239,7 @@ impl Scheduler {
                         block.slots[pos] = Slot::Final(metric);
                     }
                     CheckNeed::Check { cell: Some(cell) }
-                        if !draining && champion[&cell].1 != pos =>
+                        if !draining && (cell == u64::MAX || champion[&cell].1 != pos) =>
                     {
                         dropped += 1;
                         metric.unchecked = true;
@@ -236,6 +256,7 @@ impl Scheduler {
                 block.decided = true;
             }
         }
+        self.ordered.claimed = claimed;
         self.checks_released += released;
         self.checks_dropped += dropped;
         for (i, metric) in sends {
@@ -343,6 +364,9 @@ impl Scheduler {
             }
             let block = self.ordered.blocks.pop_front().expect("front block");
             self.ordered.returned = block.seq + 1;
+            self.ordered
+                .claimed
+                .retain(|_, &mut (seq, _)| seq != block.seq);
             let mut members = Vec::with_capacity(block.members.len());
             let mut metrics = Vec::with_capacity(block.members.len());
             for (i, slot) in block.members.iter().zip(block.slots) {
