@@ -9,7 +9,7 @@ Open work only. Delete an item when it is merged into `main` or measured and rej
 - v2 runs at about 0.2x of v1's creature-steps per second; CUDA is 1.8x Vulkan. Occupancy is 4 warps at 16 nodes [claude/p2-cuda-speed].
 - A fast v2 CPU fallback (today the scalar prototype runs about 1,000 creatures/s on 2 threads), then remove the v1 kernels and CPU engine.
 - A faster v2 contact solve (contacts are about three quarters of v2's cost). Ideas are in `docs/research-2026-09-29.md`.
-- Realism physics in v2: bones that break under load, static and kinetic friction, ground contact along bones, air drag by bone length times speed squared, energy charged only for contraction work, elastic tendons. The earlier walking levers are on `claude/physics2-levers`.
+- Realism physics in v2: bones that break under load, static and kinetic friction, ground contact along bones, air drag by bone length times speed squared, elastic tendons. The earlier walking levers are on `claude/physics2-levers`.
 - Owner question: in evolved bodies 39% have their head more than 5 cm below the highest node. Should the fall rule (head below neck) change for them?
 
 ## Interface
