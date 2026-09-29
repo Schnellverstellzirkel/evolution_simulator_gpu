@@ -218,3 +218,30 @@ Per seed, best and QD: seed 38 422 m / 36,415 against 158 m / 33,227; seed 39 37
 ## Decision
 
 All 44 anatomy operators are on by default, on top of the 7 classic ones. Each has its own pick slot except the eight gentle second-round operators (`mirror_limb_timing`, `swap_limb_programs`, `copy_muscle_to_partner`, `nudge_limb_phase`, `cadence_stride_trade`, `scale_muscle_leverage`, `scale_limb_strength`, `prune_weakest_muscle`), which share one (`SHARED_SLOT` in `src/evolution/anatomy/mod.rs`). No operator is removed. `EVOLUTION_ANATOMY=0` restores the classic structural mutation exactly (same random draws), and a list of names enables only those, for experiments.
+
+## Third round: controller operators (2026-09-29)
+
+The owner asked for more operator types, starting with an antagonist pair and operators on the controller of a whole limb. `add_antagonist` already does the antagonist pair (a muscle from the child bone to a bone on the far side of the joint, checked to turn it the other way, half a cycle out of phase), so no new operator was written for it. It applies to 98% of the elites of the new audit checkpoint. The clock is shared by every muscle (`repair` copies the first muscle's period to all), so a limb cannot run at its own period. "Slow or speed a limb" is done through stroke, posture and duty instead. Seven operators in `src/evolution/anatomy/controller.rs`, all on by default, all in one new shared pick slot:
+
+- `limb_stroke_scale`: every active muscle on a limb scales its stroke about its middle by 0.6 to 1.6.
+- `limb_posture_shift`: both ends of every stroke on a limb move by 5 to 15% of the stroke, up or down.
+- `taper_limb_strength`: stiffness rises or falls along the limb's muscles by a factor of 1.2 to 1.8 from the root to the tip.
+- `copy_limb_rhythm`: the rhythm (phase, duty, touchdown reset) of one limb goes onto a different limb of any shape, a quarter, half or three quarters of a cycle later. `mirror_limb_timing` only pairs limbs of the same shape at half a cycle.
+- `retune_muscle_pair`: two active muscles across the same pair of bones are set half a cycle apart or into one phase.
+- `release_touchdown`: clears the touchdown sensors of a limb (the reverse of `touchdown_package`).
+- `snap_limb_phases`: the phases of a limb's muscles are rounded to eighths of a cycle from its first muscle.
+
+Audit (`examples/mutation_audit.rs`, 120 best elites of a 40-generation `search_ab` save, seed 38, 5,000 creatures, 20 s trials, CPU; parent median 4.10 m, 8.1 nodes, 16.9 muscles). Elites of this save are insensitive to gentle changes: the parameter mutation alone keeps a median 0.99, so the audit cannot rank gentle operators.
+
+| operator | applied | child/parent median | keeps 90% | beats parent |
+|---|---:|---:|---:|---:|
+| parameter mutation 0.035 (baseline) | 100% | 0.99 | 83% | 34% |
+| add_antagonist | 98% | 1.00 | 84% | 28% |
+| nudge_limb_phase | 100% | 0.99 | 85% | 28% |
+| limb_stroke_scale | 100% | 1.00 | 80% | 34% |
+| limb_posture_shift | 100% | 1.00 | 98% | 39% |
+| taper_limb_strength | 100% | 1.00 | 89% | 35% |
+| copy_limb_rhythm | 98% | 0.98 | 74% | 32% |
+| retune_muscle_pair | 100% | 1.00 | 82% | 38% |
+
+Search A/B (`search_ab --checks`, 5,000 creatures, 60 generations, 20 s trials, seeds 38 to 46, the same binary with `EVOLUTION_ANATOMY` listing the 44 earlier operators for the base arm). Five of the operators with a slot each: best distance x0.71 (one base seed reached 48 m), QD x0.94, better best in 4 and better QD in 5 of 9 seeds. The same five plus `release_touchdown` and `snap_limb_phases`, sharing one slot: best x1.50 (again driven by that seed), QD x1.02, better best in 6 and better QD in 5 of 9 seeds, cells x1.02. That is neutral, so the seven stay, in a shared slot as the eight gentle operators do. There are now 51 operators.

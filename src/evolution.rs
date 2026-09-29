@@ -1841,8 +1841,12 @@ fn structural_mutation_from(
     let classic = CLASSIC_COUNT;
     // An operator that does not fit this body leaves it unchanged; try
     // another, a few times.
-    // The shared operators together take one slot, drawn after the others.
-    let slots = classic + extra.single.len() + usize::from(!extra.shared.is_empty());
+    // Each shared group takes one slot, drawn after the others.
+    let groups: Vec<&Vec<usize>> = [&extra.shared, &extra.controller]
+        .into_iter()
+        .filter(|group| !group.is_empty())
+        .collect();
+    let slots = classic + extra.single.len() + groups.len();
     for _ in 0..4 {
         let pick = rng.index(slots);
         let changed = if pick < classic {
@@ -1850,7 +1854,8 @@ fn structural_mutation_from(
         } else if let Some(&index) = extra.single.get(pick - classic) {
             anatomy::apply(index, creature, cfg, rng, &cx)
         } else {
-            let index = extra.shared[rng.index(extra.shared.len())];
+            let group = groups[pick - classic - extra.single.len()];
+            let index = group[rng.index(group.len())];
             anatomy::apply(index, creature, cfg, rng, &cx)
         };
         if changed {
