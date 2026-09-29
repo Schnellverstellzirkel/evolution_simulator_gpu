@@ -496,6 +496,8 @@ fn run(
     let mut selected: Option<(Creature, Config)> = None;
     // A background autosave, which reports the file and generation it wrote.
     let mut checkpoint_thread: Option<std::thread::JoinHandle<Option<(PathBuf, u32)>>> = None;
+    // Milliseconds each snapshot took to build, for the benchmark report.
+    let mut snapshot_build_ms: Vec<f64> = Vec::new();
     let benchmark_generations = std::env::var("EVOLUTION_BENCH_GENERATIONS")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -1176,6 +1178,17 @@ fn run(
                                         .unwrap_or(0.0),
                                     per_generation.last().copied().unwrap_or(0.0)
                                 );
+                                let mut builds = snapshot_build_ms.clone();
+                                builds.sort_by(f64::total_cmp);
+                                if !builds.is_empty() {
+                                    eprintln!(
+                                        "Native benchmark snapshot build: {} snapshots, median {:.3} ms, p95 {:.3} ms, max {:.3} ms",
+                                        builds.len(),
+                                        builds[builds.len() / 2],
+                                        builds[builds.len() * 95 / 100],
+                                        builds.last().copied().unwrap_or(0.0)
+                                    );
+                                }
                                 let mut configures = benchmark_configure_ms.clone();
                                 configures.sort_by(f64::total_cmp);
                                 if !configures.is_empty() {
@@ -1339,6 +1352,7 @@ fn run(
             changed = true;
         }
         if changed && (last_publish.elapsed() > Duration::from_millis(200) || !running) {
+            let build_started = Instant::now();
             let snapshot = if let Some(e) = &exp {
                 if history.len() != e.history.len() {
                     history = Arc::new(e.history.clone());
@@ -1513,6 +1527,7 @@ fn run(
                     error: error.clone(),
                 }
             };
+            snapshot_build_ms.push(build_started.elapsed().as_secs_f64() * 1e3);
             *output.lock().unwrap() = Some(snapshot);
             ctx.request_repaint();
             changed = false;
