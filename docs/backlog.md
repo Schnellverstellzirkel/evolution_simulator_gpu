@@ -7,7 +7,7 @@ Open work only. Delete an item when it is merged into `main` or measured and rej
 - The walking levers (tendons, joint damping) are on `claude/physics2-levers` and need a port onto v2 and one GPU evolution each.
 - v2 runs at about 0.2x of v1's creature-steps per second; CUDA is 1.8x Vulkan. Occupancy is 4 warps at 16 nodes [claude/p2-cuda-speed].
 - A faster v2 contact solve (contacts are about three quarters of v2's cost). Ideas are in `docs/research-2026-09-29.md`.
-- Realism physics in v2: bones that break under load, static and kinetic friction, ground contact along bones, elastic tendons. The earlier walking levers are on `claude/physics2-levers`.
+- Realism physics in v2: static and kinetic friction, ground contact along bones. Bones that break under load are deferred until the contact solve is faster (the exact load costs an estimated 20 to 30% of kernel time; the CPU diagnostic is on claude/p2-bone-break). The earlier walking levers are on `claude/physics2-levers`.
 - Owner question: in evolved bodies 39% have their head more than 5 cm below the highest node. Should the fall rule (head below neck) change for them?
 
 ## Interface
@@ -34,4 +34,4 @@ Each item is an A/B over 3 seeds. Winners go on by default and losers are delete
 
 ## World
 
-- More environment effects and catastrophes that push toward complex, efficient movement, including water. These go into v2.
+- More environment effects and catastrophes (Water and Ice patches landed; ideas: wind gusts, low ceiling, moving ground). The ice band is hard to see.
