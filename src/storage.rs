@@ -1640,28 +1640,36 @@ impl Experiment {
         let planned = self.plan_offspring(&cfg, self.generation, self.breed_round, slots);
         let plans: Vec<CandidatePlan> = planned.iter().map(|p| p.plan).collect();
         let planned_at = started.elapsed();
-        let children = evolution::emit_offspring(
+        // Reseeded elites take the first slots; the rest are emitted straight
+        // into batches, so no child is alive after it is copied.
+        let reseeded = self.reseed.len().min(slots.len());
+        let mut batches = Vec::new();
+        if reseeded > 0 {
+            let mut lead = evolution::ChildBatch::default();
+            for _ in 0..reseeded {
+                lead.push(self.reseed.pop().expect("reseed elite"));
+            }
+            batches.push(lead);
+        }
+        batches.extend(evolution::emit_offspring_batches(
             &self.islands,
             &self.archive,
             &self.cma_emitters,
-            &plans,
-            slots,
+            &plans[reseeded..],
+            &slots[reseeded..],
             &cfg,
             self.generation,
             self.breed_round,
-        );
+        ));
         let emitted_at = started.elapsed();
-        let mut creatures = Vec::with_capacity(slots.len());
-        for ((&slot, child), plan) in slots.iter().zip(children).zip(&planned) {
-            if let Some(elite) = self.reseed.pop() {
-                creatures.push(elite);
+        for (k, (&slot, plan)) in slots.iter().zip(&planned).enumerate() {
+            if k < reseeded {
                 self.candidate_emitters[slot] = Emitter::Restart;
                 self.candidate_cma[slot] = None;
                 self.candidate_parent_ids[slot] = None;
                 self.candidate_mates[slot] = false;
                 self.protected_until[slot] = 0;
             } else {
-                creatures.push(child);
                 self.candidate_emitters[slot] = plan.plan.emitter;
                 self.candidate_cma[slot] = plan.plan.cma;
                 self.candidate_parent_ids[slot] = plan.parent_id;
@@ -1672,7 +1680,7 @@ impl Experiment {
             self.scores[slot] = f32::NAN;
             self.trial_metrics[slot] = TrialMetrics::default();
         }
-        self.population.replace_many(slots, creatures);
+        self.population.append_batches(slots, batches);
         let total = started.elapsed();
         let add = |k: usize, d: std::time::Duration| {
             BREED_NANOS[k].fetch_add(d.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -3355,5 +3363,107 @@ mod migration_tests {
         }
         assert_eq!(experiment.config.season_step, 1);
         assert_eq!(experiment.config.wind, crate::environment::WIND[1]);
+    }
+}
+
+#[cfg(test)]
+mod breeding_tests {
+    use super::*;
+
+    /// The breeding path before children were packed into batches: one
+    /// `Creature` per child, then `replace_many`.
+    fn breed_slots_by_creature(e: &mut Experiment, slots: &[usize]) {
+        let count = e.config.population;
+        e.candidate_parent_ids.resize(count, None);
+        e.candidate_mates.resize(count, false);
+        e.candidate_emitters.resize(count, Emitter::Restart);
+        e.candidate_cma.resize(count, None);
+        e.protected_until.resize(count, 0);
+        e.parent_scores.resize(count, f32::NAN);
+        let cfg = e.config.clone();
+        e.breed_round += 1;
+        let planned = e.plan_offspring(&cfg, e.generation, e.breed_round, slots);
+        let plans: Vec<CandidatePlan> = planned.iter().map(|p| p.plan).collect();
+        let children = evolution::emit_offspring(
+            &e.islands,
+            &e.archive,
+            &e.cma_emitters,
+            &plans,
+            slots,
+            &cfg,
+            e.generation,
+            e.breed_round,
+        );
+        let mut creatures = Vec::new();
+        for ((&slot, child), plan) in slots.iter().zip(children).zip(&planned) {
+            if let Some(elite) = e.reseed.pop() {
+                creatures.push(elite);
+                e.candidate_emitters[slot] = Emitter::Restart;
+                e.candidate_cma[slot] = None;
+                e.candidate_parent_ids[slot] = None;
+                e.candidate_mates[slot] = false;
+                e.protected_until[slot] = 0;
+            } else {
+                creatures.push(child);
+                e.candidate_emitters[slot] = plan.plan.emitter;
+                e.candidate_cma[slot] = plan.plan.cma;
+                e.candidate_parent_ids[slot] = plan.parent_id;
+                e.candidate_mates[slot] = plan.plan.mate.is_some();
+                e.protected_until[slot] = plan.protection;
+            }
+            e.parent_scores[slot] = f32::NAN;
+            e.scores[slot] = f32::NAN;
+            e.trial_metrics[slot] = TrialMetrics::default();
+        }
+        e.population.replace_many(slots, creatures);
+    }
+
+    #[test]
+    fn batched_breeding_matches_creature_by_creature_breeding() {
+        let config = Config {
+            population: 10_000,
+            random_seed: false,
+            seed: 12,
+            ..Config::default()
+        };
+        let mut a = Experiment::new(config).unwrap();
+        for i in 0..a.config.population {
+            let h = (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 20;
+            a.scores[i] = 1.0 + (h % 1000) as f32 * 0.02;
+            a.trial_metrics[i] = qd::TrialMetrics {
+                ground_contact: ((h >> 10) % 6) as f32 / 6.0 + 0.05,
+                gait_frequency: ((h >> 13) % 8) as f32 * 0.75 + 0.1,
+                mean_height: ((h >> 16) % 6) as f32 * 0.3 + 0.05,
+                feet: ((h >> 19) % 5) as f32,
+                ..Default::default()
+            };
+        }
+        let all: Vec<usize> = (0..a.config.population).collect();
+        a.archive_slots(&all);
+        for k in 0..5 {
+            a.reseed.push(a.population.creature(k));
+        }
+        let mut b = a.clone();
+        let slots: Vec<usize> = (0..a.config.population).rev().step_by(1).collect();
+        a.breed_slots(&slots).unwrap();
+        breed_slots_by_creature(&mut b, &slots);
+        assert_eq!(a.population.nodes, b.population.nodes);
+        assert_eq!(a.population.bones, b.population.bones);
+        assert_eq!(a.population.muscles, b.population.muscles);
+        assert_eq!(a.population.genomes.len(), b.population.genomes.len());
+        for (x, y) in a.population.genomes.iter().zip(&b.population.genomes) {
+            assert_eq!(
+                (x.node_start, x.node_count, x.bone_start, x.bone_count),
+                (y.node_start, y.node_count, y.bone_start, y.bone_count)
+            );
+            assert_eq!(
+                (x.muscle_start, x.muscle_count, x.id),
+                (y.muscle_start, y.muscle_count, y.id)
+            );
+            assert_eq!(x.mutability, y.mutability);
+        }
+        assert_eq!(a.candidate_emitters, b.candidate_emitters);
+        assert_eq!(a.candidate_parent_ids, b.candidate_parent_ids);
+        assert_eq!(a.protected_until, b.protected_until);
     }
 }
