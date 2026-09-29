@@ -30,7 +30,7 @@ Each effect changes the physics and never the objective. Levels are in `src/envi
 - Mud lowers the contact floor by a sink depth. The sink scales the normal push, the friction budget and a horizontal drag. A node clear of the surface pays nothing.
 - Gaps cut periodic pits of depth 2 m. Hurdles raise periodic steps every 3 m. Earthquake gives every creature its own bumps, with a phase and height derived from its id, so no gait can memorize one pattern. Ground roughness adds fixed bumps.
 - Water shallows add drag and buoyancy. Ice patches lower friction on periodic stretches.
-- Seasons rotate one effect one level every 20, 10 or 5 generations.
+- Autochange environment raises one effect one level every 100, 50 or 20 generations, most benign first, and never lowers one.
 
 `physics::ground` combines bumps, per-creature phase, slope, pits and steps in one sample. Constants are in `physics.rs`, `physics2.rs` and the packed kernel parameters.
 

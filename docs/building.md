@@ -82,3 +82,4 @@ While paused the game window shows "Paused for a developer measurement, resumes 
 - CUDA: `EVOLUTION_CUDA`, `EVOLUTION_NVRTC`, `EVOLUTION_CUDA_VERBOSE` (see the CUDA section).
 - Measuring: `EVOLUTION_STAGE_LOG=<path>` writes one CSV row per generation. `EVOLUTION_PROFILE_BREED` prints archive and breeding timings.
 - Benchmarks, tests and screenshots: `EVOLUTION_BENCH_*` drives the graphical benchmark mode (generations, duration, warm-up). `EVOLUTION_TEST_*` sizes the ignored GPU tests. `EVOLUTION_SMOKE_*` starts short screenshot runs, and their windows show on the desktop.
+- Unattended runs: `EVOLUTION_AUTOSTART="Autochange environment=1"` sets the listed effect levels (the list may be empty), turns autosave on every 10 generations and starts evolving continuously.

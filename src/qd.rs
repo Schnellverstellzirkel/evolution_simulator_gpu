@@ -33,7 +33,9 @@ pub(crate) const CMA_LIMIT: usize = 96;
 //     format changed).
 // 39: muscles have mass (a fixed part plus a part per metre), and an elite
 //     remembers whether its score came from its fine check.
-pub const VERSION: u32 = 39;
+// 40: seasons became autochange environment (renamed settings fields, a
+//     ladder that only adds effects).
+pub const VERSION: u32 = 40;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and

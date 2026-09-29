@@ -135,8 +135,8 @@ pub enum EventKind {
     Opened,
     /// The player changed the world.
     World,
-    /// The seasons changed the world.
-    Season,
+    /// Autochange changed the world.
+    Autochange,
     /// A meteor strike or an extinction.
     Catastrophe,
     /// An undo brought creatures back.
@@ -163,7 +163,7 @@ fn log_event(events: &mut Arc<Vec<Event>>, generation: u32, kind: EventKind, tex
 pub fn world_change_text(before: &Config, after: &Config) -> Option<String> {
     let parts: Vec<String> = crate::environment::EFFECTS
         .iter()
-        .filter(|effect| effect.name != "Seasons")
+        .filter(|effect| effect.name != "Autochange environment")
         .filter(|effect| effect.level(before) != effect.level(after))
         .map(|effect| {
             format!(
@@ -187,15 +187,15 @@ fn log_world_change(
     if !before.physics_differs(after) {
         return;
     }
-    let season = after.seasons > 0 && after.season_step != before.season_step;
+    let autochange = after.autochange > 0 && after.autochange_step != before.autochange_step;
     let change = world_change_text(before, after).unwrap_or_else(|| "The world changed".into());
     let text = if retesting > 0 {
         format!("{change}. Re-testing {retesting} kept creatures in the new world.")
     } else {
         format!("{change}.")
     };
-    let kind = if season {
-        EventKind::Season
+    let kind = if autochange {
+        EventKind::Autochange
     } else {
         EventKind::World
     };

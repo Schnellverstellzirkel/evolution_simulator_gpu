@@ -70,7 +70,7 @@ fn band(painter: &Painter, line: &[Pos2], depth: f32, top: Color32, bottom: Colo
 }
 
 /// Overlays on the sky, drawn before the ground: warmth, haze, wind streaks
-/// and a season tint.
+/// and a tint for how far autochange has gone.
 pub fn sky(painter: &Painter, rect: Rect, cfg: &Config, time: f32) {
     let heat = amount(cfg, "Heat wave");
     if heat > 0.0 {
@@ -128,10 +128,10 @@ pub fn sky(painter: &Painter, rect: Rect, cfg: &Config, time: f32) {
             );
         }
     }
-    if cfg.seasons > 0 {
-        // The world walks through the seasons' rotation; tint by quarter lap.
-        let lap = crate::environment::season_rotation().len().max(4);
-        let quarter = (usize::from(cfg.season_step) % lap) * 4 / lap;
+    if cfg.autochange > 0 {
+        // Tint by how far up the autochange ladder the world has climbed.
+        let lap = crate::environment::autochange_ladder().len().max(4);
+        let quarter = (usize::from(cfg.autochange_step).min(lap - 1)) * 4 / lap;
         let tint = [
             (120, 200, 90),
             (255, 220, 90),

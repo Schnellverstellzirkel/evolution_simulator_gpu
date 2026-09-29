@@ -13,7 +13,7 @@
 | `creature_kernel` | GPU data layout (`LaneBatch`, `Params`, `GpuResult`) and the CUDA source builders |
 | `vk_engine`, `cuda_engine`, `gpu` | The Vulkan and CUDA backends and the evaluation front end |
 | `engine`, `scheduler` | Device threads, replays, GPU failure and out-of-memory recovery, work units, contender checks |
-| `environment` | Environment effects, presets and the seasons rotation |
+| `environment` | Environment effects, presets and the autochange ladder |
 | `storage` | The `Experiment`: islands, emitters, breeding, migration, contender checks, catastrophes, history, saves |
 | `worker` | The background evolution thread and the snapshot the UI draws |
 | `ui`, `dev_pause` | The egui dashboard and playback. The developer pause used by measurement tools |

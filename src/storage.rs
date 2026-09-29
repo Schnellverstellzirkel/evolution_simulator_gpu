@@ -1214,7 +1214,7 @@ impl Experiment {
         let mut cfg = self.pending.clone().unwrap_or_else(|| self.config.clone());
         cfg.validate()?;
         let generation = self.generation + 1;
-        crate::environment::advance_seasons(&mut cfg, generation);
+        crate::environment::advance_autochange(&mut cfg, generation);
         let world_changed = fitness_context_changed(&self.config, &cfg);
         if world_changed {
             self.reset_search_context();
@@ -1916,7 +1916,7 @@ impl Experiment {
             cfg.population == self.config.population,
             "Population changes need a new experiment"
         );
-        crate::environment::advance_seasons(&mut cfg, self.generation);
+        crate::environment::advance_autochange(&mut cfg, self.generation);
         let world_changed = fitness_context_changed(&self.config, &cfg);
         if world_changed {
             self.reset_search_context();
@@ -1957,9 +1957,9 @@ impl Experiment {
     }
     fn update_config_at(&mut self, mut cfg: Config, now: bool) -> Result<()> {
         cfg.validate()?;
-        // The season step advances in the worker, so a settings update must
+        // The autochange step advances in the worker, so a settings update must
         // never rewind a checkpoint-carrying counter to its stale copy.
-        cfg.season_step = cfg.season_step.max(self.config.season_step);
+        cfg.autochange_step = cfg.autochange_step.max(self.config.autochange_step);
         ensure!(
             cfg.population == self.config.population
                 && cfg.seed == self.config.seed
@@ -2884,23 +2884,23 @@ mod migration_tests {
     }
 
     #[test]
-    fn checkpoint_round_trip_keeps_the_season_step() {
+    fn checkpoint_round_trip_keeps_the_autochange_step() {
         let config = Config {
             population: 2,
             random_seed: false,
-            seasons: 2,
+            autochange: 2,
             ..Config::default()
         };
         let mut experiment = Experiment::new(config).unwrap();
-        experiment.config.season_step = 7;
+        experiment.config.autochange_step = 7;
         experiment.config.wind = crate::environment::WIND[2];
         let checkpoint =
-            std::env::temp_dir().join(format!("evolution-season-step-{}.evo", std::process::id()));
+            std::env::temp_dir().join(format!("evolution-autochange-step-{}.evo", std::process::id()));
         save(&checkpoint, &experiment).unwrap();
         let loaded = load(&checkpoint).unwrap();
         let _ = std::fs::remove_file(checkpoint);
-        assert_eq!(loaded.config.seasons, 2);
-        assert_eq!(loaded.config.season_step, 7);
+        assert_eq!(loaded.config.autochange, 2);
+        assert_eq!(loaded.config.autochange_step, 7);
         assert_eq!(loaded.config.wind, experiment.config.wind);
     }
 
@@ -2934,12 +2934,12 @@ mod migration_tests {
         );
     }
 
-    /// The Seasons button at each speed: set while a generation runs, the
+    /// The autochange button at each speed: set while a generation runs, the
     /// level must survive the generation boundary and keep stepping.
     #[test]
-    fn a_seasons_level_set_mid_generation_stays_and_steps() {
+    fn an_autochange_level_set_mid_generation_stays_and_steps() {
         for level in 1u8..=3 {
-            let interval = crate::environment::SEASON_INTERVALS[usize::from(level)];
+            let interval = crate::environment::AUTOCHANGE_INTERVALS[usize::from(level)];
             let config = Config {
                 population: 4,
                 random_seed: false,
@@ -2954,26 +2954,26 @@ mod migration_tests {
                 if generation == 2 {
                     // The panel sends its whole config, as the game does.
                     let mut cfg = experiment.config.clone();
-                    cfg.seasons = level;
+                    cfg.autochange = level;
                     experiment.update_config(cfg).unwrap();
                 }
                 experiment.prepare_next_batch().unwrap();
                 if generation >= 2 {
-                    assert_eq!(experiment.config.seasons, level, "generation {generation}");
+                    assert_eq!(experiment.config.autochange, level, "generation {generation}");
                 }
                 assert!(experiment.pending.is_none());
             }
-            assert!(experiment.config.season_step >= 1, "level {level}");
+            assert!(experiment.config.autochange_step >= 1, "level {level}");
         }
     }
 
     #[test]
-    fn generation_boundaries_advance_the_seasons() {
-        let interval = crate::environment::SEASON_INTERVALS[2];
+    fn generation_boundaries_advance_the_autochange() {
+        let interval = crate::environment::AUTOCHANGE_INTERVALS[2];
         let config = Config {
             population: 4,
             random_seed: false,
-            seasons: 2,
+            autochange: 2,
             ..Config::default()
         };
         let mut experiment = Experiment::new(config).unwrap();
@@ -2985,10 +2985,10 @@ mod migration_tests {
             experiment.prepare_next_batch().unwrap();
             assert_eq!(experiment.generation, generation);
             if generation < interval {
-                assert_eq!(experiment.config.season_step, 0);
+                assert_eq!(experiment.config.autochange_step, 0);
             }
         }
-        assert_eq!(experiment.config.season_step, 1);
+        assert_eq!(experiment.config.autochange_step, 1);
         assert_eq!(experiment.config.wind, crate::environment::WIND[1]);
     }
 }

@@ -587,3 +587,65 @@ mod tests {
         assert!(applied >= 120, "applied to {applied} of 160");
     }
 }
+
+/// Turns bone `j`'s branch about its pivot by `angle` (counterclockwise),
+/// lifting the body if a node would go below the ground.
+fn turn_branch(c: &mut Creature, j: usize, angle: f32) {
+    let pivot = c.nodes[c.bones[j].a as usize];
+    let (sin, cos) = angle.sin_cos();
+    for n in branch_nodes(c, &branch(c, j)) {
+        let (dx, dy) = (c.nodes[n].x - pivot.x, c.nodes[n].y - pivot.y);
+        c.nodes[n].x = pivot.x + dx * cos - dy * sin;
+        c.nodes[n].y = pivot.y + dx * sin + dy * cos;
+    }
+    let low = c.nodes.iter().map(|n| n.y).fold(0.0, f32::min);
+    for n in &mut c.nodes {
+        n.y -= low;
+    }
+}
+
+/// A joint (not the neck) and one of its stops, the stop as an angle from
+/// the starting pose.
+fn joint_and_stop(c: &Creature, rng: &mut Rng) -> Option<(usize, f32)> {
+    let joints: Vec<usize> = (0..c.bones.len())
+        .filter(|&j| !is_neck(c, j) && c.bones[j].max_angle - c.bones[j].min_angle > 0.05)
+        .collect();
+    let j = *joints.get(rng.index(joints.len().max(1)))?;
+    let b = c.bones[j];
+    Some((j, if rng.unit() < 0.5 { b.min_angle } else { b.max_angle }))
+}
+
+/// Starts a joint near one of its stops and measures its range from there, so
+/// the stops stay where they were and only the starting pose changes. The
+/// best elites of a 120-generation save ran with their joints 0.3 to 0.6 rad
+/// from the pose their genome starts in, so every trial began by folding.
+pub(crate) fn pose_joint_at_stop(
+    c: &mut Creature,
+    _cfg: &Config,
+    rng: &mut Rng,
+    _cx: &Context,
+) -> bool {
+    let Some((j, stop)) = joint_and_stop(c, rng) else {
+        return false;
+    };
+    let angle = stop * rng.range(0.5, 1.0);
+    turn_branch(c, j, angle);
+    c.bones[j].min_angle -= angle;
+    c.bones[j].max_angle -= angle;
+    true
+}
+
+/// Sets a joint against one of its stops and leaves it only a small flex back
+/// from it, so the skeleton holds a braced shape by itself. The best elites of
+/// a 120-generation save held 40 to 80% of their joints against a stop with
+/// muscles (as much steady force as oscillating force) and hopped as one
+/// rigid frame; mid-ranked elites held 8 to 18% and slid.
+pub(crate) fn brace_joint(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
+    let Some((j, stop)) = joint_and_stop(c, rng) else {
+        return false;
+    };
+    turn_branch(c, j, stop);
+    let flex = rng.range(0.03, 0.2);
+    (c.bones[j].min_angle, c.bones[j].max_angle) = if stop > 0.0 { (-flex, 0.0) } else { (0.0, flex) };
+    true
+}

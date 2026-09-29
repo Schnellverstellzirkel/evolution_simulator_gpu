@@ -1604,8 +1604,17 @@ impl App {
             initial_config.throughput = false;
         }
         // Screenshot runs: EVOLUTION_SMOKE_WORLD="Wind=2,Mud=3" starts the
-        // game with those effect levels.
-        if let Ok(list) = std::env::var("EVOLUTION_SMOKE_WORLD") {
+        // game with those effect levels. EVOLUTION_AUTOSTART takes the same
+        // list, turns autosave on and starts evolving continuously, for an
+        // unattended run.
+        let autostart = std::env::var("EVOLUTION_AUTOSTART").ok();
+        if autostart.is_some() {
+            initial_config.checkpoint_interval = AUTOSAVE_INTERVAL;
+        }
+        for list in [std::env::var("EVOLUTION_SMOKE_WORLD").ok(), autostart.clone()]
+            .into_iter()
+            .flatten()
+        {
             for pair in list.split(',') {
                 if let Some((name, level)) = pair.split_once('=')
                     && let Ok(level) = level.trim().parse::<usize>()
@@ -1617,7 +1626,8 @@ impl App {
                 }
             }
         }
-        let smoke_start_pending = std::env::var_os("EVOLUTION_SMOKE_POPULATION").is_some();
+        let smoke_start_pending =
+            std::env::var_os("EVOLUTION_SMOKE_POPULATION").is_some() || autostart.is_some();
         // Developer screenshots: EVOLUTION_SMOKE_DARK=1 opens in the dark
         // theme, EVOLUTION_SMOKE_ZOOM=0.75 lays a 1440 px window out like a
         // 1920 px one.
@@ -2019,7 +2029,7 @@ impl App {
                     .clicked()
             {
                 for effect in &crate::environment::EFFECTS {
-                    if effect.name != "Seasons" {
+                    if effect.name != "Autochange environment" {
                         effect.set_level(&mut self.config, effect.calm);
                     }
                 }
@@ -2044,7 +2054,7 @@ impl App {
         for (i, effect) in crate::environment::EFFECTS
             .iter()
             .enumerate()
-            .filter(|(_, effect)| effect.name != "Seasons")
+            .filter(|(_, effect)| effect.name != "Autochange environment")
             .filter(|(_, effect)| effect.level(&self.config) != effect.calm)
         {
             ui.horizontal_wrapped(|ui| {
@@ -2100,7 +2110,7 @@ impl App {
             .small()
             .color(theme.muted),
         );
-        // One grid for every effect and the seasons, so the names share a
+        // One grid for every effect and the autochange, so the names share a
         // column and the level buttons start on one line. Rows are the
         // height of a level button.
         ui.scope(|ui| {
@@ -2111,17 +2121,17 @@ impl App {
                 .show(ui, |ui| {
                     for effect in crate::environment::EFFECTS
                         .iter()
-                        .filter(|effect| effect.name != "Seasons")
+                        .filter(|effect| effect.name != "Autochange environment")
                     {
                         if effect_row(ui, effect, &mut self.config, live.as_ref(), theme) {
                             world_changed = true;
                         }
                         ui.end_row();
                     }
-                    if let Some(seasons) = crate::environment::EFFECTS
+                    if let Some(autochange) = crate::environment::EFFECTS
                         .iter()
-                        .find(|effect| effect.name == "Seasons")
-                        && effect_row(ui, seasons, &mut self.config, None, theme)
+                        .find(|effect| effect.name == "Autochange environment")
+                        && effect_row(ui, autochange, &mut self.config, None, theme)
                     {
                         world_changed = true;
                     }
@@ -2129,7 +2139,7 @@ impl App {
                 });
         });
         let generation = self.snapshot.as_ref().map_or(0, |s| s.generation);
-        if let Some(forecast) = season_forecast(&self.config, generation) {
+        if let Some(forecast) = autochange_forecast(&self.config, generation) {
             ui.label(RichText::new(forecast).small().color(theme.muted));
         }
         let fossils = self.snapshot.as_ref().map_or(0, |s| s.fossils);
@@ -2929,8 +2939,8 @@ impl App {
             for mark in world_marks(&s.events, &s.history) {
                 plot.vline(
                     VLine::new(
-                        if mark.season {
-                            "Season"
+                        if mark.autochange {
+                            "Autochange"
                         } else {
                             "World change"
                         },
@@ -3372,7 +3382,7 @@ impl App {
         }
     }
     /// The lines of the event feed, newest first: the worker's events (world
-    /// changes, seasons, catastrophes, saves) and the records in the history.
+    /// changes, autochange, catastrophes, saves) and the records in the history.
     fn feed_items(&self) -> Vec<FeedItem> {
         let Some(snapshot) = &self.snapshot else {
             return Vec::new();
@@ -3388,7 +3398,7 @@ impl App {
                     theme.warn,
                     (snapshot.fossils > 0).then_some(FeedAction::Undo),
                 ),
-                EventKind::World | EventKind::Season => {
+                EventKind::World | EventKind::Autochange => {
                     if let Some(before) = event.generation.checked_sub(1).and_then(row) {
                         if let Some(after) = row(event.generation) {
                             text.push_str(&format!(
@@ -3404,8 +3414,8 @@ impl App {
                             ));
                         }
                     }
-                    if event.kind == EventKind::Season {
-                        text.insert_str(0, "Season: ");
+                    if event.kind == EventKind::Autochange {
+                        text.insert_str(0, "Autochange: ");
                     }
                     (theme.accent, None)
                 }
@@ -4817,7 +4827,7 @@ impl eframe::App for App {
             } else if self.config_sent.is_none_or(|sent| {
                 // A click is acknowledged once the worker's world shows it.
                 // A snapshot published before the worker read the click must
-                // not put the panel back (Seasons would flip to Off), so wait
+                // not put the panel back (autochange would flip to Off), so wait
                 // for the match, and give up after a while.
                 let acknowledged = worlds_match(
                     &next.pending.clone().unwrap_or_else(|| next.config.clone()),
@@ -4829,7 +4839,7 @@ impl eframe::App for App {
                 .as_ref()
                 .is_none_or(|old| old.epoch == next.epoch)
             {
-                // The worker owns the world: seasons advance it, and a change
+                // The worker owns the world: autochange advance it, and a change
                 // waits in `pending` until the next generation. The panel
                 // shows the world the player asked for.
                 self.config = next.pending.clone().unwrap_or_else(|| next.config.clone());
@@ -5619,17 +5629,17 @@ fn origin_words(emitter: crate::qd::Emitter) -> &'static str {
         crate::qd::Emitter::Restart => "as a new random body",
     }
 }
-/// The next season step while seasons are on: "Next change at generation 60:
-/// Wind to Breeze". The worker applies step `season_step` when a generation
+/// The next autochange step while autochange is on: "Next change at generation 60:
+/// Wind to Breeze". The worker applies step `autochange_step` when a generation
 /// that is a multiple of the interval begins.
-fn season_forecast(config: &Config, generation: u32) -> Option<String> {
-    let interval = *crate::environment::SEASON_INTERVALS.get(usize::from(config.seasons))?;
+fn autochange_forecast(config: &Config, generation: u32) -> Option<String> {
+    let interval = *crate::environment::AUTOCHANGE_INTERVALS.get(usize::from(config.autochange))?;
     if interval == 0 {
         return None;
     }
     let at = (generation / interval + 1) * interval;
-    let rotation = crate::environment::season_rotation();
-    let &(index, level) = rotation.get(usize::from(config.season_step) % rotation.len())?;
+    let ladder = crate::environment::autochange_ladder();
+    let &(index, level) = ladder.get(usize::from(config.autochange_step))?;
     let effect = &crate::environment::EFFECTS[index];
     Some(format!(
         "Next change at generation {at}: {} to {}",
@@ -5648,7 +5658,7 @@ fn follows_champion(pinned: bool, showing: Option<u64>, champion: Option<u64>) -
 struct WorldMark {
     generation: u32,
     label: String,
-    season: bool,
+    autochange: bool,
 }
 /// A chart label cut to fit beside its line.
 fn short_label(label: &str) -> String {
@@ -5665,11 +5675,11 @@ fn short_label(label: &str) -> String {
 fn world_marks(events: &[crate::worker::Event], history: &[Stats]) -> Vec<WorldMark> {
     let mut marks: Vec<WorldMark> = events
         .iter()
-        .filter(|e| matches!(e.kind, EventKind::World | EventKind::Season))
+        .filter(|e| matches!(e.kind, EventKind::World | EventKind::Autochange))
         .map(|e| WorldMark {
             generation: e.generation,
             label: e.text.split(". ").next().unwrap_or(&e.text).to_owned(),
-            season: e.kind == EventKind::Season,
+            autochange: e.kind == EventKind::Autochange,
         })
         .collect();
     for pair in history.windows(2) {
@@ -5681,15 +5691,15 @@ fn world_marks(events: &[crate::worker::Event], history: &[Stats]) -> Vec<WorldM
                 generation,
                 label: crate::worker::world_change_text(&pair[0].config, &pair[1].config)
                     .unwrap_or_else(|| "The world changed".into()),
-                season: pair[1].config.season_step != pair[0].config.season_step
-                    && pair[1].config.seasons > 0,
+                autochange: pair[1].config.autochange_step != pair[0].config.autochange_step
+                    && pair[1].config.autochange > 0,
             });
         }
     }
     marks.sort_by_key(|m| m.generation);
     marks
 }
-/// Whether two configs have every effect, including Seasons, at the same level.
+/// Whether two configs have every effect, including autochange, at the same level.
 fn worlds_match(a: &Config, b: &Config) -> bool {
     crate::environment::EFFECTS
         .iter()
@@ -5723,11 +5733,11 @@ fn generation_progress(
         format!("{percent:.0}% done")
     }
 }
-/// Whether every effect except the seasons schedule sits at its calm level.
+/// Whether every effect except the autochange schedule sits at its calm level.
 fn world_is_calm(config: &Config) -> bool {
     crate::environment::EFFECTS
         .iter()
-        .filter(|effect| effect.name != "Seasons")
+        .filter(|effect| effect.name != "Autochange environment")
         .all(|effect| effect.level(config) == effect.calm)
 }
 /// An effect and its level in a few words: "Mud: Deep", or just "Heat wave"
@@ -5745,7 +5755,7 @@ fn effect_text(effect: &crate::environment::Effect, config: &Config) -> String {
 fn world_summary(config: &Config) -> String {
     let parts: Vec<String> = crate::environment::EFFECTS
         .iter()
-        .filter(|effect| effect.name != "Seasons")
+        .filter(|effect| effect.name != "Autochange environment")
         .filter(|effect| effect.level(config) != effect.calm)
         .map(|effect| effect_text(effect, config))
         .collect();
@@ -6558,21 +6568,21 @@ mod tests {
         assert!(!follows_champion(false, Some(7), None));
     }
     #[test]
-    fn the_season_forecast_names_the_next_step() {
+    fn the_autochange_forecast_names_the_next_step() {
         let mut config = Config {
-            seasons: 2,
+            autochange: 2,
             ..Config::default()
         };
         assert_eq!(
-            season_forecast(&config, 7).as_deref(),
-            Some("Next change at generation 10: Wind to Breeze")
+            autochange_forecast(&config, 7).as_deref(),
+            Some("Next change at generation 50: Air to Breezy")
         );
         assert_eq!(
-            season_forecast(&config, 10).as_deref(),
-            Some("Next change at generation 20: Wind to Breeze")
+            autochange_forecast(&config, 50).as_deref(),
+            Some("Next change at generation 100: Air to Breezy")
         );
-        config.seasons = 0;
-        assert_eq!(season_forecast(&config, 7), None);
+        config.autochange = 0;
+        assert_eq!(autochange_forecast(&config, 7), None);
     }
     #[test]
     fn the_generation_tile_tells_when_finalists_still_run() {

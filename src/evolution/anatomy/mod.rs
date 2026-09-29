@@ -95,6 +95,8 @@ pub(super) const OPERATORS: &[(&str, Operator)] = &[
     ("reflex_all_feet", controller::reflex_all_feet),
     ("reflex_reset_shift", controller::reflex_reset_shift),
     ("shift_gait_start", controller::shift_gait_start),
+    ("pose_joint_at_stop", junctions::pose_joint_at_stop),
+    ("brace_joint", junctions::brace_joint),
 ];
 
 /// Operators that share one pick slot: together they are as likely as one
