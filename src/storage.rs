@@ -42,6 +42,15 @@ fn cell_key(island: u64, niche: &qd::Niche) -> u64 {
     niche.hash(&mut hasher);
     hasher.finish()
 }
+/// Check key of a body plan in the morphology reserve.
+fn reserve_key(topology: &qd::Topology) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    u64::MAX.hash(&mut hasher);
+    topology.nodes.hash(&mut hasher);
+    topology.edges.hash(&mut hasher);
+    hasher.finish()
+}
 /// Nanoseconds of steady breeding spent planning, emitting offspring, and
 /// writing them into the population, since the last `take_breed_nanos`.
 pub static BREED_NANOS: [std::sync::atomic::AtomicU64; 3] =
@@ -471,7 +480,9 @@ impl Experiment {
     /// that no longer beats its cell is released unchecked: its final score
     /// would be the lower of both trials, so it is rejected either way.
     pub fn check_need(&self, i: usize, metric: &qd::EvaluationMetrics) -> CheckNeed {
-        match self.contender_reason(i, metric) {
+        let reason = self.contender_reason(i, metric);
+        CONTENDER_COUNTS[reason.0 as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match reason {
             (ContenderReason::Rejected, _) => CheckNeed::Release,
             (_, cell) => CheckNeed::Check { cell },
         }
@@ -586,7 +597,10 @@ impl Experiment {
                 .and_then(QdArchive::morphology_floor)
                 .is_none_or(|floor| metric.fitness > floor)
         {
-            return (ContenderReason::Reserve, None);
+            // The reserve keeps one elite per body plan, so contenders of
+            // one plan share a check like contenders of one archive cell.
+            let topology = qd::topology_of_population(&self.population, i);
+            return (ContenderReason::Reserve, Some(reserve_key(&topology)));
         }
         (ContenderReason::Rejected, None)
     }
