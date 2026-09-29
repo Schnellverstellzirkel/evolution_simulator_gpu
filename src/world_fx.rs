@@ -361,12 +361,12 @@ pub fn ground(
         let mut shine: Vec<(Pos2, f32)> = Vec::new();
         for p in &line {
             let weight = crate::physics::ice(world_x(p.x));
-            let top = alpha((215, 240, 255), (0.40 + 0.50 * frost) * weight);
+            let top = alpha((130, 205, 250), (0.65 + 0.30 * frost) * weight);
             for (pos, color) in [
                 (*p, top),
                 (
-                    *p + Vec2::new(0.0, 14.0),
-                    alpha((205, 235, 255), 0.03 * weight),
+                    *p + Vec2::new(0.0, 24.0),
+                    alpha((80, 160, 235), 0.30 * weight),
                 ),
             ] {
                 mesh.vertices.push(Vertex {
@@ -389,6 +389,15 @@ pub fn ground(
                 painter.line_segment(
                     [pair[0].0, pair[1].0],
                     Stroke::new(1.5, alpha((255, 255, 255), (0.25 + 0.5 * frost) * weight)),
+                );
+                // A dark blue edge along the surface keeps the patch readable
+                // against the pale sky and the green ground.
+                painter.line_segment(
+                    [
+                        pair[0].0 - Vec2::new(0.0, 1.0),
+                        pair[1].0 - Vec2::new(0.0, 1.0),
+                    ],
+                    Stroke::new(2.5, alpha((40, 100, 190), 0.85 * weight)),
                 );
             }
         }
