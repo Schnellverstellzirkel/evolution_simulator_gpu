@@ -929,3 +929,9 @@ The design, if the archive stage becomes the wall after the breeding cost falls:
 - The host side then needs two input kinds in `archive_slots` (full metrics and compact records) and a compact path in `record_result`. The check logic (`contender`, `check_need`) already runs only on contenders.
 
 Not built: the measured ceiling is small and the checks are the larger GPU cost. Build it if breeding falls by half and archive is then the largest serial stage.
+
+## Breeding: children packed into batches, not one Creature each (2026-09-29, claude/speed)
+
+`emit_offspring_batches` emits the children of each run of 4,096 slots into a `ChildBatch` (three gene vectors and a small meta list): each child is canonicalized, copied into the batch and freed at once, so malloc reuses the same blocks and no child outlives its copy. `Population::append_batches` copies the batches into the arenas in parallel. Reseeded elites take the first slots as before. The operators still build one `Creature` per child inside `offspring`, so the allocation of the clone and mutation remains; only the long-lived per-child vectors and the extra passes are gone. Test `batched_breeding_matches_creature_by_creature_breeding` runs both paths on a cloned 10,000-creature experiment (reseed elites and reversed slot order included) and requires identical arenas, genomes, emitters, parent ids and protection.
+
+`worker_profile`, 1M creatures, units of 350k, 8 threads, load average about 17: breeding 1.03 s before, 0.88 s after (emit 0.48 to 0.60 s, write 0.32 to 0.08 s; emit now includes the copy into the batch). About 15% of breeding, CPU only; no GPU end-to-end run was taken for this step.

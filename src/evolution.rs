@@ -577,6 +577,72 @@ impl Population {
             at = [at[0] + n, at[1] + b, at[2] + m];
         }
     }
+    /// `replace_many` for children packed into batches: batch after batch
+    /// go to `slots` in order, and the arenas end up exactly as after
+    /// `replace_many` with the same children.
+    pub fn append_batches(&mut self, slots: &[usize], batches: Vec<ChildBatch>) {
+        let sizes: Vec<[usize; 3]> = batches
+            .iter()
+            .map(|b| [b.nodes.len(), b.bones.len(), b.muscles.len()])
+            .collect();
+        let added = sizes
+            .iter()
+            .fold([0; 3], |t, s| [t[0] + s[0], t[1] + s[1], t[2] + s[2]]);
+        self.nodes.reserve(added[0]);
+        self.bones.reserve(added[1]);
+        self.muscles.reserve(added[2]);
+        let node_parts = split(
+            &mut self.nodes.spare_capacity_mut()[..added[0]],
+            sizes.iter().map(|s| s[0]),
+        );
+        let bone_parts = split(
+            &mut self.bones.spare_capacity_mut()[..added[1]],
+            sizes.iter().map(|s| s[1]),
+        );
+        let muscle_parts = split(
+            &mut self.muscles.spare_capacity_mut()[..added[2]],
+            sizes.iter().map(|s| s[2]),
+        );
+        batches
+            .par_iter()
+            .zip(node_parts)
+            .zip(bone_parts)
+            .zip(muscle_parts)
+            .for_each(|(((batch, nodes), bones), muscles)| {
+                for (dst, &src) in nodes.iter_mut().zip(&batch.nodes) {
+                    dst.write(src);
+                }
+                for (dst, &src) in bones.iter_mut().zip(&batch.bones) {
+                    dst.write(src);
+                }
+                for (dst, &src) in muscles.iter_mut().zip(&batch.muscles) {
+                    dst.write(src);
+                }
+            });
+        let mut at = [self.nodes.len(), self.bones.len(), self.muscles.len()];
+        // SAFETY: the parts cover the first `added` spare elements of each
+        // arena, and every batch wrote all of its part.
+        unsafe {
+            self.nodes.set_len(at[0] + added[0]);
+            self.bones.set_len(at[1] + added[1]);
+            self.muscles.set_len(at[2] + added[2]);
+        }
+        let metas = batches.iter().flat_map(|b| &b.meta);
+        for (&slot, meta) in slots.iter().zip(metas) {
+            let [n, b, m] = meta.counts.map(|c| c as usize);
+            self.genomes[slot] = Genome {
+                node_start: at[0],
+                node_count: n,
+                bone_start: at[1],
+                bone_count: b,
+                muscle_start: at[2],
+                muscle_count: m,
+                id: meta.id,
+                mutability: meta.mutability,
+            };
+            at = [at[0] + n, at[1] + b, at[2] + m];
+        }
+    }
     /// Copies `indices` into a standalone population; creature `k` of the
     /// result is `indices[k]` of `self`.
     pub fn subset(&self, indices: &[usize]) -> Population {
@@ -1725,6 +1791,87 @@ pub fn emit_offspring(
                 &mut rng,
                 id,
             )
+        })
+        .collect()
+}
+
+/// Children of one run of slots, genes packed into three vectors. A batch
+/// holds a few thousand children in three allocations, where one `Creature`
+/// per child took three each.
+#[derive(Default)]
+pub struct ChildBatch {
+    nodes: Vec<NodeGene>,
+    bones: Vec<Bone>,
+    muscles: Vec<Muscle>,
+    meta: Vec<ChildMeta>,
+}
+
+struct ChildMeta {
+    id: u64,
+    mutability: f32,
+    counts: [u32; 3],
+}
+
+impl ChildBatch {
+    /// Puts the child's bones in canonical order and appends it; the child's
+    /// own vectors are freed right away, while still in cache.
+    pub fn push(&mut self, mut child: Creature) {
+        canonicalize_bone_order(&mut child);
+        self.meta.push(ChildMeta {
+            id: child.id,
+            mutability: child.mutability,
+            counts: [
+                child.nodes.len() as u32,
+                child.bones.len() as u32,
+                child.muscles.len() as u32,
+            ],
+        });
+        self.nodes.extend_from_slice(&child.nodes);
+        self.bones.extend_from_slice(&child.bones);
+        self.muscles.extend_from_slice(&child.muscles);
+    }
+}
+
+/// `emit_offspring` that packs the children of each run of slots into a
+/// `ChildBatch` as it goes, so no child stays alive after it is copied.
+/// `Population::append_batches` writes the same arenas `replace_many` does.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_offspring_batches(
+    archive: &[QdArchive],
+    reserve: &QdArchive,
+    cma_emitters: &[CmaEmitter],
+    plans: &[CandidatePlan],
+    slots: &[usize],
+    cfg: &Config,
+    generation: u32,
+    round: u64,
+) -> Vec<ChildBatch> {
+    const CHUNK: usize = 4096;
+    let seed = cfg.seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x5bd1_e995;
+    plans
+        .par_chunks(CHUNK)
+        .zip(slots.par_chunks(CHUNK))
+        .map(|(plans, slots)| {
+            let mut batch = ChildBatch {
+                nodes: Vec::with_capacity(plans.len() * 8),
+                bones: Vec::with_capacity(plans.len() * 8),
+                muscles: Vec::with_capacity(plans.len() * 12),
+                meta: Vec::with_capacity(plans.len()),
+            };
+            for (&plan, &slot) in plans.iter().zip(slots) {
+                let mut rng = Rng::new(seed, generation, slot);
+                let id = (round << 32) ^ ((generation as u64) << 24) ^ slot as u64 ^ (1 << 63);
+                batch.push(offspring(
+                    &archive[slot % archive.len()],
+                    reserve,
+                    cma_emitters,
+                    plan,
+                    cfg,
+                    &mut rng,
+                    id,
+                ));
+            }
+            batch
         })
         .collect()
 }
