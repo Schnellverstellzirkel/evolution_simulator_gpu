@@ -140,10 +140,20 @@ fn zero_mutation_copies_genetics() {
             parent: Some(0),
             cma: None,
             mate: None,
+            reserve: false,
         })
         .collect();
     let slots: Vec<usize> = (0..8).collect();
-    let children = evolution::emit_offspring(&[archive], &[], &plans, &slots, &cfg, 0, 0);
+    let children = evolution::emit_offspring(
+        &[archive],
+        &Default::default(),
+        &[],
+        &plans,
+        &slots,
+        &cfg,
+        0,
+        0,
+    );
     for child in &children {
         assert_genomes_close(child, &parent);
     }
