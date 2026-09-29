@@ -42,6 +42,7 @@ struct Options {
     checks: bool,
     gpu: bool,
     seed_offset: u64,
+    save: Option<String>,
 }
 
 fn usage() -> &'static str {
@@ -54,6 +55,7 @@ fn options() -> Result<Options> {
     let mut checks = false;
     let mut gpu = false;
     let mut seed_offset = 0u64;
+    let mut save = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--checks" {
@@ -66,6 +68,8 @@ fn options() -> Result<Options> {
                 .context("--seed-offset needs a number")?
                 .parse()
                 .context("seed offset")?;
+        } else if arg == "--save" {
+            save = Some(args.next().context("--save needs a path")?);
         } else if arg == "--tag" {
             tag = Some(args.next().context("--tag needs a name")?);
         } else if arg == "--help" || arg == "-h" {
@@ -117,6 +121,7 @@ fn options() -> Result<Options> {
         checks,
         gpu,
         seed_offset,
+        save,
     })
 }
 
@@ -389,6 +394,9 @@ fn run_seed(
         println!("{scope} seed {seed} summary: best {best:.2} m, qd {qd:.2}, cells {cells}");
     } else {
         println!("{scope} seed {seed} summary: archive empty, qd {qd:.2}, cells {cells}");
+    }
+    if let Some(path) = &options.save {
+        evolution_simulator::storage::save(std::path::Path::new(path), &experiment)?;
     }
     print_body_mix(scope, seed, &top);
     print_robustness(scope, seed, &experiment);

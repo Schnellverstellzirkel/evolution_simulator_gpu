@@ -6,8 +6,8 @@
 //! and the search A/B). `EVOLUTION_ANATOMY=0` turns them off for
 //! comparisons, and a comma-separated list of operator names enables only
 //! those. The structural emitter picks uniformly among the classic
-//! operators, the enabled ones below and one slot that the `SHARED_SLOT`
-//! operators share, and tries up to four times when the chosen operator
+//! operators, the enabled ones below, one slot that the `SHARED_SLOT`
+//! operators share and one for the `CONTROLLER_SLOT` operators, and tries up to four times when the chosen operator
 //! does not apply to the body.
 //!
 //! Conventions every operator follows:
@@ -23,6 +23,7 @@
 use super::{Bone, Creature, Muscle, NodeGene, Rng, bone_point};
 use crate::config::Config;
 
+mod controller;
 mod extra;
 mod junctions;
 mod limbs;
@@ -83,6 +84,13 @@ pub(super) const OPERATORS: &[(&str, Operator)] = &[
     ("merge_leaf_bones", extra::merge_leaf_bones),
     ("leg_to_dragging_end", extra::leg_to_dragging_end),
     ("lift_dragging_end", extra::lift_dragging_end),
+    ("limb_stroke_scale", controller::limb_stroke_scale),
+    ("limb_posture_shift", controller::limb_posture_shift),
+    ("taper_limb_strength", controller::taper_limb_strength),
+    ("copy_limb_rhythm", controller::copy_limb_rhythm),
+    ("retune_muscle_pair", controller::retune_muscle_pair),
+    ("release_touchdown", controller::release_touchdown),
+    ("snap_limb_phases", controller::snap_limb_phases),
 ];
 
 /// Operators that share one pick slot: together they are as likely as one
@@ -106,6 +114,18 @@ pub(super) fn graft_from(c: &mut Creature, cfg: &Config, rng: &mut Rng, donor: &
     let cx = Context { donor: Some(donor) };
     limbs::graft_donor_limb(c, cfg, rng, &cx)
 }
+/// The controller operators (`controller.rs`) share a second pick slot. With a
+/// slot each they looked slightly worse in the search (9 seeds), so they
+/// share one as the gentle group does.
+const CONTROLLER_SLOT: &[&str] = &[
+    "limb_stroke_scale",
+    "limb_posture_shift",
+    "taper_limb_strength",
+    "copy_limb_rhythm",
+    "retune_muscle_pair",
+    "release_touchdown",
+    "snap_limb_phases",
+];
 
 /// The enabled operators, as indices into `OPERATORS`.
 pub(super) struct Enabled {
@@ -113,11 +133,13 @@ pub(super) struct Enabled {
     pub single: Vec<usize>,
     /// Operators that share one pick slot (`SHARED_SLOT`).
     pub shared: Vec<usize>,
+    /// Operators that share the second pick slot (`CONTROLLER_SLOT`).
+    pub controller: Vec<usize>,
 }
 
 impl Enabled {
     pub fn is_empty(&self) -> bool {
-        self.single.is_empty() && self.shared.is_empty()
+        self.single.is_empty() && self.shared.is_empty() && self.controller.is_empty()
     }
 }
 
@@ -128,10 +150,22 @@ pub(super) fn enabled() -> &'static Enabled {
 }
 
 fn split(indices: Vec<usize>) -> Enabled {
-    let (shared, single) = indices
-        .into_iter()
-        .partition(|&i| SHARED_SLOT.contains(&OPERATORS[i].0));
-    Enabled { single, shared }
+    let mut enabled = Enabled {
+        single: Vec::new(),
+        shared: Vec::new(),
+        controller: Vec::new(),
+    };
+    for i in indices {
+        let name = OPERATORS[i].0;
+        if SHARED_SLOT.contains(&name) {
+            enabled.shared.push(i);
+        } else if CONTROLLER_SLOT.contains(&name) {
+            enabled.controller.push(i);
+        } else {
+            enabled.single.push(i);
+        }
+    }
+    enabled
 }
 
 fn parse(value: Option<&str>) -> Vec<usize> {
@@ -445,7 +479,11 @@ mod tests {
         }
         let on = split(parse(None));
         assert_eq!(on.shared.len(), SHARED_SLOT.len());
-        assert_eq!(on.single.len() + on.shared.len(), OPERATORS.len());
+        assert_eq!(on.controller.len(), CONTROLLER_SLOT.len());
+        assert_eq!(
+            on.single.len() + on.shared.len() + on.controller.len(),
+            OPERATORS.len()
+        );
         assert!(on.single.windows(2).all(|w| w[0] < w[1]), "table order");
         let some = split(parse(Some("copy_limb,nudge_limb_phase")));
         assert_eq!((some.single.len(), some.shared.len()), (1, 1));
