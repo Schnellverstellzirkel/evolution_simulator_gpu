@@ -102,7 +102,7 @@ Measuring controls
 - `EVOLUTION_EXACT_COS`: exact cosine in the kernels instead of the polynomial, as a control for its rate and accuracy.
 - `EVOLUTION_NODE_SLIP`: contact details for the champion in `size_report`.
 - `EVOLUTION_PROFILE_BREED`: prints archive and breeding timings.
-- `EVOLUTION_STAGE_LOG`: appends one CSV row per generation.
+- `EVOLUTION_STAGE_LOG`: appends one CSV row per generation (stage seconds, end-to-end rate, check trials, check and device busy seconds, device idle seconds, mean nodes per body).
 - `EVOLUTION_DUMP_IR`: dumps the compiled kernel IR.
 - `EVOLUTION_STATS_PLAN`: `<checkpoint>:<rank>` adds the specialized kernel to `shader_stats`.
 

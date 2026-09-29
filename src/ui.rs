@@ -1755,10 +1755,15 @@ impl App {
         self.set_preview(creature, config);
         self.lineage.clear();
     }
-    /// The best elite of the newest finished generation, and the world it was
-    /// scored in.
+    /// The best elite in the archive now, and the world it is scored in. The
+    /// worker sends it as soon as a record is absorbed, mid-generation too;
+    /// the newest finished generation's best stands in until then.
     fn champion(&self) -> Option<(Creature, Config)> {
-        let stats = self.snapshot.as_ref()?.history.last()?;
+        let snapshot = self.snapshot.as_ref()?;
+        if let Some(live) = &snapshot.champion {
+            return Some((live.0.clone(), live.1.clone()));
+        }
+        let stats = snapshot.history.last()?;
         Some((stats.representatives.last()?.clone(), stats.config.clone()))
     }
     /// Keeps the theater (on the Overview and docked beside Ways of moving)
