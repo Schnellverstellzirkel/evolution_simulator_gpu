@@ -36,6 +36,9 @@ pub struct Finished {
 pub struct Recording {
     pub frames: Vec<Vec<[f32; 2]>>,
     pub result: GpuResult,
+    /// The muscle energy, muscle force and ground contact force the kernel
+    /// recorded with each frame (physics v2); None for physics v1.
+    pub forces: Option<crate::replay_forces::Forces>,
 }
 
 struct ReplayRequest {
@@ -79,14 +82,33 @@ pub fn record_on_gpu(creature: &Creature, cfg: &Config, timeout: Duration) -> Op
 /// evaluates, the CPU engine in a CPU-only game. A replay runs the full
 /// trial, without the early screen.
 pub fn replay(creature: &Creature, cfg: &Config) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
+    let (frames, result, _) = replay_forces(creature, cfg);
+    (frames, result)
+}
+
+/// `replay` with the muscle energy, muscle force and ground contact forces
+/// the engine recorded with each frame (physics v2; None under physics v1).
+pub fn replay_forces(
+    creature: &Creature,
+    cfg: &Config,
+) -> (
+    Vec<Vec<[f32; 2]>>,
+    GpuResult,
+    Option<crate::replay_forces::Forces>,
+) {
     let cfg = Config {
         screen: None,
         ..cfg.clone()
     };
     if let Some(recording) = record_on_gpu(creature, &cfg, Duration::from_secs(3)) {
-        return (recording.frames, recording.result);
+        return (recording.frames, recording.result, recording.forces);
     }
-    crate::cpu_engine::replay(creature, &cfg)
+    if crate::physics2::enabled() {
+        let (frames, result, forces) = crate::physics2::replay_forces(creature, &cfg);
+        return (frames, result, Some(forces));
+    }
+    let (frames, result) = crate::cpu_engine::replay(creature, &cfg);
+    (frames, result, None)
 }
 
 pub trait Engine: Send {
@@ -669,12 +691,11 @@ fn run_segments<D: SegmentDevice>(
             && let Some(request) = replays.as_ref().and_then(|rx| rx.try_recv().ok())
         {
             match start_recording(&mut engine, &request, step_range) {
-                Ok((ticket, nodes, stride, total)) => {
+                Ok((ticket, layout, total)) => {
                     recording = Some(InFlightReplay {
                         ticket,
                         reply: request.reply,
-                        nodes,
-                        stride,
+                        layout,
                         total,
                     });
                 }
@@ -784,12 +805,9 @@ fn run_segments<D: SegmentDevice>(
                     .is_some_and(|replay| replay.ticket == finished.ticket) =>
             {
                 let replay = recording.take().expect("a recording");
-                let _ = replay.reply.send(recorded(
-                    &finished,
-                    replay.nodes,
-                    replay.stride,
-                    replay.total,
-                ));
+                let _ = replay
+                    .reply
+                    .send(recorded(&finished, replay.layout, replay.total));
             }
             Ok(Some(finished)) => {
                 // Units on separate queues can finish out of order.
@@ -854,18 +872,29 @@ fn run_segments<D: SegmentDevice>(
 struct InFlightReplay {
     ticket: u64,
     reply: mpsc::Sender<Result<Recording, String>>,
-    nodes: usize,
-    stride: usize,
+    layout: FrameLayout,
     total: u32,
 }
 
+/// How one recorded frame is laid out (`creature_kernel::frame_stride`): the
+/// body's `nodes` positions at the start of `stride` slots, then, when
+/// `stride` is longer than `capacity`, an (energy, force) pair per muscle and
+/// a (normal, friction) contact force per node.
+#[derive(Clone, Copy)]
+struct FrameLayout {
+    nodes: usize,
+    capacity: usize,
+    muscles: usize,
+    stride: usize,
+}
+
 /// Packs a replay request's creature and queues its recording. Returns the
-/// device ticket, the body's node count and node stride, and the trial length.
+/// device ticket, the frame layout and the trial length.
 fn start_recording<D: SegmentDevice>(
     engine: &mut D,
     request: &ReplayRequest,
     step_range: u32,
-) -> Result<(u64, usize, usize, u32)> {
+) -> Result<(u64, FrameLayout, u32)> {
     let mut population = Population::default();
     population.push(request.creature.clone());
     let batches = if crate::physics2::enabled() {
@@ -878,17 +907,24 @@ fn start_recording<D: SegmentDevice>(
     let total = fidelity.settle() + request.cfg.steps();
     let batch = &batches[0];
     let ticket = engine.record(batch, &request.cfg, total, step_range)?;
-    Ok((ticket, request.creature.nodes.len(), batch.capacity, total))
+    let layout = FrameLayout {
+        nodes: request.creature.nodes.len(),
+        capacity: batch.capacity,
+        muscles: batch.info.first().map_or(0, |i| i[2] as usize),
+        stride: creature_kernel::frame_stride(batch),
+    };
+    Ok((ticket, layout, total))
 }
 
 /// The replay in a finished recording: one frame per step and one after the
 /// last, each with the body's node positions.
-fn recorded(
-    finished: &Completed,
-    nodes: usize,
-    stride: usize,
-    total: u32,
-) -> Result<Recording, String> {
+fn recorded(finished: &Completed, layout: FrameLayout, total: u32) -> Result<Recording, String> {
+    let FrameLayout {
+        nodes,
+        capacity,
+        muscles,
+        stride,
+    } = layout;
     let flat = finished
         .frames
         .as_ref()
@@ -905,7 +941,28 @@ fn recorded(
     let frames = (0..count)
         .map(|t| flat[t * stride..t * stride + nodes].to_vec())
         .collect();
-    Ok(Recording { frames, result })
+    let forces = (stride >= capacity + muscles + nodes && stride > capacity).then(|| {
+        let slot = |t: usize, k: usize| flat[t * stride + capacity + k];
+        crate::replay_forces::Forces {
+            energy: (0..count)
+                .map(|t| (0..muscles).map(|k| slot(t, k)[0]).collect())
+                .collect(),
+            muscle: (0..count)
+                .map(|t| (0..muscles).map(|k| slot(t, k)[1]).collect())
+                .collect(),
+            ground: (0..count)
+                .map(|t| (0..nodes).map(|i| slot(t, muscles + i)[0]).collect())
+                .collect(),
+            friction: (0..count)
+                .map(|t| (0..nodes).map(|i| slot(t, muscles + i)[1]).collect())
+                .collect(),
+        }
+    });
+    Ok(Recording {
+        frames,
+        result,
+        forces,
+    })
 }
 
 fn worker_budget(logical: usize) -> usize {
@@ -1454,8 +1511,11 @@ mod tests {
             let ticket = self.next;
             self.next += 1;
             let layout = vec![(batch.slots.clone(), batch.creatures.clone())];
-            self.in_flight
-                .push_back((ticket, layout, Some((batch.capacity, total))));
+            self.in_flight.push_back((
+                ticket,
+                layout,
+                Some((creature_kernel::frame_stride(batch), total)),
+            ));
             Ok(ticket)
         }
     }

@@ -197,3 +197,90 @@ fn each_backend_repeats_v2_scores() {
         }
     }
 }
+
+/// The muscle energy, muscle force and contact forces a v2 recording carries
+/// are the kernel's own values: they agree with the CPU prototype's replay of
+/// the same creature, and recording does not change the score.
+#[test]
+#[ignore = "requires a GPU; run explicitly on the workstation"]
+fn recorded_forces_match_the_prototype_on_each_backend() {
+    use evolution_simulator::{engine, physics2};
+    let cfg = Config {
+        population: 400,
+        random_seed: false,
+        duration: 1.5,
+        screen: None,
+        ..Config::default()
+    };
+    let pop = evolution::create(&cfg).expect("population");
+    let indices: Vec<usize> = (0..pop.genomes.len()).collect();
+    for setting in ["0", "1"] {
+        // SAFETY: the variable is read when a GPU opens; the backends run one
+        // after another and no other thread reads it.
+        unsafe { std::env::set_var("EVOLUTION_CUDA", setting) };
+        let mut gpu = Gpu::new("RTX 4060").expect("GPU scheduler");
+        assert!(
+            gpu.startup_warning.is_none(),
+            "the primary GPU did not open"
+        );
+        let name = gpu.names();
+        let scheduler = gpu.sched.as_mut().expect("scheduler");
+        let scores = scheduler
+            .evaluate_single(&pop, &indices, &cfg)
+            .expect("GPU trials");
+        let (mut entries, mut close_energy, mut close_force, mut ground_entries) =
+            (0usize, 0usize, 0usize, 0usize);
+        let mut ground_close = 0usize;
+        let mut live = 0usize;
+        let mut checked = 0;
+        for (i, score) in scores.iter().enumerate() {
+            let mut creature = pop.creature(i);
+            evolution_simulator::evolution::canonicalize_bone_order(&mut creature);
+            if creature.muscles.is_empty() || score.fitness <= -1e10 {
+                continue;
+            }
+            let recording =
+                engine::record_on_gpu(&creature, &cfg, std::time::Duration::from_secs(30))
+                    .expect("a GPU replay");
+            assert_eq!(recording.result.fitness.to_bits(), score.fitness.to_bits());
+            let forces = recording.forces.expect("recorded forces");
+            let (frames, _, cpu) = physics2::replay_forces(&creature, &cfg);
+            assert_eq!(forces.energy.len(), frames.len());
+            assert_eq!(forces.muscle.len(), frames.len());
+            assert_eq!(forces.ground.len(), frames.len());
+            // Only the first second and a bit after settling: contact
+            // sequences drift apart later.
+            let start = evolution_simulator::physics::settle() as usize;
+            for t in start..(start + 80).min(frames.len()) {
+                for k in 0..creature.muscles.len() {
+                    entries += 1;
+                    close_energy +=
+                        usize::from((forces.energy[t][k] - cpu.energy[t][k]).abs() < 0.01);
+                    close_force +=
+                        usize::from((forces.muscle[t][k] - cpu.muscle[t][k]).abs() < 0.5);
+                }
+                for n in 0..creature.nodes.len() {
+                    ground_entries += 1;
+                    live += usize::from(forces.ground[t][n] > 0.0);
+                    ground_close +=
+                        usize::from((forces.ground[t][n] - cpu.ground[t][n]).abs() < 0.5);
+                }
+            }
+            checked += 1;
+            if checked >= 40 {
+                break;
+            }
+        }
+        eprintln!(
+            "{name}: {checked} creatures, energy {close_energy}/{entries}, force {close_force}/{entries}, ground {ground_close}/{ground_entries} close to the prototype ({live} recorded contact forces above zero)"
+        );
+        assert!(checked >= 10, "too few creatures with muscles");
+        assert!(live > 0, "{name}: no contact force was recorded");
+        assert!(close_energy * 100 >= entries * 99, "{name}: energy");
+        assert!(close_force * 100 >= entries * 98, "{name}: muscle force");
+        assert!(
+            ground_close * 100 >= ground_entries * 98,
+            "{name}: ground force"
+        );
+    }
+}

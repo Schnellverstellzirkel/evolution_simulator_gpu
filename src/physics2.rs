@@ -684,7 +684,35 @@ fn fresh_metrics() -> GpuResult {
 /// into `frames` when given (entry `t` after `t` steps; the first
 /// `physics::settle()` entries repeat the starting pose so the replay
 /// viewer's clock matches the current physics).
-pub fn run(model: &Model, cfg: &Config, mut frames: Option<&mut Vec<Vec<[f32; 2]>>>) -> GpuResult {
+pub fn run(model: &Model, cfg: &Config, frames: Option<&mut Vec<Vec<[f32; 2]>>>) -> GpuResult {
+    run_recorded(model, cfg, frames, None)
+}
+
+/// The muscle state and contact forces one recorded frame carries, in the
+/// GPU kernels' convention: the energy is the state the frame starts from,
+/// the forces are those of the step that led to it.
+fn push_extras(forces: &mut crate::replay_forces::Forces, model: &Model, s: &State, sc: &Scratch) {
+    forces.energy.push(s.energy.clone());
+    forces.muscle.push(sc.muscle_force.clone());
+    // Contact forces in the creature's own node numbering, as the frames.
+    let mut ground = vec![0.0; s.warm.len()];
+    let mut friction = vec![0.0; s.warm.len()];
+    for (r, &node) in model.order.iter().enumerate() {
+        ground[node] = s.warm[r][0];
+        friction[node] = s.warm[r][1];
+    }
+    forces.ground.push(ground);
+    forces.friction.push(friction);
+}
+
+/// `run`, also recording each frame's muscle energy, muscle force and ground
+/// contact forces into `forces` (one entry per frame, as `frames`).
+pub fn run_recorded(
+    model: &Model,
+    cfg: &Config,
+    mut frames: Option<&mut Vec<Vec<[f32; 2]>>>,
+    mut forces: Option<&mut crate::replay_forces::Forces>,
+) -> GpuResult {
     let fidelity = cfg.fidelity();
     let rate = fidelity.rate as f32;
     let dt = 1.0 / rate;
@@ -725,6 +753,9 @@ pub fn run(model: &Model, cfg: &Config, mut frames: Option<&mut Vec<Vec<[f32; 2]
     if let Some(frames) = frames.as_deref_mut() {
         for _ in 0..=fidelity.settle() {
             frames.push(model.frame(&s));
+            if let Some(forces) = forces.as_deref_mut() {
+                push_extras(forces, model, &s, &sc);
+            }
         }
     }
     let mut metrics = fresh_metrics();
@@ -901,6 +932,9 @@ pub fn run(model: &Model, cfg: &Config, mut frames: Option<&mut Vec<Vec<[f32; 2]
         }
         if let Some(frames) = frames.as_deref_mut() {
             frames.push(model.frame(&s));
+            if let Some(forces) = forces.as_deref_mut() {
+                push_extras(forces, model, &s, &sc);
+            }
         }
         if ended {
             metrics.vertical_oscillation =
@@ -917,6 +951,9 @@ pub fn run(model: &Model, cfg: &Config, mut frames: Option<&mut Vec<Vec<[f32; 2]
                 s.th0 = wrap(s.th0);
                 if let Some(frames) = frames.as_deref_mut() {
                     frames.push(model.frame(&s));
+                    if let Some(forces) = forces.as_deref_mut() {
+                        push_extras(forces, model, &s, &sc);
+                    }
                 }
             }
             return result;
@@ -1629,8 +1666,11 @@ pub fn shader_source(capacity: usize, workgroup: u32, fidelity: physics::Fidelit
 
 /// The v2 kernel that also records every creature's trial for a replay, the
 /// counterpart of `creature_kernel::record_source`: node positions before
-/// each step and after the last, in binding 7 as `[creature][frame][node]`
-/// with the bucket's node stride. It computes what `shader_source` computes;
+/// each step and after the last, in binding 7 as `[creature][frame][slot]`.
+/// A frame is `p.stride` vec2f long: the node positions (`STRIDE` slots),
+/// then an (energy, force) pair per muscle, then a (normal, friction) contact
+/// force per node (`creature_kernel::frame_stride`). It computes what
+/// `shader_source` computes;
 /// its only other change is that a creature keeps moving after its trial
 /// ends (limp after a fall) while its result stays the one at the end. A
 /// trial starts at the settling tick, as scoring does (so chunk boundaries
@@ -1646,11 +1686,33 @@ pub fn record_source(capacity: usize, workgroup: u32, fidelity: physics::Fidelit
 
 /// The changes `record_source` makes to the kernel text. Each must match
 /// exactly once.
-const RECORD_EDITS: [(&str, &str); 3] = [
+const RECORD_EDITS: [(&str, &str); 4] = [
     (
         "@group(0) @binding(6) var<storage, read> tile_info: array<vec4u>;\n",
         "@group(0) @binding(6) var<storage, read> tile_info: array<vec4u>;\n\
          @group(0) @binding(7) var<storage, read_write> frames: array<vec2f>;\n",
+    ),
+    // The recorded frame is `p.stride` vec2f long: the node positions (`STRIDE`
+    // of them), then one (energy, force) pair per muscle, then one (normal,
+    // friction) contact force per node. The forces of a frame are those of the
+    // step that led to it; the energy is the state it starts from.
+    (
+        "@compute @workgroup_size(WG)\nfn advance(",
+        "fn record_extras(base: u32, muscle_count: u32, tile_x: u32, tl: u32, record_base: u32, nn: u32) {\n\
+             for (var k = 0u; k < muscle_count; k++) {\n\
+                 let field = tile_x + k * MUSCLE_FIELDS * TILE + tl;\n\
+                 frames[base + STRIDE + k] = vec2f(muscle_data[field + 14u * TILE], muscle_data[field + 11u * TILE]);\n\
+             }\n\
+             for (var i = 0u; i < MAXN; i++) {\n\
+                 if i >= nn { break; }\n\
+                 var w = records[record_base + i].b;\n\
+                 if i == 0u {\n\
+                     w = records[record_base].c;\n\
+                 }\n\
+                 frames[base + STRIDE + muscle_count + i] = w;\n\
+             }\n\
+         }\n\
+         @compute @workgroup_size(WG)\nfn advance(",
     ),
     (
         "    for (var s = 0u; s < p.steps; s++) {\n        if metrics.fall_time > 0.0 || metrics.screened > 0.0 {\n            break;\n        }\n        let tick = p.tick + s;\n",
@@ -1664,18 +1726,20 @@ const RECORD_EDITS: [(&str, &str); 3] = [
              kept.head_shake = head_shake;\n\
              done = true;\n\
          }\n\
-         let frame = (creature * (p.total_steps + 1u) + tick) * STRIDE;\n\
+         let frame = (creature * (p.total_steps + 1u) + tick) * p.stride;\n\
          for (var j = 0u; j < MAXN; j++) {\n\
              if j >= nn { break; }\n\
              frames[frame + j] = node_pos(j);\n\
          }\n\
+         record_extras(frame, muscle_count, tile.x, tl, record_base, nn);\n\
          if s == 0u && p.tick == SETTLE {\n\
              for (var t = 0u; t < SETTLE; t++) {\n\
-                 let before = (creature * (p.total_steps + 1u) + t) * STRIDE;\n\
+                 let before = (creature * (p.total_steps + 1u) + t) * p.stride;\n\
                  for (var j = 0u; j < MAXN; j++) {\n\
                      if j >= nn { break; }\n\
                      frames[before + j] = node_pos(j);\n\
                  }\n\
+                 record_extras(before, muscle_count, tile.x, tl, record_base, nn);\n\
              }\n\
          }\n",
     ),
@@ -1687,11 +1751,12 @@ const RECORD_EDITS: [(&str, &str); 3] = [
          }\n\
          results[creature] = kept;\n\
          if p.tick + p.steps >= p.total_steps {\n\
-             let frame = (creature * (p.total_steps + 1u) + p.total_steps) * STRIDE;\n\
+             let frame = (creature * (p.total_steps + 1u) + p.total_steps) * p.stride;\n\
              for (var j = 0u; j < MAXN; j++) {\n\
                  if j >= nn { break; }\n\
                  frames[frame + j] = node_pos(j);\n\
              }\n\
+             record_extras(frame, muscle_count, tile.x, tl, record_base, nn);\n\
          }\n",
     ),
 ];
@@ -2159,13 +2224,29 @@ pub fn evaluate(unit: &Population, cfg: &Config) -> Vec<GpuResult> {
 
 /// A creature's recorded trial and its result, for the replay viewer.
 pub fn replay(creature: &Creature, cfg: &Config) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
+    let (frames, result, _) = replay_forces(creature, cfg);
+    (frames, result)
+}
+
+/// `replay` with the muscle energy, muscle force and ground contact forces of
+/// every frame.
+pub fn replay_forces(
+    creature: &Creature,
+    cfg: &Config,
+) -> (Vec<Vec<[f32; 2]>>, GpuResult, crate::replay_forces::Forces) {
     let cfg = Config {
         screen: None,
         ..cfg.clone()
     };
     let mut frames = Vec::new();
-    let result = run(&Model::new(creature, &cfg), &cfg, Some(&mut frames));
-    (frames, result)
+    let mut forces = crate::replay_forces::Forces::default();
+    let result = run_recorded(
+        &Model::new(creature, &cfg),
+        &cfg,
+        Some(&mut frames),
+        Some(&mut forces),
+    );
+    (frames, result, forces)
 }
 
 /// Muscle work (J) of a creature's full trial: the sum of |force x relative
@@ -2958,5 +3039,32 @@ mod tests {
         assert!(low < dry - 0.01, "no sink: {low} against {dry}");
         assert!(low > dry - 0.06, "sank past the mud: {low} against {dry}");
         assert!(result.fitness.abs() < 0.05, "traveled {}", result.fitness);
+    }
+
+    #[test]
+    fn a_replay_records_one_set_of_forces_per_frame() {
+        let cfg = Config {
+            duration: 1.0,
+            ..calm()
+        };
+        let c = chain(&[[0.0, 0.5], [0.0, 0.3], [-0.25, 0.1], [0.25, 0.05]], true);
+        let (frames, _, forces) = replay_forces(&c, &cfg);
+        assert_eq!(forces.energy.len(), frames.len());
+        assert_eq!(forces.muscle.len(), frames.len());
+        assert_eq!(forces.ground.len(), frames.len());
+        assert_eq!(forces.friction.len(), frames.len());
+        assert!(
+            forces
+                .energy
+                .iter()
+                .flatten()
+                .all(|e| (0.0..=1.0).contains(e))
+        );
+        assert!(forces.ground.iter().all(|f| f.len() == c.nodes.len()));
+        // The bodies start resting on the ground, so contact forces appear.
+        assert!(forces.ground.iter().flatten().any(|&f| f > 0.0));
+        // Before the trial starts nothing is loaded.
+        let settle = physics::settle() as usize;
+        assert!(forces.ground[..=settle].iter().flatten().all(|&f| f == 0.0));
     }
 }
