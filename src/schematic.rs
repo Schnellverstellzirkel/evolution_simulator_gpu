@@ -79,7 +79,7 @@ impl Scene<'_> {
         self.poly(&points, fill, 3.0);
     }
     fn font(&self, size: f32) -> FontId {
-        FontId::proportional((size * self.k).max(10.0))
+        FontId::proportional((size * self.k).max(9.0))
     }
     /// Wrapped text inside `r`, from the top left corner.
     fn text(&self, r: Rect, text: &str, size: f32, color: Color32) {
@@ -99,18 +99,28 @@ impl Scene<'_> {
         );
     }
     /// A cream sign with a title line and body text.
-    fn sign(&self, x: f32, y: f32, w: f32, h: f32, title: &str, body: &str) {
+    fn sign(&self, x: f32, y: f32, w: f32, h: f32, num: u32, title: &str, body: &str) {
         let r = self.rect(x, y, w, h);
         self.block(r, CREAM, 8.0, 3.0);
         let pad = 8.0 * self.k;
         let inner = r.shrink2(Vec2::new(pad, 5.0 * self.k));
-        let head = self
-            .p
-            .layout(title.to_owned(), self.font(14.5), INK, inner.width());
+        let indent = if num > 0 { 26.0 * self.k } else { 0.0 };
+        let head = self.p.layout(
+            title.to_owned(),
+            self.font(14.5),
+            INK,
+            inner.width() - indent,
+        );
         let head_h = head.size().y;
-        self.p.galley(inner.min, head, INK);
+        if num > 0 {
+            self.badge(x + 17.0, y + 5.0 + head_h / self.k * 0.5, num);
+        }
+        self.p.galley(inner.min + Vec2::new(indent, 0.0), head, INK);
         self.text(
-            Rect::from_min_max(inner.min + Vec2::new(0.0, head_h), inner.max),
+            Rect::from_min_max(
+                inner.min + Vec2::new(0.0, head_h + if num > 0 { 6.0 * self.k } else { 0.0 }),
+                inner.max,
+            ),
             body,
             12.5,
             INK,
@@ -254,7 +264,7 @@ fn island(s: &Scene, snap: Option<&Snapshot>, index: usize) {
     let best = summary.map_or(f32::NAN, |i| i.best);
     let title = format!("Island {}", index + 1);
     let body = format!("best {}\n{} niches", meters(best), cells);
-    s.sign(cx - 66.0, cy - 106.0, 132.0, 56.0, &title, &body);
+    s.sign(cx - 66.0, cy - 106.0, 132.0, 56.0, 0, &title, &body);
 }
 
 fn boat(s: &Scene, x: f32, y: f32, tint: Color32) {
@@ -333,7 +343,7 @@ fn workshop(s: &Scene, index: usize, snap: Option<&Snapshot>) {
 
 fn arena(s: &Scene) {
     // Track.
-    s.sign(770.0, 66.0, 222.0, 22.0, "Trial arena", "");
+    s.sign(770.0, 64.0, 222.0, 28.0, 3, "Trial arena", "");
     let lane = s.rect(776.0, 130.0, 210.0, 34.0);
     s.block(lane, DIRT, 6.0, 3.0);
     for i in 0..9 {
@@ -374,11 +384,10 @@ fn arena(s: &Scene) {
         300.0,
         222.0,
         150.0,
+        5,
         "Fine check",
         "A contender for an archive cell runs again as a nudged copy: pose moved by up to 2 cm, grip changed by up to 10%, physics at 4x the step rate. The worse distance counts. A check that fails the 5 s gate keeps it out.",
     );
-    s.badge(770.0, 300.0, 5);
-    s.badge(984.0, 66.0, 3);
 }
 
 /// Paints the whole picture into `rect`.
@@ -424,9 +433,9 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
     for i in 0..4 {
         island(&s, snap, i);
     }
-    boat(&s, 500.0, 208.0, ring_color[0]);
+    boat(&s, 500.0, 232.0, ring_color[0]);
     boat(&s, 645.0, 336.0, ring_color[1]);
-    boat(&s, 500.0, 480.0, ring_color[2]);
+    boat(&s, 500.0, 502.0, ring_color[2]);
     boat(&s, 355.0, 336.0, ring_color[3]);
     let next = until_migration(generation);
     let when = if next == 0 {
@@ -449,7 +458,7 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
     for i in 0..4 {
         workshop(&s, i, snap);
     }
-    s.badge(14.0, 92.0, 2);
+    s.badge(116.0, 92.0, 2);
     s.arrow((250.0, 250.0), (284.0, 250.0), RED);
     s.text(
         s.rect(14.0, 60.0, 232.0, 30.0),
@@ -488,7 +497,7 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
         12.0,
         INK,
     );
-    s.badge(262.0, 590.0, 6);
+    s.badge(437.0, 580.0, 6);
 
     // Champion podium.
     let champion = snap.and_then(|snap| {
@@ -514,10 +523,10 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
         534.0,
         232.0,
         170.0,
+        4,
         "How a child is made",
         "One: pick a parent from an island archive. Two: a workshop changes it. Three: it runs the 20 s trial. Four: a contender gets the fine check. Five: it is offered to the archives. Islands keep creatures apart until the boats sail.",
     );
-    s.badge(14.0, 534.0, 4);
 }
 
 /// Opens or closes the schematic window. `open` is the UI flag; the window's
@@ -528,6 +537,7 @@ pub fn show(ctx: &egui::Context, snapshot: Option<&Snapshot>, open: &mut bool) {
         .collapsible(false)
         .resizable(true)
         .default_size(Vec2::new(1000.0, 740.0))
+        .min_size(Vec2::new(880.0, 640.0))
         .show(ctx, |ui| {
             let avail = ui.available_size();
             let (rect, _) = ui.allocate_exact_size(
