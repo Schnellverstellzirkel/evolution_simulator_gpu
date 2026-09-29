@@ -1392,6 +1392,8 @@ struct App {
     /// Light is the default; the choice lives only in UI state.
     dark: bool,
     show_help: bool,
+    /// The "How evolution works" window (`schematic::show`).
+    pub schematic_open: bool,
     runs_bytes: u64,
     runs_checked: Instant,
     screenshot_pending: bool,
@@ -1532,6 +1534,7 @@ impl App {
             bench_pings: 0,
             dark: smoke_dark,
             show_help: false,
+            schematic_open: std::env::var_os("EVOLUTION_SMOKE_SCHEMATIC").is_some(),
             runs_bytes: 0,
             runs_checked: Instant::now() - RUNS_REFRESH,
             screenshot_pending: false,
@@ -2881,8 +2884,7 @@ impl App {
                     .on_hover_text("Shows how the islands, the emitters and migration fit together")
                     .clicked()
                 {
-                    // The schematic is not merged yet; the Help overlay stands in.
-                    self.show_help = true;
+                    self.schematic_open = true;
                 }
             });
         });
@@ -3945,6 +3947,10 @@ impl App {
                         }
                     });
                 ui.separator();
+                if ui.button("How evolution works").clicked() {
+                    self.schematic_open = true;
+                }
+                ui.separator();
                 ui.heading("Tabs");
                 for (name, why) in [
                     (
@@ -4667,6 +4673,7 @@ impl eframe::App for App {
             });
         self.dialogs(&ctx);
         self.help_window(&ctx);
+        crate::schematic::show(&ctx, self.snapshot.as_ref(), &mut self.schematic_open);
         if self.playing || self.active() {
             // Playback and live evolution redraw at the frame cap; the rest of
             // the GPU stays with evolution. EVOLUTION_UI_FPS=0 follows vsync.
@@ -5487,7 +5494,7 @@ fn draw_creature(
         );
     }
 }
-fn thumbnail(p: &egui::Painter, c: &Creature, rect: Rect) {
+pub(crate) fn thumbnail(p: &egui::Painter, c: &Creature, rect: Rect) {
     let nodes = physics::nodes(c);
     let minx = nodes
         .iter()
