@@ -317,22 +317,22 @@ fn run_seed(
             // GPU score is final.
             let sched = gpu.sched.as_mut().expect("scheduler");
             let population = experiment.config.population;
-            let mut done = vec![false; population];
-            sched.begin(&experiment.population, 0..population);
+            sched.ordered_reset();
+            sched.ordered_configure(false, 0, 0);
+            sched.add_blocks(0..population, population.div_ceil(8));
             let mut stored = 0;
             while stored < population {
-                sched.pump(&experiment.population, &experiment.config, &done, |i, m| {
+                sched.ordered_pump(&experiment.population, &experiment.config, |i, m| {
                     experiment.check_need(i, m)
                 })?;
-                for (indices, metrics) in sched.collect(
+                for (indices, metrics) in sched.ordered_collect(
                     &experiment.population,
                     &experiment.config,
                     std::time::Duration::from_millis(4),
-                    |i, m| experiment.contender(i, m),
+                    usize::MAX,
                 )? {
                     for (&i, m) in indices.iter().zip(&metrics) {
                         experiment.record_result(i, m);
-                        done[i] = true;
                         stored += 1;
                     }
                 }
