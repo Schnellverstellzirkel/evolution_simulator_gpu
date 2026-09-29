@@ -452,7 +452,7 @@ impl StageLog {
         if file.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
             let _ = writeln!(
                 file,
-                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second,checks,check_busy_seconds,device_busy_seconds,device_idle_seconds,mean_nodes"
+                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second,checks,check_busy_seconds,device_busy_seconds,device_idle_seconds,mean_nodes,share_over_8_nodes"
             );
         }
         Some(Self {
@@ -474,7 +474,7 @@ impl StageLog {
         generation: u32,
         population: usize,
         sched: Option<&crate::scheduler::Scheduler>,
-        mean_nodes: f64,
+        nodes: [f64; 2],
     ) {
         let seconds = self.started.elapsed().as_secs_f64().max(1e-9);
         let totals = sched.map_or([0.0; 4], |s| {
@@ -503,7 +503,7 @@ impl StageLog {
         }
         let _ = writeln!(
             self.file,
-            "{generation},{:.6},{:.6},{:.6},{:.3},{:.0},{:.3},{:.3},{:.3},{mean_nodes:.3}",
+            "{generation},{:.6},{:.6},{:.6},{:.3},{:.0},{:.3},{:.3},{:.3},{:.3},{:.4}",
             self.seconds[0],
             self.seconds[1],
             self.seconds[2],
@@ -512,6 +512,8 @@ impl StageLog {
             delta[1],
             delta[2],
             delta[3],
+            nodes[0],
+            nodes[1],
         );
         let _ = self.file.flush();
         self.reset();
@@ -1242,14 +1244,18 @@ fn run(
                             if let Some(log) = &mut stage_log {
                                 log.add(2, breeding_seconds);
                                 let genomes = &e.population.genomes;
-                                let mean_nodes =
+                                let count = genomes.len().max(1) as f64;
+                                let nodes = [
                                     genomes.iter().map(|g| g.node_count as f64).sum::<f64>()
-                                        / genomes.len().max(1) as f64;
+                                        / count,
+                                    genomes.iter().filter(|g| g.node_count > 8).count() as f64
+                                        / count,
+                                ];
                                 log.write_row(
                                     e.generation.saturating_sub(1),
                                     e.config.population,
                                     gpu.sched.as_ref(),
-                                    mean_nodes,
+                                    nodes,
                                 );
                             }
                             generation_marks.push_back((Instant::now(), e.config.population));
@@ -1944,9 +1950,9 @@ mod tests {
             seconds: [1.0, 2.0, 3.0],
             totals: [0.0; 4],
         };
-        log.write_row(5, 1000, None, 4.0);
+        log.write_row(5, 1000, None, [4.0, 0.0]);
         log.add(0, 4.0);
-        log.write_row(6, 1000, None, 4.0);
+        log.write_row(6, 1000, None, [4.0, 0.0]);
         drop(log);
         let text = std::fs::read_to_string(&path).unwrap();
         let rows: Vec<&str> = text.lines().collect();
