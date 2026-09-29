@@ -16,7 +16,7 @@ Open work only. Delete an item when it is merged into `main` or measured and rej
 
 ## Interface
 
-- Muscle energy and a force overlay in the replay [claude/camera].
+- Replay muscle energy and forces are estimates rebuilt from recorded positions. Record the exact values in the v2 kernel's frames once v2 is on main.
 - The wet grip level is barely visible in the world view, and the effect label repeats the effect name ("Heat wave: Heat wave").
 - The Islands view does not save the last migration, so a loaded game shows none until the next one.
 
