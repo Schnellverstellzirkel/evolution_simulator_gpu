@@ -2674,20 +2674,32 @@ impl App {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        let Some(s) = snapshot.history.last() else {
+        let history = &snapshot.history;
+        // The best distance and the kinds of movement are the archive's
+        // numbers now, so they change as results are absorbed. A history row
+        // stands in before the first snapshot has an elite.
+        let best = if snapshot.live_best.is_finite() {
+            snapshot.live_best
+        } else if let Some(s) = history.last() {
+            s.best
+        } else {
             ui.label(
                 RichText::new(
-                    "The first generation is running. Its best creature appears here when it ends.",
+                    "The first generation is running. Its best creature appears here as soon as one is kept.",
                 )
                 .color(theme.muted),
             );
             return;
         };
-        let history = &snapshot.history;
+        let cells = if snapshot.archive_cells > 0 {
+            snapshot.archive_cells
+        } else {
+            history.last().map_or(0, |s| s.archive_cells)
+        };
         let gain = history
             .len()
-            .checked_sub(11)
-            .map(|earlier| s.best - history[earlier].best);
+            .checked_sub(10)
+            .map(|earlier| best - history[earlier].best);
         let population = snapshot.config.population.max(1);
         let progress = generation_progress(
             snapshot.completed,
@@ -2704,7 +2716,7 @@ impl App {
             for (ui, (name, value, color, note, why)) in cols.iter_mut().zip([
                 (
                     "BEST DISTANCE",
-                    format!("{:.2} m", s.best),
+                    format!("{:.2} m", best),
                     theme.accent,
                     gain.map_or_else(
                         || "so far".to_owned(),
@@ -2721,7 +2733,7 @@ impl App {
                 ),
                 (
                     "KINDS OF MOVEMENT",
-                    number(s.archive_cells),
+                    number(cells),
                     theme.ink,
                     "different ways of moving kept".to_owned(),
                     "Evolution keeps the best creature for each way of moving: how much of the time it touches the ground, its stride rate, its height and how many feet it uses.",

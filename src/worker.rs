@@ -313,6 +313,11 @@ pub struct Snapshot {
     /// in. It changes as soon as a new record is absorbed, mid-generation
     /// too, so the world view can switch to it at once.
     pub champion: Option<Arc<(Creature, Config)>>,
+    /// The best distance in the archive now and the median of its behavior
+    /// elites (NaN before any elite), the same numbers a history row keeps at
+    /// the end of a generation.
+    pub live_best: f32,
+    pub live_median: f32,
     /// What happened to this experiment, oldest first.
     pub events: Arc<Vec<Event>>,
     /// The archive map table while the UI asks for it.
@@ -1492,6 +1497,24 @@ fn run(
                     champion =
                         best.map(|elite| Arc::new((elite.creature.clone(), e.config.clone())));
                 }
+                let live_best = best.map_or(f32::NAN, |elite| elite.fitness.max(0.0));
+                let live_median = {
+                    let mut kept: Vec<f32> = e
+                        .archive
+                        .entries
+                        .iter()
+                        .filter(|elite| !qd::is_morphology_niche(&elite.niche))
+                        .map(|elite| elite.fitness)
+                        .collect();
+                    if kept.is_empty() {
+                        f32::NAN
+                    } else {
+                        // The same rank a history row's median uses.
+                        let rank = ((kept.len() - 1) as f32 * 0.5).round() as usize;
+                        kept.select_nth_unstable_by(rank, |a, b| b.total_cmp(a));
+                        kept[rank]
+                    }
+                };
                 let archive_count = e.archive.entries.len();
                 // The ranked archive, built only when the UI asks: one sort
                 // and one copy of each kept creature (about 1,500 at 3M).
@@ -1555,6 +1578,8 @@ fn run(
                     cards,
                     preview: preview.take(),
                     champion: champion.clone(),
+                    live_best,
+                    live_median,
                     lineage: lineage.take(),
                     gpu: gpu.names(),
                     engines: engine_rows(&gpu),
@@ -1614,6 +1639,8 @@ fn run(
                     cards: None,
                     preview: None,
                     champion: None,
+                    live_best: f32::NAN,
+                    live_median: f32::NAN,
                     lineage: None,
                     gpu: gpu.names(),
                     engines: engine_rows(&gpu),
