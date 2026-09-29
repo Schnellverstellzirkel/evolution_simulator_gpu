@@ -927,17 +927,17 @@ fn run(
                             e.stage = Stage::Evaluating;
                             let sched = gpu.sched.as_mut().unwrap();
                             if !steady.active {
-                                if sched.in_flight() > 0 {
+                                if sched.ordered_in_flight() > 0 {
                                     // Results from a generational run: keep them; the
                                     // next pass offers them to the archive.
-                                    sched.pump_checks(&e.population, &e.config, |i, m| {
+                                    sched.ordered_pump(&e.population, &e.config, |i, m| {
                                         e.check_need(i, m)
                                     })?;
-                                    for (indices, metrics) in sched.collect(
+                                    for (indices, metrics) in sched.ordered_collect(
                                         &e.population,
                                         &e.config,
                                         Duration::from_millis(4),
-                                        |i, m| e.contender(i, m),
+                                        usize::MAX,
                                     )? {
                                         for (&i, m) in indices.iter().zip(&metrics) {
                                             e.record_result(i, m);
@@ -954,29 +954,30 @@ fn run(
                                     steady.failed += e.archive_slots(&evaluated);
                                     e.breed_slots(&evaluated)?;
                                 }
-                                sched.stop();
-                                sched.begin(&e.population, 0..e.config.population);
+                                sched.ordered_reset();
+                                let (size, window, lag) = steady_blocks(e.config.population);
+                                sched.ordered_configure(true, window, lag);
+                                sched.add_blocks(0..e.config.population, size);
                                 steady.active = true;
                             }
-                            sched.pump(&e.population, &e.config, &[], |i, m| e.check_need(i, m))?;
-                            // One unit per pass: archiving and breeding a unit
+                            sched.ordered_pump(&e.population, &e.config, |i, m| {
+                                e.check_need(i, m)
+                            })?;
+                            // One block per pass: archiving and breeding a block
                             // takes a few tenths of a second, and controls are
-                            // read between passes.
-                            for (indices, metrics) in sched.collect_one(
+                            // read between passes. Blocks come back in a fixed
+                            // order and are absorbed before the next pump, so the
+                            // run does not depend on which unit finished first.
+                            for (indices, metrics) in sched.ordered_collect(
                                 &e.population,
                                 &e.config,
                                 Duration::from_millis(4),
-                                |i, m| e.contender(i, m),
+                                1,
                             )? {
-                                // Refill the freed slot before the CPU work.
-                                // Units that share the GPU finish together,
-                                // so waiting for the next pass would leave
-                                // the engines idle for all of this unit's
-                                // archiving and breeding.
-                                sched.pump(&e.population, &e.config, &[], |i, m| {
+                                steady_absorb(e, &mut steady, sched, &indices, &metrics, true)?;
+                                sched.ordered_pump(&e.population, &e.config, |i, m| {
                                     e.check_need(i, m)
                                 })?;
-                                steady_absorb(e, &mut steady, sched, &indices, &metrics, true)?;
                             }
                             status = format!("Evolving · generation {}", e.generation);
                             let seconds = stage_start.elapsed().as_secs_f64();
@@ -1003,16 +1004,23 @@ fn run(
                             }
                             e.stage = Stage::Evaluating;
                             let sched = gpu.sched.as_mut().unwrap();
-                            if sched.in_flight() == 0 {
-                                sched.begin(&e.population, e.evaluated..e.config.population);
+                            if sched.ordered_in_flight() == 0 {
+                                sched.ordered_reset();
+                                let (size, _, _) = steady_blocks(e.config.population);
+                                sched.ordered_configure(false, 0, 0);
+                                sched.add_blocks(
+                                    (e.evaluated..e.config.population).filter(|&i| !done[i]),
+                                    size,
+                                );
                             }
-                            sched
-                                .pump(&e.population, &e.config, &done, |i, m| e.check_need(i, m))?;
-                            for (indices, metrics) in sched.collect(
+                            sched.ordered_pump(&e.population, &e.config, |i, m| {
+                                e.check_need(i, m)
+                            })?;
+                            for (indices, metrics) in sched.ordered_collect(
                                 &e.population,
                                 &e.config,
                                 Duration::from_millis(4),
-                                |i, m| e.contender(i, m),
+                                usize::MAX,
                             )? {
                                 store_results(e, &mut done, &indices, &metrics);
                             }
@@ -1095,9 +1103,11 @@ fn run(
                                 // Offspring go to the evaluation engines slice by slice
                                 // while the rest of the generation is bred.
                                 let slice = (e.config.population / 8).max(4096);
+                                sched.ordered_reset();
+                                sched.ordered_configure(false, 0, 0);
                                 e.prepare_next_batch_streaming(slice, |pop, range, cfg| {
-                                    sched.extend(pop, range);
-                                    sched.pump_standard(pop, cfg, &[])
+                                    sched.add_block(range.collect());
+                                    sched.ordered_pump_standard(pop, cfg)
                                 })?;
                                 done = vec![false; e.config.population];
                                 done_key = (epoch, e.generation);
@@ -1304,18 +1314,18 @@ fn run(
         }
         // A pause stops new submissions; queued GPU work still completes and is kept.
         if !running && let Some(sched) = gpu.sched.as_mut() {
-            sched.stop();
-            if sched.in_flight() > 0
+            sched.ordered_stop();
+            if sched.ordered_in_flight() > 0
                 && let Some(e) = &mut exp
             {
                 let absorbed = sched
-                    .pump_checks(&e.population, &e.config, |i, m| e.check_need(i, m))
+                    .ordered_pump_checks(&e.population, &e.config, |i, m| e.check_need(i, m))
                     .and_then(|()| {
-                        sched.collect(
+                        sched.ordered_collect(
                             &e.population,
                             &e.config,
                             Duration::from_millis(4),
-                            |i, m| e.contender(i, m),
+                            usize::MAX,
                         )
                     })
                     .and_then(|units| {
@@ -1333,7 +1343,7 @@ fn run(
                 }
                 changed = true;
             }
-            if sched.in_flight() == 0 {
+            if sched.ordered_in_flight() == 0 {
                 steady.active = false;
             }
         }
@@ -1628,15 +1638,15 @@ fn finish_queued(
     steady: &mut Steady,
 ) -> anyhow::Result<()> {
     if let Some(sched) = gpu.sched.as_mut() {
-        sched.stop();
-        while sched.in_flight() > 0 {
+        sched.ordered_stop();
+        while sched.ordered_in_flight() > 0 {
             // With no round left, waiting contenders go out for their checks now.
-            sched.pump_checks(&e.population, &e.config, |i, m| e.check_need(i, m))?;
-            for (indices, metrics) in sched.collect(
+            sched.ordered_pump_checks(&e.population, &e.config, |i, m| e.check_need(i, m))?;
+            for (indices, metrics) in sched.ordered_collect(
                 &e.population,
                 &e.config,
                 Duration::from_millis(100),
-                |i, m| e.contender(i, m),
+                usize::MAX,
             )? {
                 if steady.active {
                     steady_absorb(e, steady, sched, &indices, &metrics, false)?;
@@ -1665,6 +1675,26 @@ struct Steady {
     stage_seconds: [f64; 3],
 }
 
+/// Block size, release window and decision lag for a steady run. A block is
+/// a sixteenth of the population (at least 8,192 creatures). A block is
+/// decided against the archives as they stood `lag` blocks earlier, and its
+/// checks must finish before it is absorbed, so a run absorbs about
+/// `lag + 1` blocks per check latency: the lag is three quarters of a
+/// generation, which keeps the check latency off the critical path. A block
+/// is released `lag + 2` blocks ahead of the next one to return, so the
+/// engines always have work queued. With a single block per generation the
+/// decision cannot run ahead of the absorption.
+fn steady_blocks(population: usize) -> (usize, usize, usize) {
+    let size = population.div_ceil(16).max(8192).min(population.max(1));
+    let blocks = population.div_ceil(size);
+    let lag = if blocks >= 2 {
+        (blocks * 3 / 4).clamp(1, blocks - 1)
+    } else {
+        0
+    };
+    (size, (lag + 2).min(blocks.max(2)), lag)
+}
+
 /// Stores a finished unit, offers it to the archive, breeds replacements into
 /// the same slots from the updated archive, and queues them when `resubmit`.
 fn steady_absorb(
@@ -1686,7 +1716,7 @@ fn steady_absorb(
     e.breed_slots(indices)?;
     steady.stage_seconds[2] += breeding_started.elapsed().as_secs_f64();
     if resubmit {
-        sched.extend(&e.population, indices.iter().copied());
+        sched.add_block(indices.to_vec());
     }
     steady.count += indices.len();
     e.evaluated = steady.count.min(e.config.population);
@@ -1861,5 +1891,62 @@ mod tests {
             assert!(Instant::now() < deadline, "continuous run did not advance");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The steady loop absorbs blocks in a fixed order, so two runs of one
+    /// seed on one GPU agree in every generation's statistics.
+    #[test]
+    #[ignore = "requires a Vulkan GPU"]
+    fn two_continuous_runs_of_one_seed_agree() {
+        let run = || {
+            let gpu = Gpu::new("RTX 4060").unwrap();
+            let worker = Worker::spawn(gpu, eframe::egui::Context::default());
+            let cfg = Config {
+                population: 200_000,
+                duration: 10.0,
+                seed: 38,
+                random_seed: false,
+                checkpoint_interval: 0,
+                ..Config::default()
+            };
+            worker.send(Command::New(cfg));
+            worker.send(Command::Run {
+                continuous: true,
+                guided: false,
+            });
+            let deadline = Instant::now() + Duration::from_secs(600);
+            let history = loop {
+                if let Some(snapshot) = worker.view.lock().unwrap().take() {
+                    assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+                    if snapshot.history.len() >= 12 {
+                        break snapshot.history.clone();
+                    }
+                }
+                assert!(Instant::now() < deadline, "the run did not advance");
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            worker.send(Command::Shutdown);
+            history[..12]
+                .iter()
+                .map(|s| {
+                    (
+                        s.generation,
+                        s.best.to_bits(),
+                        s.median.to_bits(),
+                        s.mean.to_bits(),
+                        s.failed,
+                        s.archive_cells,
+                        s.qd_score.to_bits(),
+                        s.percentiles
+                            .iter()
+                            .map(|p| p.to_bits())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first, second, "two runs of one seed diverged");
     }
 }

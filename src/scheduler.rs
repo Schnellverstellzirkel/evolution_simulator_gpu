@@ -265,6 +265,22 @@ pub struct Scheduler {
     /// after N units of its results were collected.
     simulate_loss_after: Option<u64>,
     collected_units: u64,
+    /// Trial settings of creatures queued through `extend_with`: every unit
+    /// holds creatures of one setting only. Creatures without an entry use
+    /// the settings passed to `pump`.
+    cfg_of: HashMap<usize, Arc<Config>>,
+    /// In-order absorption of results (see `ordered.rs`).
+    ordered: ordered::Ordered,
+}
+
+mod ordered;
+
+fn same_cfg(a: &Option<Arc<Config>>, b: &Option<Arc<Config>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    }
 }
 
 fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -419,6 +435,8 @@ impl Scheduler {
                 .ok()
                 .and_then(|v| v.parse().ok()),
             collected_units: 0,
+            cfg_of: HashMap::new(),
+            ordered: Default::default(),
         })
     }
 
@@ -453,6 +471,8 @@ impl Scheduler {
             notices: Vec::new(),
             simulate_loss_after: None,
             collected_units: 0,
+            cfg_of: HashMap::new(),
+            ordered: Default::default(),
         })
     }
 
@@ -550,8 +570,8 @@ impl Scheduler {
         // contender whose fine trial falls below the bar at the screen is
         // not robust, and its check stops there instead of running the full
         // trial at four times the steps.
-        let fine = check_config(cfg);
         let standby = self.reserves_standing_by();
+        let cfg_of = &self.cfg_of;
         let max_check_units = env_or("EVOLUTION_CHECK_UNITS", 2usize).max(1);
         for device in &mut self.devices {
             if standby && device.reserve {
@@ -586,8 +606,17 @@ impl Scheduler {
                 let capacity = device.engine.max_nodes();
                 let mut indices = Vec::with_capacity(size.min(self.ready.len()));
                 let mut rest = Vec::new();
+                let mut unit_cfg: Option<Option<Arc<Config>>> = None;
                 for i in self.ready.drain(..) {
-                    if indices.len() < size && pop.genomes[i].node_count <= capacity {
+                    let c = cfg_of.get(&i).cloned();
+                    let same = match &unit_cfg {
+                        None => true,
+                        Some(u) => same_cfg(u, &c),
+                    };
+                    if indices.len() < size && pop.genomes[i].node_count <= capacity && same {
+                        if unit_cfg.is_none() {
+                            unit_cfg = Some(c);
+                        }
                         indices.push(i);
                     } else {
                         rest.push(i);
@@ -597,7 +626,10 @@ impl Scheduler {
                 if indices.is_empty() {
                     break;
                 }
-                let check_config = fine.clone();
+                let check_config = match unit_cfg {
+                    Some(Some(own)) => check_config(&own),
+                    _ => check_config(cfg),
+                };
                 let started = Instant::now();
                 let mut unit = Population::default();
                 for &i in &indices {
@@ -704,6 +736,23 @@ impl Scheduler {
         }
     }
 
+    /// Like `extend`, but the creatures run (and are checked) with `cfg`,
+    /// whatever settings later calls pass. Units never mix settings.
+    pub(crate) fn extend_with(&mut self, pop: &Population, indices: Vec<usize>, cfg: Arc<Config>) {
+        for &i in &indices {
+            self.cfg_of.insert(i, Arc::clone(&cfg));
+        }
+        self.extend(pop, indices);
+    }
+
+    /// Holds creature `i`'s standard result for a check trial, which the next
+    /// `pump_checks` sends (with `CheckNeed::Check { cell: None }`).
+    pub(crate) fn submit_check(&mut self, i: usize, metric: EvaluationMetrics) {
+        self.held.insert(i, metric);
+        self.checks.push(i);
+        self.checks_since.get_or_insert_with(Instant::now);
+    }
+
     /// Stops handing out new work; queued work still completes.
     pub fn stop(&mut self) {
         self.round = None;
@@ -735,6 +784,7 @@ impl Scheduler {
         let Some(round) = self.round.as_mut() else {
             return Ok(());
         };
+        let cfg_of = &self.cfg_of;
         let working = |d: &Device| !(standby && d.reserve);
         let total_rate: f64 = self
             .devices
@@ -768,30 +818,69 @@ impl Scheduler {
                     .min(remaining);
                 let capacity = device.engine.max_nodes();
                 let mut indices = Vec::with_capacity(size);
-                let retry = round.retry.len().min(size);
-                indices.extend(round.retry.drain(..retry));
+                // A unit holds creatures of one trial setting only.
+                let mut unit_cfg: Option<Option<Arc<Config>>> = None;
+                let fits = |i: usize, unit_cfg: &mut Option<Option<Arc<Config>>>| {
+                    let c = cfg_of.get(&i).cloned();
+                    match unit_cfg {
+                        None => {
+                            *unit_cfg = Some(c);
+                            true
+                        }
+                        Some(u) => same_cfg(u, &c),
+                    }
+                };
+                let mut kept = Vec::new();
+                let mut moved = 0;
+                for i in std::mem::take(&mut round.retry) {
+                    if moved < size && fits(i, &mut unit_cfg) {
+                        indices.push(i);
+                        moved += 1;
+                    } else {
+                        kept.push(i);
+                    }
+                }
+                round.retry = kept;
                 if capacity >= 64 {
-                    let take = round.oversize.len().min(size - indices.len());
-                    indices.extend(round.oversize.drain(..take));
+                    let mut kept = Vec::new();
+                    for i in std::mem::take(&mut round.oversize) {
+                        if indices.len() < size && fits(i, &mut unit_cfg) {
+                            indices.push(i);
+                        } else {
+                            kept.push(i);
+                        }
+                    }
+                    round.oversize = kept;
                 }
                 while indices.len() < size && round.cursor < round.order.len() {
                     let i = round.order[round.cursor];
-                    round.cursor += 1;
                     if done.get(i).copied().unwrap_or(false) {
+                        round.cursor += 1;
                         continue;
                     }
                     if pop.genomes[i].node_count > capacity {
+                        round.cursor += 1;
                         round.oversize.push(i);
-                    } else {
+                    } else if fits(i, &mut unit_cfg) {
+                        round.cursor += 1;
                         indices.push(i);
+                    } else {
+                        break;
                     }
                 }
                 if indices.is_empty() {
                     break;
                 }
+                let unit_config = match unit_cfg {
+                    Some(Some(own)) => (*own).clone(),
+                    _ => cfg.clone(),
+                };
                 let started = Instant::now();
                 let population = Arc::new(pop.subset(&indices));
-                match device.engine.submit_shared(Arc::clone(&population), cfg) {
+                match device
+                    .engine
+                    .submit_shared(Arc::clone(&population), &unit_config)
+                {
                     Ok(ticket) => {
                         self.packing_seconds += started.elapsed().as_secs_f64();
                         device.queued.push_back(QueuedUnit {
@@ -799,7 +888,7 @@ impl Scheduler {
                             indices,
                             trial: Trial::Standard,
                             population,
-                            config: cfg.clone(),
+                            config: unit_config,
                             retries: 0,
                         });
                     }
@@ -1382,6 +1471,8 @@ mod tests {
             notices: Vec::new(),
             simulate_loss_after: None,
             collected_units: 0,
+            cfg_of: HashMap::new(),
+            ordered: Default::default(),
         };
         (scheduler, state)
     }
@@ -1415,6 +1506,8 @@ mod tests {
             notices: Vec::new(),
             simulate_loss_after: None,
             collected_units: 0,
+            cfg_of: HashMap::new(),
+            ordered: Default::default(),
         };
         (scheduler, gpu, cpu)
     }
