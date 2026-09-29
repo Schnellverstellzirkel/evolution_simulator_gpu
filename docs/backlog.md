@@ -32,4 +32,4 @@ Each item is an A/B over 3 seeds. Winners go on by default and losers are delete
 
 ## World
 
-- More environment effects and catastrophes (Water and Ice patches landed; ideas: wind gusts, low ceiling, moving ground). The ice band is hard to see.
+- More environment effects and catastrophes (Water and Ice patches landed; ideas: wind gusts, low ceiling, moving ground).
