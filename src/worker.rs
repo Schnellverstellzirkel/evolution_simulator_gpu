@@ -347,10 +347,18 @@ pub struct Worker {
     pub pause: Arc<AtomicBool>,
     /// True while a native benchmark is inside its measured window (after warm-up).
     pub measuring: Arc<AtomicBool>,
+    /// A pause developers asked for from outside the game (`dev_pause`).
+    pub dev_pause: Arc<crate::dev_pause::Shared>,
     join: Option<std::thread::JoinHandle<()>>,
 }
 impl Worker {
     pub fn spawn(gpu: Gpu, ctx: eframe::egui::Context) -> Self {
+        Self::spawn_with_pause_dir(gpu, ctx, crate::dev_pause::dir())
+    }
+    /// `spawn`, watching `pause_dir` for developer pause requests.
+    pub fn spawn_with_pause_dir(gpu: Gpu, ctx: eframe::egui::Context, pause_dir: PathBuf) -> Self {
+        let dev_pause = Arc::new(crate::dev_pause::Shared::default());
+        let dev = crate::dev_pause::DevPause::new(pause_dir, dev_pause.clone());
         let (tx, rx) = mpsc::channel();
         let view = Arc::new(Mutex::new(None));
         let output = view.clone();
@@ -360,13 +368,14 @@ impl Worker {
         let bench_measuring = measuring.clone();
         let join = std::thread::Builder::new()
             .name("evolution".into())
-            .spawn(move || run(gpu, rx, output, paused, bench_measuring, ctx))
+            .spawn(move || run(gpu, rx, output, paused, bench_measuring, ctx, dev))
             .expect("Start simulation worker");
         Self {
             tx,
             view,
             pause,
             measuring,
+            dev_pause,
             join: Some(join),
         }
     }
@@ -465,6 +474,7 @@ fn run(
     pause: Arc<AtomicBool>,
     measuring: Arc<AtomicBool>,
     ctx: eframe::egui::Context,
+    mut dev: crate::dev_pause::DevPause,
 ) {
     let mut exp: Option<Experiment> = None;
     let mut running = false;
@@ -526,7 +536,9 @@ fn run(
     // Completion time and population of recent generations.
     let mut generation_marks: std::collections::VecDeque<(Instant, usize)> = Default::default();
     'worker: loop {
-        let first = if running || gpu.async_in_flight() > 0 {
+        // A developer pause with the engines closed leaves nothing to
+        // collect: wait for commands instead of spinning.
+        let first = if (running || gpu.async_in_flight() > 0) && !dev.idle() {
             rx.try_recv().ok()
         } else {
             match rx.recv_timeout(Duration::from_millis(100)) {
@@ -575,7 +587,7 @@ fn run(
                         | Command::UndoMeteor
                         | Command::Export(_)
                 );
-            if !steady_safe
+            let drains = !steady_safe
                 && !matches!(
                     command,
                     Command::Ping(_)
@@ -586,7 +598,20 @@ fn run(
                         | Command::Pause
                         | Command::Run { .. }
                         | Command::Next
-                )
+                );
+            // Draining needs the engines, which a developer pause holds:
+            // the command waits for the pause to end.
+            if dev.holding()
+                && exp.is_some()
+                && (drains || !deferred.is_empty())
+                && !matches!(command, Command::Ping(_))
+            {
+                deferred.push(command);
+                status = "Waiting for the developer pause to end".into();
+                changed = true;
+                continue;
+            }
+            if drains
                 && let Some(e) = &mut exp
                 && let Err(err) = finish_queued(&mut gpu, e, &mut done, &mut steady)
             {
@@ -915,6 +940,11 @@ fn run(
         }
         if pause.load(Ordering::Relaxed) {
             running = false;
+        }
+        if let Some(text) = dev.tick(gpu.sched.as_mut()) {
+            let generation = exp.as_ref().map_or(0, |e| e.generation);
+            log_event(&mut events, generation, EventKind::Gpu, text);
+            changed = true;
         }
         if running {
             if let Some(e) = &mut exp {

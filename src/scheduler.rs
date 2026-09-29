@@ -271,9 +271,12 @@ pub struct Scheduler {
     cfg_of: HashMap<usize, Arc<Config>>,
     /// In-order absorption of results (see `ordered.rs`).
     ordered: ordered::Ordered,
+    /// Evaluation held for a developer measurement (see `suspend.rs`).
+    suspension: suspend::Suspension,
 }
 
 mod ordered;
+mod suspend;
 
 fn same_cfg(a: &Option<Arc<Config>>, b: &Option<Arc<Config>>) -> bool {
     match (a, b) {
@@ -437,6 +440,7 @@ impl Scheduler {
             collected_units: 0,
             cfg_of: HashMap::new(),
             ordered: Default::default(),
+            suspension: Default::default(),
         })
     }
 
@@ -473,6 +477,7 @@ impl Scheduler {
             collected_units: 0,
             cfg_of: HashMap::new(),
             ordered: Default::default(),
+            suspension: Default::default(),
         })
     }
 
@@ -570,6 +575,9 @@ impl Scheduler {
         // contender whose fine trial falls below the bar at the screen is
         // not robust, and its check stops there instead of running the full
         // trial at four times the steps.
+        if !self.may_submit() {
+            return Ok(());
+        }
         let standby = self.reserves_standing_by();
         let cfg_of = &self.cfg_of;
         let max_check_units = env_or("EVOLUTION_CHECK_UNITS", 2usize).max(1);
@@ -780,6 +788,9 @@ impl Scheduler {
     /// Queues standard work only; waiting contenders keep waiting. For
     /// callers that cannot decide contenders at the moment (while breeding).
     pub fn pump_standard(&mut self, pop: &Population, cfg: &Config, done: &[bool]) -> Result<()> {
+        if !self.may_submit() {
+            return Ok(());
+        }
         let standby = self.reserves_standing_by();
         let Some(round) = self.round.as_mut() else {
             return Ok(());
@@ -1473,6 +1484,7 @@ mod tests {
             collected_units: 0,
             cfg_of: HashMap::new(),
             ordered: Default::default(),
+            suspension: Default::default(),
         };
         (scheduler, state)
     }
@@ -1508,6 +1520,7 @@ mod tests {
             collected_units: 0,
             cfg_of: HashMap::new(),
             ordered: Default::default(),
+            suspension: Default::default(),
         };
         (scheduler, gpu, cpu)
     }
