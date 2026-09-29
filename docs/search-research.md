@@ -594,3 +594,14 @@ Not adopted, deleted:
 Not possible: stopping a trial when it can no longer beat its cell's elite. The cell comes from behavior measured over the whole trial (contact, cadence, height, feet), so it is unknown until the end. The 5 s screen already stops hopeless creatures.
 
 Not tried: age-layered populations, deep grids, Hoeffding racing, dominated novelty search. The contender check already races one contender per cell.
+
+## 12. GPU A/B harness and its noise floor (2026-09-29, physics v1)
+
+`examples/search_ab --gpu` runs the game's generational path (scheduler, 5 s screen, contender checks, GPU score final) and prints the same report as the CPU runs: best distance, QD, QD on the fixed grid, reserve size, body plans, top-50 body mix, emitter shares. `--seed-offset N` shifts every seed, so two arms of identical code give independent runs. Run it under `flock -s .../target/gpu.lock`, with `EVOLUTION_DEVICES=primary`. An arm pair differs by a developer-only environment switch on the experiment branch.
+
+A/A on main at 571b17c: 6 seeds (38 to 43), 100k creatures, 30 generations, 20 s trials, RTX 4060 with other jobs sharing it. One seed takes 50 to 80 s on an idle GPU.
+- Two identical arms (same seeds): 3 of 6 seeds reproduced bit for bit in best and QD, 3 diverged (best ratios 1.48, 0.85, 1.00, 1.00, 1.00, 0.94). GPU scheduling order (which contender takes a shared cell check) is not deterministic, so a run can branch from a small difference. Geometric mean best ratio 1.03, QD 1.07.
+- Identical code, seeds shifted by 1000: per seed best ratios 1.12, 1.83, 0.79, 0.55, 1.29, 3.31 and QD ratios 0.95, 1.03, 1.01, 0.67, 1.30, 1.86. The standard deviation of the log ratio is 0.63 for best distance (a factor 1.9) and 0.34 for QD (a factor 1.4). The mean over 6 seeds carries a standard error of 0.26 in log units for best distance (plus or minus 30%) and 0.14 for QD (plus or minus 15%).
+- Means: best 20.7, 21.7 and 28.8 m; fixed-grid QD 3894, 4171 and 4294; 1290 cells; 650 to 700 body plans.
+
+So at 100k and 30 generations a 6-seed A/B detects a QD change only above about 30% and a best-distance change only above about 50%. Best distance is the noisier metric, because it is a maximum of one run. Use QD on the fixed grid as the main number, keep best distance as a check, and use 12 or more seeds for effects under 30%.
