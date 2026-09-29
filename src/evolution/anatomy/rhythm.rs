@@ -384,13 +384,10 @@ mod tests {
     use super::super::tests::bodies;
     use super::super::{Context, Operator};
     use super::*;
-    use crate::evolution::{Muscle, NO_SENSOR, Population, repair_with};
+    use crate::evolution::{Muscle, NO_SENSOR, Population, repair};
 
     fn cx() -> Context<'static> {
-        Context {
-            neutral: false,
-            donor: None,
-        }
+        Context { donor: None }
     }
 
     /// Whether two phases are the same point of the cycle.
@@ -634,7 +631,7 @@ mod tests {
                 let organ = MIN_ORGAN_MASS - 1e-6..=MAX_ORGAN_MASS;
                 assert!(b.organ_mass == 0.0 || organ.contains(&b.organ_mass));
             }
-            repair_with(&mut c, &cfg, &mut Rng::new(1, 0, i), false);
+            repair(&mut c, &cfg, &mut Rng::new(1, 0, i));
             assert!(
                 (total(&c) - total(body)).abs() < 1e-5,
                 "repair keeps the mass"

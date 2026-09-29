@@ -21,7 +21,7 @@ The production scoring path is `shaders/physics_creature.wgsl`. In a GPU run, it
 
 ## Physics and scoring
 
-Standard fidelity uses 60 steps/s, two bone position-projection passes, and one velocity-constraint pass. `EVOLUTION_PHYSICS_RATE`, `EVOLUTION_BONE_PASSES`, and `EVOLUTION_VELOCITY_PASSES` override these for experiments. Settling lasts about 1.67 s (100 standard steps), before the timed trial. Settling disables gravity and contacts; the body is then centered horizontally by mass, placed on the ground, and its velocities reset.
+Standard fidelity uses 60 steps/s, two bone position-projection passes, and one velocity-constraint pass. These are fixed in `physics::rate` and `physics::solver_passes`. Settling lasts about 1.67 s (100 standard steps), before the timed trial. Settling disables gravity and contacts; the body is then centered horizontally by mass, placed on the ground, and its velocities reset.
 
 A skeleton is a connected tree of rigid bones. Bone order is normalized parent-first and muscle anchors are remapped to preserve attachment positions. Each muscle joins two bones at normalized positions along them; forces distribute to the endpoints according to those positions. Joint ranges constrain bending. Bones can also carry organs, whose mass is distributed to their endpoint nodes according to attachment position.
 
@@ -58,7 +58,7 @@ Fitness is horizontal center-of-mass displacement after centering the start pose
 
 In the graphical worker, candidates that could enter the global archive, an island archive, or the topology reserve are held for a check. Optimizer offspring are also checked. The scheduler perturbs starting node positions by up to 2 cm and grip by ±10%, then evaluates at `Fidelity::fine()`: four times the standard rate and solver passes, with rate capped at 960 Hz. At the defaults this is 240 Hz, eight bone passes, and four velocity passes. The returned fitness is the lower distance from the standard and fine trials; descriptors remain from the standard trial.
 
-The blocking `Gpu::evaluate_with_metrics` path, used by the headless CLI, has no archive callback and checks every evaluated candidate. `Scheduler::evaluate_single` explicitly bypasses the additional check for engine comparisons. `EVOLUTION_ROBUST_TRIALS=1` disables checks for diagnostics; the normal default is two trials for contenders.
+The blocking `Gpu::evaluate_with_metrics` path, used by the headless CLI, has no archive callback and checks every evaluated candidate. `Scheduler::evaluate_single` explicitly bypasses the additional check for engine comparisons. The normal default is two trials for contenders.
 
 Archive admission uses the selected evaluator's result. A normal GPU run keeps the GPU standard score and behavior descriptors, then applies the GPU fine check to eligible contenders. Archive insertion does not run a CPU replay or adjust those values afterward.
 
