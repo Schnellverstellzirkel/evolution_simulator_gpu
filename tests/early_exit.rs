@@ -182,7 +182,7 @@ fn a_mixed_group_with_a_live_lane_is_unchanged() {
     EARLY_EXIT_GROUPS.store(0, Ordering::Relaxed);
     EARLY_EXIT_GROUPS_TOTAL.store(0, Ordering::Relaxed);
     let full = full_run(&pop, &cfg);
-    let early = cpu_engine::evaluate(&pop, &cfg);
+    let early = cpu_engine::evaluate_v1(&pop, &cfg);
     assert_eq!(full[0].fall_time, 0.0, "fixture: lane 0 must stay upright");
     assert_eq!(
         EARLY_EXIT_GROUPS.load(Ordering::Relaxed),
