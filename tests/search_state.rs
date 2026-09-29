@@ -780,3 +780,41 @@ fn rebuilding_islands_resets_records_from_the_previous_partition() {
         assert_eq!(generation, experiment.generation);
     }
 }
+
+#[test]
+fn an_island_migration_is_recorded_and_summarized() {
+    use evolution_simulator::worker::{IslandSummary, MigrationSummary};
+    let mut experiment = Experiment::new(config(38)).unwrap();
+    archive_synthetic_results(&mut experiment);
+    assert!(experiment.last_migration.is_none());
+    // The generation before a migration boundary.
+    experiment.generation = storage::MIGRATION_INTERVAL - 1;
+    experiment.prepare_next_batch().unwrap();
+    let (generation, exchange) = experiment.last_migration.clone().unwrap();
+    assert_eq!(generation, storage::MIGRATION_INTERVAL);
+    assert_eq!(exchange.len(), storage::island_count());
+    for &(sent, kept) in &exchange {
+        assert!(sent > 0);
+        assert!(kept <= sent);
+    }
+    let migration = MigrationSummary {
+        generation,
+        exchange: exchange.clone(),
+    };
+    // Island 0 receives what the last island sent.
+    assert_eq!(migration.received(0), exchange.last().copied());
+    assert_eq!(migration.received(1), exchange.first().copied());
+
+    for island in &experiment.islands {
+        let summary = IslandSummary::of(island);
+        assert_eq!(summary.cells, island.behavior_count());
+        assert_eq!(summary.origins.iter().sum::<usize>(), summary.cells);
+        assert!(!summary.top.is_empty() && summary.top.len() <= 3);
+        assert!(summary.top.windows(2).all(|w| w[0].0 >= w[1].0));
+        assert_eq!(summary.best, summary.top[0].0);
+        assert_eq!(summary.leader.as_ref().unwrap().id, summary.top[0].1.id);
+        assert_eq!(summary.best, island.best_fitness());
+    }
+    let empty = IslandSummary::of(&QdArchive::default());
+    assert!(empty.best.is_nan() && empty.leader.is_none() && empty.cells == 0);
+}

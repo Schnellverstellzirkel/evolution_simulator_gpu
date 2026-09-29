@@ -703,6 +703,7 @@ const MAP_BINS: [usize; 5] = [6, 8, 1, 6, 5];
 enum ArchiveView {
     Cards,
     Map,
+    Islands,
 }
 /// Which archive cards the player looks at.
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -1448,7 +1449,7 @@ impl App {
             playback: None,
             tab: match smoke_tab.as_str() {
                 "history" => Tab::History,
-                "population" | "map" => Tab::Population,
+                "population" | "map" | "islands" => Tab::Population,
                 "race" => Tab::Race,
                 "lineage" => Tab::Lineage,
                 _ => Tab::Overview,
@@ -1499,6 +1500,8 @@ impl App {
             prev_tab: Tab::Overview,
             archive_view: if smoke_tab == "map" {
                 ArchiveView::Map
+            } else if smoke_tab == "islands" {
+                ArchiveView::Islands
             } else {
                 ArchiveView::Cards
             },
@@ -2658,8 +2661,16 @@ impl App {
                         "Watch evolution fill the ways of moving. Cells are colored by distance.",
                     );
                 ui.selectable_value(&mut self.archive_view, ArchiveView::Cards, "Cards");
+                ui.selectable_value(&mut self.archive_view, ArchiveView::Islands, "Islands")
+                    .on_hover_text(
+                        "The four island archives, each with its best creature, its top elites and its migrants.",
+                    );
             });
         });
+        if self.archive_view == ArchiveView::Islands {
+            self.islands_view(ui);
+            return;
+        }
         if self.archive_view == ArchiveView::Map {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Body height").small().color(theme.muted));
@@ -2773,6 +2784,88 @@ impl App {
             self.worker.send(Command::Select(id));
         }
         if let Some((creature, config)) = selected {
+            self.select(creature, config);
+        }
+    }
+    /// The four island archives in a 2x2 grid. Each card has a fixed size and
+    /// fixed places for its parts, so numbers change without moving anything.
+    fn islands_view(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme();
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "Every {} generations each island sends its fastest tenth to the next one.",
+                    crate::storage::MIGRATION_INTERVAL
+                ))
+                .small()
+                .color(theme.muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("How evolution works")
+                    .on_hover_text("Shows how the islands, the emitters and migration fit together")
+                    .clicked()
+                {
+                    // The schematic is not merged yet; the Help overlay stands in.
+                    self.show_help = true;
+                }
+            });
+        });
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        if snapshot
+            .islands
+            .iter()
+            .all(|island| island.leader.is_none())
+        {
+            ui.add_space(8.);
+            ui.label(
+                RichText::new(
+                    "The islands fill as the first generation ends. Their creatures appear here.",
+                )
+                .color(theme.muted),
+            );
+            return;
+        }
+        let config = snapshot.config.clone();
+        let generation = snapshot.generation;
+        let islands = snapshot.islands.clone();
+        let migration = snapshot.migration.clone();
+        let shown = self.playback.as_ref().map(|p| p.creature.id);
+        let width = (ui.available_width() - ISLAND_GAP) / 2.;
+        let mut selected = None;
+        egui::ScrollArea::vertical()
+            .id_salt("islands_grid")
+            .show(ui, |ui| {
+                for pair in islands.chunks(2).enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = ISLAND_GAP;
+                        for (offset, island) in pair.1.iter().enumerate() {
+                            let index = pair.0 * 2 + offset;
+                            let (rect, _) = ui.allocate_exact_size(
+                                Vec2::new(width, ISLAND_HEIGHT),
+                                Sense::hover(),
+                            );
+                            let hit = paint_island(
+                                ui,
+                                rect,
+                                index,
+                                island,
+                                migration.as_ref(),
+                                generation,
+                                shown,
+                                theme,
+                            );
+                            if let Some(creature) = hit {
+                                selected = Some(creature);
+                            }
+                        }
+                    });
+                    ui.add_space(ISLAND_GAP);
+                }
+            });
+        if let Some(creature) = selected {
             self.select(creature, config);
         }
     }
@@ -4509,7 +4602,7 @@ impl eframe::App for App {
         }
         // Explicit opt-in capture hook for repeatable native rendering/performance checks.
         if self.capture_path.is_some()
-            && self.started.elapsed() > Duration::from_secs(8)
+            && self.started.elapsed() > smoke_capture_delay()
             && !self.capture_requested
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
@@ -4711,6 +4804,230 @@ fn paint_card(
     }
 }
 /// How a creature came to be, in the words the lineage uses.
+/// Space between island cards, and a card's height.
+const ISLAND_GAP: f32 = 10.;
+const ISLAND_HEIGHT: f32 = 268.;
+/// Words for the emitter shares of an island's elites, in `Emitter::ALL` order.
+const ORIGIN_SHORT: [&str; 4] = ["Tuned", "Reshaped", "Novel", "New"];
+/// What an island card says about migration: the last exchange, or when the
+/// next one comes.
+fn migration_lines(
+    migration: Option<&crate::worker::MigrationSummary>,
+    island: usize,
+    generation: u32,
+) -> [String; 2] {
+    let next =
+        (generation / crate::storage::MIGRATION_INTERVAL + 1) * crate::storage::MIGRATION_INTERVAL;
+    let count = migration.map_or(0, |m| m.exchange.len());
+    match migration.filter(|_| count > 0) {
+        Some(m) => {
+            let (sent, kept_by_next) = m.exchange[island];
+            let (got, kept) = m.received(island).unwrap_or((0, 0));
+            [
+                format!(
+                    "Gen {}: sent {sent} to island {}, it kept {kept_by_next}",
+                    m.generation,
+                    (island + 1) % count + 1
+                ),
+                format!(
+                    "Received {got} from island {}, kept {kept}. Next: gen {next}",
+                    (island + count - 1) % count + 1
+                ),
+            ]
+        }
+        None => [
+            "No migration yet this session".to_owned(),
+            format!("Next migration at generation {next}"),
+        ],
+    }
+}
+/// Percent shares that add to 100 (largest remainder), so the legend never
+/// reads 99 or 101.
+fn percent_shares(counts: &[usize]) -> Vec<usize> {
+    let total: usize = counts.iter().sum();
+    if total == 0 {
+        return vec![0; counts.len()];
+    }
+    let mut shares: Vec<usize> = counts.iter().map(|&c| c * 100 / total).collect();
+    let mut order: Vec<usize> = (0..counts.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(counts[i] * 100 % total));
+    let missing = 100 - shares.iter().sum::<usize>();
+    for &i in order.iter().take(missing) {
+        shares[i] += 1;
+    }
+    shares
+}
+/// Paints one island card and returns the creature the player clicked.
+#[allow(clippy::too_many_arguments)]
+fn paint_island(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    index: usize,
+    island: &crate::worker::IslandSummary,
+    migration: Option<&crate::worker::MigrationSummary>,
+    generation: u32,
+    shown: Option<u64>,
+    theme: Theme,
+) -> Option<Creature> {
+    let painter = ui.painter().clone();
+    painter.rect_filled(rect, 8, theme.card);
+    painter.rect_stroke(
+        rect,
+        8,
+        Stroke::new(1., theme.card_border),
+        egui::StrokeKind::Inside,
+    );
+    let at = |x: f32, y: f32| rect.left_top() + Vec2::new(x, y);
+    painter.text(
+        at(12., 10.),
+        Align2::LEFT_TOP,
+        format!("Island {}", index + 1),
+        FontId::proportional(16.),
+        theme.ink,
+    );
+    painter.text(
+        rect.right_top() + Vec2::new(-12., 12.),
+        Align2::RIGHT_TOP,
+        format!("{} ways of moving", number(island.cells)),
+        FontId::proportional(13.),
+        theme.muted,
+    );
+    let mut clicked = None;
+    // The best creature, left; its distance under it.
+    let lead_rect = Rect::from_min_size(at(12., 36.), Vec2::new(rect.width() * 0.5 - 18., 104.));
+    let best_text = if island.best.is_finite() {
+        format!("Best {:.2} m", island.best)
+    } else {
+        "Empty".to_owned()
+    };
+    if let Some(leader) = &island.leader {
+        let response = ui.interact(
+            lead_rect,
+            ui.id().with(("island_leader", index)),
+            Sense::click(),
+        );
+        let lit = response.hovered() || shown == Some(leader.id);
+        painter.rect_filled(
+            lead_rect,
+            6,
+            if lit { theme.card_hover } else { theme.canvas },
+        );
+        thumbnail(&painter, leader, lead_rect);
+        if response.clicked() {
+            clicked = Some(leader.clone());
+        }
+        response.on_hover_text(format!(
+            "{}\n{} nodes, {} muscles\nClick to replay",
+            species_name(leader),
+            leader.nodes.len(),
+            leader.muscles.len()
+        ));
+    }
+    painter.text(
+        lead_rect.left_bottom() + Vec2::new(0., 6.),
+        Align2::LEFT_TOP,
+        best_text,
+        FontId::proportional(15.),
+        theme.accent,
+    );
+    // The next fastest elites, right, one row each.
+    let list_left = lead_rect.right() + 12.;
+    painter.text(
+        Pos2::new(list_left, 38.0 + rect.top()),
+        Align2::LEFT_TOP,
+        "Top elites",
+        FontId::proportional(12.),
+        theme.muted,
+    );
+    for (row, (distance, creature)) in island.top.iter().enumerate() {
+        let row_rect = Rect::from_min_size(
+            Pos2::new(list_left, rect.top() + 56. + row as f32 * 28.),
+            Vec2::new(rect.right() - 12. - list_left, 26.),
+        );
+        let response = ui.interact(
+            row_rect,
+            ui.id().with(("island_top", index, row)),
+            Sense::click(),
+        );
+        let lit = response.hovered() || shown == Some(creature.id);
+        painter.rect_filled(
+            row_rect,
+            4,
+            if lit { theme.card_hover } else { theme.canvas },
+        );
+        thumbnail(
+            &painter,
+            creature,
+            Rect::from_min_size(row_rect.left_top(), Vec2::new(40., 26.)),
+        );
+        painter.text(
+            row_rect.left_center() + Vec2::new(46., 0.),
+            Align2::LEFT_CENTER,
+            format!("{distance:.2} m"),
+            FontId::proportional(13.),
+            theme.ink,
+        );
+        if response.clicked() {
+            clicked = Some(creature.clone());
+        }
+        response.on_hover_text(format!("{}\nClick to replay", species_name(creature)));
+    }
+    // Who bred the island's elites.
+    painter.text(
+        at(12., 168.),
+        Align2::LEFT_TOP,
+        "Bred by",
+        FontId::proportional(12.),
+        theme.muted,
+    );
+    let bar = Rect::from_min_size(at(12., 184.), Vec2::new(rect.width() - 24., 10.));
+    painter.rect_filled(bar, 3, theme.canvas);
+    let shares = percent_shares(&island.origins);
+    let total: usize = island.origins.iter().sum();
+    let mut x = bar.left();
+    for (i, &count) in island.origins.iter().enumerate() {
+        if total == 0 || count == 0 {
+            continue;
+        }
+        let w = bar.width() * count as f32 / total as f32;
+        painter.rect_filled(
+            Rect::from_min_size(Pos2::new(x, bar.top()), Vec2::new(w, bar.height())),
+            0,
+            species_color(i, 3),
+        );
+        x += w;
+    }
+    let legend_width = (rect.width() - 24.) / 2.;
+    for i in 0..island.origins.len() {
+        let cell = at(
+            12. + (i % 2) as f32 * legend_width,
+            200. + (i / 2) as f32 * 16.,
+        );
+        painter.rect_filled(
+            Rect::from_min_size(cell + Vec2::new(0., 3.), Vec2::splat(9.)),
+            2,
+            species_color(i, 3),
+        );
+        painter.text(
+            cell + Vec2::new(14., 0.),
+            Align2::LEFT_TOP,
+            format!("{} {}%", ORIGIN_SHORT[i], shares[i]),
+            FontId::proportional(12.),
+            theme.ink,
+        );
+    }
+    let lines = migration_lines(migration, index, generation);
+    for (i, line) in lines.iter().enumerate() {
+        painter.text(
+            at(12., 236. + i as f32 * 14.),
+            Align2::LEFT_TOP,
+            line,
+            FontId::proportional(11.5),
+            theme.muted,
+        );
+    }
+    clicked
+}
 fn origin_words(emitter: crate::qd::Emitter) -> &'static str {
     match emitter {
         crate::qd::Emitter::Cma => "fine-tuned from a parent",
@@ -5684,4 +6001,50 @@ mod tests {
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
     }
+}
+#[cfg(test)]
+mod island_view_tests {
+    use super::*;
+    use crate::worker::MigrationSummary;
+
+    #[test]
+    fn origin_shares_always_add_to_100() {
+        assert_eq!(percent_shares(&[0, 0, 0, 0]), vec![0; 4]);
+        for counts in [[1, 1, 1, 0], [7, 3, 3, 1], [5, 0, 0, 0], [1, 2, 4, 8]] {
+            let shares = percent_shares(&counts);
+            assert_eq!(shares.iter().sum::<usize>(), 100, "{counts:?}");
+            for (share, count) in shares.iter().zip(counts) {
+                assert_eq!(count == 0, *share == 0);
+            }
+        }
+    }
+
+    #[test]
+    fn migration_lines_name_the_neighbors_and_the_next_date() {
+        let next = crate::storage::MIGRATION_INTERVAL;
+        let none = migration_lines(None, 0, 3);
+        assert!(none[0].contains("No migration"));
+        assert!(none[1].contains(&format!("generation {next}")));
+        let migration = MigrationSummary {
+            generation: next,
+            exchange: vec![(4, 1), (4, 2), (4, 3), (4, 4)],
+        };
+        let lines = migration_lines(Some(&migration), 0, next + 2);
+        assert!(lines[0].contains(&format!("Gen {next}: sent 4 to island 2, it kept 1")));
+        assert!(lines[1].contains("Received 4 from island 4, kept 4"));
+        assert!(lines[1].contains(&format!("gen {}", next * 2)));
+    }
+}
+/// How long a screenshot run waits before it captures: 8 s, or
+/// `EVOLUTION_SMOKE_CAPTURE_AFTER` seconds (developer diagnostic).
+fn smoke_capture_delay() -> Duration {
+    static DELAY: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *DELAY.get_or_init(|| {
+        let seconds = std::env::var("EVOLUTION_SMOKE_CAPTURE_AFTER")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|s| (1.0..=600.0).contains(s))
+            .unwrap_or(8.0);
+        Duration::from_secs_f64(seconds)
+    })
 }

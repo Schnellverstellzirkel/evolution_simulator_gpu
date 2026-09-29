@@ -224,7 +224,8 @@ pub struct LineageStep {
     pub change: String,
     pub creature: Creature,
 }
-/// One island archive at a glance, for the "How evolution works" schematic.
+/// One island archive at a glance, for the Islands view and the "How
+/// evolution works" schematic.
 #[derive(Clone)]
 pub struct IslandSummary {
     /// Its fastest behavior elite's distance (NaN while it is empty).
@@ -233,19 +234,54 @@ pub struct IslandSummary {
     pub cells: usize,
     /// Its fastest behavior elite.
     pub leader: Option<Creature>,
+    /// Its fastest behavior elites with their distances, best first (the
+    /// leader is the first).
+    pub top: Vec<(f32, Creature)>,
+    /// How many of its behavior elites each emitter bred, in `Emitter::ALL`
+    /// order.
+    pub origins: [usize; qd::EMITTER_COUNT],
 }
+/// How many top elites an island summary carries.
+pub const ISLAND_TOP: usize = 3;
 impl IslandSummary {
-    fn of(island: &qd::QdArchive) -> Self {
-        let leader = island
+    pub fn of(island: &qd::QdArchive) -> Self {
+        let mut origins = [0; qd::EMITTER_COUNT];
+        let mut ranked: Vec<&qd::Elite> = island
             .entries
             .iter()
             .filter(|elite| !qd::is_morphology_niche(&elite.niche))
-            .max_by(|a, b| a.fitness.total_cmp(&b.fitness));
+            .inspect(|elite| origins[elite.emitter.index()] += 1)
+            .collect();
+        ranked.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
+        ranked.truncate(ISLAND_TOP);
+        let top: Vec<(f32, Creature)> = ranked
+            .iter()
+            .map(|elite| (elite.fitness, elite.creature.clone()))
+            .collect();
         Self {
-            best: leader.map_or(f32::NAN, |elite| elite.fitness),
+            best: top.first().map_or(f32::NAN, |t| t.0),
             cells: island.behavior_count(),
-            leader: leader.map(|elite| elite.creature.clone()),
+            leader: top.first().map(|t| t.1.clone()),
+            top,
+            origins,
         }
+    }
+}
+/// The last island migration of this session: the generation it happened at
+/// and, per island, the elites it sent and how many its neighbor kept.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MigrationSummary {
+    pub generation: u32,
+    pub exchange: Vec<(usize, usize)>,
+}
+impl MigrationSummary {
+    /// Elites island `island` received from the previous island in the ring,
+    /// and how many it kept.
+    pub fn received(&self, island: usize) -> Option<(usize, usize)> {
+        let count = self.exchange.len();
+        (count > 0)
+            .then(|| self.exchange.get((island + count - 1) % count).copied())
+            .flatten()
     }
 }
 #[derive(Clone)]
@@ -298,6 +334,8 @@ pub struct Snapshot {
     pub emitter_weights: [f64; 4],
     /// Each island archive, in island order.
     pub islands: Vec<IslandSummary>,
+    /// The last island migration this session, if one happened.
+    pub migration: Option<MigrationSummary>,
     pub status: String,
     pub error: Option<String>,
 }
@@ -1409,6 +1447,12 @@ fn run(
                     emitters: e.emitter_stats,
                     emitter_weights: qd::emitter_weights(&e.emitter_stats),
                     islands: e.islands.iter().map(IslandSummary::of).collect(),
+                    migration: e.last_migration.clone().map(|(generation, exchange)| {
+                        MigrationSummary {
+                            generation,
+                            exchange,
+                        }
+                    }),
                     status: status.clone(),
                     error: error.clone(),
                 }
@@ -1444,6 +1488,7 @@ fn run(
                     emitters: [EmitterStats::default(); 4],
                     emitter_weights: qd::emitter_weights(&[EmitterStats::default(); 4]),
                     islands: Vec::new(),
+                    migration: None,
                     status: status.clone(),
                     error: error.clone(),
                 }
