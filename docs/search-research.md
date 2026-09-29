@@ -526,6 +526,16 @@ Setup: `search_ab` with `--checks`, population 5000, 60 generations, 20 s trials
 
 Notes. The current emitter weights are inert: the mean reward per attempt is about 0.002 while the formula adds a constant 0.55 and an exploration bonus, so the shares stay at the 0.35/0.35/0.30 prior. The first bandit arm looked positive only because its exploration term still dominated, so its shares stayed near the prior. The second arm made the shares follow reward (morphology 0.52) and lost the gain. The best-distance means are pulled by single seeds (for example 53 m on one line-variation seed). The mutability result did not survive nine more seeds (second batch: best x1.00, QD x0.98). `Creature.mutability` is still mutated but unused; deleting it touches the save format and 32 sites, so it was left for the owner. The bandit was rewarded per evaluation, not per GPU-second, because the CPU harness has no GPU time.
 
+## 11. Varied first bodies and a grammar source (measured 2026-09-29, both deleted)
+
+Setup: `examples/search_ab`, 24 seeds (100 to 123), 2,048 creatures, 60 generations, 20 s trials, CPU only. The baseline is main (3 to 5 node chains). Best distance varies a lot between seeds, so counts of paired wins matter more than means.
+
+Varied first population (also used by immigrants). Shares: 40% the old chain, 20% chains of 6 to 9 nodes, 30% bilateral bodies (a spine with one or two mirrored leg pairs of 1 to 2 segments, twin legs sharing muscle timing together or half a cycle apart), 10% random branching trees of 5 to 9 nodes. Result: QD mean 1,620 against 1,848 (median 1,535 against 1,823, the variant won QD on 5 of 24 seeds), best distance mean 30.6 m against 21.9 m (median 13.3 against 15.6, the variant won 9 of 24; the mean comes from a few outlier seeds). A loss on QD, so it was deleted.
+
+Grammar source: a random L-system per body (one rule rewriting X into bones, turns, branches and mirrored branch pairs, three rewrites, node budget 4 to 9), used for 20% of structural children (about 7% of each generation). Result: QD mean ratio 0.98 (won 8 of 24), best distance median 16.5 m against 15.6 (won 10 of 24). A tie or slightly worse, so it was deleted. Rule-level mutation was not built, because a rule set is not stored with the creature and adding that to archives and saves was not worth it for a tie.
+
+Repetition and symmetry: already present. `copy_limb`, `twin_limb`, `repeat_body_segment`, `duplicate_mirrored_node`, `reverse_bend`, `grow_matching_tips`, `mutate_matching_limbs`, `copy_actuation_to_limb` and `mirror_limb_timing` cover copying and mirroring limbs, so nothing was added.
+
 ## Sources
 
 - Arza, Le Goff, Hart (2024). [Generalized Early Stopping in Evolutionary Direct Policy Search](https://arxiv.org/abs/2308.03574). ACM TELO.
