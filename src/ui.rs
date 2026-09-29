@@ -3192,6 +3192,7 @@ impl App {
                     }
                     (theme.accent, None)
                 }
+                EventKind::Gpu => (theme.warn, None),
                 _ => (theme.muted, None),
             };
             items.push(FeedItem {
