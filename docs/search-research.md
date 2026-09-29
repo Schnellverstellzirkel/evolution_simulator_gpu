@@ -526,7 +526,7 @@ Setup: `search_ab` with `--checks`, population 5000, 60 generations, 20 s trials
 
 Notes. The current emitter weights are inert: the mean reward per attempt is about 0.002 while the formula adds a constant 0.55 and an exploration bonus, so the shares stay at the 0.35/0.35/0.30 prior. The first bandit arm looked positive only because its exploration term still dominated, so its shares stayed near the prior. The second arm made the shares follow reward (morphology 0.52) and lost the gain. The best-distance means are pulled by single seeds (for example 53 m on one line-variation seed). The mutability result did not survive nine more seeds (second batch: best x1.00, QD x0.98). `Creature.mutability` is still mutated but unused; deleting it touches the save format and 32 sites, so it was left for the owner. The bandit was rewarded per evaluation, not per GPU-second, because the CPU harness has no GPU time.
 
-## 11. Varied first bodies and a grammar source (measured 2026-09-29, both deleted)
+## 12. Varied first bodies and a grammar source (measured 2026-09-29, both deleted)
 
 Setup: `examples/search_ab`, 24 seeds (100 to 123), 2,048 creatures, 60 generations, 20 s trials, CPU only. The baseline is main (3 to 5 node chains). Best distance varies a lot between seeds, so counts of paired wins matter more than means.
 
