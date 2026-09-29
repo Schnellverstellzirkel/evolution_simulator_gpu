@@ -100,6 +100,7 @@ fn zero_mutation_copies_genetics() {
         visits: 0,
         topology: evolution_simulator::qd::topology_of_population(&population, 0),
         graduate: false,
+        fine: false,
     });
     let plans: Vec<_> = (0..8)
         .map(|_| evolution::CandidatePlan {

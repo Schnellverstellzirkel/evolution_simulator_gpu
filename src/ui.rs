@@ -3325,7 +3325,7 @@ impl App {
                                 theme,
                             );
                             if response.clicked() {
-                                *selected = Some((card.creature.clone(), list.config.clone()));
+                                *selected = Some((card.creature.clone(), card.replay_config(&list.config)));
                             }
                             response.on_hover_text(format!(
                                 "{}\n{} nodes, {} bones, {} muscles\n{}\n{}\nClick to replay",
@@ -3694,7 +3694,7 @@ impl App {
             .take(5)
             .map(|card| RaceLane {
                 label: format!("archive rank {}", card.rank + 1),
-                playback: Playback::new(card.creature.clone(), list.config.clone()),
+                playback: Playback::new(card.creature.clone(), card.replay_config(&list.config)),
             })
             .collect();
         // Lanes run in the order their replays finish, so the standings end

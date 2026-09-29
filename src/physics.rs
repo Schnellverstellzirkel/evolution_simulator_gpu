@@ -193,8 +193,33 @@ fn add_bone_masses(bones: &[Bone], nodes: &mut [Node]) {
         }
     }
 }
+/// A muscle's mass: a fixed part plus a part per metre of its longest length.
+pub const MUSCLE_MASS_BASE: f32 = 0.05;
+pub const MUSCLE_MASS_PER_M: f32 = 1.0;
+/// Adds each muscle's mass to the nodes: half at each attachment, shared by
+/// that bone's two nodes in proportion to where the muscle attaches.
+pub fn add_muscle_masses(bones: &[Bone], muscles: &[Muscle], nodes: &mut [Node]) {
+    for m in muscles {
+        let half = 0.5 * (MUSCLE_MASS_BASE + MUSCLE_MASS_PER_M * m.long.max(0.0));
+        for (bone, t) in [(m.bone_a, m.anchor_a), (m.bone_b, m.anchor_b)] {
+            let Some(bone) = bones.get(bone as usize) else {
+                continue;
+            };
+            let (a, b) = (bone.a as usize, bone.b as usize);
+            if a >= nodes.len() || b >= nodes.len() {
+                continue;
+            }
+            let t = t.clamp(0.0, 1.0);
+            nodes[a].mass += half * (1.0 - t);
+            nodes[b].mass += half * t;
+        }
+    }
+}
+/// A creature's nodes with the masses of its bones, organs and muscles.
 pub fn nodes(c: &Creature) -> Vec<Node> {
-    body(&c.nodes, &c.bones)
+    let mut nodes = body(&c.nodes, &c.bones);
+    add_muscle_masses(&c.bones, &c.muscles, &mut nodes);
+    nodes
 }
 pub fn target(m: &Muscle, time: f32) -> f32 {
     let phase = (time / m.period + m.phase).fract();

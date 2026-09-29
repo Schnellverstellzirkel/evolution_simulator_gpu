@@ -31,7 +31,9 @@ pub(crate) const CMA_LIMIT: usize = 96;
 //     reserve, CMA emitters and reseed queue (the save format changed).
 // 38: every island has a nursery archive for new random bodies (the save
 //     format changed).
-pub const VERSION: u32 = 38;
+// 39: muscles have mass (a fixed part plus a part per metre), and an elite
+//     remembers whether its score came from its fine check.
+pub const VERSION: u32 = 39;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
@@ -105,6 +107,9 @@ pub struct EvaluationMetrics {
     /// Distance at the screen, or at an earlier fall (0 when there was no
     /// screen and no earlier fall).
     pub screen_x: f32,
+    /// The fitness is the fine check's (it was worse than the standard trial),
+    /// so a replay runs at fine fidelity to show that trial.
+    pub fine: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -142,6 +147,19 @@ pub struct Elite {
     /// The elite, or its ancestor, grew up in its island's nursery.
     #[serde(default)]
     pub graduate: bool,
+    /// Its fitness is its fine check's, so its replay runs at fine fidelity.
+    #[serde(default)]
+    pub fine: bool,
+}
+impl Elite {
+    /// The world to replay this elite in: the trial its fitness came from.
+    pub fn replay_config(&self, cfg: &crate::config::Config) -> crate::config::Config {
+        if self.fine {
+            crate::scheduler::check_config(cfg)
+        } else {
+            cfg.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -664,6 +682,7 @@ impl QdArchive {
         index: usize,
         descriptor: Descriptor,
         fitness: f32,
+        fine: bool,
         emitter: Emitter,
         generation: u32,
         protected_until: u32,
@@ -698,6 +717,7 @@ impl QdArchive {
                 visits,
                 topology: candidate_topology.clone(),
                 graduate: false,
+                fine,
             };
             self.qd_score += fitness.max(0.0) as f64 - previous_fitness.max(0.0) as f64;
             self.note_changed_cell(self.entries[slot].niche.clone());
@@ -727,6 +747,7 @@ impl QdArchive {
             visits: 0,
             topology: topology.clone(),
             graduate: false,
+            fine,
         });
         let slot = self.entries.len() - 1;
         self.lookup.insert(niche, slot);
@@ -748,6 +769,7 @@ impl QdArchive {
         descriptor: Descriptor,
         topology: Topology,
         fitness: f32,
+        fine: bool,
         emitter: Emitter,
         generation: u32,
         protected_until: u32,
@@ -788,6 +810,7 @@ impl QdArchive {
                 visits,
                 topology,
                 graduate: false,
+                fine,
             };
             return Offer {
                 inserted: true,
@@ -837,6 +860,7 @@ impl QdArchive {
             visits: 0,
             topology,
             graduate: false,
+            fine,
         };
         self.entries.push(elite);
         let slot = self.entries.len() - 1;
@@ -1685,6 +1709,7 @@ mod tests {
                     index,
                     descriptor,
                     fitness,
+                    false,
                     Emitter::Cma,
                     round,
                     0,

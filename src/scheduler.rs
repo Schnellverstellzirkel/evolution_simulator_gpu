@@ -1052,6 +1052,8 @@ impl Scheduler {
                                         // Reliable motion only: keep the worse of all trials.
                                         let (fitness, unchecked) =
                                             check_verdict(metric, &done.results[k]);
+                                        // The replay must show the trial the score came from.
+                                        metric.fine = fitness < metric.fitness;
                                         metric.fitness = fitness;
                                         // A check stopped by the screen:
                                         // the creature enters no archive.
@@ -1360,6 +1362,7 @@ pub fn to_metrics(
         unchecked: false,
         screened: r.screened > 0.0,
         screen_x: r.screen_x,
+        fine: false,
     }
 }
 

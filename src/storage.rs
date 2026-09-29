@@ -153,6 +153,9 @@ pub struct Experiment {
     /// distance at the screen or an earlier fall.
     #[serde(skip)]
     pub screened: Vec<bool>,
+    /// Per slot: the score is the fine check's, so a replay runs at fine
+    /// fidelity.
+    pub fine: Vec<bool>,
     #[serde(skip)]
     pub screen_distance: Vec<f32>,
     /// Gene memory reused by each generation's compaction.
@@ -394,6 +397,7 @@ impl Experiment {
             protected_until: vec![0; population_count],
             trial_metrics: vec![TrialMetrics::default(); population_count],
             screened: Vec::new(),
+            fine: Vec::new(),
             screen_distance: Vec::new(),
             arena_spare: evolution::Arena::default(),
             screen_samples: 0,
@@ -518,6 +522,10 @@ impl Experiment {
         }
         // Screened and unchecked results are both kept out of the archives.
         self.screened[i] = metric.screened || metric.unchecked;
+        if self.fine.len() < self.scores.len() {
+            self.fine.resize(self.scores.len(), false);
+        }
+        self.fine[i] = metric.fine;
         self.screen_distance[i] = metric.screen_x;
         // A result from a world that has since changed carries no distance.
         if metric.screen_x.is_finite()
@@ -669,6 +677,7 @@ impl Experiment {
             descriptor: qd::Descriptor,
             emitter: Emitter,
             score: f32,
+            fine: bool,
             protection: u32,
             behavior_candidate: bool,
             /// Body plan of a structural or novelty child, for its island's
@@ -726,6 +735,7 @@ impl Experiment {
                     descriptor,
                     emitter,
                     score,
+                    fine: self.fine.get(i).copied().unwrap_or(false),
                     protection,
                     behavior_candidate,
                     topology,
@@ -788,6 +798,7 @@ impl Experiment {
                         i,
                         p.descriptor,
                         p.score,
+                        p.fine,
                         p.emitter,
                         generation,
                         p.protection,
@@ -840,6 +851,7 @@ impl Experiment {
                         p.descriptor,
                         topology.clone(),
                         p.score,
+                        p.fine,
                         p.emitter,
                         generation,
                         p.protection,
@@ -942,6 +954,7 @@ impl Experiment {
                     i,
                     prep.descriptor,
                     prep.score,
+                    prep.fine,
                     prep.emitter,
                     self.generation,
                     prep.protection,
@@ -2335,6 +2348,7 @@ impl SmallLoad {
             protected_until: vec![0; n],
             trial_metrics: vec![TrialMetrics::default(); n],
             screened: Vec::new(),
+            fine: Vec::new(),
             screen_distance: Vec::new(),
             arena_spare: evolution::Arena::default(),
             screen_samples: 0,

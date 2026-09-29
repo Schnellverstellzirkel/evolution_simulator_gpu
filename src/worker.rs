@@ -110,6 +110,18 @@ pub struct Card {
     pub visits: u64,
     pub innovation_reserve: bool,
     pub creature: Creature,
+    /// The score is the fine check's: replay at fine fidelity.
+    pub fine: bool,
+}
+impl Card {
+    /// The world to replay this card in, from its list's world.
+    pub fn replay_config(&self, cfg: &Config) -> Config {
+        if self.fine {
+            crate::scheduler::check_config(cfg)
+        } else {
+            cfg.clone()
+        }
+    }
 }
 /// Something that happened to the experiment, for the UI's event feed.
 #[derive(Clone)]
@@ -905,7 +917,7 @@ fn run(
                                 .iter()
                                 .find(|elite| elite.creature.id == id)
                         {
-                            selected = Some((elite.creature.clone(), e.config.clone()));
+                            selected = Some((elite.creature.clone(), elite.replay_config(&e.config)));
                         }
                     }
                     Command::Lineage(id) => {
@@ -1543,7 +1555,9 @@ fn run(
                 if key != champion_key {
                     champion_key = key;
                     champion =
-                        best.map(|elite| Arc::new((elite.creature.clone(), e.config.clone())));
+                        best.map(|elite| {
+                            Arc::new((elite.creature.clone(), elite.replay_config(&e.config)))
+                        });
                 }
                 let live_best = best.map_or(f32::NAN, |elite| elite.fitness.max(0.0));
                 let live_median = {
@@ -1594,6 +1608,7 @@ fn run(
                                         visits: elite.visits,
                                         innovation_reserve: qd::is_morphology_niche(&elite.niche),
                                         creature: elite.creature.clone(),
+                                        fine: elite.fine,
                                     }
                                 })
                                 .collect(),

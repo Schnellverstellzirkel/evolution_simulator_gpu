@@ -279,7 +279,7 @@ impl Model {
         self.muscles.iter().map(|m| m.strength).collect()
     }
     pub fn new(c: &Creature, cfg: &Config) -> Model {
-        let nodes = physics::body(&c.nodes, &c.bones);
+        let nodes = physics::nodes(c);
         let n = nodes.len();
         // Node `j + 1` is bone `j`'s child.
         let order: Vec<usize> = std::iter::once(0)

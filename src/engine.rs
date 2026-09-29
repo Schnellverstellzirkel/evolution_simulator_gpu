@@ -106,11 +106,47 @@ pub fn replay_forces(
         screen: None,
         ..cfg.clone()
     };
+    // A fine trial records several frames per standard step; the viewer
+    // plays standard steps, so it keeps one frame per standard step.
+    let every = (cfg.fidelity().rate / crate::physics::Fidelity::standard().rate).max(1) as usize;
     if let Some(recording) = record_on_gpu(creature, &cfg, patience) {
-        return (recording.frames, recording.result, recording.forces);
+        return thin(recording.frames, recording.result, recording.forces, every);
     }
     let (frames, result, forces) = crate::physics2::replay_forces(creature, &cfg);
-    (frames, result, Some(forces))
+    thin(frames, result, Some(forces), every)
+}
+
+type Replay = (
+    Vec<Vec<[f32; 2]>>,
+    GpuResult,
+    Option<crate::replay_forces::Forces>,
+);
+/// Keeps every `every`-th frame (the first and the last always).
+fn thin(
+    frames: Vec<Vec<[f32; 2]>>,
+    result: GpuResult,
+    forces: Option<crate::replay_forces::Forces>,
+    every: usize,
+) -> Replay {
+    if every <= 1 {
+        return (frames, result, forces);
+    }
+    fn keep<T>(v: Vec<T>, every: usize) -> Vec<T> {
+        let last = v.len().saturating_sub(1);
+        v.into_iter()
+            .enumerate()
+            .filter(|(i, _)| i % every == 0 || *i == last)
+            .map(|(_, x)| x)
+            .collect()
+    }
+    let forces = forces.map(|f| crate::replay_forces::Forces {
+        energy: keep(f.energy, every),
+        muscle: keep(f.muscle, every),
+        ground: keep(f.ground, every),
+        friction: keep(f.friction, every),
+        broken: keep(f.broken, every),
+    });
+    (keep(frames, every), result, forces)
 }
 
 pub trait Engine: Send {
@@ -295,8 +331,12 @@ pub(crate) fn segment_ends(cfg: &Config) -> Vec<u32> {
     let mut ends: Vec<u32> = [2.0_f32, 10.0]
         .into_iter()
         .map(|s| fidelity.settle() + (s * fidelity.rate as f32).round() as u32)
-        // Screened creatures leave right after the screen step.
-        .chain(cfg.screen.map(|screen| screen.tick(fidelity) + 1))
+        // Screened creatures leave right after the screen step. The cut is
+        // there with or without a screen, so a replay (which has none) runs in
+        // the same dispatches as the trial that scored it.
+        .chain(crate::physics::screen_seconds().map(|seconds| {
+            crate::physics::Screen { seconds, bar: 0.0 }.tick(fidelity) + 1
+        }))
         .filter(|&tick| tick < total)
         .collect();
     ends.sort_unstable();
