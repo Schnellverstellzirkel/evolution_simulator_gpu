@@ -505,7 +505,7 @@ fn physics2() -> bool {
 fn shared_per_thread(capacity: usize) -> usize {
     if !physics2() {
         24 * capacity
-    } else if capacity > 32 {
+    } else if creature_kernel::cuda_table_local(capacity) {
         0
     } else {
         4 * (10 * capacity - 6)

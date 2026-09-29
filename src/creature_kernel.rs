@@ -667,6 +667,19 @@ fn cuda_source_variant(
     source
 }
 
+/// Whether the v2 CUDA kernel of `capacity` nodes keeps its per-lane table in
+/// local memory (through L1 and L2) instead of shared memory. Above 32 nodes
+/// it does, because the table would not fit. `EVOLUTION_CUDA_TABLE_LOCAL=N`
+/// (a developer diagnostic) moves the limit down to bodies above N nodes.
+pub fn cuda_table_local(capacity: usize) -> bool {
+    let above = std::env::var("EVOLUTION_CUDA_TABLE_LOCAL")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(32)
+        .min(32);
+    capacity > above
+}
+
 /// The physics v2 CUDA kernel (`shaders/physics2_creature.cu`) for
 /// `capacity`-node buckets: the counterpart of `physics2::shader_source`,
 /// with the same constants as `#define` lines. Bodies of up to 16 nodes
@@ -713,7 +726,7 @@ fn cuda_source2_variant(
             "UNROLL",
             (if unroll { "_Pragma(\"unroll\")" } else { "" }).into(),
         ),
-        ("TAB_LOCAL", (if capacity > 32 { "1" } else { "0" }).into()),
+        ("TAB_LOCAL", (if cuda_table_local(capacity) { "1" } else { "0" }).into()),
         (
             "LAUNCH_BOUNDS",
             if launch_bounds {
