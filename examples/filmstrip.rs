@@ -1,5 +1,4 @@
-//! Evolves a small population under the selected physics (`EVOLUTION_PHYSICS=2`
-//! for the v2 prototype) and draws the best creature's trial as a filmstrip:
+//! Evolves a small population under physics v2 and draws the best creature's trial as a filmstrip:
 //! one stick figure per `every` seconds, left to right, over the ground, so a
 //! gait can be judged from a still image. Also prints its speed, how often a
 //! node touches the ground, and the fastest node speed.

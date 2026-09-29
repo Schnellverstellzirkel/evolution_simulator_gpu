@@ -1,5 +1,5 @@
 //! Replays one creature (a JSON file from `filmstrip` with
-//! EVOLUTION_FILM_DUMP) under the selected physics (`EVOLUTION_PHYSICS=2` for
+//! EVOLUTION_FILM_DUMP) under physics v2 (
 //! the v2 prototype) and draws a chronophotograph: every pose of a short
 //! window at fixed intervals, in world coordinates, light to dark, so a gait
 //! cycle can be judged from one image. Also prints its speed, flight time,
@@ -64,7 +64,7 @@ fn main() -> anyhow::Result<()> {
         fastest,
         low_head
     );
-    if physics2::enabled() {
+    {
         println!(
             "momentum: ground and wind {:.2} N s, change {:.2} N s; energy: muscle work {:.1} J, gained otherwise {:.1} J, lost {:.1} J, momentum balance +{:.1} J -{:.1} J; no contact in {:.1}% of steps",
             ledger[0],
@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
             energy[7], energy[8], energy[10], energy[9], energy[11]
         );
     }
-    if physics2::enabled() {
+    {
         let counts = physics2::CONTACT_COUNTS.with(|c| c.get());
         println!("steps by nodes in the contact solve (0, 1, 2, ...): {counts:?}");
     }

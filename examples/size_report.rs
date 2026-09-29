@@ -1,11 +1,9 @@
 //! Body size and foot slip of the fastest archive elites: how long each body
 //! is, what it weighs, and how far its feet slide while touching the ground.
-//! With `EVOLUTION_LEDGER` set, it also prints where the three fastest
-//! bodies' forward momentum comes from.
 //! `EVOLUTION_NODE_SLIP` adds scored-interval contact details for the champion.
 //! Usage: cargo run --release --example size_report <checkpoint.evo> [count]
 use evolution_simulator::{
-    config::Config, cpu_engine, creature_kernel::GpuResult, evolution::Population, physics, storage,
+    config::Config, cpu_engine, creature_kernel::GpuResult, physics, storage,
 };
 
 struct ReplayMetrics {
@@ -178,31 +176,6 @@ fn main() {
                 "{j:4}  {mass:7.2}  {:13.2}  {:6.1}  {:5}",
                 detail.contact_share, detail.slip, detail.lifts,
             );
-        }
-    }
-    if std::env::var_os("EVOLUTION_LEDGER").is_none() {
-        return;
-    }
-    let names = [
-        "integration speed cap",
-        "ground contact",
-        "velocity-pass speed cap",
-        "velocity-pass constraints",
-        "projection COM shift",
-        "muscle forces",
-    ];
-    for elite in elites.iter().take(3) {
-        *cpu_engine::LEDGER.lock().unwrap() = [0.0; 6];
-        let mut pop = Population::default();
-        pop.push(elite.creature.clone());
-        let result = cpu_engine::evaluate(&pop, &e.config);
-        let mass: f32 = physics::nodes(&elite.creature).iter().map(|n| n.mass).sum();
-        println!(
-            "ledger for {:.1} m ({:.0} kg), kg*m/s over the trial:",
-            result[0].fitness, mass
-        );
-        for (name, v) in names.iter().zip(*cpu_engine::LEDGER.lock().unwrap()) {
-            println!("  {name:28} {v:+12.1}");
         }
     }
 }

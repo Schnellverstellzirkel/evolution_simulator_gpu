@@ -1,5 +1,4 @@
-//! Physics v2 on the GPU against the CPU prototype (`EVOLUTION_PHYSICS=2`
-//! required): evaluates the same creatures with `physics2::evaluate` and with
+//! Physics v2 on the GPU against the CPU prototype: evaluates the same creatures with `physics2::evaluate` and with
 //! the v2 kernel on the named Vulkan device, and prints how far their
 //! distances and fall times differ, over time spans short and long (chaotic
 //! trials drift apart, so the long ones are distributions). Also prints
@@ -49,7 +48,6 @@ fn quantile(values: &mut [f32], q: f32) -> f32 {
 }
 
 fn main() -> anyhow::Result<()> {
-    anyhow::ensure!(physics2::enabled(), "set EVOLUTION_PHYSICS=2");
     let args: Vec<String> = std::env::args().collect();
     let count: usize = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(4096);
     let seconds: f32 = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(10.0);

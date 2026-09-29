@@ -1,5 +1,5 @@
 //! How a fresh random population fares under the selected physics
-//! (`EVOLUTION_PHYSICS=2` for the v2 prototype): how many fall and when,
+//! (the v2 prototype): how many fall and when,
 //! how far the survivors get, and the evaluation rate.
 //! Usage: cargo run --release --example physics_probe [count] [seconds]
 use evolution_simulator::{config::Config, cpu_engine, evolution};

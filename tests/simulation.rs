@@ -3,11 +3,18 @@ use evolution_simulator::{
     config::Config,
     evolution::{self, Bone, Creature, Muscle, NodeGene},
     gpu::Gpu,
-    physics::{self, Node},
+    physics,
     qd::{Elite, Emitter, QdArchive},
     storage::{self, Experiment, Stage},
 };
 use std::path::PathBuf;
+/// One creature's score on the production CPU engine.
+fn evaluate_one(creature: &Creature, cfg: &Config) -> f32 {
+    let mut pop = evolution_simulator::evolution::Population::default();
+    pop.push(creature.clone());
+    evolution_simulator::cpu_engine::evaluate(&pop, cfg)[0].fitness
+}
+
 fn config() -> Config {
     Config {
         population: 32,
@@ -18,47 +25,6 @@ fn config() -> Config {
 }
 fn path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("evolution-{}-{name}.evo", std::process::id()))
-}
-fn stress_creature() -> Creature {
-    let node_count = 64;
-    let nodes: Vec<_> = (0..node_count)
-        .map(|i| NodeGene {
-            x: (i as f32 - (node_count - 1) as f32 * 0.5) * 0.12,
-            y: 0.09 + (i % 2) as f32 * 0.05,
-            diameter: 0.08,
-            friction: 0.5,
-        })
-        .collect();
-    let bones: Vec<_> = (0..node_count - 1)
-        .map(|i| {
-            let a = &nodes[i];
-            let b = &nodes[i + 1];
-            Bone::new(i as u32, (i + 1) as u32, (a.x - b.x).hypot(a.y - b.y))
-        })
-        .collect();
-    let muscles: Vec<_> = (0..bones.len())
-        .map(|i| Muscle {
-            bone_a: i as u32,
-            bone_b: ((i + 31) % bones.len()) as u32,
-            anchor_a: if i % 2 == 0 { 0.0 } else { 1.0 },
-            anchor_b: if i % 3 == 0 { 1.0 } else { 0.0 },
-            short: 0.02,
-            long: 0.24,
-            period: 0.1 + (i % 5) as f32 * 0.07,
-            phase: (i % 7) as f32 / 7.0,
-            duty: 0.5,
-            stiffness: 120.0,
-            sensor: 255,
-            reset: 0.0,
-        })
-        .collect();
-    Creature {
-        nodes,
-        bones,
-        muscles,
-        id: 0,
-        mutability: 1.0,
-    }
 }
 
 #[test]
@@ -179,30 +145,6 @@ fn mutation_keeps_valid_graphs_at_limits() {
     }
 }
 #[test]
-fn flat_ground_contact_resolves_nodes_and_can_be_disabled() {
-    let cfg = config();
-    let mut node = Node {
-        pos: [0., -0.1],
-        vel: [1., -2.],
-        radius: 0.04,
-        friction: 1.,
-        mass: 0.1,
-        failed: 0.,
-    };
-    physics::collide(&mut node, &cfg);
-    assert!(node.pos[1] >= node.radius - 1e-6);
-    assert_eq!(node.vel, [0., 0.]);
-    let cfg = Config {
-        ground: false,
-        ..cfg
-    };
-    node.pos = [0., 0.];
-    node.vel = [1., -2.];
-    physics::collide(&mut node, &cfg);
-    assert_eq!(node.pos, [0., 0.]);
-    assert_eq!(node.vel, [1., -2.]);
-}
-#[test]
 fn muscle_cycle_is_continuous_and_periodic() {
     let m = Muscle {
         bone_a: 0,
@@ -237,114 +179,9 @@ fn frozen_muscles_behave_like_unpowered_muscles() {
     for muscle in &mut unpowered.muscles {
         muscle.stiffness = 0.0;
     }
-    let fixed_score = physics::evaluate(&fixed, &cfg);
-    let unpowered_score = physics::evaluate(&unpowered, &cfg);
+    let fixed_score = evaluate_one(&fixed, &cfg);
+    let unpowered_score = evaluate_one(&unpowered, &cfg);
     assert!((fixed_score - unpowered_score).abs() < 1e-5);
-}
-
-#[test]
-fn bone_lengths_hold_and_off_center_muscles_rotate_bones() {
-    let cfg = Config {
-        gravity: 0.0,
-        ground: false,
-        air_retention: 1.0,
-        ..config()
-    };
-    let genes = [
-        NodeGene {
-            x: 0.0,
-            y: 0.0,
-            diameter: 0.08,
-            friction: 0.5,
-        },
-        NodeGene {
-            x: 1.0,
-            y: 0.0,
-            diameter: 0.08,
-            friction: 0.5,
-        },
-        NodeGene {
-            x: 1.0,
-            y: 1.0,
-            diameter: 0.08,
-            friction: 0.5,
-        },
-        NodeGene {
-            x: 0.0,
-            y: 1.0,
-            diameter: 0.08,
-            friction: 0.5,
-        },
-    ];
-    let creature = Creature {
-        nodes: genes.to_vec(),
-        bones: vec![
-            Bone::new(0, 1, 1.0),
-            Bone::new(1, 2, 1.0),
-            Bone::new(2, 3, 1.0),
-        ],
-        muscles: vec![Muscle {
-            bone_a: 0,
-            bone_b: 2,
-            anchor_a: 0.25,
-            anchor_b: 0.75,
-            short: 0.1,
-            long: 0.4,
-            period: 1.0,
-            phase: 0.25,
-            duty: 0.5,
-            stiffness: 40.0,
-            sensor: 255,
-            reset: 0.0,
-        }],
-        id: 1,
-        mutability: 1.0,
-    };
-    let mut nodes = physics::nodes(&creature);
-    physics::step(
-        &mut nodes,
-        &creature.bones,
-        &creature.muscles,
-        &cfg,
-        physics::settle() + 1,
-    );
-    for bone in &creature.bones {
-        let a = nodes[bone.a as usize].pos;
-        let b = nodes[bone.b as usize].pos;
-        let length = (a[0] - b[0]).hypot(a[1] - b[1]);
-        assert!(
-            (length - bone.rest_length).abs() < 0.002,
-            "{bone:?}: {length}"
-        );
-    }
-    assert!(nodes[0].vel[1] > 0.0);
-    assert!(nodes[0].vel[1] > nodes[1].vel[1]);
-    assert!(nodes[3].vel[1] < nodes[2].vel[1]);
-}
-
-#[test]
-fn bone_lengths_hold_under_sustained_muscle_and_ground_forces() {
-    let cfg = Config {
-        gravity: 30.0,
-        ground: true,
-        air_retention: 1.0,
-        ..config()
-    };
-    let creature = stress_creature();
-    let mut body = physics::nodes(&creature);
-
-    let mut max_error = 0.0f32;
-    for tick in 0..560 {
-        physics::step(&mut body, &creature.bones, &creature.muscles, &cfg, tick);
-        for bone in &creature.bones {
-            let a = body[bone.a as usize].pos;
-            let b = body[bone.b as usize].pos;
-            max_error = max_error.max((a[0] - b[0]).hypot(a[1] - b[1]) - bone.rest_length);
-            max_error = max_error.max(bone.rest_length - (a[0] - b[0]).hypot(a[1] - b[1]));
-        }
-    }
-    assert!(max_error < 0.0001, "maximum bone length error: {max_error}");
-    assert!(body.iter().all(|node| node.pos[1] >= node.radius - 1e-6));
 }
 
 #[test]
@@ -377,7 +214,7 @@ fn overlapping_nodes_remain_finite() {
         id: 1,
         mutability: 1.,
     };
-    assert!(physics::evaluate(&c, &config()).is_finite());
+    assert!(evaluate_one(&c, &config()).is_finite());
 }
 #[test]
 fn a_checkpoint_mid_generation_resumes_from_its_archives() {
@@ -387,7 +224,7 @@ fn a_checkpoint_mid_generation_resumes_from_its_archives() {
     let mut e = Experiment::new(config()).unwrap();
     e.stage = Stage::Evaluating;
     for i in 0..7 {
-        e.scores[i] = physics::evaluate(&e.population.creature(i), &e.config);
+        e.scores[i] = evaluate_one(&e.population.creature(i), &e.config);
     }
     e.evaluated = 7;
     let checkpoint = path("partial");

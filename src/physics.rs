@@ -1,7 +1,4 @@
-use crate::{
-    config::Config,
-    evolution::{Bone, Creature, FAILED, Muscle, NodeGene},
-};
+use crate::evolution::{Bone, Creature, FAILED, Muscle, NodeGene};
 /// Physics steps per second. Every engine, the replay, and trial lengths
 /// follow it.
 pub fn rate() -> u32 {
@@ -218,319 +215,13 @@ pub(crate) fn limited_target(m: &Muscle, time: f32) -> f32 {
     limited.short = m.long - amplitude;
     target(&limited, time)
 }
-fn motor_force(m: &Muscle, time: f32, relative: f32) -> f32 {
-    let target_speed = (limited_target(m, time) - limited_target(m, (time - dt()).max(0.0))) / dt();
-    // A fixed target is a passive constraint, not an inexhaustible motor.
-    // The actuator only pulls: it drives while shortening and goes slack while
-    // lengthening.
-    ((-target_speed * m.stiffness * 0.25).max(0.0) + relative * 0.15)
-        .clamp(-limits().muscle_force, limits().muscle_force)
-}
 thread_local! {
     /// Diagnostic ledger of horizontal momentum changes by source:
     /// [integration speed cap, ground contact, velocity-pass speed cap,
     ///  velocity-pass constraints, projection/rebuild center-of-mass shift x mass].
     pub static MOMENTUM_LEDGER: std::cell::Cell<[f64; 5]> = const { std::cell::Cell::new([0.0; 5]) };
 }
-fn ledger_add(slot: usize, amount: f32) {
-    MOMENTUM_LEDGER.with(|l| {
-        let mut v = l.get();
-        v[slot] += f64::from(amount);
-        l.set(v);
-    });
-}
-fn momentum_x(nodes: &[Node]) -> f32 {
-    nodes.iter().map(|n| n.vel[0] * n.mass).sum()
-}
-fn limit_speed(velocity: &mut [f32; 2]) {
-    let speed = velocity[0].hypot(velocity[1]);
-    if speed > limits().node_speed {
-        let scale = limits().node_speed / speed;
-        velocity[0] *= scale;
-        velocity[1] *= scale;
-    }
-}
-pub fn center(nodes: &mut [Node]) {
-    let mass_sum = nodes.iter().map(|n| n.mass).sum::<f32>();
-    let x = nodes.iter().map(|n| n.pos[0] * n.mass).sum::<f32>() / mass_sum;
-    let low = nodes
-        .iter()
-        .map(|n| n.pos[1] - n.radius)
-        .fold(f32::INFINITY, f32::min);
-    for n in nodes {
-        n.pos[0] -= x;
-        n.pos[1] -= low;
-        n.vel = [0.0; 2];
-    }
-}
-fn contact(n: &mut Node, normal: [f32; 2], penetration: f32, friction: f32) {
-    n.pos[0] += normal[0] * penetration;
-    n.pos[1] += normal[1] * penetration;
-    let vn = n.vel[0] * normal[0] + n.vel[1] * normal[1];
-    if vn < 0.0 {
-        n.vel[0] -= vn * normal[0];
-        n.vel[1] -= vn * normal[1];
-        let speed = n.vel[0].hypot(n.vel[1]);
-        let keep = (1.0 - (-vn) * friction / speed.max(1e-8)).max(0.0);
-        n.vel[0] *= keep;
-        n.vel[1] *= keep;
-    }
-}
-pub fn collide(n: &mut Node, cfg: &Config) {
-    let mu = n.friction * cfg.ground_friction;
-    if cfg.ground && n.pos[1] < n.radius {
-        contact(n, [0.0, 1.0], n.radius - n.pos[1], mu);
-    }
-}
-fn bone_point(bone: Bone, nodes: &[Node; 64], t: f32, velocity: bool) -> [f32; 2] {
-    let a = &nodes[bone.a as usize];
-    let b = &nodes[bone.b as usize];
-    let av = if velocity { a.vel } else { a.pos };
-    let bv = if velocity { b.vel } else { b.pos };
-    [av[0] + (bv[0] - av[0]) * t, av[1] + (bv[1] - av[1]) * t]
-}
 
-fn project_bones(nodes: &mut [Node], bones: &[Bone], ground: bool, previous: &[Node; 64]) {
-    let com_before: f32 = nodes.iter().map(|n| n.pos[0] * n.mass).sum();
-    let mut positions = [[0.0; 2]; 64];
-    for (i, node) in nodes.iter().enumerate() {
-        positions[i] = node.pos;
-    }
-    for _ in 0..solver_passes().0 {
-        for bone in bones {
-            let a = bone.a as usize;
-            let b = bone.b as usize;
-            let delta = [
-                positions[b][0] - positions[a][0],
-                positions[b][1] - positions[a][1],
-            ];
-            let raw_distance = delta[0].hypot(delta[1]);
-            let distance = raw_distance.max(1.0e-6);
-            let error = distance - bone.rest_length;
-            let direction = if raw_distance > 1.0e-6 {
-                [delta[0] / distance, delta[1] / distance]
-            } else {
-                [1.0, 0.0]
-            };
-            let inverse_a = 1.0 / nodes[a].mass;
-            let inverse_b = 1.0 / nodes[b].mass;
-            let inverse_sum = inverse_a + inverse_b;
-            let share_a = inverse_a / inverse_sum;
-            let share_b = inverse_b / inverse_sum;
-            positions[a][0] += direction[0] * error * share_a;
-            positions[a][1] += direction[1] * error * share_a;
-            positions[b][0] -= direction[0] * error * share_b;
-            positions[b][1] -= direction[1] * error * share_b;
-            if ground {
-                positions[a][1] = positions[a][1].max(nodes[a].radius);
-                positions[b][1] = positions[b][1].max(nodes[b].radius);
-            }
-        }
-    }
-    // A final parent-first reconstruction puts every tree edge exactly on its
-    // rest length. The iterative projections above choose a stable set of bone
-    // directions; this pass removes accumulated chain-compression error.
-    let shape = positions;
-    let mut target_center = [0.0; 2];
-    let mut mass_sum = 0.0;
-    for (i, node) in nodes.iter().enumerate() {
-        mass_sum += node.mass;
-        target_center[0] += shape[i][0] * node.mass;
-        target_center[1] += shape[i][1] * node.mass;
-    }
-    for bone in bones {
-        let a = bone.a as usize;
-        let b = bone.b as usize;
-        let delta = [shape[b][0] - shape[a][0], shape[b][1] - shape[a][1]];
-        let length = delta[0].hypot(delta[1]);
-        let mut direction = if length > 1.0e-6 {
-            [delta[0] / length, delta[1] / length]
-        } else {
-            [1.0, 0.0]
-        };
-        let previous_delta = [
-            previous[b].pos[0] - previous[a].pos[0],
-            previous[b].pos[1] - previous[a].pos[1],
-        ];
-        let previous_length = previous_delta[0].hypot(previous_delta[1]);
-        if previous_length > 1.0e-6 {
-            let previous_direction = [
-                previous_delta[0] / previous_length,
-                previous_delta[1] / previous_length,
-            ];
-            let dot = previous_direction[0] * direction[0] + previous_direction[1] * direction[1];
-            if dot < turn_limits().0 {
-                let cross =
-                    previous_direction[0] * direction[1] - previous_direction[1] * direction[0];
-                let turn_sign = if cross < 0.0 { -1.0 } else { 1.0 };
-                let turned = [
-                    previous_direction[0] - previous_direction[1] * turn_sign * turn_limits().1,
-                    previous_direction[1] + previous_direction[0] * turn_sign * turn_limits().1,
-                ];
-                let turn_length = turned[0].hypot(turned[1]);
-                direction = [turned[0] / turn_length, turned[1] / turn_length];
-            }
-        }
-        positions[b] = [
-            positions[a][0] + direction[0] * bone.rest_length,
-            positions[a][1] + direction[1] * bone.rest_length,
-        ];
-    }
-    let mut current_center = [0.0; 2];
-    for (i, node) in nodes.iter().enumerate() {
-        current_center[0] += positions[i][0] * node.mass;
-        current_center[1] += positions[i][1] * node.mass;
-    }
-    let shift = [
-        (target_center[0] - current_center[0]) / mass_sum,
-        (target_center[1] - current_center[1]) / mass_sum,
-    ];
-    for position in &mut positions[..nodes.len()] {
-        position[0] += shift[0];
-        position[1] += shift[1];
-    }
-    if ground {
-        let lift = nodes
-            .iter()
-            .enumerate()
-            .map(|(i, node)| node.radius - positions[i][1])
-            .fold(0.0f32, f32::max);
-        for position in &mut positions[..nodes.len()] {
-            position[1] += lift;
-        }
-    }
-    let com_after: f32 = (0..nodes.len())
-        .map(|i| positions[i][0] * nodes[i].mass)
-        .sum();
-    ledger_add(4, (com_after - com_before) / dt());
-    let before = momentum_x(nodes);
-    for (i, node) in nodes.iter_mut().enumerate() {
-        node.pos = positions[i];
-        limit_speed(&mut node.vel);
-        if ground && node.pos[1] <= node.radius + 1e-5 {
-            node.vel[1] = node.vel[1].max(0.0);
-        }
-    }
-    ledger_add(2, momentum_x(nodes) - before);
-    // Keep each link's rotation bounded and remove only velocity components
-    // that would stretch a bone or rotate it beyond the same angular limit.
-    for _ in 0..solver_passes().1 {
-        let before = momentum_x(nodes);
-        for bone in bones {
-            let a = bone.a as usize;
-            let b = bone.b as usize;
-            let delta = [
-                nodes[b].pos[0] - nodes[a].pos[0],
-                nodes[b].pos[1] - nodes[a].pos[1],
-            ];
-            let length = delta[0].hypot(delta[1]).max(1.0e-6);
-            let direction = [delta[0] / length, delta[1] / length];
-            let inverse_a = 1.0 / nodes[a].mass;
-            let inverse_b = 1.0 / nodes[b].mass;
-            let inverse_sum = inverse_a + inverse_b;
-            let relative = (nodes[b].vel[0] - nodes[a].vel[0]) * direction[0]
-                + (nodes[b].vel[1] - nodes[a].vel[1]) * direction[1];
-            let impulse = relative / inverse_sum;
-            nodes[a].vel[0] += direction[0] * impulse * inverse_a;
-            nodes[a].vel[1] += direction[1] * impulse * inverse_a;
-            nodes[b].vel[0] -= direction[0] * impulse * inverse_b;
-            nodes[b].vel[1] -= direction[1] * impulse * inverse_b;
-
-            let tangent = [-direction[1], direction[0]];
-            let angular_velocity = (nodes[b].vel[0] - nodes[a].vel[0]) * tangent[0]
-                + (nodes[b].vel[1] - nodes[a].vel[1]) * tangent[1];
-            let target_angular_velocity =
-                angular_velocity.clamp(-limits().bone_spin * length, limits().bone_spin * length);
-            let impulse = (angular_velocity - target_angular_velocity) / inverse_sum;
-            nodes[a].vel[0] += tangent[0] * impulse * inverse_a;
-            nodes[a].vel[1] += tangent[1] * impulse * inverse_a;
-            nodes[b].vel[0] -= tangent[0] * impulse * inverse_b;
-            nodes[b].vel[1] -= tangent[1] * impulse * inverse_b;
-        }
-        ledger_add(3, momentum_x(nodes) - before);
-        let before = momentum_x(nodes);
-        for node in nodes.iter_mut() {
-            limit_speed(&mut node.vel);
-            if ground && node.pos[1] <= node.radius + 1e-5 {
-                node.vel[1] = node.vel[1].max(0.0);
-            }
-        }
-        ledger_add(2, momentum_x(nodes) - before);
-    }
-}
-
-pub fn step(nodes: &mut [Node], bones: &[Bone], muscles: &[Muscle], cfg: &Config, tick: u32) {
-    if tick == settle() {
-        center(nodes);
-    }
-    let mut old = [Node::default(); 64];
-    old[..nodes.len()].copy_from_slice(nodes);
-    let time = tick.saturating_sub(settle()) as f32 * dt();
-    for (i, n) in nodes.iter_mut().enumerate() {
-        let mut f = [0.0; 2];
-        for m in muscles {
-            let bone_a = bones[m.bone_a as usize];
-            let bone_b = bones[m.bone_b as usize];
-            let endpoint_a = bone_point(bone_a, &old, m.anchor_a, false);
-            let endpoint_b = bone_point(bone_b, &old, m.anchor_b, false);
-            let d = [endpoint_b[0] - endpoint_a[0], endpoint_b[1] - endpoint_a[1]];
-            let distance = d[0].hypot(d[1]).max(1e-6);
-            let dir = [d[0] / distance, d[1] / distance];
-            let velocity_a = bone_point(bone_a, &old, m.anchor_a, true);
-            let velocity_b = bone_point(bone_b, &old, m.anchor_b, true);
-            let relative =
-                (velocity_b[0] - velocity_a[0]) * dir[0] + (velocity_b[1] - velocity_a[1]) * dir[1];
-            let force = motor_force(m, time, relative);
-            let mut weight = 0.0;
-            if bone_a.a as usize == i {
-                weight += 1.0 - m.anchor_a;
-            }
-            if bone_a.b as usize == i {
-                weight += m.anchor_a;
-            }
-            if bone_b.a as usize == i {
-                weight -= 1.0 - m.anchor_b;
-            }
-            if bone_b.b as usize == i {
-                weight -= m.anchor_b;
-            }
-            f[0] += dir[0] * force * weight;
-            f[1] += dir[1] * force * weight;
-        }
-        n.vel[0] = (n.vel[0] + f[0] / n.mass * dt()) * air_per_step(cfg.air_retention);
-        n.vel[1] = (n.vel[1]
-            + (f[1] / n.mass - if tick >= settle() { cfg.gravity } else { 0.0 }) * dt())
-            * air_per_step(cfg.air_retention);
-        let before = n.vel[0] * n.mass;
-        limit_speed(&mut n.vel);
-        ledger_add(0, n.vel[0] * n.mass - before);
-        n.pos[0] += n.vel[0] * dt();
-        n.pos[1] += n.vel[1] * dt();
-        if tick >= settle() {
-            let before = n.vel[0] * n.mass;
-            collide(n, cfg);
-            ledger_add(1, n.vel[0] * n.mass - before);
-        }
-        if !n
-            .pos
-            .iter()
-            .chain(n.vel.iter())
-            .all(|v| v.is_finite() && v.abs() < 1e6)
-        {
-            n.failed = 1.0;
-            n.pos = [0.0; 2];
-            n.vel = [0.0; 2];
-        }
-    }
-    project_bones(nodes, bones, tick >= settle() && cfg.ground, &old);
-}
-/// Evaluates one creature with the same stepping loop used by CPU replay.
-/// Evaluate a whole population with `cpu_engine::evaluate` to fill SIMD groups.
-pub fn evaluate(c: &Creature, cfg: &Config) -> f32 {
-    let mut population = crate::evolution::Population::default();
-    population.push(c.clone());
-    crate::cpu_engine::evaluate(&population, cfg)[0].fitness
-}
 /// Joint range constraint for one bone, precomputed from the genome. The bone
 /// turns about its parent node `a` against a reference bone that shares that
 /// node: the parent's own bone, or for bones leaving the root, the first root
@@ -651,10 +342,6 @@ pub fn broken_joint(positions: &[[f32; 2]], bones: &[Bone], joints: &[Joint]) ->
         cos * joint.center[0] + sin * joint.center[1] < joint_break_cos(joint.half)
     })
 }
-/// Rounds to the GPU's snorm16 storage of the joint range center.
-fn snorm16(v: f32) -> f32 {
-    (v.clamp(-1.0, 1.0) * 32767.0).round() / 32767.0
-}
 /// Joint constraints for a canonical (parent-first) skeleton.
 /// Reference node of bone `index`'s joint: its parent bone's pivot, or for a
 /// bone at the root the first root bone's child. `None` for a free joint. It
@@ -669,11 +356,9 @@ pub fn joint_reference(bones: &[Bone], index: usize) -> Option<usize> {
         },
     }
 }
-pub fn joints(genes: &[NodeGene], bones: &[Bone]) -> Vec<Joint> {
-    let state = body(genes, bones);
-    let mut out = vec![Joint::FREE; bones.len()];
-    joints_from_body(genes, bones, &state, &mut out);
-    out
+/// Rounds to the GPU's snorm16 storage of the joint range center.
+fn snorm16(v: f32) -> f32 {
+    (v.clamp(-1.0, 1.0) * 32767.0).round() / 32767.0
 }
 
 /// Writes joint constants using an already computed body state. Callers that
@@ -716,6 +401,14 @@ pub fn joints_from_body(genes: &[NodeGene], bones: &[Bone], state: &[Node], out:
         };
     }
 }
+
+pub fn joints(genes: &[NodeGene], bones: &[Bone]) -> Vec<Joint> {
+    let state = body(genes, bones);
+    let mut out = vec![Joint::FREE; bones.len()];
+    joints_from_body(genes, bones, &state, &mut out);
+    out
+}
+
 /// Ground heights (m) of the bumps added by each roughness level.
 pub const TERRAIN_AMPLITUDES: [f32; 5] = [0.0, 0.03, 0.08, 0.15, 0.25];
 /// Bump height for `Config::terrain`.
@@ -904,15 +597,6 @@ pub fn fitness(n: &[Node]) -> f32 {
 mod tests {
     use super::*;
 
-    fn test_node(pos: [f32; 2]) -> Node {
-        Node {
-            pos,
-            radius: 0.03,
-            mass: 1.0,
-            ..Node::default()
-        }
-    }
-
     #[test]
     fn reusable_body_and_joint_outputs_match_allocating_wrappers() {
         let genes = [
@@ -1003,28 +687,6 @@ mod tests {
                     <= limits().muscle_speed * dt() + 1e-6
             );
         }
-    }
-
-    #[test]
-    fn fixed_target_cannot_supply_motor_force() {
-        let muscle = Muscle {
-            bone_a: 0,
-            bone_b: 1,
-            anchor_a: 0.5,
-            anchor_b: 0.5,
-            short: 0.1,
-            long: 0.1,
-            period: 0.1,
-            phase: 0.25,
-            duty: 0.5,
-            stiffness: 120.0,
-            sensor: 255,
-            reset: 0.0,
-        };
-        for tick in 0..120 {
-            assert_eq!(motor_force(&muscle, tick as f32 * dt(), 0.0), 0.0);
-        }
-        assert!(motor_force(&muscle, 0.025, 0.0) == 0.0);
     }
 
     #[test]
@@ -1183,21 +845,6 @@ mod tests {
     }
 
     #[test]
-    fn correcting_a_bone_does_not_create_velocity() {
-        let mut nodes = [test_node([0.0, 0.0]), test_node([0.2, 0.0])];
-        let mut previous = [Node::default(); 64];
-        previous[0] = nodes[0];
-        previous[1] = nodes[1];
-        let bone = Bone::new(0, 1, 1.0);
-
-        project_bones(&mut nodes, &[bone], false, &previous);
-
-        let length = (nodes[1].pos[0] - nodes[0].pos[0]).hypot(nodes[1].pos[1] - nodes[0].pos[1]);
-        assert!((length - bone.rest_length).abs() < 1e-6);
-        assert!(nodes.iter().all(|node| node.vel == [0.0; 2]));
-    }
-
-    #[test]
     fn joints_break_only_well_past_their_range() {
         let genes: Vec<NodeGene> = [[0.0, 1.0], [1.0, 1.0], [2.0, 1.0]]
             .iter()
@@ -1255,39 +902,5 @@ mod tests {
                 > 0.1
         );
         assert!((fitness(&before) - fitness(&reshaped)).abs() < 1e-6);
-    }
-
-    #[test]
-    fn bone_rotation_and_node_speed_are_bounded() {
-        let mut previous = [Node::default(); 64];
-        previous[0] = test_node([0.0, 0.0]);
-        previous[1] = test_node([0.1, 0.0]);
-        let mut nodes = [previous[0], previous[1]];
-        nodes[1].pos = [0.1, 0.1];
-        nodes[1].vel = [0.0, 100.0];
-        let bone = Bone::new(0, 1, 0.1);
-
-        project_bones(&mut nodes, &[bone], false, &previous);
-
-        let delta = [
-            nodes[1].pos[0] - nodes[0].pos[0],
-            nodes[1].pos[1] - nodes[0].pos[1],
-        ];
-        let angle = delta[1].atan2(delta[0]).abs();
-        assert!(angle <= limits().bone_spin * dt() + 1e-5);
-        assert!(
-            nodes
-                .iter()
-                .all(|node| node.vel[0].hypot(node.vel[1]) <= limits().node_speed + 1e-5)
-        );
-        let length = delta[0].hypot(delta[1]);
-        let direction = [delta[0] / length, delta[1] / length];
-        let relative_radial = (nodes[1].vel[0] - nodes[0].vel[0]) * direction[0]
-            + (nodes[1].vel[1] - nodes[0].vel[1]) * direction[1];
-        let tangent = [-direction[1], direction[0]];
-        let relative_tangent = (nodes[1].vel[0] - nodes[0].vel[0]) * tangent[0]
-            + (nodes[1].vel[1] - nodes[0].vel[1]) * tangent[1];
-        assert!(relative_radial.abs() < 1e-5);
-        assert!(relative_tangent.abs() <= limits().bone_spin * length + 1e-5);
     }
 }

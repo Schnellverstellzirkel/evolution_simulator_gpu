@@ -1,12 +1,12 @@
 //! Solver-made energy and momentum of elites under the selected physics
-//! (`EVOLUTION_PHYSICS=2` for v2). Replays elites spread over the archive's
+//! (physics v2). Replays elites spread over the archive's
 //! rank order on the CPU engine and prints, per elite and in total, where its
 //! energy and momentum came from: muscle work, mechanical energy the solver
 //! added or removed beyond it, the momentum balance and first-law
 //! corrections of v2, friction that pushed a node the way it slid, and the
 //! steps by contact count. Diagnostic only.
 //! With `random` in place of a checkpoint it audits a random first generation.
-//! Usage: EVOLUTION_PHYSICS=2 cargo run --release --example physics_audit <checkpoint.evo|random> [count]
+//! Usage: cargo run --release --example physics_audit <checkpoint.evo|random> [count]
 use evolution_simulator::{config::Config, cpu_engine, physics, physics2, storage};
 
 fn main() {
@@ -15,7 +15,6 @@ fn main() {
         .nth(2)
         .and_then(|v| v.parse().ok())
         .unwrap_or(24);
-    assert!(physics2::enabled(), "set EVOLUTION_PHYSICS=2");
     let (config, mut creatures): (Config, Vec<(f32, evolution_simulator::evolution::Creature)>) =
         if path == "random" {
             let cfg = Config {

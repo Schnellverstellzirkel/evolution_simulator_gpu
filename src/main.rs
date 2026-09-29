@@ -117,10 +117,6 @@ enum Action {
         /// Evaluate directly on the named Vulkan device (bodies up to 16 nodes).
         #[arg(long)]
         engine: Option<String>,
-        /// Keep only creatures of the checkpoint's Nth most common body plan
-        /// (0 is the most common), before `--limit`.
-        #[arg(long)]
-        plan_rank: Option<usize>,
         /// Screen like the game: a first pass of standard trials without a
         /// bar sets the screen's bar from its distances, then every repeat
         /// runs with that bar.
@@ -436,7 +432,6 @@ fn main() -> Result<()> {
             compare,
             duration,
             engine,
-            plan_rank,
             screened,
             max_nodes,
         }) => {
@@ -447,25 +442,6 @@ fn main() -> Result<()> {
             }
             cfg.throughput = true;
             let mut source: Vec<usize> = (0..cfg.population).collect();
-            if let Some(rank) = plan_rank {
-                use evolution_simulator::creature_kernel::plan_of;
-                let mut counts = std::collections::HashMap::new();
-                for &i in &source {
-                    *counts.entry(plan_of(&e.population, i)).or_insert(0usize) += 1;
-                }
-                let mut ranked: Vec<_> = counts.into_iter().collect();
-                ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-                let (plan, size) = ranked
-                    .get(rank)
-                    .context("No body plan of that rank")?
-                    .clone();
-                eprintln!(
-                    "Plan rank {rank}: {size} creatures, {} nodes, {} muscles",
-                    plan.nodes,
-                    plan.muscles.len()
-                );
-                source.retain(|&i| plan_of(&e.population, i) == plan);
-            }
             if let Some(max) = max_nodes {
                 source.retain(|&i| e.population.genomes[i].node_count as usize <= max);
             }
@@ -551,12 +527,8 @@ fn main() -> Result<()> {
             let batch = cfg.batch_size();
             let mut out = Vec::new();
             let rate = cfg.fidelity().rate as f64;
-            // Settling steps the kernel runs before a trial (none in physics v2).
-            let settle = if evolution_simulator::physics2::enabled() {
-                0.0
-            } else {
-                f64::from(cfg.fidelity().settle())
-            };
+            // Settling steps the kernel runs before a trial (none).
+            let settle = 0.0;
             for r in 0..repeat {
                 let start = Instant::now();
                 out.clear();

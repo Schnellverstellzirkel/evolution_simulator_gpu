@@ -78,23 +78,3 @@ impl Gpu {
         self.sched.as_ref().map_or(0, |s| s.in_flight())
     }
 }
-
-/// Replaces the kernel's exact cosine with the default polynomial unless
-/// `EVOLUTION_EXACT_COS` is set.
-pub(crate) fn apply_fast_cos(source: String) -> String {
-    if std::env::var_os("EVOLUTION_EXACT_COS").is_some() {
-        return source;
-    }
-    let fast_cos_function = "fn fast_cos_pi(x:f32)->f32 { let y=(x-0.5)*3.14159265359; let z=y*y; var p=fma(z,-2.50521084e-8,2.75573192e-6); p=fma(z,p,-1.98412698e-4); p=fma(z,p,8.33333377e-3); p=fma(z,p,-1.66666672e-1); p=fma(z,p,1.0); return -y*p; }\n";
-    let marker = "fn limited_muscle_length";
-    source
-        .replace(
-            "cos(3.14159265359 * phase * m.inv_duty)",
-            "fast_cos_pi(phase * m.inv_duty)",
-        )
-        .replace(
-            "cos(3.14159265359 * (phase - m.duty) * m.inv_complement)",
-            "fast_cos_pi((phase - m.duty) * m.inv_complement)",
-        )
-        .replace(marker, &format!("{fast_cos_function}{marker}"))
-}

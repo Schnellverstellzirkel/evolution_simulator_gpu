@@ -37,7 +37,7 @@ pub struct Recording {
     pub frames: Vec<Vec<[f32; 2]>>,
     pub result: GpuResult,
     /// The muscle energy, muscle force and ground contact force the kernel
-    /// recorded with each frame (physics v2); None for physics v1.
+    /// recorded with each frame; `None` only where an engine cannot record them.
     pub forces: Option<crate::replay_forces::Forces>,
 }
 
@@ -87,7 +87,7 @@ pub fn replay(creature: &Creature, cfg: &Config) -> (Vec<Vec<[f32; 2]>>, GpuResu
 }
 
 /// `replay` with the muscle energy, muscle force and ground contact forces
-/// the engine recorded with each frame (physics v2; None under physics v1).
+/// the engine recorded with each frame.
 pub fn replay_forces(
     creature: &Creature,
     cfg: &Config,
@@ -103,12 +103,8 @@ pub fn replay_forces(
     if let Some(recording) = record_on_gpu(creature, &cfg, Duration::from_secs(3)) {
         return (recording.frames, recording.result, recording.forces);
     }
-    if crate::physics2::enabled() {
-        let (frames, result, forces) = crate::physics2::replay_forces(creature, &cfg);
-        return (frames, result, Some(forces));
-    }
-    let (frames, result) = crate::cpu_engine::replay(creature, &cfg);
-    (frames, result, None)
+    let (frames, result, forces) = crate::physics2::replay_forces(creature, &cfg);
+    (frames, result, Some(forces))
 }
 
 pub trait Engine: Send {
@@ -710,12 +706,7 @@ fn run_segments<D: SegmentDevice>(
                 Some(unit) => Some(Ok(unit)),
                 None => pending.take().map(|(ticket, unit, cfg)| {
                     let indices: Vec<usize> = (0..unit.genomes.len()).collect();
-                    let packed = if crate::physics2::enabled() {
-                        crate::physics2::pack(&unit, &indices, &cfg)
-                    } else {
-                        creature_kernel::pack(&unit, &indices)
-                    };
-                    packed.map(|batches| SegmentedUnit {
+                    crate::physics2::pack(&unit, &indices, &cfg).map(|batches| SegmentedUnit {
                         ticket,
                         results: vec![GpuResult::default(); indices.len()],
                         ends: segment_ends(&cfg),
@@ -735,13 +726,8 @@ fn run_segments<D: SegmentDevice>(
                     }
                 };
                 let total = *unit.ends.last().expect("segment ends");
-                // Physics v2 has no settling phase: its trials start at the
-                // settling tick.
-                let first = if crate::physics2::enabled() {
-                    unit.cfg.fidelity().settle()
-                } else {
-                    0
-                };
+                // There is no settling phase: trials start at the settling tick.
+                let first = unit.cfg.fidelity().settle();
                 let start = unit.segment.checked_sub(1).map_or(first, |s| unit.ends[s]);
                 let end = unit.ends[unit.segment];
                 match engine.submit(
@@ -897,11 +883,7 @@ fn start_recording<D: SegmentDevice>(
 ) -> Result<(u64, FrameLayout, u32)> {
     let mut population = Population::default();
     population.push(request.creature.clone());
-    let batches = if crate::physics2::enabled() {
-        crate::physics2::pack(&population, &[0], &request.cfg)?
-    } else {
-        creature_kernel::pack(&population, &[0])?
-    };
+    let batches = crate::physics2::pack(&population, &[0], &request.cfg)?;
     anyhow::ensure!(batches.len() == 1, "A replay packs into one batch");
     let fidelity = request.cfg.fidelity();
     let total = fidelity.settle() + request.cfg.steps();

@@ -8,9 +8,6 @@
 //!   (sled, near 1).
 //! - `slip/m`: total slide of touching nodes per meter traveled.
 //! - `touch`: share of steps with a node on the ground.
-//! - with `EVOLUTION_LEDGER` set, where the forward travel comes from: the
-//!   bone passes' center-of-mass shift (`projection`, meters) and the
-//!   momentum the contact friction adds (`contact`, kg m/s).
 //!
 //! With `--film DIR` it also draws each seed's worst slider as two PNG
 //! strips: 16 poses over the trial, and 16 poses 1/15 s apart in a fixed
@@ -237,15 +234,7 @@ fn main() -> Result<()> {
         .start_handler(|_| engine::lower_thread_priority())
         .build_global();
     let options = options()?;
-    let ledger = std::env::var_os("EVOLUTION_LEDGER").is_some();
-    println!(
-        "seed rank distance_m drag slip_per_m touch fall_s nodes bones muscles mass_kg feet{}",
-        if ledger {
-            " projection_m contact_kgms"
-        } else {
-            ""
-        }
-    );
+    println!("seed rank distance_m drag slip_per_m touch fall_s nodes bones muscles mass_kg feet");
     let mut all = Vec::new();
     for &seed in &options.seeds {
         let cfg = Config {
@@ -280,14 +269,11 @@ fn main() -> Result<()> {
         let mut worst: Option<(f32, Creature, Frames)> = None;
         for (rank, elite) in elites.iter().enumerate() {
             let creature = &elite.creature;
-            if ledger {
-                *cpu_engine::LEDGER.lock().unwrap() = [0.0; 6];
-            }
             let (frames, result) = cpu_engine::replay(creature, &cfg);
             let s = slide(creature, &frames, &result, &cfg);
             let nodes = physics::body(&creature.nodes, &creature.bones);
             let mass: f32 = nodes.iter().map(|n| n.mass).sum();
-            let mut row = format!(
+            let row = format!(
                 "{seed} {rank} {:.2} {:.3} {:.3} {:.2} {:.2} {} {} {} {:.2} {}",
                 s.distance,
                 s.drag,
@@ -300,11 +286,6 @@ fn main() -> Result<()> {
                 mass,
                 result.feet()
             );
-            if ledger {
-                let l = *cpu_engine::LEDGER.lock().unwrap();
-                let dt = cfg.fidelity().dt() as f64;
-                row += &format!(" {:.2} {:.2}", l[4] * dt / f64::from(mass), l[1]);
-            }
             println!("{row}");
             if let Some(dir) = &options.dump {
                 std::fs::create_dir_all(dir)?;

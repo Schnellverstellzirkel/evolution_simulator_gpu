@@ -6005,8 +6005,7 @@ fn write_creature_gif(
     drop(encoder);
     Ok(written)
 }
-/// Replays a creature (`cpu_engine::replay`, so under physics v2 when
-/// `EVOLUTION_PHYSICS=2`) and animates `seconds` of its trial from `from`
+/// Replays a creature (`cpu_engine::replay`) and animates `seconds` of its trial from `from`
 /// seconds in, at `fps` frames per second of trial time, playing at the
 /// speed it was simulated. Returns the frame count.
 pub fn creature_gif(

@@ -1,6 +1,6 @@
 //! Writes an animated GIF of one creature's trial (a JSON file from
 //! `filmstrip` with EVOLUTION_FILM_DUMP, or a creature exported from the
-//! game), replayed under the selected physics (`EVOLUTION_PHYSICS=2` for
+//! game), replayed under physics v2 (
 //! the v2 prototype).
 //!
 //! Usage: cargo run --release --example creature_gif -- <creature.json> <out.gif> [from s] [seconds] [fps]

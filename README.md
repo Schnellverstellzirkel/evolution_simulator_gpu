@@ -94,7 +94,7 @@ Run these after setting the environment above:
 nice -n 10 cargo run --release -- headless --population 100000 --seed 38 --generations 20 --checkpoint runs/seed-38-100k.evo
 nice -n 10 cargo run --release -- headless --resume runs/seed-38-100k.evo --generations 20 --checkpoint runs/seed-38-100k.evo
 nice -n 10 cargo run --release --example size_report -- runs/seed-38-100k.evo 50
-EVOLUTION_LEDGER=1 nice -n 10 cargo run --release --example size_report -- runs/seed-38-100k.evo 10
+nice -n 10 cargo run --release --example size_report -- runs/seed-38-100k.evo 10
 nice -n 10 cargo run --release --example search_ab -- 2 64 0.5 38,39 --tag baseline
 ```
 

@@ -36,7 +36,7 @@ builds and runs remain available with `--release`.
 ## CUDA on NVIDIA GPUs
 
 On an NVIDIA GPU the game evaluates creatures through CUDA
-(`src/cuda_engine.rs`, `shaders/physics_creature.cu`). On the RTX 4060 it
+(`src/cuda_engine.rs`, `shaders/physics2_creature.cu`). On the RTX 4060 it
 runs the kernel 1.6 to 1.8 times as fast as Vulkan, the 3M game on an
 evolved population 1.37 times as fast, and a fresh game at the same speed
 (docs/performance-log.md).
@@ -100,7 +100,6 @@ Measuring controls
 - `EVOLUTION_SCREEN`: seconds of the early screen (`0` turns screening off for comparisons).
 - `EVOLUTION_ANATOMY`: `0` restores the classic mutation for comparisons.
 - `EVOLUTION_EXACT_COS`: exact cosine in the kernels instead of the polynomial, as a control for its rate and accuracy.
-- `EVOLUTION_LEDGER`: momentum ledger in the CPU engine.
 - `EVOLUTION_NODE_SLIP`: contact details for the champion in `size_report`.
 - `EVOLUTION_PROFILE_BREED`: prints archive and breeding timings.
 - `EVOLUTION_STAGE_LOG`: appends one CSV row per generation.

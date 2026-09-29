@@ -1,6 +1,6 @@
 //! Physics v2 prototype: a planar articulated tree in reduced coordinates
 //! (`docs/hpc-assessment.md` section 7.2, `docs/data-architecture.md`
-//! section 8). The game's physics; `EVOLUTION_PHYSICS=1` selects the older one for comparisons.
+//! section 8).
 //!
 //! A creature is a tree of point masses (its nodes) joined by rigid,
 //! massless bones. The state is the head's position and velocity, the neck's
@@ -34,17 +34,6 @@ use crate::{
     physics,
 };
 use rayon::prelude::*;
-
-/// Whether the v2 physics scores the game. It does, unless the developer
-/// diagnostic `EVOLUTION_PHYSICS=1` selects the older physics (v1) for a
-/// comparison.
-pub fn enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("EVOLUTION_PHYSICS").is_ok_and(|v| v.trim() != "1")
-            || std::env::var("EVOLUTION_PHYSICS").is_err()
-    })
-}
 
 /// How firmly a joint limit holds: its damper weighs this many times the
 /// joint's inertia per step.
@@ -2235,7 +2224,6 @@ pub fn pack(
             }
             LaneBatch {
                 capacity,
-                plan: None,
                 slots: members.iter().map(|&(slot, _)| slot).collect(),
                 creatures: members.iter().map(|&(_, i)| i).collect(),
                 nodes,
