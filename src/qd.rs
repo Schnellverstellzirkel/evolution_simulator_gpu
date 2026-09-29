@@ -116,6 +116,9 @@ pub struct QdArchive {
     morphology_indices: Vec<usize>,
     #[serde(skip)]
     behavior_scores: BehaviorScores,
+    /// Cells whose elite changed since the scores were last computed.
+    #[serde(skip)]
+    changed_cells: Vec<Niche>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -491,53 +494,99 @@ impl QdArchive {
     /// Novelty (mean distance to the nearest archived behaviors) and local
     /// competition (share of those neighbors this elite beats), found through
     /// adjacent grid cells instead of comparing every pair.
+    /// Whether the cached novelty and local-competition scores cover every
+    /// elite (false after anything reset or grew the archive).
+    pub fn scores_current(&self) -> bool {
+        self.behavior_scores.novelty.len() == self.entries.len()
+            && self.behavior_scores.local_competition.len() == self.entries.len()
+    }
+    /// Novelty and local competition of the behavior elite at `index`, from
+    /// the elites in the cells around it.
+    fn behavior_score_of(&self, index: usize) -> (usize, f32, f32) {
+        let elite = &self.entries[index];
+        let mut neighbors: Vec<(f32, f32)> = Vec::new();
+        for radius in 1..=2 {
+            neighbors.clear();
+            for niche in neighbor_niches(&elite.niche, radius) {
+                if let Some(&slot) = self.lookup.get(&niche) {
+                    let other = &self.entries[slot];
+                    neighbors.push((
+                        behavior_distance(elite.descriptor, other.descriptor),
+                        other.fitness,
+                    ));
+                }
+            }
+            if neighbors.len() >= LOCAL_NEIGHBORS {
+                break;
+            }
+        }
+        if neighbors.is_empty() {
+            return (index, 1.0, 1.0);
+        }
+        neighbors.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        let nearest = &neighbors[..LOCAL_NEIGHBORS.min(neighbors.len())];
+        let novelty = nearest.iter().map(|(d, _)| *d).sum::<f32>() / nearest.len() as f32;
+        let local = nearest
+            .iter()
+            .map(|(_, f)| match elite.fitness.total_cmp(f) {
+                std::cmp::Ordering::Greater => 1.0,
+                std::cmp::Ordering::Equal => 0.5,
+                std::cmp::Ordering::Less => 0.0,
+            })
+            .sum::<f32>()
+            / nearest.len() as f32;
+        (index, novelty, local)
+    }
+    /// Records that the elite of `niche` changed. While the cached scores
+    /// still cover every elite they stay, and the next refresh recomputes
+    /// only the elites near that cell.
+    fn note_changed_cell(&mut self, niche: Niche) {
+        if self.scores_current() {
+            let len = self.entries.len();
+            self.behavior_scores.novelty.resize(len, 0.0);
+            self.behavior_scores.local_competition.resize(len, 0.5);
+            self.changed_cells.push(niche);
+        } else {
+            self.behavior_scores = BehaviorScores::default();
+            self.changed_cells.clear();
+        }
+    }
     pub fn refresh_behavior_scores(&mut self) {
         use rayon::prelude::*;
-        let behavior = &self.behavior_indices;
-        if behavior.is_empty() {
+        let changed = std::mem::take(&mut self.changed_cells);
+        if self.behavior_indices.is_empty() {
             self.behavior_scores = BehaviorScores::default();
             return;
         }
-        let scores: Vec<(usize, f32, f32)> = behavior
-            .par_iter()
-            .map(|&index| {
-                let elite = &self.entries[index];
-                let mut neighbors: Vec<(f32, f32)> = Vec::new();
-                for radius in 1..=2 {
-                    neighbors.clear();
-                    for niche in neighbor_niches(&elite.niche, radius) {
-                        if let Some(&slot) = self.lookup.get(&niche) {
-                            let other = &self.entries[slot];
-                            neighbors.push((
-                                behavior_distance(elite.descriptor, other.descriptor),
-                                other.fitness,
-                            ));
-                        }
-                    }
-                    if neighbors.len() >= LOCAL_NEIGHBORS {
-                        break;
-                    }
-                }
-                if neighbors.is_empty() {
-                    return (index, 1.0, 1.0);
-                }
-                neighbors.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-                let nearest = &neighbors[..LOCAL_NEIGHBORS.min(neighbors.len())];
-                let novelty = nearest.iter().map(|(d, _)| *d).sum::<f32>() / nearest.len() as f32;
-                let local = nearest
-                    .iter()
-                    .map(|(_, f)| match elite.fitness.total_cmp(f) {
-                        std::cmp::Ordering::Greater => 1.0,
-                        std::cmp::Ordering::Equal => 0.5,
-                        std::cmp::Ordering::Less => 0.0,
+        // Only elites within two cells of a changed cell can see a difference.
+        let partial = self.scores_current() && changed.len() <= 32;
+        let indices: Vec<usize> = if partial {
+            self.behavior_indices
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    let niche = &self.entries[i].niche;
+                    changed.iter().any(|c| {
+                        (0..BINS.len())
+                            .all(|axis| (niche.0[axis] as i32 - c.0[axis] as i32).abs() <= 2)
                     })
-                    .sum::<f32>()
-                    / nearest.len() as f32;
-                (index, novelty, local)
-            })
+                })
+                .collect()
+        } else {
+            self.behavior_indices.clone()
+        };
+        let scores: Vec<(usize, f32, f32)> = indices
+            .par_iter()
+            .map(|&index| self.behavior_score_of(index))
             .collect();
-        let mut novelty = vec![0.0; self.entries.len()];
-        let mut local_competition = vec![0.5; self.entries.len()];
+        let (mut novelty, mut local_competition) = if partial {
+            (
+                std::mem::take(&mut self.behavior_scores.novelty),
+                std::mem::take(&mut self.behavior_scores.local_competition),
+            )
+        } else {
+            (vec![0.0; self.entries.len()], vec![0.5; self.entries.len()])
+        };
         for (index, n, l) in scores {
             novelty[index] = n;
             local_competition[index] = l;
@@ -606,7 +655,7 @@ impl QdArchive {
                 topology: candidate_topology.clone(),
             };
             self.qd_score += fitness.max(0.0) as f64 - previous_fitness.max(0.0) as f64;
-            self.behavior_scores = BehaviorScores::default();
+            self.note_changed_cell(self.entries[slot].niche.clone());
             self.remove_morphology_topology(&candidate_topology, fitness);
             return Offer {
                 inserted: true,
@@ -637,7 +686,7 @@ impl QdArchive {
         self.lookup.insert(niche, slot);
         self.least_visited.insert((0, slot));
         self.behavior_indices.push(slot);
-        self.behavior_scores = BehaviorScores::default();
+        self.note_changed_cell(self.entries[slot].niche.clone());
         self.remove_morphology_topology(&topology, fitness);
         Offer {
             inserted: true,
@@ -1549,6 +1598,63 @@ mod tests {
         config::Config,
         evolution::{self, Population},
     };
+
+    #[test]
+    fn partial_score_refresh_matches_a_full_refresh() {
+        use super::{Descriptor, Emitter, QdArchive};
+        let config = Config {
+            population: 400,
+            random_seed: false,
+            seed: 3,
+            ..Config::default()
+        };
+        let population = evolution::create(&config).unwrap();
+        let mut archive = QdArchive::default();
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (rng >> 33) as u32
+        };
+        for round in 0..40u32 {
+            for _ in 0..(1 + round % 5) {
+                let index = next() as usize % 400;
+                let descriptor = Descriptor {
+                    ground_contact: (next() % 100) as f32 / 100.0,
+                    gait_frequency: (next() % 60) as f32 / 10.0,
+                    vertical_oscillation: 0.1,
+                    mean_height: (next() % 300) as f32 / 100.0 + 0.1,
+                    feet: (next() % 5) as f32 + 1.0,
+                    ..Default::default()
+                };
+                let fitness = (next() % 1000) as f32 / 10.0;
+                archive.offer(
+                    &population,
+                    index,
+                    descriptor,
+                    fitness,
+                    Emitter::Cma,
+                    round,
+                    0,
+                );
+            }
+            archive.refresh_behavior_scores();
+            let mut full = archive.clone();
+            full.behavior_scores = Default::default();
+            full.changed_cells.clear();
+            full.refresh_behavior_scores();
+            assert_eq!(
+                archive.behavior_scores.novelty,
+                full.behavior_scores.novelty
+            );
+            assert_eq!(
+                archive.behavior_scores.local_competition,
+                full.behavior_scores.local_competition
+            );
+        }
+        assert!(archive.behavior_count() > 20);
+    }
 
     #[test]
     fn cma_feedback_ignores_candidates_with_changed_topology() {
