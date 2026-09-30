@@ -11,7 +11,9 @@
 //
 // A group runs one creature from its start to its end (a fall, the screen or
 // the last step), then takes the next creature of the wave from an atomic
-// counter. Each 1/RATE step is SUBSTEPS substeps. A substep is one
+// counter. The wave is sorted by muscle rounds and has one counter per
+// rounds bucket; every warp starts on one bucket, so its groups run the same
+// round count, and moves to the next bucket up when its own runs dry. Each 1/RATE step is SUBSTEPS substeps. A substep is one
 // articulated-body pass with the muscles, gravity, wind, drag and water, a
 // contact solve of at most MAXC contacts by projected Gauss-Seidel on the
 // exact contact-space matrix, the contact response, semi-implicit Euler, a
@@ -59,6 +61,14 @@ struct Params {
     float inv_muscle_energy;
     float spare1;
     float spare2;
+};
+// The take-up buckets of a wave (cuda_engine::Takeup): bucket b holds the
+// wave's creatures from start[b] to end[b], sorted by muscle rounds, and
+// warps from warp[b] on (in the order warp in block, then block) start on it.
+struct Takeup {
+    unsigned start[RMAX];
+    unsigned end[RMAX];
+    unsigned warp[RMAX];
 };
 // Same layout as creature_kernel::GpuResult.
 struct Result {
@@ -163,7 +173,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     const uint4* __restrict__ heads,
     Result* __restrict__ results,
     unsigned* __restrict__ counter,
-    const Params p
+    const Params p,
+    const Takeup tk
 #if RECORD
     , float2* __restrict__ frames
 #endif
@@ -309,14 +320,32 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
         return make_float2(height, slope);
     };
 
+    // This warp's bucket: the last one whose first warp is at or before it.
+    unsigned bucket = 0u;
+    {
+        const unsigned order = (threadIdx.x >> 5) * gridDim.x + blockIdx.x;
+#pragma unroll
+        for (unsigned b = 1u; b < RMAX; b++) { if (tk.warp[b] <= order) { bucket = b; } }
+    }
     const unsigned* ltab = lanes;
     for (;;) {
         // A group without a creature takes the next one of the wave.
         PROF(0);
         if (!live && !exhausted) {
-            unsigned got = 0u;
-            if (lg == 0u) { got = atomicAdd(counter, 1u); }
+            // The next creature of this group's bucket, or of the next bucket
+            // up with creatures left.
+            unsigned got = 0xffffffffu;
+            if (lg == 0u) {
+                for (unsigned k = 0u; k < RMAX; k++) {
+                    const unsigned b = (bucket + k) % RMAX;
+                    const unsigned size = tk.end[b] - tk.start[b];
+                    if (size == 0u || *(volatile unsigned*)&counter[b] >= size) { continue; }
+                    const unsigned i = atomicAdd(&counter[b], 1u);
+                    if (i < size) { got = tk.start[b] + i; bucket = b; break; }
+                }
+            }
             got = __shfl_sync(GM << gshift, got, gbase);
+            bucket = __shfl_sync(GM << gshift, bucket, gbase);
             if (got < p.count) {
                 cidx = p.base + got;
                 const uint4 h0 = heads[2u * cidx];

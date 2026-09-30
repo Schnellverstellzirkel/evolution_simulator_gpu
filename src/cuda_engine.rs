@@ -449,6 +449,91 @@ struct Kernel {
     blocks_per_sm: u32,
 }
 
+/// Take-up counters per wave: one per muscle-rounds bucket.
+const BUCKETS: usize = crate::warp_kernel::ROUNDS;
+
+/// The take-up buckets of a wave (`Takeup` in `shaders/warp_creature.cu`).
+/// Bucket `b` holds the wave's creatures with `b + 1` muscle rounds (bodies
+/// without muscles join the first) as `start[b]..end[b]`, and the warps from
+/// `warp[b]` start on it. A warp takes only from its bucket until it runs dry,
+/// so its groups run one round count, where one counter for the wave soon
+/// fills a warp with creatures from the whole wave and runs it at their
+/// largest round count.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Takeup {
+    start: [u32; BUCKETS],
+    end: [u32; BUCKETS],
+    warp: [u32; BUCKETS],
+}
+
+impl Takeup {
+    /// Buckets for the `count` creatures of a batch from `first` (`heads`
+    /// sorted by rounds, as `warp_kernel::pack` writes them) run by `warps`
+    /// warps. Each bucket with creatures gets at least one warp and the rest
+    /// in proportion to its creatures times their rounds plus one, a round
+    /// being about as long as the rest of a step. `buckets` 1 (the
+    /// developer diagnostic `EVOLUTION_WARP_BUCKETS=1`) gives one counter.
+    fn new(heads: &[[u32; 4]], first: usize, count: usize, warps: usize, buckets: usize) -> Self {
+        let bucket_of = |c: usize| {
+            let rounds = ((heads[2 * (first + c)][0] >> 16) & 255) as usize;
+            if buckets < BUCKETS {
+                0
+            } else {
+                rounds.clamp(1, BUCKETS) - 1
+            }
+        };
+        let mut counts = [0usize; BUCKETS];
+        let mut sorted = true;
+        let mut last = 0;
+        for c in 0..count {
+            let b = bucket_of(c);
+            sorted &= b >= last;
+            last = b;
+            counts[b] += 1;
+        }
+        if !sorted {
+            counts = [0; BUCKETS];
+            counts[0] = count;
+        }
+        let weight: [usize; BUCKETS] = std::array::from_fn(|b| counts[b] * (b + 2));
+        let total = weight.iter().sum::<usize>().max(1);
+        let mut shares: [usize; BUCKETS] = std::array::from_fn(|b| {
+            if counts[b] == 0 {
+                0
+            } else {
+                (warps * weight[b] / total).max(1)
+            }
+        });
+        while shares.iter().sum::<usize>() > warps {
+            let Some(b) = (0..BUCKETS)
+                .filter(|&b| shares[b] > 1)
+                .max_by_key(|&b| shares[b])
+            else {
+                break;
+            };
+            shares[b] -= 1;
+        }
+        let spare = warps.saturating_sub(shares.iter().sum());
+        let heaviest = (0..BUCKETS).max_by_key(|&b| weight[b]).unwrap_or(0);
+        shares[heaviest] += spare;
+        let mut take = Takeup {
+            start: [0; BUCKETS],
+            end: [0; BUCKETS],
+            warp: [0; BUCKETS],
+        };
+        let (mut at, mut warp) = (0usize, 0usize);
+        for b in 0..BUCKETS {
+            take.start[b] = at as u32;
+            at += counts[b];
+            take.end[b] = at as u32;
+            take.warp[b] = warp as u32;
+            warp += shares[b];
+        }
+        take
+    }
+}
+
 struct DeviceBuf {
     ptr: CuDevicePtr,
     size: usize,
@@ -476,7 +561,7 @@ struct Slot {
     stop: CuEvent,
     done: CuEvent,
     groups: Vec<Option<GroupRes>>,
-    /// One creature counter per wave.
+    /// One creature counter per wave and take-up bucket.
     counters: Option<DeviceBuf>,
     staging: Option<HostBuf>,
     readback: Option<HostBuf>,
@@ -1110,7 +1195,7 @@ impl CudaEngine {
             };
             self.slots[slot].groups[group] = Some(GroupRes { bufs });
         }
-        let counter_bytes = 4 * waves;
+        let counter_bytes = 4 * BUCKETS * waves;
         if self.slots[slot]
             .counters
             .as_ref()
@@ -1293,6 +1378,7 @@ impl CudaEngine {
             0
         };
         let frame_bytes = frame_count * std::mem::size_of::<[f32; 2]>();
+        let buckets = crate::warp_kernel::solver_setting("BUCKETS", BUCKETS as u32) as usize;
         let buffers = self.ensure_buffers(slot, batches, waves.len(), frame_bytes);
         self.recount_allocated();
         buffers?;
@@ -1330,7 +1416,7 @@ impl CudaEngine {
             }
             let counters = resources.counters.as_ref().unwrap();
             cu.check(
-                (cu.memset_d32_async)(counters.ptr, 0, waves.len(), resources.main),
+                (cu.memset_d32_async)(counters.ptr, 0, BUCKETS * waves.len(), resources.main),
                 "cuMemsetD32Async",
             )?;
             cu.check(
@@ -1354,16 +1440,19 @@ impl CudaEngine {
                     .div_ceil(groups_per_block)
                     .min(blocks_per_sm as usize * self.multiprocessors as usize)
                     .max(1);
+                let warps = blocks * crate::warp_kernel::BLOCK as usize / 32;
+                let heads = &batch.wave.as_ref().unwrap().heads;
+                let mut takeup = Takeup::new(heads, first, count, warps, buckets);
                 let mut pointers = [
                     res.bufs[0].ptr,
                     res.bufs[1].ptr,
                     res.bufs[2].ptr,
                     res.bufs[3].ptr,
                     res.bufs[4].ptr,
-                    counters.ptr + 4 * w as u64,
+                    counters.ptr + (4 * BUCKETS * w) as u64,
                 ];
                 let mut frames = resources.frames.as_ref().map_or(0, |f| f.ptr);
-                let mut args: [*mut c_void; 8] = [
+                let mut args: [*mut c_void; 9] = [
                     &mut pointers[0] as *mut u64 as *mut c_void,
                     &mut pointers[1] as *mut u64 as *mut c_void,
                     &mut pointers[2] as *mut u64 as *mut c_void,
@@ -1371,6 +1460,7 @@ impl CudaEngine {
                     &mut pointers[4] as *mut u64 as *mut c_void,
                     &mut pointers[5] as *mut u64 as *mut c_void,
                     &mut params as *mut crate::warp_kernel::Params as *mut c_void,
+                    &mut takeup as *mut Takeup as *mut c_void,
                     &mut frames as *mut u64 as *mut c_void,
                 ];
                 cu.check(
@@ -1573,5 +1663,43 @@ impl Drop for CudaEngine {
             }
             (cu.primary_ctx_release)(self.device);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn heads(rounds: &[u32]) -> Vec<[u32; 4]> {
+        rounds
+            .iter()
+            .flat_map(|&r| [[r << 16, 0, 0, 0], [0; 4]])
+            .collect()
+    }
+
+    #[test]
+    fn takeup_buckets_follow_the_rounds_and_share_the_warps() {
+        let h = heads(&[0, 1, 1, 2, 2, 2, 4]);
+        let t = Takeup::new(&h, 0, 7, 20, BUCKETS);
+        assert_eq!(t.start, [0, 3, 6, 6]);
+        assert_eq!(t.end, [3, 6, 6, 7]);
+        // Weights 3 x 2, 3 x 3, 0, 1 x 5 of 20: 6, 9, 0 and 5 warps.
+        assert_eq!(t.warp, [0, 6, 15, 15]);
+        // A wave from the middle of a batch, and fewer warps than buckets.
+        let t = Takeup::new(&h, 3, 4, 2, BUCKETS);
+        assert_eq!((t.start, t.end), ([0, 0, 3, 3], [0, 3, 3, 4]));
+        assert_eq!(t.warp, [0, 0, 1, 1]);
+        // One counter.
+        let t = Takeup::new(&h, 0, 7, 20, 1);
+        assert_eq!(
+            (t.start, t.end, t.warp),
+            ([0, 7, 7, 7], [7, 7, 7, 7], [0, 20, 20, 20])
+        );
+    }
+
+    #[test]
+    fn unsorted_heads_take_one_counter() {
+        let t = Takeup::new(&heads(&[2, 1]), 0, 2, 8, BUCKETS);
+        assert_eq!((t.start, t.end), ([0, 2, 2, 2], [2, 2, 2, 2]));
     }
 }
