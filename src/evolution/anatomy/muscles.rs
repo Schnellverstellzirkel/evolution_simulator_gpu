@@ -224,7 +224,7 @@ pub(crate) fn swap_muscle_routes(
     let free: MuscleIds = (0..c.muscles.len())
         .filter(|&i| !ring(c, &c.muscles[i]))
         .collect();
-    let mut pairs: Bounded<(usize, usize), { MAX_MUSCLES * MAX_MUSCLES / 2 }> = Bounded::new();
+    let mut pairs: Bounded<(u8, u8), { MAX_MUSCLES * MAX_MUSCLES / 2 }> = Bounded::new();
     for (n, &i) in free.iter().enumerate() {
         for &j in &free[n + 1..] {
             let (p, q) = (c.muscles[i], c.muscles[j]);
@@ -233,7 +233,7 @@ pub(crate) fn swap_muscle_routes(
                 && p.bone_a != q.bone_b
                 && q.bone_a != p.bone_b
             {
-                pairs.push((i, j));
+                pairs.push((i as u8, j as u8));
             }
         }
     }
@@ -241,6 +241,7 @@ pub(crate) fn swap_muscle_routes(
         return false;
     }
     let (i, j) = pairs[rng.index(pairs.len())];
+    let (i, j) = (i as usize, j as usize);
     let (p, q) = (c.muscles[i], c.muscles[j]);
     for (index, old, to) in [(i, p, q), (j, q, p)] {
         let mut m = Muscle {

@@ -128,18 +128,19 @@ pub(crate) fn copy_limb_rhythm(
     _cx: &Context,
 ) -> bool {
     let limbs = driven_limbs(c);
-    let mut pairs: Bounded<(usize, usize), { MAX_NODES * MAX_NODES }> = Bounded::new();
+    let mut pairs: Bounded<(u8, u8), { MAX_NODES * MAX_NODES }> = Bounded::new();
     for &from in &limbs {
         let a = branch(c, from);
         for &to in &limbs {
             if !branch(c, to).iter().any(|b| a.contains(b)) {
-                pairs.push((from, to));
+                pairs.push((from as u8, to as u8));
             }
         }
     }
     let Some((from, to)) = pick(&pairs, rng) else {
         return false;
     };
+    let (from, to) = (from as usize, to as usize);
     let source = active_on(c, from);
     let target = active_on(c, to);
     let offset = [0.25, 0.5, 0.75][rng.index(3)] + rng.range(-0.04, 0.04);
