@@ -2831,12 +2831,8 @@ impl App {
         let mut zoom = 1.0f64;
         let mut last: Option<f64> = None;
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new("BEST DISTANCE OVER TIME")
-                    .small()
-                    .color(theme.muted),
-            )
-            .on_hover_text("Drag to pan. Double-click or Reset view fits the chart again.");
+            crate::theme::section(ui, "Best distance over time", theme)
+                .on_hover_text("Drag to pan. Double-click or Reset view fits the chart again.");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .small_button("Reset view")
@@ -3492,7 +3488,7 @@ impl App {
     /// a record holder or undo a catastrophe.
     fn feed(&mut self, ui: &mut egui::Ui, height: f32) {
         let theme = self.theme();
-        ui.label(RichText::new("WHAT HAPPENED").small().color(theme.muted));
+        crate::theme::section(ui, "What happened", theme);
         let items = self.feed_items();
         let mut chosen = None;
         egui::ScrollArea::vertical()
@@ -3551,7 +3547,7 @@ impl App {
         let theme = self.theme();
         let records = world_records(&snapshot.history);
         let live = live_record(snapshot);
-        ui.label(RichText::new("RECORDS").small().color(theme.muted));
+        crate::theme::section(ui, "Records", theme);
         if records.is_empty() && live.is_none() {
             ui.label(
                 RichText::new("No records yet. The first best creature lands here.")
@@ -4120,13 +4116,16 @@ impl App {
             return;
         }
         let theme = self.theme();
-        ui.label(
-            RichText::new(
-                "BODY TYPES THROUGH GENERATIONS · each color is one count of nodes and muscles, named in the list below",
-            )
-            .small()
-            .color(theme.muted),
-        );
+        ui.horizontal_wrapped(|ui| {
+            crate::theme::section(ui, "Body types through generations", theme);
+            ui.label(
+                RichText::new(
+                    "each color is one count of nodes and muscles, named in the list below",
+                )
+                .small()
+                .color(theme.muted),
+            );
+        });
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 80.), Sense::click());
         let painter = ui.painter_at(rect);
@@ -4215,7 +4214,7 @@ impl App {
         });
         ui.columns(2, |cols| {
             self.histogram(&mut cols[0], &stats, 155.);
-            cols[1].label(RichText::new("BODY TYPES").small().color(theme.muted));
+            crate::theme::section(&mut cols[1], "Body types", theme);
             let mut species = stats.species.clone();
             species.sort_by_key(|&(_, _, n)| std::cmp::Reverse(n));
             egui::ScrollArea::vertical()
@@ -5998,7 +5997,13 @@ fn number(n: usize) -> String {
 }
 fn species_color(n: usize, m: usize) -> Color32 {
     // Muted hues, like paint on old machinery.
-    egui::ecolor::Hsva::new(((n * 257 + m) as f32 * 0.618034).fract(), 0.36, 0.66, 1.).into()
+    egui::ecolor::HsvaGamma {
+        h: ((n * 257 + m) as f32 * 0.618034).fract(),
+        s: 0.45,
+        v: 0.72,
+        a: 1.,
+    }
+    .into()
 }
 /// Linear blend between two colors; `t` is clamped to [0, 1].
 fn mix_color(a: Color32, b: Color32, t: f32) -> Color32 {
