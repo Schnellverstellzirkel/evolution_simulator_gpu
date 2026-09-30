@@ -12,7 +12,11 @@ use evolution_simulator::{
 };
 use std::time::{Duration, Instant};
 
-fn run(engine: &mut impl Engine, pop: &Population, cfg: &Config) -> anyhow::Result<(f64, f64, f64)> {
+fn run(
+    engine: &mut impl Engine,
+    pop: &Population,
+    cfg: &Config,
+) -> anyhow::Result<(f64, f64, f64)> {
     let start = Instant::now();
     engine.submit(pop.clone(), cfg)?;
     let done = loop {
@@ -54,7 +58,11 @@ fn main() -> anyhow::Result<()> {
     let mut cfg = if path.ends_with(".bin") {
         // A creature dump (settings, population, elites) of a save this game
         // no longer reads.
-        type Dump = (Config, Population, Vec<(evolution_simulator::evolution::Creature, Config, f32)>);
+        type Dump = (
+            Config,
+            Population,
+            Vec<(evolution_simulator::evolution::Creature, Config, f32)>,
+        );
         let (settings, all, _): Dump = bincode::deserialize(&std::fs::read(path)?)?;
         for i in 0..count.min(all.genomes.len()) {
             pop.push(all.creature(i));

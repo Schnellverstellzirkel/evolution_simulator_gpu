@@ -90,7 +90,12 @@ pub fn replay(creature: &Creature, cfg: &Config, patience: Duration) -> Option<R
     // plays standard steps, so it keeps one frame per standard step.
     let every = (cfg.fidelity().rate / crate::physics::Fidelity::standard().rate).max(1) as usize;
     let recording = record_on_gpu(creature, &cfg, patience)?;
-    Some(thin(recording.frames, recording.result, recording.forces, every))
+    Some(thin(
+        recording.frames,
+        recording.result,
+        recording.forces,
+        every,
+    ))
 }
 
 pub type Replay = (

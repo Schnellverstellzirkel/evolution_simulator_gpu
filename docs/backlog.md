@@ -4,7 +4,7 @@ Open work only. Delete an item when it is merged into `main`. If it is a real de
 
 ## Physics
 
-- CUDA is 1.8x Vulkan. Occupancy is 4 warps at 16 nodes [claude/p2-cuda-speed].
+- CUDA occupancy is 4 warps at 16 nodes [claude/p2-cuda-speed].
 - A faster contact solve. Contacts are about 55% of a step, and the cheap changes are listed in `docs/rejected-ideas.md`. A different solver (fewer, larger operations per step) is what is left.
 - Realism physics: ground contact along bones. Bones that break under load are deferred until the contact solve is faster (the exact load costs an estimated 20 to 30% of kernel time; the CPU diagnostic is on claude/p2-bone-break).
 - Owner question: in evolved bodies 39% have their head more than 5 cm below the highest node. Should the fall rule (head below neck) change for them?
@@ -16,7 +16,7 @@ Open work only. Delete an item when it is merged into `main`. If it is a real de
 
 - Breed the next batch from the previous archive while the GPU works, and write children straight into the arenas. Then measure end to end at 3M on a free GPU and make an evolved 3M save [claude/speed].
 - Build local-mutation children on the GPU. A device-side contender filter has a low ceiling (`docs/rejected-ideas.md`).
-- A persistent Vulkan pipeline cache. Size work units per device from measured rates. Send only snapshot changes from the worker to the UI. Keep the GUI at 60 FPS and the controls responsive at 3M.
+- Size work units per device from measured rates. Send only snapshot changes from the worker to the UI. Keep the GUI at 60 FPS and the controls responsive at 3M.
 - CUDA costs 1.2 to 1.6 GB more peak RSS (pinned buffers).
 
 ## Search

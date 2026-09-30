@@ -172,16 +172,23 @@ fn recorded_forces_are_in_range_and_keep_the_score() {
             bone.a = relabel(bone.a);
             bone.b = relabel(bone.b);
         }
-        let recording =
-            engine::record_on_gpu(&creature, &cfg, std::time::Duration::from_secs(30))
-                .expect("a GPU replay");
+        let recording = engine::record_on_gpu(&creature, &cfg, std::time::Duration::from_secs(30))
+            .expect("a GPU replay");
         assert_eq!(recording.result.fitness.to_bits(), score.fitness.to_bits());
         let frames = recording.frames.len();
         let forces = recording.forces.expect("recorded forces");
         assert!(
-            forces.energy.iter().flatten().all(|e| (0.0..=1.0).contains(e))
+            forces
+                .energy
+                .iter()
+                .flatten()
+                .all(|e| (0.0..=1.0).contains(e))
                 && forces.muscle.iter().flatten().all(|f| f.is_finite())
-                && forces.ground.iter().flatten().all(|f| f.is_finite() && *f >= 0.0),
+                && forces
+                    .ground
+                    .iter()
+                    .flatten()
+                    .all(|f| f.is_finite() && *f >= 0.0),
             "creature {i} recorded an energy outside [0, 1] or a force that is not finite"
         );
         assert_eq!(forces.energy.len(), frames);
@@ -334,9 +341,8 @@ fn recorded_broken_joints_are_the_kernels() {
     let mut breaks = 0usize;
     for (i, score) in scores.iter().enumerate() {
         let creature = pop.creature(i);
-        let recording =
-            engine::record_on_gpu(&creature, &cfg, std::time::Duration::from_secs(120))
-                .expect("a GPU replay");
+        let recording = engine::record_on_gpu(&creature, &cfg, std::time::Duration::from_secs(120))
+            .expect("a GPU replay");
         assert_eq!(recording.result.fitness.to_bits(), score.fitness.to_bits());
         let broken = recording.forces.expect("recorded forces").broken;
         let terminal = if recording.result.fall_time > 0.0 {
@@ -350,6 +356,9 @@ fn recorded_broken_joints_are_the_kernels() {
         );
         breaks += usize::from(broken[terminal] != 0);
     }
-    eprintln!("{breaks} of {} trials ended on a recorded broken joint", scores.len());
+    eprintln!(
+        "{breaks} of {} trials ended on a recorded broken joint",
+        scores.len()
+    );
     assert!(breaks * 2 >= scores.len(), "too few breaks");
 }

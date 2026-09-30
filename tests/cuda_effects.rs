@@ -44,26 +44,107 @@ fn the_cuda_kernel_feels_every_effect() {
         }
     };
     let calm = run(&base);
-    assert!(calm.iter().all(|r| r.fitness > -1e19), "a calm trial failed");
+    assert!(
+        calm.iter().all(|r| r.fitness > -1e19),
+        "a calm trial failed"
+    );
     let walked = (first_hopper..calm.len())
         .map(|i| calm[i].fitness)
         .fold(f32::NEG_INFINITY, f32::max);
     eprintln!("the walkers get up to {walked:.2} m");
     assert!(walked > 5.0, "the walkers stand still ({walked} m)");
     let effects: Vec<(&str, Config)> = vec![
-        ("terrain", Config { terrain: 2, ..base.clone() }),
-        ("slope", Config { slope: 0.1, ..base.clone() }),
-        ("mud", Config { mud: 0.06, ..base.clone() }),
-        ("water", Config { water: 0.35, ..base.clone() }),
-        ("gaps", Config { gaps: 0.5, ..base.clone() }),
-        ("hurdles", Config { hurdles: 0.1, ..base.clone() }),
-        ("ice", Config { patches: 0.95, ..base.clone() }),
-        ("quake", Config { quake: 0.05, ..base.clone() }),
-        ("wind", Config { wind: 2.0, ..base.clone() }),
-        ("air", Config { air_retention: 0.98, ..base.clone() }),
-        ("gravity", Config { gravity: 5.0, ..base.clone() }),
-        ("grip", Config { ground_friction: 0.5, ..base.clone() }),
-        ("heat", Config { muscle_energy: 0.3, ..base.clone() }),
+        (
+            "terrain",
+            Config {
+                terrain: 2,
+                ..base.clone()
+            },
+        ),
+        (
+            "slope",
+            Config {
+                slope: 0.1,
+                ..base.clone()
+            },
+        ),
+        (
+            "mud",
+            Config {
+                mud: 0.06,
+                ..base.clone()
+            },
+        ),
+        (
+            "water",
+            Config {
+                water: 0.35,
+                ..base.clone()
+            },
+        ),
+        (
+            "gaps",
+            Config {
+                gaps: 0.5,
+                ..base.clone()
+            },
+        ),
+        (
+            "hurdles",
+            Config {
+                hurdles: 0.1,
+                ..base.clone()
+            },
+        ),
+        (
+            "ice",
+            Config {
+                patches: 0.95,
+                ..base.clone()
+            },
+        ),
+        (
+            "quake",
+            Config {
+                quake: 0.05,
+                ..base.clone()
+            },
+        ),
+        (
+            "wind",
+            Config {
+                wind: 2.0,
+                ..base.clone()
+            },
+        ),
+        (
+            "air",
+            Config {
+                air_retention: 0.98,
+                ..base.clone()
+            },
+        ),
+        (
+            "gravity",
+            Config {
+                gravity: 5.0,
+                ..base.clone()
+            },
+        ),
+        (
+            "grip",
+            Config {
+                ground_friction: 0.5,
+                ..base.clone()
+            },
+        ),
+        (
+            "heat",
+            Config {
+                muscle_energy: 0.3,
+                ..base.clone()
+            },
+        ),
     ];
     for (name, cfg) in effects {
         let results = run(&cfg);

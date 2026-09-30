@@ -475,8 +475,7 @@ impl Scheduler {
                     continue;
                 }
                 loop {
-                    if self.simulate_loss_after == Some(self.collected_units)
-                    {
+                    if self.simulate_loss_after == Some(self.collected_units) {
                         self.simulate_loss_after = None;
                         device.failure = Some("simulated device loss".into());
                         break;

@@ -2,7 +2,7 @@
 
 A Rust game in which 2D creatures made of bones, joints, and muscles evolve to travel as far as possible. The graphical game starts with **3 million creatures per generation** and **20-second trials**. Fitness is horizontal center-of-mass distance in meters. Gait, height, and ground contact describe archive niches; they do not multiply or penalize the score.
 
-The search combines MAP-Elites, CMA optimizers, structural mutations, novelty search, and immigrants across four isolated island archives and a hub. Vulkan compute is the scoring authority in the full-performance run; the CPU engine remains available for fallback and recorded playback. An egui dashboard shows the archive, history, lineage, and replays.
+The search combines MAP-Elites, CMA optimizers, structural mutations, novelty search, and immigrants across four isolated island archives and a hub. A CUDA kernel on an NVIDIA GPU simulates and scores every creature and records the replays. An egui dashboard shows the archive, history, lineage, and replays.
 
 ## Original work and license
 
@@ -11,13 +11,13 @@ This project adapts Carykh's **Evolution Simulator** by Cary Huang.
 - Original source: [OpenProcessing sketch](https://openprocessing.org/@carykh/205807)
 - Original license: [CC BY-SA 3.0 Unported](https://creativecommons.org/licenses/by-sa/3.0/)
 - Modified by: Amipo (Schnellverstellzirkel)
-- Changes: rebuilt in Rust with GPU and CPU simulation, quality-diversity search, evolving body plans, environment effects, and an interactive dashboard.
+- Changes: rebuilt in Rust with GPU simulation, quality-diversity search, evolving body plans, environment effects, and an interactive dashboard.
 
 The license text is in [LICENSE](LICENSE). The original Processing sketch is preserved in [old_code.txt](old_code.txt).
 
 ## Build and run
 
-The runtime uses Vulkan for compute and rendering. Linux uses Wayland or X11 for the dashboard; Windows uses the native window system. Rust 1.95 or newer is required by the GUI dependencies. On Ubuntu, install the native build dependencies:
+The game needs an NVIDIA GPU with the CUDA driver and NVRTC: creatures are simulated on CUDA only, and the game stops with an error without them. The CUDA driver library comes with the NVIDIA driver, and NVRTC with a CUDA toolkit or NVIDIA's pip wheel ([building](docs/building.md)). The window is drawn through Vulkan. Linux uses Wayland or X11 for the dashboard; Windows uses the native window system. Rust 1.95 or newer is required by the GUI dependencies. On Ubuntu, install the native build dependencies:
 
 ```bash
 sudo apt-get install build-essential pkg-config libwayland-dev libxkbcommon-dev \
@@ -33,9 +33,9 @@ export EVOLUTION_DEVICES=primary
 nice -n 10 cargo run --release
 ```
 
-The default compute adapter name is `RTX 4060`; `--gpu NAME` selects another primary adapter. Secondary GPUs are off by default; `EVOLUTION_DEVICES=radeon` opts the integrated Radeon into evaluation. `EVOLUTION_DEVICES=primary` prevents adding secondary evaluation devices. Keep that setting on this workstation, because the Radeon 780M draws the desktop and the game window and never evaluates creatures ([building](docs/building.md#the-radeon-780m) has the reasons). Evaluation and general Rayon workers share a budget of half the available logical CPUs, capped at eight. By default the GPU evaluates and all eight go to general workers (archive insertion, breeding, packing). In a GPU run, CPU engines stand by for GPU failure and never contribute scores while a GPU is healthy. `EVOLUTION_CPU_THREADS=N` sizes that failover pool; `RAYON_NUM_THREADS` is limited to the remaining budget.
+The default GPU name is `RTX 4060`; `--gpu NAME` selects another NVIDIA GPU. Secondary GPUs are off by default; `EVOLUTION_DEVICES=NAME` adds other NVIDIA GPUs to evaluation, and `EVOLUTION_DEVICES=primary` keeps them off. Keep that setting on this workstation, because the Radeon 780M draws the desktop and the game window and never evaluates creatures ([building](docs/building.md#the-radeon-780m) has the reasons). General Rayon workers (archive insertion, breeding, packing) take half the available logical CPUs, at most eight; `RAYON_NUM_THREADS` can lower that.
 
-If the primary GPU cannot open, evaluation falls back to the CPU and reports why once; without a separate CPU pool that fallback shares the general Rayon pool. A GPU that fails during a run is retired and its unfinished units, including pending confirmation trials, are retried on the CPU with the same creatures and settings. A failed CPU stops the session with a persistent error after completed results are stored.
+If the primary GPU cannot open, the game stops and says why. A GPU that fails during a run is reopened and its unfinished units, including pending confirmation trials, run again with the same creatures and settings. A GPU that does not reopen stops the session with a persistent error after completed results are stored.
 
 For local iteration, use the named profile:
 
@@ -84,7 +84,7 @@ Each behavior archive has 1,440 niches for ground contact, gait cadence, body he
 
 A standard trial stops at 5 s when the creature is below the bar, the 5 s distance the top 20% reached. A screened creature enters no archive. A creature that would set a new record of its island also gets a confirmation trial at twice the physics rate, and its fitness is the lower distance. Both are GPU evaluations and the GPU score is final.
 
-Replays are recorded by the GPU that scores the archive (`engine::replay`): the scoring kernel with a frame output, so the replay shows the trial and the distance the archive holds. A CPU-only game replays on the CPU engine. See [architecture](docs/architecture.md) and [design decisions](docs/design-decisions.md).
+Replays are recorded by the GPU that scores the archive (`engine::replay`): the scoring kernel with a frame output, so the replay shows the trial and the distance the archive holds. See [architecture](docs/architecture.md) and [design decisions](docs/design-decisions.md).
 
 ## Headless experiments and diagnostics
 

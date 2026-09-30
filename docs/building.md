@@ -31,8 +31,10 @@ GPU tests are ignored. Select them explicitly, for example
 
 ## CUDA on NVIDIA GPUs
 
-On an NVIDIA GPU the game evaluates creatures through CUDA
-(`src/cuda_engine.rs`, `shaders/warp_creature.cu`, `src/warp_kernel.rs`).
+The game needs an NVIDIA GPU with the CUDA driver and NVRTC. It evaluates
+creatures through CUDA and nowhere else (`src/cuda_engine.rs`,
+`shaders/warp_creature.cu`, `src/warp_kernel.rs`). The window is drawn
+through Vulkan (wgpu), on the GPU the desktop uses.
 `examples/warp_regs.rs` prints each kernel's registers and spills from NVRTC
 alone; `EVOLUTION_WARP_PROFILE=1` makes one warp print its cycles per kernel
 section. `EVOLUTION_WARP_SUBSTEPS`, `EVOLUTION_WARP_PGS_SWEEPS`,
@@ -41,7 +43,7 @@ section. `EVOLUTION_WARP_SUBSTEPS`, `EVOLUTION_WARP_PGS_SWEEPS`,
 them.
 Nothing needs configuring: the build links no CUDA library, and the engine
 loads the CUDA driver library and NVRTC when it opens. If either is missing,
-or the GPU is not an NVIDIA GPU, the game prints one line and runs on Vulkan.
+or the GPU is not an NVIDIA GPU, the game stops with an error that says so.
 
 The driver library (`libcuda.so.1`) comes with the NVIDIA driver. NVRTC comes
 with a CUDA toolkit, or, without root, from NVIDIA's pip wheel in a virtual
@@ -58,14 +60,13 @@ check kernels on first use), about 2 s per kernel the first time. NVIDIA's
 compute cache (`~/.nv/ComputeCache`) keeps them, so later starts take about
 0.3 s.
 
-Developer diagnostics, never needed to play: `EVOLUTION_CUDA=0` runs on
-Vulkan, `EVOLUTION_CUDA=1` makes the GPU tests refuse a Vulkan fallback,
+Developer diagnostics, never needed to play:
 `EVOLUTION_NVRTC=/path/to/libnvrtc.so.13` names another NVRTC, and
 `EVOLUTION_CUDA_VERBOSE=1` reports compile times.
 
 ## Diagnostic examples
 
-The tools in `examples/` (`search_ab`, `size_report`, `mutation_audit`, `physics_audit`, `first_generation`, `replay_match`, `p2_speed`, `worker_rate`) score and replay creatures on the GPU engine and have no CPU mode. They fail if the primary GPU does not open. They submit at most 50,000 creatures per unit, so they need little GPU memory beside the owner's game. Run them with the lock shared, unless they measure speed:
+The tools in `examples/` (`search_ab`, `size_report`, `mutation_audit`, `physics_audit`, `first_generation`, `replay_match`, `p2_speed`, `worker_rate`) score and replay creatures on the GPU engine. They fail if the primary GPU does not open. They submit at most 50,000 creatures per unit, so they need little GPU memory beside the owner's game. Run them with the lock shared, unless they measure speed:
 
 ```bash
 EVOLUTION_DEVICES=primary flock -s target/gpu.lock nice -n 19 tools/cpu-slot.sh cargo run --release --example first_generation 20000
@@ -83,7 +84,7 @@ The tool writes the request file `pause` in `$XDG_RUNTIME_DIR/evolution-simulato
 
 A pause lasts at most 5 minutes from when it began, even if the request stays. After a pause the game runs at least 2 minutes before it honors a new request (it writes `waiting` with the time it will), and it never honors the same request twice. The tool warns when a command ran past the 5 minutes, because the game then resumed partway through. Split such a measurement.
 
-While paused the game window shows "Paused for a developer measurement, resumes in m:ss" and a Resume now button. The replay keeps playing. A new replay records on the CPU. Save, open and new game wait until the pause ends. The pause does not change the search: work is held back, never dropped, so a paused run of a fixed seed matches an undisturbed one (`tests/dev_pause.rs`). The code is in `src/dev_pause.rs` and `src/scheduler/suspend.rs`.
+While paused the game window shows "Paused for a developer measurement, resumes in m:ss" and a Resume now button. The replay keeps playing. A new replay cannot be recorded until the pause ends. Save, open and new game wait until the pause ends. The pause does not change the search: work is held back, never dropped, so a paused run of a fixed seed matches an undisturbed one (`tests/dev_pause.rs`). The code is in `src/dev_pause.rs` and `src/scheduler/suspend.rs`.
 
 ## GPU failures
 
@@ -138,8 +139,8 @@ The measurements behind this section are in `docs/plan-2m-debate/round-1-igpu.md
 
 `cargo run --release` is the whole game and needs none of these. Every `EVOLUTION_*` variable is a developer diagnostic or a measuring control. Speed and search settings (GPU slots, batch and unit sizes, workgroup sizes, screening, the anatomy operators, joint damping, Hill speed) are fixed in the code and have no switch. Read the code (`grep -rn EVOLUTION_ src`) for the exact list. The groups are:
 
-- Devices and threads: `EVOLUTION_DEVICES` (`primary` on this machine, never the Radeon), `EVOLUTION_CPU_THREADS` (size of the CPU failover pool, 0 turns it off), `EVOLUTION_RENDER_GPU` (adapter for drawing the window), `EVOLUTION_UI_FPS` (frame rate cap, 0 follows vsync).
-- CUDA: `EVOLUTION_CUDA`, `EVOLUTION_NVRTC`, `EVOLUTION_CUDA_VERBOSE` (see the CUDA section).
+- Devices and threads: `EVOLUTION_DEVICES` (`primary` on this machine; other names add NVIDIA GPUs), `RAYON_NUM_THREADS` (lowers the general worker pool), `EVOLUTION_RENDER_GPU` (adapter for drawing the window), `EVOLUTION_UI_FPS` (frame rate cap, 0 follows vsync).
+- CUDA: `EVOLUTION_NVRTC`, `EVOLUTION_CUDA_VERBOSE`, the `EVOLUTION_WARP_*` solver overrides (see the CUDA section).
 - Measuring: `EVOLUTION_STAGE_LOG=<path>` writes one CSV row per generation. `EVOLUTION_PROFILE_BREED` prints archive and breeding timings.
 - Benchmarks, tests and screenshots: `EVOLUTION_BENCH_*` drives the graphical benchmark mode (generations, duration, warm-up). `EVOLUTION_TEST_*` sizes the ignored GPU tests. `EVOLUTION_SMOKE_*` starts short screenshot runs, and their windows show on the desktop.
 - Unattended runs: `EVOLUTION_AUTOSTART="Autochange environment=1"` sets the listed effect levels (the list may be empty), turns autosave on every 10 generations and starts evolving continuously.

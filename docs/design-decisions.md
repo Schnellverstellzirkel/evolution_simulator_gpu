@@ -32,9 +32,9 @@ The search is deterministic for a fixed seed on one GPU. Blocks are absorbed in 
 
 ## Scoring and replays
 
-The GPU score is final. A replay is recorded by the scoring kernel with a frame output on a slot and queue of its own, so its result is bit for bit the archive score (`gpu_replays_show_the_gpu_score`). CPU and GPU agreement is a diagnostic. Bit equality across engines is not expected, because the compilers contract floating point differently.
+The GPU score is final. A replay is recorded by the scoring kernel with a frame output on a slot and queue of its own, so its result is bit for bit the archive score (`gpu_replays_show_the_gpu_score`).
 
-A GPU that fails is retired and its unfinished units run on the CPU engine with the same creatures. A GPU out of memory keeps its unit, frees idle buffers and retries with fewer units in flight. Buffers above 1 MiB get 25% headroom, which cut peak GPU memory 15%.
+A GPU that fails is reopened and its unfinished units run again with the same creatures, so they give the same results (`a_lost_gpu_is_reopened_and_gives_the_same_results`). A GPU that does not reopen stops evolution. A GPU out of memory keeps its unit, frees idle buffers and retries with fewer units in flight. Buffers above 1 MiB get 25% headroom, which cut peak GPU memory 15%.
 
 Saves hold only the configuration, history, archives, CMA and emitter state, lineage and queued elites. A 3M game saves 3.4 MB in 0.06 s where the full population took 1,389 MB and 24 s. Loading breeds the ring from the archives. Autosave is off. An older `qd::VERSION` is turned down by the header before the load starts.
 
@@ -52,14 +52,12 @@ The physics is a planar articulated tree in reduced coordinates (`docs/physics.m
 - Bones feel air drag. Tendons store and return energy. With tendons QD was 13,162 against 6,437 and 12% of the muscles of sampled elites carried one.
 - The contact solve keeps the 4 deepest contacts per step. Eight contacts with cold sweeps ran 4.1M creature-steps/s, four with warm sweeps and planting rounds ran 22M and one ran 62M.
 
-Every engine reads the same physics constants. A physics change updates the WGSL and CUDA kernels together, the prototype, and `cpu_v2`.
+The CUDA kernel is the only physics. The game is NVIDIA-only, and nothing else simulates creatures, so there is one implementation to change and no engines to keep in agreement.
 
 ## Speed
 
-On NVIDIA the game runs CUDA (`src/cuda_engine.rs`). It is 1.8 times Vulkan on an evolved population and equal on a fresh one, so it is never slower. The kernels compile without a register cap, which was 3% faster than a 128 cap.
+The game runs CUDA (`src/cuda_engine.rs`). It was 1.8 times the Vulkan kernel it replaced on an evolved population and equal on a fresh one. The kernels compile without a register cap, which was 3% faster than a 128 cap.
 
-Work units of 1 s gave 186,700 creatures/s end to end against 168,600 for 3 s units, with 2.5 GB less peak memory. The worker keeps 8 general threads. Adding 8 CPU evaluation workers to a healthy GPU lowered the rate from 137,800 to 121,300 creatures/s. Archive refreshes recompute only the cells near a change, which cut the archive stage from 3.4 s to 2.1 s per generation at 3M. Breeding packs children in batches, and the CPU chain is now under a quarter of a generation, so the GPU is the wall.
+Work units of 1 s gave 186,700 creatures/s end to end against 168,600 for 3 s units, with 2.5 GB less peak memory. The worker keeps 8 general threads. Adding 8 CPU evaluation workers beside the GPU lowered the rate from 137,800 to 121,300 creatures/s, before the CPU engine was deleted. Archive refreshes recompute only the cells near a change, which cut the archive stage from 3.4 s to 2.1 s per generation at 3M. Breeding packs children in batches, and the CPU chain is now under a quarter of a generation, so the GPU is the wall.
 
 The game holds a ring of at most 786,432 creatures in flight, not a resident 3M population with a spare arena, which reached 23 GB. The ring is 4 blocks of 196,608, each one engine unit handed over without a copy. At 1M creatures per generation `worker_rate` peaked at 5.2 GB RSS, and the ring does not grow with the generation size. Long sessions grow bodies, and every creature then costs more. Autosave is off by default.
-
-The fast CPU engine runs 16 creatures with one skeleton per SIMD group. It scores 7,800 creatures/s on 4 threads with full groups against 1,000 for the scalar reference, and it is bit-equal to the reference.

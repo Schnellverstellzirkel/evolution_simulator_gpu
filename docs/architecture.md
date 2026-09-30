@@ -8,11 +8,11 @@
 | `evolution`, `evolution/anatomy` | Arena-packed genomes, deterministic creation and breeding, body repair, mutation operators |
 | `qd` | Behavior niches, elite archives, emitters, diagonal CMA state, the morphology reserve, `qd::VERSION` |
 | `physics` | Limits, node masses, joint constants, the ground functions, screening |
-| `physics2` | The scalar reference of the physics, the kernel source builders, the packing and the recording edits for replays |
-| `cpu_v2`, `cpu_engine`, `simd` | The fast CPU engine (16 creatures per SIMD group), and its front for evaluation, replays and trajectories |
-| `creature_kernel` | GPU data layout (`LaneBatch`, `Params`, `GpuResult`) and the CUDA source builders |
-| `vk_engine`, `cuda_engine`, `gpu` | The Vulkan and CUDA backends and the evaluation front end |
-| `engine`, `scheduler` | Device threads, replays, GPU failure and out-of-memory recovery, work units, confirmation trials first |
+| `physics2` | The physics constants and `Model`, a creature's constants and starting state, which the packing reads |
+| `warp_kernel` | The CUDA kernel's packing and its source, with the world's effects compiled in |
+| `creature_kernel` | `GpuResult`, `LaneBatch` and the layout of a recorded frame |
+| `cuda_engine`, `gpu` | The CUDA backend and the evaluation front end |
+| `engine`, `scheduler` | Device threads, replays, GPU reopening and out-of-memory recovery, work units, confirmation trials first |
 | `ring` | The blocks in flight between the experiment and the engines, absorbed in ring order |
 | `environment` | Environment effects, presets and the autochange ladder |
 | `storage` | The `Experiment`: the ring of blocks, islands, emitters, breeding, migration, record confirmations, catastrophes, history, saves |
@@ -21,9 +21,9 @@
 
 ## Scoring and replays
 
-The GPU scores every creature. On NVIDIA, when the driver and NVRTC load, `shaders/warp_creature.cu` runs one creature per group of 8, 16 or 32 lanes of a warp, by its nodes and muscles (`src/warp_kernel.rs`). A unit runs as waves of up to 262,144 creatures, one launch each, and a lane group runs its creature to the end of its trial and takes the next from the wave, so there are no trial segments. Kernels compile per lane class, world (the effects that are on), rate and recording. Elsewhere `shaders/physics2_creature.wgsl` (Vulkan) runs one creature per lane, bucketed by node capacity. The GPU result and the GPU confirmation trial are final: no CPU run validates, caps or moves a GPU score. The CPU engine scores CPU-only games and takes over units of a GPU that fails.
+The GPU scores every creature, and nothing else simulates one. The game needs an NVIDIA GPU with the CUDA driver and NVRTC. `shaders/warp_creature.cu` runs one creature per group of 8, 16 or 32 lanes of a warp, by its nodes and muscles (`src/warp_kernel.rs`). A unit runs as waves of up to 262,144 creatures, one launch each, and a lane group runs its creature to the end of its trial and takes the next from the wave, so there are no trial segments. Kernels compile per lane class, world (the effects that are on), rate and recording. The engine thread submits each unit as one whole-trial run. The GPU result and the GPU confirmation trial are final.
 
-`engine::replay` sends the creature to the primary GPU's engine thread. It runs the scoring kernel with a frame output (node positions, muscle energy and force, contact forces) on a slot and queue of its own, and returns the frames and the result of that same run. Without a GPU, or when the GPU does not answer in time, the replay runs on the CPU engine.
+`engine::replay` sends the creature to the primary GPU's engine thread. It runs the scoring kernel with a frame output (node positions, muscle energy and force, contact forces) on a slot and queue of its own, and returns the frames and the result of that same run. When the GPU does not answer in time, the replay viewer holds the first pose and says the replay is unavailable.
 
 ## Evaluation flow
 
@@ -31,7 +31,7 @@ The creatures in flight form a ring of 4 blocks, at most 786,432 creatures (`sto
 
 A standard trial stops at 5 s when the creature is below the bar, the 5 s distance the top 20% reached. A screened creature enters no archive. Every other standard result is final, with one exception: a creature that would set a new record of its island or nursery gets one confirmation trial from the same pose at the fine fidelity (twice the rate and solver passes), and its fitness is the lower distance (`Experiment::verdict`, `scheduler::confirm_config`). The record-setters of an archive are taken fastest first, each against the record the ones before it set, so no unconfirmed score becomes a record. A block asks for its confirmations as soon as its standard results are in, so they run while the blocks before it are absorbed.
 
-A failed GPU is retired and its unfinished units, including pending confirmations, run on the CPU engine with the same creatures and settings. A GPU out of memory keeps the unit, frees idle buffers and retries with fewer units in flight.
+A failed GPU is reopened and its unfinished units, including pending confirmations, run again with the same creatures and settings, so they give the same results. A GPU that does not reopen after three tries stops evolution with an error. A GPU out of memory keeps the unit, frees idle buffers and retries with fewer units in flight.
 
 ## Archives and breeding
 
@@ -53,8 +53,8 @@ A world change applies at once. Blocks already run or running in the old world e
 
 ## Threads
 
-Evaluation and Rayon share a budget of half the logical CPUs, capped at eight. By default the GPU evaluates and all eight go to general workers (archive insertion, breeding, packing). CPU engines stand by for GPU failure and never score while a GPU is healthy. `EVOLUTION_DEVICES=primary` keeps evaluation off the desktop Radeon. The UI has its own render device and targets 60 FPS.
+The general Rayon pool (archive insertion, breeding, packing) takes half the logical CPUs, at most eight. `RAYON_NUM_THREADS` can lower it. Each GPU has its own engine thread that packs the next unit while earlier units run. `EVOLUTION_DEVICES=primary` keeps evaluation to the primary GPU. The UI has its own render device and targets 60 FPS.
 
 ## Checks
 
-CI runs `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings` and the release CPU tests on Ubuntu with the portable SIMD fallback. GPU tests are ignored and run on the workstation.
+CI runs `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings` and the release tests on Ubuntu, which has no GPU. GPU tests are ignored and run on the workstation (`tests/cuda_effects.rs`, `tests/cuda_physics.rs`, `tests/screening.rs`, `tests/gpu_repeatability.rs`).

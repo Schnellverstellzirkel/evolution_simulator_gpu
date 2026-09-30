@@ -1,5 +1,5 @@
-pub mod config;
 pub mod assets;
+pub mod config;
 pub mod creature_kernel;
 pub mod cuda_engine;
 pub mod dev_pause;

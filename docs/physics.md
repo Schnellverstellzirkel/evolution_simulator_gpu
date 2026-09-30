@@ -2,9 +2,9 @@
 
 A creature is a tree of point masses (nodes) joined by rigid, massless bones. The state is the head's position and velocity, the neck's angle and angular velocity, and one relative angle and angular velocity per other bone. Node positions come from forward kinematics, so every bone keeps its exact length and every pose is valid.
 
-The dynamics are Featherstone's articulated-body algorithm in planar spatial vectors, written in world axes about the head's position at the start of the step so the numbers stay small in single precision. The neck body floats freely. Every other bone turns about its pivot relative to its parent bone. Integration is semi-implicit Euler on the joint coordinates at 60 steps per second. Trials last 20 s after a short settling phase.
+The dynamics are Featherstone's articulated-body algorithm in planar spatial vectors, written in world axes about the head's position at the start of the step so the numbers stay small in single precision. The neck body floats freely. Every other bone turns about its pivot relative to its parent bone. Integration is semi-implicit Euler on the joint coordinates at 60 steps per second, each step taken as 2 substeps of 1/120 s. Trials last 20 s after a short settling phase.
 
-The scalar reference is `physics2::simulate_step_inner`. The WGSL kernel and the fast CPU engine (`cpu_v2`) compute the same expressions. The CUDA kernel (`shaders/warp_creature.cu`), the physics authority on NVIDIA, differs in the contact solve and the time step: see the last section.
+The physics is the CUDA kernel, `shaders/warp_creature.cu`, and nothing else simulates creatures. The game needs an NVIDIA GPU with the CUDA driver and NVRTC. `src/warp_kernel.rs` packs each creature from `physics2::Model` and writes the kernel source with the constants of `physics.rs` and `physics2.rs` and the world's effects compiled in. Where the rules below say step, the kernel uses the substep's time step.
 
 ## Forces and rules
 
@@ -15,9 +15,9 @@ The scalar reference is `physics2::simulate_step_inner`. The WGSL kernel and the
 - Passive joint damping with a 0.1 s time constant, sized to the inertia each joint moves.
 - Joint limits are inelastic stops. A joint that would pass its limit within the step turns only as far as the limit. A joint forced 0.5 rad past its range breaks and ends the trial like a fall.
 - Spin cap: a bone turning faster than 15 rad/s meets an implicit drag toward rest. The drag is a pure torque, so it changes no linear momentum.
-- Ground contact: every node that would reach the ground within the step gets a contact, at most the 4 deepest per step. The contacts are solved together at velocity level by projected Gauss-Seidel (8 sweeps, warm started). A touching node may approach the ground only as fast as its gap allows, normal impulses only push, and friction stays within mu times the normal impulse and opposes sliding. A foot that barely slides holds 25% harder (static friction). Each step is taken once and the solve is repeated with the contact velocities measured in the end pose (2 planting rounds of 4 sweeps), so a foot is planted against where the step leaves it.
-- Momentum balance: after each step the body's momentum equals its old momentum plus the external impulses. The difference from first-order integration is applied as one uniform velocity.
-- First law in flight: a step without ground contact may not gain more kinetic plus potential energy than the muscles, the wind and the tendons put in. The excess comes off the motion about the center of mass.
+- Ground contact: a substep is one articulated-body pass with the muscles, gravity, wind, drag and water, then one contact solve. Every node that would reach the ground within the substep gets a contact, at most the 4 deepest. The contacts are solved together at velocity level with the exact contact-space matrix and 4 sweeps of projected Gauss-Seidel from zero impulses, then 1 sweep that only takes back friction that would do positive work. A touching node may approach the ground only as fast as its gap allows, normal impulses only push, and friction stays within mu times the normal impulse and opposes sliding. There are no planting rounds, no warm start and no static friction factor.
+- Momentum balance: after each substep the body's momentum equals its old momentum plus the external impulses. The difference from first-order integration is applied as one uniform velocity.
+- First law in flight: a substep without ground contact may not gain more kinetic plus potential energy than the muscles, the wind and the tendons put in. The excess comes off the motion about the center of mass.
 
 A fall (head below the neck base), a joint break, or head acceleration averaged over about 0.1 s above 8 g ends scoring at the distance reached and disables muscle force. Fitness is horizontal center-of-mass distance and nothing else. Ground contact, cadence, body height and lifted feet are behavior descriptors for the archive.
 
@@ -38,12 +38,10 @@ Each effect changes the physics and never the objective. Levels are in `src/envi
 
 The contact solve is about 55% of a step. The dense contact matrix, the sweeps and the planting rounds each cost a quarter to a third of that section. `docs/rejected-ideas.md` lists what was tried to make it cheaper.
 
-## The CUDA kernel
-
-Each 1/60 s step is 2 substeps of 1/120 s. A substep is one articulated-body pass with the muscles, gravity, wind, drag and water, then one contact solve: the deepest 4 nodes that would reach the ground within the substep, the exact contact-space matrix, and 4 sweeps of projected Gauss-Seidel from zero impulses, then 1 sweep that only takes back friction that would do positive work. There are no planting rounds, no warm start and no static friction factor. The momentum balance runs after every substep, the first-law check after every substep without contact. Joint limits, joint break, the fall rule, head shake, screening, every environment effect and the muscle model (waveform, Hill, energy store, tendon with its slack length, sensors, per-limb clocks) are as above, with the substep's time step where the rules above say step.
+## Substeps
 
 Measured on 300 elites of an evolved population (60 Hz against the same kernel at 4x rate): 2 substeps give a median distance ratio of 1.03; 1 substep gives 0.05, and 1 substep with one planting round 0.79. Holding the muscle forces over both substeps gave 0.41. Random bodies gain nothing (median -0.05 m, best -0.01 m in 20 s).
 
 ## Audits
 
-`examples/physics_audit.rs` prints what the GPU replay records per elite (contact-free steps, ground push, muscle energy store, broken joints). The energy, friction and momentum ledgers exist only in the CPU prototype. `examples/first_generation.rs` scores a random population on the GPU (median, p99, best) and catches free propulsion. Run it after any physics change.
+`examples/physics_audit.rs` prints what the GPU replay records per elite (contact-free steps, ground push, muscle energy store, broken joints). The kernel keeps no energy, friction or momentum ledgers. `tests/cuda_physics.rs` checks that bodies stay on the ground, joints stay in range, a body without drive neither travels nor rises, and a creature scores the same in any batch. `examples/first_generation.rs` scores a random population on the GPU (median, p99, best) and catches free propulsion. Run it after any physics change.

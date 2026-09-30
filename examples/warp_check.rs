@@ -14,7 +14,11 @@ use evolution_simulator::{
 };
 use std::time::Duration;
 
-fn evaluate(engine: &mut impl Engine, pop: Population, cfg: &Config) -> anyhow::Result<Vec<GpuResult>> {
+fn evaluate(
+    engine: &mut impl Engine,
+    pop: Population,
+    cfg: &Config,
+) -> anyhow::Result<Vec<GpuResult>> {
     engine.submit(pop, cfg)?;
     loop {
         if let Some(done) = engine.poll()? {
@@ -25,7 +29,11 @@ fn evaluate(engine: &mut impl Engine, pop: Population, cfg: &Config) -> anyhow::
 }
 
 fn quantile(values: &[f32], q: f32) -> f32 {
-    let mut sorted: Vec<f32> = values.iter().copied().filter(|v| v.is_finite() && *v > -1e10).collect();
+    let mut sorted: Vec<f32> = values
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite() && *v > -1e10)
+        .collect();
     sorted.sort_by(f32::total_cmp);
     if sorted.is_empty() {
         return f32::NAN;
@@ -39,24 +47,29 @@ fn main() -> anyhow::Result<()> {
     let top: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(100);
     let random: usize = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(20_000);
     // The best elites: (creature, trial settings, archive distance).
-    let best: Vec<(evolution_simulator::evolution::Creature, Config, f32)> = if path.ends_with(".bin") {
-        // A creature dump (settings, population, elites) of a save this game
-        // no longer reads.
-        type Dump = (Config, Population, Vec<(evolution_simulator::evolution::Creature, Config, f32)>);
-        let (_, _, elites): Dump = bincode::deserialize(&std::fs::read(path)?)?;
-        elites
-    } else {
-        let experiment = storage::load(std::path::Path::new(path))?;
-        let mut elites: Vec<_> = experiment.archive.entries.iter().collect();
-        elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
-        elites
-            .iter()
-            .map(|e| {
-                let (creature, cfg) = e.replay_of(&experiment.config);
-                (creature, cfg, e.fitness)
-            })
-            .collect()
-    };
+    let best: Vec<(evolution_simulator::evolution::Creature, Config, f32)> =
+        if path.ends_with(".bin") {
+            // A creature dump (settings, population, elites) of a save this game
+            // no longer reads.
+            type Dump = (
+                Config,
+                Population,
+                Vec<(evolution_simulator::evolution::Creature, Config, f32)>,
+            );
+            let (_, _, elites): Dump = bincode::deserialize(&std::fs::read(path)?)?;
+            elites
+        } else {
+            let experiment = storage::load(std::path::Path::new(path))?;
+            let mut elites: Vec<_> = experiment.archive.entries.iter().collect();
+            elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
+            elites
+                .iter()
+                .map(|e| {
+                    let (creature, cfg) = e.replay_of(&experiment.config);
+                    (creature, cfg, e.fitness)
+                })
+                .collect()
+        };
     let mut engine = engine::gpu_engine("RTX 4060", 64)?;
     eprintln!("engine: {}", engine.name());
     let mut pop = Population::default();
