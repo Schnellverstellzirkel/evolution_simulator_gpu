@@ -12,7 +12,7 @@ use evolution_simulator::{
 };
 use std::time::{Duration, Instant};
 
-fn run(engine: &mut impl Engine, pop: &Population, cfg: &Config) -> anyhow::Result<(f64, f64)> {
+fn run(engine: &mut impl Engine, pop: &Population, cfg: &Config) -> anyhow::Result<(f64, f64, f64)> {
     let start = Instant::now();
     engine.submit(pop.clone(), cfg)?;
     let done = loop {
@@ -38,7 +38,11 @@ fn run(engine: &mut impl Engine, pop: &Population, cfg: &Config) -> anyhow::Resu
             t.min(total)
         })
         .sum();
-    Ok((pop.genomes.len() as f64 / seconds, steps / seconds))
+    Ok((
+        pop.genomes.len() as f64 / seconds,
+        steps / seconds,
+        steps / done.busy_seconds.max(1e-9),
+    ))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -58,11 +62,12 @@ fn main() -> anyhow::Result<()> {
     eprintln!("engine: {}", engine.name());
     run(&mut engine, &pop, &cfg)?;
     for _ in 0..repeats {
-        let (creatures, steps) = run(&mut engine, &pop, &cfg)?;
+        let (creatures, steps, busy) = run(&mut engine, &pop, &cfg)?;
         println!(
-            "{} creatures: {creatures:.0} creatures/s, {:.1}M creature-steps/s",
+            "{} creatures: {creatures:.0} creatures/s, {:.1}M creature-steps/s ({:.1}M per GPU-busy second)",
             pop.genomes.len(),
-            steps / 1e6
+            steps / 1e6,
+            busy / 1e6
         );
     }
     Ok(())

@@ -188,6 +188,10 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
         ("CLEAN_SWEEPS".into(), format!("{}u", solver_setting("CLEAN_SWEEPS", CLEAN_SWEEPS))),
         ("RECORD".into(), (if record { "1" } else { "0" }).into()),
         (
+            "PROFILE".into(),
+            format!("{}", solver_setting("PROFILE", 0)),
+        ),
+        (
             "DEBUG".into(),
             if record {
                 std::env::var("EVOLUTION_WARP_DEBUG").unwrap_or_else(|_| "0".into())
