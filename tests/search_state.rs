@@ -383,14 +383,41 @@ fn the_ring_breeds_every_emitter_and_stays_valid() {
 
 #[test]
 fn the_ring_is_smaller_than_a_large_generation() {
-    let experiment = Experiment::new(Config {
-        population: storage::RING_SLOTS + 1000,
-        ..config(38)
-    })
+    let ring = storage::RingShape {
+        block: 4096,
+        blocks: 3,
+    };
+    let experiment = Experiment::with_ring(
+        Config {
+            population: 3 * 4096 + 1000,
+            ..config(38)
+        },
+        ring,
+    )
     .unwrap();
-    assert_eq!(experiment.ring_len(), storage::RING_SLOTS);
-    assert_eq!(experiment.blocks.len(), storage::RING_BLOCKS);
+    assert_eq!(experiment.ring_len(), 3 * 4096);
+    assert_eq!(experiment.blocks.len(), 3);
+    assert!(experiment.blocks.iter().all(|b| b.len() == 4096));
     experiment.validate().unwrap();
+}
+
+#[test]
+fn a_saved_game_keeps_its_ring_and_history_records_it() {
+    let ring = storage::RingShape {
+        block: 32,
+        blocks: 3,
+    };
+    let mut experiment = Experiment::with_ring(config(38), ring).unwrap();
+    assert_eq!(experiment.blocks.len(), 3);
+    run_synthetic(&mut experiment);
+    assert!(experiment.history.iter().all(|s| s.ring == ring));
+    let path = std::env::temp_dir().join(format!("ring-shape-{}.evo", std::process::id()));
+    storage::save(&path, &experiment).unwrap();
+    let loaded = storage::load(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(loaded.ring, ring);
+    assert_eq!(loaded.blocks.len(), 3);
+    assert_eq!(loaded.ring_len(), 96);
 }
 
 #[test]

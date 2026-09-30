@@ -209,6 +209,9 @@ pub struct Scheduler {
     /// busy seconds they took.
     pub confirms_submitted: u64,
     pub confirm_busy_seconds: f64,
+    /// Lane-steps of standard trials since start, per lane class
+    /// (`warp_kernel::CLASSES`): steps a creature ran times its lanes.
+    pub lane_steps: [u64; 3],
     /// Messages for the player (a GPU lost and reopened), taken by the worker.
     notices: Vec<String>,
     /// Developer hook (`EVOLUTION_SIMULATE_GPU_LOSS=N`): the GPU fails once,
@@ -250,6 +253,7 @@ impl Scheduler {
             packing_seconds: 0.0,
             confirms_submitted: 0,
             confirm_busy_seconds: 0.0,
+            lane_steps: [0; 3],
             notices: Vec::new(),
             simulate_loss_after: None,
             collected_units: 0,
@@ -508,6 +512,12 @@ impl Scheduler {
                                 Trial::Standard => {
                                     device.creatures += count as u64;
                                     device.update_rate(Instant::now(), true, count);
+                                    count_lane_steps(
+                                        &mut self.lane_steps,
+                                        &unit.population,
+                                        &done.results,
+                                        &unit.config,
+                                    );
                                 }
                                 Trial::Confirm => {
                                     // The rate counts standard-trial
@@ -740,6 +750,33 @@ impl Scheduler {
     }
 }
 
+/// Steps a trial ran: to its fall, its screen, or its end.
+fn trial_steps(r: &GpuResult, cfg: &Config) -> u32 {
+    let ended = if r.fall_time > 0.0 {
+        r.fall_time
+    } else {
+        r.screened
+    };
+    if ended > 0.0 {
+        ((ended * cfg.fidelity().rate as f32).round() as u32).clamp(1, cfg.steps().max(1))
+    } else {
+        cfg.steps().max(1)
+    }
+}
+
+/// Adds each creature's steps times the lanes of its class to `totals`.
+fn count_lane_steps(totals: &mut [u64; 3], pop: &Population, results: &[GpuResult], cfg: &Config) {
+    let classes = crate::warp_kernel::CLASSES;
+    for (genome, r) in pop.genomes.iter().zip(results) {
+        let Some(lanes) = crate::warp_kernel::class_of(genome.node_count, genome.muscle_count)
+        else {
+            continue;
+        };
+        let class = classes.iter().position(|&w| w == lanes).unwrap_or(0);
+        totals[class] += u64::from(trial_steps(r, cfg)) * lanes as u64;
+    }
+}
+
 /// Converts a raw kernel result to the archive's normalized metrics.
 pub fn to_metrics(
     pop: &Population,
@@ -749,16 +786,7 @@ pub fn to_metrics(
 ) -> EvaluationMetrics {
     // Behavior totals end at a fall or the screen, so they average over the
     // steps walked.
-    let ended = if r.fall_time > 0.0 {
-        r.fall_time
-    } else {
-        r.screened
-    };
-    let steps = if ended > 0.0 {
-        ((ended * cfg.fidelity().rate as f32).round() as u32).clamp(1, cfg.steps().max(1))
-    } else {
-        cfg.steps().max(1)
-    };
+    let steps = trial_steps(r, cfg);
     let contact_denominator = (steps * pop.genomes[index].node_count as u32) as f32;
     EvaluationMetrics {
         fitness: r.fitness,

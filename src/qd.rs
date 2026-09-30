@@ -46,7 +46,9 @@ pub(crate) const CMA_LIMIT: usize = 96;
 //     two sweeps.
 // 45: breeding draws from counter-based streams keyed by slot and gene with
 //     a 12-uniform gaussian, and bodies are held to 32 nodes and 96 muscles.
-pub const VERSION: u32 = 45;
+// 46: the ring's block size and block count are saved with the experiment
+//     and recorded in every generation's statistics.
+pub const VERSION: u32 = 46;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and

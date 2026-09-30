@@ -450,6 +450,14 @@ struct StageLog {
     /// Scheduler totals at the last row: confirmation trials submitted and
     /// their busy seconds, device busy seconds, device idle seconds.
     totals: [f64; 4],
+    /// Lane-steps per lane class at the last row.
+    lane_steps: [u64; 3],
+    /// Device idle seconds at the last absorbed block, and the most that
+    /// passed between two absorbed blocks this generation.
+    idle_at_block: f64,
+    starved_block: f64,
+    /// Creatures a world change threw away this generation.
+    discarded: usize,
 }
 impl StageLog {
     fn open() -> Option<Self> {
@@ -468,7 +476,7 @@ impl StageLog {
         if file.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
             let _ = writeln!(
                 file,
-                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second,confirmations,confirmation_busy_seconds,device_busy_seconds,device_idle_seconds,mean_nodes,share_over_8_nodes"
+                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second,confirmations,confirmation_busy_seconds,device_busy_seconds,device_idle_seconds,mean_nodes,share_over_8_nodes,ring_block,ring_blocks,chain_p95_seconds,boundary_seconds,starved_block_max_seconds,lane_steps_8,lane_steps_16,lane_steps_32,world_change_discarded"
             );
         }
         Some(Self {
@@ -476,6 +484,10 @@ impl StageLog {
             started: Instant::now(),
             seconds: [0.0; 3],
             totals: [0.0; 4],
+            lane_steps: [0; 3],
+            idle_at_block: 0.0,
+            starved_block: 0.0,
+            discarded: 0,
         })
     }
     fn add(&mut self, stage: usize, seconds: f64) {
@@ -484,6 +496,13 @@ impl StageLog {
     fn reset(&mut self) {
         self.started = Instant::now();
         self.seconds = [0.0; 3];
+        self.starved_block = 0.0;
+        self.discarded = 0;
+    }
+    /// A block was absorbed: the GPU idle time since the last one.
+    fn block(&mut self, idle: f64) {
+        self.starved_block = self.starved_block.max(idle - self.idle_at_block);
+        self.idle_at_block = idle;
     }
     fn write_row(
         &mut self,
@@ -491,6 +510,8 @@ impl StageLog {
         population: usize,
         sched: Option<&crate::scheduler::Scheduler>,
         nodes: [f64; 2],
+        ring: crate::storage::RingShape,
+        meter: &RingMeter,
     ) {
         let seconds = self.started.elapsed().as_secs_f64().max(1e-9);
         let totals = sched.map_or([0.0; 4], |s| {
@@ -503,6 +524,10 @@ impl StageLog {
         });
         let delta: [f64; 4] = std::array::from_fn(|k| totals[k] - self.totals[k]);
         self.totals = totals;
+        let lane_totals = sched.map_or([0; 3], |s| s.lane_steps);
+        let lanes: [u64; 3] =
+            std::array::from_fn(|k| lane_totals[k].saturating_sub(self.lane_steps[k]));
+        self.lane_steps = lane_totals;
         if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
             let [plan, emit, write] = crate::storage::take_breed_nanos();
             eprintln!(
@@ -514,7 +539,7 @@ impl StageLog {
         }
         let _ = writeln!(
             self.file,
-            "{generation},{:.6},{:.6},{:.6},{:.3},{:.0},{:.3},{:.3},{:.3},{:.3},{:.4}",
+            "{generation},{:.6},{:.6},{:.6},{:.3},{:.0},{:.3},{:.3},{:.3},{:.3},{:.4},{},{},{:.4},{:.4},{:.4},{},{},{},{}",
             self.seconds[0],
             self.seconds[1],
             self.seconds[2],
@@ -525,9 +550,90 @@ impl StageLog {
             delta[3],
             nodes[0],
             nodes[1],
+            ring.block,
+            ring.blocks,
+            meter.chain_p95_of(generation),
+            meter.boundary_of(generation),
+            self.starved_block,
+            lanes[0],
+            lanes[1],
+            lanes[2],
+            self.discarded,
         );
         let _ = self.file.flush();
         self.reset();
+    }
+}
+/// The host's time per ring block (`ring::Step::chain`) over the last three
+/// generations, which sizes the ring of the next new game.
+#[derive(Default)]
+struct RingMeter {
+    /// (generation, seconds) of blocks that did not end a generation.
+    chains: std::collections::VecDeque<(u32, f64)>,
+    /// (generation, seconds) of the blocks that ended one.
+    boundaries: std::collections::VecDeque<(u32, f64)>,
+}
+impl RingMeter {
+    const GENERATIONS: u32 = 3;
+    fn clear(&mut self) {
+        self.chains.clear();
+        self.boundaries.clear();
+    }
+    /// A block of `generation` took `seconds`; `boundary` when it ended it.
+    fn add(&mut self, generation: u32, seconds: f64, boundary: bool) {
+        let list = if boundary {
+            &mut self.boundaries
+        } else {
+            &mut self.chains
+        };
+        list.push_back((generation, seconds));
+        let oldest = generation.saturating_sub(Self::GENERATIONS - 1);
+        for list in [&mut self.chains, &mut self.boundaries] {
+            while list.front().is_some_and(|&(g, _)| g < oldest) {
+                list.pop_front();
+            }
+        }
+    }
+    fn p95(values: impl Iterator<Item = f64>) -> Option<f64> {
+        let mut v: Vec<f64> = values.collect();
+        if v.is_empty() {
+            return None;
+        }
+        v.sort_by(f64::total_cmp);
+        Some(v[((v.len() - 1) as f64 * 0.95).round() as usize])
+    }
+    /// For the stage log: this generation's p95 and boundary, 0 if none.
+    fn chain_p95_of(&self, generation: u32) -> f64 {
+        Self::p95(
+            self.chains
+                .iter()
+                .filter(|c| c.0 == generation)
+                .map(|c| c.1),
+        )
+        .unwrap_or(0.0)
+    }
+    fn boundary_of(&self, generation: u32) -> f64 {
+        self.boundaries
+            .iter()
+            .filter(|c| c.0 == generation)
+            .map(|c| c.1)
+            .fold(0.0, f64::max)
+    }
+    /// What the next ring is sized from: the scheduler's rate, and the
+    /// measured host times when this session has run a generation.
+    fn times(&self, sched: Option<&crate::scheduler::Scheduler>) -> crate::storage::RingTimes {
+        let prior = crate::storage::RingTimes::default();
+        let rate = sched.map_or(prior.rate, |s| {
+            s.devices.iter().map(|d| d.rate).sum::<f64>()
+        });
+        if self.boundaries.is_empty() {
+            return crate::storage::RingTimes { rate, ..prior };
+        }
+        crate::storage::RingTimes {
+            rate,
+            chain: Self::p95(self.chains.iter().map(|c| c.1)).unwrap_or(prior.chain),
+            boundary: self.boundaries.iter().map(|c| c.1).fold(0.0, f64::max),
+        }
     }
 }
 /// A save loading on its own thread.
@@ -552,6 +658,16 @@ struct Pass {
     /// Steps that absorbed a block: start, end, and whether it ended a
     /// generation.
     breeding: Vec<(Instant, Instant, bool)>,
+    /// Each absorbed block: its generation, its host time (`ring::Step::chain`),
+    /// whether it ended the generation, and the engines' idle seconds so far.
+    blocks: Vec<BlockNote>,
+}
+/// What one absorbed block tells the ring meter and the stage log.
+struct BlockNote {
+    generation: u32,
+    chain: f64,
+    boundary: bool,
+    idle: f64,
 }
 /// Longest search pass: snapshots are built between passes.
 const PASS_LIMIT: Duration = Duration::from_millis(100);
@@ -578,8 +694,15 @@ fn search_pass(
             let mut pass = Pass::default();
             loop {
                 let step_started = Instant::now();
+                let generation = e.generation;
                 let step = ring.step(e, sched, Duration::from_millis(4), 1)?;
                 if step.absorbed > 0 {
+                    pass.blocks.push(BlockNote {
+                        generation,
+                        chain: step.chain,
+                        boundary: step.generations > 0,
+                        idle: sched.devices.iter().map(|d| d.idle_seconds).sum(),
+                    });
                     pass.breeding
                         .push((step_started, Instant::now(), step.generations > 0));
                 }
@@ -684,6 +807,7 @@ fn run(
     // The creatures in flight, and the generation a run of one generation
     // stops at.
     let mut ring = crate::ring::Ring::default();
+    let mut ring_meter = RingMeter::default();
     let mut run_until: Option<u32> = None;
     // Completion time and population of recent generations.
     let mut generation_marks: std::collections::VecDeque<(Instant, usize)> = Default::default();
@@ -745,7 +869,12 @@ fn run(
                             ring.stop(sched);
                         }
                         status = "Creating population…".into();
-                        let next = Experiment::new(cfg)?;
+                        // The ring is sized once, for the whole game, from
+                        // what this session measured.
+                        let shape =
+                            crate::storage::RingShape::size(&ring_meter.times(gpu.sched.as_ref()));
+                        let next = Experiment::with_ring(cfg, shape)?;
+                        ring_meter.clear();
                         preview =
                             Some((next.blocks[0].population.creature(0), next.config.clone()));
                         events = Arc::new(Vec::new());
@@ -798,7 +927,10 @@ fn run(
                             if before.physics_differs(&e.config)
                                 && let Some(sched) = gpu.sched.as_mut()
                             {
-                                ring.world_changed(e, sched);
+                                let lost = ring.world_changed(e, sched);
+                                if let Some(log) = &mut stage_log {
+                                    log.discarded += lost;
+                                }
                             }
                             log_world_change(
                                 &mut events,
@@ -877,6 +1009,7 @@ fn run(
                             ring.stop(sched);
                         }
                         running = false;
+                        ring_meter.clear();
                         // Holding the current game while a 3M save loads
                         // doubles the memory and can push the machine into
                         // swap: let it go first.
@@ -1080,6 +1213,12 @@ fn run(
                 // are read.
                 let pass = search_pass(&helper, e, sched, &mut ring, &rx, &mut deferred)?;
                 let step = pass.step;
+                for note in &pass.blocks {
+                    ring_meter.add(note.generation, note.chain, note.boundary);
+                    if let Some(log) = &mut stage_log {
+                        log.block(note.idle);
+                    }
+                }
                 if measuring.load(Ordering::Relaxed) {
                     benchmark_pings.extend(&pass.pings);
                     bench.breeding.lock().unwrap().extend(&pass.breeding);
@@ -1110,7 +1249,10 @@ fn run(
                     // Autochange changed the world at the boundary: blocks
                     // not yet on an engine run in the new world, and the
                     // kept elites are tested again in it.
-                    ring.world_changed(e, sched);
+                    let lost = ring.world_changed(e, sched);
+                    if let Some(log) = &mut stage_log {
+                        log.discarded += lost;
+                    }
                     log_world_change(
                         &mut events,
                         &world_before,
@@ -1131,6 +1273,8 @@ fn run(
                         e.config.population,
                         Some(&*sched),
                         nodes,
+                        e.ring,
+                        &ring_meter,
                     );
                 }
                 generation_marks.push_back((Instant::now(), e.config.population));
@@ -1674,6 +1818,7 @@ mod tests {
                 qd_score: 0.0,
                 archive_coverage: 0.0,
                 emitters: Default::default(),
+                ring: Default::default(),
             }
         };
         let history = vec![stats(0, 0.0), stats(1, -3.0), stats(2, -3.0)];
@@ -1698,10 +1843,28 @@ mod tests {
             started: Instant::now(),
             seconds: [1.0, 2.0, 3.0],
             totals: [0.0; 4],
+            lane_steps: [0; 3],
+            idle_at_block: 0.0,
+            starved_block: 0.0,
+            discarded: 0,
         };
-        log.write_row(5, 1000, None, [4.0, 0.0]);
+        log.write_row(
+            5,
+            1000,
+            None,
+            [4.0, 0.0],
+            Default::default(),
+            &RingMeter::default(),
+        );
         log.add(0, 4.0);
-        log.write_row(6, 1000, None, [4.0, 0.0]);
+        log.write_row(
+            6,
+            1000,
+            None,
+            [4.0, 0.0],
+            Default::default(),
+            &RingMeter::default(),
+        );
         drop(log);
         let text = std::fs::read_to_string(&path).unwrap();
         let rows: Vec<&str> = text.lines().collect();

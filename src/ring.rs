@@ -20,7 +20,7 @@ use anyhow::Result;
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// One block on its way.
@@ -34,6 +34,8 @@ struct Flight {
     confirms: HashMap<usize, Option<EvaluationMetrics>>,
     /// Its confirmations were asked for before its turn.
     early: bool,
+    /// When its last standard result came back.
+    complete: Option<Instant>,
 }
 
 /// What one `Ring::step` did.
@@ -43,12 +45,20 @@ pub struct Step {
     pub absorbed: usize,
     /// Generations that ended.
     pub generations: usize,
+    /// The longest host time of an absorbed block, in seconds: from the
+    /// moment it could be absorbed (its results were in and the block
+    /// before it was queued again) until it was bred again and queued. It
+    /// includes the confirmation trials it waited for and the worker's time
+    /// between passes.
+    pub chain: f64,
 }
 
 #[derive(Default)]
 pub struct Ring {
     flights: VecDeque<Flight>,
     next_seq: u64,
+    /// When the last absorbed block was queued again.
+    requeued: Option<Instant>,
 }
 
 impl Ring {
@@ -85,6 +95,7 @@ impl Ring {
     pub fn stop(&mut self, sched: &mut Scheduler) {
         sched.reset();
         self.flights.clear();
+        self.requeued = None;
     }
 
     fn launch(&mut self, e: &Experiment, sched: &mut Scheduler, k: usize) {
@@ -105,6 +116,7 @@ impl Ring {
             missing: block.len(),
             confirms: HashMap::new(),
             early: false,
+            complete: None,
         });
     }
 
@@ -115,8 +127,8 @@ impl Ring {
 
     /// The world changed: blocks whose work has not reached an engine run in
     /// the new world. Blocks already run or running enter no archive when
-    /// they are absorbed.
-    pub fn world_changed(&mut self, e: &mut Experiment, sched: &mut Scheduler) {
+    /// they are absorbed. Returns how many creatures that throws away.
+    pub fn world_changed(&mut self, e: &mut Experiment, sched: &mut Scheduler) -> usize {
         let current = Arc::new(e.config.clone());
         for tag in sched.retarget(&current) {
             if let Some(flight) = self.flight(tag >> 1) {
@@ -124,6 +136,11 @@ impl Ring {
                 e.retarget_block(k, &current);
             }
         }
+        self.flights
+            .iter()
+            .filter(|f| e.blocks[f.block].config.physics_differs(&current))
+            .map(|f| f.standard.len())
+            .sum()
     }
 
     /// Collects finished work, waiting up to `timeout` for some, then
@@ -156,6 +173,9 @@ impl Ring {
                 } else if flight.standard[j].is_none() {
                     flight.standard[j] = Some(metric);
                     flight.missing -= 1;
+                    if flight.missing == 0 {
+                        flight.complete = Some(Instant::now());
+                    }
                 }
             }
         }
@@ -179,6 +199,11 @@ impl Ring {
             }
         }
         let mut step = Step::default();
+        if absorb == 0 {
+            // Paused: the host is not behind, so the pause is no block's
+            // host time.
+            self.requeued = Some(Instant::now());
+        }
         while step.absorbed < absorb {
             let Some(front) = self.flights.front_mut() else {
                 break;
@@ -203,9 +228,18 @@ impl Ring {
                     if e.absorb(k, &finals)? {
                         step.generations += 1;
                     }
-                    self.flights.pop_front();
+                    let flight = self.flights.pop_front().expect("the front block");
                     self.launch(e, sched, k);
                     step.absorbed += 1;
+                    let now = Instant::now();
+                    let ready = match (flight.complete, self.requeued) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (a, b) => a.or(b),
+                    };
+                    if let Some(ready) = ready {
+                        step.chain = step.chain.max(now.duration_since(ready).as_secs_f64());
+                    }
+                    self.requeued = Some(now);
                 }
             }
         }

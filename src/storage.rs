@@ -26,13 +26,6 @@ pub fn take_breed_nanos() -> [u64; 3] {
     std::array::from_fn(|i| BREED_NANOS[i].swap(0, std::sync::atomic::Ordering::Relaxed))
 }
 
-/// Creatures in flight: the ring holds this many at most, whatever the
-/// generation size. It is enough to keep the GPU busy while the host
-/// absorbs one block and breeds it again.
-pub const RING_SLOTS: usize = 786_432;
-/// Blocks in the ring. A block is bred, evaluated as one unit and absorbed
-/// as a whole.
-pub const RING_BLOCKS: usize = 4;
 /// Distances at the screen the bar's window holds at least, when the ring
 /// has them. The kept share of a quantile over this many varies by about
 /// 0.3%, so a larger window only adds lag: a block of the game's ring holds
@@ -42,17 +35,112 @@ const SCREEN_WINDOW_DISTANCES: usize = 16_384;
 /// for the ones it needs.
 const SPECULATIVE_CONFIRMS: usize = 8;
 
-/// Ring slots for a generation of `population` evaluations.
-pub fn ring_len(population: usize) -> usize {
-    population.clamp(1, RING_SLOTS)
+/// The shape of the ring: creatures per block and blocks in flight. It is
+/// chosen when an experiment starts, from the engine's rate and the host's
+/// time per block (`RingShape::size`), saved with the experiment and written
+/// into every generation's statistics. It never follows the rate while the
+/// experiment runs: how many blocks were absorbed before a child is bred
+/// decides its parents, so a shape that followed the rate would give one
+/// seed a different search on every run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RingShape {
+    /// Creatures per block.
+    pub block: usize,
+    /// Blocks in the ring.
+    pub blocks: usize,
 }
-/// First slot and length of each block of a ring of `len` slots.
-fn block_ranges(len: usize) -> Vec<(usize, usize)> {
-    let size = len.div_ceil(RING_BLOCKS).max(1);
-    (0..len)
-        .step_by(size)
-        .map(|first| (first, size.min(len - first)))
-        .collect()
+
+/// What the ring is sized from.
+#[derive(Clone, Copy, Debug)]
+pub struct RingTimes {
+    /// Standard creatures per second the engines finish.
+    pub rate: f64,
+    /// 95th percentile of the host's time per block: from the moment a block
+    /// could be absorbed until it is bred again and queued.
+    pub chain: f64,
+    /// The longest such time of a block that ended a generation, over the
+    /// last three generations.
+    pub boundary: f64,
+}
+
+impl Default for RingTimes {
+    /// Before anything is measured: the scheduler's first rate estimate for
+    /// the RTX 4060 and the host times of a young 3M game on 4 threads at
+    /// 32k blocks (worker_rate, 2026-09-30).
+    fn default() -> Self {
+        Self {
+            rate: 180_000.0,
+            chain: 0.06,
+            boundary: 0.35,
+        }
+    }
+}
+
+impl RingShape {
+    /// GPU seconds of work in one block.
+    pub const BLOCK_SECONDS: f64 = 0.05;
+    /// Smallest and largest block.
+    pub const MIN_BLOCK: usize = 32_768;
+    pub const MAX_BLOCK: usize = 262_144;
+    /// Host times per block the ring holds, so a slow block does not leave
+    /// the GPU without work.
+    pub const CHAIN_BLOCKS: f64 = 5.0;
+    /// Shortest and longest ring in seconds of GPU work. A world change
+    /// throws away at most the longest.
+    pub const MIN_SECONDS: f64 = 0.3;
+    pub const MAX_SECONDS: f64 = 1.0;
+
+    /// Block = 50 ms of GPU work between 32k and 256k creatures (a multiple
+    /// of 4,096). Ring = 5 host times per block, or the generation boundary
+    /// plus 2 blocks when that is longer, kept between 0.3 s and 1 s of GPU
+    /// work, and at least 2 blocks so the GPU runs one while the host
+    /// absorbs another.
+    pub fn size(times: &RingTimes) -> Self {
+        let rate = if times.rate.is_finite() && times.rate > 0.0 {
+            times.rate
+        } else {
+            RingTimes::default().rate
+        };
+        let finite = |x: f64| if x.is_finite() { x.max(0.0) } else { 0.0 };
+        let block = ((rate * Self::BLOCK_SECONDS) as usize)
+            .next_multiple_of(4096)
+            .clamp(Self::MIN_BLOCK, Self::MAX_BLOCK);
+        let block_seconds = block as f64 / rate;
+        let seconds = (Self::CHAIN_BLOCKS * finite(times.chain))
+            .max(finite(times.boundary) + 2.0 * block_seconds)
+            .clamp(Self::MIN_SECONDS, Self::MAX_SECONDS);
+        // Whole blocks that cover the ring's seconds, one fewer when that
+        // would pass the longest ring.
+        let mut blocks = (seconds / block_seconds - 1e-9).ceil().max(1.0) as usize;
+        if blocks as f64 * block_seconds > Self::MAX_SECONDS + 1e-9 {
+            blocks -= 1;
+        }
+        let blocks = blocks.max(2);
+        Self { block, blocks }
+    }
+    /// Ring slots for a generation of `population` evaluations.
+    pub fn len(&self, population: usize) -> usize {
+        population.clamp(1, self.block * self.blocks)
+    }
+    /// First slot and length of each block of a ring of `len` slots: the
+    /// ring's blocks, fewer and smaller for a small population.
+    fn ranges(&self, len: usize) -> Vec<(usize, usize)> {
+        let size = len.div_ceil(self.blocks).max(1);
+        (0..len)
+            .step_by(size)
+            .map(|first| (first, size.min(len - first)))
+            .collect()
+    }
+    /// Seconds of GPU work the ring holds at `rate` creatures per second.
+    pub fn seconds(&self, population: usize, rate: f64) -> f64 {
+        self.len(population) as f64 / rate.max(1.0)
+    }
+}
+
+impl Default for RingShape {
+    fn default() -> Self {
+        Self::size(&RingTimes::default())
+    }
 }
 
 pub const PERCENTILES: [f32; 29] = [
@@ -83,6 +171,8 @@ pub struct Stats {
     pub archive_coverage: f32,
     #[serde(default)]
     pub emitters: [EmitterStats; qd::EMITTER_COUNT],
+    /// The ring the generation ran with.
+    pub ring: RingShape,
 }
 /// How a creature in the ring was bred.
 #[derive(Clone, Copy, Debug)]
@@ -143,8 +233,8 @@ pub type Evaluate<'a> = dyn FnMut(&Population, &Config) -> Result<Vec<Evaluation
 
 /// The game: archives and search state, and the ring of creatures in
 /// flight. A generation is a count of `config.population` evaluations; the
-/// ring holds at most `RING_SLOTS` creatures, and each block is bred again
-/// as soon as it is absorbed.
+/// ring holds at most `ring.block * ring.blocks` creatures, and each block
+/// is bred again as soon as it is absorbed.
 #[derive(Clone)]
 pub struct Experiment {
     pub config: Config,
@@ -184,6 +274,8 @@ pub struct Experiment {
     /// Elites a meteor wiped out, with their island (None for the global
     /// archive), kept so the strike can be undone. Not saved.
     pub fossils: Vec<(Option<usize>, qd::Elite)>,
+    /// The ring's shape, fixed for the experiment.
+    pub ring: RingShape,
     /// The ring. Blocks are absorbed in ring order, starting at `cursor`.
     pub blocks: Vec<Block>,
     pub cursor: usize,
@@ -365,10 +457,19 @@ struct OffspringPlan {
 }
 
 impl Experiment {
-    /// A new game: the ring holds new random bodies, and the first
-    /// generation has no screen bar yet, so every trial runs in full and
-    /// records its distance at the screen.
+    /// A new game with the ring sized before anything is measured
+    /// (`RingShape::default`).
     pub fn new(config: Config) -> Result<Self> {
+        Self::with_ring(config, RingShape::default())
+    }
+    /// A new game with a ring of `ring`: the ring holds new random bodies,
+    /// and the first generation has no screen bar yet, so every trial runs
+    /// in full and records its distance at the screen.
+    pub fn with_ring(config: Config, ring: RingShape) -> Result<Self> {
+        ensure!(
+            ring.block > 0 && ring.blocks > 0,
+            "A ring needs at least one block"
+        );
         let mut config = config.resolved();
         config.validate()?;
         config.screen = crate::physics::screen_seconds()
@@ -378,8 +479,11 @@ impl Experiment {
                 bar: f32::NEG_INFINITY,
             });
         let mut e = Self::empty(config);
+        e.ring = ring;
         let shared = Arc::new(e.config.clone());
-        e.blocks = block_ranges(ring_len(e.config.population))
+        e.blocks = e
+            .ring
+            .ranges(e.ring.len(e.config.population))
             .into_iter()
             .map(|(first, count)| Block {
                 first,
@@ -411,6 +515,7 @@ impl Experiment {
             last_migration: None,
             reseed: Reseed::default(),
             fossils: Vec::new(),
+            ring: RingShape::default(),
             blocks: Vec::new(),
             cursor: 0,
             failed: 0,
@@ -1240,6 +1345,7 @@ impl Experiment {
             qd_score: self.archive.qd_score,
             archive_coverage: self.archive.coverage(),
             emitters: self.emitter_stats,
+            ring: self.ring,
         });
     }
     /// The next elite queued for the island of `slot`. A nursery slot takes
@@ -2161,7 +2267,7 @@ impl Experiment {
             })?;
         }
         ensure!(
-            next == ring_len(self.config.population),
+            next == self.ring.len(self.config.population),
             "Invalid ring size"
         );
         ensure!(
@@ -2678,6 +2784,7 @@ struct SmallSave<'a> {
     lineage: &'a HashMap<u64, Ancestor>,
     island_progress: &'a [(f32, u32)],
     reseed: &'a Reseed,
+    ring: RingShape,
 }
 #[derive(Deserialize)]
 struct SmallLoad {
@@ -2694,6 +2801,7 @@ struct SmallLoad {
     lineage: HashMap<u64, Ancestor>,
     island_progress: Vec<(f32, u32)>,
     reseed: Reseed,
+    ring: RingShape,
 }
 impl<'a> SmallSave<'a> {
     fn of(e: &'a Experiment) -> Self {
@@ -2711,6 +2819,7 @@ impl<'a> SmallSave<'a> {
             lineage: &e.lineage,
             island_progress: &e.island_progress,
             reseed: &e.reseed,
+            ring: e.ring,
         }
     }
 }
@@ -2732,6 +2841,13 @@ impl SmallLoad {
         e.lineage = self.lineage;
         e.island_progress = self.island_progress;
         e.reseed = self.reseed;
+        ensure!(
+            self.ring.block > 0 && self.ring.blocks > 0,
+            "Invalid ring shape"
+        );
+        // The ring keeps the shape it was saved with, so a resumed game
+        // continues the search the uninterrupted one would have run.
+        e.ring = self.ring;
         ensure!(
             e.island_progress.len() <= 64
                 && (e.island_progress.is_empty() || e.island_progress.len() == e.islands.len())
@@ -2757,7 +2873,7 @@ impl SmallLoad {
         let shared = Arc::new(e.config.clone());
         let elites =
             e.archive.entries.len() + e.islands.iter().map(|i| i.entries.len()).sum::<usize>();
-        for (first, count) in block_ranges(ring_len(e.config.population)) {
+        for (first, count) in e.ring.ranges(e.ring.len(e.config.population)) {
             let block = if elites == 0 && e.reseed.is_empty() {
                 // Nothing to breed from: the new bodies of a new game.
                 Block {

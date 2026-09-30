@@ -1,7 +1,12 @@
 //! Runs the game's worker headless (the ring on the GPU) and prints the end
-//! to end creature rate, the peak resident memory, and a digest of every
-//! generation's statistics, which two runs of one seed must share.
-//! Usage: worker_rate [population] [generations] [seed]
+//! to end creature rate, the peak resident memory, the ring's shape, how
+//! long the champion's replay took to record (asked every 5 s, as a player
+//! clicking it), and a digest of every generation's statistics, which two
+//! runs of one seed must share.
+//! Usage: worker_rate [population] [generations] [seed] [button seconds]
+//! With button seconds above 0 the wind button is pressed that often (on,
+//! then off), so the stage log's world_change_discarded column shows what a
+//! world change throws away; the search then differs from a run without.
 use evolution_simulator::{
     config::Config,
     gpu::Gpu,
@@ -18,6 +23,7 @@ fn main() -> anyhow::Result<()> {
     let population = arg(1, 1_000_000) as usize;
     let generations = arg(2, 12) as usize;
     let seed = arg(3, 38);
+    let button = arg(4, 0);
     let gpu = Gpu::new("RTX 4060")?;
     // A measurement must not pause itself when it runs under
     // tools/pause-game.sh, so it watches a private pause directory.
@@ -36,9 +42,52 @@ fn main() -> anyhow::Result<()> {
     });
     let started = Instant::now();
     let mut marks: Vec<(usize, Instant)> = Vec::new();
+    // The champion's replay, asked every 5 s from its own thread like the
+    // UI's replay thread.
+    type Champion = std::sync::Arc<(
+        evolution_simulator::evolution::Creature,
+        evolution_simulator::config::Config,
+    )>;
+    let champion: std::sync::Arc<std::sync::Mutex<Option<Champion>>> = Default::default();
+    let replay_seconds: std::sync::Arc<std::sync::Mutex<Vec<f64>>> = Default::default();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let replays = {
+        let (champion, replay_seconds, done) =
+            (champion.clone(), replay_seconds.clone(), done.clone());
+        std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_secs(5));
+                let Some(c) = champion.lock().unwrap().clone() else {
+                    continue;
+                };
+                let asked = Instant::now();
+                if evolution_simulator::engine::replay(&c.0, &c.1, Duration::from_secs(60))
+                    .is_some()
+                {
+                    replay_seconds
+                        .lock()
+                        .unwrap()
+                        .push(asked.elapsed().as_secs_f64());
+                }
+            }
+        })
+    };
+    let mut last_button = Instant::now();
+    let mut wind = false;
     let history = loop {
         if let Some(snapshot) = worker.view.lock().unwrap().take() {
             anyhow::ensure!(snapshot.error.is_none(), "{:?}", snapshot.error);
+            if snapshot.champion.is_some() {
+                *champion.lock().unwrap() = snapshot.champion.clone();
+            }
+            if button > 0 && last_button.elapsed() >= Duration::from_secs(button) {
+                last_button = Instant::now();
+                wind = !wind;
+                worker.send(Command::Configure(Config {
+                    wind: if wind { 2.0 } else { 0.0 },
+                    ..snapshot.config.clone()
+                }));
+            }
             let n = snapshot.history.len();
             if marks.last().is_none_or(|m| m.0 != n) {
                 marks.push((n, Instant::now()));
@@ -56,6 +105,13 @@ fn main() -> anyhow::Result<()> {
         anyhow::ensure!(started.elapsed() < Duration::from_secs(1800), "too slow");
         std::thread::sleep(Duration::from_millis(20));
     };
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(ring) = history.last().map(|s| s.ring) {
+        println!(
+            "worker_rate: ring of {} blocks of {} creatures",
+            ring.blocks, ring.block
+        );
+    }
     // Rate over the generations after the first two (warm-up).
     let first = marks.iter().find(|m| m.0 == 3).map(|m| m.1);
     let last = marks.last().map(|m| (m.0, m.1));
@@ -104,6 +160,19 @@ fn main() -> anyhow::Result<()> {
         field("VmHWM:"),
         digest.finish()
     );
+    let _ = replays.join();
+    let mut times = replay_seconds.lock().unwrap().clone();
+    if !times.is_empty() {
+        times.sort_by(f64::total_cmp);
+        let at = |q: f64| times[((times.len() - 1) as f64 * q).round() as usize];
+        println!(
+            "worker_rate: {} replays, p50 {:.3} s, p95 {:.3} s, max {:.3} s",
+            times.len(),
+            at(0.5),
+            at(0.95),
+            times[times.len() - 1]
+        );
+    }
     worker.send(Command::Shutdown);
     Ok(())
 }
