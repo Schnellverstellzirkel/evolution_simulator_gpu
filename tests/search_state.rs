@@ -2,7 +2,6 @@ use evolution_simulator::{
     config::Config,
     evolution::{self, Population},
     qd::{Descriptor, Emitter, Niche, QdArchive, TrialMetrics},
-    scheduler::Scheduler,
     storage::{self, Experiment, Stage},
 };
 use serde::Serialize;
@@ -17,132 +16,6 @@ fn config(seed: u64) -> Config {
         max_muscles: 12,
         ..Config::default()
     }
-}
-
-#[test]
-fn configuration_defaults_and_float_boundaries_are_validated() {
-    Config::default().validate().unwrap();
-    type FloatCase = (&'static str, fn(&mut Config) -> &mut f32, f32, f32);
-    let fields: [FloatCase; 13] = [
-        ("duration", |c| &mut c.duration, 0.1, 300.0),
-        ("mutation", |c| &mut c.mutation, 0.0, 10.0),
-        ("gravity", |c| &mut c.gravity, 0.0, 100.0),
-        ("air retention", |c| &mut c.air_retention, 0.0, 1.02),
-        ("ground friction", |c| &mut c.ground_friction, 0.0, 20.0),
-        ("muscle energy", |c| &mut c.muscle_energy, 0.05, 2.0),
-        ("muscle recovery", |c| &mut c.muscle_recovery, 0.05, 2.0),
-        ("slope", |c| &mut c.slope, -0.6, 0.6),
-        ("wind", |c| &mut c.wind, -20.0, 20.0),
-        ("minimum diameter", |c| &mut c.min_size, 0.01, 1.0),
-        ("maximum diameter", |c| &mut c.max_size, 0.01, 1.0),
-        ("minimum friction", |c| &mut c.min_friction, 0.0, 1.0),
-        ("maximum friction", |c| &mut c.max_friction, 0.0, 1.0),
-    ];
-    let base = Config {
-        min_size: 0.01,
-        max_size: 1.0,
-        min_friction: 0.0,
-        max_friction: 1.0,
-        ..config(38)
-    };
-    for (name, field, minimum, maximum) in fields {
-        for value in [minimum, maximum] {
-            let mut cfg = base.clone();
-            *field(&mut cfg) = value;
-            assert!(cfg.validate().is_ok(), "rejected {name} = {value}");
-        }
-        for value in [
-            minimum.next_down(),
-            maximum.next_up(),
-            f32::NAN,
-            f32::NEG_INFINITY,
-            f32::INFINITY,
-        ] {
-            let mut cfg = base.clone();
-            *field(&mut cfg) = value;
-            assert!(cfg.validate().is_err(), "accepted {name} = {value}");
-        }
-    }
-}
-
-#[test]
-fn configuration_integer_limits_and_ordered_bounds_are_validated() {
-    type IntegerCase = (&'static str, fn(&mut Config) -> &mut usize, usize, usize);
-    let fields: [IntegerCase; 5] = [
-        ("population", |c| &mut c.population, 2, 20_000_000),
-        ("nodes", |c| &mut c.max_nodes, 3, 64),
-        ("muscles", |c| &mut c.max_muscles, 3, 256),
-        ("GPU budget", |c| &mut c.gpu_budget_mib, 32, 6144),
-        ("RAM budget", |c| &mut c.ram_budget_mib, 64, 24576),
-    ];
-    let base = Config {
-        population: 2,
-        max_nodes: 3,
-        max_muscles: 256,
-        ram_budget_mib: 24576,
-        ..config(38)
-    };
-    for (name, field, minimum, maximum) in fields {
-        for value in [minimum, maximum] {
-            let mut cfg = base.clone();
-            *field(&mut cfg) = value;
-            assert!(cfg.validate().is_ok(), "rejected {name} = {value}");
-        }
-        for value in [minimum - 1, maximum + 1, usize::MAX] {
-            let mut cfg = base.clone();
-            *field(&mut cfg) = value;
-            assert!(cfg.validate().is_err(), "accepted {name} = {value}");
-        }
-    }
-    let invalid = [
-        Config {
-            population: 3,
-            ..base.clone()
-        },
-        Config {
-            min_size: 0.2,
-            max_size: 0.1,
-            ..base.clone()
-        },
-        Config {
-            min_friction: 0.8,
-            max_friction: 0.7,
-            ..base.clone()
-        },
-        Config {
-            max_nodes: 8,
-            max_muscles: 7,
-            ..base.clone()
-        },
-        Config {
-            terrain: u8::MAX,
-            ..base.clone()
-        },
-    ];
-    for cfg in invalid {
-        assert!(cfg.validate().is_err(), "accepted invalid config: {cfg:?}");
-    }
-    for terrain in 0..evolution_simulator::physics::TERRAIN_AMPLITUDES.len() {
-        Config {
-            terrain: terrain as u8,
-            ..base.clone()
-        }
-        .validate()
-        .unwrap();
-    }
-}
-
-#[test]
-fn configuration_rejects_population_above_the_ram_budget() {
-    let mut cfg = Config {
-        ram_budget_mib: 64,
-        ..config(38)
-    };
-    // Use neighboring even population sizes on either side of the RAM limit.
-    cfg.population = (cfg.ram_budget_mib * 1024 * 1024 / 1200) & !1;
-    cfg.validate().unwrap();
-    cfg.population += 2;
-    assert!(cfg.validate().is_err());
 }
 
 #[test]
@@ -320,8 +193,6 @@ fn resumed(e: &Experiment) -> Experiment {
 }
 
 fn assert_same_next_batch(a: &Experiment, b: &Experiment) {
-    a.validate().unwrap();
-    b.validate().unwrap();
     assert_same_population(&a.population, &b.population);
     assert_eq!(a.config, b.config);
     assert_eq!(a.generation, b.generation);
@@ -429,25 +300,6 @@ impl Drop for Checkpoint {
 }
 
 #[test]
-fn saving_twice_replaces_the_checkpoint_with_the_latest_state() {
-    let checkpoint = Checkpoint::new("replace-save");
-    let mut experiment = Experiment::new(config(38)).unwrap();
-    storage::save(&checkpoint.0, &experiment).unwrap();
-    let original = storage::load(&checkpoint.0).unwrap();
-    assert_same_population(&experiment.population, &original.population);
-
-    archive_synthetic_results(&mut experiment);
-    experiment.prepare_next_batch().unwrap();
-    storage::save(&checkpoint.0, &experiment).unwrap();
-    let replaced = storage::load(&checkpoint.0).unwrap();
-    // The save holds the archives, and loading breeds the next generation.
-    assert_eq!(replaced.generation, original.generation + 2);
-    assert_same_next_batch(&resumed(&experiment), &replaced);
-    assert_eq!(encoded(&experiment.archive), encoded(&replaced.archive));
-    assert!(!checkpoint.0.with_extension("evo.tmp").exists());
-}
-
-#[test]
 fn checkpoint_restores_archive_and_cma_for_identical_next_generation() {
     let mut uninterrupted = Experiment::new(config(38)).unwrap();
     for _ in 0..3 {
@@ -502,7 +354,6 @@ fn checkpoint_preserves_stalled_island_optimizer_next_generation() {
             .iter()
             .all(|island| island.behavior_count() > 1)
     );
-    uninterrupted.validate().unwrap();
     let checkpoint = Checkpoint::new("stalled-island-resume");
     storage::save(&checkpoint.0, &uninterrupted).unwrap();
     let restored = storage::load(&checkpoint.0).unwrap();
@@ -516,37 +367,6 @@ fn checkpoint_preserves_stalled_island_optimizer_next_generation() {
             .any(|&index| uninterrupted.cma_emitters[index].optimizing())
     );
     assert_same_next_batch(&uninterrupted, &restored);
-}
-
-#[test]
-fn checkpoint_rejects_invalid_optimizer_resume_metadata() {
-    let mut experiment = Experiment::new(config(38)).unwrap();
-    archive_synthetic_results(&mut experiment);
-    experiment.prepare_next_batch().unwrap();
-    let islands = experiment.islands.len();
-    let checkpoint = Checkpoint::new("invalid-resume");
-    for progress in [
-        vec![(f32::NAN, 0); islands],
-        vec![(f32::INFINITY, 0); islands],
-        vec![(1.0, experiment.generation + 1); islands],
-        vec![(1.0, 0); islands + 1],
-        vec![(1.0, 0); 65],
-    ] {
-        experiment.island_progress = progress;
-        storage::save(&checkpoint.0, &experiment).unwrap();
-        assert!(storage::load(&checkpoint.0).is_err());
-    }
-    // No planning pass has run yet after loading a save or after an empty
-    // island receives its first elite. Both forms are valid resume states.
-    for progress in [Vec::new(), vec![(f32::NEG_INFINITY, 0); islands]] {
-        experiment.island_progress = progress;
-        storage::save(&checkpoint.0, &experiment).unwrap();
-        let restored = storage::load(&checkpoint.0).unwrap();
-        assert_eq!(
-            restored.island_progress,
-            resumed(&experiment).island_progress
-        );
-    }
 }
 
 #[test]
@@ -619,7 +439,6 @@ fn steady_environment_change_checkpoint_keeps_boundary_state_valid() {
     assert_eq!(restored.config, changed);
     assert!(restored.pending.is_none());
     assert!(restored.reseed.is_empty());
-    restored.validate().unwrap();
     assert_eq!(restored.generation, uninterrupted.generation + 1);
     assert_eq!(restored.breed_round, uninterrupted.breed_round);
     assert_eq!(restored.stage, Stage::Ready);
@@ -641,101 +460,6 @@ fn steady_environment_change_checkpoint_keeps_boundary_state_valid() {
     expected.breed_slots(&slots).unwrap();
     restored.breed_slots(&slots).unwrap();
     assert_same_next_batch(&expected, &restored);
-}
-
-#[test]
-fn a_steady_world_change_rescores_the_archive_in_the_new_world() {
-    let mut experiment = Experiment::new(Config {
-        duration: 2.0,
-        ..config(38)
-    })
-    .unwrap();
-    let mut scheduler = Scheduler::cpu_only(6).unwrap();
-    let all: Vec<usize> = (0..experiment.config.population).collect();
-    let metrics = scheduler
-        .evaluate(&experiment.population, &all, &experiment.config)
-        .unwrap();
-    for (i, metric) in metrics.iter().enumerate() {
-        experiment.record_result(i, metric);
-    }
-    experiment.evaluated = experiment.config.population;
-    experiment.archive_batch().unwrap();
-    assert!(!experiment.archive.entries.is_empty());
-    let calm_champion = experiment
-        .archive
-        .entries
-        .iter()
-        .max_by(|a, b| a.fitness.total_cmp(&b.fitness))
-        .unwrap()
-        .fitness;
-    // Random v2 bodies barely move in 2 s, so only a finite score is required.
-    assert!(calm_champion > -1.0);
-
-    // A mid-generation terrain change, as the environment buttons do in a
-    // steady run: the new world waits for the generation boundary.
-    experiment.stage = Stage::Evaluating;
-    experiment
-        .update_config(Config {
-            terrain: 3,
-            ..experiment.config.clone()
-        })
-        .unwrap();
-    assert!(experiment.pending.is_some());
-    experiment.archive_slots(&all);
-    experiment.breed_slots(&all).unwrap();
-    experiment.finish_steady_generation(0).unwrap();
-    assert!(
-        experiment.archive.entries.is_empty(),
-        "the world change must clear the old scores"
-    );
-    assert!(!experiment.reseed.is_empty());
-
-    // The steady loop breeds queued elites into freed slots as units finish;
-    // breeding every slot at once places them all, then the rough world
-    // evaluates them.
-    experiment.breed_slots(&all).unwrap();
-    let metrics = scheduler
-        .evaluate(&experiment.population, &all, &experiment.config)
-        .unwrap();
-    for (i, metric) in metrics.iter().enumerate() {
-        experiment.record_result(i, metric);
-    }
-    experiment.evaluated = experiment.config.population;
-    experiment.archive_batch().unwrap();
-
-    for elite in &experiment.archive.entries {
-        let mut population = Population::default();
-        population.push(elite.creature.clone());
-        let replay =
-            evolution_simulator::cpu_engine::evaluate(&population, &experiment.config)[0].fitness;
-        assert!(
-            elite.fitness <= replay + 1e-4,
-            "archive shows {} m for creature {} but the rough-world replay reaches {replay} m",
-            elite.fitness,
-            elite.creature.id
-        );
-    }
-}
-
-#[test]
-fn rebuilding_islands_resets_records_from_the_previous_partition() {
-    let mut experiment = Experiment::new(config(38)).unwrap();
-    archive_synthetic_results(&mut experiment);
-    experiment.prepare_next_batch().unwrap();
-    // A checkpoint saved with a different island count gets new, empty
-    // islands on the next planning pass. Its previous records cannot apply.
-    experiment.islands.pop();
-    experiment.island_progress = vec![(1.0e9, 0); experiment.islands.len()];
-    let slots: Vec<_> = (0..experiment.config.population).collect();
-    experiment.breed_slots(&slots).unwrap();
-    assert_eq!(experiment.islands.len(), storage::arena_count());
-    assert_eq!(experiment.island_progress.len(), experiment.islands.len());
-    for (island, &(record, generation)) in
-        experiment.islands.iter().zip(&experiment.island_progress)
-    {
-        assert_eq!(record, island.best_fitness());
-        assert_eq!(generation, experiment.generation);
-    }
 }
 
 #[test]

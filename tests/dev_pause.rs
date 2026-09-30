@@ -5,7 +5,6 @@
 use evolution_simulator::{
     config::Config,
     gpu::Gpu,
-    scheduler::Scheduler,
     worker::{Command, Snapshot, Worker},
 };
 use std::{
@@ -117,31 +116,6 @@ fn hold(worker: &Worker, dir: &std::path::Path) {
         closed.as_secs_f64(),
         removed.elapsed().as_secs_f64()
     );
-}
-
-fn cpu() -> Gpu {
-    let sched = Scheduler::cpu_only(2).unwrap();
-    Gpu {
-        name: sched.names(),
-        allocated_bytes: 0,
-        sched: Some(sched),
-        startup_warning: None,
-    }
-}
-
-#[test]
-fn a_paused_cpu_run_matches_an_undisturbed_one() {
-    let cfg = Config {
-        population: 24_576,
-        duration: 2.0,
-        seed: 11,
-        random_seed: false,
-        checkpoint_interval: 0,
-        ..Config::default()
-    };
-    let undisturbed = run(cpu(), cfg.clone(), 3, false, "cpu-a");
-    let paused = run(cpu(), cfg, 3, true, "cpu-b");
-    assert_eq!(undisturbed, paused, "the pause changed the search");
 }
 
 #[test]

@@ -412,7 +412,12 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
         evolution_simulator::storage::save(std::path::Path::new(path), &experiment)?;
     }
     print_body_mix(scope, seed, &top);
-    print_robustness(scope, seed, &experiment, gpu.sched.as_mut().expect("scheduler"))?;
+    print_robustness(
+        scope,
+        seed,
+        &experiment,
+        gpu.sched.as_mut().expect("scheduler"),
+    )?;
     if let Some(sched) = gpu.sched.as_ref() {
         println!(
             "{scope} seed {seed} checks: {} submitted, {} released, {} dropped, per evaluated creature {:.4}",

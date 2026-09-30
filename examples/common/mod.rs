@@ -29,7 +29,11 @@ pub fn open() -> Result<ThreadedEngine> {
 }
 
 /// Scores every creature of `pop` with `cfg` on the GPU, in population order.
-pub fn score(engine: &mut ThreadedEngine, pop: &Population, cfg: &Config) -> Result<Vec<GpuResult>> {
+pub fn score(
+    engine: &mut ThreadedEngine,
+    pop: &Population,
+    cfg: &Config,
+) -> Result<Vec<GpuResult>> {
     let total = pop.genomes.len();
     let mut results = Vec::with_capacity(total);
     for begin in (0..total).step_by(UNIT) {
@@ -76,5 +80,6 @@ pub fn record(creature: &Creature, cfg: &Config) -> Result<Recording> {
         population: 1,
         ..cfg.clone()
     };
-    engine::record_on_gpu(creature, &cfg, REPLAY_PATIENCE).context("the GPU did not record the replay")
+    engine::record_on_gpu(creature, &cfg, REPLAY_PATIENCE)
+        .context("the GPU did not record the replay")
 }
