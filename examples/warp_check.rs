@@ -3,7 +3,7 @@
 //! first generation. A gait that holds under twice the rate does not live on
 //! the step size, and random bodies must not move far on their own.
 //!
-//! Usage: warp_check <save.evo> [elites] [random bodies]
+//! Usage: warp_check <save.evo | dump.bin> [elites] [random bodies]
 use evolution_simulator::{
     config::Config,
     creature_kernel::GpuResult,
@@ -38,21 +38,35 @@ fn main() -> anyhow::Result<()> {
     let path = args.get(1).expect("save path");
     let top: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(100);
     let random: usize = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(20_000);
-    let experiment = storage::load(std::path::Path::new(path))?;
+    // The best elites: (creature, trial settings, archive distance).
+    let best: Vec<(evolution_simulator::evolution::Creature, Config, f32)> = if path.ends_with(".bin") {
+        // A creature dump (settings, population, elites) of a save this game
+        // no longer reads.
+        type Dump = (Config, Population, Vec<(evolution_simulator::evolution::Creature, Config, f32)>);
+        let (_, _, elites): Dump = bincode::deserialize(&std::fs::read(path)?)?;
+        elites
+    } else {
+        let experiment = storage::load(std::path::Path::new(path))?;
+        let mut elites: Vec<_> = experiment.archive.entries.iter().collect();
+        elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
+        elites
+            .iter()
+            .map(|e| {
+                let (creature, cfg) = e.replay_of(&experiment.config);
+                (creature, cfg, e.fitness)
+            })
+            .collect()
+    };
     let mut engine =
         engine::gpu_engine("RTX 4060", 64, evolution_simulator::gpu::DEFAULT_STEP_RANGE)?;
     eprintln!("engine: {}", engine.name());
-
-    let mut elites: Vec<_> = experiment.archive.entries.iter().collect();
-    elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
     let mut pop = Population::default();
     let mut archive = Vec::new();
-    let mut cfg = experiment.config.clone();
-    for e in elites.iter().take(top) {
-        let (creature, elite_cfg) = e.replay_of(&experiment.config);
+    let mut cfg = Config::default();
+    for (creature, elite_cfg, fitness) in best.into_iter().take(top) {
         cfg = elite_cfg;
         pop.push(creature);
-        archive.push(e.fitness);
+        archive.push(fitness);
     }
     cfg.screen = None;
     cfg.fidelity = None;

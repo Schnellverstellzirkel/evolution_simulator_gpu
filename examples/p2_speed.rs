@@ -3,7 +3,7 @@
 //! Prints creatures/s and creature-steps/s (steps a creature simulated before
 //! it fell or finished). `EVOLUTION_CUDA=0` selects Vulkan.
 //!
-//! Usage: p2_speed <save.evo> [count] [repeats]
+//! Usage: p2_speed <save.evo | dump.bin> [count] [repeats]
 use evolution_simulator::{
     config::Config,
     engine::{self, Engine},
@@ -50,13 +50,24 @@ fn main() -> anyhow::Result<()> {
     let path = args.get(1).expect("save path");
     let count: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(50_000);
     let repeats: usize = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(3);
-    let e = storage::load(std::path::Path::new(path))?;
-    let mut cfg = e.config.clone();
-    cfg.screen = None;
     let mut pop = Population::default();
-    for i in 0..count.min(e.ring_len()) {
-        pop.push(e.creature(i));
-    }
+    let mut cfg = if path.ends_with(".bin") {
+        // A creature dump (settings, population, elites) of a save this game
+        // no longer reads.
+        type Dump = (Config, Population, Vec<(evolution_simulator::evolution::Creature, Config, f32)>);
+        let (settings, all, _): Dump = bincode::deserialize(&std::fs::read(path)?)?;
+        for i in 0..count.min(all.genomes.len()) {
+            pop.push(all.creature(i));
+        }
+        settings
+    } else {
+        let e = storage::load(std::path::Path::new(path))?;
+        for i in 0..count.min(e.ring_len()) {
+            pop.push(e.creature(i));
+        }
+        e.config.clone()
+    };
+    cfg.screen = None;
     let mut engine =
         engine::gpu_engine("RTX 4060", 64, evolution_simulator::gpu::DEFAULT_STEP_RANGE)?;
     eprintln!("engine: {}", engine.name());
