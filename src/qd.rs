@@ -1137,10 +1137,16 @@ impl CmaEmitter {
         self.sample_scaled(rng, 1.0)
     }
     pub fn sample_scaled(&self, rng: &mut Rng, strength: f32) -> Creature {
+        let mut creature = Creature::default();
+        self.sample_into(rng, strength, &mut creature);
+        creature
+    }
+    /// `sample_scaled` into `creature`, which it overwrites.
+    pub fn sample_into(&self, rng: &mut Rng, strength: f32, creature: &mut Creature) {
         if self.optimizing() {
-            self.sample_optimizing(rng, strength)
+            self.sample_optimizing(rng, strength, creature)
         } else {
-            self.sample_exploring(rng, strength)
+            self.sample_exploring(rng, strength, creature)
         }
     }
     /// Updates the search distribution from scored samples. CMA-ME emitters
@@ -1176,7 +1182,7 @@ impl CmaEmitter {
             self.tell_exploring(population, samples);
         }
     }
-    fn sample_exploring(&self, rng: &mut Rng, strength: f32) -> Creature {
+    fn sample_exploring(&self, rng: &mut Rng, strength: f32, creature: &mut Creature) {
         let phase_start = self.template.nodes.len() * 4 + self.template.bones.len();
         // Diagonal covariance plus a rank-one term along the evolution path, so
         // parameter changes that keep paying off move together.
@@ -1216,9 +1222,8 @@ impl CmaEmitter {
         for (slot, value) in values.iter_mut().zip(noise) {
             *slot = value;
         }
-        let mut creature = self.template.clone();
-        apply_exploring_parameters(&mut creature, values);
-        creature
+        creature.clone_from(&self.template);
+        apply_exploring_parameters(creature, values);
     }
     fn tell_exploring(&mut self, population: &Population, samples: &[(usize, f32)]) {
         let dimensions = self.mean.len();
@@ -1311,7 +1316,7 @@ impl CmaEmitter {
         .clamp(0.005, 0.35);
         self.mean = new_mean;
     }
-    fn sample_optimizing(&self, rng: &mut Rng, strength: f32) -> Creature {
+    fn sample_optimizing(&self, rng: &mut Rng, strength: f32, creature: &mut Creature) {
         let layout = Layout::of(&self.template);
         let genes = rng.genes();
         let mut buffer = [0.0f32; MAX_PARAMETERS];
@@ -1323,11 +1328,14 @@ impl CmaEmitter {
             .enumerate()
         {
             *slot = mean
-                + self.sigma * strength * layout.scale(d) * variance.sqrt() * genes.gaussian(d as u32);
+                + self.sigma
+                    * strength
+                    * layout.scale(d)
+                    * variance.sqrt()
+                    * genes.gaussian(d as u32);
         }
-        let mut creature = self.template.clone();
-        apply_parameters(&mut creature, values);
-        creature
+        creature.clone_from(&self.template);
+        apply_parameters(creature, values);
     }
     /// Separable CMA-ES update (Ros & Hansen 2008) from scored samples, fastest
     /// first. Steps are measured in each coordinate's physical scale.
@@ -1412,9 +1420,8 @@ fn wrap_phase(delta: f32) -> f32 {
 
 /// Most CMA coordinates of a body at the caps: 4 per node, 5 per bone, the
 /// shared period and 8 per muscle.
-const MAX_PARAMETERS: usize = crate::evolution::MAX_NODES * (4 + BONE_FIELDS)
-    + 1
-    + crate::evolution::MAX_MUSCLES * 8;
+const MAX_PARAMETERS: usize =
+    crate::evolution::MAX_NODES * (4 + BONE_FIELDS) + 1 + crate::evolution::MAX_MUSCLES * 8;
 /// Share of each CMA step taken along the normalized evolution path.
 const PATH_WEIGHT: f32 = 0.3;
 

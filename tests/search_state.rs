@@ -69,15 +69,15 @@ fn configuration_integer_limits_and_ordered_bounds_are_validated() {
     type IntegerCase = (&'static str, fn(&mut Config) -> &mut usize, usize, usize);
     let fields: [IntegerCase; 5] = [
         ("population", |c| &mut c.population, 2, 20_000_000),
-        ("nodes", |c| &mut c.max_nodes, 3, 64),
-        ("muscles", |c| &mut c.max_muscles, 3, 256),
+        ("nodes", |c| &mut c.max_nodes, 3, evolution::MAX_NODES),
+        ("muscles", |c| &mut c.max_muscles, 3, evolution::MAX_MUSCLES),
         ("GPU budget", |c| &mut c.gpu_budget_mib, 32, 6144),
         ("RAM budget", |c| &mut c.ram_budget_mib, 64, 24576),
     ];
     let base = Config {
         population: 2,
         max_nodes: 3,
-        max_muscles: 256,
+        max_muscles: evolution::MAX_MUSCLES,
         ram_budget_mib: 24576,
         ..config(38)
     };

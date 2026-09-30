@@ -231,12 +231,30 @@ pub type Bones = Bounded<Bone, MAX_NODES>;
 pub type Muscles = Bounded<Muscle, MAX_MUSCLES>;
 /// A body's genes, held inline in bounded arrays: a creature is about 6.4 KB
 /// and breeding one never allocates.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Creature {
     pub nodes: Nodes,
     pub bones: Bones,
     pub muscles: Muscles,
     pub id: u64,
+}
+/// `clone_from` copies only the genes in use into the existing arrays, where
+/// the derived one would build a whole new creature and move it.
+impl Clone for Creature {
+    fn clone(&self) -> Self {
+        Self {
+            nodes: self.nodes.clone(),
+            bones: self.bones.clone(),
+            muscles: self.muscles.clone(),
+            id: self.id,
+        }
+    }
+    fn clone_from(&mut self, source: &Self) {
+        self.nodes.clone_from(&source.nodes);
+        self.bones.clone_from(&source.bones);
+        self.muscles.clone_from(&source.muscles);
+        self.id = source.id;
+    }
 }
 /// Splits `all` into consecutive parts of the given sizes.
 fn split<T>(mut all: &mut [T], sizes: impl Iterator<Item = usize>) -> Vec<&mut [T]> {
@@ -264,13 +282,15 @@ fn finalize(mut z: u64) -> u64 {
     z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
     z ^ (z >> 31)
 }
-/// Draw `draw` of gene `gene` in the stream with `key`. The pair is packed
-/// into one word and multiplied by an odd constant, both bijections, so two
-/// different pairs of one stream never share an input to the finalizer.
+/// Draw `draw` of gene `gene` in the stream with `key`: SplitMix64 started
+/// at the key, at counter `gene << 32 | draw`. The key comes from four rounds
+/// of the finalizer over the stream's coordinates (`stream_key`), so streams
+/// start at unrelated points, and within one stream every (gene, draw) pair
+/// gets its own counter.
 #[inline(always)]
 fn keyed(key: u64, gene: u32, draw: u32) -> u64 {
-    let packed = ((gene as u64) << 32 | draw as u64).wrapping_mul(0x9e3779b97f4a7c15);
-    finalize(finalize(key ^ packed))
+    let counter = (gene as u64) << 32 | draw as u64;
+    finalize(key.wrapping_add(counter.wrapping_mul(0x9e3779b97f4a7c15)))
 }
 /// A stream key from its coordinates, absorbed one at a time.
 fn stream_key(seed: u64, generation: u64, round: u64, slot: u64) -> u64 {
@@ -869,15 +889,16 @@ fn snap_clock_ratios(c: &mut Creature) {
         return;
     };
     let (low, high) = (min_muscle_period(), 10.0);
+    let logs = CLOCK_RATIOS.map(f32::ln);
     for m in &mut c.muscles {
         let log = (m.period / base).ln();
-        let best = CLOCK_RATIOS
-            .iter()
-            .copied()
-            .min_by(|a, b| (a.ln() - log).abs().total_cmp(&(b.ln() - log).abs()))
-            .unwrap_or(1.0);
-        let ratio = if (best.ln() - log).abs() < 0.003 && (low..=high).contains(&(base * best)) {
-            best
+        let best = (0..CLOCK_RATIOS.len())
+            .min_by(|&a, &b| (logs[a] - log).abs().total_cmp(&(logs[b] - log).abs()))
+            .unwrap_or(2);
+        let ratio = if (logs[best] - log).abs() < 0.003
+            && (low..=high).contains(&(base * CLOCK_RATIOS[best]))
+        {
+            CLOCK_RATIOS[best]
         } else {
             1.0
         };
@@ -1319,7 +1340,9 @@ pub struct ChildTrace {
     pub operator: Option<u8>,
 }
 
-/// Breeds one offspring from its plan with the given random stream.
+/// Breeds one offspring from its plan with the given random stream into
+/// `child`, which it overwrites.
+#[allow(clippy::too_many_arguments)]
 fn offspring(
     archive: &QdArchive,
     cma_emitters: &[CmaEmitter],
@@ -1328,7 +1351,8 @@ fn offspring(
     rng: &mut Rng,
     id: u64,
     step: Option<GrowthStep>,
-) -> (Creature, ChildTrace) {
+    child: &mut Creature,
+) -> ChildTrace {
     let mut trace = ChildTrace::default();
     let limited = match plan.emitter {
         Emitter::Structural | Emitter::Novelty => plan
@@ -1337,45 +1361,41 @@ fn offspring(
         Emitter::Restart | Emitter::Cma => None,
     };
     let cfg = limited.as_ref().unwrap_or(cfg);
-    let mut creature = match plan.emitter {
-        Emitter::Restart => random_creature_from(cfg, rng),
+    match plan.emitter {
+        Emitter::Restart => *child = random_creature_from(cfg, rng),
         Emitter::Cma => {
             if let Some(cma) = plan.cma.and_then(|index| cma_emitters.get(index)) {
-                cma.sample_scaled(rng, cfg.mutation)
+                cma.sample_into(rng, cfg.mutation, child);
             } else {
-                let mut child = archive.entries[plan.parent.expect("CMA parent")]
-                    .creature
-                    .clone();
-                mutate_genes(&mut child, cfg, rng, 0.12);
-                child
+                child.clone_from(&archive.entries[plan.parent.expect("CMA parent")].creature);
+                mutate_genes(child, cfg, rng, 0.12);
             }
         }
         Emitter::Structural => {
-            let mut child = mated(archive, plan, cfg, rng);
+            mated(archive, plan, cfg, rng, child);
             trace.structural = true;
-            trace.operator = structural_mutation_from(&mut child, cfg, rng, archive);
-            mutate_genes(&mut child, cfg, rng, 0.035);
-            child
+            trace.operator = structural_mutation_from(child, cfg, rng, archive);
+            mutate_genes(child, cfg, rng, 0.035);
         }
         Emitter::Novelty => {
-            let mut child = mated(archive, plan, cfg, rng);
+            mated(archive, plan, cfg, rng, child);
             // Occasional large jumps help lineages cross fitness valleys.
             let scale = if rng.unit() < 0.05 { 2.25 } else { 0.75 };
-            mutate_genes(&mut child, cfg, rng, scale);
+            mutate_genes(child, cfg, rng, scale);
             if rng.unit() < 0.18 {
                 trace.structural = true;
-                trace.operator = structural_mutation_from(&mut child, cfg, rng, archive);
+                trace.operator = structural_mutation_from(child, cfg, rng, archive);
             }
-            child
         }
-    };
-    creature.id = id;
-    repair(&mut creature, cfg, rng);
-    (creature, trace)
+    }
+    child.id = id;
+    repair(child, cfg, rng);
+    trace
 }
 
-/// Breeds the child of ring `slot` in breeding `round` from its plan, as
-/// `emit_offspring_batches` does, and says what breeding did to it.
+/// Breeds the child of ring `slot` in breeding `round` from its plan into
+/// `child`, as `emit_offspring_batches` does, and says what breeding did.
+#[allow(clippy::too_many_arguments)]
 pub fn breed_child(
     archive: &[QdArchive],
     cma_emitters: &[CmaEmitter],
@@ -1384,7 +1404,8 @@ pub fn breed_child(
     cfg: &Config,
     generation: u32,
     round: u64,
-) -> (Creature, ChildTrace) {
+    child: &mut Creature,
+) -> ChildTrace {
     let mut rng = Rng::stream(cfg.seed, generation, round, slot);
     offspring(
         &archive[qd::arena_of_slot(slot, archive.len())],
@@ -1394,30 +1415,36 @@ pub fn breed_child(
         &mut rng,
         bred_id(round, slot),
         GROWTH_STEP,
+        child,
     )
 }
 
-/// The plan's parent, crossed with its mate when it has one.
-fn mated(archive: &QdArchive, plan: CandidatePlan, cfg: &Config, rng: &mut Rng) -> Creature {
+/// The plan's parent, crossed with its mate when it has one, into `child`.
+fn mated(
+    archive: &QdArchive,
+    plan: CandidatePlan,
+    cfg: &Config,
+    rng: &mut Rng,
+    child: &mut Creature,
+) {
     let parent = &archive.entries[plan.parent.expect("archive parent")].creature;
     match plan.mate {
         Some(mate) => {
             let mate = &archive.entries[mate].creature;
             if same_shape(parent, mate) {
-                crossover(parent, mate, rng)
+                crossover_into(parent, mate, rng, child);
             } else {
                 // Different body plans: graft one of the mate's limbs, with
                 // its muscles and rhythm, onto a copy of the parent.
-                let mut child = parent.clone();
+                child.clone_from(parent);
                 for _ in 0..4 {
-                    if anatomy::graft_from(&mut child, cfg, rng, mate) {
+                    if anatomy::graft_from(child, cfg, rng, mate) {
                         break;
                     }
                 }
-                child
             }
         }
-        None => parent.clone(),
+        None => child.clone_from(parent),
     }
 }
 
@@ -1441,12 +1468,18 @@ fn same_shape(a: &Creature, b: &Creature) -> bool {
 /// bone, and muscle comes from one parent. Sometimes the whole muscle rhythm
 /// (periods and phases) comes from one parent so gaits stay coherent.
 pub fn crossover(a: &Creature, b: &Creature, rng: &mut Rng) -> Creature {
-    let mut child = a.clone();
+    let mut child = Creature::default();
+    crossover_into(a, b, rng, &mut child);
+    child
+}
+/// `crossover` into `child`, which it overwrites.
+fn crossover_into(a: &Creature, b: &Creature, rng: &mut Rng, child: &mut Creature) {
+    child.clone_from(a);
     if a.nodes.len() != b.nodes.len()
         || a.bones.len() != b.bones.len()
         || a.muscles.len() != b.muscles.len()
     {
-        return child;
+        return;
     }
     for (node, other) in child.nodes.iter_mut().zip(&b.nodes) {
         if rng.unit() < 0.5 {
@@ -1481,7 +1514,6 @@ pub fn crossover(a: &Creature, b: &Creature, rng: &mut Rng) -> Creature {
             None => {}
         }
     }
-    child
 }
 
 /// Copies a leaf limb as its mirror image around its joint, with copies of the
@@ -1582,7 +1614,12 @@ impl ChildBatch {
     /// Puts the child's bones in canonical order and appends it; the child's
     /// own vectors are freed right away, while still in cache.
     pub fn push(&mut self, mut child: Creature) {
-        canonicalize_bone_order(&mut child);
+        self.push_bred(&mut child);
+    }
+    /// `push` for a child the caller keeps and reuses; its bones are put in
+    /// canonical order in place.
+    pub fn push_bred(&mut self, child: &mut Creature) {
+        canonicalize_bone_order(child);
         self.meta.push(ChildMeta {
             id: child.id,
             counts: [
@@ -1622,10 +1659,19 @@ pub fn emit_offspring_batches(
                 muscles: Vec::with_capacity(plans.len() * 12),
                 meta: Vec::with_capacity(plans.len()),
             };
+            let mut child = Creature::default();
             for (&plan, &slot) in plans.iter().zip(slots) {
-                let (child, _) =
-                    breed_child(archive, cma_emitters, plan, slot, cfg, generation, round);
-                batch.push(child);
+                breed_child(
+                    archive,
+                    cma_emitters,
+                    plan,
+                    slot,
+                    cfg,
+                    generation,
+                    round,
+                    &mut child,
+                );
+                batch.push_bred(&mut child);
             }
             batch
         })

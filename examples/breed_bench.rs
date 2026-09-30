@@ -405,11 +405,12 @@ fn time_block(
             let mut tally = Tally::new();
             let mut records: Vec<(usize, u64, u64, Option<u8>, bool)> =
                 Vec::with_capacity(plans.len());
+            let mut child = Creature::default();
             let (c0, t0) = (thread_cycles(), thread_ns());
             for (&plan, &slot) in plans.iter().zip(slots) {
                 let a = allocations();
                 let t = thread_ns();
-                let (child, trace) = evolution::breed_child(
+                let trace = evolution::breed_child(
                     &e.islands,
                     &e.cma_emitters,
                     plan,
@@ -417,6 +418,7 @@ fn time_block(
                     &e.config,
                     e.generation,
                     round,
+                    &mut child,
                 );
                 let ns = (thread_ns() - t).saturating_sub(overhead);
                 let allocs = allocations() - a;

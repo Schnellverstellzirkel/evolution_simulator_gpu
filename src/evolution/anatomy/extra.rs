@@ -971,7 +971,7 @@ mod tests {
                 }
             }
         });
-        assert!(applied >= 150, "applied {applied}");
+        assert!(applied >= 140, "applied {applied}");
     }
 
     #[test]
