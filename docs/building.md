@@ -135,6 +135,131 @@ Diagnostics: run `journalctl -k | grep -E "amdgpu.*(timeout|reset)"` after any R
 
 The measurements behind this section are in `docs/plan-2m-debate/round-1-igpu.md` to `round-5-igpu.md`. Radeon physics stays closed: the 780M issues 0.2 to 0.25 of the RTX's instructions per clock, and its watts come from the package budget the CPU needs.
 
+## Power rows
+
+These rows fix the power budget, the host tax, the sustained clock, the Radeon's cost and four root settings for the 2M/s plan (`docs/plan-2m.md`, section 6, item 1). The row numbers are the ones the plan and `docs/plan-2m-debate/round-2-os.md` use. Every row is logged by `tools/power-sample.sh` at 100 ms: SM and memory clock, GPU power, the live power limit (`enforced.power.limit`, which Dynamic Boost moves between 85 and 100 W), the limiter reasons, temperature, the APU package power (PPT) and the Radeon's clock and load. Its summary averages the samples where the RTX is at least 90% busy.
+
+The tools:
+
+- `examples/power_probe.rs <fma|mio|int|idle> [seconds] [cubin-dir]` runs one synthetic NVRTC kernel at full occupancy (48 warps per SM). `fma` is 8 chaotic FFMA chains per thread in registers. `mio` has one shared-memory load and one shuffle per two FFMAs, so 49% of its instructions go to the MIO pipes. `int` is IMAD, LOP3 and IADD3 chains with one shuffle in six instructions. It prints warp instructions per second from the loop's SASS count (131, 131 and 99 instructions per iteration with NVRTC 13.0 on sm_89, counted with `cuobjdump -sass` on the cubins it writes to `cubin-dir`) and the SM clock the kernel itself saw. The Ada peak is 4 warp instructions per SM per clock. nJ per warp instruction is the busy GPU power divided by that rate.
+- `tools/cpu-burn.c <threads> [duty%] [period_ms] [seconds]` keeps N threads on AVX-512 FMAs for duty% of each period, all threads on the same period grid. It stops on SIGTERM and prints the busy core-seconds.
+- `examples/p2_speed.rs` scores the 262,144 creatures of the generation-10 dump, one warm-up pass and 5 timed passes, about 28 s. The dump is at `~/.cache/evolution-simulator/power-dump.bin` (copied from the warp track's scratchpad `save_dump.bin`).
+
+A row needs the RTX to itself and a quiet CPU, because Dynamic Boost takes the 15 W from the RTX as soon as the APU draws more. Other GPU work shares the SMs by time slices: the fma probe beside other agents' runs read 1.0 to 2.6 warp instructions per SM per clock at full clock, against a peak of 4. So a calibration row runs under `flock -x target/gpu.lock` with nothing else on the RTX, and the APU column shows how quiet the CPU was.
+
+### The table
+
+Each result is the busy summary of the sampler. For p2_speed rows the rate is the mean of the 5 timed passes in M creature-steps/s, and the tax is 1 minus the rate over row 0's. For probe rows it is G warp instructions/s, warp instructions per SM per clock, and nJ per warp instruction (busy GPU power over the rate, all-in, then above the idle reading). A blank row is the owner's (see below).
+
+| row | load beside the RTX | needs | SM MHz | GPU W | limit W | limiters | APU W | result | taken |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | p2_speed alone | | 2490 | 67.9 | 99.9 | none | 29.6 | 12.3 (time-sliced with 3 other GPU processes) | agent, shared lock, 09-30 |
+| 1 | p2_speed, 2 CPU threads at 100% | | 2482 | 71.2 | 99.6 | none | 29.5 | 9.4 (3 other GPU processes) | agent, shared lock, 09-30 |
+| 2 | p2_speed, 4 CPU threads at 100% | | 2476 | 74.2 | 99.8 | none | 29.5 | 7.0 (5 other GPU processes) | agent, shared lock, 09-30 |
+| 3 | p2_speed, 8 CPU threads at 100% | quiet machine | | | | | | not taken (no two free CPU slots) | |
+| 4 | p2_speed, 16 CPU threads at 100% | the whole CPU | | | | | | | |
+| 5 | row 3 with the CPU capped at 3.4 GHz | root | | | | | | | |
+| 6 | row 3 with EPP balance_performance | root | | | | | | | |
+| 7 | p2_speed, Radeon burner at 800 MHz, 100% duty | root, Radeon | | | | | | | |
+| 8 | p2_speed, Radeon burner at 1,100 MHz, 100% duty | root, Radeon | | | | | | | |
+| 9 | p2_speed, Radeon burner at 2,700 MHz, 100% duty | root, Radeon | | | | | | | |
+| 10 | p2_speed, Radeon at 1,100 MHz and 30% duty, 4 CPU threads | root, Radeon | | | | | | | |
+| 11 | power_probe fma, 30 s | | 2419 (1965 to 2505) | 82.8 | 96.7 | power cap 39%, SW thermal 15%, HW slowdown 5%, HW thermal 5% | 34.0 | 150.2 G/s, 2.64 per SM per clock, 0.55 nJ all-in (1 other GPU process) | agent, shared lock, 09-30 |
+| 12 | power_probe mio, 30 s | | 2490 | 61.1 | 99.8 | none | 29.3 | 21.7 G/s, 0.36 per SM per clock, 2.8 nJ all-in (1 other GPU process) | agent, shared lock, 09-30 |
+| 13 | power_probe int, 30 s | | 2486 | 73.3 | 99.6 | power cap 3% | 29.4 | 52.1 G/s, 0.87 per SM per clock, 1.41 nJ all-in (3 other GPU processes) | agent, shared lock, 09-30 |
+| idle | power_probe idle, 10 s (a context, no kernel) | quiet GPU | | | | | | not usable: 2 other processes kept the GPU busy at 63.4 W | agent, shared lock, 09-30 |
+| 14 to 16 | p2_speed at 4, 2 and 1 blocks per SM | engine code | | | | | | not taken, see below | |
+| 17 | p2_speed, memory clock locked at 810 and at 6,001 MHz | root | | | | | | | |
+| 18 | p2_speed, platform profile max-power | root | | | | | | | |
+| 19 | p2_speed for 10 minutes | 10 min of GPU | | | | | | | |
+| 19a | p2_speed, 4 and 8 CPU threads at 20% duty in 20 ms bursts | quiet machine | | | | | | not taken | |
+
+The agent rows of 2026-09-30 (21:06 to 21:15) are not the calibration. The exclusive lock waited more than an hour behind other agents' 3M-creature searches, so they were taken under the shared lock with 1 to 5 other processes on the RTX. Those processes share the SMs by time slice, so every rate is a lower bound and the power includes their kernels. Rows 0 to 2 fall from 12.3 to 7.0M creature-steps/s because more processes joined, not because of the CPU threads, so they say nothing about the host tax (43 to 45M is the exclusive rate on this dump). The APU sat near 29 W in all of them and the limit stayed near 100 W. Two things they do show. The FMA kernel reached 2.64 warp instructions per SM per clock of the 4.0 peak even while sharing, and at that rate it met the power limit (39% of samples at the SW power cap, 15% thermal, clock down to 1,965 MHz). So a register-dense kernel does run into the cap on this laptop, and row 11 on a quiet GPU will give the cap clock. The MIO kernel issued only 0.36 warp instructions per SM per clock at full clock and 61 W, which is 0.18 shared loads and shuffles per SM per clock. If that holds on a quiet GPU, an MIO-heavy kernel is bound by the MIO pipe long before it is bound by power.
+
+Rows 14 to 16 are not taken. The engine sizes each wave's grid to the resident capacity and runs up to 8 waves at once on separate streams, so a grid cap in p2_speed does not set the blocks per SM. They need a per-SM cap in `src/cuda_engine.rs`, and the plan's session (section 6, item 1) leaves them out.
+
+### The owner's session
+
+The rows left blank need root, more than half the CPU, the Radeon, or more than 5 minutes of GPU. The rows an agent took ran beside other agents' CPU work, which the APU column shows, so the session takes them again on a quiet machine. The owner runs it in five pauses and one 10-minute window, with no agent builds or GPU work during the session. First, once, from the repository root (the tools build into their own target directory, so the game's `target/release` is untouched):
+
+```bash
+CARGO_TARGET_DIR=target/power CARGO_BUILD_JOBS=8 nice -n 10 cargo build --release --example power_probe --example p2_speed
+gcc -O2 -march=native -pthread -o target/power/cpu-burn tools/cpu-burn.c
+mkdir -p target/power/rows
+export EVOLUTION_DEVICES=primary RAYON_NUM_THREADS=4
+export P=target/power/release/examples/power_probe D=~/.cache/evolution-simulator/power-dump.bin
+export P2="target/power/release/examples/p2_speed $D 262144 5"
+row() { n=$1; shift; tools/power-sample.sh target/power/rows/$n.csv -- "$@" 2>&1 | tee target/power/rows/$n.txt; }
+burn() { target/power/cpu-burn "$1" "$2" 100 600 & b=$!; $P2; kill $b; wait $b; }
+export -f row burn
+```
+
+`burn <threads> <duty%>` runs p2_speed beside the burner and stops the burner when p2_speed ends. Each pause below is one command. It pauses the game, runs its rows and lets the game resume.
+
+1. Rows 11 to 13 and the idle reading, no root:
+
+   ```bash
+   flock -x target/gpu.lock tools/pause-game.sh bash -c 'row r11 $P fma 30; row r12 $P mio 30; row r13 $P int 30; row idle $P idle 10'
+   ```
+
+2. Rows 0 to 3, no root:
+
+   ```bash
+   flock -x target/gpu.lock tools/pause-game.sh bash -c 'row r00 $P2; row r01 burn 2 100; row r02 burn 4 100; row r03 burn 8 100'
+   ```
+
+3. Row 4 and row 19a, no root:
+
+   ```bash
+   flock -x target/gpu.lock tools/pause-game.sh bash -c 'row r04 burn 16 100; row r19a-4 burn 4 20; row r19a-8 burn 8 20'
+   ```
+
+4. Row 19, no root, with the game closed (it is longer than a pause): 135 timed passes of about 4.4 s.
+
+   ```bash
+   flock -x target/gpu.lock bash -c 'row r19 target/power/release/examples/p2_speed $D 262144 135'
+   ```
+
+5. Rows 7 to 10, root for the Radeon's DPM level (the Radeon is `card2`). The burner is igpu's (`burner.c` in the radeon-rows track, built with `gcc -O2 burner.c -o target/power/burner -l:libEGL.so.1 -l:libGLESv2.so.2`, usage `burner <seconds> [target_ms] [duty]`, 10 ms dispatches). Start it from a second terminal with the Mesa vendor forced, check that its first line names the Radeon 780M, and give it 10 s more than the row:
+
+   ```bash
+   # terminal 2, before each row (duty 1.0 for rows 7 to 9, 0.3 for row 10):
+   __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json EGL_PLATFORM=surfaceless target/power/burner 45 10 1.0
+   # terminal 1:
+   echo manual | sudo tee /sys/class/drm/card2/device/power_dpm_force_performance_level
+   echo 0 | sudo tee /sys/class/drm/card2/device/pp_dpm_sclk   # row 7, 800 MHz;  1 is 1,100 MHz (rows 8 and 10), 2 is 2,700 MHz (row 9)
+   flock -x target/gpu.lock tools/pause-game.sh bash -c 'row r07 $P2'
+   # row 10: burner at duty 0.3, sclk 1, then: row r10 burn 4 100
+   echo auto | sudo tee /sys/class/drm/card2/device/power_dpm_force_performance_level
+   journalctl -k --since "15 min ago" | grep -E "amdgpu.*(timeout|reset)"   # must print nothing
+   ```
+
+6. Rows 5, 6, 17 and 18, root. Each setting is kept only if it moves the rate by 3% or more. Restore each one before the next:
+
+   ```bash
+   # row 5: 8 threads with the CPU capped at 3.4 GHz (compare with row 3)
+   echo 3400000 | sudo tee /sys/devices/system/cpu/cpufreq/policy*/scaling_max_freq
+   flock -x target/gpu.lock tools/pause-game.sh bash -c 'row r05 burn 8 100'
+   for p in /sys/devices/system/cpu/cpufreq/policy*; do sudo cp $p/cpuinfo_max_freq $p/scaling_max_freq; done
+   # row 6: 8 threads with EPP balance_performance (the EPP needs the powersave governor)
+   sudo cpupower frequency-set -g powersave
+   echo balance_performance | sudo tee /sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference
+   flock -x target/gpu.lock tools/pause-game.sh bash -c 'row r06 burn 8 100'
+   sudo cpupower frequency-set -g performance
+   # row 17: memory clock locked at 810 MHz, then at 6,001 MHz (the listed clocks are 810, 6001, 7001 and 8001)
+   sudo nvidia-smi -lmc 810,810
+   flock -x target/gpu.lock tools/pause-game.sh bash -c 'row r17-810 $P2'
+   sudo nvidia-smi -lmc 6001,6001
+   flock -x target/gpu.lock tools/pause-game.sh bash -c 'row r17-6001 $P2'
+   sudo nvidia-smi -rmc
+   # row 18: platform profile max-power (the sampler logs the live limit)
+   echo max-power | sudo tee /sys/firmware/acpi/platform_profile
+   flock -x target/gpu.lock tools/pause-game.sh bash -c 'row r18 $P2'
+   echo performance | sudo tee /sys/firmware/acpi/platform_profile
+   ```
+
+Each `target/power/rows/<row>.txt` holds the p2_speed or probe lines and the sampler's summary. The rate of a p2_speed row is the mean of its 5 timed passes, and its host tax is 1 minus its rate over row 0's.
+
 ## Environment variables
 
 `cargo run --release` is the whole game and needs none of these. Every `EVOLUTION_*` variable is a developer diagnostic or a measuring control. Speed and search settings (GPU slots, batch and unit sizes, workgroup sizes, screening, the anatomy operators, joint damping, Hill speed) are fixed in the code and have no switch. Read the code (`grep -rn EVOLUTION_ src`) for the exact list. The groups are:
