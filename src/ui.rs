@@ -1,3 +1,11 @@
+use crate::theme::{
+    GAP_L, GAP_M, Theme, apply_style,
+    scene::{
+        BONE, EYE, FALLEN, FORCE_GROUND, FORCE_MUSCLE, GROUND_DEEP, GROUND_EDGE, GROUND_INK,
+        GROUND_TOP, MUSCLE_ACTIVE, MUSCLE_REST, MUSCLE_TIRED, NODE_GRIPPY, NODE_SLICK, ORGAN,
+        OUTLINE, SKY_HORIZON, SKY_TOP, TOUCHDOWN,
+    },
+};
 use crate::{
     config::Config,
     creature_kernel,
@@ -19,27 +27,6 @@ use std::{
     sync::{Arc, atomic::Ordering, mpsc},
     time::{Duration, Instant},
 };
-const MINT: Color32 = Color32::from_rgb(22, 122, 91);
-const ORGAN: Color32 = Color32::from_rgb(190, 78, 104);
-const AMBER: Color32 = Color32::from_rgb(164, 96, 24);
-const FALLEN: Color32 = Color32::from_rgb(196, 64, 52);
-const MUTED: Color32 = Color32::from_rgb(105, 121, 113);
-const INK: Color32 = Color32::from_rgb(40, 55, 48);
-const PANEL: Color32 = Color32::from_rgb(255, 255, 252);
-const CANVAS: Color32 = Color32::from_rgb(244, 247, 242);
-const VIEWPORT: Color32 = Color32::from_rgb(151, 203, 245);
-const CARD: Color32 = Color32::from_rgb(255, 255, 253);
-const CARD_HOVER: Color32 = Color32::from_rgb(238, 247, 241);
-const CARD_BORDER: Color32 = Color32::from_rgb(218, 229, 221);
-const GROUND: Color32 = Color32::from_rgb(121, 176, 89);
-const GROUND_EDGE: Color32 = Color32::from_rgb(66, 118, 55);
-const MUSCLE_REST: Color32 = Color32::from_rgb(249, 168, 191);
-const MUSCLE_ACTIVE: Color32 = Color32::from_rgb(146, 16, 28);
-const MUSCLE_TIRED: Color32 = Color32::from_rgb(150, 150, 150);
-const FORCE_MUSCLE: Color32 = Color32::from_rgb(230, 120, 20);
-const FORCE_GROUND: Color32 = Color32::from_rgb(30, 100, 220);
-/// Ring around every node touching the ground in the current frame.
-const TOUCHDOWN: Color32 = Color32::from_rgb(255, 196, 64);
 const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
 /// Share of the viewport height a creature fills at the default zoom.
 const FIT_HEIGHT_SHARE: f32 = 0.42;
@@ -86,11 +73,6 @@ fn body_height(frames: &[Vec<[f32; 2]>], nodes: &[Node]) -> f32 {
 }
 /// The spacing scale: every gap, margin and padding is one of these.
 const GAP_S: f32 = 4.0;
-const GAP_M: f32 = 8.0;
-const GAP_L: f32 = 16.0;
-/// Height of every button, menu and selectable in a row, and the starting
-/// height of a row, so a row's items share one center line.
-const CONTROL_HEIGHT: f32 = 34.0;
 /// Height of an effect's level buttons: every effect row is this tall.
 const LEVEL_HEIGHT: f32 = 26.0;
 /// How long the UI's own messages hold the status line.
@@ -104,73 +86,6 @@ const GIF_HEIGHT: u32 = 224;
 const GIF_MAX_FRAMES: usize = 360;
 /// Pixels per meter cap, so a tiny creature stays in frame whole.
 const GIF_MAX_SCALE: f32 = 200.0;
-/// UI surface colors for the active theme. The scene itself (sky, grass,
-/// creatures) keeps fixed colors, so the viewport reads the same in both.
-#[derive(Clone, Copy)]
-struct Theme {
-    panel: Color32,
-    canvas: Color32,
-    card: Color32,
-    card_hover: Color32,
-    card_border: Color32,
-    ink: Color32,
-    muted: Color32,
-    accent: Color32,
-    /// Text for things that wait or warn (a pending world change, a failed
-    /// trial, the median curve), readable on the panel and card colors.
-    warn: Color32,
-    /// Text for a fall or an error.
-    danger: Color32,
-    /// Record markers on the charts.
-    record: Color32,
-    /// The Evolve button: fill and text.
-    go_fill: Color32,
-    go_text: Color32,
-    /// The Pause evolution button: fill and text.
-    stop_fill: Color32,
-    stop_text: Color32,
-}
-impl Theme {
-    fn of(dark: bool) -> Self {
-        if dark {
-            Self {
-                panel: Color32::from_rgb(29, 34, 32),
-                canvas: Color32::from_rgb(20, 24, 23),
-                card: Color32::from_rgb(38, 45, 41),
-                card_hover: Color32::from_rgb(48, 57, 52),
-                card_border: Color32::from_rgb(62, 73, 67),
-                ink: Color32::from_rgb(228, 234, 229),
-                muted: Color32::from_rgb(160, 173, 165),
-                accent: Color32::from_rgb(88, 205, 155),
-                warn: Color32::from_rgb(242, 178, 96),
-                danger: Color32::from_rgb(244, 120, 104),
-                record: Color32::from_rgb(186, 156, 255),
-                go_fill: Color32::from_rgb(30, 110, 78),
-                go_text: Color32::WHITE,
-                stop_fill: Color32::from_rgb(150, 84, 20),
-                stop_text: Color32::WHITE,
-            }
-        } else {
-            Self {
-                panel: PANEL,
-                canvas: CANVAS,
-                card: CARD,
-                card_hover: CARD_HOVER,
-                card_border: CARD_BORDER,
-                ink: INK,
-                muted: MUTED,
-                accent: MINT,
-                warn: AMBER,
-                danger: FALLEN,
-                record: Color32::from_rgb(117, 76, 210),
-                go_fill: Color32::from_rgb(222, 241, 229),
-                go_text: INK,
-                stop_fill: Color32::from_rgb(255, 232, 204),
-                stop_text: INK,
-            }
-        }
-    }
-}
 /// Marker carried by a screenshot request, so its reply can be told apart
 /// from the benchmark capture.
 struct ScreenshotRequest;
@@ -227,55 +142,6 @@ fn save_screenshot(capture: &egui::ColorImage, dir: &std::path::Path) -> anyhow:
         image::ColorType::Rgba8,
     )?;
     Ok(path)
-}
-/// Applies the custom style of the chosen theme.
-fn apply_style(ctx: &egui::Context, dark: bool) {
-    let theme = Theme::of(dark);
-    ctx.set_theme(if dark {
-        egui::Theme::Dark
-    } else {
-        egui::Theme::Light
-    });
-    let mut style = (*ctx.global_style()).clone();
-    style.spacing.item_spacing = Vec2::new(GAP_M, GAP_M);
-    style.spacing.button_padding = Vec2::new(12.0, 7.0);
-    style.spacing.interact_size = Vec2::new(40.0, CONTROL_HEIGHT);
-    style.spacing.slider_width = 120.0;
-    style.spacing.window_margin = egui::Margin::same(GAP_L as i8);
-    style.spacing.menu_margin = egui::Margin::same(GAP_M as i8);
-    let mut visuals = if dark {
-        egui::Visuals::dark()
-    } else {
-        egui::Visuals::light()
-    };
-    visuals.override_text_color = Some(theme.ink);
-    visuals.weak_text_color = Some(theme.muted);
-    visuals.panel_fill = theme.panel;
-    visuals.window_fill = theme.panel;
-    visuals.extreme_bg_color = theme.canvas;
-    visuals.code_bg_color = if dark { theme.canvas } else { VIEWPORT };
-    visuals.faint_bg_color = theme.card_border;
-    visuals.selection.bg_fill = if dark {
-        Color32::from_rgb(45, 84, 66)
-    } else {
-        Color32::from_rgb(219, 239, 227)
-    };
-    visuals.selection.stroke = Stroke::new(1.0, theme.accent);
-    visuals.hyperlink_color = theme.accent;
-    style.visuals = visuals;
-    // Type scale: small print 13 px, body and buttons 16 px, headings 26 px.
-    for (style_name, size) in [
-        (egui::TextStyle::Small, 13.0),
-        (egui::TextStyle::Body, 16.0),
-        (egui::TextStyle::Button, 16.0),
-        (egui::TextStyle::Monospace, 14.0),
-        (egui::TextStyle::Heading, 26.0),
-    ] {
-        style
-            .text_styles
-            .insert(style_name, FontId::proportional(size));
-    }
-    ctx.set_global_style(style);
 }
 pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
     let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
@@ -1565,7 +1431,7 @@ struct App {
     bench_frames: Vec<f32>,
     bench_last_ping: Instant,
     bench_pings: u64,
-    /// Light is the default; the choice lives only in UI state.
+    /// Dark is the default; the choice lives only in UI state.
     dark: bool,
     show_help: bool,
     /// The "How evolution works" window (`schematic::show`).
@@ -1578,7 +1444,6 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, gpu: Gpu) -> Self {
         let ctx = &cc.egui_ctx;
-        apply_style(ctx, false);
         let worker = Worker::spawn(gpu, ctx.clone());
         let mut initial_config = Config::default();
         if let Ok(n) = std::env::var("EVOLUTION_SMOKE_POPULATION")
@@ -1611,9 +1476,12 @@ impl App {
         if autostart.is_some() {
             initial_config.checkpoint_interval = AUTOSAVE_INTERVAL;
         }
-        for list in [std::env::var("EVOLUTION_SMOKE_WORLD").ok(), autostart.clone()]
-            .into_iter()
-            .flatten()
+        for list in [
+            std::env::var("EVOLUTION_SMOKE_WORLD").ok(),
+            autostart.clone(),
+        ]
+        .into_iter()
+        .flatten()
         {
             for pair in list.split(',') {
                 if let Some((name, level)) = pair.split_once('=')
@@ -1628,13 +1496,11 @@ impl App {
         }
         let smoke_start_pending =
             std::env::var_os("EVOLUTION_SMOKE_POPULATION").is_some() || autostart.is_some();
-        // Developer screenshots: EVOLUTION_SMOKE_DARK=1 opens in the dark
-        // theme, EVOLUTION_SMOKE_ZOOM=0.75 lays a 1440 px window out like a
-        // 1920 px one.
-        let smoke_dark = std::env::var_os("EVOLUTION_SMOKE_DARK").is_some();
-        if smoke_dark {
-            apply_style(ctx, true);
-        }
+        // The dark theme is the default. Developer screenshots:
+        // EVOLUTION_SMOKE_LIGHT=1 opens in the light theme,
+        // EVOLUTION_SMOKE_ZOOM=0.75 lays a 1440 px window out like a 1920 px one.
+        let dark = std::env::var_os("EVOLUTION_SMOKE_LIGHT").is_none();
+        apply_style(ctx, dark);
         let smoke_zoom = std::env::var("EVOLUTION_SMOKE_ZOOM")
             .ok()
             .and_then(|zoom| zoom.parse::<f32>().ok())
@@ -1723,7 +1589,7 @@ impl App {
             ctx: ctx.clone(),
             bench_last_ping: Instant::now(),
             bench_pings: 0,
-            dark: smoke_dark,
+            dark,
             show_help: false,
             schematic_open: std::env::var_os("EVOLUTION_SMOKE_SCHEMATIC").is_some(),
             runs_bytes: 0,
@@ -1872,17 +1738,29 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_space(GAP_S);
             let (logo, _) = ui.allocate_exact_size(Vec2::splat(28.), Sense::hover());
+            // Three joined nodes, the smallest creature, lit in amber.
             let points = [
                 logo.center_top() + Vec2::new(0., 4.),
                 logo.left_bottom() + Vec2::new(4., -4.),
                 logo.right_bottom() + Vec2::new(-4., -4.),
             ];
-            for i in 0..3 {
-                ui.painter()
-                    .line_segment([points[i], points[(i + 1) % 3]], Stroke::new(2., MINT));
-                ui.painter().circle_filled(points[i], 3., MINT);
+            let painter = ui.painter();
+            if theme.dark {
+                painter.circle_filled(logo.center(), 16., theme.accent.gamma_multiply(0.06));
             }
-            ui.label(RichText::new("EVOLUTION").size(24.).strong());
+            for i in 0..3 {
+                painter.line_segment(
+                    [points[i], points[(i + 1) % 3]],
+                    Stroke::new(2., theme.accent),
+                );
+            }
+            for point in points {
+                painter.circle_filled(point, 3.5, theme.accent);
+                painter.circle_filled(point, 1.5, theme.panel);
+            }
+            let title = ui.painter().layout_job(crate::theme::caps("Evolution", 21., theme.ink));
+            let (title_rect, _) = ui.allocate_exact_size(title.size(), Sense::hover());
+            ui.painter().galley(title_rect.min, title, theme.ink);
             ui.add_space(GAP_L);
             let running = self.active();
             let (text, fill, ink, why) = if running {
@@ -2013,7 +1891,7 @@ impl App {
         let mut world_changed = false;
         let world_before = self.config.clone();
         let mut undoing = false;
-        ui.label(RichText::new("World").strong());
+        crate::theme::section(ui, "World", theme);
         let live = self.snapshot.as_ref().map(|s| s.config.clone());
         let calm = world_is_calm(&self.config);
         ui.horizontal_wrapped(|ui| {
@@ -2074,7 +1952,8 @@ impl App {
             effect.set_level(&mut self.config, effect.calm);
             world_changed = true;
         }
-        ui.label(RichText::new("Presets").small().color(theme.muted));
+        ui.add_space(GAP_S);
+        crate::theme::section(ui, "Presets", theme);
         ui.horizontal_wrapped(|ui| {
             for preset in &crate::environment::PRESETS {
                 if ui
@@ -2103,6 +1982,8 @@ impl App {
                 world_changed = true;
             }
         });
+        ui.add_space(GAP_S);
+        crate::theme::section(ui, "Effects", theme);
         ui.label(
             RichText::new(
                 "Click a level to change the world. The best creatures are tested again in the new world.",
@@ -2110,41 +1991,34 @@ impl App {
             .small()
             .color(theme.muted),
         );
-        // One grid for every effect and the autochange, so the names share a
-        // column and the level buttons start on one line. Rows are the
-        // height of a level button.
+        // One row for every effect and the autochange: the name in a fixed
+        // column, then its levels as one segmented bar.
         ui.scope(|ui| {
-            ui.spacing_mut().interact_size.y = LEVEL_HEIGHT;
-            egui::Grid::new("world_effects")
-                .num_columns(2)
-                .spacing([GAP_M, GAP_S + 2.])
-                .show(ui, |ui| {
-                    for effect in crate::environment::EFFECTS
-                        .iter()
-                        .filter(|effect| effect.name != "Autochange environment")
-                    {
-                        if effect_row(ui, effect, &mut self.config, live.as_ref(), theme) {
-                            world_changed = true;
-                        }
-                        ui.end_row();
-                    }
-                    if let Some(autochange) = crate::environment::EFFECTS
-                        .iter()
-                        .find(|effect| effect.name == "Autochange environment")
-                        && effect_row(ui, autochange, &mut self.config, None, theme)
-                    {
-                        world_changed = true;
-                    }
-                    ui.end_row();
-                });
+            ui.spacing_mut().item_spacing.y = GAP_S + 2.;
+            for effect in crate::environment::EFFECTS
+                .iter()
+                .filter(|effect| effect.name != "Autochange environment")
+            {
+                if effect_row(ui, effect, &mut self.config, live.as_ref(), theme) {
+                    world_changed = true;
+                }
+            }
+            ui.add_space(GAP_S);
+            if let Some(autochange) = crate::environment::EFFECTS
+                .iter()
+                .find(|effect| effect.name == "Autochange environment")
+                && effect_row(ui, autochange, &mut self.config, None, theme)
+            {
+                world_changed = true;
+            }
         });
         let generation = self.snapshot.as_ref().map_or(0, |s| s.generation);
         if let Some(forecast) = autochange_forecast(&self.config, generation) {
             ui.label(RichText::new(forecast).small().color(theme.muted));
         }
         let fossils = self.snapshot.as_ref().map_or(0, |s| s.fossils);
-        ui.add_space(GAP_S);
-        ui.label(RichText::new("Catastrophes").strong()).on_hover_text(
+        ui.add_space(GAP_M);
+        crate::theme::section(ui, "Catastrophes", theme).on_hover_text(
             "A catastrophe wipes out creatures that evolution kept. Survivors and newcomers refill the empty places, which makes room for new ways of moving.",
         );
         ui.horizontal_wrapped(|ui| {
@@ -2323,28 +2197,7 @@ impl App {
             self.zoom = zoom;
         }
         let painter = ui.painter_at(rect);
-        if self.playback.as_ref().is_some_and(|p| p.preparing) {
-            let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("preparing"));
-            ui.ctx().layer_painter(layer).with_clip_rect(rect).text(
-                Pos2::new(rect.center().x, rect.top() + 26.),
-                Align2::CENTER_CENTER,
-                "Preparing replay...",
-                FontId::proportional(18.),
-                theme.muted,
-            );
-        }
         // All scene primitives are tessellated into egui's batched wgpu render pass.
-        painter.rect_filled(rect, 12, VIEWPORT);
-        if self.playback.is_none() && self.awaiting_new_world() {
-            painter.text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                "Testing in the new world...",
-                FontId::proportional(20.),
-                theme.muted,
-            );
-        }
-        draw_clouds(&painter, rect, self.camera[0] * self.zoom);
         let origin = Pos2::new(
             rect.center().x - self.camera[0] * self.zoom,
             rect.bottom() - rect.height() * 0.22 + self.camera[1] * self.zoom,
@@ -2361,26 +2214,6 @@ impl App {
             .playback
             .as_ref()
             .map_or(0.0, |p| p.tick as f32 / physics::rate() as f32);
-        crate::world_fx::sky(&painter, rect, cfg, clock);
-        let left = ((rect.left() - origin.x) / self.zoom).floor() as i32;
-        let right = ((rect.right() - origin.x) / self.zoom).ceil() as i32;
-        for x in left..=right {
-            let pos = world(x as f32, 0.);
-            painter.line_segment(
-                [
-                    Pos2::new(pos.x, rect.top()),
-                    Pos2::new(pos.x, rect.bottom()),
-                ],
-                Stroke::new(1., CARD_BORDER),
-            );
-            painter.text(
-                Pos2::new(pos.x + 5., origin.y + 16.),
-                Align2::LEFT_TOP,
-                format!("{x} m"),
-                FontId::proportional(14.),
-                MUTED,
-            );
-        }
         // The replay's own creature decides the earthquake ground, through
         // the same id hash the engines use.
         let quake_hash = self
@@ -2399,41 +2232,129 @@ impl App {
         } else {
             0.0
         };
-        if cfg.ground
-            && (amplitude > 0.0 || slope != 0.0 || gaps > 0.0 || hurdles > 0.0 || mud > 0.0)
-        {
-            // Sample the ground every few pixels and fill down to the frame.
+        let height_at = |x: f32, with_hurdles: bool| {
+            crate::physics::ground(
+                x,
+                amplitude,
+                slope,
+                gaps,
+                if with_hurdles { hurdles } else { 0.0 },
+                phase,
+            )
+            .0
+        };
+        let start = (rect.left() - origin.x) / self.zoom;
+        let end = (rect.right() - origin.x) / self.zoom;
+        // The skyline stands on the ground under the middle of the view.
+        let horizon = if cfg.ground {
+            world(
+                0.,
+                height_at((rect.center().x - origin.x) / self.zoom, false),
+            )
+            .y
+        } else {
+            origin.y
+        };
+        crate::world_fx::backdrop(&painter, rect, horizon, self.camera[0] * self.zoom, clock);
+        crate::world_fx::sky(&painter, rect, cfg, clock);
+        let left = start.floor() as i32;
+        let right = end.ceil() as i32;
+        for x in left..=right {
+            let pos = world(x as f32, 0.);
+            painter.line_segment(
+                [
+                    Pos2::new(pos.x, rect.top()),
+                    Pos2::new(pos.x, rect.bottom()),
+                ],
+                Stroke::new(1., crate::theme::scene::GRID),
+            );
+        }
+        if cfg.ground {
+            // Sample the ground every few pixels (flat ground needs only its
+            // ends) and fill down to the frame: packed dirt fading to dark.
             // Pits carve notches into the polyline; mud draws its sunk layer
             // `mud` meters below the surface line.
-            let step = (4.0 / self.zoom).max(0.002);
-            let start = (rect.left() - origin.x) / self.zoom;
-            let end = (rect.right() - origin.x) / self.zoom;
+            let flat = amplitude == 0.0 && slope == 0.0 && gaps == 0.0 && hurdles == 0.0;
+            let step = if flat {
+                (end - start).max(0.01)
+            } else {
+                (4.0 / self.zoom).max(0.002)
+            };
             let mut x = start;
             let mut line = Vec::new();
             let mut mud_line = Vec::new();
             while x <= end + step {
-                let height = crate::physics::ground(x, amplitude, slope, gaps, hurdles, phase).0;
+                let height = height_at(x, true);
                 line.push(world(x, height));
                 if mud > 0.0 {
                     mud_line.push(world(x, height - mud));
                 }
                 x += step;
             }
-            for pair in line.windows(2) {
-                let (a, b) = (pair[0], pair[1]);
-                painter.add(egui::Shape::convex_polygon(
-                    vec![
-                        a,
-                        b,
-                        Pos2::new(b.x, rect.bottom()),
-                        Pos2::new(a.x, rect.bottom()),
-                    ],
-                    GROUND,
-                    Stroke::NONE,
+            let mut mesh = egui::epaint::Mesh::default();
+            for (i, p) in line.iter().enumerate() {
+                for (pos, color) in [
+                    (*p, GROUND_TOP),
+                    (Pos2::new(p.x, rect.bottom()), GROUND_DEEP),
+                ] {
+                    mesh.vertices.push(egui::epaint::Vertex {
+                        pos,
+                        uv: egui::epaint::WHITE_UV,
+                        color,
+                    });
+                }
+                if i > 0 {
+                    let k = (i * 2) as u32;
+                    mesh.indices
+                        .extend_from_slice(&[k - 2, k - 1, k, k - 1, k + 1, k]);
+                }
+            }
+            painter.add(egui::Shape::mesh(mesh));
+            // A lighter crust under the surface, and faint strata below it.
+            crate::world_fx::band(
+                &painter,
+                &line,
+                14.,
+                Color32::from_rgba_unmultiplied(150, 140, 110, 40),
+                Color32::TRANSPARENT,
+            );
+            for depth in [26., 58.] {
+                let strata: Vec<Pos2> = line.iter().map(|p| *p + Vec2::new(0., depth)).collect();
+                painter.add(egui::Shape::line(
+                    strata,
+                    Stroke::new(1., Color32::from_black_alpha(40)),
                 ));
             }
+            // Gravel and broken concrete, fixed to the ground as it scrolls.
+            let spacing = (7.0 / self.zoom).max(0.12);
+            let first = (start / spacing).floor() as i64;
+            let last = (end / spacing).ceil() as i64;
+            for k in first..=last {
+                let meters = (k as f32 + crate::theme::hash(k * 3)) * spacing;
+                let top = world(meters, height_at(meters, true));
+                let depth = 4. + 40. * crate::theme::hash(k * 5 + 1).powi(2);
+                let light = crate::theme::hash(k * 7 + 2) > 0.5;
+                painter.circle_filled(
+                    top + Vec2::new(0., depth),
+                    0.8 + 1.4 * crate::theme::hash(k * 11),
+                    if light {
+                        Color32::from_rgba_unmultiplied(170, 162, 136, 60)
+                    } else {
+                        Color32::from_black_alpha(80)
+                    },
+                );
+            }
+            // Expansion joints every 2 m, like slabs of old concrete.
+            for k in (start / 2.0).floor() as i32..=(end / 2.0).ceil() as i32 {
+                let meters = k as f32 * 2.0 + 1.0;
+                let top = world(meters, height_at(meters, true));
+                painter.line_segment(
+                    [top + Vec2::new(0., 3.), top + Vec2::new(0., 16.)],
+                    Stroke::new(1.5, Color32::from_black_alpha(90)),
+                );
+            }
             if mud > 0.0 {
-                let fill = Color32::from_rgb(103, 76, 52);
+                let fill = crate::theme::scene::MUD;
                 for i in 0..line.len().saturating_sub(1) {
                     painter.add(egui::Shape::convex_polygon(
                         vec![line[i], line[i + 1], mud_line[i + 1], mud_line[i]],
@@ -2443,36 +2364,17 @@ impl App {
                 }
                 painter.add(egui::Shape::line(
                     mud_line,
-                    Stroke::new(1., Color32::from_rgb(72, 51, 34)),
+                    Stroke::new(1., crate::theme::scene::MUD_EDGE),
                 ));
             }
-            painter.add(egui::Shape::line(line, Stroke::new(2., GROUND_EDGE)));
-        } else if cfg.ground {
-            painter.rect_filled(
-                Rect::from_min_max(
-                    Pos2::new(rect.left(), origin.y.clamp(rect.top(), rect.bottom())),
-                    rect.right_bottom(),
-                ),
-                0,
-                GROUND,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(rect.left(), origin.y),
-                    Pos2::new(rect.right(), origin.y),
-                ],
-                Stroke::new(2., GROUND_EDGE),
-            );
-        }
-        if cfg.ground {
-            let surface = |sx: f32| {
-                let x = (sx - origin.x) / self.zoom;
-                world(
-                    x,
-                    crate::physics::ground(x, amplitude, slope, gaps, hurdles, phase).0,
-                )
-                .y
-            };
+            let shade: Vec<Pos2> = line.iter().map(|p| *p + Vec2::new(0., 2.)).collect();
+            painter.add(egui::Shape::line(
+                shade,
+                Stroke::new(1.5, Color32::from_black_alpha(110)),
+            ));
+            painter.add(egui::Shape::line(line, Stroke::new(1.5, GROUND_EDGE)));
+            crate::world_fx::structures(&painter, rect, cfg, &world, &height_at, (start, end));
+            let surface = |sx: f32| world(0., height_at((sx - origin.x) / self.zoom, true)).y;
             let feet: Vec<crate::world_fx::Foot> = self
                 .playback
                 .as_ref()
@@ -2483,10 +2385,7 @@ impl App {
                         .iter()
                         .enumerate()
                         .filter_map(|(id, n)| {
-                            let ground_y = crate::physics::ground(
-                                n.pos[0], amplitude, slope, gaps, hurdles, phase,
-                            )
-                            .0;
+                            let ground_y = height_at(n.pos[0], true);
                             (n.pos[1] - n.radius - ground_y < 0.06 + mud).then(|| {
                                 let dx = before
                                     .and_then(|f| f.get(id))
@@ -2523,18 +2422,19 @@ impl App {
         );
         for x in left..=right {
             let pos = world(x as f32, 0.);
-            painter.line_segment([pos, pos + Vec2::new(0., 6.)], Stroke::new(1., GROUND_EDGE));
+            painter.line_segment([pos, pos + Vec2::new(0., 6.)], Stroke::new(1., GROUND_INK));
             painter.text(
                 pos + Vec2::new(5., 6.),
                 Align2::LEFT_TOP,
                 format!("{x} m"),
-                FontId::proportional(14.),
-                GROUND_EDGE,
+                FontId::proportional(13.),
+                GROUND_INK,
             );
         }
         if let Some(p) = &self.playback {
             // Center-of-mass trail from the last two seconds of recorded
             // frames, fading with age.
+            let trail = crate::theme::scene::TRAIL;
             let span = physics::rate().saturating_mul(2).max(1);
             let first = p.tick.saturating_sub(span);
             let mut previous: Option<Pos2> = None;
@@ -2549,91 +2449,115 @@ impl App {
                     painter.line_segment(
                         [from, point],
                         Stroke::new(
-                            2.5,
-                            Color32::from_rgba_unmultiplied(INK.r(), INK.g(), INK.b(), alpha),
+                            2.,
+                            Color32::from_rgba_unmultiplied(trail.r(), trail.g(), trail.b(), alpha),
                         ),
                     );
                 }
                 previous = Some(point);
             }
             if let Some(com) = p.shown_center() {
-                painter.circle_filled(
-                    world(com[0], com[1]),
-                    3.5,
-                    Color32::from_rgba_unmultiplied(INK.r(), INK.g(), INK.b(), 170),
-                );
+                let at = world(com[0], com[1]);
+                painter.circle_filled(at, 6., trail.gamma_multiply(0.15));
+                painter.circle_filled(at, 3., trail);
             }
             for n in &p.nodes {
-                let shadow = world(n.pos[0], 0.);
+                let shadow = world(n.pos[0], height_at(n.pos[0], true));
                 painter.add(egui::Shape::ellipse_filled(
                     shadow,
                     Vec2::new(n.radius * self.zoom * 1.6, 4.),
-                    Color32::from_black_alpha(30),
+                    Color32::from_black_alpha(70),
                 ));
             }
             let mut marks = FrameMarks::of(p);
             marks.arrows = self.show_forces;
             draw_creature(&painter, &p.nodes, &p.creature, origin, self.zoom, &marks);
-            match p.fallen() {
-                Some((tick, distance)) => {
-                    painter.text(
-                        rect.left_top() + Vec2::new(18., 16.),
-                        Align2::LEFT_TOP,
-                        format!("{distance:.2} m"),
-                        FontId::proportional(30.),
-                        FALLEN,
-                    );
-                    painter.text(
-                        rect.left_top() + Vec2::new(18., 52.),
-                        Align2::LEFT_TOP,
+        }
+        // Film look over the scene, under the HUD.
+        crate::theme::vignette(&painter, rect, 0.55);
+        crate::theme::grain(&painter, rect, clock, 0.055);
+        use crate::theme::{HudLine, hud_block, scene::HUD};
+        let inset = 12.;
+        if let Some(p) = &self.playback {
+            let lines = match p.fallen() {
+                Some((tick, distance)) => [
+                    HudLine::label("Distance"),
+                    HudLine::value(format!("{distance:.2} m"), 28., FALLEN),
+                    HudLine::text(
                         p.ending.sentence(
                             tick.saturating_sub(physics::settle()) as f32 * physics::dt(),
                         ),
-                        FontId::proportional(16.),
+                        14.,
                         FALLEN,
-                    );
-                }
-                None => {
-                    painter.text(
-                        rect.left_top() + Vec2::new(18., 16.),
-                        Align2::LEFT_TOP,
-                        format!("{:.2} m", physics::fitness(&p.nodes)),
-                        FontId::proportional(30.),
-                        MINT,
-                    );
-                    painter.text(
-                        rect.left_top() + Vec2::new(18., 52.),
-                        Align2::LEFT_TOP,
+                    ),
+                ],
+                None => [
+                    HudLine::label("Distance"),
+                    HudLine::value(format!("{:.2} m", physics::fitness(&p.nodes)), 28., HUD),
+                    HudLine::text(
                         format!("{:.2} m/s", p.speed()),
-                        FontId::proportional(16.),
-                        INK,
-                    );
-                }
-            }
-        } else {
-            painter.text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                "Preparing your first population…",
-                FontId::proportional(22.),
-                MUTED,
+                        14.,
+                        crate::theme::scene::HUD_DIM,
+                    ),
+                ],
+            };
+            hud_block(
+                &painter,
+                rect.left_top() + Vec2::splat(inset),
+                Align2::LEFT_TOP,
+                &lines,
             );
-        }
-        if let Some(p) = &self.playback {
             let live = self.snapshot.as_ref().map(|s| &s.config);
             let earlier = live.is_some_and(|live| live.physics_differs(&p.config));
-            painter.text(
-                rect.right_top() + Vec2::new(-14., 12.),
-                Align2::RIGHT_TOP,
-                if earlier {
-                    format!("{} (an earlier world)", world_summary(&p.config))
+            let mut lines = vec![
+                HudLine::label(if earlier {
+                    "World · an earlier one"
                 } else {
-                    world_summary(&p.config)
-                },
-                FontId::proportional(16.),
-                INK,
+                    "World"
+                }),
+                HudLine::text(world_summary(&p.config), 15., HUD),
+            ];
+            if let Some(s) = &self.snapshot {
+                lines.push(HudLine::text(
+                    format!(
+                        "gen {}  ·  {} creatures/s",
+                        s.generation,
+                        number(s.end_to_end.max(0.0) as usize)
+                    ),
+                    13.,
+                    crate::theme::scene::HUD_DIM,
+                ));
+            }
+            hud_block(
+                &painter,
+                rect.right_top() + Vec2::new(-inset, inset),
+                Align2::RIGHT_TOP,
+                &lines,
             );
         }
+        let center_note = if self.playback.is_none() && self.awaiting_new_world() {
+            Some("Testing in the new world...")
+        } else if self.playback.is_none() {
+            Some("Preparing your first population…")
+        } else if self.playback.as_ref().is_some_and(|p| p.preparing) {
+            Some("Preparing replay...")
+        } else {
+            None
+        };
+        if let Some(note) = center_note {
+            hud_block(
+                &painter,
+                Pos2::new(rect.center().x, rect.top() + inset),
+                Align2::CENTER_TOP,
+                &[HudLine::text(note.to_owned(), 17., HUD)],
+            );
+        }
+        painter.rect_stroke(
+            rect,
+            0,
+            Stroke::new(1., theme.card_border),
+            egui::StrokeKind::Inside,
+        );
         let mut sought = false;
         let mut race_it = None;
         if let Some(p) = &mut self.playback {
@@ -2797,44 +2721,96 @@ impl App {
             "How far the best creature travels in its {:.0} s trial. Distance is the only score.",
             snapshot.config.duration
         );
-        ui.columns(3, |cols| {
-            for (ui, (name, value, color, note, why)) in cols.iter_mut().zip([
-                (
-                    "BEST DISTANCE",
-                    format!("{:.2} m", best),
-                    theme.accent,
-                    gain.map_or_else(
-                        || "so far".to_owned(),
-                        |gain| format!("{gain:+.2} m in the last 10 generations"),
-                    ),
-                    trial.as_str(),
+        let rate = if snapshot.running && snapshot.end_to_end > 0.0 {
+            format!("{} /s", number(snapshot.end_to_end as usize))
+        } else {
+            "—".to_owned()
+        };
+        let rate_note = if snapshot.running {
+            "creatures scored per second".to_owned()
+        } else {
+            "Paused".to_owned()
+        };
+        let tiles = [
+            (
+                "Best distance",
+                format!("{:.2} m", best),
+                theme.accent,
+                gain.map_or_else(
+                    || "so far".to_owned(),
+                    |gain| format!("{gain:+.2} m in the last 10 generations"),
                 ),
-                (
-                    "GENERATION",
-                    snapshot.generation.to_string(),
-                    theme.ink,
-                    progress,
-                    "Every generation tries a whole population of new creatures.",
-                ),
-                (
-                    "KINDS OF MOVEMENT",
-                    number(cells),
-                    theme.ink,
-                    "different ways of moving kept".to_owned(),
-                    "Evolution keeps the best creature for each way of moving: how much of the time it touches the ground, its stride rate, its height and how many feet it uses.",
-                ),
-            ]) {
-                egui::Frame::new()
-                    .fill(theme.card)
-                    .corner_radius(8)
-                    .inner_margin(GAP_L as i8)
-                    .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        ui.label(RichText::new(name).small().color(theme.muted))
-                            .on_hover_text(why);
-                        ui.label(RichText::new(value).size(34.).strong().color(color));
-                        ui.label(RichText::new(note).small().color(theme.muted));
-                    });
+                trial.as_str(),
+            ),
+            (
+                "Generation",
+                snapshot.generation.to_string(),
+                theme.ink,
+                progress,
+                "Every generation tries a whole population of new creatures.",
+            ),
+            (
+                "Kinds of movement",
+                number(cells),
+                theme.ink,
+                "different ways of moving kept".to_owned(),
+                "Evolution keeps the best creature for each way of moving: how much of the time it touches the ground, its stride rate, its height and how many feet it uses.",
+            ),
+            (
+                "Rate",
+                rate,
+                theme.cold,
+                rate_note,
+                "How many creatures the machine tries each second, from breeding to score.",
+            ),
+        ];
+        // HUD tiles: a capital label, a big number that glows in the dark
+        // theme, and a line of detail.
+        const TILE_HEIGHT: f32 = 92.;
+        let gap = GAP_M;
+        let width = (ui.available_width() - gap * (tiles.len() - 1) as f32) / tiles.len() as f32;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (name, value, color, note, why) in tiles {
+                let (rect, response) =
+                    ui.allocate_exact_size(Vec2::new(width, TILE_HEIGHT), Sense::hover());
+                let painter = ui.painter_at(rect);
+                let fill = if theme.dark {
+                    Color32::from_rgb(22, 23, 21)
+                } else {
+                    theme.card
+                };
+                crate::theme::plate(&painter, rect, theme, fill, false);
+                painter.rect_filled(
+                    Rect::from_min_size(rect.left_top() + Vec2::new(0., 12.), Vec2::new(2., 14.)),
+                    0,
+                    color,
+                );
+                crate::theme::caps_text(
+                    &painter,
+                    rect.left_top() + Vec2::new(14., 12.),
+                    Align2::LEFT_TOP,
+                    name,
+                    11.,
+                    theme.muted,
+                );
+                crate::theme::glow_text(
+                    &painter,
+                    rect.left_top() + Vec2::new(13., 30.),
+                    Align2::LEFT_TOP,
+                    value,
+                    FontId::proportional(32.),
+                    color,
+                    theme.dark,
+                );
+                painter.text(
+                    rect.left_bottom() + Vec2::new(14., -10.),
+                    Align2::LEFT_BOTTOM,
+                    note,
+                    FontId::proportional(13.),
+                    theme.muted,
+                );
+                response.on_hover_text(why);
             }
         });
     }
@@ -2911,7 +2887,7 @@ impl App {
             }
             // The best creature and the typical kept one; the percentile
             // index follows `storage::PERCENTILES` (28 is 100, 14 is 50).
-            for (i, name, color) in [(28, "Best", theme.accent), (14, "Median", theme.warn)] {
+            for (i, name, color) in [(28, "Best", theme.accent), (14, "Median", theme.cold)] {
                 let mut values: Vec<[f64; 2]> = s
                     .history
                     .iter()
@@ -5056,17 +5032,32 @@ impl eframe::App for App {
                     .inner_margin(GAP_L as i8),
             )
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (tab, label) in [
+                let strip = ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.;
+                    for (key, (tab, label)) in [
                         (Tab::Overview, "Overview"),
                         (Tab::Population, "Ways of moving"),
                         (Tab::History, "History"),
                         (Tab::Race, "Race"),
                         (Tab::Lineage, "Lineage"),
-                    ] {
-                        ui.selectable_value(&mut self.tab, tab, RichText::new(label).size(18.));
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        if crate::theme::tab(ui, self.tab == tab, label, theme)
+                            .on_hover_text(format!("Key {}", key + 1))
+                            .clicked()
+                        {
+                            self.tab = tab;
+                        }
                     }
                 });
+                // A thin rule under the tabs, across the panel.
+                ui.painter().hline(
+                    ui.max_rect().x_range(),
+                    strip.response.rect.bottom() + 1.,
+                    Stroke::new(1., theme.card_border),
+                );
                 ui.add_space(GAP_M);
                 match self.tab {
                     Tab::Overview => {
@@ -5765,8 +5756,13 @@ fn world_summary(config: &Config) -> String {
         parts.join(" · ")
     }
 }
-/// One effect as its name and a button per level. The lit button is the
-/// current level. Returns true when the player picked another level.
+/// Width of the effect name column in the World panel.
+const EFFECT_NAME_WIDTH: f32 = 100.0;
+/// One effect as its name and a segmented bar of its levels. The lit segment
+/// is the current level: amber when the effect is away from calm. While a
+/// change waits for the next generation, the name turns cold blue and a blue
+/// outline marks the level that still runs. Returns true when the player
+/// picked another level.
 fn effect_row(
     ui: &mut egui::Ui,
     effect: &crate::environment::Effect,
@@ -5776,45 +5772,123 @@ fn effect_row(
 ) -> bool {
     let level = effect.level(config);
     let away = level != effect.calm;
-    let waiting = live.is_some_and(|live| effect.level(live) != level);
+    let running = live.map(|live| effect.level(live));
+    let waiting = running.is_some_and(|running| running != level);
     let color = if waiting {
-        theme.warn
+        theme.cold
     } else if away {
         theme.accent
     } else {
         theme.ink
     };
-    let name = ui.label(RichText::new(effect.name).color(color));
-    if let (true, Some(live)) = (waiting, live) {
-        name.on_hover_text(format!(
-            "Now {}. {} from the next generation.",
-            effect.levels[effect.level(live)],
-            effect.levels[level]
-        ));
+    let label = if effect.name == "Autochange environment" {
+        "Autochange"
     } else {
-        name.on_hover_text(effect.why);
-    }
+        effect.name
+    };
     let mut picked = None;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(GAP_S, GAP_S);
-        ui.spacing_mut().button_padding = Vec2::new(6., 3.);
-        ui.spacing_mut().interact_size.y = LEVEL_HEIGHT;
-        for (i, text) in effect.levels.iter().enumerate() {
-            let short = text.split(',').next().unwrap_or(text);
-            let hover = if i == effect.calm {
-                format!("{text}. The calm world.")
-            } else {
-                format!("{text}. {}", effect.why)
-            };
-            if ui
-                .selectable_label(i == level, RichText::new(short).small())
-                .on_hover_text(hover)
-                .clicked()
-                && i != level
-            {
-                picked = Some(i);
-            }
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.;
+        let (name_rect, name) =
+            ui.allocate_exact_size(Vec2::new(EFFECT_NAME_WIDTH, LEVEL_HEIGHT), Sense::hover());
+        ui.painter().text(
+            name_rect.left_center(),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(15.),
+            color,
+        );
+        if let (true, Some(running)) = (waiting, running) {
+            name.on_hover_text(format!(
+                "Now {}. {} from the next generation.",
+                effect.levels[running], effect.levels[level]
+            ));
+        } else {
+            name.on_hover_text(format!("{}. {}", effect.name, effect.why));
         }
+        ui.vertical(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(1., 1.);
+                let font = FontId::proportional(13.);
+                let galleys: Vec<_> = effect
+                    .levels
+                    .iter()
+                    .map(|text| {
+                        let short = text.split(',').next().unwrap_or(text);
+                        ui.painter()
+                            .layout_no_wrap(short.to_owned(), font.clone(), theme.ink)
+                    })
+                    .collect();
+                const PAD: f32 = 10.;
+                let count = galleys.len().max(1) as f32;
+                let natural: f32 =
+                    galleys.iter().map(|g| g.size().x + PAD).sum::<f32>() + count - 1.;
+                let room = ui.available_width();
+                // One line: the segments share the whole width. Too long for
+                // one line, they keep their own width and wrap.
+                let extra = if natural <= room {
+                    ((room - natural) / count).floor()
+                } else {
+                    0.
+                };
+                let last = galleys.len().saturating_sub(1);
+                for (i, galley) in galleys.into_iter().enumerate() {
+                    let size = Vec2::new(galley.size().x + PAD + extra, LEVEL_HEIGHT);
+                    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                    let lit = i == level;
+                    let hovered = response.hovered();
+                    let fill = match (lit, away, hovered) {
+                        (true, true, _) => theme.go_fill,
+                        (true, false, _) => theme.card_hover,
+                        (false, _, true) => ui.visuals().widgets.hovered.weak_bg_fill,
+                        _ => ui.visuals().widgets.inactive.weak_bg_fill,
+                    };
+                    let corner = egui::CornerRadius {
+                        nw: if i == 0 { 3 } else { 0 },
+                        sw: if i == 0 { 3 } else { 0 },
+                        ne: if i == last { 3 } else { 0 },
+                        se: if i == last { 3 } else { 0 },
+                    };
+                    ui.painter().rect_filled(rect, corner, fill);
+                    if lit && !away {
+                        ui.painter().rect_filled(
+                            Rect::from_min_max(
+                                Pos2::new(rect.left() + 4., rect.bottom() - 2.),
+                                Pos2::new(rect.right() - 4., rect.bottom()),
+                            ),
+                            0,
+                            theme.accent.gamma_multiply(0.8),
+                        );
+                    }
+                    if waiting && running == Some(i) {
+                        ui.painter().rect_stroke(
+                            rect,
+                            corner,
+                            Stroke::new(1.5, theme.cold),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    let text_color = match (lit, away) {
+                        (true, true) => theme.go_text,
+                        (true, false) => theme.ink,
+                        _ if hovered => theme.ink,
+                        _ => theme.muted,
+                    };
+                    let at = rect.center() - galley.size() / 2.;
+                    ui.painter()
+                        .galley_with_override_text_color(at, galley, text_color);
+                    let text = effect.levels[i];
+                    let hover = if i == effect.calm {
+                        format!("{text}. The calm world.")
+                    } else {
+                        format!("{text}. {}", effect.why)
+                    };
+                    if response.on_hover_text(hover).clicked() && i != level {
+                        picked = Some(i);
+                    }
+                }
+            });
+        });
     });
     if let Some(i) = picked {
         effect.set_level(config, i);
@@ -5867,39 +5941,25 @@ fn number(n: usize) -> String {
 fn species_color(n: usize, m: usize) -> Color32 {
     egui::ecolor::Hsva::new(((n * 257 + m) as f32 * 0.618034).fract(), 0.45, 0.9, 1.).into()
 }
-/// White clouds in the upper sky, drifting slowly against the camera.
-fn draw_clouds(painter: &egui::Painter, rect: Rect, parallax: f32) {
-    // Keep cloud centers and their reach clear of the rounded corners, so no
-    // cloud paints in the clipped corner squares.
-    let left = rect.left() + 40.0;
-    let span = (rect.width() - 80.0).max(1.0);
-    let top = rect.top() + 50.0;
-    let floor = (rect.top() + 120.0).min(rect.bottom() - 60.0).max(top);
-    for i in 0..5 {
-        let x = left + (i as f32 * 211.0 - parallax * 0.12).rem_euclid(span);
-        let y = top + (i * 67) as f32 % (floor - top).max(1.0);
-        cloud(painter, Pos2::new(x, y), 0.75 + (i % 3) as f32 * 0.2);
-    }
-}
-fn cloud(painter: &egui::Painter, center: Pos2, s: f32) {
-    for &(dx, dy, r) in &[
-        (0.0, 0.0, 26.0),
-        (-30.0, 7.0, 19.0),
-        (29.0, 8.0, 17.0),
-        (5.0, -13.0, 17.0),
-    ] {
-        painter.add(egui::Shape::ellipse_filled(
-            center + Vec2::new(dx * s, dy * s),
-            Vec2::new(r * s, r * 0.6 * s),
-            Color32::from_white_alpha(225),
-        ));
-    }
-}
 /// Linear blend between two colors; `t` is clamped to [0, 1].
 fn mix_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+}
+/// A node's shell: slick steel blue at the lowest friction a gene allows,
+/// brass at the highest.
+fn node_color(friction: f32) -> Color32 {
+    static RANGE: std::sync::OnceLock<(f32, f32)> = std::sync::OnceLock::new();
+    let &(low, high) = RANGE.get_or_init(|| {
+        let config = Config::default();
+        (config.min_friction, config.max_friction)
+    });
+    mix_color(
+        NODE_SLICK,
+        NODE_GRIPPY,
+        (friction - low) / (high - low).max(1e-3),
+    )
 }
 /// An arrow starting at `from` and pointing along `delta`.
 fn draw_arrow(p: &egui::Painter, from: Pos2, delta: Vec2, color: Color32) {
@@ -5933,11 +5993,8 @@ fn draw_creature(
         let a = position(&nodes[bone.a as usize]);
         let b = position(&nodes[bone.b as usize]);
         let width = (scale * 0.032).max(3.0);
-        p.line_segment(
-            [a, b],
-            Stroke::new(width + 3.0, Color32::from_rgb(10, 15, 19)),
-        );
-        p.line_segment([a, b], Stroke::new(width, Color32::from_rgb(192, 205, 187)));
+        p.line_segment([a, b], Stroke::new(width + 3.0, OUTLINE));
+        p.line_segment([a, b], Stroke::new(width, BONE));
     }
     // Organs ride on their bones; drawn with the density of a node.
     for bone in c.bones.iter().filter(|b| b.organ_mass > 0.0) {
@@ -5950,7 +6007,7 @@ fn draw_creature(
                 -(a[1] + (b[1] - a[1]) * t) * scale,
             );
         let r = (0.04 * (bone.organ_mass / 0.1).sqrt() * scale).max(2.5);
-        p.circle_filled(center, r + 1.5, Color32::from_rgb(9, 17, 22));
+        p.circle_filled(center, r + 1.5, OUTLINE);
         p.circle_filled(center, r, ORGAN);
         p.circle_filled(
             center + Vec2::new(-r * 0.25, -r * 0.3),
@@ -5981,11 +6038,8 @@ fn draw_creature(
         // A tired muscle thins and goes grey.
         let energy = marks.energy.get(mi).copied().unwrap_or(1.0).clamp(0.0, 1.0);
         let width = (scale * 0.017 * (1. + 0.45 * contraction) * (0.45 + 0.55 * energy)).max(2.);
-        p.line_segment(
-            [a, b],
-            Stroke::new(width + 3., Color32::from_rgb(10, 15, 19)),
-        );
-        // Pink at rest, deep red at full contraction, grey when spent.
+        p.line_segment([a, b], Stroke::new(width + 3., OUTLINE));
+        // Pale flesh at rest, deep red at full contraction, grey when spent.
         p.line_segment(
             [a, b],
             Stroke::new(
@@ -6028,10 +6082,8 @@ fn draw_creature(
     for (i, n) in nodes.iter().enumerate() {
         let center = position(n);
         let r = (n.radius * scale).max(2.);
-        let color =
-            egui::ecolor::Hsva::new(0.44 - 0.07 * n.friction, 0.3 + 0.4 * n.friction, 0.95, 1.);
-        p.circle_filled(center, r + 1.5, Color32::from_rgb(9, 17, 22));
-        p.circle_filled(center, r, Color32::from(color));
+        p.circle_filled(center, r + 1.5, OUTLINE);
+        p.circle_filled(center, r, node_color(n.friction));
         p.circle_filled(
             center + Vec2::new(-r * 0.22, -r * 0.26),
             r * 0.5,
@@ -6055,12 +6107,8 @@ fn draw_creature(
             draw_break_mark(p, center, r);
         }
         let eye = center + Vec2::new(r * 0.4, -r * 0.2);
-        p.circle_filled(eye, r * 0.3, Color32::WHITE);
-        p.circle_filled(
-            eye + Vec2::new(r * 0.08, 0.),
-            r * 0.15,
-            Color32::from_rgb(9, 17, 22),
-        );
+        p.circle_filled(eye, r * 0.3, EYE);
+        p.circle_filled(eye + Vec2::new(r * 0.08, 0.), r * 0.15, OUTLINE);
     }
 }
 pub(crate) fn thumbnail(p: &egui::Painter, c: &Creature, rect: Rect) {
@@ -6221,16 +6269,21 @@ impl GifScene<'_> {
         contact: &[bool],
         broken: &[bool],
     ) {
-        let dark = gif_color(Color32::from_rgb(10, 15, 19));
+        let dark = gif_color(OUTLINE);
         let origin_x = self.camera.origin_x(pose_center_x(self.nodes, positions));
         let at = |position: [f32; 2]| self.camera.screen(origin_x, position);
-        for pixel in buffer.pixels_mut() {
-            *pixel = gif_color(VIEWPORT);
+        // The overcast sky, fading to haze toward the ground.
+        for (_, y, pixel) in buffer.enumerate_pixels_mut() {
+            *pixel = gif_color(mix_color(
+                SKY_TOP,
+                SKY_HORIZON,
+                y as f32 / (GIF_HEIGHT as f32 * 0.8),
+            ));
         }
         // A meter grid; it scrolls with the follow camera, so motion reads even
         // when the creature holds its screen position.
         let right = origin_x + GIF_WIDTH as f32 / self.camera.scale;
-        let grid = gif_color(CARD_BORDER);
+        let grid = gif_color(Color32::from_rgb(104, 110, 112));
         for meter in origin_x.floor() as i32..=right.ceil() as i32 {
             let screen_x = (meter as f32 - origin_x) * self.camera.scale;
             gif_line(
@@ -6250,7 +6303,7 @@ impl GifScene<'_> {
             } else {
                 0.0
             };
-            let ground = gif_color(GROUND);
+            let ground = gif_color(GROUND_TOP);
             let edge = gif_color(GROUND_EDGE);
             for px in 0..GIF_WIDTH {
                 let world_x = origin_x + px as f32 / self.camera.scale;
@@ -6280,13 +6333,7 @@ impl GifScene<'_> {
             let b = at(positions[bone.b as usize]);
             let half = (self.camera.scale * 0.032).max(3.0) * 0.5;
             gif_line(buffer, a, b, half + 1.5, dark);
-            gif_line(
-                buffer,
-                a,
-                b,
-                half,
-                gif_color(Color32::from_rgb(192, 205, 187)),
-            );
+            gif_line(buffer, a, b, half, gif_color(BONE));
         }
         for bone in self.creature.bones.iter().filter(|b| b.organ_mass > 0.0) {
             let a = positions[bone.a as usize];
@@ -6326,10 +6373,8 @@ impl GifScene<'_> {
         for (i, n) in self.nodes.iter().enumerate() {
             let center = at(positions[i]);
             let r = (n.radius * self.camera.scale).max(2.);
-            let color =
-                egui::ecolor::Hsva::new(0.44 - 0.07 * n.friction, 0.3 + 0.4 * n.friction, 0.95, 1.);
             gif_disc(buffer, center, r + 1.5, dark);
-            gif_disc(buffer, center, r, gif_color(Color32::from(color)));
+            gif_disc(buffer, center, r, gif_color(node_color(n.friction)));
             if contact.get(i).copied().unwrap_or(false) {
                 gif_ring(buffer, center, r + 2.5, 2.0, gif_color(TOUCHDOWN));
             }
@@ -6345,7 +6390,7 @@ impl GifScene<'_> {
                 buffer,
                 (center.0 + r * 0.4, center.1 - r * 0.2),
                 r * 0.3,
-                gif_color(Color32::WHITE),
+                gif_color(EYE),
             );
             gif_disc(
                 buffer,

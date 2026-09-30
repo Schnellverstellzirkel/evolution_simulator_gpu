@@ -17,6 +17,7 @@ pub mod schematic;
 pub mod search_benchmark;
 pub mod simd;
 pub mod storage;
+pub mod theme;
 pub mod ui;
 pub mod vk_engine;
 pub mod worker;
