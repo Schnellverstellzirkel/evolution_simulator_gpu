@@ -375,6 +375,19 @@ trait SegmentDevice {
         total: u32,
         chunk: u32,
     ) -> Result<u64>;
+    /// Packs creatures for this device's kernel.
+    fn pack(
+        &self,
+        unit: &Population,
+        indices: &[usize],
+        cfg: &Config,
+    ) -> Result<Vec<creature_kernel::LaneBatch>> {
+        crate::physics2::pack(unit, indices, cfg)
+    }
+    /// The ticks at which this device's trials pause (`segment_ends`).
+    fn segment_ends(&self, cfg: &Config) -> Vec<u32> {
+        segment_ends(cfg)
+    }
 }
 
 impl SegmentDevice for VkEngine {
@@ -452,6 +465,18 @@ impl SegmentDevice for CudaEngine {
         chunk: u32,
     ) -> Result<u64> {
         CudaEngine::record(self, batch, cfg, total, chunk)
+    }
+    fn pack(
+        &self,
+        unit: &Population,
+        indices: &[usize],
+        cfg: &Config,
+    ) -> Result<Vec<creature_kernel::LaneBatch>> {
+        crate::warp_kernel::pack(unit, indices, cfg)
+    }
+    /// A lane group runs its creature to the end: one segment.
+    fn segment_ends(&self, cfg: &Config) -> Vec<u32> {
+        vec![cfg.fidelity().settle() + cfg.steps()]
     }
 }
 
@@ -617,7 +642,11 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
         .spawn(move || {
             let (engine, name) = match open_backend(&device_name, max_nodes) {
                 Ok(opened) => {
-                    let _ = ready_tx.send(Ok(opened.1.clone()));
+                    let largest = match &opened.0 {
+                        Backend::Cuda(engine) => engine.max_capacity,
+                        Backend::Vulkan(_) => max_nodes,
+                    };
+                    let _ = ready_tx.send(Ok((opened.1.clone(), largest)));
                     opened
                 }
                 Err(err) => {
@@ -653,7 +682,7 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
             }
         })
         .context("GPU engine thread")?;
-    let device_name = ready_rx.recv().context("GPU engine thread stopped")??;
+    let (device_name, max_nodes) = ready_rx.recv().context("GPU engine thread stopped")??;
     Ok(ThreadedEngine {
         name: device_name,
         max_nodes,
@@ -745,10 +774,11 @@ fn run_segments<D: SegmentDevice>(
                 Some(unit) => Some(Ok(unit)),
                 None => pending.take().map(|(ticket, unit, cfg)| {
                     let indices: Vec<usize> = (0..unit.genomes.len()).collect();
-                    crate::physics2::pack(&unit, &indices, &cfg).map(|batches| SegmentedUnit {
+                    let ends = engine.segment_ends(&cfg);
+                    engine.pack(&unit, &indices, &cfg).map(|batches| SegmentedUnit {
                         ticket,
                         results: vec![GpuResult::default(); indices.len()],
-                        ends: segment_ends(&cfg),
+                        ends,
                         segment: 0,
                         cfg,
                         busy: 0.0,
@@ -924,7 +954,7 @@ fn start_recording<D: SegmentDevice>(
 ) -> Result<(u64, FrameLayout, u32)> {
     let mut population = Population::default();
     population.push(request.creature.clone());
-    let batches = crate::physics2::pack(&population, &[0], &request.cfg)?;
+    let batches = engine.pack(&population, &[0], &request.cfg)?;
     anyhow::ensure!(batches.len() == 1, "A replay packs into one batch");
     let fidelity = request.cfg.fidelity();
     let total = fidelity.settle() + request.cfg.steps();

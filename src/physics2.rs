@@ -2479,6 +2479,7 @@ pub fn pack(
                 muscle_fields: MUSCLE_FIELDS,
                 bones,
                 results: None,
+                wave: None,
             }
         })
         .collect())

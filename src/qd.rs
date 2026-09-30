@@ -40,7 +40,9 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 42: no fine checks; a creature that would set an island record gets one
 //     confirmation trial from the same pose at twice the rate and solver
 //     passes (the fine fidelity), and the search runs on a ring of blocks.
-pub const VERSION: u32 = 42;
+// 43: the CUDA kernel runs a creature per lane group with substeps instead
+//     of planting rounds, warm start and static friction.
+pub const VERSION: u32 = 43;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and

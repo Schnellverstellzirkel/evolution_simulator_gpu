@@ -5,7 +5,7 @@
 //! sorted by body size so the 32 creatures that share a warp run similar loop
 //! counts. Muscles and bones are packed per 32-creature tile as
 //! `[item][field][lane]`, which makes every warp load one coalesced line.
-use crate::physics::{self, Node};
+use crate::physics::Node;
 
 pub const TILE: usize = 32;
 /// Per bone: pivot node, length, joint range, the child node's mass, radius
@@ -114,6 +114,9 @@ pub struct LaneBatch {
     /// Behavior totals to resume from, for a batch that continues a trial
     /// (`repack`); a fresh batch starts from zero.
     pub results: Option<Vec<GpuResult>>,
+    /// The lane-group CUDA kernel's records (`warp_kernel::pack`); the
+    /// per-lane fields above are then empty.
+    pub wave: Option<crate::warp_kernel::WavePack>,
 }
 
 impl LaneBatch {
@@ -124,6 +127,7 @@ impl LaneBatch {
         self.nodes = Vec::new();
         self.muscles = Vec::new();
         self.results = None;
+        self.wave = None;
     }
     /// The creatures at positions `keep` (ascending) of this batch, with the
     /// node state, muscle buffer (rhythm offsets and energy included) and
@@ -187,6 +191,7 @@ impl LaneBatch {
             muscle_fields: self.muscle_fields,
             bones: new_bones,
             results: Some(keep.iter().map(|&j| results[j]).collect()),
+            wave: None,
         }
     }
 }
@@ -249,106 +254,4 @@ pub fn launch_params(
         patches: if cfg.ground { cfg.patches } else { 0.0 },
         spare: [0.0; 2],
     }
-}
-
-/// Whether the v2 CUDA kernel of `capacity` nodes keeps its per-lane table in
-/// local memory (through L1 and L2) instead of shared memory. Above 32 nodes
-/// it does, because the table would not fit.
-pub fn cuda_table_local(capacity: usize) -> bool {
-    capacity > 32
-}
-
-/// The physics v2 CUDA kernel (`shaders/physics2_creature.cu`) for
-/// `capacity`-node buckets: the counterpart of `physics2::shader_source`,
-/// with the same constants as `#define` lines. Bodies of up to 16 nodes
-/// unroll their node and bone loops (private arrays in registers); bodies
-/// above 32 nodes keep the per-lane table in local memory.
-pub fn cuda_source(capacity: usize, workgroup: u32, fidelity: crate::physics::Fidelity) -> String {
-    cuda_source_variant(capacity, workgroup, fidelity, false)
-}
-
-/// The physics v2 CUDA recording kernel: the scoring kernel of `cuda_source`
-/// plus the frame output in an eighth argument (the counterpart of
-/// `physics2::record_source`).
-pub fn cuda_record_source(
-    capacity: usize,
-    workgroup: u32,
-    fidelity: crate::physics::Fidelity,
-) -> String {
-    cuda_source_variant(capacity, workgroup, fidelity, true)
-}
-
-fn cuda_source_variant(
-    capacity: usize,
-    workgroup: u32,
-    fidelity: crate::physics::Fidelity,
-    record: bool,
-) -> String {
-    use crate::physics2 as p2;
-    let limits = crate::physics::limits();
-    let float = |value: f32| format!("{value:?}f");
-    let unroll = capacity <= 16;
-    let defines = [
-        ("WG", format!("{workgroup}u")),
-        ("MAXN", format!("{capacity}u")),
-        ("STRIDE", format!("{capacity}u")),
-        ("MAXC", format!("{}u", capacity.min(p2::MAX_CONTACTS))),
-        (
-            "UNROLL",
-            (if unroll { "_Pragma(\"unroll\")" } else { "" }).into(),
-        ),
-        (
-            "TAB_LOCAL",
-            (if cuda_table_local(capacity) { "1" } else { "0" }).into(),
-        ),
-        ("LAUNCH_BOUNDS", format!("__launch_bounds__({workgroup})")),
-        ("RECORD", (if record { "1" } else { "0" }).into()),
-        ("MUSCLE_CAPACITY", float(limits.muscle_energy)),
-        ("MUSCLE_RECOVERY", float(limits.muscle_recovery)),
-        ("MAX_MUSCLE_FORCE", float(limits.muscle_force)),
-        (
-            "INV_JOINT_DAMPING",
-            float(if p2::joint_damping() > 0.0 {
-                1.0 / p2::joint_damping()
-            } else {
-                0.0
-            }),
-        ),
-        ("LIMIT_HARDNESS", float(p2::LIMIT_HARDNESS)),
-        ("JOINT_BREAK", float(physics::JOINT_BREAK)),
-        ("MUD_NORMAL", float(physics::MUD_NORMAL)),
-        ("MUD_GRIP", float(physics::MUD_GRIP)),
-        ("MUD_DRAG", float(physics::MUD_DRAG)),
-        ("MUD_FULL_DEPTH", float(physics::MUD_FULL_DEPTH)),
-        ("SPIN_CAP", float(p2::SPIN_CAP)),
-        ("INV_SPIN_CAP", float(1.0 / p2::SPIN_CAP)),
-        ("SPIN_HARDNESS", float(p2::SPIN_HARDNESS)),
-        ("PGS_SWEEPS", format!("{}u", p2::PGS_ITERATIONS)),
-        ("PLANT_SWEEPS", format!("{}u", p2::PLANT_SWEEPS)),
-        ("PLANT_ROUNDS", format!("{}u", p2::PLANT_ROUNDS)),
-        ("PUSH_OUT", float(p2::PUSH_OUT)),
-        ("AIR_DRAG", float(p2::AIR_DRAG)),
-        ("WATER_DRAG", float(p2::WATER_DRAG)),
-        ("WATER_ALONG", float(p2::WATER_ALONG)),
-        ("WATER_BUOYANCY", float(p2::WATER_BUOYANCY)),
-        ("ICE_INV", float(1.0 / physics::ICE_SPACING)),
-        ("HEAD_SHAKE_LIMIT", float(physics::HEAD_SHAKE_LIMIT)),
-        ("HEAD_SHAKE_WINDOW", float(physics::HEAD_SHAKE_WINDOW)),
-        ("CONTACT_SLACK", float(p2::CONTACT_SLACK)),
-        ("LIFT_CLEARANCE", float(p2::LIFT_CLEARANCE)),
-        ("GAP_DEPTH", float(physics::GAP_DEPTH)),
-        ("GAP_RUN", float(physics::GAP_RUN)),
-        ("HURDLE_SPACING", float(physics::HURDLE_SPACING)),
-        ("HURDLE_TOP", float(physics::HURDLE_TOP)),
-        ("HURDLE_RUN", float(physics::HURDLE_RUN)),
-        ("RATE", format!("{:.1}f", fidelity.rate as f32)),
-        ("SETTLE", format!("{}u", fidelity.settle())),
-        ("SAMPLE", format!("{}u", fidelity.sample_interval())),
-    ];
-    let mut source = String::new();
-    for (name, value) in defines {
-        source.push_str(&format!("#define {name} {value}\n"));
-    }
-    source.push_str(include_str!("../shaders/physics2_creature.cu"));
-    source
 }
