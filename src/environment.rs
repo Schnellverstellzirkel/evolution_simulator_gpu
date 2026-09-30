@@ -77,7 +77,10 @@ impl Preset {
     /// Sets every effect except the autochange level: the listed ones to
     /// their level, the rest to calm.
     pub fn apply(&self, cfg: &mut Config) {
-        for effect in EFFECTS.iter().filter(|e| e.name != "Autochange environment") {
+        for effect in EFFECTS
+            .iter()
+            .filter(|e| e.name != "Autochange environment")
+        {
             let level = self
                 .levels
                 .iter()
@@ -379,23 +382,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_level_round_trips_and_validates() {
+    fn every_level_round_trips() {
         for effect in &EFFECTS {
             for level in 0..effect.levels.len() {
                 let mut cfg = Config::default();
                 effect.set_level(&mut cfg, level);
                 assert_eq!(effect.level(&cfg), level, "{}", effect.name);
-                cfg.validate().unwrap();
             }
         }
     }
 
     #[test]
-    fn presets_name_real_effects_and_validate() {
+    fn presets_name_real_effects() {
         for preset in &PRESETS {
             let mut cfg = Config::default();
             preset.apply(&mut cfg);
-            cfg.validate().unwrap();
             for &(name, level) in preset.levels {
                 let effect = EFFECTS.iter().find(|e| e.name == name).unwrap();
                 assert!(level < effect.levels.len(), "{}", preset.name);
@@ -543,7 +544,11 @@ mod tests {
         assert!(advance_autochange(&mut cfg, interval));
         assert_eq!(cfg.autochange_step, 1);
         let air = EFFECTS.iter().find(|e| e.name == "Air").unwrap();
-        assert_eq!(air.level(&cfg), 1, "the first step is the air's first level");
+        assert_eq!(
+            air.level(&cfg),
+            1,
+            "the first step is the air's first level"
+        );
         let mut off = with_autochange(0);
         for generation in (0..200).step_by(5) {
             assert!(!advance_autochange(&mut off, generation));

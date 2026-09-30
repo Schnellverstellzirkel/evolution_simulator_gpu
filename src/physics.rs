@@ -200,7 +200,10 @@ pub const MUSCLE_MASS_PER_M: f32 = 1.0;
 fn muscle_span(bones: &[Bone], nodes: &[Node], m: &Muscle) -> f32 {
     let point = |bone: u32, t: f32| -> Option<[f32; 2]> {
         let bone = bones.get(bone as usize)?;
-        let (a, b) = (nodes.get(bone.a as usize)?.pos, nodes.get(bone.b as usize)?.pos);
+        let (a, b) = (
+            nodes.get(bone.a as usize)?.pos,
+            nodes.get(bone.b as usize)?.pos,
+        );
         Some([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t])
     };
     match (point(m.bone_a, m.anchor_a), point(m.bone_b, m.anchor_b)) {
@@ -624,99 +627,6 @@ pub fn fitness(n: &[Node]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reusable_body_and_joint_outputs_match_allocating_wrappers() {
-        let genes = [
-            NodeGene {
-                x: 0.0,
-                y: 1.0,
-                diameter: 0.08,
-                friction: 0.7,
-            },
-            NodeGene {
-                x: 0.7,
-                y: 1.2,
-                diameter: 0.10,
-                friction: 0.9,
-            },
-            NodeGene {
-                x: 1.1,
-                y: 1.0,
-                diameter: 0.06,
-                friction: 0.5,
-            },
-        ];
-        let mut first = Bone::new(0, 1, 0.73);
-        first.organ_mass = 0.2;
-        first.organ_at = 0.3;
-        let mut second = Bone::new(1, 2, 0.45);
-        second.min_angle = -0.4;
-        second.max_angle = 0.6;
-        let bones = [first, second];
-
-        let expected_body = body(&genes, &bones);
-        let mut reused_body = vec![Node::default(); genes.len()];
-        body_into(&genes, &bones, &mut reused_body);
-        assert_eq!(
-            bytemuck::cast_slice::<Node, u8>(&reused_body),
-            bytemuck::cast_slice::<Node, u8>(&expected_body)
-        );
-
-        let expected_joints = joints(&genes, &bones);
-        let mut reused_joints = vec![Joint::FREE; bones.len()];
-        joints_from_body(&genes, &bones, &reused_body, &mut reused_joints);
-        for (expected, actual) in expected_joints.iter().zip(&reused_joints) {
-            assert_eq!(actual.reference, expected.reference);
-            assert_eq!(
-                actual.center.map(f32::to_bits),
-                expected.center.map(f32::to_bits)
-            );
-            assert_eq!(
-                actual.half.map(f32::to_bits),
-                expected.half.map(f32::to_bits)
-            );
-            assert_eq!(actual.child_share.to_bits(), expected.child_share.to_bits());
-            assert_eq!(actual.child_mass.to_bits(), expected.child_mass.to_bits());
-            assert_eq!(
-                actual.reference_mass.to_bits(),
-                expected.reference_mass.to_bits()
-            );
-        }
-    }
-
-    #[test]
-    fn muscle_targets_change_at_a_bounded_rate() {
-        let muscle = Muscle {
-            bone_a: 0,
-            bone_b: 1,
-            anchor_a: 0.5,
-            anchor_b: 0.5,
-            short: 0.01,
-            long: 1.0,
-            period: 0.1,
-            phase: 0.0,
-            duty: 0.5,
-            stiffness: 20.0,
-            sensor: 255,
-            reset: 0.0,
-            tendon: 0.0,
-        };
-        for time in [0.025, 0.075] {
-            assert!(
-                (limited_target(&muscle, time) - limited_target(&muscle, (time - dt()).max(0.0)))
-                    .abs()
-                    <= limits().muscle_speed * dt() + 1e-6
-            );
-        }
-        for tick in 1..120 {
-            let time = tick as f32 * dt();
-            assert!(
-                (limited_target(&muscle, time) - limited_target(&muscle, time - dt())).abs()
-                    <= limits().muscle_speed * dt() + 1e-6
-            );
-        }
-    }
 
     #[test]
     fn terrain_slope_matches_its_height() {

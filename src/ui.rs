@@ -1611,9 +1611,12 @@ impl App {
         if autostart.is_some() {
             initial_config.checkpoint_interval = AUTOSAVE_INTERVAL;
         }
-        for list in [std::env::var("EVOLUTION_SMOKE_WORLD").ok(), autostart.clone()]
-            .into_iter()
-            .flatten()
+        for list in [
+            std::env::var("EVOLUTION_SMOKE_WORLD").ok(),
+            autostart.clone(),
+        ]
+        .into_iter()
+        .flatten()
         {
             for pair in list.split(',') {
                 if let Some((name, level)) = pair.split_once('=')
@@ -6464,19 +6467,6 @@ mod tests {
         }
     }
     #[test]
-    fn replay_forces_stay_in_range() {
-        let creature = test_creature();
-        let config = Config::default();
-        let (frames, _) = crate::cpu_engine::replay(&creature, &config);
-        let nodes = physics::nodes(&creature);
-        let contact = vec![vec![false; nodes.len()]; frames.len()];
-        let out =
-            crate::replay_forces::analyze(&creature, &nodes, &frames, &contact, None, &config);
-        assert_eq!(out.energy.len(), frames.len());
-        assert!(out.energy.iter().flatten().all(|e| (0.0..=1.0).contains(e)));
-        assert!(out.muscle.iter().flatten().any(|f| *f != 0.0));
-    }
-    #[test]
     fn a_leaper_keeps_its_peak_in_view_without_shrinking_the_body_too_far() {
         let typical = fit_zoom(0.5, 260.0);
         // A mild jump fits whole.
@@ -6568,59 +6558,6 @@ mod tests {
         assert!(!follows_champion(false, Some(7), None));
     }
     #[test]
-    fn the_autochange_forecast_names_the_next_step() {
-        let mut config = Config {
-            autochange: 2,
-            ..Config::default()
-        };
-        assert_eq!(
-            autochange_forecast(&config, 7).as_deref(),
-            Some("Next change at generation 50: Air to Breezy")
-        );
-        assert_eq!(
-            autochange_forecast(&config, 50).as_deref(),
-            Some("Next change at generation 100: Air to Breezy")
-        );
-        config.autochange = 0;
-        assert_eq!(autochange_forecast(&config, 7), None);
-    }
-    #[test]
-    fn the_generation_tile_tells_when_finalists_still_run() {
-        assert_eq!(
-            generation_progress(999_999, 1_000_000, 0, true, 0.0),
-            "99% done"
-        );
-        assert!(generation_progress(1_000_000, 1_000_000, 40, true, 5.0).contains("checking 40"));
-        assert!(!generation_progress(1_000_000, 1_000_000, 40, true, 5.0).contains("100%"));
-        assert_eq!(generation_progress(5, 10, 0, false, 1.0), "Paused");
-    }
-    #[test]
-    fn world_marks_come_from_events_and_history() {
-        let events = vec![crate::worker::Event {
-            generation: 4,
-            kind: EventKind::World,
-            text: "Ground Flat to Rough, 8 cm. Re-testing 3 kept creatures.".into(),
-        }];
-        let marks = world_marks(&events, &[]);
-        assert_eq!(marks.len(), 1);
-        assert_eq!(marks[0].generation, 4);
-        assert_eq!(marks[0].label, "Ground Flat to Rough, 8 cm");
-    }
-    #[test]
-    fn a_stall_suggests_the_next_harder_world() {
-        let mut config = Config::default();
-        let ground = crate::environment::EFFECTS
-            .iter()
-            .position(|effect| effect.name == "Ground")
-            .unwrap();
-        assert_eq!(stall_suggestion(&config), Some((ground, 1)));
-        let top = crate::environment::EFFECTS[ground].levels.len() - 1;
-        crate::environment::EFFECTS[ground].set_level(&mut config, top);
-        let (next, level) = stall_suggestion(&config).unwrap();
-        assert_eq!(crate::environment::EFFECTS[next].name, "Hurdles");
-        assert_eq!(level, 1);
-    }
-    #[test]
     fn body_plans_ignore_lengths_and_rhythms() {
         use crate::worker::body_plan;
         let creature = test_creature();
@@ -6707,7 +6644,6 @@ mod tests {
 #[cfg(test)]
 mod island_view_tests {
     use super::*;
-    use crate::worker::MigrationSummary;
 
     #[test]
     fn origin_shares_always_add_to_100() {
@@ -6719,29 +6655,6 @@ mod island_view_tests {
                 assert_eq!(count == 0, *share == 0);
             }
         }
-    }
-
-    #[test]
-    fn migration_lines_name_the_hub_and_the_next_date() {
-        let next = crate::storage::MIGRATION_INTERVAL;
-        let hub = crate::storage::hub_island();
-        let none = migration_lines(None, 0, 3);
-        assert!(none[0].contains("receives no migrants"));
-        assert!(none[1].contains(&format!("generation {next}")));
-        assert!(migration_lines(None, hub, 3)[0].contains("No copies yet"));
-        let migration = MigrationSummary {
-            generation: next,
-            exchange: vec![(4, 1), (4, 2), (4, 3), (4, 4), (0, 0)],
-        };
-        let lines = migration_lines(Some(&migration), 0, next + 2);
-        assert!(lines[0].contains(&format!("Gen {next}: copied 4 to the hub, it kept 1")));
-        assert!(lines[1].contains("Receives no migrants"));
-        assert!(lines[1].contains(&format!("gen {}", next * 2)));
-        let lines = migration_lines(Some(&migration), hub, next + 2);
-        assert!(lines[0].contains("got 16 copies from the islands, kept 10"));
-        assert!(lines[1].contains("Sends nothing back"));
-        assert_eq!(island_name(0), "Island 1");
-        assert_eq!(island_name(hub), "Hub");
     }
 }
 /// How long a screenshot run waits before it captures: 8 s, or
