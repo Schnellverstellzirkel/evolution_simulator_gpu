@@ -87,6 +87,7 @@ struct Driver {
     event_record: unsafe extern "C" fn(CuEvent, CuStream) -> CuResult,
     event_query: unsafe extern "C" fn(CuEvent) -> CuResult,
     event_elapsed_time: unsafe extern "C" fn(*mut f32, CuEvent, CuEvent) -> CuResult,
+    func_get_attribute: unsafe extern "C" fn(*mut c_int, c_int, CuFunction) -> CuResult,
     #[allow(clippy::type_complexity)]
     launch_kernel: unsafe extern "C" fn(
         CuFunction,
@@ -184,6 +185,7 @@ impl Driver {
                 event_record: symbol!(library, "cuEventRecord"),
                 event_query: symbol!(library, "cuEventQuery"),
                 event_elapsed_time: symbol!(library, "cuEventElapsedTime"),
+                func_get_attribute: symbol!(library, "cuFuncGetAttribute"),
                 launch_kernel: symbol!(library, "cuLaunchKernel"),
                 get_error_name: symbol!(library, "cuGetErrorName"),
                 _library: library,
@@ -930,6 +932,20 @@ impl CudaEngine {
             ) {
                 (cu.module_unload)(module);
                 return Err(error);
+            }
+            if std::env::var_os("EVOLUTION_CUDA_VERBOSE").is_some() {
+                // CU_FUNC_ATTRIBUTE_NUM_REGS, _SHARED_SIZE_BYTES, _LOCAL_SIZE_BYTES
+                let attribute = |which: c_int| {
+                    let mut value = 0;
+                    (cu.func_get_attribute)(&mut value, which, function);
+                    value
+                };
+                eprintln!(
+                    "CUDA: kernel of {threads} threads: {} registers, {} B shared, {} B local per thread",
+                    attribute(4),
+                    attribute(1),
+                    attribute(3)
+                );
             }
             Ok(Kernel {
                 module,
