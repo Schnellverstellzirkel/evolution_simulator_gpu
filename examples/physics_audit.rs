@@ -6,11 +6,10 @@
 //! energy store and the steps with a joint past its break angle.
 //! Diagnostic only.
 //!
-//! The GPU kernel does not expose the solver ledgers that the CPU prototype
-//! kept: muscle work, mechanical energy the solver gained or lost, the
-//! momentum balance and first-law corrections, friction that pushed a node the
-//! way it slid, cost of transport, and the bone load. Those columns are gone.
-//! `physics2::replay` still fills them on the CPU, and only tests use it.
+//! The GPU kernel does not expose solver ledgers (muscle work, energy the
+//! solver gained or lost, the momentum balance, friction that pushed a node
+//! the way it slid, cost of transport, bone load), so the audit has no such
+//! columns.
 //! With `random` in place of a checkpoint it audits a random first generation.
 //! Usage: cargo run --release --example physics_audit <checkpoint.evo|random> [count]
 mod common;

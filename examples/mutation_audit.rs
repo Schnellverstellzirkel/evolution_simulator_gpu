@@ -2,7 +2,7 @@
 //! Takes the best elites of a checkpoint's global archive, applies each
 //! operator once to each elite (and repairs the body as breeding does, but
 //! without the small parameter mutation that follows in breeding), and scores
-//! parents and children with the CPU engine. A row for that parameter
+//! parents and children on the GPU. A row for that parameter
 //! mutation alone is the baseline.
 //!
 //! Usage: cargo run --release --example mutation_audit -- <checkpoint> [elites] [seconds]

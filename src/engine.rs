@@ -389,8 +389,8 @@ enum OutOfMemory {
     GiveUp(Duration),
 }
 
-/// Rides out failed GPU memory allocations instead of retiring the GPU,
-/// which would leave the rest of the session on the CPU. Another process
+/// Rides out failed GPU memory allocations instead of failing the GPU,
+/// which would stop evolution. Another process
 /// can hold GPU memory for a while. While other units run, a unit that does
 /// not fit waits for one of them to finish, and fewer units run at once from
 /// then on; one more is tried every `RAISE_AFTER`. With nothing running, it

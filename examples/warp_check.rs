@@ -113,10 +113,9 @@ fn main() -> anyhow::Result<()> {
             standard.len()
         );
     }
-    let cpu = evolution_simulator::physics2::evaluate(&pop, &cfg);
     let mut kept = 0;
     let mut ratios = Vec::new();
-    for (k, (((a, s), d), c)) in archive.iter().zip(&standard).zip(&double).zip(&cpu).enumerate() {
+    for (k, ((a, s), d)) in archive.iter().zip(&standard).zip(&double).enumerate() {
         let ratio = d.fitness / s.fitness;
         ratios.push(ratio);
         if (ratio - 1.0).abs() <= 0.2 {
@@ -124,10 +123,9 @@ fn main() -> anyhow::Result<()> {
         }
         if k < 20 {
             println!(
-                "#{:>3}: archive {:7.2} m, CPU prototype {:7.2} m, 60 Hz {:7.2} m (fell {:5.2} s), 120 Hz {:7.2} m (fell {:5.2} s)",
+                "#{:>3}: archive {:7.2} m, 60 Hz {:7.2} m (fell {:5.2} s), 120 Hz {:7.2} m (fell {:5.2} s)",
                 k + 1,
                 a,
-                c.fitness,
                 s.fitness,
                 s.fall_time,
                 d.fitness,
@@ -136,7 +134,6 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let s_dist: Vec<f32> = standard.iter().map(|r| r.fitness).collect();
-    let c_dist: Vec<f32> = cpu.iter().map(|r| r.fitness).collect();
     let walkers: Vec<(f32, f32)> = standard
         .iter()
         .zip(&double)
@@ -148,8 +145,7 @@ fn main() -> anyhow::Result<()> {
         .filter(|(s, d)| (d / s - 1.0).abs() <= 0.2)
         .count();
     println!(
-        "CPU prototype median {:.2} m; {} elites pass 5 m at 60 Hz, {walker_kept} of them within 20% at 120 Hz, sum {:.1} m at 60 Hz and {:.1} m at 120 Hz",
-        quantile(&c_dist, 0.5),
+        "{} elites pass 5 m at 60 Hz, {walker_kept} of them within 20% at 120 Hz, sum {:.1} m at 60 Hz and {:.1} m at 120 Hz",
         walkers.len(),
         walkers.iter().map(|w| w.0).sum::<f32>(),
         walkers.iter().map(|w| w.1).sum::<f32>()
