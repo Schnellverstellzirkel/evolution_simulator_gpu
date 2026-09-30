@@ -28,7 +28,7 @@
 #define HS (1.0f / (RATE * SUBSTEPS))
 #define INV_HS (RATE * SUBSTEPS)
 #define LF 12u
-#define MF 15u
+#define MF 16u
 #define RMAX 4
 #define MAXC 4
 #define PI_F 3.14159265359f
@@ -56,7 +56,7 @@ struct Params {
     float water;
     float patches;
     float air_sub;
-    float spare0;
+    float inv_muscle_energy;
     float spare1;
     float spare2;
 };
@@ -168,6 +168,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     __shared__ float s_en[RMAX][BLOCK];
     __shared__ float s_off[RMAX][BLOCK];
     __shared__ float s_mag[RMAX][BLOCK];
+    // The waveform at the last substep, or -1 when it must be computed.
+    __shared__ float s_wp[RMAX][BLOCK];
     __shared__ Result s_mt[BLOCK / W];
     __shared__ uint4 s_bits[BLOCK / W];
     // A walker's two rows of the contact-space matrix.
@@ -197,7 +199,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     float q = 0.0f, qd = 0.0f, hx = 0.0f, hy = 0.0f, hvx = 0.0f, hvy = 0.0f;
     float tpull[RMAX];
 #pragma unroll
-    for (int r = 0; r < RMAX; r++) { s_en[r][tid] = 1.0f; s_off[r][tid] = 0.0f; s_mag[r][tid] = 0.0f; tpull[r] = 0.0f; }
+    for (int r = 0; r < RMAX; r++) { s_en[r][tid] = 1.0f; s_off[r][tid] = 0.0f; s_mag[r][tid] = 0.0f; s_wp[r][tid] = -1.0f; tpull[r] = 0.0f; }
     // Kinematics: absolute angle and rate, node and pivot position and velocity.
     float th = 0.0f, om = 0.0f, px = 0.0f, py = 0.0f, vx = 0.0f, vy = 0.0f;
     float ppx = 0.0f, ppy = 0.0f, pvx = 0.0f, pvy = 0.0f;
@@ -327,7 +329,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 qd = 0.0f;
                 th = 0.0f; om = 0.0f;
 #pragma unroll
-                for (int r = 0; r < RMAX; r++) { s_en[r][tid] = 1.0f; s_off[r][tid] = 0.0f; s_mag[r][tid] = 0.0f; tpull[r] = 0.0f; }
+                for (int r = 0; r < RMAX; r++) { s_en[r][tid] = 1.0f; s_off[r][tid] = 0.0f; s_mag[r][tid] = 0.0f; s_wp[r][tid] = -1.0f; tpull[r] = 0.0f; }
                 reset_metrics();
                 rec_n = 0.0f; rec_t = 0.0f;
                 step = 0u;
@@ -478,17 +480,17 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                             if ((unsigned)r >= maxrounds) { break; }
                             const unsigned mi = (unsigned)r * W + lg;
                             const bool mon = (unsigned)r < rounds && mi < nmus;
-                            const float* mrec = muscles + mbase + (unsigned)r * MF * W + lg;
-                            const unsigned packed = mon ? __float_as_uint(mrec[0]) : 0u;
+                            const float4* mrec = reinterpret_cast<const float4*>(muscles + mbase) + mi * 4u;
+                            const float4 f0 = mon ? mrec[0] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                            const unsigned packed = __float_as_uint(f0.x);
                             const unsigned la = packed & 31u;
                             const unsigned lb = (packed >> 5u) & 31u;
                             const float a_px = shf(px, la), a_py = shf(py, la), a_qx = shf(ppx, la), a_qy = shf(ppy, la);
                             const float b_px = shf(px, lb), b_py = shf(py, lb), b_qx = shf(ppx, lb), b_qy = shf(ppy, lb);
                             if (mon) {
-                                const float anchor_a = mrec[1u * W];
-                                const float anchor_b = mrec[2u * W];
-                                const float tendon_k = mrec[13u * W];
-                                const float slack = mrec[14u * W];
+                                const float4 f3 = mrec[3];
+                                const float anchor_a = f0.y, anchor_b = f0.z;
+                                const float tendon_k = f3.z, slack = f3.w;
                                 const float pax = a_qx + (a_px - a_qx) * anchor_a, pay = a_qy + (a_py - a_qy) * anchor_a;
                                 const float pbx = b_qx + (b_px - b_qx) * anchor_b, pby = b_qy + (b_py - b_qy) * anchor_b;
                                 const float dx = pbx - pax, dy = pby - pay;
@@ -641,8 +643,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 if ((unsigned)r >= maxrounds) { break; }
                 const unsigned mi = (unsigned)r * W + lg;
                 const bool mon = (unsigned)r < rounds && mi < nmus;
-                const float* mrec = muscles + mbase + (unsigned)r * MF * W + lg;
-                const unsigned packed = mon ? __float_as_uint(mrec[0]) : 0u;
+                const float4* mrec = reinterpret_cast<const float4*>(muscles + mbase) + mi * 4u;
+                const float4 f0 = mon ? mrec[0] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                const unsigned packed = __float_as_uint(f0.x);
                 const unsigned la = packed & 31u;
                 const unsigned lb = (packed >> 5u) & 31u;
                 const float a_px = shf(px, la), a_py = shf(py, la), a_qx = shf(ppx, la), a_qy = shf(ppy, la);
@@ -651,21 +654,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 const float b_vx = shf(vx, lb), b_vy = shf(vy, lb), b_wx = shf(pvx, lb), b_wy = shf(pvy, lb);
                 float4 fa = make_float4(0.0f, 0.0f, 0.0f, 0.0f), fb = fa;
                 if (mon) {
-                    const float anchor_a = mrec[1u * W];
-                    const float anchor_b = mrec[2u * W];
-                    const float mamp = mrec[3u * W];
-                    const float hill = mrec[4u * W];
-                    const float inv_period = mrec[5u * W];
-                    const float phase = mrec[6u * W];
-                    const float duty = mrec[7u * W];
-                    const float stiffness = mrec[8u * W];
-                    const float inv_duty = mrec[9u * W];
-                    const float inv_complement = mrec[10u * W];
-                    const float strength = mrec[12u * W];
-                    const float tendon_k = mrec[13u * W];
-                    const float slack = mrec[14u * W];
-                    const float cap = MAX_MUSCLE_FORCE * strength;
-                    const float inv_capacity = 1.0f / (MUSCLE_CAPACITY * p.muscle_energy * strength);
+                    const float4 f1 = mrec[1], f2 = mrec[2], f3 = mrec[3];
+                    const float anchor_a = f0.y, anchor_b = f0.z, mamp = f0.w;
+                    const float hill = f1.x, inv_period = f1.y, phase = f1.z, duty = f1.w;
+                    const float stiffness = f2.x, inv_duty = f2.y, inv_complement = f2.z;
+                    const float cap = f3.x;
+                    const float inv_capacity = f3.y * p.inv_muscle_energy;
+                    const float tendon_k = f3.z, slack = f3.w;
                     const float pax = a_qx + (a_px - a_qx) * anchor_a, pay = a_qy + (a_py - a_qy) * anchor_a;
                     const float vax = a_wx + (a_vx - a_wx) * anchor_a, vay = a_wy + (a_vy - a_wy) * anchor_a;
                     const float pbx = b_qx + (b_px - b_qx) * anchor_b, pby = b_qy + (b_py - b_qy) * anchor_b;
@@ -675,11 +670,15 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     const float inverse = 1.0f / length_m;
                     const float dirx = dx * inverse, diry = dy * inverse;
                     const float relative = (vbx - vax) * dirx + (vby - vay) * diry;
-                    float target_speed = 0.0f;
-                    if (ts > 0.0f) {
-                        target_speed = mamp * (wave(ts, inv_period, phase, s_off[r][tid], duty, inv_duty, inv_complement)
-                            - wave(fmaxf(ts - HS, 0.0f), inv_period, phase, s_off[r][tid], duty, inv_duty, inv_complement)) * INV_HS;
+                    // The waveform's shortening speed over the substep; the
+                    // waveform at the substep's start is kept from the last one.
+                    const float w_now = wave(ts, inv_period, phase, s_off[r][tid], duty, inv_duty, inv_complement);
+                    float w_prev = s_wp[r][tid];
+                    if (w_prev < 0.0f) {
+                        w_prev = wave(fmaxf(ts - HS, 0.0f), inv_period, phase, s_off[r][tid], duty, inv_duty, inv_complement);
                     }
+                    s_wp[r][tid] = w_now;
+                    const float target_speed = ts > 0.0f ? mamp * (w_now - w_prev) * INV_HS : 0.0f;
                     float drive = limp ? 0.0f : fmaxf(-target_speed * stiffness * 0.25f, 0.0f) * s_en[r][tid];
                     if (hill > 0.0f) {
                         drive *= clampf(1.0f + relative * hill, 0.0f, 1.0f);
@@ -1084,14 +1083,16 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 for (int r = 0; r < RMAX; r++) {
                     const unsigned mi = (unsigned)r * W + lg;
                     if ((unsigned)r < rounds && mi < nmus) {
-                        const float* mrec = muscles + mbase + (unsigned)r * MF * W + lg;
-                        const unsigned packed = __float_as_uint(mrec[0]);
+                        const float4* mrec = reinterpret_cast<const float4*>(muscles + mbase) + mi * 4u;
+                        const unsigned packed = __float_as_uint(mrec[0].x);
                         if ((packed >> 15u) & 1u) {
                             const unsigned sensor = (packed >> 10u) & 31u;
                             if ((down >> sensor) & 1u) {
-                                const float clock = next * mrec[5u * W] + mrec[6u * W];
-                                const float x = mrec[11u * W] - clock;
+                                const float4 f1 = mrec[1];
+                                const float clock = next * f1.y + f1.z;
+                                const float x = mrec[2].w - clock;
                                 s_off[r][tid] = x - floorf(x);
+                                s_wp[r][tid] = -1.0f;
                             }
                         }
                     }

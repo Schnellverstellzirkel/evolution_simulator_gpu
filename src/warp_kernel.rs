@@ -22,8 +22,8 @@ use rayon::prelude::*;
 
 /// Words per lane of a creature's lane record.
 pub const LANE_FIELDS: usize = 12;
-/// Words per muscle.
-pub const MUSCLE_FIELDS: usize = 15;
+/// Words per muscle, read as four 16-byte loads.
+pub const MUSCLE_FIELDS: usize = 16;
 /// Muscle rounds a group runs: a creature on `W` lanes has at most
 /// `ROUNDS * W` muscles.
 pub const ROUNDS: usize = 4;
@@ -50,7 +50,8 @@ pub const WAVE: usize = 262_144;
 pub struct WavePack {
     /// `[creature][field][lane]` lane records.
     pub lanes: Vec<u32>,
-    /// `[round][field][lane]` muscle records, per creature at its `heads` offset.
+    /// `[round][lane][field]` muscle records, per creature at its `heads`
+    /// offset.
     pub muscles: Vec<f32>,
     /// `[round][word][lane]` lists of the muscle ends each bone carries: four
     /// byte slots per word (muscle lane times two plus the end), 255 for none.
@@ -123,7 +124,8 @@ pub struct Params {
     pub water: f32,
     pub patches: f32,
     pub air_sub: f32,
-    pub spare: [f32; 3],
+    pub inv_muscle_energy: f32,
+    pub spare: [f32; 2],
 }
 
 /// Parameters of a wave of `count` creatures from `base` of a batch.
@@ -155,7 +157,8 @@ pub fn params(cfg: &Config, base: usize, count: usize, stride: usize) -> Params 
         water: cfg.water,
         patches: if ground { cfg.patches } else { 0.0 },
         air_sub: air.powf(1.0 / solver_setting("SUBSTEPS", SUBSTEPS) as f32),
-        spare: [0.0; 3],
+        inv_muscle_energy: 1.0 / cfg.muscle_energy,
+        spare: [0.0; 2],
     }
 }
 
@@ -346,6 +349,8 @@ fn pack_creature(model: &Model, cfg: &Config, hash: u32, w: usize) -> Packed {
             .sensor
             .map_or(0, |node| (lane_of_node(node) as u32) << 10 | 1 << 15);
         let packed = la as u32 | (lb as u32) << 5 | sensor;
+        let strength = m.strength * model.muscle_scale;
+        let limits = physics::limits();
         let values = [
             f32::from_bits(packed),
             m.anchor_a,
@@ -359,13 +364,13 @@ fn pack_creature(model: &Model, cfg: &Config, hash: u32, w: usize) -> Packed {
             m.inv_duty,
             m.inv_complement,
             m.reset,
-            m.strength * model.muscle_scale,
+            limits.muscle_force * strength,
+            1.0 / (limits.muscle_energy * strength),
             m.tendon_k,
             m.long,
         ];
-        for (f, value) in values.into_iter().enumerate() {
-            muscles[(round * MUSCLE_FIELDS + f) * w + lane] = value;
-        }
+        let at = ((round * w) + lane) * MUSCLE_FIELDS;
+        muscles[at..at + MUSCLE_FIELDS].copy_from_slice(&values);
         lists[round][la].push((2 * lane) as u8);
         lists[round][lb].push((2 * lane + 1) as u8);
     }
