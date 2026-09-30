@@ -187,6 +187,10 @@ pub struct Experiment {
     /// Distances at the screen of the current generation's results, for the
     /// next generation's bar.
     screen_log: Vec<f32>,
+    /// The last absorbed block's screen bar and the share of its results at
+    /// or above it, for the stage log. None when that block ran without a
+    /// bar or came from a world that has since changed.
+    pub last_screen: Option<(f32, f32)>,
     /// Seconds spent absorbing results into the archives and breeding
     /// blocks again, since the caller last took them.
     pub stage_seconds: [f64; 2],
@@ -399,6 +403,7 @@ impl Experiment {
             cursor: 0,
             failed: 0,
             screen_log: Vec::new(),
+            last_screen: None,
             stage_seconds: [0.0; 2],
         }
     }
@@ -517,6 +522,15 @@ impl Experiment {
             "Blocks are absorbed whole and in ring order"
         );
         let stale = self.blocks[k].config.physics_differs(&self.config);
+        self.last_screen = self.blocks[k]
+            .config
+            .screen
+            .map(|s| s.bar)
+            .filter(|bar| !stale && bar.is_finite())
+            .map(|bar| {
+                let kept = finals.iter().filter(|m| m.screen_x >= bar).count();
+                (bar, kept as f32 / finals.len().max(1) as f32)
+            });
         if !stale {
             // A result from a world that has since changed carries no distance.
             self.screen_log
