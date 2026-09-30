@@ -146,6 +146,9 @@ fn save_screenshot(capture: &egui::ColorImage, dir: &std::path::Path) -> anyhow:
     Ok(path)
 }
 pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
+    // The UI thread asks for a 1 ms slice, so a frame preempts the breeding
+    // threads when it wakes (`threads::short_slice`).
+    crate::threads::short_slice();
     let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
     setup.instance_descriptor.backends = wgpu::Backends::VULKAN;
     // Render the UI on the GPU the desktop compositor uses: frames then need no
@@ -1420,8 +1423,15 @@ struct App {
     race_camera: f32,
     /// Creatures the player sent to the race, oldest first, with their worlds.
     race_picks: Vec<(Creature, Config)>,
-    /// Native benchmark frame intervals and the last control probe time.
+    /// Native benchmark frame intervals, the time each frame began, and
+    /// the last control probe time.
     bench_frames: Vec<f32>,
+    bench_frame_starts: Vec<Instant>,
+    /// CPU time of each measured frame without the vsync wait (eframe's
+    /// `cpu_usage`), with the time it began.
+    bench_work: Vec<f32>,
+    /// The UI thread's major page faults when the measured window began.
+    bench_faults: Option<u64>,
     bench_last_ping: Instant,
     bench_pings: u64,
     show_help: bool,
@@ -1575,6 +1585,9 @@ impl App {
             race_camera: 0.0,
             race_picks: Vec::new(),
             bench_frames: Vec::new(),
+            bench_frame_starts: Vec::new(),
+            bench_work: Vec::new(),
+            bench_faults: None,
             replay_wait: None,
             replay_seconds: Vec::new(),
             bench_last_replay: Instant::now(),
@@ -4745,21 +4758,64 @@ impl eframe::App for App {
                 times[times.len() - 1]
             );
         }
-        let mut frames = self.bench_frames.clone();
-        frames.sort_by(f32::total_cmp);
-        let pct = |q: usize| frames[(frames.len() * q / 100).min(frames.len() - 1)] * 1000.;
-        let total: f32 = frames.iter().sum();
+        let report = |label: &str, frames: &[f32]| {
+            if frames.is_empty() {
+                return;
+            }
+            let mut sorted = frames.to_vec();
+            sorted.sort_by(f32::total_cmp);
+            let pct = |q: usize| sorted[(sorted.len() * q / 100).min(sorted.len() - 1)] * 1000.;
+            let total: f32 = sorted.iter().sum();
+            eprintln!(
+                "Native benchmark frames{label}: {} frames, {:.1} FPS, p50 {:.2} ms, p95 {:.2} ms, p99 {:.2} ms, max {:.2} ms",
+                sorted.len(),
+                sorted.len() as f32 / total.max(1e-6),
+                pct(50),
+                pct(95),
+                pct(99),
+                sorted[sorted.len() - 1] * 1000.
+            );
+            // Frame-time histogram in milliseconds.
+            let edges = [8.3f32, 16.7, 25.0, 33.3, 50.0, 100.0];
+            let mut counts = [0usize; 7];
+            for &f in frames {
+                let ms = f * 1000.;
+                counts[edges.iter().take_while(|&&e| ms >= e).count()] += 1;
+            }
+            eprintln!(
+                "Native benchmark frame histogram{label}: <8.3 ms {}, 8.3-16.7 {}, 16.7-25 {}, 25-33.3 {}, 33.3-50 {}, 50-100 {}, >=100 {}",
+                counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6]
+            );
+        };
+        report("", &self.bench_frames);
+        report(" (frame time without vsync)", &self.bench_work);
+        // Frames that overlapped a ring step that absorbed and bred a block.
+        let mut spans = self.worker.breeding.lock().unwrap().clone();
+        spans.sort_by_key(|span| span.0);
+        let breeding: Vec<f32> = self
+            .bench_frames
+            .iter()
+            .zip(&self.bench_frame_starts)
+            .filter(|&(&dt, &start)| {
+                let end = start + Duration::from_secs_f32(dt);
+                spans.iter().any(|&(a, b, _)| start < b && end > a)
+            })
+            .map(|(&dt, _)| dt)
+            .collect();
+        let bred: f32 = spans.iter().map(|(a, b, _)| (*b - *a).as_secs_f32()).sum();
         eprintln!(
-            "Native benchmark frames: {} frames, {:.1} FPS, p50 {:.2} ms, p95 {:.2} ms, p99 {:.2} ms, max {:.2} ms",
-            frames.len(),
-            frames.len() as f32 / total.max(1e-6),
-            pct(50),
-            pct(95),
-            pct(99),
-            frames[frames.len() - 1] * 1000.
+            "Native benchmark breeding: {} blocks absorbed and bred, {bred:.2} s",
+            spans.len()
         );
+        report(" during breeding", &breeding);
+        if let (Some(start), Some(end)) = (self.bench_faults, crate::threads::major_faults()) {
+            eprintln!(
+                "Native benchmark UI thread: {} major faults while measuring",
+                end - start
+            );
+        }
     }
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32();
@@ -4791,7 +4847,12 @@ impl eframe::App for App {
             self.frame_times.pop_front();
         }
         if self.worker.measuring.load(Ordering::Relaxed) {
+            if self.bench_frames.is_empty() {
+                self.bench_faults = crate::threads::major_faults();
+            }
             self.bench_frames.push(dt);
+            self.bench_frame_starts
+                .push(now - Duration::from_secs_f32(dt));
             // EVOLUTION_BENCH_REPLAY: ask for the champion's replay every 6 s
             // and time how long it takes to appear.
             if std::env::var_os("EVOLUTION_BENCH_REPLAY").is_some()
@@ -4802,7 +4863,7 @@ impl eframe::App for App {
                 self.bench_last_replay = now;
                 self.set_preview(creature, config);
             }
-            if self.bench_last_ping.elapsed() >= Duration::from_millis(500) {
+            if self.bench_last_ping.elapsed() >= Duration::from_millis(100) {
                 self.bench_last_ping = now;
                 self.bench_pings += 1;
                 // Every tenth probe re-applies the settings, like an
@@ -5238,6 +5299,13 @@ impl eframe::App for App {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
+        }
+        // eframe's frame time: the previous frame's update, tessellation
+        // and paint, without the wait for vsync.
+        if self.worker.measuring.load(Ordering::Relaxed)
+            && let Some(seconds) = frame.info().cpu_usage
+        {
+            self.bench_work.push(seconds);
         }
     }
 }

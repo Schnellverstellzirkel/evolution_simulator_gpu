@@ -53,7 +53,7 @@ A world change applies at once. Blocks already run or running in the old world e
 
 ## Threads
 
-The general Rayon pool (archive insertion, breeding, packing) takes half the logical CPUs, at most eight. `RAYON_NUM_THREADS` can lower it. Each GPU has its own engine thread that packs the next unit while earlier units run. `EVOLUTION_DEVICES=primary` keeps evaluation to the primary GPU. The UI has its own render device and targets 60 FPS.
+The general Rayon pool (archive insertion, breeding, packing) takes every logical CPU but two, as SCHED_BATCH threads at nice 10 pinned to hardware threads 2 to 15 (`src/threads.rs`). `RAYON_NUM_THREADS` can lower it. The worker thread runs on hardware thread 0 and the GPU engine thread on 1. The worker runs ring steps on a helper thread and reads commands every millisecond, so a control never waits behind a block being absorbed and bred; commands that change the experiment apply when the step in progress ends. The UI thread asks the scheduler for a 1 ms slice. Each GPU has its own engine thread that packs the next unit while earlier units run. `EVOLUTION_DEVICES=primary` keeps evaluation to the primary GPU. The UI has its own render device and targets 60 FPS.
 
 ## Checks
 

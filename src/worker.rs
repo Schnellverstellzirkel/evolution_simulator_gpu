@@ -388,6 +388,10 @@ pub struct Worker {
     pub pause: Arc<AtomicBool>,
     /// True while a native benchmark is inside its measured window (after warm-up).
     pub measuring: Arc<AtomicBool>,
+    /// Start and end of every ring step that absorbed and bred a block while
+    /// measuring, and whether it ended a generation, for the benchmark's
+    /// frame times and control latency during breeding.
+    pub breeding: Arc<Mutex<Vec<(Instant, Instant, bool)>>>,
     /// A pause developers asked for from outside the game (`dev_pause`).
     pub dev_pause: Arc<crate::dev_pause::Shared>,
     join: Option<std::thread::JoinHandle<()>>,
@@ -406,16 +410,21 @@ impl Worker {
         let pause = Arc::new(AtomicBool::new(false));
         let paused = pause.clone();
         let measuring = Arc::new(AtomicBool::new(false));
-        let bench_measuring = measuring.clone();
+        let breeding = Arc::new(Mutex::new(Vec::new()));
+        let bench = Bench {
+            measuring: measuring.clone(),
+            breeding: breeding.clone(),
+        };
         let join = std::thread::Builder::new()
             .name("evolution".into())
-            .spawn(move || run(gpu, rx, output, paused, bench_measuring, ctx, dev))
+            .spawn(move || run(gpu, rx, output, paused, bench, ctx, dev))
             .expect("Start simulation worker");
         Self {
             tx,
             view,
             pause,
             measuring,
+            breeding,
             dev_pause,
             join: Some(join),
         }
@@ -529,15 +538,92 @@ struct Loading {
     started: Instant,
 }
 
+/// What the worker shares with the UI for the native benchmark.
+struct Bench {
+    measuring: Arc<AtomicBool>,
+    breeding: Arc<Mutex<Vec<(Instant, Instant, bool)>>>,
+}
+/// Ring steps of one search pass, run on a helper thread.
+#[derive(Default)]
+struct Pass {
+    step: crate::ring::Step,
+    /// Send and read times of the pings read during the pass.
+    pings: Vec<(Instant, Instant)>,
+    /// Steps that absorbed a block: start, end, and whether it ended a
+    /// generation.
+    breeding: Vec<(Instant, Instant, bool)>,
+}
+/// Longest search pass: snapshots are built between passes.
+const PASS_LIMIT: Duration = Duration::from_millis(100);
+/// Runs ring steps on `helper`, a thread on the pool's CPUs, until a
+/// generation ends, a command arrives or `PASS_LIMIT` passes, while this
+/// thread reads commands every millisecond. Absorbing and breeding a block
+/// takes a few tenths of a second at 3M; the worker keeps reading commands
+/// through it. Pings are answered at once. Other commands act on the
+/// experiment, so they wait in `deferred`, in order, for the step in
+/// progress to end.
+fn search_pass(
+    helper: &crate::threads::Helper,
+    e: &mut Experiment,
+    sched: &mut crate::scheduler::Scheduler,
+    ring: &mut crate::ring::Ring,
+    rx: &Receiver<Command>,
+    deferred: &mut Vec<Command>,
+) -> anyhow::Result<Pass> {
+    let stop = AtomicBool::new(false);
+    let mut pings = Vec::new();
+    let mut result = helper.run(
+        || -> anyhow::Result<Pass> {
+            let started = Instant::now();
+            let mut pass = Pass::default();
+            loop {
+                let step_started = Instant::now();
+                let step = ring.step(e, sched, Duration::from_millis(4), 1)?;
+                if step.absorbed > 0 {
+                    pass.breeding
+                        .push((step_started, Instant::now(), step.generations > 0));
+                }
+                pass.step.absorbed += step.absorbed;
+                pass.step.generations += step.generations;
+                if pass.step.generations > 0
+                    || stop.load(Ordering::Relaxed)
+                    || started.elapsed() >= PASS_LIMIT
+                {
+                    return Ok(pass);
+                }
+            }
+        },
+        || match rx.recv_timeout(Duration::from_millis(1)) {
+            Ok(Command::Ping(sent)) => pings.push((sent, Instant::now())),
+            Ok(command) => {
+                deferred.push(command);
+                stop.store(true, Ordering::Relaxed);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // The UI is gone: the loop ends after this pass.
+                stop.store(true, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        },
+    );
+    if let Ok(pass) = &mut result {
+        pass.pings = pings;
+    }
+    result
+}
 fn run(
     mut gpu: Gpu,
     rx: Receiver<Command>,
     output: Arc<Mutex<Option<Snapshot>>>,
     pause: Arc<AtomicBool>,
-    measuring: Arc<AtomicBool>,
+    bench: Bench,
     ctx: eframe::egui::Context,
     mut dev: crate::dev_pause::DevPause,
 ) {
+    crate::threads::pin_worker();
+    let helper = crate::threads::Helper::new("search");
+    let measuring = bench.measuring.clone();
     let mut exp: Option<Experiment> = None;
     let mut running = false;
     // The UI asked for the ranked archive (`Command::Cards`).
@@ -584,7 +670,8 @@ fn run(
     let mut benchmark_stage_seconds = [0.0f64; 3];
     let mut benchmark_generation_seconds: Vec<f64> = Vec::new();
     let mut benchmark_generation_started = Instant::now();
-    let mut benchmark_ping_ms: Vec<f64> = Vec::new();
+    // Send and read time of every ping.
+    let mut benchmark_pings: Vec<(Instant, Instant)> = Vec::new();
     let mut benchmark_configure_ms: Vec<f64> = Vec::new();
     let mut stage_log = StageLog::open();
     // The creatures in flight, and the generation a run of one generation
@@ -798,6 +885,7 @@ fn run(
                             std::thread::Builder::new()
                                 .name("load".into())
                                 .spawn(move || {
+                                    crate::threads::pin_pool();
                                     storage::load_with_progress(
                                         &thread_path,
                                         Some(&thread_progress),
@@ -824,7 +912,7 @@ fn run(
                     }
                     Command::Ping(sent) => {
                         if measuring.load(Ordering::Relaxed) {
-                            benchmark_ping_ms.push(sent.elapsed().as_secs_f64() * 1e3);
+                            benchmark_pings.push((sent, Instant::now()));
                         }
                         changed = false;
                     }
@@ -980,11 +1068,15 @@ fn run(
                     ring.start(e, sched);
                 }
                 sched.pump()?;
-                // One block per pass: archiving and breeding a block takes a
-                // few tenths of a second, and controls are read between
-                // passes. Blocks are absorbed in ring order, so the run does
-                // not depend on which unit finished first.
-                let step = ring.step(e, sched, Duration::from_millis(4), 1)?;
+                // Blocks are absorbed in ring order, so the run does not
+                // depend on which unit finished first, nor on when commands
+                // are read.
+                let pass = search_pass(&helper, e, sched, &mut ring, &rx, &mut deferred)?;
+                let step = pass.step;
+                if measuring.load(Ordering::Relaxed) {
+                    benchmark_pings.extend(&pass.pings);
+                    bench.breeding.lock().unwrap().extend(&pass.breeding);
+                }
                 let seconds = pass_started.elapsed().as_secs_f64();
                 e.evaluation_seconds += seconds;
                 let [archive, breeding] = std::mem::take(&mut e.stage_seconds);
@@ -1062,7 +1154,8 @@ fn run(
                         &benchmark_generation_seconds,
                         &snapshot_build_ms,
                         &benchmark_configure_ms,
-                        &benchmark_ping_ms,
+                        &benchmark_pings,
+                        &bench.breeding.lock().unwrap(),
                     );
                     running = false;
                     // Developer benchmarks: EVOLUTION_BENCH_SAVE keeps the
@@ -1096,6 +1189,7 @@ fn run(
                     // the archives and the search state.
                     let snapshot = e.clone();
                     checkpoint_thread = Some(std::thread::spawn(move || {
+                        crate::threads::pin_pool();
                         if let Err(err) = storage::save(&path, &snapshot) {
                             eprintln!("Background checkpoint failed: {err:#}");
                             return None;
@@ -1427,7 +1521,8 @@ fn report_benchmark(
     generation_seconds: &[f64],
     snapshot_build_ms: &[f64],
     configure_ms: &[f64],
-    ping_ms: &[f64],
+    pings: &[(Instant, Instant)],
+    breeding: &[(Instant, Instant, bool)],
 ) {
     let creatures = f64::from(generations) * e.config.population as f64;
     eprintln!(
@@ -1473,27 +1568,55 @@ fn report_benchmark(
     let configures = sorted(configure_ms);
     if !configures.is_empty() {
         eprintln!(
-            "Native benchmark settings latency: {} probes, median {:.1} ms, max {:.1} ms",
+            "Native benchmark settings latency: {} probes, median {:.1} ms, p99 {:.1} ms, max {:.1} ms",
             configures.len(),
             configures[configures.len() / 2],
+            configures[(configures.len() * 99 / 100).min(configures.len() - 1)],
             configures.last().copied().unwrap_or(0.0)
         );
     }
-    let pings = sorted(ping_ms);
-    let pct = |q: usize| {
+    // Control latency over all probes, over the probes that waited while a
+    // block was absorbed and bred, and over those that waited while a
+    // generation ended.
+    let waited = |boundary: bool| -> Vec<f64> {
         pings
-            .get((pings.len() * q / 100).min(pings.len().saturating_sub(1)))
-            .copied()
-            .unwrap_or(0.0)
+            .iter()
+            .filter(|&&(sent, read)| {
+                breeding
+                    .iter()
+                    .any(|&(a, b, ended)| (ended || !boundary) && sent < b && read > a)
+            })
+            .map(|(sent, read)| (*read - *sent).as_secs_f64() * 1e3)
+            .collect()
     };
-    eprintln!(
-        "Native benchmark control latency: {} probes, p50 {:.1} ms, p95 {:.1} ms, p99 {:.1} ms, max {:.1} ms",
-        pings.len(),
-        pct(50),
-        pct(95),
-        pct(99),
-        pings.last().copied().unwrap_or(0.0)
-    );
+    let all: Vec<f64> = pings
+        .iter()
+        .map(|(sent, read)| (*read - *sent).as_secs_f64() * 1e3)
+        .collect();
+    for (pings, when) in [all, waited(false), waited(true)].iter().zip([
+        "",
+        " during breeding",
+        " across boundaries",
+    ]) {
+        let pings = sorted(pings);
+        let pct = |q: usize| {
+            pings
+                .get((pings.len() * q / 100).min(pings.len().saturating_sub(1)))
+                .copied()
+                .unwrap_or(0.0)
+        };
+        eprintln!(
+            "Native benchmark control latency{when}: {} probes, p50 {:.1} ms, p95 {:.1} ms, p99 {:.1} ms, max {:.1} ms",
+            pings.len(),
+            pct(50),
+            pct(95),
+            pct(99),
+            pings.last().copied().unwrap_or(0.0)
+        );
+    }
+    if let Some(faults) = crate::threads::major_faults() {
+        eprintln!("Native benchmark worker thread: {faults} major faults since start");
+    }
     for device in &sched.devices {
         eprintln!(
             "Native benchmark device {}: {} creatures, busy {:.3} s, idle {:.3} s, rate {:.0}/s (totals since start)",

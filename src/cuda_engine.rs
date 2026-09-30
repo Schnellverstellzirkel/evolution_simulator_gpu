@@ -707,7 +707,11 @@ impl Prefetch {
             let (prefetch, api, options) = (self.clone(), api.clone(), options.clone());
             let spawned = std::thread::Builder::new()
                 .name("cuda-compile".into())
-                .spawn(move || prefetch.work(&api, &options));
+                .spawn(move || {
+                    // Compile beside the pool, not on the engine thread's CPU.
+                    crate::threads::pin_pool();
+                    prefetch.work(&api, &options)
+                });
             if spawned.is_err() {
                 break;
             }

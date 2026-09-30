@@ -33,7 +33,7 @@ export EVOLUTION_DEVICES=primary
 nice -n 10 cargo run --release
 ```
 
-The default GPU name is `RTX 4060`; `--gpu NAME` selects another NVIDIA GPU. Secondary GPUs are off by default; `EVOLUTION_DEVICES=NAME` adds other NVIDIA GPUs to evaluation, and `EVOLUTION_DEVICES=primary` keeps them off. Keep that setting on this workstation, because the Radeon 780M draws the desktop and the game window and never evaluates creatures ([building](docs/building.md#the-radeon-780m) has the reasons). General Rayon workers (archive insertion, breeding, packing) take half the available logical CPUs, at most eight; `RAYON_NUM_THREADS` can lower that.
+The default GPU name is `RTX 4060`; `--gpu NAME` selects another NVIDIA GPU. Secondary GPUs are off by default; `EVOLUTION_DEVICES=NAME` adds other NVIDIA GPUs to evaluation, and `EVOLUTION_DEVICES=primary` keeps them off. Keep that setting on this workstation, because the Radeon 780M draws the desktop and the game window and never evaluates creatures ([building](docs/building.md#the-radeon-780m) has the reasons). General Rayon workers (archive insertion, breeding, packing) take every logical CPU but two, at low priority; `RAYON_NUM_THREADS` can lower that.
 
 If the primary GPU cannot open, the game stops and says why. A GPU that fails during a run is reopened and its unfinished units, including pending confirmation trials, run again with the same creatures and settings. A GPU that does not reopen stops the session with a persistent error after completed results are stored.
 

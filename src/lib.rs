@@ -17,6 +17,7 @@ pub mod scheduler;
 pub mod schematic;
 pub mod storage;
 pub mod theme;
+pub mod threads;
 pub mod ui;
 pub mod warp_kernel;
 pub mod worker;

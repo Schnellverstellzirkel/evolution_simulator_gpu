@@ -522,6 +522,7 @@ pub fn gpu_engine(name: &str, max_nodes: usize) -> Result<ThreadedEngine> {
     let thread = std::thread::Builder::new()
         .name(format!("gpu-{name}"))
         .spawn(move || {
+            crate::threads::pin_engine();
             let engine = match CudaEngine::new(&device_name, max_nodes) {
                 Ok(engine) => {
                     let _ = ready_tx.send(Ok((engine.name.clone(), engine.max_capacity)));

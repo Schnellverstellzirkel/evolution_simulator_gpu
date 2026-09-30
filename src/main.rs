@@ -2,11 +2,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use evolution_simulator::{
     config::Config,
-    engine,
     gpu::Gpu,
     ring::Ring,
     storage::{self, Experiment},
-    ui,
+    threads, ui,
 };
 use std::{
     path::PathBuf,
@@ -85,13 +84,14 @@ enum Action {
     },
 }
 fn main() -> Result<()> {
-    // General workers take half the logical CPUs, at most eight. The owner
-    // allows the game the whole machine, but at 3M creatures 16 general
-    // workers (129.8k creatures/s) were no faster than 8 (137.8k): the GPU
-    // bounds the game and busy CPU cores slow it.
+    // The Rayon pool breeds on every CPU but two: the first runs the
+    // worker thread and the second the GPU engine thread, so commands and
+    // frames always find a core during a breeding burst. Pool threads are
+    // SCHED_BATCH at nice 10 (`threads`).
+    threads::init();
     rayon::ThreadPoolBuilder::new()
-        .num_threads(engine::rayon_threads())
-        .start_handler(|_| engine::lower_thread_priority())
+        .num_threads(threads::pool_threads())
+        .start_handler(|_| threads::pool_thread_start())
         .build_global()?;
     let cli = Cli::parse();
     let result = match cli.command {
