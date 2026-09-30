@@ -32,9 +32,13 @@ GPU tests are ignored. Select them explicitly, for example
 ## CUDA on NVIDIA GPUs
 
 On an NVIDIA GPU the game evaluates creatures through CUDA
-(`src/cuda_engine.rs`, `shaders/physics2_creature.cu`). On the RTX 4060 it
-runs an evolved population about 1.8 times as fast as Vulkan and a fresh game
-at the same speed (`docs/design-decisions.md`).
+(`src/cuda_engine.rs`, `shaders/warp_creature.cu`, `src/warp_kernel.rs`).
+`examples/warp_regs.rs` prints each kernel's registers and spills from NVRTC
+alone; `EVOLUTION_WARP_PROFILE=1` makes one warp print its cycles per kernel
+section. `EVOLUTION_WARP_SUBSTEPS`, `EVOLUTION_WARP_PGS_SWEEPS`,
+`EVOLUTION_WARP_CLEAN_SWEEPS`, `EVOLUTION_WARP_PLANT_ROUNDS` and
+`EVOLUTION_WARP_PLANT_SWEEPS` override the solver settings for measuring
+them.
 Nothing needs configuring: the build links no CUDA library, and the engine
 loads the CUDA driver library and NVRTC when it opens. If either is missing,
 or the GPU is not an NVIDIA GPU, the game prints one line and runs on Vulkan.

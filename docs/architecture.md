@@ -21,7 +21,7 @@
 
 ## Scoring and replays
 
-The GPU scores every creature. `shaders/physics2_creature.wgsl` (Vulkan) and its CUDA mirror `shaders/physics2_creature.cu` run one creature per lane, bucketed by node capacity (3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48 and 64). CUDA is used on NVIDIA when the driver and NVRTC load. The GPU result and the GPU confirmation trial are final: no CPU run validates, caps or moves a GPU score. The CPU engine scores CPU-only games and takes over units of a GPU that fails.
+The GPU scores every creature. On NVIDIA, when the driver and NVRTC load, `shaders/warp_creature.cu` runs one creature per group of 8, 16 or 32 lanes of a warp, by its nodes and muscles (`src/warp_kernel.rs`). A unit runs as waves of up to 262,144 creatures, one launch each, and a lane group runs its creature to the end of its trial and takes the next from the wave, so there are no trial segments. Kernels compile per lane class, world (the effects that are on), rate and recording. Elsewhere `shaders/physics2_creature.wgsl` (Vulkan) runs one creature per lane, bucketed by node capacity. The GPU result and the GPU confirmation trial are final: no CPU run validates, caps or moves a GPU score. The CPU engine scores CPU-only games and takes over units of a GPU that fails.
 
 `engine::replay` sends the creature to the primary GPU's engine thread. It runs the scoring kernel with a frame output (node positions, muscle energy and force, contact forces) on a slot and queue of its own, and returns the frames and the result of that same run. Without a GPU, or when the GPU does not answer in time, the replay runs on the CPU engine.
 

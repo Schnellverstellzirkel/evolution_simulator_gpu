@@ -4,7 +4,7 @@ A creature is a tree of point masses (nodes) joined by rigid, massless bones. Th
 
 The dynamics are Featherstone's articulated-body algorithm in planar spatial vectors, written in world axes about the head's position at the start of the step so the numbers stay small in single precision. The neck body floats freely. Every other bone turns about its pivot relative to its parent bone. Integration is semi-implicit Euler on the joint coordinates at 60 steps per second. Trials last 20 s after a short settling phase.
 
-The scalar reference is `physics2::simulate_step_inner`. The WGSL kernel, the CUDA kernel and the fast CPU engine (`cpu_v2`) compute the same expressions. The two GPU kernels change together.
+The scalar reference is `physics2::simulate_step_inner`. The WGSL kernel and the fast CPU engine (`cpu_v2`) compute the same expressions. The CUDA kernel (`shaders/warp_creature.cu`), the physics authority on NVIDIA, differs in the contact solve and the time step: see the last section.
 
 ## Forces and rules
 
@@ -37,6 +37,12 @@ Each effect changes the physics and never the objective. Levels are in `src/envi
 ## Cost
 
 The contact solve is about 55% of a step. The dense contact matrix, the sweeps and the planting rounds each cost a quarter to a third of that section. `docs/rejected-ideas.md` lists what was tried to make it cheaper.
+
+## The CUDA kernel
+
+Each 1/60 s step is 2 substeps of 1/120 s. A substep is one articulated-body pass with the muscles, gravity, wind, drag and water, then one contact solve: the deepest 4 nodes that would reach the ground within the substep, the exact contact-space matrix, and 4 sweeps of projected Gauss-Seidel from zero impulses, then 1 sweep that only takes back friction that would do positive work. There are no planting rounds, no warm start and no static friction factor. The momentum balance runs after every substep, the first-law check after every substep without contact. Joint limits, joint break, the fall rule, head shake, screening, every environment effect and the muscle model (waveform, Hill, energy store, tendon with its slack length, sensors, per-limb clocks) are as above, with the substep's time step where the rules above say step.
+
+Measured on 300 elites of an evolved population (60 Hz against the same kernel at 4x rate): 2 substeps give a median distance ratio of 1.03; 1 substep gives 0.05, and 1 substep with one planting round 0.79. Holding the muscle forces over both substeps gave 0.41. Random bodies gain nothing (median -0.05 m, best -0.01 m in 20 s).
 
 ## Audits
 
