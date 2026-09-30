@@ -70,7 +70,8 @@ impl Gpu {
     pub fn async_capable(&self) -> bool {
         self.sched.is_some()
     }
-    pub fn async_in_flight(&self) -> usize {
-        self.sched.as_ref().map_or(0, |s| s.in_flight())
+    /// Units on the evaluation engines now.
+    pub fn on_engines(&self) -> usize {
+        self.sched.as_ref().map_or(0, Scheduler::on_engines)
     }
 }

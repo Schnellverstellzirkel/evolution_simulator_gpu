@@ -216,7 +216,7 @@ pub const NO_SENSOR: u32 = 255;
 fn no_sensor() -> u32 {
     NO_SENSOR
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Genome {
     pub node_start: usize,
     pub node_count: usize,
@@ -243,28 +243,6 @@ fn split<T>(mut all: &mut [T], sizes: impl Iterator<Item = usize>) -> Vec<&mut [
     }
     out
 }
-/// Spare gene arenas that `Population::compact_with` fills and swaps in.
-#[derive(Default)]
-pub struct Arena {
-    nodes: Vec<NodeGene>,
-    bones: Vec<Bone>,
-    muscles: Vec<Muscle>,
-}
-impl Arena {
-    /// Bytes the spare arenas hold, by capacity.
-    pub fn bytes(&self) -> usize {
-        self.nodes.capacity() * std::mem::size_of::<NodeGene>()
-            + self.bones.capacity() * std::mem::size_of::<Bone>()
-            + self.muscles.capacity() * std::mem::size_of::<Muscle>()
-    }
-}
-/// Spare memory is not state: a copy starts empty.
-impl Clone for Arena {
-    fn clone(&self) -> Self {
-        Self::default()
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Population {
     pub genomes: Vec<Genome>,
@@ -328,216 +306,9 @@ impl Population {
         self.bones.extend(c.bones);
         self.muscles.extend(c.muscles);
     }
-    /// Puts `c` into population slot `slot`. Its genes are appended to the
-    /// arenas; `compact` later drops the replaced genes.
-    pub fn replace(&mut self, slot: usize, c: Creature) {
-        let mut c = c;
-        canonicalize_bone_order(&mut c);
-        self.genomes[slot] = Genome {
-            node_start: self.nodes.len(),
-            node_count: c.nodes.len(),
-            bone_start: self.bones.len(),
-            bone_count: c.bones.len(),
-            muscle_start: self.muscles.len(),
-            muscle_count: c.muscles.len(),
-            id: c.id,
-        };
-        self.nodes.extend(c.nodes);
-        self.bones.extend(c.bones);
-        self.muscles.extend(c.muscles);
-    }
-    /// Rebuilds the arenas without genes of replaced creatures.
-    pub fn compact(&mut self) {
-        self.compact_with(&mut Arena::default());
-    }
-    /// Rebuilds the arenas without genes of replaced creatures, copying the
-    /// live genes in parallel into `spare`, whose memory is already mapped
-    /// after the first generation; the old arenas become the next spare.
-    /// Genes keep their creature order, so the result equals `compact`.
-    pub fn compact_with(&mut self, spare: &mut Arena) {
-        const CHUNK: usize = 4096;
-        let Population {
-            genomes,
-            nodes,
-            bones,
-            muscles,
-        } = self;
-        let sizes: Vec<[usize; 3]> = genomes
-            .par_chunks(CHUNK)
-            .map(|chunk| {
-                chunk.iter().fold([0; 3], |t, g| {
-                    [
-                        t[0] + g.node_count,
-                        t[1] + g.bone_count,
-                        t[2] + g.muscle_count,
-                    ]
-                })
-            })
-            .collect();
-        let mut starts = Vec::with_capacity(sizes.len());
-        let mut total = [0usize; 3];
-        for size in &sizes {
-            starts.push(total);
-            for k in 0..3 {
-                total[k] += size[k];
-            }
-        }
-        fn sized<T: Copy>(spare: &mut Vec<T>, len: usize, fill: Option<T>) {
-            spare.clear();
-            if let Some(fill) = fill {
-                spare.resize(len, fill);
-            }
-        }
-        sized(&mut spare.nodes, total[0], nodes.first().copied());
-        sized(&mut spare.bones, total[1], bones.first().copied());
-        sized(&mut spare.muscles, total[2], muscles.first().copied());
-        let node_parts = split(&mut spare.nodes, sizes.iter().map(|s| s[0]));
-        let bone_parts = split(&mut spare.bones, sizes.iter().map(|s| s[1]));
-        let muscle_parts = split(&mut spare.muscles, sizes.iter().map(|s| s[2]));
-        let (old_nodes, old_bones, old_muscles) = (&*nodes, &*bones, &*muscles);
-        genomes
-            .par_chunks_mut(CHUNK)
-            .zip(node_parts)
-            .zip(bone_parts)
-            .zip(muscle_parts)
-            .zip(starts)
-            .for_each(|((((chunk, node_part), bone_part), muscle_part), start)| {
-                let mut at = [0usize; 3];
-                for g in chunk {
-                    node_part[at[0]..at[0] + g.node_count]
-                        .copy_from_slice(&old_nodes[g.node_start..g.node_start + g.node_count]);
-                    bone_part[at[1]..at[1] + g.bone_count]
-                        .copy_from_slice(&old_bones[g.bone_start..g.bone_start + g.bone_count]);
-                    muscle_part[at[2]..at[2] + g.muscle_count].copy_from_slice(
-                        &old_muscles[g.muscle_start..g.muscle_start + g.muscle_count],
-                    );
-                    g.node_start = start[0] + at[0];
-                    g.bone_start = start[1] + at[1];
-                    g.muscle_start = start[2] + at[2];
-                    at[0] += g.node_count;
-                    at[1] += g.bone_count;
-                    at[2] += g.muscle_count;
-                }
-            });
-        std::mem::swap(nodes, &mut spare.nodes);
-        std::mem::swap(bones, &mut spare.bones);
-        std::mem::swap(muscles, &mut spare.muscles);
-        // Breeding appends a generation of children before the next
-        // compaction: room for them now (with an eighth more, as bodies
-        // grow) means no doubling reallocation later. The spare keeps only
-        // what that compaction fills, so the old arena's children do not stay
-        // resident.
-        fn resize_room<T>(live: &mut Vec<T>, spare: &mut Vec<T>, len: usize) {
-            live.reserve_exact(len + len / 8);
-            spare.clear();
-            spare.shrink_to(len + len / 8);
-        }
-        resize_room(nodes, &mut spare.nodes, total[0]);
-        resize_room(bones, &mut spare.bones, total[1]);
-        resize_room(muscles, &mut spare.muscles, total[2]);
-    }
-    /// `replace` for many slots at once: canonicalizes and copies the genes
-    /// in parallel, then appends them in slot order, so the arenas end up
-    /// exactly as after replacing the slots one by one.
-    pub fn replace_many(&mut self, slots: &[usize], mut creatures: Vec<Creature>) {
-        const CHUNK: usize = 4096;
-        let counts: Vec<[u32; 3]> = creatures
-            .par_iter()
-            .map(|c| {
-                [
-                    c.nodes.len() as u32,
-                    c.bones.len() as u32,
-                    c.muscles.len() as u32,
-                ]
-            })
-            .collect();
-        let sizes: Vec<[usize; 3]> = counts
-            .par_chunks(CHUNK)
-            .map(|part| {
-                part.iter().fold([0; 3], |t, c| {
-                    [
-                        t[0] + c[0] as usize,
-                        t[1] + c[1] as usize,
-                        t[2] + c[2] as usize,
-                    ]
-                })
-            })
-            .collect();
-        let added = sizes
-            .iter()
-            .fold([0; 3], |t, s| [t[0] + s[0], t[1] + s[1], t[2] + s[2]]);
-        // One pass: each run of children puts its bones in canonical order,
-        // writes its genes into its own part of the arenas' spare room and
-        // frees the children while they are still in cache. The first touch
-        // of fresh memory is most of the cost, so all threads share it.
-        self.nodes.reserve(added[0]);
-        self.bones.reserve(added[1]);
-        self.muscles.reserve(added[2]);
-        let node_parts = split(
-            &mut self.nodes.spare_capacity_mut()[..added[0]],
-            sizes.iter().map(|s| s[0]),
-        );
-        let bone_parts = split(
-            &mut self.bones.spare_capacity_mut()[..added[1]],
-            sizes.iter().map(|s| s[1]),
-        );
-        let muscle_parts = split(
-            &mut self.muscles.spare_capacity_mut()[..added[2]],
-            sizes.iter().map(|s| s[2]),
-        );
-        creatures
-            .par_chunks_mut(CHUNK)
-            .zip(node_parts)
-            .zip(bone_parts)
-            .zip(muscle_parts)
-            .for_each(|(((chunk, nodes), bones), muscles)| {
-                let mut at = [0; 3];
-                for c in chunk {
-                    canonicalize_bone_order(c);
-                    for (dst, &src) in nodes[at[0]..].iter_mut().zip(&c.nodes) {
-                        dst.write(src);
-                    }
-                    for (dst, &src) in bones[at[1]..].iter_mut().zip(&c.bones) {
-                        dst.write(src);
-                    }
-                    for (dst, &src) in muscles[at[2]..].iter_mut().zip(&c.muscles) {
-                        dst.write(src);
-                    }
-                    at = [
-                        at[0] + c.nodes.len(),
-                        at[1] + c.bones.len(),
-                        at[2] + c.muscles.len(),
-                    ];
-                    drop(std::mem::take(&mut c.nodes));
-                    drop(std::mem::take(&mut c.bones));
-                    drop(std::mem::take(&mut c.muscles));
-                }
-            });
-        let mut at = [self.nodes.len(), self.bones.len(), self.muscles.len()];
-        // SAFETY: the parts cover the first `added` spare elements of each
-        // arena, and every run wrote all of its part.
-        unsafe {
-            self.nodes.set_len(at[0] + added[0]);
-            self.bones.set_len(at[1] + added[1]);
-            self.muscles.set_len(at[2] + added[2]);
-        }
-        for ((&slot, c), count) in slots.iter().zip(&creatures).zip(&counts) {
-            let (n, b, m) = (count[0] as usize, count[1] as usize, count[2] as usize);
-            self.genomes[slot] = Genome {
-                node_start: at[0],
-                node_count: n,
-                bone_start: at[1],
-                bone_count: b,
-                muscle_start: at[2],
-                muscle_count: m,
-                id: c.id,
-            };
-            at = [at[0] + n, at[1] + b, at[2] + m];
-        }
-    }
-    /// `replace_many` for children packed into batches: batch after batch
-    /// go to `slots` in order, and the arenas end up exactly as after
-    /// `replace_many` with the same children.
+    /// Children packed into batches, batch after batch, for `slots` in
+    /// order: their genes are appended to the arenas and each slot's genome
+    /// points at its child.
     pub fn append_batches(&mut self, slots: &[usize], batches: Vec<ChildBatch>) {
         let sizes: Vec<[usize; 3]> = batches
             .iter()
@@ -1328,75 +1099,80 @@ fn random_creature_from(cfg: &Config, rng: &mut Rng) -> Creature {
     }
     c
 }
+/// Builds creatures `0..count` in parallel, in index order.
 fn collect_parallel(count: usize, make: impl Fn(usize) -> Creature + Sync) -> Population {
-    collect_parallel_streaming(count, count.max(1), make, |_, _| Ok(()))
-        .expect("infallible slice callback")
-}
-/// Builds creatures `0..count` in slices of `slice` creatures (each slice in
-/// parallel) and calls `on_slice` with the population built so far after each
-/// slice. Indices and contents do not depend on the slice size.
-fn collect_parallel_streaming(
-    count: usize,
-    slice: usize,
-    make: impl Fn(usize) -> Creature + Sync,
-    mut on_slice: impl FnMut(&Population, std::ops::Range<usize>) -> Result<()>,
-) -> Result<Population> {
     let mut out = Population {
         genomes: Vec::with_capacity(count),
         ..Default::default()
     };
-    for start in (0..count).step_by(slice.max(1)) {
-        let end = (start + slice).min(count);
-        // Bounded temporary arenas, not a Vec<Creature> with millions of allocations retained.
-        let chunks: Vec<Population> = (start..end)
-            .step_by(4096)
-            .collect::<Vec<_>>()
-            .into_par_iter()
-            .map(|chunk| {
-                // Typical bodies are 3 to 8 nodes; a low estimate only costs a
-                // growth reallocation, never a different result.
-                let estimate = (chunk + 4096).min(end) - chunk;
-                let mut p = Population {
-                    nodes: Vec::with_capacity(estimate * 8),
-                    bones: Vec::with_capacity(estimate * 8),
-                    muscles: Vec::with_capacity(estimate * 10),
-                    ..Default::default()
-                };
-                for i in chunk..(chunk + 4096).min(end) {
-                    p.push(make(i));
-                }
-                p
-            })
-            .collect();
-        // Reserve the merged arenas exactly so the copies below do not
-        // reallocate the growing gene vectors.
-        let node_total: usize = chunks.iter().map(|chunk| chunk.nodes.len()).sum();
-        let bone_total: usize = chunks.iter().map(|chunk| chunk.bones.len()).sum();
-        let muscle_total: usize = chunks.iter().map(|chunk| chunk.muscles.len()).sum();
-        out.nodes.reserve_exact(node_total);
-        out.bones.reserve_exact(bone_total);
-        out.muscles.reserve_exact(muscle_total);
-        for mut chunk in chunks {
-            let ns = out.nodes.len();
-            let bs = out.bones.len();
-            let ms = out.muscles.len();
-            for g in &mut chunk.genomes {
-                g.node_start += ns;
-                g.bone_start += bs;
-                g.muscle_start += ms;
+    // Bounded temporary arenas, not a Vec<Creature> with millions of allocations retained.
+    let chunks: Vec<Population> = (0..count)
+        .step_by(4096)
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|chunk| {
+            // Typical bodies are 3 to 8 nodes; a low estimate only costs a
+            // growth reallocation, never a different result.
+            let estimate = (chunk + 4096).min(count) - chunk;
+            let mut p = Population {
+                nodes: Vec::with_capacity(estimate * 8),
+                bones: Vec::with_capacity(estimate * 8),
+                muscles: Vec::with_capacity(estimate * 10),
+                ..Default::default()
+            };
+            for i in chunk..(chunk + 4096).min(count) {
+                p.push(make(i));
             }
-            out.genomes.extend(chunk.genomes);
-            out.nodes.extend(chunk.nodes);
-            out.bones.extend(chunk.bones);
-            out.muscles.extend(chunk.muscles);
+            p
+        })
+        .collect();
+    // Reserve the merged arenas exactly so the copies below do not
+    // reallocate the growing gene vectors.
+    out.nodes
+        .reserve_exact(chunks.iter().map(|chunk| chunk.nodes.len()).sum());
+    out.bones
+        .reserve_exact(chunks.iter().map(|chunk| chunk.bones.len()).sum());
+    out.muscles
+        .reserve_exact(chunks.iter().map(|chunk| chunk.muscles.len()).sum());
+    for mut chunk in chunks {
+        let ns = out.nodes.len();
+        let bs = out.bones.len();
+        let ms = out.muscles.len();
+        for g in &mut chunk.genomes {
+            g.node_start += ns;
+            g.bone_start += bs;
+            g.muscle_start += ms;
         }
-        on_slice(&out, start..end)?;
+        out.genomes.extend(chunk.genomes);
+        out.nodes.extend(chunk.nodes);
+        out.bones.extend(chunk.bones);
+        out.muscles.extend(chunk.muscles);
     }
-    Ok(out)
+    out
 }
 pub fn create(cfg: &Config) -> Result<Population> {
     cfg.validate()?;
     Ok(collect_parallel(cfg.population, |i| initial(cfg, i)))
+}
+/// New random bodies for ring slots `first..first + count`.
+pub fn random_block(cfg: &Config, first: usize, count: usize) -> Population {
+    collect_parallel(count, |k| initial(cfg, first + k))
+}
+/// Ring slots have fewer than 2^24 places, so a bred creature's id holds its
+/// breeding round and its slot, and no two bred creatures share an id.
+const SLOT_BITS: u32 = 24;
+const BRED: u64 = 1 << 63;
+/// Id of the child bred for ring `slot` in breeding round `round`.
+pub fn bred_id(round: u64, slot: usize) -> u64 {
+    BRED | (round << SLOT_BITS) | slot as u64
+}
+/// The ring slot a creature was born in, from its id.
+pub fn slot_of_id(id: u64) -> usize {
+    if id & BRED != 0 {
+        (id & ((1 << SLOT_BITS) - 1)) as usize
+    } else {
+        id.saturating_sub(1) as usize
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1406,59 +1182,6 @@ pub struct CandidatePlan {
     pub cma: Option<usize>,
     /// Second archive parent with the same body plan, for crossover.
     pub mate: Option<usize>,
-}
-
-pub fn emit_archive_batch(
-    current: &Population,
-    archive: &[QdArchive],
-    cma_emitters: &[CmaEmitter],
-    plans: &[CandidatePlan],
-    cfg: &Config,
-    generation: u32,
-) -> Result<Population> {
-    emit_archive_batch_streaming(
-        current,
-        archive,
-        cma_emitters,
-        plans,
-        cfg,
-        generation,
-        cfg.population.max(1),
-        |_, _| Ok(()),
-    )
-}
-/// Like `emit_archive_batch`, but hands each finished slice of offspring to
-/// `on_slice` so evaluation can start while the rest is bred.
-#[allow(clippy::too_many_arguments)]
-pub fn emit_archive_batch_streaming(
-    current: &Population,
-    archive: &[QdArchive],
-    cma_emitters: &[CmaEmitter],
-    plans: &[CandidatePlan],
-    cfg: &Config,
-    generation: u32,
-    slice: usize,
-    on_slice: impl FnMut(&Population, std::ops::Range<usize>) -> Result<()>,
-) -> Result<Population> {
-    ensure_archive_batch_memory(current, &archive[0], cfg)?;
-    ensure!(plans.len() == cfg.population, "Invalid emitter plan count");
-    collect_parallel_streaming(
-        cfg.population,
-        slice,
-        |i| {
-            let mut rng = Rng::new(cfg.seed, generation, i);
-            let id = (generation as u64) * cfg.population as u64 + i as u64 + 1;
-            offspring(
-                &archive[qd::arena_of_slot(i, archive.len())],
-                cma_emitters,
-                plans[i],
-                cfg,
-                &mut rng,
-                id,
-            )
-        },
-        on_slice,
-    )
 }
 
 /// Breeds one offspring from its plan with the given random stream.
@@ -1667,37 +1390,6 @@ fn retime_rhythm(creature: &mut Creature, rng: &mut Rng) -> bool {
     true
 }
 
-/// Steady-state breeding: one offspring per plan, for population `slots`.
-/// `round` salts the random streams and keeps creature ids unique.
-#[allow(clippy::too_many_arguments)]
-pub fn emit_offspring(
-    archive: &[QdArchive],
-    cma_emitters: &[CmaEmitter],
-    plans: &[CandidatePlan],
-    slots: &[usize],
-    cfg: &Config,
-    generation: u32,
-    round: u64,
-) -> Vec<Creature> {
-    let seed = cfg.seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x5bd1_e995;
-    plans
-        .par_iter()
-        .zip(slots)
-        .map(|(&plan, &slot)| {
-            let mut rng = Rng::new(seed, generation, slot);
-            let id = (round << 32) ^ ((generation as u64) << 24) ^ slot as u64 ^ (1 << 63);
-            offspring(
-                &archive[qd::arena_of_slot(slot, archive.len())],
-                cma_emitters,
-                plan,
-                cfg,
-                &mut rng,
-                id,
-            )
-        })
-        .collect()
-}
-
 /// Children of one run of slots, genes packed into three vectors. A batch
 /// holds a few thousand children in three allocations, where one `Creature`
 /// per child took three each.
@@ -1733,9 +1425,10 @@ impl ChildBatch {
     }
 }
 
-/// `emit_offspring` that packs the children of each run of slots into a
-/// `ChildBatch` as it goes, so no child stays alive after it is copied.
-/// `Population::append_batches` writes the same arenas `replace_many` does.
+/// Breeds one offspring per plan, for ring `slots`, and packs the children
+/// of each run of slots into a `ChildBatch` as it goes, so no child stays
+/// alive after it is copied (`Population::append_batches`). `round` salts
+/// the random streams and keeps creature ids unique.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_offspring_batches(
     archive: &[QdArchive],
@@ -1760,7 +1453,7 @@ pub fn emit_offspring_batches(
             };
             for (&plan, &slot) in plans.iter().zip(slots) {
                 let mut rng = Rng::new(seed, generation, slot);
-                let id = (round << 32) ^ ((generation as u64) << 24) ^ slot as u64 ^ (1 << 63);
+                let id = bred_id(round, slot);
                 batch.push(offspring(
                     &archive[qd::arena_of_slot(slot, archive.len())],
                     cma_emitters,
@@ -1773,33 +1466,6 @@ pub fn emit_offspring_batches(
             batch
         })
         .collect()
-}
-
-pub fn ensure_archive_batch_memory(
-    current: &Population,
-    archive: &QdArchive,
-    cfg: &Config,
-) -> Result<()> {
-    let archive_bytes = archive
-        .entries
-        .iter()
-        .map(|elite| {
-            elite.creature.nodes.len() * std::mem::size_of::<NodeGene>()
-                + elite.creature.bones.len() * std::mem::size_of::<Bone>()
-                + elite.creature.muscles.len() * std::mem::size_of::<Muscle>()
-                + std::mem::size_of::<Creature>()
-        })
-        .sum::<usize>();
-    let temporary = current
-        .bytes()
-        .saturating_mul(4)
-        .saturating_add(archive_bytes.saturating_mul(3))
-        .saturating_add(cfg.population.saturating_mul(96));
-    ensure!(
-        temporary < cfg.ram_budget_mib * 1024 * 1024,
-        "Evolution would exceed the RAM budget; save and raise the budget before continuing"
-    );
-    Ok(())
 }
 
 fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f32) -> Creature {
@@ -2173,55 +1839,6 @@ mod tests {
             assert_eq!(a.id, b.id);
         }
         assert!(population.subset(&[]).genomes.is_empty());
-    }
-
-    #[test]
-    fn compaction_leaves_room_for_a_generation_and_keeps_a_small_spare() {
-        let cfg = Config {
-            population: 64,
-            random_seed: false,
-            seed: 5,
-            ..Config::default()
-        };
-        let mut population = create(&cfg).unwrap();
-        let children: Vec<Creature> = (0..cfg.population)
-            .map(|i| population.creature(i))
-            .collect();
-        let slots: Vec<usize> = (0..cfg.population).collect();
-        // Fill the spare with a large arena, as after a generation of breeding.
-        population.replace_many(&slots, children.clone());
-        population.replace_many(&slots, children.clone());
-        let mut spare = Arena::default();
-        population.compact_with(&mut spare);
-        population.replace_many(&slots, children.clone());
-        population.compact_with(&mut spare);
-        let live = population.bytes() - population.genomes.capacity() * size_of::<Genome>();
-        assert!(
-            spare.bytes() <= live,
-            "the spare keeps {} bytes for {live} live",
-            spare.bytes()
-        );
-        let arenas = (
-            population.nodes.as_ptr(),
-            population.bones.as_ptr(),
-            population.muscles.as_ptr(),
-        );
-        population.replace_many(&slots, children.clone());
-        assert_eq!(
-            arenas,
-            (
-                population.nodes.as_ptr(),
-                population.bones.as_ptr(),
-                population.muscles.as_ptr(),
-            ),
-            "a generation of children must fit without moving the arenas"
-        );
-        for (i, child) in children.iter().enumerate() {
-            let stored = population.creature(i);
-            assert_eq!(stored.nodes, child.nodes);
-            assert_eq!(stored.bones, child.bones);
-            assert_eq!(stored.muscles, child.muscles);
-        }
     }
 
     #[test]

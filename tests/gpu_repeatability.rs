@@ -41,10 +41,10 @@ fn gpu_repeats_scores_for_identical_trials() {
     }
     let scheduler = gpu.sched.as_mut().expect("scheduler");
     let first = scheduler
-        .evaluate_single(&pop, &indices, &cfg)
+        .evaluate(&pop, &indices, &cfg)
         .expect("first GPU trial");
     let second = scheduler
-        .evaluate_single(&pop, &indices, &cfg)
+        .evaluate(&pop, &indices, &cfg)
         .expect("repeat GPU trial");
 
     assert_eq!(first.len(), second.len());
@@ -70,8 +70,8 @@ fn gpu_repeats_scores_for_identical_trials() {
             "GPU metrics changed for creature {i}"
         );
         assert_eq!(
-            (a.screened, a.unchecked),
-            (b.screened, b.unchecked),
+            (a.screened, a.excluded),
+            (b.screened, b.excluded),
             "creature {i}"
         );
     }
@@ -98,7 +98,7 @@ fn gpu_replays_show_the_gpu_score() {
     );
     let scheduler = gpu.sched.as_mut().expect("scheduler");
     let scores = scheduler
-        .evaluate_single(&pop, &indices, &cfg)
+        .evaluate(&pop, &indices, &cfg)
         .expect("GPU trials");
     let fidelity = cfg.fidelity();
     let total = (fidelity.settle() + cfg.steps()) as usize;
@@ -176,12 +176,8 @@ fn each_backend_repeats_v2_scores() {
             assert!(gpu.names().contains("CUDA"), "opened {}", gpu.names());
         }
         let scheduler = gpu.sched.as_mut().expect("scheduler");
-        let first = scheduler
-            .evaluate_single(&pop, &indices, &cfg)
-            .expect("first");
-        let second = scheduler
-            .evaluate_single(&pop, &indices, &cfg)
-            .expect("second");
+        let first = scheduler.evaluate(&pop, &indices, &cfg).expect("first");
+        let second = scheduler.evaluate(&pop, &indices, &cfg).expect("second");
         for (i, (a, b)) in first.iter().zip(&second).enumerate() {
             assert_eq!(a.fitness.to_bits(), b.fitness.to_bits(), "creature {i}");
             assert_eq!(
@@ -233,7 +229,7 @@ fn recorded_forces_match_the_prototype_on_each_backend() {
         let name = gpu.names();
         let scheduler = gpu.sched.as_mut().expect("scheduler");
         let scores = scheduler
-            .evaluate_single(&pop, &indices, &cfg)
+            .evaluate(&pop, &indices, &cfg)
             .expect("GPU trials");
         let (mut entries, mut close_energy, mut close_force, mut ground_entries) =
             (0usize, 0usize, 0usize, 0usize);
@@ -355,13 +351,13 @@ fn a_lost_gpu_is_reopened_and_gives_the_same_results() {
     assert!(gpu.startup_warning.is_none(), "the GPU did not open");
     let scheduler = gpu.sched.as_mut().expect("scheduler");
     let undisturbed = scheduler
-        .evaluate_single(&pop, &indices, &cfg)
+        .evaluate(&pop, &indices, &cfg)
         .expect("undisturbed run");
     // The GPU is lost while its first units are in flight; the game must reopen it
     // and finish the run on it.
     scheduler.simulate_gpu_loss_after(0);
     let disturbed = scheduler
-        .evaluate_single(&pop, &indices, &cfg)
+        .evaluate(&pop, &indices, &cfg)
         .expect("run with a lost GPU");
     let notices = scheduler.take_notices();
     assert!(
@@ -469,7 +465,7 @@ fn recorded_broken_joints_are_the_kernels() {
         let name = gpu.names();
         let scheduler = gpu.sched.as_mut().expect("scheduler");
         let scores = scheduler
-            .evaluate_single(&pop, &indices, &cfg)
+            .evaluate(&pop, &indices, &cfg)
             .expect("GPU trials");
         let fidelity = cfg.fidelity();
         let settle = fidelity.settle() as usize;

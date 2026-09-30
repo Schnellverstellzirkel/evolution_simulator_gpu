@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod config;
 pub mod cpu_engine;
 pub mod cpu_v2;
@@ -12,9 +13,9 @@ pub mod physics;
 pub mod physics2;
 pub mod qd;
 pub mod replay_forces;
+pub mod ring;
 pub mod scheduler;
 pub mod schematic;
-pub mod search_benchmark;
 pub mod simd;
 pub mod storage;
 pub mod ui;

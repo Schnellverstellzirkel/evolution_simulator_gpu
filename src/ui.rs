@@ -4,7 +4,7 @@ use crate::{
     evolution::{Creature, FAILED},
     gpu::Gpu,
     physics::{self, Node},
-    storage::{Stage, Stats},
+    storage::Stats,
     worker::{Command, EventKind, Snapshot, Worker},
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
@@ -1611,9 +1611,12 @@ impl App {
         if autostart.is_some() {
             initial_config.checkpoint_interval = AUTOSAVE_INTERVAL;
         }
-        for list in [std::env::var("EVOLUTION_SMOKE_WORLD").ok(), autostart.clone()]
-            .into_iter()
-            .flatten()
+        for list in [
+            std::env::var("EVOLUTION_SMOKE_WORLD").ok(),
+            autostart.clone(),
+        ]
+        .into_iter()
+        .flatten()
         {
             for pair in list.split(',') {
                 if let Some((name, level)) = pair.split_once('=')
@@ -3331,7 +3334,6 @@ impl App {
                                 card,
                                 rect,
                                 response.hovered() || shown == Some(card.creature.id),
-                                Stage::Archived,
                                 theme,
                             );
                             if response.clicked() {
@@ -4281,10 +4283,10 @@ impl App {
         frames.sort_by(f32::total_cmp);
         let p95 = frames.get(frames.len() * 95 / 100).copied().unwrap_or(0.);
         ui.small(format!(
-            "{} · seed {} · stage: {} · {} / {} evaluated · {} in checks",
+            "{} · seed {} · {} · {} / {} evaluated · {} in confirmation",
             s.gpu,
             s.config.seed,
-            s.stage.label(),
+            if s.running { "running" } else { "paused" },
             number(s.completed),
             number(s.config.population),
             number(s.checking),
@@ -5254,7 +5256,6 @@ fn paint_card(
     card: &crate::worker::Card,
     rect: Rect,
     hovered: bool,
-    stage: Stage,
     theme: Theme,
 ) {
     painter.rect_filled(
@@ -5283,7 +5284,7 @@ fn paint_card(
     painter.text(
         rect.left_top() + Vec2::new(9., 8.),
         Align2::LEFT_TOP,
-        if card.descriptor.is_some() || matches!(stage, Stage::Ranked | Stage::Selected) {
+        if card.descriptor.is_some() {
             format!("#{}", card.rank + 1)
         } else {
             format!("ID {}", card.creature.id)
@@ -5334,23 +5335,6 @@ fn paint_card(
         FontId::proportional(15.),
         score_color,
     );
-    if stage == Stage::Selected {
-        painter.text(
-            rect.right_top() + Vec2::new(-9., 8.),
-            Align2::RIGHT_TOP,
-            if card.survivor {
-                "Survives"
-            } else {
-                "Replaced"
-            },
-            FontId::proportional(13.),
-            if card.survivor {
-                theme.accent
-            } else {
-                theme.warn
-            },
-        );
-    }
 }
 /// How a creature came to be, in the words the lineage uses.
 /// Space between island cards, and a card's height.

@@ -37,7 +37,10 @@ pub(crate) const CMA_LIMIT: usize = 96;
 //     ladder that only adds effects).
 // 41: a tendon starts to pull past the longer of its muscle's longest length
 //     and its length in the start pose, and muscle mass follows that length.
-pub const VERSION: u32 = 41;
+// 42: no fine checks; a creature that would set an island record gets one
+//     unperturbed confirmation trial at twice the rate, and the fine
+//     fidelity is twice the standard rate and solver passes.
+pub const VERSION: u32 = 42;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
@@ -105,14 +108,14 @@ pub struct EvaluationMetrics {
     /// The early screen stopped the trial (`physics::Screen`): the creature
     /// never enters an archive.
     pub screened: bool,
-    /// The creature could have entered an archive but another contender took
-    /// its cell's check: it enters no archive this time.
-    pub unchecked: bool,
+    /// The result enters no archive: it was measured in a world that has
+    /// since changed, or its confirmation trial was stopped by the screen.
+    pub excluded: bool,
     /// Distance at the screen, or at an earlier fall (0 when there was no
     /// screen and no earlier fall).
     pub screen_x: f32,
-    /// The fitness is the fine check's (it was worse than the standard trial),
-    /// so a replay runs at fine fidelity to show that trial.
+    /// The fitness is the confirmation trial's (it was worse than the
+    /// standard trial), so a replay runs at fine fidelity to show that trial.
     pub fine: bool,
 }
 
@@ -151,7 +154,8 @@ pub struct Elite {
     /// The elite, or its ancestor, grew up in its island's nursery.
     #[serde(default)]
     pub graduate: bool,
-    /// Its fitness is its fine check's, so its replay runs at fine fidelity.
+    /// Its fitness is its confirmation trial's, so its replay runs at fine
+    /// fidelity.
     #[serde(default)]
     pub fine: bool,
 }
@@ -162,16 +166,14 @@ pub fn replay_of(
     cfg: &crate::config::Config,
 ) -> (Creature, crate::config::Config) {
     if fine {
-        let mut perturbed = creature.clone();
-        crate::scheduler::perturb(&mut perturbed);
-        (perturbed, crate::scheduler::check_config(cfg))
+        (creature.clone(), crate::scheduler::confirm_config(cfg))
     } else {
         (creature.clone(), cfg.clone())
     }
 }
 impl Elite {
     /// The creature and world of the trial this elite's fitness came from:
-    /// the standard trial, or the fine check of the perturbed body.
+    /// the standard trial, or the confirmation trial at the fine physics.
     pub fn replay_of(&self, cfg: &crate::config::Config) -> (Creature, crate::config::Config) {
         replay_of(&self.creature, self.fine, cfg)
     }

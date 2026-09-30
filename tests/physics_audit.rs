@@ -4,7 +4,7 @@
 //! filled by `physics2::replay`. Numbers measured on 6ccc472 are in the
 //! comments; the thresholds leave room for search noise.
 use evolution_simulator::{
-    config::Config, cpu_engine, evolution::Creature, physics2, scheduler, storage::Experiment,
+    config::Config, evolution::Creature, physics2, scheduler, storage::Experiment,
 };
 
 /// Elites of a short deterministic evolution: 1,500 bodies, 10 generations,
@@ -20,14 +20,8 @@ fn elites() -> Vec<Creature> {
     };
     let mut e = Experiment::new(cfg).unwrap();
     for _ in 0..10 {
-        let results = cpu_engine::evaluate(&e.population, &e.config);
-        for (i, r) in results.iter().enumerate() {
-            let m = scheduler::to_metrics(&e.population, i, r, &e.config);
-            e.record_result(i, &m);
-        }
-        e.evaluated = e.config.population;
-        e.archive_batch().unwrap();
-        e.prepare_next_batch().unwrap();
+        e.run_generation(&mut |pop, cfg| Ok(scheduler::cpu_metrics(pop, cfg)))
+            .unwrap();
     }
     let mut list: Vec<_> = e.archive.entries.iter().collect();
     list.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));

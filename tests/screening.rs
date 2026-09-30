@@ -124,21 +124,33 @@ fn screened_creatures_enter_no_archive_and_the_bar_keeps_the_top_share() {
     assert_eq!(first.bar, f32::NEG_INFINITY);
     assert_eq!(first.seconds, physics::screen_seconds().unwrap());
     for generation in 0..3 {
-        let results = cpu_engine::evaluate(&experiment.population, &experiment.config);
-        for (i, result) in results.iter().enumerate() {
-            let metric =
-                scheduler::to_metrics(&experiment.population, i, result, &experiment.config);
-            experiment.record_result(i, &metric);
-        }
-        let screened_ids: Vec<u64> = (0..experiment.config.population)
-            .filter(|&i| results[i].screened > 0.0)
-            .map(|i| experiment.population.genomes[i].id)
-            .collect();
+        // Standard trials of the generation: ids of screened creatures and
+        // every distance at the screen.
+        let mut screened_ids: Vec<u64> = Vec::new();
+        let mut distances: Vec<f32> = Vec::new();
+        let mut first_block = None;
+        experiment
+            .run_generation(&mut |pop, cfg| {
+                let results = cpu_engine::evaluate(pop, cfg);
+                if cfg.fidelity.is_none() {
+                    for (g, r) in pop.genomes.iter().zip(&results) {
+                        if r.screened > 0.0 {
+                            screened_ids.push(g.id);
+                        }
+                        distances.push(r.screen_x);
+                    }
+                    first_block.get_or_insert(screened_ids.len());
+                }
+                Ok(results
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| scheduler::to_metrics(pop, i, r, cfg))
+                    .collect())
+            })
+            .unwrap();
         if generation == 0 {
-            assert!(screened_ids.is_empty(), "no bar in the first generation");
+            assert_eq!(first_block, Some(0), "no bar in the first block");
         }
-        experiment.evaluated = experiment.config.population;
-        experiment.archive_batch().unwrap();
         for elite in experiment
             .archive
             .entries
@@ -150,8 +162,6 @@ fn screened_creatures_enter_no_archive_and_the_bar_keeps_the_top_share() {
                 "a screened creature entered an archive"
             );
         }
-        let distances: Vec<f32> = results.iter().map(|r| r.screen_x).collect();
-        experiment.prepare_next_batch().unwrap();
         let bar = experiment.config.screen.unwrap().bar;
         let kept = distances.iter().filter(|&&d| d >= bar).count() as f32 / distances.len() as f32;
         assert!(
@@ -189,7 +199,7 @@ fn gpu_cpu_diagnostic_screening() {
         .sched
         .as_mut()
         .unwrap()
-        .evaluate_single(&pop, &indices, &screen_cfg)
+        .evaluate(&pop, &indices, &screen_cfg)
         .unwrap();
     let mut screened = 0;
     for (i, (g, c)) in gpu.iter().zip(&cpu).enumerate() {
@@ -222,30 +232,42 @@ fn a_generation_without_a_bar_sets_one_after_a_quarter_of_its_results() {
         ..Config::default()
     };
     let mut experiment = Experiment::new(cfg).unwrap();
-    let results = cpu_engine::evaluate(&experiment.population, &experiment.config);
     let bar = |e: &Experiment| e.config.screen.unwrap().bar;
-    for (i, result) in results.iter().enumerate() {
-        let metric = scheduler::to_metrics(&experiment.population, i, result, &experiment.config);
-        experiment.record_result(i, &metric);
-        experiment.arm_screen_early();
-        if i + 1 < 64 {
-            assert_eq!(bar(&experiment), f32::NEG_INFINITY, "result {i}");
-        }
-    }
+    // The ring's first block is a quarter of the generation.
+    assert_eq!(experiment.blocks[0].len(), 64);
+    let mut distances: Vec<f32> = Vec::new();
+    experiment
+        .step(&mut |pop, cfg| {
+            let results = cpu_engine::evaluate(pop, cfg);
+            if cfg.fidelity.is_none() {
+                distances.extend(results.iter().map(|r| r.screen_x));
+            }
+            Ok(results
+                .iter()
+                .enumerate()
+                .map(|(i, r)| scheduler::to_metrics(pop, i, r, cfg))
+                .collect())
+        })
+        .unwrap();
     let armed = bar(&experiment);
     assert!(
         armed.is_finite(),
         "a quarter of the results must set the bar"
     );
-    let distances: Vec<f32> = results[..64].iter().map(|r| r.screen_x).collect();
     let kept = distances.iter().filter(|&&d| d >= armed).count() as f32 / 64.0;
     assert!(
         (kept - physics::screen_keep()).abs() < 0.05,
         "the bar keeps {kept} of the sample"
     );
+    // The next block runs with the bar.
+    assert_eq!(
+        experiment.blocks[1].config.screen.unwrap().bar,
+        f32::NEG_INFINITY
+    );
+    assert_eq!(experiment.blocks[0].config.screen.unwrap().bar, armed);
     // A world change forgets the old world's distances and the bar.
     let mut rough = experiment.config.clone();
     rough.terrain = 3;
-    experiment.update_config(rough).unwrap();
+    experiment.update_config_now(rough).unwrap();
     assert_eq!(bar(&experiment), f32::NEG_INFINITY);
 }

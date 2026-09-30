@@ -5,7 +5,7 @@ use evolution_simulator::{
     gpu::Gpu,
     physics,
     qd::{Elite, Emitter, QdArchive},
-    storage::{self, Experiment, Stage},
+    storage::{self, Experiment},
 };
 use std::path::PathBuf;
 /// One creature's score on the production CPU engine.
@@ -23,6 +23,31 @@ fn config() -> Config {
         ..Default::default()
     }
 }
+/// Made-up standard results: the score grows with the birth slot.
+fn by_slot(
+    pop: &evolution::Population,
+    _: &Config,
+) -> anyhow::Result<Vec<evolution_simulator::qd::EvaluationMetrics>> {
+    Ok(pop
+        .genomes
+        .iter()
+        .map(|g| evolution_simulator::qd::EvaluationMetrics {
+            fitness: evolution::slot_of_id(g.id) as f32 * 0.1,
+            ..Default::default()
+        })
+        .collect())
+}
+/// Scores from the CPU-only scheduler, as a ring evaluator.
+fn cpu_scheduler() -> impl FnMut(
+    &evolution::Population,
+    &Config,
+) -> anyhow::Result<Vec<evolution_simulator::qd::EvaluationMetrics>> {
+    let mut sched = evolution_simulator::scheduler::Scheduler::cpu_only(2).unwrap();
+    move |pop, cfg| {
+        let all: Vec<usize> = (0..pop.genomes.len()).collect();
+        sched.evaluate(pop, &all, cfg)
+    }
+}
 fn path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("evolution-{}-{name}.evo", std::process::id()))
 }
@@ -36,22 +61,17 @@ fn seed_is_repeatable_and_breeding_conserves_population() {
     assert_eq!(a.bones, b.bones);
     assert_eq!(a.muscles, b.muscles);
 
-    let scores: Vec<_> = (0..cfg.population).map(|i| i as f32).collect();
     let mut first = Experiment::new(cfg.clone()).unwrap();
     let mut second = Experiment::new(cfg.clone()).unwrap();
-    first.scores.clone_from(&scores);
-    second.scores.clone_from(&scores);
-    first.evaluated = cfg.population;
-    second.evaluated = cfg.population;
-    first.archive_batch().unwrap();
-    second.archive_batch().unwrap();
-    first.prepare_next_batch().unwrap();
-    second.prepare_next_batch().unwrap();
-    assert_eq!(first.population.genomes.len(), cfg.population);
-    first.population.validate(&cfg).unwrap();
-    assert_eq!(first.population.nodes, second.population.nodes);
-    assert_eq!(first.population.bones, second.population.bones);
-    assert_eq!(first.population.muscles, second.population.muscles);
+    first.run_generation(&mut by_slot).unwrap();
+    second.run_generation(&mut by_slot).unwrap();
+    assert_eq!(first.ring_len(), cfg.population);
+    first.validate().unwrap();
+    for (x, y) in first.blocks.iter().zip(&second.blocks) {
+        assert_eq!(x.population.nodes, y.population.nodes);
+        assert_eq!(x.population.bones, y.population.bones);
+        assert_eq!(x.population.muscles, y.population.muscles);
+    }
 }
 fn assert_genomes_close(a: &Creature, b: &Creature) {
     let close = |x: f32, y: f32| (x - y).abs() <= 1e-4;
@@ -111,9 +131,14 @@ fn zero_mutation_copies_genetics() {
         })
         .collect();
     let slots: Vec<usize> = (0..8).collect();
-    let children = evolution::emit_offspring(&[archive], &[], &plans, &slots, &cfg, 0, 0);
-    for child in &children {
-        assert_genomes_close(child, &parent);
+    let batches = evolution::emit_offspring_batches(&[archive], &[], &plans, &slots, &cfg, 0, 0);
+    let mut children = evolution::Population {
+        genomes: vec![Default::default(); 8],
+        ..Default::default()
+    };
+    children.append_batches(&slots, batches);
+    for k in 0..8 {
+        assert_genomes_close(&children.creature(k), &parent);
     }
 }
 #[test]
@@ -126,14 +151,9 @@ fn mutation_keeps_valid_graphs_at_limits() {
         ..config()
     };
     let mut e = Experiment::new(cfg.clone()).unwrap();
-    for generation in 0..80 {
-        for (i, score) in e.scores.iter_mut().enumerate() {
-            *score = generation as f32 * 0.1 + i as f32;
-        }
-        e.evaluated = cfg.population;
-        e.archive_batch().unwrap();
-        e.prepare_next_batch().unwrap();
-        e.population.validate(&cfg).unwrap();
+    for _ in 0..80 {
+        e.run_generation(&mut by_slot).unwrap();
+        e.validate().unwrap();
     }
 }
 #[test]
@@ -210,23 +230,18 @@ fn overlapping_nodes_remain_finite() {
     assert!(evaluate_one(&c, &config()).is_finite());
 }
 #[test]
-fn a_checkpoint_mid_generation_resumes_from_its_archives() {
-    // Saves keep the archives and search state, not the generation in
-    // progress: a game saved before its first archive starts again from the
-    // same random population.
-    let mut e = Experiment::new(config()).unwrap();
-    e.stage = Stage::Evaluating;
-    for i in 0..7 {
-        e.scores[i] = evaluate_one(&e.population.creature(i), &e.config);
-    }
-    e.evaluated = 7;
+fn a_checkpoint_before_the_first_archive_starts_the_same_game() {
+    // Saves keep the archives and search state, not the ring: a game saved
+    // before its first archive starts again from the same random bodies.
+    let e = Experiment::new(config()).unwrap();
     let checkpoint = path("partial");
     storage::save(&checkpoint, &e).unwrap();
     let loaded = storage::load(&checkpoint).unwrap();
     assert_eq!(loaded.evaluated, 0);
-    assert_eq!(loaded.stage, Stage::Ready);
-    assert_eq!(e.population.nodes, loaded.population.nodes);
-    assert_eq!(e.population.muscles, loaded.population.muscles);
+    for (x, y) in e.blocks.iter().zip(&loaded.blocks) {
+        assert_eq!(x.population.nodes, y.population.nodes);
+        assert_eq!(x.population.muscles, y.population.muscles);
+    }
     // A stale/incomplete temporary write cannot corrupt the committed checkpoint.
     std::fs::write(checkpoint.with_extension("evo.tmp"), b"partial").unwrap();
     assert!(storage::load(&checkpoint).is_ok());
@@ -247,21 +262,18 @@ fn invalid_settings_and_checkpoints_are_rejected() {
     let _ = std::fs::remove_file(p);
 }
 #[test]
-fn statistics_count_every_creature() {
+fn statistics_count_every_archive_elite() {
     let mut e = Experiment::new(config()).unwrap();
-    e.scores = (0..e.config.population)
-        .map(|i| i as f32 / 10. - 1.)
-        .collect();
-    e.evaluated = e.config.population;
-    e.rank();
+    e.run_generation(&mut by_slot).unwrap();
     let s = &e.history[0];
+    assert!(s.archive_cells > 0);
     assert_eq!(
         s.histogram.iter().map(|x| x.1 as usize).sum::<usize>(),
-        e.config.population
+        s.archive_cells
     );
     assert_eq!(
         s.species.iter().map(|x| x.2 as usize).sum::<usize>(),
-        e.config.population
+        s.archive_cells
     );
     assert_eq!(s.percentiles.len(), 29);
     assert!(s.best >= s.median && s.median >= s.worst);
@@ -270,9 +282,7 @@ fn statistics_count_every_creature() {
 #[test]
 fn history_and_checksums_are_validated_on_load() {
     let mut e = Experiment::new(config()).unwrap();
-    e.scores = (0..e.config.population).map(|i| i as f32 * 0.1).collect();
-    e.evaluated = e.config.population;
-    e.rank();
+    e.run_generation(&mut by_slot).unwrap();
     let checkpoint = path("history");
     storage::save(&checkpoint, &e).unwrap();
     assert_eq!(storage::load(&checkpoint).unwrap().history.len(), 1);
@@ -318,7 +328,7 @@ fn gpu_cpu_diagnostic_handles_partial_workgroups() {
             .sched
             .as_mut()
             .unwrap()
-            .evaluate_single(&pop, &indices, &cfg)
+            .evaluate(&pop, &indices, &cfg)
             .unwrap();
         let cpu = evolution_simulator::cpu_engine::evaluate(&pop, &cfg);
         for (i, (gpu_result, cpu_result)) in gpu_scores.iter().zip(&cpu).enumerate() {
@@ -679,34 +689,8 @@ fn full_joint_ranges_do_not_spin_through_a_half_turn() {
     );
 }
 
-#[test]
-#[ignore = "optional CPU/GPU diagnostic; not a physics acceptance gate"]
-fn gpu_cpu_diagnostic_with_narrow_joints() {
-    let cfg = Config {
-        population: 64,
-        duration: 0.2,
-        ..config()
-    };
-    let mut pop = evolution::create(&cfg).unwrap();
-    for bone in &mut pop.bones {
-        bone.min_angle = -0.2;
-        bone.max_angle = 0.2;
-    }
-    let mut gpu = Gpu::new("RTX 4060").unwrap();
-    let scores = gpu
-        .evaluate(&pop, &(0..64).collect::<Vec<_>>(), &cfg)
-        .unwrap();
-    let cpu = cpu_reference(&pop, &cfg);
-    for (i, (&gpu_score, &cpu_score)) in scores.iter().zip(&cpu).enumerate() {
-        assert!(
-            (gpu_score - cpu_score).abs() < 0.05,
-            "score {i}: GPU {gpu_score}, CPU engine {cpu_score}",
-        );
-    }
-}
-
-/// Scores from the CPU-only scheduler, which runs the same trials as the GPU
-/// scheduler: every creature gets the perturbed fine-physics contender check.
+/// Scores from the CPU-only scheduler, which runs the same standard trials
+/// as the GPU scheduler.
 fn cpu_reference(pop: &evolution::Population, cfg: &Config) -> Vec<f32> {
     let indices: Vec<usize> = (0..pop.genomes.len()).collect();
     evolution_simulator::scheduler::Scheduler::cpu_only(4)
@@ -719,41 +703,28 @@ fn cpu_reference(pop: &evolution::Population, cfg: &Config) -> Vec<f32> {
 }
 
 #[test]
-fn world_change_retests_archive_elites_in_generational_mode() {
+fn a_world_change_retests_archive_elites() {
     let mut e = Experiment::new(config()).unwrap();
-    let all: Vec<usize> = (0..e.config.population).collect();
-    let metrics = evolution_simulator::scheduler::Scheduler::cpu_only(2)
-        .unwrap()
-        .evaluate(&e.population, &all, &e.config)
-        .unwrap();
-    for (i, m) in metrics.iter().enumerate() {
-        e.scores[i] = m.fitness;
-        e.trial_metrics[i] = m.behavior;
-    }
-    e.evaluated = e.config.population;
-    e.rank();
-    e.archive_batch().unwrap();
+    let mut evaluate = cpu_scheduler();
+    e.run_generation(&mut evaluate).unwrap();
     let elites: Vec<u64> = e.archive.entries.iter().map(|x| x.creature.id).collect();
     assert!(!elites.is_empty());
-    e.update_config(Config {
+    e.update_config_now(Config {
         terrain: 1,
         ..e.config.clone()
     })
     .unwrap();
+    // One lap of the ring breeds every block again, the queued elites first.
     let mut handed_over = Vec::new();
-    e.prepare_next_batch_streaming(4, |pop, range, _| {
-        handed_over.extend(range.map(|i| pop.creature(i).id));
-        Ok(())
-    })
-    .unwrap();
+    for _ in 0..e.blocks.len() {
+        e.step(&mut evaluate).unwrap();
+        let k = (e.cursor + e.blocks.len() - 1) % e.blocks.len();
+        handed_over.extend(e.blocks[k].population.genomes.iter().map(|g| g.id));
+    }
     for id in elites {
         assert!(
-            (0..e.config.population).any(|i| e.population.creature(i).id == id),
-            "elite {id} was dropped by the world change"
-        );
-        assert!(
             handed_over.contains(&id),
-            "elite {id} never reached a device"
+            "elite {id} was dropped by the world change"
         );
     }
 }
@@ -792,22 +763,25 @@ fn autosave_rotation_keeps_the_newest_and_spares_manual_saves() {
 #[test]
 fn archive_keeps_the_selected_engine_score_without_cpu_rescoring() {
     let mut e = Experiment::new(config()).unwrap();
-    let all: Vec<usize> = (0..e.config.population).collect();
-    let metrics = evolution_simulator::scheduler::Scheduler::cpu_only(2)
-        .unwrap()
-        .evaluate(&e.population, &all, &e.config)
-        .unwrap();
+    let mut cpu = cpu_scheduler();
     // Treat this evaluation engine's output as authoritative. Archive
-    // insertion must not silently replace its score with a CPU replay.
+    // insertion must not silently replace its score with a CPU replay. The
+    // confirmation trials score higher, so the standard score stands.
     let mut expected = std::collections::HashMap::new();
-    for (i, m) in metrics.iter().enumerate() {
-        e.scores[i] = m.fitness + 100.0;
-        e.trial_metrics[i] = m.behavior;
-        expected.insert(e.population.genomes[i].id, e.scores[i]);
-    }
-    e.evaluated = e.config.population;
-    e.rank();
-    e.archive_batch().unwrap();
+    e.step(&mut |pop, cfg| {
+        let mut metrics = cpu(pop, cfg)?;
+        let confirm = cfg.fidelity.is_some();
+        for (g, m) in pop.genomes.iter().zip(&mut metrics) {
+            if confirm {
+                m.fitness += 1000.0;
+            } else {
+                m.fitness += 100.0;
+                expected.insert(g.id, m.fitness);
+            }
+        }
+        Ok(metrics)
+    })
+    .unwrap();
     assert!(!e.archive.entries.is_empty());
     for elite in &e.archive.entries {
         assert_eq!(elite.fitness, expected[&elite.creature.id]);
@@ -817,18 +791,7 @@ fn archive_keeps_the_selected_engine_score_without_cpu_rescoring() {
 #[test]
 fn meteor_strike_can_be_undone() {
     let mut e = Experiment::new(config()).unwrap();
-    let all: Vec<usize> = (0..e.config.population).collect();
-    let metrics = evolution_simulator::scheduler::Scheduler::cpu_only(2)
-        .unwrap()
-        .evaluate(&e.population, &all, &e.config)
-        .unwrap();
-    for (i, m) in metrics.iter().enumerate() {
-        e.scores[i] = m.fitness;
-        e.trial_metrics[i] = m.behavior;
-    }
-    e.evaluated = e.config.population;
-    e.rank();
-    e.archive_batch().unwrap();
+    e.run_generation(&mut cpu_scheduler()).unwrap();
     let count = |e: &Experiment| {
         e.archive.entries.len() + e.islands.iter().map(|i| i.entries.len()).sum::<usize>()
     };

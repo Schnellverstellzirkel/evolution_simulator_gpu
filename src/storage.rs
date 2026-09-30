@@ -1,8 +1,7 @@
-use crate::scheduler::CheckNeed;
 use crate::{
     config::Config,
-    evolution::{self, CandidatePlan, Creature, FAILED, Population, Rng},
-    qd::{self, CmaEmitter, Emitter, EmitterStats, QdArchive, TrialMetrics},
+    evolution::{self, CandidatePlan, Creature, FAILED, Genome, Population, Rng},
+    qd::{self, CmaEmitter, Emitter, EmitterStats, EvaluationMetrics, QdArchive},
 };
 use anyhow::{Context, Result, ensure};
 use bincode::Options;
@@ -15,76 +14,42 @@ use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Write},
     path::Path,
+    sync::Arc,
 };
 
-/// Why a standard-trial result was or was not held for a fine check, in the
-/// order `Experiment::contender` tests the rules.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContenderReason {
-    Rejected,
-    Optimizer,
-    Global,
-    Island,
-    Reserve,
-}
-/// Contender decisions since the last `take_contender_counts`, indexed by
-/// `ContenderReason` (a diagnostic for the check cost).
-pub static CONTENDER_COUNTS: [std::sync::atomic::AtomicU64; 5] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; 5];
-/// Key of one behavior cell of one island, for sharing checks between
-/// contenders for the same cell. A contender for a global cell uses its own
-/// island's key too, so contenders from different islands never drop each
-/// other.
-fn cell_key(island: u64, niche: &qd::Niche) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    island.hash(&mut hasher);
-    niche.hash(&mut hasher);
-    hasher.finish()
-}
-/// Check key of a body plan in the morphology reserve.
-fn reserve_key(topology: &qd::Topology) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    u64::MAX.hash(&mut hasher);
-    topology.nodes.hash(&mut hasher);
-    topology.edges.hash(&mut hasher);
-    hasher.finish()
-}
-/// Nanoseconds of steady breeding spent planning, emitting offspring, and
-/// writing them into the population, since the last `take_breed_nanos`.
+/// Nanoseconds of breeding spent planning, emitting offspring, and writing
+/// them into their block, since the last `take_breed_nanos`.
 pub static BREED_NANOS: [std::sync::atomic::AtomicU64; 3] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 /// Returns and clears the breeding timers.
 pub fn take_breed_nanos() -> [u64; 3] {
     std::array::from_fn(|i| BREED_NANOS[i].swap(0, std::sync::atomic::Ordering::Relaxed))
 }
-/// Returns and clears the contender counters.
-pub fn take_contender_counts() -> [u64; 5] {
-    std::array::from_fn(|i| CONTENDER_COUNTS[i].swap(0, std::sync::atomic::Ordering::Relaxed))
+
+/// Creatures in flight: the ring holds this many at most, whatever the
+/// generation size. It is enough to keep the GPU busy while the host
+/// absorbs one block and breeds it again.
+pub const RING_SLOTS: usize = 786_432;
+/// Blocks in the ring. A block is bred, evaluated as one unit and absorbed
+/// as a whole.
+pub const RING_BLOCKS: usize = 4;
+/// Confirmation trials a block asks for per archive at once while it waits
+/// for the ones it needs.
+const SPECULATIVE_CONFIRMS: usize = 4;
+
+/// Ring slots for a generation of `population` evaluations.
+pub fn ring_len(population: usize) -> usize {
+    population.clamp(1, RING_SLOTS)
+}
+/// First slot and length of each block of a ring of `len` slots.
+fn block_ranges(len: usize) -> Vec<(usize, usize)> {
+    let size = len.div_ceil(RING_BLOCKS).max(1);
+    (0..len)
+        .step_by(size)
+        .map(|first| (first, size.min(len - first)))
+        .collect()
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum Stage {
-    Ready,
-    Evaluating,
-    Evaluated,
-    Ranked,
-    Selected,
-    Archived,
-}
-impl Stage {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Ready => "Ready",
-            Self::Evaluating => "Evaluating",
-            Self::Evaluated => "Evaluation complete",
-            Self::Ranked => "Sorted by fitness",
-            Self::Selected => "Survivors selected",
-            Self::Archived => "Archive updated",
-        }
-    }
-}
 pub const PERCENTILES: [f32; 29] = [
     0., 1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 20., 30., 40., 50., 60., 70., 80., 90., 91., 92.,
     93., 94., 95., 96., 97., 98., 99., 100.,
@@ -114,94 +79,117 @@ pub struct Stats {
     #[serde(default)]
     pub emitters: [EmitterStats; qd::EMITTER_COUNT],
 }
-#[derive(Clone, Serialize, Deserialize)]
+/// How a creature in the ring was bred.
+#[derive(Clone, Copy, Debug)]
+pub struct Birth {
+    pub emitter: Emitter,
+    /// The CMA emitter that sampled it.
+    pub cma: Option<usize>,
+    pub parent_id: Option<u64>,
+    /// It came from crossover.
+    pub mate: bool,
+    /// Generation until which its niche is protected from other body plans.
+    pub protection: u32,
+}
+impl Birth {
+    /// A new random body, or an elite queued again after a world change.
+    pub const RANDOM: Self = Self {
+        emitter: Emitter::Restart,
+        cma: None,
+        parent_id: None,
+        mate: false,
+        protection: 0,
+    };
+}
+
+/// One block of the ring: creatures bred together, evaluated as one unit and
+/// absorbed together.
+#[derive(Clone)]
+pub struct Block {
+    /// Ring slot of the first creature: creature `k` holds slot `first + k`,
+    /// which picks its island and its random stream.
+    pub first: usize,
+    pub population: Arc<Population>,
+    pub births: Vec<Birth>,
+    /// The trial settings the block runs with, fixed when it is bred.
+    pub config: Arc<Config>,
+}
+impl Block {
+    pub fn len(&self) -> usize {
+        self.population.genomes.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.population.genomes.is_empty()
+    }
+}
+
+/// What a block needs before it can be absorbed.
+#[derive(Clone, Debug)]
+pub enum Verdict {
+    /// Confirmation trials for these members (positions in the block).
+    Confirm(Vec<usize>),
+    /// The final result of every member, in block order.
+    Final(Vec<EvaluationMetrics>),
+}
+
+/// Scores a population with the given trial settings, one result per
+/// creature in order. The synchronous drivers (`Experiment::step`) take one.
+pub type Evaluate<'a> = dyn FnMut(&Population, &Config) -> Result<Vec<EvaluationMetrics>> + 'a;
+
+/// The game: archives and search state, and the ring of creatures in
+/// flight. A generation is a count of `config.population` evaluations; the
+/// ring holds at most `RING_SLOTS` creatures, and each block is bred again
+/// as soon as it is absorbed.
+#[derive(Clone)]
 pub struct Experiment {
     pub config: Config,
+    /// Settings that take effect when the next generation starts.
     pub pending: Option<Config>,
     pub generation: u32,
-    pub population: Population,
-    pub scores: Vec<f32>,
-    /// Parent generation results for newly created creatures; never used as current fitness.
-    #[serde(skip)]
-    pub parent_scores: Vec<f32>,
+    /// Evaluations absorbed toward the current generation.
     pub evaluated: usize,
-    pub stage: Stage,
-    pub ranks: Vec<usize>,
-    pub parents: Vec<usize>,
     pub history: Vec<Stats>,
     pub evaluation_seconds: f64,
-    #[serde(default)]
     pub archive: QdArchive,
-    #[serde(default)]
     pub emitter_stats: [EmitterStats; qd::EMITTER_COUNT],
-    #[serde(default)]
     pub cma_emitters: Vec<CmaEmitter>,
-    #[serde(default)]
-    pub candidate_emitters: Vec<Emitter>,
-    #[serde(default)]
-    pub candidate_cma: Vec<Option<usize>>,
-    /// Parent IDs for the current batch. Kept in memory for benchmark genealogy
-    /// analysis; lineage is intentionally not part of checkpoint state.
-    #[serde(skip)]
-    pub candidate_parent_ids: Vec<Option<u64>>,
-    #[serde(default)]
-    pub protected_until: Vec<u32>,
-    #[serde(default)]
-    pub trial_metrics: Vec<TrialMetrics>,
-    /// Per slot: the result is never offered to an archive (the early screen
-    /// stopped it, or another contender took its cell's check), and its
-    /// distance at the screen or an earlier fall.
-    #[serde(skip)]
-    pub screened: Vec<bool>,
-    /// Per slot: the score is the fine check's, so a replay runs at fine
-    /// fidelity.
-    pub fine: Vec<bool>,
-    #[serde(skip)]
-    pub screen_distance: Vec<f32>,
-    /// Gene memory reused by each generation's compaction.
-    #[serde(skip)]
-    arena_spare: evolution::Arena,
-    /// Screen distances recorded since the generation started without a bar.
-    #[serde(skip)]
-    screen_samples: usize,
-    #[serde(default)]
     pub qd_version: u32,
-    /// Steady-state breeding rounds so far; salts offspring random streams.
-    #[serde(default)]
+    /// Breeding rounds so far; salts offspring random streams and ids.
     pub breed_round: u64,
-    /// Island archives. Slot `i` breeds from island `qd::island_of_slot(i, island_count())`; the global
-    /// `archive` collects every island's elites for display and statistics
-    /// and is never a parent source.
-    #[serde(default)]
+    /// Island archives, then one nursery per island. Ring slot `i` breeds
+    /// for `qd::arena_of_slot(i, arena_count())`; the global `archive`
+    /// collects every island's elites for display and statistics and is
+    /// never a parent source.
     pub islands: Vec<QdArchive>,
     /// Every creature that entered an archive, keyed by creature id, with its
     /// parent and the change that produced it. Pruned to living elites' ancestors.
-    #[serde(default)]
     pub lineage: HashMap<u64, Ancestor>,
-    /// Whether each slot's current creature came from crossover.
-    #[serde(skip)]
-    pub candidate_mates: Vec<bool>,
     /// Each island's best distance so far and the generation it was set.
-    /// Stored separately in V4 checkpoints to keep the V3 payload readable.
-    #[serde(skip)]
     pub island_progress: Vec<(f32, u32)>,
     /// Per island, what its nursery graduated this session.
-    #[serde(skip)]
     pub graduations: Vec<Graduation>,
     /// The last migration to the hub this session: its generation, and per
     /// island how many elites it sent and how many of those the hub kept
     /// (the hub's own entry is zero). Saved after the body of a small save.
-    #[serde(skip)] // the full V7 format does not carry it
     pub last_migration: Option<(u32, Vec<(usize, usize)>)>,
     /// Elites from before an environment change, waiting to be evaluated again
     /// in the new world, each queued for its own island. Breeding hands them
     /// out before new offspring.
-    #[serde(default)]
     pub reseed: Reseed,
     /// Elites a meteor wiped out, with their island (None for the global
-    /// archive), kept so the strike can be undone. Not saved in checkpoints.
-    #[serde(skip)]
+    /// archive), kept so the strike can be undone. Not saved.
     pub fossils: Vec<(Option<usize>, qd::Elite)>,
+    /// The ring. Blocks are absorbed in ring order, starting at `cursor`.
+    pub blocks: Vec<Block>,
+    pub cursor: usize,
+    /// Failed trials in the current generation.
+    failed: usize,
+    /// Distances at the screen of the current generation's results, for the
+    /// next generation's bar.
+    screen_log: Vec<f32>,
+    /// Seconds spent absorbing results into the archives and breeding
+    /// blocks again, since the caller last took them.
+    pub stage_seconds: [f64; 2],
 }
 
 /// Elites waiting to be evaluated again after a world change, one queue per
@@ -361,197 +349,243 @@ struct OffspringPlan {
 }
 
 impl Experiment {
+    /// A new game: the ring holds new random bodies, and the first
+    /// generation has no screen bar yet, so every trial runs in full and
+    /// records its distance at the screen.
     pub fn new(config: Config) -> Result<Self> {
         let mut config = config.resolved();
-        // The first generation has no bar yet: every trial runs in full and
-        // records its distance at the screen.
+        config.validate()?;
         config.screen = crate::physics::screen_seconds()
             .filter(|&seconds| seconds < config.duration)
             .map(|seconds| crate::physics::Screen {
                 seconds,
                 bar: f32::NEG_INFINITY,
             });
-        let population = evolution::create(&config)?;
-        let population_count = config.population;
-        let scores = vec![f32::NAN; population_count];
-        let parent_scores = vec![f32::NAN; population_count];
-        Ok(Self {
+        let mut e = Self::empty(config);
+        let shared = Arc::new(e.config.clone());
+        e.blocks = block_ranges(ring_len(e.config.population))
+            .into_iter()
+            .map(|(first, count)| Block {
+                first,
+                population: Arc::new(evolution::random_block(&e.config, first, count)),
+                births: vec![Birth::RANDOM; count],
+                config: Arc::clone(&shared),
+            })
+            .collect();
+        Ok(e)
+    }
+    /// An experiment with empty archives and no ring.
+    fn empty(config: Config) -> Self {
+        Self {
             config,
             pending: None,
             generation: 0,
-            population,
-            scores,
-            parent_scores,
             evaluated: 0,
-            stage: Stage::Ready,
-            ranks: vec![],
-            parents: vec![],
             history: vec![],
             evaluation_seconds: 0.0,
             archive: QdArchive::default(),
             emitter_stats: [EmitterStats::default(); qd::EMITTER_COUNT],
             cma_emitters: vec![],
-            candidate_emitters: vec![Emitter::Restart; population_count],
-            candidate_cma: vec![None; population_count],
-            candidate_parent_ids: vec![None; population_count],
-            protected_until: vec![0; population_count],
-            trial_metrics: vec![TrialMetrics::default(); population_count],
-            screened: Vec::new(),
-            fine: Vec::new(),
-            screen_distance: Vec::new(),
-            arena_spare: evolution::Arena::default(),
-            screen_samples: 0,
             qd_version: qd::VERSION,
             breed_round: 0,
             islands: Vec::new(),
             lineage: HashMap::new(),
-            candidate_mates: Vec::new(),
             island_progress: Vec::new(),
             graduations: Vec::new(),
             last_migration: None,
             reseed: Reseed::default(),
             fossils: Vec::new(),
-        })
-    }
-    pub fn rank(&mut self) {
-        self.ranks = evolution::ranking(&self.scores);
-        let mut histogram = BTreeMap::<i32, u32>::new();
-        let mut species = BTreeMap::<(usize, usize), u32>::new();
-        let mut sum = 0.0f64;
-        let mut failed = 0;
-        for (&s, g) in self.scores.iter().zip(&self.population.genomes) {
-            if s > FAILED && s.is_finite() {
-                sum += s as f64;
-                *histogram.entry((s * 100.0).floor() as i32).or_default() += 1;
-            } else {
-                failed += 1;
-            }
-            *species.entry((g.node_count, g.muscle_count)).or_default() += 1;
+            blocks: Vec::new(),
+            cursor: 0,
+            failed: 0,
+            screen_log: Vec::new(),
+            stage_seconds: [0.0; 2],
         }
-        let count = self.scores.len();
-        let valid = count - failed;
-        let quantile = |p: f32| {
-            if valid == 0 {
-                0.0
-            } else {
-                self.scores[self.ranks[((1.0 - p / 100.0) * (valid - 1) as f32).round() as usize]]
+    }
+    /// Creatures in the ring.
+    pub fn ring_len(&self) -> usize {
+        self.blocks.iter().map(Block::len).sum()
+    }
+    /// The creature in ring slot `slot`.
+    pub fn creature(&self, slot: usize) -> Creature {
+        let block = self
+            .blocks
+            .iter()
+            .rfind(|b| b.first <= slot)
+            .expect("a ring slot");
+        block.population.creature(slot - block.first)
+    }
+    /// Genes the ring holds, in bytes.
+    pub fn ring_bytes(&self) -> usize {
+        self.blocks.iter().map(|b| b.population.bytes()).sum()
+    }
+    /// Gives block `k` the current trial settings when its world is not the
+    /// current one. Only for a block that has not been evaluated yet.
+    pub fn retarget_block(&mut self, k: usize, config: &Arc<Config>) {
+        if self.blocks[k].config.physics_differs(config) {
+            self.blocks[k].config = Arc::clone(config);
+        }
+    }
+    /// Whether member `m`'s result may enter an archive at all.
+    fn eligible(m: &EvaluationMetrics) -> bool {
+        m.fitness.is_finite() && m.fitness > FAILED && !m.screened && !m.excluded
+    }
+    /// Decides block `k`'s results against the archives as they stand now.
+    /// A creature that would set a new record of its island (or nursery)
+    /// needs a confirmation trial at the fine physics, and its score is the
+    /// lower of the two. The record-setters of each archive are taken
+    /// fastest first, each against the record the ones before it set, so no
+    /// unconfirmed score becomes a record. `confirmed` holds the
+    /// confirmations that came back, by position. A block from a world that
+    /// has since changed enters no archive.
+    pub fn verdict(
+        &self,
+        k: usize,
+        standard: &[EvaluationMetrics],
+        confirmed: &HashMap<usize, EvaluationMetrics>,
+    ) -> Verdict {
+        let block = &self.blocks[k];
+        let mut out = standard.to_vec();
+        if block.config.physics_differs(&self.config) {
+            for m in &mut out {
+                m.excluded = true;
+                m.screen_x = f32::NAN;
             }
+            return Verdict::Final(out);
+        }
+        let arenas = arena_count();
+        let bar = |arena: usize| {
+            self.islands
+                .get(arena)
+                .map_or(f32::NEG_INFINITY, QdArchive::best_fitness)
         };
-        let representatives = [count - 1, (count - 1) / 2, 0]
-            .map(|r| self.population.creature(self.ranks[r]))
-            .to_vec();
-        self.history.push(Stats {
-            generation: self.generation,
-            best: quantile(100.),
-            median: quantile(50.),
-            worst: quantile(0.),
-            mean: if valid > 0 {
-                (sum / valid as f64) as f32
-            } else {
-                0.
-            },
-            failed,
-            seconds: self.evaluation_seconds,
-            population: count,
-            percentiles: PERCENTILES.iter().map(|&p| quantile(p)).collect(),
-            histogram: histogram.into_iter().collect(),
-            species: species.into_iter().map(|((n, m), c)| (n, m, c)).collect(),
-            representatives,
-            config: self.config.clone(),
-            archive_cells: 0,
-            qd_score: 0.0,
-            archive_coverage: 0.0,
-            emitters: self.emitter_stats,
-        });
-        self.stage = Stage::Ranked;
+        let mut candidates: Vec<Vec<usize>> = vec![Vec::new(); arenas];
+        for (j, m) in standard.iter().enumerate() {
+            let arena = qd::arena_of_slot(block.first + j, arenas);
+            if Self::eligible(m) && m.fitness > bar(arena) {
+                candidates[arena].push(j);
+            }
+        }
+        let mut need = Vec::new();
+        for (arena, mut members) in candidates.into_iter().enumerate() {
+            members.sort_by(|&a, &b| {
+                standard[b]
+                    .fitness
+                    .total_cmp(&standard[a].fitness)
+                    .then(a.cmp(&b))
+            });
+            let mut record = bar(arena);
+            let mut asked = 0;
+            for j in members {
+                if standard[j].fitness <= record {
+                    break;
+                }
+                let Some(check) = confirmed.get(&j) else {
+                    need.push(j);
+                    asked += 1;
+                    if asked == SPECULATIVE_CONFIRMS {
+                        break;
+                    }
+                    continue;
+                };
+                let m = &mut out[j];
+                // The replay must show the trial the score came from.
+                m.fine = check.fitness < m.fitness;
+                m.fitness = m.fitness.min(check.fitness);
+                // A confirmation stopped by the screen is not robust.
+                m.excluded |= check.screened || !check.fitness.is_finite();
+                if Self::eligible(m) {
+                    record = record.max(m.fitness);
+                }
+            }
+        }
+        if need.is_empty() {
+            Verdict::Final(out)
+        } else {
+            need.sort_unstable();
+            Verdict::Confirm(need)
+        }
     }
-    pub fn archive_batch(&mut self) -> Result<()> {
+    /// Absorbs block `k`, the block at the cursor, with its final results:
+    /// offers each creature to its archives in block order, counts the
+    /// evaluations, ends the generation once a generation's worth is in, and
+    /// breeds the block again from the archives. Returns whether a
+    /// generation ended.
+    pub fn absorb(&mut self, k: usize, finals: &[EvaluationMetrics]) -> Result<bool> {
+        ensure!(
+            k == self.cursor && finals.len() == self.blocks[k].len(),
+            "Blocks are absorbed whole and in ring order"
+        );
+        let stale = self.blocks[k].config.physics_differs(&self.config);
+        if !stale {
+            // A result from a world that has since changed carries no distance.
+            self.screen_log
+                .extend(finals.iter().map(|m| m.screen_x).filter(|x| x.is_finite()));
+            self.arm_screen_early();
+        }
         let started = std::time::Instant::now();
-        ensure!(
-            self.evaluated == self.config.population,
-            "Cannot archive an incomplete batch"
-        );
-        ensure!(
-            self.trial_metrics.len() == self.config.population,
-            "Invalid behavior metric count"
-        );
-        let all: Vec<usize> = (0..self.config.population).collect();
-        let failed = self.archive_slots(&all);
-        let slots_seconds = started.elapsed().as_secs_f64();
-        self.push_archive_stats(failed);
-        self.prune_lineage();
-        self.stage = Stage::Archived;
-        if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
-            let total = started.elapsed().as_secs_f64();
-            eprintln!(
-                "Archive batch: generation {}, archive_slots {slots_seconds:.6} s, stats {:.6} s, total {total:.6} s",
-                self.generation,
-                total - slots_seconds
-            );
+        self.failed += self.archive_block(k, finals, stale);
+        self.evaluated += finals.len();
+        let ended = self.evaluated >= self.config.population;
+        if ended {
+            self.evaluated -= self.config.population;
+            self.end_generation()?;
         }
+        let archived = std::time::Instant::now();
+        self.stage_seconds[0] += archived.duration_since(started).as_secs_f64();
+        let (first, count) = (self.blocks[k].first, self.blocks[k].len());
+        self.blocks[k] = self.breed_block(first, count);
+        self.cursor = (k + 1) % self.blocks.len();
+        self.stage_seconds[1] += archived.elapsed().as_secs_f64();
+        Ok(ended)
+    }
+    /// Evaluates and absorbs the block at the cursor with `evaluate`, its
+    /// confirmation trials included. Returns whether a generation ended.
+    pub fn step(&mut self, evaluate: &mut Evaluate) -> Result<bool> {
+        let k = self.cursor;
+        let current = Arc::new(self.config.clone());
+        self.retarget_block(k, &current);
+        let block = self.blocks[k].clone();
+        let standard = evaluate(&block.population, &block.config)?;
+        ensure!(
+            standard.len() == block.len(),
+            "The evaluator returned {} results for {} creatures",
+            standard.len(),
+            block.len()
+        );
+        let mut confirmed = HashMap::new();
+        loop {
+            match self.verdict(k, &standard, &confirmed) {
+                Verdict::Final(finals) => return self.absorb(k, &finals),
+                Verdict::Confirm(need) => {
+                    let subset = block.population.subset(&need);
+                    let cfg = crate::scheduler::confirm_config(&block.config);
+                    let results = evaluate(&subset, &cfg)?;
+                    ensure!(results.len() == need.len(), "Missing confirmation results");
+                    confirmed.extend(need.into_iter().zip(results));
+                }
+            }
+        }
+    }
+    /// Steps until the current generation ends.
+    pub fn run_generation(&mut self, evaluate: &mut Evaluate) -> Result<()> {
+        while !self.step(evaluate)? {}
         Ok(())
-    }
-    /// Whether creature `i`'s standard-trial result could enter an archive.
-    /// Only those creatures need the check trial: their final score is the
-    /// lower of both trials, so every other creature is rejected either way.
-    pub fn contender(&self, i: usize, metric: &qd::EvaluationMetrics) -> bool {
-        let (reason, _) = self.contender_reason(i, metric);
-        CONTENDER_COUNTS[reason as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        reason != ContenderReason::Rejected
-    }
-    /// What a held contender needs now. The scheduler re-tests waiting
-    /// contenders against the live archives each time it sends checks, and
-    /// checks one contender per archive cell at a time. A waiting contender
-    /// that no longer beats its cell is released unchecked: its final score
-    /// would be the lower of both trials, so it is rejected either way.
-    pub fn check_need(&self, i: usize, metric: &qd::EvaluationMetrics) -> CheckNeed {
-        let reason = self.contender_reason(i, metric);
-        CONTENDER_COUNTS[reason.0 as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        match reason {
-            (ContenderReason::Rejected, _) => CheckNeed::Release,
-            (_, cell) => CheckNeed::Check { cell },
-        }
-    }
-    /// Stores creature `i`'s final evaluation result.
-    pub fn record_result(&mut self, i: usize, metric: &qd::EvaluationMetrics) {
-        self.scores[i] = metric.fitness;
-        self.trial_metrics[i] = metric.behavior;
-        if self.screened.len() < self.scores.len() {
-            self.screened.resize(self.scores.len(), false);
-            self.screen_distance.resize(self.scores.len(), f32::NAN);
-        }
-        // Screened and unchecked results are both kept out of the archives.
-        self.screened[i] = metric.screened || metric.unchecked;
-        if self.fine.len() < self.scores.len() {
-            self.fine.resize(self.scores.len(), false);
-        }
-        self.fine[i] = metric.fine;
-        self.screen_distance[i] = metric.screen_x;
-        // A result from a world that has since changed carries no distance.
-        if metric.screen_x.is_finite()
-            && self
-                .config
-                .screen
-                .is_some_and(|screen| screen.bar == f32::NEG_INFINITY)
-        {
-            self.screen_samples += 1;
-        }
     }
     /// Sets the screen bar inside a generation that started without one (a
     /// new game, the first generation after a load or a world change) once a
-    /// quarter of the population has recorded its distance at the screen, so
-    /// only that first quarter runs every trial in full. Steady runs call it
-    /// as results arrive; later generations take their bar at the boundary.
-    pub fn arm_screen_early(&mut self) {
+    /// quarter of the generation has recorded its distance at the screen, so
+    /// only that first quarter runs every trial in full. Blocks bred after
+    /// that take the bar; later generations take theirs at the boundary.
+    fn arm_screen_early(&mut self) {
         let Some(screen) = self.config.screen else {
             return;
         };
         if screen.bar != f32::NEG_INFINITY
-            || self.screen_samples < (self.config.population / 4).max(64)
+            || self.screen_log.len() < (self.config.population / 4).max(64)
         {
             return;
         }
-        self.screen_samples = 0;
         self.config.screen = self.next_screen(false, self.config.duration);
     }
     /// The early screen for the next generation: its bar is the distance at
@@ -565,97 +599,25 @@ impl Experiment {
             f32::NEG_INFINITY
         } else {
             crate::physics::screen_bar(
-                self.screen_distance.iter().copied(),
+                self.screen_log.iter().copied(),
                 crate::physics::screen_keep(),
             )
         };
         Some(crate::physics::Screen { seconds, bar })
     }
-    /// The first rule that makes `i` a contender, and the archive cell it
-    /// competes for (none for optimizer samples and reserve candidates, which
-    /// are checked without sharing).
-    fn contender_reason(
-        &self,
-        i: usize,
-        metric: &qd::EvaluationMetrics,
-    ) -> (ContenderReason, Option<u64>) {
-        // A screened creature's score is its distance at the screen, not a
-        // full trial: it enters no archive.
-        if !metric.fitness.is_finite()
-            || metric.fitness <= FAILED
-            || metric.screened
-            || metric.unchecked
-        {
-            return (ContenderReason::Rejected, None);
-        }
-        if self.from_optimizer(i) {
-            return (ContenderReason::Optimizer, None);
-        }
-        let Some(genome) = self.population.genomes.get(i) else {
-            return (ContenderReason::Rejected, None);
-        };
-        let nodes =
-            &self.population.nodes[genome.node_start..genome.node_start + genome.node_count];
-        let muscles = &self.population.muscles
-            [genome.muscle_start..genome.muscle_start + genome.muscle_count];
-        let niche = qd::descriptor(nodes, muscles, metric.behavior).niche();
-        let beats = |archive: &QdArchive| match archive.slot_for(&niche) {
-            Some(slot) => metric.fitness > archive.entries[slot].fitness,
-            None => archive.behavior_count() < qd::ARCHIVE_LIMIT,
-        };
-        // A nursery creature competes only in its nursery until it graduates.
-        let island = qd::arena_of_slot(i, self.islands.len().max(arena_count()));
-        let nursery = island >= island_count();
-        if !nursery && beats(&self.archive) {
-            return (
-                ContenderReason::Global,
-                Some(cell_key(island as u64, &niche)),
-            );
-        }
-        if self.islands.get(island).is_some_and(beats) {
-            return (
-                ContenderReason::Island,
-                Some(cell_key(island as u64, &niche)),
-            );
-        }
-        let reserve_candidate = matches!(
-            self.candidate_emitters.get(i),
-            Some(Emitter::Structural | Emitter::Novelty)
-        );
-        if reserve_candidate
-            && self
-                .islands
-                .get(island)
-                .and_then(QdArchive::morphology_floor)
-                .is_none_or(|floor| metric.fitness > floor)
-        {
-            // The reserve keeps one elite per body plan, so contenders of
-            // one plan share a check like contenders of one archive cell.
-            let topology = qd::topology_of_population(&self.population, i);
-            return (ContenderReason::Reserve, Some(reserve_key(&topology)));
-        }
-        (ContenderReason::Rejected, None)
-    }
-    /// Whether creature `i` was sampled by an island optimizer. Optimizers
-    /// rank all their samples, so all of them get the same check: ranking
-    /// checked samples by the check and the rest by their first trial alone
-    /// would steer the search away from its most promising samples.
-    pub fn from_optimizer(&self, i: usize) -> bool {
-        self.candidate_cma
-            .get(i)
-            .copied()
-            .flatten()
-            .and_then(|c| self.cma_emitters.get(c))
-            .is_some_and(|c| c.optimizing())
-    }
-    /// Offers the evaluated creatures in `slots` to the archive (in slot-list
-    /// order), updates CMA emitters and emitter statistics, and returns how
-    /// many trials failed.
-    pub fn archive_slots(&mut self, slots: &[usize]) -> usize {
+    /// Offers block `k`'s creatures to the archives in block order, updates
+    /// CMA emitters and emitter statistics, and returns how many trials
+    /// failed. Screened and excluded results, and every result of a
+    /// `stale` block, enter no archive.
+    fn archive_block(&mut self, k: usize, finals: &[EvaluationMetrics], stale: bool) -> usize {
         let profile = std::env::var_os("EVOLUTION_PROFILE_BREED").is_some();
         let mut timings = [0.0f64; 7];
         let mut section = std::time::Instant::now();
         self.ensure_islands();
+        let block = self.blocks[k].clone();
+        let population = &*block.population;
+        let births = &block.births;
+        let first = block.first;
         let mut entered: Vec<usize> = Vec::new();
         let previous_parent_ids: [Option<u64>; qd::EMITTER_COUNT] = std::array::from_fn(|i| {
             self.emitter_stats[i]
@@ -669,10 +631,9 @@ impl Experiment {
         let mut cma_samples = vec![Vec::<(usize, f32)>::new(); self.cma_emitters.len()];
         let optimizers: Vec<bool> = self.cma_emitters.iter().map(|c| c.optimizing()).collect();
         // Parallel prefilter: descriptors and behavior-offer eligibility against
-        // the start-of-batch global archive. Occupant fitness only ever rises,
+        // the start-of-block global archive. Occupant fitness only ever rises,
         // so a snapshot reject stays a live reject. Inserts still commit
-        // sequentially in index order so niche races resolve exactly like the
-        // old single loop.
+        // sequentially in block order.
         struct Prep {
             descriptor: qd::Descriptor,
             emitter: Emitter,
@@ -683,50 +644,44 @@ impl Experiment {
             /// Body plan of a structural or novelty child, for its island's
             /// morphology reserve.
             topology: Option<qd::Topology>,
-            /// Stopped by the early screen: offered to no archive.
+            /// Offered to no archive.
             screened: bool,
             /// Fitness of the global archive's elite in this creature's
-            /// cell at the start of the batch, for a CMA sample.
+            /// cell at the start of the block, for a CMA sample.
             elite_before: Option<f32>,
         }
         let arenas = self.islands.len().max(arena_count());
-        let prep: Vec<Prep> = slots
+        let positions: Vec<usize> = (0..block.len()).collect();
+        let prep: Vec<Prep> = positions
             .par_iter()
-            .map(|&i| {
-                let score = self.scores[i];
-                let emitter = self
-                    .candidate_emitters
-                    .get(i)
-                    .copied()
-                    .unwrap_or(Emitter::Restart);
-                let genome = &self.population.genomes[i];
-                let nodes = &self.population.nodes
-                    [genome.node_start..genome.node_start + genome.node_count];
-                let muscles = &self.population.muscles
+            .map(|&j| {
+                let m = &finals[j];
+                let score = m.fitness;
+                let birth = births[j];
+                let emitter = birth.emitter;
+                let genome = &population.genomes[j];
+                let nodes =
+                    &population.nodes[genome.node_start..genome.node_start + genome.node_count];
+                let muscles = &population.muscles
                     [genome.muscle_start..genome.muscle_start + genome.muscle_count];
-                let descriptor = qd::descriptor(nodes, muscles, self.trial_metrics[i]);
-                let protection = self.protected_until.get(i).copied().unwrap_or(0);
-                let screened = self.screened.get(i).copied().unwrap_or(false);
-                // A screened creature enters no archive.
+                let descriptor = qd::descriptor(nodes, muscles, m.behavior);
+                let screened = stale || m.screened || m.excluded;
                 // A nursery creature is offered to its nursery only.
-                let nursery = qd::arena_of_slot(i, arenas) >= island_count();
-                let behavior_candidate =
-                    if score.is_finite() && score > FAILED && !screened && !nursery {
-                        let niche = descriptor.niche();
-                        match self.archive.slot_for(&niche) {
-                            Some(slot) => score > self.archive.entries[slot].fitness,
-                            None => self.archive.behavior_count() < qd::ARCHIVE_LIMIT,
-                        }
-                    } else {
-                        false
-                    };
-                let topology = (!screened
-                    && score.is_finite()
-                    && score > FAILED
-                    && matches!(emitter, Emitter::Structural | Emitter::Novelty))
-                .then(|| qd::topology_of_population(&self.population, i));
+                let nursery = qd::arena_of_slot(first + j, arenas) >= island_count();
+                let valid = score.is_finite() && score > FAILED && !screened;
+                let behavior_candidate = if valid && !nursery {
+                    let niche = descriptor.niche();
+                    match self.archive.slot_for(&niche) {
+                        Some(slot) => score > self.archive.entries[slot].fitness,
+                        None => self.archive.behavior_count() < qd::ARCHIVE_LIMIT,
+                    }
+                } else {
+                    false
+                };
+                let topology = (valid && matches!(emitter, Emitter::Structural | Emitter::Novelty))
+                    .then(|| qd::topology_of_population(population, j));
                 let elite_before = (emitter == Emitter::Cma)
-                    .then(|| self.candidate_cma.get(i).copied().flatten())
+                    .then_some(birth.cma)
                     .flatten()
                     .filter(|_| score.is_finite() && score > FAILED)
                     .and_then(|_| self.archive.slot_for(&descriptor.niche()))
@@ -735,8 +690,8 @@ impl Experiment {
                     descriptor,
                     emitter,
                     score,
-                    fine: self.fine.get(i).copied().unwrap_or(false),
-                    protection,
+                    fine: m.fine,
+                    protection: birth.protection,
                     behavior_candidate,
                     topology,
                     screened,
@@ -748,14 +703,12 @@ impl Experiment {
         section = std::time::Instant::now();
         // Every creature also competes in its own island's archive, and a
         // new body plan that does not take a behavior cell may enter the
-        // island's morphology reserve. Each island's offers resolve in slot
+        // island's morphology reserve. Each island's offers resolve in block
         // order and the islands are independent, so the streams run in
         // parallel.
-        let population = &self.population;
         let generation = self.generation;
-        let parent_ids = &self.candidate_parent_ids;
-        // Per island: the slots that entered, and the emitter and offer of
-        // each reserve entry.
+        // Per island: the positions that entered, and the emitter and offer
+        // of each reserve entry.
         type IslandResult = (Vec<usize>, Vec<(usize, qd::Offer)>);
         let island_results: Vec<IslandResult> = self
             .islands
@@ -782,20 +735,16 @@ impl Experiment {
                         bar.0 = bar.0.max(elite.fitness);
                     }
                 }
-                for (k, &i) in slots.iter().enumerate() {
-                    if qd::arena_of_slot(i, arenas) != island {
+                for (j, p) in prep.iter().enumerate() {
+                    if qd::arena_of_slot(first + j, arenas) != island {
                         continue;
                     }
-                    let p = &prep[k];
-                    if !p.score.is_finite() || p.score <= FAILED {
-                        continue;
-                    }
-                    if p.screened {
+                    if !p.score.is_finite() || p.score <= FAILED || p.screened {
                         continue;
                     }
                     let behavior = archive.offer(
                         population,
-                        i,
+                        j,
                         p.descriptor,
                         p.score,
                         p.fine,
@@ -804,7 +753,7 @@ impl Experiment {
                         p.protection,
                     );
                     if behavior.inserted {
-                        entered.push(i);
+                        entered.push(j);
                         if let Some(topology) = &p.topology {
                             let bar = bars
                                 .entry(topology.clone())
@@ -818,11 +767,7 @@ impl Experiment {
                     };
                     // A reserve place goes to a new body plan, or to a better
                     // child of a reserve entry with the same plan.
-                    let parent = parent_ids
-                        .get(i)
-                        .copied()
-                        .flatten()
-                        .and_then(|id| parents.get(&id));
+                    let parent = births[j].parent_id.and_then(|id| parents.get(&id));
                     let changed = parent.is_some_and(|(plan, _)| {
                         !qd::topology_equivalent_for_archive(topology, plan)
                     });
@@ -847,7 +792,7 @@ impl Experiment {
                     }
                     let offer = archive.offer_morphology(
                         population,
-                        i,
+                        j,
                         p.descriptor,
                         topology.clone(),
                         p.score,
@@ -857,7 +802,7 @@ impl Experiment {
                         p.protection,
                     );
                     if offer.inserted {
-                        entered.push(i);
+                        entered.push(j);
                         let bar = bars
                             .entry(topology.clone())
                             .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
@@ -897,61 +842,62 @@ impl Experiment {
         // not edit archive fitness or descriptors.
         let mut prep = prep;
         let mut best_by_niche: HashMap<qd::Niche, usize> = HashMap::new();
-        for (k, p) in prep.iter().enumerate() {
+        for (j, p) in prep.iter().enumerate() {
             if p.behavior_candidate {
-                let best = best_by_niche.entry(p.descriptor.niche()).or_insert(k);
+                let best = best_by_niche.entry(p.descriptor.niche()).or_insert(j);
                 if prep[*best].score < p.score {
-                    *best = k;
+                    *best = j;
                 }
             }
         }
         let behavior_best: std::collections::HashSet<usize> =
             best_by_niche.values().copied().collect();
-        for (k, p) in prep.iter_mut().enumerate() {
-            p.behavior_candidate &= behavior_best.contains(&k);
+        for (j, p) in prep.iter_mut().enumerate() {
+            p.behavior_candidate &= behavior_best.contains(&j);
         }
-        timings[2] = section.elapsed().as_secs_f64();
+        timings[2] += section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
         let mut attempts = [0u64; qd::EMITTER_COUNT];
         let mut failed = 0usize;
         let mut global_changed = false;
         let mut behavior_inserted = false;
-        for (&i, prep) in slots.iter().zip(prep) {
+        for (j, prep) in prep.into_iter().enumerate() {
             if !prep.score.is_finite() || prep.score <= FAILED {
                 failed += 1;
             }
-            if qd::arena_of_slot(i, arenas) >= island_count() {
+            let cma = births[j].cma;
+            if qd::arena_of_slot(first + j, arenas) >= island_count() {
                 // Nursery samples rank by distance alone.
                 if prep.emitter == Emitter::Cma
-                    && let Some(cma) = self.candidate_cma.get(i).copied().flatten()
+                    && let Some(cma) = cma
                     && let Some(samples) = cma_samples.get_mut(cma)
                     && prep.score.is_finite()
                     && prep.score > FAILED
                 {
-                    samples.push((i, prep.score));
+                    samples.push((j, prep.score));
                 }
                 continue;
             }
             let emitter_index = prep.emitter.index();
             attempts[emitter_index] += 1;
             // The CMA improvement key needs the cell's fitness before the
-            // offers; only CMA samples use it.
-            // The prefilter read the cell's elite before any offer of this
-            // batch; after the first insertion a new read keeps the order.
+            // offers; only CMA samples use it. The prefilter read the cell's
+            // elite before any offer of this block; after the first
+            // insertion a new read keeps the order.
             let elite_before = if !behavior_inserted {
                 prep.elite_before
             } else {
                 (prep.emitter == Emitter::Cma)
-                    .then(|| self.candidate_cma.get(i).copied().flatten())
+                    .then_some(cma)
                     .flatten()
                     .filter(|_| prep.score.is_finite() && prep.score > FAILED)
                     .and_then(|_| self.archive.slot_for(&prep.descriptor.niche()))
                     .map(|slot| self.archive.entries[slot].fitness)
             };
-            let behavior_offer = if prep.behavior_candidate {
+            let offer = if prep.behavior_candidate {
                 self.archive.offer(
-                    &self.population,
-                    i,
+                    population,
+                    j,
                     prep.descriptor,
                     prep.score,
                     prep.fine,
@@ -962,28 +908,27 @@ impl Experiment {
             } else {
                 qd::Offer::default()
             };
-            behavior_inserted |= behavior_offer.inserted;
-            let offer = behavior_offer;
+            behavior_inserted |= offer.inserted;
             // CMA-ME improvement ranking: new niches first, then improvement over
             // the niche's elite, then how far short of it a sample fell.
             if prep.emitter == Emitter::Cma
-                && let Some(cma) = self.candidate_cma.get(i).copied().flatten()
+                && let Some(cma) = cma
                 && let Some(samples) = cma_samples.get_mut(cma)
                 && prep.score.is_finite()
                 && prep.score > FAILED
             {
                 let key = match elite_before {
                     _ if optimizers[cma] => prep.score,
-                    None if behavior_offer.inserted => 1.0e6 + prep.score,
-                    Some(before) if behavior_offer.inserted => 1.0e3 + (prep.score - before),
+                    None if offer.inserted => 1.0e6 + prep.score,
+                    Some(before) if offer.inserted => 1.0e3 + (prep.score - before),
                     Some(before) => prep.score - before,
                     None => prep.score - 1.0e3,
                 };
-                samples.push((i, key));
+                samples.push((j, key));
             }
             if offer.inserted {
                 global_changed = true;
-                entered.push(i);
+                entered.push(j);
                 rewards[emitter_index] += offer.reward;
                 if offer.new_niche {
                     discoveries[emitter_index] += 1;
@@ -1004,7 +949,7 @@ impl Experiment {
         timings[3] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
         for (emitter, samples) in self.cma_emitters.iter_mut().zip(&mut cma_samples) {
-            emitter.tell(&self.population, samples);
+            emitter.tell(population, samples);
         }
         qd::record_emitter_batch(
             &mut self.emitter_stats,
@@ -1033,15 +978,15 @@ impl Experiment {
         entered.sort_unstable();
         entered.dedup();
         let entered_count = entered.len();
-        for i in entered {
-            self.record_ancestor(i);
+        for j in entered {
+            self.record_ancestor(population, births[j], j, finals[j].fitness);
         }
         timings[6] = section.elapsed().as_secs_f64();
         if profile {
             eprintln!(
-                "Archive profile: generation {}, slots {}, island offers {:.6} s, island refresh {:.6} s, prefilter {:.6} s, global offers {:.6} s, cma tell {:.6} s, archive refresh {:.6} s, lineage {:.6} s, entered {}",
+                "Archive profile: generation {}, block {}, island offers {:.6} s, island refresh {:.6} s, prefilter {:.6} s, global offers {:.6} s, cma tell {:.6} s, archive refresh {:.6} s, lineage {:.6} s, entered {}",
                 self.generation,
-                slots.len(),
+                block.len(),
                 timings[0],
                 timings[1],
                 timings[2],
@@ -1054,32 +999,33 @@ impl Experiment {
         }
         failed
     }
-    /// Records the creature in `slot` (which just entered an archive).
-    fn record_ancestor(&mut self, slot: usize) {
-        let creature = self.population.creature(slot);
+    /// Records creature `index` of `population` (which just entered an
+    /// archive with `fitness`).
+    fn record_ancestor(
+        &mut self,
+        population: &Population,
+        birth: Birth,
+        index: usize,
+        fitness: f32,
+    ) {
+        let creature = population.creature(index);
         if self.lineage.contains_key(&creature.id) {
             return;
         }
-        let parent = self.candidate_parent_ids.get(slot).copied().flatten();
-        let emitter = self
-            .candidate_emitters
-            .get(slot)
-            .copied()
-            .unwrap_or(Emitter::Restart);
-        let crossed = self.candidate_mates.get(slot).copied().unwrap_or(false);
         let change = describe_change(
-            parent
+            birth
+                .parent_id
                 .and_then(|id| self.lineage.get(&id))
                 .map(|a| &a.creature),
             &creature,
-            emitter,
-            crossed,
+            birth.emitter,
+            birth.mate,
         );
         self.lineage.insert(
             creature.id,
             Ancestor {
-                parent,
-                fitness: self.scores[slot],
+                parent: birth.parent_id,
+                fitness,
                 generation: self.generation,
                 change,
                 creature,
@@ -1160,7 +1106,7 @@ impl Experiment {
         let mut all_elites: Vec<_> = self.archive.entries.iter().collect();
         all_elites.sort_unstable_by(|a, b| b.fitness.total_cmp(&a.fitness));
         let representatives = if all_elites.is_empty() {
-            [0, 0, 0].map(|i| self.population.creature(i)).to_vec()
+            vec![self.blocks[0].population.creature(0); 3]
         } else {
             [all_elites.len() - 1, (all_elites.len() - 1) / 2, 0]
                 .map(|i| all_elites[i].creature.clone())
@@ -1189,121 +1135,6 @@ impl Experiment {
             archive_coverage: self.archive.coverage(),
             emitters: self.emitter_stats,
         });
-    }
-    pub fn prepare_next_batch(&mut self) -> Result<()> {
-        self.prepare_next_batch_streaming(usize::MAX, |_, _, _| Ok(()))
-    }
-    /// Breeds the next generation, handing each finished slice of `slice`
-    /// offspring to `on_slice` (with the generation's settings) so evaluation
-    /// can start early. The result is identical for every slice size.
-    pub fn prepare_next_batch_streaming(
-        &mut self,
-        slice: usize,
-        mut on_slice: impl FnMut(&Population, std::ops::Range<usize>, &Config) -> Result<()>,
-    ) -> Result<()> {
-        let preparation_started = std::time::Instant::now();
-        ensure!(
-            self.stage == Stage::Archived,
-            "The archive must be updated before breeding"
-        );
-        // A generation cut short by a load or a new steady run has no row yet.
-        self.history = repair_history(std::mem::take(&mut self.history), self.generation);
-        if self.history.len() == self.generation as usize
-            && let Some(last) = self.history.last()
-        {
-            let mut row = last.clone();
-            row.generation = self.generation;
-            self.history.push(row);
-        }
-        let mut cfg = self.pending.clone().unwrap_or_else(|| self.config.clone());
-        cfg.validate()?;
-        let generation = self.generation + 1;
-        crate::environment::advance_autochange(&mut cfg, generation);
-        let world_changed = fitness_context_changed(&self.config, &cfg);
-        if world_changed {
-            self.reset_search_context();
-        }
-        cfg.screen = self.next_screen(world_changed, cfg.duration);
-        evolution::ensure_archive_batch_memory(&self.population, &self.archive, &cfg)?;
-        let setup_seconds = preparation_started.elapsed().as_secs_f64();
-        let plan_started = std::time::Instant::now();
-        let all: Vec<usize> = (0..cfg.population).collect();
-        let planned = self.plan_offspring(&cfg, generation, 0, &all);
-        let plans: Vec<CandidatePlan> = planned.iter().map(|p| p.plan).collect();
-        let emitters: Vec<Emitter> = planned.iter().map(|p| p.plan.emitter).collect();
-        let cma_indices: Vec<Option<usize>> = planned.iter().map(|p| p.plan.cma).collect();
-        let parent_ids: Vec<Option<u64>> = planned.iter().map(|p| p.parent_id).collect();
-        let protections: Vec<u32> = planned.iter().map(|p| p.protection).collect();
-        let plan_seconds = plan_started.elapsed().as_secs_f64();
-        let emission_started = std::time::Instant::now();
-        // Elites queued by a world change take the first slots of their own
-        // islands. No slice is handed over until they are placed, so every
-        // device sees them.
-        let reseeding = !self.reseed.is_empty();
-        let next = evolution::emit_archive_batch_streaming(
-            &self.population,
-            &self.islands,
-            &self.cma_emitters,
-            &plans,
-            &cfg,
-            generation,
-            slice.min(cfg.population).max(1),
-            |population, range| {
-                if reseeding {
-                    Ok(())
-                } else {
-                    on_slice(population, range, &cfg)
-                }
-            },
-        )?;
-        let emission_seconds = emission_started.elapsed().as_secs_f64();
-        self.config = cfg;
-        self.pending = None;
-        self.population = next;
-        self.candidate_emitters = emitters;
-        self.candidate_cma = cma_indices;
-        self.candidate_parent_ids = parent_ids;
-        self.candidate_mates = planned.iter().map(|p| p.plan.mate.is_some()).collect();
-        self.protected_until = protections;
-        if reseeding {
-            for slot in 0..self.config.population {
-                if self.reseed.is_empty() {
-                    break;
-                }
-                let Some(elite) = self.reseed_for_slot(slot) else {
-                    continue;
-                };
-                self.population.replace(slot, elite);
-                self.candidate_emitters[slot] = Emitter::Restart;
-                self.candidate_cma[slot] = None;
-                self.candidate_parent_ids[slot] = None;
-                self.candidate_mates[slot] = false;
-                self.protected_until[slot] = 0;
-            }
-            on_slice(&self.population, 0..self.config.population, &self.config)?;
-        }
-        self.parent_scores.fill(f32::NAN);
-        self.generation = generation;
-        self.graduate_nurseries();
-        self.migrate_islands();
-        self.stage = Stage::Ready;
-        self.evaluated = 0;
-        self.scores.fill(f32::NAN);
-        self.trial_metrics.fill(TrialMetrics::default());
-        self.ranks.clear();
-        self.parents.clear();
-        self.evaluation_seconds = 0.0;
-        if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
-            eprintln!(
-                "Breeding profile: generation {generation}, setup {setup_seconds:.6} s, parent plans {plan_seconds:.6} s, candidate emission {emission_seconds:.6} s, finalization {:.6} s, total {:.6} s",
-                preparation_started.elapsed().as_secs_f64()
-                    - setup_seconds
-                    - plan_seconds
-                    - emission_seconds,
-                preparation_started.elapsed().as_secs_f64()
-            );
-        }
-        Ok(())
     }
     /// The next elite queued for the island of `slot`. A nursery slot takes
     /// none, so a re-tested elite competes in its island's archive.
@@ -1822,44 +1653,49 @@ impl Experiment {
         }
         out
     }
-    /// Steady-state breeding: replaces the creatures in `slots` (already offered
-    /// to the archive) with offspring bred from the current archive.
-    pub fn breed_slots(&mut self, slots: &[usize]) -> Result<()> {
-        if slots.is_empty() {
-            return Ok(());
-        }
-        let count = self.config.population;
-        self.candidate_parent_ids.resize(count, None);
-        self.candidate_mates.resize(count, false);
-        self.candidate_emitters.resize(count, Emitter::Restart);
-        self.candidate_cma.resize(count, None);
-        self.protected_until.resize(count, 0);
-        self.parent_scores.resize(count, f32::NAN);
+    /// Breeds a block for ring slots `first..first + count` from the current
+    /// archives with the current settings. Elites queued by a world change
+    /// take the slots of their own islands first. An island without elites
+    /// breeds new random bodies.
+    fn breed_block(&mut self, first: usize, count: usize) -> Block {
+        let slots: Vec<usize> = (first..first + count).collect();
         let cfg = self.config.clone();
         self.breed_round += 1;
         let started = std::time::Instant::now();
-        let planned = self.plan_offspring(&cfg, self.generation, self.breed_round, slots);
-        let plans: Vec<CandidatePlan> = planned.iter().map(|p| p.plan).collect();
+        let planned = self.plan_offspring(&cfg, self.generation, self.breed_round, &slots);
         let planned_at = started.elapsed();
-        // Reseeded elites take the slots of their own islands first; the rest
-        // are emitted straight into batches, so no child is alive after it is
-        // copied.
+        // Reseeded elites first, then the children, emitted straight into
+        // batches so no child is alive after it is copied.
         let mut lead = evolution::ChildBatch::default();
-        let mut order: Vec<usize> = Vec::with_capacity(slots.len());
-        let mut reseeded_slot = vec![false; slots.len()];
+        let mut order: Vec<usize> = Vec::with_capacity(count);
+        let mut births: Vec<Birth> = planned
+            .iter()
+            .map(|p| Birth {
+                emitter: p.plan.emitter,
+                cma: p.plan.cma,
+                parent_id: p.parent_id,
+                mate: p.plan.mate.is_some(),
+                protection: p.protection,
+            })
+            .collect();
         if !self.reseed.is_empty() {
             for (k, &slot) in slots.iter().enumerate() {
                 if let Some(elite) = self.reseed_for_slot(slot) {
                     lead.push(elite);
                     order.push(k);
-                    reseeded_slot[k] = true;
+                    births[k] = Birth::RANDOM;
                 }
             }
         }
         let reseeded = order.len();
-        order.extend((0..slots.len()).filter(|&k| !reseeded_slot[k]));
-        let ordered_slots: Vec<usize> = order.iter().map(|&k| slots[k]).collect();
-        let bred_plans: Vec<CandidatePlan> = order[reseeded..].iter().map(|&k| plans[k]).collect();
+        let mut taken = vec![false; count];
+        for &k in &order {
+            taken[k] = true;
+        }
+        order.extend((0..count).filter(|&k| !taken[k]));
+        let bred_slots: Vec<usize> = order[reseeded..].iter().map(|&k| slots[k]).collect();
+        let bred_plans: Vec<CandidatePlan> =
+            order[reseeded..].iter().map(|&k| planned[k].plan).collect();
         let mut batches = Vec::new();
         if reseeded > 0 {
             batches.push(lead);
@@ -1868,31 +1704,17 @@ impl Experiment {
             &self.islands,
             &self.cma_emitters,
             &bred_plans,
-            &ordered_slots[reseeded..],
+            &bred_slots,
             &cfg,
             self.generation,
             self.breed_round,
         ));
         let emitted_at = started.elapsed();
-        for (k, (&slot, plan)) in slots.iter().zip(&planned).enumerate() {
-            if reseeded_slot[k] {
-                self.candidate_emitters[slot] = Emitter::Restart;
-                self.candidate_cma[slot] = None;
-                self.candidate_parent_ids[slot] = None;
-                self.candidate_mates[slot] = false;
-                self.protected_until[slot] = 0;
-            } else {
-                self.candidate_emitters[slot] = plan.plan.emitter;
-                self.candidate_cma[slot] = plan.plan.cma;
-                self.candidate_parent_ids[slot] = plan.parent_id;
-                self.candidate_mates[slot] = plan.plan.mate.is_some();
-                self.protected_until[slot] = plan.protection;
-            }
-            self.parent_scores[slot] = f32::NAN;
-            self.scores[slot] = f32::NAN;
-            self.trial_metrics[slot] = TrialMetrics::default();
-        }
-        self.population.append_batches(&ordered_slots, batches);
+        let mut population = Population {
+            genomes: vec![Genome::default(); count],
+            ..Population::default()
+        };
+        population.append_batches(&order, batches);
         let total = started.elapsed();
         let add = |k: usize, d: std::time::Duration| {
             BREED_NANOS[k].fetch_add(d.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -1900,20 +1722,24 @@ impl Experiment {
         add(0, planned_at);
         add(1, emitted_at.saturating_sub(planned_at));
         add(2, total.saturating_sub(emitted_at));
-        Ok(())
+        Block {
+            first,
+            population: Arc::new(population),
+            births,
+            config: Arc::new(cfg),
+        }
     }
-    /// Steady-state generation boundary (every `population` evaluations):
-    /// records history, applies queued settings, and compacts the arenas.
-    pub fn finish_steady_generation(&mut self, failed: usize) -> Result<()> {
+    /// The generation boundary (every `population` evaluations): records
+    /// history, graduates the nurseries, migrates to the hub, and applies
+    /// queued settings and the autochange ladder.
+    fn end_generation(&mut self) -> Result<()> {
         let started = std::time::Instant::now();
+        let failed = std::mem::take(&mut self.failed);
         self.push_archive_stats(failed);
-        let stats = started.elapsed();
         self.prune_lineage();
-        let lineage = started.elapsed();
         self.generation += 1;
         self.graduate_nurseries();
         self.migrate_islands();
-        let migrated = started.elapsed();
         let mut cfg = self.pending.take().unwrap_or_else(|| self.config.clone());
         cfg.validate()?;
         ensure!(
@@ -1927,35 +1753,24 @@ impl Experiment {
         }
         cfg.screen = self.next_screen(world_changed, cfg.duration);
         self.config = cfg;
-        let compact_started = std::time::Instant::now();
-        let before = (self.population.bytes(), self.arena_spare.bytes());
-        self.population.compact_with(&mut self.arena_spare);
+        self.screen_log.clear();
+        self.evaluation_seconds = 0.0;
         if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
-            let mib = |b: usize| b as f64 / 1048576.0;
             eprintln!(
-                "Generation boundary: stats {:.3} s, lineage {:.3} s, migration {:.3} s, compact {:.3} s, arenas {:.0} + spare {:.0} MiB before, {:.0} + spare {:.0} MiB after",
-                stats.as_secs_f64(),
-                (lineage - stats).as_secs_f64(),
-                (migrated - lineage).as_secs_f64(),
-                compact_started.elapsed().as_secs_f64(),
-                mib(before.0),
-                mib(before.1),
-                mib(self.population.bytes()),
-                mib(self.arena_spare.bytes()),
+                "Generation boundary: {:.3} s, ring {:.0} MiB",
+                started.elapsed().as_secs_f64(),
+                self.ring_bytes() as f64 / 1048576.0
             );
         }
-        self.evaluation_seconds = 0.0;
-        self.evaluated = 0;
         Ok(())
     }
-    /// Applies settings when the experiment is idle, and otherwise at the
-    /// next generation boundary.
+    /// Applies settings at the next generation boundary.
     pub fn update_config(&mut self, cfg: Config) -> Result<()> {
-        self.update_config_at(cfg, self.stage == Stage::Ready)
+        self.update_config_at(cfg, false)
     }
-    /// Applies settings now, in the middle of a steady run. A world change
-    /// resets the search context at once. Trials in flight from the old world
-    /// are recognized by their own settings and enter no archive.
+    /// Applies settings now. A world change resets the search context at
+    /// once. Blocks in flight from the old world are recognized by their own
+    /// settings and enter no archive.
     pub fn update_config_now(&mut self, cfg: Config) -> Result<()> {
         self.update_config_at(cfg, true)
     }
@@ -1971,18 +1786,8 @@ impl Experiment {
             "Population or seed changes require a new experiment"
         );
         ensure!(
-            self.population
-                .genomes
-                .iter()
-                .all(|g| g.node_count <= cfg.max_nodes && g.muscle_count <= cfg.max_muscles),
+            self.bodies_fit(&cfg),
             "Existing bodies exceed these limits; start a new experiment"
-        );
-        ensure!(
-            self.archive.entries.iter().all(|elite| {
-                elite.creature.nodes.len() <= cfg.max_nodes
-                    && elite.creature.muscles.len() <= cfg.max_muscles
-            }),
-            "Archived bodies exceed these limits; start a new experiment"
         );
         if now {
             self.pending = None;
@@ -2109,75 +1914,52 @@ impl Experiment {
         self.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
         self.cma_emitters.clear();
         // Distances measured in the old world say nothing about the new one.
-        self.screen_distance.fill(f32::NAN);
-        self.screen_samples = 0;
+        self.screen_log.clear();
+    }
+    /// Whether every body in the ring and the archive fits `cfg`'s limits.
+    fn bodies_fit(&self, cfg: &Config) -> bool {
+        self.blocks
+            .iter()
+            .flat_map(|b| &b.population.genomes)
+            .all(|g| g.node_count <= cfg.max_nodes && g.muscle_count <= cfg.max_muscles)
+            && self.archive.entries.iter().all(|elite| {
+                elite.creature.nodes.len() <= cfg.max_nodes
+                    && elite.creature.muscles.len() <= cfg.max_muscles
+            })
     }
     pub fn validate(&self) -> Result<()> {
         self.config.validate()?;
-        self.population.validate(&self.config)?;
         ensure!(
-            self.scores.len() == self.config.population
-                && self.evaluated <= self.scores.len()
-                && self.trial_metrics.len() == self.config.population,
+            !self.blocks.is_empty() && self.cursor < self.blocks.len(),
+            "Invalid ring"
+        );
+        let mut next = 0;
+        for block in &self.blocks {
+            ensure!(
+                block.first == next && block.births.len() == block.len() && !block.is_empty(),
+                "Invalid ring block"
+            );
+            next += block.len();
+            block.population.validate(&Config {
+                population: block.len(),
+                ..(*block.config).clone()
+            })?;
+        }
+        ensure!(
+            next == ring_len(self.config.population),
+            "Invalid ring size"
+        );
+        ensure!(
+            self.evaluated < self.config.population.max(1),
             "Invalid evaluation progress"
         );
-        ensure!(
-            self.candidate_emitters.len() == self.config.population
-                && self.candidate_cma.len() == self.config.population
-                && self.protected_until.len() == self.config.population,
-            "Invalid QD candidate state"
-        );
-        // A continuous run evaluates and re-breeds slots in any order, so a
-        // finished score can sit at any slot and a new child (NaN) below
-        // `evaluated`. Only the values themselves are checked.
-        ensure!(
-            self.scores.iter().all(|s| s.is_finite() || s.is_nan()),
-            "Invalid fitness values"
-        );
-        if matches!(
-            self.stage,
-            Stage::Evaluated | Stage::Ranked | Stage::Selected | Stage::Archived
-        ) {
-            ensure!(
-                self.evaluated == self.scores.len(),
-                "Incomplete evaluated generation"
-            );
-        }
-        if matches!(self.stage, Stage::Ranked | Stage::Selected) {
-            ensure!(
-                self.ranks.len() == self.config.population,
-                "Invalid ranking length"
-            );
-            let mut seen = vec![false; self.ranks.len()];
-            for &r in &self.ranks {
-                ensure!(r < seen.len() && !seen[r], "Invalid ranking index");
-                seen[r] = true;
-            }
-        }
-        if self.stage == Stage::Selected {
-            ensure!(
-                self.parents.len() == self.config.population / 2
-                    && self.parents.iter().all(|&i| i < self.config.population),
-                "Invalid parents"
-            );
-        }
         if let Some(cfg) = &self.pending {
             cfg.validate()?;
             ensure!(
                 cfg.population == self.config.population
                     && cfg.seed == self.config.seed
                     && cfg.random_seed == self.config.random_seed
-                    && self
-                        .population
-                        .genomes
-                        .iter()
-                        .all(|g| g.node_count <= cfg.max_nodes && g.muscle_count <= cfg.max_muscles)
-                    && self
-                        .archive
-                        .entries
-                        .iter()
-                        .all(|elite| elite.creature.nodes.len() <= cfg.max_nodes
-                            && elite.creature.muscles.len() <= cfg.max_muscles),
+                    && self.bodies_fit(cfg),
                 "Invalid pending settings"
             );
         }
@@ -2333,48 +2115,23 @@ impl<'a> SmallSave<'a> {
     }
 }
 impl SmallLoad {
-    /// The game the save describes. With elites to breed from, the next
-    /// generation is bred from the archives, as the game would have after
-    /// the saved generation; without, the population starts at random.
+    /// The game the save describes, at the start of its saved generation.
+    /// Its ring is bred from the archives, as the game would have bred it;
+    /// without elites it starts with new random bodies.
     fn into_experiment(self) -> Result<Experiment> {
-        let n = self.config.population;
-        let mut e = Experiment {
-            config: self.config,
-            pending: self.pending,
-            generation: self.generation,
-            population: Population::default(),
-            scores: vec![f32::NAN; n],
-            parent_scores: vec![f32::NAN; n],
-            evaluated: 0,
-            stage: Stage::Archived,
-            ranks: vec![],
-            parents: vec![],
-            history: repair_history(self.history, self.generation),
-            evaluation_seconds: 0.0,
-            archive: self.archive,
-            emitter_stats: self.emitter_stats,
-            cma_emitters: self.cma_emitters,
-            candidate_emitters: vec![Emitter::Restart; n],
-            candidate_cma: vec![None; n],
-            candidate_parent_ids: vec![None; n],
-            protected_until: vec![0; n],
-            trial_metrics: vec![TrialMetrics::default(); n],
-            screened: Vec::new(),
-            fine: Vec::new(),
-            screen_distance: Vec::new(),
-            arena_spare: evolution::Arena::default(),
-            screen_samples: 0,
-            qd_version: self.qd_version,
-            breed_round: self.breed_round,
-            islands: self.islands,
-            lineage: self.lineage,
-            candidate_mates: Vec::new(),
-            island_progress: self.island_progress,
-            graduations: Vec::new(),
-            last_migration: None,
-            reseed: self.reseed,
-            fossils: Vec::new(),
-        };
+        let mut e = Experiment::empty(self.config);
+        e.pending = self.pending;
+        e.generation = self.generation;
+        e.history = repair_history(self.history, self.generation);
+        e.archive = self.archive;
+        e.emitter_stats = self.emitter_stats;
+        e.cma_emitters = self.cma_emitters;
+        e.qd_version = self.qd_version;
+        e.breed_round = self.breed_round;
+        e.islands = self.islands;
+        e.lineage = self.lineage;
+        e.island_progress = self.island_progress;
+        e.reseed = self.reseed;
         ensure!(
             e.island_progress.len() <= 64
                 && (e.island_progress.is_empty() || e.island_progress.len() == e.islands.len())
@@ -2384,22 +2141,41 @@ impl SmallLoad {
                 }),
             "Invalid checkpoint optimizer progress"
         );
+        ensure!(
+            (e.islands.is_empty() || e.islands.len() == arena_count())
+                && e.reseed.fits(island_count())
+                && e.cma_emitters.iter().all(|c| c.island < arena_count()),
+            "Invalid island state"
+        );
         e.archive.rebuild_indices();
         for island in &mut e.islands {
             island.rebuild_indices();
         }
+        // The screen bar is not saved: the resumed generation runs every
+        // trial in full until it has set a new one.
+        e.config.screen = e.next_screen(true, e.config.duration);
+        let shared = Arc::new(e.config.clone());
         let elites =
             e.archive.entries.len() + e.islands.iter().map(|i| i.entries.len()).sum::<usize>();
-        if elites == 0 && e.reseed.is_empty() {
-            // Nothing valid to breed from: a random population, as in a new game.
-            e.population = evolution::create(&e.config)?;
-            e.stage = Stage::Ready;
-        } else {
-            e.prepare_next_batch()?;
+        for (first, count) in block_ranges(ring_len(e.config.population)) {
+            let block = if elites == 0 && e.reseed.is_empty() {
+                // Nothing to breed from: the new bodies of a new game.
+                Block {
+                    first,
+                    population: Arc::new(evolution::random_block(&e.config, first, count)),
+                    births: vec![Birth::RANDOM; count],
+                    config: Arc::clone(&shared),
+                }
+            } else {
+                // Plans sample every island's archive; an empty one breeds
+                // new random bodies.
+                Block {
+                    config: Arc::clone(&shared),
+                    ..e.breed_block(first, count)
+                }
+            };
+            e.blocks.push(block);
         }
-        // The screen bar is not saved: the first resumed generation runs every
-        // trial in full and sets a new one.
-        e.config.screen = e.next_screen(true, e.config.duration);
         e.validate()?;
         Ok(e)
     }
@@ -2457,7 +2233,7 @@ impl SaveHeader {
         Self {
             qd_version: experiment.qd_version,
             generation: experiment.generation,
-            population: experiment.population.genomes.len() as u64,
+            population: experiment.config.population as u64,
         }
     }
     fn to_bytes(self) -> [u8; Self::BYTES] {
@@ -2803,6 +2579,29 @@ mod peek_tests {
 mod migration_tests {
     use super::*;
 
+    /// Deterministic made-up results: a distance and a behavior from each
+    /// creature's id.
+    fn synthetic(pop: &Population, _: &Config) -> Result<Vec<EvaluationMetrics>> {
+        Ok(pop
+            .genomes
+            .iter()
+            .map(|g| {
+                let h = g.id.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 20;
+                EvaluationMetrics {
+                    fitness: 1.0 + (h % 1000) as f32 * 0.02,
+                    behavior: qd::TrialMetrics {
+                        ground_contact: ((h >> 10) % 6) as f32 / 6.0 + 0.05,
+                        gait_frequency: ((h >> 13) % 8) as f32 * 0.75 + 0.1,
+                        mean_height: ((h >> 16) % 6) as f32 * 0.3 + 0.05,
+                        feet: ((h >> 19) % 5) as f32,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            })
+            .collect())
+    }
+
     #[test]
     fn the_header_turns_down_old_saves_before_reading_them() {
         let config = Config {
@@ -2823,7 +2622,7 @@ mod migration_tests {
                 population: 8,
             }
         );
-        assert_eq!(load(&current).unwrap().population.genomes.len(), 8);
+        assert_eq!(load(&current).unwrap().ring_len(), 8);
 
         // Saved under other physics: the header says so.
         experiment.qd_version = qd::VERSION - 1;
@@ -2864,27 +2663,32 @@ mod migration_tests {
     }
 
     #[test]
-    fn a_continuous_run_checkpoint_with_scattered_scores_loads() {
-        // A steady run's autosave: the generation's count is complete, but
-        // slots re-bred during it hold new, unevaluated children.
+    fn a_checkpoint_mid_generation_resumes_that_generation() {
         let config = Config {
-            population: 4,
+            population: 40,
             random_seed: false,
             ..Config::default()
         };
         let mut experiment = Experiment::new(config).unwrap();
-        experiment.scores = vec![f32::NAN, 2.0, f32::NAN, -1e20];
-        experiment.evaluated = experiment.config.population;
-        experiment.stage = Stage::Archived;
+        experiment.step(&mut synthetic).unwrap();
+        assert!(experiment.evaluated > 0);
         let checkpoint =
             std::env::temp_dir().join(format!("evolution-steady-{}.evo", std::process::id()));
-        // A save keeps no scores: the loaded game starts a fresh
-        // generation from its (here empty) archives.
+        // A save keeps no ring: the loaded game starts its saved generation
+        // again with a ring bred from its archives.
         save(&checkpoint, &experiment).unwrap();
         let loaded = load(&checkpoint).unwrap();
         let _ = std::fs::remove_file(checkpoint);
-        assert!(loaded.scores.iter().all(|score| score.is_nan()));
         assert_eq!(loaded.evaluated, 0);
+        assert_eq!(loaded.generation, experiment.generation);
+        assert_eq!(loaded.ring_len(), 40);
+        assert!(
+            loaded
+                .blocks
+                .iter()
+                .flat_map(|b| &b.births)
+                .any(|b| b.emitter != Emitter::Restart)
+        );
     }
 
     #[test]
@@ -2898,8 +2702,10 @@ mod migration_tests {
         let mut experiment = Experiment::new(config).unwrap();
         experiment.config.autochange_step = 7;
         experiment.config.wind = crate::environment::WIND[2];
-        let checkpoint =
-            std::env::temp_dir().join(format!("evolution-autochange-step-{}.evo", std::process::id()));
+        let checkpoint = std::env::temp_dir().join(format!(
+            "evolution-autochange-step-{}.evo",
+            std::process::id()
+        ));
         save(&checkpoint, &experiment).unwrap();
         let loaded = load(&checkpoint).unwrap();
         let _ = std::fs::remove_file(checkpoint);
@@ -2916,14 +2722,7 @@ mod migration_tests {
             ..Config::default()
         };
         let mut experiment = Experiment::new(config).unwrap();
-        experiment
-            .scores
-            .iter_mut()
-            .enumerate()
-            .for_each(|(i, s)| *s = 1.0 + i as f32);
-        experiment.evaluated = experiment.config.population;
-        experiment.stage = Stage::Evaluated;
-        experiment.archive_batch().unwrap();
+        experiment.run_generation(&mut synthetic).unwrap();
         let exchange: Vec<(usize, usize)> = (0..island_count()).map(|i| (i + 2, i + 1)).collect();
         assert!(!exchange.is_empty());
         experiment.last_migration = Some((experiment.generation, exchange.clone()));
@@ -2951,19 +2750,18 @@ mod migration_tests {
             };
             let mut experiment = Experiment::new(config).unwrap();
             for generation in 1..=interval * 2 {
-                experiment.scores.fill(1.0);
-                experiment.evaluated = experiment.config.population;
-                experiment.stage = Stage::Evaluated;
-                experiment.archive_batch().unwrap();
                 if generation == 2 {
                     // The panel sends its whole config, as the game does.
                     let mut cfg = experiment.config.clone();
                     cfg.autochange = level;
                     experiment.update_config(cfg).unwrap();
                 }
-                experiment.prepare_next_batch().unwrap();
+                experiment.run_generation(&mut synthetic).unwrap();
                 if generation >= 2 {
-                    assert_eq!(experiment.config.autochange, level, "generation {generation}");
+                    assert_eq!(
+                        experiment.config.autochange, level,
+                        "generation {generation}"
+                    );
                 }
                 assert!(experiment.pending.is_none());
             }
@@ -2982,117 +2780,18 @@ mod migration_tests {
         };
         let mut experiment = Experiment::new(config).unwrap();
         for generation in 1..=interval {
-            experiment.scores.fill(1.0);
-            experiment.evaluated = experiment.config.population;
-            experiment.stage = Stage::Evaluated;
-            experiment.archive_batch().unwrap();
-            experiment.prepare_next_batch().unwrap();
+            experiment.run_generation(&mut synthetic).unwrap();
             assert_eq!(experiment.generation, generation);
             if generation < interval {
                 assert_eq!(experiment.config.autochange_step, 0);
             }
         }
         assert_eq!(experiment.config.autochange_step, 1);
-        assert_eq!(experiment.config.wind, crate::environment::WIND[1]);
-    }
-}
-
-#[cfg(test)]
-mod breeding_tests {
-    use super::*;
-
-    /// The breeding path before children were packed into batches: one
-    /// `Creature` per child, then `replace_many`.
-    fn breed_slots_by_creature(e: &mut Experiment, slots: &[usize]) {
-        let count = e.config.population;
-        e.candidate_parent_ids.resize(count, None);
-        e.candidate_mates.resize(count, false);
-        e.candidate_emitters.resize(count, Emitter::Restart);
-        e.candidate_cma.resize(count, None);
-        e.protected_until.resize(count, 0);
-        e.parent_scores.resize(count, f32::NAN);
-        let cfg = e.config.clone();
-        e.breed_round += 1;
-        let planned = e.plan_offspring(&cfg, e.generation, e.breed_round, slots);
-        let plans: Vec<CandidatePlan> = planned.iter().map(|p| p.plan).collect();
-        let children = evolution::emit_offspring(
-            &e.islands,
-            &e.cma_emitters,
-            &plans,
-            slots,
-            &cfg,
-            e.generation,
-            e.breed_round,
+        // The first rung of the ladder is on.
+        let (effect, level) = crate::environment::autochange_ladder()[0];
+        assert_eq!(
+            crate::environment::EFFECTS[effect].level(&experiment.config),
+            level
         );
-        let mut creatures = Vec::new();
-        for ((&slot, child), plan) in slots.iter().zip(children).zip(&planned) {
-            if let Some(elite) = e.reseed_for_slot(slot) {
-                creatures.push(elite);
-                e.candidate_emitters[slot] = Emitter::Restart;
-                e.candidate_cma[slot] = None;
-                e.candidate_parent_ids[slot] = None;
-                e.candidate_mates[slot] = false;
-                e.protected_until[slot] = 0;
-            } else {
-                creatures.push(child);
-                e.candidate_emitters[slot] = plan.plan.emitter;
-                e.candidate_cma[slot] = plan.plan.cma;
-                e.candidate_parent_ids[slot] = plan.parent_id;
-                e.candidate_mates[slot] = plan.plan.mate.is_some();
-                e.protected_until[slot] = plan.protection;
-            }
-            e.parent_scores[slot] = f32::NAN;
-            e.scores[slot] = f32::NAN;
-            e.trial_metrics[slot] = TrialMetrics::default();
-        }
-        e.population.replace_many(slots, creatures);
-    }
-
-    #[test]
-    fn batched_breeding_matches_creature_by_creature_breeding() {
-        let config = Config {
-            population: 10_000,
-            random_seed: false,
-            seed: 12,
-            ..Config::default()
-        };
-        let mut a = Experiment::new(config).unwrap();
-        for i in 0..a.config.population {
-            let h = (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 20;
-            a.scores[i] = 1.0 + (h % 1000) as f32 * 0.02;
-            a.trial_metrics[i] = qd::TrialMetrics {
-                ground_contact: ((h >> 10) % 6) as f32 / 6.0 + 0.05,
-                gait_frequency: ((h >> 13) % 8) as f32 * 0.75 + 0.1,
-                mean_height: ((h >> 16) % 6) as f32 * 0.3 + 0.05,
-                feet: ((h >> 19) % 5) as f32,
-                ..Default::default()
-            };
-        }
-        let all: Vec<usize> = (0..a.config.population).collect();
-        a.archive_slots(&all);
-        for k in 0..12 {
-            a.reseed.push(
-                qd::island_of_slot(k, island_count()),
-                a.population.creature(k),
-            );
-        }
-        let mut b = a.clone();
-        let slots: Vec<usize> = (0..a.config.population).rev().step_by(1).collect();
-        a.breed_slots(&slots).unwrap();
-        breed_slots_by_creature(&mut b, &slots);
-        // Reseeded elites sit in their islands' slots, so the arenas hold
-        // the same creatures in another order: compare slot by slot.
-        assert_eq!(a.population.genomes.len(), b.population.genomes.len());
-        assert_eq!(a.population.nodes.len(), b.population.nodes.len());
-        for slot in 0..a.population.genomes.len() {
-            let (x, y) = (a.population.creature(slot), b.population.creature(slot));
-            assert_eq!(x.id, y.id);
-            assert_eq!(x.nodes, y.nodes);
-            assert_eq!(x.bones, y.bones);
-            assert_eq!(x.muscles, y.muscles);
-        }
-        assert_eq!(a.candidate_emitters, b.candidate_emitters);
-        assert_eq!(a.candidate_parent_ids, b.candidate_parent_ids);
-        assert_eq!(a.protected_until, b.protected_until);
     }
 }

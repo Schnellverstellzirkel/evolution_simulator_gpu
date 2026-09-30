@@ -43,13 +43,14 @@ impl Fidelity {
             velocity_passes,
         }
     }
-    /// Four times the standard rate and solver passes.
+    /// Twice the standard rate and solver passes, for the confirmation trial
+    /// of a creature that would set an island record.
     pub fn fine() -> Self {
         let standard = Self::standard();
         Self {
-            rate: (standard.rate * 4).min(960),
-            bone_passes: standard.bone_passes * 4,
-            velocity_passes: standard.velocity_passes * 4,
+            rate: (standard.rate * 2).min(960),
+            bone_passes: standard.bone_passes * 2,
+            velocity_passes: standard.velocity_passes * 2,
         }
     }
     pub fn dt(self) -> f32 {
@@ -200,7 +201,10 @@ pub const MUSCLE_MASS_PER_M: f32 = 1.0;
 fn muscle_span(bones: &[Bone], nodes: &[Node], m: &Muscle) -> f32 {
     let point = |bone: u32, t: f32| -> Option<[f32; 2]> {
         let bone = bones.get(bone as usize)?;
-        let (a, b) = (nodes.get(bone.a as usize)?.pos, nodes.get(bone.b as usize)?.pos);
+        let (a, b) = (
+            nodes.get(bone.a as usize)?.pos,
+            nodes.get(bone.b as usize)?.pos,
+        );
         Some([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t])
     };
     match (point(m.bone_a, m.anchor_a), point(m.bone_b, m.anchor_b)) {

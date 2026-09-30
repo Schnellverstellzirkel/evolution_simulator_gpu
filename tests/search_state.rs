@@ -1,9 +1,9 @@
 use evolution_simulator::{
     config::Config,
     evolution::{self, Population},
-    qd::{Descriptor, Emitter, Niche, QdArchive, TrialMetrics},
+    qd::{Descriptor, Emitter, EvaluationMetrics, Niche, QdArchive, TrialMetrics},
     scheduler::Scheduler,
-    storage::{self, Experiment, Stage},
+    storage::{self, Experiment},
 };
 use serde::Serialize;
 use std::{collections::BTreeMap, path::PathBuf};
@@ -265,21 +265,39 @@ fn island_migration_never_duplicates_a_cell_or_replaces_a_faster_elite() {
 }
 
 // Synthetic results isolate search state from the physics engine and make these
-// regression tests cheap. Every island receives several distinct cadence cells.
-fn archive_synthetic_results(experiment: &mut Experiment) {
-    for i in 0..experiment.config.population {
-        experiment.scores[i] = 10.0 + experiment.generation as f32 + i as f32;
-        experiment.trial_metrics[i] = TrialMetrics {
-            ground_contact: 0.5,
-            gait_frequency: ((i / storage::island_count()) % 8) as f32 * 0.75 + 0.1,
-            mean_height: 0.5,
-            feet: 2.0,
-            ..TrialMetrics::default()
-        };
+// regression tests cheap. The score follows the generation and the birth
+// slot, and every island receives several distinct cadence cells.
+fn synthetic(
+    generation: u32,
+) -> impl FnMut(&Population, &Config) -> anyhow::Result<Vec<EvaluationMetrics>> {
+    move |pop, _| {
+        Ok(pop
+            .genomes
+            .iter()
+            .map(|g| {
+                let i = evolution::slot_of_id(g.id);
+                EvaluationMetrics {
+                    fitness: 10.0 + generation as f32 + i as f32,
+                    behavior: TrialMetrics {
+                        ground_contact: 0.5,
+                        gait_frequency: ((i / storage::island_count()) % 8) as f32 * 0.75 + 0.1,
+                        mean_height: 0.5,
+                        feet: 2.0,
+                        ..TrialMetrics::default()
+                    },
+                    ..EvaluationMetrics::default()
+                }
+            })
+            .collect())
     }
-    experiment.evaluated = experiment.config.population;
-    experiment.stage = Stage::Evaluated;
-    experiment.archive_batch().unwrap();
+}
+
+/// Runs one generation of the ring on synthetic results.
+fn run_synthetic(experiment: &mut Experiment) {
+    let generation = experiment.generation;
+    experiment
+        .run_generation(&mut synthetic(generation))
+        .unwrap();
 }
 
 fn encoded<T: Serialize>(value: &T) -> Vec<u8> {
@@ -310,29 +328,27 @@ fn assert_same_archive(a: &QdArchive, b: &QdArchive) {
     assert_eq!(a.morphology_count(), b.morphology_count());
 }
 
-/// What loading a save of `e` gives: saves keep only the archives and the
-/// search state, so a loaded game breeds its next generation from them.
-fn resumed(e: &Experiment) -> Experiment {
-    let mut resumed = e.clone();
-    resumed.stage = Stage::Archived;
-    resumed.prepare_next_batch().unwrap();
-    resumed
-}
-
-fn assert_same_next_batch(a: &Experiment, b: &Experiment) {
+/// The same ring, archives and search state.
+fn assert_same_state(a: &Experiment, b: &Experiment) {
     a.validate().unwrap();
     b.validate().unwrap();
-    assert_same_population(&a.population, &b.population);
+    assert_eq!(a.blocks.len(), b.blocks.len());
+    for (x, y) in a.blocks.iter().zip(&b.blocks) {
+        assert_eq!(x.first, y.first);
+        assert_same_population(&x.population, &y.population);
+        assert_eq!(*x.config, *y.config);
+        for (p, q) in x.births.iter().zip(&y.births) {
+            assert_eq!(
+                (p.emitter, p.cma, p.parent_id, p.mate, p.protection),
+                (q.emitter, q.cma, q.parent_id, q.mate, q.protection)
+            );
+        }
+    }
     assert_eq!(a.config, b.config);
     assert_eq!(a.generation, b.generation);
     assert_eq!(a.breed_round, b.breed_round);
-    assert_eq!(a.stage, b.stage);
     assert_eq!(a.evaluated, b.evaluated);
-    assert_eq!(a.candidate_emitters, b.candidate_emitters);
-    assert_eq!(a.candidate_cma, b.candidate_cma);
-    assert_eq!(a.candidate_parent_ids, b.candidate_parent_ids);
-    assert_eq!(a.candidate_mates, b.candidate_mates);
-    assert_eq!(a.protected_until, b.protected_until);
+    assert_eq!(a.cursor, b.cursor);
     assert!(
         encoded(&a.cma_emitters) == encoded(&b.cma_emitters),
         "CMA state differs"
@@ -342,39 +358,40 @@ fn assert_same_next_batch(a: &Experiment, b: &Experiment) {
     for (a, b) in a.islands.iter().zip(&b.islands) {
         assert_same_archive(a, b);
     }
-    assert!(a.scores.iter().all(|score| score.is_nan()));
-    assert!(b.scores.iter().all(|score| score.is_nan()));
+}
+
+fn births(e: &Experiment) -> impl Iterator<Item = &storage::Birth> {
+    e.blocks.iter().flat_map(|b| &b.births)
 }
 
 #[test]
-fn archive_breeding_is_repeatable_and_valid_across_streaming_slice_sizes() {
+fn the_ring_breeds_every_emitter_and_stays_valid() {
     for seed in [7, 38, 91] {
-        let mut whole = Experiment::new(config(seed)).unwrap();
-        let mut streamed = Experiment::new(config(seed)).unwrap();
-        for slice in [1, 17, 63, 256] {
-            archive_synthetic_results(&mut whole);
-            archive_synthetic_results(&mut streamed);
-            whole.prepare_next_batch().unwrap();
-            let mut delivered = Population::default();
-            streamed
-                .prepare_next_batch_streaming(slice, |population, range, cfg| {
-                    assert_eq!(range.start, delivered.genomes.len());
-                    assert!(range.len() <= slice);
-                    assert_eq!(cfg.seed, seed);
-                    for index in range {
-                        delivered.push(population.creature(index));
-                    }
-                    Ok(())
-                })
-                .unwrap();
-            delivered.validate(&whole.config).unwrap();
-            assert_same_population(&delivered, &whole.population);
-            assert_same_next_batch(&whole, &streamed);
+        let mut experiment = Experiment::new(config(seed)).unwrap();
+        assert_eq!(experiment.ring_len(), 128);
+        for _ in 0..4 {
+            run_synthetic(&mut experiment);
+            experiment.validate().unwrap();
         }
-        assert!(!whole.cma_emitters.is_empty(), "CMA must be exercised");
-        assert!(whole.candidate_emitters.contains(&Emitter::Structural));
-        assert!(whole.candidate_emitters.contains(&Emitter::Novelty));
+        assert!(!experiment.cma_emitters.is_empty(), "CMA must be exercised");
+        let emitters: Vec<Emitter> = births(&experiment).map(|b| b.emitter).collect();
+        assert!(emitters.contains(&Emitter::Cma));
+        assert!(emitters.contains(&Emitter::Structural));
+        assert!(emitters.contains(&Emitter::Novelty));
+        assert_eq!(experiment.history.len(), 4);
     }
+}
+
+#[test]
+fn the_ring_is_smaller_than_a_large_generation() {
+    let experiment = Experiment::new(Config {
+        population: storage::RING_SLOTS + 1000,
+        ..config(38)
+    })
+    .unwrap();
+    assert_eq!(experiment.ring_len(), storage::RING_SLOTS);
+    assert_eq!(experiment.blocks.len(), storage::RING_BLOCKS);
+    experiment.validate().unwrap();
 }
 
 #[test]
@@ -385,8 +402,7 @@ fn the_island_reserves_breed_and_count_their_visits() {
     })
     .unwrap();
     for _ in 0..12 {
-        archive_synthetic_results(&mut experiment);
-        experiment.prepare_next_batch().unwrap();
+        run_synthetic(&mut experiment);
     }
     let reserve: Vec<_> = experiment
         .islands
@@ -404,6 +420,41 @@ fn the_island_reserves_breed_and_count_their_visits() {
         reserve.iter().any(|elite| elite.visits > 0),
         "reserve entries never became parents"
     );
+}
+
+#[test]
+fn a_record_is_confirmed_and_keeps_the_lower_score() {
+    let mut experiment = Experiment::new(config(38)).unwrap();
+    // The confirmation trial finds half the standard distance.
+    let mut confirmed = 0;
+    experiment
+        .step(&mut |pop, cfg| {
+            let mut metrics = synthetic(0)(pop, cfg)?;
+            if cfg.fidelity.is_some() {
+                confirmed += metrics.len();
+                for m in &mut metrics {
+                    m.fitness *= 0.5;
+                }
+            }
+            Ok(metrics)
+        })
+        .unwrap();
+    assert!(confirmed > 0, "the first block sets records");
+    // Every island record is a confirmed score: it lies below any
+    // unconfirmed standard score of its island.
+    for island in &experiment.islands[..storage::island_count()] {
+        let Some(best) = island
+            .entries
+            .iter()
+            .max_by(|a, b| a.fitness.total_cmp(&b.fitness))
+        else {
+            continue;
+        };
+        assert!(best.fine, "the record holder shows its confirmation trial");
+        for elite in island.entries.iter().filter(|e| !e.fine) {
+            assert!(elite.fitness <= best.fitness);
+        }
+    }
 }
 
 struct Checkpoint(PathBuf);
@@ -434,61 +485,48 @@ fn saving_twice_replaces_the_checkpoint_with_the_latest_state() {
     let mut experiment = Experiment::new(config(38)).unwrap();
     storage::save(&checkpoint.0, &experiment).unwrap();
     let original = storage::load(&checkpoint.0).unwrap();
-    assert_same_population(&experiment.population, &original.population);
+    assert_eq!(original.generation, 0);
+    assert!(original.archive.entries.is_empty());
 
-    archive_synthetic_results(&mut experiment);
-    experiment.prepare_next_batch().unwrap();
+    run_synthetic(&mut experiment);
     storage::save(&checkpoint.0, &experiment).unwrap();
     let replaced = storage::load(&checkpoint.0).unwrap();
-    // The save holds the archives, and loading breeds the next generation.
-    assert_eq!(replaced.generation, original.generation + 2);
-    assert_same_next_batch(&resumed(&experiment), &replaced);
+    assert_eq!(replaced.generation, 1);
     assert_eq!(encoded(&experiment.archive), encoded(&replaced.archive));
     assert!(!checkpoint.0.with_extension("evo.tmp").exists());
 }
 
 #[test]
-fn checkpoint_restores_archive_and_cma_for_identical_next_generation() {
+fn a_loaded_save_breeds_one_ring_and_repeats_its_search() {
     let mut uninterrupted = Experiment::new(config(38)).unwrap();
     for _ in 0..3 {
-        archive_synthetic_results(&mut uninterrupted);
-        uninterrupted.prepare_next_batch().unwrap();
+        run_synthetic(&mut uninterrupted);
     }
-    archive_synthetic_results(&mut uninterrupted);
     assert!(!uninterrupted.cma_emitters.is_empty());
     let checkpoint = Checkpoint::new("archive-resume");
     storage::save(&checkpoint.0, &uninterrupted).unwrap();
-    // Saved right after archiving: the loaded game breeds exactly the
-    // generation the uninterrupted one breeds next.
-    let restored = storage::load(&checkpoint.0).unwrap();
-    uninterrupted.prepare_next_batch().unwrap();
-    assert_same_next_batch(&uninterrupted, &restored);
-
-    // A steady-state resume must also retain the RNG salt from earlier rounds.
-    let slots: Vec<_> = (0..uninterrupted.config.population).rev().collect();
-    uninterrupted.breed_slots(&slots).unwrap();
-    uninterrupted.breed_slots(&slots).unwrap();
-    let steady_checkpoint = Checkpoint::new("steady-resume");
-    storage::save(&steady_checkpoint.0, &uninterrupted).unwrap();
-    let mut restored = storage::load(&steady_checkpoint.0).unwrap();
-    let mut expected = resumed(&uninterrupted);
-    assert_eq!(restored.breed_round, 2);
-    assert_same_next_batch(&expected, &restored);
-    expected.breed_slots(&slots).unwrap();
-    restored.breed_slots(&slots).unwrap();
-    assert_eq!(restored.breed_round, 3);
-    assert_same_next_batch(&expected, &restored);
+    let mut first = storage::load(&checkpoint.0).unwrap();
+    let mut second = storage::load(&checkpoint.0).unwrap();
+    assert_same_archive(&first.archive, &uninterrupted.archive);
+    // Loading breeds every block of the ring from the saved archives.
+    assert_eq!(
+        first.breed_round,
+        uninterrupted.breed_round + first.blocks.len() as u64
+    );
+    assert_same_state(&first, &second);
+    run_synthetic(&mut first);
+    run_synthetic(&mut second);
+    assert_same_state(&first, &second);
 }
 
 #[test]
-fn checkpoint_preserves_stalled_island_optimizer_next_generation() {
+fn checkpoint_preserves_stalled_island_optimizer() {
     let mut uninterrupted = Experiment::new(config(38)).unwrap();
-    archive_synthetic_results(&mut uninterrupted);
-    uninterrupted.prepare_next_batch().unwrap();
-    archive_synthetic_results(&mut uninterrupted);
+    run_synthetic(&mut uninterrupted);
+    run_synthetic(&mut uninterrupted);
     // Advance the record age past the 30-generation optimizer rotation without
     // spending 30 generations evaluating bodies. The archived scores and CMA
-    // state remain valid; the next batch must use the same alternate design.
+    // state remain valid; the loaded ring must use the same alternate design.
     uninterrupted.generation = 40;
     uninterrupted.history.clear();
     uninterrupted.island_progress = uninterrupted
@@ -505,24 +543,21 @@ fn checkpoint_preserves_stalled_island_optimizer_next_generation() {
     uninterrupted.validate().unwrap();
     let checkpoint = Checkpoint::new("stalled-island-resume");
     storage::save(&checkpoint.0, &uninterrupted).unwrap();
-    let restored = storage::load(&checkpoint.0).unwrap();
-    uninterrupted.prepare_next_batch().unwrap();
-    assert_eq!(uninterrupted.island_progress, restored.island_progress);
+    let first = storage::load(&checkpoint.0).unwrap();
+    let second = storage::load(&checkpoint.0).unwrap();
+    assert_eq!(first.island_progress, second.island_progress);
     assert!(
-        uninterrupted
-            .candidate_cma
-            .iter()
-            .flatten()
-            .any(|&index| uninterrupted.cma_emitters[index].optimizing())
+        births(&first)
+            .filter_map(|b| b.cma)
+            .any(|index| first.cma_emitters[index].optimizing())
     );
-    assert_same_next_batch(&uninterrupted, &restored);
+    assert_same_state(&first, &second);
 }
 
 #[test]
 fn checkpoint_rejects_invalid_optimizer_resume_metadata() {
     let mut experiment = Experiment::new(config(38)).unwrap();
-    archive_synthetic_results(&mut experiment);
-    experiment.prepare_next_batch().unwrap();
+    run_synthetic(&mut experiment);
     let islands = experiment.islands.len();
     let checkpoint = Checkpoint::new("invalid-resume");
     for progress in [
@@ -542,10 +577,7 @@ fn checkpoint_rejects_invalid_optimizer_resume_metadata() {
         experiment.island_progress = progress;
         storage::save(&checkpoint.0, &experiment).unwrap();
         let restored = storage::load(&checkpoint.0).unwrap();
-        assert_eq!(
-            restored.island_progress,
-            resumed(&experiment).island_progress
-        );
+        assert_eq!(restored.island_progress.len(), islands);
     }
 }
 
@@ -560,106 +592,87 @@ fn a_save_from_other_physics_is_turned_down() {
 }
 
 #[test]
-fn ready_environment_change_checkpoint_retests_the_same_elites() {
+fn a_world_change_checkpoint_retests_the_same_elites() {
     let mut uninterrupted = Experiment::new(config(38)).unwrap();
-    archive_synthetic_results(&mut uninterrupted);
-    uninterrupted.prepare_next_batch().unwrap();
+    run_synthetic(&mut uninterrupted);
     assert!(!uninterrupted.island_progress.is_empty());
     let mut changed = uninterrupted.config.clone();
     changed.gravity += 1.0;
-    uninterrupted.update_config(changed.clone()).unwrap();
+    uninterrupted.update_config_now(changed).unwrap();
     assert!(uninterrupted.islands.is_empty());
     assert!(!uninterrupted.reseed.is_empty());
 
-    let checkpoint = Checkpoint::new("ready-world-change");
+    let checkpoint = Checkpoint::new("world-change");
     storage::save(&checkpoint.0, &uninterrupted).unwrap();
     let restored = storage::load(&checkpoint.0).unwrap();
-    assert_eq!(restored.config, changed);
+    assert_eq!(restored.config, uninterrupted.config);
     assert!(restored.archive.entries.is_empty());
     assert!(restored.cma_emitters.is_empty());
-    // The queued elites are bred back into the loaded generation first.
-    let elite_ids: Vec<_> = uninterrupted
-        .reseed
-        .iter()
-        .map(|creature| creature.id)
-        .collect();
+    // The queued elites are bred back into the loaded ring first.
     assert!(restored.reseed.is_empty());
-    assert_same_next_batch(&resumed(&uninterrupted), &restored);
-    assert!(elite_ids.iter().all(|id| {
-        restored
-            .population
-            .genomes
-            .iter()
-            .any(|genome| genome.id == *id)
-    }));
+    for creature in uninterrupted.reseed.iter() {
+        assert!(
+            births_ids(&restored).any(|id| id == creature.id),
+            "elite {} is not in the ring",
+            creature.id
+        );
+    }
+}
+
+fn births_ids(e: &Experiment) -> impl Iterator<Item = u64> + '_ {
+    e.blocks
+        .iter()
+        .flat_map(|b| b.population.genomes.iter().map(|g| g.id))
 }
 
 #[test]
-fn steady_environment_change_checkpoint_keeps_boundary_state_valid() {
+fn a_world_change_at_the_boundary_keeps_the_state_valid() {
     let mut uninterrupted = Experiment::new(config(38)).unwrap();
-    archive_synthetic_results(&mut uninterrupted);
-    uninterrupted.prepare_next_batch().unwrap();
-    uninterrupted.stage = Stage::Evaluating;
+    run_synthetic(&mut uninterrupted);
     let mut changed = uninterrupted.config.clone();
     changed.ground_friction *= 0.5;
     uninterrupted.update_config(changed.clone()).unwrap();
     assert!(uninterrupted.pending.is_some());
-    let slots: Vec<_> = (0..uninterrupted.config.population).collect();
-    uninterrupted.scores.fill(20.0);
-    uninterrupted.evaluated = uninterrupted.config.population;
-    uninterrupted.archive_slots(&slots);
-    uninterrupted.breed_slots(&slots).unwrap();
-    uninterrupted.finish_steady_generation(0).unwrap();
-    assert!(uninterrupted.islands.is_empty());
+    run_synthetic(&mut uninterrupted);
+    assert!(uninterrupted.pending.is_none());
+    assert_eq!(
+        uninterrupted.config.ground_friction,
+        changed.ground_friction
+    );
+    // The world changed at the boundary: the archives start over and the
+    // old elites wait to be tested again, the first of them in the block
+    // bred right after the boundary.
+    assert!(uninterrupted.islands.iter().all(|i| i.entries.is_empty()));
     assert!(!uninterrupted.reseed.is_empty());
+    uninterrupted.validate().unwrap();
 
-    let checkpoint = Checkpoint::new("steady-world-change");
+    let checkpoint = Checkpoint::new("boundary-world-change");
     storage::save(&checkpoint.0, &uninterrupted).unwrap();
-    let mut restored = storage::load(&checkpoint.0).unwrap();
-    assert_eq!(restored.config, changed);
+    let restored = storage::load(&checkpoint.0).unwrap();
+    assert_eq!(restored.config, uninterrupted.config);
     assert!(restored.pending.is_none());
-    assert!(restored.reseed.is_empty());
-    restored.validate().unwrap();
-    assert_eq!(restored.generation, uninterrupted.generation + 1);
-    assert_eq!(restored.breed_round, uninterrupted.breed_round);
-    assert_eq!(restored.stage, Stage::Ready);
+    assert_eq!(restored.generation, uninterrupted.generation);
     assert_eq!(restored.evaluated, 0);
     assert!(restored.archive.entries.is_empty());
     assert!(restored.cma_emitters.is_empty());
-    // The queued elites are bred back into the loaded generation first.
-    for elite in uninterrupted.reseed.iter() {
-        assert!(
-            restored
-                .population
-                .genomes
-                .iter()
-                .any(|genome| genome.id == elite.id)
-        );
+    for creature in uninterrupted.reseed.iter() {
+        assert!(births_ids(&restored).any(|id| id == creature.id));
     }
-    let mut expected = resumed(&uninterrupted);
-    assert_same_next_batch(&expected, &restored);
-    expected.breed_slots(&slots).unwrap();
-    restored.breed_slots(&slots).unwrap();
-    assert_same_next_batch(&expected, &restored);
 }
 
 #[test]
-fn a_steady_world_change_rescores_the_archive_in_the_new_world() {
+fn a_world_change_rescores_the_archive_in_the_new_world() {
     let mut experiment = Experiment::new(Config {
         duration: 2.0,
         ..config(38)
     })
     .unwrap();
     let mut scheduler = Scheduler::cpu_only(6).unwrap();
-    let all: Vec<usize> = (0..experiment.config.population).collect();
-    let metrics = scheduler
-        .evaluate(&experiment.population, &all, &experiment.config)
-        .unwrap();
-    for (i, metric) in metrics.iter().enumerate() {
-        experiment.record_result(i, metric);
-    }
-    experiment.evaluated = experiment.config.population;
-    experiment.archive_batch().unwrap();
+    let mut evaluate = |pop: &Population, cfg: &Config| {
+        let all: Vec<usize> = (0..pop.genomes.len()).collect();
+        scheduler.evaluate(pop, &all, cfg)
+    };
+    experiment.run_generation(&mut evaluate).unwrap();
     assert!(!experiment.archive.entries.is_empty());
     let calm_champion = experiment
         .archive
@@ -671,38 +684,23 @@ fn a_steady_world_change_rescores_the_archive_in_the_new_world() {
     // Random v2 bodies barely move in 2 s, so only a finite score is required.
     assert!(calm_champion > -1.0);
 
-    // A mid-generation terrain change, as the environment buttons do in a
-    // steady run: the new world waits for the generation boundary.
-    experiment.stage = Stage::Evaluating;
+    // A terrain change for the next generation: the world changes at the
+    // boundary and the archives start over.
     experiment
         .update_config(Config {
             terrain: 3,
             ..experiment.config.clone()
         })
         .unwrap();
-    assert!(experiment.pending.is_some());
-    experiment.archive_slots(&all);
-    experiment.breed_slots(&all).unwrap();
-    experiment.finish_steady_generation(0).unwrap();
+    experiment.run_generation(&mut evaluate).unwrap();
     assert!(
         experiment.archive.entries.is_empty(),
         "the world change must clear the old scores"
     );
     assert!(!experiment.reseed.is_empty());
-
-    // The steady loop breeds queued elites into freed slots as units finish;
-    // breeding every slot at once places them all, then the rough world
-    // evaluates them.
-    experiment.breed_slots(&all).unwrap();
-    let metrics = scheduler
-        .evaluate(&experiment.population, &all, &experiment.config)
-        .unwrap();
-    for (i, metric) in metrics.iter().enumerate() {
-        experiment.record_result(i, metric);
-    }
-    experiment.evaluated = experiment.config.population;
-    experiment.archive_batch().unwrap();
-
+    // The next generation tests the queued elites in the rough world.
+    experiment.run_generation(&mut evaluate).unwrap();
+    assert!(!experiment.archive.entries.is_empty());
     for elite in &experiment.archive.entries {
         let mut population = Population::default();
         population.push(elite.creature.clone());
@@ -720,14 +718,13 @@ fn a_steady_world_change_rescores_the_archive_in_the_new_world() {
 #[test]
 fn rebuilding_islands_resets_records_from_the_previous_partition() {
     let mut experiment = Experiment::new(config(38)).unwrap();
-    archive_synthetic_results(&mut experiment);
-    experiment.prepare_next_batch().unwrap();
+    run_synthetic(&mut experiment);
     // A checkpoint saved with a different island count gets new, empty
-    // islands on the next planning pass. Its previous records cannot apply.
+    // islands on the next absorption. Its previous records cannot apply.
     experiment.islands.pop();
     experiment.island_progress = vec![(1.0e9, 0); experiment.islands.len()];
-    let slots: Vec<_> = (0..experiment.config.population).collect();
-    experiment.breed_slots(&slots).unwrap();
+    let generation = experiment.generation;
+    experiment.step(&mut synthetic(generation)).unwrap();
     assert_eq!(experiment.islands.len(), storage::arena_count());
     assert_eq!(experiment.island_progress.len(), experiment.islands.len());
     for (island, &(record, generation)) in
@@ -742,11 +739,11 @@ fn rebuilding_islands_resets_records_from_the_previous_partition() {
 fn an_island_migration_is_recorded_and_summarized() {
     use evolution_simulator::worker::{IslandSummary, MigrationSummary};
     let mut experiment = Experiment::new(config(38)).unwrap();
-    archive_synthetic_results(&mut experiment);
+    run_synthetic(&mut experiment);
     assert!(experiment.last_migration.is_none());
     // The generation before a migration boundary.
     experiment.generation = storage::MIGRATION_INTERVAL - 1;
-    experiment.prepare_next_batch().unwrap();
+    run_synthetic(&mut experiment);
     let (generation, exchange) = experiment.last_migration.clone().unwrap();
     assert_eq!(generation, storage::MIGRATION_INTERVAL);
     assert_eq!(exchange.len(), storage::island_count());
@@ -789,9 +786,9 @@ fn an_island_migration_is_recorded_and_summarized() {
     assert!(empty.best.is_nan() && empty.leader.is_none() && empty.cells == 0);
 }
 
-/// The island a creature was born in: every id comes from its slot.
-fn birth_island(id: u64, population: usize) -> usize {
-    evolution_simulator::qd::island_of_slot((id - 1) as usize % population, storage::island_count())
+/// The island a creature was born in, from the ring slot its id carries.
+fn birth_island(id: u64) -> usize {
+    evolution_simulator::qd::island_of_slot(evolution::slot_of_id(id), storage::island_count())
 }
 
 #[test]
@@ -801,7 +798,6 @@ fn isolated_islands_only_hold_their_own_descendants() {
         ..config(38)
     })
     .unwrap();
-    let population = experiment.config.population;
     let hub = storage::hub_island();
     let check = |experiment: &Experiment| {
         for (arena, island) in experiment.islands.iter().enumerate() {
@@ -813,7 +809,7 @@ fn isolated_islands_only_hold_their_own_descendants() {
             for elite in &island.entries {
                 // Only nursery slots fill a nursery, and an island archive
                 // holds nursery bodies only as marked graduates.
-                let slot = (elite.creature.id - 1) as usize % population;
+                let slot = evolution::slot_of_id(elite.creature.id);
                 let nursery_slot =
                     evolution_simulator::qd::is_nursery_slot(slot, storage::island_count());
                 if arena >= storage::island_count() {
@@ -824,12 +820,12 @@ fn isolated_islands_only_hold_their_own_descendants() {
                 // The elite and every recorded ancestor were born here.
                 for ancestor in experiment.ancestry(elite.creature.id, usize::MAX) {
                     assert_eq!(
-                        birth_island(ancestor.creature.id, population),
+                        birth_island(ancestor.creature.id),
                         index,
                         "island {index} holds a creature from another island"
                     );
                 }
-                assert_eq!(birth_island(elite.creature.id, population), index);
+                assert_eq!(birth_island(elite.creature.id), index);
             }
         }
         for cma in &experiment.cma_emitters {
@@ -837,15 +833,14 @@ fn isolated_islands_only_hold_their_own_descendants() {
         }
     };
     for generation in 0..2 * storage::MIGRATION_INTERVAL + 3 {
-        archive_synthetic_results(&mut experiment);
-        check(&experiment);
         if generation == storage::MIGRATION_INTERVAL + 5 {
             // A world change queues each island's elites for its own slots.
             let mut changed = experiment.config.clone();
             changed.gravity += 1.0;
             experiment.update_config(changed).unwrap();
         }
-        experiment.prepare_next_batch().unwrap();
+        run_synthetic(&mut experiment);
+        check(&experiment);
     }
     // The nurseries sent cohorts to their islands.
     assert!(experiment.graduations.iter().any(|g| g.sent > 0));
