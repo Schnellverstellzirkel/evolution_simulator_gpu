@@ -196,14 +196,6 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
             "PROFILE".into(),
             format!("{}", solver_setting("PROFILE", 0)),
         ),
-        (
-            "DEBUG".into(),
-            if record {
-                std::env::var("EVOLUTION_WARP_DEBUG").unwrap_or_else(|_| "0".into())
-            } else {
-                "0".into()
-            },
-        ),
     ];
     for (bit, name) in FLAG_NAMES.iter().enumerate() {
         defines.push((

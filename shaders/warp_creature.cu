@@ -489,17 +489,6 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     const float wantx = ex, wanty = ey;
     #endif
                     const float sx = (wantx - ax_) * inv_mass, sy = (wanty - ay_) * inv_mass;
-    #if DEBUG
-                    if (live && step < 1 && valid) {
-                        printf("step %u sub %u lane %u mx %.5f my %.5f m %.4f vx %.5f\n", step, sub, lg, mx, my, m, vx);
-                    }
-                    if (live && step < DEBUG && lg == 0u) {
-                        printf("step %u sub %u shift %.5f %.5f want %.5f %.5f got %.5f %.5f\n", step, sub, sx, sy, wantx, wanty, ax_, ay_);
-                    }
-                    if (live && step < DEBUG && valid && lg > 0u) {
-                        printf("step %u sub %u lane %u node vy %.5f y %.5f\n", step, sub, lg, vy, py);
-                    }
-    #endif
                     if (lg == 0u) { hvx += sx; hvy += sy; }
                     vx += sx;
                     vy += sy;
@@ -547,11 +536,6 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                         const float cx = wantx * inv_mass, cy = wanty * inv_mass;
                         const float dvx = vx - cx, dvy = vy - cy;
                         const float internal = gsum(valid ? 0.5f * m * (dvx * dvx + dvy * dvy) : 0.0f);
-    #if DEBUG
-                        if (live && step < DEBUG && lg == 0u) {
-                            printf("step %u sub %u excess %.5f internal %.5f\n", step, sub, excess, internal);
-                        }
-    #endif
                         if (live && nc == 0u && excess > 0.0f) {
                             const float keep = internal > 0.0f ? sqrtf(fmaxf(1.0f - excess / internal, 0.0f)) : 0.0f;
                             qd *= keep;
@@ -792,11 +776,6 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     }
                     const float u = tau - sdot(axis, bs);
                     const float di = 1.0f / d;
-#if DEBUG
-                    if (live && step < DEBUG) {
-                        printf("step %u sub %u lane %u q %.4f qd %.4f lo %.3f hi %.3f limit %d om %.3f\n", step, sub, lg, q, qd, lo, hi, (int)(upper || predicted < lo), om);
-                    }
-#endif
                     uvs = uv; dis = di; uus = u;
                     const float k = -di;
                     c0 = i0 + v3(k * uv.x * uv.x, k * uv.x * uv.y, k * uv.x * uv.z);
@@ -1127,17 +1106,6 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                         mx += (ln * dn.y + lt * dtg.y) * HS;
                         my += (ln * dn.z + lt * dtg.z) * HS;
                     }
-#if DEBUG
-                    {
-                        const vec3 bar = shv(ar, 1u);
-                        const vec3 myar = lg == 0u ? bar : ar;
-                        if (walker && live && step < DEBUG) {
-                            printf("step %u sub %u lane %u slot %d nc %u gap %.5f vnf %.5f goal %.4f K %.5f %.5f vn_pgs %.5f vt_pgs %.5f ln %.3f lt %.3f resp_vn %.5f\n",
-                                step, sub, lg, slot, nc, gap, vnf, goal, knn, ktt, vn, vt, ln, lt,
-                                vnf + HS * sdot(dn, myar));
-                        }
-                    }
-#endif
                 }
             }
 #endif
