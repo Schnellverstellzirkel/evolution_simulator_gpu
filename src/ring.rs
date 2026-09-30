@@ -14,7 +14,7 @@ use crate::{
     config::Config,
     qd::EvaluationMetrics,
     scheduler::{self, Scheduler, Trial},
-    storage::Experiment,
+    storage::{Experiment, Verdict},
 };
 use anyhow::Result;
 use std::{
@@ -32,6 +32,8 @@ struct Flight {
     missing: usize,
     /// Confirmation trials by position in the block: `None` while running.
     confirms: HashMap<usize, Option<EvaluationMetrics>>,
+    /// Its confirmations were asked for before its turn.
+    early: bool,
 }
 
 /// What one `Ring::step` did.
@@ -102,6 +104,7 @@ impl Ring {
             standard: vec![None; block.len()],
             missing: block.len(),
             confirms: HashMap::new(),
+            early: false,
         });
     }
 
@@ -156,6 +159,25 @@ impl Ring {
                 }
             }
         }
+        if absorb > 0 {
+            // A block whose standard results are in asks for the
+            // confirmations it would need against the archives as they are
+            // now, so they run while the blocks before it are absorbed. The
+            // archive records only rise until its turn, so it rarely needs
+            // more then; a confirmation it no longer needs is ignored.
+            for flight in self.flights.iter_mut().skip(1) {
+                if flight.missing > 0 || flight.early {
+                    continue;
+                }
+                flight.early = true;
+                let standard: Vec<EvaluationMetrics> =
+                    flight.standard.iter().map(|m| m.expect("result")).collect();
+                if let Verdict::Confirm(need) = e.verdict(flight.block, &standard, &HashMap::new())
+                {
+                    Self::ask(e, sched, flight, need);
+                }
+            }
+        }
         let mut step = Step::default();
         while step.absorbed < absorb {
             let Some(front) = self.flights.front_mut() else {
@@ -173,29 +195,11 @@ impl Ring {
                 .collect();
             let k = front.block;
             match e.verdict(k, &standard, &confirmed) {
-                crate::storage::Verdict::Confirm(need) => {
-                    let new: Vec<usize> = need
-                        .into_iter()
-                        .filter(|j| !front.confirms.contains_key(j))
-                        .collect();
-                    if !new.is_empty() {
-                        for &j in &new {
-                            front.confirms.insert(j, None);
-                        }
-                        let block = &e.blocks[k];
-                        let config: Arc<Config> =
-                            Arc::new(scheduler::confirm_config(&block.config));
-                        sched.queue(
-                            front.seq << 1 | 1,
-                            Trial::Confirm,
-                            Arc::clone(&block.population),
-                            Some(new),
-                            config,
-                        );
-                    }
+                Verdict::Confirm(need) => {
+                    Self::ask(e, sched, front, need);
                     break;
                 }
-                crate::storage::Verdict::Final(finals) => {
+                Verdict::Final(finals) => {
                     if e.absorb(k, &finals)? {
                         step.generations += 1;
                     }
@@ -210,5 +214,29 @@ impl Ring {
             sched.pump()?;
         }
         Ok(step)
+    }
+
+    /// Queues the confirmation trials of `need` that `flight` has not asked
+    /// for yet.
+    fn ask(e: &Experiment, sched: &mut Scheduler, flight: &mut Flight, need: Vec<usize>) {
+        let new: Vec<usize> = need
+            .into_iter()
+            .filter(|j| !flight.confirms.contains_key(j))
+            .collect();
+        if new.is_empty() {
+            return;
+        }
+        for &j in &new {
+            flight.confirms.insert(j, None);
+        }
+        let block = &e.blocks[flight.block];
+        let config: Arc<Config> = Arc::new(scheduler::confirm_config(&block.config));
+        sched.queue(
+            flight.seq << 1 | 1,
+            Trial::Confirm,
+            Arc::clone(&block.population),
+            Some(new),
+            config,
+        );
     }
 }

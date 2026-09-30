@@ -35,7 +35,7 @@ pub const RING_SLOTS: usize = 786_432;
 pub const RING_BLOCKS: usize = 4;
 /// Confirmation trials a block asks for per archive at once while it waits
 /// for the ones it needs.
-const SPECULATIVE_CONFIRMS: usize = 4;
+const SPECULATIVE_CONFIRMS: usize = 8;
 
 /// Ring slots for a generation of `population` evaluations.
 pub fn ring_len(population: usize) -> usize {

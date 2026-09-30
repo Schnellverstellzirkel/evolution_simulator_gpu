@@ -1,5 +1,7 @@
-//! Runs the game's worker headless (steady loop, GPU) and prints the end to
-//! end creature rate. Usage: worker_rate [population] [generations] [seed]
+//! Runs the game's worker headless (the ring on the GPU) and prints the end
+//! to end creature rate, the peak resident memory, and a digest of every
+//! generation's statistics, which two runs of one seed must share.
+//! Usage: worker_rate [population] [generations] [seed]
 use evolution_simulator::{
     config::Config,
     gpu::Gpu,
@@ -34,7 +36,7 @@ fn main() -> anyhow::Result<()> {
     });
     let started = Instant::now();
     let mut marks: Vec<(usize, Instant)> = Vec::new();
-    loop {
+    let history = loop {
         if let Some(snapshot) = worker.view.lock().unwrap().take() {
             anyhow::ensure!(snapshot.error.is_none(), "{:?}", snapshot.error);
             let n = snapshot.history.len();
@@ -48,12 +50,12 @@ fn main() -> anyhow::Result<()> {
                 );
             }
             if n >= generations {
-                break;
+                break snapshot.history.clone();
             }
         }
         anyhow::ensure!(started.elapsed() < Duration::from_secs(1800), "too slow");
         std::thread::sleep(Duration::from_millis(20));
-    }
+    };
     // Rate over the generations after the first two (warm-up).
     let first = marks.iter().find(|m| m.0 == 3).map(|m| m.1);
     let last = marks.last().map(|m| (m.0, m.1));
@@ -65,6 +67,43 @@ fn main() -> anyhow::Result<()> {
             last.duration_since(first).as_secs_f64() / (n - 3) as f64
         );
     }
+    // Every generation's statistics, bit for bit.
+    use std::hash::{Hash, Hasher};
+    let mut digest = std::collections::hash_map::DefaultHasher::new();
+    for s in history.iter().take(generations) {
+        (
+            s.generation,
+            s.best.to_bits(),
+            s.median.to_bits(),
+            s.mean.to_bits(),
+            s.failed,
+            s.archive_cells,
+            s.qd_score.to_bits(),
+        )
+            .hash(&mut digest);
+        for p in &s.percentiles {
+            p.to_bits().hash(&mut digest);
+        }
+        println!(
+            "worker_rate: generation {} best {:.3} m, median {:.3} m, cells {}, qd {:.1}",
+            s.generation, s.best, s.median, s.archive_cells, s.qd_score
+        );
+    }
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let field = |name: &str| {
+        status
+            .lines()
+            .find(|l| l.starts_with(name))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|kb| kb.parse::<f64>().ok())
+            .map_or(f64::NAN, |kb| kb / 1048576.0)
+    };
+    println!(
+        "worker_rate: RSS {:.2} GB, peak RSS {:.2} GB, statistics digest {:016x}",
+        field("VmRSS:"),
+        field("VmHWM:"),
+        digest.finish()
+    );
     worker.send(Command::Shutdown);
     Ok(())
 }
