@@ -86,21 +86,6 @@ pub fn sky(painter: &Painter, rect: Rect, cfg: &Config, time: f32) {
         }
         mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
         painter.add(egui::Shape::mesh(mesh));
-        // Shimmer: thin wavy lines rising off the horizon.
-        for k in 0..3 {
-            let y = rect.bottom() - rect.height() * (0.30 + 0.06 * k as f32);
-            let points: Vec<Pos2> = (0..=40)
-                .map(|i| {
-                    let x = rect.left() + rect.width() * i as f32 / 40.0;
-                    let wave = (x * 0.03 + time * 3.0 + k as f32 * 2.0).sin() * (2.0 + 2.0 * heat);
-                    Pos2::new(x, y + wave)
-                })
-                .collect();
-            painter.add(egui::Shape::line(
-                points,
-                Stroke::new(1.5, alpha((255, 236, 200), 0.10 + 0.14 * heat)),
-            ));
-        }
     }
     let air = amount(cfg, "Air");
     if air > 0.0 {
@@ -115,10 +100,10 @@ pub fn sky(painter: &Painter, rect: Rect, cfg: &Config, time: f32) {
             let speed = 90.0 + 220.0 * wind * (0.6 + hash(i * 3));
             let x = rect.left() - 60.0 + (hash(i) * span - time * speed).rem_euclid(span);
             let y = rect.top() + rect.height() * (0.08 + 0.65 * hash(i * 7 + 1));
-            let len = 24.0 + 50.0 * hash(i * 5 + 2) * (0.5 + wind);
+            let len = 16.0 + 40.0 * hash(i * 5 + 2) * (0.5 + wind);
             painter.line_segment(
-                [Pos2::new(x, y), Pos2::new(x + len, y)],
-                Stroke::new(1.5, alpha((222, 224, 216), 0.30 + 0.30 * wind)),
+                [Pos2::new(x, y), Pos2::new(x + len, y + len * 0.04)],
+                Stroke::new(1.0, alpha((210, 212, 206), 0.10 + 0.14 * wind)),
             );
         }
     }
@@ -155,8 +140,9 @@ pub fn water(
         return;
     }
     let top = line_y.clamp(rect.top(), rect.bottom());
-    let body = alpha((46, 88, 86), 0.34 + 0.10 * level);
-    let deep = alpha((16, 34, 34), 0.55 + 0.12 * level);
+    // Murky canal water: green-brown, dark in the depth.
+    let body = alpha((52, 74, 62), 0.52 + 0.14 * level);
+    let deep = alpha((14, 24, 20), 0.82 + 0.1 * level);
     let mut mesh = Mesh::default();
     for (pos, color) in [
         (Pos2::new(rect.left(), top), body),
@@ -584,9 +570,56 @@ fn fog(painter: &Painter, rect: Rect, top: f32, bottom: f32, color: Color32) {
 /// the clouds, a nearer row of old tenements, and in front of them the
 /// street's poles, wires, lamps and bare trees. Each layer slides at its
 /// own parallax, and fog settles between them. `horizon` is the screen y
-/// the skyline stands on, `camera` the camera's x in pixels.
-pub fn backdrop(painter: &Painter, rect: Rect, horizon: f32, camera: f32, time: f32, cfg: &Config) {
+/// the skyline stands on, `camera` the camera's x in pixels. With `water`,
+/// the screen y of a water surface, the sky and the skyline also show
+/// upside down below it, dimmed, as the canal reflects them.
+#[allow(clippy::too_many_arguments)]
+pub fn backdrop(
+    painter: &Painter,
+    rect: Rect,
+    horizon: f32,
+    camera: f32,
+    time: f32,
+    cfg: &Config,
+    water: Option<f32>,
+) {
     let ctx = painter.ctx();
+    // Paints one image, and its reflection when there is water.
+    // The water's surface hides what stands behind it below the line.
+    let above = water.map_or(rect, |y| {
+        Rect::from_min_max(
+            rect.left_top(),
+            Pos2::new(rect.right(), y.clamp(rect.top(), rect.bottom())),
+        )
+    });
+    let draw = |tex: egui::TextureId, dest: Rect, uv: Rect, tint: Color32| {
+        painter
+            .with_clip_rect(above.intersect(painter.clip_rect()))
+            .image(tex, dest, uv, tint);
+        let Some(surface) = water.filter(|&y| y > dest.top() && y < rect.bottom()) else {
+            return;
+        };
+        let bottom = dest.bottom().min(surface);
+        let t = |y: f32| uv.top() + (y - dest.top()) / dest.height() * uv.height();
+        let mirrored = Rect::from_min_max(
+            Pos2::new(dest.left(), 2.0 * surface - bottom),
+            Pos2::new(dest.right(), 2.0 * surface - dest.top()),
+        );
+        painter
+            .with_clip_rect(Rect::from_min_max(
+                Pos2::new(rect.left(), surface),
+                rect.right_bottom(),
+            ))
+            .image(
+                tex,
+                mirrored,
+                Rect::from_min_max(
+                    Pos2::new(uv.left(), t(bottom)),
+                    Pos2::new(uv.right(), t(dest.top())),
+                ),
+                Color32::from_gray(120),
+            );
+    };
     let horizon = horizon.clamp(rect.top() + 40.0, rect.bottom() + 120.0);
     let sky_h = horizon - rect.top();
     painter.rect_filled(rect, 0, crate::theme::scene::SKY_HORIZON);
@@ -601,7 +634,7 @@ pub fn backdrop(painter: &Painter, rect: Rect, horizon: f32, camera: f32, time: 
     let v_top = (horizon_row - sky_h / scale) / size.y;
     let bottom = (horizon + 17.0 * scale).min(rect.bottom());
     let v_bottom = (horizon_row + (bottom - horizon) / scale) / size.y;
-    painter.image(
+    draw(
         art.texture(ctx),
         Rect::from_min_max(rect.left_top(), Pos2::new(rect.right(), bottom)),
         Rect::from_min_max(
@@ -614,7 +647,11 @@ pub fn backdrop(painter: &Painter, rect: Rect, horizon: f32, camera: f32, time: 
     // shafts of light falling from it.
     // The sun is far away, so it holds its place on screen.
     let sun = Pos2::new(rect.left() + rect.width() * 0.66, rect.top() + sky_h * 0.28);
-    let warm = if art == Art::SkyDusk { (255, 196, 120) } else { (255, 244, 220) };
+    let warm = if art == Art::SkyDusk {
+        (255, 196, 120)
+    } else {
+        (255, 244, 220)
+    };
     let glow = Art::Glow.texture(ctx);
     let r = sky_h * 0.9;
     painter.image(
@@ -668,7 +705,7 @@ pub fn backdrop(painter: &Painter, rect: Rect, horizon: f32, camera: f32, time: 
         if shown.height() > 0.0 {
             let v0 = (shown.top() - top) / h;
             let v1 = (shown.bottom() - top) / h;
-            painter.image(
+            draw(
                 layer.art.texture(ctx),
                 shown,
                 Rect::from_min_max(Pos2::new(u, v0), Pos2::new(u + rect.width() / w, v1)),
@@ -695,15 +732,20 @@ pub fn backdrop(painter: &Painter, rect: Rect, horizon: f32, camera: f32, time: 
 pub fn weather(painter: &Painter, rect: Rect, cfg: &Config, time: f32, camera: f32) {
     let (_, slip) = grip(cfg);
     let wet = if slip > 0.3 && slip < 0.9 { slip } else { 0.0 };
-    let rain = wet.max(amount(cfg, "Mud") * 0.8).max(amount(cfg, "Water") * 0.4);
+    let rain = wet
+        .max(amount(cfg, "Mud") * 0.8)
+        .max(amount(cfg, "Water") * 0.4);
     let wind = amount(cfg, "Wind");
     if rain > 0.0 {
         let count = 40 + (140.0 * rain) as i64;
         let slant = -0.18 - 0.5 * wind;
         for i in 0..count {
             let speed = 520.0 + 240.0 * hash(i * 3);
-            let x = rect.left() + (hash(i) * (rect.width() + 80.0) + camera * 0.6).rem_euclid(rect.width() + 80.0) - 40.0;
-            let y = rect.top() + (hash(i * 5 + 1) * rect.height() + time * speed).rem_euclid(rect.height());
+            let x = rect.left()
+                + (hash(i) * (rect.width() + 80.0) + camera * 0.6).rem_euclid(rect.width() + 80.0)
+                - 40.0;
+            let y = rect.top()
+                + (hash(i * 5 + 1) * rect.height() + time * speed).rem_euclid(rect.height());
             let len = 10.0 + 12.0 * hash(i * 7);
             let a = Pos2::new(x, y);
             painter.line_segment(
@@ -712,7 +754,9 @@ pub fn weather(painter: &Painter, rect: Rect, cfg: &Config, time: f32, camera: f
             );
         }
     }
-    let dust = amount(cfg, "Drought").max(amount(cfg, "Heat wave") * 0.6).max(wind * 0.7);
+    let dust = amount(cfg, "Drought")
+        .max(amount(cfg, "Heat wave") * 0.6)
+        .max(wind * 0.7);
     if dust > 0.0 {
         let tint = if amount(cfg, "Drought").max(amount(cfg, "Heat wave")) > 0.0 {
             (200, 170, 120)
@@ -721,8 +765,12 @@ pub fn weather(painter: &Painter, rect: Rect, cfg: &Config, time: f32, camera: f
         };
         for i in 0..(30 + (70.0 * dust) as i64) {
             let speed = 40.0 + 180.0 * (dust + wind) * hash(i * 11);
-            let x = rect.left() + (hash(i * 13) * rect.width() - time * speed + camera * 0.5).rem_euclid(rect.width());
-            let y = rect.top() + rect.height() * (0.35 + 0.6 * hash(i * 17)) + (time * 2.0 + i as f32).sin() * 4.0;
+            let x = rect.left()
+                + (hash(i * 13) * rect.width() - time * speed + camera * 0.5)
+                    .rem_euclid(rect.width());
+            let y = rect.top()
+                + rect.height() * (0.35 + 0.6 * hash(i * 17))
+                + (time * 2.0 + i as f32).sin() * 4.0;
             painter.circle_filled(
                 Pos2::new(x, y),
                 0.8 + 1.4 * hash(i * 19),
@@ -753,9 +801,15 @@ pub fn weather(painter: &Painter, rect: Rect, cfg: &Config, time: f32, camera: f
     if quake > 0.0 {
         for i in 0..(20 + (60.0 * quake) as i64) {
             let fall = 30.0 + 50.0 * hash(i * 23);
-            let x = rect.left() + hash(i * 29) * rect.width() + (time * 1.5 + i as f32).sin() * 10.0;
-            let y = rect.top() + (hash(i * 31) * rect.height() + time * fall).rem_euclid(rect.height());
-            painter.circle_filled(Pos2::new(x, y), 1.0 + hash(i) * 1.2, alpha((150, 146, 136), 0.35 * quake + 0.15));
+            let x =
+                rect.left() + hash(i * 29) * rect.width() + (time * 1.5 + i as f32).sin() * 10.0;
+            let y =
+                rect.top() + (hash(i * 31) * rect.height() + time * fall).rem_euclid(rect.height());
+            painter.circle_filled(
+                Pos2::new(x, y),
+                1.0 + hash(i) * 1.2,
+                alpha((150, 146, 136), 0.35 * quake + 0.15),
+            );
         }
     }
 }
@@ -765,7 +819,14 @@ pub fn weather(painter: &Painter, rect: Rect, cfg: &Config, time: f32, camera: f
 /// drought, sludge in mud, a wet canal wall by the water. `line` is the
 /// surface polyline, `meters` the meter under each of its points, and
 /// `ppm` the zoom.
-pub fn ground_body(painter: &Painter, rect: Rect, cfg: &Config, line: &[Pos2], meters: &[f32], ppm: f32) {
+pub fn ground_body(
+    painter: &Painter,
+    rect: Rect,
+    cfg: &Config,
+    line: &[Pos2],
+    meters: &[f32],
+    ppm: f32,
+) {
     if line.len() < 2 {
         return;
     }
@@ -789,7 +850,11 @@ pub fn ground_body(painter: &Painter, rect: Rect, cfg: &Config, line: &[Pos2], m
         let depth = (rect.bottom() - p.y).max(0.0);
         for (pos, v, color) in [
             (*p, 0.0, Color32::from_gray(150)),
-            (Pos2::new(p.x, rect.bottom()), depth / tile, Color32::from_gray(58)),
+            (
+                Pos2::new(p.x, rect.bottom()),
+                depth / tile,
+                Color32::from_gray(58),
+            ),
         ] {
             mesh.vertices.push(Vertex {
                 pos,
@@ -799,7 +864,8 @@ pub fn ground_body(painter: &Painter, rect: Rect, cfg: &Config, line: &[Pos2], m
         }
         if i > 0 {
             let k = (i * 2) as u32;
-            mesh.indices.extend_from_slice(&[k - 2, k - 1, k, k - 1, k + 1, k]);
+            mesh.indices
+                .extend_from_slice(&[k - 2, k - 1, k, k - 1, k + 1, k]);
         }
     }
     painter.add(egui::Shape::Mesh(mesh.into()));
@@ -821,16 +887,26 @@ pub fn ground_body(painter: &Painter, rect: Rect, cfg: &Config, line: &[Pos2], m
         }
         if i > 0 {
             let k = (i * 2) as u32;
-            mesh.indices.extend_from_slice(&[k - 2, k - 1, k, k - 1, k + 1, k]);
+            mesh.indices
+                .extend_from_slice(&[k - 2, k - 1, k, k - 1, k + 1, k]);
         }
     }
     painter.add(egui::Shape::Mesh(mesh.into()));
     // The curb under the crust: a pale concrete edge with a shadow below.
-    let curb: Vec<Pos2> = line.iter().map(|p| *p + Vec2::new(0.0, thick + 1.5)).collect();
-    painter.add(egui::Shape::line(curb.clone(), Stroke::new(3.0, Color32::from_rgb(150, 148, 138))));
+    let curb: Vec<Pos2> = line
+        .iter()
+        .map(|p| *p + Vec2::new(0.0, thick + 1.5))
+        .collect();
+    painter.add(egui::Shape::line(
+        curb.clone(),
+        Stroke::new(3.0, Color32::from_rgb(150, 148, 138)),
+    ));
     band(
         painter,
-        &curb.iter().map(|p| *p + Vec2::new(0.0, 1.5)).collect::<Vec<_>>(),
+        &curb
+            .iter()
+            .map(|p| *p + Vec2::new(0.0, 1.5))
+            .collect::<Vec<_>>(),
         14.0,
         Color32::from_black_alpha(150),
         Color32::TRANSPARENT,
@@ -940,7 +1016,11 @@ pub fn structures(
             // marker on each lip.
             let wall = (0.12 * ppm).clamp(4.0, 14.0);
             for (x0, x1) in [(lip_a.x, lip_a.x + wall), (lip_b.x - wall, lip_b.x)] {
-                let top = if x0 < lip_b.x - wall * 1.5 { lip_a.y } else { lip_b.y };
+                let top = if x0 < lip_b.x - wall * 1.5 {
+                    lip_a.y
+                } else {
+                    lip_b.y
+                };
                 crate::theme::tiled(
                     painter,
                     Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x1, floor)),
@@ -1007,7 +1087,13 @@ pub fn structures(
                 Art::ConcreteLight
             };
             let tile = (0.9 * ppm).max(8.0);
-            textured_fan(painter, &body, art, tile, Color32::from_gray(if combine { 150 } else { 190 }));
+            textured_fan(
+                painter,
+                &body,
+                art,
+                tile,
+                Color32::from_gray(if combine { 150 } else { 190 }),
+            );
             painter.add(egui::Shape::closed_line(
                 body.to_vec(),
                 Stroke::new(1.2, Color32::from_rgb(24, 24, 22)),
@@ -1016,7 +1102,10 @@ pub fn structures(
             let foot = body[6].y.max(body[5].y);
             gradient(
                 painter,
-                Rect::from_min_max(Pos2::new(body[0].x, rect.top()), Pos2::new(body[3].x, rect.bottom())),
+                Rect::from_min_max(
+                    Pos2::new(body[0].x, rect.top()),
+                    Pos2::new(body[3].x, rect.bottom()),
+                ),
                 (body[1].y + foot) * 0.5,
                 foot,
                 Color32::TRANSPARENT,

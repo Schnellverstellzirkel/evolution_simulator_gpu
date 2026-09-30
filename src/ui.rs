@@ -1,9 +1,9 @@
 use crate::theme::{
     GAP_L, GAP_M, Theme, apply_style,
     scene::{
-        BONE, EYE, FALLEN, FORCE_GROUND, FORCE_MUSCLE, GROUND_EDGE, GROUND_INK,
-        GROUND_TOP, MUSCLE_ACTIVE, MUSCLE_REST, MUSCLE_TIRED, NODE_GRIPPY, NODE_SLICK, ORGAN,
-        OUTLINE, SKY_HORIZON, SKY_TOP, TOUCHDOWN,
+        BONE, EYE, FALLEN, FORCE_GROUND, FORCE_MUSCLE, GROUND_EDGE, GROUND_INK, GROUND_TOP,
+        MUSCLE_ACTIVE, MUSCLE_REST, MUSCLE_TIRED, NODE_GRIPPY, NODE_SLICK, ORGAN, OUTLINE,
+        SKY_HORIZON, SKY_TOP, TOUCHDOWN,
     },
 };
 use crate::{
@@ -2260,6 +2260,7 @@ impl App {
             self.camera[0] * self.zoom,
             clock,
             cfg,
+            (cfg.water > 0.0).then(|| world(0., cfg.water).y),
         );
         crate::world_fx::sky(&painter, rect, cfg, clock);
         let left = start.floor() as i32;
@@ -2519,7 +2520,10 @@ impl App {
             let (anchor, align) = if rect.width() < 760. {
                 (rect.left_top() + Vec2::splat(inset), Align2::LEFT_TOP)
             } else {
-                (rect.right_bottom() - Vec2::splat(inset), Align2::RIGHT_BOTTOM)
+                (
+                    rect.right_bottom() - Vec2::splat(inset),
+                    Align2::RIGHT_BOTTOM,
+                )
             };
             counter(
                 &painter,
@@ -2797,7 +2801,9 @@ impl App {
         let tile_height = (value_size * 1.2).max(28. + note_height) + 12.;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
-            for (((name, _, color, _, why), note), value) in tiles.into_iter().zip(notes).zip(values) {
+            for (((name, _, color, _, why), note), value) in
+                tiles.into_iter().zip(notes).zip(values)
+            {
                 let (rect, response) =
                     ui.allocate_exact_size(Vec2::new(width, tile_height), Sense::hover());
                 let painter = ui.painter_at(rect);
@@ -2811,11 +2817,7 @@ impl App {
                     if width < 280. { 9.5 } else { 10.5 },
                     color.gamma_multiply(0.85),
                 );
-                painter.galley(
-                    rect.left_top() + Vec2::new(14., 28.),
-                    note,
-                    theme.muted,
-                );
+                painter.galley(rect.left_top() + Vec2::new(14., 28.), note, theme.muted);
                 crate::theme::glow_text(
                     &painter,
                     Pos2::new(rect.right() - 14., rect.center().y),
@@ -3929,6 +3931,7 @@ impl App {
                 camera * zoom + i as f32 * 900.,
                 clock,
                 lane_config,
+                None,
             );
             let span = [
                 Pos2::new(lane_rect.left(), ground),

@@ -140,7 +140,12 @@ pub const GAP_L: f32 = 16.0;
 /// height of a row, so a row's items share one center line.
 pub const CONTROL_HEIGHT: f32 = 34.0;
 
-fn widget(fill: Color32, stroke: Color32, text: Color32, text_width: f32) -> egui::style::WidgetVisuals {
+fn widget(
+    fill: Color32,
+    stroke: Color32,
+    text: Color32,
+    text_width: f32,
+) -> egui::style::WidgetVisuals {
     egui::style::WidgetVisuals {
         bg_fill: fill,
         weak_bg_fill: fill,
@@ -180,10 +185,20 @@ pub fn apply_style(ctx: &egui::Context) {
     visuals.slider_trailing_fill = true;
     let bright = Color32::from_rgb(255, 255, 250);
     visuals.widgets.noninteractive = widget(theme.panel, glass(255, 255, 255, 26), theme.ink, 1.0);
-    visuals.widgets.inactive = widget(glass(60, 62, 62, 200), glass(255, 255, 255, 40), theme.ink, 1.0);
+    visuals.widgets.inactive = widget(
+        glass(60, 62, 62, 200),
+        glass(255, 255, 255, 40),
+        theme.ink,
+        1.0,
+    );
     visuals.widgets.hovered = widget(glass(76, 64, 40, 220), glass(255, 176, 0, 150), bright, 1.5);
     visuals.widgets.active = widget(theme.armed_fill, theme.accent, theme.armed_text, 2.0);
-    visuals.widgets.open = widget(glass(76, 64, 40, 220), glass(255, 255, 255, 40), bright, 1.0);
+    visuals.widgets.open = widget(
+        glass(44, 46, 46, 235),
+        glass(255, 255, 255, 40),
+        bright,
+        1.0,
+    );
     visuals.window_corner_radius = egui::CornerRadius::same(6);
     visuals.menu_corner_radius = egui::CornerRadius::same(4);
     visuals.window_stroke = Stroke::new(1.0, glass(255, 255, 255, 46));
@@ -206,7 +221,10 @@ pub fn apply_style(ctx: &egui::Context) {
         (egui::TextStyle::Body, FontId::proportional(15.0)),
         (egui::TextStyle::Button, FontId::proportional(15.0)),
         (egui::TextStyle::Monospace, FontId::monospace(13.0)),
-        (egui::TextStyle::Heading, FontId::new(22.0, assets::hud_bold())),
+        (
+            egui::TextStyle::Heading,
+            FontId::new(22.0, assets::hud_bold()),
+        ),
     ] {
         style.text_styles.insert(style_name, font);
     }
@@ -224,7 +242,14 @@ pub fn hash(n: i64) -> f32 {
 
 /// A textured quad: `art` tiled so one repeat covers `tile` points, shifted
 /// by `offset` repeats, tinted by `tint` (premultiplied).
-pub fn tiled(painter: &egui::Painter, rect: Rect, art: Art, tile: Vec2, offset: Vec2, tint: Color32) {
+pub fn tiled(
+    painter: &egui::Painter,
+    rect: Rect,
+    art: Art,
+    tile: Vec2,
+    offset: Vec2,
+    tint: Color32,
+) {
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
         return;
     }
@@ -295,7 +320,8 @@ fn glow_galley(
 ) {
     if strength > 0.0 {
         let a = |x: f32| (x * strength).clamp(0.0, 255.0) as u8;
-        let halo = |alpha: u8| Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+        let halo =
+            |alpha: u8| Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
         for (radius, alpha, steps) in [(3.5_f32, a(10.0), 12), (1.8, a(22.0), 8)] {
             for i in 0..steps {
                 let angle = i as f32 / steps as f32 * std::f32::consts::TAU;
@@ -322,7 +348,13 @@ pub fn glow_text(
 ) -> Rect {
     let galley = painter.layout_no_wrap(text.to_string(), font, color);
     let rect = align.anchor_size(pos, galley.size());
-    glow_galley(painter, rect.min, galley, color, if glow { 1.0 } else { 0.0 });
+    glow_galley(
+        painter,
+        rect.min,
+        galley,
+        color,
+        if glow { 1.0 } else { 0.0 },
+    );
     rect
 }
 
@@ -380,7 +412,9 @@ pub fn section(ui: &mut egui::Ui, text: &str, theme: Theme) -> Response {
 /// thin rule under it.
 pub fn tab(ui: &mut egui::Ui, selected: bool, text: &str, theme: Theme) -> Response {
     let font = FontId::new(19.0, FontFamily::Proportional);
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, theme.ink);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, theme.ink);
     let size = galley.size() + Vec2::new(22.0, 16.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let hovered = response.hovered();
@@ -398,7 +432,13 @@ pub fn tab(ui: &mut egui::Ui, selected: bool, text: &str, theme: Theme) -> Respo
         galley.clone(),
         Color32::from_black_alpha(160),
     );
-    glow_galley(ui.painter(), at, galley, color, if selected { 0.8 } else { 0.0 });
+    glow_galley(
+        ui.painter(),
+        at,
+        galley,
+        color,
+        if selected { 0.8 } else { 0.0 },
+    );
     if selected {
         ui.painter().rect_filled(
             Rect::from_min_max(
@@ -568,7 +608,11 @@ pub fn hud_block(painter: &egui::Painter, anchor: Pos2, align: Align2, lines: &[
                     line.color,
                 )
             } else {
-                painter.layout_no_wrap(line.text.clone(), FontId::proportional(line.size), line.color)
+                painter.layout_no_wrap(
+                    line.text.clone(),
+                    FontId::proportional(line.size),
+                    line.color,
+                )
             }
         })
         .collect();
@@ -585,7 +629,13 @@ pub fn hud_block(painter: &egui::Painter, anchor: Pos2, align: Align2, lines: &[
         };
         let at = Pos2::new(x, y);
         y += galley.size().y;
-        glow_galley(painter, at, galley, line.color, if line.glow { 1.0 } else { 0.0 });
+        glow_galley(
+            painter,
+            at,
+            galley,
+            line.color,
+            if line.glow { 1.0 } else { 0.0 },
+        );
     }
     rect
 }
@@ -604,7 +654,13 @@ pub struct Counter<'a> {
 
 /// Paints a counter anchored at `anchor` by `align` and returns its rect.
 /// `size` is the digit height.
-pub fn counter(painter: &egui::Painter, anchor: Pos2, align: Align2, counter: &Counter, size: f32) -> Rect {
+pub fn counter(
+    painter: &egui::Painter,
+    anchor: Pos2,
+    align: Align2,
+    counter: &Counter,
+    size: f32,
+) -> Rect {
     let color = if counter.damaged {
         scene::FALLEN
     } else {
@@ -650,7 +706,11 @@ pub fn counter(painter: &egui::Painter, anchor: Pos2, align: Align2, counter: &C
     );
     let baseline = rect.bottom() - size * 0.22;
     let mut x = rect.left() + pad;
-    painter.galley(Pos2::new(x, baseline - label.size().y), label.clone(), color);
+    painter.galley(
+        Pos2::new(x, baseline - label.size().y),
+        label.clone(),
+        color,
+    );
     x += label.size().x + gap;
     let digits_width = digits.size().x;
     glow_galley(painter, Pos2::new(x, rect.top()), digits, color, 1.0);
