@@ -708,9 +708,10 @@ struct RaceLane {
 const RACE_PICKS: usize = 4;
 /// Cold-to-hot color for a normalized map value.
 fn heat_color(t: f32) -> Color32 {
-    let cold = Color32::from_rgb(64, 98, 168);
-    let mid = Color32::from_rgb(242, 201, 76);
-    let hot = Color32::from_rgb(202, 58, 46);
+    // Cold steel blue through amber to hot rust.
+    let cold = Color32::from_rgb(52, 84, 110);
+    let mid = Color32::from_rgb(226, 170, 64);
+    let hot = Color32::from_rgb(196, 70, 40);
     if t < 0.5 {
         mix_color(cold, mid, t * 2.0)
     } else {
@@ -1230,28 +1231,17 @@ fn paint_lineage_tile(
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let hovered = response.hovered();
     let painter = ui.painter_at(rect);
-    painter.rect_filled(
+    let changed = body_plan_changed(step, parent);
+    crate::theme::plate(
+        &painter,
         rect,
-        8,
+        theme,
         if big || hovered {
             theme.card_hover
         } else {
             theme.card
         },
-    );
-    let changed = body_plan_changed(step, parent);
-    painter.rect_stroke(
-        rect,
-        8,
-        Stroke::new(
-            if current { 2. } else { 1. },
-            if current || changed {
-                theme.accent
-            } else {
-                theme.card_border
-            },
-        ),
-        egui::StrokeKind::Inside,
+        current || changed,
     );
     let art_size = (size.y - 16.).clamp(40., 96.);
     thumbnail(
@@ -1302,11 +1292,12 @@ fn paint_lineage_tile(
         );
     }
     if changed {
-        painter.text(
-            rect.right_top() + Vec2::new(-8., 6.),
+        crate::theme::caps_text(
+            &painter,
+            rect.right_top() + Vec2::new(-8., 8.),
             Align2::RIGHT_TOP,
-            "BODY PLAN",
-            FontId::proportional(12.),
+            "Body plan",
+            11.,
             theme.accent,
         );
     }
@@ -2364,7 +2355,12 @@ impl App {
                 }
                 painter.add(egui::Shape::line(
                     mud_line,
-                    Stroke::new(1., crate::theme::scene::MUD_EDGE),
+                    Stroke::new(1.5, crate::theme::scene::MUD_EDGE),
+                ));
+                let sheen: Vec<Pos2> = line.iter().map(|p| *p + Vec2::new(0., 1.5)).collect();
+                painter.add(egui::Shape::line(
+                    sheen,
+                    Stroke::new(1.5, crate::theme::scene::MUD_SHEEN),
                 ));
             }
             let shade: Vec<Pos2> = line.iter().map(|p| *p + Vec2::new(0., 2.)).collect();
@@ -2547,8 +2543,8 @@ impl App {
         if let Some(note) = center_note {
             hud_block(
                 &painter,
-                Pos2::new(rect.center().x, rect.top() + inset),
-                Align2::CENTER_TOP,
+                rect.center(),
+                Align2::CENTER_CENTER,
                 &[HudLine::text(note.to_owned(), 17., HUD)],
             );
         }
@@ -3871,7 +3867,7 @@ impl App {
             Sense::hover(),
         );
         let painter = ui.painter_at(rect);
-        let board_width = 200.0_f32.min(rect.width() * 0.3);
+        let board_width = 250.0_f32.min(rect.width() * 0.3);
         let lanes_rect = Rect::from_min_max(
             rect.min,
             Pos2::new(rect.right() - board_width - 12., rect.bottom()),
@@ -3906,18 +3902,143 @@ impl App {
                 ),
             );
             let is_leader = i == leader;
-            painter.rect_filled(
-                lane_rect,
-                8,
+            // Each lane is a strip of the world: overcast sky over a band
+            // of dirt, the leader's lane framed in amber.
+            let ground = lane_rect.bottom() - 12.;
+            let lane_painter = painter.with_clip_rect(lane_rect);
+            lane_painter.rect_filled(lane_rect, 0, SKY_HORIZON);
+            let sky = egui::epaint::Mesh {
+                indices: vec![0, 1, 2, 0, 2, 3],
+                vertices: [
+                    (lane_rect.left_top(), SKY_TOP),
+                    (lane_rect.right_top(), SKY_TOP),
+                    (Pos2::new(lane_rect.right(), ground), SKY_HORIZON),
+                    (Pos2::new(lane_rect.left(), ground), SKY_HORIZON),
+                ]
+                .into_iter()
+                .map(|(pos, color)| egui::epaint::Vertex {
+                    pos,
+                    uv: egui::epaint::WHITE_UV,
+                    color,
+                })
+                .collect(),
+                ..Default::default()
+            };
+            lane_painter.add(egui::Shape::mesh(sky));
+            lane_painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(lane_rect.left(), ground),
+                    lane_rect.right_bottom(),
+                ),
+                0,
+                GROUND_TOP,
+            );
+            lane_painter.line_segment(
+                [
+                    Pos2::new(lane_rect.left(), ground),
+                    Pos2::new(lane_rect.right(), ground),
+                ],
+                Stroke::new(1.5, GROUND_EDGE),
+            );
+            // A tick about every 150 px: 0.5, 1, 2, 5 or 10 m.
+            let step = [0.5f32, 1.0, 2.0, 5.0, 10.0]
+                .into_iter()
+                .find(|step| step * zoom >= 150.0)
+                .unwrap_or(10.0);
+            let mut x = (camera / step).ceil() * step;
+            while x <= camera + visible {
+                let px = lane_rect.left() + (x - camera) * zoom;
+                lane_painter.line_segment(
+                    [
+                        Pos2::new(px, ground),
+                        Pos2::new(px, lane_rect.bottom() - 5.),
+                    ],
+                    Stroke::new(1., GROUND_INK),
+                );
+                lane_painter.line_segment(
+                    [Pos2::new(px, lane_rect.top()), Pos2::new(px, ground)],
+                    Stroke::new(1., crate::theme::scene::GRID),
+                );
+                if i == 0 {
+                    lane_painter.text(
+                        Pos2::new(px + 3., ground - 2.),
+                        Align2::LEFT_BOTTOM,
+                        if step < 1.0 {
+                            format!("{x:.1} m")
+                        } else {
+                            format!("{x:.0} m")
+                        },
+                        FontId::proportional(13.),
+                        GROUND_INK,
+                    );
+                }
+                x += step;
+            }
+            let origin = Pos2::new(lane_rect.left() - camera * zoom, ground);
+            let playback = &lane.playback;
+            let marks = FrameMarks::of(playback);
+            draw_creature(
+                &lane_painter,
+                &playback.nodes,
+                &playback.creature,
+                origin,
+                zoom,
+                &marks,
+            );
+            crate::theme::vignette(&lane_painter, lane_rect, 0.35);
+            use crate::theme::{
+                HudLine, hud_block,
+                scene::{HUD, HUD_DIM},
+            };
+            hud_block(
+                &lane_painter,
+                lane_rect.left_top() + Vec2::splat(6.),
+                Align2::LEFT_TOP,
+                &[
+                    HudLine::text(
+                        format!("{}. {}", i + 1, species_name(&lane.playback.creature)),
+                        15.,
+                        if is_leader {
+                            HUD
+                        } else {
+                            crate::theme::scene::HUD_INK
+                        },
+                    ),
+                    HudLine::text(
+                        format!(
+                            "finishes at {:.2} m · {}",
+                            lane.playback.distance, lane.label
+                        ),
+                        12.,
+                        HUD_DIM,
+                    ),
+                ],
+            );
+            let mut right = vec![HudLine::value(
+                format!("{:.2} m", distances[i]),
+                18.,
                 if is_leader {
-                    theme.card_hover
+                    HUD
                 } else {
-                    theme.card
+                    crate::theme::scene::HUD_INK
                 },
+            )];
+            if playback.fallen().is_some() {
+                right.push(HudLine::text(
+                    playback.ending.short().to_owned(),
+                    13.,
+                    FALLEN,
+                ));
+            }
+            hud_block(
+                &lane_painter,
+                lane_rect.right_top() + Vec2::new(-6., 6.),
+                Align2::RIGHT_TOP,
+                &right,
             );
             painter.rect_stroke(
                 lane_rect,
-                8,
+                2,
                 Stroke::new(
                     if is_leader { 2. } else { 1. },
                     if is_leader {
@@ -3928,105 +4049,18 @@ impl App {
                 ),
                 egui::StrokeKind::Inside,
             );
-            let ground = lane_rect.bottom() - 12.;
-            painter.line_segment(
-                [
-                    Pos2::new(lane_rect.left() + 4., ground),
-                    Pos2::new(lane_rect.right() - 4., ground),
-                ],
-                Stroke::new(2., GROUND_EDGE),
-            );
-            // A tick about every 150 px: 0.5, 1, 2, 5 or 10 m.
-            let step = [0.5f32, 1.0, 2.0, 5.0, 10.0]
-                .into_iter()
-                .find(|step| step * zoom >= 150.0)
-                .unwrap_or(10.0);
-            let mut x = (camera / step).ceil() * step;
-            while x <= camera + visible {
-                let px = lane_rect.left() + (x - camera) * zoom;
-                painter.line_segment(
-                    [
-                        Pos2::new(px, ground),
-                        Pos2::new(px, lane_rect.bottom() - 5.),
-                    ],
-                    Stroke::new(1., theme.card_border),
-                );
-                if i == 0 {
-                    painter.text(
-                        Pos2::new(px + 3., ground - 2.),
-                        Align2::LEFT_BOTTOM,
-                        if step < 1.0 {
-                            format!("{x:.1} m")
-                        } else {
-                            format!("{x:.0} m")
-                        },
-                        FontId::proportional(13.),
-                        theme.muted,
-                    );
-                }
-                x += step;
-            }
-            let origin = Pos2::new(lane_rect.left() - camera * zoom, ground);
-            let playback = &lane.playback;
-            let marks = FrameMarks::of(playback);
-            draw_creature(
-                &painter,
-                &playback.nodes,
-                &playback.creature,
-                origin,
-                zoom,
-                &marks,
-            );
-            painter.text(
-                lane_rect.left_top() + Vec2::new(8., 6.),
-                Align2::LEFT_TOP,
-                format!("{}. {}", i + 1, species_name(&lane.playback.creature)),
-                FontId::proportional(16.),
-                if is_leader { theme.accent } else { theme.ink },
-            );
-            painter.text(
-                lane_rect.left_top() + Vec2::new(8., 28.),
-                Align2::LEFT_TOP,
-                format!(
-                    "finishes at {:.2} m · {}",
-                    lane.playback.distance, lane.label
-                ),
-                FontId::proportional(14.),
-                theme.muted,
-            );
-            painter.text(
-                lane_rect.right_top() + Vec2::new(-8., 6.),
-                Align2::RIGHT_TOP,
-                format!("{:.2} m", distances[i]),
-                FontId::proportional(18.),
-                if is_leader { theme.accent } else { theme.ink },
-            );
-            if playback.fallen().is_some() {
-                painter.text(
-                    lane_rect.right_top() + Vec2::new(-8., 30.),
-                    Align2::RIGHT_TOP,
-                    playback.ending.short(),
-                    FontId::proportional(14.),
-                    theme.danger,
-                );
-            }
         }
         let board = Rect::from_min_max(
             Pos2::new(lanes_rect.right() + 12., rect.top()),
             rect.right_bottom(),
         );
-        painter.rect_filled(board, 8, theme.card);
-        painter.rect_stroke(
-            board,
-            8,
-            Stroke::new(1., theme.card_border),
-            egui::StrokeKind::Inside,
-        );
-        painter.text(
-            board.left_top() + Vec2::new(10., 8.),
+        crate::theme::plate(&painter, board, theme, theme.card, false);
+        crate::theme::caps_text(
+            &painter,
+            board.left_top() + Vec2::new(10., 10.),
             Align2::LEFT_TOP,
-            "STANDINGS",
-            FontId::proportional(14.),
+            "Standings",
+            12.,
             theme.muted,
         );
         let mut order: Vec<usize> = (0..self.race.len()).collect();
@@ -4041,14 +4075,14 @@ impl App {
                 Pos2::new(board.left() + 10., y),
                 Align2::LEFT_CENTER,
                 format!("{}. {}", place + 1, species_name(&lane.playback.creature)),
-                FontId::proportional(15.),
+                FontId::proportional(14.),
                 if place == 0 { theme.accent } else { theme.ink },
             );
             painter.text(
                 Pos2::new(board.right() - 10., y),
                 Align2::RIGHT_CENTER,
                 format!("{:.2} m", distances[i]),
-                FontId::proportional(15.),
+                FontId::proportional(14.),
                 if place == 0 {
                     theme.accent
                 } else {
@@ -4962,7 +4996,15 @@ impl eframe::App for App {
                     .fill(theme.panel)
                     .inner_margin(egui::Margin::symmetric(GAP_L as i8, 15)),
             )
-            .show(ui, |ui| self.top(ui));
+            .show(ui, |ui| {
+                crate::theme::wear(
+                    ui.painter(),
+                    ui.max_rect().expand2(Vec2::new(GAP_L, 15.)),
+                    theme,
+                    3.,
+                );
+                self.top(ui)
+            });
         self.dev_pause_bar(ui);
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -5024,7 +5066,10 @@ impl eframe::App for App {
                     .fill(theme.panel)
                     .inner_margin(GAP_L as i8),
             )
-            .show(ui, |ui| self.controls(ui));
+            .show(ui, |ui| {
+                crate::theme::wear(ui.painter(), ui.max_rect().expand(GAP_L), theme, 7.);
+                self.controls(ui)
+            });
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -5248,20 +5293,16 @@ fn paint_card(
     stage: Stage,
     theme: Theme,
 ) {
-    painter.rect_filled(
+    crate::theme::plate(
+        painter,
         rect,
-        8,
+        theme,
         if hovered {
             theme.card_hover
         } else {
             theme.card
         },
-    );
-    painter.rect_stroke(
-        rect,
-        8,
-        Stroke::new(1., theme.card_border),
-        egui::StrokeKind::Inside,
+        hovered,
     );
     thumbnail(
         painter,
@@ -5280,7 +5321,7 @@ fn paint_card(
             format!("ID {}", card.creature.id)
         },
         FontId::proportional(14.),
-        theme.muted,
+        theme.accent.gamma_multiply(0.85),
     );
     painter.text(
         rect.left_top() + Vec2::new(9., 26.),
@@ -5290,12 +5331,13 @@ fn paint_card(
         theme.ink,
     );
     if card.innovation_reserve {
-        painter.text(
-            rect.right_top() + Vec2::new(-9., 8.),
+        crate::theme::caps_text(
+            painter,
+            rect.right_top() + Vec2::new(-9., 9.),
             Align2::RIGHT_TOP,
-            "NEW BODY",
-            FontId::proportional(12.),
-            theme.accent,
+            "New body",
+            11.,
+            theme.cold,
         );
     }
     let (label, score_color) = if !card.score.is_finite() {
@@ -5349,6 +5391,13 @@ const ISLAND_GAP: f32 = 10.;
 const ISLAND_HEIGHT: f32 = 300.;
 /// Words for the emitter shares of an island's elites, in `Emitter::ALL` order.
 const ORIGIN_SHORT: [&str; 4] = ["Tuned", "Reshaped", "Novel", "New"];
+/// Their colors: amber, rust, cold blue and olive.
+const ORIGIN_COLORS: [Color32; 4] = [
+    Color32::from_rgb(222, 160, 60),
+    Color32::from_rgb(178, 92, 58),
+    Color32::from_rgb(96, 154, 196),
+    Color32::from_rgb(132, 140, 76),
+];
 /// What an island card says about its nursery: its size and best distance,
 /// when it graduates next, and what the last graduation kept.
 fn nursery_lines(island: &crate::worker::IslandSummary, generation: u32) -> [String; 2] {
@@ -5451,19 +5500,14 @@ fn paint_island(
     theme: Theme,
 ) -> Option<Creature> {
     let painter = ui.painter().clone();
-    painter.rect_filled(rect, 8, theme.card);
-    painter.rect_stroke(
-        rect,
-        8,
-        Stroke::new(1., theme.card_border),
-        egui::StrokeKind::Inside,
-    );
+    crate::theme::plate(&painter, rect, theme, theme.card, false);
     let at = |x: f32, y: f32| rect.left_top() + Vec2::new(x, y);
-    painter.text(
-        at(12., 10.),
+    crate::theme::caps_text(
+        &painter,
+        at(12., 12.),
         Align2::LEFT_TOP,
-        island_name(index),
-        FontId::proportional(16.),
+        &island_name(index),
+        14.,
         theme.ink,
     );
     painter.text(
@@ -5574,7 +5618,7 @@ fn paint_island(
         painter.rect_filled(
             Rect::from_min_size(Pos2::new(x, bar.top()), Vec2::new(w, bar.height())),
             0,
-            species_color(i, 3),
+            ORIGIN_COLORS[i],
         );
         x += w;
     }
@@ -5586,8 +5630,8 @@ fn paint_island(
         );
         painter.rect_filled(
             Rect::from_min_size(cell + Vec2::new(0., 3.), Vec2::splat(9.)),
-            2,
-            species_color(i, 3),
+            1,
+            ORIGIN_COLORS[i],
         );
         painter.text(
             cell + Vec2::new(14., 0.),
@@ -5939,7 +5983,8 @@ fn number(n: usize) -> String {
     out
 }
 fn species_color(n: usize, m: usize) -> Color32 {
-    egui::ecolor::Hsva::new(((n * 257 + m) as f32 * 0.618034).fract(), 0.45, 0.9, 1.).into()
+    // Muted hues, like paint on old machinery.
+    egui::ecolor::Hsva::new(((n * 257 + m) as f32 * 0.618034).fract(), 0.36, 0.66, 1.).into()
 }
 /// Linear blend between two colors; `t` is clamped to [0, 1].
 fn mix_color(a: Color32, b: Color32, t: f32) -> Color32 {

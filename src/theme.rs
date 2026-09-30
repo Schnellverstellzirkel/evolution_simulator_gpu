@@ -30,8 +30,10 @@ pub mod scene {
     /// Faint meter lines across the sky.
     pub const GRID: Color32 = Color32::from_rgba_premultiplied(18, 18, 18, 18);
     /// Sludge of the mud layer and its lower edge.
-    pub const MUD: Color32 = Color32::from_rgb(70, 56, 38);
-    pub const MUD_EDGE: Color32 = Color32::from_rgb(44, 34, 22);
+    pub const MUD: Color32 = Color32::from_rgb(60, 44, 26);
+    pub const MUD_EDGE: Color32 = Color32::from_rgb(34, 25, 14);
+    /// The wet shine on top of the mud.
+    pub const MUD_SHEEN: Color32 = Color32::from_rgba_premultiplied(66, 52, 34, 120);
     /// Creature parts: steel bones, flesh muscles, dark outlines.
     pub const OUTLINE: Color32 = Color32::from_rgb(12, 13, 13);
     pub const BONE: Color32 = Color32::from_rgb(184, 186, 176);
@@ -54,6 +56,8 @@ pub mod scene {
     /// The HUD over the scene: amber text on smoked glass.
     pub const HUD: Color32 = Color32::from_rgb(255, 196, 84);
     pub const HUD_DIM: Color32 = Color32::from_rgb(196, 160, 96);
+    /// Plain text on a HUD panel.
+    pub const HUD_INK: Color32 = Color32::from_rgb(222, 216, 200);
     pub const HUD_BACK: Color32 = Color32::from_rgba_premultiplied(8, 8, 7, 150);
     /// The centre of mass and its trail.
     pub const TRAIL: Color32 = Color32::from_rgb(255, 190, 80);
@@ -398,9 +402,9 @@ pub fn wear(painter: &egui::Painter, rect: Rect, theme: Theme, seed: f32) {
         painter,
         rect,
         Texture::Stain,
-        360.0,
+        420.0,
         offset,
-        0.045 * theme.wear,
+        0.03 * theme.wear,
     );
     overlay(
         painter,
