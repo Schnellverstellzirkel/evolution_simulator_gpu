@@ -40,9 +40,149 @@ pub struct GpuResult {
 impl GpuResult {
     /// Number of feet: nodes that touched the ground and lifted off again.
     /// A node dragged along the ground never lifts, so it is not a foot.
+    /// Bodies have at most 32 nodes, so `lift_lo` holds them all; the CUDA
+    /// kernel uses `lift_hi` for the rung trace.
     pub fn feet(&self) -> u32 {
-        self.lift_lo.to_bits().count_ones() + self.lift_hi.to_bits().count_ones()
+        self.lift_lo.to_bits().count_ones()
     }
+    /// The rung trace the CUDA lane-group kernel writes into the seven words
+    /// the host reads for nothing else (`contact_hi`, `lift_hi`, `ground_hi`
+    /// and the four gait working words), with the standard fitness.
+    pub fn rung_trace(&self) -> RungTrace {
+        RungTrace {
+            words: [
+                self.contact_hi,
+                self.lift_hi,
+                self.ground_hi,
+                self.previous_center_y,
+                self.vertical_extremum,
+                self.vertical_trend,
+                self.gait_turns,
+            ]
+            .map(f32::to_bits),
+            fitness: self.fitness,
+        }
+    }
+}
+
+/// What a trial looked like on its way, for the steps ladder
+/// (`docs/plan-2m.md`, R1 to R4): the distance at 1, 2.5, 5 and 10 s and the
+/// early features at 1 and 2.5 s, as fp16 pairs (low half first):
+///
+/// - word 0: d60, d150 (m; a rung the trial did not reach holds the final
+///   distance)
+/// - word 1: d300, d600
+/// - word 2: end code (u16: 3 the screen stopped it, bit 4 it fell, bit 5 it
+///   failed), steps run (u16)
+/// - word 3: speed over the half second before 1 s and before 2.5 s (m/s)
+/// - word 4: share of nodes that touched the ground by 1 s, mean muscle
+///   energy store at 1 s
+/// - word 5: the same two at 2.5 s
+/// - word 6: head shake at 1 s and at 2.5 s (m/s^2)
+///
+/// Only the CUDA kernel writes it; the other engines leave working state in
+/// these words, so `steps()` is 0 when the trace is absent. fp16 holds a
+/// distance under 256 m to 0.125 m, enough for calibration; the fitness
+/// stays f32.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RungTrace {
+    pub words: [u32; 7],
+    /// The standard trial's fitness (a confirmation may lower the score).
+    pub fitness: f32,
+}
+
+impl RungTrace {
+    /// Steps of the kernel's rungs: 1, 2.5, 5 and 10 s at 60 Hz.
+    pub const STEPS: [u32; 4] = [60, 150, 300, 600];
+    fn half(&self, word: usize, high: bool) -> f32 {
+        f16_to_f32((self.words[word] >> if high { 16 } else { 0 }) as u16)
+    }
+    /// Distance at rung `r` (0 to 3: 1, 2.5, 5, 10 s).
+    pub fn distance(&self, r: usize) -> f32 {
+        self.half(r / 2, r % 2 == 1)
+    }
+    /// End code: 3 when the screen stopped the trial, plus 16 for a fall and
+    /// 32 for a failed trial.
+    pub fn code(&self) -> u16 {
+        self.words[2] as u16
+    }
+    /// Steps the trial ran, or 0 when no kernel wrote a trace.
+    pub fn steps(&self) -> u32 {
+        self.words[2] >> 16
+    }
+    pub fn fell(&self) -> bool {
+        self.code() & 16 != 0
+    }
+    /// Speed (m/s) over the half second before rung `r` (0 or 1).
+    pub fn speed(&self, r: usize) -> f32 {
+        self.half(3, r == 1)
+    }
+    /// Share of nodes that touched the ground by rung `r` (0 or 1).
+    pub fn touched(&self, r: usize) -> f32 {
+        self.half(4 + r, false)
+    }
+    /// Mean muscle energy store at rung `r` (0 or 1).
+    pub fn energy(&self, r: usize) -> f32 {
+        self.half(4 + r, true)
+    }
+    /// Head shake at rung `r` (0 or 1).
+    pub fn head_shake(&self, r: usize) -> f32 {
+        self.half(6, r == 1)
+    }
+}
+
+/// IEEE half to single precision.
+pub fn f16_to_f32(h: u16) -> f32 {
+    let sign = ((h >> 15) as u32) << 31;
+    let exponent = ((h >> 10) & 0x1f) as u32;
+    let mantissa = (h & 0x3ff) as u32;
+    let bits = match (exponent, mantissa) {
+        (0, 0) => sign,
+        (0, _) => {
+            // Subnormal: normalize.
+            let shift = mantissa.leading_zeros() - 21;
+            let mantissa = (mantissa << shift) & 0x3ff;
+            sign | ((113 - shift) << 23) | (mantissa << 13)
+        }
+        (31, 0) => sign | 0x7f80_0000,
+        (31, _) => sign | 0x7fc0_0000 | (mantissa << 13),
+        _ => sign | ((exponent + 112) << 23) | (mantissa << 13),
+    };
+    f32::from_bits(bits)
+}
+/// Single to IEEE half precision, rounded to nearest even, for the dump files.
+pub fn f32_to_f16(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32;
+    let mantissa = bits & 0x7f_ffff;
+    if exponent == 0xff {
+        return sign | 0x7c00 | if mantissa != 0 { 0x200 } else { 0 };
+    }
+    let e = exponent - 127 + 15;
+    if e >= 31 {
+        return sign | 0x7c00;
+    }
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        let m = mantissa | 0x80_0000;
+        let shift = (14 - e) as u32;
+        let half = 1u32 << (shift - 1);
+        let rest = m & ((1 << shift) - 1);
+        let mut out = m >> shift;
+        if rest > half || (rest == half && out & 1 == 1) {
+            out += 1;
+        }
+        return sign | out as u16;
+    }
+    let rest = mantissa & 0x1fff;
+    let mut out = ((e as u32) << 10) | (mantissa >> 13);
+    if rest > 0x1000 || (rest == 0x1000 && out & 1 == 1) {
+        out += 1;
+    }
+    sign | out as u16
 }
 
 /// One group of creatures, ready for upload.
@@ -76,4 +216,22 @@ pub struct LaneBatch {
 pub fn frame_stride(batch: &LaneBatch) -> usize {
     let muscles = batch.info.iter().map(|i| i[2] as usize).max().unwrap_or(0);
     2 * batch.capacity + muscles + 1
+}
+
+#[cfg(test)]
+mod half_tests {
+    use super::*;
+    #[test]
+    fn halves_round_trip() {
+        for h in 0..=u16::MAX {
+            let v = f16_to_f32(h);
+            if v.is_nan() {
+                continue;
+            }
+            assert_eq!(f32_to_f16(v), h, "{h:#06x} {v}");
+        }
+        assert_eq!(f16_to_f32(f32_to_f16(1.0)), 1.0);
+        assert_eq!(f16_to_f32(f32_to_f16(-1e20)), f32::NEG_INFINITY);
+        assert_eq!(f16_to_f32(f32_to_f16(12.3)), 12.296875);
+    }
 }
