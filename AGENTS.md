@@ -21,7 +21,7 @@ Product:
 - The search is deterministic for a fixed seed on one GPU.
 - Saves are small (archives and search state), and the game writes as few files as possible. Autosave is off. Breaking old saves is fine: bump `qd::VERSION` when archive or physics semantics change, and the save header turns older saves down with a message.
 - Speed matters. The goal is 2M, then 4M, evaluated creatures per second in the graphical game at 60 FPS.
-- The current game is the reference, not the past. A change stays if the game is better or faster now, shown by a direct measurement of that change on its own. No comparison to an earlier version is needed, and nobody writes experiment reports. Search changes rest on papers and practice and must not break the search.
+- The current game is the reference, not the past. A change stays if the game is better or faster now, shown by a direct measurement of that change on its own. Any measured speedup that keeps the quality checks (elite distances, no free propulsion, determinism) is kept and merged, however small: 1.05x is a win. A track's gate (3x, 2x, 45% issue) is its ambition and decides what to try next, never whether measured gains are thrown away. No comparison to an earlier version is needed, and nobody writes experiment reports. Search changes rest on papers and practice and must not break the search.
 - There is one physics (`docs/physics.md`): the CUDA kernel, `shaders/warp_creature.cu`. Nothing else simulates creatures. The game needs an NVIDIA GPU with the CUDA driver and NVRTC.
 - Posture rules (for example what counts as a fall) need the owner's approval.
 
