@@ -42,7 +42,7 @@ pub(crate) const CMA_LIMIT: usize = 96;
 //     passes (the fine fidelity), and the search runs on a ring of blocks.
 // 43: the CUDA kernel runs a creature per lane group with substeps instead
 //     of planting rounds, warm start and static friction.
-pub const VERSION: u32 = 43;
+pub const VERSION: u32 = 44;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and

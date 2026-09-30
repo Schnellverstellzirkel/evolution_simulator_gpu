@@ -170,8 +170,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     ) {
     // 96 float4 per warp, reused by phase: the muscle forces (two per muscle
     // lane), the children's articulated inertias and biases (three per
-    // lane), the walkers' contact-matrix rows (16 per group, in the first
-    // 64), the children's contact responses (one per lane, in the last 32).
+    // lane), the walkers' torques at each joint (two per lane).
     __shared__ float4 scatter[BLOCK / 32][96];
     // Per-muscle state (energy store, rhythm offset, force of the substep) of
     // each lane's muscles, and each group's behavior totals: touched once per
@@ -193,6 +192,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     __shared__ float4 s_t0[BLOCK];
     __shared__ float4 s_t1[BLOCK];
     __shared__ float4 s_root[BLOCK / W][2];
+    // Each lane's bone and its ancestors, as a lane mask.
+    __shared__ unsigned s_anc[BLOCK];
     const unsigned tid = threadIdx.x;
     const unsigned gtid = tid - (threadIdx.x & 31u) % W;
 #if PROFILE
@@ -207,9 +208,6 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     const unsigned gshift = gbase;
     float4* const mf = &scatter[threadIdx.x >> 5][gbase * 2u];
     float4* const region = scatter[threadIdx.x >> 5];
-    float4* const kbase = region + (lane / W) * (MAXC * MAXC);
-    __shared__ float4 s_w[BLOCK / W][MAXC];
-    float4* const wrec = s_w[tid / W];
     const unsigned below = (1u << lg) - 1u;
 
     // The group's creature (the same in every lane of the group).
@@ -223,9 +221,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     // This lane's node and bone.
     float m = 0.0f, rad = 0.0f, fric = 0.0f, len = 0.0f, lo = 0.0f, hi = 0.0f, prad = 0.0f, hm = 0.0f;
     unsigned topo = 0u, mnode = 0u;
-    // State: the head's position and velocity (lane 0), the joint angle and
-    // rate of the lane's bone (the neck's absolute angle on lane 1).
-    float q = 0.0f, qd = 0.0f, hx = 0.0f, hy = 0.0f, hvx = 0.0f, hvy = 0.0f;
+    // State: the joint angle and rate of the lane's bone (the neck's absolute
+    // angle on lane 1); the head's position and velocity are lane 0's node
+    // position and velocity.
+    float q = 0.0f, qd = 0.0f;
     float tpull[RMAX];
 #pragma unroll
     for (int r = 0; r < RMAX; r++) { s_en[r][tid] = 1.0f; s_off[r][tid] = 0.0f; s_mag[r][tid] = 0.0f; s_wp[r][tid] = -1.0f; tpull[r] = 0.0f; }
@@ -349,10 +348,11 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 const float s7 = __uint_as_float(rec[7u * W]);
                 prad = __uint_as_float(rec[8u * W]);
                 topo = rec[9u * W];
+                s_anc[tid] = rec[10u * W];
                 mnode = rec[11u * W];
                 hm = lg == 1u ? s7 : 0.0f;
                 if (lg == 0u) {
-                    hx = s6; hy = s7; hvx = 0.0f; hvy = 0.0f; q = 0.0f;
+                    px = s6; py = s7; vx = 0.0f; vy = 0.0f; q = 0.0f;
                 } else {
                     q = s6;
                 }
@@ -374,7 +374,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 nn = 0u; depth = 0u; rounds = 0u; ew = 0u; nmus = 0u;
                 m = 0.0f; rad = 0.0f; fric = 0.0f; len = 0.0f; hm = 0.0f; topo = 0u;
                 inv_mass = 0.0f; inv_nodes = 0.0f;
-                q = 0.0f; qd = 0.0f; hx = 0.0f; hy = 0.0f; hvx = 0.0f; hvy = 0.0f;
+                q = 0.0f; qd = 0.0f;
             }
         }
         if (!__any_sync(FULL, live)) {
@@ -395,7 +395,6 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
         // `upd` false leaves the group's values as they are, so a neighbour
         // group taking a new creature never changes this one's numbers.
         auto kinematics = [&](bool upd) {
-            if (lg == 0u && upd) { px = hx; py = hy; vx = hvx; vy = hvy; }
             for (unsigned L = 1u; L <= maxlev; L++) {
                 const float a = shf(th, pb);
                 const float w = shf(om, pb);
@@ -489,7 +488,6 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     const float wantx = ex, wanty = ey;
     #endif
                     const float sx = (wantx - ax_) * inv_mass, sy = (wanty - ay_) * inv_mass;
-                    if (lg == 0u) { hvx += sx; hvy += sy; }
                     vx += sx;
                     vy += sy;
                     pvx += sx;
@@ -540,7 +538,6 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                             const float keep = internal > 0.0f ? sqrtf(fmaxf(1.0f - excess / internal, 0.0f)) : 0.0f;
                             qd *= keep;
                             om *= keep;
-                            if (lg == 0u) { hvx = cx + keep * (hvx - cx); hvy = cy + keep * (hvy - cy); }
                             vx = cx + keep * dvx;
                             vy = cy + keep * dvy;
                             pvx = cx + keep * (pvx - cx);
@@ -753,49 +750,49 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             // The joint's velocity-product acceleration.
             const vec3 cv = crm(v3(om, pvx + om * army, pvy - om * armx), axis) * qd;
             float dis = 0.0f, uus = 0.0f;
+            // Damping and a limit stop that engages are implicit terms that
+            // scale with the joint's inertia d: the joint's inertia becomes
+            // d * jf and its torque -d * jg.
+            float jf = 1.0f + INV_JOINT_DAMPING * HS;
+            float jg = INV_JOINT_DAMPING * qd;
+            {
+                const float predicted = q + HS * qd;
+                const bool upper = predicted > hi;
+                if (upper || predicted < lo) {
+                    const float room = upper ? hi - q : lo - q;
+                    const bool past = (room < 0.0f) == upper;
+                    const float goal = (past ? room * PUSH_OUT : room) * INV_HS;
+                    if ((qd > goal) == upper) {
+                        jg += LIMIT_HARDNESS * jf * INV_HS * (qd - goal);
+                        jf *= 1.0f + LIMIT_HARDNESS;
+                    }
+                }
+            }
             for (unsigned L = maxlev; L >= 2u; L--) {
-                vec3 c0 = v3(0.0f, 0.0f, 0.0f), c1 = c0, cp = c0;
                 if (lvl == L) {
                     const vec3 uv = sym_mul(i0, i1, axis);
-                    float d = sdot(axis, uv);
-                    float tau = 0.0f;
-                    const float c = d * INV_JOINT_DAMPING;
-                    tau -= c * qd;
-                    d += c * HS;
-                    const float predicted = q + HS * qd;
-                    const bool upper = predicted > hi;
-                    if (upper || predicted < lo) {
-                        const float room = upper ? hi - q : lo - q;
-                        const bool past = (room < 0.0f) == upper;
-                        const float goal = (past ? room * PUSH_OUT : room) * INV_HS;
-                        if ((qd > goal) == upper) {
-                            const float cl = LIMIT_HARDNESS * d * INV_HS;
-                            tau -= cl * (qd - goal);
-                            d += cl * HS;
-                        }
-                    }
-                    const float u = tau - sdot(axis, bs);
-                    const float di = 1.0f / d;
+                    const float d = sdot(axis, uv);
+                    const float u = -d * jg - sdot(axis, bs);
+                    const float di = 1.0f / (d * jf);
                     uvs = uv; dis = di; uus = u;
-                    const float k = -di;
-                    c0 = i0 + v3(k * uv.x * uv.x, k * uv.x * uv.y, k * uv.x * uv.z);
-                    c1 = i1 + v3(k * uv.y * uv.y, k * uv.y * uv.z, k * uv.z * uv.z);
-                    cp = bs + sym_mul(c0, c1, cv) + uv * (u * di);
-                }
-                if (lvl == L) {
+                    const float kx = -di * uv.x, ky = -di * uv.y, kz = -di * uv.z;
+                    const vec3 c0 = i0 + v3(kx * uv.x, kx * uv.y, kx * uv.z);
+                    const vec3 c1 = i1 + v3(ky * uv.y, ky * uv.z, kz * uv.z);
+                    const vec3 cp = bs + sym_mul(c0, c1, cv) + uv * (u * di);
                     region[3u * lane] = make_float4(c0.x, c0.y, c0.z, c1.x);
                     region[3u * lane + 1u] = make_float4(c1.y, c1.z, cp.x, cp.y);
-                    region[3u * lane + 2u] = make_float4(cp.z, 0.0f, 0.0f, 0.0f);
+                    reinterpret_cast<float*>(region + 3u * lane + 2u)[0] = cp.z;
                 }
                 __syncwarp();
                 const unsigned cm = __reduce_max_sync(FULL, lvl == L - 1u ? nch : 0u);
                 for (unsigned k = 0u; k < cm; k++) {
                     if (lvl == L - 1u && k < nch) {
                         const unsigned src = gbase + fc + k;
-                        const float4 e0 = region[3u * src], e1 = region[3u * src + 1u], e2 = region[3u * src + 2u];
+                        const float4 e0 = region[3u * src], e1 = region[3u * src + 1u];
+                        const float e2 = reinterpret_cast<const float*>(region + 3u * src + 2u)[0];
                         i0 += v3(e0.x, e0.y, e0.z);
                         i1 += v3(e0.w, e1.x, e1.y);
-                        bs += v3(e1.z, e1.w, e2.x);
+                        bs += v3(e1.z, e1.w, e2);
                     }
                 }
             }
@@ -905,7 +902,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     // the root. At every joint it passes, the unit forces of its
                     // two rows reach the joint as t = -s.p; two walkers at the
                     // same joint add dinv t_r t_c, and at the root F_r' Phi F_c.
-                    // The joints, for the walkers.
+                    // A walker keeps its two rows in registers.
                     __syncwarp();
                     s_t0[tid] = make_float4(armx, army, dis, __uint_as_float(topo));
                     s_t1[tid] = make_float4(uvs.x, uvs.y, uvs.z, 0.0f);
@@ -913,23 +910,32 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                         s_root[tid / W][0] = make_float4(r0.x, r0.y, r0.z, 0.0f);
                         s_root[tid / W][1] = make_float4(r1.x, r1.y, r1.z, 0.0f);
                     }
-                    // This walker's rows: one per slot of the group.
                     __syncwarp();
-                    float4* const krow = kbase + (slot >= 0 ? slot : 0) * MAXC;
-                    if (walker) {
-#pragma unroll
-                        for (int c = 0; c < MAXC; c++) { krow[c] = make_float4(0.0f, 0.0f, 0.0f, 0.0f); }
-                    }
-                    __syncwarp();
-                    vec3 pn = -dn, pt = -dtg;
                     unsigned cur = walker ? (lg == 0u ? 1u : lg) : lg;
+                    // The bones on each walker's path to the root.
+                    unsigned pc[MAXC];
+                    float4 kr[MAXC];
+                    // The torques at this lane's joint of the walkers that pass it.
+                    float tjn[MAXC], tjt[MAXC];
+                    {
+                        const unsigned path = walker ? s_anc[gtid + cur] : 0u;
+#pragma unroll
+                        for (int c = 0; c < MAXC; c++) {
+                            const unsigned v = shu(path, (slot_lanes >> (5 * c)) & 31u);
+                            pc[c] = (unsigned)c < nc ? v : 0u;
+                            kr[c] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                            tjn[c] = 0.0f;
+                            tjt[c] = 0.0f;
+                        }
+                    }
+                    vec3 pn = -dn, pt = -dtg;
                     for (unsigned L = maxlev; L >= 2u; L--) {
                         const float4 ja = s_t0[gtid + cur];
                         const float4 ju = s_t1[gtid + cur];
                         const unsigned jt = __float_as_uint(ja.w);
                         const bool act = walker && ((jt >> 10u) & 31u) == L;
                         float tn = 0.0f, tt = 0.0f;
-                        unsigned jj = 32u + lg;
+                        unsigned jj = 0u;
                         if (act) {
                             const vec3 axj = v3(1.0f, ja.y, -ja.x);
                             tn = -sdot(axj, pn);
@@ -941,26 +947,20 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                             cur = (jt >> 5u) & 31u;
                         }
                         const float jd = ja.z;
-                        // Each walker's joint and torques of this level, for
-                        // the walkers that meet it there.
-                        if (walker) { wrec[slot] = make_float4(__uint_as_float(jj), tn, tt, 0.0f); }
-                        __syncwarp();
+                        const bool here = lvl == L;
 #pragma unroll
                         for (int c = 0; c < MAXC; c++) {
                             if ((unsigned)c >= ncmax) { break; }
-                            const float4 wc = wrec[c];
-                            const float tnc = wc.y, ttc = wc.z;
-                            const unsigned jc = __float_as_uint(wc.x);
-                            if (act && jc == jj && (unsigned)c < nc) {
-                                float4 k = krow[c];
-                                k.x += jd * tn * tnc;
-                                k.y += jd * tn * ttc;
-                                k.z += jd * tt * tnc;
-                                k.w += jd * tt * ttc;
-                                krow[c] = k;
+                            const unsigned src = (slot_lanes >> (5 * c)) & 31u;
+                            const float tnc = shf(tn, src), ttc = shf(tt, src);
+                            if (act && ((pc[c] >> jj) & 1u)) {
+                                kr[c].x += jd * tn * tnc;
+                                kr[c].y += jd * tn * ttc;
+                                kr[c].z += jd * tt * tnc;
+                                kr[c].w += jd * tt * ttc;
                             }
+                            if (here && ((pc[c] >> lg) & 1u)) { tjn[c] = tnc; tjt[c] = ttc; }
                         }
-                        __syncwarp();
                     }
                     float knn = 1.0f, ktt = 1.0f;
                     {
@@ -972,100 +972,78 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                             if ((unsigned)c >= ncmax) { break; }
                             const unsigned src = (slot_lanes >> (5 * c)) & 31u;
                             const vec3 qn = shv(pn, src), qt = shv(pt, src);
-                            if (walker && (unsigned)c < nc) {
-                                float4 k = krow[c];
-                                k.x = (k.x + sdot(phn, qn)) * HS;
-                                k.y = (k.y + sdot(phn, qt)) * HS;
-                                k.z = (k.z + sdot(pht, qn)) * HS;
-                                k.w = (k.w + sdot(pht, qt)) * HS;
-                                krow[c] = k;
-                                if (slot == c) { knn = k.x; ktt = k.w; }
-                            }
+                            kr[c].x = (kr[c].x + sdot(phn, qn)) * HS;
+                            kr[c].y = (kr[c].y + sdot(phn, qt)) * HS;
+                            kr[c].z = (kr[c].z + sdot(pht, qn)) * HS;
+                            kr[c].w = (kr[c].w + sdot(pht, qt)) * HS;
+                            if (slot == c) { knn = kr[c].x; ktt = kr[c].w; }
                         }
                     }
                     const float inv_knn = 1.0f / knn, inv_ktt = 1.0f / ktt;
+                    // The joint torques wait in shared memory during the solve.
+                    region[2u * lane] = make_float4(tjn[0], tjn[1], tjn[2], tjn[3]);
+                    region[2u * lane + 1u] = make_float4(tjt[0], tjt[1], tjt[2], tjt[3]);
                     PROF(9);
-                    // Rounds: the solve, then PLANT_ROUNDS plantings. A planting
-                    // takes the step, measures each contact's velocity in the
-                    // end pose (after the momentum balance), solves on from
-                    // the impulses so far with those velocities, and applies
-                    // the change.
-                    float ln_prev = 0.0f, lt_prev = 0.0f;
-                    for (unsigned round = 0u; round <= PLANT_ROUNDS; round++) {
-                        const unsigned sweeps = round == 0u ? PGS_SWEEPS : PLANT_SWEEPS;
-                        ln_prev = ln;
-                        lt_prev = lt;
-                        PROF(9);
-                        // Projected Gauss-Seidel. Walker c holds rows 2c and 2c + 1;
-                        // every impulse change is broadcast to the other walkers.
-                        for (unsigned sweep = 0u; sweep < sweeps + CLEAN_SWEEPS; sweep++) {
-                            const bool clean = sweep >= sweeps;
-    #pragma unroll
-                            for (int c = 0; c < MAXC; c++) {
-                                if ((unsigned)c >= ncmax) { break; }
-                                const unsigned src = (slot_lanes >> (5 * c)) & 31u;
-                                const bool use = walker && (unsigned)c < nc;
-                                const float4 k = krow[c];
-                                // The owner updates its normal, then its friction
-                                // against its own new speed, and broadcasts both.
-                                float dn_ = 0.0f, dt_ = 0.0f;
-                                if (slot == c) {
-                                    if (!clean) {
-                                        const float normal = fmaxf(fmaf(goal - vn, inv_knn, ln), 0.0f);
-                                        dn_ = normal - ln;
-                                        ln = normal;
-                                    }
-                                    const float vt1 = vt + k.z * dn_;
-                                    // Friction may not do positive work: it only
-                                    // opposes a = start speed + end speed without
-                                    // its own force, and only up to |a| / k.
-                                    const float a = vs + vt1 - ktt * lt;
-                                    const float cap = fminf(mu * ln, fabsf(a) * inv_ktt);
-                                    const float tgt = clean ? lt : lt - vt1 * inv_ktt;
-                                    const float friction = clampf(tgt, a > 0.0f ? -cap : 0.0f, a > 0.0f ? 0.0f : cap);
-                                    dt_ = friction - lt;
-                                    lt = friction;
-                                }
-                                dn_ = shf(dn_, src);
-                                dt_ = shf(dt_, src);
-                                if (use) {
-                                    vn += k.x * dn_ + k.y * dt_;
-                                    vt += k.z * dn_ + k.w * dt_;
-                                }
-                            }
+                    // Projected Gauss-Seidel. Walker c holds rows 2c and 2c + 1;
+                    // every impulse change is broadcast to the other walkers.
+                    // Every lane computes the owner's update; only the owner
+                    // keeps it.
+#pragma unroll
+                    for (unsigned sweep = 0u; sweep < PGS_SWEEPS + CLEAN_SWEEPS; sweep++) {
+                        const bool clean = sweep >= PGS_SWEEPS;
+#pragma unroll
+                        for (int c = 0; c < MAXC; c++) {
+                            if ((unsigned)c >= ncmax) { break; }
+                            const unsigned src = (slot_lanes >> (5 * c)) & 31u;
+                            const bool own = slot == c;
+                            const float4 k = kr[c];
+                            // The owner updates its normal, then its friction
+                            // against its own new speed, and broadcasts both.
+                            const float normal = clean ? ln : fmaxf(fmaf(goal - vn, inv_knn, ln), 0.0f);
+                            float dn_ = own ? normal - ln : 0.0f;
+                            ln += dn_;
+                            const float vt1 = vt + k.z * dn_;
+                            // Friction may not do positive work: it only
+                            // opposes a = start speed + end speed without
+                            // its own force, and only up to |a| / k.
+                            const float a = vs + vt1 - ktt * lt;
+                            const float cap = fminf(mu * ln, fabsf(a) * inv_ktt);
+                            const float tgt = clean ? lt : lt - vt1 * inv_ktt;
+                            const float friction = clampf(tgt, a > 0.0f ? -cap : 0.0f, a > 0.0f ? 0.0f : cap);
+                            float dt_ = own ? friction - lt : 0.0f;
+                            lt += dt_;
+                            dn_ = shf(dn_, src);
+                            dt_ = shf(dt_, src);
+                            vn += k.x * dn_ + k.y * dt_;
+                            vt += k.z * dn_ + k.w * dt_;
                         }
-                        if (!walker) { ln = 0.0f; lt = 0.0f; }
-                        PROF(10);
-                        // The response to the contact forces, through the same
-                        // articulated inertias.
-                        vec3 pr = walker ? -(dn * (ln - ln_prev) + dtg * (lt - lt_prev)) : v3(0.0f, 0.0f, 0.0f);
-                        __syncwarp();
-                        {
-                            const vec3 ph = shv(pr, 0u);
-                            if (lg == 1u) { pr += ph; }
-                            if (lg == 0u) { pr = v3(0.0f, 0.0f, 0.0f); }
-                        }
+                    }
+                    if (!walker) { ln = 0.0f; lt = 0.0f; }
+                    PROF(10);
+                    // The response to the contact impulses through the same
+                    // articulated inertias: the root takes the walkers' unit
+                    // forces there, and every joint the torques of the walkers
+                    // that pass it.
+                    {
+                        const float4 en = region[2u * lane], et = region[2u * lane + 1u];
+                        const float tn4[MAXC] = {en.x, en.y, en.z, en.w};
+                        const float tt4[MAXC] = {et.x, et.y, et.z, et.w};
                         float dqr = 0.0f;
-                        for (unsigned L = maxlev; L >= 2u; L--) {
-                            vec3 cr = v3(0.0f, 0.0f, 0.0f);
-                            if (lvl == L) {
-                                const float t = -sdot(axis, pr);
-                                dqr = t;
-                                cr = pr + uvs * (t * dis);
-                            }
-                            // Above the contact rows, which a planting round reads again.
-                            if (lvl == L) { region[64u + lane] = make_float4(cr.x, cr.y, cr.z, 0.0f); }
-                            __syncwarp();
-                            const unsigned cm = __reduce_max_sync(FULL, lvl == L - 1u ? nch : 0u);
-                            for (unsigned k = 0u; k < cm; k++) {
-                                if (lvl == L - 1u && k < nch) {
-                                    const float4 e = region[64u + gbase + fc + k];
-                                    pr += v3(e.x, e.y, e.z);
-                                }
-                            }
+#pragma unroll
+                        for (int c = 0; c < MAXC; c++) {
+                            if ((unsigned)c >= ncmax) { break; }
+                            const unsigned src = (slot_lanes >> (5 * c)) & 31u;
+                            const float lnc = shf(ln, src), ltc = shf(lt, src);
+                            dqr += lnc * tn4[c] + ltc * tt4[c];
                         }
+                        vec3 pr = walker ? pn * ln + pt * lt : v3(0.0f, 0.0f, 0.0f);
+                        pr = v3(gsum(pr.x), gsum(pr.y), gsum(pr.z));
                         vec3 ar = v3(0.0f, 0.0f, 0.0f);
-                        if (lg == 1u && valid) { ar = -sym_mul(r0, r1, pr); acc += ar; }
+                        if (lg == 1u && valid) {
+                            const float4 q0 = s_root[tid / W][0], q1 = s_root[tid / W][1];
+                            ar = -sym_mul(v3(q0.x, q0.y, q0.z), v3(q1.x, q1.y, q1.z), pr);
+                            acc += ar;
+                        }
                         for (unsigned L = 2u; L <= maxlev; L++) {
                             const vec3 pa = shv(ar, pb);
                             if (lvl == L) {
@@ -1073,33 +1051,6 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                                 ar = pa + axis * tq;
                                 qdd += tq;
                             }
-                        }
-
-                        if (round < PLANT_ROUNDS) {
-                            const float sq = q, sqd = qd, shx = hx, shy = hy, shvx = hvx, shvy = hvy;
-                            {
-                                const vec3 ra = shv(acc, 1u);
-                                const float rqd = shf(qd, 1u);
-                                if (lg == 0u) {
-                                    hvx += (ra.y - rqd * hvy) * HS;
-                                    hvy += (ra.z + rqd * shvx) * HS;
-                                    hx += hvx * HS;
-                                    hy += hvy * HS;
-                                } else if (body) {
-                                    qd += (lg == 1u ? acc.x : qdd) * HS;
-                                    q += qd * HS;
-                                }
-                            }
-                            kinematics(true);
-                            const float gx = gsum(mx + (walker ? (ln * dn.y + lt * dtg.y) * HS : 0.0f));
-                            const float gy = gsum(my + (walker ? (ln * dn.z + lt * dtg.z) * HS : 0.0f));
-                            const float ax_ = gsum(valid ? m * vx : 0.0f), ay_ = gsum(valid ? m * vy : 0.0f);
-                            if (walker) {
-                                const float wx = vx + (gx - ax_) * inv_mass, wy = vy + (gy - ay_) * inv_mass;
-                                vn = wx * dn.y + wy * dn.z;
-                                vt = wx * dtg.y + wy * dtg.z;
-                            }
-                            q = sq; qd = sqd; hx = shx; hy = shy; hvx = shvx; hvy = shvy;
                         }
                     }
                     if (walker) {
@@ -1117,17 +1068,17 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 const vec3 ra = shv(acc, 1u);
                 const float rqd = shf(qd, 1u);
                 if (lg == 0u) {
-                    const float hax = ra.y - rqd * hvy;
-                    const float hay = ra.z + rqd * hvx;
+                    const float hax = ra.y - rqd * vy;
+                    const float hay = ra.z + rqd * vx;
 #if AIR
-                    hvx = (hvx + hax * HS) * p.air_sub;
-                    hvy = (hvy + hay * HS) * p.air_sub;
+                    vx = (vx + hax * HS) * p.air_sub;
+                    vy = (vy + hay * HS) * p.air_sub;
 #else
-                    hvx = hvx + hax * HS;
-                    hvy = hvy + hay * HS;
+                    vx = vx + hax * HS;
+                    vy = vy + hay * HS;
 #endif
-                    hx += hvx * HS;
-                    hy += hvy * HS;
+                    px += vx * HS;
+                    py += vy * HS;
                 } else if (body) {
                     const float a = lg == 1u ? acc.x : qdd;
 #if AIR

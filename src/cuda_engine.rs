@@ -856,7 +856,7 @@ impl CudaEngine {
 
     /// NVRTC options for this device.
     fn options(&self) -> Vec<String> {
-        vec![
+        let mut options = vec![
             format!("--gpu-architecture={}", self.arch),
             "--std=c++17".into(),
             "--prec-div=false".into(),
@@ -864,7 +864,12 @@ impl CudaEngine {
             "--fmad=true".into(),
             "--extra-device-vectorization".into(),
             "--ptxas-options=-v".into(),
-        ]
+        ];
+        // A developer's extra options, such as -lineinfo for a profiler.
+        if let Ok(extra) = std::env::var("EVOLUTION_NVRTC_EXTRA") {
+            options.extend(extra.split_whitespace().map(String::from));
+        }
+        options
     }
 
     /// Loads a cubin into this engine's context.
