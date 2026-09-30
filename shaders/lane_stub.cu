@@ -27,7 +27,12 @@
 //
 // Defines (all have defaults): W, MPL, NB (rod neighbours kept per rod: the
 // parent and NB - 1 lower siblings), BLOCK, MIN_BLOCKS, SUBSTEPS,
-// MAX_ROUNDS.
+// MAX_ROUNDS, MSTATE_REGS, MUSCLE_UNROLL. Developer switches: NO_MUSCLES,
+// NO_CONTACT, NO_DAMP, NO_FRICTION, NO_LEDGER, USE_STASH, DIAG (solve
+// residuals in the result), TRACE, DUMP, DUMPW (see examples/lane_stub.rs).
+//
+// The synthetic bodies and the explicit forces are not tuned; a speed clamp
+// (SPEED_CLAMP) keeps trials finite so every creature runs its full length.
 
 #ifndef W
 #define W 2
@@ -82,9 +87,6 @@
 #endif
 #ifndef NO_FRICTION
 #define NO_FRICTION 0
-#endif
-#ifndef NO_PROJ
-#define NO_PROJ 0
 #endif
 #if W != 2
 #error "the stub implements the W = 2 exchange only"
@@ -330,13 +332,6 @@ __device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&
 #pragma unroll
         for (int q = 1; q < NPL; q++) { xin[q] = xch(x[q]); }
     }
-}
-
-// Contact coefficient of a local rod (topology t, child node `child`) at
-// contact node c with inverse mass im: +im at its child, -im at its pivot.
-// R's entry is this times d.y (normal row) or d.x (friction row).
-__device__ __forceinline__ float rcoef(unsigned t, unsigned child, unsigned c, float im) {
-    return T_VALID(t) ? ((c == child ? im : 0.0f) - (c == T_PIVOT(t) ? im : 0.0f)) : 0.0f;
 }
 
 extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
@@ -664,7 +659,23 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 b0[2 * c + 1] = (isnan(s1.y) ? 0.0f : (s1.y - nd.x) * INV_HS) - nd.z;
             }
 #define CNODE(c) ((word >> (6u * (c))) & 31u)
-#define RCO(k, c) rcoef(topo[k], lg * NPL + (k), CNODE(c), cim[c])
+            // Incidence of each local rod at each contact node, two bits per
+            // pair: the rod's child (+) or its pivot (-). R's entry is this
+            // times the node's inverse mass times d.y (normal) or d.x.
+            unsigned sgw = 0u;
+#pragma unroll
+            for (int k = 0; k < NPL; k++) {
+                const unsigned t = topo[k];
+                if (T_VALID(t)) {
+#pragma unroll
+                    for (int c = 0; c < NC; c++) {
+                        const unsigned cn = CNODE(c);
+                        if (cn == lg * NPL + (unsigned)k) { sgw |= 1u << (2 * (4 * k + c)); }
+                        if (cn == T_PIVOT(t)) { sgw |= 2u << (2 * (4 * k + c)); }
+                    }
+                }
+            }
+#define RCO(k, c) (((sgw >> (2 * (4 * (k) + (c)))) & 1u) ? cim[c] : (((sgw >> (2 * (4 * (k) + (c)))) & 2u) ? -cim[c] : 0.0f))
             // Batch A: row 0 the rods' own, rows 1 + 2c and 2 + 2c contact
             // c's normal and friction (c = 0, 1); lane 0 one slot behind.
             float mu0[NPL], me[4][NPL];

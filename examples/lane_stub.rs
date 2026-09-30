@@ -7,6 +7,13 @@
 //!   count=262144 steps=300 nodes=8 muscles=19 substeps=2 nb=3 mpl=16
 //!   rounds=3 block=128 min_blocks=4 repeat=3 arch=sm_89 seed=1
 //!   report        compile and report only (no GPU time)
+//!   cubin=PATH, src=PATH, log   write the cubin, the source, the full log
+//!   first         print creature 0 and the first non-finite creatures
+//! Developer checks (defines through EVOLUTION_NVRTC_EXTRA, see the kernel
+//! header): -DTRACE with trace=SECONDS prints each warp's last checkpoint
+//! from mapped memory without waiting (for hangs); -DDUMP with trace=2 dump
+//! checks creature 0's rod solve against a dense A; -DDUMPW=STEP with
+//! trace=3 dumpw checks its Delassus matrix and free contact velocities.
 //!
 //! Nothing here is the game's physics; the kernel is a stand-in with the
 //! planned state layout and instruction mix. The CUDA driver and NVRTC are
@@ -321,14 +328,34 @@ pub fn source(defines: &[(&str, String)]) -> String {
     s
 }
 
-/// ptxas's numbers from an NVRTC log: registers, stack frame, spill stores
-/// and loads, per function.
+/// ptxas's numbers from an NVRTC log, one entry per function:
+/// registers, stack frame, spill stores and loads.
 pub fn ptxas_summary(log: &str) -> String {
-    log.lines()
-        .filter(|l| l.contains("registers") || l.contains("spill") || l.contains("stack") || l.contains("Compiling entry"))
-        .map(|l| l.trim().trim_start_matches("ptxas info    :").trim())
-        .collect::<Vec<_>>()
-        .join(" | ")
+    let number = |line: &str, before: &str| -> Option<u32> {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        words.windows(2).find(|w| w[1].starts_with(before)).and_then(|w| w[0].parse().ok())
+    };
+    let mut out = Vec::new();
+    let mut frame = None;
+    for line in log.lines() {
+        if line.contains("stack frame") {
+            frame = Some((number(line, "bytes").unwrap_or(0), line));
+        }
+        if line.contains("Used") && line.contains("registers") {
+            let regs = line.split("Used").nth(1).and_then(|r| r.split_whitespace().next()).unwrap_or("?");
+            let (stack, spills) = frame.take().unwrap_or((0, ""));
+            let words: Vec<&str> = spills.split_whitespace().collect();
+            let spill = |kind: &str| {
+                words.windows(3).find(|w| w[2] == kind).map(|w| w[0]).unwrap_or("0").to_owned()
+            };
+            out.push(format!(
+                "{regs} registers, {stack} B stack frame, {} B spill stores, {} B spill loads",
+                spill("stores,"),
+                spill("loads")
+            ));
+        }
+    }
+    out.join(" | ")
 }
 
 /// Largest spill (stores or loads) over the log's functions, in bytes.
