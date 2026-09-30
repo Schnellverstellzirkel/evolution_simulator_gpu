@@ -1,9 +1,12 @@
 //! Operators that change joint ranges, timing patterns and mass together.
-use super::{Context, branch, child_bones, degree, is_neck, muscles_on, parent_bones};
+use super::{
+    BoneIds, Context, Limbs, MuscleIds, branch, child_bones, degree, is_neck, muscles_on,
+    parent_bones,
+};
 use crate::config::Config;
 use crate::evolution::{
-    Bone, Creature, JOINT_LIMIT, MAX_ORGAN_MASS, MIN_ORGAN_MASS, Rng, max_bone_length,
-    organ_center, organ_range,
+    Bone, Bounded, Creature, JOINT_LIMIT, MAX_MUSCLES, MAX_NODES, MAX_ORGAN_MASS, MIN_ORGAN_MASS,
+    Rng, max_bone_length, organ_center, organ_range,
 };
 use crate::qd::gaussian;
 
@@ -18,7 +21,9 @@ pub(crate) fn redistribute_joint_flex(
     let width = |b: &Bone| b.max_angle - b.min_angle;
     // A bone and the bone above or below it, as (narrowed, widened), with the
     // most angle that can move. The neck's joint is free, so it takes no part.
-    let mut pairs = Vec::new();
+    // A bone has one bone above it and its children below: at most two pairs
+    // per bone.
+    let mut pairs: Bounded<(usize, usize, f32), { 2 * MAX_NODES }> = Bounded::new();
     for from in 0..c.bones.len() {
         for to in 0..c.bones.len() {
             let (x, y) = (c.bones[from], c.bones[to]);
@@ -60,7 +65,7 @@ pub(crate) fn mutate_matching_limbs(
     if pairs.is_empty() {
         return false;
     }
-    let (x, y) = &pairs[rng.index(pairs.len())];
+    let (x, y) = pairs.get(rng.index(pairs.len()));
     let at = rng.index(x.len());
     let (p, q) = (x[at], y[at]);
     let mut changed = false;
@@ -101,10 +106,44 @@ pub(crate) fn mutate_matching_limbs(
     changed
 }
 
+/// Pairs of branches of the same shape (`matching_limbs`): the branches, and
+/// the pairs as indices into them.
+pub(super) struct LimbPairs {
+    pub limbs: Limbs,
+    pub pairs: Bounded<(u8, u8), { MAX_NODES * MAX_NODES / 2 }>,
+}
+impl LimbPairs {
+    pub fn len(&self) -> usize {
+        self.pairs.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+    /// Pair `k`, in order.
+    pub fn get(&self, k: usize) -> (&BoneIds, &BoneIds) {
+        let (x, y) = self.pairs[k];
+        (&self.limbs[x as usize], &self.limbs[y as usize])
+    }
+    pub fn iter(&self) -> impl Iterator<Item = (&BoneIds, &BoneIds)> {
+        (0..self.len()).map(|k| self.get(k))
+    }
+}
+impl IntoIterator for LimbPairs {
+    type Item = (BoneIds, BoneIds);
+    type IntoIter = std::vec::IntoIter<(BoneIds, BoneIds)>;
+    /// The pairs by value, for tests.
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+            .map(|(x, y)| (*x, *y))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+}
+
 /// Pairs of branches of the same shape: apart from each other, with the same
 /// bone count and bone lengths within 25% of each other, position by position.
-pub(super) fn matching_limbs(c: &Creature) -> Vec<(Vec<usize>, Vec<usize>)> {
-    let limbs: Vec<Vec<usize>> = (0..c.bones.len())
+pub(super) fn matching_limbs(c: &Creature) -> LimbPairs {
+    let limbs: Limbs = (0..c.bones.len())
         .filter(|&b| !is_neck(c, b))
         .map(|b| branch(c, b))
         .collect();
@@ -112,19 +151,19 @@ pub(super) fn matching_limbs(c: &Creature) -> Vec<(Vec<usize>, Vec<usize>)> {
         let (a, b) = (c.bones[p].rest_length, c.bones[q].rest_length);
         a.max(b) <= 1.25 * a.min(b)
     };
-    let mut pairs = Vec::new();
+    let mut pairs = Bounded::new();
     for (i, x) in limbs.iter().enumerate() {
-        for y in &limbs[i + 1..] {
+        for (j, y) in limbs.iter().enumerate().skip(i + 1) {
             if x.len() == y.len()
                 && !x.contains(&y[0])
                 && !y.contains(&x[0])
-                && x.iter().zip(y).all(similar)
+                && x.iter().zip(y.iter()).all(similar)
             {
-                pairs.push((x.clone(), y.clone()));
+                pairs.push((i as u8, j as u8));
             }
         }
     }
-    pairs
+    LimbPairs { limbs, pairs }
 }
 
 /// Along a chain of bones (a path down one branch), sets the phase of the
@@ -145,15 +184,15 @@ pub(crate) fn chain_phase_wave(
 
 /// A path of at least two bones from a random bone (not the neck) down to a
 /// foot, taking a random child bone at each junction.
-fn chain_below(c: &Creature, rng: &mut Rng) -> Option<Vec<usize>> {
+fn chain_below(c: &Creature, rng: &mut Rng) -> Option<BoneIds> {
     let children = child_bones(c);
-    let starts: Vec<usize> = (0..c.bones.len())
+    let starts: BoneIds = (0..c.bones.len())
         .filter(|&b| !is_neck(c, b) && !children[c.bones[b].b as usize].is_empty())
         .collect();
     if starts.is_empty() {
         return None;
     }
-    let mut chain = vec![starts[rng.index(starts.len())]];
+    let mut chain = BoneIds::from_slice(&[starts[rng.index(starts.len())]]);
     loop {
         let below = &children[c.bones[chain[chain.len() - 1]].b as usize];
         if below.is_empty() {
@@ -166,7 +205,7 @@ fn chain_below(c: &Creature, rng: &mut Rng) -> Option<Vec<usize>> {
 /// Sets every muscle on `chain[i]` to the phase of the chain's first muscle
 /// plus `i` steps. A muscle on two chain bones counts for the upper one.
 fn phase_wave(c: &mut Creature, chain: &[usize], step: f32) -> bool {
-    let parts: Vec<Vec<usize>> = chain.iter().map(|&b| vec![b]).collect();
+    let parts: Limbs = chain.iter().map(|&b| BoneIds::from_slice(&[b])).collect();
     let groups = muscle_groups(c, &parts);
     let Some(&first) = groups.iter().flatten().next() else {
         return false;
@@ -191,7 +230,8 @@ pub(crate) fn limb_phase_pattern(
 ) -> bool {
     let limbs = if rng.unit() < 0.5 {
         let children = child_bones(c);
-        let junctions: Vec<&Vec<usize>> = children.iter().filter(|list| list.len() > 1).collect();
+        let junctions: Bounded<&BoneIds, MAX_NODES> =
+            children.iter().filter(|list| list.len() > 1).collect();
         if junctions.is_empty() {
             return false;
         }
@@ -207,7 +247,7 @@ pub(crate) fn limb_phase_pattern(
 
 /// Every limb that ends in a foot: the bones from a leaf node up to the node
 /// where the body branches, or up to the neck.
-pub(super) fn leaf_limbs(c: &Creature) -> Vec<Vec<usize>> {
+pub(super) fn leaf_limbs(c: &Creature) -> Limbs {
     let parents = parent_bones(c);
     let children = child_bones(c);
     (1..c.nodes.len())
@@ -228,7 +268,7 @@ pub(super) fn leaf_limbs(c: &Creature) -> Vec<Vec<usize>> {
 /// Shifts the muscles of each limb together so that the first muscle of limb
 /// `i` sits at the first limb's phase plus the pattern's offset for `i`:
 /// 0 all together, 1 alternating halves, 2 evenly staggered.
-fn shift_limbs(c: &mut Creature, limbs: &[Vec<usize>], pattern: usize) -> bool {
+fn shift_limbs(c: &mut Creature, limbs: &[BoneIds], pattern: usize) -> bool {
     let groups = muscle_groups(c, limbs);
     let Some(&first) = groups.iter().flatten().next() else {
         return false;
@@ -253,8 +293,8 @@ fn shift_limbs(c: &mut Creature, limbs: &[Vec<usize>], pattern: usize) -> bool {
 
 /// The muscles with an end on each part (a list of bones). A muscle on two
 /// parts belongs to the first.
-fn muscle_groups(c: &Creature, parts: &[Vec<usize>]) -> Vec<Vec<usize>> {
-    let mut taken = vec![false; c.muscles.len()];
+fn muscle_groups(c: &Creature, parts: &[BoneIds]) -> Bounded<MuscleIds, MAX_NODES> {
+    let mut taken = [false; MAX_MUSCLES];
     parts
         .iter()
         .map(|bones| {
@@ -275,7 +315,7 @@ pub(crate) fn limb_duty_cycle(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let roots: Vec<usize> = (0..c.bones.len()).filter(|&b| !is_neck(c, b)).collect();
+    let roots: BoneIds = (0..c.bones.len()).filter(|&b| !is_neck(c, b)).collect();
     if roots.is_empty() {
         return false;
     }
@@ -304,7 +344,7 @@ pub(crate) fn touchdown_package(
     _cx: &Context,
 ) -> bool {
     let parents = parent_bones(c);
-    let feet: Vec<(usize, Vec<usize>)> = (1..c.nodes.len())
+    let feet: Bounded<(usize, MuscleIds), MAX_NODES> = (1..c.nodes.len())
         .filter(|&n| degree(c, n) == 1)
         .filter_map(|n| Some((n, muscles_on(c, &[parents[n]?], false))))
         .filter(|(_, muscles)| !muscles.is_empty())
@@ -339,7 +379,7 @@ pub(crate) fn redistribute_organ_mass(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let organs: Vec<usize> = (0..c.bones.len())
+    let organs: BoneIds = (0..c.bones.len())
         .filter(|&b| c.bones[b].organ_mass > 0.0)
         .collect();
     if organs.is_empty() {
@@ -351,7 +391,7 @@ pub(crate) fn redistribute_organ_mass(
     // it can take.
     let spare = c.bones[from].organ_mass - MIN_ORGAN_MASS;
     let center = organ_center(&c.nodes);
-    let targets: Vec<(usize, f32, f32)> = (0..c.bones.len())
+    let targets: Bounded<(usize, f32, f32), MAX_NODES> = (0..c.bones.len())
         .filter(|&b| b != from)
         .filter_map(|b| {
             let bone = &c.bones[b];
@@ -492,7 +532,7 @@ mod tests {
             for pair in chain.windows(2) {
                 assert_eq!(body.bones[pair[0]].b, body.bones[pair[1]].a);
             }
-            let parts: Vec<Vec<usize>> = chain.iter().map(|&b| vec![b]).collect();
+            let parts: Vec<BoneIds> = chain.iter().map(|&b| BoneIds::from_slice(&[b])).collect();
             let groups = muscle_groups(body, &parts);
             let mut c = body.clone();
             assert!(phase_wave(&mut c, &chain, 0.1));

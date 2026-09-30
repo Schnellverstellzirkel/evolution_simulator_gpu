@@ -149,6 +149,19 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
         out.resize(len, value);
         out
     }
+    /// A stable sort by `compare`, in place and without allocating (the
+    /// standard stable sort allocates a buffer). Insertion sort: the arrays
+    /// here hold at most a few hundred items.
+    pub fn sort_stable_by(&mut self, mut compare: impl FnMut(&T, &T) -> std::cmp::Ordering) {
+        let items = self.as_mut_slice();
+        for i in 1..items.len() {
+            let mut j = i;
+            while j > 0 && compare(&items[j - 1], &items[j]) == std::cmp::Ordering::Greater {
+                items.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+    }
     pub fn to_vec(&self) -> Vec<T> {
         self.as_slice().to_vec()
     }
@@ -160,6 +173,10 @@ impl<T: Copy, const N: usize> Default for Bounded<T, N> {
     }
 }
 
+/// Copy moves the whole array, as any move does; `clone` copies only the
+/// items in use, so it is the cheaper way to duplicate a large one.
+impl<T: Copy, const N: usize> Copy for Bounded<T, N> {}
+#[allow(clippy::non_canonical_clone_impl)]
 impl<T: Copy, const N: usize> Clone for Bounded<T, N> {
     fn clone(&self) -> Self {
         let mut out = Self::new();
@@ -204,6 +221,11 @@ impl<T: Copy + PartialEq, const N: usize> PartialEq<[T]> for Bounded<T, N> {
 }
 impl<T: Copy + PartialEq, const N: usize> PartialEq<Vec<T>> for Bounded<T, N> {
     fn eq(&self, other: &Vec<T>) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+impl<T: Copy + PartialEq, const N: usize> PartialEq<Bounded<T, N>> for Vec<T> {
+    fn eq(&self, other: &Bounded<T, N>) -> bool {
         self.as_slice() == other.as_slice()
     }
 }

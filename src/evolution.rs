@@ -91,11 +91,6 @@ impl Bone {
         self.min_angle = self.min_angle.clamp(-JOINT_LIMIT, 0.0);
         self.max_angle = self.max_angle.clamp(0.0, JOINT_LIMIT);
     }
-    fn mutate_range(&mut self, step: f32, rng: &mut Rng) {
-        self.min_angle += qd::gaussian(rng) * step;
-        self.max_angle += qd::gaussian(rng) * step;
-        self.clamp_range();
-    }
 }
 /// Center of mass of the starting pose without the head (node 0) and
 /// without organs: the point organs must stay near.
@@ -261,22 +256,82 @@ pub struct Population {
     pub muscles: Vec<Muscle>,
 }
 
-/// Each creature has its own deterministic stream: thread scheduling cannot change evolution.
-pub struct Rng(u64);
+/// The splitmix64 finalizer: a bijection on 64 bits that mixes every input
+/// bit into every output bit.
+#[inline(always)]
+fn finalize(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z ^ (z >> 31)
+}
+/// Draw `draw` of gene `gene` in the stream with `key`. The pair is packed
+/// into one word and multiplied by an odd constant, both bijections, so two
+/// different pairs of one stream never share an input to the finalizer.
+#[inline(always)]
+fn keyed(key: u64, gene: u32, draw: u32) -> u64 {
+    let packed = ((gene as u64) << 32 | draw as u64).wrapping_mul(0x9e3779b97f4a7c15);
+    finalize(finalize(key ^ packed))
+}
+/// A stream key from its coordinates, absorbed one at a time.
+fn stream_key(seed: u64, generation: u64, round: u64, slot: u64) -> u64 {
+    let mut key = finalize(seed.wrapping_add(0x632be59bd9b4e019));
+    for word in [generation, round, slot] {
+        key = finalize(key ^ word.wrapping_mul(0xd1342543de82ef95));
+    }
+    key
+}
+/// The gene index the cursor draws of a stream use.
+const CURSOR: u32 = u32::MAX;
+/// 1 / 65535: twelve 16-bit uniforms on 0..65535, scaled by this, have
+/// variance 1 to 3e-5.
+const GAUSSIAN_SCALE: f32 = 1.0 / 65535.0;
+/// Twelve 16-bit uniforms from three draws, summed and centered: a gaussian
+/// with mean exactly 0 and variance 1, cut at 6. The sum is an integer, so
+/// the value is the same on any machine.
+#[inline(always)]
+fn twelve_uniforms(words: [u64; 3]) -> f32 {
+    let mut sum = 0i64;
+    for w in words {
+        sum += (w & 0xffff) as i64
+            + (w >> 16 & 0xffff) as i64
+            + (w >> 32 & 0xffff) as i64
+            + (w >> 48) as i64;
+    }
+    (sum - 6 * 65535) as f32 * GAUSSIAN_SCALE
+}
+
+/// Counter-based random numbers. A stream is keyed by its coordinates (the
+/// seed, the generation, the breeding round and the ring slot), and every
+/// value is a hash of the key and the value's own index: a child is a
+/// function of its slot and its plan, whatever thread breeds it and in
+/// whatever order.
+///
+/// The cursor (`next_u64`, `unit`, `gaussian`) walks the stream in order, as
+/// structural operators read it. `genes` hands out a sub-stream whose values
+/// are keyed by gene index, so parametric noise on a gene does not depend on
+/// the draws before it.
+pub struct Rng {
+    key: u64,
+    counter: u32,
+}
 impl Rng {
     pub fn new(seed: u64, generation: u32, index: usize) -> Self {
-        Self(
-            seed ^ (generation as u64).wrapping_mul(0xd1342543de82ef95)
-                ^ (index as u64).wrapping_mul(0x9e3779b97f4a7c15),
-        )
+        Self::stream(seed, generation, 0, index)
     }
+    /// The stream of the child bred for ring `slot` in breeding `round`.
+    pub fn stream(seed: u64, generation: u32, round: u64, slot: usize) -> Self {
+        Self {
+            key: stream_key(seed, generation as u64, round, slot as u64),
+            counter: 0,
+        }
+    }
+    #[inline]
     pub fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
-        z ^ (z >> 31)
+        let value = keyed(self.key, CURSOR, self.counter);
+        self.counter = self.counter.wrapping_add(1);
+        value
     }
+    #[inline]
     pub fn unit(&mut self) -> f32 {
         (self.next_u64() >> 40) as f32 / 16_777_216.0
     }
@@ -288,6 +343,43 @@ impl Rng {
     }
     pub fn delta(&mut self) -> f32 {
         self.range(-1.0, 1.0).powi(7)
+    }
+    /// A standard gaussian from three cursor draws (`twelve_uniforms`).
+    #[inline]
+    pub fn gaussian(&mut self) -> f32 {
+        twelve_uniforms([self.next_u64(), self.next_u64(), self.next_u64()])
+    }
+    /// A new sub-stream keyed by gene index, for one pass of parametric
+    /// noise over a body. Takes one cursor draw.
+    pub fn genes(&mut self) -> Genes {
+        Genes {
+            key: self.next_u64(),
+        }
+    }
+}
+/// Random values keyed by gene index (`Rng::genes`). Gene `g` gets draws
+/// `0, 1, 2` for its gaussian and `3..` for its uniforms.
+#[derive(Clone, Copy)]
+pub struct Genes {
+    key: u64,
+}
+impl Genes {
+    #[inline(always)]
+    pub fn gaussian(self, gene: u32) -> f32 {
+        twelve_uniforms([
+            keyed(self.key, gene, 0),
+            keyed(self.key, gene, 1),
+            keyed(self.key, gene, 2),
+        ])
+    }
+    /// Uniform on [0, 1): draw `3 + k` of `gene`.
+    #[inline(always)]
+    pub fn unit(self, gene: u32, k: u32) -> f32 {
+        (keyed(self.key, gene, 3 + k) >> 40) as f32 / 16_777_216.0
+    }
+    #[inline(always)]
+    pub fn index(self, gene: u32, k: u32, n: usize) -> usize {
+        (keyed(self.key, gene, 3 + k) % n as u64) as usize
     }
 }
 impl Population {
@@ -1192,6 +1284,41 @@ pub struct CandidatePlan {
     pub mate: Option<usize>,
 }
 
+/// The growth-step body rule (docs/plan-2m.md, the owner's decision 2): a
+/// child gains at most this many nodes and muscles over its parent. Off
+/// until the owner decides; the fit check below already takes it.
+pub const GROWTH_STEP: Option<GrowthStep> = None;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GrowthStep {
+    pub nodes: usize,
+    pub muscles: usize,
+}
+
+/// The body limits a child of `parent` must fit: the config caps, lowered to
+/// the parent's size plus `step` when there is one. Every operator's fit
+/// check reads `cfg.max_nodes` and `cfg.max_muscles`, so tighter limits
+/// reach them as a config (`None` when the config's own caps apply).
+pub fn child_limits(cfg: &Config, parent: &Creature, step: Option<GrowthStep>) -> Option<Config> {
+    let step = step?;
+    let nodes = cfg.max_nodes.min(parent.nodes.len() + step.nodes);
+    let muscles = cfg.max_muscles.min(parent.muscles.len() + step.muscles);
+    (nodes < cfg.max_nodes || muscles < cfg.max_muscles).then(|| Config {
+        max_nodes: nodes,
+        max_muscles: muscles,
+        ..cfg.clone()
+    })
+}
+
+/// What breeding did to one child, for `examples/breed_bench.rs`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChildTrace {
+    /// The child went through `structural_mutation_from`.
+    pub structural: bool,
+    /// The structural operator that changed it, as an index into
+    /// `structural_operator_names`.
+    pub operator: Option<u8>,
+}
+
 /// Breeds one offspring from its plan with the given random stream.
 fn offspring(
     archive: &QdArchive,
@@ -1200,37 +1327,74 @@ fn offspring(
     cfg: &Config,
     rng: &mut Rng,
     id: u64,
-) -> Creature {
+    step: Option<GrowthStep>,
+) -> (Creature, ChildTrace) {
+    let mut trace = ChildTrace::default();
+    let limited = match plan.emitter {
+        Emitter::Structural | Emitter::Novelty => plan
+            .parent
+            .and_then(|p| child_limits(cfg, &archive.entries[p].creature, step)),
+        Emitter::Restart | Emitter::Cma => None,
+    };
+    let cfg = limited.as_ref().unwrap_or(cfg);
     let mut creature = match plan.emitter {
         Emitter::Restart => random_creature_from(cfg, rng),
         Emitter::Cma => {
             if let Some(cma) = plan.cma.and_then(|index| cma_emitters.get(index)) {
                 cma.sample_scaled(rng, cfg.mutation)
             } else {
-                let parent = &archive.entries[plan.parent.expect("CMA parent")].creature;
-                local_mutation(parent.clone(), cfg, rng, 0.12)
+                let mut child = archive.entries[plan.parent.expect("CMA parent")]
+                    .creature
+                    .clone();
+                mutate_genes(&mut child, cfg, rng, 0.12);
+                child
             }
         }
         Emitter::Structural => {
-            let parent = mated(archive, plan, cfg, rng);
-            let mut child = parent;
-            let _ = structural_mutation_from(&mut child, cfg, rng, archive);
-            local_mutation(child, cfg, rng, 0.035)
+            let mut child = mated(archive, plan, cfg, rng);
+            trace.structural = true;
+            trace.operator = structural_mutation_from(&mut child, cfg, rng, archive);
+            mutate_genes(&mut child, cfg, rng, 0.035);
+            child
         }
         Emitter::Novelty => {
-            let parent = mated(archive, plan, cfg, rng);
+            let mut child = mated(archive, plan, cfg, rng);
             // Occasional large jumps help lineages cross fitness valleys.
             let scale = if rng.unit() < 0.05 { 2.25 } else { 0.75 };
-            let mut child = local_mutation(parent, cfg, rng, scale);
+            mutate_genes(&mut child, cfg, rng, scale);
             if rng.unit() < 0.18 {
-                let _ = structural_mutation_from(&mut child, cfg, rng, archive);
+                trace.structural = true;
+                trace.operator = structural_mutation_from(&mut child, cfg, rng, archive);
             }
             child
         }
     };
     creature.id = id;
     repair(&mut creature, cfg, rng);
-    creature
+    (creature, trace)
+}
+
+/// Breeds the child of ring `slot` in breeding `round` from its plan, as
+/// `emit_offspring_batches` does, and says what breeding did to it.
+pub fn breed_child(
+    archive: &[QdArchive],
+    cma_emitters: &[CmaEmitter],
+    plan: CandidatePlan,
+    slot: usize,
+    cfg: &Config,
+    generation: u32,
+    round: u64,
+) -> (Creature, ChildTrace) {
+    let mut rng = Rng::stream(cfg.seed, generation, round, slot);
+    offspring(
+        &archive[qd::arena_of_slot(slot, archive.len())],
+        cma_emitters,
+        plan,
+        cfg,
+        &mut rng,
+        bred_id(round, slot),
+        GROWTH_STEP,
+    )
 }
 
 /// The plan's parent, crossed with its mate when it has one.
@@ -1448,7 +1612,6 @@ pub fn emit_offspring_batches(
     round: u64,
 ) -> Vec<ChildBatch> {
     const CHUNK: usize = 4096;
-    let seed = cfg.seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x5bd1_e995;
     plans
         .par_chunks(CHUNK)
         .zip(slots.par_chunks(CHUNK))
@@ -1460,16 +1623,9 @@ pub fn emit_offspring_batches(
                 meta: Vec::with_capacity(plans.len()),
             };
             for (&plan, &slot) in plans.iter().zip(slots) {
-                let mut rng = Rng::new(seed, generation, slot);
-                let id = bred_id(round, slot);
-                batch.push(offspring(
-                    &archive[qd::arena_of_slot(slot, archive.len())],
-                    cma_emitters,
-                    plan,
-                    cfg,
-                    &mut rng,
-                    id,
-                ));
+                let (child, _) =
+                    breed_child(archive, cma_emitters, plan, slot, cfg, generation, round);
+                batch.push(child);
             }
             batch
         })
@@ -1477,61 +1633,84 @@ pub fn emit_offspring_batches(
 }
 
 fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f32) -> Creature {
+    mutate_genes(&mut creature, cfg, rng, scale);
+    creature
+}
+
+/// Where each gene's noise is keyed (`Genes`): node `i` field `f` at
+/// `4 i + f`, bone `i` at `BONE_GENES + 8 i`, the body tempo at `TEMPO_GENE`,
+/// muscle `i` at `MUSCLE_GENES + 16 i`.
+const BONE_GENES: u32 = 4 * MAX_NODES as u32;
+const TEMPO_GENE: u32 = BONE_GENES + 8 * MAX_NODES as u32;
+const MUSCLE_GENES: u32 = TEMPO_GENE + 128;
+
+/// Gaussian noise on every gene at `scale` (times the config's mutation
+/// strength), clamped to the gene's range. Each gene's noise is keyed by its
+/// index, so it does not depend on the body's other genes or on the order
+/// they are visited in.
+fn mutate_genes(creature: &mut Creature, cfg: &Config, rng: &mut Rng, scale: f32) {
     let scale = scale * cfg.mutation;
     if scale <= 0.0 {
-        return creature;
+        return;
     }
-    for node in &mut creature.nodes {
-        node.x = (node.x + qd::gaussian(rng) * 0.10 * scale).clamp(-body_extent(), body_extent());
-        node.y = (node.y + qd::gaussian(rng) * 0.08 * scale).clamp(0.0, body_extent());
+    let g = rng.genes();
+    let extent = body_extent();
+    for (i, node) in creature.nodes.iter_mut().enumerate() {
+        let at = 4 * i as u32;
+        node.x = (node.x + g.gaussian(at) * 0.10 * scale).clamp(-extent, extent);
+        node.y = (node.y + g.gaussian(at + 1) * 0.08 * scale).clamp(0.0, extent);
         node.diameter =
-            (node.diameter + qd::gaussian(rng) * 0.025 * scale).clamp(cfg.min_size, cfg.max_size);
-        node.friction = (node.friction + qd::gaussian(rng) * 0.10 * scale)
+            (node.diameter + g.gaussian(at + 2) * 0.025 * scale).clamp(cfg.min_size, cfg.max_size);
+        node.friction = (node.friction + g.gaussian(at + 3) * 0.10 * scale)
             .clamp(cfg.min_friction, cfg.max_friction);
     }
-    for bone in &mut creature.bones {
+    let max_bone = max_bone_length();
+    for (i, bone) in creature.bones.iter_mut().enumerate() {
+        let at = BONE_GENES + 8 * i as u32;
         bone.rest_length =
-            (bone.rest_length + qd::gaussian(rng) * 0.035 * scale).clamp(0.03, max_bone_length());
-        bone.mutate_range(0.15 * scale, rng);
+            (bone.rest_length + g.gaussian(at) * 0.035 * scale).clamp(0.03, max_bone);
+        bone.min_angle += g.gaussian(at + 1) * 0.15 * scale;
+        bone.max_angle += g.gaussian(at + 2) * 0.15 * scale;
+        bone.clamp_range();
         if bone.organ_mass > 0.0 {
-            bone.organ_mass = (bone.organ_mass * (qd::gaussian(rng) * 0.15 * scale).exp())
+            bone.organ_mass = (bone.organ_mass * (g.gaussian(at + 3) * 0.15 * scale).exp())
                 .clamp(MIN_ORGAN_MASS, MAX_ORGAN_MASS);
-            bone.organ_at = (bone.organ_at + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
+            bone.organ_at = (bone.organ_at + g.gaussian(at + 4) * 0.10 * scale).clamp(0.0, 1.0);
         }
     }
     // The body's clock speeds up or slows down as a whole.
-    let tempo = (qd::gaussian(rng) * 0.10 * scale).exp();
-    for muscle in &mut creature.muscles {
-        muscle.anchor_a = (muscle.anchor_a + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
-        muscle.anchor_b = (muscle.anchor_b + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
-        muscle.short =
-            (muscle.short + qd::gaussian(rng) * 0.06 * scale).clamp(0.01, 0.8 * max_stroke());
-        muscle.long =
-            (muscle.long + qd::gaussian(rng) * 0.08 * scale).clamp(muscle.short, max_stroke());
-        muscle.period = (muscle.period * tempo).clamp(min_muscle_period(), 10.0);
-        muscle.phase = (muscle.phase + qd::gaussian(rng) * 0.12 * scale).rem_euclid(1.0);
-        muscle.duty = (muscle.duty + qd::gaussian(rng) * 0.08 * scale).clamp(0.05, 0.95);
+    let tempo = (g.gaussian(TEMPO_GENE) * 0.10 * scale).exp();
+    let (min_period, stroke) = (min_muscle_period(), max_stroke());
+    let rare = scale.min(1.0);
+    for (i, muscle) in creature.muscles.iter_mut().enumerate() {
+        let at = MUSCLE_GENES + 16 * i as u32;
+        muscle.anchor_a = (muscle.anchor_a + g.gaussian(at) * 0.10 * scale).clamp(0.0, 1.0);
+        muscle.anchor_b = (muscle.anchor_b + g.gaussian(at + 1) * 0.10 * scale).clamp(0.0, 1.0);
+        muscle.short = (muscle.short + g.gaussian(at + 2) * 0.06 * scale).clamp(0.01, 0.8 * stroke);
+        muscle.long = (muscle.long + g.gaussian(at + 3) * 0.08 * scale).clamp(muscle.short, stroke);
+        muscle.period = (muscle.period * tempo).clamp(min_period, 10.0);
+        muscle.phase = (muscle.phase + g.gaussian(at + 4) * 0.12 * scale).rem_euclid(1.0);
+        muscle.duty = (muscle.duty + g.gaussian(at + 5) * 0.08 * scale).clamp(0.05, 0.95);
         muscle.stiffness =
-            (muscle.stiffness * (qd::gaussian(rng) * 0.10 * scale).exp()).clamp(1.0, 120.0);
-        muscle.reset = (muscle.reset + qd::gaussian(rng) * 0.12 * scale).rem_euclid(1.0);
+            (muscle.stiffness * (g.gaussian(at + 6) * 0.10 * scale).exp()).clamp(1.0, 120.0);
+        muscle.reset = (muscle.reset + g.gaussian(at + 7) * 0.12 * scale).rem_euclid(1.0);
         // The elastic tendon grows in, tunes, or drops out.
-        if rng.unit() < 0.10 * scale.min(1.0) {
+        if g.unit(at + 8, 0) < 0.10 * rare {
             muscle.tendon = if muscle.tendon == 0.0 {
-                rng.range(0.05, 0.5)
-            } else if rng.unit() < 0.2 {
+                0.05 + g.unit(at + 8, 1) * 0.45
+            } else if g.unit(at + 8, 2) < 0.2 {
                 0.0
             } else {
-                (muscle.tendon + qd::gaussian(rng) * 0.2).clamp(0.0, 1.0)
+                (muscle.tendon + g.gaussian(at + 9) * 0.2).clamp(0.0, 1.0)
             };
         }
-        if rng.unit() < 0.05 * scale.min(1.0) {
-            muscle.sensor = match rng.index(5) {
+        if g.unit(at + 10, 0) < 0.05 * rare {
+            muscle.sensor = match g.index(at + 10, 1, 5) {
                 4 => NO_SENSOR,
                 endpoint => endpoint as u32,
             };
         }
     }
-    creature
 }
 
 /// Benchmark workload helper: grows a body with the game's own structural
@@ -1553,12 +1732,14 @@ pub fn grow_for_benchmark(creature: &mut Creature, cfg: &Config, seed: u64, targ
 /// `structural_mutation_in_place` for a child bred from `archive`. The
 /// anatomy operators join the classic ones (and graft limbs from another
 /// elite of the archive).
+/// Returns the operator that changed the body, as an index into
+/// `structural_operator_names`, or `None` when none fit.
 fn structural_mutation_from(
     creature: &mut Creature,
     cfg: &Config,
     rng: &mut Rng,
     archive: &QdArchive,
-) -> bool {
+) -> Option<u8> {
     let extra = anatomy::enabled();
     let donor = (!archive.entries.is_empty())
         .then(|| &archive.entries[rng.index(archive.entries.len())].creature);
@@ -1574,20 +1755,24 @@ fn structural_mutation_from(
     let slots = classic + extra.single.len() + groups.len();
     for _ in 0..4 {
         let pick = rng.index(slots);
-        let changed = if pick < classic {
-            classic_operator(pick, creature, cfg, rng)
+        let operator = if pick < classic {
+            pick
         } else if let Some(&index) = extra.single.get(pick - classic) {
-            anatomy::apply(index, creature, cfg, rng, &cx)
+            classic + index
         } else {
             let group = groups[pick - classic - extra.single.len()];
-            let index = group[rng.index(group.len())];
-            anatomy::apply(index, creature, cfg, rng, &cx)
+            classic + group[rng.index(group.len())]
+        };
+        let changed = if operator < classic {
+            classic_operator(operator, creature, cfg, rng)
+        } else {
+            anatomy::apply(operator - classic, creature, cfg, rng, &cx)
         };
         if changed {
-            return true;
+            return Some(operator as u8);
         }
     }
-    false
+    None
 }
 
 /// Names of the classic structural operators, in `classic_operator` order.
@@ -2311,6 +2496,80 @@ mod tests {
             })
             .collect();
         assert!((mass(&doubled) - nodes_only - 4.0 * expected).abs() < 1e-3);
+    }
+
+    #[test]
+    fn twelve_uniform_gaussians_have_unit_variance() {
+        let mut rng = Rng::stream(1, 2, 3, 4);
+        let genes = rng.genes();
+        for draw in [
+            (0..200_000).map(|_| rng.gaussian()).collect::<Vec<f32>>(),
+            (0..200_000).map(|g| genes.gaussian(g)).collect(),
+        ] {
+            let n = draw.len() as f64;
+            let mean = draw.iter().map(|&x| x as f64).sum::<f64>() / n;
+            let variance = draw.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n;
+            assert!(mean.abs() < 0.01, "mean {mean}");
+            assert!((variance - 1.0).abs() < 0.02, "variance {variance}");
+            assert!(draw.iter().all(|x| x.abs() <= 6.0));
+        }
+    }
+
+    #[test]
+    fn gene_noise_does_not_depend_on_other_draws() {
+        // A gene's noise is keyed by its index: it is the same whichever
+        // genes were drawn before it, and streams of other slots differ.
+        let a = Rng::stream(5, 1, 2, 3).genes();
+        let b = Rng::stream(5, 1, 2, 3).genes();
+        let forward: Vec<f32> = (0..64).map(|g| a.gaussian(g)).collect();
+        let backward: Vec<f32> = (0..64).rev().map(|g| b.gaussian(g)).collect();
+        assert!(forward.iter().eq(backward.iter().rev()));
+        let other = Rng::stream(5, 1, 2, 4).genes();
+        assert!((0..64).any(|g| other.gaussian(g) != a.gaussian(g)));
+        // The same child from its slot's stream, bred twice.
+        let cfg = Config::default();
+        let body = random_creature_from(&cfg, &mut Rng::new(1, 0, 0));
+        let mut x = body.clone();
+        let mut y = body.clone();
+        mutate_genes(&mut x, &cfg, &mut Rng::stream(9, 3, 7, 11), 1.0);
+        mutate_genes(&mut y, &cfg, &mut Rng::stream(9, 3, 7, 11), 1.0);
+        assert_eq!(x.nodes, y.nodes);
+        assert_eq!(x.muscles, y.muscles);
+    }
+
+    #[test]
+    fn the_growth_step_limits_what_a_child_gains() {
+        let cfg = Config::default();
+        let step = GrowthStep {
+            nodes: 4,
+            muscles: 4,
+        };
+        let archive = QdArchive::default();
+        let mut grew = 0;
+        for index in 0..300 {
+            let mut rng = Rng::new(17, 0, index);
+            let mut parent = random_creature_from(&cfg, &mut rng);
+            grow_for_benchmark(&mut parent, &cfg, index as u64, 3 + index % 12);
+            let limited = child_limits(&cfg, &parent, Some(step));
+            let fit = limited.as_ref().unwrap_or(&cfg);
+            let mut child = parent.clone();
+            for _ in 0..12 {
+                let _ = structural_mutation_from(&mut child, fit, &mut rng, &archive);
+                repair(&mut child, fit, &mut rng);
+            }
+            assert!(child.nodes.len() <= parent.nodes.len() + 4);
+            assert!(child.muscles.len() <= parent.muscles.len() + 4);
+            grew += usize::from(child.nodes.len() > parent.nodes.len());
+        }
+        assert!(grew > 50, "only {grew} children grew");
+        assert!(
+            child_limits(
+                &cfg,
+                &Creature::clone(&random_creature_from(&cfg, &mut Rng::new(1, 1, 1))),
+                None
+            )
+            .is_none()
+        );
     }
 
     #[test]

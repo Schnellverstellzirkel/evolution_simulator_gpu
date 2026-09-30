@@ -1653,6 +1653,16 @@ impl Experiment {
         }
         out
     }
+    /// Plans offspring for `slots` in the next breeding round, as a block's
+    /// breeding does, and returns the plans with that round. For
+    /// `examples/breed_bench.rs`.
+    #[doc(hidden)]
+    pub fn plan_for_bench(&mut self, slots: &[usize]) -> (Vec<CandidatePlan>, u64) {
+        let cfg = self.config.clone();
+        self.breed_round += 1;
+        let plans = self.plan_offspring(&cfg, self.generation, self.breed_round, slots);
+        (plans.into_iter().map(|p| p.plan).collect(), self.breed_round)
+    }
     /// Breeds a block for ring slots `first..first + count` from the current
     /// archives with the current settings. Elites queued by a world change
     /// take the slots of their own islands first. An island without elites

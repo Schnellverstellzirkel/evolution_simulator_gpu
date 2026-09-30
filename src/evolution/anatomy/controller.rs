@@ -8,13 +8,16 @@
 //! so the motor ring stays as it is. They only touch active muscles (a
 //! stroke longer than zero), never the passive ring.
 use super::limbs::{limb_roots, pick};
-use super::{Context, branch, muscles_on};
+use super::{BoneIds, Context, MuscleIds, branch, muscles_on};
 use crate::config::Config;
-use crate::evolution::{CLOCK_RATIOS, Creature, NO_SENSOR, Rng, max_stroke, min_muscle_period};
+use crate::evolution::{
+    Bounded, CLOCK_RATIOS, Creature, MAX_MUSCLES, MAX_NODES, NO_SENSOR, Rng, max_stroke,
+    min_muscle_period,
+};
 
 /// The active muscles (with a stroke) that have an end on the limb starting
 /// at `root`.
-fn active_on(c: &Creature, root: usize) -> Vec<usize> {
+fn active_on(c: &Creature, root: usize) -> MuscleIds {
     muscles_on(c, &branch(c, root), false)
         .into_iter()
         .filter(|&i| c.muscles[i].long > c.muscles[i].short)
@@ -22,7 +25,7 @@ fn active_on(c: &Creature, root: usize) -> Vec<usize> {
 }
 
 /// Limb roots that have at least one active muscle.
-fn driven_limbs(c: &Creature) -> Vec<usize> {
+fn driven_limbs(c: &Creature) -> BoneIds {
     limb_roots(c)
         .into_iter()
         .filter(|&b| !active_on(c, b).is_empty())
@@ -89,7 +92,7 @@ pub(crate) fn taper_limb_strength(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let limbs: Vec<usize> = driven_limbs(c)
+    let limbs: BoneIds = driven_limbs(c)
         .into_iter()
         .filter(|&b| active_on(c, b).len() > 1)
         .collect();
@@ -97,7 +100,8 @@ pub(crate) fn taper_limb_strength(
         return false;
     };
     let mut muscles = active_on(c, root);
-    muscles.sort_by_key(|&i| c.muscles[i].bone_a.min(c.muscles[i].bone_b));
+    let key = |i: usize| c.muscles[i].bone_a.min(c.muscles[i].bone_b);
+    muscles.sort_stable_by(|&i, &j| key(i).cmp(&key(j)));
     let ratio = rng.range(1.2, 1.8) * if rng.unit() < 0.5 { 1.0 } else { -1.0 };
     let last = (muscles.len() - 1) as f32;
     let mut changed = false;
@@ -124,7 +128,7 @@ pub(crate) fn copy_limb_rhythm(
     _cx: &Context,
 ) -> bool {
     let limbs = driven_limbs(c);
-    let mut pairs = Vec::new();
+    let mut pairs: Bounded<(usize, usize), { MAX_NODES * MAX_NODES }> = Bounded::new();
     for &from in &limbs {
         let a = branch(c, from);
         for &to in &limbs {
@@ -160,24 +164,25 @@ pub(crate) fn retune_muscle_pair(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let active: Vec<usize> = (0..c.muscles.len())
+    let active: MuscleIds = (0..c.muscles.len())
         .filter(|&i| c.muscles[i].long > c.muscles[i].short)
         .collect();
     let key = |i: usize| {
         let m = &c.muscles[i];
         (m.bone_a.min(m.bone_b), m.bone_a.max(m.bone_b))
     };
-    let mut pairs = Vec::new();
+    let mut pairs: Bounded<(u8, u8), { MAX_MUSCLES * MAX_MUSCLES / 2 }> = Bounded::new();
     for (n, &i) in active.iter().enumerate() {
         for &j in &active[n + 1..] {
             if key(i) == key(j) {
-                pairs.push((i, j));
+                pairs.push((i as u8, j as u8));
             }
         }
     }
     let Some((i, j)) = pick(&pairs, rng) else {
         return false;
     };
+    let (i, j) = (i as usize, j as usize);
     let lag = if rng.unit() < 0.5 { 0.5 } else { 0.0 };
     let lead = c.muscles[i];
     let m = &mut c.muscles[j];
@@ -212,7 +217,7 @@ pub(crate) fn limb_clock_ratio(
     {
         return false;
     }
-    let mut periods: Vec<f32> = c.muscles.iter().map(|m| m.period).collect();
+    let mut periods: Bounded<f32, MAX_MUSCLES> = c.muscles.iter().map(|m| m.period).collect();
     for &i in &limb {
         periods[i] = period;
     }
@@ -263,7 +268,7 @@ pub(crate) fn limb_clock_lock(
     let Some(base) = c.muscles.first().map(|m| m.period) else {
         return false;
     };
-    let off: Vec<usize> = driven_limbs(c)
+    let off: BoneIds = driven_limbs(c)
         .into_iter()
         .filter(|&b| active_on(c, b).iter().any(|&i| c.muscles[i].period != base))
         .collect();
@@ -279,7 +284,7 @@ pub(crate) fn limb_clock_lock(
 /// The foot nodes of a muscle's two bones (nodes with one bone, not the
 /// head), as sensor indices (0 and 1 are the first bone's ends, 2 and 3 the
 /// second's).
-fn sensable_feet(c: &Creature, m: &crate::evolution::Muscle) -> Vec<u32> {
+fn sensable_feet(c: &Creature, m: &crate::evolution::Muscle) -> Bounded<u32, 4> {
     let (a, b) = (c.bones[m.bone_a as usize], c.bones[m.bone_b as usize]);
     [a.a, a.b, b.a, b.b]
         .iter()
@@ -298,7 +303,7 @@ pub(crate) fn reflex_on_muscle(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let options: Vec<(usize, Vec<u32>)> = (0..c.muscles.len())
+    let options: Bounded<(usize, Bounded<u32, 4>), MAX_MUSCLES> = (0..c.muscles.len())
         .filter(|&i| c.muscles[i].long > c.muscles[i].short && c.muscles[i].sensor == NO_SENSOR)
         .map(|i| (i, sensable_feet(c, &c.muscles[i])))
         .filter(|(_, feet)| !feet.is_empty())
@@ -348,7 +353,7 @@ pub(crate) fn reflex_reset_shift(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let limbs: Vec<usize> = limb_roots(c)
+    let limbs: BoneIds = limb_roots(c)
         .into_iter()
         .filter(|&b| {
             muscles_on(c, &branch(c, b), false)
@@ -377,7 +382,7 @@ pub(crate) fn release_touchdown(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let limbs: Vec<usize> = limb_roots(c)
+    let limbs: BoneIds = limb_roots(c)
         .into_iter()
         .filter(|&b| {
             muscles_on(c, &branch(c, b), false)
@@ -403,7 +408,7 @@ pub(crate) fn snap_limb_phases(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let limbs: Vec<usize> = driven_limbs(c)
+    let limbs: BoneIds = driven_limbs(c)
         .into_iter()
         .filter(|&b| active_on(c, b).len() > 1)
         .collect();

@@ -42,7 +42,11 @@ pub(crate) const CMA_LIMIT: usize = 96;
 //     passes (the fine fidelity), and the search runs on a ring of blocks.
 // 43: the CUDA kernel runs a creature per lane group with substeps instead
 //     of planting rounds, warm start and static friction.
-pub const VERSION: u32 = 44;
+// 44: the CUDA contact solve keeps the contact matrix in registers and runs
+//     two sweeps.
+// 45: breeding draws from counter-based streams keyed by slot and gene with
+//     a 12-uniform gaussian, and bodies are held to 32 nodes and 96 muscles.
+pub const VERSION: u32 = 45;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
@@ -1183,14 +1187,17 @@ impl CmaEmitter {
             0.0
         };
         let node_end = self.template.nodes.len() * 4;
-        let values: Vec<_> = self
+        let genes = rng.genes();
+        let mut buffer = [0.0f32; MAX_PARAMETERS];
+        let values = &mut buffer[..self.mean.len()];
+        let noise = self
             .mean
             .iter()
             .zip(&self.covariance)
             .zip(&self.path_c)
             .enumerate()
             .map(|(d, ((&mean, &variance), &path))| {
-                let step = variance.sqrt() * gaussian(rng) + path * path_scale;
+                let step = variance.sqrt() * genes.gaussian(d as u32) + path * path_scale;
                 let value = mean + self.sigma * step * strength;
                 // Positions and muscle lengths keep the original 4 m and 1 m
                 // scales but are open-ended, so large bodies keep their shape;
@@ -1205,10 +1212,12 @@ impl CmaEmitter {
                 } else {
                     value.clamp(0.0, 1.0)
                 }
-            })
-            .collect();
+            });
+        for (slot, value) in values.iter_mut().zip(noise) {
+            *slot = value;
+        }
         let mut creature = self.template.clone();
-        apply_exploring_parameters(&mut creature, &values);
+        apply_exploring_parameters(&mut creature, values);
         creature
     }
     fn tell_exploring(&mut self, population: &Population, samples: &[(usize, f32)]) {
@@ -1304,17 +1313,20 @@ impl CmaEmitter {
     }
     fn sample_optimizing(&self, rng: &mut Rng, strength: f32) -> Creature {
         let layout = Layout::of(&self.template);
-        let values: Vec<_> = self
-            .mean
-            .iter()
+        let genes = rng.genes();
+        let mut buffer = [0.0f32; MAX_PARAMETERS];
+        let values = &mut buffer[..self.mean.len()];
+        for (d, ((slot, &mean), &variance)) in values
+            .iter_mut()
+            .zip(&self.mean)
             .zip(&self.covariance)
             .enumerate()
-            .map(|(d, (&mean, &variance))| {
-                mean + self.sigma * strength * layout.scale(d) * variance.sqrt() * gaussian(rng)
-            })
-            .collect();
+        {
+            *slot = mean
+                + self.sigma * strength * layout.scale(d) * variance.sqrt() * genes.gaussian(d as u32);
+        }
         let mut creature = self.template.clone();
-        apply_parameters(&mut creature, &values);
+        apply_parameters(&mut creature, values);
         creature
     }
     /// Separable CMA-ES update (Ros & Hansen 2008) from scored samples, fastest
@@ -1398,13 +1410,17 @@ fn wrap_phase(delta: f32) -> f32 {
     (delta + 0.5).rem_euclid(1.0) - 0.5
 }
 
+/// Most CMA coordinates of a body at the caps: 4 per node, 5 per bone, the
+/// shared period and 8 per muscle.
+const MAX_PARAMETERS: usize = crate::evolution::MAX_NODES * (4 + BONE_FIELDS)
+    + 1
+    + crate::evolution::MAX_MUSCLES * 8;
 /// Share of each CMA step taken along the normalized evolution path.
 const PATH_WEIGHT: f32 = 0.3;
 
+/// A standard gaussian from the stream's cursor (`Rng::gaussian`).
 pub(crate) fn gaussian(rng: &mut Rng) -> f32 {
-    let u1 = (1.0 - rng.unit()).max(1e-7);
-    let u2 = rng.unit();
-    (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+    rng.gaussian()
 }
 fn exploring_parameters(creature: &Creature) -> Vec<f32> {
     let mut output = Vec::with_capacity(

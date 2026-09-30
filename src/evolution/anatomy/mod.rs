@@ -18,7 +18,7 @@
 //!   the neck. `repair` runs after it (in `offspring`), which clamps
 //!   genes, restores canonical order and the muscle ring, and lines the nodes
 //!   up with the bone lengths.
-use super::{Bone, Creature, Muscle, NodeGene, Rng, bone_point};
+use super::{Bone, Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, NodeGene, Rng, bone_point};
 use crate::config::Config;
 
 mod controller;
@@ -27,6 +27,15 @@ mod junctions;
 mod limbs;
 mod muscles;
 mod rhythm;
+
+/// Indices of bones or nodes of one body.
+pub(super) type BoneIds = Bounded<usize, MAX_NODES>;
+/// Indices of muscles of one body.
+pub(super) type MuscleIds = Bounded<usize, MAX_MUSCLES>;
+/// For each node, the bones it is the parent of (`child_bones`).
+pub(super) type Children = [BoneIds; MAX_NODES];
+/// Lists of bones, one per limb.
+pub(super) type Limbs = Bounded<BoneIds, MAX_NODES>;
 
 /// What an operator may use besides the creature.
 pub(super) struct Context<'a> {
@@ -187,6 +196,28 @@ pub(super) fn apply(
 // Shared helpers. They read the skeleton from `a` (parent) and `b` (child),
 // so they also work on bones an operator appended.
 
+/// Picks one of the options `each` passes to its sink, as picking from the
+/// collected list would (one `rng.index` draw over their count), without
+/// storing them: `each` runs twice, once to count and once to find the one
+/// picked. For option lists too long to hold on the stack.
+pub(super) fn pick_each<T>(rng: &mut Rng, each: impl Fn(&mut dyn FnMut(T))) -> Option<T> {
+    let mut count = 0usize;
+    each(&mut |_| count += 1);
+    if count == 0 {
+        return None;
+    }
+    let target = rng.index(count);
+    let mut seen = 0usize;
+    let mut chosen = None;
+    each(&mut |item| {
+        if seen == target {
+            chosen = Some(item);
+        }
+        seen += 1;
+    });
+    chosen
+}
+
 /// Bones at a node.
 pub(super) fn degree(c: &Creature, node: usize) -> usize {
     c.bones
@@ -196,8 +227,8 @@ pub(super) fn degree(c: &Creature, node: usize) -> usize {
 }
 
 /// For each node, the bone whose child it is (`None` for the head).
-pub(super) fn parent_bones(c: &Creature) -> Vec<Option<usize>> {
-    let mut parent = vec![None; c.nodes.len()];
+pub(super) fn parent_bones(c: &Creature) -> Bounded<Option<usize>, MAX_NODES> {
+    let mut parent = Bounded::filled(c.nodes.len(), None);
     for (index, bone) in c.bones.iter().enumerate() {
         if let Some(slot) = parent.get_mut(bone.b as usize) {
             *slot = Some(index);
@@ -207,10 +238,10 @@ pub(super) fn parent_bones(c: &Creature) -> Vec<Option<usize>> {
 }
 
 /// For each node, the bones it is the parent of.
-pub(super) fn child_bones(c: &Creature) -> Vec<Vec<usize>> {
-    let mut children = vec![Vec::new(); c.nodes.len()];
+pub(super) fn child_bones(c: &Creature) -> Children {
+    let mut children: Children = std::array::from_fn(|_| BoneIds::new());
     for (index, bone) in c.bones.iter().enumerate() {
-        if let Some(list) = children.get_mut(bone.a as usize) {
+        if let Some(list) = children[..c.nodes.len()].get_mut(bone.a as usize) {
             list.push(index);
         }
     }
@@ -224,25 +255,31 @@ pub(super) fn is_neck(c: &Creature, bone: usize) -> bool {
 
 /// The branch that starts with `bone`: it and every bone below its child
 /// node, parents before children.
-pub(super) fn branch(c: &Creature, bone: usize) -> Vec<usize> {
+pub(super) fn branch(c: &Creature, bone: usize) -> BoneIds {
     let children = child_bones(c);
-    let mut out = vec![bone];
+    let mut out = BoneIds::from_slice(&[bone]);
     let mut next = 0;
     while next < out.len() {
         let node = c.bones[out[next]].b as usize;
-        out.extend(children.get(node).into_iter().flatten().copied());
+        out.extend(
+            children[..c.nodes.len()]
+                .get(node)
+                .into_iter()
+                .flatten()
+                .copied(),
+        );
         next += 1;
     }
     out
 }
 
 /// The child nodes of a branch's bones (every node below its root joint).
-pub(super) fn branch_nodes(c: &Creature, bones: &[usize]) -> Vec<usize> {
+pub(super) fn branch_nodes(c: &Creature, bones: &[usize]) -> BoneIds {
     bones.iter().map(|&b| c.bones[b].b as usize).collect()
 }
 
 /// Muscles with both ends (`both`) or at least one end on `bones`.
-pub(super) fn muscles_on(c: &Creature, bones: &[usize], both: bool) -> Vec<usize> {
+pub(super) fn muscles_on(c: &Creature, bones: &[usize], both: bool) -> MuscleIds {
     let on = |b: u32| bones.contains(&(b as usize));
     (0..c.muscles.len())
         .filter(|&i| {
@@ -259,7 +296,8 @@ pub(super) fn muscles_on(c: &Creature, bones: &[usize], both: bool) -> Vec<usize
 /// Whether the body has room for `nodes` more nodes and `muscles` more
 /// muscles.
 pub(super) fn room(c: &Creature, cfg: &Config, nodes: usize, muscles: usize) -> bool {
-    c.nodes.len() + nodes <= cfg.max_nodes.min(64) && c.muscles.len() + muscles <= cfg.max_muscles
+    c.nodes.len() + nodes <= cfg.max_nodes.min(MAX_NODES)
+        && c.muscles.len() + muscles <= cfg.max_muscles.min(MAX_MUSCLES)
 }
 
 /// Removes `bones` and `nodes` (and every muscle on a removed bone), and
@@ -294,8 +332,8 @@ pub(super) fn remove_parts(c: &mut Creature, bones: &[usize], nodes: &[usize]) {
 
 /// New index of each of `len` items after `removed` go (`usize::MAX` for a
 /// removed one).
-fn renumber(len: usize, removed: &[usize]) -> Vec<usize> {
-    let mut map = vec![0; len];
+fn renumber(len: usize, removed: &[usize]) -> BoneIds {
+    let mut map = BoneIds::filled(len, 0);
     let mut next = 0;
     for (index, slot) in map.iter_mut().enumerate() {
         if removed.contains(&index) {
@@ -374,7 +412,7 @@ pub(super) fn copy_branch(
     let above_source = parents[c.bones[bone].a as usize];
     let above_target = parents.get(at).copied().flatten();
     let inside = muscles_on(c, &bones, true);
-    let hinge: Vec<usize> = match (above_source, above_target) {
+    let hinge: MuscleIds = match (above_source, above_target) {
         (Some(src), Some(_)) => muscles_on(c, &[bone], false)
             .into_iter()
             .filter(|&i| {
@@ -382,14 +420,15 @@ pub(super) fn copy_branch(
                 (m.bone_a as usize == src) != (m.bone_b as usize == src) && !inside.contains(&i)
             })
             .collect(),
-        _ => Vec::new(),
+        _ => MuscleIds::new(),
     };
     if !room(c, cfg, bones.len(), inside.len() + hinge.len()) {
         return None;
     }
-    let mut new_bone = std::collections::HashMap::new();
-    let mut new_node = std::collections::HashMap::new();
-    new_node.insert(c.bones[bone].a as usize, at);
+    // Where each copied bone and node went (`usize::MAX` for the rest).
+    let mut new_bone = [usize::MAX; MAX_NODES];
+    let mut new_node = [usize::MAX; MAX_NODES];
+    new_node[c.bones[bone].a as usize] = at;
     for &b in &bones {
         let old = c.bones[b];
         let child = old.b as usize;
@@ -401,15 +440,15 @@ pub(super) fn copy_branch(
             y: y.clamp(0.0, super::body_extent()),
             ..n
         });
-        new_node.insert(child, node);
+        new_node[child] = node;
         let (min, max) = if mirror {
             (-old.max_angle, -old.min_angle)
         } else {
             (old.min_angle, old.max_angle)
         };
-        new_bone.insert(b, c.bones.len());
+        new_bone[b] = c.bones.len();
         c.bones.push(Bone {
-            a: new_node[&(old.a as usize)] as u32,
+            a: new_node[old.a as usize] as u32,
             b: node as u32,
             min_angle: min,
             max_angle: max,
@@ -417,9 +456,9 @@ pub(super) fn copy_branch(
         });
     }
     let remap = |b: u32| -> u32 {
-        match new_bone.get(&(b as usize)) {
-            Some(&n) => n as u32,
-            None => above_target.expect("hinge muscles need a bone above") as u32,
+        match new_bone[b as usize] {
+            usize::MAX => above_target.expect("hinge muscles need a bone above") as u32,
+            n => n as u32,
         }
     };
     for i in inside.into_iter().chain(hinge) {
@@ -432,7 +471,7 @@ pub(super) fn copy_branch(
         m.phase = (m.phase + phase).rem_euclid(1.0);
         c.muscles.push(m);
     }
-    Some(new_bone[&bone])
+    Some(new_bone[bone])
 }
 
 #[cfg(test)]
@@ -518,6 +557,82 @@ mod tests {
                     cfg.max_nodes
                 );
             }
+        }
+    }
+
+    /// Bodies at the default caps: grown toward 32 nodes and filled toward
+    /// 96 muscles, where the bounded arrays are full.
+    fn full_bodies(cfg: &Config, count: usize) -> Vec<Creature> {
+        (0..count)
+            .map(|i| {
+                let mut rng = Rng::new(3, 2, i);
+                let mut c = random_creature_from(cfg, &mut rng);
+                c.id = i as u64 + 1;
+                grow_for_benchmark(&mut c, cfg, 5 + i as u64, 22 + i % 11);
+                let target = cfg.max_muscles - i % 4;
+                while c.muscles.len() < target {
+                    let (a, b) = (rng.index(c.bones.len()), rng.index(c.bones.len()));
+                    if a != b {
+                        let m = crate::evolution::muscle(a, b, &c.bones, &c.nodes, &mut rng);
+                        c.muscles.push(m);
+                    }
+                }
+                repair(&mut c, cfg, &mut rng);
+                c
+            })
+            .collect()
+    }
+
+    #[test]
+    fn operators_fit_the_bounded_arrays_at_the_caps() {
+        let cfg = Config::default();
+        assert_eq!(
+            (cfg.max_nodes, cfg.max_muscles),
+            (MAX_NODES, MAX_MUSCLES),
+            "the default caps are the array capacities"
+        );
+        let bodies = full_bodies(&cfg, 48);
+        assert!(bodies.iter().any(|c| c.nodes.len() == MAX_NODES));
+        assert!(bodies.iter().any(|c| c.muscles.len() == MAX_MUSCLES));
+        let check = Config {
+            population: 1,
+            ..cfg.clone()
+        };
+        for (index, (name, _)) in OPERATORS.iter().enumerate() {
+            for (i, body) in bodies.iter().enumerate() {
+                for variant in 0..3u32 {
+                    let mut c = body.clone();
+                    let mut rng = Rng::new(29, index as u32 + 1000 * variant, i);
+                    let donor = &bodies[(i + 1 + variant as usize) % bodies.len()];
+                    let cx = Context { donor: Some(donor) };
+                    if !apply(index, &mut c, &cfg, &mut rng, &cx) {
+                        continue;
+                    }
+                    repair(&mut c, &cfg, &mut rng);
+                    let mut pop = Population::default();
+                    pop.push(c.clone());
+                    if let Err(error) = pop.validate(&check) {
+                        panic!("{name} on full body {i}: {error:#}");
+                    }
+                }
+            }
+        }
+        // Lineages that stay at the caps: random operators one after another.
+        for (i, body) in bodies.iter().enumerate().take(24) {
+            let mut c = body.clone();
+            let mut rng = Rng::new(31, 0, i);
+            for _ in 0..100 {
+                let donor = &bodies[rng.index(bodies.len())];
+                let cx = Context { donor: Some(donor) };
+                let index = rng.index(OPERATORS.len());
+                if apply(index, &mut c, &cfg, &mut rng, &cx) {
+                    c = crate::evolution::local_mutation(c, &cfg, &mut rng, 0.1);
+                    repair(&mut c, &cfg, &mut rng);
+                }
+            }
+            let mut pop = Population::default();
+            pop.push(c);
+            pop.validate(&check).unwrap();
         }
     }
 
