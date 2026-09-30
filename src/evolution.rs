@@ -2,6 +2,7 @@ pub use crate::bounded::Bounded;
 use crate::config::Config;
 use crate::qd::{self, CmaEmitter, Emitter, QdArchive};
 use anyhow::{Result, ensure};
+use bytemuck::Zeroable;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -429,71 +430,6 @@ impl Population {
         self.nodes.extend(c.nodes);
         self.bones.extend(c.bones);
         self.muscles.extend(c.muscles);
-    }
-    /// Children packed into batches, batch after batch, for `slots` in
-    /// order: their genes are appended to the arenas and each slot's genome
-    /// points at its child.
-    pub fn append_batches(&mut self, slots: &[usize], batches: Vec<ChildBatch>) {
-        let sizes: Vec<[usize; 3]> = batches
-            .iter()
-            .map(|b| [b.nodes.len(), b.bones.len(), b.muscles.len()])
-            .collect();
-        let added = sizes
-            .iter()
-            .fold([0; 3], |t, s| [t[0] + s[0], t[1] + s[1], t[2] + s[2]]);
-        self.nodes.reserve(added[0]);
-        self.bones.reserve(added[1]);
-        self.muscles.reserve(added[2]);
-        let node_parts = split(
-            &mut self.nodes.spare_capacity_mut()[..added[0]],
-            sizes.iter().map(|s| s[0]),
-        );
-        let bone_parts = split(
-            &mut self.bones.spare_capacity_mut()[..added[1]],
-            sizes.iter().map(|s| s[1]),
-        );
-        let muscle_parts = split(
-            &mut self.muscles.spare_capacity_mut()[..added[2]],
-            sizes.iter().map(|s| s[2]),
-        );
-        batches
-            .par_iter()
-            .zip(node_parts)
-            .zip(bone_parts)
-            .zip(muscle_parts)
-            .for_each(|(((batch, nodes), bones), muscles)| {
-                for (dst, &src) in nodes.iter_mut().zip(&batch.nodes) {
-                    dst.write(src);
-                }
-                for (dst, &src) in bones.iter_mut().zip(&batch.bones) {
-                    dst.write(src);
-                }
-                for (dst, &src) in muscles.iter_mut().zip(&batch.muscles) {
-                    dst.write(src);
-                }
-            });
-        let mut at = [self.nodes.len(), self.bones.len(), self.muscles.len()];
-        // SAFETY: the parts cover the first `added` spare elements of each
-        // arena, and every batch wrote all of its part.
-        unsafe {
-            self.nodes.set_len(at[0] + added[0]);
-            self.bones.set_len(at[1] + added[1]);
-            self.muscles.set_len(at[2] + added[2]);
-        }
-        let metas = batches.iter().flat_map(|b| &b.meta);
-        for (&slot, meta) in slots.iter().zip(metas) {
-            let [n, b, m] = meta.counts.map(|c| c as usize);
-            self.genomes[slot] = Genome {
-                node_start: at[0],
-                node_count: n,
-                bone_start: at[1],
-                bone_count: b,
-                muscle_start: at[2],
-                muscle_count: m,
-                id: meta.id,
-            };
-            at = [at[0] + n, at[1] + b, at[2] + m];
-        }
     }
     /// Copies `indices` into a standalone population; creature `k` of the
     /// result is `indices[k]` of `self`.
@@ -1394,7 +1330,7 @@ fn offspring(
 }
 
 /// Breeds the child of ring `slot` in breeding `round` from its plan into
-/// `child`, as `emit_offspring_batches` does, and says what breeding did.
+/// `child`, as `Population::breed` does, and says what breeding did.
 #[allow(clippy::too_many_arguments)]
 pub fn breed_child(
     archive: &[QdArchive],
@@ -1594,46 +1530,6 @@ fn retime_rhythm(creature: &mut Creature, rng: &mut Rng) -> bool {
     true
 }
 
-/// Children of one run of slots, genes packed into three vectors. A batch
-/// holds a few thousand children in three allocations, where one `Creature`
-/// per child took three each.
-#[derive(Default)]
-pub struct ChildBatch {
-    nodes: Vec<NodeGene>,
-    bones: Vec<Bone>,
-    muscles: Vec<Muscle>,
-    meta: Vec<ChildMeta>,
-}
-
-struct ChildMeta {
-    id: u64,
-    counts: [u32; 3],
-}
-
-impl ChildBatch {
-    /// Puts the child's bones in canonical order and appends it; the child's
-    /// own vectors are freed right away, while still in cache.
-    pub fn push(&mut self, mut child: Creature) {
-        self.push_bred(&mut child);
-    }
-    /// `push` for a child the caller keeps and reuses; its bones are put in
-    /// canonical order in place.
-    pub fn push_bred(&mut self, child: &mut Creature) {
-        canonicalize_bone_order(child);
-        self.meta.push(ChildMeta {
-            id: child.id,
-            counts: [
-                child.nodes.len() as u32,
-                child.bones.len() as u32,
-                child.muscles.len() as u32,
-            ],
-        });
-        self.nodes.extend_from_slice(&child.nodes);
-        self.bones.extend_from_slice(&child.bones);
-        self.muscles.extend_from_slice(&child.muscles);
-    }
-}
-
 /// The structural operator (its index in `structural_operator_names`) that
 /// changed each child bred while the log is on, by child id: a diagnostic
 /// for the generation dump (`storage`), off otherwise.
@@ -1654,64 +1550,240 @@ pub fn take_operators() -> std::collections::HashMap<u64, u8> {
         .unwrap_or_default()
 }
 
-/// Breeds one offspring per plan, for ring `slots`, and packs the children
-/// of each run of slots into a `ChildBatch` as it goes, so no child stays
-/// alive after it is copied (`Population::append_batches`). `round` salts
-/// the random streams and keeps creature ids unique.
-#[allow(clippy::too_many_arguments)]
-pub fn emit_offspring_batches(
-    archive: &[QdArchive],
-    cma_emitters: &[CmaEmitter],
-    plans: &[CandidatePlan],
-    slots: &[usize],
-    cfg: &Config,
-    generation: u32,
-    round: u64,
-) -> Vec<ChildBatch> {
-    const CHUNK: usize = 4096;
-    plans
-        .par_chunks(CHUNK)
-        .zip(slots.par_chunks(CHUNK))
-        .map(|(plans, slots)| {
-            let mut batch = ChildBatch {
-                nodes: Vec::with_capacity(plans.len() * 8),
-                bones: Vec::with_capacity(plans.len() * 8),
-                muscles: Vec::with_capacity(plans.len() * 12),
-                meta: Vec::with_capacity(plans.len()),
-            };
-            let recording = OPERATOR_LOG
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_some();
-            let mut operators = Vec::new();
-            let mut child = Creature::default();
-            for (&plan, &slot) in plans.iter().zip(slots) {
-                let trace = breed_child(
-                    archive,
-                    cma_emitters,
-                    plan,
-                    slot,
-                    cfg,
-                    generation,
-                    round,
-                    &mut child,
-                );
-                if recording && let Some(operator) = trace.operator {
-                    operators.push((child.id, operator));
-                }
-                batch.push_bred(&mut child);
+/// Children bred per task. Each run of this many children gets its own part
+/// of the block's gene arena.
+const BREED_CHUNK: usize = 4096;
+
+/// A node gene with every field zero, to fill arena space not yet written.
+const NO_NODE: NodeGene = NodeGene {
+    x: 0.0,
+    y: 0.0,
+    diameter: 0.0,
+    friction: 0.0,
+};
+
+/// One run of children's part of a block's gene arena: the arena indices
+/// where it starts, the genes written so far, and the free space left.
+struct ArenaPart<'a> {
+    base: [usize; 3],
+    at: [usize; 3],
+    nodes: &'a mut [NodeGene],
+    bones: &'a mut [Bone],
+    muscles: &'a mut [Muscle],
+}
+
+impl ArenaPart<'_> {
+    /// Writes `c`'s genes after the ones already here and returns its genome,
+    /// or `None` when the part has no room left for it.
+    fn put(&mut self, c: &Creature) -> Option<Genome> {
+        let counts = [c.nodes.len(), c.bones.len(), c.muscles.len()];
+        let room = [self.nodes.len(), self.bones.len(), self.muscles.len()];
+        if (0..3).any(|k| self.at[k] + counts[k] > room[k]) {
+            return None;
+        }
+        let [n, b, m] = self.at;
+        self.nodes[n..n + counts[0]].copy_from_slice(&c.nodes);
+        self.bones[b..b + counts[1]].copy_from_slice(&c.bones);
+        self.muscles[m..m + counts[2]].copy_from_slice(&c.muscles);
+        let genome = Genome {
+            node_start: self.base[0] + n,
+            node_count: counts[0],
+            bone_start: self.base[1] + b,
+            bone_count: counts[1],
+            muscle_start: self.base[2] + m,
+            muscle_count: counts[2],
+            id: c.id,
+        };
+        self.at = [n + counts[0], b + counts[1], m + counts[2]];
+        Some(genome)
+    }
+}
+
+/// Genome slots written by parallel tasks, each at its own block position.
+#[derive(Clone, Copy)]
+struct GenomeOut(*mut Genome);
+unsafe impl Send for GenomeOut {}
+unsafe impl Sync for GenomeOut {}
+
+impl Population {
+    /// Breeds a ring block into this population, which becomes the block's
+    /// genes: `count` creatures, the elites of `lead` at their positions and
+    /// one child per plan at `positions`, bred for ring `slots` (`round`
+    /// salts the random streams and keeps creature ids unique).
+    ///
+    /// The population is the block's gene arena and is reused from one
+    /// breeding to the next, so its memory is allocated and touched once.
+    /// Every run of `BREED_CHUNK` children gets a part of the arena sized
+    /// from the genes the same positions held last time (from `hint` when
+    /// this population held no block of this size), plus a quarter, and
+    /// writes each child there as soon as it is bred. A child that does not
+    /// fit goes after all parts. Returns how many children went there.
+    #[allow(clippy::too_many_arguments)]
+    pub fn breed(
+        &mut self,
+        count: usize,
+        hint: Option<&Population>,
+        lead: &mut [(usize, Creature)],
+        archive: &[QdArchive],
+        cma_emitters: &[CmaEmitter],
+        plans: &[CandidatePlan],
+        slots: &[usize],
+        positions: &[usize],
+        cfg: &Config,
+        generation: u32,
+        round: u64,
+    ) -> usize {
+        assert_eq!(plans.len(), slots.len());
+        assert_eq!(plans.len(), positions.len());
+        assert_eq!(lead.len() + plans.len(), count);
+        // Genes per part: what the part's positions held last time.
+        let last: &Population = match hint {
+            Some(h) if self.genomes.len() != count => h,
+            _ => self,
+        };
+        let known = last.genomes.len() == count;
+        let held = |chunk: &[usize]| -> [usize; 3] {
+            let t = chunk.iter().fold([0usize; 3], |t, &k| {
+                let s = if known {
+                    let g = &last.genomes[k];
+                    [g.node_count, g.bone_count, g.muscle_count]
+                } else {
+                    // A new arena: a typical body.
+                    [8, 7, 16]
+                };
+                [t[0] + s[0], t[1] + s[1], t[2] + s[2]]
+            });
+            t.map(|x| x + x / 4 + 256)
+        };
+        for (_, c) in lead.iter_mut() {
+            canonicalize_bone_order(c);
+        }
+        let lead_size = lead.iter().fold([0usize; 3], |t, (_, c)| {
+            [t[0] + c.nodes.len(), t[1] + c.bones.len(), t[2] + c.muscles.len()]
+        });
+        let parts: Vec<[usize; 3]> = std::iter::once(lead_size)
+            .chain(
+                positions
+                    .chunks(BREED_CHUNK)
+                    .map(held),
+            )
+            .collect();
+        let need = parts
+            .iter()
+            .fold([0usize; 3], |t, s| [t[0] + s[0], t[1] + s[1], t[2] + s[2]]);
+        // Grow the arena once, with room for the next block's growth too.
+        fn fit<T: Copy>(v: &mut Vec<T>, need: usize, zero: T) {
+            if v.len() < need {
+                v.reserve_exact((need + need / 4).saturating_sub(v.len()));
+                v.resize(need, zero);
             }
-            if !operators.is_empty()
-                && let Some(log) = OPERATOR_LOG
+        }
+        fit(&mut self.nodes, need[0], NO_NODE);
+        fit(&mut self.bones, need[1], Bone::zeroed());
+        fit(&mut self.muscles, need[2], Muscle::zeroed());
+        if self.genomes.len() != count {
+            self.genomes.clear();
+            self.genomes.resize(count, Genome::default());
+        }
+        let node_parts = split(&mut self.nodes[..need[0]], parts.iter().map(|s| s[0]));
+        let bone_parts = split(&mut self.bones[..need[1]], parts.iter().map(|s| s[1]));
+        let muscle_parts = split(&mut self.muscles[..need[2]], parts.iter().map(|s| s[2]));
+        let mut base = [0usize; 3];
+        let mut arena_parts: Vec<ArenaPart> = Vec::with_capacity(parts.len());
+        for (((nodes, bones), muscles), size) in node_parts
+            .into_iter()
+            .zip(bone_parts)
+            .zip(muscle_parts)
+            .zip(&parts)
+        {
+            arena_parts.push(ArenaPart {
+                base,
+                at: [0; 3],
+                nodes,
+                bones,
+                muscles,
+            });
+            base = [base[0] + size[0], base[1] + size[1], base[2] + size[2]];
+        }
+        let mut arena_parts = arena_parts.into_iter();
+        let mut lead_part = arena_parts.next().expect("the lead part");
+        for (k, c) in lead.iter() {
+            self.genomes[*k] = lead_part.put(c).expect("the lead part holds the lead");
+        }
+        let genomes = GenomeOut(self.genomes.as_mut_ptr());
+        let spilled: Vec<Vec<(usize, Creature)>> = arena_parts
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .zip(plans.par_chunks(BREED_CHUNK))
+            .zip(slots.par_chunks(BREED_CHUNK))
+            .zip(positions.par_chunks(BREED_CHUNK))
+            .map(|(((mut part, plans), slots), positions)| {
+                let genomes = genomes;
+                let mut spill = Vec::new();
+                let recording = OPERATOR_LOG
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .as_mut()
-            {
-                log.extend(operators);
-            }
-            batch
-        })
-        .collect()
+                    .is_some();
+                let mut operators = Vec::new();
+                let mut child = Creature::default();
+                for ((&plan, &slot), &k) in plans.iter().zip(slots).zip(positions) {
+                    let trace = breed_child(
+                        archive,
+                        cma_emitters,
+                        plan,
+                        slot,
+                        cfg,
+                        generation,
+                        round,
+                        &mut child,
+                    );
+                    if recording && let Some(operator) = trace.operator {
+                        operators.push((child.id, operator));
+                    }
+                    canonicalize_bone_order(&mut child);
+                    match part.put(&child) {
+                        // SAFETY: positions are distinct and below `count`,
+                        // the genome vector's length, and nothing else
+                        // touches the vector while the tasks run.
+                        Some(genome) => unsafe { *genomes.0.add(k) = genome },
+                        None => spill.push((k, child.clone())),
+                    }
+                }
+                if !operators.is_empty()
+                    && let Some(log) = OPERATOR_LOG
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_mut()
+                {
+                    log.extend(operators);
+                }
+                spill
+            })
+            .collect();
+        // Children that did not fit their part go after every part.
+        let mut at = need;
+        let mut late = 0;
+        for (k, child) in spilled.into_iter().flatten() {
+            late += 1;
+            fit(&mut self.nodes, at[0] + child.nodes.len(), NO_NODE);
+            fit(&mut self.bones, at[1] + child.bones.len(), Bone::zeroed());
+            fit(&mut self.muscles, at[2] + child.muscles.len(), Muscle::zeroed());
+            let mut part = ArenaPart {
+                base: at,
+                at: [0; 3],
+                nodes: &mut self.nodes[at[0]..],
+                bones: &mut self.bones[at[1]..],
+                muscles: &mut self.muscles[at[2]..],
+            };
+            self.genomes[k] = part.put(&child).expect("room was made");
+            at = [
+                at[0] + child.nodes.len(),
+                at[1] + child.bones.len(),
+                at[2] + child.muscles.len(),
+            ];
+        }
+        late
+    }
 }
 
 fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f32) -> Creature {

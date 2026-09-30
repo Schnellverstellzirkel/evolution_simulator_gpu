@@ -105,12 +105,8 @@ fn zero_mutation_children(cfg: &Config, parent: &Creature) -> Vec<Creature> {
         })
         .collect();
     let slots: Vec<usize> = (0..8).collect();
-    let batches = evolution::emit_offspring_batches(&[archive], &[], &plans, &slots, cfg, 0, 0);
-    let mut children = evolution::Population {
-        genomes: vec![Default::default(); 8],
-        ..Default::default()
-    };
-    children.append_batches(&slots, batches);
+    let mut children = evolution::Population::default();
+    children.breed(8, None, &mut [], &[archive], &[], &plans, &slots, &slots, cfg, 0, 0);
     (0..8).map(|k| children.creature(k)).collect()
 }
 #[test]
@@ -129,6 +125,81 @@ fn zero_mutation_copies_genetics() {
     for child in zero_mutation_children(&cfg, &repaired) {
         assert_genomes_close(&child, &repaired);
     }
+}
+/// A block bred into a reused arena, into one whose parts are too small (so
+/// children go after the parts), and into a new one holds the same creatures.
+#[test]
+fn breeding_into_a_reused_arena_gives_the_same_creatures() {
+    let cfg = Config {
+        population: 64,
+        ..config()
+    };
+    let parents = evolution::create(&cfg).unwrap();
+    let mut archive = QdArchive::default();
+    for i in 0..parents.genomes.len() {
+        archive.entries.push(Elite {
+            niche: Default::default(),
+            descriptor: Default::default(),
+            creature: parents.creature(i),
+            fitness: 1.0,
+            emitter: Emitter::Structural,
+            improved_generation: 0,
+            protected_until: 0,
+            visits: 0,
+            topology: evolution_simulator::qd::topology_of_population(&parents, i),
+            graduate: false,
+            fine: false,
+        });
+    }
+    let archive = [archive];
+    let count = 9_000;
+    let emitters = [
+        Emitter::Structural,
+        Emitter::Novelty,
+        Emitter::Restart,
+        Emitter::Cma,
+    ];
+    // Position 5 holds a reseeded elite; the rest are bred.
+    let positions: Vec<usize> = (0..count).filter(|&k| k != 5).collect();
+    let plans: Vec<_> = positions
+        .iter()
+        .map(|&k| evolution::CandidatePlan {
+            emitter: emitters[k % 4],
+            parent: Some(k % 64),
+            cma: None,
+            mate: None,
+        })
+        .collect();
+    let slots: Vec<usize> = positions.iter().map(|&k| 1000 + k).collect();
+    let lead = || vec![(5, parents.creature(7))];
+    let breed = |arena: &mut evolution::Population, round: u64| {
+        arena.breed(
+            count, None, &mut lead(), &archive, &[], &plans, &slots, &positions, &cfg, 3, round,
+        )
+    };
+    let mut fresh = evolution::Population::default();
+    breed(&mut fresh, 2);
+    // Reused: the arena held another block of this size.
+    let mut reused = evolution::Population::default();
+    breed(&mut reused, 1);
+    breed(&mut reused, 2);
+    // Too small: the last block's creatures had no genes.
+    let mut small = evolution::Population {
+        genomes: vec![Default::default(); count],
+        ..Default::default()
+    };
+    let late = breed(&mut small, 2);
+    assert!(late > 0);
+    for arena in [&reused, &small] {
+        for k in 0..count {
+            let (a, b) = (fresh.creature(k), arena.creature(k));
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.nodes, b.nodes);
+            assert_eq!(a.bones, b.bones);
+            assert_eq!(a.muscles, b.muscles);
+        }
+    }
+    assert_eq!(fresh.creature(5).nodes, parents.creature(7).nodes);
 }
 #[test]
 fn mutation_keeps_valid_graphs_at_limits() {

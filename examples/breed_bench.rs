@@ -19,7 +19,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use evolution_simulator::{
     config::Config,
-    evolution::{self, CandidatePlan, Creature, Genome, Population},
+    evolution::{self, CandidatePlan, Creature, Population},
     qd::{self, Emitter, EvaluationMetrics, TrialMetrics},
     storage::{self, Experiment},
 };
@@ -476,6 +476,8 @@ fn digest(start: &Experiment, o: &Options) -> Result<u64> {
     let mut e = start.clone();
     let ring = e.ring_len();
     let mut h = 0u64;
+    // One arena for every block, reused as the ring reuses a block's.
+    let mut population = Population::default();
     for k in 0..o.blocks {
         let slots = slots_of(o.block, k, ring);
         let (plans, round) = e.plan_for_bench(&slots);
@@ -485,20 +487,20 @@ fn digest(start: &Experiment, o: &Options) -> Result<u64> {
                 h = mix(h ^ x.map_or(u64::MAX, |v| v as u64));
             }
         }
-        let batches = evolution::emit_offspring_batches(
+        let positions: Vec<usize> = (0..slots.len()).collect();
+        population.breed(
+            slots.len(),
+            None,
+            &mut [],
             &e.islands,
             &e.cma_emitters,
             &plans,
             &slots,
+            &positions,
             &e.config,
             e.generation,
             round,
         );
-        let mut population = Population {
-            genomes: vec![Genome::default(); slots.len()],
-            ..Population::default()
-        };
-        population.append_batches(&(0..slots.len()).collect::<Vec<_>>(), batches);
         for g in &population.genomes {
             h = mix(h
                 ^ gene_hash(

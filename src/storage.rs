@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    evolution::{self, CandidatePlan, Creature, FAILED, Genome, Population, Rng},
+    evolution::{self, CandidatePlan, Creature, FAILED, Population, Rng},
     qd::{self, CmaEmitter, Emitter, EmitterStats, EvaluationMetrics, QdArchive},
 };
 use anyhow::{Context, Result, ensure};
@@ -24,6 +24,15 @@ pub static BREED_NANOS: [std::sync::atomic::AtomicU64; 3] =
 /// Returns and clears the breeding timers.
 pub fn take_breed_nanos() -> [u64; 3] {
     std::array::from_fn(|i| BREED_NANOS[i].swap(0, std::sync::atomic::Ordering::Relaxed))
+}
+/// Children written after their part of the block's arena (low 32 bits)
+/// and blocks bred into a new arena because the old one was still shared
+/// (high 32 bits), since the last `take_breed_late`.
+pub static BREED_LATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Returns and clears `BREED_LATE` as (late children, new arenas).
+pub fn take_breed_late() -> (u64, u64) {
+    let v = BREED_LATE.swap(0, std::sync::atomic::Ordering::Relaxed);
+    (v & 0xffff_ffff, v >> 32)
 }
 
 /// Distances at the screen the bar's window holds at least, when the ring
@@ -749,7 +758,8 @@ impl Experiment {
         let archived = std::time::Instant::now();
         self.stage_seconds[0] += archived.duration_since(started).as_secs_f64();
         let (first, count) = (self.blocks[k].first, self.blocks[k].len());
-        self.blocks[k] = self.breed_block(first, count);
+        let arena = std::mem::take(&mut self.blocks[k].population);
+        self.blocks[k] = self.breed_block(first, count, arena);
         self.note_dump_block(k);
         self.cursor = (k + 1) % self.blocks.len();
         self.stage_seconds[1] += archived.elapsed().as_secs_f64();
@@ -772,7 +782,11 @@ impl Experiment {
         let mut confirmed = HashMap::new();
         loop {
             match self.verdict(k, &standard, &confirmed) {
-                Verdict::Final(finals) => return self.absorb(k, &finals),
+                Verdict::Final(finals) => {
+                    // The block's arena is bred again in place.
+                    drop(block);
+                    return self.absorb(k, &finals);
+                }
                 Verdict::Confirm(need) => {
                     let subset = block.population.subset(&need);
                     let cfg = crate::scheduler::confirm_config(&block.config);
@@ -1898,10 +1912,12 @@ impl Experiment {
         (plans.into_iter().map(|p| p.plan).collect(), self.breed_round)
     }
     /// Breeds a block for ring slots `first..first + count` from the current
-    /// archives with the current settings. Elites queued by a world change
+    /// archives with the current settings, into `arena`: the genes of the
+    /// block bred for these slots last time, whose memory the new block
+    /// reuses when nothing else holds it. Elites queued by a world change
     /// take the slots of their own islands first. An island without elites
     /// breeds new random bodies.
-    fn breed_block(&mut self, first: usize, count: usize) -> Block {
+    fn breed_block(&mut self, first: usize, count: usize, arena: Arc<Population>) -> Block {
         let slots: Vec<usize> = (first..first + count).collect();
         let cfg = self.config.clone();
         self.breed_round += 1;
@@ -1929,10 +1945,6 @@ impl Experiment {
                 })
                 .collect()
         });
-        // Reseeded elites first, then the children, emitted straight into
-        // batches so no child is alive after it is copied.
-        let mut lead = evolution::ChildBatch::default();
-        let mut order: Vec<usize> = Vec::with_capacity(count);
         let mut births: Vec<Birth> = planned
             .iter()
             .map(|p| Birth {
@@ -1943,45 +1955,44 @@ impl Experiment {
                 protection: p.protection,
             })
             .collect();
+        // Reseeded elites first, then the children.
+        let mut lead: Vec<(usize, Creature)> = Vec::new();
         if !self.reseed.is_empty() {
             for (k, &slot) in slots.iter().enumerate() {
                 if let Some(elite) = self.reseed_for_slot(slot) {
-                    lead.push(elite);
-                    order.push(k);
+                    lead.push((k, elite));
                     births[k] = Birth::RANDOM;
                 }
             }
         }
-        let reseeded = order.len();
         let mut taken = vec![false; count];
-        for &k in &order {
+        for &(k, _) in &lead {
             taken[k] = true;
         }
-        order.extend((0..count).filter(|&k| !taken[k]));
-        let bred_slots: Vec<usize> = order[reseeded..].iter().map(|&k| slots[k]).collect();
-        let bred_plans: Vec<CandidatePlan> =
-            order[reseeded..].iter().map(|&k| planned[k].plan).collect();
-        let mut batches = Vec::new();
-        if reseeded > 0 {
-            batches.push(lead);
-        }
-        batches.extend(evolution::emit_offspring_batches(
+        let positions: Vec<usize> = (0..count).filter(|&k| !taken[k]).collect();
+        let bred_slots: Vec<usize> = positions.iter().map(|&k| slots[k]).collect();
+        let bred_plans: Vec<CandidatePlan> = positions.iter().map(|&k| planned[k].plan).collect();
+        // The arena's memory is reused when no unit or save still holds it;
+        // otherwise its sizes guide a new one.
+        let (mut population, hint) = match Arc::try_unwrap(arena) {
+            Ok(population) => (population, None),
+            Err(shared) => (Population::default(), Some(shared)),
+        };
+        let late = population.breed(
+            count,
+            hint.as_deref(),
+            &mut lead,
             &self.islands,
             &self.cma_emitters,
             &bred_plans,
             &bred_slots,
+            &positions,
             &cfg,
             self.generation,
             self.breed_round,
-        ));
-        let emitted_at = started.elapsed();
-        let mut population = Population {
-            genomes: vec![Genome::default(); count],
-            ..Population::default()
-        };
-        population.append_batches(&order, batches);
+        );
         if let (Some(parents), Some(dump)) = (dump_parents, &self.dump) {
-            let reseeded: Vec<usize> = order[..reseeded].to_vec();
+            let reseeded: Vec<usize> = lead.iter().map(|&(k, _)| k).collect();
             dump.lock().unwrap_or_else(|e| e.into_inner()).bred(
                 first,
                 &population,
@@ -1994,9 +2005,14 @@ impl Experiment {
         let add = |k: usize, d: std::time::Duration| {
             BREED_NANOS[k].fetch_add(d.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         };
+        // Children are written into the arena as they are bred, so the
+        // write stage is part of emitting.
         add(0, planned_at);
-        add(1, emitted_at.saturating_sub(planned_at));
-        add(2, total.saturating_sub(emitted_at));
+        add(1, total.saturating_sub(planned_at));
+        BREED_LATE.fetch_add(late as u64, std::sync::atomic::Ordering::Relaxed);
+        if hint.is_some() {
+            BREED_LATE.fetch_add(1 << 32, std::sync::atomic::Ordering::Relaxed);
+        }
         Block {
             first,
             population: Arc::new(population),
@@ -2909,7 +2925,7 @@ impl SmallLoad {
                 // new random bodies.
                 Block {
                     config: Arc::clone(&shared),
-                    ..e.breed_block(first, count)
+                    ..e.breed_block(first, count, Arc::default())
                 }
             };
             e.blocks.push(block);
