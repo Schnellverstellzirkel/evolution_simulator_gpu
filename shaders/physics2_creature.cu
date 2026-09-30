@@ -81,7 +81,9 @@ struct Result {
 #define NO_SENSOR 7u
 #define MAXB (MAXN - 1u)
 #define MAXR (2u * MAXC)
+// RATE and DT are the substep rate; FRATE and FDT are the frame rate.
 #define DT (1.0f / RATE)
+#define FDT (1.0f / FRATE)
 #define PI_F 3.14159265359f
 #define TAU_F 6.28318530718f
 // Sweeps and the like arrive as #defines; the per-lane table's size.
@@ -684,6 +686,9 @@ struct Lane {
                 unsigned node = c_node[ci];
                 Record rec = records_in[record_base + node];
                 float2 w = node == 0u ? rec.c : rec.b;
+#if !WARM
+                w = v2(0.0f, 0.0f);
+#endif
                 ln = w.x;
                 lt = clampf(w.y, -c_mu[ci] * ln, c_mu[ci] * ln);
             }
@@ -912,8 +917,10 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
             continue;
         }
         const unsigned step = tick - SETTLE;
-        const float t_now = (float)step * DT;
+        const float t_now = (float)step * FDT;
         const float2 head_before = L.v0;
+        for (unsigned sub = 0u; sub < SUBSTEPS; sub++) {
+        const float t_sub = t_now + (float)sub * DT;
         const float2 origin = L.x0;
         const float2 before = L.momentum();
         // For the first-law check in flight.
@@ -1064,9 +1071,9 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
             const float2 dir = v2(d.x * inverse, d.y * inverse);
             const float relative = (vb.x - va.x) * dir.x + (vb.y - va.y) * dir.y;
             float target_speed = 0.0f;
-            if (t_now > 0.0f) {
-                target_speed = amp * (wave(t_now, inv_period, phase, offset, duty, inv_duty, inv_complement)
-                    - wave(fmaxf(t_now - DT, 0.0f), inv_period, phase, offset, duty, inv_duty, inv_complement)) * RATE;
+            if (t_sub > 0.0f) {
+                target_speed = amp * (wave(t_sub, inv_period, phase, offset, duty, inv_duty, inv_complement)
+                    - wave(fmaxf(t_sub - DT, 0.0f), inv_period, phase, offset, duty, inv_duty, inv_complement)) * RATE;
             }
             float drive = fmaxf(-target_speed * stiffness * 0.25f, 0.0f) * energy;
             if (hill > 0.0f) {
@@ -1306,6 +1313,7 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
             }
         }
         L.q[0] = wrap_angle(L.q[0]);
+        }
 
         // Metrics, falls and the screen (physics2::run).
         bool failed = false;
@@ -1366,7 +1374,7 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
         metrics.ground_lo = __uint_as_float(now_lo);
         metrics.ground_hi = __uint_as_float(now_hi);
         if ((down_lo | down_hi) != 0u && step > 0u) {
-            const float next = t_now + DT;
+            const float next = t_now + FDT;
             for (unsigned k = 0u; k < muscle_count; k++) {
                 const unsigned field = tile.x + k * MUSCLE_FIELDS * TILE + tl;
                 const unsigned packed = __float_as_uint(muscle_data[field]);
@@ -1385,8 +1393,8 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
         }
         if (t_now >= HEAD_SHAKE_WINDOW) {
             const float2 dv = L.v0 - head_before;
-            const float accel = sqrtf(dv.x * dv.x + dv.y * dv.y) * RATE;
-            head_shake += (accel - head_shake) * fminf(1.0f / (HEAD_SHAKE_WINDOW * RATE), 1.0f);
+            const float accel = sqrtf(dv.x * dv.x + dv.y * dv.y) * FRATE;
+            head_shake += (accel - head_shake) * fminf(1.0f / (HEAD_SHAKE_WINDOW * FRATE), 1.0f);
         }
         metrics.head_shake = head_shake;
         bool broken = false;
@@ -1400,7 +1408,7 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
         const bool fell = L.x0.y < L.node_pos(1u).y || broken || head_shake > HEAD_SHAKE_LIMIT || failed;
         bool ended = false;
         if (fell) {
-            metrics.fall_time = t_now + DT;
+            metrics.fall_time = t_now + FDT;
             metrics.fitness = failed ? -1e20f : com_x;
             if (tick <= p.screen_tick) {
                 metrics.screen_x = metrics.fitness;
@@ -1445,18 +1453,18 @@ extern "C" __global__ void LAUNCH_BOUNDS advance(
         if (tick == p.screen_tick && !ended) {
             metrics.screen_x = com_x;
             if (com_x < p.screen_bar) {
-                metrics.screened = t_now + DT;
+                metrics.screened = t_now + FDT;
                 metrics.fitness = com_x;
                 ended = true;
             }
         }
         if (ended) {
             metrics.vertical_oscillation = fmaxf(metrics.gait_frequency - metrics.vertical_oscillation, 0.0f);
-            metrics.gait_frequency = metrics.gait_turns * 0.5f / (t_now + DT);
+            metrics.gait_frequency = metrics.gait_turns * 0.5f / (t_now + FDT);
         } else if (tick + 1u == p.total_steps) {
             metrics.fitness = com_x;
             metrics.vertical_oscillation = fmaxf(metrics.gait_frequency - metrics.vertical_oscillation, 0.0f);
-            metrics.gait_frequency = metrics.gait_turns * 0.5f / fmaxf((float)(step + 1u) * DT, DT);
+            metrics.gait_frequency = metrics.gait_turns * 0.5f / fmaxf((float)(step + 1u) * FDT, FDT);
         }
     }
     metrics.head_shake = head_shake;

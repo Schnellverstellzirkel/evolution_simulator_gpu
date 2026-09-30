@@ -227,7 +227,9 @@ pub fn launch_params(
         stride: capacity as u32,
         count: count as u32,
         gravity: cfg.gravity,
-        air: fidelity.air_per_step(cfg.air_retention),
+        air: cfg
+            .air_retention
+            .powf(60.0 / (fidelity.rate * dev_setting("EVOLUTION_SUBSTEPS", 1, fidelity.rate)) as f32),
         friction: cfg.ground_friction,
         ground: if cfg.ground { 1.0 } else { 0.0 },
         total_steps: total,
@@ -278,6 +280,23 @@ pub fn cuda_record_source(
     cuda_source_variant(capacity, workgroup, fidelity, true)
 }
 
+/// Measurement branch only: an integer setting from the environment.
+pub fn dev_env(name: &str, default: u32) -> u32 {
+    dev_setting(name, default, crate::physics::Fidelity::standard().rate)
+}
+
+/// The setting applies at the standard rate only: the fine check keeps the
+/// current scheme as the reference.
+pub fn dev_setting(name: &str, default: u32, rate: u32) -> u32 {
+    if rate != crate::physics::Fidelity::standard().rate {
+        return default;
+    }
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 fn cuda_source_variant(
     capacity: usize,
     workgroup: u32,
@@ -286,6 +305,7 @@ fn cuda_source_variant(
 ) -> String {
     use crate::physics2 as p2;
     let limits = crate::physics::limits();
+    let env = |name: &str, default: u32| dev_setting(name, default, fidelity.rate);
     let float = |value: f32| format!("{value:?}f");
     let unroll = capacity <= 16;
     let defines = [
@@ -323,9 +343,15 @@ fn cuda_source_variant(
         ("SPIN_CAP", float(p2::SPIN_CAP)),
         ("INV_SPIN_CAP", float(1.0 / p2::SPIN_CAP)),
         ("SPIN_HARDNESS", float(p2::SPIN_HARDNESS)),
-        ("PGS_SWEEPS", format!("{}u", p2::PGS_ITERATIONS)),
+        (
+            "PGS_SWEEPS",
+            format!("{}u", env("EVOLUTION_SWEEPS", p2::PGS_ITERATIONS as u32)),
+        ),
         ("PLANT_SWEEPS", format!("{}u", p2::PLANT_SWEEPS)),
-        ("PLANT_ROUNDS", format!("{}u", p2::PLANT_ROUNDS)),
+        (
+            "PLANT_ROUNDS",
+            format!("{}u", env("EVOLUTION_PLANT", p2::PLANT_ROUNDS as u32)),
+        ),
         ("PUSH_OUT", float(p2::PUSH_OUT)),
         ("AIR_DRAG", float(p2::AIR_DRAG)),
         ("WATER_DRAG", float(p2::WATER_DRAG)),
@@ -341,7 +367,16 @@ fn cuda_source_variant(
         ("HURDLE_SPACING", float(physics::HURDLE_SPACING)),
         ("HURDLE_TOP", float(physics::HURDLE_TOP)),
         ("HURDLE_RUN", float(physics::HURDLE_RUN)),
-        ("RATE", format!("{:.1}f", fidelity.rate as f32)),
+        ("SUBSTEPS", format!("{}u", env("EVOLUTION_SUBSTEPS", 1))),
+        ("WARM", format!("{}", env("EVOLUTION_WARM", 1))),
+        ("FRATE", format!("{:.1}f", fidelity.rate as f32)),
+        (
+            "RATE",
+            format!(
+                "{:.1}f",
+                (fidelity.rate * env("EVOLUTION_SUBSTEPS", 1)) as f32
+            ),
+        ),
         ("SETTLE", format!("{}u", fidelity.settle())),
         ("SAMPLE", format!("{}u", fidelity.sample_interval())),
     ];
