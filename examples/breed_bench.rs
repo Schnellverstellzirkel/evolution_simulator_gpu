@@ -283,34 +283,18 @@ fn grown(o: &Options) -> Result<Experiment> {
     Ok(e)
 }
 
-/// Loads a save. A save one physics version older than this game is loaded
-/// through a copy with its header's version replaced: breeding reads only
-/// the archives and search state, whose format did not change.
+/// Loads a save. An older physics version loads too: breeding reads only
+/// the archives and search state, not the physics their scores came from.
 fn loaded(path: &PathBuf) -> Result<Experiment> {
     let header = storage::peek(path)?;
-    if header.qd_version == qd::VERSION {
-        return storage::load(path);
-    }
-    ensure!(
-        header.qd_version + 1 == qd::VERSION,
-        "{} is physics version {}, this game {}",
-        path.display(),
-        header.qd_version,
-        qd::VERSION
-    );
-    let mut bytes = std::fs::read(path)?;
-    bytes[8..12].copy_from_slice(&qd::VERSION.to_le_bytes());
-    let copy = std::env::temp_dir().join(format!("breed-bench-{}.evo", std::process::id()));
-    std::fs::write(&copy, bytes)?;
-    let loaded = storage::load(&copy);
-    let _ = std::fs::remove_file(&copy);
+    let experiment = storage::load_any_version(path)?;
     eprintln!(
-        "loaded {} (version {} read as {})",
+        "loaded {} (physics version {}, this game {})",
         path.display(),
         header.qd_version,
         qd::VERSION
     );
-    loaded
+    Ok(experiment)
 }
 
 fn elite_sizes(e: &Experiment) -> (usize, f64, f64) {
@@ -566,6 +550,27 @@ fn main() -> Result<()> {
         start.islands.len(),
         start.cma_emitters.len(),
         start.ring_len()
+    );
+    // Creatures the game holds by value, each one inline arrays.
+    let stored = [
+        (
+            "island",
+            start.islands.iter().map(|a| a.entries.len()).sum::<usize>(),
+        ),
+        ("global", start.archive.entries.len()),
+        ("lineage", start.lineage.len()),
+        ("CMA templates", start.cma_emitters.len()),
+    ];
+    let count: usize = stored.iter().map(|s| s.1).sum();
+    println!(
+        "stored creatures: {} = {count}, {:.0} MB at {} B each",
+        stored
+            .iter()
+            .map(|(name, n)| format!("{n} {name}"))
+            .collect::<Vec<_>>()
+            .join(" + "),
+        (count * std::mem::size_of::<Creature>()) as f64 / 1e6,
+        std::mem::size_of::<Creature>()
     );
     // Timing: plan each block, then breed it child by child on the pool.
     let overhead = clock_overhead();

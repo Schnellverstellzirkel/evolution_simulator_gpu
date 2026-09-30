@@ -2476,6 +2476,18 @@ fn repair_history(history: Vec<Stats>, generation: u32) -> Vec<Stats> {
 }
 
 pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Experiment> {
+    load_from(path, progress, false)
+}
+
+/// `load` for diagnostics that only breed from the archives
+/// (`examples/breed_bench.rs`): a save of an older physics version loads
+/// too, with the scores it measured then.
+#[doc(hidden)]
+pub fn load_any_version(path: &Path) -> Result<Experiment> {
+    load_from(path, None, true)
+}
+
+fn load_from(path: &Path, progress: Option<&Progress>, any_version: bool) -> Result<Experiment> {
     let file = File::open(path).context("Cannot open checkpoint")?;
     if let Some(progress) = progress {
         progress.total.store(
@@ -2494,12 +2506,14 @@ pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Ex
     let mut header = [0; SaveHeader::BYTES];
     file.read_exact(&mut header)
         .with_context(|| format!("{} is cut short", path.display()))?;
-    ensure_current_version(path, &SaveHeader::from_bytes(header))?;
+    if !any_version {
+        ensure_current_version(path, &SaveHeader::from_bytes(header))?;
+    }
     // bincode reads field by field; a buffer turns each read into a copy
     // instead of a call into the decompressor (18 s to 5 s at 3M).
     let mut decoder =
         BufReader::with_capacity(1 << 20, zstd::stream::read::Decoder::with_buffer(file)?);
-    let small: SmallLoad = bincode::DefaultOptions::new()
+    let mut small: SmallLoad = bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .with_limit(24 * 1024 * 1024 * 1024)
         .deserialize_from(&mut decoder)?;
@@ -2512,6 +2526,9 @@ pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Ex
         decoder.read(&mut trailing)? == 0,
         "Unexpected trailing checkpoint data"
     );
+    if any_version {
+        small.qd_version = qd::VERSION;
+    }
     let mut experiment = small.into_experiment()?;
     experiment.last_migration = migration.filter(|(generation, exchange)| {
         *generation <= experiment.generation && exchange.len() == island_count()
