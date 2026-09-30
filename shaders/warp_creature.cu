@@ -149,7 +149,7 @@ __device__ __forceinline__ float ice_at(float x) {
     return s * s * (3.0f - 2.0f * s);
 }
 
-extern "C" __global__ void __launch_bounds__(BLOCK) advance(
+extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     const unsigned* __restrict__ lanes,
     const float* __restrict__ muscles,
     const unsigned* __restrict__ ends,
@@ -162,6 +162,18 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
 #endif
     ) {
     __shared__ float4 scatter[BLOCK / 32][64];
+    // Per-muscle state (energy store, rhythm offset, force of the substep) of
+    // each lane's muscles, and each group's behavior totals: touched once per
+    // round or per step, so they wait in shared memory instead of registers.
+    __shared__ float s_en[RMAX][BLOCK];
+    __shared__ float s_off[RMAX][BLOCK];
+    __shared__ float s_mag[RMAX][BLOCK];
+    __shared__ Result s_mt[BLOCK / W];
+    __shared__ uint4 s_bits[BLOCK / W];
+    // A walker's two rows of the contact-space matrix.
+    __shared__ float s_kn[2 * MAXC][BLOCK];
+    __shared__ float s_kt[2 * MAXC][BLOCK];
+    const unsigned tid = threadIdx.x;
     const unsigned lane = threadIdx.x & 31u;
     const unsigned lg = lane % W;
     const unsigned gbase = lane - lg;
@@ -179,20 +191,22 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
     float amp = 0.0f, qphase = 0.0f, inv_mass = 0.0f, inv_nodes = 0.0f;
     // This lane's node and bone.
     float m = 0.0f, rad = 0.0f, fric = 0.0f, len = 0.0f, lo = 0.0f, hi = 0.0f, prad = 0.0f, hm = 0.0f;
-    unsigned topo = 0u, anc = 0u, mnode = 0u;
+    unsigned topo = 0u, mnode = 0u;
     // State: the head's position and velocity (lane 0), the joint angle and
     // rate of the lane's bone (the neck's absolute angle on lane 1).
     float q = 0.0f, qd = 0.0f, hx = 0.0f, hy = 0.0f, hvx = 0.0f, hvy = 0.0f;
-    float en[RMAX], off[RMAX], mag[RMAX], tpull[RMAX];
+    float tpull[RMAX];
 #pragma unroll
-    for (int r = 0; r < RMAX; r++) { en[r] = 1.0f; off[r] = 0.0f; mag[r] = 0.0f; tpull[r] = 0.0f; }
+    for (int r = 0; r < RMAX; r++) { s_en[r][tid] = 1.0f; s_off[r][tid] = 0.0f; s_mag[r][tid] = 0.0f; tpull[r] = 0.0f; }
     // Kinematics: absolute angle and rate, node and pivot position and velocity.
     float th = 0.0f, om = 0.0f, px = 0.0f, py = 0.0f, vx = 0.0f, vy = 0.0f;
     float ppx = 0.0f, ppy = 0.0f, pvx = 0.0f, pvy = 0.0f;
     // Behavior totals.
-    Result mt;
-    unsigned contact_bits = 0u, lift_bits = 0u, ground_bits = 0u;
-    float head_shake = 0.0f;
+    Result& mt = s_mt[tid / W];
+    unsigned& contact_bits = s_bits[tid / W].x;
+    unsigned& lift_bits = s_bits[tid / W].y;
+    unsigned& ground_bits = s_bits[tid / W].z;
+    float& head_shake = *reinterpret_cast<float*>(&s_bits[tid / W].w);
     // Contact forces of the last step, per node, for a recording.
     float rec_n = 0.0f, rec_t = 0.0f;
 #if RECORD
@@ -303,7 +317,6 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
                 const float s7 = __uint_as_float(rec[7u * W]);
                 prad = __uint_as_float(rec[8u * W]);
                 topo = rec[9u * W];
-                anc = rec[10u * W];
                 mnode = rec[11u * W];
                 hm = lg == 1u ? s7 : 0.0f;
                 if (lg == 0u) {
@@ -314,7 +327,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
                 qd = 0.0f;
                 th = 0.0f; om = 0.0f;
 #pragma unroll
-                for (int r = 0; r < RMAX; r++) { en[r] = 1.0f; off[r] = 0.0f; mag[r] = 0.0f; tpull[r] = 0.0f; }
+                for (int r = 0; r < RMAX; r++) { s_en[r][tid] = 1.0f; s_off[r][tid] = 0.0f; s_mag[r][tid] = 0.0f; tpull[r] = 0.0f; }
                 reset_metrics();
                 rec_n = 0.0f; rec_t = 0.0f;
                 step = 0u;
@@ -327,7 +340,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
             } else {
                 exhausted = true;
                 nn = 0u; depth = 0u; rounds = 0u; ew = 0u; nmus = 0u;
-                m = 0.0f; rad = 0.0f; fric = 0.0f; len = 0.0f; hm = 0.0f; topo = 0u; anc = 0u;
+                m = 0.0f; rad = 0.0f; fric = 0.0f; len = 0.0f; hm = 0.0f; topo = 0u;
                 inv_mass = 0.0f; inv_nodes = 0.0f;
                 q = 0.0f; qd = 0.0f; hx = 0.0f; hy = 0.0f; hvx = 0.0f; hvy = 0.0f;
             }
@@ -387,7 +400,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
             for (int r = 0; r < RMAX; r++) {
                 const unsigned mi = (unsigned)r * W + lg;
                 if (write && (unsigned)r < rounds && mi < nmus) {
-                    frames[fb + W + mi] = make_float2(en[r], mag[r] + tpull[r]);
+                    frames[fb + W + mi] = make_float2(s_en[r][tid], s_mag[r][tid] + tpull[r]);
                 }
             }
             const bool broken = body && lg >= 2u && (q < lo - JOINT_BREAK || q > hi + JOINT_BREAK);
@@ -406,29 +419,127 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
             }
         };
 #endif
-        if (__any_sync(FULL, fresh)) {
-            kinematics(fresh);
-#if RECORD
-            for (unsigned t = 0u; t <= SETTLE; t++) { record_frame(t, fresh); }
-#endif
-            fresh = false;
-        }
-
         const float t_now = (float)step * DT;
-        const float head_vx0 = shf(vx, 0u);
-        const float head_vy0 = shf(vy, 0u);
+        float head_vx0 = 0.0f, head_vy0 = 0.0f;
         float step_n = 0.0f, step_t = 0.0f;
-
-        for (unsigned sub = 0u; sub < SUBSTEPS; sub++) {
+        // Carried from a substep's body to the balance at the top of the next.
+        float mx = 0.0f, my = 0.0f, ledger = 0.0f, scale = 0.0f, y_start = 0.0f, buoy = 0.0f;
+        unsigned nc = 0u;
+        for (unsigned sub = 0u;; sub++) {
+            // Node positions and velocities from the state: for a new
+            // creature before its first substep, and after every substep.
+            if (sub > 0u || __any_sync(FULL, fresh)) {
+                kinematics(sub > 0u || fresh);
+            }
+            if (sub == 0u) {
+#if RECORD
+                if (__any_sync(FULL, fresh)) {
+                    for (unsigned t = 0u; t <= SETTLE; t++) { record_frame(t, fresh); }
+                }
+#endif
+                fresh = false;
+                head_vx0 = shf(vx, 0u);
+                head_vy0 = shf(vy, 0u);
+            } else {
+                // Momentum balance: the body's momentum is its old momentum plus
+                // the external impulses; the rest of first-order integration's
+                // error goes as one uniform velocity.
+                {
+                    const float ex = gsum(mx), ey = gsum(my);
+                    const float ax_ = gsum(valid ? m * vx : 0.0f), ay_ = gsum(valid ? m * vy : 0.0f);
+    #if AIR
+                    const float wantx = ex * p.air_sub, wanty = ey * p.air_sub;
+    #else
+                    const float wantx = ex, wanty = ey;
+    #endif
+                    const float sx = (wantx - ax_) * inv_mass, sy = (wanty - ay_) * inv_mass;
+    #if DEBUG
+                    if (live && step < 1 && valid) {
+                        printf("step %u sub %u lane %u mx %.5f my %.5f m %.4f vx %.5f\n", step, sub, lg, mx, my, m, vx);
+                    }
+                    if (live && step < DEBUG && lg == 0u) {
+                        printf("step %u sub %u shift %.5f %.5f want %.5f %.5f got %.5f %.5f\n", step, sub, sx, sy, wantx, wanty, ax_, ay_);
+                    }
+                    if (live && step < DEBUG && valid && lg > 0u) {
+                        printf("step %u sub %u lane %u node vy %.5f y %.5f\n", step, sub, lg, vy, py);
+                    }
+    #endif
+                    if (lg == 0u) { hvx += sx; hvy += sy; }
+                    vx += sx;
+                    vy += sy;
+                    pvx += sx;
+                    pvy += sy;
+                    // First law in flight: a substep without ground contact gains no
+                    // more energy than the muscles, the wind, the buoyancy and the
+                    // tendons put in.
+                    if (__any_sync(FULL, live && nc == 0u)) {
+    #pragma unroll
+                        for (int r = 0; r < RMAX; r++) {
+                            if ((unsigned)r >= maxrounds) { break; }
+                            const unsigned mi = (unsigned)r * W + lg;
+                            const bool mon = (unsigned)r < rounds && mi < nmus;
+                            const float* mrec = muscles + mbase + (unsigned)r * MF * W + lg;
+                            const unsigned packed = mon ? __float_as_uint(mrec[0]) : 0u;
+                            const unsigned la = packed & 31u;
+                            const unsigned lb = (packed >> 5u) & 31u;
+                            const float a_px = shf(px, la), a_py = shf(py, la), a_qx = shf(ppx, la), a_qy = shf(ppy, la);
+                            const float b_px = shf(px, lb), b_py = shf(py, lb), b_qx = shf(ppx, lb), b_qy = shf(ppy, lb);
+                            if (mon) {
+                                const float anchor_a = mrec[1u * W];
+                                const float anchor_b = mrec[2u * W];
+                                const float tendon_k = mrec[13u * W];
+                                const float slack = mrec[14u * W];
+                                const float pax = a_qx + (a_px - a_qx) * anchor_a, pay = a_qy + (a_py - a_qy) * anchor_a;
+                                const float pbx = b_qx + (b_px - b_qx) * anchor_b, pby = b_qy + (b_py - b_qy) * anchor_b;
+                                const float dx = pbx - pax, dy = pby - pay;
+                                const float length_m = sqrtf(dx * dx + dy * dy);
+                                const float stretch = fmaxf(length_m - slack, 0.0f);
+                                ledger += 0.5f * tendon_k * stretch * stretch + s_mag[r][tid] * length_m;
+                            }
+                        }
+                        if (valid) {
+                            ledger += 0.5f * m * (vx * vx + vy * vy) + m * p.gravity * py;
+    #if WIND
+                            ledger -= p.wind * m * px;
+    #endif
+    #if WATER
+                            ledger -= buoy * (py - y_start);
+    #endif
+                        }
+                        const float excess = gsum(ledger) - (1e-4f + 1e-5f * gsum(scale));
+                        const float cx = wantx * inv_mass, cy = wanty * inv_mass;
+                        const float dvx = vx - cx, dvy = vy - cy;
+                        const float internal = gsum(valid ? 0.5f * m * (dvx * dvx + dvy * dvy) : 0.0f);
+    #if DEBUG
+                        if (live && step < DEBUG && lg == 0u) {
+                            printf("step %u sub %u excess %.5f internal %.5f\n", step, sub, excess, internal);
+                        }
+    #endif
+                        if (live && nc == 0u && excess > 0.0f) {
+                            const float keep = internal > 0.0f ? sqrtf(fmaxf(1.0f - excess / internal, 0.0f)) : 0.0f;
+                            qd *= keep;
+                            om *= keep;
+                            if (lg == 0u) { hvx = cx + keep * (hvx - cx); hvy = cy + keep * (hvy - cy); }
+                            vx = cx + keep * dvx;
+                            vy = cy + keep * dvy;
+                            pvx = cx + keep * (pvx - cx);
+                            pvy = cy + keep * (pvy - cy);
+                        }
+                    }
+                }
+            }
+            if (sub == SUBSTEPS) {
+                break;
+            }
             const float ts = t_now + (float)sub * HS;
             const float ox = shf(px, 0u);
             const float oy = shf(py, 0u);
             // Momentum before the substep plus the external impulses, and the
             // first-law ledger, per lane.
-            float mx = valid ? m * vx : 0.0f;
-            float my = valid ? m * vy : 0.0f;
-            float ledger = 0.0f;
-            float scale = 0.0f;
+            mx = valid ? m * vx : 0.0f;
+            my = valid ? m * vy : 0.0f;
+            ledger = 0.0f;
+            scale = 0.0f;
             if (valid) {
                 const float kinetic = 0.5f * m * (vx * vx + vy * vy);
                 const float potential = m * p.gravity * py;
@@ -438,7 +549,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
                 ledger += p.wind * m * px;
 #endif
             }
-            const float y_start = py;
+            y_start = py;
             // Body inertia (the neck also carries the head), pivot arm and the
             // velocity-product force.
             vec3 i0 = v3(0.0f, 0.0f, 0.0f), i1 = v3(0.0f, 0.0f, 0.0f), bs = v3(0.0f, 0.0f, 0.0f);
@@ -454,7 +565,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
             }
             // Gravity, wind, mud drag and buoyancy on the lane's node; the
             // head's force goes to the neck.
-            float buoy = 0.0f;
+            buoy = 0.0f;
             vec3 nf = v3(0.0f, 0.0f, 0.0f);
             if (valid) {
                 float fx = 0.0f;
@@ -566,18 +677,18 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
                     const float relative = (vbx - vax) * dirx + (vby - vay) * diry;
                     float target_speed = 0.0f;
                     if (ts > 0.0f) {
-                        target_speed = mamp * (wave(ts, inv_period, phase, off[r], duty, inv_duty, inv_complement)
-                            - wave(fmaxf(ts - HS, 0.0f), inv_period, phase, off[r], duty, inv_duty, inv_complement)) * INV_HS;
+                        target_speed = mamp * (wave(ts, inv_period, phase, s_off[r][tid], duty, inv_duty, inv_complement)
+                            - wave(fmaxf(ts - HS, 0.0f), inv_period, phase, s_off[r][tid], duty, inv_duty, inv_complement)) * INV_HS;
                     }
-                    float drive = limp ? 0.0f : fmaxf(-target_speed * stiffness * 0.25f, 0.0f) * en[r];
+                    float drive = limp ? 0.0f : fmaxf(-target_speed * stiffness * 0.25f, 0.0f) * s_en[r][tid];
                     if (hill > 0.0f) {
                         drive *= clampf(1.0f + relative * hill, 0.0f, 1.0f);
                     }
                     const float magnitude = clampf(drive + relative * 0.15f, -cap, cap);
                     const float work = fminf(drive, cap) * fmaxf(-relative, 0.0f) * HS;
-                    en[r] = clampf(en[r] - work * inv_capacity
-                        + MUSCLE_RECOVERY * p.muscle_recovery * HS * (1.0f - en[r]), 0.0f, 1.0f);
-                    mag[r] = magnitude;
+                    s_en[r][tid] = clampf(s_en[r][tid] - work * inv_capacity
+                        + MUSCLE_RECOVERY * p.muscle_recovery * HS * (1.0f - s_en[r][tid]), 0.0f, 1.0f);
+                    s_mag[r][tid] = magnitude;
                     const float stretch = fmaxf(length_m - slack, 0.0f);
                     const float tendon = tendon_k * stretch;
                     tpull[r] = tendon;
@@ -687,7 +798,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
 
             // Ground contacts at velocity level: the deepest MAXC nodes that
             // would reach the ground within the substep, solved together.
-            unsigned nc = 0u;
+            nc = 0u;
             float ln = 0.0f, lt = 0.0f;
             vec3 dn = v3(0.0f, 0.0f, 0.0f), dtg = dn;
 #if GROUND
@@ -763,9 +874,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
                     // the root. At every joint it passes, the unit forces of its
                     // two rows reach the joint as t = -s.p; two walkers at the
                     // same joint add dinv t_r t_c, and at the root F_r' Phi F_c.
-                    float kn[2 * MAXC], kt[2 * MAXC];
+#define kn(c) s_kn[c][tid]
+#define kt(c) s_kt[c][tid]
 #pragma unroll
-                    for (int c = 0; c < 2 * MAXC; c++) { kn[c] = 0.0f; kt[c] = 0.0f; }
+                    for (int c = 0; c < 2 * MAXC; c++) { kn(c) = 0.0f; kt(c) = 0.0f; }
                     vec3 pn = -dn, pt = -dtg;
                     unsigned cur = walker ? (lg == 0u ? 1u : lg) : lg;
                     for (unsigned L = maxlev; L >= 2u; L--) {
@@ -792,10 +904,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
                             const float tnc = shf(tn, src), ttc = shf(tt, src);
                             const unsigned jc = shu(jj, src);
                             if (act && jc == jj && (unsigned)c < nc) {
-                                kn[2 * c] += jd * tn * tnc;
-                                kn[2 * c + 1] += jd * tn * ttc;
-                                kt[2 * c] += jd * tt * tnc;
-                                kt[2 * c + 1] += jd * tt * ttc;
+                                kn(2 * c) += jd * tn * tnc;
+                                kn(2 * c + 1) += jd * tn * ttc;
+                                kt(2 * c) += jd * tt * tnc;
+                                kt(2 * c + 1) += jd * tt * ttc;
                             }
                         }
                     }
@@ -808,10 +920,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
                             const unsigned src = (slot_lanes >> (5 * c)) & 31u;
                             const vec3 qn = shv(pn, src), qt = shv(pt, src);
                             if (walker && (unsigned)c < nc) {
-                                kn[2 * c] = (kn[2 * c] + sdot(phn, qn)) * HS;
-                                kn[2 * c + 1] = (kn[2 * c + 1] + sdot(phn, qt)) * HS;
-                                kt[2 * c] = (kt[2 * c] + sdot(pht, qn)) * HS;
-                                kt[2 * c + 1] = (kt[2 * c + 1] + sdot(pht, qt)) * HS;
+                                kn(2 * c) = (kn(2 * c) + sdot(phn, qn)) * HS;
+                                kn(2 * c + 1) = (kn(2 * c + 1) + sdot(phn, qt)) * HS;
+                                kt(2 * c) = (kt(2 * c) + sdot(pht, qn)) * HS;
+                                kt(2 * c + 1) = (kt(2 * c + 1) + sdot(pht, qt)) * HS;
                             }
                         }
                     }
@@ -827,14 +939,14 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
                             if (!clean) {
                                 float dl = 0.0f;
                                 if (mine) {
-                                    const float normal = fmaxf(ln + (goal - vn) * (1.0f / kn[2 * c]), 0.0f);
+                                    const float normal = fmaxf(ln + (goal - vn) * (1.0f / kn(2 * c)), 0.0f);
                                     dl = normal - ln;
                                     ln = normal;
                                 }
                                 dl = shf(dl, src);
                                 if (walker && (unsigned)c < nc) {
-                                    vn += kn[2 * c] * dl;
-                                    vt += kt[2 * c] * dl;
+                                    vn += kn(2 * c) * dl;
+                                    vt += kt(2 * c) * dl;
                                 }
                             }
                             float dl = 0.0f;
@@ -842,7 +954,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
                                 // Friction may not do positive work: it only
                                 // opposes a = start speed + end speed without
                                 // its own force, and only up to |a| / k.
-                                const float stiff = kt[2 * c + 1];
+                                const float stiff = kt(2 * c + 1);
                                 const float a = vs + vt - stiff * lt;
                                 const float cap = fminf(mu * ln, fabsf(a) / stiff);
                                 const float tgt = clean ? lt : lt - vt * (1.0f / stiff);
@@ -852,8 +964,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
                             }
                             dl = shf(dl, src);
                             if (walker && (unsigned)c < nc) {
-                                vn += kn[2 * c + 1] * dl;
-                                vt += kt[2 * c + 1] * dl;
+                                vn += kn(2 * c + 1) * dl;
+                                vt += kt(2 * c + 1) * dl;
                             }
                         }
                     }
@@ -900,7 +1012,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
                         const vec3 myar = lg == 0u ? bar : ar;
                         if (walker && live && step < DEBUG) {
                             printf("step %u sub %u lane %u slot %d nc %u gap %.5f vnf %.5f goal %.4f K %.5f %.5f vn_pgs %.5f vt_pgs %.5f ln %.3f lt %.3f resp_vn %.5f\n",
-                                step, sub, lg, slot, nc, gap, vnf, goal, kn[2 * slot], kt[2 * slot + 1], vn, vt, ln, lt,
+                                step, sub, lg, slot, nc, gap, vnf, goal, kn(2 * slot), kt(2 * slot + 1), vn, vt, ln, lt,
                                 vnf + HS * sdot(dn, myar));
                         }
                     }
@@ -934,93 +1046,6 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
                     qd = qd + a * HS;
 #endif
                     q += qd * HS;
-                }
-            }
-            kinematics(true);
-            // Momentum balance: the body's momentum is its old momentum plus
-            // the external impulses; the rest of first-order integration's
-            // error goes as one uniform velocity.
-            {
-                const float ex = gsum(mx), ey = gsum(my);
-                const float ax_ = gsum(valid ? m * vx : 0.0f), ay_ = gsum(valid ? m * vy : 0.0f);
-#if AIR
-                const float wantx = ex * p.air_sub, wanty = ey * p.air_sub;
-#else
-                const float wantx = ex, wanty = ey;
-#endif
-                const float sx = (wantx - ax_) * inv_mass, sy = (wanty - ay_) * inv_mass;
-#if DEBUG
-                if (live && step < 1 && valid) {
-                    printf("step %u sub %u lane %u mx %.5f my %.5f m %.4f vx %.5f\n", step, sub, lg, mx, my, m, vx);
-                }
-                if (live && step < DEBUG && lg == 0u) {
-                    printf("step %u sub %u shift %.5f %.5f want %.5f %.5f got %.5f %.5f\n", step, sub, sx, sy, wantx, wanty, ax_, ay_);
-                }
-                if (live && step < DEBUG && valid && lg > 0u) {
-                    printf("step %u sub %u lane %u node vy %.5f y %.5f\n", step, sub, lg, vy, py);
-                }
-#endif
-                if (lg == 0u) { hvx += sx; hvy += sy; }
-                vx += sx;
-                vy += sy;
-                pvx += sx;
-                pvy += sy;
-                // First law in flight: a substep without ground contact gains no
-                // more energy than the muscles, the wind, the buoyancy and the
-                // tendons put in.
-                if (__any_sync(FULL, live && nc == 0u)) {
-#pragma unroll
-                    for (int r = 0; r < RMAX; r++) {
-                        if ((unsigned)r >= maxrounds) { break; }
-                        const unsigned mi = (unsigned)r * W + lg;
-                        const bool mon = (unsigned)r < rounds && mi < nmus;
-                        const float* mrec = muscles + mbase + (unsigned)r * MF * W + lg;
-                        const unsigned packed = mon ? __float_as_uint(mrec[0]) : 0u;
-                        const unsigned la = packed & 31u;
-                        const unsigned lb = (packed >> 5u) & 31u;
-                        const float a_px = shf(px, la), a_py = shf(py, la), a_qx = shf(ppx, la), a_qy = shf(ppy, la);
-                        const float b_px = shf(px, lb), b_py = shf(py, lb), b_qx = shf(ppx, lb), b_qy = shf(ppy, lb);
-                        if (mon) {
-                            const float anchor_a = mrec[1u * W];
-                            const float anchor_b = mrec[2u * W];
-                            const float tendon_k = mrec[13u * W];
-                            const float slack = mrec[14u * W];
-                            const float pax = a_qx + (a_px - a_qx) * anchor_a, pay = a_qy + (a_py - a_qy) * anchor_a;
-                            const float pbx = b_qx + (b_px - b_qx) * anchor_b, pby = b_qy + (b_py - b_qy) * anchor_b;
-                            const float dx = pbx - pax, dy = pby - pay;
-                            const float length_m = sqrtf(dx * dx + dy * dy);
-                            const float stretch = fmaxf(length_m - slack, 0.0f);
-                            ledger += 0.5f * tendon_k * stretch * stretch + mag[r] * length_m;
-                        }
-                    }
-                    if (valid) {
-                        ledger += 0.5f * m * (vx * vx + vy * vy) + m * p.gravity * py;
-#if WIND
-                        ledger -= p.wind * m * px;
-#endif
-#if WATER
-                        ledger -= buoy * (py - y_start);
-#endif
-                    }
-                    const float excess = gsum(ledger) - (1e-4f + 1e-5f * gsum(scale));
-                    const float cx = wantx * inv_mass, cy = wanty * inv_mass;
-                    const float dvx = vx - cx, dvy = vy - cy;
-                    const float internal = gsum(valid ? 0.5f * m * (dvx * dvx + dvy * dvy) : 0.0f);
-#if DEBUG
-                    if (live && step < DEBUG && lg == 0u) {
-                        printf("step %u sub %u excess %.5f internal %.5f\n", step, sub, excess, internal);
-                    }
-#endif
-                    if (live && nc == 0u && excess > 0.0f) {
-                        const float keep = internal > 0.0f ? sqrtf(fmaxf(1.0f - excess / internal, 0.0f)) : 0.0f;
-                        qd *= keep;
-                        om *= keep;
-                        if (lg == 0u) { hvx = cx + keep * (hvx - cx); hvy = cy + keep * (hvy - cy); }
-                        vx = cx + keep * dvx;
-                        vy = cy + keep * dvy;
-                        pvx = cx + keep * (pvx - cx);
-                        pvy = cy + keep * (pvy - cy);
-                    }
                 }
             }
         }
@@ -1066,7 +1091,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK) advance(
                             if ((down >> sensor) & 1u) {
                                 const float clock = next * mrec[5u * W] + mrec[6u * W];
                                 const float x = mrec[11u * W] - clock;
-                                off[r] = x - floorf(x);
+                                s_off[r][tid] = x - floorf(x);
                             }
                         }
                     }

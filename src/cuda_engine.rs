@@ -603,6 +603,43 @@ fn compile_kernel(api: &Api, options: &[String], key: KernelKey, use_cache: bool
     Ok(cubin)
 }
 
+/// Compiles the lane-group kernel for `class` lanes and `cfg`'s world on
+/// this machine's NVRTC and returns ptxas's report (registers, spills,
+/// stack), for developers measuring register use. Needs no GPU time.
+pub fn compile_report(class: usize, cfg: &Config, record: bool, arch: &str) -> Result<String> {
+    let api = api()?;
+    let options = vec![
+        format!("--gpu-architecture={arch}"),
+        "--std=c++17".into(),
+        "--prec-div=false".into(),
+        "--prec-sqrt=false".into(),
+        "--fmad=true".into(),
+        "--extra-device-vectorization".into(),
+        "--ptxas-options=-v".into(),
+    ];
+    let mut options = options;
+    if let Ok(extra) = std::env::var("EVOLUTION_NVRTC_EXTRA") {
+        options.extend(extra.split_whitespace().map(String::from));
+    }
+    let source = crate::warp_kernel::cuda_source(
+        class,
+        crate::warp_kernel::world_flags(cfg),
+        cfg.fidelity(),
+        record,
+    );
+    let (_, log) = api.nvrtc.compile(&source, &options)?;
+    Ok(log
+        .lines()
+        .filter(|l| {
+            std::env::var_os("EVOLUTION_NVRTC_LOG").is_some()
+                || l.contains("registers")
+                || l.contains("spill")
+                || l.contains("stack")
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 /// Where compiled kernels are kept: `EVOLUTION_KERNEL_CACHE`, else the
 /// user's cache directory, else nowhere.
 fn kernel_cache_dir() -> Option<PathBuf> {

@@ -38,8 +38,10 @@ pub const MAX_CONTACTS: usize = 4;
 pub const SUBSTEPS: u32 = 2;
 pub const PGS_SWEEPS: u32 = 4;
 pub const CLEAN_SWEEPS: u32 = 1;
-/// Threads per block.
+/// Threads per block, and blocks per multiprocessor the register budget is
+/// set for: 4 blocks of 128 threads fit 128 registers per thread.
 pub const BLOCK: u32 = 128;
+pub const MIN_BLOCKS: u32 = 4;
 /// Creatures per kernel launch (a wave).
 pub const WAVE: usize = 262_144;
 
@@ -174,6 +176,7 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
     let mut defines: Vec<(String, String)> = vec![
         ("W".into(), format!("{class}u")),
         ("BLOCK".into(), format!("{BLOCK}u")),
+        ("MIN_BLOCKS".into(), format!("{}", solver_setting("MIN_BLOCKS", MIN_BLOCKS))),
         ("RATE".into(), format!("{:.1}f", fidelity.rate as f32)),
         ("SETTLE".into(), format!("{}u", fidelity.settle())),
         ("SAMPLE".into(), format!("{}u", fidelity.sample_interval())),
