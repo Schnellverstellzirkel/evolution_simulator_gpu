@@ -33,6 +33,11 @@ pub const RING_SLOTS: usize = 786_432;
 /// Blocks in the ring. A block is bred, evaluated as one unit and absorbed
 /// as a whole.
 pub const RING_BLOCKS: usize = 4;
+/// Distances at the screen the bar's window holds at least, when the ring
+/// has them. The kept share of a quantile over this many varies by about
+/// 0.3%, so a larger window only adds lag: a block of the game's ring holds
+/// 196,608, and the bar comes from the newest block alone.
+const SCREEN_WINDOW_DISTANCES: usize = 16_384;
 /// Confirmation trials a block asks for per archive at once while it waits
 /// for the ones it needs.
 const SPECULATIVE_CONFIRMS: usize = 8;
@@ -184,9 +189,10 @@ pub struct Experiment {
     pub cursor: usize,
     /// Failed trials in the current generation.
     failed: usize,
-    /// Distances at the screen of the last ring's worth of results, one
-    /// entry per absorbed block, oldest first. The bar is recomputed from
-    /// them at every absorption.
+    /// Distances at the screen of the newest absorbed blocks, one entry per
+    /// block, oldest first: as few blocks as hold `SCREEN_WINDOW_DISTANCES`,
+    /// and at most a ring. The bar is recomputed from them at every
+    /// absorption.
     screen_window: VecDeque<Vec<f32>>,
     /// The last absorbed block's screen bar and the share of its results at
     /// or above it, for the stage log. None when that block ran without a
@@ -541,8 +547,15 @@ impl Experiment {
                     .filter(|x| x.is_finite())
                     .collect(),
             );
-            while self.screen_window.len() > self.blocks.len() {
+            // The newest blocks that hold enough distances for a steady
+            // quantile, at most a ring: older results lag the population more.
+            let mut held: usize = self.screen_window.iter().map(Vec::len).sum();
+            while let Some(oldest) = self.screen_window.front().map(Vec::len)
+                && (self.screen_window.len() > self.blocks.len()
+                    || held - oldest >= SCREEN_WINDOW_DISTANCES)
+            {
                 self.screen_window.pop_front();
+                held -= oldest;
             }
             self.config.screen = self.next_screen(self.config.duration);
         }
@@ -597,10 +610,10 @@ impl Experiment {
     }
     /// The early screen for the blocks bred from now on: its bar is the
     /// distance at the screen that the best `physics::screen_keep()` share
-    /// of the last ring's worth of results reached. It moves at every
+    /// of the newest results reached (`screen_window`). It moves at every
     /// absorption, so a population that improves fast (the first
-    /// generations, and every world change) keeps its share instead of the
-    /// share a generation-old bar would keep. Each block carries the bar it
+    /// generations, and every world change) keeps about its share instead
+    /// of the 50 to 80% a generation-old bar kept. Each block carries the bar it
     /// was bred with, so the history depends on ring order only. With no
     /// distances yet (a new game, a load, a world change, which forgets the
     /// old world's distances) the blocks run every trial in full until the
