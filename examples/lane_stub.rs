@@ -346,7 +346,7 @@ pub fn ptxas_summary(log: &str) -> String {
             let (stack, spills) = frame.take().unwrap_or((0, ""));
             let words: Vec<&str> = spills.split_whitespace().collect();
             let spill = |kind: &str| {
-                words.windows(3).find(|w| w[2] == kind).map(|w| w[0]).unwrap_or("0").to_owned()
+                words.windows(4).find(|w| w[3] == kind).map(|w| w[0]).unwrap_or("0").to_owned()
             };
             out.push(format!(
                 "{regs} registers, {stack} B stack frame, {} B spill stores, {} B spill loads",
