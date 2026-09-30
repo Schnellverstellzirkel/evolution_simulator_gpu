@@ -1208,8 +1208,12 @@ impl Experiment {
         );
         // A generation cut short by a load or a new steady run has no row yet.
         self.history = repair_history(std::mem::take(&mut self.history), self.generation);
-        if self.history.len() == self.generation as usize {
-            self.push_archive_stats(0);
+        if self.history.len() == self.generation as usize
+            && let Some(last) = self.history.last()
+        {
+            let mut row = last.clone();
+            row.generation = self.generation;
+            self.history.push(row);
         }
         let mut cfg = self.pending.clone().unwrap_or_else(|| self.config.clone());
         cfg.validate()?;
