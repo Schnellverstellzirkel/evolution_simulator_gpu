@@ -65,12 +65,16 @@ pub struct RingTimes {
 
 impl Default for RingTimes {
     /// Before anything is measured: the scheduler's first rate estimate for
-    /// the RTX 4060 and the host times of a young 3M game on 4 threads at
-    /// 32k blocks (worker_rate, 2026-09-30).
+    /// the RTX 4060, and host times near those of a young 3M game at 32k
+    /// blocks. A block that sets island records waits for their
+    /// confirmation trials, so its host time is one or more round trips
+    /// through the GPU: the p95 was 1.4 to 3.6 s and the boundary 0.14 to
+    /// 1.9 s over generations 0 to 7 on a GPU shared with other runs
+    /// (worker_rate, 2026-09-30). Either gives the longest ring.
     fn default() -> Self {
         Self {
             rate: 180_000.0,
-            chain: 0.06,
+            chain: 0.2,
             boundary: 0.35,
         }
     }
@@ -3526,5 +3530,65 @@ mod migration_tests {
             crate::environment::EFFECTS[effect].level(&experiment.config),
             level
         );
+    }
+}
+
+#[cfg(test)]
+mod ring_shape_tests {
+    use super::*;
+
+    fn times(rate: f64, chain: f64, boundary: f64) -> RingTimes {
+        RingTimes {
+            rate,
+            chain,
+            boundary,
+        }
+    }
+
+    #[test]
+    fn a_block_is_50_ms_of_gpu_work_between_32k_and_256k() {
+        assert_eq!(RingShape::size(&times(167_000.0, 0.0, 0.0)).block, 32_768);
+        assert_eq!(RingShape::size(&times(2e6, 0.0, 0.0)).block, 102_400);
+        assert_eq!(RingShape::size(&times(1e8, 0.0, 0.0)).block, 262_144);
+    }
+
+    #[test]
+    fn the_ring_holds_5_host_times_or_the_boundary_within_03_to_1_s() {
+        let seconds = |t: RingTimes| {
+            let r = RingShape::size(&t);
+            (r.block * r.blocks) as f64 / t.rate
+        };
+        // Fast host: the shortest ring, rounded up to whole blocks.
+        let s = seconds(times(2e6, 0.01, 0.0));
+        assert!((0.3..0.36).contains(&s), "{s}");
+        // Five host times.
+        let s = seconds(times(2e6, 0.12, 0.0));
+        assert!((0.6..0.66).contains(&s), "{s}");
+        // The boundary plus two blocks.
+        let s = seconds(times(2e6, 0.01, 0.5));
+        assert!((0.6..0.66).contains(&s), "{s}");
+        // Never past 1 s, and at least 2 blocks.
+        let s = seconds(times(2e6, 5.0, 5.0));
+        assert!((0.95..=1.0).contains(&s), "{s}");
+        assert_eq!(RingShape::size(&times(40_000.0, 5.0, 5.0)).blocks, 2);
+        // Today's rate: 5 blocks of 32k, just under 1 s.
+        let today = RingShape::size(&times(167_000.0, 0.3, 0.3));
+        assert_eq!((today.block, today.blocks), (32_768, 5));
+        // Nothing measured.
+        let prior = RingShape::default();
+        assert_eq!((prior.block, prior.blocks), (32_768, 5));
+    }
+
+    #[test]
+    fn a_small_population_splits_into_the_rings_blocks() {
+        let ring = RingShape {
+            block: 32_768,
+            blocks: 5,
+        };
+        assert_eq!(ring.len(100), 100);
+        assert_eq!(ring.len(3_000_000), 163_840);
+        let ranges = ring.ranges(100);
+        assert_eq!(ranges.len(), 5);
+        assert_eq!(ranges.iter().map(|r| r.1).sum::<usize>(), 100);
     }
 }
