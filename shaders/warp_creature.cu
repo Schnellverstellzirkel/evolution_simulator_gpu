@@ -134,12 +134,12 @@ __device__ __forceinline__ unsigned gmaxu(unsigned v) {
     return v;
 }
 __device__ __forceinline__ float wave(float t, float inv_period, float phase, float offset, float duty, float inv_duty, float inv_complement) {
-    float x = t * inv_period + phase + offset;
-    float ph = x - floorf(x);
-    if (ph < duty) {
-        return 0.5f + 0.5f * __cosf(PI_F * (ph * inv_duty));
-    }
-    return 0.5f - 0.5f * __cosf(PI_F * ((ph - duty) * inv_complement));
+    const float x = t * inv_period + phase + offset;
+    const float ph = x - floorf(x);
+    const bool rise = ph < duty;
+    const float arg = rise ? ph * inv_duty : (ph - duty) * inv_complement;
+    const float half = rise ? 0.5f : -0.5f;
+    return 0.5f + half * __cosf(PI_F * arg);
 }
 __device__ __forceinline__ float ice_at(float x) {
     float u = x * ICE_INV;
@@ -765,7 +765,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             PROF(5);
             // Articulated-body pass, children first. Joint damping and the joint
             // limits' inelastic stops are implicit in each joint's inertia.
-            vec3 uvs = v3(0.0f, 0.0f, 0.0f), cv = v3(0.0f, 0.0f, 0.0f);
+            vec3 uvs = v3(0.0f, 0.0f, 0.0f);
+            // The joint's velocity-product acceleration.
+            const vec3 cv = crm(v3(om, pvx + om * army, pvy - om * armx), axis) * qd;
             float dis = 0.0f, uus = 0.0f;
             for (unsigned L = maxlev; L >= 2u; L--) {
                 vec3 c0 = v3(0.0f, 0.0f, 0.0f), c1 = c0, cp = c0;
@@ -799,8 +801,6 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     const float k = -di;
                     c0 = i0 + v3(k * uv.x * uv.x, k * uv.x * uv.y, k * uv.x * uv.z);
                     c1 = i1 + v3(k * uv.y * uv.y, k * uv.y * uv.z, k * uv.z * uv.z);
-                    const vec3 sv = v3(om, pvx + om * army, pvy - om * armx);
-                    cv = crm(sv, axis) * qd;
                     cp = bs + sym_mul(c0, c1, cv) + uv * (u * di);
                 }
                 if (lvl == L) {
