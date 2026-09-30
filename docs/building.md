@@ -88,7 +88,7 @@ While paused the game window shows "Paused for a developer measurement, resumes 
 
 ## GPU failures
 
-Today a GPU engine that fails is dropped, and the scheduler opens it again after 1, 4 and then 10 s (`recover` in `src/scheduler.rs`). Each reopen submits the unfinished units again with their exact inputs, so they give the same results, and the event feed shows every attempt. After three failed reopens the units go to the CPU engine. The 2M/s plan (`docs/plan-2m.md`) deletes the CPU engine, so there will be no failover physics. From then on the third failed reopen pauses the game with the error in the event feed, and the game does not retry forever.
+A GPU engine that fails is dropped, and the scheduler opens it again after 1, 4 and then 10 s (`recover` in `src/scheduler.rs`). Each reopen submits the unfinished units again with their exact inputs, so they give the same results, and the event feed shows every attempt. There is no failover physics: after the third failed reopen the game stops evolving and shows the error, and it does not retry forever.
 
 ## Machine settings for measurements
 
@@ -117,7 +117,7 @@ Rules for anything that submits work to the Radeon, including tools and diagnost
 1. No submission may take longer than 50 ms. Size dispatches from a measured rate and halve them when one exceeds 20 ms. No persistent kernels, no in-kernel work loops, no unbounded step counts. 50 ms is 2.5% of the timeout, and the halving stops a dispatch that drifts from ever reaching it.
 2. Use a compute-only queue at `VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR`, which needs no privilege. Never raise the game's priority above the compositor's.
 3. Allocate only host-visible memory (GTT, or host memory imported through `VK_EXT_external_memory_host`). Never `DEVICE_LOCAL` on the Radeon. Stay under 512 MB.
-4. At most two submissions in flight. If a fence wait exceeds 500 ms, stop submitting for the session and fall back to the CPU path.
+4. At most two submissions in flight. If a fence wait exceeds 500 ms, stop submitting for the session.
 5. Run Radeon compute in a helper process that shares memory with the game. A `VK_ERROR_DEVICE_LOST` then kills the helper and the game goes on.
 6. Vulkan through RADV only. No ROCm, no OpenCL, no second driver stack on the display device.
 7. Before shipping anything that uses the Radeon, soak it for 10 minutes with the game window open and the compositor at 60 FPS. It passes if the UI frame time p99 stays under 20 ms, `journalctl -k` has no `ring comp` or `reset` line, and the RTX rate is unchanged.
