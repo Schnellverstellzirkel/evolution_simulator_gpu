@@ -208,7 +208,7 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
         "Evolution Laboratory",
         options,
         Box::new(|cc| {
-            // Evaluation opens its own Vulkan devices; the render device only draws.
+            // Evaluation opens its own CUDA devices; the render device only draws.
             let gpu = Gpu::new(&compute_name)?;
             Ok(Box::new(App::new(cc, gpu)))
         }),
