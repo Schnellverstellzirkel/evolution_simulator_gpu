@@ -1238,12 +1238,12 @@ fn paint_lineage_tile(
         &painter,
         rect,
         theme,
-        if big || hovered {
+        if hovered {
             theme.card_hover
         } else {
             theme.card
         },
-        current || changed,
+        current || changed || hovered,
     );
     let art_size = (size.y - 16.).clamp(40., 96.);
     thumbnail(
