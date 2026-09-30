@@ -332,7 +332,7 @@ impl Model {
                     } else {
                         0.0
                     },
-                    long: m.long,
+                    long: physics::slack_length(&c.bones, &nodes, m),
                     tendon_k: 0.0,
                     amplitude: (m.long - m.short).min(
                         2.0 * limits.muscle_speed * m.period * m.duty.min(1.0 - m.duty)
@@ -2798,92 +2798,6 @@ mod tests {
         // grows with speed squared); longer bones pay for more air.
         assert!(fast > 3.0 * slow, "{fast} against {slow}");
         assert!(long > 1.5 * slow, "{long} against {slow}");
-    }
-
-    #[test]
-    fn a_tendon_pulls_a_stretched_muscle_back_and_adds_no_energy() {
-        use crate::evolution::Muscle;
-        let cfg = Config {
-            ground: false,
-            gravity: 0.0,
-            ..calm()
-        };
-        let body = |tendon: f32| {
-            let mut c = chain(&[[0.0, 1.0], [0.0, 0.6], [0.4, 0.6]], false);
-            c.bones[1].min_angle = -2.5;
-            c.bones[1].max_angle = 2.5;
-            // A muscle from the head to the end of the leg, stretched well past
-            // its longest length, with no drive of its own.
-            c.muscles.push(Muscle {
-                bone_a: 0,
-                bone_b: 1,
-                anchor_a: 0.0,
-                anchor_b: 1.0,
-                short: 0.3,
-                long: 0.3,
-                period: 1.0,
-                phase: 0.0,
-                duty: 0.5,
-                stiffness: 60.0,
-                sensor: NO_SENSOR,
-                reset: 0.0,
-                tendon,
-            });
-            let model = Model::new(&c, &cfg);
-            let mut s = model.start(&cfg);
-            model.kinematics(&mut s);
-            let mut sc = scratch(&model);
-            let limits = physics::limits();
-            let dt = 1.0 / 60.0;
-            let length = |model: &Model, s: &State| model.muscle_lengths(s).next().unwrap();
-            let start = length(&model, &s);
-            let start_energy = model.energy(&s, 0.0).0;
-            let mut shortest = start;
-            let mut worst_gain = 0.0f32;
-            let mut previous = start_energy;
-            for step in 0..120 {
-                simulate_step(
-                    &model,
-                    &cfg,
-                    &mut s,
-                    &mut sc,
-                    step as f32 * dt,
-                    dt,
-                    1.0,
-                    &limits,
-                );
-                model.kinematics(&mut s);
-                let e = model.energy(&s, 0.0).0;
-                worst_gain = worst_gain.max(e - previous);
-                previous = e;
-                shortest = shortest.min(length(&model, &s));
-            }
-            (
-                start,
-                shortest,
-                start_energy,
-                worst_gain,
-                model.muscles[0].tendon_k,
-            )
-        };
-        let (start, shortest, stored, gain, k) = body(1.0);
-        eprintln!(
-            "tendon k {k}: length {start} -> {shortest}, stored {stored} J, worst gain {gain} J"
-        );
-        assert!(
-            k > 0.0 && stored > 0.05,
-            "the stretched tendon must store energy: {stored}"
-        );
-        assert!(
-            shortest < start - 0.05,
-            "the tendon must pull the muscle back"
-        );
-        assert!(gain < 0.02 * stored, "a step gained {gain} J of {stored} J");
-        let (start, shortest, ..) = body(0.0);
-        assert!(
-            (start - shortest).abs() < 1e-3,
-            "without a tendon nothing moves"
-        );
     }
 
     #[test]

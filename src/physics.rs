@@ -193,14 +193,35 @@ fn add_bone_masses(bones: &[Bone], nodes: &mut [Node]) {
         }
     }
 }
-/// A muscle's mass: a fixed part plus a part per metre of its longest length.
+/// A muscle's mass: a fixed part plus a part per metre of its slack length.
 pub const MUSCLE_MASS_BASE: f32 = 0.05;
 pub const MUSCLE_MASS_PER_M: f32 = 1.0;
-/// Adds each muscle's mass to the nodes: half at each attachment, shared by
-/// that bone's two nodes in proportion to where the muscle attaches.
+/// Distance between a muscle's two attachment points on `nodes`.
+fn muscle_span(bones: &[Bone], nodes: &[Node], m: &Muscle) -> f32 {
+    let point = |bone: u32, t: f32| -> Option<[f32; 2]> {
+        let bone = bones.get(bone as usize)?;
+        let (a, b) = (nodes.get(bone.a as usize)?.pos, nodes.get(bone.b as usize)?.pos);
+        Some([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t])
+    };
+    match (point(m.bone_a, m.anchor_a), point(m.bone_b, m.anchor_b)) {
+        (Some(p), Some(q)) => ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt(),
+        _ => 0.0,
+    }
+}
+/// Where a muscle's tendon starts to pull: its longest length, or its length
+/// in the start pose when that is longer, so no tendon starts stretched. A
+/// tendon stretched in the start pose was a catapult charged for free: bodies
+/// with a 1 m muscle of 0.01 m longest length launched themselves 5 m in one
+/// step (the owner's 400-generation run, 2026-09-30).
+pub fn slack_length(bones: &[Bone], start: &[Node], m: &Muscle) -> f32 {
+    m.long.max(muscle_span(bones, start, m))
+}
+/// Adds each muscle's mass to the nodes (in the start pose): half at each
+/// attachment, shared by that bone's two nodes in proportion to where the
+/// muscle attaches.
 pub fn add_muscle_masses(bones: &[Bone], muscles: &[Muscle], nodes: &mut [Node]) {
     for m in muscles {
-        let half = 0.5 * (MUSCLE_MASS_BASE + MUSCLE_MASS_PER_M * m.long.max(0.0));
+        let half = 0.5 * (MUSCLE_MASS_BASE + MUSCLE_MASS_PER_M * slack_length(bones, nodes, m));
         for (bone, t) in [(m.bone_a, m.anchor_a), (m.bone_b, m.anchor_b)] {
             let Some(bone) = bones.get(bone as usize) else {
                 continue;

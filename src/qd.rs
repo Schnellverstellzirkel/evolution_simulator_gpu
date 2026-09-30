@@ -35,7 +35,9 @@ pub(crate) const CMA_LIMIT: usize = 96;
 //     remembers whether its score came from its fine check.
 // 40: seasons became autochange environment (renamed settings fields, a
 //     ladder that only adds effects).
-pub const VERSION: u32 = 40;
+// 41: a tendon starts to pull past the longer of its muscle's longest length
+//     and its length in the start pose, and muscle mass follows that length.
+pub const VERSION: u32 = 41;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
