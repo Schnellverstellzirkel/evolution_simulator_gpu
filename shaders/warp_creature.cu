@@ -208,6 +208,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     float4* const mf = &scatter[threadIdx.x >> 5][gbase * 2u];
     float4* const region = scatter[threadIdx.x >> 5];
     float4* const kbase = region + (lane / W) * (MAXC * MAXC);
+    __shared__ float4 s_w[BLOCK / W][MAXC];
+    float4* const wrec = s_w[tid / W];
     const unsigned below = (1u << lg) - 1u;
 
     // The group's creature (the same in every lane of the group).
@@ -960,12 +962,16 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                             cur = (jt >> 5u) & 31u;
                         }
                         const float jd = ja.z;
+                        // Each walker's joint and torques of this level, for
+                        // the walkers that meet it there.
+                        if (walker) { wrec[slot] = make_float4(__uint_as_float(jj), tn, tt, 0.0f); }
+                        __syncwarp();
 #pragma unroll
                         for (int c = 0; c < MAXC; c++) {
                             if ((unsigned)c >= ncmax) { break; }
-                            const unsigned src = (slot_lanes >> (5 * c)) & 31u;
-                            const float tnc = shf(tn, src), ttc = shf(tt, src);
-                            const unsigned jc = shu(jj, src);
+                            const float4 wc = wrec[c];
+                            const float tnc = wc.y, ttc = wc.z;
+                            const unsigned jc = __float_as_uint(wc.x);
                             if (act && jc == jj && (unsigned)c < nc) {
                                 float4 k = krow[c];
                                 k.x += jd * tn * tnc;
@@ -975,6 +981,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                                 krow[c] = k;
                             }
                         }
+                        __syncwarp();
                     }
                     float knn = 1.0f, ktt = 1.0f;
                     {
@@ -1007,38 +1014,33 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                         for (int c = 0; c < MAXC; c++) {
                             if ((unsigned)c >= ncmax) { break; }
                             const unsigned src = (slot_lanes >> (5 * c)) & 31u;
-                            const bool mine = slot == c;
                             const bool use = walker && (unsigned)c < nc;
                             const float4 k = krow[c];
-                            if (!clean) {
-                                float dl = 0.0f;
-                                if (mine) {
+                            // The owner updates its normal, then its friction
+                            // against its own new speed, and broadcasts both.
+                            float dn_ = 0.0f, dt_ = 0.0f;
+                            if (slot == c) {
+                                if (!clean) {
                                     const float normal = fmaxf(fmaf(goal - vn, inv_knn, ln), 0.0f);
-                                    dl = normal - ln;
+                                    dn_ = normal - ln;
                                     ln = normal;
                                 }
-                                dl = shf(dl, src);
-                                if (use) {
-                                    vn += k.x * dl;
-                                    vt += k.z * dl;
-                                }
-                            }
-                            float dl = 0.0f;
-                            if (mine) {
+                                const float vt1 = vt + k.z * dn_;
                                 // Friction may not do positive work: it only
                                 // opposes a = start speed + end speed without
                                 // its own force, and only up to |a| / k.
-                                const float a = vs + vt - ktt * lt;
+                                const float a = vs + vt1 - ktt * lt;
                                 const float cap = fminf(mu * ln, fabsf(a) * inv_ktt);
-                                const float tgt = clean ? lt : lt - vt * inv_ktt;
+                                const float tgt = clean ? lt : lt - vt1 * inv_ktt;
                                 const float friction = clampf(tgt, a > 0.0f ? -cap : 0.0f, a > 0.0f ? 0.0f : cap);
-                                dl = friction - lt;
+                                dt_ = friction - lt;
                                 lt = friction;
                             }
-                            dl = shf(dl, src);
+                            dn_ = shf(dn_, src);
+                            dt_ = shf(dt_, src);
                             if (use) {
-                                vn += k.y * dl;
-                                vt += k.w * dl;
+                                vn += k.x * dn_ + k.y * dt_;
+                                vt += k.z * dn_ + k.w * dt_;
                             }
                         }
                     }
