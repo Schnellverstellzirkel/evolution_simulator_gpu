@@ -85,11 +85,10 @@ enum Action {
     },
 }
 fn main() -> Result<()> {
-    // Evaluation and general workers share half the logical CPUs, at most
-    // eight. The owner allows the game the whole machine, but at 3M creatures
-    // 16 general workers (129.8k creatures/s) or 8 plus 8 CPU evaluation
-    // workers (121.3k) were no faster than 8 (137.8k): the GPU bounds the
-    // game and busy CPU cores slow it.
+    // General workers take half the logical CPUs, at most eight. The owner
+    // allows the game the whole machine, but at 3M creatures 16 general
+    // workers (129.8k creatures/s) were no faster than 8 (137.8k): the GPU
+    // bounds the game and busy CPU cores slow it.
     rayon::ThreadPoolBuilder::new()
         .num_threads(engine::rayon_threads())
         .start_handler(|_| engine::lower_thread_priority())

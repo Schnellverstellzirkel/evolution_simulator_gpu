@@ -1,14 +1,13 @@
 //! Routes evaluation work to the selected GPU devices. Additional GPUs require
-//! an explicit `EVOLUTION_DEVICES` selection; CPU evaluation is reserved for
-//! CPU-only runs or GPU failover.
+//! an explicit `EVOLUTION_DEVICES` selection. The GPU is the only engine:
+//! there is no CPU evaluation.
 //!
 //! Callers queue work: a population, the creatures of it to evaluate, and the
 //! trial settings. Each piece of work goes to an engine as one unit. A piece
 //! that covers its whole population is handed over without a copy.
 //! Confirmation work goes before standard work. Results come back tagged with
-//! the caller's tag, in whatever order the engines finish. The selected
-//! evaluation engine defines fitness; CPU/GPU comparisons are only
-//! diagnostics, and CPU output never validates or lowers a GPU score.
+//! the caller's tag, in whatever order the engines finish. The GPU's score
+//! is final.
 use crate::{
     config::Config,
     creature_kernel::GpuResult,
@@ -51,14 +50,6 @@ pub fn confirm_config(cfg: &Config) -> Config {
         fidelity: Some(crate::physics::Fidelity::fine()),
         ..cfg.clone()
     }
-}
-
-/// Which engine backs a device. A failed GPU can hand its work to the CPU;
-/// a failed CPU is terminal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DeviceKind {
-    Gpu,
-    Cpu,
 }
 
 /// Creatures waiting for an engine.
@@ -135,9 +126,8 @@ pub struct Device {
     reopen: Option<Reopen>,
     /// Reopens since the last unit finished on this device.
     recoveries: usize,
-    kind: DeviceKind,
-    /// Set when the engine reported a failure. A failed GPU is retired and its
-    /// unfinished units move to the CPU; a failed CPU stops the scheduler.
+    /// Set when the engine reported a failure. A failed GPU is reopened, and
+    /// one that does not open again stops the scheduler.
     failure: Option<String>,
     /// Exact submitted input remains available until its result is accepted.
     queued: VecDeque<QueuedUnit>,
@@ -156,18 +146,14 @@ pub struct Device {
     idle_since: Option<Instant>,
     pub creatures: u64,
     pub busy_seconds: f64,
-    /// A reserve engine takes over evaluation work only when no primary
-    /// engine remains healthy.
-    reserve: bool,
 }
 
 impl Device {
-    fn new(engine: Box<dyn Engine>, kind: DeviceKind, rate: f64) -> Self {
+    fn new(engine: Box<dyn Engine>, rate: f64) -> Self {
         Self {
             engine,
             reopen: None,
             recoveries: 0,
-            kind,
             failure: None,
             queued: VecDeque::new(),
             rate,
@@ -178,7 +164,6 @@ impl Device {
             rate_at: None,
             idle_seconds: 0.0,
             idle_since: None,
-            reserve: false,
         }
     }
     /// Advances the rate average to `now`, counting the time since the last
@@ -224,8 +209,6 @@ pub struct Scheduler {
     /// busy seconds they took.
     pub confirms_submitted: u64,
     pub confirm_busy_seconds: f64,
-    /// Why the primary GPU was not used, reported once at startup.
-    startup_failure: Option<String>,
     /// Messages for the player (a GPU lost and reopened), taken by the worker.
     notices: Vec<String>,
     /// Developer hook (`EVOLUTION_SIMULATE_GPU_LOSS=N`): the GPU fails once,
@@ -234,16 +217,6 @@ pub struct Scheduler {
     collected_units: u64,
     /// Evaluation held for a developer measurement (see `suspend.rs`).
     suspension: suspend::Suspension,
-}
-
-fn reserve_cpu_when_gpu_available(devices: &mut [Device]) {
-    if devices.iter().any(|device| device.kind == DeviceKind::Gpu) {
-        for device in devices {
-            if device.kind == DeviceKind::Cpu {
-                device.reserve = true;
-            }
-        }
-    }
 }
 
 /// Returns explicitly requested secondary GPU names. The safe default is to
@@ -268,7 +241,7 @@ fn secondary_device_names(selection: Option<&str>) -> Vec<&str> {
 }
 
 impl Scheduler {
-    fn with_devices(devices: Vec<Device>, startup_failure: Option<String>) -> Self {
+    fn with_devices(devices: Vec<Device>) -> Self {
         Self {
             devices,
             confirms: VecDeque::new(),
@@ -277,7 +250,6 @@ impl Scheduler {
             packing_seconds: 0.0,
             confirms_submitted: 0,
             confirm_busy_seconds: 0.0,
-            startup_failure,
             notices: Vec::new(),
             simulate_loss_after: None,
             collected_units: 0,
@@ -285,94 +257,43 @@ impl Scheduler {
         }
     }
 
-    /// Opens the named primary GPU, the other GPUs listed in `EVOLUTION_DEVICES`
-    /// (off by default; `primary` or `off` for none), and a CPU engine with
-    /// `EVOLUTION_CPU_THREADS` threads (default six). Evaluation and general
-    /// workers share half the logical CPUs, at most eight, with at least one
-    /// general worker. Zero or a one-worker budget disables the separate CPU
-    /// engine. If the primary GPU cannot open, evaluation falls back to the
-    /// CPU; with the separate pool disabled, it shares the general Rayon pool.
+    /// Opens the named primary GPU and the other GPUs listed in
+    /// `EVOLUTION_DEVICES` (off by default; `primary` or `off` for none). The
+    /// game needs the primary GPU: without it this fails.
     pub fn new(primary: &str) -> Result<Self> {
-        let step_range = crate::gpu::DEFAULT_STEP_RANGE;
-        let mut devices = Vec::new();
-        let mut startup_failure = None;
-        match engine::gpu_engine(primary, 64, step_range) {
-            Ok(gpu) => {
-                // The primary GPU scores the archive, so it records replays.
+        let gpu = engine::gpu_engine(primary, 64, crate::gpu::DEFAULT_STEP_RANGE).with_context(|| {
+            format!(
+                "The game needs an NVIDIA GPU with the CUDA driver and NVRTC, and GPU {primary:?} did not open"
+            )
+        })?;
+        // The primary GPU scores the archive, so it records replays.
+        gpu.publish_replays();
+        let mut device = Device::new(Box::new(gpu), 180_000.0);
+        let name = primary.to_owned();
+        device.reopen = Some(Reopen {
+            open: Box::new(move || {
+                let gpu = engine::gpu_engine(&name, 64, crate::gpu::DEFAULT_STEP_RANGE)?;
                 gpu.publish_replays();
-                let mut device = Device::new(Box::new(gpu), DeviceKind::Gpu, 180_000.0);
-                let name = primary.to_owned();
-                device.reopen = Some(Reopen {
-                    open: Box::new(move || {
-                        let gpu = engine::gpu_engine(&name, 64, step_range)?;
-                        gpu.publish_replays();
-                        Ok(Box::new(gpu) as Box<dyn Engine>)
-                    }),
-                    backoff: [1u64, 4, 10].map(Duration::from_secs).to_vec(),
-                });
-                devices.push(device)
-            }
-            Err(error) => {
-                let message = format!("Primary GPU {primary:?} unavailable: {error:#}");
-                eprintln!("{message}; evaluating on the CPU");
-                startup_failure = Some(message);
-            }
-        }
+                Ok(Box::new(gpu) as Box<dyn Engine>)
+            }),
+            backoff: [1u64, 4, 10].map(Duration::from_secs).to_vec(),
+        });
+        let mut devices = vec![device];
         let extra = std::env::var("EVOLUTION_DEVICES").ok();
         for name in secondary_device_names(extra.as_deref()) {
             if primary.to_lowercase().contains(&name.to_lowercase()) {
                 continue;
             }
-            // RADV compile time explodes for the largest bodies; those stay on the
-            // primary GPU. Short dispatches let the desktop interleave its frames.
-            match engine::gpu_engine(name, 16, 16) {
-                Ok(engine) => {
-                    devices.push(Device::new(Box::new(engine), DeviceKind::Gpu, 40_000.0))
-                }
+            match engine::gpu_engine(name, 64, crate::gpu::DEFAULT_STEP_RANGE) {
+                Ok(engine) => devices.push(Device::new(Box::new(engine), 40_000.0)),
                 Err(err) => eprintln!("Evaluation device {name:?} unavailable: {err:#}"),
             }
         }
-        let threads = engine::cpu_threads();
-        if threads > 0 {
-            devices.push(Device::new(
-                Box::new(engine::cpu_engine(threads)?),
-                DeviceKind::Cpu,
-                30_000.0,
-            ));
-        } else {
-            // Without a separate CPU pool the CPU engine shares the general
-            // pool. When a GPU is available it stands by for GPU failure;
-            // without a GPU it evaluates the whole run.
-            let mut shared = Device::new(
-                Box::new(engine::cpu_engine_shared()?),
-                DeviceKind::Cpu,
-                30_000.0,
-            );
-            shared.reserve = !devices.is_empty();
-            devices.push(shared);
-        }
-        // A configured CPU pool also stays idle while any GPU is healthy.
-        // This keeps every score in a GPU run on the GPU path; CPU results
-        // enter only a CPU-only run or an explicit failover after GPU loss.
-        reserve_cpu_when_gpu_available(&mut devices);
-        let mut scheduler = Self::with_devices(devices, startup_failure);
+        let mut scheduler = Self::with_devices(devices);
         scheduler.simulate_loss_after = std::env::var("EVOLUTION_SIMULATE_GPU_LOSS")
             .ok()
             .and_then(|v| v.parse().ok());
         Ok(scheduler)
-    }
-
-    /// A scheduler with only the CPU engine, for machines without a GPU and
-    /// for tests.
-    pub fn cpu_only(threads: usize) -> Result<Self> {
-        Ok(Self::with_devices(
-            vec![Device::new(
-                Box::new(engine::cpu_engine(threads.max(1))?),
-                DeviceKind::Cpu,
-                30_000.0,
-            )],
-            None,
-        ))
     }
 
     pub fn names(&self) -> String {
@@ -381,11 +302,6 @@ impl Scheduler {
             .map(|d| d.engine.name())
             .collect::<Vec<_>>()
             .join(" + ")
-    }
-
-    /// Why the primary GPU was not used, for reporting once at startup.
-    pub fn startup_failure(&self) -> Option<&str> {
-        self.startup_failure.as_deref()
     }
 
     /// Units on engines plus work waiting for one. A failed engine that has
@@ -461,13 +377,6 @@ impl Scheduler {
         self.session += 1;
     }
 
-    /// Whether reserve engines stand by: another engine is healthy.
-    fn reserves_standing_by(&self) -> bool {
-        self.devices
-            .iter()
-            .any(|d| !d.reserve && d.failure.is_none())
-    }
-
     pub fn allocated_bytes(&self) -> u64 {
         self.devices
             .iter()
@@ -480,11 +389,7 @@ impl Scheduler {
     pub fn pump(&mut self) -> Result<()> {
         let now = Instant::now();
         if self.may_submit() {
-            let standby = self.reserves_standing_by();
             for index in 0..self.devices.len() {
-                if standby && self.devices[index].reserve {
-                    continue;
-                }
                 loop {
                     let device = &self.devices[index];
                     if device.failure.is_some() || device.engine.free_slots() == 0 {
@@ -570,8 +475,7 @@ impl Scheduler {
                     continue;
                 }
                 loop {
-                    if device.kind == DeviceKind::Gpu
-                        && self.simulate_loss_after == Some(self.collected_units)
+                    if self.simulate_loss_after == Some(self.collected_units)
                     {
                         self.simulate_loss_after = None;
                         device.failure = Some("simulated device loss".into());
@@ -670,79 +574,40 @@ impl Scheduler {
         }
     }
 
-    /// Retires every engine that reported a failure since the last pass. A
-    /// failed GPU hands its unfinished units to a healthy CPU engine, which
-    /// preserves their inputs and the order of their tickets. A failed CPU,
-    /// or a GPU with no CPU to fall back on, is terminal.
+    /// Handles every engine that reported a failure since the last pass. A
+    /// failed GPU is reopened and gets its unfinished units again. A GPU that
+    /// does not open again is terminal.
     fn retire_failed(&mut self) -> Result<()> {
-        let mut index = 0;
-        while index < self.devices.len() {
-            if self.devices[index].failure.is_some() {
-                if self.retire(index) {
-                    continue;
-                }
+        for index in 0..self.devices.len() {
+            if self.devices[index].failure.is_some() && !self.retire(index) {
                 let error = self.devices[index]
                     .failure
                     .clone()
                     .unwrap_or_else(|| "Evaluation device failed".into());
                 anyhow::bail!("{error}");
             }
-            index += 1;
         }
         Ok(())
     }
 
-    /// Removes one failed device, re-submitting a GPU's queued units to the
-    /// CPU. Returns false when the failure is terminal.
+    /// Reopens one failed device. Returns false when the failure is terminal.
     fn retire(&mut self, index: usize) -> bool {
         let reason = self.devices[index]
             .failure
             .clone()
             .unwrap_or_else(|| "evaluation failed".into());
-        if self.devices[index].kind == DeviceKind::Cpu {
-            return false;
-        }
-        // Units of an older session need no second engine.
+        // Units of an older session need no second run.
         let session = self.session;
         self.devices[index]
             .queued
             .retain(|unit| unit.session == session);
-        if self.devices[index].reopen.is_some() && self.recover(index, &reason) {
-            return true;
-        }
-        let Some(cpu) = self
-            .devices
-            .iter()
-            .position(|d| d.kind == DeviceKind::Cpu && d.failure.is_none())
-        else {
-            self.devices[index].failure =
-                Some(format!("{reason}; no CPU engine can retry its work"));
-            return false;
-        };
-        let units: Vec<QueuedUnit> = self.devices[index].queued.drain(..).collect();
-        let count = units.len();
-        for mut unit in units {
-            unit.retries = unit.retries.saturating_add(1);
-            match self.devices[cpu]
-                .engine
-                .submit_shared(Arc::clone(&unit.population), &unit.config)
-            {
-                Ok(ticket) => {
-                    self.devices[cpu]
-                        .queued
-                        .push_back(QueuedUnit { ticket, ..unit });
-                }
-                Err(error) => {
-                    let message = format!("{reason}; CPU retry failed: {error:#}");
-                    self.devices[cpu].failure = Some(message.clone());
-                    self.devices[index].failure = Some(message);
-                    return false;
-                }
+        if self.devices[index].reopen.is_some() {
+            if self.recover(index, &reason) {
+                return true;
             }
+            self.devices[index].failure = Some(format!("{reason}; the GPU could not be reopened"));
         }
-        self.devices.remove(index);
-        eprintln!("{reason}; retried {count} units on the CPU");
-        true
+        false
     }
 
     /// Developer hook: the GPU fails once, after `units` units of results were
@@ -760,7 +625,7 @@ impl Scheduler {
     /// waits (a little longer after each failed attempt), opens a new engine
     /// and submits the unfinished units again with their exact inputs, so
     /// they give the same results. Returns false when every attempt failed;
-    /// the units stay queued for the CPU.
+    /// the units stay queued.
     fn recover(&mut self, index: usize, reason: &str) -> bool {
         let Some(mut reopen) = self.devices[index].reopen.take() else {
             return false;
@@ -817,7 +682,7 @@ impl Scheduler {
             return true;
         }
         self.notices
-            .push("The GPU could not be reopened. Continuing on the CPU.".into());
+            .push("The GPU could not be reopened. Evolution stops.".into());
         self.devices[index].queued = units.into_iter().collect();
         false
     }
@@ -874,16 +739,6 @@ impl Scheduler {
         }
         Ok(out)
     }
-}
-
-/// Standard-trial metrics from the CPU engine, one per creature in order,
-/// for tests and tools that run without a scheduler.
-pub fn cpu_metrics(pop: &Population, cfg: &Config) -> Vec<EvaluationMetrics> {
-    crate::cpu_engine::evaluate(pop, cfg)
-        .iter()
-        .enumerate()
-        .map(|(index, result)| to_metrics(pop, index, result, cfg))
-        .collect()
 }
 
 /// Converts a raw kernel result to the archive's normalized metrics.

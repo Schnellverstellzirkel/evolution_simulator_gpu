@@ -15,8 +15,6 @@ use std::time::Duration;
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn the_cuda_kernel_feels_every_effect() {
-    // SAFETY: read when the engine opens, before any other thread runs.
-    unsafe { std::env::set_var("EVOLUTION_CUDA", "1") };
     let base = Config {
         population: 256,
         random_seed: false,

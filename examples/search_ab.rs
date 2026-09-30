@@ -238,9 +238,6 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
     cfg.validate()
         .with_context(|| format!("seed {seed} configuration"))?;
     let mut gpu = evolution_simulator::gpu::Gpu::new("RTX 4060")?;
-    if let Some(warning) = &gpu.startup_warning {
-        anyhow::bail!("the primary GPU did not open: {warning}");
-    }
     let mut experiment = Experiment::new(cfg).with_context(|| format!("seed {seed} experiment"))?;
     let mut best = f32::NAN;
     let mut top = Vec::new();

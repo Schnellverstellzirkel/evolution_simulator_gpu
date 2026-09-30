@@ -249,7 +249,7 @@ struct Playback {
     creature: Creature,
     config: Config,
     nodes: Vec<Node>,
-    /// Node positions after each step, from the CPU evaluation engine.
+    /// Node positions after each step, recorded by the scoring kernel.
     frames: Vec<Vec<[f32; 2]>>,
     tick: u32,
     accumulator: f32,
@@ -260,9 +260,6 @@ struct Playback {
     ending: Ending,
     /// The distance the engine scored for this very recording.
     distance: f32,
-    /// Muscle work per kilogram per meter (J/kg/m) of a CPU trial of this
-    /// creature. A diagnostic, never part of the score.
-    cost_of_transport: Option<f32>,
     /// Where the follow camera looks at each frame: the body's center of
     /// mass averaged over `CAMERA_WINDOW` seconds on either side. Every
     /// frame is recorded in advance, so the average cancels the swing of
@@ -277,6 +274,8 @@ struct Playback {
     forces: crate::replay_forces::Forces,
     /// A still first pose while the recording runs.
     preparing: bool,
+    /// A still first pose because the GPU did not record the replay.
+    unavailable: bool,
 }
 /// Half-width of the follow camera's average of the center of mass (s).
 const CAMERA_WINDOW: f32 = 1.0;
@@ -310,17 +309,22 @@ impl Playback {
     fn new(creature: Creature, config: Config) -> Self {
         Self::recorded(creature, config, Duration::from_secs(3))
     }
-    /// A replay that waits `patience` for the GPU's recording, then falls
-    /// back to the CPU.
+    /// A replay that waits `patience` for the GPU's recording. Without one
+    /// it holds the first pose and says the replay is unavailable.
     fn recorded(creature: Creature, config: Config, patience: Duration) -> Self {
         let mut normalized = creature.clone();
         crate::evolution::canonicalize_bone_order(&mut normalized);
-        // The engine that recorded the frames also decides when the trial
-        // ended and how far it got, so the replay shows exactly its score:
-        // the GPU that scores the archive, or the CPU in a CPU-only game.
-        let (frames, result, recorded_forces) =
-            crate::engine::replay_forces(&normalized, &config, patience);
-        Self::from_recording(normalized, config, frames, result, recorded_forces, true)
+        // The kernel that recorded the frames also decides when the trial
+        // ended and how far it got, so the replay shows exactly its score.
+        let Some((frames, result, recorded_forces)) =
+            crate::engine::replay(&normalized, &config, patience)
+        else {
+            let mut playback = Self::preparing(normalized, config);
+            playback.preparing = false;
+            playback.unavailable = true;
+            return playback;
+        };
+        Self::from_recording(normalized, config, frames, result, recorded_forces)
     }
     /// The creature's first pose, held still while its replay is recorded.
     fn preparing(creature: Creature, config: Config) -> Self {
@@ -333,7 +337,6 @@ impl Playback {
             vec![start],
             creature_kernel::GpuResult::default(),
             None,
-            false,
         );
         playback.preparing = true;
         playback
@@ -344,7 +347,6 @@ impl Playback {
         frames: Vec<Vec<[f32; 2]>>,
         result: creature_kernel::GpuResult,
         recorded_forces: Option<crate::replay_forces::Forces>,
-        transport: bool,
     ) -> Self {
         let nodes = physics::nodes(&normalized);
         let last_frame = frames.len().saturating_sub(1).min(u32::MAX as usize) as u32;
@@ -400,9 +402,6 @@ impl Playback {
             ending,
             distance: result.fitness,
             height,
-            cost_of_transport: transport
-                .then(|| crate::cpu_engine::transport_cost(&normalized, &config))
-                .flatten(),
             peak,
             forces,
             track,
@@ -415,6 +414,7 @@ impl Playback {
             frames,
             accumulator: 0.0,
             preparing: false,
+            unavailable: false,
         };
         playback.show();
         playback
@@ -2130,14 +2130,12 @@ impl App {
                         .strong(),
                 )
                 .on_hover_text(format!(
-                    "{} nodes, {} bones, {} muscles. Creature {}. {:.2} m is the distance this CPU playback reaches, and m/s its speed over the last fifth of a second. The GPU archive score comes from the GPU trial, and for an island record from its confirmation trial; CPU playback can differ and does not change that score.\nCost of transport: {} (muscle work per kilogram per meter in a CPU trial; lower is more efficient; a diagnostic, never part of the score).",
+                    "{} nodes, {} bones, {} muscles. Creature {}. {:.2} m is the distance this replay reaches, and m/s its speed over the last fifth of a second. The replay is the scoring kernel's own trial, so it shows the GPU score. An island record's archive score comes from its confirmation trial.",
                     p.nodes.len(),
                     p.creature.bones.len(),
                     p.creature.muscles.len(),
                     p.creature.id,
                     p.distance,
-                    p.cost_of_transport
-                        .map_or("n/a".to_owned(), |c| format!("{c:.2} J/kg/m"))
                 ));
             }
             if wide {
@@ -2545,6 +2543,8 @@ impl App {
             Some("Preparing your first population…")
         } else if self.playback.as_ref().is_some_and(|p| p.preparing) {
             Some("Preparing replay...")
+        } else if self.playback.as_ref().is_some_and(|p| p.unavailable) {
+            Some("The GPU did not record this replay")
         } else {
             None
         };
@@ -6713,18 +6713,6 @@ mod tests {
             GifDecoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap())).unwrap();
         let decoded = decoder.into_frames().collect_frames().unwrap();
         assert_eq!(decoded.len(), 3);
-        std::fs::remove_file(&path).ok();
-        std::fs::remove_dir(&dir).ok();
-    }
-    #[test]
-    fn gif_export_samples_a_recorded_trial() {
-        let playback = Playback::new(test_creature(), Config::default());
-        let dir = std::env::temp_dir().join(format!("evolution-gif-trial-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("trial.gif");
-        let written = export_creature_gif(&playback, &path).unwrap();
-        assert!((3..=GIF_MAX_FRAMES).contains(&written));
-        image::open(&path).unwrap();
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
     }

@@ -1,15 +1,36 @@
-//! Early screening (`physics::Screen`): at the screen time a standing
-//! creature below the bar stops like a fall, keeping its distance there, and
-//! enters no archive; survivors run the full trial unchanged.
+//! Early screening (`physics::Screen`) on the CUDA kernel: at the screen
+//! time a standing creature below the bar stops like a fall, keeping its
+//! distance there, and enters no archive; survivors run the full trial
+//! unchanged.
+//!
+//! Needs the RTX 4060 and is ignored by default. Run it with
+//!
+//!     cargo test --release --test screening -- --ignored
+#[path = "../examples/common/mod.rs"]
+mod common;
 use evolution_simulator::{
     config::Config,
-    cpu_engine,
     creature_kernel::GpuResult,
-    evolution,
+    engine::ThreadedEngine,
+    evolution::{self, Population},
     physics::{self, Screen},
     scheduler,
     storage::Experiment,
 };
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+/// The GPU engine all tests of this file share. It also records replays.
+fn gpu() -> MutexGuard<'static, ThreadedEngine> {
+    static GPU: OnceLock<Mutex<ThreadedEngine>> = OnceLock::new();
+    GPU.get_or_init(|| Mutex::new(common::open().expect("the GPU")))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Every creature's result on the GPU, in population order.
+fn evaluate(pop: &Population, cfg: &Config) -> Vec<GpuResult> {
+    common::score(&mut gpu(), pop, cfg).expect("GPU trials")
+}
 
 const SCREEN_SECONDS: f32 = 2.0;
 
@@ -45,16 +66,17 @@ fn median_bar(results: &[GpuResult]) -> f32 {
 }
 
 #[test]
+#[ignore = "needs the RTX 4060"]
 fn screened_creatures_end_at_the_screen_and_survivors_run_in_full() {
     let cfg = config(6.0);
     let pop = evolution::create(&cfg).unwrap();
     // No bar: every trial runs in full and records its screen distance.
-    let full = cpu_engine::evaluate(&pop, &screened(&cfg, f32::NEG_INFINITY));
+    let full = evaluate(&pop, &screened(&cfg, f32::NEG_INFINITY));
     assert!(full.iter().all(|r| r.screened == 0.0));
     let bar = median_bar(&full);
-    let short = cpu_engine::evaluate(&pop, &config(SCREEN_SECONDS));
+    let short = evaluate(&pop, &config(SCREEN_SECONDS));
     let screen_cfg = screened(&cfg, bar);
-    let results = cpu_engine::evaluate(&pop, &screen_cfg);
+    let results = evaluate(&pop, &screen_cfg);
     let mut stopped = 0;
     for (i, ((r, f), s)) in results.iter().zip(&full).zip(&short).enumerate() {
         assert_eq!(
@@ -94,19 +116,26 @@ fn screened_creatures_end_at_the_screen_and_survivors_run_in_full() {
 }
 
 #[test]
+#[ignore = "needs the RTX 4060"]
 fn replays_run_the_full_trial_even_under_a_screen() {
     let cfg = config(4.0);
     let pop = evolution::create(&cfg).unwrap();
-    let full = cpu_engine::evaluate(&pop, &cfg);
+    let full = evaluate(&pop, &cfg);
     let everyone_below = screened(&cfg, f32::INFINITY);
     for (i, expected) in full.iter().enumerate().take(4) {
-        let (_, replayed) = cpu_engine::replay(&pop.creature(i), &everyone_below);
+        let (_, replayed, _) = evolution_simulator::engine::replay(
+            &pop.creature(i),
+            &everyone_below,
+            std::time::Duration::from_secs(60),
+        )
+        .expect("a GPU replay");
         assert_eq!(replayed.screened, 0.0);
         assert_eq!(replayed.fitness.to_bits(), expected.fitness.to_bits());
     }
 }
 
 #[test]
+#[ignore = "needs the RTX 4060"]
 fn screened_creatures_enter_no_archive_and_the_bar_keeps_the_top_share() {
     let cfg = Config {
         population: 256,
@@ -131,7 +160,7 @@ fn screened_creatures_enter_no_archive_and_the_bar_keeps_the_top_share() {
         let mut first_block = None;
         experiment
             .run_generation(&mut |pop, cfg| {
-                let results = cpu_engine::evaluate(pop, cfg);
+                let results = evaluate(pop, cfg);
                 if cfg.fidelity.is_none() {
                     for (g, r) in pop.genomes.iter().zip(&results) {
                         if r.screened > 0.0 {
@@ -171,58 +200,8 @@ fn screened_creatures_enter_no_archive_and_the_bar_keeps_the_top_share() {
     }
 }
 
-/// Optional cross-engine screening diagnostic. Rounding can move creatures
-/// near the bar to opposite sides; this is not an acceptance gate for GPU
-/// scoring.
 #[test]
-#[ignore = "optional CPU/GPU diagnostic; not a physics acceptance gate"]
-fn gpu_cpu_diagnostic_screening() {
-    let cfg = Config {
-        population: 96,
-        duration: 3.0,
-        random_seed: false,
-        seed: 47,
-        ..Config::default()
-    };
-    let pop = evolution::create(&cfg).unwrap();
-    let screen = |bar| Config {
-        screen: Some(Screen { seconds: 1.0, bar }),
-        ..cfg.clone()
-    };
-    let recorded = cpu_engine::evaluate(&pop, &screen(f32::NEG_INFINITY));
-    let bar = median_bar(&recorded);
-    let screen_cfg = screen(bar);
-    let cpu = cpu_engine::evaluate(&pop, &screen_cfg);
-    let mut gpu = evolution_simulator::gpu::Gpu::new("RTX 4060").unwrap();
-    let indices: Vec<usize> = (0..cfg.population).collect();
-    let gpu = gpu
-        .sched
-        .as_mut()
-        .unwrap()
-        .evaluate(&pop, &indices, &screen_cfg)
-        .unwrap();
-    let mut screened = 0;
-    for (i, (g, c)) in gpu.iter().zip(&cpu).enumerate() {
-        if (recorded[i].screen_x - bar).abs() < 0.01 {
-            continue;
-        }
-        assert_eq!(
-            g.screened,
-            c.screened > 0.0,
-            "creature {i}: screen decision"
-        );
-        screened += usize::from(g.screened);
-        assert!(
-            (g.fitness - c.fitness).abs() < 0.05,
-            "creature {i}: GPU {} vs CPU {}",
-            g.fitness,
-            c.fitness
-        );
-    }
-    assert!(screened > 0, "the median bar must screen some creatures");
-}
-
-#[test]
+#[ignore = "needs the RTX 4060"]
 fn a_generation_without_a_bar_sets_one_after_a_quarter_of_its_results() {
     let cfg = Config {
         population: 256,
@@ -238,7 +217,7 @@ fn a_generation_without_a_bar_sets_one_after_a_quarter_of_its_results() {
     let mut distances: Vec<f32> = Vec::new();
     experiment
         .step(&mut |pop, cfg| {
-            let results = cpu_engine::evaluate(pop, cfg);
+            let results = evaluate(pop, cfg);
             if cfg.fidelity.is_none() {
                 distances.extend(results.iter().map(|r| r.screen_x));
             }

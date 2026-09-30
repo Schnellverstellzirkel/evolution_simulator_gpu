@@ -547,10 +547,7 @@ fn run(
     let mut champion: Option<Arc<(Creature, Config)>> = None;
     let mut champion_key: Option<(u64, u64)> = None;
     let mut lineage: Option<(u64, Vec<LineageStep>)> = None;
-    let mut status = gpu
-        .startup_warning
-        .clone()
-        .unwrap_or_else(|| "Create a population to begin".to_owned());
+    let mut status = "Create a population to begin".to_owned();
     let mut error = None;
     let mut last_publish = Instant::now() - Duration::from_secs(1);
     let mut changed = true;
@@ -1583,7 +1580,7 @@ mod tests {
     /// block sets island records again. The run must keep advancing
     /// generations.
     #[test]
-    #[ignore = "requires a Vulkan GPU"]
+    #[ignore = "requires the GPU"]
     fn a_world_change_mid_generation_keeps_generations_advancing() {
         let gpu = Gpu::new("RTX 4060").unwrap();
         let worker = Worker::spawn(gpu, eframe::egui::Context::default());
@@ -1651,7 +1648,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan GPU"]
+    #[ignore = "requires the GPU"]
     fn continuous_run_advances_generations() {
         let gpu = Gpu::new("RTX 4060").unwrap();
         let worker = Worker::spawn(gpu, eframe::egui::Context::default());
@@ -1683,7 +1680,7 @@ mod tests {
     /// The ring absorbs blocks in a fixed order, so two runs of one
     /// seed on one GPU agree in every generation's statistics.
     #[test]
-    #[ignore = "requires a Vulkan GPU"]
+    #[ignore = "requires the GPU"]
     fn two_continuous_runs_of_one_seed_agree() {
         let run = || {
             let gpu = Gpu::new("RTX 4060").unwrap();

@@ -69,38 +69,45 @@ impl Engine for FakeEngine {
     fn wait(&mut self, _timeout: Duration) {}
 }
 
-fn fake_device(name: &'static str, kind: DeviceKind, state: &Arc<Mutex<FakeState>>) -> Device {
+fn fake_device(name: &'static str, state: &Arc<Mutex<FakeState>>) -> Device {
     Device::new(
         Box::new(FakeEngine {
             name,
             state: Arc::clone(state),
         }),
-        kind,
         100.0,
     )
 }
 
 fn fake_scheduler() -> (Scheduler, Arc<Mutex<FakeState>>) {
     let state = Arc::new(Mutex::new(FakeState::default()));
-    let scheduler = Scheduler::with_devices(
-        vec![fake_device("fake evaluator", DeviceKind::Cpu, &state)],
-        None,
-    );
+    let scheduler = Scheduler::with_devices(vec![fake_device("fake gpu", &state)]);
     (scheduler, state)
 }
 
-/// One fake GPU and one fake CPU, for recovery tests that need both.
-fn mixed_scheduler() -> (Scheduler, Arc<Mutex<FakeState>>, Arc<Mutex<FakeState>>) {
-    let gpu = Arc::new(Mutex::new(FakeState::default()));
-    let cpu = Arc::new(Mutex::new(FakeState::default()));
-    let scheduler = Scheduler::with_devices(
-        vec![
-            fake_device("fake gpu", DeviceKind::Gpu, &gpu),
-            fake_device("fake cpu", DeviceKind::Cpu, &cpu),
-        ],
-        None,
-    );
-    (scheduler, gpu, cpu)
+/// Two fake GPUs, for failure tests that need a second engine.
+fn two_gpus() -> (Scheduler, Arc<Mutex<FakeState>>, Arc<Mutex<FakeState>>) {
+    let first = Arc::new(Mutex::new(FakeState::default()));
+    let second = Arc::new(Mutex::new(FakeState::default()));
+    let scheduler = Scheduler::with_devices(vec![
+        fake_device("first gpu", &first),
+        fake_device("second gpu", &second),
+    ]);
+    (scheduler, first, second)
+}
+
+/// A reopen hook that opens a fresh fake GPU on `state`.
+fn reopen_on(state: &Arc<Mutex<FakeState>>) -> Reopen {
+    let state = Arc::clone(state);
+    Reopen {
+        open: Box::new(move || {
+            Ok(Box::new(FakeEngine {
+                name: "reopened gpu",
+                state: Arc::clone(&state),
+            }) as Box<dyn Engine>)
+        }),
+        backoff: vec![Duration::ZERO; 3],
+    }
 }
 
 fn submission_config() -> Config {
@@ -342,7 +349,7 @@ fn a_world_change_retargets_only_waiting_work() {
 fn a_lost_gpu_is_reopened_and_gets_its_units_again() {
     let cfg = submission_config();
     let pop = crate::evolution::create(&cfg).unwrap();
-    let (mut scheduler, gpu, cpu) = mixed_scheduler();
+    let (mut scheduler, gpu) = fake_scheduler();
     let reopened = Arc::new(Mutex::new(FakeState::default()));
     let engine_state = Arc::clone(&reopened);
     let mut attempts = 0;
@@ -373,13 +380,8 @@ fn a_lost_gpu_is_reopened_and_gets_its_units_again() {
                 .collect::<Vec<_>>(),
         )
     };
-    let cpu_units = cpu.lock().unwrap().submissions.len();
     gpu.lock().unwrap().poll_failure = Some("device lost".into());
     assert!(scheduler.collect(Duration::ZERO).unwrap().is_empty());
-    assert!(
-        scheduler.devices.iter().any(|d| d.kind == DeviceKind::Gpu),
-        "the GPU must stay"
-    );
     assert_eq!(scheduler.devices[0].engine.name(), "reopened gpu");
     {
         let state = reopened.lock().unwrap();
@@ -392,11 +394,6 @@ fn a_lost_gpu_is_reopened_and_gets_its_units_again() {
             assert_eq!(again.config, cfg);
         }
     }
-    assert_eq!(
-        cpu.lock().unwrap().submissions.len(),
-        cpu_units,
-        "no work moves to the CPU"
-    );
     let notices = scheduler.take_notices();
     assert!(
         notices.iter().any(|n| n.contains("GPU is back")),
@@ -406,142 +403,60 @@ fn a_lost_gpu_is_reopened_and_gets_its_units_again() {
 }
 
 #[test]
-fn a_gpu_that_never_reopens_falls_back_to_the_cpu() {
+fn a_gpu_that_never_reopens_stops_evolution() {
     let cfg = submission_config();
     let pop = crate::evolution::create(&cfg).unwrap();
-    let (mut scheduler, gpu, cpu) = mixed_scheduler();
+    let (mut scheduler, gpu) = fake_scheduler();
     scheduler.devices[0].reopen = Some(Reopen {
         open: Box::new(|| anyhow::bail!("no device")),
         backoff: vec![Duration::ZERO; 3],
     });
     queue_halves(&mut scheduler, &pop, &cfg);
     scheduler.pump().unwrap();
-    let (gpu_units, cpu_units) = (
-        gpu.lock().unwrap().submissions.len(),
-        cpu.lock().unwrap().submissions.len(),
-    );
     gpu.lock().unwrap().poll_failure = Some("device lost".into());
-    scheduler.collect(Duration::ZERO).unwrap();
-    assert!(scheduler.devices.iter().all(|d| d.kind != DeviceKind::Gpu));
-    assert_eq!(cpu.lock().unwrap().submissions.len(), cpu_units + gpu_units);
-    let notices = scheduler.take_notices();
-    assert!(notices.iter().any(|n| n.contains("Continuing on the CPU")));
-}
-
-#[test]
-fn a_failed_gpu_retries_its_unfinished_units_on_the_cpu() {
-    let cfg = submission_config();
-    let pop = crate::evolution::create(&cfg).unwrap();
-    let (mut scheduler, gpu, cpu) = mixed_scheduler();
-    queue_halves(&mut scheduler, &pop, &cfg);
-    scheduler.pump().unwrap();
-    let (gpu_units, cpu_units, gpu_populations) = {
-        let gpu = gpu.lock().unwrap();
-        let cpu = cpu.lock().unwrap();
-        assert!(!gpu.submissions.is_empty(), "the GPU took no work");
-        assert!(!cpu.submissions.is_empty(), "the CPU took no work");
-        (
-            gpu.submissions.len(),
-            cpu.submissions.len(),
-            gpu.submissions
-                .iter()
-                .map(|s| Arc::clone(&s.population))
-                .collect::<Vec<_>>(),
-        )
-    };
-    // The GPU dies with every one of its units still unfinished.
-    gpu.lock().unwrap().poll_failure = Some("device lost".into());
-    assert!(scheduler.collect(Duration::ZERO).unwrap().is_empty());
-    assert!(
-        scheduler.devices.iter().all(|d| d.kind != DeviceKind::Gpu),
-        "the failed GPU must be retired"
-    );
-    {
-        let cpu = cpu.lock().unwrap();
-        assert_eq!(cpu.submissions.len(), cpu_units + gpu_units);
-        for (retried, original) in cpu.submissions[cpu_units..].iter().zip(&gpu_populations) {
-            assert!(
-                Arc::ptr_eq(&retried.population, original),
-                "the retried unit must keep the exact submitted creatures"
-            );
-            assert_eq!(retried.config, cfg);
-        }
+    for _ in 0..2 {
+        let error = scheduler
+            .collect(Duration::ZERO)
+            .expect_err("the lost GPU must stop evolution");
+        assert!(error.to_string().contains("device lost"), "{error}");
     }
-    assert!(
-        scheduler.devices[0]
-            .queued
-            .iter()
-            .skip(cpu_units)
-            .all(|unit| unit.retries == 1),
-        "moved units must carry their retry state"
-    );
-    complete_submissions(&cpu, 0, 3.0);
-    let mut seen: Vec<usize> = scheduler
-        .collect(Duration::ZERO)
-        .unwrap()
-        .into_iter()
-        .flat_map(|d| d.members)
-        .collect();
-    seen.sort_unstable();
-    assert_eq!(seen, vec![0, 1, 2, 3], "every creature must finish once");
-    assert_eq!(scheduler.in_flight(), 0);
+    assert!(scheduler.in_flight() > 0, "the failure must stay visible");
+    let notices = scheduler.take_notices();
+    assert!(notices.iter().any(|n| n.contains("could not be reopened")));
 }
 
 #[test]
-fn a_reserve_cpu_stands_by_while_the_gpu_works_and_takes_over_after() {
+fn a_failed_gpu_submission_runs_on_the_reopened_gpu() {
     let cfg = submission_config();
     let pop = crate::evolution::create(&cfg).unwrap();
-    let (mut scheduler, gpu, cpu) = mixed_scheduler();
-    reserve_cpu_when_gpu_available(&mut scheduler.devices);
-    assert!(scheduler.devices[1].reserve);
-    queue_halves(&mut scheduler, &pop, &cfg);
-    scheduler.pump().unwrap();
-    let gpu_units = gpu.lock().unwrap().submissions.len();
-    assert!(gpu_units > 0, "the GPU took no work");
-    assert!(
-        cpu.lock().unwrap().submissions.is_empty(),
-        "a reserve CPU must not take standard work beside a healthy GPU"
-    );
-    gpu.lock().unwrap().poll_failure = Some("device lost".into());
-    assert!(scheduler.collect(Duration::ZERO).unwrap().is_empty());
-    let seen = drain_all(&mut scheduler, &cpu);
-    assert_eq!(seen, vec![0, 1, 2, 3]);
-}
-
-#[test]
-fn a_failed_gpu_submission_keeps_its_creatures_for_the_cpu() {
-    let cfg = submission_config();
-    let pop = crate::evolution::create(&cfg).unwrap();
-    let (mut scheduler, gpu, cpu) = mixed_scheduler();
+    let (mut scheduler, gpu) = fake_scheduler();
+    let reopened = Arc::new(Mutex::new(FakeState::default()));
+    scheduler.devices[0].reopen = Some(reopen_on(&reopened));
     gpu.lock().unwrap().submit_failure = Some("device lost".into());
     queue_halves(&mut scheduler, &pop, &cfg);
     scheduler.pump().unwrap();
     assert_eq!(gpu.lock().unwrap().submissions.len(), 0);
-    assert_eq!(
-        cpu.lock().unwrap().submissions.len(),
-        1,
-        "the CPU must take the rejected unit"
-    );
     scheduler.collect(Duration::ZERO).unwrap();
-    assert!(scheduler.devices.iter().all(|d| d.kind != DeviceKind::Gpu));
-    let seen = drain_all(&mut scheduler, &cpu);
+    assert_eq!(scheduler.devices[0].engine.name(), "reopened gpu");
+    let seen = drain_all(&mut scheduler, &reopened);
     assert_eq!(seen, vec![0, 1, 2, 3], "every creature must finish once");
 }
 
 #[test]
-fn a_failed_cpu_is_terminal_and_delivers_completed_output_first() {
+fn a_gpu_that_cannot_reopen_is_terminal_and_delivers_completed_output_first() {
     let cfg = submission_config();
     let pop = crate::evolution::create(&cfg).unwrap();
-    let (mut scheduler, gpu, cpu) = mixed_scheduler();
+    let (mut scheduler, first, second) = two_gpus();
     queue_halves(&mut scheduler, &pop, &cfg);
     scheduler.pump().unwrap();
     let (ticket, count) = {
-        let gpu = gpu.lock().unwrap();
-        let submission = &gpu.submissions[0];
+        let first = first.lock().unwrap();
+        let submission = &first.submissions[0];
         (submission.ticket, submission.population.genomes.len())
     };
-    // One GPU unit completes; the CPU dies before returning anything.
-    gpu.lock().unwrap().results.push_back(Finished {
+    // One unit completes on the first GPU; the second dies before returning
+    // anything and has no way to reopen.
+    first.lock().unwrap().results.push_back(Finished {
         ticket,
         results: vec![
             GpuResult {
@@ -552,38 +467,29 @@ fn a_failed_cpu_is_terminal_and_delivers_completed_output_first() {
         ],
         busy_seconds: 0.5,
     });
-    cpu.lock().unwrap().poll_failure = Some("cpu lost".into());
+    second.lock().unwrap().poll_failure = Some("second lost".into());
     let completed = scheduler.collect(Duration::ZERO).unwrap();
     assert_eq!(
         completed.iter().map(|d| d.members.len()).sum::<usize>(),
         count,
-        "completed output must be delivered before the CPU error"
+        "completed output must be delivered before the GPU error"
     );
-    let submissions = cpu.lock().unwrap().submissions.len();
     for _ in 0..3 {
         let error = scheduler
             .collect(Duration::ZERO)
-            .expect_err("the CPU error must persist");
-        assert!(error.to_string().contains("cpu lost"));
+            .expect_err("the GPU error must persist");
+        assert!(error.to_string().contains("second lost"));
     }
-    assert_eq!(
-        cpu.lock().unwrap().submissions.len(),
-        submissions,
-        "a failed CPU must not be retried"
-    );
     assert!(scheduler.in_flight() > 0, "the failure must stay visible");
 }
 
 #[test]
-fn a_missing_primary_gpu_falls_back_to_the_cpu() {
-    // An invalid adapter name cannot open; the CPU keeps the session alive
-    // and reports why the GPU was skipped.
-    let scheduler = Scheduler::new("definitely not a vulkan adapter").unwrap();
-    assert!(scheduler.startup_failure().is_some());
-    assert!(
-        scheduler.devices.iter().any(|d| d.kind == DeviceKind::Cpu),
-        "the fallback must include a CPU engine"
-    );
+fn a_missing_primary_gpu_is_an_error() {
+    // An invalid device name cannot open, and there is no other engine.
+    let error = Scheduler::new("definitely not a gpu")
+        .err()
+        .expect("no scheduler without its GPU");
+    assert!(error.to_string().contains("NVIDIA"), "{error:#}");
 }
 
 #[test]
@@ -605,23 +511,4 @@ fn secondary_device_names_preserve_explicit_comma_separated_selection() {
         vec!["radeon"]
     );
     assert_eq!(secondary_device_names(Some(" , ")), Vec::<&str>::new());
-}
-
-#[test]
-fn evaluate_returns_the_cpu_engine_scores_in_order() {
-    let cfg = Config {
-        population: 24,
-        duration: 2.0,
-        random_seed: false,
-        ..Config::default()
-    };
-    let pop = crate::evolution::create(&cfg).unwrap();
-    let mut sched = Scheduler::cpu_only(2).unwrap();
-    let indices: Vec<usize> = (0..cfg.population).rev().collect();
-    let got = sched.evaluate(&pop, &indices, &cfg).unwrap();
-    let expected = crate::cpu_engine::evaluate(&pop, &cfg);
-    for (&i, metric) in indices.iter().zip(&got) {
-        assert_eq!(metric.fitness.to_bits(), expected[i].fitness.to_bits());
-    }
-    assert_eq!(sched.in_flight(), 0);
 }

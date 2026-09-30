@@ -1,7 +1,5 @@
 pub mod config;
 pub mod assets;
-pub mod cpu_engine;
-pub mod cpu_v2;
 pub mod creature_kernel;
 pub mod cuda_engine;
 pub mod dev_pause;
@@ -16,7 +14,6 @@ pub mod replay_forces;
 pub mod ring;
 pub mod scheduler;
 pub mod schematic;
-pub mod simd;
 pub mod storage;
 pub mod theme;
 pub mod ui;

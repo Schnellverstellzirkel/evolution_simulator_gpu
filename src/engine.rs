@@ -67,41 +67,22 @@ pub fn record_on_gpu(creature: &Creature, cfg: &Config, timeout: Duration) -> Op
     match answer.recv_timeout(timeout) {
         Ok(Ok(recording)) => Some(recording),
         Ok(Err(error)) => {
-            eprintln!("GPU replay failed, the CPU replays instead: {error}");
+            eprintln!("GPU replay failed: {error}");
             None
         }
         Err(_) => {
-            eprintln!("GPU replay did not answer in time; the CPU replays instead");
+            eprintln!("GPU replay did not answer in time");
             None
         }
     }
 }
 
-/// How long a replay waits for the GPU before the CPU replays instead. The
-/// GPU is busy with scoring at 3M creatures, and only its recording matches
-/// the creature's score, so the wait is long.
-const REPLAY_PATIENCE: Duration = Duration::from_secs(60);
-
 /// A creature's full trial for the replay viewer and the result scored in
-/// the same run, from the engine that scores the archive: the GPU when one
-/// evaluates, the CPU engine in a CPU-only game. A replay runs the full
-/// trial, without the early screen.
-pub fn replay(creature: &Creature, cfg: &Config) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
-    let (frames, result, _) = replay_forces(creature, cfg, REPLAY_PATIENCE);
-    (frames, result)
-}
-
-/// `replay` with the muscle energy, muscle force and ground contact forces
-/// the engine recorded with each frame, waiting up to `patience` for the GPU.
-pub fn replay_forces(
-    creature: &Creature,
-    cfg: &Config,
-    patience: Duration,
-) -> (
-    Vec<Vec<[f32; 2]>>,
-    GpuResult,
-    Option<crate::replay_forces::Forces>,
-) {
+/// the same run, recorded by the scoring kernel on the GPU that scores the
+/// archive, with the muscle energy, muscle force and ground contact forces it
+/// recorded with each frame. A replay runs the full trial, without the early
+/// screen. None when the GPU did not answer within `patience`.
+pub fn replay(creature: &Creature, cfg: &Config, patience: Duration) -> Option<Replay> {
     let cfg = Config {
         screen: None,
         ..cfg.clone()
@@ -109,14 +90,11 @@ pub fn replay_forces(
     // A fine trial records several frames per standard step; the viewer
     // plays standard steps, so it keeps one frame per standard step.
     let every = (cfg.fidelity().rate / crate::physics::Fidelity::standard().rate).max(1) as usize;
-    if let Some(recording) = record_on_gpu(creature, &cfg, patience) {
-        return thin(recording.frames, recording.result, recording.forces, every);
-    }
-    let (frames, result, forces) = crate::physics2::replay_forces(creature, &cfg);
-    thin(frames, result, Some(forces), every)
+    let recording = record_on_gpu(creature, &cfg, patience)?;
+    Some(thin(recording.frames, recording.result, recording.forces, every))
 }
 
-type Replay = (
+pub type Replay = (
     Vec<Vec<[f32; 2]>>,
     GpuResult,
     Option<crate::replay_forces::Forces>,
@@ -1048,52 +1026,24 @@ fn worker_budget(logical: usize) -> usize {
     (logical / 2).clamp(1, 8)
 }
 
-fn rayon_thread_count(
-    logical: usize,
-    requested: Option<usize>,
-    cpu_requested: Option<usize>,
-) -> usize {
-    let remaining = worker_budget(logical) - cpu_thread_count(logical, cpu_requested);
-    requested
-        .filter(|&n| n > 0)
-        .unwrap_or(remaining)
-        .min(remaining)
-}
-
-fn cpu_thread_count(logical: usize, requested: Option<usize>) -> usize {
-    // By default the CPU evaluates nothing beside the GPU: at 3M creatures a
-    // separate six-thread pool slowed the game (56k against 64k creatures/s
-    // end to end) because archive insertion and breeding lost their threads.
-    // Breeding and packing need a general worker even during CPU evaluation.
-    requested
-        .unwrap_or(0)
-        .min(worker_budget(logical).saturating_sub(1))
+fn rayon_thread_count(logical: usize, requested: Option<usize>) -> usize {
+    let budget = worker_budget(logical);
+    requested.filter(|&n| n > 0).unwrap_or(budget).min(budget)
 }
 
 fn logical_cpus() -> usize {
     std::thread::available_parallelism().map_or(2, usize::from)
 }
 
-fn thread_override(name: &str) -> Option<usize> {
-    std::env::var(name).ok().and_then(|v| v.parse().ok())
-}
-
-/// Breeding and general worker count after reserving the CPU evaluation workers.
-/// Both pools share at most eight threads and half the logical CPUs.
-/// `RAYON_NUM_THREADS` can reduce, but cannot exceed, the remaining budget.
+/// General worker count (archive insertion, breeding, packing): half the
+/// logical CPUs, at most eight. `RAYON_NUM_THREADS` can reduce it.
 pub fn rayon_threads() -> usize {
     rayon_thread_count(
         logical_cpus(),
-        thread_override("RAYON_NUM_THREADS"),
-        thread_override("EVOLUTION_CPU_THREADS"),
+        std::env::var("RAYON_NUM_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok()),
     )
-}
-
-/// Evaluation workers, defaulting to six while leaving one general worker.
-/// `EVOLUTION_CPU_THREADS=0` or a one-worker budget disables the scheduler's CPU
-/// engine, leaving the general pool available for breeding and packing.
-pub fn cpu_threads() -> usize {
-    cpu_thread_count(logical_cpus(), thread_override("EVOLUTION_CPU_THREADS"))
 }
 
 /// Best-effort worker priority reduction so evaluation yields to the desktop.
@@ -1118,97 +1068,6 @@ pub fn lower_thread_priority() {
             set_thread_priority(get_current_thread(), THREAD_PRIORITY_LOWEST);
         }
     }
-}
-
-/// A CPU engine that evaluates on the general Rayon pool instead of starting
-/// its own. Used when the primary GPU cannot open and no separate CPU
-/// evaluation pool is configured: evaluation then shares the breeding pool.
-pub fn cpu_engine_shared() -> Result<ThreadedEngine> {
-    let threads = rayon::current_num_threads();
-    let (jobs, job_rx) = mpsc::channel::<(u64, Arc<Population>, Config)>();
-    let (done_tx, done) = mpsc::channel();
-    let thread = std::thread::Builder::new()
-        .name("cpu-eval-shared".into())
-        .spawn(move || {
-            lower_thread_priority();
-            for (ticket, unit, cfg) in job_rx {
-                let started = Instant::now();
-                let results = crate::cpu_engine::evaluate(&unit, &cfg);
-                let message = Finished {
-                    ticket,
-                    results,
-                    busy_seconds: started.elapsed().as_secs_f64(),
-                };
-                if done_tx.send(Ok(message)).is_err() {
-                    break;
-                }
-            }
-        })
-        .context("shared CPU evaluation dispatcher")?;
-    Ok(ThreadedEngine {
-        name: format!(
-            "CPU (general pool, {threads} threads, {}-lane SIMD)",
-            crate::simd::LANES
-        ),
-        max_nodes: 64,
-        depth: 2,
-        jobs: Some(jobs),
-        done,
-        thread: Some(thread),
-        queued: VecDeque::new(),
-        ready: VecDeque::new(),
-        failure: None,
-        next_ticket: 0,
-        allocated: Default::default(),
-        replays: None,
-    })
-}
-
-/// Starts a CPU engine on low-priority threads, leaving one general worker in
-/// the shared budget. Explicit CPU-only callers can still run one evaluation
-/// worker when the budget is one; the scheduler disables that extra pool.
-pub fn cpu_engine(threads: usize) -> Result<ThreadedEngine> {
-    let threads = cpu_thread_count(logical_cpus(), Some(threads)).max(1);
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .thread_name(|i| format!("cpu-eval-{i}"))
-        // Evaluation yields to the UI, the compositor, and breeding.
-        .start_handler(|_| lower_thread_priority())
-        .build()
-        .context("CPU evaluation thread pool")?;
-    let (jobs, job_rx) = mpsc::channel::<(u64, Arc<Population>, Config)>();
-    let (done_tx, done) = mpsc::channel();
-    let thread = std::thread::Builder::new()
-        .name("cpu-eval-dispatch".into())
-        .spawn(move || {
-            for (ticket, unit, cfg) in job_rx {
-                let started = Instant::now();
-                let results = pool.install(|| crate::cpu_engine::evaluate(&unit, &cfg));
-                let message = Finished {
-                    ticket,
-                    results,
-                    busy_seconds: started.elapsed().as_secs_f64(),
-                };
-                if done_tx.send(Ok(message)).is_err() {
-                    break;
-                }
-            }
-        })
-        .context("CPU evaluation dispatcher")?;
-    Ok(ThreadedEngine {
-        name: format!("CPU ({threads} threads, {}-lane SIMD)", crate::simd::LANES),
-        max_nodes: 64,
-        depth: 2,
-        jobs: Some(jobs),
-        done,
-        thread: Some(thread),
-        queued: VecDeque::new(),
-        ready: VecDeque::new(),
-        failure: None,
-        next_ticket: 0,
-        allocated: Default::default(),
-        replays: None,
-    })
 }
 
 #[cfg(test)]
@@ -1300,27 +1159,6 @@ mod tests {
         assert_eq!(received_ticket, ticket);
         assert_eq!(received_unit.nodes.as_ptr(), node_storage);
         assert_eq!(received_unit.nodes[0].x, 1.25);
-    }
-
-    #[test]
-    fn shared_cpu_engine_evaluates_units_on_the_general_pool() {
-        let mut engine = cpu_engine_shared().unwrap();
-        let cfg = Config {
-            population: 4,
-            duration: 0.1,
-            random_seed: false,
-            ..Config::default()
-        };
-        let pop = Arc::new(crate::evolution::create(&cfg).unwrap());
-        let ticket = engine.submit_shared(Arc::clone(&pop), &cfg).unwrap();
-        let done = loop {
-            if let Some(done) = engine.poll().unwrap() {
-                break done;
-            }
-            engine.wait(Duration::from_millis(20));
-        };
-        assert_eq!(done.ticket, ticket);
-        assert_eq!(done.results.len(), cfg.population);
     }
 
     #[test]
@@ -1825,42 +1663,12 @@ mod tests {
     }
 
     #[test]
-    fn worker_defaults_leave_half_the_machine_free() {
-        for (logical, rayon, cpu) in [(1, 1, 0), (3, 1, 0), (8, 4, 0), (16, 8, 0), (64, 8, 0)] {
-            assert_eq!(rayon_thread_count(logical, None, None), rayon);
-            assert_eq!(cpu_thread_count(logical, None), cpu);
+    fn general_workers_take_half_the_machine_at_most_eight() {
+        for (logical, workers) in [(1, 1), (3, 1), (8, 4), (16, 8), (64, 8)] {
+            assert_eq!(rayon_thread_count(logical, None), workers);
         }
-    }
-
-    #[test]
-    fn thread_overrides_respect_the_desktop_budget() {
-        assert_eq!(rayon_thread_count(16, Some(3), Some(6)), 2);
-        assert_eq!(rayon_thread_count(16, Some(0), None), 8);
-        assert_eq!(rayon_thread_count(16, Some(usize::MAX), None), 8);
-        assert_eq!(rayon_thread_count(16, None, Some(0)), 8);
-        assert_eq!(rayon_thread_count(16, Some(3), Some(0)), 3);
-        assert_eq!(rayon_thread_count(16, Some(3), Some(2)), 3);
-        assert_eq!(cpu_thread_count(16, Some(0)), 0);
-        assert_eq!(cpu_thread_count(16, Some(2)), 2);
-        assert_eq!(cpu_thread_count(8, Some(6)), 3);
-        assert_eq!(cpu_thread_count(16, Some(usize::MAX)), 7);
-        assert_eq!(cpu_thread_count(1, Some(6)), 0);
-    }
-
-    #[test]
-    fn concurrent_worker_pools_share_one_budget() {
-        for logical in [1, 2, 3, 4, 8, 12, 16, 32, 64] {
-            for cpu_request in [None, Some(0), Some(1), Some(6), Some(usize::MAX)] {
-                for rayon_request in [None, Some(0), Some(1), Some(8), Some(usize::MAX)] {
-                    let cpu = cpu_thread_count(logical, cpu_request);
-                    let rayon = rayon_thread_count(logical, rayon_request, cpu_request);
-                    assert!(rayon >= 1, "general workers must make progress");
-                    assert!(
-                        cpu + rayon <= 8 && cpu + rayon <= (logical / 2).max(1),
-                        "{logical} logical CPUs: {cpu} evaluation + {rayon} general workers"
-                    );
-                }
-            }
-        }
+        assert_eq!(rayon_thread_count(16, Some(3)), 3);
+        assert_eq!(rayon_thread_count(16, Some(0)), 8);
+        assert_eq!(rayon_thread_count(16, Some(usize::MAX)), 8);
     }
 }

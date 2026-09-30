@@ -1,6 +1,5 @@
 //! Evaluation front end. All creature evaluation runs through the scheduler,
-//! which routes work to Vulkan GPUs and keeps CPU evaluation for CPU-only runs
-//! or failover after GPU loss.
+//! which routes work to the CUDA engines of the NVIDIA GPUs.
 use crate::{config::Config, evolution::Population, qd::EvaluationMetrics, scheduler::Scheduler};
 use anyhow::{Result, ensure};
 
@@ -12,21 +11,17 @@ pub struct Gpu {
     pub name: String,
     pub allocated_bytes: u64,
     pub sched: Option<Scheduler>,
-    /// Why the primary GPU was not used, shown once when a session starts.
-    pub startup_warning: Option<String>,
 }
 
 impl Gpu {
-    /// Opens the named primary GPU plus the other evaluation engines. A
-    /// primary that cannot open falls back to the CPU instead of failing.
+    /// Opens the named primary GPU plus the other evaluation engines. Fails
+    /// when the primary GPU does not open.
     pub fn new(name: &str) -> Result<Self> {
         let sched = Scheduler::new(name)?;
-        let startup_warning = sched.startup_failure().map(str::to_owned);
         Ok(Self {
             name: sched.names(),
             allocated_bytes: 0,
             sched: Some(sched),
-            startup_warning,
         })
     }
     /// Current evaluation backends, including changes after device recovery.

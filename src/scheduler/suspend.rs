@@ -43,8 +43,7 @@ impl Scheduler {
             return false;
         }
         for (index, device) in self.devices.iter_mut().enumerate() {
-            if device.kind == DeviceKind::Gpu
-                && device.reopen.is_some()
+            if device.reopen.is_some()
                 && device.failure.is_none()
                 && !self.suspension.closed.contains(&index)
             {
@@ -59,7 +58,7 @@ impl Scheduler {
 
     /// Ends a suspension: opens the closed GPUs again and lets work flow. A
     /// GPU that does not open is marked failed, so the usual recovery tries
-    /// again and, failing that, moves its work to the CPU.
+    /// again.
     pub fn resume(&mut self) {
         self.suspension.active = false;
         for index in std::mem::take(&mut self.suspension.closed) {
