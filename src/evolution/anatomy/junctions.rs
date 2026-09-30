@@ -612,7 +612,14 @@ fn joint_and_stop(c: &Creature, rng: &mut Rng) -> Option<(usize, f32)> {
         .collect();
     let j = *joints.get(rng.index(joints.len().max(1)))?;
     let b = c.bones[j];
-    Some((j, if rng.unit() < 0.5 { b.min_angle } else { b.max_angle }))
+    Some((
+        j,
+        if rng.unit() < 0.5 {
+            b.min_angle
+        } else {
+            b.max_angle
+        },
+    ))
 }
 
 /// Starts a joint near one of its stops and measures its range from there, so
@@ -646,6 +653,10 @@ pub(crate) fn brace_joint(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &
     };
     turn_branch(c, j, stop);
     let flex = rng.range(0.03, 0.2);
-    (c.bones[j].min_angle, c.bones[j].max_angle) = if stop > 0.0 { (-flex, 0.0) } else { (0.0, flex) };
+    (c.bones[j].min_angle, c.bones[j].max_angle) = if stop > 0.0 {
+        (-flex, 0.0)
+    } else {
+        (0.0, flex)
+    };
     true
 }

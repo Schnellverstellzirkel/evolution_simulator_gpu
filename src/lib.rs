@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod bounded;
 pub mod config;
 pub mod creature_kernel;
 pub mod cuda_engine;

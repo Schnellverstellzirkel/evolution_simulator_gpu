@@ -306,8 +306,8 @@ fn breaking_chain(variant: usize) -> evolution::Creature {
         })
         .collect();
     Creature {
-        nodes,
-        bones,
+        nodes: nodes.into(),
+        bones: bones.into(),
         muscles,
         id: variant as u64,
     }

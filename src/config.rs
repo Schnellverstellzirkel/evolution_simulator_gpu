@@ -507,10 +507,12 @@ impl Config {
             "Node friction bounds must be ordered within 0–1"
         );
         ensure!(
-            (3..=64).contains(&self.max_nodes)
-                && (3..=256).contains(&self.max_muscles)
+            (3..=crate::evolution::MAX_NODES).contains(&self.max_nodes)
+                && (3..=crate::evolution::MAX_MUSCLES).contains(&self.max_muscles)
                 && self.max_muscles >= self.max_nodes,
-            "Body limits: 3–64 nodes; at least as many muscles, up to 256"
+            "Body limits: 3 to {} nodes; at least as many muscles, up to {}",
+            crate::evolution::MAX_NODES,
+            crate::evolution::MAX_MUSCLES
         );
         ensure!(
             (32..=6144).contains(&self.gpu_budget_mib),

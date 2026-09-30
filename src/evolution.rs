@@ -1,3 +1,4 @@
+pub use crate::bounded::Bounded;
 use crate::config::Config;
 use crate::qd::{self, CmaEmitter, Emitter, QdArchive};
 use anyhow::{Result, ensure};
@@ -156,7 +157,7 @@ fn place_organs(c: &mut Creature) {
 }
 /// Adds a light organ to a bone that can hold one, or removes an organ.
 fn change_organ(creature: &mut Creature, rng: &mut Rng) -> bool {
-    let with: Vec<usize> = (0..creature.bones.len())
+    let with: Bounded<usize, MAX_NODES> = (0..creature.bones.len())
         .filter(|&i| creature.bones[i].organ_mass > 0.0)
         .collect();
     if !with.is_empty() && rng.unit() < 0.3 {
@@ -166,7 +167,7 @@ fn change_organ(creature: &mut Creature, rng: &mut Rng) -> bool {
         return true;
     }
     let center = organ_center(&creature.nodes);
-    let free: Vec<(usize, (f32, f32))> = (0..creature.bones.len())
+    let free: Bounded<(usize, (f32, f32)), MAX_NODES> = (0..creature.bones.len())
         .filter(|&i| creature.bones[i].organ_mass <= 0.0)
         .filter_map(|i| organ_range(&creature.bones[i], &creature.nodes, center).map(|r| (i, r)))
         .collect();
@@ -226,11 +227,20 @@ pub struct Genome {
     pub muscle_count: usize,
     pub id: u64,
 }
+/// Most nodes a body may have (`Config::max_nodes` is at most this).
+pub const MAX_NODES: usize = 32;
+/// Most muscles a body may have (`Config::max_muscles` is at most this).
+pub const MAX_MUSCLES: usize = 96;
+pub type Nodes = Bounded<NodeGene, MAX_NODES>;
+pub type Bones = Bounded<Bone, MAX_NODES>;
+pub type Muscles = Bounded<Muscle, MAX_MUSCLES>;
+/// A body's genes, held inline in bounded arrays: a creature is about 6.4 KB
+/// and breeding one never allocates.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Creature {
-    pub nodes: Vec<NodeGene>,
-    pub bones: Vec<Bone>,
-    pub muscles: Vec<Muscle>,
+    pub nodes: Nodes,
+    pub bones: Bones,
+    pub muscles: Muscles,
     pub id: u64,
 }
 /// Splits `all` into consecutive parts of the given sizes.
@@ -284,9 +294,11 @@ impl Population {
     pub fn creature(&self, index: usize) -> Creature {
         let g = &self.genomes[index];
         Creature {
-            nodes: self.nodes[g.node_start..g.node_start + g.node_count].to_vec(),
-            bones: self.bones[g.bone_start..g.bone_start + g.bone_count].to_vec(),
-            muscles: self.muscles[g.muscle_start..g.muscle_start + g.muscle_count].to_vec(),
+            nodes: Bounded::from_slice(&self.nodes[g.node_start..g.node_start + g.node_count]),
+            bones: Bounded::from_slice(&self.bones[g.bone_start..g.bone_start + g.bone_count]),
+            muscles: Bounded::from_slice(
+                &self.muscles[g.muscle_start..g.muscle_start + g.muscle_count],
+            ),
             id: g.id,
         }
     }
@@ -642,7 +654,7 @@ impl Population {
 }
 pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
     let node_count = creature.nodes.len();
-    if !(1..=64).contains(&node_count) || creature.bones.len() != node_count - 1 {
+    if !(1..=MAX_NODES).contains(&node_count) || creature.bones.len() != node_count - 1 {
         return false;
     }
     let mut ordered_nodes = 1u64;
@@ -663,28 +675,34 @@ pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
     if already_ordered && ordered_nodes.count_ones() as usize == node_count {
         return true;
     }
-    let mut adjacency = vec![Vec::<(usize, usize)>::new(); node_count];
-    for (index, bone) in creature.bones.iter().enumerate() {
-        let a = bone.a as usize;
-        let b = bone.b as usize;
-        if a >= node_count || b >= node_count || a == b {
-            return false;
-        }
-        adjacency[a].push((b, index));
-        adjacency[b].push((a, index));
+    if creature.bones.iter().any(|bone| {
+        let (a, b) = (bone.a as usize, bone.b as usize);
+        a >= node_count || b >= node_count || a == b
+    }) {
+        return false;
     }
-    let mut visited = [false; 64];
-    let mut queue = [0usize; 64];
+    let mut visited = [false; MAX_NODES];
+    let mut queue = [0usize; MAX_NODES];
     let mut head = 0;
     let mut tail = 1;
-    let mut ordered = Vec::with_capacity(creature.bones.len());
-    let mut remap = vec![usize::MAX; creature.bones.len()];
-    let mut reversed = vec![false; creature.bones.len()];
+    let mut ordered = Bones::new();
+    let mut remap = [usize::MAX; MAX_NODES];
+    let mut reversed = [false; MAX_NODES];
     visited[0] = true;
     while head < tail {
         let parent = queue[head];
         head += 1;
-        for &(child, old_index) in &adjacency[parent] {
+        // The parent's bones in bone order: the order an adjacency list
+        // built bone by bone would hold them in.
+        for old_index in 0..creature.bones.len() {
+            let bone = creature.bones[old_index];
+            let child = if bone.a as usize == parent {
+                bone.b as usize
+            } else if bone.b as usize == parent {
+                bone.a as usize
+            } else {
+                continue;
+            };
             if visited[child] {
                 continue;
             }
@@ -709,9 +727,10 @@ pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
     if tail != node_count || ordered.len() != creature.bones.len() {
         return false;
     }
+    let bones = creature.bones.len();
     if creature.muscles.iter().any(|muscle| {
         [muscle.bone_a, muscle.bone_b].iter().any(|bone| {
-            remap
+            remap[..bones]
                 .get(*bone as usize)
                 .is_none_or(|index| *index == usize::MAX)
         })
@@ -785,24 +804,13 @@ pub(crate) fn normalize_bone_lengths(c: &mut Creature) {
 }
 fn align_nodes_with_bones(c: &mut Creature) {
     // The starting positions are needed while the new ones are written in
-    // place. Bodies are at most 64 nodes, so the common case copies onto the
-    // stack instead of cloning the node vector.
-    let stack = (c.nodes.len() <= 64).then(|| {
-        let mut flat = [0.0f32; 128];
-        for (index, node) in c.nodes.iter().enumerate() {
-            flat[2 * index] = node.x;
-            flat[2 * index + 1] = node.y;
-        }
-        flat
-    });
-    let heap = stack.is_none().then(|| c.nodes.clone());
-    let original = |index: usize| -> (f32, f32) {
-        match (&stack, &heap) {
-            (Some(flat), _) => (flat[2 * index], flat[2 * index + 1]),
-            (_, Some(nodes)) => (nodes[index].x, nodes[index].y),
-            _ => unreachable!("one coordinate source"),
-        }
-    };
+    // place, so they are copied onto the stack first.
+    let mut flat = [0.0f32; 2 * MAX_NODES];
+    for (index, node) in c.nodes.iter().enumerate() {
+        flat[2 * index] = node.x;
+        flat[2 * index + 1] = node.y;
+    }
+    let original = |index: usize| -> (f32, f32) { (flat[2 * index], flat[2 * index + 1]) };
     for bone in &c.bones {
         let a = bone.a as usize;
         let b = bone.b as usize;
@@ -902,7 +910,7 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
         node.diameter = node.diameter.clamp(cfg.min_size, cfg.max_size);
         node.friction = node.friction.clamp(cfg.min_friction, cfg.max_friction);
     }
-    let node_count = c.nodes.len().min(64);
+    let node_count = c.nodes.len();
     // Incremental connectivity over the <= 64 nodes: accepted bones always
     // join two components, so the union-find answers the reachability test
     // that a per-candidate graph walk used to run.
@@ -1071,8 +1079,8 @@ fn random_creature_from(cfg: &Config, rng: &mut Rng) -> Creature {
                 friction: rng.range(cfg.min_friction, cfg.max_friction),
             })
             .collect(),
-        bones: Vec::with_capacity(n - 1),
-        muscles: vec![],
+        bones: Bones::new(),
+        muscles: Muscles::new(),
         id: 0,
     };
     for i in 0..n - 1 {
@@ -1325,7 +1333,7 @@ fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
             .filter(|b| b.a == node || b.b == node)
             .count()
     };
-    let leaves: Vec<usize> = (0..creature.bones.len())
+    let leaves: Bounded<usize, MAX_NODES> = (0..creature.bones.len())
         .filter(|&i| degree(creature.bones[i].b) == 1 || degree(creature.bones[i].a) == 1)
         .collect();
     if leaves.is_empty() {
@@ -1338,7 +1346,7 @@ fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
     } else {
         (bone.b, bone.a)
     };
-    let attached: Vec<Muscle> = creature
+    let attached: Muscles = creature
         .muscles
         .iter()
         .filter(|m| m.bone_a as usize == limb || m.bone_b as usize == limb)
@@ -1559,7 +1567,7 @@ fn structural_mutation_from(
     // An operator that does not fit this body leaves it unchanged; try
     // another, a few times.
     // Each shared group takes one slot, drawn after the others.
-    let groups: Vec<&Vec<usize>> = [&extra.shared, &extra.controller]
+    let groups: Bounded<&Vec<usize>, 2> = [&extra.shared, &extra.controller]
         .into_iter()
         .filter(|group| !group.is_empty())
         .collect();
@@ -1696,7 +1704,7 @@ fn split_bone(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
     {
         return false;
     }
-    let eligible: Vec<usize> = creature
+    let eligible: Bounded<usize, MAX_NODES> = creature
         .bones
         .iter()
         .enumerate()
@@ -1857,9 +1865,10 @@ mod tests {
                     diameter: 0.08,
                     friction: 0.5,
                 },
-            ],
-            bones: vec![Bone::new(0, 1, 9.6)],
-            muscles: vec![],
+            ]
+            .into(),
+            bones: vec![Bone::new(0, 1, 9.6)].into(),
+            muscles: vec![].into(),
             id: 0,
         };
         normalize_bone_lengths(&mut creature);
@@ -1892,9 +1901,10 @@ mod tests {
                     diameter: 0.03,
                     friction: 0.2,
                 },
-            ],
-            bones: vec![Bone::new(0, 1, 2.0), Bone::new(1, 2, 2.0)],
-            muscles: vec![],
+            ]
+            .into(),
+            bones: vec![Bone::new(0, 1, 2.0), Bone::new(1, 2, 2.0)].into(),
+            muscles: vec![].into(),
             id: 0,
         };
         repair(&mut creature, &cfg, &mut Rng::new(42, 0, 0));
@@ -1950,8 +1960,8 @@ mod tests {
                 },
             ];
             let mut creature = Creature {
-                nodes,
-                bones: vec![Bone::new(0, 1, 1.0), Bone::new(1, 2, 1.0)],
+                nodes: nodes.into(),
+                bones: vec![Bone::new(0, 1, 1.0), Bone::new(1, 2, 1.0)].into(),
                 muscles: vec![
                     Muscle {
                         bone_a: 0,
@@ -1983,7 +1993,8 @@ mod tests {
                         reset: 0.0,
                         tendon: 0.0,
                     },
-                ],
+                ]
+                .into(),
                 id: 1,
             };
             let old_points: Vec<_> = creature
@@ -2030,7 +2041,8 @@ mod tests {
                 Bone::new(2, 3, 1.0),
                 Bone::new(1, 0, 1.0),
                 Bone::new(2, 1, 1.0),
-            ],
+            ]
+            .into(),
             muscles: vec![Muscle {
                 bone_a: 0,
                 bone_b: 1,
@@ -2045,7 +2057,8 @@ mod tests {
                 sensor: 255,
                 reset: 0.0,
                 tendon: 0.0,
-            }],
+            }]
+            .into(),
             id: 1,
         };
         let before = [

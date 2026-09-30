@@ -6601,8 +6601,8 @@ mod tests {
                     diameter: 0.2,
                     friction: 0.8,
                 },
-            ],
-            bones: vec![Bone::new(0, 1, 0.5), Bone::new(1, 2, 0.5)],
+            ].into(),
+            bones: vec![Bone::new(0, 1, 0.5), Bone::new(1, 2, 0.5)].into(),
             muscles: vec![Muscle {
                 bone_a: 0,
                 bone_b: 1,
@@ -6617,7 +6617,7 @@ mod tests {
                 sensor: crate::evolution::NO_SENSOR,
                 reset: 0.0,
                 tendon: 0.0,
-            }],
+            }].into(),
             id: 7,
         }
     }
