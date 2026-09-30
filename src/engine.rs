@@ -1,4 +1,4 @@
-//! Common interface for every evaluation device (GPUs through Vulkan, CPU SIMD).
+//! Common interface for the evaluation devices: NVIDIA GPUs through CUDA.
 //!
 //! An engine accepts units of creatures, evaluates them asynchronously on its
 //! own thread, and returns raw per-creature results in unit order. Callers
@@ -9,7 +9,6 @@ use crate::{
     creature_kernel::{self, GpuResult},
     cuda_engine::CudaEngine,
     evolution::{Creature, Population},
-    vk_engine::{Completed, VkEngine},
 };
 use anyhow::{Context, Result};
 use std::{
@@ -274,7 +273,7 @@ impl Engine for ThreadedEngine {
 
 impl Drop for ThreadedEngine {
     fn drop(&mut self) {
-        // Join before the process tears down Vulkan and the thread pools.
+        // Join before the process tears down CUDA and the thread pools.
         self.jobs.take();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -282,146 +281,74 @@ impl Drop for ThreadedEngine {
     }
 }
 
-/// A unit on its way through the trial segments of `segment_ends`.
-struct SegmentedUnit {
-    ticket: u64,
-    /// Final results by unit position, filled as creatures finish.
-    results: Vec<GpuResult>,
-    ends: Vec<u32>,
-    /// Index into `ends` of the segment that runs next.
-    segment: usize,
-    cfg: Config,
-    busy: f64,
-    /// The creatures still running, packed for the next segment.
-    batches: Vec<creature_kernel::LaneBatch>,
+/// Results of one completed submission: per batch, the slice positions, the
+/// population indices, and the raw GPU results.
+pub struct Completed {
+    pub ticket: u64,
+    pub batches: Vec<(Vec<usize>, Vec<usize>, Vec<GpuResult>)>,
+    /// For a recording (`CudaEngine::record`): node positions as
+    /// `[creature][frame][node]`, with the batch's node stride.
+    pub frames: Option<Vec<[f32; 2]>>,
+    pub gpu_seconds: f64,
 }
 
-/// Ticks at which a GPU trial pauses to drop fallen creatures, ending with
-/// the trial's last tick. A fall ends a trial, so every step a fallen
-/// creature would take after it is wasted; at a segment boundary the others
-/// are repacked into dense warps. The pauses come 2 s and 10 s after
-/// settling. On an
-/// evolved 3M population 38% of creatures fall, most within a second, and
-/// pauses at 2 s and 10 s skip 34% of all steps.
-pub(crate) fn segment_ends(cfg: &Config) -> Vec<u32> {
-    let fidelity = cfg.fidelity();
-    let total = fidelity.settle() + cfg.steps();
-    let mut ends: Vec<u32> = [2.0_f32, 10.0]
-        .into_iter()
-        .map(|s| fidelity.settle() + (s * fidelity.rate as f32).round() as u32)
-        // Screened creatures leave right after the screen step. The cut is
-        // there with or without a screen, so a replay (which has none) runs in
-        // the same dispatches as the trial that scored it.
-        .chain(
-            crate::physics::screen_seconds()
-                .map(|seconds| crate::physics::Screen { seconds, bar: 0.0 }.tick(fidelity) + 1),
-        )
-        .filter(|&tick| tick < total)
-        .collect();
-    ends.sort_unstable();
-    ends.dedup();
-    ends.push(total);
-    ends
+/// Submission slots per GPU. One more unit packs on the engine thread while
+/// every slot runs.
+pub fn gpu_slots() -> u32 {
+    4
 }
 
-/// What the GPU engine thread needs from a device. `VkEngine` and
-/// `CudaEngine` implement it; tests use a fake that can run out of memory.
-trait SegmentDevice {
+/// Buffer size for `size` bytes of data. Small buffers round up to a power
+/// of two, which costs little. Large ones get 25% headroom, so units of
+/// slightly different sizes reuse them, without the up to 2x waste of a
+/// power of two.
+pub fn padded_size(size: u64) -> u64 {
+    const LARGE: u64 = 1 << 20;
+    let size = size.max(256);
+    if size <= LARGE {
+        size.next_power_of_two()
+    } else {
+        (size + size / 4).next_multiple_of(LARGE)
+    }
+}
+
+/// True when `error` comes from a failed device or pinned host memory
+/// allocation, which another process holding GPU memory can cause for a
+/// while.
+pub fn out_of_memory(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::cuda_engine::CudaError>()
+            .is_some_and(crate::cuda_engine::CudaError::out_of_memory)
+    })
+}
+
+/// What the GPU engine thread needs from a device. `CudaEngine` implements
+/// it; tests use a fake that can run out of memory.
+trait Device {
     fn free_slots(&self) -> usize;
-    #[allow(clippy::too_many_arguments)]
-    fn submit(
-        &mut self,
-        batches: &[creature_kernel::LaneBatch],
-        cfg: &Config,
-        start: u32,
-        end: u32,
-        total: u32,
-        chunk: u32,
-        read_state: bool,
-    ) -> Result<u64>;
+    /// Uploads the batches and queues their whole trials.
+    fn submit(&mut self, batches: &[creature_kernel::LaneBatch], cfg: &Config) -> Result<u64>;
     fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>>;
     /// Frees buffers kept for reuse by slots with nothing in flight.
     fn release_idle(&mut self) -> u64;
     fn allocated_bytes(&self) -> u64;
     /// Whether a replay can be recorded now.
     fn replay_free(&self) -> bool;
-    /// Queues a whole recorded trial of one batch (`VkEngine::record`).
-    fn record(
-        &mut self,
-        batch: &creature_kernel::LaneBatch,
-        cfg: &Config,
-        total: u32,
-        chunk: u32,
-    ) -> Result<u64>;
-    /// Packs creatures for this device's kernel.
-    fn pack(
-        &self,
-        unit: &Population,
-        indices: &[usize],
-        cfg: &Config,
-    ) -> Result<Vec<creature_kernel::LaneBatch>> {
-        crate::physics2::pack(unit, indices, cfg)
-    }
-    /// The ticks at which this device's trials pause (`segment_ends`).
-    fn segment_ends(&self, cfg: &Config) -> Vec<u32> {
-        segment_ends(cfg)
+    /// Queues a whole recorded trial of one batch (`CudaEngine::record`).
+    fn record(&mut self, batch: &creature_kernel::LaneBatch, cfg: &Config) -> Result<u64>;
+    /// Whether a failed submission ran out of memory.
+    fn out_of_memory(&self, error: &anyhow::Error) -> bool {
+        out_of_memory(error)
     }
 }
 
-impl SegmentDevice for VkEngine {
-    fn free_slots(&self) -> usize {
-        VkEngine::free_slots(self)
-    }
-    fn submit(
-        &mut self,
-        batches: &[creature_kernel::LaneBatch],
-        cfg: &Config,
-        start: u32,
-        end: u32,
-        total: u32,
-        chunk: u32,
-        read_state: bool,
-    ) -> Result<u64> {
-        VkEngine::submit(self, batches, cfg, start, end, total, chunk, read_state)
-    }
-    fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>> {
-        VkEngine::poll(self, timeout)
-    }
-    fn release_idle(&mut self) -> u64 {
-        VkEngine::release_idle(self)
-    }
-    fn allocated_bytes(&self) -> u64 {
-        self.allocated_bytes
-    }
-    fn replay_free(&self) -> bool {
-        VkEngine::replay_free(self)
-    }
-    fn record(
-        &mut self,
-        batch: &creature_kernel::LaneBatch,
-        cfg: &Config,
-        total: u32,
-        chunk: u32,
-    ) -> Result<u64> {
-        VkEngine::record(self, batch, cfg, total, chunk)
-    }
-}
-
-impl SegmentDevice for CudaEngine {
+impl Device for CudaEngine {
     fn free_slots(&self) -> usize {
         CudaEngine::free_slots(self)
     }
-    fn submit(
-        &mut self,
-        batches: &[creature_kernel::LaneBatch],
-        cfg: &Config,
-        start: u32,
-        end: u32,
-        total: u32,
-        chunk: u32,
-        read_state: bool,
-    ) -> Result<u64> {
-        CudaEngine::submit(self, batches, cfg, start, end, total, chunk, read_state)
+    fn submit(&mut self, batches: &[creature_kernel::LaneBatch], cfg: &Config) -> Result<u64> {
+        CudaEngine::submit(self, batches, cfg)
     }
     fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>> {
         CudaEngine::poll(self, timeout)
@@ -435,27 +362,22 @@ impl SegmentDevice for CudaEngine {
     fn replay_free(&self) -> bool {
         CudaEngine::replay_free(self)
     }
-    fn record(
-        &mut self,
-        batch: &creature_kernel::LaneBatch,
-        cfg: &Config,
-        total: u32,
-        chunk: u32,
-    ) -> Result<u64> {
-        CudaEngine::record(self, batch, cfg, total, chunk)
+    fn record(&mut self, batch: &creature_kernel::LaneBatch, cfg: &Config) -> Result<u64> {
+        CudaEngine::record(self, batch, cfg)
     }
-    fn pack(
-        &self,
-        unit: &Population,
-        indices: &[usize],
-        cfg: &Config,
-    ) -> Result<Vec<creature_kernel::LaneBatch>> {
-        crate::warp_kernel::pack(unit, indices, cfg)
-    }
-    /// A lane group runs its creature to the end: one segment.
-    fn segment_ends(&self, cfg: &Config) -> Vec<u32> {
-        vec![cfg.fidelity().settle() + cfg.steps()]
-    }
+}
+
+/// A packed unit waiting for a free slot or for GPU memory.
+struct PackedUnit {
+    ticket: u64,
+    cfg: Config,
+    batches: Vec<creature_kernel::LaneBatch>,
+}
+
+/// A unit on the GPU: its ticket and how many creatures it holds.
+struct RunningUnit {
+    ticket: u64,
+    count: usize,
 }
 
 /// What to do after a submission ran out of memory.
@@ -580,33 +502,10 @@ impl MemoryBackoff {
     }
 }
 
-/// The GPU a `gpu_engine` thread runs on.
-enum Backend {
-    Cuda(Box<CudaEngine>),
-    Vulkan(Box<VkEngine>),
-}
-
-/// Opens the GPU named `name` through CUDA when it is an NVIDIA GPU whose
-/// driver and NVRTC load (1.6 to 1.8 times Vulkan's kernel rate on the
-/// RTX 4060), and through Vulkan otherwise.
-fn open_backend(name: &str, max_nodes: usize) -> Result<(Backend, String)> {
-    if crate::cuda_engine::enabled() {
-        match CudaEngine::new(name, max_nodes) {
-            Ok(engine) => {
-                let name = engine.name.clone();
-                return Ok((Backend::Cuda(Box::new(engine)), name));
-            }
-            Err(error) => eprintln!("CUDA not used ({error:#}); running on Vulkan"),
-        }
-    }
-    let engine = VkEngine::new(name, max_nodes)?;
-    let name = engine.name.clone();
-    Ok((Backend::Vulkan(Box::new(engine)), name))
-}
-
-/// Opens a GPU running the creature-per-lane kernel on its own thread.
-/// The thread packs the next unit while earlier units run on the GPU.
-pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<ThreadedEngine> {
+/// Opens the NVIDIA GPU named `name` on its own thread, with kernels for
+/// bodies up to `max_nodes` nodes. The thread packs the next unit while
+/// earlier units run on the GPU.
+pub fn gpu_engine(name: &str, max_nodes: usize) -> Result<ThreadedEngine> {
     let (ready_tx, ready_rx) = mpsc::channel();
     let (jobs, job_rx) = mpsc::channel::<(u64, Arc<Population>, Config)>();
     let (done_tx, done) = mpsc::channel();
@@ -614,50 +513,33 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
     let allocated = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let thread_allocated = allocated.clone();
     let device_name = name.to_owned();
-    let slots = crate::vk_engine::gpu_slots() as usize;
+    let slots = gpu_slots() as usize;
     let thread = std::thread::Builder::new()
         .name(format!("gpu-{name}"))
         .spawn(move || {
-            let (engine, name) = match open_backend(&device_name, max_nodes) {
-                Ok(opened) => {
-                    let largest = match &opened.0 {
-                        Backend::Cuda(engine) => engine.max_capacity,
-                        Backend::Vulkan(_) => max_nodes,
-                    };
-                    let _ = ready_tx.send(Ok((opened.1.clone(), largest)));
-                    opened
+            let engine = match CudaEngine::new(&device_name, max_nodes) {
+                Ok(engine) => {
+                    let _ = ready_tx.send(Ok((engine.name.clone(), engine.max_capacity)));
+                    engine
                 }
                 Err(err) => {
                     let _ = ready_tx.send(Err(err));
                     return;
                 }
             };
+            let name = engine.name.clone();
             let memory =
                 MemoryBackoff::new(slots, Duration::from_millis(500), Duration::from_secs(60));
-            match engine {
-                // Each backend records replays with the recording variant of
-                // the kernel that scores.
-                Backend::Cuda(engine) => run_segments(
-                    *engine,
-                    &name,
-                    job_rx,
-                    done_tx,
-                    Some(replay_rx),
-                    &thread_allocated,
-                    step_range,
-                    memory,
-                ),
-                Backend::Vulkan(engine) => run_segments(
-                    *engine,
-                    &name,
-                    job_rx,
-                    done_tx,
-                    Some(replay_rx),
-                    &thread_allocated,
-                    step_range,
-                    memory,
-                ),
-            }
+            // Replays run on the recording variant of the kernel that scores.
+            run_units(
+                engine,
+                &name,
+                job_rx,
+                done_tx,
+                Some(replay_rx),
+                &thread_allocated,
+                memory,
+            );
         })
         .context("GPU engine thread")?;
     let (device_name, max_nodes) = ready_rx.recv().context("GPU engine thread stopped")??;
@@ -678,29 +560,27 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
     })
 }
 
-/// The GPU engine thread: packs jobs, runs them in trial segments, and
-/// returns finished units until the job channel closes.
-#[allow(clippy::too_many_arguments)]
-fn run_segments<D: SegmentDevice>(
+/// The GPU engine thread: packs jobs, runs each as one whole-trial
+/// submission, and returns finished units until the job channel closes.
+fn run_units<D: Device>(
     mut engine: D,
     name: &str,
     job_rx: mpsc::Receiver<(u64, Arc<Population>, Config)>,
     done_tx: mpsc::Sender<Result<Finished, String>>,
     replays: Option<mpsc::Receiver<ReplayRequest>>,
     allocated: &AtomicU64,
-    step_range: u32,
     mut memory: MemoryBackoff,
 ) {
     let mut recording: Option<InFlightReplay> = None;
-    // Units whose next trial segment waits for a free slot (they go before
-    // new jobs), and submitted segments by device ticket.
-    let mut waiting: VecDeque<SegmentedUnit> = VecDeque::new();
-    let mut running: Vec<(u64, SegmentedUnit)> = Vec::new();
+    // A packed unit that waits for memory (it goes before new jobs), and
+    // submitted units by device ticket.
+    let mut waiting: Option<PackedUnit> = None;
+    let mut running: Vec<(u64, RunningUnit)> = Vec::new();
     let mut pending: Option<(u64, Arc<Population>, Config)> = None;
     let mut open = true;
     loop {
         if pending.is_none() && open {
-            let idle = running.is_empty() && waiting.is_empty() && recording.is_none();
+            let idle = running.is_empty() && waiting.is_none() && recording.is_none();
             // While idle, wake every few milliseconds for replay requests.
             let job = match (idle, &replays) {
                 (true, Some(_)) => job_rx.recv_timeout(Duration::from_millis(5)),
@@ -720,7 +600,7 @@ fn run_segments<D: SegmentDevice>(
         }
         if !open
             && running.is_empty()
-            && waiting.is_empty()
+            && waiting.is_none()
             && pending.is_none()
             && recording.is_none()
         {
@@ -732,7 +612,7 @@ fn run_segments<D: SegmentDevice>(
             && engine.replay_free()
             && let Some(request) = replays.as_ref().and_then(|rx| rx.try_recv().ok())
         {
-            match start_recording(&mut engine, &request, step_range) {
+            match start_recording(&mut engine, &request) {
                 Ok((ticket, layout, total)) => {
                     recording = Some(InFlightReplay {
                         ticket,
@@ -748,57 +628,43 @@ fn run_segments<D: SegmentDevice>(
             allocated.store(engine.allocated_bytes(), Ordering::Relaxed);
         }
         if engine.free_slots() > 0 && memory.may_submit(Instant::now(), running.len()) {
-            let next = match waiting.pop_front() {
+            let next = match waiting.take() {
                 Some(unit) => Some(Ok(unit)),
                 None => pending.take().map(|(ticket, unit, cfg)| {
                     let indices: Vec<usize> = (0..unit.genomes.len()).collect();
-                    let ends = engine.segment_ends(&cfg);
-                    engine.pack(&unit, &indices, &cfg).map(|batches| SegmentedUnit {
+                    crate::warp_kernel::pack(&unit, &indices, &cfg).map(|batches| PackedUnit {
                         ticket,
-                        results: vec![GpuResult::default(); indices.len()],
-                        ends,
-                        segment: 0,
                         cfg,
-                        busy: 0.0,
                         batches,
                     })
                 }),
             };
             if let Some(next) = next {
-                let mut unit = match next {
+                let unit = match next {
                     Ok(unit) => unit,
                     Err(err) => {
                         let _ = done_tx.send(Err(format!("{err:#}")));
                         return;
                     }
                 };
-                let total = *unit.ends.last().expect("segment ends");
-                // There is no settling phase: trials start at the settling tick.
-                let first = unit.cfg.fidelity().settle();
-                let start = unit.segment.checked_sub(1).map_or(first, |s| unit.ends[s]);
-                let end = unit.ends[unit.segment];
-                match engine.submit(
-                    &unit.batches,
-                    &unit.cfg,
-                    start,
-                    end,
-                    total,
-                    step_range,
-                    end < total,
-                ) {
-                    Ok(vk_ticket) => {
-                        for batch in &mut unit.batches {
-                            batch.release_uploaded();
-                        }
-                        running.push((vk_ticket, unit));
+                match engine.submit(&unit.batches, &unit.cfg) {
+                    Ok(device_ticket) => {
+                        let count = unit.batches.iter().map(|b| b.slots.len()).sum();
+                        running.push((
+                            device_ticket,
+                            RunningUnit {
+                                ticket: unit.ticket,
+                                count,
+                            },
+                        ));
                         if let Some(line) = memory.submitted(Instant::now(), running.len()) {
                             eprintln!("{name}: {line}");
                         }
                     }
                     // Keep the unit; it runs once memory frees up.
-                    Err(err) if crate::vk_engine::out_of_memory(&err) => {
+                    Err(err) if engine.out_of_memory(&err) => {
                         let freed = engine.release_idle();
-                        waiting.push_front(unit);
+                        waiting = Some(unit);
                         match memory.out_of_memory(Instant::now(), running.len(), freed) {
                             OutOfMemory::Retry(line) => {
                                 if let Some(line) = line {
@@ -843,52 +709,28 @@ fn run_segments<D: SegmentDevice>(
                     .send(recorded(&finished, replay.layout, replay.total));
             }
             Ok(Some(finished)) => {
-                // Units on separate queues can finish out of order.
+                // Units on separate streams can finish out of order.
                 let Some(position) = running
                     .iter()
-                    .position(|(vk_ticket, _)| *vk_ticket == finished.ticket)
+                    .position(|(device_ticket, _)| *device_ticket == finished.ticket)
                 else {
                     let _ = done_tx.send(Err("unknown GPU submission finished".into()));
                     return;
                 };
-                let (_, mut unit) = running.swap_remove(position);
-                unit.busy += finished.gpu_seconds;
-                let last = unit.segment + 1 == unit.ends.len();
-                // Fallen creatures are final; the rest continue in the
-                // next segment, repacked into dense warps.
-                let mut next = Vec::new();
-                for (b, (slots, _, results)) in finished.batches.iter().enumerate() {
-                    let mut keep = Vec::new();
-                    for (j, result) in results.iter().enumerate() {
-                        if last || result.fall_time > 0.0 || result.screened > 0.0 {
-                            unit.results[slots[j]] = *result;
-                        } else {
-                            keep.push(j);
-                        }
-                    }
-                    if !keep.is_empty() {
-                        let Some((nodes, muscles)) =
-                            finished.state.as_ref().and_then(|state| state.get(b))
-                        else {
-                            let _ = done_tx.send(Err("GPU segment state missing".into()));
-                            return;
-                        };
-                        next.push(unit.batches[b].repack(&keep, nodes, muscles, results));
+                let (_, unit) = running.swap_remove(position);
+                let mut results = vec![GpuResult::default(); unit.count];
+                for (slots, _, batch) in &finished.batches {
+                    for (&slot, result) in slots.iter().zip(batch) {
+                        results[slot] = *result;
                     }
                 }
-                if next.is_empty() {
-                    let message = Finished {
-                        ticket: unit.ticket,
-                        results: std::mem::take(&mut unit.results),
-                        busy_seconds: unit.busy,
-                    };
-                    if done_tx.send(Ok(message)).is_err() {
-                        return;
-                    }
-                } else {
-                    unit.batches = next;
-                    unit.segment += 1;
-                    waiting.push_front(unit);
+                let message = Finished {
+                    ticket: unit.ticket,
+                    results,
+                    busy_seconds: finished.gpu_seconds,
+                };
+                if done_tx.send(Ok(message)).is_err() {
+                    return;
                 }
             }
             Ok(None) => {}
@@ -925,19 +767,18 @@ struct FrameLayout {
 
 /// Packs a replay request's creature and queues its recording. Returns the
 /// device ticket, the frame layout and the trial length.
-fn start_recording<D: SegmentDevice>(
+fn start_recording<D: Device>(
     engine: &mut D,
     request: &ReplayRequest,
-    step_range: u32,
 ) -> Result<(u64, FrameLayout, u32)> {
     let mut population = Population::default();
     population.push(request.creature.clone());
-    let batches = engine.pack(&population, &[0], &request.cfg)?;
+    let batches = crate::warp_kernel::pack(&population, &[0], &request.cfg)?;
     anyhow::ensure!(batches.len() == 1, "A replay packs into one batch");
     let fidelity = request.cfg.fidelity();
     let total = fidelity.settle() + request.cfg.steps();
     let batch = &batches[0];
-    let ticket = engine.record(batch, &request.cfg, total, step_range)?;
+    let ticket = engine.record(batch, &request.cfg)?;
     // The kernel's node numbering, from the bone order `pack` gave it.
     let mut creature = request.creature.clone();
     crate::evolution::canonicalize_bone_order(&mut creature);
@@ -1343,25 +1184,23 @@ mod tests {
         }
     }
 
-    impl SegmentDevice for FakeDevice {
+    /// The fake device's out-of-memory error.
+    #[derive(Debug)]
+    struct NoMemory;
+    impl std::fmt::Display for NoMemory {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("out of fake GPU memory")
+        }
+    }
+    impl std::error::Error for NoMemory {}
+
+    impl Device for FakeDevice {
         fn free_slots(&self) -> usize {
             self.slots - self.in_flight.len()
         }
-        fn submit(
-            &mut self,
-            batches: &[creature_kernel::LaneBatch],
-            _cfg: &Config,
-            _start: u32,
-            _end: u32,
-            _total: u32,
-            _chunk: u32,
-            _read_state: bool,
-        ) -> Result<u64> {
+        fn submit(&mut self, batches: &[creature_kernel::LaneBatch], _cfg: &Config) -> Result<u64> {
             if self.script.pop_front().unwrap_or(false) {
-                return Err(
-                    anyhow::Error::from(ash::vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)
-                        .context("GPU buffers"),
-                );
+                return Err(anyhow::Error::from(NoMemory).context("GPU buffers"));
             }
             let ticket = self.next;
             self.next += 1;
@@ -1375,7 +1214,6 @@ mod tests {
             Ok(ticket)
         }
         fn poll(&mut self, _timeout: Duration) -> Result<Option<Completed>> {
-            // Every creature falls, so each unit finishes in one segment.
             Ok(self
                 .in_flight
                 .pop_front()
@@ -1395,7 +1233,6 @@ mod tests {
                             (slots, creatures, results)
                         })
                         .collect(),
-                    state: None,
                     // Frame t puts node j at (t, j).
                     frames: recorded.map(|(stride, total)| {
                         (0..=total)
@@ -1418,13 +1255,8 @@ mod tests {
                 .iter()
                 .any(|(_, _, recorded)| recorded.is_some())
         }
-        fn record(
-            &mut self,
-            batch: &creature_kernel::LaneBatch,
-            _cfg: &Config,
-            total: u32,
-            _chunk: u32,
-        ) -> Result<u64> {
+        fn record(&mut self, batch: &creature_kernel::LaneBatch, cfg: &Config) -> Result<u64> {
+            let total = cfg.fidelity().settle() + cfg.steps();
             let ticket = self.next;
             self.next += 1;
             let layout = vec![(batch.slots.clone(), batch.creatures.clone())];
@@ -1434,6 +1266,9 @@ mod tests {
                 Some((creature_kernel::frame_stride(batch), total)),
             ));
             Ok(ticket)
+        }
+        fn out_of_memory(&self, error: &anyhow::Error) -> bool {
+            error.chain().any(|cause| cause.is::<NoMemory>())
         }
     }
 
@@ -1459,14 +1294,13 @@ mod tests {
         }
         drop(jobs);
         let memory = MemoryBackoff::new(device.slots, Duration::from_millis(2), limit);
-        run_segments(
+        run_units(
             device,
             "fake GPU",
             job_rx,
             done_tx,
             None,
             &AtomicU64::new(0),
-            64,
             memory,
         );
         done.try_iter().collect()
@@ -1487,14 +1321,13 @@ mod tests {
         let creature = pop.creature(3);
         let thread = std::thread::spawn(move || {
             let memory = MemoryBackoff::new(2, Duration::from_millis(2), Duration::from_secs(10));
-            run_segments(
+            run_units(
                 FakeDevice::new(2, &[]),
                 "fake GPU",
                 job_rx,
                 done_tx,
                 Some(replay_rx),
                 &AtomicU64::new(0),
-                64,
                 memory,
             );
         });
@@ -1527,25 +1360,7 @@ mod tests {
     }
 
     #[test]
-    fn out_of_memory_is_recognized_through_error_context() {
-        use ash::vk;
-        for code in [
-            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
-            vk::Result::ERROR_OUT_OF_HOST_MEMORY,
-        ] {
-            let error = anyhow::Error::from(code).context("GPU buffers");
-            assert!(crate::vk_engine::out_of_memory(&error));
-            assert!(crate::vk_engine::out_of_memory(&anyhow::Error::from(code)));
-        }
-        let lost = anyhow::Error::from(vk::Result::ERROR_DEVICE_LOST).context("fence");
-        assert!(!crate::vk_engine::out_of_memory(&lost));
-        let text = anyhow::anyhow!("A device memory allocation has failed");
-        assert!(!crate::vk_engine::out_of_memory(&text));
-    }
-
-    #[test]
     fn large_buffers_get_a_quarter_of_headroom_and_small_ones_a_power_of_two() {
-        use crate::vk_engine::padded_size;
         assert_eq!(padded_size(0), 256);
         assert_eq!(padded_size(300), 512);
         assert_eq!(padded_size(1 << 20), 1 << 20);

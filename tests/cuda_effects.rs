@@ -32,7 +32,7 @@ fn the_cuda_kernel_feels_every_effect() {
         walker.id = id;
         pop.push(walker);
     }
-    let mut gpu = engine::gpu_engine("RTX 4060", 32, 64).expect("GPU");
+    let mut gpu = engine::gpu_engine("RTX 4060", 32).expect("GPU");
     assert!(gpu.name().contains("CUDA"), "opened {}", gpu.name());
     let mut run = |cfg: &Config| {
         gpu.submit(pop.clone(), cfg).unwrap();

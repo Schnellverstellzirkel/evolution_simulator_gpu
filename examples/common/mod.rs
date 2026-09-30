@@ -8,7 +8,6 @@ use evolution_simulator::{
     creature_kernel::GpuResult,
     engine::{self, Engine, Recording, ThreadedEngine},
     evolution::{Creature, Population},
-    gpu::DEFAULT_STEP_RANGE,
 };
 use std::time::Duration;
 
@@ -21,7 +20,7 @@ const REPLAY_PATIENCE: Duration = Duration::from_secs(300);
 
 /// Opens the primary GPU and makes it the engine that records replays.
 pub fn open() -> Result<ThreadedEngine> {
-    let engine = engine::gpu_engine("RTX 4060", 64, DEFAULT_STEP_RANGE)
+    let engine = engine::gpu_engine("RTX 4060", 64)
         .context("the primary GPU did not open (set EVOLUTION_DEVICES=primary, and check nvidia-smi for free memory)")?;
     eprintln!("engine: {}", engine.name());
     engine.publish_replays();

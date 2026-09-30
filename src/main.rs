@@ -230,9 +230,7 @@ fn main() -> Result<()> {
             // `--engine <name>` opens that GPU alone (bodies up to 64 nodes).
             let mut engine: Option<Box<dyn evolution_simulator::engine::Engine>> = match engine {
                 Some(name) => Some(Box::new(evolution_simulator::engine::gpu_engine(
-                    &name,
-                    64,
-                    evolution_simulator::gpu::DEFAULT_STEP_RANGE,
+                    &name, 64,
                 )?)),
                 None => None,
             };

@@ -1,31 +1,27 @@
 //! NVIDIA GPU backend: the physics authority.
 //!
 //! It runs `shaders/warp_creature.cu`, one creature per group of 8, 16 or 32
-//! lanes (`warp_kernel`), and keeps `VkEngine`'s submit and poll contract. A
-//! unit is uploaded once and runs as waves of up to `warp_kernel::WAVE`
+//! lanes (`warp_kernel`), behind `engine::gpu_engine`'s submit and poll
+//! contract. A unit is uploaded once and runs as waves of up to `warp_kernel::WAVE`
 //! creatures, one kernel launch each, on the slot's streams. Inside a wave
 //! every lane group runs its creature to the end of its trial and then takes
 //! the next one, so there are no trial segments.
 //!
 //! Nothing CUDA is linked at build time. The driver API (`libcuda`) and NVRTC
-//! (`libnvrtc`) are loaded when the engine opens, so the game builds and runs
-//! unchanged on machines without them; `engine::gpu_engine` then falls back to
-//! Vulkan. NVRTC comes from the system CUDA toolkit or from NVIDIA's pip
-//! wheel; see `docs/building.md`. Kernels compile to a cubin for the device's
+//! (`libnvrtc`) are loaded when the engine opens, so the game builds without
+//! them, but it needs them to run. NVRTC comes from the system CUDA toolkit
+//! or from NVIDIA's pip wheel; see `docs/building.md`. Kernels compile to a cubin for the device's
 //! architecture, one per lane class, world (the effects that are on), rate
 //! and recording, in the background when the engine opens and when a new
 //! world first appears.
 //!
-//! It is the default on NVIDIA GPUs: `engine::gpu_engine` opens it whenever
-//! the driver and NVRTC load, and uses Vulkan otherwise. Developer
-//! diagnostics, never needed to play: `EVOLUTION_CUDA=0` keeps Vulkan,
-//! `EVOLUTION_NVRTC` names the NVRTC library, and `EVOLUTION_CUDA_VERBOSE`
-//! reports compile times.
+//! Developer diagnostics, never needed to play: `EVOLUTION_NVRTC` names the
+//! NVRTC library, and `EVOLUTION_CUDA_VERBOSE` reports compile times.
 use crate::{
     config::Config,
     creature_kernel::{self, GpuResult, LaneBatch},
+    engine::Completed,
     physics::Fidelity,
-    vk_engine::Completed,
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
@@ -432,28 +428,6 @@ fn api() -> Result<Arc<Api>> {
     .map_err(|e| anyhow::anyhow!(e))
 }
 
-/// Whether the GPU engine tries CUDA before Vulkan. It does unless the
-/// developer override `EVOLUTION_CUDA` is `0`, `false` or `off`.
-pub fn enabled() -> bool {
-    !std::env::var("EVOLUTION_CUDA").is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off"
-        )
-    })
-}
-
-/// Whether `EVOLUTION_CUDA` asks for CUDA (`1`, `true` or `on`), so tests can
-/// refuse a Vulkan fallback.
-pub fn forced() -> bool {
-    std::env::var("EVOLUTION_CUDA").is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on"
-        )
-    })
-}
-
 /// Streams per submission slot. Wave w of a unit runs on stream w modulo
 /// this.
 const STREAM_LIMIT: usize = 8;
@@ -491,7 +465,7 @@ struct GroupRes {
     bufs: [DeviceBuf; 5],
 }
 
-/// Per-submission resources, as in `VkEngine`. Each wave runs on one of the
+/// Per-submission resources. Each wave runs on one of the
 /// slot's streams; the main stream uploads, joins the wave streams and reads
 /// the results back.
 struct Slot {
@@ -545,10 +519,10 @@ pub struct CudaEngine {
 // the engine; it makes the context current on that thread when it opens.
 unsafe impl Send for CudaEngine {}
 
-/// Rounds a buffer size up the way `VkEngine` does, so buffers are reused
+/// Rounds a buffer size up (`engine::padded_size`), so buffers are reused
 /// across units of slightly different sizes.
 fn buffer_size(bytes: usize) -> usize {
-    crate::vk_engine::padded_size(bytes as u64) as usize
+    crate::engine::padded_size(bytes as u64) as usize
 }
 
 /// NVRTC's source for one kernel, compiled to a cubin. It needs no CUDA
@@ -837,7 +811,7 @@ impl CudaEngine {
             };
             engine.name = format!("{device_name} (CUDA)");
             // Evaluation slots plus one for replays.
-            let slots = crate::vk_engine::gpu_slots() + 1;
+            let slots = crate::engine::gpu_slots() + 1;
             for index in 0..slots {
                 let slot = engine.create_slot(index + 1 == slots)?;
                 engine.slots.push(slot);
@@ -1249,30 +1223,13 @@ impl CudaEngine {
     /// the recording kernel, which writes every frame. The result arrives
     /// through `poll` with `Completed::frames`; it is the trial `submit`
     /// scores, computed the same way.
-    pub fn record(&mut self, batch: &LaneBatch, cfg: &Config, _total: u32, _chunk: u32) -> Result<u64> {
+    pub fn record(&mut self, batch: &LaneBatch, cfg: &Config) -> Result<u64> {
         ensure!(self.replay_free(), "A replay is already being recorded");
         self.submit_as(std::slice::from_ref(batch), cfg, true)
     }
 
     /// Uploads the batches and queues their whole trials, without waiting.
-    /// A unit runs in one piece: `start` must be the settling tick and `end`
-    /// the trial's last (`SegmentDevice::segment_ends` gives one segment).
-    #[allow(clippy::too_many_arguments)]
-    pub fn submit(
-        &mut self,
-        batches: &[LaneBatch],
-        cfg: &Config,
-        start: u32,
-        end: u32,
-        total: u32,
-        _chunk: u32,
-        read_state: bool,
-    ) -> Result<u64> {
-        let fidelity = cfg.fidelity();
-        ensure!(
-            start == fidelity.settle() && end == total && !read_state,
-            "The CUDA kernel runs whole trials"
-        );
+    pub fn submit(&mut self, batches: &[LaneBatch], cfg: &Config) -> Result<u64> {
         self.submit_as(batches, cfg, false)
     }
 
@@ -1490,7 +1447,7 @@ impl CudaEngine {
     }
 
     /// Returns the oldest finished submission's results, waiting up to
-    /// `timeout` for one. The contract is `VkEngine::poll`'s.
+    /// `timeout` for one.
     pub fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>> {
         let mut pending: Vec<(u64, usize)> = self
             .slots
@@ -1555,7 +1512,6 @@ impl CudaEngine {
             Ok(Some(Completed {
                 ticket: pending.ticket,
                 batches,
-                state: None,
                 frames,
                 gpu_seconds,
             }))

@@ -261,7 +261,7 @@ impl Scheduler {
     /// `EVOLUTION_DEVICES` (off by default; `primary` or `off` for none). The
     /// game needs the primary GPU: without it this fails.
     pub fn new(primary: &str) -> Result<Self> {
-        let gpu = engine::gpu_engine(primary, 64, crate::gpu::DEFAULT_STEP_RANGE).with_context(|| {
+        let gpu = engine::gpu_engine(primary, 64).with_context(|| {
             format!(
                 "The game needs an NVIDIA GPU with the CUDA driver and NVRTC, and GPU {primary:?} did not open"
             )
@@ -272,7 +272,7 @@ impl Scheduler {
         let name = primary.to_owned();
         device.reopen = Some(Reopen {
             open: Box::new(move || {
-                let gpu = engine::gpu_engine(&name, 64, crate::gpu::DEFAULT_STEP_RANGE)?;
+                let gpu = engine::gpu_engine(&name, 64)?;
                 gpu.publish_replays();
                 Ok(Box::new(gpu) as Box<dyn Engine>)
             }),
@@ -284,7 +284,7 @@ impl Scheduler {
             if primary.to_lowercase().contains(&name.to_lowercase()) {
                 continue;
             }
-            match engine::gpu_engine(name, 64, crate::gpu::DEFAULT_STEP_RANGE) {
+            match engine::gpu_engine(name, 64) {
                 Ok(engine) => devices.push(Device::new(Box::new(engine), 40_000.0)),
                 Err(err) => eprintln!("Evaluation device {name:?} unavailable: {err:#}"),
             }

@@ -3,10 +3,6 @@
 use crate::{config::Config, evolution::Population, qd::EvaluationMetrics, scheduler::Scheduler};
 use anyhow::{Result, ensure};
 
-/// Physics steps per GPU dispatch. Short ranges let display work interleave;
-/// the Vulkan engine keeps them nearly free.
-pub const DEFAULT_STEP_RANGE: u32 = 64;
-
 pub struct Gpu {
     pub name: String,
     pub allocated_bytes: u64,

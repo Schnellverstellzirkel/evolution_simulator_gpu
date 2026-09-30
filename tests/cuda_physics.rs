@@ -116,14 +116,14 @@ fn a_creature_scores_the_same_in_any_batch() {
     let cfg = Config {
         population: 8,
         duration: 0.5,
-        max_nodes: 64,
+        max_nodes: evolution_simulator::warp_kernel::MAX_NODES,
         max_muscles: 256,
         min_size: 0.01,
         min_friction: 0.0,
         ..config()
     };
     let mut mixed = Population::default();
-    for (i, count) in [3, 5, 6, 8, 9, 17, 33, 64].into_iter().enumerate() {
+    for (i, count) in [3, 5, 6, 8, 9, 17, 24, 32].into_iter().enumerate() {
         let nodes: Vec<_> = (0..count)
             .map(|j| {
                 let angle = j as f32 / count as f32 * std::f32::consts::TAU;

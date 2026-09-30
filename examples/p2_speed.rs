@@ -1,7 +1,7 @@
 //! Times the GPU engine on the population of a save, under physics v2: one
 //! warm-up pass, then `repeats` timed passes over the same creatures.
 //! Prints creatures/s and creature-steps/s (steps a creature simulated before
-//! it fell or finished). `EVOLUTION_CUDA=0` selects Vulkan.
+//! it fell or finished).
 //!
 //! Usage: p2_speed <save.evo | dump.bin> [count] [repeats]
 use evolution_simulator::{
@@ -68,8 +68,7 @@ fn main() -> anyhow::Result<()> {
         e.config.clone()
     };
     cfg.screen = None;
-    let mut engine =
-        engine::gpu_engine("RTX 4060", 64, evolution_simulator::gpu::DEFAULT_STEP_RANGE)?;
+    let mut engine = engine::gpu_engine("RTX 4060", 64)?;
     eprintln!("engine: {}", engine.name());
     run(&mut engine, &pop, &cfg)?;
     for _ in 0..repeats {

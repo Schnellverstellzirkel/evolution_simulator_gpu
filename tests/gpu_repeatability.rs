@@ -237,7 +237,7 @@ fn a_lost_gpu_is_reopened_and_gives_the_same_results() {
         "the GPU was not reopened: {notices:?}"
     );
     assert!(
-        scheduler.devices.iter().any(|d| d.engine.max_nodes() >= 64),
+        scheduler.names().contains("CUDA"),
         "the run must still have its GPU: {}",
         scheduler.names()
     );

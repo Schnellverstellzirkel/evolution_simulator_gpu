@@ -57,8 +57,7 @@ fn main() -> anyhow::Result<()> {
             })
             .collect()
     };
-    let mut engine =
-        engine::gpu_engine("RTX 4060", 64, evolution_simulator::gpu::DEFAULT_STEP_RANGE)?;
+    let mut engine = engine::gpu_engine("RTX 4060", 64)?;
     eprintln!("engine: {}", engine.name());
     let mut pop = Population::default();
     let mut archive = Vec::new();
