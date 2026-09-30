@@ -82,6 +82,38 @@ fn main() -> anyhow::Result<()> {
             ..cfg.clone()
         },
     )?;
+    // The same kernel at four times the rate is the reference.
+    let reference = evaluate(
+        &mut engine,
+        pop.clone(),
+        &Config {
+            fidelity: Some(Fidelity::fine()),
+            ..cfg.clone()
+        },
+    )?;
+    {
+        let ratios: Vec<f32> = standard
+            .iter()
+            .zip(&reference)
+            .map(|(s, r)| s.fitness / r.fitness.max(0.05))
+            .collect();
+        let close = standard
+            .iter()
+            .zip(&reference)
+            .filter(|(s, r)| (s.fitness - r.fitness).abs() <= 0.1 * r.fitness.abs().max(0.5))
+            .count();
+        let fell = standard.iter().filter(|r| r.fall_time > 0.0).count();
+        let fell_early = standard
+            .iter()
+            .filter(|r| r.fall_time > 0.0 && r.fall_time <= 0.5)
+            .count();
+        let reference_fell = reference.iter().filter(|r| r.fall_time > 0.0).count();
+        println!(
+            "against 4x rate: median ratio {:.3}, {close} of {} within 10%, {fell} fall at 60 Hz ({fell_early} within 0.5 s), {reference_fell} at 4x",
+            quantile(&ratios, 0.5),
+            standard.len()
+        );
+    }
     let cpu = evolution_simulator::physics2::evaluate(&pop, &cfg);
     let mut kept = 0;
     let mut ratios = Vec::new();

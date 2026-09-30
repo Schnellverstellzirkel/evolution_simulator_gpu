@@ -170,8 +170,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     ) {
     // 96 float4 per warp, reused by phase: the muscle forces (two per muscle
     // lane), the children's articulated inertias and biases (three per
-    // lane), the walkers' contact-matrix rows (16 per group), the children's
-    // contact responses (one per lane).
+    // lane), the walkers' contact-matrix rows (16 per group, in the first
+    // 64), the children's contact responses (one per lane, in the last 32).
     __shared__ float4 scatter[BLOCK / 32][96];
     // Per-muscle state (energy store, rhythm offset, force of the substep) of
     // each lane's muscles, and each group's behavior totals: touched once per
@@ -1006,81 +1006,121 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     }
                     const float inv_knn = 1.0f / knn, inv_ktt = 1.0f / ktt;
                     PROF(9);
-                    // Projected Gauss-Seidel. Walker c holds rows 2c and 2c + 1;
-                    // every impulse change is broadcast to the other walkers.
-                    for (unsigned sweep = 0u; sweep < PGS_SWEEPS + CLEAN_SWEEPS; sweep++) {
-                        const bool clean = sweep >= PGS_SWEEPS;
-#pragma unroll
-                        for (int c = 0; c < MAXC; c++) {
-                            if ((unsigned)c >= ncmax) { break; }
-                            const unsigned src = (slot_lanes >> (5 * c)) & 31u;
-                            const bool use = walker && (unsigned)c < nc;
-                            const float4 k = krow[c];
-                            // The owner updates its normal, then its friction
-                            // against its own new speed, and broadcasts both.
-                            float dn_ = 0.0f, dt_ = 0.0f;
-                            if (slot == c) {
-                                if (!clean) {
-                                    const float normal = fmaxf(fmaf(goal - vn, inv_knn, ln), 0.0f);
-                                    dn_ = normal - ln;
-                                    ln = normal;
+                    // Rounds: the solve, then PLANT_ROUNDS plantings. A planting
+                    // takes the step, measures each contact's velocity in the
+                    // end pose (after the momentum balance), solves on from
+                    // the impulses so far with those velocities, and applies
+                    // the change.
+                    float ln_prev = 0.0f, lt_prev = 0.0f;
+                    for (unsigned round = 0u; round <= PLANT_ROUNDS; round++) {
+                        const unsigned sweeps = round == 0u ? PGS_SWEEPS : PLANT_SWEEPS;
+                        ln_prev = ln;
+                        lt_prev = lt;
+                        PROF(9);
+                        // Projected Gauss-Seidel. Walker c holds rows 2c and 2c + 1;
+                        // every impulse change is broadcast to the other walkers.
+                        for (unsigned sweep = 0u; sweep < sweeps + CLEAN_SWEEPS; sweep++) {
+                            const bool clean = sweep >= sweeps;
+    #pragma unroll
+                            for (int c = 0; c < MAXC; c++) {
+                                if ((unsigned)c >= ncmax) { break; }
+                                const unsigned src = (slot_lanes >> (5 * c)) & 31u;
+                                const bool use = walker && (unsigned)c < nc;
+                                const float4 k = krow[c];
+                                // The owner updates its normal, then its friction
+                                // against its own new speed, and broadcasts both.
+                                float dn_ = 0.0f, dt_ = 0.0f;
+                                if (slot == c) {
+                                    if (!clean) {
+                                        const float normal = fmaxf(fmaf(goal - vn, inv_knn, ln), 0.0f);
+                                        dn_ = normal - ln;
+                                        ln = normal;
+                                    }
+                                    const float vt1 = vt + k.z * dn_;
+                                    // Friction may not do positive work: it only
+                                    // opposes a = start speed + end speed without
+                                    // its own force, and only up to |a| / k.
+                                    const float a = vs + vt1 - ktt * lt;
+                                    const float cap = fminf(mu * ln, fabsf(a) * inv_ktt);
+                                    const float tgt = clean ? lt : lt - vt1 * inv_ktt;
+                                    const float friction = clampf(tgt, a > 0.0f ? -cap : 0.0f, a > 0.0f ? 0.0f : cap);
+                                    dt_ = friction - lt;
+                                    lt = friction;
                                 }
-                                const float vt1 = vt + k.z * dn_;
-                                // Friction may not do positive work: it only
-                                // opposes a = start speed + end speed without
-                                // its own force, and only up to |a| / k.
-                                const float a = vs + vt1 - ktt * lt;
-                                const float cap = fminf(mu * ln, fabsf(a) * inv_ktt);
-                                const float tgt = clean ? lt : lt - vt1 * inv_ktt;
-                                const float friction = clampf(tgt, a > 0.0f ? -cap : 0.0f, a > 0.0f ? 0.0f : cap);
-                                dt_ = friction - lt;
-                                lt = friction;
-                            }
-                            dn_ = shf(dn_, src);
-                            dt_ = shf(dt_, src);
-                            if (use) {
-                                vn += k.x * dn_ + k.y * dt_;
-                                vt += k.z * dn_ + k.w * dt_;
+                                dn_ = shf(dn_, src);
+                                dt_ = shf(dt_, src);
+                                if (use) {
+                                    vn += k.x * dn_ + k.y * dt_;
+                                    vt += k.z * dn_ + k.w * dt_;
+                                }
                             }
                         }
-                    }
-                    if (!walker) { ln = 0.0f; lt = 0.0f; }
-                    PROF(10);
-                    // The response to the contact forces, through the same
-                    // articulated inertias.
-                    vec3 pr = walker ? -(dn * ln + dtg * lt) : v3(0.0f, 0.0f, 0.0f);
-                    __syncwarp();
-                    {
-                        const vec3 ph = shv(pr, 0u);
-                        if (lg == 1u) { pr += ph; }
-                        if (lg == 0u) { pr = v3(0.0f, 0.0f, 0.0f); }
-                    }
-                    float dqr = 0.0f;
-                    for (unsigned L = maxlev; L >= 2u; L--) {
-                        vec3 cr = v3(0.0f, 0.0f, 0.0f);
-                        if (lvl == L) {
-                            const float t = -sdot(axis, pr);
-                            dqr = t;
-                            cr = pr + uvs * (t * dis);
-                        }
-                        if (lvl == L) { region[lane] = make_float4(cr.x, cr.y, cr.z, 0.0f); }
+                        if (!walker) { ln = 0.0f; lt = 0.0f; }
+                        PROF(10);
+                        // The response to the contact forces, through the same
+                        // articulated inertias.
+                        vec3 pr = walker ? -(dn * (ln - ln_prev) + dtg * (lt - lt_prev)) : v3(0.0f, 0.0f, 0.0f);
                         __syncwarp();
-                        const unsigned cm = __reduce_max_sync(FULL, lvl == L - 1u ? nch : 0u);
-                        for (unsigned k = 0u; k < cm; k++) {
-                            if (lvl == L - 1u && k < nch) {
-                                const float4 e = region[gbase + fc + k];
-                                pr += v3(e.x, e.y, e.z);
+                        {
+                            const vec3 ph = shv(pr, 0u);
+                            if (lg == 1u) { pr += ph; }
+                            if (lg == 0u) { pr = v3(0.0f, 0.0f, 0.0f); }
+                        }
+                        float dqr = 0.0f;
+                        for (unsigned L = maxlev; L >= 2u; L--) {
+                            vec3 cr = v3(0.0f, 0.0f, 0.0f);
+                            if (lvl == L) {
+                                const float t = -sdot(axis, pr);
+                                dqr = t;
+                                cr = pr + uvs * (t * dis);
+                            }
+                            // Above the contact rows, which a planting round reads again.
+                            if (lvl == L) { region[64u + lane] = make_float4(cr.x, cr.y, cr.z, 0.0f); }
+                            __syncwarp();
+                            const unsigned cm = __reduce_max_sync(FULL, lvl == L - 1u ? nch : 0u);
+                            for (unsigned k = 0u; k < cm; k++) {
+                                if (lvl == L - 1u && k < nch) {
+                                    const float4 e = region[64u + gbase + fc + k];
+                                    pr += v3(e.x, e.y, e.z);
+                                }
                             }
                         }
-                    }
-                    vec3 ar = v3(0.0f, 0.0f, 0.0f);
-                    if (lg == 1u && valid) { ar = -sym_mul(r0, r1, pr); acc += ar; }
-                    for (unsigned L = 2u; L <= maxlev; L++) {
-                        const vec3 pa = shv(ar, pb);
-                        if (lvl == L) {
-                            const float tq = (dqr - sdot(uvs, pa)) * dis;
-                            ar = pa + axis * tq;
-                            qdd += tq;
+                        vec3 ar = v3(0.0f, 0.0f, 0.0f);
+                        if (lg == 1u && valid) { ar = -sym_mul(r0, r1, pr); acc += ar; }
+                        for (unsigned L = 2u; L <= maxlev; L++) {
+                            const vec3 pa = shv(ar, pb);
+                            if (lvl == L) {
+                                const float tq = (dqr - sdot(uvs, pa)) * dis;
+                                ar = pa + axis * tq;
+                                qdd += tq;
+                            }
+                        }
+
+                        if (round < PLANT_ROUNDS) {
+                            const float sq = q, sqd = qd, shx = hx, shy = hy, shvx = hvx, shvy = hvy;
+                            {
+                                const vec3 ra = shv(acc, 1u);
+                                const float rqd = shf(qd, 1u);
+                                if (lg == 0u) {
+                                    hvx += (ra.y - rqd * hvy) * HS;
+                                    hvy += (ra.z + rqd * shvx) * HS;
+                                    hx += hvx * HS;
+                                    hy += hvy * HS;
+                                } else if (body) {
+                                    qd += (lg == 1u ? acc.x : qdd) * HS;
+                                    q += qd * HS;
+                                }
+                            }
+                            kinematics(true);
+                            const float gx = gsum(mx + (walker ? (ln * dn.y + lt * dtg.y) * HS : 0.0f));
+                            const float gy = gsum(my + (walker ? (ln * dn.z + lt * dtg.z) * HS : 0.0f));
+                            const float ax_ = gsum(valid ? m * vx : 0.0f), ay_ = gsum(valid ? m * vy : 0.0f);
+                            if (walker) {
+                                const float wx = vx + (gx - ax_) * inv_mass, wy = vy + (gy - ay_) * inv_mass;
+                                vn = wx * dn.y + wy * dn.z;
+                                vt = wx * dtg.y + wy * dtg.z;
+                            }
+                            q = sq; qd = sqd; hx = shx; hy = shy; hvx = shvx; hvy = shvy;
                         }
                     }
                     if (walker) {

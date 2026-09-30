@@ -38,6 +38,9 @@ pub const MAX_CONTACTS: usize = 4;
 pub const SUBSTEPS: u32 = 2;
 pub const PGS_SWEEPS: u32 = 4;
 pub const CLEAN_SWEEPS: u32 = 1;
+/// Planting rounds per substep and their sweeps (see the kernel).
+pub const PLANT_ROUNDS: u32 = 0;
+pub const PLANT_SWEEPS: u32 = 4;
 /// Threads per block, and blocks per multiprocessor the register budget is
 /// set for: 4 blocks of 128 threads fit 128 registers per thread.
 pub const BLOCK: u32 = 128;
@@ -186,6 +189,8 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
         ("SUBSTEPS".into(), format!("{}u", solver_setting("SUBSTEPS", SUBSTEPS))),
         ("PGS_SWEEPS".into(), format!("{}u", solver_setting("PGS_SWEEPS", PGS_SWEEPS))),
         ("CLEAN_SWEEPS".into(), format!("{}u", solver_setting("CLEAN_SWEEPS", CLEAN_SWEEPS))),
+        ("PLANT_ROUNDS".into(), format!("{}u", solver_setting("PLANT_ROUNDS", PLANT_ROUNDS))),
+        ("PLANT_SWEEPS".into(), format!("{}u", solver_setting("PLANT_SWEEPS", PLANT_SWEEPS))),
         ("RECORD".into(), (if record { "1" } else { "0" }).into()),
         (
             "PROFILE".into(),
