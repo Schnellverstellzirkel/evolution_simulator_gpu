@@ -1,0 +1,13 @@
+# Plan measurements as they land
+
+## host-profile (2026-09-30, save42 at generation 51, 196k blocks, CPU times with the GPU shared)
+
+Archive stage per block: median 55 ms, p95 77 ms, max 92 ms (island offers 13 to 15, prefilter 14 to 16, global offers 13, CMA tell 8.5, island refresh 4 to 6, novelty refresh 5.5 median and 12.9 max, lineage 1.4 to 1.8). Scaled to a 100k block: about 30 ms median, 40 ms p95.
+Candidates: 1.9% of results beat an island cell (2.7% of unscreened); with reserve and global candidates 2.1%, under the 5% gate. Tells: 4.5 per block of 96 CMA emitters.
+Generation boundary: 22 to 41 ms; prune_lineage dominates (21 ms at 18k entries).
+Breeding on the same serial chain: 232 ms per 196k block (plan 57, emit 150, write 25), so the host chain is about 290 ms per block today.
+Decisions: no incremental novelty (fallback if the refresh p95 passes 20 ms at 100k), no pool-side boundary, ring floor 0.3 s (binds only after host-bounded and host-arenas shrink the breed chain).
+
+## warp-speed (2026-09-30, merged 96c4d40)
+
+Lane-group kernel 1.22x (kernel time at locked clocks 640 to 524 ms on 30k dump creatures; about 53 to 55M creature-steps/s). Elites: median 34.27 m, 2x ratio 0.986; random bodies best -0.01 m. Projected Jacobi rejected: random bodies gained up to 2.1 m. Profile: issue slots 53 to 60% busy, about one eligible warp per scheduler, a fifth of instructions are control flow; the muscle section stalls on global record loads.
