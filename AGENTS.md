@@ -71,7 +71,8 @@ The physics:
 Search and game state:
 
 - `src/qd.rs`: archives, niches, behavior descriptors, the morphology reserve, `qd::VERSION`.
-- `src/storage.rs`: the `Experiment` with its islands, emitters, breeding, migration, fine checks, and saves.
+- `src/storage.rs`: the `Experiment` with its ring of blocks, islands, emitters, breeding, migration, record confirmations, and saves.
+- `src/ring.rs`: the blocks in flight, absorbed in ring order whatever order the GPU finishes them in.
 - `src/evolution.rs` and `src/evolution/anatomy/`: the genome and the mutation operators (see `docs/anatomy-operators.md`).
 - `src/scheduler.rs`: routes work to healthy GPUs, with the CPU as failover.
 - `src/worker.rs`: the worker thread and the snapshot the UI draws.
@@ -82,7 +83,7 @@ Search and game state:
 
 All example tools score and replay creatures on the GPU engine (`examples/common/mod.rs`), take the GPU lock shared and need `EVOLUTION_DEVICES=primary`. None has a CPU mode: if the primary GPU does not open they fail.
 
-- `examples/search_ab.rs`: fixed-seed search runs through the production archive and breeding path on the GPU, with the scheduler's early screen and contender checks.
+- `examples/search_ab.rs`: fixed-seed search runs through the production ring on the GPU, with the early screen and the record confirmations.
 - `EVOLUTION_STAGE_LOG=<path>`: one CSV row per generation (evaluation, archive and breeding seconds, end-to-end rate).
 - `examples/size_report.rs <save> [count]`: body length, mass and foot slip for the best elites, from GPU replays. It has no cost of transport column.
 - `examples/mutation_audit.rs`: how much of its parent's distance each operator's child keeps.

@@ -2261,7 +2261,7 @@ impl App {
                         .strong(),
                 )
                 .on_hover_text(format!(
-                    "{} nodes, {} bones, {} muscles. Creature {}. {:.2} m is the distance this CPU playback reaches, and m/s its speed over the last fifth of a second. The GPU archive score comes from the GPU trial and its fine check; CPU playback can differ and does not change that score.\nCost of transport: {} (muscle work per kilogram per meter in a CPU trial; lower is more efficient; a diagnostic, never part of the score).",
+                    "{} nodes, {} bones, {} muscles. Creature {}. {:.2} m is the distance this CPU playback reaches, and m/s its speed over the last fifth of a second. The GPU archive score comes from the GPU trial, and for an island record from its confirmation trial; CPU playback can differ and does not change that score.\nCost of transport: {} (muscle work per kilogram per meter in a CPU trial; lower is more efficient; a diagnostic, never part of the score).",
                     p.nodes.len(),
                     p.creature.bones.len(),
                     p.creature.muscles.len(),
@@ -2792,7 +2792,6 @@ impl App {
         let progress = generation_progress(
             snapshot.completed,
             population,
-            snapshot.checking,
             snapshot.running,
             snapshot.end_to_end,
         );
@@ -4326,14 +4325,6 @@ impl App {
                     guided: false,
                 });
             }
-            if ui
-                .add_enabled(!running, egui::Button::new("Guided step").small())
-                .on_hover_text("Evaluate, then update the archive, then breed, pausing after each")
-                .clicked()
-            {
-                self.worker.pause.store(false, Ordering::Relaxed);
-                self.worker.send(Command::Next);
-            }
         });
     }
     /// Keyboard shortcuts and what each tab shows.
@@ -5690,21 +5681,11 @@ fn worlds_match(a: &Config, b: &Config) -> bool {
         .all(|effect| effect.level(a) == effect.level(b))
 }
 /// The Generation tile's second line. Percent rounds down, so "100%" only
-/// shows when every creature has a result, and while finalists still wait for
-/// their fine check the tile says so instead.
-fn generation_progress(
-    completed: usize,
-    population: usize,
-    checking: usize,
-    running: bool,
-    rate: f64,
-) -> String {
+/// shows when every creature has a result.
+fn generation_progress(completed: usize, population: usize, running: bool, rate: f64) -> String {
     let done = completed.min(population);
     if !running {
         return "Paused".to_owned();
-    }
-    if done >= population && checking > 0 {
-        return format!("All tried · checking {} finalists", number(checking));
     }
     if done >= population {
         return "Finishing the generation".to_owned();
@@ -6569,14 +6550,12 @@ mod tests {
         assert_eq!(autochange_forecast(&config, 7), None);
     }
     #[test]
-    fn the_generation_tile_tells_when_finalists_still_run() {
+    fn the_generation_tile_shows_the_share_done() {
         assert_eq!(
-            generation_progress(999_999, 1_000_000, 0, true, 0.0),
+            generation_progress(999_999, 1_000_000, true, 0.0),
             "99% done"
         );
-        assert!(generation_progress(1_000_000, 1_000_000, 40, true, 5.0).contains("checking 40"));
-        assert!(!generation_progress(1_000_000, 1_000_000, 40, true, 5.0).contains("100%"));
-        assert_eq!(generation_progress(5, 10, 0, false, 1.0), "Paused");
+        assert_eq!(generation_progress(5, 10, false, 1.0), "Paused");
     }
     #[test]
     fn world_marks_come_from_events_and_history() {

@@ -14,7 +14,7 @@ Each archive has 1,440 niches: 6 ground contact, 8 cadence, 1 vertical oscillati
 
 Every muscle shares one body clock. This gained 32% best distance on every seed in the first test and was the only change that made bodies of 8 or more nodes competitive (the best such body went from 34 m to 62 m).
 
-The CMA emitter explores in normalized units with a large step (sigma 0.12). Each island also runs a separable CMA-ES in physical units on its fastest body plan. That optimizer needed three things to help: every sample gets the same contender check, it stays on its body plan instead of chasing each new record, and it starts at half the base step. With them one seed went from 455 m to 958 m at 241 generations. A uniform sigma of 0.03 for the exploring emitter lost 40%.
+The CMA emitter explores in normalized units with a large step (sigma 0.12). Each island also runs a separable CMA-ES in physical units on its fastest body plan. That optimizer needed three things to help: every sample got the same check trial (the fine checks are gone, see below), it stays on its body plan instead of chasing each new record, and it starts at half the base step. With them one seed went from 455 m to 958 m at 241 generations. A uniform sigma of 0.03 for the exploring emitter lost 40%.
 
 Whole-body rescaling is a structural mutation, so evolution can grow bodies from 0.25 m bones to giants. Together with the log height axis it took one seed from 304 m to 856 m.
 
@@ -24,11 +24,11 @@ Cross-plan crossover grafts a limb with its muscles and rhythm from an elite of 
 
 Early screening stops a standard trial at 5 s when the creature is below the bar, the 5 s distance the top 20% reached. Screened creatures enter no archive. The 5 s distance keeps every creature of the final top 1% and 96% of the final top 10% (Spearman 0.887). At equal time screening gives 56% more best distance and 2.4 times the QD, at a cost of 14% QD at equal evaluations. Letting screened creatures open empty cells tied at equal time and lost per evaluation.
 
-Every archive contender gets a check trial from a perturbed pose (nodes moved up to 2 cm, grip varied 10%) at four times the standard rate and solver passes. The lower of the two distances is the fitness. A check at twice the rate let integrator exploits through: the top 50 kept a median 12% of their distance from an unseen pose against 44% with the four-times check.
+Standard results are final. Only a creature that would set a new record of its island or nursery gets a confirmation trial from the same pose at twice the standard rate and solver passes, and it keeps the lower distance. The fine checks it replaced (every archive contender, a perturbed pose, four times the rate) took 40 to 45% of GPU time and needed contender rules, cell claims, check sharing and a 12-block decision lag. An earlier measurement found that a check at twice the rate let integrator exploits through: the top 50 kept a median 12% of their distance from an unseen pose against 44% with the four-times check (`search_ab` prints this share).
 
 Trials last 20 s and physics runs at 60 Hz. Elites evolved at 30 Hz kept a median 38% of their distance when replayed at 60 Hz, against 90% for elites evolved at 60 Hz and replayed at 120 Hz.
 
-The search is deterministic for a fixed seed on one GPU. Results are absorbed in a fixed order, and the contender claims on archive cells are ordered.
+The search is deterministic for a fixed seed on one GPU. Blocks are absorbed in ring order and bred only at absorption, and each block keeps the settings it was bred with.
 
 ## Scoring and replays
 
@@ -36,7 +36,7 @@ The GPU score is final. A replay is recorded by the scoring kernel with a frame 
 
 A GPU that fails is retired and its unfinished units run on the CPU engine with the same creatures. A GPU out of memory keeps its unit, frees idle buffers and retries with fewer units in flight. Buffers above 1 MiB get 25% headroom, which cut peak GPU memory 15%.
 
-Saves hold only the configuration, history, archives, CMA and emitter state, lineage and queued elites. A 3M game saves 3.4 MB in 0.06 s where the full population took 1,389 MB and 24 s. Loading breeds the next generation from the archives in 3.8 s. Autosave is off. An older `qd::VERSION` is turned down by the header before the load starts.
+Saves hold only the configuration, history, archives, CMA and emitter state, lineage and queued elites. A 3M game saves 3.4 MB in 0.06 s where the full population took 1,389 MB and 24 s. Loading breeds the ring from the archives. Autosave is off. An older `qd::VERSION` is turned down by the header before the load starts.
 
 ## Physics
 
@@ -60,6 +60,6 @@ On NVIDIA the game runs CUDA (`src/cuda_engine.rs`). It is 1.8 times Vulkan on a
 
 Work units of 1 s gave 186,700 creatures/s end to end against 168,600 for 3 s units, with 2.5 GB less peak memory. The worker keeps 8 general threads. Adding 8 CPU evaluation workers to a healthy GPU lowered the rate from 137,800 to 121,300 creatures/s. Archive refreshes recompute only the cells near a change, which cut the archive stage from 3.4 s to 2.1 s per generation at 3M. Breeding packs children in batches, and the CPU chain is now under a quarter of a generation, so the GPU is the wall.
 
-Long sessions grow bodies, and every creature then costs more. The gene arenas reserve one generation of children and shrink the spare, which cut peak memory from 18.6 to 14.8 GB. Autosave is off by default because a clone of the experiment pushed a 32 GB machine into swap.
+The game holds a ring of at most 786,432 creatures in flight, not a resident 3M population with a spare arena, which reached 23 GB. The ring is 4 blocks of 196,608, each one engine unit handed over without a copy. At 1M creatures per generation `worker_rate` peaked at 5.2 GB RSS, and the ring does not grow with the generation size. Long sessions grow bodies, and every creature then costs more. Autosave is off by default.
 
 The fast CPU engine runs 16 creatures with one skeleton per SIMD group. It scores 7,800 creatures/s on 4 threads with full groups against 1,000 for the scalar reference, and it is bit-equal to the reference.

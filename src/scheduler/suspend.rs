@@ -5,8 +5,8 @@
 //! them in the same order as ever. Once no engine holds work, every GPU that
 //! can be opened again is closed, which frees its memory. Resuming opens it
 //! again. To the search a suspension looks like a GPU that was slow for a
-//! while, and the ordered blocks make a run independent of timing, so a
-//! suspended and resumed run gives the same results.
+//! while, and the ring absorbs blocks in a fixed order whatever the timing,
+//! so a suspended and resumed run gives the same results.
 
 use super::*;
 

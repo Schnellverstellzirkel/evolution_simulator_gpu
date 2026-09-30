@@ -426,7 +426,7 @@ fn print_robustness(
         .collect();
     let halved = kept.iter().filter(|&&k| k < 0.5).count();
     println!(
-        "{scope} seed {seed} top-{TOP_BODIES} elites under the fine check: median share kept {:.2}, below half {halved} of {}",
+        "{scope} seed {seed} top-{TOP_BODIES} elites at 4x rate from a nudged pose: median share kept {:.2}, below half {halved} of {}",
         median(&mut kept),
         elites.len()
     );

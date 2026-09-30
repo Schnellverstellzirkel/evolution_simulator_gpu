@@ -406,12 +406,12 @@ fn arena(s: &Scene) {
         12.0,
         INK,
     );
-    // Fine check.
+    // Record confirmation.
     s.sign(
         (770.0, 300.0, 222.0, 150.0),
         5,
-        "Fine check",
-        "A contender for an archive cell runs again as a nudged copy: pose moved by up to 2 cm, grip changed by up to 10%, physics at 4x the step rate. The worse distance counts. A check that fails the 5 s gate keeps it out.",
+        "Record check",
+        "A creature that would beat its island's record runs its trial again from the same pose, with physics at 2x the step rate. The worse distance counts. A second trial that fails the 5 s gate keeps it out.",
     );
 }
 
@@ -546,7 +546,7 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
         (14.0, 534.0, 232.0, 170.0),
         4,
         "How a child is made",
-        "One: pick a parent from an island archive. Two: a workshop changes it. Three: it runs the 20 s trial. Four: a contender gets the fine check. Five: it is offered to the archives. The four islands never share creatures. Only the hub gets copies, when the boats sail.",
+        "One: pick a parent from an island archive. Two: a workshop changes it. Three: it runs the 20 s trial. Four: a new island record gets its record check. Five: it is offered to the archives. The four islands never share creatures. Only the hub gets copies, when the boats sail.",
     );
 }
 

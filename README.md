@@ -35,7 +35,7 @@ nice -n 10 cargo run --release
 
 The default compute adapter name is `RTX 4060`; `--gpu NAME` selects another primary adapter. Secondary GPUs are off by default; `EVOLUTION_DEVICES=radeon` opts the integrated Radeon into evaluation. `EVOLUTION_DEVICES=primary` prevents adding secondary evaluation devices. Keep that setting on this workstation: the Radeon drives the desktop and must not evaluate creatures. Evaluation and general Rayon workers share a budget of half the available logical CPUs, capped at eight. By default the GPU evaluates and all eight go to general workers (archive insertion, breeding, packing). In a GPU run, CPU engines stand by for GPU failure and never contribute scores while a GPU is healthy. `EVOLUTION_CPU_THREADS=N` sizes that failover pool; `RAYON_NUM_THREADS` is limited to the remaining budget.
 
-If the primary GPU cannot open, evaluation falls back to the CPU and reports why once; without a separate CPU pool that fallback shares the general Rayon pool. A GPU that fails during a run is retired and its unfinished units, including pending fine checks, are retried on the CPU with the same creatures and settings. A failed CPU stops the session with a persistent error after completed results are stored.
+If the primary GPU cannot open, evaluation falls back to the CPU and reports why once; without a separate CPU pool that fallback shares the general Rayon pool. A GPU that fails during a run is retired and its unfinished units, including pending confirmation trials, are retried on the CPU with the same creatures and settings. A failed CPU stops the session with a persistent error after completed results are stored.
 
 For local iteration, use the named profile:
 
@@ -50,7 +50,7 @@ nice -n 10 cargo run --profile release-fast
 
 Press **Evolve** in the top bar, or Space, to run generation after generation; Space or **Pause evolution** stops. The replay follows the champion: the best creature so far. When a new record makes a new champion, the view switches to it at once, mid-generation too, on the Overview and in the player beside Ways of moving. Pick any creature (an archive card, a map cell, a record, an ancestor) to watch it instead, and **Back to champion** returns. K or a click on the replay pauses it, the arrow keys step one frame, drag pans and scroll zooms. Ctrl+S opens Save, F1 opens help.
 
-The top bar shows the population and trial length; the game keeps them at three million and 20 seconds, with no mutation controls. Diagnostic CLI runs and JSON presets can use other sizes or durations. The File menu opens, saves and exports; the New experiment dialog takes a seed; the View menu holds the dark theme and UI scale. **Diagnostics** in the status line opens a drawer with search and machine numbers and the step-by-step **One generation** and **Guided step** buttons; guided mode pauses between evaluation, archive insertion, and breeding.
+The top bar shows the population and trial length; the game keeps them at three million and 20 seconds, with no mutation controls. Diagnostic CLI runs and JSON presets can use other sizes or durations. The File menu opens, saves and exports; the New experiment dialog takes a seed; the View menu holds the dark theme and UI scale. **Diagnostics** in the status line opens a drawer with search and machine numbers and the **One generation** button, which runs one generation and pauses.
 
 Each environment effect is a row with one button per level. A click sets that level, and **Calm world** resets them all:
 
@@ -82,7 +82,7 @@ A fall, a joint driven too far past its range, or head acceleration above 8 g en
 
 Each behavior archive has 1,440 niches for ground contact, gait cadence, body height and feet that touch down and lift off. Four islands are fully isolated: they never receive migrants and their children take parents and mates only from their own archive. Every 25 generations a fifth island, the hub, receives copies of each isolated island's fastest tenth of elites and breeds from them with its own. Nothing flows back. The global archive records every island's elites for display and saves, and no parent comes from it. Each island keeps a 64-entry reserve of new body plans. CMA, structural and novelty emitters share the offspring, and immigrants seed empty archives. Each island also keeps a nursery: 10% of its slots hold new random bodies and the bodies bred from them, which compete only against each other for 10 generations. Then the survivors enter the island archive and compete on distance alone.
 
-A standard trial stops at 5 s when the creature is below the bar, the 5 s distance the top 20% reached. A screened creature enters no archive. Every creature that could enter an archive also gets a check trial from a perturbed pose at four times the physics rate, and its fitness is the lower distance. Both are GPU evaluations and the GPU score is final.
+A standard trial stops at 5 s when the creature is below the bar, the 5 s distance the top 20% reached. A screened creature enters no archive. A creature that would set a new record of its island also gets a confirmation trial at twice the physics rate, and its fitness is the lower distance. Both are GPU evaluations and the GPU score is final.
 
 Replays are recorded by the GPU that scores the archive (`engine::replay`): the scoring kernel with a frame output, so the replay shows the trial and the distance the archive holds. A CPU-only game replays on the CPU engine. See [architecture](docs/architecture.md) and [design decisions](docs/design-decisions.md).
 
@@ -115,7 +115,7 @@ This starts evolution, prints stage timings, and closes after the requested gene
 
 ## Save and resume
 
-A save holds the settings, generation, history, archives, emitter and CMA state and lineage. It holds no population, so it is small, and loading breeds the next generation from the archives. Each save starts with a header that carries the physics version, so an older save is turned down with a message before it loads.
+A save holds the settings, generation, history, archives, emitter and CMA state and lineage. It holds no creatures in flight, so it is small, and loading breeds them again from the archives. Each save starts with a header that carries the physics version, so an older save is turned down with a message before it loads.
 
 The dashboard writes no files on its own: autosave is off by default, and a loaded game starts with it off. When the player turns on File > Autosave every 10 generations, autosaves go to `runs/seed-<seed>-auto.evo` in a background thread, and the three newest experiment autosaves are kept. Wait for a requested manual save to report completion before closing the app. Headless runs write to their chosen checkpoint path and also export history CSV.
 

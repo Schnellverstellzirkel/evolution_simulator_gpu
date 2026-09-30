@@ -1240,8 +1240,8 @@ impl Experiment {
         self.islands[hub].refresh_behavior_scores();
     }
     /// Chooses emitters, parents, and CMA slots for offspring in `slots`.
-    /// Round 0 reproduces the generational random streams; other rounds salt
-    /// them so steady-state breeding never repeats a draw.
+    /// The breeding `round` salts the random streams, so no two blocks
+    /// repeat a draw.
     fn plan_offspring(
         &mut self,
         cfg: &Config,

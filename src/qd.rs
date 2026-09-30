@@ -38,8 +38,8 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 41: a tendon starts to pull past the longer of its muscle's longest length
 //     and its length in the start pose, and muscle mass follows that length.
 // 42: no fine checks; a creature that would set an island record gets one
-//     unperturbed confirmation trial at twice the rate, and the fine
-//     fidelity is twice the standard rate and solver passes.
+//     confirmation trial from the same pose at twice the rate and solver
+//     passes (the fine fidelity), and the search runs on a ring of blocks.
 pub const VERSION: u32 = 42;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;

@@ -17,11 +17,12 @@ use std::{
 };
 pub enum Command {
     New(Config),
+    /// Evolve; a run that is not `continuous`, or is `guided`, stops after
+    /// one generation.
     Run {
         continuous: bool,
         guided: bool,
     },
-    Next,
     Pause,
     Configure(Config),
     /// Wipe out half of every archive's elites (kept as fossils for undo).
@@ -110,7 +111,7 @@ pub struct Card {
     pub visits: u64,
     pub innovation_reserve: bool,
     pub creature: Creature,
-    /// The score is the fine check's: replay at fine fidelity.
+    /// The score is the confirmation trial's: replay at fine fidelity.
     pub fine: bool,
 }
 impl Card {
@@ -695,11 +696,6 @@ fn run(
                     Command::Pause => {
                         running = false;
                         status = "Paused".into();
-                    }
-                    Command::Next => {
-                        run_until = exp.as_ref().map(|e| e.generation + 1);
-                        pause.store(false, Ordering::Relaxed);
-                        running = true;
                     }
                     Command::Configure(cfg) => {
                         if let Some(e) = &mut exp {
@@ -1583,9 +1579,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// A world change mid-generation empties the archive at the next
-    /// boundary, so nearly every result becomes a contender. The run must
-    /// keep advancing generations instead of holding every slot for checks.
+    /// A world change mid-generation empties the archives, so nearly every
+    /// block sets island records again. The run must keep advancing
+    /// generations.
     #[test]
     #[ignore = "requires a Vulkan GPU"]
     fn a_world_change_mid_generation_keeps_generations_advancing() {
@@ -1684,7 +1680,7 @@ mod tests {
         }
     }
 
-    /// The steady loop absorbs blocks in a fixed order, so two runs of one
+    /// The ring absorbs blocks in a fixed order, so two runs of one
     /// seed on one GPU agree in every generation's statistics.
     #[test]
     #[ignore = "requires a Vulkan GPU"]
