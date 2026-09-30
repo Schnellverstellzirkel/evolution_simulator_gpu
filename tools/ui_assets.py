@@ -162,6 +162,20 @@ def haze(img, color, amount):
     return Image.fromarray(np.concatenate([rgb, alpha], axis=2).clip(0, 255).astype(np.uint8), "RGBA")
 
 
+def grime(img, strength=0.35, tile=384):
+    """Breaks up flat paint with a photographed concrete texture, so every
+    surface carries the dirt and wear of a real one."""
+    tex = Image.open(SRC / "acg" / "Concrete031" / "Concrete031_1K-JPG_Color.jpg").convert("L").resize((tile, tile))
+    t = np.asarray(tex).astype(np.float32) / 255.0
+    t = (t - t.mean()) / (t.std() + 1e-6)
+    a = np.asarray(img).astype(np.float32)
+    h, w = a.shape[:2]
+    reps = (h // tile + 1, w // tile + 1)
+    field = np.tile(t, reps)[:h, :w]
+    a[..., :3] *= (1.0 + strength * 0.25 * field)[..., None]
+    return Image.fromarray(a.clip(0, 255).astype(np.uint8), "RGBA")
+
+
 def vertical_fade(img, top_alpha, until):
     """Fades a layer's top into the clouds: alpha scales from top_alpha at
     the top edge to 1 at row `until`."""
@@ -282,7 +296,7 @@ def far_layer(rng):
     spire = haze(c2.done(), (140, 150, 156), 0.28)
     spire = vertical_fade(spire, 0.25, 420)
     out = Image.alpha_composite(far, spire)
-    save_png(out, "skyline/far.png")
+    save_png(grime(out, 0.22), "skyline/far.png")
 
 
 def dome(c, x, y, r, color):
@@ -418,7 +432,7 @@ def mid_layer(rng):
         x += rng.uniform(90, 320)
     img = shade_layer(c.done(), fog=(120, 128, 130), fog_amount=0.35)
     img = haze(img, (118, 128, 132), 0.12)
-    save_png(img, "skyline/mid.png")
+    save_png(grime(img, 0.8), "skyline/mid.png")
 
 
 def catenary(p0, p1, sag, n=24):
@@ -505,7 +519,7 @@ def near_layer(rng):
         c.rect(sx + 4, base - 272, sx + 38, base - 230, (18, 22, 26, 255))
         c.rect(sx + 7, base - 269, sx + 35, base - 233, (96, 150, 160, 255))
         c.rect(sx + 7, base - 269, sx + 35, base - 262, (150, 200, 206, 255))
-    save_png(shade_layer(c.done(), top_light=1.0, base_dark=0.85), "skyline/near.png")
+    save_png(grime(shade_layer(c.done(), top_light=1.0, base_dark=0.85), 1.0), "skyline/near.png")
 
 
 # ---------------------------------------------------------- menu backdrop
