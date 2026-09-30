@@ -48,9 +48,12 @@ impl Fidelity {
     pub fn fine() -> Self {
         let standard = Self::standard();
         Self {
-            rate: (standard.rate * 2).min(960),
-            bone_passes: standard.bone_passes * 2,
-            velocity_passes: standard.velocity_passes * 2,
+            // Only new records run a confirmation trial, so it can afford 4x:
+            // a 2x check once let integrator exploits through
+            // (docs/design-decisions.md).
+            rate: (standard.rate * 4).min(960),
+            bone_passes: standard.bone_passes * 4,
+            velocity_passes: standard.velocity_passes * 4,
         }
     }
     pub fn dt(self) -> f32 {
