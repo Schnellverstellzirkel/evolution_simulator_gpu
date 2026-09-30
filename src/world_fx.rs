@@ -783,6 +783,14 @@ pub fn structures(
                 continue;
             }
             let (tl, tr) = (center - half, center + half);
+            // A pit under the hurdle breaks its block apart; the ground line
+            // alone shows it then.
+            if [s, tl, center, tr, e]
+                .iter()
+                .any(|&x| crate::physics::gaps(x, cfg.gaps).0 != 0.0)
+            {
+                continue;
+            }
             let body = vec![
                 at(s, height(s, true)),
                 at(tl, height(tl, true)),

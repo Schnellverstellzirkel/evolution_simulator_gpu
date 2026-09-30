@@ -2416,16 +2416,24 @@ impl App {
             &|sx| (sx - origin.x) / self.zoom,
             self.zoom,
         );
+        // A tick every meter, a label every 1, 2, 5 or 10 m so labels
+        // never run into each other.
+        let every = [1, 2, 5, 10, 20]
+            .into_iter()
+            .find(|&n| n as f32 * self.zoom >= 48.)
+            .unwrap_or(50);
         for x in left..=right {
             let pos = world(x as f32, 0.);
             painter.line_segment([pos, pos + Vec2::new(0., 6.)], Stroke::new(1., GROUND_INK));
-            painter.text(
-                pos + Vec2::new(5., 6.),
-                Align2::LEFT_TOP,
-                format!("{x} m"),
-                FontId::proportional(13.),
-                GROUND_INK,
-            );
+            if x.rem_euclid(every) == 0 {
+                painter.text(
+                    pos + Vec2::new(5., 6.),
+                    Align2::LEFT_TOP,
+                    format!("{x} m"),
+                    FontId::proportional(13.),
+                    GROUND_INK,
+                );
+            }
         }
         if let Some(p) = &self.playback {
             // Center-of-mass trail from the last two seconds of recorded
