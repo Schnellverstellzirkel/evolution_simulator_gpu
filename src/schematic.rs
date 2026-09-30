@@ -15,19 +15,21 @@ use eframe::egui::{
 
 const W: f32 = 1000.0;
 const H: f32 = 720.0;
+// A Combine terminal's display: cold blue linework on near-black glass,
+// steel platforms for the islands, amber and rust for the marks.
 /// Outlines.
-const INK: Color32 = Color32::from_rgb(12, 12, 11);
+const INK: Color32 = Color32::from_rgb(86, 150, 180);
 /// Text on the plates.
-const TEXT: Color32 = Color32::from_rgb(226, 220, 204);
-const PARCHMENT: Color32 = Color32::from_rgb(40, 41, 38);
-const PARCHMENT_DARK: Color32 = Color32::from_rgb(84, 82, 72);
-const CREAM: Color32 = Color32::from_rgb(56, 56, 51);
-const WOOD: Color32 = Color32::from_rgb(122, 76, 46);
-const WOOD_DARK: Color32 = Color32::from_rgb(92, 60, 38);
-const GRASS: Color32 = Color32::from_rgb(84, 94, 54);
-const GRASS_LIGHT: Color32 = Color32::from_rgb(106, 116, 66);
-const ROCK: Color32 = Color32::from_rgb(70, 66, 58);
-const DIRT: Color32 = Color32::from_rgb(92, 78, 58);
+const TEXT: Color32 = Color32::from_rgb(214, 226, 230);
+const PARCHMENT: Color32 = Color32::from_rgb(9, 13, 16);
+const PARCHMENT_DARK: Color32 = Color32::from_rgb(40, 62, 74);
+const CREAM: Color32 = Color32::from_rgb(16, 24, 30);
+const WOOD: Color32 = Color32::from_rgb(92, 66, 44);
+const WOOD_DARK: Color32 = Color32::from_rgb(62, 48, 34);
+const GRASS: Color32 = Color32::from_rgb(30, 40, 46);
+const GRASS_LIGHT: Color32 = Color32::from_rgb(42, 56, 64);
+const ROCK: Color32 = Color32::from_rgb(20, 26, 30);
+const DIRT: Color32 = Color32::from_rgb(38, 44, 48);
 /// The emitters, in the colors the island cards use for them.
 const ROOF: [Color32; 4] = [
     Color32::from_rgb(222, 160, 60),
@@ -162,7 +164,7 @@ impl Scene<'_> {
             Align2::CENTER_CENTER,
             n.to_string(),
             self.font(13.0),
-            INK,
+            PARCHMENT,
         );
     }
     /// A tiny stick creature for niche plots that the snapshot has no body for.
