@@ -46,6 +46,8 @@ Each idea was measured and lost. Do not redo one without a new reason. Numbers a
 - CUDA register caps of 96 or 80, a local-memory table, and blocks of 32, 64 or 128 threads for physics v2: 0.85 to 0.98 of the default.
 - One children-first pass for the contact matrix, and the same pass in registers: within noise.
 - Contact sweep counts of 8, 4 or 2: 84M to 86M creature-steps/s at every count.
+- Projected Jacobi instead of Gauss-Seidel in the lane-group kernel (4 sweeps, relaxation 1, 0.7, 0.5): random bodies travel up to 2.1 m and three to seven times as many fall.
+- One children-count bound per step instead of per tree level in the articulated-body pass, and 3 blocks per SM without spills: 3% and 8% slower.
 - GPU step ranges of 128 or 256, and extra segment boundaries: slower than 64 and two segments.
 - 16 general workers, or 8 CPU evaluation workers beside a healthy GPU: 129,792 and 121,273 creatures/s against 137,824.
 - GPU work units of 0.5 s, 2 s or 3 s: 168k, 180k and 168k creatures/s against 187k for 1 s.

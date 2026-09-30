@@ -15,7 +15,7 @@ The physics is the CUDA kernel, `shaders/warp_creature.cu`, and nothing else sim
 - Passive joint damping with a 0.1 s time constant, sized to the inertia each joint moves.
 - Joint limits are inelastic stops. A joint that would pass its limit within the step turns only as far as the limit. A joint forced 0.5 rad past its range breaks and ends the trial like a fall.
 - Spin cap: a bone turning faster than 15 rad/s meets an implicit drag toward rest. The drag is a pure torque, so it changes no linear momentum.
-- Ground contact: a substep is one articulated-body pass with the muscles, gravity, wind, drag and water, then one contact solve. Every node that would reach the ground within the substep gets a contact, at most the 4 deepest. The contacts are solved together at velocity level with the exact contact-space matrix and 4 sweeps of projected Gauss-Seidel from zero impulses, then 1 sweep that only takes back friction that would do positive work. A touching node may approach the ground only as fast as its gap allows, normal impulses only push, and friction stays within mu times the normal impulse and opposes sliding. There are no planting rounds, no warm start and no static friction factor.
+- Ground contact: a substep is one articulated-body pass with the muscles, gravity, wind, drag and water, then one contact solve. Every node that would reach the ground within the substep gets a contact, at most the 4 deepest. The contacts are solved together at velocity level with the exact contact-space matrix and 2 sweeps of projected Gauss-Seidel from zero impulses, then 1 sweep that only takes back friction that would do positive work. A touching node may approach the ground only as fast as its gap allows, normal impulses only push, and friction stays within mu times the normal impulse and opposes sliding. There are no planting rounds, no warm start and no static friction factor.
 - Momentum balance: after each substep the body's momentum equals its old momentum plus the external impulses. The difference from first-order integration is applied as one uniform velocity.
 - First law in flight: a substep without ground contact may not gain more kinetic plus potential energy than the muscles, the wind and the tendons put in. The excess comes off the motion about the center of mass.
 
@@ -36,7 +36,7 @@ Each effect changes the physics and never the objective. Levels are in `src/envi
 
 ## Cost
 
-The contact solve is about 55% of a step. The dense contact matrix, the sweeps and the planting rounds each cost a quarter to a third of that section. `docs/rejected-ideas.md` lists what was tried to make it cheaper.
+In the CUDA kernel the contact solve (detection, the matrix walk, the sweeps and the response) is about 40% of the instructions of a substep, the muscles about 16% and the articulated-body pass about 14%. Each walker keeps its matrix rows in registers, and the response to the contact impulses comes from the torques the walkers leave at each joint. About a fifth of the instructions are branches, compares and convergence bookkeeping. `docs/rejected-ideas.md` lists what was tried to make it cheaper.
 
 ## Substeps
 
