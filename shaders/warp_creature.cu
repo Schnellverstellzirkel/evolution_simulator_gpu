@@ -551,6 +551,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 break;
             }
             s_t1[tid] = make_float4(vx, vy, pvx, pvy);
+            // The first muscle round's first record, fetched early.
+            float4 pf0 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            if (0u < rounds && lg < nmus) { pf0 = reinterpret_cast<const float4*>(muscles + mbase)[lg * 4u]; }
             __syncwarp();
             const float ts = t_now + (float)sub * HS;
             const float ox = shf(px, 0u);
@@ -664,7 +667,12 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 const unsigned mi = (unsigned)r * W + lg;
                 const bool mon = (unsigned)r < rounds && mi < nmus;
                 const float4* mrec = reinterpret_cast<const float4*>(muscles + mbase) + mi * 4u;
-                const float4 f0 = mon ? mrec[0] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                const float4 f0 = pf0;
+                {
+                    const unsigned nx = (unsigned)(r + 1) * W + lg;
+                    pf0 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                    if ((unsigned)(r + 1) < rounds && nx < nmus) { pf0 = mrec[4u * W]; }
+                }
                 const unsigned packed = __float_as_uint(f0.x);
                 const unsigned la = packed & 31u;
                 const unsigned lb = (packed >> 5u) & 31u;
@@ -733,10 +741,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
 #pragma unroll
                     for (unsigned b = 0u; b < 4u; b++) {
                         const unsigned slot = (word >> (8u * b)) & 255u;
-                        if (slot != 255u) {
-                            const float4 f = mf[slot];
-                            fm += v3(f.x, f.y, f.z);
-                        }
+                        const float4 f = mf[slot & (2u * W - 1u)];
+                        const float g = slot != 255u ? 1.0f : 0.0f;
+                        fm += v3(f.x, f.y, f.z) * g;
                     }
                 }
                 __syncwarp();
@@ -786,14 +793,14 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 __syncwarp();
                 const unsigned cm = __reduce_max_sync(FULL, lvl == L - 1u ? nch : 0u);
                 for (unsigned k = 0u; k < cm; k++) {
-                    if (lvl == L - 1u && k < nch) {
-                        const unsigned src = gbase + fc + k;
-                        const float4 e0 = region[3u * src], e1 = region[3u * src + 1u];
-                        const float e2 = reinterpret_cast<const float*>(region + 3u * src + 2u)[0];
-                        i0 += v3(e0.x, e0.y, e0.z);
-                        i1 += v3(e0.w, e1.x, e1.y);
-                        bs += v3(e1.z, e1.w, e2);
-                    }
+                    const bool take = lvl == L - 1u && k < nch;
+                    const unsigned src = gbase + ((fc + k) & (W - 1u));
+                    const float4 e0 = region[3u * src], e1 = region[3u * src + 1u];
+                    const float e2 = reinterpret_cast<const float*>(region + 3u * src + 2u)[0];
+                    const float g = take ? 1.0f : 0.0f;
+                    i0 += v3(e0.x, e0.y, e0.z) * g;
+                    i1 += v3(e0.w, e1.x, e1.y) * g;
+                    bs += v3(e1.z, e1.w, e2) * g;
                 }
             }
             PROF(6);
@@ -929,7 +936,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                         }
                     }
                     vec3 pn = -dn, pt = -dtg;
-                    for (unsigned L = maxlev; L >= 2u; L--) {
+                    // Levels above every walker's body hold no work.
+                    const unsigned wtop = __reduce_max_sync(FULL, walker ? ((__float_as_uint(s_t0[tid].w) >> 10u) & 31u) : 0u);
+                    for (unsigned L = wtop; L >= 2u; L--) {
                         const float4 ja = s_t0[gtid + cur];
                         const float4 ju = s_t1[gtid + cur];
                         const unsigned jt = __float_as_uint(ja.w);
@@ -953,12 +962,12 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                             if ((unsigned)c >= ncmax) { break; }
                             const unsigned src = (slot_lanes >> (5 * c)) & 31u;
                             const float tnc = shf(tn, src), ttc = shf(tt, src);
-                            if (act && ((pc[c] >> jj) & 1u)) {
-                                kr[c].x += jd * tn * tnc;
-                                kr[c].y += jd * tn * ttc;
-                                kr[c].z += jd * tt * tnc;
-                                kr[c].w += jd * tt * ttc;
-                            }
+                            const float wd = (act && ((pc[c] >> jj) & 1u)) ? jd : 0.0f;
+                            const float wn = wd * tn, wt = wd * tt;
+                            kr[c].x += wn * tnc;
+                            kr[c].y += wn * ttc;
+                            kr[c].z += wt * tnc;
+                            kr[c].w += wt * ttc;
                             if (here && ((pc[c] >> lg) & 1u)) { tjn[c] = tnc; tjt[c] = ttc; }
                         }
                     }
