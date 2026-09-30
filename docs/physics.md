@@ -4,7 +4,7 @@ A creature is a tree of point masses (nodes) joined by rigid, massless bones. Th
 
 The dynamics are Featherstone's articulated-body algorithm in planar spatial vectors, written in world axes about the head's position at the start of the step so the numbers stay small in single precision. The neck body floats freely. Every other bone turns about its pivot relative to its parent bone. Integration is semi-implicit Euler on the joint coordinates at 60 steps per second. Trials last 20 s after a short settling phase.
 
-The scalar reference is `physics2::simulate_step_inner`. The WGSL kernel, the CUDA kernel and the fast CPU engine (`cpu_v2`) compute the same expressions. The two GPU kernels change together. `cpu_v2` is bit-equal to the reference (`tests/physics2_lanes.rs`).
+The scalar reference is `physics2::simulate_step_inner`. The WGSL kernel, the CUDA kernel and the fast CPU engine (`cpu_v2`) compute the same expressions. The two GPU kernels change together.
 
 ## Forces and rules
 
@@ -40,4 +40,4 @@ The contact solve is about 55% of a step. The dense contact matrix, the sweeps a
 
 ## Audits
 
-`tests/physics_audit.rs` guards against solver-made energy and friction exploits: no elite may gain energy the muscles did not pay for, and friction may never do positive work along a slip. `examples/physics_audit.rs` prints what the GPU replay records per elite (contact-free steps, ground push, muscle energy store, broken joints). The energy, friction and momentum ledgers exist only in the CPU prototype. `examples/first_generation.rs` scores a random population on the GPU (median, p99, best) and catches free propulsion. Run it after any physics change.
+`examples/physics_audit.rs` prints what the GPU replay records per elite (contact-free steps, ground push, muscle energy store, broken joints). The energy, friction and momentum ledgers exist only in the CPU prototype. `examples/first_generation.rs` scores a random population on the GPU (median, p99, best) and catches free propulsion. Run it after any physics change.

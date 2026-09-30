@@ -63,7 +63,7 @@ The physics:
 - `shaders/physics2_creature.wgsl` is the GPU kernel for Vulkan, driven by `src/vk_engine.rs` and `src/gpu.rs`.
 - `shaders/physics2_creature.cu` is its CUDA mirror, used on NVIDIA when the driver and NVRTC load, driven by `src/cuda_engine.rs`. It mirrors the WGSL section by section; change both together.
 - `src/physics2.rs` is the scalar CPU prototype: the reference the GPU kernels and the fast CPU engine are tested against, the engine of single CPU replays, and the home of the kernel source builders, the packing (`pack`) and the recording edits for replays.
-- `src/cpu_v2.rs` is the fast CPU engine (16 creatures with one skeleton per SIMD group, `src/simd.rs`), bit-equal to the prototype (`tests/physics2_lanes.rs`). It scores CPU-only games and GPU failover. `src/cpu_engine.rs` is the thin front (`evaluate`, `replay`, `trajectory`, `transport_cost`).
+- `src/cpu_v2.rs` is the fast CPU engine (16 creatures with one skeleton per SIMD group, `src/simd.rs`). It scores CPU-only games and GPU failover. `src/cpu_engine.rs` is the thin front (`evaluate`, `replay`, `trajectory`, `transport_cost`).
 - `src/physics.rs` holds what the physics and the UI share: limits, fidelity, node and joint constants, the ground functions (bumps, slope, gaps, hurdles, quake), screening.
 - `src/engine.rs` picks the backend and records replays with the scoring kernel (frames carry the muscle energy, muscle force and contact forces). `src/creature_kernel.rs` holds the GPU data layout (`LaneBatch`, `Params`, `GpuResult`, `frame_stride`) and builds the CUDA sources.
 - `docs/physics.md` describes the model: contacts (the deepest 4 per step), friction that may never do positive work, the plant pass, and muscle strength scaled to the mass a muscle moves.

@@ -4,7 +4,6 @@ use evolution_simulator::{
     config::Config,
     engine,
     gpu::Gpu,
-    search_benchmark,
     storage::{self, Experiment, Stage},
     ui,
 };
@@ -49,42 +48,6 @@ enum Action {
         #[arg(long)]
         throughput: bool,
     },
-    /// Record real GPU and optional CPU timings to CSV.
-    Benchmark {
-        #[arg(
-            long,
-            value_delimiter = ',',
-            default_value = "1000,100000,1000000,3000000"
-        )]
-        populations: Vec<usize>,
-        #[arg(long, default_value_t = 15.0)]
-        duration: f32,
-        #[arg(long, default_value_t = 1)]
-        generations: u32,
-        #[arg(long, default_value = "runs/benchmark.csv")]
-        output: PathBuf,
-    },
-    /// Compare fixed-seed evolutionary search runs and export morphology, lineage, and timing data.
-    SearchBenchmark {
-        #[arg(long, value_delimiter = ',', default_value = "38,39,40,41,42")]
-        seeds: Vec<u64>,
-        #[arg(long, default_value_t = 1000)]
-        population: usize,
-        #[arg(long, default_value_t = 300)]
-        generations: u32,
-        #[arg(long)]
-        config: Option<PathBuf>,
-        #[arg(long)]
-        duration: Option<f32>,
-        #[arg(
-            long,
-            value_delimiter = ',',
-            default_value = "1,5,10,20,50,100,150,200"
-        )]
-        milestones: Vec<f32>,
-        #[arg(long, default_value = "benchmarks/search-baseline")]
-        output_dir: PathBuf,
-    },
     /// Evaluate a fixed checkpoint population repeatedly (kernel diagnostics).
     EvalBench {
         #[arg(long, default_value = "bench/w3-seed38-100k.evo")]
@@ -118,14 +81,6 @@ enum Action {
         /// class, for benchmarks beside another program on the GPU).
         #[arg(long)]
         max_nodes: Option<usize>,
-    },
-    /// Summarize an existing checkpoint's record curve and archive morphology.
-    Analyze {
-        checkpoint: PathBuf,
-        #[arg(long)]
-        output: Option<PathBuf>,
-        #[arg(long)]
-        champion: Option<PathBuf>,
     },
 }
 fn main() -> Result<()> {
@@ -250,127 +205,6 @@ fn main() -> Result<()> {
             storage::export_csv(&checkpoint.with_extension("csv"), &e.history)?;
             eprintln!("Saved {}", checkpoint.display());
             run_result
-        }
-        Some(Action::Benchmark {
-            populations,
-            duration,
-            generations,
-            output,
-        }) => {
-            if let Some(parent) = output.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let mut csv = csv::Writer::from_path(&output)?;
-            csv.write_record([
-                "gpu",
-                "population",
-                "generation",
-                "duration_s",
-                "creation_s",
-                "gpu_evaluation_s",
-                "generation_s",
-                "evaluations_per_s",
-                "population_bytes",
-                "gpu_allocated_bytes",
-                "failed",
-            ])?;
-            let mut gpu = Gpu::new(&cli.gpu)?;
-            for count in populations {
-                let cfg = Config {
-                    population: count,
-                    seed: 38,
-                    random_seed: false,
-                    duration,
-                    throughput: true,
-                    ..Default::default()
-                };
-                let start = Instant::now();
-                let mut e = Experiment::new(cfg)?;
-                let creation = start.elapsed().as_secs_f64();
-                // Warm the pipeline and buffers before collecting GPU execution timings.
-                gpu.evaluate(
-                    &e.population,
-                    &(0..count.min(1024)).collect::<Vec<_>>(),
-                    &e.config,
-                )?;
-                for generation in 0..generations {
-                    let total = Instant::now();
-                    let start = Instant::now();
-                    let batch = e.config.batch_size();
-                    for begin in (0..count).step_by(batch) {
-                        let end = (begin + batch).min(count);
-                        let metrics = gpu.evaluate_with_metrics(
-                            &e.population,
-                            &(begin..end).collect::<Vec<_>>(),
-                            &e.config,
-                        )?;
-                        for (offset, metric) in metrics.iter().enumerate() {
-                            e.record_result(begin + offset, metric);
-                        }
-                    }
-                    let gpu_seconds = start.elapsed().as_secs_f64();
-                    e.evaluation_seconds = gpu_seconds;
-                    e.evaluated = count;
-                    e.archive_batch()?;
-                    let failed = e.history.last().unwrap().failed;
-                    let bytes = e.population.bytes();
-                    e.prepare_next_batch()?;
-                    let generation_seconds = total.elapsed().as_secs_f64();
-                    csv.serialize((
-                        &gpu.name,
-                        count,
-                        generation,
-                        duration,
-                        creation,
-                        gpu_seconds,
-                        generation_seconds,
-                        count as f64 / gpu_seconds,
-                        bytes,
-                        gpu.allocated_bytes,
-                        failed,
-                    ))?;
-                    csv.flush()?;
-                    println!(
-                        "{} creatures | generation {} | GPU {:.3}s | complete {:.3}s | {:.0}/s | RAM {:.1} MiB | failed {}",
-                        count,
-                        generation,
-                        gpu_seconds,
-                        generation_seconds,
-                        count as f64 / gpu_seconds,
-                        bytes as f64 / 1048576.,
-                        failed
-                    );
-                }
-            }
-            println!("Benchmark saved to {}", output.display());
-            Ok(())
-        }
-        Some(Action::SearchBenchmark {
-            seeds,
-            population,
-            generations,
-            config,
-            duration,
-            milestones,
-            output_dir,
-        }) => {
-            let mut cfg: Config = if let Some(path) = config {
-                serde_json::from_reader(std::fs::File::open(path)?)?
-            } else {
-                Config::default()
-            };
-            cfg.population = population;
-            if let Some(duration) = duration {
-                cfg.duration = duration;
-            }
-            search_benchmark::run(search_benchmark::RunOptions {
-                gpu_name: &cli.gpu,
-                config: cfg,
-                seeds: &seeds,
-                generations,
-                milestones: &milestones,
-                output_dir: &output_dir,
-            })
         }
         Some(Action::EvalBench {
             checkpoint,
@@ -564,15 +398,6 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some(Action::Analyze {
-            checkpoint,
-            output,
-            champion,
-        }) => search_benchmark::write_checkpoint_analysis(
-            &checkpoint,
-            output.as_deref(),
-            champion.as_deref(),
-        ),
     };
     result.context("Evolution Simulator")
 }

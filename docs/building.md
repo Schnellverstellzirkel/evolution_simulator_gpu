@@ -27,7 +27,7 @@ CARGO_BUILD_JOBS=8 RAYON_NUM_THREADS=8 EVOLUTION_DEVICES=primary nice -n 10 carg
 ```
 
 GPU tests are ignored. Select them explicitly, for example
-`cargo test --release --test simulation -- --ignored`.
+`cargo test --release --test gpu_repeatability -- --ignored`.
 
 ## CUDA on NVIDIA GPUs
 

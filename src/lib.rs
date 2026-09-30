@@ -14,7 +14,6 @@ pub mod qd;
 pub mod replay_forces;
 pub mod scheduler;
 pub mod schematic;
-pub mod search_benchmark;
 pub mod simd;
 pub mod storage;
 pub mod ui;
