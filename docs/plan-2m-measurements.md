@@ -19,3 +19,7 @@ W = 2 per-lane maximal-coordinate stub on 8-node, 19-muscle synthetic bodies, 2 
 ## tree-count (2026-09-30, merged 92ca335): gate passed, per-plan kernels are the default
 
 Canonical trees (children sorted by subtree shape, neck first) on save42's bred ring of 786k: 10,256 distinct trees; top 30 cover 72.9% of creatures (62.2% of lane-steps), top 100 cover 87.6% (77.7% of lane-steps); 85% of creatures needs 74 trees, 85% of lane-steps 197. Packer bone order as-is gives only 80.6% at top 100, so the packer must canonicalize. The island archives alone: 82.7% at top 100. Gen-10 dump elites: 104 trees, top 30 cover 84%. The general kernel always carries about 12% of creatures and 22% of lane-steps past the top 100.
+
+## bucket-counters (2026-09-30, merged 2dee40f): 0.7% kept; the plan's 1.15x for bucketed queues is refuted
+
+Per-bucket take-up counters on the lane-group kernel: kernel time 3316 to 3293 ms over the three classes on the save42 dump (0.5 to 0.9% per class), results identical. Cause: pack already sorts each wave by (rounds, depth, nodes), so warps are 98 to 99.8% uniform with a single counter; no take-up change can gain more than 1 to 2% while blocks stay sorted. The persistent-kernels row's 1.15x should be re-estimated at about 1.01x unless its blocks are unsorted. Gap-excluded kernel timing (sum of per-warp step intervals under 400 us) measures under the shared lock; tools in the scratchpad.
