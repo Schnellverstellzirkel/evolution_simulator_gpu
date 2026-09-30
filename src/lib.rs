@@ -17,6 +17,7 @@ pub mod scheduler;
 pub mod schematic;
 pub mod simd;
 pub mod storage;
+pub mod theme;
 pub mod ui;
 pub mod vk_engine;
 pub mod worker;

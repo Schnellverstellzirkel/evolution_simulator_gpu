@@ -77,7 +77,7 @@ Search and game state:
 - `src/scheduler.rs`: routes work to healthy GPUs, with the CPU as failover.
 - `src/worker.rs`: the worker thread and the snapshot the UI draws.
 - `src/environment.rs`: environment effects and presets. Add new effects here.
-- `src/ui.rs`: the egui interface. `src/config.rs`: settings.
+- `src/ui.rs`: the egui interface. `src/theme.rs`: its palette, style and HUD pieces. `src/world_fx.rs`: the replay backdrop and the look of each environment effect. `src/config.rs`: settings.
 
 ## Measurement tools
 
