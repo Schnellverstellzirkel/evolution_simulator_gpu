@@ -1,8 +1,9 @@
 //! "How evolution works": a painted picture of the search, with live numbers
 //! from the worker snapshot. Everything is drawn with egui's painter on a
 //! fixed 1000 x 720 canvas that scales to the window. Colors are fixed and
-//! do not follow the theme: every text sits on a cream plate with dark ink,
-//! so it reads the same in light and dark mode.
+//! do not follow the theme: it is drawn like a worn control-room board, pale
+//! text on dark steel plates with amber, rust, cold blue and olive marks, so
+//! it reads the same in light and dark mode and matches the scene.
 
 use crate::qd::Emitter;
 use crate::storage::{MIGRATION_INTERVAL, MIGRATION_SHARE, hub_island};
@@ -14,24 +15,28 @@ use eframe::egui::{
 
 const W: f32 = 1000.0;
 const H: f32 = 720.0;
-const INK: Color32 = Color32::from_rgb(43, 26, 14);
-const PARCHMENT: Color32 = Color32::from_rgb(239, 218, 168);
-const PARCHMENT_DARK: Color32 = Color32::from_rgb(214, 186, 128);
-const CREAM: Color32 = Color32::from_rgb(255, 245, 214);
-const WOOD: Color32 = Color32::from_rgb(150, 92, 44);
-const WOOD_DARK: Color32 = Color32::from_rgb(98, 58, 26);
-const GRASS: Color32 = Color32::from_rgb(96, 178, 58);
-const GRASS_LIGHT: Color32 = Color32::from_rgb(138, 208, 76);
-const ROCK: Color32 = Color32::from_rgb(130, 98, 76);
-const DIRT: Color32 = Color32::from_rgb(170, 118, 66);
+/// Outlines.
+const INK: Color32 = Color32::from_rgb(12, 12, 11);
+/// Text on the plates.
+const TEXT: Color32 = Color32::from_rgb(226, 220, 204);
+const PARCHMENT: Color32 = Color32::from_rgb(40, 41, 38);
+const PARCHMENT_DARK: Color32 = Color32::from_rgb(84, 82, 72);
+const CREAM: Color32 = Color32::from_rgb(56, 56, 51);
+const WOOD: Color32 = Color32::from_rgb(122, 76, 46);
+const WOOD_DARK: Color32 = Color32::from_rgb(92, 60, 38);
+const GRASS: Color32 = Color32::from_rgb(84, 94, 54);
+const GRASS_LIGHT: Color32 = Color32::from_rgb(106, 116, 66);
+const ROCK: Color32 = Color32::from_rgb(70, 66, 58);
+const DIRT: Color32 = Color32::from_rgb(92, 78, 58);
+/// The emitters, in the colors the island cards use for them.
 const ROOF: [Color32; 4] = [
-    Color32::from_rgb(214, 64, 48),
-    Color32::from_rgb(52, 132, 214),
-    Color32::from_rgb(140, 84, 200),
-    Color32::from_rgb(232, 150, 30),
+    Color32::from_rgb(222, 160, 60),
+    Color32::from_rgb(178, 92, 58),
+    Color32::from_rgb(96, 154, 196),
+    Color32::from_rgb(132, 140, 76),
 ];
-const RED: Color32 = Color32::from_rgb(196, 48, 36);
-const GOLD: Color32 = Color32::from_rgb(244, 190, 40);
+const RED: Color32 = Color32::from_rgb(170, 62, 40);
+const GOLD: Color32 = Color32::from_rgb(226, 166, 58);
 
 /// The fixed-canvas painter: virtual coordinates in, screen coordinates out.
 struct Scene<'a> {
@@ -109,14 +114,14 @@ impl Scene<'_> {
         let head = self.p.layout(
             title.to_owned(),
             self.font(14.5),
-            INK,
+            TEXT,
             inner.width() - indent,
         );
         let head_h = head.size().y;
         if num > 0 {
             self.badge(x + 17.0, y + 5.0 + head_h / self.k * 0.5, num);
         }
-        self.p.galley(inner.min + Vec2::new(indent, 0.0), head, INK);
+        self.p.galley(inner.min + Vec2::new(indent, 0.0), head, TEXT);
         self.text(
             Rect::from_min_max(
                 inner.min + Vec2::new(0.0, head_h + if num > 0 { 6.0 * self.k } else { 0.0 }),
@@ -124,7 +129,7 @@ impl Scene<'_> {
             ),
             body,
             12.5,
-            INK,
+            TEXT,
         );
     }
     fn arrow(&self, from: (f32, f32), to: (f32, f32), color: Color32) {
@@ -199,12 +204,7 @@ const ISLAND_CENTERS: [(f32, f32); 4] = [
     (615.0, 462.0),
     (385.0, 462.0),
 ];
-const ISLAND_TINT: [Color32; 4] = [
-    Color32::from_rgb(214, 64, 48),
-    Color32::from_rgb(52, 132, 214),
-    Color32::from_rgb(140, 84, 200),
-    Color32::from_rgb(232, 150, 30),
-];
+const ISLAND_TINT: [Color32; 4] = ROOF;
 
 /// The hub: a smaller island in the middle that receives copies of every
 /// isolated island's best elites.
@@ -230,7 +230,7 @@ fn hub(s: &Scene, snap: Option<&Snapshot>) {
     let best = summary.map_or(f32::NAN, |i| i.best);
     let plate = s.rect(cx - 54.0, cy + 8.0, 108.0, 20.0);
     s.block(plate, CREAM, 5.0, 2.0);
-    s.label(cx, cy + 18.0, &format!("Hub  {}", meters(best)), 11.5, INK);
+    s.label(cx, cy + 18.0, &format!("Hub  {}", meters(best)), 11.5, TEXT);
 }
 
 fn island(s: &Scene, snap: Option<&Snapshot>, index: usize) {
@@ -358,14 +358,14 @@ fn workshop(s: &Scene, index: usize, snap: Option<&Snapshot>) {
     s.block(wall, CREAM, 4.0, 3.0);
     let inner = wall.shrink2(Vec2::new(7.0 * s.k, 3.0 * s.k));
     let head = format!("{name}   {:.0}%", share * 100.0);
-    let g = s.p.layout(head, s.font(14.5), INK, inner.width());
+    let g = s.p.layout(head, s.font(14.5), TEXT, inner.width());
     let hh = g.size().y;
-    s.p.galley(inner.min, g, INK);
+    s.p.galley(inner.min, g, TEXT);
     s.text(
         Rect::from_min_max(inner.min + Vec2::new(0.0, hh), inner.max),
         what,
         11.0,
-        INK,
+        TEXT,
     );
 }
 
@@ -398,13 +398,13 @@ fn arena(s: &Scene) {
         );
     }
     s.critter(806.0, 152.0, ROOF[1]);
-    s.label(gate_x, 178.0, "5 s gate", 12.5, INK);
-    s.label(finish_x + 2.0, 178.0, "20 s", 12.5, INK);
+    s.label(gate_x, 178.0, "5 s gate", 12.5, TEXT);
+    s.label(finish_x + 2.0, 178.0, "20 s", 12.5, TEXT);
     s.text(
         s.rect(776.0, 190.0, 214.0, 96.0),
         "Every creature runs a 20 s trial. At 5 s a creature below the top 20% bar of the last generation is stopped and enters no archive. Survivors run on. Score is horizontal distance only.",
         12.0,
-        INK,
+        TEXT,
     );
     // Fine check.
     s.sign(
@@ -446,7 +446,7 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
         31.0,
         &format!("How evolution works  (generation {generation})"),
         20.0,
-        CREAM,
+        TEXT,
     );
 
     // The four isolated islands, the hub between them, and the boats that
@@ -474,7 +474,7 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
             MIGRATION_SHARE * 100.0
         ),
         10.5,
-        INK,
+        TEXT,
     );
     s.badge(300.0, 100.0, 1);
 
@@ -488,7 +488,7 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
         s.rect(14.0, 60.0, 232.0, 30.0),
         "Parents come from the island archives.",
         11.5,
-        INK,
+        TEXT,
     );
 
     // Arena on the right and the arrow into it.
@@ -498,14 +498,14 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
         s.rect(748.0, 12.0, 120.0, 16.0),
         "children go to trial",
         11.0,
-        INK,
+        TEXT,
     );
     s.arrow((770.0, 526.0), (626.0, 588.0), GOLD);
     s.text(
         s.rect(776.0, 462.0, 214.0, 50.0),
         "Survivors are offered to their island archive and to the global archive.",
         11.5,
-        INK,
+        TEXT,
     );
 
     // Global archive.
@@ -519,7 +519,7 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
             "Global archive\n{cells} behavior niches filled, {size_now} elites.\nEvery evaluated creature is offered to it and the best one in each niche stays. It is the record: no parent comes from it. When the world changes, each island's elites are tested again on their own island, and the emitter stats and CMA state start over."
         ),
         12.0,
-        INK,
+        TEXT,
     );
     s.badge(437.0, 580.0, 6);
 
@@ -535,7 +535,7 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
     let best_text = champion.map_or("no champion yet".to_owned(), |(best, _)| {
         format!("Champion {}", meters(best))
     });
-    s.label(750.0, 683.0, &best_text, 14.5, CREAM);
+    s.label(750.0, 683.0, &best_text, 14.5, TEXT);
     if let Some((_, creature)) = champion {
         thumbnail(&p, creature, s.rect(700.0, 570.0, 100.0, 76.0));
     }
