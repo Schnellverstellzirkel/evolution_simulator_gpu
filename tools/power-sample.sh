@@ -2,7 +2,8 @@
 # Samples the RTX and the APU for the power rows in docs/building.md: SM and
 # memory clock, power (instant and averaged), the live power limit, the
 # limiter reasons, temperature, utilization, the P-state, the PCIe link, the
-# APU package power (PPT, amdgpu hwmon) and the mean CPU clock.
+# APU package power (PPT, amdgpu hwmon), the mean CPU clock, and the
+# Radeon's shader clock and busy percent.
 #
 # Usage:
 #   tools/power-sample.sh <out.csv> [interval_ms=100] -- <command...>
@@ -29,7 +30,7 @@ summary() {
     NR == 1 { next }
     $1 + 0 < from + 0 || $1 + 0 > to + 0 { next }
     {
-      n++; sm += $2; pw += $4; ppt += $12; mhz += $13
+      n++; sm += $2; pw += $4; ppt += $12; mhz += $13; rmhz += $14; rbusy += $15
       r = hex($9)
       if ($8 + 0 >= 90) {
         b++; bsm += $2; bpw += $4; bavg += $5; blim += $6; bppt += $12; bmhz += $13
@@ -46,8 +47,8 @@ summary() {
     }
     END {
       if (n == 0) { print "no samples in the window"; exit 1 }
-      printf "window %.1f to %.1f s, %d samples: SM %.0f MHz, GPU %.1f W, APU PPT %.1f W, CPU %.0f MHz\n",
-        t0, t1, n, sm / n, pw / n, ppt / n, mhz / n
+      printf "window %.1f to %.1f s, %d samples: SM %.0f MHz, GPU %.1f W, APU PPT %.1f W, CPU %.0f MHz, Radeon %.0f MHz at %.0f%% busy\n",
+        t0, t1, n, sm / n, pw / n, ppt / n, mhz / n, rmhz / n, rbusy / n
       if (b == 0) { print "no busy samples (utilization under 90%)"; exit 0 }
       printf "busy, %d samples: SM %.0f MHz (%d to %d), GPU %.1f W (averaged %.1f W), limit %.1f W, %.0f C (max %d), APU PPT %.1f W, CPU %.0f MHz\n",
         b, bsm / b, bmin, bmax, bpw / b, bavg / b, blim / b, btemp / b, tmax, bppt / b, bmhz / b
@@ -75,23 +76,31 @@ if [ $# -gt 0 ] && [ "$1" != "--" ]; then
 fi
 [ "${1:-}" = "--" ] && shift
 
-ppt_file=
+ppt_file= radeon_freq= radeon_busy=
 for h in /sys/class/hwmon/hwmon*; do
-  [ "$(cat "$h/name" 2>/dev/null)" = amdgpu ] && [ -r "$h/power1_average" ] && ppt_file=$h/power1_average
+  if [ "$(cat "$h/name" 2>/dev/null)" = amdgpu ]; then
+    [ -r "$h/power1_average" ] && ppt_file=$h/power1_average
+    [ -r "$h/freq1_input" ] && radeon_freq=$h/freq1_input
+    busy=$h/device/gpu_busy_percent
+    [ -r "$busy" ] && radeon_busy=$busy
+  fi
 done
 
-echo "t_s,sm_mhz,mem_mhz,power_w,power_avg_w,limit_w,temp_c,util,reasons,pstate,pcie_gen,apu_ppt_w,cpu_mhz" > "$out"
+echo "t_s,sm_mhz,mem_mhz,power_w,power_avg_w,limit_w,temp_c,util,reasons,pstate,pcie_gen,apu_ppt_w,cpu_mhz,radeon_mhz,radeon_busy" > "$out"
 t0=$EPOCHREALTIME
 sample() {
   nvidia-smi -i 0 --query-gpu=clocks.sm,clocks.mem,power.draw.instant,power.draw.average,enforced.power.limit,temperature.gpu,utilization.gpu,clocks_event_reasons.active,pstate,pcie.link.gen.current \
     --format=csv,noheader,nounits -lms "$ms" |
     while IFS= read -r line; do
-      awk -v t0="$t0" -v now="$EPOCHREALTIME" -v g="${line// /}" -v ppt="$ppt_file" '
+      awk -v t0="$t0" -v now="$EPOCHREALTIME" -v g="${line// /}" -v ppt="$ppt_file" -v rf="$radeon_freq" -v rb="$radeon_busy" '
         /^cpu MHz/ { s += $4; n++ }
         END {
           p = ""
+          f = ""; b = ""
           if (ppt != "" && (getline v < ppt) > 0) p = sprintf("%.1f", v / 1e6)
-          printf "%.3f,%s,%s,%.0f\n", now - t0, g, p, n ? s / n : 0
+          if (rf != "" && (getline v < rf) > 0) f = sprintf("%.0f", v / 1e6)
+          if (rb != "" && (getline v < rb) > 0) b = v + 0
+          printf "%.3f,%s,%s,%.0f,%s,%s\n", now - t0, g, p, n ? s / n : 0, f, b
         }' /proc/cpuinfo
     done >> "$out"
 }
