@@ -2762,14 +2762,30 @@ impl App {
         ];
         // HUD tiles: a capital label, a big number that glows in the dark
         // theme, and a line of detail.
-        const TILE_HEIGHT: f32 = 92.;
         let gap = GAP_M;
         let width = (ui.available_width() - gap * (tiles.len() - 1) as f32) / tiles.len() as f32;
+        // Narrow tiles shrink the number and wrap the detail line, and every
+        // tile takes the height of the tallest.
+        let text_width = (width - 28.).max(40.);
+        let value_size = (width / 9.).clamp(24., 32.);
+        let notes: Vec<_> = tiles
+            .iter()
+            .map(|tile| {
+                ui.painter().layout(
+                    tile.3.clone(),
+                    FontId::proportional(13.),
+                    theme.muted,
+                    text_width,
+                )
+            })
+            .collect();
+        let note_height = notes.iter().map(|g| g.size().y).fold(0., f32::max);
+        let tile_height = 30. + value_size * 1.25 + note_height + 10.;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
-            for (name, value, color, note, why) in tiles {
+            for ((name, value, color, _, why), note) in tiles.into_iter().zip(notes) {
                 let (rect, response) =
-                    ui.allocate_exact_size(Vec2::new(width, TILE_HEIGHT), Sense::hover());
+                    ui.allocate_exact_size(Vec2::new(width, tile_height), Sense::hover());
                 let painter = ui.painter_at(rect);
                 let fill = if theme.dark {
                     Color32::from_rgb(22, 23, 21)
@@ -2787,23 +2803,21 @@ impl App {
                     rect.left_top() + Vec2::new(14., 12.),
                     Align2::LEFT_TOP,
                     name,
-                    11.,
+                    if width < 280. { 10. } else { 11. },
                     theme.muted,
                 );
                 crate::theme::glow_text(
                     &painter,
-                    rect.left_top() + Vec2::new(13., 30.),
+                    rect.left_top() + Vec2::new(13., 28.),
                     Align2::LEFT_TOP,
                     value,
-                    FontId::proportional(32.),
+                    FontId::proportional(value_size),
                     color,
                     theme.dark,
                 );
-                painter.text(
-                    rect.left_bottom() + Vec2::new(14., -10.),
-                    Align2::LEFT_BOTTOM,
+                painter.galley(
+                    rect.left_top() + Vec2::new(14., 30. + value_size * 1.25),
                     note,
-                    FontId::proportional(13.),
                     theme.muted,
                 );
                 response.on_hover_text(why);
