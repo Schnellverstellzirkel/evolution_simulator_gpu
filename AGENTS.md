@@ -80,14 +80,16 @@ Search and game state:
 
 ## Measurement tools
 
-- `examples/search_ab.rs`: fixed-seed search runs through the production archive and breeding path, on the CPU or with `--gpu`.
+All example tools score and replay creatures on the GPU engine (`examples/common/mod.rs`), take the GPU lock shared and need `EVOLUTION_DEVICES=primary`. None has a CPU mode: if the primary GPU does not open they fail.
+
+- `examples/search_ab.rs`: fixed-seed search runs through the production archive and breeding path on the GPU, with the scheduler's early screen and contender checks.
 - `EVOLUTION_STAGE_LOG=<path>`: one CSV row per generation (evaluation, archive and breeding seconds, end-to-end rate).
-- `examples/size_report.rs <save> [count]`: body length, mass and foot slip for the best elites.
+- `examples/size_report.rs <save> [count]`: body length, mass and foot slip for the best elites, from GPU replays. It has no cost of transport column.
 - `examples/mutation_audit.rs`: how much of its parent's distance each operator's child keeps.
-- `examples/physics_audit.rs`: energy, friction and momentum ledgers per elite.
-- `examples/first_generation.rs`: random-population distances on the CPU engine.
+- `examples/physics_audit.rs`: per elite, what the GPU replay records: contact-free steps, largest ground push, lowest muscle energy store, steps with a broken joint. The solver energy, momentum and friction ledgers and the bone load exist only in the CPU prototype and are gone from this tool.
+- `examples/first_generation.rs`: random-population distances on the GPU engine.
 - `examples/replay_match.rs <save>`: the best elites' archive distance beside their replay's.
-- `examples/p2_speed.rs`, `examples/p2_cpu_speed.rs`, `examples/worker_rate.rs`: GPU, CPU and worker throughput.
+- `examples/p2_speed.rs`, `examples/worker_rate.rs`: GPU and worker throughput.
 - `tools/pause-game.sh`: pauses the owner's game for a speed measurement (`docs/building.md`).
 
 ## Docs

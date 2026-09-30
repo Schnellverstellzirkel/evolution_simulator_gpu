@@ -40,4 +40,4 @@ The contact solve is about 55% of a step. The dense contact matrix, the sweeps a
 
 ## Audits
 
-`tests/physics_audit.rs` guards against solver-made energy and friction exploits: no elite may gain energy the muscles did not pay for, and friction may never do positive work along a slip. `examples/physics_audit.rs` prints the energy, friction and momentum ledgers per elite. `examples/first_generation.rs` scores a random population (median, p99, best) and catches free propulsion. Run it after any physics change.
+`tests/physics_audit.rs` guards against solver-made energy and friction exploits: no elite may gain energy the muscles did not pay for, and friction may never do positive work along a slip. `examples/physics_audit.rs` prints what the GPU replay records per elite (contact-free steps, ground push, muscle energy store, broken joints). The energy, friction and momentum ledgers exist only in the CPU prototype. `examples/first_generation.rs` scores a random population on the GPU (median, p99, best) and catches free propulsion. Run it after any physics change.

@@ -1,8 +1,9 @@
-//! Distances of a fresh random population on the CPU engine: a quick check
+//! Distances of a fresh random population on the GPU engine: a quick check
 //! that a physics change does not hand random bodies free propulsion.
 //! Usage: cargo run --release --example first_generation [count] [seconds]
-use evolution_simulator::{config::Config, cpu_engine, evolution};
-fn main() {
+mod common;
+use evolution_simulator::{config::Config, evolution};
+fn main() -> anyhow::Result<()> {
     let count: usize = std::env::args()
         .nth(1)
         .and_then(|v| v.parse().ok())
@@ -15,10 +16,12 @@ fn main() {
         population: count,
         duration,
         random_seed: false,
+        screen: None,
         ..Config::default()
     };
-    let pop = evolution::create(&cfg).unwrap();
-    let mut distances: Vec<f32> = cpu_engine::evaluate(&pop, &cfg)
+    let pop = evolution::create(&cfg)?;
+    let mut engine = common::open()?;
+    let mut distances: Vec<f32> = common::score(&mut engine, &pop, &cfg)?
         .iter()
         .map(|r| r.fitness)
         .filter(|f| f.is_finite() && *f > -1e10)
@@ -32,4 +35,5 @@ fn main() {
         at(0.99),
         at(1.0)
     );
+    Ok(())
 }

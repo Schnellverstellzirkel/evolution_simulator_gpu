@@ -2,7 +2,7 @@
 
 A Rust game in which 2D creatures made of bones, joints, and muscles evolve to travel as far as possible. The graphical game starts with **3 million creatures per generation** and **20-second trials**. Fitness is horizontal center-of-mass distance in meters. Gait, height, and ground contact describe archive niches; they do not multiply or penalize the score.
 
-The search combines MAP-Elites, CMA optimizers, structural mutations, novelty search, and immigrants across four isolated island archives and a hub. Vulkan compute is the scoring authority in the full-performance run; the CPU engine remains available for fallback, diagnostics, and recorded playback. An egui dashboard shows the archive, history, lineage, and replays.
+The search combines MAP-Elites, CMA optimizers, structural mutations, novelty search, and immigrants across four isolated island archives and a hub. Vulkan compute is the scoring authority in the full-performance run; the CPU engine remains available for fallback and recorded playback. An egui dashboard shows the archive, history, lineage, and replays.
 
 ## Original work and license
 
@@ -98,14 +98,12 @@ nice -n 10 cargo run --release --example size_report -- runs/seed-38-100k.evo 10
 nice -n 10 cargo run --release --example search_ab -- 2 64 0.5 38,39 --tag baseline
 ```
 
-`--generations` counts additional generations when resuming. `--config PATH` loads a JSON preset, `--duration` overrides trial duration for a new experiment, and `--checkpoint PATH` chooses the save destination. Ctrl+C requests a stop and checkpoint after the current evaluation call returns. `size_report` reports elite geometry, mass, travel, and foot slip; `EVOLUTION_LEDGER=1` adds momentum diagnostics. `search_ab` runs fixed-seed generations through the production archive and breeding path and prints best distance, QD score, archive cells, and the top-50 body mix.
+`--generations` counts additional generations when resuming. `--config PATH` loads a JSON preset, `--duration` overrides trial duration for a new experiment, and `--checkpoint PATH` chooses the save destination. Ctrl+C requests a stop and checkpoint after the current evaluation call returns. `size_report` reports elite geometry, mass, travel, and foot slip from GPU replays. `search_ab` runs fixed-seed generations through the production archive and breeding path and prints best distance, QD score, archive cells, and the top-50 body mix.
 
 ```bash
 nice -n 10 cargo run --release -- benchmark --populations 1000,100000 --duration 60 --generations 3
 nice -n 10 cargo run --release -- analyze runs/seed-38-100k.evo --output runs/analysis.json --champion runs/champion.json
 ```
-
-`benchmark --cpu` adds CPU timings.
 
 For complete-generation timing in the graphical app:
 

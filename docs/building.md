@@ -59,6 +59,14 @@ Vulkan, `EVOLUTION_CUDA=1` makes the GPU tests refuse a Vulkan fallback,
 `EVOLUTION_NVRTC=/path/to/libnvrtc.so.13` names another NVRTC, and
 `EVOLUTION_CUDA_VERBOSE=1` reports compile times.
 
+## Diagnostic examples
+
+The tools in `examples/` (`search_ab`, `size_report`, `mutation_audit`, `physics_audit`, `first_generation`, `replay_match`, `p2_speed`, `worker_rate`) score and replay creatures on the GPU engine and have no CPU mode. They fail if the primary GPU does not open. They submit at most 50,000 creatures per unit, so they need little GPU memory beside the owner's game. Run them with the lock shared, unless they measure speed:
+
+```bash
+EVOLUTION_DEVICES=primary flock -s target/gpu.lock nice -n 19 tools/cpu-slot.sh cargo run --release --example first_generation 20000
+```
+
 ## Pausing the game for a measurement
 
 A speed measurement needs the GPU and the CPU to itself, while the owner's game may be running. `tools/pause-game.sh <command...>` pauses the running game, runs the command and lets the game resume when the command ends, also on Ctrl-C or an error. Run speed measurements inside the exclusive GPU lock:

@@ -1,15 +1,22 @@
-//! Solver-made energy and momentum of elites under the selected physics
-//! (physics v2). Replays elites spread over the archive's
-//! rank order on the CPU engine and prints, per elite and in total, where its
-//! energy and momentum came from: muscle work, mechanical energy the solver
-//! added or removed beyond it, the momentum balance and first-law
-//! corrections of v2, friction that pushed a node the way it slid, and the
-//! steps by contact count. Diagnostic only.
+//! What the scoring kernel records of elites' trials, per elite and in total.
+//! Replays elites spread over the archive's rank order on the GPU engine
+//! (the scoring kernel with recording) and prints the distance of the replay
+//! beside the archive's, the body, the fall time, the share of steps with no
+//! node on the ground, the largest ground push on one node, the lowest muscle
+//! energy store and the steps with a joint past its break angle.
+//! Diagnostic only.
+//!
+//! The GPU kernel does not expose the solver ledgers that the CPU prototype
+//! kept: muscle work, mechanical energy the solver gained or lost, the
+//! momentum balance and first-law corrections, friction that pushed a node the
+//! way it slid, cost of transport, and the bone load. Those columns are gone.
+//! `physics2::replay` still fills them on the CPU, and only tests use it.
 //! With `random` in place of a checkpoint it audits a random first generation.
 //! Usage: cargo run --release --example physics_audit <checkpoint.evo|random> [count]
-use evolution_simulator::{config::Config, cpu_engine, physics, physics2, storage};
+mod common;
+use evolution_simulator::{config::Config, physics, storage};
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let path = std::env::args().nth(1).expect("checkpoint");
     let count: usize = std::env::args()
         .nth(2)
@@ -22,11 +29,11 @@ fn main() {
                 random_seed: false,
                 ..Config::default()
             };
-            let pop = evolution_simulator::evolution::create(&cfg).unwrap();
+            let pop = evolution_simulator::evolution::create(&cfg)?;
             let list = (0..count).map(|i| (0.0, pop.creature(i))).collect();
             (cfg, list)
         } else {
-            let e = storage::load(std::path::Path::new(&path)).unwrap();
+            let e = storage::load(std::path::Path::new(&path))?;
             let list = e
                 .archive
                 .entries
@@ -41,92 +48,66 @@ fn main() {
     };
     creatures.sort_by(|a, b| b.0.total_cmp(&a.0));
     let elites = creatures;
+    let _engine = common::open()?;
     println!(
         "{} elites; replaying {count} spread over the rank order",
         elites.len()
     );
     println!(
-        "rank  archive_m replay_m nodes muscles kg  work_J  gained_J lost_J  bal+J bal-J  firstlaw_J  contact_free%  fric_push%  cost_J/kg/m  fell_s  Nwork+  Nwork-  Fwork+  Fwork-"
+        "rank  archive_m replay_m nodes muscles kg  fell_s  contact_free%  max_ground_N  min_store  broken_steps%"
     );
-    let mut total = [0.0f64; 16];
     let (mut tendon_muscles, mut all_muscles) = (0usize, 0usize);
-    let mut with_muscles = 0usize;
-    let mut loads: Vec<(f32, [f32; 2])> = Vec::new();
+    let mut replayed = 0usize;
     for k in 0..count {
         let rank = (elites.len() - 1) * k / (count - 1).max(1);
         let (archive_m, c) = &elites[rank];
-        let (_frames, result) = cpu_engine::replay(c, &cfg);
-        let energy = physics2::ENERGY.with(|l| l.get());
+        let recording = common::record(c, &cfg)?;
         let mass: f32 = physics::nodes(c).iter().map(|n| n.mass).sum();
         all_muscles += c.muscles.len();
         tendon_muscles += c.muscles.iter().filter(|m| m.tendon > 0.0).count();
-        loads.push((mass, physics2::BONE_LOAD.with(|b| b.get())));
-        let cost = cpu_engine::transport_cost(c, &cfg);
-        let steps = energy[6].max(1.0);
-        let fric = if energy[10] > 0.0 {
-            100.0 * energy[9] / energy[10]
-        } else {
-            0.0
-        };
+        let (mut free, mut broken_steps, mut steps) = (0usize, 0usize, 0usize);
+        let (mut max_ground, mut min_store) = (0.0f32, 1.0f32);
+        if let Some(forces) = &recording.forces {
+            steps = forces.ground.len();
+            free = forces
+                .ground
+                .iter()
+                .filter(|frame| frame.iter().all(|&n| n <= 0.0))
+                .count();
+            max_ground = forces
+                .ground
+                .iter()
+                .flatten()
+                .copied()
+                .fold(0.0, f32::max);
+            min_store = forces
+                .energy
+                .iter()
+                .flatten()
+                .copied()
+                .fold(1.0, f32::min);
+            broken_steps = forces.broken.iter().filter(|&&b| b != 0).count();
+        }
+        let share = |n: usize| 100.0 * n as f32 / steps.max(1) as f32;
         println!(
-            "{rank:5} {:9.2} {:8.2} {:5} {:7} {:5.1} {:7.1} {:8.1} {:7.1} {:6.2} {:5.2} {:11.2} {:13.1} {:11.1} {:12} {:7.2} {:7.1} {:7.1} {:7.1} {:7.1}",
+            "{rank:5} {:9.2} {:8.2} {:5} {:7} {:5.1} {:7.2} {:13.1} {:13.0} {:10.2} {:13.1}",
             archive_m,
-            result.fitness,
+            recording.result.fitness,
             c.nodes.len(),
             c.muscles.len(),
             mass,
-            energy[0],
-            energy[1],
-            energy[2],
-            energy[3],
-            energy[4],
-            energy[11],
-            100.0 * energy[5] / steps,
-            fric,
-            cost.map_or("n/a".into(), |v| format!("{v:.1}")),
-            result.fall_time,
-            energy[12],
-            energy[13],
-            energy[14],
-            energy[15]
+            recording.result.fall_time,
+            share(free),
+            max_ground,
+            min_store,
+            share(broken_steps),
         );
-        for (t, v) in total.iter_mut().zip(energy) {
-            *t += v;
-        }
-        with_muscles += 1;
+        replayed += 1;
     }
-    println!(
-        "total over {with_muscles}: muscle work {:.1} J, solver gained {:.1} J, lost {:.1} J, balance +{:.2} -{:.2} J, first-law {:.2} J, friction push {:.1}% of {:.0} N s",
-        total[0],
-        total[1],
-        total[2],
-        total[3],
-        total[4],
-        total[11],
-        if total[10] > 0.0 {
-            100.0 * total[9] / total[10]
-        } else {
-            0.0
-        },
-        total[10]
-    );
+    println!("replayed {replayed} elites");
     println!(
         "muscles with an elastic tendon: {tendon_muscles} of {all_muscles} ({:.0}%)",
         100.0 * tendon_muscles as f64 / all_muscles.max(1) as f64
     );
-    let quantile = |column: usize, q: f32| {
-        let mut v: Vec<f32> = loads.iter().map(|l| l.1[column]).collect();
-        v.sort_by(f32::total_cmp);
-        v[((v.len() - 1) as f32 * q) as usize]
-    };
-    println!(
-        "bone load over {} elites (max over steps and bones): force per section median {:.0} p90 {:.0} max {:.0} kN/m^2; moment per modulus median {:.0} p90 {:.0} max {:.0} kN/m^2",
-        loads.len(),
-        quantile(0, 0.5) / 1e3,
-        quantile(0, 0.9) / 1e3,
-        quantile(0, 1.0) / 1e3,
-        quantile(1, 0.5) / 1e3,
-        quantile(1, 0.9) / 1e3,
-        quantile(1, 1.0) / 1e3
-    );
+    Ok(())
 }

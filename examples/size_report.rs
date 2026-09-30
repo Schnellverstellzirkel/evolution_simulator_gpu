@@ -1,10 +1,11 @@
 //! Body size and foot slip of the fastest archive elites: how long each body
 //! is, what it weighs, and how far its feet slide while touching the ground.
 //! `EVOLUTION_NODE_SLIP` adds scored-interval contact details for the champion.
+//! Replays are recorded by the GPU scoring kernel. The GPU does not report the
+//! muscle work of a trial, so there is no cost of transport column.
 //! Usage: cargo run --release --example size_report <checkpoint.evo> [count]
-use evolution_simulator::{
-    config::Config, cpu_engine, creature_kernel::GpuResult, physics, storage,
-};
+mod common;
+use evolution_simulator::{config::Config, creature_kernel::GpuResult, physics, storage};
 
 struct ReplayMetrics {
     distance: f32,
@@ -104,13 +105,14 @@ fn replay_metrics(
     }
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let path = std::env::args().nth(1).expect("checkpoint");
     let count: usize = std::env::args()
         .nth(2)
         .and_then(|v| v.parse().ok())
         .unwrap_or(12);
     let e = storage::load(std::path::Path::new(&path)).unwrap();
+    let _engine = common::open()?;
     let mut elites: Vec<_> = e.archive.entries.iter().collect();
     elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
     let node_detail = std::env::var_os("EVOLUTION_NODE_SLIP").is_some();
@@ -119,7 +121,7 @@ fn main() {
         "position-derived acceleration includes position corrections; engine_shake_g is the engine's recorded value at the scored endpoint"
     );
     println!(
-        "archive_m  replay_m  nodes  length_m  longest_bone_m  mass_kg  slip_m  slip_per_replay_m  pos_peak_g  pos_shake_peak_g  engine_shake_g  cost_J_per_kg_m"
+        "archive_m  replay_m  nodes  length_m  longest_bone_m  mass_kg  slip_m  slip_per_replay_m  pos_peak_g  pos_shake_peak_g  engine_shake_g"
     );
     let mut lengths = Vec::new();
     let mut shares = Vec::new();
@@ -129,13 +131,14 @@ fn main() {
         let mass: f32 = nodes.iter().map(|n| n.mass).sum();
         let length: f32 = c.bones.iter().map(|b| b.rest_length).sum();
         let longest = c.bones.iter().map(|b| b.rest_length).fold(0.0, f32::max);
-        let (frames, result) = cpu_engine::replay(c, &e.config);
+        let recording = common::record(c, &e.config)?;
+        let (frames, result) = (recording.frames, recording.result);
         let measured = replay_metrics(&nodes, &frames, &result, &e.config);
         let share = measured.slip / measured.distance.abs().max(0.01);
         lengths.push(length);
         shares.push(share);
         println!(
-            "{:9.1}  {:8.1}  {:5}  {:8.2}  {:14.2}  {:7.2}  {:6.1}  {:17.2}  {:10.1}  {:16.1}  {:14.1}  {:15}",
+            "{:9.1}  {:8.1}  {:5}  {:8.2}  {:14.2}  {:7.2}  {:6.1}  {:17.2}  {:10.1}  {:16.1}  {:14.1}",
             elite.fitness,
             measured.distance,
             c.nodes.len(),
@@ -147,8 +150,6 @@ fn main() {
             measured.position_peak_g,
             measured.position_shake_peak_g,
             result.head_shake / 9.8,
-            cpu_engine::transport_cost(c, &e.config)
-                .map_or("n/a".to_owned(), |v| format!("{v:.2}")),
         );
         if rank == 0 && node_detail {
             champion_detail = nodes
@@ -178,6 +179,7 @@ fn main() {
             );
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

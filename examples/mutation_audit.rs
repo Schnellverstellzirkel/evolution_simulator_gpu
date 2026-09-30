@@ -7,11 +7,11 @@
 //!
 //! Usage: cargo run --release --example mutation_audit -- <checkpoint> [elites] [seconds]
 //! Every operator runs by name, so `EVOLUTION_ANATOMY` need not be set.
+mod common;
 use anyhow::Context;
 use evolution_simulator::{
     config::Config,
-    cpu_engine,
-    evolution::{self, Creature, Population, Rng},
+    evolution::{self, Creature, Rng},
     storage,
 };
 
@@ -32,19 +32,12 @@ fn main() -> anyhow::Result<()> {
         random_seed: false,
         ..experiment.config.clone()
     };
-    let score = |creatures: &[Creature]| -> Vec<f32> {
+    let mut engine = common::open()?;
+    let mut score = |creatures: &[Creature]| -> anyhow::Result<Vec<f32>> {
         if creatures.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let mut pop = Population::default();
-        for c in creatures {
-            pop.push(c.clone());
-        }
-        let cfg = Config {
-            population: pop.genomes.len(),
-            ..cfg.clone()
-        };
-        cpu_engine::evaluate(&pop, &cfg)
+        Ok(common::score_creatures(&mut engine, creatures, &cfg)?
             .iter()
             .map(|r| {
                 if r.fitness.is_finite() {
@@ -53,10 +46,10 @@ fn main() -> anyhow::Result<()> {
                     0.0
                 }
             })
-            .collect()
+            .collect())
     };
     let parents: Vec<Creature> = elites.iter().map(|e| e.creature.clone()).collect();
-    let parent_scores = score(&parents);
+    let parent_scores = score(&parents)?;
     let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
     eprintln!(
         "{} elites, {seconds} s trials, parent median {:.2} m, mean {:.1} nodes / {:.1} muscles",
@@ -117,7 +110,7 @@ fn main() -> anyhow::Result<()> {
     }
     for (name, children) in rows {
         let bodies: Vec<Creature> = children.iter().map(|(_, c)| c.clone()).collect();
-        let scores = score(&bodies);
+        let scores = score(&bodies)?;
         let mut ratios = Vec::new();
         let (mut keeps, mut beats, mut counted) = (0, 0, 0);
         let (mut nodes, mut muscles) = (0.0f32, 0.0f32);

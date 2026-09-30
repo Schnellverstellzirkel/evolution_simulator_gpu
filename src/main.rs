@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use evolution_simulator::{
     config::Config,
-    engine::{self, Engine},
+    engine,
     gpu::Gpu,
     search_benchmark,
     storage::{self, Experiment, Stage},
@@ -61,8 +61,6 @@ enum Action {
         duration: f32,
         #[arg(long, default_value_t = 1)]
         generations: u32,
-        #[arg(long)]
-        cpu: bool,
         #[arg(long, default_value = "runs/benchmark.csv")]
         output: PathBuf,
     },
@@ -86,10 +84,6 @@ enum Action {
         milestones: Vec<f32>,
         #[arg(long, default_value = "benchmarks/search-baseline")]
         output_dir: PathBuf,
-        /// Evaluate with the production CPU SIMD engine instead of initializing Vulkan.
-        /// Thread count comes from EVOLUTION_CPU_THREADS (default: logical CPUs minus four).
-        #[arg(long)]
-        cpu: bool,
     },
     /// Evaluate a fixed checkpoint population repeatedly (kernel diagnostics).
     EvalBench {
@@ -112,7 +106,7 @@ enum Action {
         /// Override the trial duration (diagnostics only).
         #[arg(long)]
         duration: Option<f32>,
-        /// Evaluate directly on the named Vulkan device (bodies up to 16 nodes).
+        /// Evaluate directly on the named GPU (bodies up to 64 nodes).
         #[arg(long)]
         engine: Option<String>,
         /// Screen like the game: a first pass of standard trials without a
@@ -261,7 +255,6 @@ fn main() -> Result<()> {
             populations,
             duration,
             generations,
-            cpu,
             output,
         }) => {
             if let Some(parent) = output.parent() {
@@ -275,7 +268,6 @@ fn main() -> Result<()> {
                 "duration_s",
                 "creation_s",
                 "gpu_evaluation_s",
-                "cpu_evaluation_s",
                 "generation_s",
                 "evaluations_per_s",
                 "population_bytes",
@@ -283,16 +275,6 @@ fn main() -> Result<()> {
                 "failed",
             ])?;
             let mut gpu = Gpu::new(&cli.gpu)?;
-            let mut cpu_benchmark = if cpu {
-                let cpu = engine::cpu_engine(engine::cpu_threads().max(1))?;
-                eprintln!(
-                    "CPU benchmark: {}; CPU wall time includes population copying, dispatch, and result collection",
-                    cpu.name()
-                );
-                Some(cpu)
-            } else {
-                None
-            };
             for count in populations {
                 let cfg = Config {
                     population: count,
@@ -329,28 +311,11 @@ fn main() -> Result<()> {
                     let gpu_seconds = start.elapsed().as_secs_f64();
                     e.evaluation_seconds = gpu_seconds;
                     e.evaluated = count;
-                    let cpu_seconds = if let Some(cpu) = cpu_benchmark.as_mut() {
-                        let start = Instant::now();
-                        // Keep the complete diagnostic wall time separate from
-                        // generation timing, including the owned population copy.
-                        cpu.submit(e.population.clone(), &e.config)?;
-                        let result = loop {
-                            if let Some(done) = cpu.poll()? {
-                                break done;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                        };
-                        std::hint::black_box(result);
-                        Some(start.elapsed().as_secs_f64())
-                    } else {
-                        None
-                    };
                     e.archive_batch()?;
                     let failed = e.history.last().unwrap().failed;
                     let bytes = e.population.bytes();
                     e.prepare_next_batch()?;
-                    let generation_seconds =
-                        total.elapsed().as_secs_f64() - cpu_seconds.unwrap_or(0.0);
+                    let generation_seconds = total.elapsed().as_secs_f64();
                     csv.serialize((
                         &gpu.name,
                         count,
@@ -358,7 +323,6 @@ fn main() -> Result<()> {
                         duration,
                         creation,
                         gpu_seconds,
-                        cpu_seconds,
                         generation_seconds,
                         count as f64 / gpu_seconds,
                         bytes,
@@ -367,17 +331,14 @@ fn main() -> Result<()> {
                     ))?;
                     csv.flush()?;
                     println!(
-                        "{} creatures | generation {} | GPU {:.3}s | complete {:.3}s | {:.0}/s | RAM {:.1} MiB | failed {}{}",
+                        "{} creatures | generation {} | GPU {:.3}s | complete {:.3}s | {:.0}/s | RAM {:.1} MiB | failed {}",
                         count,
                         generation,
                         gpu_seconds,
                         generation_seconds,
                         count as f64 / gpu_seconds,
                         bytes as f64 / 1048576.,
-                        failed,
-                        cpu_seconds
-                            .map(|t| format!(" | CPU {t:.3}s ({:.1}×)", t / gpu_seconds))
-                            .unwrap_or_default()
+                        failed
                     );
                 }
             }
@@ -392,7 +353,6 @@ fn main() -> Result<()> {
             duration,
             milestones,
             output_dir,
-            cpu,
         }) => {
             let mut cfg: Config = if let Some(path) = config {
                 serde_json::from_reader(std::fs::File::open(path)?)?
@@ -410,7 +370,6 @@ fn main() -> Result<()> {
                 generations,
                 milestones: &milestones,
                 output_dir: &output_dir,
-                cpu_only: cpu,
             })
         }
         Some(Action::EvalBench {
@@ -457,14 +416,8 @@ fn main() -> Result<()> {
                 steps_nodes as f64 / count as f64,
                 histogram
             );
-            // `--engine cpu` runs the CPU SIMD engine alone; another name opens that
-            // Vulkan device alone (bodies up to 16 nodes).
+            // `--engine <name>` opens that GPU alone (bodies up to 64 nodes).
             let mut engine: Option<Box<dyn evolution_simulator::engine::Engine>> = match engine {
-                Some(name) if name == "cpu" => {
-                    Some(Box::new(evolution_simulator::engine::cpu_engine(
-                        evolution_simulator::engine::cpu_threads().max(1),
-                    )?))
-                }
                 Some(name) => Some(Box::new(evolution_simulator::engine::gpu_engine(
                     &name,
                     64,

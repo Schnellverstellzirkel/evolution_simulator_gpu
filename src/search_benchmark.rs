@@ -2,14 +2,12 @@
 
 use crate::{
     config::Config,
-    cpu_engine,
     evolution::{Creature, FAILED, Population},
     gpu::Gpu,
     qd::{self, Elite, Emitter, EmitterStats, Topology},
-    scheduler,
     storage::{self, Experiment},
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -223,17 +221,11 @@ struct TopEliteBodySize {
     starting_height_m: f32,
 }
 
-enum Evaluator {
-    Gpu(Box<Gpu>),
-    Cpu(rayon::ThreadPool),
-}
+struct Evaluator(Box<Gpu>);
 
 impl Evaluator {
     fn name(&self) -> String {
-        match self {
-            Self::Gpu(gpu) => gpu.name.clone(),
-            Self::Cpu(pool) => format!("CPU ({} threads)", pool.current_num_threads()),
-        }
+        self.0.name.clone()
     }
 
     fn evaluate(
@@ -241,29 +233,17 @@ impl Evaluator {
         population: &Population,
         config: &Config,
     ) -> Result<Vec<qd::EvaluationMetrics>> {
-        match self {
-            Self::Gpu(gpu) => {
-                let mut output = Vec::with_capacity(population.genomes.len());
-                let batch_size = config.batch_size().max(1);
-                for begin in (0..population.genomes.len()).step_by(batch_size) {
-                    let end = (begin + batch_size).min(population.genomes.len());
-                    output.extend(gpu.evaluate_with_metrics(
-                        population,
-                        &(begin..end).collect::<Vec<_>>(),
-                        config,
-                    )?);
-                }
-                Ok(output)
-            }
-            Self::Cpu(pool) => {
-                let results = pool.install(|| cpu_engine::evaluate(population, config));
-                Ok(results
-                    .iter()
-                    .enumerate()
-                    .map(|(index, result)| scheduler::to_metrics(population, index, result, config))
-                    .collect())
-            }
+        let mut output = Vec::with_capacity(population.genomes.len());
+        let batch_size = config.batch_size().max(1);
+        for begin in (0..population.genomes.len()).step_by(batch_size) {
+            let end = (begin + batch_size).min(population.genomes.len());
+            output.extend(self.0.evaluate_with_metrics(
+                population,
+                &(begin..end).collect::<Vec<_>>(),
+                config,
+            )?);
         }
+        Ok(output)
     }
 }
 
@@ -301,7 +281,6 @@ pub struct RunOptions<'a> {
     pub generations: u32,
     pub milestones: &'a [f32],
     pub output_dir: &'a Path,
-    pub cpu_only: bool,
 }
 
 pub fn run(options: RunOptions<'_>) -> Result<()> {
@@ -312,7 +291,6 @@ pub fn run(options: RunOptions<'_>) -> Result<()> {
         generations,
         milestones,
         output_dir,
-        cpu_only,
     } = options;
     ensure!(!seeds.is_empty(), "At least one fixed seed is required");
     ensure!(generations > 0, "Generation count must be positive");
@@ -341,23 +319,11 @@ pub fn run(options: RunOptions<'_>) -> Result<()> {
         fs::create_dir_all(output_dir)?;
     }
 
-    let mut evaluator = if cpu_only {
-        let threads = crate::engine::cpu_threads();
-        ensure!(
-            threads > 0,
-            "CPU search benchmark requires a positive EVOLUTION_CPU_THREADS setting and sufficient CPU budget"
-        );
-        Evaluator::Cpu(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .thread_name(|index| format!("cpu-search-eval-{index}"))
-                .start_handler(|_| crate::engine::lower_thread_priority())
-                .build()
-                .context("Creating CPU benchmark thread pool")?,
-        )
-    } else {
-        Evaluator::Gpu(Box::new(Gpu::new(gpu_name)?))
-    };
+    let gpu = Gpu::new(gpu_name)?;
+    if let Some(warning) = &gpu.startup_warning {
+        bail!("the primary GPU did not open: {warning}");
+    }
+    let mut evaluator = Evaluator(Box::new(gpu));
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -367,14 +333,14 @@ pub fn run(options: RunOptions<'_>) -> Result<()> {
         morphology_parent_fraction: qd::MORPHOLOGY_PARENT_FRACTION,
         minimum_morphology_descendants_before_eviction: qd::MIN_MORPHOLOGY_DESCENDANTS,
         created_unix_seconds: created,
-        backend: if cpu_only { "cpu" } else { "gpu" }.to_string(),
+        backend: "gpu".to_string(),
         evaluation_device: evaluator.name(),
         logical_cpus: std::thread::available_parallelism().map_or(1, usize::from),
         seeds: seeds.to_vec(),
         generations,
         candidate_evaluation_budget_per_seed: config.population as u64 * generations as u64,
         config: config.clone(),
-        notes: "The candidate evaluation budget is population * generations: one standard trial for every candidate slot. GPU evaluation retains the scheduler contender-check behavior, which can add check trials. CPU evaluation uses one standard trial per candidate. GPU archive admission uses the GPU standard and fine-check results; it does not replay candidates through CPU validation. Compare runs using the same backend and environment. CPU mode honors EVOLUTION_CPU_THREADS. GPU results are authoritative in GPU runs; CPU/GPU comparisons are optional diagnostics.",
+        notes: "The candidate evaluation budget is population * generations: one standard trial for every candidate slot. GPU evaluation retains the scheduler contender-check behavior, which can add check trials. Archive admission uses the GPU standard and fine-check results. Compare runs on the same GPU and environment.",
     };
     write_json(&output_dir.join("metadata.json"), &metadata)?;
 
@@ -426,8 +392,8 @@ fn run_seed(
     let mut experiment = Experiment::new(config.clone())?;
     let creation_seconds = creation_started.elapsed().as_secs_f64();
     let warmup_started = Instant::now();
-    if warm_up && let Evaluator::Gpu(gpu) = evaluator {
-        gpu.evaluate(
+    if warm_up {
+        evaluator.0.evaluate(
             &experiment.population,
             &(0..experiment.config.population.min(256)).collect::<Vec<_>>(),
             &experiment.config,
