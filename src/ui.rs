@@ -4,7 +4,7 @@ use crate::{
     evolution::{Creature, FAILED},
     gpu::Gpu,
     physics::{self, Node},
-    storage::{Stage, Stats},
+    storage::Stats,
     worker::{Command, EventKind, Snapshot, Worker},
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
@@ -2261,7 +2261,7 @@ impl App {
                         .strong(),
                 )
                 .on_hover_text(format!(
-                    "{} nodes, {} bones, {} muscles. Creature {}. {:.2} m is the distance this CPU playback reaches, and m/s its speed over the last fifth of a second. The GPU archive score comes from the GPU trial and its fine check; CPU playback can differ and does not change that score.\nCost of transport: {} (muscle work per kilogram per meter in a CPU trial; lower is more efficient; a diagnostic, never part of the score).",
+                    "{} nodes, {} bones, {} muscles. Creature {}. {:.2} m is the distance this CPU playback reaches, and m/s its speed over the last fifth of a second. The GPU archive score comes from the GPU trial, and for an island record from its confirmation trial; CPU playback can differ and does not change that score.\nCost of transport: {} (muscle work per kilogram per meter in a CPU trial; lower is more efficient; a diagnostic, never part of the score).",
                     p.nodes.len(),
                     p.creature.bones.len(),
                     p.creature.muscles.len(),
@@ -2792,7 +2792,6 @@ impl App {
         let progress = generation_progress(
             snapshot.completed,
             population,
-            snapshot.checking,
             snapshot.running,
             snapshot.end_to_end,
         );
@@ -3334,7 +3333,6 @@ impl App {
                                 card,
                                 rect,
                                 response.hovered() || shown == Some(card.creature.id),
-                                Stage::Archived,
                                 theme,
                             );
                             if response.clicked() {
@@ -4284,10 +4282,10 @@ impl App {
         frames.sort_by(f32::total_cmp);
         let p95 = frames.get(frames.len() * 95 / 100).copied().unwrap_or(0.);
         ui.small(format!(
-            "{} · seed {} · stage: {} · {} / {} evaluated · {} in checks",
+            "{} · seed {} · {} · {} / {} evaluated · {} in confirmation",
             s.gpu,
             s.config.seed,
-            s.stage.label(),
+            if s.running { "running" } else { "paused" },
             number(s.completed),
             number(s.config.population),
             number(s.checking),
@@ -4326,14 +4324,6 @@ impl App {
                     continuous: false,
                     guided: false,
                 });
-            }
-            if ui
-                .add_enabled(!running, egui::Button::new("Guided step").small())
-                .on_hover_text("Evaluate, then update the archive, then breed, pausing after each")
-                .clicked()
-            {
-                self.worker.pause.store(false, Ordering::Relaxed);
-                self.worker.send(Command::Next);
             }
         });
     }
@@ -5257,7 +5247,6 @@ fn paint_card(
     card: &crate::worker::Card,
     rect: Rect,
     hovered: bool,
-    stage: Stage,
     theme: Theme,
 ) {
     painter.rect_filled(
@@ -5286,7 +5275,7 @@ fn paint_card(
     painter.text(
         rect.left_top() + Vec2::new(9., 8.),
         Align2::LEFT_TOP,
-        if card.descriptor.is_some() || matches!(stage, Stage::Ranked | Stage::Selected) {
+        if card.descriptor.is_some() {
             format!("#{}", card.rank + 1)
         } else {
             format!("ID {}", card.creature.id)
@@ -5337,23 +5326,6 @@ fn paint_card(
         FontId::proportional(15.),
         score_color,
     );
-    if stage == Stage::Selected {
-        painter.text(
-            rect.right_top() + Vec2::new(-9., 8.),
-            Align2::RIGHT_TOP,
-            if card.survivor {
-                "Survives"
-            } else {
-                "Replaced"
-            },
-            FontId::proportional(13.),
-            if card.survivor {
-                theme.accent
-            } else {
-                theme.warn
-            },
-        );
-    }
 }
 /// How a creature came to be, in the words the lineage uses.
 /// Space between island cards, and a card's height.
@@ -5709,21 +5681,11 @@ fn worlds_match(a: &Config, b: &Config) -> bool {
         .all(|effect| effect.level(a) == effect.level(b))
 }
 /// The Generation tile's second line. Percent rounds down, so "100%" only
-/// shows when every creature has a result, and while finalists still wait for
-/// their fine check the tile says so instead.
-fn generation_progress(
-    completed: usize,
-    population: usize,
-    checking: usize,
-    running: bool,
-    rate: f64,
-) -> String {
+/// shows when every creature has a result.
+fn generation_progress(completed: usize, population: usize, running: bool, rate: f64) -> String {
     let done = completed.min(population);
     if !running {
         return "Paused".to_owned();
-    }
-    if done >= population && checking > 0 {
-        return format!("All tried · checking {} finalists", number(checking));
     }
     if done >= population {
         return "Finishing the generation".to_owned();

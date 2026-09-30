@@ -4,7 +4,8 @@ use evolution_simulator::{
     config::Config,
     engine,
     gpu::Gpu,
-    storage::{self, Experiment, Stage},
+    ring::Ring,
+    storage::{self, Experiment},
     ui,
 };
 use std::{
@@ -13,7 +14,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[derive(Parser)]
@@ -141,66 +142,38 @@ fn main() -> Result<()> {
             let signal = stop.clone();
             ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))?;
             let until = e.generation.saturating_add(generations);
+            let sched = gpu.sched.as_mut().expect("scheduler");
+            let mut ring = Ring::default();
             let run_result: Result<()> = (|| {
+                ring.start(&mut e, sched);
                 while e.generation < until && !stop.load(Ordering::Relaxed) {
-                    match e.stage {
-                        Stage::Ready | Stage::Evaluating => {
-                            e.stage = Stage::Evaluating;
-                            // The scheduler keeps every engine busy across a whole
-                            // generation; smaller batches would add a tail each.
-                            let batch = if gpu.async_capable() {
-                                e.config.population
-                            } else {
-                                e.config.batch_size()
-                            };
-                            let end = (e.evaluated + batch).min(e.config.population);
-                            let start = Instant::now();
-                            let metrics = gpu.evaluate_with_metrics(
-                                &e.population,
-                                &(e.evaluated..end).collect::<Vec<_>>(),
-                                &e.config,
-                            )?;
-                            e.evaluation_seconds += start.elapsed().as_secs_f64();
-                            for (offset, metric) in metrics.iter().enumerate() {
-                                e.record_result(e.evaluated + offset, metric);
-                            }
-                            e.evaluated = end;
-                            if end == e.config.population {
-                                e.stage = Stage::Evaluated;
-                            } else if end.is_multiple_of(batch * 16) {
-                                eprintln!(
-                                    "Generation {}: {:.1}%",
-                                    e.generation,
-                                    100.0 * end as f64 / e.config.population as f64
-                                );
-                            }
-                        }
-                        Stage::Evaluated | Stage::Ranked | Stage::Selected => {
-                            e.archive_batch()?;
-                            let s = e.history.last().unwrap();
-                            println!(
-                                "generation={} best={:.4}m median={:.4}m niches={} qd={:.2} failed={} evaluation={:.3}s",
-                                s.generation,
-                                s.best,
-                                s.median,
-                                s.archive_cells,
-                                s.qd_score,
-                                s.failed,
-                                s.seconds
-                            );
-                        }
-                        Stage::Archived => {
-                            e.prepare_next_batch()?;
-                            if e.config.checkpoint_interval > 0
-                                && e.generation.is_multiple_of(e.config.checkpoint_interval)
-                            {
-                                storage::save(&checkpoint, &e)?;
-                            }
-                        }
+                    let started = Instant::now();
+                    sched.pump()?;
+                    let step = ring.step(&mut e, sched, Duration::from_millis(20), usize::MAX)?;
+                    e.evaluation_seconds += started.elapsed().as_secs_f64();
+                    if step.generations == 0 {
+                        continue;
+                    }
+                    let s = e.history.last().unwrap();
+                    println!(
+                        "generation={} best={:.4}m median={:.4}m niches={} qd={:.2} failed={} evaluation={:.3}s",
+                        s.generation,
+                        s.best,
+                        s.median,
+                        s.archive_cells,
+                        s.qd_score,
+                        s.failed,
+                        s.seconds
+                    );
+                    if e.config.checkpoint_interval > 0
+                        && e.generation.is_multiple_of(e.config.checkpoint_interval)
+                    {
+                        storage::save(&checkpoint, &e)?;
                     }
                 }
                 Ok(())
             })();
+            ring.stop(sched);
             storage::save(&checkpoint, &e)?;
             storage::export_csv(&checkpoint.with_extension("csv"), &e.history)?;
             eprintln!("Saved {}", checkpoint.display());
@@ -224,14 +197,19 @@ fn main() -> Result<()> {
                 cfg.duration = duration;
             }
             cfg.throughput = true;
-            let mut source: Vec<usize> = (0..cfg.population).collect();
-            if let Some(max) = max_nodes {
-                source.retain(|&i| e.population.genomes[i].node_count as usize <= max);
-            }
+            // The loaded game's ring, bred from its archives.
+            let source: Vec<_> = e
+                .blocks
+                .iter()
+                .flat_map(|b| (0..b.len()).map(move |j| (b, j)))
+                .filter(|(b, j)| {
+                    max_nodes.is_none_or(|max| b.population.genomes[*j].node_count <= max)
+                })
+                .collect();
             let count = limit.unwrap_or(source.len()).min(source.len());
             let mut population = evolution_simulator::evolution::Population::default();
-            for &i in &source[..count] {
-                let mut c = e.population.creature(i);
+            for &(block, j) in &source[..count] {
+                let mut c = block.population.creature(j);
                 if let Some(target) = grow {
                     evolution_simulator::evolution::grow_for_benchmark(&mut c, &cfg, 38, target);
                 }
@@ -270,7 +248,7 @@ fn main() -> Result<()> {
                     .as_mut()
                     .context("--screened needs the default GPU path")?;
                 let start = Instant::now();
-                let sample = gpu.sched.as_mut().context("scheduler")?.evaluate_single(
+                let sample = gpu.sched.as_mut().context("scheduler")?.evaluate(
                     &population,
                     &indices,
                     &cfg,

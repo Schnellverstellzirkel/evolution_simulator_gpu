@@ -1,10 +1,10 @@
 //! Deterministic A/B harness for the evolutionary search, on the GPU.
 //!
-//! Runs the game's generational loop (the scheduler evaluates every creature
-//! on the GPU with the early screen and the contender checks, then
-//! `archive_batch` and `prepare_next_batch`) on fixed seeds and prints
-//! comparable metrics, so a search change can be measured with the same
-//! command before and after. The GPU score is final. There is no CPU mode: a
+//! Runs the game's ring (`ring::Ring` over the scheduler: every block is
+//! scored on the GPU with the early screen, the creatures that would set an
+//! island record get their confirmation trial, and the block is absorbed and
+//! bred again) on fixed seeds and prints comparable metrics, so a search
+//! change can be measured with the same command before and after. The GPU score is final. There is no CPU mode: a
 //! machine whose primary GPU does not open fails instead of falling back.
 //! Run it with `EVOLUTION_DEVICES=primary` and the GPU lock held shared.
 //!
@@ -15,7 +15,8 @@
 //! Wall time goes to stderr so stdout is deterministic and diffable.
 use anyhow::{Context, Result};
 use evolution_simulator::{
-    config::Config, engine, evolution::Population, physics, scheduler, storage::Experiment,
+    config::Config, engine, evolution::Population, physics, ring::Ring, scheduler,
+    storage::Experiment,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -178,51 +179,42 @@ fn cpu_seconds() -> f64 {
     seconds(usage.ru_utime) + seconds(usage.ru_stime)
 }
 
-/// Scores the first 20,000 creatures of the generation whole and in odd
-/// shuffled chunks, and reports creatures whose result differs by a bit.
+/// Scores the ring's first 20,000 creatures whole and in odd shuffled
+/// chunks, standard and confirmation trials, and reports creatures whose
+/// result differs by a bit.
 fn probe_gpu(sched: &mut scheduler::Scheduler, experiment: &Experiment) -> Result<()> {
-    let n = experiment.config.population.min(20_000);
+    let n = experiment.ring_len().min(20_000);
+    let mut ring = Population::default();
+    for i in 0..n {
+        ring.push(experiment.creature(i));
+    }
     let indices: Vec<usize> = (0..n).collect();
-    let cfg = &experiment.config;
-    let whole = sched.evaluate_single(&experiment.population, &indices, cfg)?;
     let mut order: Vec<usize> = indices.clone();
     order.sort_by_key(|&i| (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 7);
-    let mut mismatched = 0;
-    let mut behavior = 0;
-    for chunk in order.chunks(2999) {
-        let part = sched.evaluate_single(&experiment.population, chunk, cfg)?;
-        for (&i, m) in chunk.iter().zip(&part) {
-            if m.fitness.to_bits() != whole[i].fitness.to_bits() {
-                mismatched += 1;
-            } else if m.behavior.mean_height.to_bits() != whole[i].behavior.mean_height.to_bits()
-                || m.behavior.ground_contact.to_bits() != whole[i].behavior.ground_contact.to_bits()
-            {
-                behavior += 1;
+    let standard = experiment.config.clone();
+    let fine = scheduler::confirm_config(&standard);
+    for (name, cfg) in [("standard", &standard), ("confirmation", &fine)] {
+        let whole = sched.evaluate(&ring, &indices, cfg)?;
+        let mut mismatched = 0;
+        let mut behavior = 0;
+        for chunk in order.chunks(2999) {
+            let part = sched.evaluate(&ring, chunk, cfg)?;
+            for (&i, m) in chunk.iter().zip(&part) {
+                if m.fitness.to_bits() != whole[i].fitness.to_bits() {
+                    mismatched += 1;
+                } else if m.behavior.mean_height.to_bits()
+                    != whole[i].behavior.mean_height.to_bits()
+                    || m.behavior.ground_contact.to_bits()
+                        != whole[i].behavior.ground_contact.to_bits()
+                {
+                    behavior += 1;
+                }
             }
         }
+        println!(
+            "probe {name}: {n} creatures, {mismatched} fitness bits differ, {behavior} behavior bits differ"
+        );
     }
-    // The same for check trials: perturbed copies at fine physics.
-    let fine = scheduler::check_config(cfg);
-    let mut perturbed = Population::default();
-    for &i in &indices {
-        let mut c = experiment.population.creature(i);
-        scheduler::perturb(&mut c);
-        perturbed.push(c);
-    }
-    let whole_fine = sched.evaluate_single(&perturbed, &indices, &fine)?;
-    let mut fine_diff = 0;
-    for chunk in order.chunks(2999) {
-        let part = sched.evaluate_single(&perturbed, chunk, &fine)?;
-        for (&i, m) in chunk.iter().zip(&part) {
-            if m.fitness.to_bits() != whole_fine[i].fitness.to_bits() {
-                fine_diff += 1;
-            }
-        }
-    }
-    println!("probe fine checks: {fine_diff} fitness bits differ");
-    println!(
-        "probe: {n} creatures, {mismatched} fitness bits differ, {behavior} behavior bits differ"
-    );
     Ok(())
 }
 
@@ -254,60 +246,29 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
     let mut top = Vec::new();
     // Generations whose global best elite was born in a hub slot.
     let mut hub_best: Vec<u32> = Vec::new();
+    let mut ring = Ring::default();
     for generation in 0..options.generations {
         {
-            // The game's generational path: the scheduler runs the standard
-            // trials with the early screen and the contender checks, and the
-            // GPU score is final.
+            // The game's path: the scheduler runs the blocks of the ring with
+            // the early screen and the confirmation trials, and the GPU score
+            // is final.
             let sched = gpu.sched.as_mut().expect("scheduler");
-            let population = experiment.config.population;
-            sched.ordered_reset();
-            sched.ordered_configure(false, 0, 0);
-            sched.add_blocks(0..population, population.div_ceil(8));
-            let mut stored = 0;
-            while stored < population {
-                sched.ordered_pump(&experiment.population, &experiment.config, |i, m| {
-                    experiment.check_need(i, m)
-                })?;
-                for (indices, metrics) in sched.ordered_collect(
-                    &experiment.population,
-                    &experiment.config,
+            if !ring.active() {
+                ring.start(&mut experiment, sched);
+            }
+            while experiment.generation == generation {
+                sched.pump()?;
+                ring.step(
+                    &mut experiment,
+                    sched,
                     std::time::Duration::from_millis(4),
                     usize::MAX,
-                )? {
-                    for (&i, m) in indices.iter().zip(&metrics) {
-                        experiment.record_result(i, m);
-                        stored += 1;
-                    }
-                }
+                )?;
             }
             if options.probe && std::env::var_os("PROBE_GPU").is_some() && generation >= 3 {
                 probe_gpu(sched, &experiment)?;
             }
         }
-        experiment.evaluated = experiment.config.population;
-        if options.probe {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            for v in &experiment.scores {
-                v.to_bits().hash(&mut h);
-            }
-            let scores = h.finish();
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            for g in &experiment.population.genomes {
-                g.id.hash(&mut h);
-            }
-            for n in &experiment.population.nodes {
-                n.x.to_bits().hash(&mut h);
-            }
-            println!(
-                "trace gen {generation}: population {:016x} scores {scores:016x}",
-                h.finish()
-            );
-        }
-        experiment
-            .archive_batch()
-            .with_context(|| format!("seed {seed} generation {generation} archive"))?;
         if options.probe {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -316,18 +277,27 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
                 e.creature.id.hash(&mut h);
             }
             println!("trace gen {generation}: archive {:016x}", h.finish());
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for block in &experiment.blocks {
+                for g in &block.population.genomes {
+                    g.id.hash(&mut h);
+                }
+                for n in &block.population.nodes {
+                    n.x.to_bits().hash(&mut h);
+                }
+            }
+            println!("trace gen {generation}: ring {:016x}", h.finish());
         }
-        let generation_best = experiment
-            .scores
+        let generation_best = experiment.history.last().map_or(f32::NAN, |s| s.best);
+        // Mean body size of the ring: bodies that only grow make every
+        // later generation slower to simulate.
+        let genomes: Vec<_> = experiment
+            .blocks
             .iter()
-            .copied()
-            .filter(|score| score.is_finite())
-            .fold(f32::MIN, f32::max);
-        // Mean body size of the evaluated generation: bodies that only grow
-        // make every later generation slower to simulate.
-        let genomes = &experiment.population.genomes;
+            .flat_map(|b| &b.population.genomes)
+            .collect();
         let mean = |part: fn(&evolution_simulator::evolution::Genome) -> usize| {
-            genomes.iter().map(part).sum::<usize>() as f64 / genomes.len().max(1) as f64
+            genomes.iter().map(|g| part(g)).sum::<usize>() as f64 / genomes.len().max(1) as f64
         };
         println!(
             "{scope} {seed} {generation} {generation_best:.2} {:.2} {} {:.2} {:.2}",
@@ -349,7 +319,7 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             .iter()
             .max_by(|a, b| a.fitness.total_cmp(&b.fitness))
         {
-            let slot = (elite.creature.id - 1) as usize % experiment.config.population;
+            let slot = evolution_simulator::evolution::slot_of_id(elite.creature.id);
             let born = evolution_simulator::qd::island_of_slot(
                 slot,
                 evolution_simulator::storage::island_count(),
@@ -359,42 +329,8 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             }
         }
         top = top_bodies(&experiment, TOP_BODIES);
-        if options.probe {
-            let h = |bytes: Vec<u8>| {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                bytes.hash(&mut h);
-                h.finish()
-            };
-            println!(
-                "trace gen {generation}: before breeding islands {:016x} cma {:016x} stats {:016x}",
-                h(bincode::serialize(&experiment.islands).unwrap()),
-                h(bincode::serialize(&experiment.cma_emitters).unwrap()),
-                h(bincode::serialize(&experiment.emitter_stats).unwrap())
-            );
-        }
-        experiment
-            .prepare_next_batch()
-            .with_context(|| format!("seed {seed} generation {generation} breeding"))?;
-        if options.probe {
-            let h = |bytes: Vec<u8>| {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                bytes.hash(&mut h);
-                h.finish()
-            };
-            println!(
-                "trace gen {generation}: after breeding plan {:016x} cma {:016x}",
-                h(bincode::serialize(&(
-                    &experiment.candidate_emitters,
-                    &experiment.candidate_cma,
-                    &experiment.candidate_parent_ids
-                ))
-                .unwrap()),
-                h(bincode::serialize(&experiment.cma_emitters).unwrap())
-            );
-        }
     }
+    ring.stop(gpu.sched.as_mut().expect("scheduler"));
     // `EVOLUTION_AB_SAVE=<dir>` writes each seed's final experiment as
     // `<dir>/seed-<seed>.evo`, for `physics_audit` and `size_report`.
     if let Some(dir) = std::env::var_os("EVOLUTION_AB_SAVE") {
@@ -420,11 +356,9 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
     )?;
     if let Some(sched) = gpu.sched.as_ref() {
         println!(
-            "{scope} seed {seed} checks: {} submitted, {} released, {} dropped, per evaluated creature {:.4}",
-            sched.checks_submitted,
-            sched.checks_released,
-            sched.checks_dropped,
-            sched.checks_submitted as f64
+            "{scope} seed {seed} confirmations: {} trials, per evaluated creature {:.5}",
+            sched.confirms_submitted,
+            sched.confirms_submitted as f64
                 / (options.generations as f64 * options.population as f64)
         );
     }
@@ -443,10 +377,9 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
     Ok((best, qd))
 }
 
-/// How much of their archive distance the 50 best global elites keep under
-/// the game's fine check (4x rate and solver passes, full trial, no screen)
-/// from a perturbed pose that no run's own check used, whatever check the
-/// run itself used.
+/// How much of their archive distance the 50 best global elites keep at four
+/// times the rate and solver passes (full trial, no screen) from a slightly
+/// perturbed pose that no run used.
 fn print_robustness(
     scope: &str,
     seed: u64,
@@ -469,18 +402,23 @@ fn print_robustness(
         let mut creature = elite.creature.clone();
         // A second pose from the same rule: the id seeds the perturbation.
         creature.id ^= 0x9e37_79b9;
-        scheduler::perturb(&mut creature);
+        perturb(&mut creature);
         creature.id ^= 0x9e37_79b9;
         unit.push(creature);
     }
+    let standard = physics::Fidelity::standard();
     let cfg = Config {
-        fidelity: Some(physics::Fidelity::fine()),
+        fidelity: Some(physics::Fidelity {
+            rate: standard.rate * 4,
+            bone_passes: standard.bone_passes * 4,
+            velocity_passes: standard.velocity_passes * 4,
+        }),
         screen: None,
         population: elites.len(),
         ..experiment.config.clone()
     };
     let indices: Vec<usize> = (0..unit.genomes.len()).collect();
-    let results = sched.evaluate_single(&unit, &indices, &cfg)?;
+    let results = sched.evaluate(&unit, &indices, &cfg)?;
     let mut kept: Vec<f32> = elites
         .iter()
         .zip(&results)
@@ -488,7 +426,7 @@ fn print_robustness(
         .collect();
     let halved = kept.iter().filter(|&&k| k < 0.5).count();
     println!(
-        "{scope} seed {seed} top-{TOP_BODIES} elites under the fine check: median share kept {:.2}, below half {halved} of {}",
+        "{scope} seed {seed} top-{TOP_BODIES} elites at 4x rate from a nudged pose: median share kept {:.2}, below half {halved} of {}",
         median(&mut kept),
         elites.len()
     );
@@ -674,17 +612,20 @@ struct BodySize {
     mass: f32,
 }
 
-/// The `count` best-scoring creatures of the current evaluated generation.
+/// The `count` fastest elites of the global archive.
 fn top_bodies(experiment: &Experiment, count: usize) -> Vec<BodySize> {
-    let mut order: Vec<usize> = (0..experiment.scores.len())
-        .filter(|&index| experiment.scores[index].is_finite())
+    let mut elites: Vec<_> = experiment
+        .archive
+        .entries
+        .iter()
+        .filter(|elite| elite.fitness.is_finite())
         .collect();
-    order.sort_by(|&a, &b| experiment.scores[b].total_cmp(&experiment.scores[a]));
-    order.truncate(count);
-    order
+    elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
+    elites.truncate(count);
+    elites
         .into_iter()
-        .map(|index| {
-            let creature = experiment.population.creature(index);
+        .map(|elite| {
+            let creature = &elite.creature;
             let mass: f32 = physics::body(&creature.nodes, &creature.bones)
                 .iter()
                 .map(|node| node.mass)
@@ -766,4 +707,14 @@ fn mean(values: &[f32]) -> f32 {
 fn median(values: &mut [f32]) -> f32 {
     values.sort_by(f32::total_cmp);
     values[values.len() / 2]
+}
+
+/// Small deterministic change to a creature's starting pose and grip.
+fn perturb(creature: &mut evolution_simulator::evolution::Creature) {
+    let mut rng = evolution_simulator::evolution::Rng::new(creature.id ^ 0x5eed_7a11, 0, 0);
+    for node in &mut creature.nodes {
+        node.x += rng.range(-0.02, 0.02);
+        node.y += rng.range(0.0, 0.02);
+        node.friction = (node.friction * rng.range(0.9, 1.1)).clamp(0.0, 1.0);
+    }
 }

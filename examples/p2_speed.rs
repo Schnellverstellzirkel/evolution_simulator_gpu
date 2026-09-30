@@ -50,8 +50,8 @@ fn main() -> anyhow::Result<()> {
     let mut cfg = e.config.clone();
     cfg.screen = None;
     let mut pop = Population::default();
-    for i in 0..count.min(e.population.genomes.len()) {
-        pop.push(e.population.creature(i));
+    for i in 0..count.min(e.ring_len()) {
+        pop.push(e.creature(i));
     }
     let mut engine =
         engine::gpu_engine("RTX 4060", 64, evolution_simulator::gpu::DEFAULT_STEP_RANGE)?;

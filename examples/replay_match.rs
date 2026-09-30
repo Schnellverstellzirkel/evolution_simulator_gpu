@@ -20,7 +20,7 @@ fn main() -> Result<()> {
             k + 1,
             e.fitness,
             recording.result.fitness,
-            if e.fine { " (fine check)" } else { "" }
+            if e.fine { " (confirmation trial)" } else { "" }
         );
     }
     Ok(())

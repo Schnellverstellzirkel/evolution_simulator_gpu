@@ -43,13 +43,14 @@ impl Fidelity {
             velocity_passes,
         }
     }
-    /// Four times the standard rate and solver passes.
+    /// Twice the standard rate and solver passes, for the confirmation trial
+    /// of a creature that would set an island record.
     pub fn fine() -> Self {
         let standard = Self::standard();
         Self {
-            rate: (standard.rate * 4).min(960),
-            bone_passes: standard.bone_passes * 4,
-            velocity_passes: standard.velocity_passes * 4,
+            rate: (standard.rate * 2).min(960),
+            bone_passes: standard.bone_passes * 2,
+            velocity_passes: standard.velocity_passes * 2,
         }
     }
     pub fn dt(self) -> f32 {

@@ -3,7 +3,7 @@ use crate::{
     evolution::Creature,
     gpu::Gpu,
     qd::{self, Descriptor, Emitter, EmitterStats},
-    storage::{self, Experiment, Stage, Stats},
+    storage::{self, Experiment, Stats},
 };
 use std::{
     io::Write,
@@ -17,11 +17,12 @@ use std::{
 };
 pub enum Command {
     New(Config),
+    /// Evolve; a run that is not `continuous`, or is `guided`, stops after
+    /// one generation.
     Run {
         continuous: bool,
         guided: bool,
     },
-    Next,
     Pause,
     Configure(Config),
     /// Wipe out half of every archive's elites (kept as fossils for undo).
@@ -110,7 +111,7 @@ pub struct Card {
     pub visits: u64,
     pub innovation_reserve: bool,
     pub creature: Creature,
-    /// The score is the fine check's: replay at fine fidelity.
+    /// The score is the confirmation trial's: replay at fine fidelity.
     pub fine: bool,
 }
 impl Card {
@@ -330,13 +331,11 @@ pub struct Snapshot {
     pub fossils: usize,
     pub generation: u32,
     pub evaluated: usize,
-    /// Creatures of the current generation with stored results. Engines finish
-    /// out of order, so this runs ahead of the contiguous `evaluated` prefix.
+    /// Evaluations absorbed toward the current generation.
     pub completed: usize,
-    /// Creatures whose standard trial could enter an archive, waiting for
-    /// their fine check before their result counts.
+    /// Confirmation trials running for creatures that would set an island
+    /// record.
     pub checking: usize,
-    pub stage: Stage,
     pub running: bool,
     pub history: Arc<Vec<Stats>>,
     /// The archive ranked by distance, sent once per `Command::Cards`.
@@ -439,8 +438,8 @@ struct StageLog {
     file: std::fs::File,
     started: Instant,
     seconds: [f64; 3],
-    /// Scheduler totals at the last row: checks submitted, check busy
-    /// seconds, device busy seconds, device idle seconds.
+    /// Scheduler totals at the last row: confirmation trials submitted and
+    /// their busy seconds, device busy seconds, device idle seconds.
     totals: [f64; 4],
 }
 impl StageLog {
@@ -460,7 +459,7 @@ impl StageLog {
         if file.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
             let _ = writeln!(
                 file,
-                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second,checks,check_busy_seconds,device_busy_seconds,device_idle_seconds,mean_nodes,share_over_8_nodes"
+                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second,confirmations,confirmation_busy_seconds,device_busy_seconds,device_idle_seconds,mean_nodes,share_over_8_nodes"
             );
         }
         Some(Self {
@@ -487,8 +486,8 @@ impl StageLog {
         let seconds = self.started.elapsed().as_secs_f64().max(1e-9);
         let totals = sched.map_or([0.0; 4], |s| {
             [
-                s.checks_submitted as f64,
-                s.check_busy_seconds,
+                s.confirms_submitted as f64,
+                s.confirm_busy_seconds,
                 s.devices.iter().map(|d| d.busy_seconds).sum(),
                 s.devices.iter().map(|d| d.idle_seconds).sum(),
             ]
@@ -496,11 +495,6 @@ impl StageLog {
         let delta: [f64; 4] = std::array::from_fn(|k| totals[k] - self.totals[k]);
         self.totals = totals;
         if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
-            let [rejected, optimizer, global, island, reserve] =
-                crate::storage::take_contender_counts();
-            eprintln!(
-                "Contenders: generation {generation}, optimizer {optimizer}, global {global}, island {island}, reserve {reserve}, not checked {rejected}"
-            );
             let [plan, emit, write] = crate::storage::take_breed_nanos();
             eprintln!(
                 "Breeding: generation {generation}, plan {:.3} s, emit {:.3} s, write {:.3} s",
@@ -546,8 +540,6 @@ fn run(
 ) {
     let mut exp: Option<Experiment> = None;
     let mut running = false;
-    let mut continuous = false;
-    let mut guided = false;
     // The UI asked for the ranked archive (`Command::Cards`).
     let mut send_cards = false;
     let mut preview = None;
@@ -598,18 +590,16 @@ fn run(
     let mut benchmark_ping_ms: Vec<f64> = Vec::new();
     let mut benchmark_configure_ms: Vec<f64> = Vec::new();
     let mut stage_log = StageLog::open();
-    // Creatures of the current generation whose results are stored, and the
-    // (experiment, generation) the bitmap belongs to.
-    let mut done: Vec<bool> = Vec::new();
-    let mut done_key = (u64::MAX, u32::MAX);
-    // Steady-state evolution (continuous runs): slots cycle through the engines.
-    let mut steady = Steady::default();
+    // The creatures in flight, and the generation a run of one generation
+    // stops at.
+    let mut ring = crate::ring::Ring::default();
+    let mut run_until: Option<u32> = None;
     // Completion time and population of recent generations.
     let mut generation_marks: std::collections::VecDeque<(Instant, usize)> = Default::default();
     'worker: loop {
         // A developer pause with the engines closed leaves nothing to
         // collect: wait for commands instead of spinning.
-        let first = if (running || gpu.async_in_flight() > 0) && !dev.idle() {
+        let first = if (running || gpu.on_engines() > 0) && !dev.idle() {
             rx.try_recv().ok()
         } else {
             match rx.recv_timeout(Duration::from_millis(100)) {
@@ -642,55 +632,9 @@ fn run(
                 deferred.push(command);
                 continue;
             }
-            // Commands that change or persist the experiment first collect the
-            // results of queued GPU work, so the completed prefix stays exact.
-            // A steady run needs no such prefix: settings wait for the next
-            // generation boundary, where work in flight carries over anyway,
-            // and catastrophes only thin the archives. Draining there froze
-            // the worker and idled the GPU for 3 to 9 s per button.
-            let steady_safe = steady.active
-                && matches!(
-                    command,
-                    Command::Configure(_)
-                        | Command::ConfigureProbe(_)
-                        | Command::Meteor
-                        | Command::Extinction
-                        | Command::UndoMeteor
-                        | Command::Export(_)
-                );
-            let drains = !steady_safe
-                && !matches!(
-                    command,
-                    Command::Ping(_)
-                        | Command::Cards
-                        | Command::Lineage(_)
-                        | Command::MapTable(_)
-                        | Command::Select(_)
-                        | Command::Pause
-                        | Command::Run { .. }
-                        | Command::Next
-                );
-            // Draining needs the engines, which a developer pause holds:
-            // the command waits for the pause to end.
-            if dev.holding()
-                && exp.is_some()
-                && (drains || !deferred.is_empty())
-                && !matches!(command, Command::Ping(_))
-            {
-                deferred.push(command);
-                status = "Waiting for the developer pause to end".into();
-                changed = true;
-                continue;
-            }
-            if drains
-                && let Some(e) = &mut exp
-                && let Err(err) = finish_queued(&mut gpu, e, &mut done, &mut steady)
-            {
-                error = Some(format!("{err:#}"));
-                running = false;
-                changed = true;
-                continue;
-            }
+            // No command waits for the engines: a save holds only the
+            // archives, settings apply to the blocks bred after them, and a
+            // new or loaded game drops the ring.
             if matches!(command, Command::New(_) | Command::Load(_))
                 && let Some(handle) = checkpoint_thread.take()
             {
@@ -706,10 +650,13 @@ fn run(
                             old.progress.cancel.store(true, Ordering::Relaxed);
                         }
                         running = false;
-                        steady = Steady::default();
+                        if let Some(sched) = gpu.sched.as_mut() {
+                            ring.stop(sched);
+                        }
                         status = "Creating population…".into();
                         let next = Experiment::new(cfg)?;
-                        preview = Some((next.population.creature(0), next.config.clone()));
+                        preview =
+                            Some((next.blocks[0].population.creature(0), next.config.clone()));
                         events = Arc::new(Vec::new());
                         log_event(
                             &mut events,
@@ -738,8 +685,8 @@ fn run(
                                 measuring.store(true, Ordering::Relaxed);
                             }
                         }
-                        continuous = c;
-                        guided = g;
+                        // A run of one generation stops at its end.
+                        run_until = exp.as_ref().filter(|_| !c || g).map(|e| e.generation + 1);
                         pause.store(false, Ordering::Relaxed);
                         running = true;
                         if let Some(log) = &mut stage_log {
@@ -748,33 +695,20 @@ fn run(
                     }
                     Command::Pause => {
                         running = false;
-                        status = "Paused at a completed batch".into();
-                    }
-                    Command::Next => {
-                        guided = true;
-                        continuous = false;
-                        pause.store(false, Ordering::Relaxed);
-                        running = true;
+                        status = "Paused".into();
                     }
                     Command::Configure(cfg) => {
                         if let Some(e) = &mut exp {
                             let before = e.config.clone();
-                            if steady.active {
-                                // A steady run applies the change now. Work in
-                                // flight from the old world is discarded when
-                                // it returns.
-                                e.update_config_now(cfg)?;
-                                if before.physics_differs(&e.config)
-                                    && let Some(sched) = gpu.sched.as_mut()
-                                {
-                                    sched.discard_old_world(&e.config);
-                                }
-                            } else {
-                                e.update_config(cfg)?;
+                            // The change applies now. Blocks already run or
+                            // running in the old world enter no archive;
+                            // blocks not yet on an engine run in the new one.
+                            e.update_config_now(cfg)?;
+                            if before.physics_differs(&e.config)
+                                && let Some(sched) = gpu.sched.as_mut()
+                            {
+                                ring.world_changed(e, sched);
                             }
-                            // Between generations and in a steady run a change
-                            // applies at once; otherwise it waits in `pending`
-                            // and is logged when the next generation starts.
                             log_world_change(
                                 &mut events,
                                 &before,
@@ -792,7 +726,7 @@ fn run(
                     Command::ConfigureProbe(sent) => {
                         if let Some(e) = &mut exp {
                             let cfg = e.config.clone();
-                            e.update_config(cfg)?;
+                            e.update_config_now(cfg)?;
                             if measuring.load(Ordering::Relaxed) {
                                 benchmark_configure_ms.push(sent.elapsed().as_secs_f64() * 1e3);
                             }
@@ -848,7 +782,9 @@ fn run(
                         if let Some(old) = loading.take() {
                             old.progress.cancel.store(true, Ordering::Relaxed);
                         }
-                        steady = Steady::default();
+                        if let Some(sched) = gpu.sched.as_mut() {
+                            ring.stop(sched);
+                        }
                         running = false;
                         // Holding the current game while a 3M save loads
                         // doubles the memory and can push the machine into
@@ -960,7 +896,7 @@ fn run(
                             .iter()
                             .max_by(|a, b| a.fitness.total_cmp(&b.fitness))
                             .map_or_else(
-                                || next.population.creature(0),
+                                || next.blocks[0].population.creature(0),
                                 |elite| elite.creature.clone(),
                             );
                         preview = Some((creature, next.config.clone()));
@@ -1029,454 +965,165 @@ fn run(
             log_event(&mut events, generation, EventKind::Gpu, text);
             changed = true;
         }
-        if running {
-            if let Some(e) = &mut exp {
-                let result: anyhow::Result<()> = (|| {
-                    match e.stage {
-                        Stage::Ready | Stage::Evaluating
-                            if gpu.async_capable() && continuous && !guided =>
-                        {
-                            let stage_start = Instant::now();
-                            e.stage = Stage::Evaluating;
-                            let sched = gpu.sched.as_mut().unwrap();
-                            if !steady.active {
-                                if sched.ordered_in_flight() > 0 {
-                                    // Results from a generational run: keep them; the
-                                    // next pass offers them to the archive.
-                                    sched.ordered_pump(&e.population, &e.config, |i, m| {
-                                        e.check_need(i, m)
-                                    })?;
-                                    for (indices, metrics) in sched.ordered_collect(
-                                        &e.population,
-                                        &e.config,
-                                        Duration::from_millis(4),
-                                        usize::MAX,
-                                    )? {
-                                        for (&i, m) in indices.iter().zip(&metrics) {
-                                            e.record_result(i, m);
-                                        }
-                                    }
-                                    return Ok(());
-                                }
-                                // Offer creatures that already have results, breed their
-                                // replacements, then keep every slot cycling.
-                                let evaluated: Vec<usize> = (0..e.config.population)
-                                    .filter(|&i| !e.scores[i].is_nan())
-                                    .collect();
-                                if !evaluated.is_empty() {
-                                    steady.failed += e.archive_slots(&evaluated);
-                                    e.breed_slots(&evaluated)?;
-                                }
-                                sched.ordered_reset();
-                                let (size, window, lag) = steady_blocks(e.config.population);
-                                sched.ordered_configure(true, window, lag);
-                                sched.add_blocks(0..e.config.population, size);
-                                steady.active = true;
-                            }
-                            sched.ordered_pump(&e.population, &e.config, |i, m| {
-                                e.check_need(i, m)
-                            })?;
-                            // One block per pass: archiving and breeding a block
-                            // takes a few tenths of a second, and controls are
-                            // read between passes. Blocks come back in a fixed
-                            // order and are absorbed before the next pump, so the
-                            // run does not depend on which unit finished first.
-                            for (indices, metrics) in sched.ordered_collect(
-                                &e.population,
-                                &e.config,
-                                Duration::from_millis(4),
-                                1,
-                            )? {
-                                steady_absorb(e, &mut steady, sched, &indices, &metrics, true)?;
-                                sched.ordered_pump(&e.population, &e.config, |i, m| {
-                                    e.check_need(i, m)
-                                })?;
-                            }
-                            status = format!("Evolving · generation {}", e.generation);
-                            let seconds = stage_start.elapsed().as_secs_f64();
-                            e.evaluation_seconds += seconds;
-                            if benchmark_start.is_some() {
-                                benchmark_stage_seconds[0] += seconds;
-                            }
-                            if let Some(log) = &mut stage_log {
-                                let archive = std::mem::take(&mut steady.stage_seconds[1]);
-                                let breeding = std::mem::take(&mut steady.stage_seconds[2]);
-                                log.add(0, (seconds - archive - breeding).max(0.0));
-                                log.add(1, archive);
-                                log.add(2, breeding);
-                            }
-                        }
-                        Stage::Ready | Stage::Evaluating if gpu.async_capable() => {
-                            let stage_start = Instant::now();
-                            if done.len() != e.config.population
-                                || done_key != (epoch, e.generation)
-                            {
-                                done = vec![false; e.config.population];
-                                done[..e.evaluated].fill(true);
-                                done_key = (epoch, e.generation);
-                            }
-                            e.stage = Stage::Evaluating;
-                            let sched = gpu.sched.as_mut().unwrap();
-                            if sched.ordered_in_flight() == 0 {
-                                sched.ordered_reset();
-                                let (size, _, _) = steady_blocks(e.config.population);
-                                sched.ordered_configure(false, 0, 0);
-                                sched.add_blocks(
-                                    (e.evaluated..e.config.population).filter(|&i| !done[i]),
-                                    size,
-                                );
-                            }
-                            sched.ordered_pump(&e.population, &e.config, |i, m| {
-                                e.check_need(i, m)
-                            })?;
-                            for (indices, metrics) in sched.ordered_collect(
-                                &e.population,
-                                &e.config,
-                                Duration::from_millis(4),
-                                usize::MAX,
-                            )? {
-                                store_results(e, &mut done, &indices, &metrics);
-                            }
-                            status = format!("Evaluating generation {}", e.generation);
-                            if e.stage == Stage::Evaluated && guided {
-                                running = false;
-                            }
-                            let seconds = stage_start.elapsed().as_secs_f64();
-                            e.evaluation_seconds += seconds;
-                            if benchmark_start.is_some() {
-                                benchmark_stage_seconds[0] += seconds;
-                            }
-                            if let Some(log) = &mut stage_log {
-                                log.add(0, seconds);
-                            }
-                        }
-                        Stage::Ready | Stage::Evaluating => {
-                            let stage_start = Instant::now();
-                            e.stage = Stage::Evaluating;
-                            let batch = e.config.batch_size();
-                            let end = (e.evaluated + batch).min(e.config.population);
-                            let indices: Vec<_> = (e.evaluated..end).collect();
-                            let start = Instant::now();
-                            let metrics =
-                                gpu.evaluate_with_metrics(&e.population, &indices, &e.config)?;
-                            e.evaluation_seconds += start.elapsed().as_secs_f64();
-                            for (offset, metric) in metrics.iter().enumerate() {
-                                e.record_result(e.evaluated + offset, metric);
-                            }
-                            e.evaluated = end;
-                            status = format!("Evaluating generation {}", e.generation);
-                            if end == e.config.population {
-                                e.stage = Stage::Evaluated;
-                                if guided {
-                                    running = false;
-                                }
-                            }
-                            let evaluation_seconds = stage_start.elapsed().as_secs_f64();
-                            if benchmark_start.is_some() {
-                                benchmark_stage_seconds[0] += evaluation_seconds;
-                            }
-                            if let Some(log) = &mut stage_log {
-                                log.add(0, evaluation_seconds);
-                            }
-                        }
-                        Stage::Evaluated | Stage::Ranked | Stage::Selected => {
-                            let stage_start = Instant::now();
-                            e.archive_batch()?;
-                            let archive_seconds = stage_start.elapsed().as_secs_f64();
-                            if benchmark_start.is_some() {
-                                benchmark_stage_seconds[1] += archive_seconds;
-                            }
-                            if let Some(log) = &mut stage_log {
-                                log.add(1, archive_seconds);
-                            }
-                            status = format!(
-                                "Archive: {} niches · QD score {:.2}",
-                                e.archive.entries.len(),
-                                e.archive.qd_score
-                            );
-                            if guided {
-                                running = false;
-                            }
-                        }
-                        Stage::Archived => {
-                            let stage_start = Instant::now();
-                            let world_before = e.config.clone();
-                            let kept_before = e.archive.entries.len();
-                            if steady.boundary {
-                                steady.boundary = false;
-                                let failed = std::mem::take(&mut steady.failed);
-                                steady.count = steady.count.saturating_sub(e.config.population);
-                                e.finish_steady_generation(failed)?;
-                                if world_before.physics_differs(&e.config)
-                                    && let Some(sched) = gpu.sched.as_mut()
-                                {
-                                    sched.discard_old_world(&e.config);
-                                }
-                                e.stage = Stage::Evaluating;
-                                e.evaluated = steady.count.min(e.config.population);
-                            } else if continuous
-                                && !guided
-                                && let Some(sched) = gpu.sched.as_mut()
-                            {
-                                // Offspring go to the evaluation engines slice by slice
-                                // while the rest of the generation is bred.
-                                let slice = (e.config.population / 8).max(4096);
-                                sched.ordered_reset();
-                                sched.ordered_configure(false, 0, 0);
-                                e.prepare_next_batch_streaming(slice, |pop, range, cfg| {
-                                    sched.add_block(range.collect());
-                                    sched.ordered_pump_standard(pop, cfg)
-                                })?;
-                                done = vec![false; e.config.population];
-                                done_key = (epoch, e.generation);
-                            } else {
-                                e.prepare_next_batch()?;
-                            }
-                            if e.config.physics_differs(&world_before) {
-                                // The generation that just began runs in the
-                                // new world, and its first creatures are the
-                                // kept ones being re-tested.
-                                let retesting = kept_before.min(e.config.population);
-                                log_world_change(
-                                    &mut events,
-                                    &world_before,
-                                    &e.config,
-                                    e.generation,
-                                    retesting,
-                                );
-                            }
-                            let breeding_seconds = stage_start.elapsed().as_secs_f64();
-                            if benchmark_start.is_some() {
-                                benchmark_stage_seconds[2] += breeding_seconds;
-                            }
-                            if let Some(log) = &mut stage_log {
-                                log.add(2, breeding_seconds);
-                                let genomes = &e.population.genomes;
-                                let count = genomes.len().max(1) as f64;
-                                let nodes = [
-                                    genomes.iter().map(|g| g.node_count as f64).sum::<f64>()
-                                        / count,
-                                    genomes.iter().filter(|g| g.node_count > 8).count() as f64
-                                        / count,
-                                ];
-                                log.write_row(
-                                    e.generation.saturating_sub(1),
-                                    e.config.population,
-                                    gpu.sched.as_ref(),
-                                    nodes,
-                                );
-                            }
-                            generation_marks.push_back((Instant::now(), e.config.population));
-                            while generation_marks.len() > 2
-                                && generation_marks[0].0.elapsed() > Duration::from_secs(10)
-                            {
-                                generation_marks.pop_front();
-                            }
-                            if benchmark_start.is_some() {
-                                benchmark_generation_seconds
-                                    .push(benchmark_generation_started.elapsed().as_secs_f64());
-                            }
-                            benchmark_generation_started = Instant::now();
-                            if benchmark_start.is_none()
-                                && let Some(first) = benchmark_run_generation
-                                && e.generation.saturating_sub(first) >= benchmark_warmup
-                            {
-                                benchmark_start = Some((e.generation, Instant::now()));
-                                measuring.store(true, Ordering::Relaxed);
-                            }
-                            if let (Some(target), Some((first, started))) =
-                                (benchmark_generations, benchmark_start)
-                                && e.generation.saturating_sub(first) >= target
-                            {
-                                measuring.store(false, Ordering::Relaxed);
-                                let seconds = started.elapsed().as_secs_f64();
-                                let generations = e.generation - first;
-                                let creatures = f64::from(generations) * e.config.population as f64;
-                                eprintln!(
-                                    "Native generation benchmark: {} generations in {:.6} s ({:.3} generations/s), population {}, duration {} s, throughput {}, warm-up {} generations",
-                                    generations,
-                                    seconds,
-                                    f64::from(generations) / seconds,
-                                    e.config.population,
-                                    e.config.duration,
-                                    e.config.throughput,
-                                    benchmark_warmup
-                                );
-                                eprintln!(
-                                    "Native benchmark stages: evaluation {:.6} s, archive {:.6} s, breeding {:.6} s",
-                                    benchmark_stage_seconds[0],
-                                    benchmark_stage_seconds[1],
-                                    benchmark_stage_seconds[2]
-                                );
-                                let mut per_generation = benchmark_generation_seconds.clone();
-                                per_generation.sort_by(f64::total_cmp);
-                                eprintln!(
-                                    "Native benchmark throughput: evaluation {:.0} creatures/s, end-to-end {:.0} creatures/s; generation seconds min {:.3} median {:.3} max {:.3}",
-                                    creatures / benchmark_stage_seconds[0].max(1e-9),
-                                    creatures / seconds,
-                                    per_generation.first().copied().unwrap_or(0.0),
-                                    per_generation
-                                        .get(per_generation.len() / 2)
-                                        .copied()
-                                        .unwrap_or(0.0),
-                                    per_generation.last().copied().unwrap_or(0.0)
-                                );
-                                let mut builds = snapshot_build_ms.clone();
-                                builds.sort_by(f64::total_cmp);
-                                if !builds.is_empty() {
-                                    eprintln!(
-                                        "Native benchmark snapshot build: {} snapshots, median {:.3} ms, p95 {:.3} ms, max {:.3} ms",
-                                        builds.len(),
-                                        builds[builds.len() / 2],
-                                        builds[builds.len() * 95 / 100],
-                                        builds.last().copied().unwrap_or(0.0)
-                                    );
-                                }
-                                let mut configures = benchmark_configure_ms.clone();
-                                configures.sort_by(f64::total_cmp);
-                                if !configures.is_empty() {
-                                    eprintln!(
-                                        "Native benchmark settings latency: {} probes, median {:.1} ms, max {:.1} ms",
-                                        configures.len(),
-                                        configures[configures.len() / 2],
-                                        configures.last().copied().unwrap_or(0.0)
-                                    );
-                                }
-                                let mut pings = benchmark_ping_ms.clone();
-                                pings.sort_by(f64::total_cmp);
-                                let pct = |q: usize| {
-                                    pings
-                                        .get(
-                                            (pings.len() * q / 100)
-                                                .min(pings.len().saturating_sub(1)),
-                                        )
-                                        .copied()
-                                        .unwrap_or(0.0)
-                                };
-                                eprintln!(
-                                    "Native benchmark control latency: {} probes, p50 {:.1} ms, p95 {:.1} ms, p99 {:.1} ms, max {:.1} ms",
-                                    pings.len(),
-                                    pct(50),
-                                    pct(95),
-                                    pct(99),
-                                    pings.last().copied().unwrap_or(0.0)
-                                );
-                                if let Some(sched) = &gpu.sched {
-                                    for device in &sched.devices {
-                                        eprintln!(
-                                            "Native benchmark device {}: {} creatures, busy {:.3} s, idle {:.3} s, rate {:.0}/s (totals since start)",
-                                            device.engine.name(),
-                                            device.creatures,
-                                            device.busy_seconds,
-                                            device.idle_seconds,
-                                            device.rate
-                                        );
-                                    }
-                                    eprintln!(
-                                        "Native benchmark packing {:.3} s, checks {} submitted in {} units (busy {:.3} s), {} released, {} dropped for a shared cell (totals since start)",
-                                        sched.packing_seconds,
-                                        sched.checks_submitted,
-                                        sched.check_units,
-                                        sched.check_busy_seconds,
-                                        sched.checks_released,
-                                        sched.checks_dropped
-                                    );
-                                }
-                                running = false;
-                                // Developer benchmarks: EVOLUTION_BENCH_SAVE
-                                // keeps the evolved game for later runs.
-                                if let Some(path) = std::env::var_os("EVOLUTION_BENCH_SAVE") {
-                                    let path = PathBuf::from(path);
-                                    match storage::save(&path, e) {
-                                        Ok(()) => eprintln!("Benchmark saved {}", path.display()),
-                                        Err(err) => eprintln!(
-                                            "Benchmark save {} failed: {err:#}",
-                                            path.display()
-                                        ),
-                                    }
-                                }
-                                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
-                                ctx.request_repaint();
-                            }
-                            status = "Breeding from diverse archive elites".into();
-                            // Benchmarks keep autosaves off even for a loaded
-                            // checkpoint, which brings its own interval.
-                            if e.config.checkpoint_interval > 0
-                                && std::env::var_os("EVOLUTION_BENCH_NO_AUTOSAVE").is_none()
-                                && e.generation.is_multiple_of(e.config.checkpoint_interval)
-                                && checkpoint_thread
-                                    .as_ref()
-                                    .is_none_or(|handle| handle.is_finished())
-                            {
-                                if let Some(handle) = checkpoint_thread.take() {
-                                    let _ = handle.join();
-                                }
-                                let path =
-                                    PathBuf::from(format!("runs/seed-{}-auto.evo", e.config.seed));
-                                let snapshot = e.clone();
-                                checkpoint_thread = Some(std::thread::spawn(move || {
-                                    if let Err(err) = storage::save(&path, &snapshot) {
-                                        eprintln!("Background checkpoint failed: {err:#}");
-                                        return None;
-                                    }
-                                    if let Some(dir) = path.parent() {
-                                        // One autosave per experiment piles up: keep the
-                                        // three most recent experiments' autosaves.
-                                        storage::rotate_autosaves(dir, 3);
-                                    }
-                                    Some((path, snapshot.generation))
-                                }));
-                            }
-                            if !continuous || guided {
-                                running = false;
+        if let Some(e) = &mut exp
+            && let Some(sched) = gpu.sched.as_mut()
+            && (running || ring.active())
+        {
+            let result: anyhow::Result<()> = (|| {
+                if !running {
+                    // A pause stops new submissions and absorption; work on
+                    // the engines still completes and waits in the ring.
+                    ring.step(e, sched, Duration::from_millis(4), 0)?;
+                    return Ok(());
+                }
+                let pass_started = Instant::now();
+                let world_before = e.config.clone();
+                let kept_before = e.archive.entries.len();
+                if !ring.active() {
+                    ring.start(e, sched);
+                }
+                sched.pump()?;
+                // One block per pass: archiving and breeding a block takes a
+                // few tenths of a second, and controls are read between
+                // passes. Blocks are absorbed in ring order, so the run does
+                // not depend on which unit finished first.
+                let step = ring.step(e, sched, Duration::from_millis(4), 1)?;
+                let seconds = pass_started.elapsed().as_secs_f64();
+                e.evaluation_seconds += seconds;
+                let [archive, breeding] = std::mem::take(&mut e.stage_seconds);
+                if benchmark_start.is_some() {
+                    benchmark_stage_seconds[0] += (seconds - archive - breeding).max(0.0);
+                    benchmark_stage_seconds[1] += archive;
+                    benchmark_stage_seconds[2] += breeding;
+                }
+                if let Some(log) = &mut stage_log {
+                    log.add(0, (seconds - archive - breeding).max(0.0));
+                    log.add(1, archive);
+                    log.add(2, breeding);
+                }
+                status = format!("Evolving · generation {}", e.generation);
+                if step.generations == 0 {
+                    return Ok(());
+                }
+                if e.config.physics_differs(&world_before) {
+                    // Autochange changed the world at the boundary: blocks
+                    // not yet on an engine run in the new world, and the
+                    // kept elites are tested again in it.
+                    ring.world_changed(e, sched);
+                    log_world_change(
+                        &mut events,
+                        &world_before,
+                        &e.config,
+                        e.generation,
+                        kept_before.min(e.config.population),
+                    );
+                }
+                if let Some(log) = &mut stage_log {
+                    let genomes = e.blocks.iter().flat_map(|b| &b.population.genomes);
+                    let count = e.ring_len().max(1) as f64;
+                    let nodes = [
+                        genomes.clone().map(|g| g.node_count as f64).sum::<f64>() / count,
+                        genomes.filter(|g| g.node_count > 8).count() as f64 / count,
+                    ];
+                    log.write_row(
+                        e.generation.saturating_sub(1),
+                        e.config.population,
+                        Some(&*sched),
+                        nodes,
+                    );
+                }
+                generation_marks.push_back((Instant::now(), e.config.population));
+                while generation_marks.len() > 2
+                    && generation_marks[0].0.elapsed() > Duration::from_secs(10)
+                {
+                    generation_marks.pop_front();
+                }
+                if benchmark_start.is_some() {
+                    benchmark_generation_seconds
+                        .push(benchmark_generation_started.elapsed().as_secs_f64());
+                }
+                benchmark_generation_started = Instant::now();
+                if benchmark_start.is_none()
+                    && let Some(first) = benchmark_run_generation
+                    && e.generation.saturating_sub(first) >= benchmark_warmup
+                {
+                    benchmark_start = Some((e.generation, Instant::now()));
+                    measuring.store(true, Ordering::Relaxed);
+                }
+                if let (Some(target), Some((first, started))) =
+                    (benchmark_generations, benchmark_start)
+                    && e.generation.saturating_sub(first) >= target
+                {
+                    measuring.store(false, Ordering::Relaxed);
+                    report_benchmark(
+                        e,
+                        sched,
+                        e.generation - first,
+                        started.elapsed().as_secs_f64(),
+                        benchmark_warmup,
+                        benchmark_stage_seconds,
+                        &benchmark_generation_seconds,
+                        &snapshot_build_ms,
+                        &benchmark_configure_ms,
+                        &benchmark_ping_ms,
+                    );
+                    running = false;
+                    // Developer benchmarks: EVOLUTION_BENCH_SAVE keeps the
+                    // evolved game for later runs.
+                    if let Some(path) = std::env::var_os("EVOLUTION_BENCH_SAVE") {
+                        let path = PathBuf::from(path);
+                        match storage::save(&path, e) {
+                            Ok(()) => eprintln!("Benchmark saved {}", path.display()),
+                            Err(err) => {
+                                eprintln!("Benchmark save {} failed: {err:#}", path.display())
                             }
                         }
                     }
-                    Ok(())
-                })();
-                if let Err(err) = result {
-                    error = Some(format!("{err:#}"));
-                    running = false;
+                    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+                    ctx.request_repaint();
                 }
-                changed = true;
-            } else {
+                // Benchmarks keep autosaves off even for a loaded
+                // checkpoint, which brings its own interval.
+                if e.config.checkpoint_interval > 0
+                    && std::env::var_os("EVOLUTION_BENCH_NO_AUTOSAVE").is_none()
+                    && e.generation.is_multiple_of(e.config.checkpoint_interval)
+                    && checkpoint_thread
+                        .as_ref()
+                        .is_none_or(|handle| handle.is_finished())
+                {
+                    if let Some(handle) = checkpoint_thread.take() {
+                        let _ = handle.join();
+                    }
+                    let path = PathBuf::from(format!("runs/seed-{}-auto.evo", e.config.seed));
+                    // The ring is shared, not copied: the save holds only
+                    // the archives and the search state.
+                    let snapshot = e.clone();
+                    checkpoint_thread = Some(std::thread::spawn(move || {
+                        if let Err(err) = storage::save(&path, &snapshot) {
+                            eprintln!("Background checkpoint failed: {err:#}");
+                            return None;
+                        }
+                        if let Some(dir) = path.parent() {
+                            // One autosave per experiment piles up: keep the
+                            // three most recent experiments' autosaves.
+                            storage::rotate_autosaves(dir, 3);
+                        }
+                        Some((path, snapshot.generation))
+                    }));
+                }
+                if run_until.is_some_and(|until| e.generation >= until) {
+                    running = false;
+                    status = format!("Paused after generation {}", e.generation - 1);
+                }
+                Ok(())
+            })();
+            if let Err(err) = result {
+                error = Some(format!("{err:#}"));
                 running = false;
             }
-        }
-        // A pause stops new submissions; queued GPU work still completes and is kept.
-        if !running && let Some(sched) = gpu.sched.as_mut() {
-            sched.ordered_stop();
-            if sched.ordered_in_flight() > 0
-                && let Some(e) = &mut exp
-            {
-                let absorbed = sched
-                    .ordered_pump_checks(&e.population, &e.config, |i, m| e.check_need(i, m))
-                    .and_then(|()| {
-                        sched.ordered_collect(
-                            &e.population,
-                            &e.config,
-                            Duration::from_millis(4),
-                            usize::MAX,
-                        )
-                    })
-                    .and_then(|units| {
-                        for (indices, metrics) in units {
-                            if steady.active {
-                                steady_absorb(e, &mut steady, sched, &indices, &metrics, false)?;
-                            } else {
-                                store_results(e, &mut done, &indices, &metrics);
-                            }
-                        }
-                        Ok(())
-                    });
-                if let Err(err) = absorbed {
-                    error = Some(format!("{err:#}"));
-                }
-                changed = true;
-            }
-            if sched.ordered_in_flight() == 0 {
-                steady.active = false;
-            }
+            changed = true;
+        } else if running && exp.is_none() {
+            running = false;
         }
         // A GPU that was lost and reopened is told to the player.
         if let Some(sched) = gpu.sched.as_mut() {
@@ -1617,15 +1264,8 @@ fn run(
                     fossils: e.fossils.len(),
                     generation: e.generation,
                     evaluated: e.evaluated,
-                    completed: if done.len() == e.config.population
-                        && done_key == (epoch, e.generation)
-                    {
-                        done.iter().filter(|&&d| d).count().max(e.evaluated)
-                    } else {
-                        e.evaluated
-                    },
-                    checking: gpu.sched.as_ref().map_or(0, |sched| sched.holding()),
-                    stage: e.stage,
+                    completed: e.evaluated,
+                    checking: ring.confirming(),
                     running,
                     history: history.clone(),
                     events: events.clone(),
@@ -1641,12 +1281,7 @@ fn run(
                     engines: engine_rows(&gpu),
                     end_to_end: end_to_end_rate(&generation_marks),
                     gpu_bytes: gpu.allocated_bytes,
-                    ram_bytes: e.population.bytes()
-                        + e.scores.capacity() * 4
-                        + e.trial_metrics.capacity()
-                            * std::mem::size_of::<crate::qd::TrialMetrics>()
-                        + e.ranks.capacity() * 8
-                        + e.parents.capacity() * 8
+                    ram_bytes: e.ring_bytes()
                         + e.archive
                             .entries
                             .iter()
@@ -1694,7 +1329,6 @@ fn run(
                     evaluated: 0,
                     completed: 0,
                     checking: 0,
-                    stage: Stage::Ready,
                     running: false,
                     history: history.clone(),
                     events: events.clone(),
@@ -1784,124 +1418,99 @@ fn end_to_end_rate(marks: &std::collections::VecDeque<(Instant, usize)>) -> f64 
         _ => 0.0,
     }
 }
-/// Stores a finished unit and advances the contiguous evaluated prefix that
-/// checkpoints record. Devices can finish units out of order.
-fn store_results(
-    e: &mut Experiment,
-    done: &mut Vec<bool>,
-    indices: &[usize],
-    metrics: &[crate::qd::EvaluationMetrics],
-) {
-    if done.len() != e.config.population {
-        *done = vec![false; e.config.population];
-        done[..e.evaluated].fill(true);
-    }
-    for (&i, metric) in indices.iter().zip(metrics) {
-        e.record_result(i, metric);
-        done[i] = true;
-    }
-    while e.evaluated < e.config.population && done[e.evaluated] {
-        e.evaluated += 1;
-    }
-    if e.evaluated == e.config.population {
-        e.stage = Stage::Evaluated;
-    }
-}
-/// Waits for all queued GPU work and stores its results.
-fn finish_queued(
-    gpu: &mut Gpu,
-    e: &mut Experiment,
-    done: &mut Vec<bool>,
-    steady: &mut Steady,
-) -> anyhow::Result<()> {
-    if let Some(sched) = gpu.sched.as_mut() {
-        sched.ordered_stop();
-        while sched.ordered_in_flight() > 0 {
-            // With no round left, waiting contenders go out for their checks now.
-            sched.ordered_pump_checks(&e.population, &e.config, |i, m| e.check_need(i, m))?;
-            for (indices, metrics) in sched.ordered_collect(
-                &e.population,
-                &e.config,
-                Duration::from_millis(100),
-                usize::MAX,
-            )? {
-                if steady.active {
-                    steady_absorb(e, steady, sched, &indices, &metrics, false)?;
-                } else {
-                    store_results(e, done, &indices, &metrics);
-                }
-            }
-        }
-        steady.active = false;
-    }
-    Ok(())
-}
-
-/// Steady-state evolution bookkeeping.
-#[derive(Default)]
-struct Steady {
-    /// Slots are cycling through the engines.
-    active: bool,
-    /// Evaluations toward the current generation.
-    count: usize,
-    /// Failed trials in the current generation.
-    failed: usize,
-    /// A generation's worth of evaluations finished; record it next pass.
-    boundary: bool,
-    /// Archive and breeding seconds inside the current generation.
+/// Prints the native generation benchmark (`EVOLUTION_BENCH_GENERATIONS`).
+#[allow(clippy::too_many_arguments)]
+fn report_benchmark(
+    e: &Experiment,
+    sched: &crate::scheduler::Scheduler,
+    generations: u32,
+    seconds: f64,
+    warmup: u32,
     stage_seconds: [f64; 3],
-}
-
-/// Block size, release window and decision lag for a steady run. A block is
-/// a sixteenth of the population (at least 8,192 creatures). A block is
-/// decided against the archives as they stood `lag` blocks earlier, and its
-/// checks must finish before it is absorbed, so a run absorbs about
-/// `lag + 1` blocks per check latency: the lag is three quarters of a
-/// generation, which keeps the check latency off the critical path. A block
-/// is released `lag + 2` blocks ahead of the next one to return, so the
-/// engines always have work queued. With a single block per generation the
-/// decision cannot run ahead of the absorption.
-fn steady_blocks(population: usize) -> (usize, usize, usize) {
-    let size = population.div_ceil(16).max(8192).min(population.max(1));
-    let blocks = population.div_ceil(size);
-    let lag = if blocks >= 2 {
-        (blocks * 3 / 4).clamp(1, blocks - 1)
-    } else {
-        0
+    generation_seconds: &[f64],
+    snapshot_build_ms: &[f64],
+    configure_ms: &[f64],
+    ping_ms: &[f64],
+) {
+    let creatures = f64::from(generations) * e.config.population as f64;
+    eprintln!(
+        "Native generation benchmark: {} generations in {:.6} s ({:.3} generations/s), population {}, duration {} s, throughput {}, warm-up {} generations",
+        generations,
+        seconds,
+        f64::from(generations) / seconds,
+        e.config.population,
+        e.config.duration,
+        e.config.throughput,
+        warmup
+    );
+    eprintln!(
+        "Native benchmark stages: evaluation {:.6} s, archive {:.6} s, breeding {:.6} s",
+        stage_seconds[0], stage_seconds[1], stage_seconds[2]
+    );
+    let sorted = |values: &[f64]| {
+        let mut values = values.to_vec();
+        values.sort_by(f64::total_cmp);
+        values
     };
-    (size, (lag + 2).min(blocks.max(2)), lag)
-}
-
-/// Stores a finished unit, offers it to the archive, breeds replacements into
-/// the same slots from the updated archive, and queues them when `resubmit`.
-fn steady_absorb(
-    e: &mut Experiment,
-    steady: &mut Steady,
-    sched: &mut crate::scheduler::Scheduler,
-    indices: &[usize],
-    metrics: &[crate::qd::EvaluationMetrics],
-    resubmit: bool,
-) -> anyhow::Result<()> {
-    for (&i, m) in indices.iter().zip(metrics) {
-        e.record_result(i, m);
+    let per_generation = sorted(generation_seconds);
+    eprintln!(
+        "Native benchmark throughput: end-to-end {:.0} creatures/s; generation seconds min {:.3} median {:.3} max {:.3}",
+        creatures / seconds,
+        per_generation.first().copied().unwrap_or(0.0),
+        per_generation
+            .get(per_generation.len() / 2)
+            .copied()
+            .unwrap_or(0.0),
+        per_generation.last().copied().unwrap_or(0.0)
+    );
+    let builds = sorted(snapshot_build_ms);
+    if !builds.is_empty() {
+        eprintln!(
+            "Native benchmark snapshot build: {} snapshots, median {:.3} ms, p95 {:.3} ms, max {:.3} ms",
+            builds.len(),
+            builds[builds.len() / 2],
+            builds[builds.len() * 95 / 100],
+            builds.last().copied().unwrap_or(0.0)
+        );
     }
-    e.arm_screen_early();
-    let archive_started = Instant::now();
-    steady.failed += e.archive_slots(indices);
-    steady.stage_seconds[1] += archive_started.elapsed().as_secs_f64();
-    let breeding_started = Instant::now();
-    e.breed_slots(indices)?;
-    steady.stage_seconds[2] += breeding_started.elapsed().as_secs_f64();
-    if resubmit {
-        sched.add_block(indices.to_vec());
+    let configures = sorted(configure_ms);
+    if !configures.is_empty() {
+        eprintln!(
+            "Native benchmark settings latency: {} probes, median {:.1} ms, max {:.1} ms",
+            configures.len(),
+            configures[configures.len() / 2],
+            configures.last().copied().unwrap_or(0.0)
+        );
     }
-    steady.count += indices.len();
-    e.evaluated = steady.count.min(e.config.population);
-    if steady.count >= e.config.population {
-        steady.boundary = true;
-        e.stage = Stage::Archived;
+    let pings = sorted(ping_ms);
+    let pct = |q: usize| {
+        pings
+            .get((pings.len() * q / 100).min(pings.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0.0)
+    };
+    eprintln!(
+        "Native benchmark control latency: {} probes, p50 {:.1} ms, p95 {:.1} ms, p99 {:.1} ms, max {:.1} ms",
+        pings.len(),
+        pct(50),
+        pct(95),
+        pct(99),
+        pings.last().copied().unwrap_or(0.0)
+    );
+    for device in &sched.devices {
+        eprintln!(
+            "Native benchmark device {}: {} creatures, busy {:.3} s, idle {:.3} s, rate {:.0}/s (totals since start)",
+            device.engine.name(),
+            device.creatures,
+            device.busy_seconds,
+            device.idle_seconds,
+            device.rate
+        );
     }
-    Ok(())
+    eprintln!(
+        "Native benchmark packing {:.3} s, {} confirmation trials (busy {:.3} s) (totals since start)",
+        sched.packing_seconds, sched.confirms_submitted, sched.confirm_busy_seconds,
+    );
 }
 
 #[cfg(test)]
@@ -1970,9 +1579,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// A world change mid-generation empties the archive at the next
-    /// boundary, so nearly every result becomes a contender. The run must
-    /// keep advancing generations instead of holding every slot for checks.
+    /// A world change mid-generation empties the archives, so nearly every
+    /// block sets island records again. The run must keep advancing
+    /// generations.
     #[test]
     #[ignore = "requires a Vulkan GPU"]
     fn a_world_change_mid_generation_keeps_generations_advancing() {
@@ -2071,7 +1680,7 @@ mod tests {
         }
     }
 
-    /// The steady loop absorbs blocks in a fixed order, so two runs of one
+    /// The ring absorbs blocks in a fixed order, so two runs of one
     /// seed on one GPU agree in every generation's statistics.
     #[test]
     #[ignore = "requires a Vulkan GPU"]

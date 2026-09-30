@@ -1,16 +1,11 @@
-//! The GPU is the only physics authority. These ignored tests need a GPU and
-//! check what its results must satisfy: identical trials repeat, a replay
-//! shows the score, a creature scores the same alone as in a batch, and the
-//! early screen stops only creatures below the bar. Run them on the
-//! workstation with:
+//! GPU repeatability on a fixed population and fixed settings.
 //!
-//!     EVOLUTION_DEVICES=primary cargo test --release --test gpu_repeatability -- --ignored
-use evolution_simulator::{
-    config::Config,
-    evolution::{self, Bone, Creature, Muscle, NodeGene},
-    gpu::Gpu,
-    physics::Screen,
-};
+//! This ignored test needs a Vulkan GPU and does not compare against the CPU.
+//! Cross-engine results are not an acceptance gate: in a GPU run the GPU owns
+//! the score. Run this on the workstation with:
+//!
+//!     cargo test --release --test gpu_repeatability -- --ignored
+use evolution_simulator::{config::Config, evolution, gpu::Gpu};
 
 /// The GPU tests run one at a time: the replay GPU is published in a
 /// process-wide slot, so a second test's GPU would take it over.
@@ -46,10 +41,10 @@ fn gpu_repeats_scores_for_identical_trials() {
     }
     let scheduler = gpu.sched.as_mut().expect("scheduler");
     let first = scheduler
-        .evaluate_single(&pop, &indices, &cfg)
+        .evaluate(&pop, &indices, &cfg)
         .expect("first GPU trial");
     let second = scheduler
-        .evaluate_single(&pop, &indices, &cfg)
+        .evaluate(&pop, &indices, &cfg)
         .expect("repeat GPU trial");
 
     assert_eq!(first.len(), second.len());
@@ -75,8 +70,8 @@ fn gpu_repeats_scores_for_identical_trials() {
             "GPU metrics changed for creature {i}"
         );
         assert_eq!(
-            (a.screened, a.unchecked),
-            (b.screened, b.unchecked),
+            (a.screened, a.excluded),
+            (b.screened, b.excluded),
             "creature {i}"
         );
     }
@@ -103,7 +98,7 @@ fn gpu_replays_show_the_gpu_score() {
     );
     let scheduler = gpu.sched.as_mut().expect("scheduler");
     let scores = scheduler
-        .evaluate_single(&pop, &indices, &cfg)
+        .evaluate(&pop, &indices, &cfg)
         .expect("GPU trials");
     let fidelity = cfg.fidelity();
     let total = (fidelity.settle() + cfg.steps()) as usize;
@@ -152,6 +147,195 @@ fn gpu_replays_show_the_gpu_score() {
     );
 }
 
+/// Physics v2 repeats bit for bit on one GPU, on each backend: Vulkan and
+/// CUDA each score the same population twice.
+#[test]
+#[ignore = "requires a GPU; run explicitly on the workstation"]
+fn each_backend_repeats_v2_scores() {
+    let _one_gpu_test = ONE_GPU_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = Config {
+        population: 256,
+        random_seed: false,
+        duration: 3.0,
+        screen: None,
+        ..Config::default()
+    };
+    let pop = evolution::create(&cfg).expect("population");
+    let indices: Vec<usize> = (0..pop.genomes.len()).collect();
+    for setting in ["0", "1"] {
+        // SAFETY: the variable is read when a GPU opens; this test runs its
+        // backends one after another and no other thread reads it.
+        unsafe { std::env::set_var("EVOLUTION_CUDA", setting) };
+        let mut gpu = Gpu::new("RTX 4060").expect("GPU scheduler");
+        assert!(
+            gpu.startup_warning.is_none(),
+            "the primary GPU did not open"
+        );
+        eprintln!("GPU engine: {}", gpu.names());
+        if setting == "1" {
+            assert!(gpu.names().contains("CUDA"), "opened {}", gpu.names());
+        }
+        let scheduler = gpu.sched.as_mut().expect("scheduler");
+        let first = scheduler.evaluate(&pop, &indices, &cfg).expect("first");
+        let second = scheduler.evaluate(&pop, &indices, &cfg).expect("second");
+        for (i, (a, b)) in first.iter().zip(&second).enumerate() {
+            assert_eq!(a.fitness.to_bits(), b.fitness.to_bits(), "creature {i}");
+            assert_eq!(
+                (
+                    a.behavior.ground_contact.to_bits(),
+                    a.behavior.vertical_oscillation.to_bits(),
+                    a.behavior.gait_frequency.to_bits(),
+                    a.behavior.mean_height.to_bits(),
+                    a.behavior.feet.to_bits()
+                ),
+                (
+                    b.behavior.ground_contact.to_bits(),
+                    b.behavior.vertical_oscillation.to_bits(),
+                    b.behavior.gait_frequency.to_bits(),
+                    b.behavior.mean_height.to_bits(),
+                    b.behavior.feet.to_bits()
+                ),
+                "creature {i}"
+            );
+        }
+    }
+}
+
+/// The muscle energy, muscle force and contact forces a v2 recording carries
+/// are the kernel's own values: they agree with the CPU prototype's replay of
+/// the same creature, and recording does not change the score.
+#[test]
+#[ignore = "requires a GPU; run explicitly on the workstation"]
+fn recorded_forces_match_the_prototype_on_each_backend() {
+    use evolution_simulator::{engine, physics2};
+    let cfg = Config {
+        population: 400,
+        random_seed: false,
+        duration: 1.5,
+        screen: None,
+        ..Config::default()
+    };
+    let pop = evolution::create(&cfg).expect("population");
+    let indices: Vec<usize> = (0..pop.genomes.len()).collect();
+    for setting in ["0", "1"] {
+        // SAFETY: the variable is read when a GPU opens; the backends run one
+        // after another and no other thread reads it.
+        unsafe { std::env::set_var("EVOLUTION_CUDA", setting) };
+        let mut gpu = Gpu::new("RTX 4060").expect("GPU scheduler");
+        assert!(
+            gpu.startup_warning.is_none(),
+            "the primary GPU did not open"
+        );
+        let name = gpu.names();
+        let scheduler = gpu.sched.as_mut().expect("scheduler");
+        let scores = scheduler
+            .evaluate(&pop, &indices, &cfg)
+            .expect("GPU trials");
+        let (mut entries, mut close_energy, mut close_force, mut ground_entries) =
+            (0usize, 0usize, 0usize, 0usize);
+        let mut ground_close = 0usize;
+        let mut live = 0usize;
+        let (mut broken_entries, mut broken_same) = (0usize, 0usize);
+        let mut checked = 0;
+        for (i, score) in scores.iter().enumerate() {
+            let mut creature = pop.creature(i);
+            evolution_simulator::evolution::canonicalize_bone_order(&mut creature);
+            if creature.muscles.is_empty() || score.fitness <= -1e10 {
+                continue;
+            }
+            // Number the nodes other than the head backwards. Bone `j` then
+            // no longer ends at node `j + 1`, as in most evolved bodies, but
+            // the kernel sees the same body and scores it the same.
+            let n = creature.nodes.len();
+            let relabel = |k: u32| if k == 0 { 0 } else { n as u32 - k };
+            let mut nodes = creature.nodes.clone();
+            for (k, node) in creature.nodes.iter().enumerate() {
+                nodes[relabel(k as u32) as usize] = *node;
+            }
+            creature.nodes = nodes;
+            for bone in &mut creature.bones {
+                bone.a = relabel(bone.a);
+                bone.b = relabel(bone.b);
+            }
+            let recording =
+                engine::record_on_gpu(&creature, &cfg, std::time::Duration::from_secs(30))
+                    .expect("a GPU replay");
+            assert_eq!(recording.result.fitness.to_bits(), score.fitness.to_bits());
+            let forces = recording.forces.expect("recorded forces");
+            let (frames, _, cpu) = physics2::replay_forces(&creature, &cfg);
+            // The GPU frames are in the creature's node numbering, as the
+            // prototype's: the start poses agree node by node.
+            let settle = evolution_simulator::physics::settle() as usize;
+            for (n, (gpu, cpu)) in recording.frames[settle]
+                .iter()
+                .zip(&frames[settle])
+                .enumerate()
+            {
+                assert!(
+                    (gpu[0] - cpu[0]).abs() < 1e-4 && (gpu[1] - cpu[1]).abs() < 1e-4,
+                    "{name}: creature {i} node {n} starts at {gpu:?} on the GPU, {cpu:?} on the CPU"
+                );
+            }
+            assert_eq!(forces.energy.len(), frames.len());
+            assert_eq!(forces.muscle.len(), frames.len());
+            assert_eq!(forces.ground.len(), frames.len());
+            assert_eq!(forces.broken.len(), frames.len());
+            // The recorded broken joints are the scoring test's: none before
+            // the trial ended, since a break ends it.
+            let fidelity = cfg.fidelity();
+            let terminal = if recording.result.fall_time > 0.0 {
+                settle + (recording.result.fall_time * fidelity.rate as f32).round() as usize
+            } else {
+                frames.len() - 1
+            };
+            assert!(
+                forces.broken[..terminal].iter().all(|&b| b == 0),
+                "{name}: creature {i} shows a broken joint before its trial ended"
+            );
+            // Only the first second and a bit after settling: contact
+            // sequences drift apart later.
+            let start = evolution_simulator::physics::settle() as usize;
+            for t in start..(start + 80).min(frames.len()) {
+                for k in 0..creature.muscles.len() {
+                    entries += 1;
+                    close_energy +=
+                        usize::from((forces.energy[t][k] - cpu.energy[t][k]).abs() < 0.01);
+                    close_force +=
+                        usize::from((forces.muscle[t][k] - cpu.muscle[t][k]).abs() < 0.5);
+                }
+                broken_entries += 1;
+                broken_same += usize::from(forces.broken[t] == cpu.broken[t]);
+                for n in 0..creature.nodes.len() {
+                    ground_entries += 1;
+                    live += usize::from(forces.ground[t][n] > 0.0);
+                    ground_close +=
+                        usize::from((forces.ground[t][n] - cpu.ground[t][n]).abs() < 0.5);
+                }
+            }
+            checked += 1;
+            if checked >= 40 {
+                break;
+            }
+        }
+        eprintln!(
+            "{name}: {checked} creatures, energy {close_energy}/{entries}, force {close_force}/{entries}, ground {ground_close}/{ground_entries} close to the prototype ({live} recorded contact forces above zero)"
+        );
+        eprintln!("{name}: broken joints {broken_same}/{broken_entries} frames as the prototype");
+        assert!(checked >= 10, "too few creatures with muscles");
+        assert!(
+            broken_same * 100 >= broken_entries * 99,
+            "{name}: broken joints"
+        );
+        assert!(live > 0, "{name}: no contact force was recorded");
+        assert!(close_energy * 100 >= entries * 99, "{name}: energy");
+        assert!(close_force * 100 >= entries * 98, "{name}: muscle force");
+        assert!(
+            ground_close * 100 >= ground_entries * 98,
+            "{name}: ground force"
+        );
+    }
+}
+
 #[test]
 #[ignore = "requires a GPU; run alone: --ignored a_lost_gpu (other GPU tests in parallel change its results)"]
 fn a_lost_gpu_is_reopened_and_gives_the_same_results() {
@@ -167,13 +351,13 @@ fn a_lost_gpu_is_reopened_and_gives_the_same_results() {
     assert!(gpu.startup_warning.is_none(), "the GPU did not open");
     let scheduler = gpu.sched.as_mut().expect("scheduler");
     let undisturbed = scheduler
-        .evaluate_single(&pop, &indices, &cfg)
+        .evaluate(&pop, &indices, &cfg)
         .expect("undisturbed run");
     // The GPU is lost while its first units are in flight; the game must reopen it
     // and finish the run on it.
     scheduler.simulate_gpu_loss_after(0);
     let disturbed = scheduler
-        .evaluate_single(&pop, &indices, &cfg)
+        .evaluate(&pop, &indices, &cfg)
         .expect("run with a lost GPU");
     let notices = scheduler.take_notices();
     assert!(
@@ -195,200 +379,119 @@ fn a_lost_gpu_is_reopened_and_gives_the_same_results() {
     }
 }
 
-/// A creature scores the same alone as inside a mixed batch of bodies with
-/// different node counts, in any order.
-#[test]
-#[ignore = "requires a GPU; run explicitly on the workstation"]
-fn a_creature_scores_the_same_alone_as_in_a_batch() {
-    let _one_gpu_test = ONE_GPU_TEST.lock().unwrap_or_else(|e| e.into_inner());
-    let cfg = Config {
-        population: 8,
-        duration: 0.5,
-        random_seed: false,
-        ..Config::default()
-    };
-    let mut gpu = Gpu::new("RTX 4060").expect("GPU scheduler");
-    assert!(gpu.startup_warning.is_none(), "the GPU did not open");
-    let cfg = Config {
-        population: 8,
-        max_nodes: 64,
-        max_muscles: 256,
-        min_size: 0.01,
-        min_friction: 0.0,
-        ..cfg
-    };
-    let mut mixed = evolution::Population::default();
-    for (i, count) in [3, 5, 6, 8, 9, 17, 33, 64].into_iter().enumerate() {
-        let nodes: Vec<_> = (0..count)
-            .map(|j| {
-                let angle = j as f32 / count as f32 * std::f32::consts::TAU;
-                NodeGene {
-                    x: angle.cos() * 0.3,
-                    y: angle.sin() * 0.3 + 0.4,
-                    diameter: 0.02,
-                    friction: 0.5,
-                }
-            })
-            .collect();
-        let bones: Vec<_> = (0..count - 1)
-            .map(|j| {
-                let a = &nodes[j];
-                let b = &nodes[j + 1];
-                Bone::new(
-                    j as u32,
-                    (j + 1) as u32,
-                    (a.x - b.x).hypot(a.y - b.y).max(0.03),
-                )
-            })
-            .collect();
-        let muscle_links = if bones.len() > 2 { bones.len() } else { 1 };
-        let muscles = (0..muscle_links)
-            .map(|j| Muscle {
-                bone_a: j as u32,
-                bone_b: ((j + 1) % bones.len()) as u32,
-                anchor_a: 0.0,
-                anchor_b: 1.0,
-                short: 0.06,
-                long: 0.1,
-                period: 1.,
-                phase: 0.2,
-                duty: 0.5,
-                stiffness: 20.,
-                sensor: 255,
-                reset: 0.0,
-                tendon: 0.0,
-            })
-            .collect();
-        mixed.push(Creature {
-            nodes,
-            bones,
-            muscles,
-            id: i as u64,
-        });
-    }
-    mixed.validate(&cfg).unwrap();
-    let order = [7usize, 5, 3, 1, 6, 4, 0, 2];
-    let scores = gpu.evaluate(&mixed, &order, &cfg).unwrap();
-    assert_eq!(scores.len(), 8);
-    assert!(
-        scores
-            .iter()
-            .all(|s| s.is_finite() && *s > evolution::FAILED)
-    );
-    let combined = gpu.evaluate_with_metrics(&mixed, &order, &cfg).unwrap();
-    let mut separated = vec![evolution_simulator::qd::EvaluationMetrics::default(); order.len()];
-    for (slot, &creature) in order.iter().enumerate() {
-        let metrics = gpu
-            .evaluate_with_metrics(&mixed, &[creature], &cfg)
-            .unwrap();
-        separated[slot] = metrics[0];
-    }
-    for (combined, separated) in combined.iter().zip(&separated) {
-        assert!(
-            (combined.fitness - separated.fitness).abs() < 1e-4,
-            "combined fitness {} vs separate {}",
-            combined.fitness,
-            separated.fitness
-        );
-        assert!(
-            (combined.behavior.ground_contact - separated.behavior.ground_contact).abs() < 1e-5,
-            "combined contact {} vs separate {}",
-            combined.behavior.ground_contact,
-            separated.behavior.ground_contact
-        );
-        assert!(
-            (combined.behavior.vertical_oscillation - separated.behavior.vertical_oscillation)
-                .abs()
-                < 1e-4,
-            "combined vertical {} vs separate {}",
-            combined.behavior.vertical_oscillation,
-            separated.behavior.vertical_oscillation
-        );
-        assert!(
-            (combined.behavior.gait_frequency - separated.behavior.gait_frequency).abs() < 1e-4,
-            "combined gait {} vs separate {}",
-            combined.behavior.gait_frequency,
-            separated.behavior.gait_frequency
-        );
+/// A chain whose joints may not bend, pulled by long-range muscles, as in
+/// `tests/replay_consistency.rs`: it breaks a joint within a few seconds.
+/// `variant` changes the muscle rhythm.
+fn breaking_chain(variant: usize) -> evolution::Creature {
+    use evolution::{Bone, Creature, Muscle, NodeGene};
+    let node_count = 16;
+    let nodes: Vec<_> = (0..node_count)
+        .map(|i| {
+            let [x, y] = match i {
+                0 => [-0.2, 0.8],
+                1 => [-0.15, 0.6],
+                _ => [(i - 2) as f32 * 0.08, 0.08 + (i % 2) as f32 * 0.04],
+            };
+            NodeGene {
+                x,
+                y,
+                diameter: 0.08,
+                friction: 0.8,
+            }
+        })
+        .collect();
+    let bones: Vec<_> = (0..node_count - 1)
+        .map(|i| {
+            let (a, b) = (nodes[i], nodes[i + 1]);
+            let mut bone = Bone::new(i as u32, (i + 1) as u32, (a.x - b.x).hypot(a.y - b.y));
+            bone.min_angle = 0.0;
+            bone.max_angle = 0.0;
+            bone
+        })
+        .collect();
+    let muscles = (1..bones.len())
+        .map(|i| Muscle {
+            bone_a: i as u32,
+            bone_b: ((i + node_count / 2) % bones.len()) as u32,
+            anchor_a: 1.0,
+            anchor_b: 0.0,
+            short: 0.1,
+            long: 0.3,
+            period: 0.2 + ((i + variant) % 3) as f32 * 0.05,
+            phase: ((i + variant) % 7) as f32 / 7.0,
+            duty: 0.5,
+            stiffness: 120.0,
+            sensor: evolution::NO_SENSOR,
+            reset: 0.0,
+            tendon: 0.0,
+        })
+        .collect();
+    Creature {
+        nodes,
+        bones,
+        muscles,
+        id: variant as u64,
     }
 }
 
-/// The early screen stops creatures below the bar at the screen and keeps
-/// their distance there. Creatures above it run the full trial unchanged.
+/// A v2 recording marks the joints the scoring kernel breaks: the recorded
+/// bits appear at the frame where the trial ended and not before. (The CPU
+/// prototype drifts from the GPU within a second, so it breaks at other
+/// times; `tests/replay_consistency.rs` checks its own bits.)
 #[test]
 #[ignore = "requires a GPU; run explicitly on the workstation"]
-fn the_screen_stops_creatures_below_the_bar_and_leaves_survivors_alone() {
-    let _one_gpu_test = ONE_GPU_TEST.lock().unwrap_or_else(|e| e.into_inner());
-    const SCREEN_SECONDS: f32 = 2.0;
-    let base = Config {
-        population: 256,
-        duration: 6.0,
+fn recorded_broken_joints_are_the_kernels() {
+    use evolution_simulator::engine;
+    let cfg = Config {
         random_seed: false,
-        seed: 41,
+        duration: 3.0,
         screen: None,
         ..Config::default()
     };
-    let screened = |bar| Config {
-        screen: Some(Screen {
-            seconds: SCREEN_SECONDS,
-            bar,
-        }),
-        ..base.clone()
-    };
-    let pop = evolution::create(&base).expect("population");
-    let indices: Vec<usize> = (0..pop.genomes.len()).collect();
-    let mut gpu = Gpu::new("RTX 4060").expect("GPU scheduler");
-    assert!(gpu.startup_warning.is_none(), "the GPU did not open");
-    let scheduler = gpu.sched.as_mut().expect("scheduler");
-    // No bar: every trial runs in full and records its distance at the screen.
-    let full = scheduler
-        .evaluate_single(&pop, &indices, &screened(f32::NEG_INFINITY))
-        .expect("trials without a bar");
-    assert!(full.iter().all(|r| !r.screened));
-    let mut distances: Vec<f32> = full.iter().map(|r| r.screen_x).collect();
-    distances.sort_by(f32::total_cmp);
-    let bar = distances[distances.len() / 2];
-    let short = scheduler
-        .evaluate_single(
-            &pop,
-            &indices,
-            &Config {
-                duration: SCREEN_SECONDS,
-                ..base.clone()
-            },
-        )
-        .expect("short trials");
-    let results = scheduler
-        .evaluate_single(&pop, &indices, &screened(bar))
-        .expect("trials with a bar");
-    let mut stopped = 0;
-    for (i, ((r, f), s)) in results.iter().zip(&full).zip(&short).enumerate() {
-        assert_eq!(
-            r.screen_x.to_bits(),
-            f.screen_x.to_bits(),
-            "creature {i}: the distance at the screen must not depend on the bar"
-        );
-        if r.screened {
-            stopped += 1;
-            assert!(f.screen_x < bar, "creature {i} is above the bar");
-            let tolerance = 1e-4 * s.fitness.abs().max(1.0);
-            assert!(
-                (r.fitness - s.fitness).abs() <= tolerance,
-                "creature {i}: screened {} vs a {SCREEN_SECONDS} s trial {}",
-                r.fitness,
-                s.fitness
-            );
-        } else {
-            assert_eq!(
-                r.fitness.to_bits(),
-                f.fitness.to_bits(),
-                "creature {i}: a survivor's trial must not change"
-            );
-            assert_eq!(
-                r.behavior.ground_contact.to_bits(),
-                f.behavior.ground_contact.to_bits()
-            );
-        }
+    let mut pop = evolution::Population::default();
+    for variant in 0..8 {
+        pop.push(breaking_chain(variant));
     }
-    assert!(stopped > 0, "the median bar must stop some creatures");
+    let indices: Vec<usize> = (0..pop.genomes.len()).collect();
+    for setting in ["0", "1"] {
+        // SAFETY: the variable is read when a GPU opens; the backends run one
+        // after another and no other thread reads it.
+        unsafe { std::env::set_var("EVOLUTION_CUDA", setting) };
+        let mut gpu = Gpu::new("RTX 4060").expect("GPU scheduler");
+        assert!(
+            gpu.startup_warning.is_none(),
+            "the primary GPU did not open"
+        );
+        let name = gpu.names();
+        let scheduler = gpu.sched.as_mut().expect("scheduler");
+        let scores = scheduler
+            .evaluate(&pop, &indices, &cfg)
+            .expect("GPU trials");
+        let fidelity = cfg.fidelity();
+        let settle = fidelity.settle() as usize;
+        let mut breaks = 0usize;
+        for (i, score) in scores.iter().enumerate() {
+            let creature = pop.creature(i);
+            let recording =
+                engine::record_on_gpu(&creature, &cfg, std::time::Duration::from_secs(120))
+                    .expect("a GPU replay");
+            assert_eq!(recording.result.fitness.to_bits(), score.fitness.to_bits());
+            let broken = recording.forces.expect("recorded forces").broken;
+            let terminal = if recording.result.fall_time > 0.0 {
+                settle + (recording.result.fall_time * fidelity.rate as f32).round() as usize
+            } else {
+                broken.len() - 1
+            };
+            assert!(
+                broken[..terminal].iter().all(|&b| b == 0),
+                "{name}: creature {i} shows a broken joint before its trial ended"
+            );
+            breaks += usize::from(broken[terminal] != 0);
+        }
+        eprintln!(
+            "{name}: {breaks} of {} trials ended on a recorded broken joint",
+            scores.len()
+        );
+        assert!(breaks * 2 >= scores.len(), "{name}: too few breaks");
+    }
 }
