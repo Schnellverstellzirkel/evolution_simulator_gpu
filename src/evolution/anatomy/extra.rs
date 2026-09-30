@@ -159,7 +159,7 @@ pub(crate) fn grow_matching_tips(
             .iter()
             .flat_map(|(x, y)| x.iter().copied().zip(y.iter().copied()))
             .filter(|&(p, q)| tip(p) && tip(q))
-            .for_each(|option| push(option));
+            .for_each(push);
     };
     let Some((p, q)) = pick_each(rng, options) else {
         return false;
@@ -534,10 +534,7 @@ fn drag_ends(c: &Creature) -> Option<(BoneIds, DraggingEnd)> {
             .map(|&i| drive(&c.muscles[i]))
             .sum()
     };
-    let working = legs
-        .iter()
-        .max_by(|x, y| work(x).total_cmp(&work(y)))?
-        .clone();
+    let working = *legs.iter().max_by(|x, y| work(x).total_cmp(&work(y)))?;
     if work(&working) <= 0.0 {
         return None;
     }
@@ -551,8 +548,8 @@ fn drag_ends(c: &Creature) -> Option<(BoneIds, DraggingEnd)> {
     let end = match other {
         Some(leg) => DraggingEnd {
             node: c.bones[leg[0]].a as usize,
-            leg: Some(leg.clone()),
-            weak_leg: (work(leg) < 0.25 * work(&working)).then(|| leg.clone()),
+            leg: Some(*leg),
+            weak_leg: (work(leg) < 0.25 * work(&working)).then_some(*leg),
         },
         None => {
             let inside = super::branch_nodes(c, &working);

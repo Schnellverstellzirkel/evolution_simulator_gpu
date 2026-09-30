@@ -26,7 +26,7 @@ use evolution_simulator::{
 use rayon::prelude::*;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 // ---- allocation counting -------------------------------------------------
@@ -285,7 +285,7 @@ fn grown(o: &Options) -> Result<Experiment> {
 
 /// Loads a save. An older physics version loads too: breeding reads only
 /// the archives and search state, not the physics their scores came from.
-fn loaded(path: &PathBuf) -> Result<Experiment> {
+fn loaded(path: &Path) -> Result<Experiment> {
     let header = storage::peek(path)?;
     let experiment = storage::load_any_version(path)?;
     eprintln!(

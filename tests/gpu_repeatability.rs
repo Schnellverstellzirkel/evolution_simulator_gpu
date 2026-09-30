@@ -163,7 +163,7 @@ fn recorded_forces_are_in_range_and_keep_the_score() {
         }
         let n = creature.nodes.len();
         let relabel = |k: u32| if k == 0 { 0 } else { n as u32 - k };
-        let mut nodes = creature.nodes.clone();
+        let mut nodes = creature.nodes;
         for (k, node) in creature.nodes.iter().enumerate() {
             nodes[relabel(k as u32) as usize] = *node;
         }

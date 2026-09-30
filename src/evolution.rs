@@ -243,9 +243,9 @@ pub struct Creature {
 impl Clone for Creature {
     fn clone(&self) -> Self {
         Self {
-            nodes: self.nodes.clone(),
-            bones: self.bones.clone(),
-            muscles: self.muscles.clone(),
+            nodes: Bounded::from_slice(&self.nodes),
+            bones: Bounded::from_slice(&self.bones),
+            muscles: Bounded::from_slice(&self.muscles),
             id: self.id,
         }
     }
@@ -2496,7 +2496,7 @@ mod tests {
         let bone = creature.bones[1];
         creature.bones[1].organ_mass = 0.2;
         creature.bones[1].organ_at = 0.25;
-        let mut bare = creature.bones.clone();
+        let mut bare = creature.bones;
         bare[1].organ_mass = 0.0;
         let plain = crate::physics::body(&creature.nodes, &bare);
         let with = crate::physics::body(&creature.nodes, &creature.bones);

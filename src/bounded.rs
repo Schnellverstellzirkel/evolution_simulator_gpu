@@ -358,6 +358,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::clone_on_copy)]
     fn behaves_like_a_vec() {
         let mut b: Bounded<u32, 8> = Bounded::new();
         let mut v: Vec<u32> = Vec::new();
