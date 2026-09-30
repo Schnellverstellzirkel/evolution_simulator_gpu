@@ -68,25 +68,35 @@ fn main() -> anyhow::Result<()> {
         let (mut free, mut broken_steps, mut steps) = (0usize, 0usize, 0usize);
         let (mut max_ground, mut min_store) = (0.0f32, 1.0f32);
         if let Some(forces) = &recording.forces {
-            steps = forces.ground.len();
+            // The first frames repeat the start pose in the air, by design.
+            let settle = cfg.fidelity().settle() as usize;
+            steps = forces.ground.len().saturating_sub(settle);
             free = forces
                 .ground
                 .iter()
+                .skip(settle)
                 .filter(|frame| frame.iter().all(|&n| n <= 0.0))
                 .count();
             max_ground = forces
                 .ground
                 .iter()
+                .skip(settle)
                 .flatten()
                 .copied()
                 .fold(0.0, f32::max);
             min_store = forces
                 .energy
                 .iter()
+                .skip(settle)
                 .flatten()
                 .copied()
                 .fold(1.0, f32::min);
-            broken_steps = forces.broken.iter().filter(|&&b| b != 0).count();
+            broken_steps = forces
+                .broken
+                .iter()
+                .skip(settle)
+                .filter(|&&b| b != 0)
+                .count();
         }
         let share = |n: usize| 100.0 * n as f32 / steps.max(1) as f32;
         println!(
