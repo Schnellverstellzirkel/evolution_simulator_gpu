@@ -1,0 +1,69 @@
+# Round 4, iGPU domain: red team on K (items 4 and 9), answers to 22, 11 and 23
+
+Author: the iGPU expert. Date 2026-09-30, evening.
+
+## Item 4. The 9% tail and the W = 8 class
+
+The arithmetic gpu's own numbers give, restated with R1 in it, because the question is not "W = 8 or not" but "what runs the tail".
+
+Warp instructions per creature-step: W = 2 about 275, W = 8 about 1,200, the retired lane-group kernel on a 27-node body about 9,500 (gpu, round 3). At generation 51 the tail is 9% of offspring. Take the body of the population at 300 steps per creature (R1 to R3, mature). For the tail, three cases:
+
+- Tail at 300 steps on W = 8: tail cost 0.09 x 300 x 1,200 = 32,400 against the body's 0.91 x 300 x 275 = 75,000. The tail takes 30% of GPU time and costs 1.43x, worse than gpu's 20%, because gpu's 20% assumed equal steps and the mean body, not the mature body at 300 steps.
+- Tail stopped at R1 for 90% of its members (a 27-node graft child that does not move, which is the assumption, not a measurement): 0.09 x (0.9 x 60 + 0.1 x 300) = 7.6 steps per offspring-equivalent, times 1,200 = 9,100. The tail takes 11% of GPU time and costs 1.12x. R1 by construction turns W = 8 from a 1.43x tax into a 1.12x tax.
+- The same R1 stop but no W = 8, the tail on the retained lane-group kernel: 7.6 x 9,500 = 72,000 against 75,000. The tail takes 49% of GPU time and costs 2x. Without W = 8 the lane-group fallback is not a fallback, it halves the game. gpu's own round-3 sentence says this and then keeps the lane-group kernel as the fallback for a week in T2; that week must be short.
+
+So the answer has three branches, and the dump picks one:
+
+1. If the owner accepts ga's cap (tail 9% to 2%): W = 8 at 1,200 with R1 costs 0.02 x 84 x 1,200 = 2,000 against 75,000, under 3%. A week of work for 3% is not worth it, but the alternative is the lane-group kernel at 2% x 84 x 9,500 = 16,000, 18% of GPU time. The right move is then a hard cap at 16 nodes for offspring (the class boundary, not the elite plus two), which deletes W = 8 and the lane-group kernel both, and one source at W = 2 and W = 4 is the whole physics. That is a stronger body limit than ga's, and it needs the owner. The morphology reserve and the immigrants start at 3 to 5 nodes, so nothing born is above 16; only grafts and copies reach it, and the fit check refuses them exactly as it refuses over-long bones today.
+2. If the owner refuses any cap: W = 8 must be built, and R1 must fire on the tail. The class is then 1.12x, not 1.43x, and the dump decides whether the 0.9 holds.
+3. If the dump shows the tail moves (R1 stop share under 50%) and any 17-plus body enters any archive including the reserve: the tail is real search material, W = 8 is built, and the plan's rate loses 20 to 30% at generation 51 and more later. That is the case nobody has priced.
+
+What the dump has to show, per creature of one generation-50 generation: node count, operator id, R1 stop (would stop at step 60 under the fitted discriminant), distance at 60, 300 and final, entered (which archive). From it: the tail's R1 stop share, its entrant share by archive, its operator histogram, and the same three numbers for the 9-to-16 class. The failure mode to detect: a tail lineage that starts slow and enters the reserve late, which R1 stops for three generations before the circuit breaker fires (item 14 in another form). If the tail's entrant share is above 0.5% of tail members, R1 by construction is wrong for it and only the cap or W = 8 remains.
+
+One more attack on W = 8 itself. Four creatures per warp with 17 to 32 nodes and 30 to 96 muscles: every loop runs at the warp maximum, and data's bucketing by muscle count in widths of 4 needs four same-bucket creatures in the same class queue at the same time. At 9% of offspring and a 50 ms block of 100k creatures, a bucket holds about 9,000 x (width share) creatures, so buckets are full and the sort works; at 2% under the cap a bucket holds 500, the queue runs dry every few ms, warps take from the wider bucket, and the 25% divergence allowance is exceeded. Number at which it bites: under about 2,000 tail creatures per block. Detection: starved seconds and the per-class issue rate in the stage log. Change: below that count the W = 8 class should not exist, which is branch 1 again.
+
+## Item 9. Kernel variants, the disk cache, and what the player sees
+
+Count today (`cuda_engine.rs`): one cubin per class (3), per record flag (2), per rate (60 Hz standard, 4x confirmation), per world, where a world is the set of effects that are on (effects that are off leave no code). 12 per world. Design K keeps classes at 3 (W = 2, 4, 8) plus the lane-group kernel until T2, adds the substep count if the ladder runs both variants during the honesty experiment, and drops the 4x variant if in-kernel confirmation makes the substep a runtime parameter (item 7). So 12 to 24 per world. Worlds per session: the 14 effect buttons plus autochange every 100 generations give a handful to a few dozen distinct sets per session, and the cache is keyed by a hash of source, options and architecture (`compile_kernel`), so a world seen once is on disk forever. At 100 to 300 KB per cubin, 500 worlds are 150 MB. The cache is enough, if two things hold:
+
+- Nothing that changes at runtime may be a `#define`. The design's bar tables, block sizes, bucket widths, class shares, the occupant table size, ring depth and the world tag are runtime parameters or buffers. gpu's packed muscle record and the substep count are the two temptations. Each one that becomes a define doubles the variant count and the first-sight compile time.
+- The prefetch compiles the variants a world change needs in parallel. Today `Prefetch` runs "background threads" in wanted order; the design needs at least the three standard classes compiling at once, because a cold world at 1 to 2 s per cubin compiled serially is 3 to 6 s of GPU idle for the standard kernels alone, and 12 to 24 s before the confirmation and recording variants exist.
+
+What the player sees on a world change with a cold world: the ring drains in 20 ms, then nothing runs until the new standard kernels exist. At 2M/s a 2 s cold compile is 4M creatures, 1.3 generations, gone from the rate counter, against today's 26% of a generation lost at a button press. The chair's "loss under 10k creatures" counts only the live set; the compile idle is 400 times larger. It is not lost search (nothing is bred into the void), but it is a stall the player sees as the rate falling to zero for a second or two after every button press on a world the session has not seen. Detection: the stage log's idle seconds per world change, and a frame of the rate graph.
+
+Two fixes, one cheap and one measurable:
+
+1. Neighbour prefetch. From the current world, compile the 14 single-toggle neighbours' standard kernels in the background at low priority: 14 x 3 = 42 cubins at 1 to 2 s each on one thread, 1 to 2 minutes after a world settles, once per neighbour ever, on disk. The player's next button press is then warm in almost every case; autochange's next effect is known 100 generations ahead and is compiled first. Cost: one background thread and 10 MB of disk per world visited.
+2. One fat standard kernel with effects as uniform runtime parameters. The facts say effects that are off leave no code, chosen for speed, but never measured against uniform branches on a per-step `Params` word. A uniform branch on a warp-uniform value costs an instruction or two per effect per step, 14 effects against 275 warp instructions per creature-step at W = 2: 5 to 10% if all 14 are tested every step, 1 to 3% if the tests are hoisted per substep. Measurement, one afternoon on the lane-group kernel today: `p2_speed` on the flat world with all 14 effects compiled in as runtime-off parameters, against the specialized flat kernel. If the cost is under 3%, the variant count per world becomes 1 and a world change compiles nothing. If it is above 5%, keep specialization and rely on fix 1. Either way the player should see a "compiling the new world" state in the UI rather than a rate of zero.
+
+The disk itself (item 24): the cache lives under the target or a cache directory, and at 98% full a cache write can fail; `compile_kernel` writes through a temporary file, so a failed write costs a recompile next session, not a crash. The plan should ask the owner for a cache directory on a disk with room before any track that adds variants.
+
+## Item 22. The desktop: nothing in Design P touches it
+
+One line: nothing in Design P runs on or allocates from the Radeon; the persistent kernels, the pinned arenas, the results ring and the PCIe traffic are RTX and system RAM, the only Radeon work is egui rendering as today, and the extra 3 GB/s of gene and result traffic on the shared LPDDR bus is 3% of its bandwidth, invisible to the compositor. The item can close. One caveat that is memory, not desktop: pinned pages cannot swap, the machine has 3.2 GB in swap already, so the arenas plus the results ring plus the readback buffers should be capped at about 2 GB and allocated once.
+
+## Item 11. Recovery when a persistent kernel dies
+
+First, what does and does not kill it. Another process's out-of-memory does not: the game's device memory is allocated when the engine opens (under 1 GB in the design), and a `cuMemAlloc` failing in an agent's process fails there. Another process's illegal access does not either: CUDA faults are per context. What kills the game's kernel: a sticky error in its own context (a kernel bug, an illegal address), a driver-level GPU reset (an Xid that takes the device down, which the owner has seen as "CUDA fails to open"), and the game's own allocation failing at open. Persistent kernels add one new failure the segment design did not have: a hang. The RTX has no display watchdog, so a persistent kernel that spins forever (a bug in the take-up loop, a drain flag never set) runs until the process dies, and no CUDA call from the same process can stop it.
+
+The recovery path, in order:
+
+1. Detection. Each slot writes a heartbeat word (its take-up count) into the mapped completion page. The engine thread checks every 100 ms: no progress on a slot with a non-empty queue for 2 s is a hang; a sticky error from any CUDA call is a death; both are the same path.
+2. The engine in a helper process. The game's CUDA engine runs in a child process that shares the pinned arenas, the results ring and the queue pages through memfd and registers them itself. On a hang or a sticky error the game kills the child (SIGKILL; the driver tears down the context and reclaims the channel) and spawns it again. This is the only way to stop a hung persistent kernel from user space, and it is the same rule I wrote for the Radeon in round 3. Cost: the arenas are host-owned memory (`posix_memalign` plus `cuMemHostRegister`), never `cuMemHostAlloc`, or they die with the context.
+3. Rebuild. The new child opens the context (0.5 to 1 s, the GPU wakes from D3), loads the cubins from the disk cache (no compile), re-registers the arenas, relaunches the 92 slots, and the host re-appends every reference that has no result yet: the refs between the old heads and tails plus the creatures that were live. Genes are in the host arenas, so nothing is bred again. The re-run creatures produce the same results (fixed genes, fixed bars, fixed world), so the search history is invariant, as the scheduler's retire-and-rerun path already guarantees today.
+4. What the game does meanwhile. The worker keeps absorbing the results already in the ring, the UI shows "GPU restarting" with the rate at zero, the ring holds 0.3 to 1 s of blocks so breeding pauses after that. If the reopen fails three times (backoff 1, 4, 10 s as today), the engine retires and the CPU engine runs the ring at its 8k creatures/s, which is the existing failover.
+
+Does the persistent design survive agents on the same GPU? Yes: the driver time-slices contexts at millisecond granularity, so an agent's test beside the game slows both and breaks no one, and the design's 1 GB of VRAM leaves 7 GB for agents against today's 5 to 7.5 GB. Two things change: an agent's speed measurement beside the game is meaningless (round 2 showed it), and `tools/pause-game.sh` must drain and kill the helper so the GPU is fully free, about 1 s.
+
+Cost per incident: the 2 s heartbeat bound plus a 1 s rebuild, 6M creatures at 2M/s; the stage log should count incidents.
+
+## Item 23. Glitch risk in my domain
+
+Nothing in my domain can admit a creature to an archive. The Radeon draws; the safety rules are text; the PCIe link setting moves bytes and no numbers; the fallback breeder, if it is ever built, makes children, and a child is not a score. The one guard my domain owes is the bit-identity test of that breeder against the CPU emitter on 1M children, so that a Radeon child is the same child the CPU would have bred and the search does not fork when the Radeon drops out. Gap: none.
+
+## What would have to change in the plan
+
+- Decide the tail before T2, not after: the dump's three tail numbers (R1 stop share, entrant share, operator histogram) and the owner's answer on a hard 16-node offspring cap. With the cap, W = 8 and the lane-group kernel are deleted together and the physics is one source at two widths.
+- Add the neighbour prefetch and the uniform-effects measurement to data's world-change track, with "GPU idle seconds per world change" as the gate, target under 0.1 s on a warm world and a visible state on a cold one.
+- Put the CUDA engine in a helper process with host-owned pinned memory and a heartbeat, before the persistent kernels land, because a hung persistent kernel cannot be stopped any other way.
+- Cap pinned memory at 2 GB and ask the owner for disk before the tracks start.
