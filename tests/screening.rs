@@ -202,7 +202,7 @@ fn screened_creatures_enter_no_archive_and_the_bar_keeps_the_top_share() {
 
 #[test]
 #[ignore = "needs the RTX 4060"]
-fn a_generation_without_a_bar_sets_one_after_a_quarter_of_its_results() {
+fn the_bar_arms_after_the_first_block_and_moves_with_every_block() {
     let cfg = Config {
         population: 256,
         duration: 8.0,
@@ -215,8 +215,9 @@ fn a_generation_without_a_bar_sets_one_after_a_quarter_of_its_results() {
     // The ring's first block is a quarter of the generation.
     assert_eq!(experiment.blocks[0].len(), 64);
     let mut distances: Vec<f32> = Vec::new();
-    experiment
-        .step(&mut |pop, cfg| {
+    // Absorbs the block at the cursor and records its distances at the screen.
+    let step = |e: &mut Experiment, distances: &mut Vec<f32>| {
+        e.step(&mut |pop, cfg| {
             let results = evaluate(pop, cfg);
             if cfg.fidelity.is_none() {
                 distances.extend(results.iter().map(|r| r.screen_x));
@@ -227,12 +228,11 @@ fn a_generation_without_a_bar_sets_one_after_a_quarter_of_its_results() {
                 .map(|(i, r)| scheduler::to_metrics(pop, i, r, cfg))
                 .collect())
         })
-        .unwrap();
+        .unwrap()
+    };
+    step(&mut experiment, &mut distances);
     let armed = bar(&experiment);
-    assert!(
-        armed.is_finite(),
-        "a quarter of the results must set the bar"
-    );
+    assert!(armed.is_finite(), "the first block must set the bar");
     let kept = distances.iter().filter(|&&d| d >= armed).count() as f32 / 64.0;
     assert!(
         (kept - physics::screen_keep()).abs() < 0.05,
@@ -243,6 +243,13 @@ fn a_generation_without_a_bar_sets_one_after_a_quarter_of_its_results() {
         experiment.blocks[1].config.screen.unwrap().bar,
         f32::NEG_INFINITY
     );
+    assert_eq!(experiment.blocks[0].config.screen.unwrap().bar, armed);
+    // The second block moves the bar to the share of both blocks' results,
+    // and the block bred then takes it.
+    step(&mut experiment, &mut distances);
+    let moved = physics::screen_bar(distances.iter().copied(), physics::screen_keep());
+    assert_eq!(bar(&experiment).to_bits(), moved.to_bits());
+    assert_eq!(experiment.blocks[1].config.screen.unwrap().bar, moved);
     assert_eq!(experiment.blocks[0].config.screen.unwrap().bar, armed);
     // A world change forgets the old world's distances and the bar.
     let mut rough = experiment.config.clone();

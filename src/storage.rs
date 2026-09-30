@@ -10,7 +10,7 @@ use rayon::iter::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     fs::File,
     io::{BufReader, BufWriter, Read, Write},
     path::Path,
@@ -184,9 +184,10 @@ pub struct Experiment {
     pub cursor: usize,
     /// Failed trials in the current generation.
     failed: usize,
-    /// Distances at the screen of the current generation's results, for the
-    /// next generation's bar.
-    screen_log: Vec<f32>,
+    /// Distances at the screen of the last ring's worth of results, one
+    /// entry per absorbed block, oldest first. The bar is recomputed from
+    /// them at every absorption.
+    screen_window: VecDeque<Vec<f32>>,
     /// The last absorbed block's screen bar and the share of its results at
     /// or above it, for the stage log. None when that block ran without a
     /// bar or came from a world that has since changed.
@@ -402,7 +403,7 @@ impl Experiment {
             blocks: Vec::new(),
             cursor: 0,
             failed: 0,
-            screen_log: Vec::new(),
+            screen_window: VecDeque::new(),
             last_screen: None,
             stage_seconds: [0.0; 2],
         }
@@ -533,9 +534,17 @@ impl Experiment {
             });
         if !stale {
             // A result from a world that has since changed carries no distance.
-            self.screen_log
-                .extend(finals.iter().map(|m| m.screen_x).filter(|x| x.is_finite()));
-            self.arm_screen_early();
+            self.screen_window.push_back(
+                finals
+                    .iter()
+                    .map(|m| m.screen_x)
+                    .filter(|x| x.is_finite())
+                    .collect(),
+            );
+            while self.screen_window.len() > self.blocks.len() {
+                self.screen_window.pop_front();
+            }
+            self.config.screen = self.next_screen(self.config.duration);
         }
         let started = std::time::Instant::now();
         self.failed += self.archive_block(k, finals, stale);
@@ -586,37 +595,23 @@ impl Experiment {
         while !self.step(evaluate)? {}
         Ok(())
     }
-    /// Sets the screen bar inside a generation that started without one (a
-    /// new game, the first generation after a load or a world change) once a
-    /// quarter of the generation has recorded its distance at the screen, so
-    /// only that first quarter runs every trial in full. Blocks bred after
-    /// that take the bar; later generations take theirs at the boundary.
-    fn arm_screen_early(&mut self) {
-        let Some(screen) = self.config.screen else {
-            return;
-        };
-        if screen.bar != f32::NEG_INFINITY
-            || self.screen_log.len() < (self.config.population / 4).max(64)
-        {
-            return;
-        }
-        self.config.screen = self.next_screen(false, self.config.duration);
-    }
-    /// The early screen for the next generation: its bar is the distance at
-    /// the screen that the best `physics::screen_keep()` share of this
-    /// generation reached. After a world change distances are not comparable,
-    /// so the next generation runs unscreened and sets a new bar.
-    fn next_screen(&self, world_changed: bool, duration: f32) -> Option<crate::physics::Screen> {
+    /// The early screen for the blocks bred from now on: its bar is the
+    /// distance at the screen that the best `physics::screen_keep()` share
+    /// of the last ring's worth of results reached. It moves at every
+    /// absorption, so a population that improves fast (the first
+    /// generations, and every world change) keeps its share instead of the
+    /// share a generation-old bar would keep. Each block carries the bar it
+    /// was bred with, so the history depends on ring order only. With no
+    /// distances yet (a new game, a load, a world change, which forgets the
+    /// old world's distances) the blocks run every trial in full until the
+    /// first block of results is in.
+    fn next_screen(&self, duration: f32) -> Option<crate::physics::Screen> {
         // A trial no longer than the screen time has nothing to screen.
         let seconds = crate::physics::screen_seconds().filter(|&s| s < duration)?;
-        let bar = if world_changed {
-            f32::NEG_INFINITY
-        } else {
-            crate::physics::screen_bar(
-                self.screen_log.iter().copied(),
-                crate::physics::screen_keep(),
-            )
-        };
+        let bar = crate::physics::screen_bar(
+            self.screen_window.iter().flatten().copied(),
+            crate::physics::screen_keep(),
+        );
         Some(crate::physics::Screen { seconds, bar })
     }
     /// Offers block `k`'s creatures to the archives in block order, updates
@@ -1775,9 +1770,8 @@ impl Experiment {
         if world_changed {
             self.reset_search_context();
         }
-        cfg.screen = self.next_screen(world_changed, cfg.duration);
+        cfg.screen = self.next_screen(cfg.duration);
         self.config = cfg;
-        self.screen_log.clear();
         self.evaluation_seconds = 0.0;
         if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
             eprintln!(
@@ -1819,11 +1813,7 @@ impl Experiment {
             if world_changed {
                 self.reset_search_context();
             }
-            cfg.screen = if world_changed {
-                self.next_screen(true, cfg.duration)
-            } else {
-                self.config.screen
-            };
+            cfg.screen = self.next_screen(cfg.duration);
             self.config = cfg;
         } else {
             self.pending = Some(cfg);
@@ -1938,7 +1928,7 @@ impl Experiment {
         self.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
         self.cma_emitters.clear();
         // Distances measured in the old world say nothing about the new one.
-        self.screen_log.clear();
+        self.screen_window.clear();
     }
     /// Whether every body in the ring and the archive fits `cfg`'s limits.
     fn bodies_fit(&self, cfg: &Config) -> bool {
@@ -2177,7 +2167,7 @@ impl SmallLoad {
         }
         // The screen bar is not saved: the resumed generation runs every
         // trial in full until it has set a new one.
-        e.config.screen = e.next_screen(true, e.config.duration);
+        e.config.screen = e.next_screen(e.config.duration);
         let shared = Arc::new(e.config.clone());
         let elites =
             e.archive.entries.len() + e.islands.iter().map(|i| i.entries.len()).sum::<usize>();
