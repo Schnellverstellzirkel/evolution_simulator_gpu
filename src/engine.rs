@@ -286,11 +286,13 @@ impl Drop for ThreadedEngine {
     }
 }
 
-/// Results of one completed submission: per batch, the slice positions, the
-/// population indices, and the raw GPU results.
+/// Results of one completed submission.
 pub struct Completed {
     pub ticket: u64,
-    pub batches: Vec<(Vec<usize>, Vec<usize>, Vec<GpuResult>)>,
+    /// The raw GPU result of every creature, in unit order.
+    pub results: Vec<GpuResult>,
+    /// The unit's batches, whose buffers the next unit packs into.
+    pub batches: Vec<creature_kernel::LaneBatch>,
     /// For a recording (`CudaEngine::record`): node positions as
     /// `[creature][frame][node]`, with the batch's node stride.
     pub frames: Option<Vec<[f32; 2]>>,
@@ -332,8 +334,11 @@ pub fn out_of_memory(error: &anyhow::Error) -> bool {
 /// it; tests use a fake that can run out of memory.
 trait Device {
     fn free_slots(&self) -> usize;
-    /// Uploads the batches and queues their whole trials.
-    fn submit(&mut self, batches: &[creature_kernel::LaneBatch], cfg: &Config) -> Result<u64>;
+    /// Uploads the batches and queues their whole trials. On success the
+    /// device takes the batches (`batches` is left empty) and returns them
+    /// in `Completed`; on failure they stay.
+    fn submit(&mut self, batches: &mut Vec<creature_kernel::LaneBatch>, cfg: &Config)
+    -> Result<u64>;
     fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>>;
     /// Frees buffers kept for reuse by slots with nothing in flight.
     fn release_idle(&mut self) -> u64;
@@ -341,7 +346,7 @@ trait Device {
     /// Whether a replay can be recorded now.
     fn replay_free(&self) -> bool;
     /// Queues a whole recorded trial of one batch (`CudaEngine::record`).
-    fn record(&mut self, batch: &creature_kernel::LaneBatch, cfg: &Config) -> Result<u64>;
+    fn record(&mut self, batch: creature_kernel::LaneBatch, cfg: &Config) -> Result<u64>;
     /// Whether a failed submission ran out of memory.
     fn out_of_memory(&self, error: &anyhow::Error) -> bool {
         out_of_memory(error)
@@ -352,7 +357,11 @@ impl Device for CudaEngine {
     fn free_slots(&self) -> usize {
         CudaEngine::free_slots(self)
     }
-    fn submit(&mut self, batches: &[creature_kernel::LaneBatch], cfg: &Config) -> Result<u64> {
+    fn submit(
+        &mut self,
+        batches: &mut Vec<creature_kernel::LaneBatch>,
+        cfg: &Config,
+    ) -> Result<u64> {
         CudaEngine::submit(self, batches, cfg)
     }
     fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>> {
@@ -367,7 +376,7 @@ impl Device for CudaEngine {
     fn replay_free(&self) -> bool {
         CudaEngine::replay_free(self)
     }
-    fn record(&mut self, batch: &creature_kernel::LaneBatch, cfg: &Config) -> Result<u64> {
+    fn record(&mut self, batch: creature_kernel::LaneBatch, cfg: &Config) -> Result<u64> {
         CudaEngine::record(self, batch, cfg)
     }
 }
@@ -583,6 +592,13 @@ fn run_units<D: Device>(
     let mut waiting: Option<PackedUnit> = None;
     let mut running: Vec<(u64, RunningUnit)> = Vec::new();
     let mut pending: Option<(u64, Arc<Population>, Config)> = None;
+    // Batches of finished units: the next unit packs into their buffers, so
+    // the host memory the GPU copies from is mapped and registered once.
+    let mut spare: Vec<creature_kernel::LaneBatch> = Vec::new();
+    let mut indices: Vec<usize> = Vec::new();
+    let spare_bytes = |spare: &[creature_kernel::LaneBatch]| -> u64 {
+        spare.iter().map(|b| CudaEngine::held_bytes(b) as u64).sum()
+    };
     let mut open = true;
     loop {
         if pending.is_none() && open {
@@ -631,31 +647,34 @@ fn run_units<D: Device>(
                     let _ = request.reply.send(Err(format!("{error:#}")));
                 }
             }
-            allocated.store(engine.allocated_bytes(), Ordering::Relaxed);
+            allocated.store(engine.allocated_bytes() + spare_bytes(&spare), Ordering::Relaxed);
         }
         if engine.free_slots() > 0 && memory.may_submit(Instant::now(), running.len()) {
             let next = match waiting.take() {
                 Some(unit) => Some(Ok(unit)),
                 None => pending.take().map(|(ticket, unit, cfg)| {
-                    let indices: Vec<usize> = (0..unit.genomes.len()).collect();
-                    crate::warp_kernel::pack(&unit, &indices, &cfg).map(|batches| PackedUnit {
-                        ticket,
-                        cfg,
-                        batches,
-                    })
+                    indices.clear();
+                    indices.extend(0..unit.genomes.len());
+                    crate::warp_kernel::pack_reusing(&unit, &indices, &cfg, &mut spare).map(
+                        |batches| PackedUnit {
+                            ticket,
+                            cfg,
+                            batches,
+                        },
+                    )
                 }),
             };
             if let Some(next) = next {
-                let unit = match next {
+                let mut unit = match next {
                     Ok(unit) => unit,
                     Err(err) => {
                         let _ = done_tx.send(Err(format!("{err:#}")));
                         return;
                     }
                 };
-                match engine.submit(&unit.batches, &unit.cfg) {
+                let count = unit.batches.iter().map(|b| b.slots.len()).sum();
+                match engine.submit(&mut unit.batches, &unit.cfg) {
                     Ok(device_ticket) => {
-                        let count = unit.batches.iter().map(|b| b.slots.len()).sum();
                         running.push((
                             device_ticket,
                             RunningUnit {
@@ -669,7 +688,9 @@ fn run_units<D: Device>(
                     }
                     // Keep the unit; it runs once memory frees up.
                     Err(err) if engine.out_of_memory(&err) => {
-                        let freed = engine.release_idle();
+                        // Spare host buffers are the first to go.
+                        let freed = engine.release_idle() + spare_bytes(&spare);
+                        spare.clear();
                         waiting = Some(unit);
                         match memory.out_of_memory(Instant::now(), running.len(), freed) {
                             OutOfMemory::Retry(line) => {
@@ -691,7 +712,7 @@ fn run_units<D: Device>(
                         return;
                     }
                 }
-                allocated.store(engine.allocated_bytes(), Ordering::Relaxed);
+                allocated.store(engine.allocated_bytes() + spare_bytes(&spare), Ordering::Relaxed);
                 continue;
             }
         }
@@ -724,15 +745,14 @@ fn run_units<D: Device>(
                     return;
                 };
                 let (_, unit) = running.swap_remove(position);
-                let mut results = vec![GpuResult::default(); unit.count];
-                for (slots, _, batch) in &finished.batches {
-                    for (&slot, result) in slots.iter().zip(batch) {
-                        results[slot] = *result;
-                    }
+                if finished.results.len() != unit.count {
+                    let _ = done_tx.send(Err("a GPU submission returned too few results".into()));
+                    return;
                 }
+                spare.extend(finished.batches);
                 let message = Finished {
                     ticket: unit.ticket,
-                    results,
+                    results: finished.results,
                     busy_seconds: finished.gpu_seconds,
                 };
                 if done_tx.send(Ok(message)).is_err() {
@@ -779,12 +799,11 @@ fn start_recording<D: Device>(
 ) -> Result<(u64, FrameLayout, u32)> {
     let mut population = Population::default();
     population.push(request.creature.clone());
-    let batches = crate::warp_kernel::pack(&population, &[0], &request.cfg)?;
+    let mut batches = crate::warp_kernel::pack(&population, &[0], &request.cfg)?;
     anyhow::ensure!(batches.len() == 1, "A replay packs into one batch");
     let fidelity = request.cfg.fidelity();
     let total = fidelity.settle() + request.cfg.steps();
-    let batch = &batches[0];
-    let ticket = engine.record(batch, &request.cfg)?;
+    let batch = batches.pop().expect("one batch");
     // The kernel's node numbering, from the bone order `pack` gave it.
     let mut creature = request.creature.clone();
     crate::evolution::canonicalize_bone_order(&mut creature);
@@ -794,8 +813,9 @@ fn start_recording<D: Device>(
             .collect(),
         capacity: batch.capacity,
         muscles: batch.info.first().map_or(0, |i| i[2] as usize),
-        stride: creature_kernel::frame_stride(batch),
+        stride: creature_kernel::frame_stride(&batch),
     };
+    let ticket = engine.record(batch, &request.cfg)?;
     Ok((ticket, layout, total))
 }
 
@@ -822,9 +842,8 @@ fn recorded(finished: &Completed, layout: FrameLayout, total: u32) -> Result<Rec
         .as_ref()
         .ok_or("the recording returned no frames")?;
     let result = *finished
-        .batches
+        .results
         .first()
-        .and_then(|(_, _, results)| results.first())
         .ok_or("the recording returned no result")?;
     let count = total as usize + 1;
     if flat.len() < count * stride {
@@ -1160,8 +1179,8 @@ mod tests {
         assert_eq!(worker.jobs.try_recv().unwrap().0, ticket);
     }
 
-    /// Slice positions and population indices of each submitted batch.
-    type Layout = Vec<(Vec<usize>, Vec<usize>)>;
+    /// The batches of each submission.
+    type Layout = Vec<creature_kernel::LaneBatch>;
     /// Node stride and trial length of a recording.
     type Stretch = (usize, u32);
 
@@ -1204,17 +1223,18 @@ mod tests {
         fn free_slots(&self) -> usize {
             self.slots - self.in_flight.len()
         }
-        fn submit(&mut self, batches: &[creature_kernel::LaneBatch], _cfg: &Config) -> Result<u64> {
+        fn submit(
+            &mut self,
+            batches: &mut Vec<creature_kernel::LaneBatch>,
+            _cfg: &Config,
+        ) -> Result<u64> {
             if self.script.pop_front().unwrap_or(false) {
                 return Err(anyhow::Error::from(NoMemory).context("GPU buffers"));
             }
             let ticket = self.next;
             self.next += 1;
-            let layout = batches
-                .iter()
-                .map(|b| (b.slots.clone(), b.creatures.clone()))
-                .collect();
-            self.in_flight.push_back((ticket, layout, None));
+            self.in_flight
+                .push_back((ticket, std::mem::take(batches), None));
             self.most_in_flight
                 .fetch_max(self.in_flight.len() as u64, Ordering::Relaxed);
             Ok(ticket)
@@ -1223,22 +1243,23 @@ mod tests {
             Ok(self
                 .in_flight
                 .pop_front()
-                .map(|(ticket, layout, recorded)| Completed {
+                .map(|(ticket, batches, recorded)| Completed {
                     ticket,
-                    batches: layout
-                        .into_iter()
-                        .map(|(slots, creatures)| {
-                            let results = creatures
-                                .iter()
-                                .map(|&i| GpuResult {
+                    results: {
+                        let count = batches.iter().map(|b| b.slots.len()).sum();
+                        let mut results = vec![GpuResult::default(); count];
+                        for b in &batches {
+                            for (&slot, &i) in b.slots.iter().zip(&b.creatures) {
+                                results[slot] = GpuResult {
                                     fitness: i as f32,
                                     fall_time: 1.0,
                                     ..GpuResult::default()
-                                })
-                                .collect();
-                            (slots, creatures, results)
-                        })
-                        .collect(),
+                                };
+                            }
+                        }
+                        results
+                    },
+                    batches,
                     // Frame t puts node j at (t, j).
                     frames: recorded.map(|(stride, total)| {
                         (0..=total)
@@ -1261,16 +1282,13 @@ mod tests {
                 .iter()
                 .any(|(_, _, recorded)| recorded.is_some())
         }
-        fn record(&mut self, batch: &creature_kernel::LaneBatch, cfg: &Config) -> Result<u64> {
+        fn record(&mut self, batch: creature_kernel::LaneBatch, cfg: &Config) -> Result<u64> {
             let total = cfg.fidelity().settle() + cfg.steps();
             let ticket = self.next;
             self.next += 1;
-            let layout = vec![(batch.slots.clone(), batch.creatures.clone())];
-            self.in_flight.push_back((
-                ticket,
-                layout,
-                Some((creature_kernel::frame_stride(batch), total)),
-            ));
+            let stretch = (creature_kernel::frame_stride(&batch), total);
+            self.in_flight
+                .push_back((ticket, vec![batch], Some(stretch)));
             Ok(ticket)
         }
         fn out_of_memory(&self, error: &anyhow::Error) -> bool {

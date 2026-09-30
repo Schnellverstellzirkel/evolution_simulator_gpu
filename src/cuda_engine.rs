@@ -73,6 +73,8 @@ struct Driver {
     mem_free: unsafe extern "C" fn(CuDevicePtr) -> CuResult,
     mem_alloc_host: unsafe extern "C" fn(*mut *mut c_void, usize) -> CuResult,
     mem_free_host: unsafe extern "C" fn(*mut c_void) -> CuResult,
+    mem_host_register: unsafe extern "C" fn(*mut c_void, usize, c_uint) -> CuResult,
+    mem_host_unregister: unsafe extern "C" fn(*mut c_void) -> CuResult,
     memcpy_htod_async:
         unsafe extern "C" fn(CuDevicePtr, *const c_void, usize, CuStream) -> CuResult,
     memcpy_dtoh_async: unsafe extern "C" fn(*mut c_void, CuDevicePtr, usize, CuStream) -> CuResult,
@@ -174,6 +176,8 @@ impl Driver {
                 mem_free: symbol!(library, "cuMemFree_v2"),
                 mem_alloc_host: symbol!(library, "cuMemAllocHost_v2"),
                 mem_free_host: symbol!(library, "cuMemFreeHost"),
+                mem_host_register: symbol!(library, "cuMemHostRegister_v2"),
+                mem_host_unregister: symbol!(library, "cuMemHostUnregister"),
                 memcpy_htod_async: symbol!(library, "cuMemcpyHtoDAsync_v2"),
                 memcpy_dtoh_async: symbol!(library, "cuMemcpyDtoHAsync_v2"),
                 stream_create: symbol!(library, "cuStreamCreateWithPriority"),
@@ -544,6 +548,152 @@ struct HostBuf {
     size: usize,
 }
 
+thread_local! {
+    /// The driver, on a thread where an engine's context is current, so
+    /// `HostVec` can register the memory it maps.
+    static REGISTER: std::cell::RefCell<Option<Arc<Api>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Host memory the GPU copies from directly, with no staging copy: it is
+/// mapped once, registered with the driver once (`cuMemHostRegister`, so it
+/// stays page-locked and a copy from it runs asynchronously on the copy
+/// engine), and reused from one unit to the next. It grows with headroom
+/// and never shrinks. Registration needs an engine's thread, where its
+/// context is current; small buffers and memory mapped on other threads
+/// (tests) stay ordinary pages, which the driver copies through its own
+/// staging.
+pub struct HostVec<T: bytemuck::Pod> {
+    ptr: *mut T,
+    len: usize,
+    /// Elements that fit in the mapping.
+    capacity: usize,
+    /// Mapped bytes; zero when nothing is mapped.
+    bytes: usize,
+    registered: bool,
+}
+
+// A HostVec owns its memory like a Vec.
+unsafe impl<T: bytemuck::Pod + Send> Send for HostVec<T> {}
+unsafe impl<T: bytemuck::Pod + Sync> Sync for HostVec<T> {}
+
+impl<T: bytemuck::Pod> Default for HostVec<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: bytemuck::Pod> HostVec<T> {
+    /// Below this many bytes a buffer is not registered: the driver's own
+    /// staging copies it about as fast.
+    const REGISTER_FROM: usize = 1 << 16;
+
+    pub const fn new() -> Self {
+        Self {
+            ptr: std::ptr::NonNull::dangling().as_ptr(),
+            len: 0,
+            capacity: 0,
+            bytes: 0,
+            registered: false,
+        }
+    }
+
+    /// Makes this `len` copies of `value`, in the memory it has when that is
+    /// large enough.
+    pub fn reset(&mut self, len: usize, value: T) {
+        if len > self.capacity {
+            self.grow(len);
+        }
+        self.len = len;
+        self.fill(value);
+    }
+
+    /// Whether the driver copies from this memory directly.
+    pub fn registered(&self) -> bool {
+        self.registered
+    }
+
+    /// Bytes of memory held.
+    pub fn held_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn grow(&mut self, len: usize) {
+        self.release();
+        let bytes = crate::engine::padded_size((len * std::mem::size_of::<T>()) as u64) as usize;
+        let bytes = bytes.next_multiple_of(4096);
+        // SAFETY: an anonymous private mapping, owned by this HostVec until
+        // `release`.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            std::alloc::handle_alloc_error(
+                std::alloc::Layout::from_size_align(bytes, 4096).expect("a page layout"),
+            );
+        }
+        self.registered = bytes >= Self::REGISTER_FROM
+            && REGISTER.with(|register| {
+                register.borrow().as_ref().is_some_and(|api| unsafe {
+                    (api.cu.mem_host_register)(ptr, bytes, 0) == CUDA_SUCCESS
+                })
+            });
+        self.ptr = ptr as *mut T;
+        self.bytes = bytes;
+        self.capacity = bytes / std::mem::size_of::<T>().max(1);
+    }
+
+    fn release(&mut self) {
+        if self.bytes == 0 {
+            return;
+        }
+        // SAFETY: the mapping and its registration are this HostVec's; no
+        // copy reads it any more (the engine keeps a unit's buffers until
+        // its submission finished).
+        unsafe {
+            if self.registered
+                && let Ok(api) = api()
+            {
+                (api.cu.mem_host_unregister)(self.ptr as *mut c_void);
+            }
+            libc::munmap(self.ptr as *mut c_void, self.bytes);
+        }
+        // Field by field: assigning a whole HostVec would drop this one again.
+        self.ptr = std::ptr::NonNull::dangling().as_ptr();
+        self.len = 0;
+        self.capacity = 0;
+        self.bytes = 0;
+        self.registered = false;
+    }
+}
+
+impl<T: bytemuck::Pod> std::ops::Deref for HostVec<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        // SAFETY: `len` elements are initialized (`reset`).
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl<T: bytemuck::Pod> std::ops::DerefMut for HostVec<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        // SAFETY: as in `deref`, and `&mut self` is unique.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl<T: bytemuck::Pod> Drop for HostVec<T> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 /// One batch's buffers: lane records, muscles, muscle-end lists, heads and
 /// results.
 struct GroupRes {
@@ -563,7 +713,6 @@ struct Slot {
     groups: Vec<Option<GroupRes>>,
     /// One creature counter per wave and take-up bucket.
     counters: Option<DeviceBuf>,
-    staging: Option<HostBuf>,
     readback: Option<HostBuf>,
     /// Recorded replay frames; only the replay slot has one.
     frames: Option<DeviceBuf>,
@@ -572,7 +721,9 @@ struct Slot {
 
 struct Pending {
     ticket: u64,
-    layout: Vec<(Vec<usize>, Vec<usize>)>,
+    /// The unit's batches: their buffers are copied from until the
+    /// submission finishes, then go back to the caller for reuse.
+    batches: Vec<LaneBatch>,
     result_count: usize,
     /// Recorded frames: their byte offset in the readback buffer and their
     /// count of float pairs.
@@ -882,6 +1033,8 @@ impl CudaEngine {
                 (cu.primary_ctx_release)(device);
                 return Err(error);
             }
+            // Host buffers mapped on this thread register with the context.
+            REGISTER.with(|register| *register.borrow_mut() = Some(api.clone()));
             let mut engine = Self {
                 name: String::new(),
                 api: api.clone(),
@@ -935,7 +1088,6 @@ impl CudaEngine {
                 done: event(CU_EVENT_DISABLE_TIMING)?,
                 groups: Vec::new(),
                 counters: None,
-                staging: None,
                 readback: None,
                 frames: None,
                 pending: None,
@@ -1123,15 +1275,15 @@ impl CudaEngine {
             .as_ref()
             .context("The CUDA kernel needs a batch from warp_kernel::pack")?;
         Ok([
-            std::mem::size_of_val(wave.lanes.as_slice()),
-            std::mem::size_of_val(wave.muscles.as_slice()),
-            std::mem::size_of_val(wave.ends.as_slice()),
-            std::mem::size_of_val(wave.heads.as_slice()),
+            std::mem::size_of_val(&*wave.lanes),
+            std::mem::size_of_val(&*wave.muscles),
+            std::mem::size_of_val(&*wave.ends),
+            std::mem::size_of_val(&*wave.heads),
             batch.slots.len() * std::mem::size_of::<GpuResult>(),
         ])
     }
 
-    /// Grows the slot's device buffers, streams and host buffers to fit
+    /// Grows the slot's device buffers, streams and readback buffer to fit
     /// `batches` in `waves` waves.
     fn ensure_buffers(
         &mut self,
@@ -1165,11 +1317,9 @@ impl CudaEngine {
         if self.slots[slot].groups.len() < batches.len() {
             self.slots[slot].groups.resize_with(batches.len(), || None);
         }
-        let mut upload = 0usize;
         let mut readback = frame_bytes;
         for (group, batch) in batches.iter().enumerate() {
             let need = Self::needs(batch)?;
-            upload += need[..4].iter().sum::<usize>();
             readback += need[4];
             if let Some(res) = &self.slots[slot].groups[group]
                 && res.bufs.iter().zip(need).all(|(h, n)| h.size >= n)
@@ -1218,16 +1368,6 @@ impl CudaEngine {
             self.slots[slot].frames = Some(self.alloc_device(frame_bytes)?);
         }
         if self.slots[slot]
-            .staging
-            .as_ref()
-            .is_none_or(|b| b.size < upload)
-        {
-            if let Some(old) = self.slots[slot].staging.take() {
-                self.free_host(old);
-            }
-            self.slots[slot].staging = Some(self.alloc_host(upload)?);
-        }
-        if self.slots[slot]
             .readback
             .as_ref()
             .is_none_or(|b| b.size < readback)
@@ -1241,7 +1381,15 @@ impl CudaEngine {
         Ok(())
     }
 
-    /// Bytes of device and pinned host buffers a slot keeps for reuse.
+    /// Bytes of host memory a batch's buffers hold.
+    pub fn held_bytes(batch: &LaneBatch) -> usize {
+        batch.wave.as_ref().map_or(0, |w| {
+            w.lanes.held_bytes() + w.muscles.held_bytes() + w.ends.held_bytes() + w.heads.held_bytes()
+        })
+    }
+
+    /// Bytes of device and pinned host buffers a slot keeps for reuse, and
+    /// of the host buffers of the unit it runs.
     fn slot_bytes(slot: &Slot) -> u64 {
         slot.groups
             .iter()
@@ -1250,7 +1398,9 @@ impl CudaEngine {
             .map(|b| b.size as u64)
             .sum::<u64>()
             + slot.counters.as_ref().map_or(0, |b| b.size as u64)
-            + slot.staging.as_ref().map_or(0, |b| b.size as u64)
+            + slot.pending.as_ref().map_or(0, |p| {
+                p.batches.iter().map(|b| Self::held_bytes(b) as u64).sum::<u64>()
+            })
             + slot.readback.as_ref().map_or(0, |b| b.size as u64)
             + slot.frames.as_ref().map_or(0, |b| b.size as u64)
     }
@@ -1273,9 +1423,6 @@ impl CudaEngine {
             }
             if let Some(b) = self.slots[slot].counters.take() {
                 self.free_device(b);
-            }
-            if let Some(b) = self.slots[slot].staging.take() {
-                self.free_host(b);
             }
             if let Some(b) = self.slots[slot].readback.take() {
                 self.free_host(b);
@@ -1317,17 +1464,56 @@ impl CudaEngine {
     /// the recording kernel, which writes every frame. The result arrives
     /// through `poll` with `Completed::frames`; it is the trial `submit`
     /// scores, computed the same way.
-    pub fn record(&mut self, batch: &LaneBatch, cfg: &Config) -> Result<u64> {
+    pub fn record(&mut self, batch: LaneBatch, cfg: &Config) -> Result<u64> {
         ensure!(self.replay_free(), "A replay is already being recorded");
-        self.submit_as(std::slice::from_ref(batch), cfg, true)
+        self.submit_as(&mut vec![batch], cfg, true)
     }
 
     /// Uploads the batches and queues their whole trials, without waiting.
-    pub fn submit(&mut self, batches: &[LaneBatch], cfg: &Config) -> Result<u64> {
+    /// On success the engine takes the batches, copies straight from their
+    /// buffers, and hands them back with the results (`Completed::batches`)
+    /// for the next unit to reuse; on failure they stay with the caller.
+    pub fn submit(&mut self, batches: &mut Vec<LaneBatch>, cfg: &Config) -> Result<u64> {
         self.submit_as(batches, cfg, false)
     }
 
-    fn submit_as(&mut self, batches: &[LaneBatch], cfg: &Config, record: bool) -> Result<u64> {
+    fn submit_as(&mut self, batches: &mut Vec<LaneBatch>, cfg: &Config, record: bool) -> Result<u64> {
+        let mut uploading = false;
+        match self.launch(batches, cfg, record, &mut uploading) {
+            Ok((slot, frames)) => {
+                let ticket = self.next_ticket;
+                self.next_ticket += 1;
+                let batches = std::mem::take(batches);
+                self.slots[slot].pending = Some(Pending {
+                    ticket,
+                    result_count: batches.iter().map(|b| b.slots.len()).sum(),
+                    batches,
+                    frames,
+                });
+                self.recount_allocated();
+                Ok(ticket)
+            }
+            Err(error) => {
+                if uploading {
+                    // Copies from the caller's buffers may still run: let
+                    // them finish before the caller can reuse or free them.
+                    unsafe { (self.api.cu.ctx_synchronize)() };
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Queues the uploads, trials and readback of `batches` on a free slot.
+    /// Returns the slot and, for a recording, where its frames are read
+    /// back. `uploading` turns true once copies from the batches are queued.
+    fn launch(
+        &mut self,
+        batches: &[LaneBatch],
+        cfg: &Config,
+        record: bool,
+        uploading: &mut bool,
+    ) -> Result<(usize, Option<(usize, usize)>)> {
         ensure!(!batches.is_empty(), "Empty GPU batch");
         let flags = crate::warp_kernel::world_flags(cfg);
         let fidelity = cfg.fidelity();
@@ -1384,35 +1570,34 @@ impl CudaEngine {
         buffers?;
         let cu = &self.api.cu;
         let resources = &self.slots[slot];
-        let staging = resources.staging.as_ref().unwrap();
         let results_bytes = batches.iter().map(|b| b.slots.len()).sum::<usize>()
             * std::mem::size_of::<GpuResult>();
         unsafe {
             cu.check((cu.ctx_set_current)(self.context), "cuCtxSetCurrent")?;
-            // Stage every upload in pinned memory, then copy it to the device
-            // on the main stream.
-            let mut offset = 0usize;
-            let mut copy = |data: &[u8], dst: CuDevicePtr| -> Result<()> {
+            // Copy every upload to the device on the main stream, straight
+            // from the batch's registered buffers.
+            *uploading = true;
+            let copy = |data: &[u8], dst: CuDevicePtr| -> Result<()> {
                 if data.is_empty() {
                     return Ok(());
                 }
-                assert!(offset + data.len() <= staging.size);
-                let src = staging.ptr.add(offset);
-                std::ptr::copy_nonoverlapping(data.as_ptr(), src, data.len());
                 cu.check(
-                    (cu.memcpy_htod_async)(dst, src as *const c_void, data.len(), resources.main),
+                    (cu.memcpy_htod_async)(
+                        dst,
+                        data.as_ptr() as *const c_void,
+                        data.len(),
+                        resources.main,
+                    ),
                     "cuMemcpyHtoDAsync",
-                )?;
-                offset += data.len();
-                Ok(())
+                )
             };
             for (group, batch) in batches.iter().enumerate() {
                 let res = resources.groups[group].as_ref().unwrap();
                 let wave = batch.wave.as_ref().unwrap();
-                copy(bytemuck::cast_slice(&wave.lanes), res.bufs[0].ptr)?;
-                copy(bytemuck::cast_slice(&wave.muscles), res.bufs[1].ptr)?;
-                copy(bytemuck::cast_slice(&wave.ends), res.bufs[2].ptr)?;
-                copy(bytemuck::cast_slice(&wave.heads), res.bufs[3].ptr)?;
+                copy(bytemuck::cast_slice(&wave.lanes[..]), res.bufs[0].ptr)?;
+                copy(bytemuck::cast_slice(&wave.muscles[..]), res.bufs[1].ptr)?;
+                copy(bytemuck::cast_slice(&wave.ends[..]), res.bufs[2].ptr)?;
+                copy(bytemuck::cast_slice(&wave.heads[..]), res.bufs[3].ptr)?;
             }
             let counters = resources.counters.as_ref().unwrap();
             cu.check(
@@ -1531,18 +1716,7 @@ impl CudaEngine {
                 "cuEventRecord",
             )?;
         }
-        let ticket = self.next_ticket;
-        self.next_ticket += 1;
-        self.slots[slot].pending = Some(Pending {
-            ticket,
-            layout: batches
-                .iter()
-                .map(|b| (b.slots.clone(), b.creatures.clone()))
-                .collect(),
-            result_count: batches.iter().map(|b| b.slots.len()).sum(),
-            frames: record.then_some((results_bytes, frame_count)),
-        });
-        Ok(ticket)
+        Ok((slot, record.then_some((results_bytes, frame_count))))
     }
 
     /// Returns the oldest finished submission's results, waiting up to
@@ -1596,11 +1770,14 @@ impl CudaEngine {
         unsafe {
             let flat: &[GpuResult] =
                 std::slice::from_raw_parts(readback.ptr as *const GpuResult, pending.result_count);
-            let mut batches = Vec::with_capacity(pending.layout.len());
+            // Batch results in unit order.
+            let mut results = vec![GpuResult::default(); pending.result_count];
             let mut start = 0;
-            for (slots, creatures) in pending.layout {
-                let end = start + slots.len();
-                batches.push((slots, creatures, flat[start..end].to_vec()));
+            for batch in &pending.batches {
+                let end = start + batch.slots.len();
+                for (&slot, result) in batch.slots.iter().zip(&flat[start..end]) {
+                    results[slot] = *result;
+                }
                 start = end;
             }
             let frames = pending.frames.map(|(offset, count)| {
@@ -1608,9 +1785,11 @@ impl CudaEngine {
                     .to_vec()
             });
             self.last_gpu_seconds = gpu_seconds;
+            self.recount_allocated();
             Ok(Some(Completed {
                 ticket: pending.ticket,
-                batches,
+                results,
+                batches: pending.batches,
                 frames,
                 gpu_seconds,
             }))
@@ -1628,14 +1807,13 @@ impl Drop for CudaEngine {
             (cu.ctx_synchronize)();
         }
         for slot in 0..self.slots.len() {
+            // Unregistered while the context lives.
+            self.slots[slot].pending.take();
             for group in 0..self.slots[slot].groups.len() {
                 self.drop_group(slot, group);
             }
             if let Some(b) = self.slots[slot].counters.take() {
                 self.free_device(b);
-            }
-            if let Some(b) = self.slots[slot].staging.take() {
-                self.free_host(b);
             }
             if let Some(b) = self.slots[slot].readback.take() {
                 self.free_host(b);
@@ -1661,6 +1839,7 @@ impl Drop for CudaEngine {
             for kernel in self.kernels.values() {
                 (cu.module_unload)(kernel.module);
             }
+            REGISTER.with(|register| register.borrow_mut().take());
             (cu.primary_ctx_release)(self.device);
         }
     }

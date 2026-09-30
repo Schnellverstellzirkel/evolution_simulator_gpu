@@ -13,6 +13,7 @@
 use crate::{
     config::Config,
     creature_kernel::LaneBatch,
+    cuda_engine::HostVec,
     evolution::Population,
     physics::{self, Fidelity},
     physics2::{self, Model},
@@ -45,19 +46,20 @@ pub const MIN_BLOCKS: u32 = 4;
 /// Creatures per kernel launch (a wave).
 pub const WAVE: usize = 262_144;
 
-/// The creature data of one lane class, ready for upload.
+/// The creature data of one lane class, ready for upload, in host memory
+/// the engine copies from directly and reuses for later units.
 #[derive(Default)]
 pub struct WavePack {
     /// `[creature][field][lane]` lane records.
-    pub lanes: Vec<u32>,
+    pub lanes: HostVec<u32>,
     /// `[round][lane][field]` muscle records, per creature at its `heads`
     /// offset.
-    pub muscles: Vec<f32>,
+    pub muscles: HostVec<f32>,
     /// `[round][word][lane]` lists of the muscle ends each bone carries: four
     /// byte slots per word (muscle lane times two plus the end), 255 for none.
-    pub ends: Vec<u32>,
+    pub ends: HostVec<u32>,
     /// Two words of four per creature (see `shaders/warp_creature.cu`).
-    pub heads: Vec<[u32; 4]>,
+    pub heads: HostVec<[u32; 4]>,
 }
 
 /// The lane class of a body: the fewest lanes that hold its nodes and its
@@ -461,6 +463,17 @@ unsafe impl Sync for Out {}
 /// A batch's `capacity` is its lane count, which is also the node stride of a
 /// recorded frame (`creature_kernel::frame_stride`).
 pub fn pack(pop: &Population, indices: &[usize], cfg: &Config) -> Result<Vec<LaneBatch>> {
+    pack_reusing(pop, indices, cfg, &mut Vec::new())
+}
+
+/// `pack` into the memory of batches from `spare` (those of units that
+/// finished), taken from it by lane class; the ones not needed stay there.
+pub fn pack_reusing(
+    pop: &Population,
+    indices: &[usize],
+    cfg: &Config,
+    spare: &mut Vec<LaneBatch>,
+) -> Result<Vec<LaneBatch>> {
     let mut groups: Vec<Vec<(usize, usize)>> = vec![Vec::new(); CLASSES.len()];
     for (slot, &i) in indices.iter().enumerate() {
         let g = &pop.genomes[i];
@@ -497,12 +510,26 @@ pub fn pack(pop: &Population, indices: &[usize], cfg: &Config) -> Result<Vec<Lan
             muscle_len += z.rounds * w * MUSCLE_FIELDS;
             end_len += z.rounds * z.words * w;
         }
-        let mut wave = WavePack {
-            lanes: vec![0u32; count * LANE_FIELDS * w],
-            muscles: vec![0f32; muscle_len.max(1)],
-            ends: vec![u32::MAX; end_len.max(1)],
-            heads: vec![[0u32; 4]; 2 * count],
+        // A spare batch of this class first: its buffers have the sizes
+        // this class needed last time.
+        let reuse = spare
+            .iter()
+            .position(|b| b.capacity == w)
+            .or((!spare.is_empty()).then_some(spare.len() - 1))
+            .map(|at| spare.swap_remove(at));
+        let (mut wave, mut slots, mut creatures, mut info) = match reuse {
+            Some(mut b) => {
+                b.slots.clear();
+                b.creatures.clear();
+                b.info.clear();
+                (b.wave.take().unwrap_or_default(), b.slots, b.creatures, b.info)
+            }
+            None => Default::default(),
         };
+        wave.lanes.reset(count * LANE_FIELDS * w, 0);
+        wave.muscles.reset(muscle_len.max(1), 0.0);
+        wave.ends.reset(end_len.max(1), u32::MAX);
+        wave.heads.reset(2 * count, [0; 4]);
         let out = Out {
             lanes: wave.lanes.as_mut_ptr(),
             muscles: wave.muscles.as_mut_ptr(),
@@ -532,23 +559,21 @@ pub fn pack(pop: &Population, indices: &[usize], cfg: &Config) -> Result<Vec<Lan
                 *out.heads.add(2 * c + 1) = [head[4], head[5], head[6], head[7]];
             }
         });
-        let info = sized
-            .iter()
-            .enumerate()
-            .map(|(c, &(_, i, _))| {
-                let g = &pop.genomes[i];
-                [
-                    g.node_count as u32,
-                    g.bone_count as u32,
-                    g.muscle_count as u32,
-                    wave.heads[2 * c][2],
-                ]
-            })
-            .collect();
+        info.extend(sized.iter().enumerate().map(|(c, &(_, i, _))| {
+            let g = &pop.genomes[i];
+            [
+                g.node_count as u32,
+                g.bone_count as u32,
+                g.muscle_count as u32,
+                wave.heads[2 * c][2],
+            ]
+        }));
+        slots.extend(sized.iter().map(|&(slot, _, _)| slot));
+        creatures.extend(sized.iter().map(|&(_, i, _)| i));
         batches.push(LaneBatch {
             capacity: w,
-            slots: sized.iter().map(|&(slot, _, _)| slot).collect(),
-            creatures: sized.iter().map(|&(_, i, _)| i).collect(),
+            slots,
+            creatures,
             nodes: Vec::new(),
             info,
             tiles: Vec::new(),
