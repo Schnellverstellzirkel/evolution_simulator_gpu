@@ -1,4 +1,5 @@
 pub mod config;
+pub mod assets;
 pub mod cpu_engine;
 pub mod cpu_v2;
 pub mod creature_kernel;

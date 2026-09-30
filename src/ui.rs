@@ -1,7 +1,7 @@
 use crate::theme::{
     GAP_L, GAP_M, Theme, apply_style,
     scene::{
-        BONE, EYE, FALLEN, FORCE_GROUND, FORCE_MUSCLE, GROUND_DEEP, GROUND_EDGE, GROUND_INK,
+        BONE, EYE, FALLEN, FORCE_GROUND, FORCE_MUSCLE, GROUND_EDGE, GROUND_INK,
         GROUND_TOP, MUSCLE_ACTIVE, MUSCLE_REST, MUSCLE_TIRED, NODE_GRIPPY, NODE_SLICK, ORGAN,
         OUTLINE, SKY_HORIZON, SKY_TOP, TOUCHDOWN,
     },
@@ -28,6 +28,8 @@ use std::{
     time::{Duration, Instant},
 };
 const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
+/// Share of the viewport height under the ground line, room for the HUD.
+const GROUND_SHARE: f32 = 0.25;
 /// Share of the viewport height a creature fills at the default zoom.
 const FIT_HEIGHT_SHARE: f32 = 0.42;
 /// Pixels per meter of the default zoom: the creature's height fills
@@ -44,12 +46,12 @@ fn body_peak(frames: &[Vec<[f32; 2]>], nodes: &[Node]) -> f32 {
 }
 /// The player's default zoom: the typical height fills its share of the
 /// viewport, and the highest point of the recording stays in view (the ground
-/// sits 22% up from the bottom) unless that would shrink the body to less than
+/// sits a quarter up from the bottom) unless that would shrink the body to less than
 /// 60% of the typical fit. A creature that leaps far higher than it stands
 /// keeps that 60% and clips its peak instead of becoming tiny.
 fn player_zoom(height: f32, peak: f32, view_height: f32) -> f32 {
     let typical = fit_zoom(height, view_height);
-    let whole = 0.72 * view_height / peak.max(0.05);
+    let whole = 0.69 * view_height / peak.max(0.05);
     whole.min(typical).max(typical * 0.6).clamp(20.0, 450.0)
 }
 /// A creature's typical height over a recording (m above the ground): the
@@ -1422,8 +1424,6 @@ struct App {
     bench_frames: Vec<f32>,
     bench_last_ping: Instant,
     bench_pings: u64,
-    /// Dark is the default; the choice lives only in UI state.
-    dark: bool,
     show_help: bool,
     /// The "How evolution works" window (`schematic::show`).
     pub schematic_open: bool,
@@ -1487,11 +1487,12 @@ impl App {
         }
         let smoke_start_pending =
             std::env::var_os("EVOLUTION_SMOKE_POPULATION").is_some() || autostart.is_some();
-        // The dark theme is the default. Developer screenshots:
-        // EVOLUTION_SMOKE_LIGHT=1 opens in the light theme,
-        // EVOLUTION_SMOKE_ZOOM=0.75 lays a 1440 px window out like a 1920 px one.
-        let dark = std::env::var_os("EVOLUTION_SMOKE_LIGHT").is_none();
-        apply_style(ctx, dark);
+        // The game's fonts and style; its art decodes in the background.
+        // Developer screenshots: EVOLUTION_SMOKE_ZOOM=0.75 lays a 1440 px
+        // window out like a 1920 px one.
+        crate::assets::install_fonts(ctx);
+        crate::assets::preload(ctx);
+        apply_style(ctx);
         let smoke_zoom = std::env::var("EVOLUTION_SMOKE_ZOOM")
             .ok()
             .and_then(|zoom| zoom.parse::<f32>().ok())
@@ -1580,7 +1581,6 @@ impl App {
             ctx: ctx.clone(),
             bench_last_ping: Instant::now(),
             bench_pings: 0,
-            dark,
             show_help: false,
             schematic_open: std::env::var_os("EVOLUTION_SMOKE_SCHEMATIC").is_some(),
             runs_bytes: 0,
@@ -1590,7 +1590,7 @@ impl App {
         }
     }
     fn theme(&self) -> Theme {
-        Theme::of(self.dark)
+        Theme::get()
     }
     fn active(&self) -> bool {
         self.snapshot.as_ref().is_some_and(|s| s.running)
@@ -1736,9 +1736,7 @@ impl App {
                 logo.right_bottom() + Vec2::new(-4., -4.),
             ];
             let painter = ui.painter();
-            if theme.dark {
-                painter.circle_filled(logo.center(), 16., theme.accent.gamma_multiply(0.06));
-            }
+            painter.circle_filled(logo.center(), 16., theme.accent.gamma_multiply(0.06));
             for i in 0..3 {
                 painter.line_segment(
                     [points[i], points[(i + 1) % 3]],
@@ -1749,7 +1747,19 @@ impl App {
                 painter.circle_filled(point, 3.5, theme.accent);
                 painter.circle_filled(point, 1.5, theme.panel);
             }
-            let title = ui.painter().layout_job(crate::theme::caps("Evolution", 21., theme.ink));
+            // The title in thin wide capitals, like a Source game's logo.
+            let mut job = egui::text::LayoutJob::default();
+            job.append(
+                "EVOLUTION",
+                0.,
+                egui::TextFormat {
+                    font_id: FontId::new(27., crate::assets::hud()),
+                    color: Color32::from_rgb(236, 236, 230),
+                    extra_letter_spacing: 5.,
+                    ..Default::default()
+                },
+            );
+            let title = ui.painter().layout_job(job);
             let (title_rect, _) = ui.allocate_exact_size(title.size(), Sense::hover());
             ui.painter().galley(title_rect.min, title, theme.ink);
             ui.add_space(GAP_L);
@@ -1793,9 +1803,6 @@ impl App {
                     self.show_help = !self.show_help;
                 }
                 ui.menu_button("View", |ui| {
-                    if ui.checkbox(&mut self.dark, "Dark theme").changed() {
-                        apply_style(ui.ctx(), self.dark);
-                    }
                     if ui
                         .add(egui::Slider::new(&mut self.ui_scale, 0.75..=1.6).text("UI scale"))
                         .changed()
@@ -2191,7 +2198,7 @@ impl App {
         // All scene primitives are tessellated into egui's batched wgpu render pass.
         let origin = Pos2::new(
             rect.center().x - self.camera[0] * self.zoom,
-            rect.bottom() - rect.height() * 0.22 + self.camera[1] * self.zoom,
+            rect.bottom() - rect.height() * GROUND_SHARE + self.camera[1] * self.zoom,
         );
         let world = |x: f32, y: f32| Pos2::new(origin.x + x * self.zoom, origin.y - y * self.zoom);
         let cfg = self
@@ -2246,7 +2253,14 @@ impl App {
         } else {
             origin.y
         };
-        crate::world_fx::backdrop(&painter, rect, horizon, self.camera[0] * self.zoom, clock);
+        crate::world_fx::backdrop(
+            &painter,
+            rect,
+            horizon,
+            self.camera[0] * self.zoom,
+            clock,
+            cfg,
+        );
         crate::world_fx::sky(&painter, rect, cfg, clock);
         let left = start.floor() as i32;
         let right = end.ceil() as i32;
@@ -2262,7 +2276,7 @@ impl App {
         }
         if cfg.ground {
             // Sample the ground every few pixels (flat ground needs only its
-            // ends) and fill down to the frame: packed dirt fading to dark.
+            // ends) and fill down to the frame with the world's street.
             // Pits carve notches into the polyline; mud draws its sunk layer
             // `mud` meters below the surface line.
             let flat = amplitude == 0.0 && slope == 0.0 && gaps == 0.0 && hurdles == 0.0;
@@ -2273,77 +2287,18 @@ impl App {
             };
             let mut x = start;
             let mut line = Vec::new();
+            let mut meters = Vec::new();
             let mut mud_line = Vec::new();
             while x <= end + step {
                 let height = height_at(x, true);
                 line.push(world(x, height));
+                meters.push(x);
                 if mud > 0.0 {
                     mud_line.push(world(x, height - mud));
                 }
                 x += step;
             }
-            let mut mesh = egui::epaint::Mesh::default();
-            for (i, p) in line.iter().enumerate() {
-                for (pos, color) in [
-                    (*p, GROUND_TOP),
-                    (Pos2::new(p.x, rect.bottom()), GROUND_DEEP),
-                ] {
-                    mesh.vertices.push(egui::epaint::Vertex {
-                        pos,
-                        uv: egui::epaint::WHITE_UV,
-                        color,
-                    });
-                }
-                if i > 0 {
-                    let k = (i * 2) as u32;
-                    mesh.indices
-                        .extend_from_slice(&[k - 2, k - 1, k, k - 1, k + 1, k]);
-                }
-            }
-            painter.add(egui::Shape::mesh(mesh));
-            // A lighter crust under the surface, and faint strata below it.
-            crate::world_fx::band(
-                &painter,
-                &line,
-                14.,
-                Color32::from_rgba_unmultiplied(150, 140, 110, 40),
-                Color32::TRANSPARENT,
-            );
-            for depth in [26., 58.] {
-                let strata: Vec<Pos2> = line.iter().map(|p| *p + Vec2::new(0., depth)).collect();
-                painter.add(egui::Shape::line(
-                    strata,
-                    Stroke::new(1., Color32::from_black_alpha(40)),
-                ));
-            }
-            // Gravel and broken concrete, fixed to the ground as it scrolls.
-            let spacing = (7.0 / self.zoom).max(0.12);
-            let first = (start / spacing).floor() as i64;
-            let last = (end / spacing).ceil() as i64;
-            for k in first..=last {
-                let meters = (k as f32 + crate::theme::hash(k * 3)) * spacing;
-                let top = world(meters, height_at(meters, true));
-                let depth = 4. + 40. * crate::theme::hash(k * 5 + 1).powi(2);
-                let light = crate::theme::hash(k * 7 + 2) > 0.5;
-                painter.circle_filled(
-                    top + Vec2::new(0., depth),
-                    0.8 + 1.4 * crate::theme::hash(k * 11),
-                    if light {
-                        Color32::from_rgba_unmultiplied(170, 162, 136, 60)
-                    } else {
-                        Color32::from_black_alpha(80)
-                    },
-                );
-            }
-            // Expansion joints every 2 m, like slabs of old concrete.
-            for k in (start / 2.0).floor() as i32..=(end / 2.0).ceil() as i32 {
-                let meters = k as f32 * 2.0 + 1.0;
-                let top = world(meters, height_at(meters, true));
-                painter.line_segment(
-                    [top + Vec2::new(0., 3.), top + Vec2::new(0., 16.)],
-                    Stroke::new(1.5, Color32::from_black_alpha(90)),
-                );
-            }
+            crate::world_fx::ground_body(&painter, rect, cfg, &line, &meters, self.zoom);
             if mud > 0.0 {
                 let fill = crate::theme::scene::MUD;
                 for i in 0..line.len().saturating_sub(1) {
@@ -2465,78 +2420,112 @@ impl App {
                 painter.circle_filled(at, 6., trail.gamma_multiply(0.15));
                 painter.circle_filled(at, 3., trail);
             }
+            // Soft contact shadows, darker and tighter the nearer a node is
+            // to the ground under it.
+            let glow = crate::assets::Art::Glow.texture(ui.ctx());
             for n in &p.nodes {
-                let shadow = world(n.pos[0], height_at(n.pos[0], true));
-                painter.add(egui::Shape::ellipse_filled(
-                    shadow,
-                    Vec2::new(n.radius * self.zoom * 1.6, 4.),
-                    Color32::from_black_alpha(70),
-                ));
+                let ground = height_at(n.pos[0], true);
+                let lift = (n.pos[1] - n.radius - ground).max(0.0);
+                let fade = (1.0 - lift / 0.6).clamp(0.0, 1.0);
+                if fade <= 0.0 {
+                    continue;
+                }
+                let at = world(n.pos[0], ground);
+                let w = n.radius * self.zoom * (2.6 + lift * 2.0);
+                painter.image(
+                    glow,
+                    Rect::from_center_size(at, Vec2::new(w * 2.0, (w * 0.5).max(6.0))),
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::from_black_alpha((190.0 * fade) as u8),
+                );
             }
             let mut marks = FrameMarks::of(p);
             marks.arrows = self.show_forces;
             draw_creature(&painter, &p.nodes, &p.creature, origin, self.zoom, &marks);
         }
+        crate::world_fx::weather(&painter, rect, cfg, clock, self.camera[0] * self.zoom);
         // Film look over the scene, under the HUD.
         crate::theme::vignette(&painter, rect, 0.55);
         crate::theme::grain(&painter, rect, clock, 0.055);
-        use crate::theme::{HudLine, hud_block, scene::HUD};
+        use crate::theme::{Counter, HudLine, counter, hud_block, scene::HUD};
+        // The HUD, laid out like Half-Life 2's: the creature's counters low
+        // on the left like HEALTH and SUIT, the generation low on the right
+        // like the ammo box with the rate as its reserve, the world as a
+        // hint in the top right corner.
         let inset = 12.;
+        let size = (rect.height() * 0.085).clamp(20., 32.);
         if let Some(p) = &self.playback {
-            let lines = match p.fallen() {
-                Some((tick, distance)) => [
-                    HudLine::label("Distance"),
-                    HudLine::value(format!("{distance:.2} m"), 28., FALLEN),
-                    HudLine::text(
+            let fallen = p.fallen();
+            let distance = fallen.map_or_else(|| physics::fitness(&p.nodes), |(_, d)| d);
+            let left = counter(
+                &painter,
+                rect.left_bottom() + Vec2::new(inset, -inset),
+                Align2::LEFT_BOTTOM,
+                &Counter {
+                    label: "Distance",
+                    digits: format!("{distance:.2}"),
+                    unit: "m",
+                    extra: None,
+                    damaged: fallen.is_some(),
+                },
+                size,
+            );
+            counter(
+                &painter,
+                left.right_bottom() + Vec2::new(inset, 0.),
+                Align2::LEFT_BOTTOM,
+                &Counter {
+                    label: "Speed",
+                    digits: format!("{:.2}", if fallen.is_some() { 0.0 } else { p.speed() }),
+                    unit: "m/s",
+                    extra: None,
+                    damaged: fallen.is_some(),
+                },
+                size,
+            );
+            if let Some((tick, _)) = fallen {
+                hud_block(
+                    &painter,
+                    left.left_top() - Vec2::new(0., 8.),
+                    Align2::LEFT_BOTTOM,
+                    &[HudLine::text(
                         p.ending.sentence(
                             tick.saturating_sub(physics::settle()) as f32 * physics::dt(),
                         ),
                         14.,
                         FALLEN,
-                    ),
-                ],
-                None => [
-                    HudLine::label("Distance"),
-                    HudLine::value(format!("{:.2} m", physics::fitness(&p.nodes)), 28., HUD),
-                    HudLine::text(
-                        format!("{:.2} m/s", p.speed()),
-                        14.,
-                        crate::theme::scene::HUD_DIM,
-                    ),
-                ],
-            };
-            hud_block(
-                &painter,
-                rect.left_top() + Vec2::splat(inset),
-                Align2::LEFT_TOP,
-                &lines,
-            );
+                    )],
+                );
+            }
             let live = self.snapshot.as_ref().map(|s| &s.config);
             let earlier = live.is_some_and(|live| live.physics_differs(&p.config));
-            let mut lines = vec![
-                HudLine::label(if earlier {
-                    "World · an earlier one"
-                } else {
-                    "World"
-                }),
-                HudLine::text(world_summary(&p.config), 15., HUD),
-            ];
-            if let Some(s) = &self.snapshot {
-                lines.push(HudLine::text(
-                    format!(
-                        "gen {}  ·  {} creatures/s",
-                        s.generation,
-                        number(s.end_to_end.max(0.0) as usize)
-                    ),
-                    13.,
-                    crate::theme::scene::HUD_DIM,
-                ));
-            }
             hud_block(
                 &painter,
                 rect.right_top() + Vec2::new(-inset, inset),
                 Align2::RIGHT_TOP,
-                &lines,
+                &[
+                    HudLine::label(if earlier {
+                        "World · an earlier one"
+                    } else {
+                        "World"
+                    }),
+                    HudLine::text(world_summary(&p.config), 15., HUD),
+                ],
+            );
+        }
+        if let Some(s) = &self.snapshot {
+            counter(
+                &painter,
+                rect.right_bottom() - Vec2::splat(inset),
+                Align2::RIGHT_BOTTOM,
+                &Counter {
+                    label: "Gen",
+                    digits: s.generation.to_string(),
+                    unit: "",
+                    extra: Some(format!("{}/s", number(s.end_to_end.max(0.0) as usize))),
+                    damaged: false,
+                },
+                size,
             );
         }
         let center_note = if self.playback.is_none() && self.awaiting_new_world() {
@@ -2771,61 +2760,63 @@ impl App {
         // theme, and a line of detail.
         let gap = GAP_M;
         let width = (ui.available_width() - gap * (tiles.len() - 1) as f32) / tiles.len() as f32;
-        // Narrow tiles shrink the number and wrap the detail line, and every
-        // tile takes the height of the tallest.
-        let text_width = (width - 28.).max(40.);
-        let value_size = (width / 9.).clamp(24., 32.);
-        let notes: Vec<_> = tiles
+        // HUD counters: the label and a line of detail on the left, the
+        // glowing number on the right. Narrow tiles shrink the number and
+        // wrap the detail, and every tile takes the height of the tallest.
+        let value_size = (width / 8.5).clamp(24., 36.);
+        let values: Vec<_> = tiles
             .iter()
             .map(|tile| {
+                ui.painter().layout_no_wrap(
+                    tile.1.clone(),
+                    FontId::new(value_size, crate::assets::hud()),
+                    tile.2,
+                )
+            })
+            .collect();
+        let notes: Vec<_> = tiles
+            .iter()
+            .zip(&values)
+            .map(|(tile, value)| {
                 ui.painter().layout(
                     tile.3.clone(),
-                    FontId::proportional(13.),
+                    FontId::proportional(12.5),
                     theme.muted,
-                    text_width,
+                    (width - value.size().x - 44.).max(60.),
                 )
             })
             .collect();
         let note_height = notes.iter().map(|g| g.size().y).fold(0., f32::max);
-        let tile_height = 30. + value_size * 1.25 + note_height + 10.;
+        let tile_height = (value_size * 1.2).max(28. + note_height) + 12.;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
-            for ((name, value, color, _, why), note) in tiles.into_iter().zip(notes) {
+            for (((name, _, color, _, why), note), value) in tiles.into_iter().zip(notes).zip(values) {
                 let (rect, response) =
                     ui.allocate_exact_size(Vec2::new(width, tile_height), Sense::hover());
                 let painter = ui.painter_at(rect);
-                let fill = if theme.dark {
-                    Color32::from_rgb(22, 23, 21)
-                } else {
-                    theme.card
-                };
-                crate::theme::plate(&painter, rect, theme, fill, false);
-                painter.rect_filled(
-                    Rect::from_min_size(rect.left_top() + Vec2::new(0., 12.), Vec2::new(2., 14.)),
-                    0,
-                    color,
-                );
+                painter.rect_filled(rect, 8, crate::theme::scene::HUD_BACK);
+                painter.rect_filled(rect, 8, Color32::from_black_alpha(50));
                 crate::theme::caps_text(
                     &painter,
-                    rect.left_top() + Vec2::new(14., 12.),
+                    rect.left_top() + Vec2::new(14., 11.),
                     Align2::LEFT_TOP,
                     name,
-                    if width < 280. { 10. } else { 11. },
+                    if width < 280. { 9.5 } else { 10.5 },
+                    color.gamma_multiply(0.85),
+                );
+                painter.galley(
+                    rect.left_top() + Vec2::new(14., 28.),
+                    note,
                     theme.muted,
                 );
                 crate::theme::glow_text(
                     &painter,
-                    rect.left_top() + Vec2::new(13., 28.),
-                    Align2::LEFT_TOP,
-                    value,
-                    FontId::proportional(value_size),
+                    Pos2::new(rect.right() - 14., rect.center().y),
+                    Align2::RIGHT_CENTER,
+                    value.text(),
+                    FontId::new(value_size, crate::assets::hud()),
                     color,
-                    theme.dark,
-                );
-                painter.galley(
-                    rect.left_top() + Vec2::new(14., 30. + value_size * 1.25),
-                    note,
-                    theme.muted,
+                    true,
                 );
                 response.on_hover_text(why);
             }
@@ -5000,6 +4991,9 @@ impl eframe::App for App {
             self.camera[0] = p.camera_x();
         }
         let theme = self.theme();
+        // The blurred city behind everything, as the game world shows
+        // behind the Half-Life 2 menus; the panels are dark glass over it.
+        crate::theme::backdrop(ui.painter(), ui.ctx().content_rect());
         egui::Panel::top("top")
             .exact_size(64.)
             .frame(
@@ -5121,7 +5115,7 @@ impl eframe::App for App {
                         ui.add_space(GAP_M);
                         // The chart keeps a fixed height below the replay and
                         // its controls; the replay takes the rest.
-                        const CHART: f32 = 200.;
+                        const CHART: f32 = 175.;
                         const REPLAY_CONTROLS: f32 = 120.;
                         self.viewport(
                             ui,
@@ -6023,12 +6017,22 @@ fn draw_creature(
     marks: &FrameMarks,
 ) {
     let position = |n: &Node| origin + Vec2::new(n.pos[0] * scale, -n.pos[1] * scale);
+    let sphere = crate::assets::Art::Sphere.texture(p.ctx());
     for bone in &c.bones {
         let a = position(&nodes[bone.a as usize]);
         let b = position(&nodes[bone.b as usize]);
         let width = (scale * 0.032).max(3.0);
         p.line_segment([a, b], Stroke::new(width + 3.0, OUTLINE));
         p.line_segment([a, b], Stroke::new(width, BONE));
+        // A steel rod: a bright streak along its upper side.
+        let across = (b - a).normalized().rot90();
+        if across.x.is_finite() {
+            let lift = across * (if across.y > 0.0 { -1.0 } else { 1.0 }) * width * 0.22;
+            p.line_segment(
+                [a + lift, b + lift],
+                Stroke::new((width * 0.28).max(1.0), crate::theme::scene::BONE_SHINE),
+            );
+        }
     }
     // Organs ride on their bones; drawn with the density of a node.
     for bone in c.bones.iter().filter(|b| b.organ_mass > 0.0) {
@@ -6073,18 +6077,22 @@ fn draw_creature(
         let energy = marks.energy.get(mi).copied().unwrap_or(1.0).clamp(0.0, 1.0);
         let width = (scale * 0.017 * (1. + 0.45 * contraction) * (0.45 + 0.55 * energy)).max(2.);
         p.line_segment([a, b], Stroke::new(width + 3., OUTLINE));
-        // Pale flesh at rest, deep red at full contraction, grey when spent.
-        p.line_segment(
-            [a, b],
-            Stroke::new(
-                width,
-                mix_color(
-                    MUSCLE_TIRED,
-                    mix_color(MUSCLE_REST, MUSCLE_ACTIVE, contraction),
-                    energy,
-                ),
-            ),
+        // Pale flesh at rest, deep red at full contraction, grey when spent,
+        // with a wet sheen along the fibre.
+        let flesh = mix_color(
+            MUSCLE_TIRED,
+            mix_color(MUSCLE_REST, MUSCLE_ACTIVE, contraction),
+            energy,
         );
+        p.line_segment([a, b], Stroke::new(width, flesh));
+        let across = (b - a).normalized().rot90();
+        if across.x.is_finite() && width > 3.0 {
+            let lift = across * (if across.y > 0.0 { -1.0 } else { 1.0 }) * width * 0.2;
+            p.line_segment(
+                [a + lift, b + lift],
+                Stroke::new(width * 0.25, mix_color(flesh, Color32::WHITE, 0.35)),
+            );
+        }
         if marks.arrows
             && let Some(&force) = marks.muscle_force.get(mi)
         {
@@ -6116,14 +6124,14 @@ fn draw_creature(
     for (i, n) in nodes.iter().enumerate() {
         let center = position(n);
         let r = (n.radius * scale).max(2.);
+        // A lit metal ball: the shaded sphere sprite tinted by friction.
         p.circle_filled(center, r + 1.5, OUTLINE);
-        p.circle_filled(center, r, node_color(n.friction));
-        p.circle_filled(
-            center + Vec2::new(-r * 0.22, -r * 0.26),
-            r * 0.5,
-            Color32::from_white_alpha(35),
+        p.image(
+            sphere,
+            Rect::from_center_size(center, Vec2::splat(r * 2.0 + 0.5)),
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            node_color(n.friction),
         );
-        p.circle_stroke(center, r, Stroke::new(1., Color32::from_white_alpha(60)));
         if marks.contact.get(i).copied().unwrap_or(false) {
             p.circle_stroke(center, r + 2.5, Stroke::new(2., TOUCHDOWN));
         }
@@ -6141,6 +6149,12 @@ fn draw_creature(
             draw_break_mark(p, center, r);
         }
         let eye = center + Vec2::new(r * 0.4, -r * 0.2);
+        p.image(
+            crate::assets::Art::Glow.texture(p.ctx()),
+            Rect::from_center_size(eye, Vec2::splat(r * 1.8)),
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::from_rgba_unmultiplied(EYE.r(), EYE.g(), EYE.b(), 120),
+        );
         p.circle_filled(eye, r * 0.3, EYE);
         p.circle_filled(eye + Vec2::new(r * 0.08, 0.), r * 0.15, OUTLINE);
     }

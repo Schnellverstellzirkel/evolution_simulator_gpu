@@ -6,7 +6,7 @@
 //! The key is an overcast industrial wasteland: grey skies over a skyline of
 //! blocks and chimneys, dirt and broken concrete underfoot, murky canal
 //! water, sludge, pale ice, and concrete hurdles and pits with hazard marks.
-use crate::{config::Config, environment::EFFECTS, theme::hash};
+use crate::{assets::Art, config::Config, environment::EFFECTS, theme::hash};
 use eframe::egui::{
     self, Color32, Painter, Pos2, Rect, Stroke, Vec2,
     epaint::{Mesh, Vertex},
@@ -522,162 +522,349 @@ fn gradient(painter: &Painter, rect: Rect, y0: f32, y1: f32, top: Color32, botto
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// An ellipse with a soft edge: four nested ellipses of low alpha.
-fn soft_ellipse(painter: &Painter, center: Pos2, radius: Vec2, color: (u8, u8, u8), a: f32) {
-    for j in 0..4 {
-        let f = 1.0 - j as f32 * 0.22;
-        painter.add(egui::Shape::ellipse_filled(
-            center,
-            radius * f,
-            alpha(color, a * 0.32),
-        ));
+/// Which sky hangs over a world: a storm when the weather turns (wind,
+/// quakes, heavy gravity, wet ground, mud), the low sun of the coast in a
+/// heat wave or a drought, the overcast city otherwise.
+pub fn sky_art(cfg: &Config) -> Art {
+    let (_, slip) = grip(cfg);
+    let storm = amount(cfg, "Wind")
+        .max(amount(cfg, "Earthquake"))
+        .max(amount(cfg, "Gravity"))
+        .max(amount(cfg, "Mud"))
+        .max(if slip > 0.3 && slip < 0.9 { slip } else { 0.0 });
+    let dry = amount(cfg, "Heat wave").max(amount(cfg, "Drought"));
+    if dry > 0.0 && dry >= storm {
+        Art::SkyDusk
+    } else if storm > 0.0 {
+        Art::SkyStorm
+    } else {
+        Art::SkyCity
     }
 }
 
-/// The backdrop behind every effect: an overcast sky fading to haze at the
-/// horizon, long low clouds, a far skyline of blocks and towers with one
-/// huge spire in the haze, and a nearer row of sheds, chimneys and pylons.
-/// `horizon` is the screen y the skyline stands on, `camera` the camera's
-/// x in pixels, so each layer slides at its own parallax.
-pub fn backdrop(painter: &Painter, rect: Rect, horizon: f32, camera: f32, time: f32) {
-    use crate::theme::scene::{SKY_HORIZON, SKY_TOP, SKYLINE_FAR, SKYLINE_NEAR};
-    let horizon = horizon.clamp(rect.top() + 30.0, rect.bottom() + 200.0);
-    painter.rect_filled(rect, 0, SKY_HORIZON);
-    gradient(painter, rect, rect.top(), horizon, SKY_TOP, SKY_HORIZON);
-    let sky = (horizon - rect.top()).max(1.0);
-    // Stratus: long flat clouds, a pale top over a darker belly.
-    let span = rect.width() + 700.0;
-    for i in 0..10_i64 {
-        let x = rect.left() - 350.0
-            + (hash(i * 13) * span - camera * 0.05 - time * (3.0 + 4.0 * hash(i))).rem_euclid(span);
-        let y = rect.top() + sky * (0.10 + 0.45 * hash(i * 7 + 3));
-        let w = 150.0 + 220.0 * hash(i * 5 + 1);
-        let h = 7.0 + 12.0 * hash(i * 3 + 2);
-        soft_ellipse(
-            painter,
-            Pos2::new(x + w * 0.1, y + h * 0.5),
-            Vec2::new(w * 0.8, h * 0.6),
-            (46, 52, 56),
-            0.26,
-        );
-        soft_ellipse(
-            painter,
-            Pos2::new(x, y),
-            Vec2::new(w, h),
-            (168, 172, 168),
-            0.24,
-        );
+/// One skyline layer: its image, its height as a share of the sky above
+/// the horizon, how fast it slides with the camera, and where in the image
+/// the view starts.
+struct Layer {
+    art: Art,
+    height: f32,
+    parallax: f32,
+    start: f32,
+}
+
+const LAYERS: [Layer; 3] = [
+    Layer {
+        art: Art::SkylineFar,
+        height: 0.98,
+        parallax: 0.05,
+        start: 0.62,
+    },
+    Layer {
+        art: Art::SkylineMid,
+        height: 0.5,
+        parallax: 0.16,
+        start: 0.08,
+    },
+    Layer {
+        art: Art::SkylineNear,
+        height: 0.66,
+        parallax: 0.34,
+        start: 0.4,
+    },
+];
+
+/// A horizontal band of fog: clear at `top`, `color` at `bottom`.
+fn fog(painter: &Painter, rect: Rect, top: f32, bottom: f32, color: Color32) {
+    gradient(painter, rect, top, bottom, Color32::TRANSPARENT, color);
+}
+
+/// The backdrop behind every effect, drawn like a Source skybox with its
+/// 3D skybox in front: a photographed overcast sky, a glow where the sun
+/// burns through, the far city in haze with the great tower climbing into
+/// the clouds, a nearer row of old tenements, and in front of them the
+/// street's poles, wires, lamps and bare trees. Each layer slides at its
+/// own parallax, and fog settles between them. `horizon` is the screen y
+/// the skyline stands on, `camera` the camera's x in pixels.
+pub fn backdrop(painter: &Painter, rect: Rect, horizon: f32, camera: f32, time: f32, cfg: &Config) {
+    let ctx = painter.ctx();
+    let horizon = horizon.clamp(rect.top() + 40.0, rect.bottom() + 120.0);
+    let sky_h = horizon - rect.top();
+    painter.rect_filled(rect, 0, crate::theme::scene::SKY_HORIZON);
+    // The sky: 360 degrees across 4096 texels, the horizon 17 texels above
+    // its bottom row. A view shows about 110 degrees, and the texels stay
+    // square, unless the view is too tall for the band.
+    let art = sky_art(cfg);
+    let size = art.size(ctx);
+    let horizon_row = size.y - 17.0;
+    let scale = (rect.width() / (size.x * 0.3)).max(sky_h / (horizon_row - 4.0));
+    let u0 = 0.3 + camera * 0.015 / (size.x * scale) + time * 0.0006;
+    let v_top = (horizon_row - sky_h / scale) / size.y;
+    let bottom = (horizon + 17.0 * scale).min(rect.bottom());
+    let v_bottom = (horizon_row + (bottom - horizon) / scale) / size.y;
+    painter.image(
+        art.texture(ctx),
+        Rect::from_min_max(rect.left_top(), Pos2::new(rect.right(), bottom)),
+        Rect::from_min_max(
+            Pos2::new(u0, v_top),
+            Pos2::new(u0 + rect.width() / (size.x * scale), v_bottom),
+        ),
+        Color32::WHITE,
+    );
+    // Where the sun burns through the cloud: a wide soft glow and a few
+    // shafts of light falling from it.
+    // The sun is far away, so it holds its place on screen.
+    let sun = Pos2::new(rect.left() + rect.width() * 0.66, rect.top() + sky_h * 0.28);
+    let warm = if art == Art::SkyDusk { (255, 196, 120) } else { (255, 244, 220) };
+    let glow = Art::Glow.texture(ctx);
+    let r = sky_h * 0.9;
+    painter.image(
+        glow,
+        Rect::from_center_size(sun, Vec2::splat(r * 2.0)),
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        alpha(warm, 0.22),
+    );
+    painter.image(
+        glow,
+        Rect::from_center_size(sun, Vec2::splat(r * 0.6)),
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        alpha(warm, 0.18),
+    );
+    let mut rays = Mesh::default();
+    for k in 0..6 {
+        let spread = (k as f32 - 2.5) * 0.16 + (time * 0.05 + k as f32).sin() * 0.02;
+        let dir = Vec2::new(spread, 1.0).normalized();
+        let side = Vec2::new(dir.y, -dir.x);
+        let len = sky_h * 1.4;
+        let w = sky_h * (0.05 + 0.04 * hash(k * 7));
+        let base = rays.vertices.len() as u32;
+        let a = alpha(warm, 0.05 + 0.03 * hash(k * 3));
+        for (pos, color) in [
+            (sun, a),
+            (sun + dir * len + side * w, Color32::TRANSPARENT),
+            (sun + dir * len - side * w, Color32::TRANSPARENT),
+        ] {
+            rays.vertices.push(Vertex {
+                pos,
+                uv: egui::epaint::WHITE_UV,
+                color,
+            });
+        }
+        rays.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
-    // The far skyline in the haze, and one spire far taller than the rest.
-    let far = alpha((SKYLINE_FAR.r(), SKYLINE_FAR.g(), SKYLINE_FAR.b()), 0.55);
-    let shift = camera * 0.04;
-    let spire_every = 2600.0;
-    let spire_x = rect.left() + (rect.width() * 0.7 - shift).rem_euclid(spire_every) - 300.0;
-    let spire_h = (sky * 0.85).min(420.0);
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            Pos2::new(spire_x - 26.0, horizon),
-            Pos2::new(spire_x - 7.0, horizon - spire_h),
-            Pos2::new(spire_x + 3.0, horizon - spire_h - 14.0),
-            Pos2::new(spire_x + 9.0, horizon - spire_h * 0.96),
-            Pos2::new(spire_x + 30.0, horizon),
-        ],
-        alpha((SKYLINE_FAR.r(), SKYLINE_FAR.g(), SKYLINE_FAR.b()), 0.35),
-        Stroke::NONE,
-    ));
-    let step = 34.0;
-    let first = ((shift) / step).floor() as i64 - 1;
-    let count = (rect.width() / step) as i64 + 3;
-    for k in first..first + count {
-        let x = rect.left() + k as f32 * step - shift;
-        let h = 8.0 + 34.0 * hash(k * 3).powi(2);
-        let w = step * (0.6 + 0.5 * hash(k * 5 + 1));
-        painter.rect_filled(
-            Rect::from_min_max(Pos2::new(x, horizon - h), Pos2::new(x + w, horizon)),
-            0,
-            far,
+    painter.add(egui::Shape::mesh(rays));
+    // The skyline, far to near, with fog settling between the layers.
+    let haze = crate::theme::scene::SKY_HORIZON;
+    for (i, layer) in LAYERS.iter().enumerate() {
+        let size = layer.art.size(ctx);
+        let h = sky_h * layer.height;
+        let texel = h / size.y;
+        let w = size.x * texel;
+        let u = layer.start + camera * layer.parallax / w;
+        let top = horizon + 2.0 - h;
+        let shown = Rect::from_min_max(
+            Pos2::new(rect.left(), top.max(rect.top())),
+            Pos2::new(rect.right(), (horizon + 2.0).min(rect.bottom())),
         );
-        if hash(k * 11 + 4) > 0.86 {
-            // A tall block with a mast.
-            let top = horizon - h - 40.0 * hash(k * 17);
-            painter.rect_filled(
-                Rect::from_min_max(Pos2::new(x + w * 0.3, top), Pos2::new(x + w * 0.7, horizon)),
-                0,
-                far,
+        if shown.height() > 0.0 {
+            let v0 = (shown.top() - top) / h;
+            let v1 = (shown.bottom() - top) / h;
+            painter.image(
+                layer.art.texture(ctx),
+                shown,
+                Rect::from_min_max(Pos2::new(u, v0), Pos2::new(u + rect.width() / w, v1)),
+                Color32::WHITE,
             );
-            painter.line_segment(
-                [
-                    Pos2::new(x + w * 0.5, top),
-                    Pos2::new(x + w * 0.5, top - 16.0),
-                ],
-                Stroke::new(1.0, far),
+        }
+        if i < 2 {
+            let depth = sky_h * (0.34 - 0.12 * i as f32);
+            fog(
+                painter,
+                rect,
+                horizon - depth,
+                horizon + 2.0,
+                Color32::from_rgba_unmultiplied(haze.r(), haze.g(), haze.b(), 110 - 40 * i as u8),
             );
         }
     }
-    // The near row: sheds, chimneys and pylons, darker and faster.
-    let near = SKYLINE_NEAR;
-    let shift = camera * 0.16;
-    let step = 90.0;
-    let first = (shift / step).floor() as i64 - 1;
-    let count = (rect.width() / step) as i64 + 3;
-    for k in first..first + count {
-        let x = rect.left() + k as f32 * step - shift;
-        let kind = hash(k * 7 + 9);
-        if kind < 0.45 {
-            // A low shed with a sloped roof.
-            let w = 40.0 + 40.0 * hash(k * 3 + 1);
-            let h = 8.0 + 14.0 * hash(k * 5 + 2);
-            painter.add(egui::Shape::convex_polygon(
-                vec![
-                    Pos2::new(x, horizon),
-                    Pos2::new(x, horizon - h),
-                    Pos2::new(x + w * 0.5, horizon - h - 7.0),
-                    Pos2::new(x + w, horizon - h),
-                    Pos2::new(x + w, horizon),
-                ],
-                near,
-                Stroke::NONE,
-            ));
-        } else if kind < 0.65 {
-            // A chimney with a thin plume.
-            let h = 36.0 + 30.0 * hash(k * 13);
-            painter.rect_filled(
-                Rect::from_min_max(Pos2::new(x, horizon - h), Pos2::new(x + 7.0, horizon)),
-                0,
-                near,
-            );
-            for j in 0..4 {
-                let rise = (time * 0.15 + hash(k * 19 + j) + j as f32 * 0.25).fract();
-                painter.circle_filled(
-                    Pos2::new(x + 3.5 + rise * 30.0, horizon - h - 4.0 - rise * 26.0),
-                    3.0 + 8.0 * rise,
-                    alpha((120, 124, 122), 0.22 * (1.0 - rise)),
-                );
-            }
-        } else if kind < 0.8 {
-            // A lattice pylon.
-            let h = 44.0 + 16.0 * hash(k * 23);
-            let top = Pos2::new(x + 10.0, horizon - h);
-            let stroke = Stroke::new(1.2, near);
-            painter.line_segment([Pos2::new(x, horizon), top], stroke);
-            painter.line_segment([Pos2::new(x + 20.0, horizon), top], stroke);
+}
+
+/// Weather over the scene, drawn after the creature: rain when the ground
+/// is wet or muddy, blowing dust in a drought, a heat wave or a gale,
+/// cold mist over ice, and drifting ash in an earthquake. Each is a few
+/// dozen thin shapes on the replay clock.
+pub fn weather(painter: &Painter, rect: Rect, cfg: &Config, time: f32, camera: f32) {
+    let (_, slip) = grip(cfg);
+    let wet = if slip > 0.3 && slip < 0.9 { slip } else { 0.0 };
+    let rain = wet.max(amount(cfg, "Mud") * 0.8).max(amount(cfg, "Water") * 0.4);
+    let wind = amount(cfg, "Wind");
+    if rain > 0.0 {
+        let count = 40 + (140.0 * rain) as i64;
+        let slant = -0.18 - 0.5 * wind;
+        for i in 0..count {
+            let speed = 520.0 + 240.0 * hash(i * 3);
+            let x = rect.left() + (hash(i) * (rect.width() + 80.0) + camera * 0.6).rem_euclid(rect.width() + 80.0) - 40.0;
+            let y = rect.top() + (hash(i * 5 + 1) * rect.height() + time * speed).rem_euclid(rect.height());
+            let len = 10.0 + 12.0 * hash(i * 7);
+            let a = Pos2::new(x, y);
             painter.line_segment(
-                [top + Vec2::new(-10.0, 8.0), top + Vec2::new(10.0, 8.0)],
-                stroke,
-            );
-            painter.line_segment(
-                [top + Vec2::new(-7.0, 18.0), top + Vec2::new(7.0, 18.0)],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(x + 3.0, horizon - h * 0.4),
-                    Pos2::new(x + 17.0, horizon - h * 0.7),
-                ],
-                stroke,
+                [a, a + Vec2::new(slant * len, len)],
+                Stroke::new(1.0, alpha((200, 210, 214), 0.16 + 0.18 * rain)),
             );
         }
     }
+    let dust = amount(cfg, "Drought").max(amount(cfg, "Heat wave") * 0.6).max(wind * 0.7);
+    if dust > 0.0 {
+        let tint = if amount(cfg, "Drought").max(amount(cfg, "Heat wave")) > 0.0 {
+            (200, 170, 120)
+        } else {
+            (190, 190, 180)
+        };
+        for i in 0..(30 + (70.0 * dust) as i64) {
+            let speed = 40.0 + 180.0 * (dust + wind) * hash(i * 11);
+            let x = rect.left() + (hash(i * 13) * rect.width() - time * speed + camera * 0.5).rem_euclid(rect.width());
+            let y = rect.top() + rect.height() * (0.35 + 0.6 * hash(i * 17)) + (time * 2.0 + i as f32).sin() * 4.0;
+            painter.circle_filled(
+                Pos2::new(x, y),
+                0.8 + 1.4 * hash(i * 19),
+                alpha(tint, 0.25 + 0.35 * dust),
+            );
+        }
+        gradient(
+            painter,
+            rect,
+            rect.top() + rect.height() * 0.45,
+            rect.bottom(),
+            Color32::TRANSPARENT,
+            alpha(tint, 0.10 + 0.14 * dust),
+        );
+    }
+    let frost = amount(cfg, "Ice patches").max(if slip >= 0.9 { 1.0 } else { 0.0 });
+    if frost > 0.0 {
+        gradient(
+            painter,
+            rect,
+            rect.top() + rect.height() * 0.5,
+            rect.bottom(),
+            Color32::TRANSPARENT,
+            alpha((190, 214, 228), 0.10 + 0.10 * frost),
+        );
+    }
+    let quake = amount(cfg, "Earthquake");
+    if quake > 0.0 {
+        for i in 0..(20 + (60.0 * quake) as i64) {
+            let fall = 30.0 + 50.0 * hash(i * 23);
+            let x = rect.left() + hash(i * 29) * rect.width() + (time * 1.5 + i as f32).sin() * 10.0;
+            let y = rect.top() + (hash(i * 31) * rect.height() + time * fall).rem_euclid(rect.height());
+            painter.circle_filled(Pos2::new(x, y), 1.0 + hash(i) * 1.2, alpha((150, 146, 136), 0.35 * quake + 0.15));
+        }
+    }
+}
+
+/// The ground's body, textured like the street or the embankment of the
+/// world: cobbles on top of dark concrete in the city, packed dirt in a
+/// drought, sludge in mud, a wet canal wall by the water. `line` is the
+/// surface polyline, `meters` the meter under each of its points, and
+/// `ppm` the zoom.
+pub fn ground_body(painter: &Painter, rect: Rect, cfg: &Config, line: &[Pos2], meters: &[f32], ppm: f32) {
+    if line.len() < 2 {
+        return;
+    }
+    let dry = amount(cfg, "Drought").max(amount(cfg, "Heat wave") * 0.8);
+    let (body, crust) = if amount(cfg, "Mud") > 0.0 {
+        (Art::Mud, Art::Mud)
+    } else if dry > 0.0 {
+        (Art::Dirt, Art::Sand)
+    } else if amount(cfg, "Water") > 0.0 {
+        (Art::ConcreteDark, Art::ConcreteDark)
+    } else {
+        (Art::ConcreteDark, Art::Cobble)
+    };
+    let ctx = painter.ctx();
+    // The body: one repeat per 1.6 m, the texture fixed to the ground as it
+    // scrolls, dark toward the frame's bottom.
+    let tile = 1.6 * ppm;
+    let mut mesh = Mesh::with_texture(body.texture(ctx));
+    for (i, (p, m)) in line.iter().zip(meters).enumerate() {
+        let u = m * ppm / tile;
+        let depth = (rect.bottom() - p.y).max(0.0);
+        for (pos, v, color) in [
+            (*p, 0.0, Color32::from_gray(150)),
+            (Pos2::new(p.x, rect.bottom()), depth / tile, Color32::from_gray(58)),
+        ] {
+            mesh.vertices.push(Vertex {
+                pos,
+                uv: Pos2::new(u, v + 0.37),
+                color,
+            });
+        }
+        if i > 0 {
+            let k = (i * 2) as u32;
+            mesh.indices.extend_from_slice(&[k - 2, k - 1, k, k - 1, k + 1, k]);
+        }
+    }
+    painter.add(egui::Shape::Mesh(mesh.into()));
+    // The crust: the street's surface seen at a grazing angle, a band a few
+    // centimeters thick squeezed from its texture.
+    let thick = (0.16 * ppm).clamp(8.0, 26.0);
+    let mut mesh = Mesh::with_texture(crust.texture(ctx));
+    for (i, (p, m)) in line.iter().zip(meters).enumerate() {
+        let u = m / 0.9;
+        for (pos, v, color) in [
+            (*p, 0.0, Color32::from_gray(235)),
+            (*p + Vec2::new(0.0, thick), 0.5, Color32::from_gray(150)),
+        ] {
+            mesh.vertices.push(Vertex {
+                pos,
+                uv: Pos2::new(u, v),
+                color,
+            });
+        }
+        if i > 0 {
+            let k = (i * 2) as u32;
+            mesh.indices.extend_from_slice(&[k - 2, k - 1, k, k - 1, k + 1, k]);
+        }
+    }
+    painter.add(egui::Shape::Mesh(mesh.into()));
+    // The curb under the crust: a pale concrete edge with a shadow below.
+    let curb: Vec<Pos2> = line.iter().map(|p| *p + Vec2::new(0.0, thick + 1.5)).collect();
+    painter.add(egui::Shape::line(curb.clone(), Stroke::new(3.0, Color32::from_rgb(150, 148, 138))));
+    band(
+        painter,
+        &curb.iter().map(|p| *p + Vec2::new(0.0, 1.5)).collect::<Vec<_>>(),
+        14.0,
+        Color32::from_black_alpha(150),
+        Color32::TRANSPARENT,
+    );
+    // The top of the crust catches the overcast light.
+    band(
+        painter,
+        line,
+        thick * 0.5,
+        Color32::from_white_alpha(28),
+        Color32::TRANSPARENT,
+    );
+    let _ = gradient;
+}
+
+/// A convex polygon filled with a tiled texture, `tile` points per repeat,
+/// the texture fixed to the polygon's first point.
+fn textured_fan(painter: &Painter, pts: &[Pos2], art: Art, tile: f32, tint: Color32) {
+    if pts.len() < 3 {
+        return;
+    }
+    let mut mesh = Mesh::with_texture(art.texture(painter.ctx()));
+    let origin = pts[0];
+    for p in pts {
+        mesh.vertices.push(Vertex {
+            pos: *p,
+            uv: ((*p - origin) / tile).to_pos2(),
+            color: tint,
+        });
+    }
+    for i in 1..pts.len() as u32 - 1 {
+        mesh.indices.extend_from_slice(&[0, i, i + 1]);
+    }
+    painter.add(egui::Shape::Mesh(mesh.into()));
 }
 
 /// Hazard stripes, amber and black, filling `rect`.
@@ -749,10 +936,20 @@ pub fn structures(
             }
             mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
             painter.add(egui::Shape::mesh(mesh));
-            // The pit walls, and a striped marker on each lip.
-            let wall = Stroke::new(2.0, Color32::from_rgb(60, 58, 50));
-            painter.line_segment([lip_a, Pos2::new(lip_a.x, floor)], wall);
-            painter.line_segment([lip_b, Pos2::new(lip_b.x, floor)], wall);
+            // The pit walls: rusted steel sheet piling, and a striped
+            // marker on each lip.
+            let wall = (0.12 * ppm).clamp(4.0, 14.0);
+            for (x0, x1) in [(lip_a.x, lip_a.x + wall), (lip_b.x - wall, lip_b.x)] {
+                let top = if x0 < lip_b.x - wall * 1.5 { lip_a.y } else { lip_b.y };
+                crate::theme::tiled(
+                    painter,
+                    Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x1, floor)),
+                    Art::Rust,
+                    Vec2::splat((0.8 * ppm).max(8.0)),
+                    Vec2::new(k as f32 * 0.37, 0.0),
+                    Color32::from_gray(120),
+                );
+            }
             let mark = (0.35 * ppm).clamp(10.0, 42.0);
             let tall = (0.05 * ppm).clamp(3.0, 7.0);
             hazard(
@@ -791,7 +988,7 @@ pub fn structures(
             {
                 continue;
             }
-            let body = vec![
+            let body = [
                 at(s, height(s, true)),
                 at(tl, height(tl, true)),
                 at(tr, height(tr, true)),
@@ -801,20 +998,47 @@ pub fn structures(
                 at(tl, height(tl, false)),
                 at(s, height(s, false)),
             ];
-            painter.add(egui::Shape::convex_polygon(
-                body.clone(),
-                Color32::from_rgb(98, 96, 88),
-                Stroke::new(1.0, Color32::from_rgb(40, 38, 34)),
+            // Concrete barriers; the highest level is a Combine wall of
+            // dark plate with a cold light along it.
+            let combine = amount(cfg, "Hurdles") >= 1.0;
+            let art = if combine {
+                Art::CombinePlate
+            } else {
+                Art::ConcreteLight
+            };
+            let tile = (0.9 * ppm).max(8.0);
+            textured_fan(painter, &body, art, tile, Color32::from_gray(if combine { 150 } else { 190 }));
+            painter.add(egui::Shape::closed_line(
+                body.to_vec(),
+                Stroke::new(1.2, Color32::from_rgb(24, 24, 22)),
             ));
-            // Worn streaks down the face.
-            for j in 1..4 {
-                let x = tl + (tr - tl) * j as f32 / 4.0;
-                painter.line_segment(
-                    [at(x, height(x, true)), at(x, height(x, false))],
-                    Stroke::new(1.0, alpha((60, 58, 52), 0.5)),
-                );
-            }
+            // Shade toward the foot, a lit top edge.
+            let foot = body[6].y.max(body[5].y);
+            gradient(
+                painter,
+                Rect::from_min_max(Pos2::new(body[0].x, rect.top()), Pos2::new(body[3].x, rect.bottom())),
+                (body[1].y + foot) * 0.5,
+                foot,
+                Color32::TRANSPARENT,
+                Color32::from_black_alpha(90),
+            );
+            painter.line_segment(
+                [body[1] + Vec2::new(0.0, 1.0), body[2] + Vec2::new(0.0, 1.0)],
+                Stroke::new(1.5, alpha((230, 230, 220), 0.35)),
+            );
             let (a, b) = (body[1], body[2]);
+            if combine {
+                let y = a.y + (foot - a.y) * 0.4;
+                painter.line_segment(
+                    [Pos2::new(a.x + 3.0, y), Pos2::new(b.x - 3.0, y)],
+                    Stroke::new(2.0, Color32::from_rgb(130, 210, 255)),
+                );
+                painter.line_segment(
+                    [Pos2::new(a.x + 3.0, y), Pos2::new(b.x - 3.0, y)],
+                    Stroke::new(7.0, alpha((120, 200, 255), 0.18)),
+                );
+                continue;
+            }
             let tall = (0.06 * ppm).clamp(3.0, 8.0);
             if (body[6].y - a.y) > tall * 2.0 {
                 hazard(
