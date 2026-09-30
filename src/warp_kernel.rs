@@ -259,48 +259,104 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
     source
 }
 
-/// One creature's records before they are joined into a class's buffers.
-struct Packed {
-    lanes: Vec<u32>,
-    muscles: Vec<f32>,
-    ends: Vec<u32>,
-    head: [u32; 8],
-    key: (u32, u32, u32),
+/// A creature's size in its class's buffers and its place in the sort, from
+/// its genes alone: muscle rounds, end-list words per round, tree depth.
+#[derive(Clone, Copy)]
+struct Size {
+    rounds: usize,
+    words: usize,
+    depth: u32,
+    nodes: usize,
 }
 
-/// The records of one creature on `w` lanes.
-fn pack_creature(model: &Model, cfg: &Config, hash: u32, w: usize) -> Packed {
+fn size_of(pop: &Population, i: usize, w: usize) -> Size {
+    let g = &pop.genomes[i];
+    let bones = &pop.bones[g.bone_start..g.bone_start + g.bone_count];
+    let muscles = &pop.muscles[g.muscle_start..g.muscle_start + g.muscle_count];
+    // Bone levels: the neck is 1; a bone is one below the bone ending at its
+    // pivot (the neck for a pivot at the head). Genes keep parents first.
+    let mut end_of = [usize::MAX; MAX_NODES];
+    let mut level = [0u32; MAX_NODES];
+    let mut depth = 1;
+    for (j, b) in bones.iter().enumerate() {
+        let parent = if j == 0 {
+            usize::MAX
+        } else if b.a == 0 {
+            0
+        } else {
+            end_of[b.a as usize]
+        };
+        level[j] = if parent == usize::MAX { 1 } else { level[parent] + 1 };
+        depth = depth.max(level[j]);
+        end_of[b.b as usize] = j;
+    }
+    let rounds = muscles.len().div_ceil(w);
+    let mut count = [[0u8; MAX_NODES]; ROUNDS];
+    let mut most = 0usize;
+    for (k, m) in muscles.iter().enumerate() {
+        for bone in [m.bone_a, m.bone_b] {
+            let c = &mut count[k / w][bone as usize];
+            *c += 1;
+            most = most.max(*c as usize);
+        }
+    }
+    Size {
+        rounds,
+        words: most.div_ceil(4),
+        depth,
+        nodes: g.node_count,
+    }
+}
+
+/// Writes one creature's lane records, muscle records and end lists into
+/// its slices of its class's buffers, and returns its two head words.
+fn fill_creature(
+    model: &Model,
+    cfg: &Config,
+    hash: u32,
+    w: usize,
+    size: Size,
+    lanes: &mut [u32],
+    muscles: &mut [f32],
+    ends: &mut [u32],
+) -> [u32; 8] {
     let start = model.start(cfg);
     let bones = model.pivot.len();
     let nodes = bones + 1;
-    // Breadth-first bone order: lane of each bone, bone of each lane.
-    let mut children = vec![Vec::new(); bones];
+    // Breadth-first bone order, with each bone's children as a list.
+    let mut first = [usize::MAX; MAX_NODES];
+    let mut next = [usize::MAX; MAX_NODES];
+    let mut last = [usize::MAX; MAX_NODES];
+    let mut children = [0u32; MAX_NODES];
     for j in 1..bones {
         let parent = model.parent[j].unwrap_or(0);
-        children[parent].push(j);
+        if first[parent] == usize::MAX {
+            first[parent] = j;
+        } else {
+            next[last[parent]] = j;
+        }
+        last[parent] = j;
+        children[parent] += 1;
     }
-    let mut order = Vec::with_capacity(bones);
-    order.push(0usize);
-    let mut at = 0;
-    while at < order.len() {
-        let j = order[at];
-        order.extend(children[j].iter().copied());
+    let mut order = [0usize; MAX_NODES];
+    let (mut len, mut at) = (1, 0);
+    while at < len {
+        let mut c = first[order[at]];
+        while c != usize::MAX {
+            order[len] = c;
+            len += 1;
+            c = next[c];
+        }
         at += 1;
     }
-    let mut lane_of_bone = vec![0usize; bones];
-    for (k, &j) in order.iter().enumerate() {
+    let mut lane_of_bone = [0usize; MAX_NODES];
+    for (k, &j) in order[..bones].iter().enumerate() {
         lane_of_bone[j] = k + 1;
     }
-    let lane_of_node = |node: usize| {
-        if node == 0 {
-            0
-        } else {
-            lane_of_bone[node - 1]
-        }
-    };
-    let mut level = vec![0u32; bones];
-    let mut ancestors = vec![0u32; bones];
-    for &j in &order {
+    let lane_of_node = |node: usize| if node == 0 { 0 } else { lane_of_bone[node - 1] };
+    let mut level = [0u32; MAX_NODES];
+    let mut ancestors = [0u32; MAX_NODES];
+    for &j in &order[..bones] {
         let (up_level, up_mask) = match model.parent[j] {
             Some(p) if j > 0 => (level[p], ancestors[p]),
             _ => (0, 0),
@@ -308,8 +364,6 @@ fn pack_creature(model: &Model, cfg: &Config, hash: u32, w: usize) -> Packed {
         level[j] = up_level + 1;
         ancestors[j] = up_mask | 1 << lane_of_bone[j];
     }
-    let depth = level.iter().copied().max().unwrap_or(1);
-    let mut lanes = vec![0u32; LANE_FIELDS * w];
     let mut put = |field: usize, lane: usize, value: u32| lanes[field * w + lane] = value;
     // The head.
     put(0, 0, model.mass[0].to_bits());
@@ -325,12 +379,12 @@ fn pack_creature(model: &Model, cfg: &Config, hash: u32, w: usize) -> Packed {
             Some(p) if j > 0 => lane_of_bone[p],
             _ => 1,
         };
-        let first_child = children[j].first().map_or(0, |&c| lane_of_bone[c]);
+        let first_child = if first[j] == usize::MAX { 0 } else { lane_of_bone[first[j]] };
         let topo = lane_of_node(pivot) as u32
             | (parent_lane as u32) << 5
             | level[j] << 10
             | (first_child as u32) << 15
-            | (children[j].len() as u32) << 20;
+            | children[j] << 20;
         put(0, lane, model.mass[node].to_bits());
         put(1, lane, model.radius[node].to_bits());
         put(2, lane, model.friction[node].to_bits());
@@ -345,11 +399,11 @@ fn pack_creature(model: &Model, cfg: &Config, hash: u32, w: usize) -> Packed {
         put(10, lane, ancestors[j]);
         put(11, lane, node as u32);
     }
-    // Muscles and the lists of the muscle ends each bone carries.
-    let count = model.muscles.len();
-    let rounds = count.div_ceil(w);
-    let mut muscles = vec![0f32; rounds * MUSCLE_FIELDS * w];
-    let mut lists: Vec<Vec<Vec<u8>>> = vec![vec![Vec::new(); w]; rounds];
+    // Muscles, and the ends each bone carries: four byte slots per word
+    // (muscle lane times two plus the end), 255 for none.
+    let limits = physics::limits();
+    let mut filled = [[0usize; MAX_NODES]; ROUNDS];
+    let words = size.words;
     for (k, m) in model.muscles.iter().enumerate() {
         let (round, lane) = (k / w, k % w);
         let la = lane_of_bone[m.bone_a];
@@ -359,7 +413,6 @@ fn pack_creature(model: &Model, cfg: &Config, hash: u32, w: usize) -> Packed {
             .map_or(0, |node| (lane_of_node(node) as u32) << 10 | 1 << 15);
         let packed = la as u32 | (lb as u32) << 5 | sensor;
         let strength = m.strength * model.muscle_scale;
-        let limits = physics::limits();
         let values = [
             f32::from_bits(packed),
             m.anchor_a,
@@ -380,43 +433,37 @@ fn pack_creature(model: &Model, cfg: &Config, hash: u32, w: usize) -> Packed {
         ];
         let at = ((round * w) + lane) * MUSCLE_FIELDS;
         muscles[at..at + MUSCLE_FIELDS].copy_from_slice(&values);
-        lists[round][la].push((2 * lane) as u8);
-        lists[round][lb].push((2 * lane + 1) as u8);
-    }
-    let words = lists
-        .iter()
-        .flatten()
-        .map(|l| l.len().div_ceil(4))
-        .max()
-        .unwrap_or(0);
-    let mut ends = vec![u32::MAX; rounds * words * w];
-    for (round, per_lane) in lists.iter().enumerate() {
-        for (lane, list) in per_lane.iter().enumerate() {
-            for (e, &slot) in list.iter().enumerate() {
-                let at = (round * words + e / 4) * w + lane;
-                let shift = 8 * (e % 4);
-                ends[at] = (ends[at] & !(0xff << shift)) | u32::from(slot) << shift;
-            }
+        for (end_lane, slot) in [(la, 2 * lane), (lb, 2 * lane + 1)] {
+            let e = filled[round][end_lane];
+            filled[round][end_lane] += 1;
+            let at = (round * words + e / 4) * w + end_lane;
+            let shift = 8 * (e % 4);
+            ends[at] = (ends[at] & !(0xff << shift)) | (slot as u32) << shift;
         }
     }
-    let head = [
-        nodes as u32 | depth << 8 | (rounds as u32) << 16 | (words as u32) << 24,
-        count as u32,
+    [
+        nodes as u32 | size.depth << 8 | (size.rounds as u32) << 16 | (words as u32) << 24,
+        model.muscles.len() as u32,
         hash,
         0,
         0,
         model.total_mass.to_bits(),
         model.inv_mass.to_bits(),
         0,
-    ];
-    Packed {
-        lanes,
-        muscles,
-        ends,
-        head,
-        key: (rounds as u32, depth, nodes as u32),
-    }
+    ]
 }
+
+/// Raw buffer pointers that parallel fills write through, each creature in
+/// its own range.
+#[derive(Clone, Copy)]
+struct Out {
+    lanes: *mut u32,
+    muscles: *mut f32,
+    ends: *mut u32,
+    heads: *mut [u32; 4],
+}
+unsafe impl Send for Out {}
+unsafe impl Sync for Out {}
 
 /// Packs the creatures at `indices` of `pop` into one batch per lane class.
 /// A batch's `capacity` is its lane count, which is also the node stride of a
@@ -443,52 +490,73 @@ pub fn pack(pop: &Population, indices: &[usize], cfg: &Config) -> Result<Vec<Lan
             continue;
         }
         let w = CLASSES[class];
-        let mut packed: Vec<(usize, usize, Packed)> = members
+        let mut sized: Vec<(usize, usize, Size)> = members
             .into_par_iter()
-            .map(|(slot, i)| {
-                let creature = pop.creature(i);
-                let model = Model::new(&creature, cfg);
-                let hash = physics::quake_hash(pop.genomes[i].id);
-                (slot, i, pack_creature(&model, cfg, hash, w))
-            })
+            .map(|(slot, i)| (slot, i, size_of(pop, i, w)))
             .collect();
         // Similar bodies share a warp: the same loop counts.
-        packed.sort_by_key(|(_, i, p)| (p.key, *i));
-        let count = packed.len();
+        sized.par_sort_by_key(|&(_, i, z)| (z.rounds, z.depth, z.nodes, i));
+        let count = sized.len();
+        let (mut muscle_at, mut end_at) = (Vec::with_capacity(count), Vec::with_capacity(count));
+        let (mut muscle_len, mut end_len) = (0usize, 0usize);
+        for &(_, _, z) in &sized {
+            muscle_at.push(muscle_len);
+            end_at.push(end_len);
+            muscle_len += z.rounds * w * MUSCLE_FIELDS;
+            end_len += z.rounds * z.words * w;
+        }
         let mut wave = WavePack {
-            lanes: Vec::with_capacity(count * LANE_FIELDS * w),
-            muscles: Vec::new(),
-            ends: Vec::new(),
-            heads: Vec::with_capacity(2 * count),
+            lanes: vec![0u32; count * LANE_FIELDS * w],
+            muscles: vec![0f32; muscle_len.max(1)],
+            ends: vec![u32::MAX; end_len.max(1)],
+            heads: vec![[0u32; 4]; 2 * count],
         };
-        let mut info = Vec::with_capacity(count);
-        for (_, i, p) in &packed {
-            let mut head = p.head;
-            head[3] = wave.muscles.len() as u32;
-            head[4] = wave.ends.len() as u32;
-            wave.lanes.extend_from_slice(&p.lanes);
-            wave.muscles.extend_from_slice(&p.muscles);
-            wave.ends.extend_from_slice(&p.ends);
-            wave.heads.push([head[0], head[1], head[2], head[3]]);
-            wave.heads.push([head[4], head[5], head[6], head[7]]);
-            let g = &pop.genomes[*i];
-            info.push([
-                g.node_count as u32,
-                g.bone_count as u32,
-                g.muscle_count as u32,
-                head[2],
-            ]);
-        }
-        if wave.muscles.is_empty() {
-            wave.muscles.push(0.0);
-        }
-        if wave.ends.is_empty() {
-            wave.ends.push(u32::MAX);
-        }
+        let out = Out {
+            lanes: wave.lanes.as_mut_ptr(),
+            muscles: wave.muscles.as_mut_ptr(),
+            ends: wave.ends.as_mut_ptr(),
+            heads: wave.heads.as_mut_ptr(),
+        };
+        sized.par_iter().enumerate().for_each(|(c, &(_, i, z))| {
+            let out = out;
+            let creature = pop.creature(i);
+            let model = Model::new(&creature, cfg);
+            let hash = physics::quake_hash(pop.genomes[i].id);
+            // SAFETY: creature `c` owns lanes [c * LANE_FIELDS * w, ..),
+            // muscles from muscle_at[c] and ends from end_at[c], each as long
+            // as its size says, and heads 2c and 2c + 1; the ranges are
+            // disjoint and inside the buffers allocated above.
+            unsafe {
+                let lanes = std::slice::from_raw_parts_mut(out.lanes.add(c * LANE_FIELDS * w), LANE_FIELDS * w);
+                let muscles = std::slice::from_raw_parts_mut(
+                    out.muscles.add(muscle_at[c]),
+                    z.rounds * w * MUSCLE_FIELDS,
+                );
+                let ends = std::slice::from_raw_parts_mut(out.ends.add(end_at[c]), z.rounds * z.words * w);
+                let mut head = fill_creature(&model, cfg, hash, w, z, lanes, muscles, ends);
+                head[3] = muscle_at[c] as u32;
+                head[4] = end_at[c] as u32;
+                *out.heads.add(2 * c) = [head[0], head[1], head[2], head[3]];
+                *out.heads.add(2 * c + 1) = [head[4], head[5], head[6], head[7]];
+            }
+        });
+        let info = sized
+            .iter()
+            .enumerate()
+            .map(|(c, &(_, i, _))| {
+                let g = &pop.genomes[i];
+                [
+                    g.node_count as u32,
+                    g.bone_count as u32,
+                    g.muscle_count as u32,
+                    wave.heads[2 * c][2],
+                ]
+            })
+            .collect();
         batches.push(LaneBatch {
             capacity: w,
-            slots: packed.iter().map(|(slot, _, _)| *slot).collect(),
-            creatures: packed.iter().map(|(_, i, _)| *i).collect(),
+            slots: sized.iter().map(|&(slot, _, _)| slot).collect(),
+            creatures: sized.iter().map(|&(_, i, _)| i).collect(),
             nodes: Vec::new(),
             info,
             tiles: Vec::new(),
