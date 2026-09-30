@@ -2514,10 +2514,17 @@ impl App {
             );
         }
         if let Some(s) = &self.snapshot {
+            // A narrow view has no room beside the creature's counters, so
+            // the generation moves to the top left corner.
+            let (anchor, align) = if rect.width() < 760. {
+                (rect.left_top() + Vec2::splat(inset), Align2::LEFT_TOP)
+            } else {
+                (rect.right_bottom() - Vec2::splat(inset), Align2::RIGHT_BOTTOM)
+            };
             counter(
                 &painter,
-                rect.right_bottom() - Vec2::splat(inset),
-                Align2::RIGHT_BOTTOM,
+                anchor,
+                align,
                 &Counter {
                     label: "Gen",
                     digits: s.generation.to_string(),
@@ -3909,43 +3916,31 @@ impl App {
                 ),
             );
             let is_leader = i == leader;
-            // Each lane is a strip of the world: overcast sky over a band
-            // of dirt, the leader's lane framed in amber.
-            let ground = lane_rect.bottom() - 12.;
+            // Each lane is a strip of the world: its sky and skyline over a
+            // street, the leader's lane framed in orange.
+            let ground = lane_rect.bottom() - 16.;
             let lane_painter = painter.with_clip_rect(lane_rect);
-            lane_painter.rect_filled(lane_rect, 0, SKY_HORIZON);
-            let sky = egui::epaint::Mesh {
-                indices: vec![0, 1, 2, 0, 2, 3],
-                vertices: [
-                    (lane_rect.left_top(), SKY_TOP),
-                    (lane_rect.right_top(), SKY_TOP),
-                    (Pos2::new(lane_rect.right(), ground), SKY_HORIZON),
-                    (Pos2::new(lane_rect.left(), ground), SKY_HORIZON),
-                ]
-                .into_iter()
-                .map(|(pos, color)| egui::epaint::Vertex {
-                    pos,
-                    uv: egui::epaint::WHITE_UV,
-                    color,
-                })
-                .collect(),
-                ..Default::default()
-            };
-            lane_painter.add(egui::Shape::mesh(sky));
-            lane_painter.rect_filled(
-                Rect::from_min_max(
-                    Pos2::new(lane_rect.left(), ground),
-                    lane_rect.right_bottom(),
-                ),
-                0,
-                GROUND_TOP,
+            let lane_config = &lane.playback.config;
+            let clock = lane.playback.tick as f32 / physics::rate() as f32;
+            crate::world_fx::backdrop(
+                &lane_painter,
+                lane_rect,
+                ground,
+                camera * zoom + i as f32 * 900.,
+                clock,
+                lane_config,
             );
-            lane_painter.line_segment(
-                [
-                    Pos2::new(lane_rect.left(), ground),
-                    Pos2::new(lane_rect.right(), ground),
-                ],
-                Stroke::new(1.5, GROUND_EDGE),
+            let span = [
+                Pos2::new(lane_rect.left(), ground),
+                Pos2::new(lane_rect.right(), ground),
+            ];
+            crate::world_fx::ground_body(
+                &lane_painter,
+                lane_rect,
+                lane_config,
+                &span,
+                &[camera, camera + lane_rect.width() / zoom],
+                zoom,
             );
             // A tick about every 150 px: 0.5, 1, 2, 5 or 10 m.
             let step = [0.5f32, 1.0, 2.0, 5.0, 10.0]
