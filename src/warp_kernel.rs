@@ -189,6 +189,16 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
         ("PGS_SWEEPS".into(), format!("{}u", solver_setting("PGS_SWEEPS", PGS_SWEEPS))),
         ("CLEAN_SWEEPS".into(), format!("{}u", solver_setting("CLEAN_SWEEPS", CLEAN_SWEEPS))),
         ("RECORD".into(), (if record { "1" } else { "0" }).into()),
+        // The substep ladder's switches (docs/plan-2m.md, section 6 item 3),
+        // all off in the game: the realized-friction-work ledger, anchored
+        // friction with its energy store, spin-adaptive substeps (SUBSTEPS
+        // becomes the count for fast steps, calm steps run one), and the
+        // diagnostic result words. Rungs: L0 is SUBSTEPS=1; L1 adds LEDGER=1;
+        // L2 adds ANCHOR=1; L2.5 is SUBSTEPS=2 ADAPT=1 LEDGER=1 ANCHOR=1.
+        ("LEDGER".into(), format!("{}", solver_setting("LEDGER", 0))),
+        ("ANCHOR".into(), format!("{}", solver_setting("ANCHOR", 0))),
+        ("ADAPT".into(), format!("{}", solver_setting("ADAPT", 0))),
+        ("DIAG".into(), format!("{}", solver_setting("DIAG", 0))),
         (
             "PROFILE".into(),
             format!("{}", solver_setting("PROFILE", 0)),

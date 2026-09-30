@@ -24,11 +24,47 @@
 // TERRAIN, SLOPE, GAPS, HURDLES, QUAKE, MUD, WATER, ICE, WIND, AIR) and the
 // physics constants.
 
+// Developer switches of the substep ladder (EVOLUTION_WARP_LEDGER, _ANCHOR,
+// _ADAPT, _DIAG; see warp_kernel::cuda_source). All off is the game's physics.
+// LEDGER: friction's realized positive work on a substep's motion is taken
+// back from the internal kinetic energy, as the first law does in flight.
+// ANCHOR: a planted node holds the point where it landed and slides only when
+// the friction cone binds; the pull back returns at most the friction work
+// the node absorbed since it landed.
+// ADAPT: a step runs SUBSTEPS substeps when a bone turns faster than
+// ADAPT_SPIN or a node approaches the ground faster than ADAPT_APPROACH,
+// else one.
+// DIAG: a scoring trial reports its positive realized friction work, its
+// muscle work, the energy the ledger took back and its share of one-substep
+// steps in four behavior words (previous_center_y, vertical_extremum,
+// vertical_trend, contact_hi) that the host does not read.
+#ifndef LEDGER
+#define LEDGER 0
+#endif
+#ifndef ANCHOR
+#define ANCHOR 0
+#endif
+#ifndef ADAPT
+#define ADAPT 0
+#endif
+#ifndef DIAG
+#define DIAG 0
+#endif
+#define ADAPT_SPIN 5.0f
+#define ADAPT_APPROACH 0.5f
 #define FULL 0xffffffffu
 #define GM ((W == 32) ? 0xffffffffu : ((1u << W) - 1u))
 #define DT (1.0f / RATE)
+#if ADAPT
+// The substep length of the group's current step.
+#define HS hs_
+#define INV_HS inv_hs_
+#define AIR_SUB air_s_
+#else
 #define HS (1.0f / (RATE * SUBSTEPS))
 #define INV_HS (RATE * SUBSTEPS)
+#define AIR_SUB p.air_sub
+#endif
 #define LF 12u
 #define MF 16u
 #define RMAX 4
@@ -250,6 +286,25 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     float& head_shake = *reinterpret_cast<float*>(&s_bits[tid / W].w);
     // Contact forces of the last step, per node, for a recording.
     float rec_n = 0.0f, rec_t = 0.0f;
+#if LEDGER || ANCHOR || DIAG
+    // The friction force on this lane's node in the last substep, and the
+    // node's position at that substep's start: the realized friction work.
+    float fr_x = 0.0f, fr_y = 0.0f, x_start = 0.0f;
+    bool slid = false;
+#endif
+#if ANCHOR
+    // The node's friction anchor: the point it holds, the friction work it
+    // absorbed since it landed, whether it is set, and whether the node
+    // touched the ground in this step.
+    float anc_x = 0.0f, anc_y = 0.0f, anc_store = 0.0f;
+    bool anc_on = false, anc_touch = false;
+#endif
+#if DIAG
+    float d_fpos = 0.0f, d_mwork = 0.0f, d_taken = 0.0f, d_one = 0.0f;
+#endif
+#if ADAPT
+    unsigned prev_nsub = SUBSTEPS;
+#endif
 #if RECORD
     Result kept;
     bool done_scoring = false;
@@ -391,6 +446,18 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 for (int r = 0; r < RMAX; r++) { s_en[r][tid] = 1.0f; s_off[r][tid] = 0.0f; s_mag[r][tid] = 0.0f; s_wp[r][tid] = -1.0f; tpull[r] = 0.0f; }
                 reset_metrics();
                 rec_n = 0.0f; rec_t = 0.0f;
+#if LEDGER || ANCHOR || DIAG
+                fr_x = 0.0f; fr_y = 0.0f; slid = false;
+#endif
+#if ANCHOR
+                anc_x = 0.0f; anc_y = 0.0f; anc_store = 0.0f; anc_on = false; anc_touch = false;
+#endif
+#if DIAG
+                d_fpos = 0.0f; d_mwork = 0.0f; d_taken = 0.0f; d_one = 0.0f;
+#endif
+#if ADAPT
+                prev_nsub = SUBSTEPS;
+#endif
                 step = 0u;
                 live = true;
                 fresh = true;
@@ -485,13 +552,58 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
         // Carried from a substep's body to the balance at the top of the next.
         float mx = 0.0f, my = 0.0f, ledger = 0.0f, scale = 0.0f, y_start = 0.0f, buoy = 0.0f;
         unsigned nc = 0u;
+#if ADAPT
+        // This step's substeps, from the group's state: SUBSTEPS when a bone
+        // turns fast or a node comes down fast onto the ground, else one. A
+        // new creature starts at rest. The warp runs its groups' largest
+        // count; a group past its own count leaves its state untouched.
+        unsigned nsub = 1u;
+        {
+            bool need = false;
+            if (!fresh && valid) {
+                if (body && fabsf(om) > ADAPT_SPIN) { need = true; }
+#if GROUND
+                const float2 g = terrain(px);
+                const float secant = sqrtf(1.0f + g.y * g.y);
+                const float vn = (vy - vx * g.y) / secant;
+#if MUD
+                const float gap = (py - g.x) / secant - rad + p.mud;
+#else
+                const float gap = (py - g.x) / secant - rad;
+#endif
+                if (vn < -ADAPT_APPROACH && gap + DT * vn <= 0.0f) { need = true; }
+#endif
+            }
+            nsub = ((__ballot_sync(FULL, need) >> gshift) & GM) != 0u ? SUBSTEPS : 1u;
+        }
+        if (nsub != prev_nsub) {
+            // The kept waveform belongs to a substep of the other length.
+#pragma unroll
+            for (int r = 0; r < RMAX; r++) { s_wp[r][tid] = -1.0f; }
+        }
+        prev_nsub = nsub;
+        const unsigned maxsub = __reduce_max_sync(FULL, nsub);
+        const float hs_ = 1.0f / (RATE * (float)nsub);
+        const float inv_hs_ = RATE * (float)nsub;
+        const float air_s_ = nsub == 1u ? p.air : p.air_sub;
+#if DIAG
+        if (live && nsub == 1u) { d_one += 1.0f; }
+#endif
+#else
+        const unsigned nsub = SUBSTEPS;
+        const unsigned maxsub = SUBSTEPS;
+#endif
         for (unsigned sub = 0u;; sub++) {
             // Node positions and velocities from the state: for a new
             // creature before its first substep, and after every substep.
             PROF(1);
             if (sub > 0u || __any_sync(FULL, fresh)) {
-                kinematics(sub > 0u || fresh);
+                kinematics((sub > 0u && sub <= nsub) || fresh);
             }
+            // Whether this group balances a substep it just ran, and whether
+            // it runs one now.
+            const bool bal = sub > 0u && sub <= nsub;
+            const bool act = sub < nsub;
             PROF(2);
             s_t0[tid] = make_float4(px, py, ppx, ppy);
             __syncwarp();
@@ -512,19 +624,21 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     const float ex = gsum(mx), ey = gsum(my);
                     const float ax_ = gsum(valid ? m * vx : 0.0f), ay_ = gsum(valid ? m * vy : 0.0f);
     #if AIR
-                    const float wantx = ex * p.air_sub, wanty = ey * p.air_sub;
+                    const float wantx = ex * AIR_SUB, wanty = ey * AIR_SUB;
     #else
                     const float wantx = ex, wanty = ey;
     #endif
                     const float sx = (wantx - ax_) * inv_mass, sy = (wanty - ay_) * inv_mass;
-                    vx += sx;
-                    vy += sy;
-                    pvx += sx;
-                    pvy += sy;
+                    if (bal) {
+                        vx += sx;
+                        vy += sy;
+                        pvx += sx;
+                        pvy += sy;
+                    }
                     // First law in flight: a substep without ground contact gains no
                     // more energy than the muscles, the wind, the buoyancy and the
                     // tendons put in.
-                    if (__any_sync(FULL, live && nc == 0u)) {
+                    if (__any_sync(FULL, live && bal && nc == 0u)) {
     #pragma unroll
                         for (int r = 0; r < RMAX; r++) {
                             if ((unsigned)r >= maxrounds) { break; }
@@ -563,7 +677,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                         const float cx = wantx * inv_mass, cy = wanty * inv_mass;
                         const float dvx = vx - cx, dvy = vy - cy;
                         const float internal = gsum(valid ? 0.5f * m * (dvx * dvx + dvy * dvy) : 0.0f);
-                        if (live && nc == 0u && excess > 0.0f) {
+                        if (live && bal && nc == 0u && excess > 0.0f) {
                             const float keep = internal > 0.0f ? sqrtf(fmaxf(1.0f - excess / internal, 0.0f)) : 0.0f;
                             qd *= keep;
                             om *= keep;
@@ -573,10 +687,53 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                             pvy = cy + keep * (pvy - cy);
                         }
                     }
+#if LEDGER || ANCHOR || DIAG
+                    // Realized friction work: the friction force of the last
+                    // substep times the node's actual displacement in it.
+                    // Positive work (beyond an anchor's store) is energy that
+                    // friction made up; the ledger takes it back from the
+                    // motion about the center of mass.
+                    float over = 0.0f;
+                    if (bal) {
+                        const float fw = fr_x * (px - x_start) + fr_y * (py - y_start);
+#if DIAG
+                        if (live) { d_fpos += fmaxf(fw, 0.0f); }
+#endif
+#if ANCHOR
+                        // A sliding node plants again where it ended, with an
+                        // empty store: sliding friction's work is heat.
+                        anc_store -= fw;
+                        if (anc_store < 0.0f) { over = -anc_store; anc_store = 0.0f; }
+                        if (slid) { anc_x = px; anc_y = py; anc_store = 0.0f; }
+#else
+                        over = fmaxf(fw, 0.0f);
+#endif
+                    }
+#if LEDGER
+                    if (__any_sync(FULL, live && over > 0.0f)) {
+                        const float taken = gsum(valid ? over : 0.0f);
+                        const float cx = wantx * inv_mass, cy = wanty * inv_mass;
+                        const float dvx = vx - cx, dvy = vy - cy;
+                        const float internal = gsum(valid ? 0.5f * m * (dvx * dvx + dvy * dvy) : 0.0f);
+                        if (live && bal && taken > 0.0f) {
+                            const float keep = internal > 0.0f ? sqrtf(fmaxf(1.0f - taken / internal, 0.0f)) : 0.0f;
+                            qd *= keep;
+                            om *= keep;
+                            vx = cx + keep * dvx;
+                            vy = cy + keep * dvy;
+                            pvx = cx + keep * (pvx - cx);
+                            pvy = cy + keep * (pvy - cy);
+#if DIAG
+                            if (lg == 0u) { d_taken += fminf(taken, internal); }
+#endif
+                        }
+                    }
+#endif
+#endif
                 }
             }
             PROF(3);
-            if (sub == SUBSTEPS) {
+            if (sub == maxsub) {
                 break;
             }
             s_t1[tid] = make_float4(vx, vy, pvx, pvy);
@@ -603,6 +760,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
 #endif
             }
             y_start = py;
+#if LEDGER || ANCHOR || DIAG
+            x_start = px;
+            fr_x = 0.0f; fr_y = 0.0f; slid = false;
+#endif
             // Body inertia (the neck also carries the head), pivot arm and the
             // velocity-product force.
             vec3 i0 = v3(0.0f, 0.0f, 0.0f), i1 = v3(0.0f, 0.0f, 0.0f), bs = v3(0.0f, 0.0f, 0.0f);
@@ -694,7 +855,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             for (int r = 0; r < RMAX; r++) {
                 if ((unsigned)r >= maxrounds) { break; }
                 const unsigned mi = (unsigned)r * W + lg;
-                const bool mon = (unsigned)r < rounds && mi < nmus;
+                const bool mon = act && (unsigned)r < rounds && mi < nmus;
                 const float4* mrec = reinterpret_cast<const float4*>(muscles + mbase) + mi * 4u;
                 const float4 f0 = pf0;
                 {
@@ -744,6 +905,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     }
                     const float magnitude = clampf(drive + relative * 0.15f, -cap, cap);
                     const float work = fminf(drive, cap) * fmaxf(-relative, 0.0f) * HS;
+#if DIAG
+                    if (live) { d_mwork += work; }
+#endif
                     s_en[r][tid] = clampf(s_en[r][tid] - work * inv_capacity
                         + MUSCLE_RECOVERY * p.muscle_recovery * HS * (1.0f - s_en[r][tid]), 0.0f, 1.0f);
                     s_mag[r][tid] = magnitude;
@@ -886,7 +1050,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     dn = force_at(px - ox, py - oy, nx, ny);
                     vnf = vx * nx + vy * ny + HS * (sdot(dn, ba) + bw * (-vy * nx + vx * ny));
                     depth_c = gap + HS * vnf;
-                    cand = depth_c <= 0.0f;
+                    cand = act && depth_c <= 0.0f;
                 }
                 const unsigned cb = (__ballot_sync(FULL, cand) >> gshift) & GM;
                 const unsigned ncand = __popc(cb);
@@ -914,8 +1078,19 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 const unsigned ncmax = __reduce_max_sync(FULL, nc);
                 if (ncmax > 0u) {
                     float vn = 0.0f, vt = 0.0f, vs = 0.0f, goal = 0.0f, mu = 0.0f;
+#if ANCHOR
+                    // The tangential speed that returns the node to its anchor
+                    // within the substep, and the work friction may give back.
+                    float hold = 0.0f, store = 0.0f;
+#endif
                     if (walker) {
                         const float tx = ny, ty = -nx;
+#if ANCHOR
+                        if (!anc_on) { anc_x = px; anc_y = py; anc_store = 0.0f; anc_on = true; }
+                        anc_touch = true;
+                        hold = -((px - anc_x) * tx + (py - anc_y) * ty) * INV_HS;
+                        store = anc_store;
+#endif
                         dtg = force_at(px - ox, py - oy, tx, ty);
                         vn = vnf;
                         vt = vx * tx + vy * ty + HS * (sdot(dtg, ba) + bw * (-vy * tx + vx * ty));
@@ -1045,9 +1220,23 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                             // opposes a = start speed + end speed without
                             // its own force, and only up to |a| / k.
                             const float a = vs + vt1 - ktt * lt;
+#if ANCHOR
+                            // An anchored node is pulled toward its anchor. The
+                            // predicted work of a friction force f over the
+                            // substep is f HS (a + ktt f) / 2; it may not exceed
+                            // the node's store, so f stays between the roots of
+                            // ktt f^2 + a f - 2 store / HS (with an empty store,
+                            // between 0 and -a / ktt as without anchors).
+                            const float root = sqrtf(a * a + 8.0f * ktt * store * INV_HS);
+                            const float f_lo = fmaxf(-mu * ln, (-a - root) * 0.5f * inv_ktt);
+                            const float f_hi = fminf(mu * ln, (-a + root) * 0.5f * inv_ktt);
+                            const float tgt = clean ? lt : lt - (vt1 - hold) * inv_ktt;
+                            const float friction = clampf(tgt, f_lo, fmaxf(f_lo, f_hi));
+#else
                             const float cap = fminf(mu * ln, fabsf(a) * inv_ktt);
                             const float tgt = clean ? lt : lt - vt1 * inv_ktt;
                             const float friction = clampf(tgt, a > 0.0f ? -cap : 0.0f, a > 0.0f ? 0.0f : cap);
+#endif
                             float dt_ = own ? friction - lt : 0.0f;
                             lt += dt_;
                             dn_ = shf(dn_, src);
@@ -1057,6 +1246,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                         }
                     }
                     if (!walker) { ln = 0.0f; lt = 0.0f; }
+#if ANCHOR
+                    // The cone binds: the node slides and plants again.
+                    slid = walker && fabsf(lt) >= mu * ln * 0.9999f;
+#endif
                     PROF(10);
                     // The response to the contact impulses through the same
                     // articulated inertias: the root takes the walkers' unit
@@ -1094,6 +1287,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     if (walker) {
                         mx += (ln * dn.y + lt * dtg.y) * HS;
                         my += (ln * dn.z + lt * dtg.z) * HS;
+#if LEDGER || ANCHOR || DIAG
+                        fr_x = lt * dtg.y;
+                        fr_y = lt * dtg.z;
+#endif
                     }
                 }
             }
@@ -1105,12 +1302,14 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             {
                 const vec3 ra = shv(acc, 1u);
                 const float rqd = shf(qd, 1u);
-                if (lg == 0u) {
+                if (!act) {
+                    // A group past its substeps waits for the warp.
+                } else if (lg == 0u) {
                     const float hax = ra.y - rqd * vy;
                     const float hay = ra.z + rqd * vx;
 #if AIR
-                    vx = (vx + hax * HS) * p.air_sub;
-                    vy = (vy + hay * HS) * p.air_sub;
+                    vx = (vx + hax * HS) * AIR_SUB;
+                    vy = (vy + hay * HS) * AIR_SUB;
 #else
                     vx = vx + hax * HS;
                     vy = vy + hay * HS;
@@ -1120,7 +1319,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 } else if (body) {
                     const float a = lg == 1u ? acc.x : qdd;
 #if AIR
-                    qd = (qd + a * HS) * p.air_sub;
+                    qd = (qd + a * HS) * AIR_SUB;
 #else
                     qd = qd + a * HS;
 #endif
@@ -1130,8 +1329,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
         }
         if (lg == 0u) { q = 0.0f; }
         if (lg == 1u) { q = q - TAU_F * floorf((q + PI_F) / TAU_F); }
-        rec_n = step_n * (1.0f / SUBSTEPS);
-        rec_t = step_t * (1.0f / SUBSTEPS);
+        rec_n = step_n * (1.0f / (float)nsub);
+        rec_t = step_t * (1.0f / (float)nsub);
+#if ANCHOR
+        // A node that touched nothing for a whole step lets go of its anchor.
+        if (!anc_touch) { anc_on = false; anc_store = 0.0f; }
+        anc_touch = false;
+#endif
 
         PROF(12);
         // Metrics, falls and the screen, once per step.
@@ -1217,6 +1421,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 }
                 en_mean = gsum(en) / (float)max(nmus, 1u);
             }
+#if DIAG && !RECORD
+            const float diag_f = gsum(d_fpos), diag_m = gsum(d_mwork), diag_t = gsum(d_taken);
+#endif
             if (live
 #if RECORD
                 && !done_scoring
@@ -1330,6 +1537,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     done_scoring = true;
                     limp = true;
 #else
+#if DIAG
+                    // Diagnostic words (see the top of this file).
+                    mt.previous_center_y = diag_f;
+                    mt.vertical_extremum = diag_m;
+                    mt.vertical_trend = diag_t;
+                    mt.contact_hi = d_one / (float)(step + 1u);
+#endif
                     if (lg == 0u) { results[cidx] = mt; }
                     live = false;
 #endif
