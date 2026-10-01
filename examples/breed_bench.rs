@@ -24,42 +24,13 @@ use evolution_simulator::{
     storage::{self, Experiment},
 };
 use rayon::prelude::*;
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 // ---- allocation counting -------------------------------------------------
 
-struct Counting;
-thread_local! {
-    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
-}
-fn count_one() {
-    let _ = ALLOCATIONS.try_with(|n| n.set(n.get() + 1));
-}
-fn allocations() -> u64 {
-    ALLOCATIONS.try_with(Cell::get).unwrap_or(0)
-}
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        count_one();
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        count_one();
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        count_one();
-        unsafe { System.realloc(ptr, layout, size) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-#[global_allocator]
-static GLOBAL: Counting = Counting;
+use evolution_simulator::huge_alloc::{allocations, count_allocations};
 
 // ---- clocks --------------------------------------------------------------
 
@@ -542,6 +513,7 @@ fn print_row(name: &str, row: &Row, total: u64, cycles: bool) {
 }
 
 fn main() -> Result<()> {
+    count_allocations();
     let o = options()?;
     let threads = rayon::current_num_threads();
     let start = match &o.save {
