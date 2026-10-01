@@ -71,6 +71,9 @@ pub struct Config {
     /// Early screening of standard trials, set by the experiment each
     /// generation; `None` runs every trial in full. Runtime only, never saved.
     pub screen: Option<crate::physics::Screen>,
+    /// The early rungs of standard trials (`rungs`), set by the experiment
+    /// each generation; `None` runs no rung. Runtime only, never saved.
+    pub rungs: Option<crate::rungs::Rungs>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -113,6 +116,7 @@ impl Default for Config {
             checkpoint_interval: 0,
             fidelity: None,
             screen: None,
+            rungs: None,
         }
     }
 }
@@ -199,6 +203,7 @@ impl From<HumanConfig> for Config {
         Self {
             fidelity: None,
             screen: None,
+            rungs: None,
             population: c.population,
             seed: c.seed,
             random_seed: c.random_seed,
@@ -354,6 +359,7 @@ impl From<BinaryConfig> for Config {
         Self {
             fidelity: None,
             screen: None,
+            rungs: None,
             population: c.population,
             seed: c.seed,
             random_seed: c.random_seed,

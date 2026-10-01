@@ -468,6 +468,8 @@ pub struct Ladder {
     /// per-cell bars.
     pub cell_bars: bool,
     pub r4: bool,
+    /// R2's seventh feature, the parent neighbourhood's 2.5 s bar.
+    pub bar_feature: bool,
     pub w1: Vec<f64>,
     pub b1: f64,
     pub w2: Vec<f64>,
@@ -514,16 +516,19 @@ impl Ladder {
             r.period as f64,
         ]
     }
-    pub fn features2(&self, r: &Row, h: &Header) -> [f64; 7] {
-        [
+    pub fn features2(&self, r: &Row, h: &Header) -> Vec<f64> {
+        let mut f = vec![
             r.d(1) as f64,
             r.trace.speed(1) as f64,
             r.trace.touched(1) as f64,
             r.trace.head_shake(1) as f64,
             r.trace.energy(1) as f64,
             r.period as f64,
-            self.bar150(r, h) as f64,
-        ]
+        ];
+        if self.bar_feature {
+            f.push(self.bar150(r, h) as f64);
+        }
+        f
     }
     fn parent_min(table: &[Vec<f32>], r: &Row, h: &Header) -> f32 {
         let arena = r.arena(h);
@@ -583,6 +588,7 @@ impl Ladder {
             tol,
             cell_bars,
             r4,
+            bar_feature: std::env::var_os("RUNG_NO_BAR_FEATURE").is_none(),
             w1: vec![],
             b1: f64::NEG_INFINITY,
             w2: vec![],
@@ -627,7 +633,7 @@ impl Ladder {
                 }
             }
             if r.steps() > RUNG_STEPS[1] {
-                let f = ladder.features2(r, h).to_vec();
+                let f = ladder.features2(r, h);
                 if f.iter().all(|v| v.is_finite()) {
                     if pass { a2.push(f) } else { b2.push(f) }
                 }

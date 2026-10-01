@@ -41,6 +41,9 @@ pub fn score(
         for i in begin..end {
             unit.push(pop.creature(i));
         }
+        if !pop.flags.is_empty() {
+            unit.flags = pop.flags[begin..end].to_vec();
+        }
         let cfg = Config {
             population: unit.genomes.len(),
             ..cfg.clone()

@@ -70,6 +70,7 @@ The physics:
 Search and game state:
 
 - `src/qd.rs`: archives, niches, behavior descriptors, the morphology reserve, `qd::VERSION`.
+- `src/rungs.rs`: the audit lane and the early rungs (R1 at 1 s, R2 at 2.5 s), their fit at the generation boundary, the breaker per cadence band. The rule runs in the metrics block of `shaders/warp_creature.cu`.
 - `src/storage.rs`: the `Experiment` with its ring of blocks, islands, emitters, breeding, migration, record confirmations, and saves.
 - `src/ring.rs`: the blocks in flight, absorbed in ring order whatever order the GPU finishes them in.
 - `src/evolution.rs` and `src/evolution/anatomy/`: the genome and the mutation operators (see `docs/anatomy-operators.md`).

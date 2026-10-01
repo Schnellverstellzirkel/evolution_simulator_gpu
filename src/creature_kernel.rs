@@ -72,8 +72,12 @@ impl GpuResult {
 /// - word 0: d60, d150 (m; a rung the trial did not reach holds the final
 ///   distance)
 /// - word 1: d300, d600
-/// - word 2: end code (u16: 3 the screen stopped it, bit 4 it fell, bit 5 it
-///   failed), steps run (u16)
+/// - word 2: end code (u16), steps run (u16). The end code: bits 0 and 1 are
+///   set when a screen or a rung stopped it, bit 4 it fell, bit 5 it failed,
+///   bits 6 and 7 the early rung that stopped it (0 none, 1 R1, 2 R2; a stop
+///   by the 5 s screen has neither), bits 8 to 10 and 11 to 13 the cadence
+///   band (`BAND_COUNT` bands of the live gait frequency) at 1 and 2.5 s,
+///   bit 14 an audit creature (every rule off)
 /// - word 3: speed over the half second before 1 s and before 2.5 s (m/s)
 /// - word 4: share of nodes that touched the ground by 1 s, mean muscle
 ///   energy store at 1 s
@@ -92,6 +96,9 @@ pub struct RungTrace {
 }
 
 impl RungTrace {
+    /// Cadence bands of the early rungs: the live gait frequency in
+    /// `BAND_COUNT` bins of 0 to 6 Hz, as the archive's cadence axis bins it.
+    pub const BAND_COUNT: usize = 8;
     /// Steps of the kernel's rungs: 1, 2.5, 5 and 10 s at 60 Hz.
     pub const STEPS: [u32; 4] = [60, 150, 300, 600];
     fn half(&self, word: usize, high: bool) -> f32 {
@@ -112,6 +119,18 @@ impl RungTrace {
     }
     pub fn fell(&self) -> bool {
         self.code() & 16 != 0
+    }
+    /// The early rung that stopped the trial: 1 (R1), 2 (R2), or 0.
+    pub fn stopped_by(&self) -> u8 {
+        ((self.code() >> 6) & 3) as u8
+    }
+    /// Cadence band at rung `r` (0 or 1), from the live gait frequency.
+    pub fn band(&self, r: usize) -> usize {
+        ((self.code() >> (8 + 3 * r)) & 7) as usize
+    }
+    /// The creature was an audit creature.
+    pub fn audit(&self) -> bool {
+        self.code() & (1 << 14) != 0
     }
     /// Speed (m/s) over the half second before rung `r` (0 or 1).
     pub fn speed(&self, r: usize) -> f32 {

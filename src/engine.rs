@@ -84,6 +84,7 @@ pub fn record_on_gpu(creature: &Creature, cfg: &Config, timeout: Duration) -> Op
 pub fn replay(creature: &Creature, cfg: &Config, patience: Duration) -> Option<Replay> {
     let cfg = Config {
         screen: None,
+        rungs: None,
         ..cfg.clone()
     };
     // A fine trial records several frames per standard step; the viewer

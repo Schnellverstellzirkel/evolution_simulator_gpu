@@ -17,6 +17,7 @@ use crate::{
     evolution::Population,
     physics::{self, Fidelity},
     physics2::{self, Model},
+    rungs::Rung,
 };
 use anyhow::{Result, bail};
 use rayon::prelude::*;
@@ -127,7 +128,10 @@ pub struct Params {
     pub patches: f32,
     pub air_sub: f32,
     pub inv_muscle_energy: f32,
-    pub spare: [f32; 2],
+    /// The early rungs at 1 s and 2.5 s (`rungs::Rung`); a rule that never
+    /// stops for a trial without them.
+    pub r1: Rung,
+    pub r2: Rung,
 }
 
 /// Parameters of a wave of `count` creatures from `base` of a batch.
@@ -160,7 +164,8 @@ pub fn params(cfg: &Config, base: usize, count: usize, stride: usize) -> Params 
         patches: if ground { cfg.patches } else { 0.0 },
         air_sub: air.powf(1.0 / solver_setting("SUBSTEPS", SUBSTEPS) as f32),
         inv_muscle_energy: 1.0 / cfg.muscle_energy,
-        spare: [0.0; 2],
+        r1: cfg.rungs.map_or(Rung::NEVER, |r| r.0[0]),
+        r2: cfg.rungs.map_or(Rung::NEVER, |r| r.0[1]),
     }
 }
 
@@ -443,7 +448,7 @@ fn fill_creature(
         0,
         model.total_mass.to_bits(),
         model.inv_mass.to_bits(),
-        0,
+        0, // the period and flags, set by `pack`
     ]
 }
 
@@ -555,6 +560,16 @@ pub fn pack_reusing(
                 let mut head = fill_creature(&model, cfg, hash, w, z, lanes, muscles, ends);
                 head[3] = muscle_at[c] as u32;
                 head[4] = end_at[c] as u32;
+                // The rung features and flags: the rhythm period as a half
+                // and the creature's flags (`rungs::AUDIT`, `rungs::EXEMPT`).
+                let g = &pop.genomes[i];
+                let period = if g.muscle_count > 0 {
+                    pop.muscles[g.muscle_start].period
+                } else {
+                    0.0
+                };
+                head[7] = u32::from(crate::rungs::period_half(period))
+                    | u32::from(pop.flags.get(i).copied().unwrap_or(0)) << 16;
                 *out.heads.add(2 * c) = [head[0], head[1], head[2], head[3]];
                 *out.heads.add(2 * c + 1) = [head[4], head[5], head[6], head[7]];
             }

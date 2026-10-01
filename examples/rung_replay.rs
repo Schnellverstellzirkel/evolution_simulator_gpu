@@ -21,6 +21,7 @@
 #[path = "dump_common/mod.rs"]
 mod dump_common;
 use dump_common::*;
+use evolution_simulator::rungs;
 
 struct Outcome {
     label: String,
@@ -82,6 +83,63 @@ fn evaluate(label: &str, ladder: Option<&Ladder>, rows: &[&Row], d: &DumpFile) -
         top1: 100.0 * share_kept(order.len() / 100),
         top10: 100.0 * share_kept(order.len() / 10),
         r4_fire: 100.0 * stops[3] as f64 / reached600.max(1) as f64,
+    }
+}
+
+/// The game's own rules (`rungs`), fitted by the audit lane on the dump's 1 in
+/// 128 audit rows alone and applied to every other row with today's 5 s bar.
+fn evaluate_live(label: &str, rules: &rungs::Rungs, rows: &[&Row], d: &DumpFile) -> Outcome {
+    let h = &d.header;
+    let n = rows.len().max(1) as f64;
+    let mut steps = 0.0;
+    let mut stops = [0usize; 4];
+    let mut entrant_misses = [0usize; 4];
+    let mut pass3_misses = [0usize; 2];
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| rows[b].fitness.total_cmp(&rows[a].fitness));
+    let mut kept = vec![true; rows.len()];
+    for (i, r) in rows.iter().enumerate() {
+        let exempt = r.nursery(h) || r.emitter == RESTART;
+        let mut fate = Fate::Ran;
+        if !r.audit() {
+            for k in 0..2 {
+                if !exempt
+                    && r.steps() > RUNG_STEPS[k]
+                    && rules.0[k].stops(&rungs::features(&r.trace, k, r.period), 0)
+                {
+                    fate = Fate::Stopped(k);
+                    break;
+                }
+            }
+            if fate == Fate::Ran && today_steps(r, h) < r.steps() {
+                fate = Fate::Stopped(2);
+            }
+        }
+        steps += Ladder::steps(fate, r) as f64;
+        if let Fate::Stopped(k) = fate {
+            stops[k] += 1;
+            kept[i] = false;
+            if r.entered != 0 {
+                entrant_misses[k] += 1;
+            }
+            if k < 2 && r.d(2) >= h.bar {
+                pass3_misses[k] += 1;
+            }
+        }
+    }
+    let share_kept = |count: usize| {
+        let count = count.max(1).min(order.len());
+        order[..count].iter().filter(|&&i| kept[i]).count() as f64 / count as f64
+    };
+    Outcome {
+        label: label.to_owned(),
+        steps: steps / n,
+        stops: stops.map(|s| 100.0 * s as f64 / n),
+        entrant_misses: entrant_misses.map(|s| 1e4 * s as f64 / n),
+        pass3_misses: pass3_misses.map(|s| 1e4 * s as f64 / n),
+        top1: 100.0 * share_kept(order.len() / 100),
+        top10: 100.0 * share_kept(order.len() / 10),
+        r4_fire: 0.0,
     }
 }
 
@@ -196,6 +254,52 @@ fn main() -> anyhow::Result<()> {
         }
         if !cell_bars && r4 {
             main_ladder = Some(ladder);
+        }
+    }
+    // The game's rules: the audit lane's rows are the whole fit, and the
+    // window holds one generation.
+    {
+        let mut audit = rungs::Audit::default();
+        for r in children.iter().filter(|r| r.audit()) {
+            audit.record(rungs::AuditRow {
+                trace: r.trace,
+                period: r.period,
+                exempt: r.nursery(h) || r.emitter == RESTART,
+                parent_exempt: 0,
+                bar_known: true,
+                pass3: r.d(2) >= h.bar,
+                below_bar: r.steps() > RUNG_STEPS[2] && r.d(2) < h.bar,
+                entrant: r.entered != 0,
+            });
+        }
+        let rules = audit.boundary(None);
+        println!(
+            "the game's rules, fitted on the {} audit rows alone (one generation) and measured on the rows of the other half:",
+            children.iter().filter(|r| r.audit()).count()
+        );
+        print_header();
+        match rules {
+            Some(rules) => {
+                print(&evaluate_live("R1-R3 live fit", &rules, &test, &d));
+                // The entrants the 5 s screen would have kept, and how many
+                // of them each rung stops.
+                for k in 0..2 {
+                    let (mut n, mut stopped) = (0usize, 0usize);
+                    for r in test.iter().filter(|r| {
+                        r.entered != 0
+                            && !(r.steps() > RUNG_STEPS[2] && r.d(2) < h.bar)
+                            && !r.nursery(h)
+                            && r.emitter != RESTART
+                            && r.steps() > RUNG_STEPS[k]
+                    }) {
+                        n += 1;
+                        stopped += usize::from(rules.0[k].stops(&rungs::features(&r.trace, k, r.period), 0));
+                    }
+                    println!("  rung {}: {stopped} of {n} entrants the screen keeps would stop ({:.2}%)", k + 1, 100.0 * stopped as f64 / n.max(1) as f64);
+                }
+                println!("  rules {:?}", rules.0);
+            }
+            None => println!("  no rung armed"),
         }
     }
     // Each rung alone, on top of today's screen (R3), for the gate of a rung

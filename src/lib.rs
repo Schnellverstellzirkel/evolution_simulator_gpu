@@ -14,6 +14,7 @@ pub mod physics2;
 pub mod qd;
 pub mod replay_forces;
 pub mod ring;
+pub mod rungs;
 pub mod scheduler;
 pub mod schematic;
 pub mod storage;

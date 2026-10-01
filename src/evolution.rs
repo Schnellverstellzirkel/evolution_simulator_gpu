@@ -273,6 +273,10 @@ pub struct Population {
     pub nodes: Vec<NodeGene>,
     pub bones: Vec<Bone>,
     pub muscles: Vec<Muscle>,
+    /// How each creature's trial treats it (`rungs::AUDIT`, `rungs::EXEMPT`),
+    /// one byte per genome, set when its block is bred. Empty means no flags.
+    #[serde(default)]
+    pub flags: Vec<u8>,
 }
 
 /// The splitmix64 finalizer: a bijection on 64 bits that mixes every input
@@ -458,6 +462,11 @@ impl Population {
             nodes: Vec::with_capacity(total[0]),
             bones: Vec::with_capacity(total[1]),
             muscles: Vec::with_capacity(total[2]),
+            flags: if self.flags.is_empty() {
+                Vec::new()
+            } else {
+                indices.iter().map(|&i| self.flags[i]).collect()
+            },
         };
         let mut starts = Vec::with_capacity(sizes.len());
         let mut at = [0usize; 3];

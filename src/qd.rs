@@ -50,7 +50,9 @@ pub(crate) const CMA_LIMIT: usize = 96;
 //     and recorded in every generation's statistics.
 // 47: one substep per 1/60 s step (the L0 rung of the substep ladder).
 // 48: the growth-step body rule (a child gains at most 4 nodes and 4 muscles).
-pub const VERSION: u32 = 48;
+// 50: the audit lane and the early rungs: the save holds the audit window
+//     (49 is the lean muscle model).
+pub const VERSION: u32 = 50;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
@@ -130,6 +132,10 @@ pub struct EvaluationMetrics {
     /// The standard trial's rung trace (distances at 1, 2.5, 5 and 10 s and
     /// the early features), for the generation dump.
     pub trace: crate::creature_kernel::RungTrace,
+    /// An audit creature the 5 s screen would have stopped that would enter
+    /// an archive is re-run at the fine physics first: 1 when it was, 2 when
+    /// that run refused it (`rungs::REFUSE_BELOW`).
+    pub audit_check: u8,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]

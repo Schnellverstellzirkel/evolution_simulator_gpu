@@ -38,12 +38,15 @@ struct Options {
     seed_offset: u64,
     probe: bool,
     save: Option<String>,
+    /// `--seconds N`: stop after the generation that ends past N seconds of
+    /// wall time (the generation count is then a limit). Not deterministic.
+    seconds: Option<f64>,
     /// `--effect Name=level`: environment effects to apply (level index).
     effects: Vec<(String, usize)>,
 }
 
 fn usage() -> &'static str {
-    "usage: search_ab [tag] [generations] [population] [duration_seconds] [seed,seed,...] [--tag NAME] [--seed-offset N] [--effect Name=level]"
+    "usage: search_ab [tag] [generations] [population] [duration_seconds] [seed,seed,...] [--tag NAME] [--seed-offset N] [--seconds N] [--effect Name=level]"
 }
 
 fn options() -> Result<Options> {
@@ -52,6 +55,7 @@ fn options() -> Result<Options> {
     let mut probe = false;
     let mut seed_offset = 0u64;
     let mut save = None;
+    let mut seconds = None;
     let mut effects: Vec<(String, usize)> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -67,6 +71,13 @@ fn options() -> Result<Options> {
             let spec = args.next().context("--effect needs Name=level")?;
             let (name, level) = spec.split_once('=').context("--effect needs Name=level")?;
             effects.push((name.to_owned(), level.parse().context("effect level")?));
+        } else if arg == "--seconds" {
+            seconds = Some(
+                args.next()
+                    .context("--seconds needs a number")?
+                    .parse()
+                    .context("seconds")?,
+            );
         } else if arg == "--save" {
             save = Some(args.next().context("--save needs a path")?);
         } else if arg == "--tag" {
@@ -120,6 +131,7 @@ fn options() -> Result<Options> {
         seed_offset,
         probe,
         save,
+        seconds,
         effects,
     })
 }
@@ -244,7 +256,14 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
     // Generations whose global best elite was born in a hub slot.
     let mut hub_best: Vec<u32> = Vec::new();
     let mut ring = Ring::default();
+    let seed_started = Instant::now();
     for generation in 0..options.generations {
+        if options
+            .seconds
+            .is_some_and(|limit| seed_started.elapsed().as_secs_f64() > limit)
+        {
+            break;
+        }
         {
             // The game's path: the scheduler runs the blocks of the ring with
             // the early screen and the confirmation trials, and the GPU score
@@ -302,6 +321,38 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             experiment.archive.behavior_count(),
             mean(|g| g.node_count),
             mean(|g| g.muscle_count)
+        );
+        let rungs = experiment.rungs.last();
+        eprintln!(
+            "search_ab: seed {seed} generation {generation} last screen {:?}",
+            experiment.last_screen
+        );
+        eprintln!(
+            "search_ab: seed {seed} generation {generation} ended at {:.1} s",
+            seed_started.elapsed().as_secs_f64()
+        );
+        println!(
+            "{scope} {seed} {generation} rungs steps {:.1} stops {} {} {} of {} audit {} armed {}{} pass_misses {} {} misses {:.1} {:.1} extra_misses {:.1} {:.1} top1 {:.1} top10 {:.1} screen_top1 {:.1} screen_top10 {:.1} confirmed {} refused {}",
+            rungs.steps_per_creature(),
+            rungs.stops[0],
+            rungs.stops[1],
+            rungs.stops[2],
+            rungs.creatures,
+            rungs.audit_rows,
+            u8::from(rungs.armed[0]),
+            u8::from(rungs.armed[1]),
+            rungs.pass_misses[0],
+            rungs.pass_misses[1],
+            rungs.misses_per_10k(0),
+            rungs.misses_per_10k(1),
+            rungs.extra_misses_per_10k(0),
+            rungs.extra_misses_per_10k(1),
+            rungs.top1_kept,
+            rungs.top10_kept,
+            rungs.top1_screen,
+            rungs.top10_screen,
+            rungs.confirmed,
+            rungs.refused,
         );
         best = experiment
             .archive

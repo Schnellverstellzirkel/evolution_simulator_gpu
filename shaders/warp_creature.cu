@@ -36,6 +36,14 @@
 #define PI_F 3.14159265359f
 #define TAU_F 6.28318530718f
 
+// One early rung's rule (rungs::Rung): stop when the chain of fused
+// multiply-adds of the weights and the six features, from zero, is below the
+// bias; `off` has bit b set when cadence band b is off.
+struct RungParams {
+    float w[6];
+    float bias;
+    unsigned off;
+};
 struct Params {
     unsigned count;
     unsigned base;
@@ -59,8 +67,8 @@ struct Params {
     float patches;
     float air_sub;
     float inv_muscle_energy;
-    float spare1;
-    float spare2;
+    RungParams r1;
+    RungParams r2;
 };
 // The take-up buckets of a wave (cuda_engine::Takeup): bucket b holds the
 // wave's creatures from start[b] to end[b], sorted by muscle rounds, and
@@ -92,6 +100,18 @@ struct Result {
     float screen_x;
     float screened;
 };
+
+// Half precision, as the rung trace and the rung features carry values.
+__device__ __forceinline__ unsigned f2h(float v) {
+    unsigned short r;
+    asm("cvt.rn.f16.f32 %0, %1;" : "=h"(r) : "f"(v));
+    return (unsigned)r;
+}
+__device__ __forceinline__ float h2f(unsigned h) {
+    float r;
+    asm("cvt.f32.f16 %0, %1;" : "=f"(r) : "h"((unsigned short)h));
+    return r;
+}
 
 typedef float3 vec3;
 __device__ __forceinline__ vec3 v3(float x, float y, float z) { return make_float3(x, y, z); }
@@ -1198,6 +1218,16 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             // head shake pair in `ground_hi`.
             __shared__ uint4 s_rung[BLOCK / W];
             uint4& rung = s_rung[tid / W];
+            // The early rungs' record of the trial, in the end code's bit
+            // positions: the rung that stopped it (bits 6 and 7) and the
+            // cadence band at 1 and 2.5 s (bits 8 to 13).
+            __shared__ unsigned s_rb[BLOCK / W];
+            unsigned& rbits = s_rb[tid / W];
+            // The creature's last head word, read when a rule needs it: its
+            // rhythm period (a rung feature) in the low half and its flags in
+            // the high half (an audit creature runs every rule off, an exempt
+            // one, a nursery's or an immigrant's, skips the early rungs).
+            auto head_flags = [&]() -> unsigned { return heads[2u * cidx + 1u].w; };
             auto h16 = [](float v) -> unsigned {
                 unsigned short r;
                 asm("cvt.rn.f16.f32 %0, %1;" : "=h"(r) : "f"(v));
@@ -1269,7 +1299,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     }
                     mt.previous_center_y = center_y;
                 }
-                if (step == 0u) { rung = make_uint4(0u, 0u, 0u, 0u); }
+                if (step == 0u) { rung = make_uint4(0u, 0u, 0u, 0u); rbits = 0u; }
                 if (step + half_s == rung1 || step + half_s == rung2) { rung.x = __float_as_uint(com_x); }
                 if (early) {
                     const bool second = step == rung2;
@@ -1282,6 +1312,37 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     rung.y = (rung.y & keep) | (h16(speed) << sh);
                     const unsigned pair = h16(touched) | (h16(en_mean) << 16u);
                     if (second) { rung.w = pair; } else { rung.z = pair; }
+                    // The cadence band the audit lane files this trial under:
+                    // the live gait frequency in eight bins of 0 to 6 Hz, as
+                    // the archive's cadence axis bins it.
+                    const unsigned r = second ? 1u : 0u;
+                    const float gait_now = mt.gait_turns * (0.5f / (t_now + DT));
+                    const unsigned band = min((unsigned)(gait_now * (8.0f / 6.0f)), 7u);
+                    rbits |= band << (8u + 3u * r);
+                    const unsigned hw = head_flags();
+                    // Flags: 1 audit, 2 exempt, 4 and 8 exempt from R1 and R2.
+                    if (!ended && ((hw >> 16u) & (second ? 0xbu : 0x7u)) == 0u) {
+                        const RungParams rp = second ? p.r2 : p.r1;
+                        const float period_f = h2f(hw & 0xffffu);
+                        // The decision reads the features as the trace stores
+                        // them, so the host can replay it.
+                        const float fv[6] = {h2f(h16(com_x)), h2f(h16(speed)), h2f(h16(touched)),
+                                             h2f(h16(head_shake)), h2f(h16(en_mean)), period_f};
+                        float score = 0.0f;
+                        bool finite = true;
+#pragma unroll
+                        for (int i = 0; i < 6; i++) {
+                            score = fmaf(rp.w[i], fv[i], score);
+                            finite = finite && isfinite(fv[i]);
+                        }
+                        if (finite && score < rp.bias && ((rp.off >> band) & 1u) == 0u) {
+                            mt.screened = t_now + DT;
+                            mt.screen_x = com_x;
+                            mt.fitness = com_x;
+                            rbits |= (r + 1u) << 6u;
+                            ended = true;
+                        }
+                    }
                 }
                 if (step == rung3 || step == rung4) {
                     const bool second = step == rung4;
@@ -1290,7 +1351,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 }
                 if (step == p.screen_step && !ended) {
                     mt.screen_x = com_x;
-                    if (com_x < p.screen_bar) {
+                    if (com_x < p.screen_bar && ((head_flags() >> 16u) & 1u) == 0u) {
                         mt.screened = t_now + DT;
                         mt.fitness = com_x;
                         ended = true;
@@ -1318,7 +1379,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                         if (step < rung3) { d = (d & 0xffff0000u) | fin; }
                         if (step < rung4) { d = (d & 0x0000ffffu) | (fin << 16u); }
                         mt.lift_hi = __uint_as_float(d);
-                        const unsigned code = (fell ? 16u : 0u) | (failed ? 32u : 0u) | (mt.screened > 0.0f ? 3u : 0u);
+                        const unsigned code = (fell ? 16u : 0u) | (failed ? 32u : 0u) | (mt.screened > 0.0f ? 3u : 0u)
+                            | (rbits & 0x3fc0u) | (((head_flags() >> 16u) & 1u) << 14u);
                         mt.previous_center_y = __uint_as_float(rung.y);
                         mt.vertical_extremum = __uint_as_float(rung.z);
                         mt.vertical_trend = __uint_as_float(rung.w);

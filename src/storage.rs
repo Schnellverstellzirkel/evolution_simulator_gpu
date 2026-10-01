@@ -317,6 +317,8 @@ pub struct Experiment {
     /// and at most a ring. The bar is recomputed from them at every
     /// absorption.
     screen_window: VecDeque<Vec<f32>>,
+    /// The audit lane and the early rungs it calibrates (`rungs`).
+    pub rungs: crate::rungs::Audit,
     /// The last absorbed block's screen bar and the share of its results at
     /// or above it, for the stage log. None when that block ran without a
     /// bar or came from a world that has since changed.
@@ -390,6 +392,9 @@ pub struct Ancestor {
     pub generation: u32,
     /// What changed from the parent, for display.
     pub change: String,
+    /// Its own features at the early rungs (`rungs::profile`), which decide
+    /// whether its children skip them.
+    pub rung: [u16; 2 * crate::rungs::FEATURES],
 }
 
 /// Short description of how a child differs from its parent.
@@ -551,6 +556,7 @@ impl Experiment {
             cursor: 0,
             failed: 0,
             screen_window: VecDeque::new(),
+            rungs: crate::rungs::Audit::default(),
             last_screen: None,
             stage_seconds: [0.0; 2],
             dump: None,
@@ -614,6 +620,8 @@ impl Experiment {
                 .get(arena)
                 .map_or(f32::NEG_INFINITY, QdArchive::best_fitness)
         };
+        let mut need = Vec::new();
+        self.check_audit_entrants(block, standard, confirmed, &mut out, &mut need);
         let mut candidates: Vec<Vec<usize>> = vec![Vec::new(); arenas];
         for (j, m) in standard.iter().enumerate() {
             let arena = qd::arena_of_slot(block.first + j, arenas);
@@ -621,7 +629,6 @@ impl Experiment {
                 candidates[arena].push(j);
             }
         }
-        let mut need = Vec::new();
         for (arena, mut members) in candidates.into_iter().enumerate() {
             members.sort_by(|&a, &b| {
                 standard[b]
@@ -658,7 +665,66 @@ impl Experiment {
             Verdict::Final(out)
         } else {
             need.sort_unstable();
+            need.dedup();
             Verdict::Confirm(need)
+        }
+    }
+    /// The audit lane's guard: an audit creature that the 5 s screen would
+    /// have stopped and that would enter an archive is re-run at the fine
+    /// physics first. Its score becomes the lower of the two, and a re-run
+    /// that reaches under `rungs::REFUSE_BELOW` of it keeps it out. The ones
+    /// still waiting for their re-run go to `need`.
+    fn check_audit_entrants(
+        &self,
+        block: &Block,
+        standard: &[EvaluationMetrics],
+        confirmed: &HashMap<usize, EvaluationMetrics>,
+        out: &mut [EvaluationMetrics],
+        need: &mut Vec<usize>,
+    ) {
+        let Some(bar) = block
+            .config
+            .screen
+            .map(|s| s.bar)
+            .filter(|bar| bar.is_finite())
+        else {
+            return;
+        };
+        let population = &*block.population;
+        let arenas = arena_count();
+        for (j, m) in standard.iter().enumerate() {
+            let flags = population.flags.get(j).copied().unwrap_or(0);
+            if flags & crate::rungs::AUDIT == 0
+                || !Self::eligible(m)
+                || m.trace.steps() == 0
+                || m.screen_x >= bar
+            {
+                continue;
+            }
+            if let Some(check) = confirmed.get(&j) {
+                let refused = !check.fitness.is_finite()
+                    || check.screened
+                    || check.fitness < m.fitness * crate::rungs::REFUSE_BELOW;
+                let o = &mut out[j];
+                o.fine = check.fitness < m.fitness;
+                o.fitness = m.fitness.min(check.fitness);
+                o.excluded |= refused;
+                o.audit_check = if refused { 2 } else { 1 };
+                continue;
+            }
+            let g = &population.genomes[j];
+            let nodes = &population.nodes[g.node_start..g.node_start + g.node_count];
+            let muscles = &population.muscles[g.muscle_start..g.muscle_start + g.muscle_count];
+            let niche = qd::descriptor(nodes, muscles, m.behavior).niche();
+            let arena = qd::arena_of_slot(block.first + j, arenas);
+            let enters = self.islands.get(arena).is_none_or(|archive| {
+                archive
+                    .slot_for(&niche)
+                    .is_none_or(|slot| m.fitness > archive.entries[slot].fitness)
+            });
+            if enters {
+                need.push(j);
+            }
         }
     }
     /// Absorbs block `k`, the block at the cursor, with its final results:
@@ -709,7 +775,8 @@ impl Experiment {
         let head = dump
             .as_ref()
             .and_then(|d| d.lock().unwrap_or_else(|e| e.into_inner()).take_head(k));
-        let mut kinds = head.as_ref().map(|_| vec![0u8; finals.len()]);
+        // What each creature entered, for the dump's rows and the audit lane.
+        let mut kinds = Some(vec![0u8; finals.len()]);
         let marked: Vec<EvaluationMetrics>;
         let finals = match &head {
             Some(head) => {
@@ -726,6 +793,9 @@ impl Experiment {
             None => finals,
         };
         self.failed += self.archive_block(k, finals, stale, kinds.as_deref_mut());
+        if !stale && let Some(kinds) = &kinds {
+            self.record_rungs(k, finals, kinds);
+        }
         if let (Some(dump), Some(head), Some(kinds)) = (&dump, &head, &kinds) {
             let block = &self.blocks[k];
             let mut d = dump.lock().unwrap_or_else(|e| e.into_inner());
@@ -764,6 +834,47 @@ impl Experiment {
         self.cursor = (k + 1) % self.blocks.len();
         self.stage_seconds[1] += archived.elapsed().as_secs_f64();
         Ok(ended)
+    }
+    /// Counts block `k`'s trials for the stage log and files its audit
+    /// creatures' rows for the fit of the early rungs (`rungs`). `kinds`
+    /// says what each creature entered.
+    fn record_rungs(&mut self, k: usize, finals: &[EvaluationMetrics], kinds: &[u8]) {
+        let block = &self.blocks[k];
+        let bar = block
+            .config
+            .screen
+            .map(|s| s.bar)
+            .filter(|bar| bar.is_finite());
+        let population = &*block.population;
+        for (j, m) in finals.iter().enumerate() {
+            self.rungs.note(&m.trace, m.screened);
+            match m.audit_check {
+                0 => {}
+                check => self.rungs.note_confirmation(check == 2),
+            }
+            let flags = population.flags.get(j).copied().unwrap_or(0);
+            if flags & crate::rungs::AUDIT == 0 || m.trace.steps() == 0 {
+                continue;
+            }
+            let g = &population.genomes[j];
+            let period = if g.muscle_count > 0 {
+                population.muscles[g.muscle_start].period
+            } else {
+                0.0
+            };
+            self.rungs.record(crate::rungs::AuditRow {
+                trace: m.trace,
+                period,
+                exempt: flags & crate::rungs::EXEMPT != 0,
+                parent_exempt: flags & (crate::rungs::EXEMPT_R1 | crate::rungs::EXEMPT_R2),
+                bar_known: bar.is_some(),
+                pass3: bar.is_some_and(|bar| m.screen_x >= bar),
+                below_bar: bar.is_some_and(|bar| {
+                    m.trace.steps() > crate::rungs::SCREEN_STEPS && m.screen_x < bar
+                }),
+                entrant: kinds[j] != 0,
+            });
+        }
     }
     /// Evaluates and absorbs the block at the cursor with `evaluate`, its
     /// confirmation trials included. Returns whether a generation ended.
@@ -1226,7 +1337,7 @@ impl Experiment {
         entered.dedup();
         let entered_count = entered.len();
         for j in entered {
-            self.record_ancestor(population, births[j], j, finals[j].fitness);
+            self.record_ancestor(population, births[j], j, &finals[j]);
         }
         timings[6] = section.elapsed().as_secs_f64();
         if profile {
@@ -1253,9 +1364,16 @@ impl Experiment {
         population: &Population,
         birth: Birth,
         index: usize,
-        fitness: f32,
+        result: &EvaluationMetrics,
     ) {
+        let fitness = result.fitness;
         let creature = population.creature(index);
+        let genome = &population.genomes[index];
+        let period = if genome.muscle_count > 0 {
+            population.muscles[genome.muscle_start].period
+        } else {
+            0.0
+        };
         if self.lineage.contains_key(&creature.id) {
             return;
         }
@@ -1276,6 +1394,7 @@ impl Experiment {
                 generation: self.generation,
                 change,
                 creature,
+                rung: crate::rungs::profile(&result.trace, period),
             },
         );
     }
@@ -1991,6 +2110,27 @@ impl Experiment {
             self.generation,
             self.breed_round,
         );
+        // Each creature's flags for its trial: the audit lane, and the
+        // exemption of nurseries and immigrants from the early rungs.
+        population.flags.clear();
+        population.flags.extend((0..count).map(|k| {
+            let slot = first + k;
+            let mut flags = 0u8;
+            if crate::rungs::is_audit(cfg.seed, self.breed_round, slot) {
+                flags |= crate::rungs::AUDIT;
+            }
+            // A child whose parent the rules would stop skips those rungs.
+            if let Some(rules) = &cfg.rungs {
+                let profile = births[k].parent_id.and_then(|id| self.lineage.get(&id)).map(|a| &a.rung);
+                flags |= crate::rungs::parent_exemptions(rules, profile);
+            }
+            if births[k].emitter == Emitter::Restart
+                || qd::arena_of_slot(slot, self.islands.len().max(arena_count())) >= island_count()
+            {
+                flags |= crate::rungs::EXEMPT;
+            }
+            flags
+        }));
         if let (Some(parents), Some(dump)) = (dump_parents, &self.dump) {
             let reseeded: Vec<usize> = lead.iter().map(|&(k, _)| k).collect();
             dump.lock().unwrap_or_else(|e| e.into_inner()).bred(
@@ -2025,6 +2165,9 @@ impl Experiment {
     /// queued settings and the autochange ladder.
     fn end_generation(&mut self) -> Result<()> {
         let started = std::time::Instant::now();
+        // The audit lane judges the rules this generation ran with and fits
+        // the next generation's.
+        let rules = self.rungs.boundary(self.config.rungs);
         let failed = std::mem::take(&mut self.failed);
         self.push_archive_stats(failed);
         self.prune_lineage();
@@ -2043,13 +2186,15 @@ impl Experiment {
             self.reset_search_context();
         }
         cfg.screen = self.next_screen(cfg.duration);
+        cfg.rungs = if world_changed { None } else { rules };
         self.config = cfg;
         self.start_dump()?;
-        if self.dump_breeding()
-            && let Some(screen) = &mut self.config.screen
-        {
+        if self.dump_breeding() {
             // The dump generation runs every trial in full.
-            screen.bar = f32::NEG_INFINITY;
+            if let Some(screen) = &mut self.config.screen {
+                screen.bar = f32::NEG_INFINITY;
+            }
+            self.config.rungs = None;
         }
         self.evaluation_seconds = 0.0;
         if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
@@ -2093,6 +2238,7 @@ impl Experiment {
                 self.reset_search_context();
             }
             cfg.screen = self.next_screen(cfg.duration);
+            cfg.rungs = if world_changed { None } else { self.config.rungs };
             self.config = cfg;
         } else {
             self.pending = Some(cfg);
@@ -2206,8 +2352,11 @@ impl Experiment {
         self.last_migration = None;
         self.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
         self.cma_emitters.clear();
-        // Distances measured in the old world say nothing about the new one.
+        // Distances measured in the old world say nothing about the new one,
+        // and neither do the audit rows: the rungs disarm and refit.
         self.screen_window.clear();
+        self.rungs.clear();
+        self.config.rungs = None;
     }
     /// Starts the generation dump (`EVOLUTION_DUMP_GENERATION`) at the
     /// boundary it names: every island elite is queued for a re-run, the
@@ -2823,6 +2972,7 @@ struct SmallSave<'a> {
     island_progress: &'a [(f32, u32)],
     reseed: &'a Reseed,
     ring: RingShape,
+    audit: &'a crate::rungs::Audit,
 }
 #[derive(Deserialize)]
 struct SmallLoad {
@@ -2840,6 +2990,7 @@ struct SmallLoad {
     island_progress: Vec<(f32, u32)>,
     reseed: Reseed,
     ring: RingShape,
+    audit: crate::rungs::Audit,
 }
 impl<'a> SmallSave<'a> {
     fn of(e: &'a Experiment) -> Self {
@@ -2858,6 +3009,7 @@ impl<'a> SmallSave<'a> {
             island_progress: &e.island_progress,
             reseed: &e.reseed,
             ring: e.ring,
+            audit: &e.rungs,
         }
     }
 }
@@ -2879,6 +3031,7 @@ impl SmallLoad {
         e.lineage = self.lineage;
         e.island_progress = self.island_progress;
         e.reseed = self.reseed;
+        e.rungs = self.audit;
         ensure!(
             self.ring.block > 0 && self.ring.blocks > 0,
             "Invalid ring shape"
@@ -2908,6 +3061,8 @@ impl SmallLoad {
         // The screen bar is not saved: the resumed generation runs every
         // trial in full until it has set a new one.
         e.config.screen = e.next_screen(e.config.duration);
+        // The rungs' rules are not saved either: they are the window's fit.
+        e.config.rungs = e.rungs.fit();
         let shared = Arc::new(e.config.clone());
         let elites =
             e.archive.entries.len() + e.islands.iter().map(|i| i.entries.len()).sum::<usize>();

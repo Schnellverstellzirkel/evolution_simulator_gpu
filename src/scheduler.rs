@@ -44,10 +44,12 @@ pub const WORK_UNIT: usize = 196_608;
 
 /// The settings of a confirmation trial: the same world and screen as the
 /// standard trial, at the fine physics (`physics::Fidelity::fine()`), from
-/// the same pose.
+/// the same pose. It runs no early rung: a rung is a prediction about the
+/// standard trial.
 pub fn confirm_config(cfg: &Config) -> Config {
     Config {
         fidelity: Some(crate::physics::Fidelity::fine()),
+        rungs: None,
         ..cfg.clone()
     }
 }
@@ -810,6 +812,7 @@ pub fn to_metrics(
         screen_x: r.screen_x,
         fine: false,
         trace: r.rung_trace(),
+        audit_check: 0,
     }
 }
 
