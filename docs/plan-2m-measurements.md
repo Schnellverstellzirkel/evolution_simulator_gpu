@@ -83,3 +83,37 @@ Reproduce: `tools/lane-count.sh lane_lean trim plan=0,1,1,2,4,5,6 baked -DMUSCLE
 ## dump (2026-10-01, merged 500faff): the ladder saves 12%, not the plan's 1.5x
 
 Generation-50 dump of a 3M run (seed 5051, best 63.5 m, qd 41,579): steps per creature 838 in full, 397 under today's 5 s screen (the plan assumed 480). Ladder R1 to R3 with today's bar: 348 steps (12% fewer), top 1% kept 100%, top 10% 99.4%, entrant misses 0.0, 6.2 and 15.2 per 10k at R1 to R3 (today's screen alone misses 21.6). R4 stops 0.09% with today's bar (worth nothing); per-cell bars keep more creatures alive (692 steps) and are not a speed lever. Nurseries must be exempt from the early rungs (70% stop at R3 with 117 misses per 10k). 34.3% of creatures fall. Spearman of d(10 s) to final 0.991, of d(5 s) 0.969. Bodies at generation 50: 9.48 nodes mean, p50 8, p90 15, p99 32; 24.8 muscles mean, p90 45; classes 3 to 8 nodes 52.8%, 9 to 16 41.0%, 17 to 32 6.3%. Entrants born more than 4 nodes above their parent: 65 of 11,984; more than 4 muscles: 422. Determinism: two identical search_ab runs on main differed from generation 3 while other agents loaded the GPU; retest on a quiet GPU.
+
+## substep-ladder (2026-10-01, claude/substep-ladder): L0 passes the spirit, the ledger and the anchors lose
+
+Method. One seed (38), 30 generations at 3M on the lane-group kernel, then the top 300 elites of each save re-scored in one batch with `replay_match --retest` at the rung, at 2 substeps and at 4 substeps with the same rules (a rung's own ledger and anchors stay on), and at 4 substeps with today's rules. The ratio is the re-test distance over the distance at the rung. Control is today's game (2 substeps, no switches). Rungs: L0 `EVOLUTION_WARP_SUBSTEPS=1`; L1 plus `EVOLUTION_WARP_LEDGER=1`; L2 plus `EVOLUTION_WARP_ANCHOR=1`; L2.5 `SUBSTEPS=2 ADAPT=1 LEDGER=1 ANCHOR=1`. One seed per rung, so differences of a few percent are noise.
+
+| | control (2) | L0 | L1 | L2 | L2.5 |
+|---|---:|---:|---:|---:|---:|
+| best distance, m | 52.2 | 66.6 | 45.1 | 41.1 | 49.6 |
+| QD score | 32,136 | 36,015 | 26,089 | 25,639 | 29,322 |
+| top 300 median distance at the rung, m | 37.9 | 52.2 | 32.4 | 30.8 | 35.1 |
+| top 300 median distance at 4 substeps, m | 35.1 | 39.6 | 24.6 | 11.9 | 31.0 |
+| median ratio at 4 substeps (bar 0.9) | 0.960 | 0.807 | 0.775 | 0.333 | 0.879 |
+| p10 ratio at 4 substeps | 0.011 | 0.358 | 0.031 | 0.004 | 0.012 |
+| elites that fall at 4 substeps, of 300 | 68 | 17 | 47 | 40 | 48 |
+| median ratio at 4 substeps, non-fallers | 0.970 | 0.816 | 0.791 | 0.742 | 0.901 |
+| median ratio at 2 substeps | 1 | 0.858 | 0.837 | 0.405 | 0.914 |
+| planted-foot slip, rung over 4 substeps (bar 0.95 to 1.05) | 0.97 | 0.94 | 1.04 | 0.48 | 0.81 |
+| first_generation median (20,000 bodies, 20 s) | -0.05 m | -0.05 m | -0.05 m | -0.05 m | -0.05 m |
+| positive realized friction work, share of muscle work (bar 1%) | 0.09% | 0.11% | 0.32% (all taken back) | 2.53% (p90 of elites 28.8%) | 0.20% |
+| top 50 elites at 4x rate from a nudged pose, share kept | 0.01 | 0.82 | 0.75 | 0.78 | 0.59 |
+| median body length of the top 300, m | 1.46 | 2.33 | 1.64 | 1.31 | 1.30 |
+| steps run at one substep | 0% | 100% | 100% | 100% | 38.5% |
+| kernel rate on control.evo, M creature-steps per GPU-busy second, best and median of 6 passes | 48 and 25 | 77 and 70 | 88 and 80 | 69 and 54 | 52 and 44 |
+
+Reading.
+- No rung reaches 0.9 at 4 substeps over its own distance. L2.5 is the closest at 0.879, and its non-fallers reach 0.901.
+- The ratio alone misleads here. Today's game has 68 of 300 elites that fall when the same body is run at 4 substeps, and its top 50 keep 0.01 of their distance at a 4x rate from a nudged pose, so its elites lean on the 2 substep integrator. L0's elites hold 39.6 m at 4 substeps, more than control's 35.1 m at its own rate and 37.9 m at 2. Only 17 of its 300 fall at 4 substeps and its top 50 keep 0.82 under the nudged 4x test. L0 loses distance from its own rate (0.807) because it reaches 52 m there, and that is the whole gap. By the spirit (good movers, no glitches) L0 passes. It misses two numbers: the ratio, and the slip ratio at 0.94 against a band of 0.95. Its bodies are larger (2.33 m, 4.5 kg against 1.46 m, 2.9 kg), so slip per replay meter is higher in absolute terms (1.42 against 0.89).
+- L1 loses to L0 on every search number (best 45 m against 67 m, QD 26k against 36k) and holds 24.6 m at 4 substeps against 39.6 m. The ledger takes back 0.32% of muscle work and gives no honesty gain. The friction work share at L0 is already 0.11%.
+- L2 fails. Anchored friction is exploited: slip at the rung is 0.77 against 1.62 at 4 substeps, 2.53% of muscle work is friction work (28.8% at the p90 elite), and the ratio is 0.333.
+- L2.5 evolves movers at the level of today's game (49.6 m, QD 29.3k) and has the highest ratio of the four rungs, but 24 of its top 50 keep under half of their distance in the nudged 4x test and 59 of 300 fall at 2 substeps. Its adaptive steps run at one substep 38.5% of the time per creature, and the kernel gains only about 1.07x over today's because a warp runs the largest substep count of its groups. A creature-level rule needs a per-lane kernel.
+- Speed. Clocks cannot be locked here (no root). The kernel rates were taken under the exclusive lock, with no game running, and they still swing by 2x between passes while other agents' jobs load the CPU (Dynamic Boost), so the best of six passes is the least throttled reading and the median is what was realized. Best over best, 1 substep is 1.6x today's 2 substeps, and 4 substeps is 0.54x. The L1 rate above L0's comes from different step counts (the ledger changes when creatures fall) and noise, not from the ledger.
+- The 4 substep re-test is itself a weak reference: 68 of control's 300 elites fall there. The p10 column (0.011 for control, 0.358 for L0) shows that.
+
+Proposal. L0 (1 substep, no code) is the rung that passes the spirit and the one that is a speed lever (about 1.6x), subject to the owner's yes on the substep count and a `qd::VERSION` bump. The ledger, the anchors and the adaptive rule lose and stay on this branch only. The default substep count is unchanged.
