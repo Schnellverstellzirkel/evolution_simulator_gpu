@@ -1194,16 +1194,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             const unsigned rung3 = (unsigned)(5.0f * RATE) - 1u, rung4 = (unsigned)(10.0f * RATE) - 1u;
             const unsigned half_s = (unsigned)(0.5f * RATE);
             const bool early = step == rung1 || step == rung2;
-            float en_mean = 0.0f;
-            if (__any_sync(FULL, early)) {
-                float en = 0.0f;
-#pragma unroll
-                for (int r = 0; r < RMAX; r++) {
-                    const unsigned mi = (unsigned)r * W + lg;
-                    if ((unsigned)r < rounds && mi < nmus) { en += s_en[r][tid]; }
-                }
-                en_mean = gsum(en) / (float)max(nmus, 1u);
-            }
+            // The creature's stamina stands for the mean muscle energy.
+            const float en_mean = stam;
             if (live
 #if RECORD
                 && !done_scoring
