@@ -882,12 +882,13 @@ pub(crate) fn root_paths(nodes: usize, bones: &[Bone]) -> [u32; MAX_NODES] {
         }
     }
 }
-/// A random muscle between two nodes, with a rhythm and a modest strength.
+/// A random muscle between two nodes, with a rhythm and a strength in the
+/// upper half of the gene, where it can move its limb.
 pub(crate) fn muscle(node_a: usize, node_b: usize, rng: &mut Rng) -> Muscle {
     Muscle {
         node_a: node_a as u32,
         node_b: node_b as u32,
-        strength: rng.range(0.03, 0.15),
+        strength: rng.range(0.5, 1.0),
         period: rng.range(0.65, 2.6),
         phase: rng.unit(),
         duty: rng.range(0.25, 0.75),
