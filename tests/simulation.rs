@@ -80,14 +80,8 @@ fn assert_genomes_close(a: &Creature, b: &Creature) {
         assert!(close(x.reset, y.reset));
     }
 }
-#[test]
-fn zero_mutation_copies_genetics() {
-    let cfg = Config {
-        mutation: 0.,
-        ..config()
-    };
-    let population = evolution::create(&cfg).unwrap();
-    let parent = population.creature(0);
+/// Breeds eight zero-mutation CMA children of `parent` (the only elite).
+fn zero_mutation_children(cfg: &Config, parent: &Creature) -> Vec<Creature> {
     let mut archive = QdArchive::default();
     archive.entries.push(Elite {
         niche: Default::default(),
@@ -98,7 +92,7 @@ fn zero_mutation_copies_genetics() {
         improved_generation: 0,
         protected_until: 0,
         visits: 0,
-        topology: evolution_simulator::qd::topology_of_population(&population, 0),
+        topology: Default::default(),
         graduate: false,
         fine: false,
     });
@@ -111,14 +105,29 @@ fn zero_mutation_copies_genetics() {
         })
         .collect();
     let slots: Vec<usize> = (0..8).collect();
-    let batches = evolution::emit_offspring_batches(&[archive], &[], &plans, &slots, &cfg, 0, 0);
+    let batches = evolution::emit_offspring_batches(&[archive], &[], &plans, &slots, cfg, 0, 0);
     let mut children = evolution::Population {
         genomes: vec![Default::default(); 8],
         ..Default::default()
     };
     children.append_batches(&slots, batches);
-    for k in 0..8 {
-        assert_genomes_close(&children.creature(k), &parent);
+    (0..8).map(|k| children.creature(k)).collect()
+}
+#[test]
+fn zero_mutation_copies_genetics() {
+    let cfg = Config {
+        mutation: 0.,
+        ..config()
+    };
+    let population = evolution::create(&cfg).unwrap();
+    // A new random body may carry muscles that no repair has put on the
+    // body's clock yet, and breeding repairs every child. So the first
+    // generation of children may differ from the random body in those
+    // periods, and only a repaired body is copied exactly.
+    let repaired = zero_mutation_children(&cfg, &population.creature(0))
+        .swap_remove(0);
+    for child in zero_mutation_children(&cfg, &repaired) {
+        assert_genomes_close(&child, &repaired);
     }
 }
 #[test]
