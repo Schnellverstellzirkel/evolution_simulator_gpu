@@ -780,8 +780,6 @@ pub struct CudaEngine {
     /// Worlds (effect levels and flags) whose kernels have been queued for
     /// every class.
     worlds: HashSet<(Vec<u8>, u32)>,
-    /// Kernels queued at idle priority for the worlds around them.
-    neighbours: HashSet<KernelKey>,
     /// Submission slots. The last one is kept for replays, with streams of
     /// its own, so a replay never waits behind evaluation.
     slots: Vec<Slot>,
@@ -820,9 +818,15 @@ fn compile_kernel(api: &Api, options: &[String], key: KernelKey, use_cache: bool
         dir.join(format!("{:016x}{:016x}.cubin", halves[0], halves[1]))
     });
     if use_cache
-        && let Some(bytes) = path.as_ref().and_then(|p| std::fs::read(p).ok())
+        && let Some(path) = &path
+        && let Ok(bytes) = std::fs::read(path)
         && !bytes.is_empty()
     {
+        // A kernel in use stays young, so eviction by age (`evict_cache`)
+        // keeps it.
+        if let Ok(file) = std::fs::File::open(path) {
+            let _ = file.set_modified(std::time::SystemTime::now());
+        }
         return Ok(bytes);
     }
     let started = Instant::now();
@@ -888,6 +892,43 @@ pub fn compile_report(class: usize, cfg: &Config, record: bool, arch: &str) -> R
         })
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+/// Compiled kernels kept on disk, about 300 to 900 KB each.
+const CACHE_FILES: usize = 200;
+
+/// Deletes the oldest compiled kernels beyond `CACHE_FILES`, and temporary
+/// files a crashed compile left. Every source edit makes new kernels for
+/// every world, and nothing else ever removes the old ones. A kernel another
+/// process still wants is compiled again.
+fn evict_cache(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut kernels = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(modified) = entry.metadata().ok().and_then(|m| m.modified().ok()) else {
+            continue;
+        };
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("cubin") => kernels.push((modified, path)),
+            Some(e) if e.starts_with("tmp") => {
+                if now.duration_since(modified).is_ok_and(|age| age > Duration::from_secs(3600)) {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            _ => {}
+        }
+    }
+    if kernels.len() > CACHE_FILES {
+        kernels.sort();
+        let extra = kernels.len() - CACHE_FILES;
+        for (_, path) in kernels.drain(..extra) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// Where compiled kernels are kept: `EVOLUTION_KERNEL_CACHE`, else the
@@ -1004,6 +1045,10 @@ struct PrefetchState {
     /// each.
     running: HashMap<KernelKey, [usize; 2]>,
     done: HashMap<KernelKey, std::result::Result<Kernel, String>>,
+    /// The order kernels finished in, oldest first, for wanted and idle
+    /// threads (entries of kernels already taken stay until they reach the
+    /// front).
+    finished: [VecDeque<KernelKey>; 2],
     /// Background threads alive: wanted ones, idle ones.
     workers: [usize; 2],
     closed: bool,
@@ -1011,6 +1056,10 @@ struct PrefetchState {
 
 /// Most wanted threads at once: the three lane classes of a world.
 const WANTED_THREADS: usize = 3;
+/// Most loaded kernels waiting to be used, from wanted and from idle
+/// threads. The neighbours of one world are about 100 kernels, and each
+/// module holds device memory, so the oldest go when more finish.
+const READY_KERNELS: [usize; 2] = [48, 128];
 
 /// Lowers the calling thread's priority to the least (Linux: per thread).
 fn nice_idle() {
@@ -1074,11 +1123,26 @@ impl Prefetch {
                 }
             }
             // A second thread on one kernel (a neighbour that became wanted)
-            // leaves a module nobody needs.
+            // leaves a module nobody needs. Unloading waits for the kernels
+            // running on the GPU, so it happens outside the lock.
+            let mut unused = Vec::new();
             if let Some(Ok(extra)) = state.done.insert(key, result) {
-                self.unload(&extra);
+                unused.push(extra);
+            }
+            state.finished[kind].push_back(key);
+            while state.finished[kind].len() > READY_KERNELS[kind] {
+                let Some(oldest) = state.finished[kind].pop_front() else {
+                    break;
+                };
+                if let Some(Ok(old)) = state.done.remove(&oldest) {
+                    unused.push(old);
+                }
             }
             self.ready.notify_all();
+            drop(state);
+            for kernel in &unused {
+                self.unload(kernel);
+            }
         }
     }
 
@@ -1108,8 +1172,24 @@ impl Prefetch {
         }
     }
 
-    /// Queues `wanted` ahead of everything queued and `idle` after it, and
-    /// starts threads. A kernel already queued, running or done stays where
+    /// The loaded kernels among `keys`, without waiting for any.
+    fn take_ready(&self, keys: &[KernelKey]) -> Vec<(KernelKey, Kernel)> {
+        let mut state = self.lock();
+        keys.iter()
+            .filter_map(|key| match state.done.remove(key) {
+                Some(Ok(kernel)) => Some((*key, kernel)),
+                Some(Err(error)) => {
+                    // Left for `take`, which reports it.
+                    state.done.insert(*key, Err(error));
+                    None
+                }
+                None => None,
+            })
+            .collect()
+    }
+
+    /// Queues `wanted` and `idle` ahead of everything queued in their queues
+    /// (in their own order), and starts threads. A kernel already queued, running or done stays where
     /// it is, except that an idle one now wanted moves up (a thread at
     /// nice 19 may be slow, so a wanted thread compiles it too).
     fn enqueue(self: &Arc<Self>, wanted: Vec<KernelKey>, idle: Vec<KernelKey>) {
@@ -1133,14 +1213,19 @@ impl Prefetch {
         for key in fresh.into_iter().rev() {
             state.wanted.push_front(key);
         }
-        for key in idle {
-            let known = state.done.contains_key(&key)
-                || state.running.contains_key(&key)
-                || state.wanted.contains(&key)
-                || state.idle.contains(&key);
-            if !known {
-                state.idle.push_back(key);
-            }
+        // The newest world's neighbours go first: the player's next press is
+        // one of them, not one of an earlier world's.
+        let fresh: Vec<KernelKey> = idle
+            .into_iter()
+            .filter(|key| {
+                !(state.done.contains_key(key)
+                    || state.running.contains_key(key)
+                    || state.wanted.contains(key))
+            })
+            .collect();
+        state.idle.retain(|key| !fresh.contains(key));
+        for key in fresh.into_iter().rev() {
+            state.idle.push_front(key);
         }
         for (kind, queued) in [state.wanted.len(), state.idle.len()].into_iter().enumerate() {
             let most = if kind == 0 { WANTED_THREADS } else { 1 };
@@ -1276,7 +1361,6 @@ impl CudaEngine {
                 kernels: HashMap::new(),
                 prefetch: Prefetch::new(api.clone(), context, options),
                 worlds: HashSet::new(),
-                neighbours: HashSet::new(),
                 slots: Vec::new(),
                 next_ticket: 0,
                 max_capacity,
@@ -1290,6 +1374,12 @@ impl CudaEngine {
                 let slot = engine.create_slot(index + 1 == slots)?;
                 engine.slots.push(slot);
             }
+            static EVICT: std::sync::Once = std::sync::Once::new();
+            EVICT.call_once(|| {
+                if let Some(dir) = kernel_cache_dir() {
+                    evict_cache(&dir);
+                }
+            });
             engine.prefetch_world(&Config::default());
             Ok(engine)
         }
@@ -1345,23 +1435,16 @@ impl CudaEngine {
     /// ready: all the scoring kernels first, then fine, then recordings.
     fn prefetch_world(&mut self, cfg: &Config) {
         let flags = crate::warp_kernel::world_flags(cfg);
-        let levels: Vec<u8> = crate::environment::EFFECTS
-            .iter()
-            .map(|effect| effect.level(cfg) as u8)
-            .collect();
-        if !self.worlds.insert((levels, flags)) {
-            return;
-        }
         let mut fidelities = vec![Fidelity::standard(), Fidelity::fine()];
         if !fidelities.contains(&cfg.fidelity()) {
             fidelities.push(cfg.fidelity());
         }
-        // Kernels of `flags` in the order of (record, fidelity) steps.
+        // Kernels of a world in the order of (record, fidelity) steps.
         let steps: Vec<(bool, Fidelity)> = [false, true]
             .into_iter()
             .flat_map(|record| fidelities.iter().map(move |&f| (record, f)))
             .collect();
-        let keys = |engine: &Self, flags: u32, steps: &[(bool, Fidelity)]| -> Vec<KernelKey> {
+        let keys = |flags: u32, steps: &[(bool, Fidelity)]| -> Vec<KernelKey> {
             steps
                 .iter()
                 .flat_map(|&(record, fidelity)| {
@@ -1372,31 +1455,50 @@ impl CudaEngine {
                         fidelity,
                     })
                 })
-                .filter(|key| !engine.kernels.contains_key(key))
                 .collect()
         };
-        let wanted = keys(self, flags, &steps);
-        let mut idle = Vec::new();
-        let mut near = Vec::new();
-        for neighbour in crate::environment::one_level_away(cfg) {
-            let neighbour_flags = crate::warp_kernel::world_flags(&neighbour);
-            if neighbour_flags != flags && !near.contains(&neighbour_flags) {
-                near.push(neighbour_flags);
+        let levels: Vec<u8> = crate::environment::EFFECTS
+            .iter()
+            .map(|effect| effect.level(cfg) as u8)
+            .collect();
+        let mut world = keys(flags, &steps);
+        if self.worlds.insert((levels, flags)) {
+            let wanted = world
+                .iter()
+                .copied()
+                .filter(|key| !self.kernels.contains_key(key))
+                .collect();
+            let mut near = Vec::new();
+            for neighbour in crate::environment::one_level_away(cfg) {
+                let neighbour_flags = crate::warp_kernel::world_flags(&neighbour);
+                if neighbour_flags != flags && !near.contains(&neighbour_flags) {
+                    near.push(neighbour_flags);
+                }
             }
-        }
-        // Standard scoring, fine scoring, then recordings at the standard
-        // physics, each across all the neighbours.
-        for step in [
-            &steps[..1],
-            &steps[1..2],
-            &steps[fidelities.len()..fidelities.len() + 1],
-        ] {
-            for &neighbour_flags in &near {
-                idle.extend(keys(self, neighbour_flags, step));
+            // Standard scoring, fine scoring, then recordings at the
+            // standard physics, each across all the neighbours.
+            let mut idle = Vec::new();
+            for step in [
+                &steps[..1],
+                &steps[1..2],
+                &steps[fidelities.len()..fidelities.len() + 1],
+            ] {
+                for &neighbour_flags in &near {
+                    idle.extend(
+                        keys(neighbour_flags, step)
+                            .into_iter()
+                            .filter(|key| !self.kernels.contains_key(key)),
+                    );
+                }
             }
+            self.prefetch.enqueue(wanted, idle);
         }
-        idle.retain(|key| self.neighbours.insert(*key));
-        self.prefetch.enqueue(wanted, idle);
+        // Kernels of this world that finished loading are the engine's from
+        // now on (the background threads drop the ones nobody takes).
+        world.retain(|key| !self.kernels.contains_key(key));
+        for (key, kernel) in self.prefetch.take_ready(&world) {
+            self.kernels.insert(key, kernel);
+        }
     }
 
     /// The kernel for `key`: from the background compiler if it has it or is
@@ -2078,6 +2180,32 @@ mod tests {
             (t.start, t.end, t.warp),
             ([0, 7, 7, 7], [7, 7, 7, 7], [0, 20, 20, 20])
         );
+    }
+
+    #[test]
+    fn eviction_keeps_the_newest_kernels() {
+        let dir = std::env::temp_dir().join(format!("evolution-cache-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let start = std::time::SystemTime::now() - Duration::from_secs(10_000);
+        for i in 0..CACHE_FILES + 5 {
+            let path = dir.join(format!("{i:04}.cubin"));
+            std::fs::write(&path, b"x").unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            file.set_modified(start + Duration::from_secs(i as u64)).unwrap();
+        }
+        std::fs::write(dir.join("other.txt"), b"x").unwrap();
+        evict_cache(&dir);
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), CACHE_FILES + 1);
+        assert!(names.contains(&"other.txt".to_string()));
+        assert!(!names.contains(&"0004.cubin".to_string()));
+        assert!(names.contains(&"0005.cubin".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

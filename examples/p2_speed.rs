@@ -5,7 +5,9 @@
 //! muscle-rounds histogram, and a hash of every creature's result bits, which
 //! two runs of one population compare.
 //!
-//! Usage: p2_speed <save.evo | dump.bin> [count] [repeats]
+//! Usage: p2_speed <save.evo | dump.bin> [count] [repeats] [effects]
+//! `effects` is a comma list of effect names (`Wind,Mud`) put on at their
+//! first level over the save's world.
 use evolution_simulator::{
     config::Config,
     engine::{self, Engine},
@@ -96,6 +98,15 @@ fn main() -> anyhow::Result<()> {
         e.config.clone()
     };
     cfg.screen = None;
+    for name in args.get(4).map_or("", |v| v.as_str()).split(',').filter(|n| !n.is_empty()) {
+        let effect = evolution_simulator::environment::EFFECTS
+            .iter()
+            .find(|e| e.name.eq_ignore_ascii_case(name))
+            .unwrap_or_else(|| panic!("no effect {name}"));
+        let level = effect.level(&cfg) + 1;
+        effect.set_level(&mut cfg, level);
+    }
+    eprintln!("world flags {:#x}", warp_kernel::world_flags(&cfg));
     let mut engine = engine::gpu_engine("RTX 4060", 64)?;
     eprintln!("engine: {}", engine.name());
     run(&mut engine, &pop, &cfg)?;

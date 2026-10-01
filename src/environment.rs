@@ -403,6 +403,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_worlds_one_level_away_differ_by_one_effect() {
+        let calm = Config::default();
+        let away = one_level_away(&calm);
+        // Every effect but the autochange has a level above the calm one,
+        // and the grip (calm level 1 of 5) one below as well.
+        assert!(away.len() >= EFFECTS.len() - 1);
+        for world in &away {
+            let changed = EFFECTS
+                .iter()
+                .filter(|e| e.level(world) != e.level(&calm))
+                .count();
+            assert_eq!(changed, 1);
+        }
+        // The kernels need few distinct worlds: most effects change no flag.
+        let mut flags: Vec<u32> = away.iter().map(crate::warp_kernel::world_flags).collect();
+        flags.sort();
+        flags.dedup();
+        assert!(flags.len() < away.len());
+    }
+
+    #[test]
     fn every_level_round_trips() {
         for effect in &EFFECTS {
             for level in 0..effect.levels.len() {

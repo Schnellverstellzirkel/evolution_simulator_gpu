@@ -1372,6 +1372,8 @@ struct App {
     message: Option<String>,
     /// The message on the status line and when it first showed.
     shown_message: Option<(String, Instant)>,
+    /// Since when the GPU has waited for a kernel (`cuda_engine::compiling_world`).
+    compiling_since: Option<Instant>,
     new_dialog: bool,
     /// When the UI last sent a settings change to the worker.
     config_sent: Option<Instant>,
@@ -1546,6 +1548,7 @@ impl App {
             file_path: "runs/experiment.evo".into(),
             message: None,
             shown_message: None,
+            compiling_since: None,
             new_dialog: false,
             config_sent: None,
             world_undo: Vec::new(),
@@ -5084,9 +5087,26 @@ impl eframe::App for App {
                 }
                 if let Some(s) = &self.snapshot {
                     color_dot(ui, theme.accent);
-                    match &self.shown_message {
-                        Some((message, _)) => ui.label(message),
-                        None => ui.label(&s.status),
+                    // A world whose kernels nobody compiled yet makes the GPU
+                    // wait for them. Waits under a third of a second are
+                    // loads of kernels that are ready, not worth a message.
+                    if crate::cuda_engine::compiling_world() {
+                        self.compiling_since.get_or_insert_with(Instant::now);
+                        ui.ctx().request_repaint_after(Duration::from_millis(250));
+                    } else {
+                        self.compiling_since = None;
+                    }
+                    let compiling = self
+                        .compiling_since
+                        .map(|since| since.elapsed())
+                        .filter(|waited| *waited > Duration::from_millis(300));
+                    match (&self.shown_message, compiling) {
+                        (Some((message, _)), _) => ui.label(message),
+                        (None, Some(waited)) => ui.label(format!(
+                            "Compiling the new world… {:.0} s",
+                            waited.as_secs_f32()
+                        )),
+                        (None, None) => ui.label(&s.status),
                     };
                     if self.shown_message.is_some() {
                         ui.ctx().request_repaint_after(Duration::from_millis(500));
