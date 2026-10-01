@@ -33,6 +33,13 @@ pub const MUSCLE_FIELDS: usize = 8;
 pub const ROUNDS: usize = 4;
 /// Lanes per creature.
 pub const CLASSES: [usize; 3] = [8, 16, 32];
+/// The class that runs one creature per thread (`shaders/lane_creature.cu`)
+/// instead of one per lane group.
+pub const THREAD_CLASS: usize = 8;
+/// Creatures a warp runs at once in a class.
+pub fn creatures_per_warp(class: usize) -> usize {
+    if class == THREAD_CLASS { 32 } else { 32 / class }
+}
 /// Largest body the kernel runs.
 pub const MAX_NODES: usize = 32;
 /// Contacts per substep.
@@ -251,10 +258,12 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
     for (name, value) in defines {
         source.push_str(&format!("#define {name} {value}\n"));
     }
+    source.push_str(include_str!("../shaders/creature_common.cu"));
     // A developer working on the kernel may point `EVOLUTION_WARP_SOURCE` at
     // a copy of it to skip rebuilds.
     match std::env::var("EVOLUTION_WARP_SOURCE").ok().and_then(|p| std::fs::read_to_string(p).ok()) {
         Some(text) => source.push_str(&text),
+        None if class == THREAD_CLASS => source.push_str(include_str!("../shaders/lane_creature.cu")),
         None => source.push_str(include_str!("../shaders/warp_creature.cu")),
     }
     source

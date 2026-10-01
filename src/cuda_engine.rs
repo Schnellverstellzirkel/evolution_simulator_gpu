@@ -1926,7 +1926,7 @@ impl CudaEngine {
                 let res = resources.groups[b].as_ref().unwrap();
                 let (kernel, blocks_per_sm) = kernels[b];
                 let mut params = crate::warp_kernel::params(cfg, first, count, stride);
-                let groups_per_block = (crate::warp_kernel::BLOCK as usize / 32) * (32 / batch.capacity);
+                let groups_per_block = (crate::warp_kernel::BLOCK as usize / 32) * crate::warp_kernel::creatures_per_warp(batch.capacity);
                 let blocks = count
                     .div_ceil(groups_per_block)
                     .min(blocks_per_sm as usize * self.multiprocessors as usize)
