@@ -5,7 +5,7 @@
 # is paused. A pause lasts at most 5 minutes; after one the game runs at
 # least 2 minutes before it honors a new request. See src/dev_pause.rs.
 # Usage: tools/pause-game.sh <command> [args...]
-# Speed measurements: flock -x target/gpu.lock tools/pause-game.sh tools/cpu-slot.sh <bench>
+# Speed measurements: flock -x target/gpu.lock tools/pause-game.sh <bench>
 set -u
 if [ $# -eq 0 ]; then
   echo "Usage: $0 <command> [args...]" >&2

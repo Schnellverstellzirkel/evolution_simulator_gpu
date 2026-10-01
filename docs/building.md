@@ -5,25 +5,25 @@ iteration, `release-fast` inherits the release settings but disables LTO, uses 2
 codegen units, and enables incremental compilation:
 
 ```bash
-CARGO_BUILD_JOBS=8 nice -n 10 cargo build --profile release-fast
-CARGO_BUILD_JOBS=8 RAYON_NUM_THREADS=8 EVOLUTION_DEVICES=primary nice -n 10 cargo run --profile release-fast
+cargo build --profile release-fast
+EVOLUTION_DEVICES=primary cargo run --profile release-fast
 ```
 
 The repository's x86_64 Linux Cargo config already enables `target-cpu=native`.
 If `mold` is installed, it can speed up linking:
 
 ```bash
-CARGO_BUILD_JOBS=8 nice -n 10 env RUSTFLAGS="-C target-cpu=native -C link-arg=-fuse-ld=mold" cargo build --profile release-fast
+RUSTFLAGS="-C target-cpu=native -C link-arg=-fuse-ld=mold" cargo build --profile release-fast
 ```
 
 Supplying `RUSTFLAGS` replaces Cargo's configured rustflags, so the command
 repeats `target-cpu=native` explicitly. Omit it when `mold` is unavailable.
 
-On this machine keep evaluation off the desktop Radeon and cap CPU use. Apply
-these settings to every game run and benchmark:
+On this machine keep evaluation off the desktop Radeon. Apply this setting to
+every game run and benchmark:
 
 ```bash
-CARGO_BUILD_JOBS=8 RAYON_NUM_THREADS=8 EVOLUTION_DEVICES=primary nice -n 10 cargo run --release
+EVOLUTION_DEVICES=primary cargo run --release
 ```
 
 ## CUDA on NVIDIA GPUs
@@ -71,7 +71,7 @@ Developer diagnostics, never needed to play:
 The tools in `examples/` (`search_ab`, `size_report`, `mutation_audit`, `physics_audit`, `first_generation`, `replay_match`, `p2_speed`, `worker_rate`, and for a physics change `lean_gates`, which runs the spirit checks on a save's elites: `run`, `report`, `gifs`; `repeat_diff` and `order_diff`, which score one population repeatedly or in other orders and name the creatures that changed) score and replay creatures on the GPU engine. They fail if the primary GPU does not open. They submit at most 50,000 creatures per unit, so they need little GPU memory beside the owner's game. Run them with the lock shared, unless they measure speed:
 
 ```bash
-EVOLUTION_DEVICES=primary flock -s target/gpu.lock nice -n 19 tools/cpu-slot.sh cargo run --release --example first_generation 20000
+EVOLUTION_DEVICES=primary flock -s target/gpu.lock cargo run --release --example first_generation 20000
 ```
 
 ## Pausing the game for a measurement
@@ -79,7 +79,7 @@ EVOLUTION_DEVICES=primary flock -s target/gpu.lock nice -n 19 tools/cpu-slot.sh 
 A speed measurement needs the GPU and the CPU to itself, while the owner's game may be running. `tools/pause-game.sh <command...>` pauses the running game, runs the command and lets the game resume when the command ends, also on Ctrl-C or an error. Run speed measurements inside the exclusive GPU lock:
 
 ```
-flock -x target/gpu.lock tools/pause-game.sh tools/cpu-slot.sh <bench>
+flock -x target/gpu.lock tools/pause-game.sh <bench>
 ```
 
 The tool writes the request file `pause` in `$XDG_RUNTIME_DIR/evolution-simulator` (or `/tmp/evolution-simulator-<uid>` without `XDG_RUNTIME_DIR`). The game looks for it four times a second. It stops handing new work to its engines, lets the units already on them finish and be absorbed, closes its GPU engines so their memory is freed, and writes `paused` with its pid. The tool waits up to 60 s for that file and then runs the command. With no game running it runs the command at once. When the command ends the tool removes the request, the game opens its engines again and goes on. It prints how long the game was paused.
@@ -187,7 +187,7 @@ Rows 14 to 16 are not taken. The engine sizes each wave's grid to the resident c
 The rows left blank need root, more than half the CPU, the Radeon, or more than 5 minutes of GPU. The rows an agent took ran beside other agents' CPU work, which the APU column shows, so the session takes them again on a quiet machine. The owner runs it in five pauses and one 10-minute window, with no agent builds or GPU work during the session. First, once, from the repository root (the tools build into their own target directory, so the game's `target/release` is untouched):
 
 ```bash
-CARGO_TARGET_DIR=target/power CARGO_BUILD_JOBS=8 nice -n 10 cargo build --release --example power_probe --example p2_speed
+CARGO_TARGET_DIR=target/power cargo build --release --example power_probe --example p2_speed
 gcc -O2 -march=native -pthread -o target/power/cpu-burn tools/cpu-burn.c
 mkdir -p target/power/rows
 export EVOLUTION_DEVICES=primary RAYON_NUM_THREADS=4

@@ -27,10 +27,8 @@ sudo apt-get install build-essential pkg-config libwayland-dev libxkbcommon-dev 
 Use this environment for all builds, tests, game runs, and benchmarks on the owner's workstation:
 
 ```bash
-export CARGO_BUILD_JOBS=8
-export RAYON_NUM_THREADS=8
 export EVOLUTION_DEVICES=primary
-nice -n 10 cargo run --release
+cargo run --release
 ```
 
 The default GPU name is `RTX 4060`; `--gpu NAME` selects another NVIDIA GPU. Secondary GPUs are off by default; `EVOLUTION_DEVICES=NAME` adds other NVIDIA GPUs to evaluation, and `EVOLUTION_DEVICES=primary` keeps them off. Keep that setting on this workstation, because the Radeon 780M draws the desktop and the game window and never evaluates creatures ([building](docs/building.md#the-radeon-780m) has the reasons). General Rayon workers (archive insertion, breeding, packing) take every logical CPU but two, at low priority; `RAYON_NUM_THREADS` can lower that.
