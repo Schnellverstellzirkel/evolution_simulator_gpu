@@ -160,7 +160,7 @@ pub fn params(cfg: &Config, base: usize, count: usize, stride: usize) -> Params 
         patches: if ground { cfg.patches } else { 0.0 },
         air_sub: air.powf(1.0 / solver_setting("SUBSTEPS", SUBSTEPS) as f32),
         inv_muscle_energy: 1.0 / cfg.muscle_energy,
-        spare: [f32::from_bits(world_flags(cfg)), 0.0],
+        spare: [0.0; 2],
     }
 }
 
@@ -194,15 +194,10 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
             format!("{}", solver_setting("PROFILE", 0)),
         ),
     ];
-    let fat = solver_setting("FAT", 0) != 0;
     for (bit, name) in FLAG_NAMES.iter().enumerate() {
         defines.push((
             (*name).into(),
-            if fat {
-                format!("((p.flags >> {bit}u) & 1u)")
-            } else {
-                (if flags & (1 << bit) != 0 { "1" } else { "0" }).into()
-            },
+            (if flags & (1 << bit) != 0 { "1" } else { "0" }).into(),
         ));
     }
     let constants = [
@@ -255,46 +250,7 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
         Some(text) => source.push_str(&text),
         None => source.push_str(include_str!("../shaders/warp_creature.cu")),
     }
-    if fat {
-        source = fat_source(&source);
-    }
     source
-}
-
-/// The kernel with the world flags as runtime values: `#if FLAG` lines
-/// become `if (FLAG) {`.
-fn fat_source(source: &str) -> String {
-    let mut out = String::new();
-    // The one place a flag's two branches declare the same names.
-    let source = source.replace(
-        "    #if AIR\n                    const float wantx = ex * p.air_sub, wanty = ey * p.air_sub;\n    #else\n                    const float wantx = ex, wanty = ey;\n    #endif\n",
-        "    const float wantx = AIR ? ex * p.air_sub : ex, wanty = AIR ? ey * p.air_sub : ey;\n",
-    );
-    // Whether each open `#if` is a world flag's.
-    let mut open: Vec<bool> = Vec::new();
-    for line in source.lines() {
-        let t = line.trim_start();
-        let indent = &line[..line.len() - t.len()];
-        if let Some(name) = t.strip_prefix("#if ") {
-            let world = FLAG_NAMES.contains(&name.trim());
-            open.push(world);
-            if world {
-                out.push_str(&format!("{indent}if ({}) {{\n", name.trim()));
-                continue;
-            }
-        } else if t.starts_with("#else") && open.last() == Some(&true) {
-            out.push_str(&format!("{indent}}} else {{\n"));
-            continue;
-        } else if t.starts_with("#endif") {
-            if open.pop() == Some(true) {
-                out.push_str(&format!("{indent}}}\n"));
-                continue;
-            }
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.replace("float spare1;", "unsigned flags;")
 }
 
 /// A creature's size in its class's buffers and its place in the sort, from

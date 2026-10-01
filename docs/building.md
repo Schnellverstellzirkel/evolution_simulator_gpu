@@ -59,10 +59,11 @@ python3 -m venv ~/.local/share/evolution-cuda/venv
 ```
 
 Pick an NVRTC no newer than the driver's CUDA version (`nvidia-smi` shows it;
-driver 580 is CUDA 13.0). The kernels compile when the engine opens (the fine
-check kernels on first use), about 2 s per kernel the first time. NVIDIA's
-compute cache (`~/.nv/ComputeCache`) keeps them, so later starts take about
-0.3 s.
+driver 580 is CUDA 13.0). The kernels of the current world compile when the
+engine opens and when the world changes, and the kernels of every world one
+effect level away compile after them at idle priority, about 1 to 2 s per kernel
+the first time. They are kept in `~/.cache/evolution-simulator/cuda` (the
+200 newest files), so later starts load them in milliseconds.
 
 Developer diagnostics, never needed to play:
 `EVOLUTION_NVRTC=/path/to/libnvrtc.so.13` names another NVRTC, and

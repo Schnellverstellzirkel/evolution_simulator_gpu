@@ -914,10 +914,13 @@ fn evict_cache(dir: &Path) {
         };
         match path.extension().and_then(|e| e.to_str()) {
             Some("cubin") => kernels.push((modified, path)),
-            Some(e) if e.starts_with("tmp") => {
-                if now.duration_since(modified).is_ok_and(|age| age > Duration::from_secs(3600)) {
-                    let _ = std::fs::remove_file(&path);
-                }
+            Some(e)
+                if e.starts_with("tmp")
+                    && now
+                        .duration_since(modified)
+                        .is_ok_and(|age| age > Duration::from_secs(3600)) =>
+            {
+                let _ = std::fs::remove_file(&path);
             }
             _ => {}
         }

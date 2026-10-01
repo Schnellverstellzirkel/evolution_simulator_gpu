@@ -3,7 +3,11 @@
 //! long the champion's replay took to record (asked every 5 s, as a player
 //! clicking it), and a digest of every generation's statistics, which two
 //! runs of one seed must share.
-//! Usage: worker_rate [population] [generations] [seed] [button seconds]
+//! With a fifth argument above 0 each press applies the next world preset
+//! (rough hills, icy slope, swamp, desert, obstacle course, heavy world, then
+//! the calm world) instead: most of them are several effects away, so their
+//! kernels are not ready yet.
+//! Usage: worker_rate [population] [generations] [seed] [button seconds] [presets]
 //! With button seconds above 0 an effect button is pressed that often: wind,
 //! mud, water, ice patches, gaps and hurdles go on one after another, then
 //! off in reverse, so every press is one level away from the world before it.
@@ -28,6 +32,7 @@ fn main() -> anyhow::Result<()> {
     let generations = arg(2, 12) as usize;
     let seed = arg(3, 38);
     let button = arg(4, 0);
+    let presets = arg(5, 0) > 0;
     let gpu = Gpu::new("RTX 4060")?;
     // A measurement must not pause itself when it runs under
     // tools/pause-game.sh, so it watches a private pause directory.
@@ -123,19 +128,35 @@ fn main() -> anyhow::Result<()> {
                     );
                 }
                 wait_at_press = wait;
-                let step = presses % (2 * BUTTONS.len());
-                let (name, level) = if step < BUTTONS.len() {
-                    (BUTTONS[step], 1)
-                } else {
-                    (BUTTONS[2 * BUTTONS.len() - 1 - step], 0)
-                };
-                let effect = evolution_simulator::environment::EFFECTS
-                    .iter()
-                    .find(|e| e.name == name)
-                    .expect("effect");
                 let mut config = snapshot.config.clone();
-                effect.set_level(&mut config, level);
-                eprintln!("press {}: {name} level {level}", presses + 1);
+                if presets {
+                    let all = &evolution_simulator::environment::PRESETS;
+                    let step = presses % (all.len() + 1);
+                    if step < all.len() {
+                        all[step].apply(&mut config);
+                        eprintln!("press {}: {}", presses + 1, all[step].name);
+                    } else {
+                        for effect in &evolution_simulator::environment::EFFECTS {
+                            if effect.name != "Autochange environment" {
+                                effect.set_level(&mut config, effect.calm);
+                            }
+                        }
+                        eprintln!("press {}: calm world", presses + 1);
+                    }
+                } else {
+                    let step = presses % (2 * BUTTONS.len());
+                    let (name, level) = if step < BUTTONS.len() {
+                        (BUTTONS[step], 1)
+                    } else {
+                        (BUTTONS[2 * BUTTONS.len() - 1 - step], 0)
+                    };
+                    let effect = evolution_simulator::environment::EFFECTS
+                        .iter()
+                        .find(|e| e.name == name)
+                        .expect("effect");
+                    effect.set_level(&mut config, level);
+                    eprintln!("press {}: {name} level {level}", presses + 1);
+                }
                 presses += 1;
                 worker.send(Command::Configure(config));
             }
