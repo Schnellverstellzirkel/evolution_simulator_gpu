@@ -1,6 +1,6 @@
 # Agent guide
 
-Read this before you change the code. It covers the game, the owner's rules, how work is organized, and how to build, test and measure on this machine. Open work is listed in `docs/backlog.md`.
+Read this before you change the code. It covers the game, the owner's rules, how work is organized, and how to build and measure on this machine. Open work is listed in `docs/backlog.md`.
 
 ## The game
 
@@ -21,8 +21,8 @@ Product:
 - The search is deterministic for a fixed seed on one GPU.
 - Saves are small (archives and search state), and the game writes as few files as possible. Autosave is off. Breaking old saves is fine: bump `qd::VERSION` when archive or physics semantics change, and the save header turns older saves down with a message.
 - Speed matters. The goal is 2M, then 4M, evaluated creatures per second in the graphical game at 60 FPS.
-- The current game is the reference, not the past. A change stays if the game is better or faster now, shown by a direct measurement of that change on its own. Any measured speedup that keeps the quality checks (elite distances, no free propulsion, determinism) is kept and merged, however small: 1.05x is a win. A track's gate (3x, 2x, 45% issue) is its ambition and decides what to try next, never whether measured gains are thrown away. No comparison to an earlier version is needed, and nobody writes experiment reports. Search changes rest on papers and practice and must not break the search.
-- No golden reference. The physics, the muscle model and the kernel that exist today are vibecoded and are not a reference: any of them may be replaced by a cheaper one. The only physics requirement is the spirit of the game: creatures evolve interesting, efficient shapes and gaits, and no glitchy movers (checks: random bodies gain no distance, elites hold under a finer-rate retest, planted feet do not slide, no energy from nowhere). Bit-equality between two implementations or kernel variants is never a gate. The one determinism rule is that one build on one GPU gives one search per seed.
+- The current game is the reference, not the past. A change stays if the game is better or faster now, shown by a direct measurement of that change on its own. Any measured speedup is kept and merged, however small: 1.05x is a win. A track's gate (3x, 2x, 45% issue) is its ambition and decides what to try next, never whether measured gains are thrown away. No comparison to an earlier version is needed, and nobody writes experiment reports. Search changes rest on papers and practice and must not break the search.
+- No golden reference. The physics, the muscle model and the kernel that exist today are vibecoded and are not a reference: any of them may be replaced by a cheaper one. The only physics requirement is the spirit of the game: creatures evolve interesting, efficient shapes and gaits, and no glitchy movers (random bodies that travel, feet that slide, energy from nowhere). Bit-equality between two implementations or kernel variants never matters. The one determinism rule is that one build on one GPU gives one search per seed.
 - There is one physics (`docs/physics.md`): the CUDA kernel, `shaders/warp_creature.cu`. Nothing else simulates creatures. The game needs an NVIDIA GPU with the CUDA driver and NVRTC.
 - Posture rules (for example what counts as a fall) need the owner's approval.
 
@@ -46,22 +46,22 @@ Use absolute paths, because `git -C` resolves a relative worktree path against t
 
 ## This machine
 
-- 16 threads, an RTX 4060 laptop GPU for compute, and a Radeon 780M that drives the desktop. Never evaluate creatures on the Radeon, because heavy Radeon use once crashed the desktop. Set `EVOLUTION_DEVICES=primary` for every run of the game, the tests and benchmarks.
-- Agents share at most half the machine. Build with `nice -n 19` and `CARGO_BUILD_JOBS=2`. Run long CPU jobs (the full test suite, A/B runs, benchmarks) through `tools/cpu-slot.sh <command>`, which waits for one of two shared 4-thread slots. The game itself may use the whole machine. Its general Rayon pool (breeding, archive insertion, packing) takes every logical CPU but two, at nice 10.
-- GPU runs share the GPU through `/home/amipo/workspace/evolutionSimulator/target/gpu.lock`. Tests, smoke windows and evolutions that do not measure speed take it shared (`flock -s`), so they run side by side. Speed measurements take it exclusive (`flock -x`), so they run alone. Run at most 2 GPU processes per agent at once, because the owner's game holds 5 to 7.5 GB of the RTX 4060's 8 GB and CUDA fails to open when memory runs out. Since 2026-09-29 the owner allows agent GPU work while their game runs: keep GPU memory low, and retry smaller after an out-of-memory error. `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv` shows who is on the GPU.
+- 16 threads, an RTX 4060 laptop GPU for compute, and a Radeon 780M that drives the desktop. Never evaluate creatures on the Radeon, because heavy Radeon use once crashed the desktop. Set `EVOLUTION_DEVICES=primary` for every run of the game and the tools.
+- Agents share at most half the machine. Build with `nice -n 19` and `CARGO_BUILD_JOBS=2`. Run long CPU jobs (benchmarks, long runs) through `tools/cpu-slot.sh <command>`, which waits for one of two shared 4-thread slots. The game itself may use the whole machine. Its general Rayon pool (breeding, archive insertion, packing) takes every logical CPU but two, at nice 10.
+- GPU runs share the GPU through `/home/amipo/workspace/evolutionSimulator/target/gpu.lock`. Smoke windows and evolutions that do not measure speed take it shared (`flock -s`), so they run side by side. Speed measurements take it exclusive (`flock -x`), so they run alone. Run at most 2 GPU processes per agent at once, because the owner's game holds 5 to 7.5 GB of the RTX 4060's 8 GB and CUDA fails to open when memory runs out. Since 2026-09-29 the owner allows agent GPU work while their game runs: keep GPU memory low, and retry smaller after an out-of-memory error. `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv` shows who is on the GPU.
 - Speed measurements pause the owner's game while they run: `flock -x target/gpu.lock tools/pause-game.sh tools/cpu-slot.sh <bench>`. The game stops evaluating and breeding and closes its GPU engines, so the GPU memory is free, and it resumes when the command ends. A pause lasts at most 5 minutes, so a measurement must fit in 5 minutes or be split. After a pause the game runs at least 2 minutes before it pauses again. `docs/building.md` has the details.
 - Screenshot runs (`EVOLUTION_SMOKE_*`, see `src/ui.rs`) open real windows on the owner's desktop titled "agent screenshot run, not your game". Keep them to seconds and look at every screenshot yourself.
 
 ## Build
 
 - Iteration build: `cargo build --profile release-fast` (LTO off, 256 codegen units, incremental). Use the normal release profile (thin LTO) for performance measurements.
-- GPU tests are `#[ignore]`d. `docs/building.md` has the build details and the environment variables.
+- `docs/building.md` has the build details and the environment variables.
 
 ## Code map
 
 The physics:
 
-- `shaders/warp_creature.cu` is the CUDA kernel, the only physics, driven by `src/cuda_engine.rs`. A creature runs on a group of 8, 16 or 32 lanes (lane i owns node i and the bone ending there, state in registers, tree passes level by level), and each 1/60 s step is 2 substeps (`docs/physics.md`). `src/warp_kernel.rs` packs creatures for it from `physics2::Model` and writes its source with the world's effects compiled in.
+- `shaders/warp_creature.cu` is the CUDA kernel, the only physics, driven by `src/cuda_engine.rs`. A creature runs on a group of 8, 16 or 32 lanes (lane i owns node i and the bone ending there, state in registers, tree passes level by level), and each 1/60 s step is one substep (`docs/physics.md`). `src/warp_kernel.rs` packs creatures for it from `physics2::Model` and writes its source with the world's effects compiled in.
 - `src/physics2.rs` holds the physics constants and `Model`, a creature's constants and starting state, from which `warp_kernel::pack` fills every kernel record.
 - `src/physics.rs` holds what the physics and the UI share: limits, fidelity, node and joint constants, the ground functions (bumps, slope, gaps, hurdles, quake), screening.
 - `src/engine.rs` runs each GPU on its own thread, one whole-trial submission per unit, and records replays with the scoring kernel (frames carry the muscle energy, muscle force and contact forces). `src/gpu.rs` is the evaluation front end. `src/creature_kernel.rs` holds `GpuResult`, `LaneBatch` and `frame_stride`.

@@ -60,4 +60,4 @@ The general Rayon pool (archive insertion, breeding, packing) takes every logica
 
 ## Checks
 
-CI runs `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings` and the release tests on Ubuntu, which has no GPU. GPU tests are ignored and run on the workstation (`tests/cuda_effects.rs`, `tests/cuda_physics.rs`, `tests/screening.rs`, `tests/rungs.rs`, `tests/gpu_repeatability.rs`).
+CI runs `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings` and the release tests on Ubuntu, which has no GPU.

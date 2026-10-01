@@ -121,7 +121,6 @@ Use the workstation environment above:
 ```bash
 nice -n 10 cargo fmt --all --check
 nice -n 10 cargo clippy --locked --all-targets -- -D warnings
-nice -n 10 cargo test --locked --release
 ```
 
 

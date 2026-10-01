@@ -20,14 +20,11 @@ Supplying `RUSTFLAGS` replaces Cargo's configured rustflags, so the command
 repeats `target-cpu=native` explicitly. Omit it when `mold` is unavailable.
 
 On this machine keep evaluation off the desktop Radeon and cap CPU use. Apply
-these settings to every game run, test and benchmark:
+these settings to every game run and benchmark:
 
 ```bash
-CARGO_BUILD_JOBS=8 RAYON_NUM_THREADS=8 EVOLUTION_DEVICES=primary nice -n 10 cargo test --release
+CARGO_BUILD_JOBS=8 RAYON_NUM_THREADS=8 EVOLUTION_DEVICES=primary nice -n 10 cargo run --release
 ```
-
-GPU tests are ignored. Select them explicitly, for example
-`cargo test --release --test gpu_repeatability -- --ignored`.
 
 ## CUDA on NVIDIA GPUs
 
@@ -272,5 +269,5 @@ Each `target/power/rows/<row>.txt` holds the p2_speed or probe lines and the sam
 - Devices and threads: `EVOLUTION_DEVICES` (`primary` on this machine; other names add NVIDIA GPUs), `RAYON_NUM_THREADS` (lowers the general worker pool), `EVOLUTION_RENDER_GPU` (adapter for drawing the window), `EVOLUTION_UI_FPS` (frame rate cap, 0 follows vsync).
 - CUDA: `EVOLUTION_NVRTC`, `EVOLUTION_CUDA_VERBOSE`, the `EVOLUTION_WARP_*` solver overrides (see the CUDA section).
 - Measuring: `EVOLUTION_STAGE_LOG=<path>` writes one CSV row per generation. `EVOLUTION_PROFILE_BREED` prints archive and breeding timings. `EVOLUTION_DUMP_GENERATION=<generation>[:<path>]` runs one generation with the screen bar off, re-runs the island elites in it, and writes a 64 B row per creature and a 32 B row per elite (`storage::dump` has the layout). `dump_stats <path>` and `rung_replay <path>` read it. The CUDA kernel writes the rung trace (distances at 1, 2.5, 5 and 10 s, the early features, the end code with the rung that stopped the trial, the cadence bands and the audit bit) into seven result words nothing else reads. `rung_replay` also fits the game's own rules (`rungs::Audit`) on the dump's audit rows alone and measures them on the rest. `EVOLUTION_NO_RUNGS=1` removes the audit lane and the early rungs, to measure the game without them in the same build (`search_ab` prints one `rungs` line per generation: steps per creature, stops per rung, audit rows, the audit lane's miss estimate and how much of the final top 1% and 10% the ladder and the 5 s screen alone would keep; `--seconds N` stops a run after N seconds of wall time).
-- Benchmarks, tests and screenshots: `EVOLUTION_BENCH_*` drives the graphical benchmark mode (generations, duration, warm-up). `EVOLUTION_TEST_*` sizes the ignored GPU tests. `EVOLUTION_SMOKE_*` starts short screenshot runs, and their windows show on the desktop.
+- Benchmarks and screenshots: `EVOLUTION_BENCH_*` drives the graphical benchmark mode (generations, duration, warm-up). `EVOLUTION_SMOKE_*` starts short screenshot runs, and their windows show on the desktop.
 - Unattended runs: `EVOLUTION_AUTOSTART="Autochange environment=1"` sets the listed effect levels (the list may be empty), turns autosave on every 10 generations and starts evolving continuously.

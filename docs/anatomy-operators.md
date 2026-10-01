@@ -2,7 +2,7 @@
 
 The structural emitter picks one of 7 classic operators (split a bone, mirrored node, duplicate a leaf limb, retime, organ, phase shift, rescale) or one of the anatomy operators in `src/evolution/anatomy/`. All of them are on. It picks uniformly among the classic operators, the anatomy operators that have their own slot, and the shared slots, and tries again (up to four times) when the chosen operator does not fit the body. The owner wants more operator types and never fewer.
 
-Every operator keeps the body limits and never touches the head or the neck. A property test runs every operator on 160 grown bodies and validates the repaired result. Each operator has its own test of its defining effect.
+Every operator keeps the body limits and never touches the head or the neck.
 
 | group (file) | operators |
 |---|---|
