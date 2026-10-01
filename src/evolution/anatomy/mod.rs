@@ -601,6 +601,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_operator_leaves_a_valid_body_under_the_growth_step() {
+        // Breeding gives a structural child the limits of its parent plus the
+        // growth step; the body must still validate against the game's caps.
+        let cfg = Config::default();
+        let bodies = bodies(&cfg, 160);
+        let mut bad: std::collections::BTreeMap<&str, usize> = Default::default();
+        for (index, (name, _)) in OPERATORS.iter().enumerate() {
+            for (i, body) in bodies.iter().enumerate() {
+                let limited = crate::evolution::child_limits(
+                    &cfg,
+                    body,
+                    Some(crate::evolution::GrowthStep { nodes: 4, muscles: 4 }),
+                );
+                let fit = limited.as_ref().unwrap_or(&cfg);
+                let mut c = body.clone();
+                let mut rng = Rng::new(41, index as u32, i);
+                let donor = &bodies[(i * 7 + 3) % bodies.len()];
+                if !apply(index, &mut c, fit, &mut rng, &Context { donor: Some(donor) }) {
+                    continue;
+                }
+                repair(&mut c, fit, &mut rng);
+                let mut pop = Population::default();
+                pop.push(c);
+                let check = Config {
+                    population: 1,
+                    ..cfg.clone()
+                };
+                if pop.validate(&check).is_err() {
+                    *bad.entry(name).or_default() += 1;
+                }
+            }
+        }
+        assert!(bad.is_empty(), "invalid under the growth step: {bad:?}");
+    }
+
     /// Bodies at the default caps: grown toward 32 nodes and filled toward
     /// 96 muscles, where the bounded arrays are full.
     fn full_bodies(cfg: &Config, count: usize) -> Vec<Creature> {

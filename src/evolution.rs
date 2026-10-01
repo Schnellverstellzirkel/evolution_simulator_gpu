@@ -687,9 +687,14 @@ impl Population {
             if historical {
                 continue;
             }
+            if spanned.count_ones() as usize != g.bone_count && std::env::var_os("EVOLUTION_DUMP_FAILED").is_some() {
+                eprintln!("{}", serde_json::to_string(&self.creature(genome_index)).unwrap_or_default());
+            }
             ensure!(
                 spanned.count_ones() as usize == g.bone_count,
-                "Every bone must be spanned by a muscle"
+                "Every bone must be spanned by a muscle (genome {genome_index}: {} nodes, {} muscles)",
+                g.node_count,
+                g.muscle_count
             );
         }
         Ok(())
@@ -1083,13 +1088,53 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
                 c.muscles.swap_remove(i);
             }
         }
-        if c.muscles.len() < cfg.max_muscles
-            && let Some(m) = muscle_across(&paths, node_count, j, rng)
-        {
-            c.muscles.push(m);
+        if c.muscles.len() < cfg.max_muscles {
+            if let Some(m) = muscle_across(&paths, node_count, j, rng) {
+                c.muscles.push(m);
+            }
+        } else {
+            // Still at the limit: stretch a muscle over the bone. One of its
+            // ends moves onto a node of the bone, and the muscle must keep
+            // every bone it spans now.
+            let (end_a, end_b) = (c.bones[j].a, c.bones[j].b);
+            let mut fix = None;
+            'search: for i in 0..c.muscles.len() {
+                let m = c.muscles[i];
+                let old = paths[m.node_a as usize] ^ paths[m.node_b as usize];
+                for to in [end_a, end_b] {
+                    for first in [true, false] {
+                        let (moved, other) = if first { (m.node_a, m.node_b) } else { (m.node_b, m.node_a) };
+                        if moved == to || other == to {
+                            continue;
+                        }
+                        let span = paths[to as usize] ^ paths[other as usize];
+                        if span.count_ones() >= 2 && span >> j & 1 == 1 && span & old == old {
+                            fix = Some((i, first, to));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            if let Some((i, first, to)) = fix {
+                if first {
+                    c.muscles[i].node_a = to;
+                } else {
+                    c.muscles[i].node_b = to;
+                }
+            }
         }
     }
     let _ = &mut paths;
+    #[cfg(debug_assertions)]
+    {
+        let paths = root_paths(node_count, &c.bones);
+        let all = c.muscles.iter().fold(0u32, |all, m| all | paths[m.node_a as usize] ^ paths[m.node_b as usize]);
+        debug_assert!(
+            c.muscles.len() >= cfg.max_muscles || all.count_ones() as usize == c.bones.len(),
+            "repair left a bone unspanned: {} nodes, {} bones, {} muscles, cap {}",
+            c.nodes.len(), c.bones.len(), c.muscles.len(), cfg.max_muscles
+        );
+    }
     snap_clock_ratios(c);
     normalize_bone_lengths(c);
     align_nodes_with_bones(c);
