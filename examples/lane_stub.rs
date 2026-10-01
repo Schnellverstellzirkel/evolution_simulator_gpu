@@ -6,6 +6,15 @@
 //! Usage: lane_stub [key=value ...]
 //!   count=262144 steps=300 nodes=8 muscles=19 substeps=2 nb=3 mpl=16
 //!   rounds=3 block=128 min_blocks=4 repeat=3 arch=sm_89 seed=1
+//!   trim          the trimmed kernel (TRIM 1: one warm-started round plus a
+//!                 two-sweep polish, state in registers, no stash, hoisted
+//!                 one-hots and statics, node-masked anchors, contact impulses
+//!                 through the force table); sets rounds=1 min_blocks=2 unless
+//!                 given (8 warps per SM, 255 registers, no spill)
+//!   plan=0,1,1,2,4,5,6   every creature has this tree (the parents of nodes
+//!                 1 .. n - 1, breadth first; nodes follows from it)
+//!   baked         with plan=: compile the tree into the kernel as constants
+//!   results=PATH  write every creature's eight result words (f32, little endian)
 //!   report        compile and report only (no GPU time)
 //!   cubin=PATH, src=PATH, log   write the cubin, the source, the full log
 //!   first         print creature 0 and the first non-finite creatures
@@ -688,6 +697,8 @@ fn args() -> HashMap<String, String> {
 pub struct Setup {
     /// The baked tree (parents of nodes 1 .. n - 1), if any.
     pub baked: Option<Vec<usize>>,
+    /// TRIM 1.
+    pub trim: bool,
     pub mpl: usize,
     pub nb: usize,
     pub substeps: u32,
@@ -707,6 +718,9 @@ impl Setup {
             ("BLOCK", self.block.to_string()),
             ("MIN_BLOCKS", self.min_blocks.to_string()),
         ];
+        if self.trim {
+            d.push(("TRIM", "1".into()));
+        }
         if let Some(p) = &self.baked {
             d.extend(bake_defines(p, self.nb));
         }
@@ -783,14 +797,16 @@ fn main() -> Result<()> {
         }
         v
     });
+    let trim = a.contains_key("trim");
     let setup = Setup {
         baked: if a.contains_key("baked") { Some(plan.clone().expect("baked needs plan=")) } else { None },
+        trim,
         mpl: num("mpl", "16"),
         nb: num("nb", "3"),
         substeps: num("substeps", "2") as u32,
-        rounds: num("rounds", "3") as u32,
+        rounds: num("rounds", if trim { "1" } else { "3" }) as u32,
         block: num("block", "128") as u32,
-        min_blocks: num("min_blocks", "4") as u32,
+        min_blocks: num("min_blocks", if trim { "2" } else { "4" }) as u32,
     };
     let arch = get("arch", "sm_89");
     let (cubin, log) = compile_stub(&setup, &arch)?;

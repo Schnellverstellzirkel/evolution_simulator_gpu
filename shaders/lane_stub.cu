@@ -31,6 +31,21 @@
 // NO_CONTACT, NO_DAMP, NO_FRICTION, NO_LEDGER, USE_STASH, DIAG (solve
 // residuals in the result), TRACE, DUMP, DUMPW (see examples/lane_stub.rs).
 //
+// Two builds of the same arithmetic. TRIM 1 is the general kernel with its
+// removable overhead removed: no stash, the muscle state in registers, the
+// parent one-hots once per step, one warm-started active-set round followed
+// by a two-sweep Gauss-Seidel polish, the per-rod statics read once per
+// creature, the contact impulses through the node force table, the friction
+// anchors in registers, the projection's second factor only when a node is
+// held, hardware reciprocals and square roots, muscle end nodes as table
+// offsets. BAKED 1 compiles one bone tree into the kernel (the host writes
+// BTOPO, BPM, BSR, BINC0 and BINC1, see bake_defines in examples/lane_stub.rs):
+// the topology words, parent one-hots and sibling lists become literals
+// selected by the lane bit, the contact incidence is a constant table indexed
+// by the runtime contact node, and the energy and drive of each muscle are
+// two registers. Model variants, which change the muscle model and are not
+// part of TRIM: MUSCLE_STEP, WAVE.
+//
 // The synthetic bodies and the explicit forces are not tuned; a speed clamp
 // (SPEED_CLAMP) keeps trials finite so every creature runs its full length.
 
