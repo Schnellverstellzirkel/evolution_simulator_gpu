@@ -124,8 +124,6 @@
 // SREG: the per-rod statics (radius, friction, pivot inverse mass, rest length,
 // mass for the drag) are read once at the take-up into registers, as vector
 // loads, instead of one scalar load per use.
-// RR_REGS: R's eight rows at the four local rods are formed once per substep
-// (32 products) instead of at each of their uses.
 // CAPPLY: the contact impulses go into the node force table (two contacts per
 // lane, one read-modify-write each) and the torque ledger reads the node
 // table, instead of predicated per-rod updates. ANC_REGS: the friction
@@ -135,12 +133,6 @@
 #endif
 #ifndef ANC_REGS
 #define ANC_REGS TRIM
-#endif
-#ifndef RRZ1OLD
-#define RRZ1OLD 0
-#endif
-#ifndef RR_REGS
-#define RR_REGS 0
 #endif
 #ifndef SREG
 #define SREG TRIM
@@ -1099,19 +1091,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #undef RCO
 #define RCO(k, c) rc[k][c]
 #endif
-#if RR_REGS
-            // R's rows: contact e >> 1's normal (even e, along y) and friction
-            // (odd e, along x) at each local rod, once per substep.
-            float rrm[NE][NPL];
-#pragma unroll
-            for (int e = 0; e < NE; e++) {
-#pragma unroll
-                for (int k = 0; k < NPL; k++) { rrm[e][k] = RCO(k, e >> 1) * pick((e) & 1, dx[k], dy[k]); }
-            }
-#define RR(e, k) rrm[e][k]
-#else
+            // R's row e at local rod k: contact e >> 1's normal (even e, along
+            // y) or friction (odd e, along x).
 #define RR(e, k) (RCO(k, (e) >> 1) * pick((e) & 1, dx[k], dy[k]))
-#endif
             // Batch A: row 0 the rods' own, rows 1 + 2c and 2 + 2c contact
             // c's normal and friction (c = 0, 1); lane 0 one slot behind.
             float mu0[NPL], me[4][NPL];
@@ -1383,12 +1365,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
                 float r = 0.0f;
-#if !RR_REGS || RRZ1OLD
 #pragma unroll
-                for (int c = 0; c < NC; c++) { r += RCO(k, c) * (lam[2 * c] * dyg[k] + lam[2 * c + 1] * dxg[k]); }
-#else
                 for (int e = 0; e < NE; e++) { r += RR(e, k) * lam[e]; }
-#endif
                 z1[0][k] = lg == 1u ? r : 0.0f;
                 z1[1][k] = lg == 1u ? 0.0f : r;
             }
