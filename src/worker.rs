@@ -450,6 +450,8 @@ struct StageLog {
     /// Scheduler totals at the last row: confirmation trials submitted and
     /// their busy seconds, device busy seconds, device idle seconds.
     totals: [f64; 4],
+    /// Seconds engine threads waited for kernels, at the last row.
+    kernel_wait: f64,
     /// Lane-steps per lane class at the last row.
     lane_steps: [u64; 3],
     /// Device idle seconds at the last absorbed block, and the most that
@@ -476,7 +478,7 @@ impl StageLog {
         if file.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
             let _ = writeln!(
                 file,
-                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second,confirmations,confirmation_busy_seconds,device_busy_seconds,device_idle_seconds,mean_nodes,share_over_8_nodes,ring_block,ring_blocks,chain_p95_seconds,boundary_seconds,starved_block_max_seconds,lane_steps_8,lane_steps_16,lane_steps_32,world_change_discarded"
+                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second,confirmations,confirmation_busy_seconds,device_busy_seconds,device_idle_seconds,mean_nodes,share_over_8_nodes,ring_block,ring_blocks,chain_p95_seconds,boundary_seconds,starved_block_max_seconds,lane_steps_8,lane_steps_16,lane_steps_32,world_change_discarded,kernel_wait_seconds"
             );
         }
         Some(Self {
@@ -484,6 +486,7 @@ impl StageLog {
             started: Instant::now(),
             seconds: [0.0; 3],
             totals: [0.0; 4],
+            kernel_wait: 0.0,
             lane_steps: [0; 3],
             idle_at_block: 0.0,
             starved_block: 0.0,
@@ -524,6 +527,9 @@ impl StageLog {
         });
         let delta: [f64; 4] = std::array::from_fn(|k| totals[k] - self.totals[k]);
         self.totals = totals;
+        let kernel_wait = crate::cuda_engine::kernel_wait_seconds();
+        let kernel_wait_delta = kernel_wait - self.kernel_wait;
+        self.kernel_wait = kernel_wait;
         let lane_totals = sched.map_or([0; 3], |s| s.lane_steps);
         let lanes: [u64; 3] =
             std::array::from_fn(|k| lane_totals[k].saturating_sub(self.lane_steps[k]));
@@ -539,7 +545,7 @@ impl StageLog {
         }
         let _ = writeln!(
             self.file,
-            "{generation},{:.6},{:.6},{:.6},{:.3},{:.0},{:.3},{:.3},{:.3},{:.3},{:.4},{},{},{:.4},{:.4},{:.4},{},{},{},{}",
+            "{generation},{:.6},{:.6},{:.6},{:.3},{:.0},{:.3},{:.3},{:.3},{:.3},{:.4},{},{},{:.4},{:.4},{:.4},{},{},{},{},{:.3}",
             self.seconds[0],
             self.seconds[1],
             self.seconds[2],
@@ -559,6 +565,7 @@ impl StageLog {
             lanes[1],
             lanes[2],
             self.discarded,
+            kernel_wait_delta,
         );
         let _ = self.file.flush();
         self.reset();
@@ -1843,6 +1850,7 @@ mod tests {
             started: Instant::now(),
             seconds: [1.0, 2.0, 3.0],
             totals: [0.0; 4],
+            kernel_wait: 0.0,
             lane_steps: [0; 3],
             idle_at_block: 0.0,
             starved_block: 0.0,

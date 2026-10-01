@@ -28,9 +28,30 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     ffi::{CStr, CString, c_char, c_int, c_uint, c_void},
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
+
+/// Wall nanoseconds engine threads have waited for a kernel (compiling or
+/// loading one the engine did not have yet), and how many are waiting now.
+static KERNEL_WAIT_NANOS: AtomicU64 = AtomicU64::new(0);
+static KERNEL_WAITERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Seconds engine threads have waited for kernels since the process began.
+/// A GPU with work queued does not run during this time, so a world change
+/// that needs a kernel nobody compiled yet shows up here.
+pub fn kernel_wait_seconds() -> f64 {
+    KERNEL_WAIT_NANOS.load(Ordering::Relaxed) as f64 * 1e-9
+}
+
+/// Whether an engine thread waits for a kernel now (the status line says
+/// the new world is compiling).
+pub fn compiling_world() -> bool {
+    KERNEL_WAITERS.load(Ordering::Relaxed) > 0
+}
 
 type CuResult = c_int;
 type CuDevice = c_int;
@@ -453,6 +474,10 @@ struct Kernel {
     blocks_per_sm: u32,
 }
 
+// A module belongs to the context, not to a thread: background threads load
+// kernels for the engine, which launches them.
+unsafe impl Send for Kernel {}
+
 /// Take-up counters per wave: one per muscle-rounds bucket.
 const BUCKETS: usize = crate::warp_kernel::ROUNDS;
 
@@ -752,8 +777,11 @@ pub struct CudaEngine {
     kernels: HashMap<KernelKey, Kernel>,
     /// Kernels compiling on background threads.
     prefetch: Arc<Prefetch>,
-    /// World flags whose kernels have been queued for every class.
-    worlds: HashSet<(u32, Fidelity)>,
+    /// Worlds (effect levels and flags) whose kernels have been queued for
+    /// every class.
+    worlds: HashSet<(Vec<u8>, u32)>,
+    /// Kernels queued at idle priority for the worlds around them.
+    neighbours: HashSet<KernelKey>,
     /// Submission slots. The last one is kept for replays, with streams of
     /// its own, so a replay never waits behind evaluation.
     slots: Vec<Slot>,
@@ -875,107 +903,278 @@ fn kernel_cache_dir() -> Option<PathBuf> {
     Some(base.join("evolution-simulator").join("cuda"))
 }
 
-/// Kernels that background threads compile, in the order they are wanted.
-#[derive(Default)]
+/// Loads a cubin into `context` (the calling thread makes it current).
+fn load_kernel(api: &Api, context: CuContext, cubin: &[u8], key: KernelKey) -> Result<Kernel> {
+    let cu = &api.cu;
+    unsafe {
+        cu.check((cu.ctx_set_current)(context), "cuCtxSetCurrent")?;
+        let mut module = std::ptr::null_mut();
+        let loading = Instant::now();
+        cu.check(
+            (cu.module_load_data)(&mut module, cubin.as_ptr() as *const c_void),
+            "cuModuleLoadData",
+        )?;
+        let load_seconds = loading.elapsed().as_secs_f64();
+        let mut function = std::ptr::null_mut();
+        if let Err(error) = cu.check(
+            (cu.module_get_function)(&mut function, module, c"advance".as_ptr()),
+            "cuModuleGetFunction",
+        ) {
+            (cu.module_unload)(module);
+            return Err(error);
+        }
+        let mut blocks = 0;
+        cu.check(
+            (cu.occupancy)(&mut blocks, function, crate::warp_kernel::BLOCK as c_int, 0),
+            "cuOccupancyMaxActiveBlocksPerMultiprocessor",
+        )?;
+        if std::env::var_os("EVOLUTION_CUDA_VERBOSE").is_some() {
+            // CU_FUNC_ATTRIBUTE_NUM_REGS, _SHARED_SIZE_BYTES, _LOCAL_SIZE_BYTES
+            let attribute = |which: c_int| {
+                let mut value = 0;
+                (cu.func_get_attribute)(&mut value, which, function);
+                value
+            };
+            eprintln!(
+                "CUDA: {}-lane {} kernel: {} registers, {} B shared, {} B local per thread, {} blocks of {} threads per SM, module loaded in {:.3} s",
+                key.class,
+                if key.record { "recording" } else { "scoring" },
+                attribute(4),
+                attribute(1),
+                attribute(3),
+                blocks,
+                crate::warp_kernel::BLOCK,
+                load_seconds
+            );
+        }
+        Ok(Kernel {
+            module,
+            function,
+            blocks_per_sm: blocks.max(1) as u32,
+        })
+    }
+}
+
+/// A kernel from the disk cache or NVRTC, loaded into `context`. A damaged
+/// cache entry fails to load: the kernel is compiled again.
+fn compile_and_load(
+    api: &Api,
+    context: CuContext,
+    options: &[String],
+    key: KernelKey,
+) -> Result<Kernel> {
+    let cubin = compile_kernel(api, options, key, true)?;
+    match load_kernel(api, context, &cubin, key) {
+        Ok(kernel) => Ok(kernel),
+        Err(_) => load_kernel(api, context, &compile_kernel(api, options, key, false)?, key),
+    }
+}
+
+/// Counts the time an engine thread spends getting a kernel.
+struct KernelWait(Instant);
+
+impl Drop for KernelWait {
+    fn drop(&mut self) {
+        KERNEL_WAIT_NANOS.fetch_add(self.0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        KERNEL_WAITERS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Kernels that background threads compile and load, in the order they are
+/// wanted. The kernels of the world the engine runs ("wanted") compile on up
+/// to three threads at once. The kernels of the worlds one effect level away
+/// ("idle") compile on one thread at nice 19, so the next button press finds
+/// them ready. A thread loads each kernel into the context after it compiles,
+/// because `cuModuleLoadData` waits for the kernels running on the GPU: on
+/// the engine thread it would hold up submissions for up to a second.
 struct Prefetch {
+    api: Arc<Api>,
+    /// The engine's context (an address, so the struct is `Send`).
+    context: usize,
+    options: Vec<String>,
     state: Mutex<PrefetchState>,
     ready: Condvar,
 }
 
 #[derive(Default)]
 struct PrefetchState {
-    queue: VecDeque<KernelKey>,
-    running: HashSet<KernelKey>,
-    done: HashMap<KernelKey, std::result::Result<Vec<u8>, String>>,
-    /// Background threads alive.
-    workers: usize,
+    wanted: VecDeque<KernelKey>,
+    idle: VecDeque<KernelKey>,
+    /// Kernels a thread is on, with the number of wanted and idle threads on
+    /// each.
+    running: HashMap<KernelKey, [usize; 2]>,
+    done: HashMap<KernelKey, std::result::Result<Kernel, String>>,
+    /// Background threads alive: wanted ones, idle ones.
+    workers: [usize; 2],
     closed: bool,
 }
 
+/// Most wanted threads at once: the three lane classes of a world.
+const WANTED_THREADS: usize = 3;
+
+/// Lowers the calling thread's priority to the least (Linux: per thread).
+fn nice_idle() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        libc::setpriority(libc::PRIO_PROCESS, tid, 19);
+    }
+}
+
 impl Prefetch {
-    /// Compiles queued kernels until the queue is empty or the engine closes.
-    fn work(&self, api: &Api, options: &[String]) {
+    fn new(api: Arc<Api>, context: CuContext, options: Vec<String>) -> Arc<Self> {
+        Arc::new(Self {
+            api,
+            context: context as usize,
+            options,
+            state: Mutex::default(),
+            ready: Condvar::new(),
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PrefetchState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Compiles and loads queued kernels until the queue is empty or the
+    /// engine closes. `idle` threads take the idle queue, the others the
+    /// wanted queue.
+    fn work(&self, idle: bool) {
+        let kind = usize::from(idle);
         loop {
             let key = {
-                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if state.closed {
-                    state.workers -= 1;
-                    self.ready.notify_all();
-                    return;
-                }
-                let Some(key) = state.queue.pop_front() else {
-                    state.workers -= 1;
+                let mut state = self.lock();
+                let next = if state.closed {
+                    None
+                } else if idle {
+                    state.idle.pop_front()
+                } else {
+                    state.wanted.pop_front()
+                };
+                let Some(key) = next else {
+                    state.workers[kind] -= 1;
                     self.ready.notify_all();
                     return;
                 };
-                state.running.insert(key);
+                state.running.entry(key).or_default()[kind] += 1;
                 key
             };
-            let result = compile_kernel(api, options, key, true).map_err(|e| format!("{e:#}"));
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.running.remove(&key);
-            state.done.insert(key, result);
+            let result = compile_and_load(
+                &self.api,
+                self.context as CuContext,
+                &self.options,
+                key,
+            )
+            .map_err(|e| format!("{e:#}"));
+            let mut state = self.lock();
+            if let Some(counts) = state.running.get_mut(&key) {
+                counts[kind] -= 1;
+                if counts == &[0, 0] {
+                    state.running.remove(&key);
+                }
+            }
+            // A second thread on one kernel (a neighbour that became wanted)
+            // leaves a module nobody needs.
+            if let Some(Ok(extra)) = state.done.insert(key, result) {
+                self.unload(&extra);
+            }
             self.ready.notify_all();
         }
     }
 
-    /// The compiled kernel, waiting if a thread is on it. None when nobody
-    /// is: the caller compiles it (a queued job is taken off the queue).
-    fn take(&self, key: KernelKey) -> Option<Result<Vec<u8>>> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+    fn unload(&self, kernel: &Kernel) {
+        let cu = &self.api.cu;
+        unsafe {
+            (cu.ctx_set_current)(self.context as CuContext);
+            (cu.module_unload)(kernel.module);
+        }
+    }
+
+    /// The kernel, waiting if a thread is on it. None when nobody is: the
+    /// caller compiles it (a queued job is taken off its queue).
+    fn take(&self, key: KernelKey) -> Option<Result<Kernel>> {
+        let mut state = self.lock();
         loop {
             if let Some(result) = state.done.remove(&key) {
                 return Some(result.map_err(|e| anyhow::anyhow!(e)));
             }
-            if state.running.contains(&key) {
+            if state.running.contains_key(&key) {
                 state = self.ready.wait(state).unwrap_or_else(|e| e.into_inner());
                 continue;
             }
-            state.queue.retain(|k| *k != key);
+            state.wanted.retain(|k| *k != key);
+            state.idle.retain(|k| *k != key);
             return None;
         }
     }
 
-    /// Queues `jobs` not already queued, running or done, and starts
-    /// threads (at most three at a time) to compile them.
-    fn enqueue(self: &Arc<Self>, jobs: Vec<KernelKey>, api: &Arc<Api>, options: &Arc<Vec<String>>) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+    /// Queues `wanted` ahead of everything queued and `idle` after it, and
+    /// starts threads. A kernel already queued, running or done stays where
+    /// it is, except that an idle one now wanted moves up (a thread at
+    /// nice 19 may be slow, so a wanted thread compiles it too).
+    fn enqueue(self: &Arc<Self>, wanted: Vec<KernelKey>, idle: Vec<KernelKey>) {
+        let mut state = self.lock();
         if state.closed {
             return;
         }
-        for key in jobs {
+        let fresh: Vec<KernelKey> = wanted
+            .into_iter()
+            .filter(|key| {
+                if state.done.contains_key(key)
+                    || state.wanted.contains(key)
+                    || state.running.get(key).is_some_and(|counts| counts[0] > 0)
+                {
+                    return false;
+                }
+                state.idle.retain(|k| k != key);
+                true
+            })
+            .collect();
+        for key in fresh.into_iter().rev() {
+            state.wanted.push_front(key);
+        }
+        for key in idle {
             let known = state.done.contains_key(&key)
-                || state.running.contains(&key)
-                || state.queue.contains(&key);
+                || state.running.contains_key(&key)
+                || state.wanted.contains(&key)
+                || state.idle.contains(&key);
             if !known {
-                state.queue.push_back(key);
+                state.idle.push_back(key);
             }
         }
-        while state.workers < 3 && state.workers < state.queue.len() + state.running.len() {
-            let (prefetch, api, options) = (self.clone(), api.clone(), options.clone());
-            let spawned = std::thread::Builder::new()
-                .name("cuda-compile".into())
-                .spawn(move || {
-                    // Compile beside the pool, not on the engine thread's CPU.
-                    crate::threads::pin_pool();
-                    prefetch.work(&api, &options)
-                });
-            if spawned.is_err() {
-                break;
+        for (kind, queued) in [state.wanted.len(), state.idle.len()].into_iter().enumerate() {
+            let most = if kind == 0 { WANTED_THREADS } else { 1 };
+            while state.workers[kind] < most && state.workers[kind] < queued {
+                let (prefetch, idle) = (self.clone(), kind == 1);
+                let spawned = std::thread::Builder::new()
+                    .name(if idle { "cuda-compile-idle" } else { "cuda-compile" }.into())
+                    .spawn(move || {
+                        // Compile beside the pool, not on the engine thread's CPU.
+                        crate::threads::pin_pool();
+                        if idle {
+                            nice_idle();
+                        }
+                        prefetch.work(idle)
+                    });
+                if spawned.is_err() {
+                    break;
+                }
+                state.workers[kind] += 1;
             }
-            state.workers += 1;
         }
     }
 
     /// Stops the background threads once their current kernels finish, and
     /// waits for them, at most `patience`: a compiler thread still inside
-    /// NVRTC when the process exits crashes it.
-    fn close(&self, patience: Duration) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+    /// NVRTC when the process exits crashes it. Returns the kernels that
+    /// were loaded and not used, for the caller to unload.
+    fn close(&self, patience: Duration) -> Vec<Kernel> {
+        let mut state = self.lock();
         state.closed = true;
-        state.queue.clear();
+        state.wanted.clear();
+        state.idle.clear();
         let deadline = Instant::now() + patience;
-        while state.workers > 0 {
+        while state.workers.iter().sum::<usize>() > 0 {
             let Some(left) = deadline.checked_duration_since(Instant::now()) else {
                 break;
             };
@@ -985,7 +1184,26 @@ impl Prefetch {
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
+        state.done.drain().filter_map(|(_, r)| r.ok()).collect()
     }
+}
+
+/// NVRTC options for a device of architecture `arch`.
+fn nvrtc_options(arch: &str) -> Vec<String> {
+    let mut options = vec![
+        format!("--gpu-architecture={arch}"),
+        "--std=c++17".into(),
+        "--prec-div=false".into(),
+        "--prec-sqrt=false".into(),
+        "--fmad=true".into(),
+        "--extra-device-vectorization".into(),
+        "--ptxas-options=-v".into(),
+    ];
+    // A developer's extra options, such as -lineinfo for a profiler.
+    if let Ok(extra) = std::env::var("EVOLUTION_NVRTC_EXTRA") {
+        options.extend(extra.split_whitespace().map(String::from));
+    }
+    options
 }
 
 impl CudaEngine {
@@ -1047,6 +1265,7 @@ impl CudaEngine {
             }
             // Host buffers mapped on this thread register with the context.
             REGISTER.with(|register| *register.borrow_mut() = Some(api.clone()));
+            let options = nvrtc_options(&arch);
             let mut engine = Self {
                 name: String::new(),
                 api: api.clone(),
@@ -1055,8 +1274,9 @@ impl CudaEngine {
                 arch,
                 multiprocessors,
                 kernels: HashMap::new(),
-                prefetch: Arc::new(Prefetch::default()),
+                prefetch: Prefetch::new(api.clone(), context, options),
                 worlds: HashSet::new(),
+                neighbours: HashSet::new(),
                 slots: Vec::new(),
                 next_ticket: 0,
                 max_capacity,
@@ -1109,99 +1329,74 @@ impl CudaEngine {
 
     /// NVRTC options for this device.
     fn options(&self) -> Vec<String> {
-        let mut options = vec![
-            format!("--gpu-architecture={}", self.arch),
-            "--std=c++17".into(),
-            "--prec-div=false".into(),
-            "--prec-sqrt=false".into(),
-            "--fmad=true".into(),
-            "--extra-device-vectorization".into(),
-            "--ptxas-options=-v".into(),
-        ];
-        // A developer's extra options, such as -lineinfo for a profiler.
-        if let Ok(extra) = std::env::var("EVOLUTION_NVRTC_EXTRA") {
-            options.extend(extra.split_whitespace().map(String::from));
-        }
-        options
+        nvrtc_options(&self.arch)
     }
 
-    /// Loads a cubin into this engine's context.
-    fn load(&self, cubin: &[u8], key: KernelKey) -> Result<Kernel> {
-        let cu = &self.api.cu;
-        unsafe {
-            cu.check((cu.ctx_set_current)(self.context), "cuCtxSetCurrent")?;
-            let mut module = std::ptr::null_mut();
-            cu.check(
-                (cu.module_load_data)(&mut module, cubin.as_ptr() as *const c_void),
-                "cuModuleLoadData",
-            )?;
-            let mut function = std::ptr::null_mut();
-            if let Err(error) = cu.check(
-                (cu.module_get_function)(&mut function, module, c"advance".as_ptr()),
-                "cuModuleGetFunction",
-            ) {
-                (cu.module_unload)(module);
-                return Err(error);
-            }
-            let mut blocks = 0;
-            cu.check(
-                (cu.occupancy)(&mut blocks, function, crate::warp_kernel::BLOCK as c_int, 0),
-                "cuOccupancyMaxActiveBlocksPerMultiprocessor",
-            )?;
-            if std::env::var_os("EVOLUTION_CUDA_VERBOSE").is_some() {
-                // CU_FUNC_ATTRIBUTE_NUM_REGS, _SHARED_SIZE_BYTES, _LOCAL_SIZE_BYTES
-                let attribute = |which: c_int| {
-                    let mut value = 0;
-                    (cu.func_get_attribute)(&mut value, which, function);
-                    value
-                };
-                eprintln!(
-                    "CUDA: {}-lane {} kernel: {} registers, {} B shared, {} B local per thread, {} blocks of {} threads per SM",
-                    key.class,
-                    if key.record { "recording" } else { "scoring" },
-                    attribute(4),
-                    attribute(1),
-                    attribute(3),
-                    blocks,
-                    crate::warp_kernel::BLOCK
-                );
-            }
-            Ok(Kernel {
-                module,
-                function,
-                blocks_per_sm: blocks.max(1) as u32,
-            })
-        }
+    /// The kernel for `key`, compiled and loaded on this thread.
+    fn load_here(&self, key: KernelKey) -> Result<Kernel> {
+        compile_and_load(&self.api, self.context, &self.options(), key)
     }
 
-    /// Queues the scoring and recording kernels of `cfg`'s world, every
-    /// lane class, on the background compiler.
+    /// Queues the kernels of `cfg`'s world on the background compiler, every
+    /// lane class: scoring at the standard physics first (the engine waits
+    /// for these), then the confirmation trials' fine physics, then
+    /// recordings. After them, at idle priority, the same for every world
+    /// one effect level away, so the next button press finds its kernels
+    /// ready: all the scoring kernels first, then fine, then recordings.
     fn prefetch_world(&mut self, cfg: &Config) {
         let flags = crate::warp_kernel::world_flags(cfg);
-        let fidelity = cfg.fidelity();
-        if !self.worlds.insert((flags, fidelity)) {
+        let levels: Vec<u8> = crate::environment::EFFECTS
+            .iter()
+            .map(|effect| effect.level(cfg) as u8)
+            .collect();
+        if !self.worlds.insert((levels, flags)) {
             return;
         }
-        let mut jobs = Vec::new();
-        for record in [false, true] {
-            // Fine checks never record.
-            if record && fidelity != Fidelity::standard() {
-                continue;
-            }
-            for class in crate::warp_kernel::CLASSES {
-                let key = KernelKey {
-                    record,
-                    class,
-                    flags,
-                    fidelity,
-                };
-                if !self.kernels.contains_key(&key) {
-                    jobs.push(key);
-                }
+        let mut fidelities = vec![Fidelity::standard(), Fidelity::fine()];
+        if !fidelities.contains(&cfg.fidelity()) {
+            fidelities.push(cfg.fidelity());
+        }
+        // Kernels of `flags` in the order of (record, fidelity) steps.
+        let steps: Vec<(bool, Fidelity)> = [false, true]
+            .into_iter()
+            .flat_map(|record| fidelities.iter().map(move |&f| (record, f)))
+            .collect();
+        let keys = |engine: &Self, flags: u32, steps: &[(bool, Fidelity)]| -> Vec<KernelKey> {
+            steps
+                .iter()
+                .flat_map(|&(record, fidelity)| {
+                    crate::warp_kernel::CLASSES.into_iter().map(move |class| KernelKey {
+                        record,
+                        class,
+                        flags,
+                        fidelity,
+                    })
+                })
+                .filter(|key| !engine.kernels.contains_key(key))
+                .collect()
+        };
+        let wanted = keys(self, flags, &steps);
+        let mut idle = Vec::new();
+        let mut near = Vec::new();
+        for neighbour in crate::environment::one_level_away(cfg) {
+            let neighbour_flags = crate::warp_kernel::world_flags(&neighbour);
+            if neighbour_flags != flags && !near.contains(&neighbour_flags) {
+                near.push(neighbour_flags);
             }
         }
-        let options = Arc::new(self.options());
-        self.prefetch.enqueue(jobs, &self.api, &options);
+        // Standard scoring, fine scoring, then recordings at the standard
+        // physics, each across all the neighbours.
+        for step in [
+            &steps[..1],
+            &steps[1..2],
+            &steps[fidelities.len()..fidelities.len() + 1],
+        ] {
+            for &neighbour_flags in &near {
+                idle.extend(keys(self, neighbour_flags, step));
+            }
+        }
+        idle.retain(|key| self.neighbours.insert(*key));
+        self.prefetch.enqueue(wanted, idle);
     }
 
     /// The kernel for `key`: from the background compiler if it has it or is
@@ -1209,17 +1404,11 @@ impl CudaEngine {
     fn kernel(&mut self, key: KernelKey) -> Result<(CuFunction, u32)> {
         if !self.kernels.contains_key(&key) {
             let started = Instant::now();
-            let compile = |engine: &Self, use_cache: bool| {
-                compile_kernel(&engine.api, &engine.options(), key, use_cache)
-            };
-            let cubin = match self.prefetch.take(key) {
+            KERNEL_WAITERS.fetch_add(1, Ordering::Relaxed);
+            let _waiting = KernelWait(started);
+            let kernel = match self.prefetch.take(key) {
                 Some(result) => result?,
-                None => compile(self, true)?,
-            };
-            // A damaged cache entry fails to load: compile it again.
-            let kernel = match self.load(&cubin, key) {
-                Ok(kernel) => kernel,
-                Err(_) => self.load(&compile(self, false)?, key)?,
+                None => self.load_here(key)?,
             };
             if std::env::var_os("EVOLUTION_CUDA_VERBOSE").is_some() {
                 eprintln!(
@@ -1811,12 +2000,15 @@ impl CudaEngine {
 
 impl Drop for CudaEngine {
     fn drop(&mut self) {
-        self.prefetch.close(Duration::from_secs(30));
+        let unused = self.prefetch.close(Duration::from_secs(30));
         let api = self.api.clone();
         let cu = &api.cu;
         unsafe {
             (cu.ctx_set_current)(self.context);
             (cu.ctx_synchronize)();
+            for kernel in &unused {
+                (cu.module_unload)(kernel.module);
+            }
         }
         for slot in 0..self.slots.len() {
             // Unregistered while the context lives.

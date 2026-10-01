@@ -318,6 +318,27 @@ pub const EFFECTS: [Effect; 15] = [
     },
 ];
 
+/// Every world one effect level away from `cfg`'s: each effect one level
+/// up and one level down, the rest unchanged. The kernels of these worlds
+/// are the ones the next button press may need (`cuda_engine`).
+pub fn one_level_away(cfg: &Config) -> Vec<Config> {
+    let mut worlds = Vec::new();
+    for effect in EFFECTS
+        .iter()
+        .filter(|effect| effect.name != "Autochange environment")
+    {
+        let level = effect.level(cfg);
+        for next in [level.checked_sub(1), Some(level + 1)].into_iter().flatten() {
+            if next < effect.levels.len() {
+                let mut world = cfg.clone();
+                effect.set_level(&mut world, next);
+                worlds.push(world);
+            }
+        }
+    }
+    worlds
+}
+
 /// The deterministic autochange ladder: one entry per step, each raising one
 /// effect to its next level above calm. Round one adds every effect at its
 /// mildest level, from the most benign, and later rounds make them harsher.

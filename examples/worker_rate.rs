@@ -4,9 +4,13 @@
 //! clicking it), and a digest of every generation's statistics, which two
 //! runs of one seed must share.
 //! Usage: worker_rate [population] [generations] [seed] [button seconds]
-//! With button seconds above 0 the wind button is pressed that often (on,
-//! then off), so the stage log's world_change_discarded column shows what a
-//! world change throws away; the search then differs from a run without.
+//! With button seconds above 0 an effect button is pressed that often: wind,
+//! mud, water, ice patches, gaps and hurdles go on one after another, then
+//! off in reverse, so every press is one level away from the world before it.
+//! The stage log's world_change_discarded column shows what a world change
+//! throws away and its kernel_wait_seconds column what it waited for kernels;
+//! each press prints the kernel wait until the next one. The search then
+//! differs from a run without.
 use evolution_simulator::{
     config::Config,
     gpu::Gpu,
@@ -100,7 +104,9 @@ fn main() -> anyhow::Result<()> {
         })
     };
     let mut last_button = Instant::now();
-    let mut wind = false;
+    const BUTTONS: [&str; 6] = ["Wind", "Mud", "Water", "Ice patches", "Gaps", "Hurdles"];
+    let mut presses = 0usize;
+    let mut wait_at_press = evolution_simulator::cuda_engine::kernel_wait_seconds();
     let history = loop {
         if let Some(snapshot) = worker.view.lock().unwrap().take() {
             anyhow::ensure!(snapshot.error.is_none(), "{:?}", snapshot.error);
@@ -109,11 +115,29 @@ fn main() -> anyhow::Result<()> {
             }
             if button > 0 && last_button.elapsed() >= Duration::from_secs(button) {
                 last_button = Instant::now();
-                wind = !wind;
-                worker.send(Command::Configure(Config {
-                    wind: if wind { 2.0 } else { 0.0 },
-                    ..snapshot.config.clone()
-                }));
+                let wait = evolution_simulator::cuda_engine::kernel_wait_seconds();
+                if presses > 0 {
+                    eprintln!(
+                        "          kernel wait since press {presses}: {:.2} s",
+                        wait - wait_at_press
+                    );
+                }
+                wait_at_press = wait;
+                let step = presses % (2 * BUTTONS.len());
+                let (name, level) = if step < BUTTONS.len() {
+                    (BUTTONS[step], 1)
+                } else {
+                    (BUTTONS[2 * BUTTONS.len() - 1 - step], 0)
+                };
+                let effect = evolution_simulator::environment::EFFECTS
+                    .iter()
+                    .find(|e| e.name == name)
+                    .expect("effect");
+                let mut config = snapshot.config.clone();
+                effect.set_level(&mut config, level);
+                eprintln!("press {}: {name} level {level}", presses + 1);
+                presses += 1;
+                worker.send(Command::Configure(config));
             }
             let n = snapshot.history.len();
             if marks.last().is_none_or(|m| m.0 != n) {
@@ -223,6 +247,10 @@ fn main() -> anyhow::Result<()> {
         field("VmRSS:"),
         field("VmHWM:"),
         digest.finish()
+    );
+    println!(
+        "worker_rate: engine threads waited {:.2} s for kernels",
+        evolution_simulator::cuda_engine::kernel_wait_seconds()
     );
     let _ = replays.join();
     let mut times = replay_seconds.lock().unwrap().clone();
