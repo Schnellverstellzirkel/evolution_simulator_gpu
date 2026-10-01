@@ -687,9 +687,6 @@ impl Population {
             if historical {
                 continue;
             }
-            if spanned.count_ones() as usize != g.bone_count && std::env::var_os("EVOLUTION_DUMP_FAILED").is_some() {
-                eprintln!("{}", serde_json::to_string(&self.creature(genome_index)).unwrap_or_default());
-            }
             ensure!(
                 spanned.count_ones() as usize == g.bone_count,
                 "Every bone must be spanned by a muscle (genome {genome_index}: {} nodes, {} muscles)",

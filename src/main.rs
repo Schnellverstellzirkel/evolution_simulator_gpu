@@ -181,23 +181,6 @@ fn main() -> Result<()> {
                 Ok(())
             })();
             ring.stop(sched);
-            if std::env::var_os("EVOLUTION_CHECK_BLOCKS").is_some() {
-                let mut bad = 0usize;
-                for block in &e.blocks {
-                    for i in 0..block.len() {
-                        let mut pop = evolution_simulator::evolution::Population::default();
-                        pop.push(block.population.creature(i));
-                        let check = Config { population: 1, ..(*block.config).clone() };
-                        if let Err(error) = pop.validate(&check) {
-                            bad += 1;
-                            if bad <= 3 {
-                                eprintln!("invalid child: {error:#} {:?}\n{}", block.births[i], serde_json::to_string(&block.population.creature(i)).unwrap_or_default());
-                            }
-                        }
-                    }
-                }
-                eprintln!("{bad} invalid children in the ring");
-            }
             storage::save(&checkpoint, &e)?;
             storage::export_csv(&checkpoint.with_extension("csv"), &e.history)?;
             eprintln!("Saved {}", checkpoint.display());

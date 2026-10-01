@@ -70,7 +70,7 @@ Developer diagnostics, never needed to play:
 
 ## Diagnostic examples
 
-The tools in `examples/` (`search_ab`, `size_report`, `mutation_audit`, `physics_audit`, `first_generation`, `replay_match`, `p2_speed`, `worker_rate`) score and replay creatures on the GPU engine. They fail if the primary GPU does not open. They submit at most 50,000 creatures per unit, so they need little GPU memory beside the owner's game. Run them with the lock shared, unless they measure speed:
+The tools in `examples/` (`search_ab`, `size_report`, `mutation_audit`, `physics_audit`, `first_generation`, `replay_match`, `p2_speed`, `worker_rate`, and for a physics change `lean_gates`, which runs the spirit checks on a save's elites: `run`, `report`, `gifs`; `repeat_diff` and `order_diff`, which score one population repeatedly or in other orders and name the creatures that changed) score and replay creatures on the GPU engine. They fail if the primary GPU does not open. They submit at most 50,000 creatures per unit, so they need little GPU memory beside the owner's game. Run them with the lock shared, unless they measure speed:
 
 ```bash
 EVOLUTION_DEVICES=primary flock -s target/gpu.lock nice -n 19 tools/cpu-slot.sh cargo run --release --example first_generation 20000
@@ -97,6 +97,8 @@ A GPU engine that fails is dropped, and the scheduler opens it again after 1, 4 
 ## Machine settings for measurements
 
 These need root, so the owner runs them. `nvidia-smi -lgc <min>,<max>` pins the RTX 4060's SM clock for a measurement and `nvidia-smi -rgc` releases it. The power rows of the plan decide if a pinned clock also helps long runs.
+
+`evolution-simulator headless ... --snapshot-at N` also saves the run at generation N next to the checkpoint (`<checkpoint>.gN.evo`), for the checks that compare generation 10 with generation 30.
 
 The RTX's PCIe link idles at Gen 1 x8 and trains up to Gen 4 under load. On 2026-09-30 `nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.gen.max --format=csv` printed 1 and 4 on the idle machine, and the device's runtime PM (`/sys/bus/pci/devices/0000:01:00.0/power/control`) was `auto`. A speed change is a link retrain of 1 to 5 ms, and no DMA moves during it. Waves that last seconds never notice. Blocks of 50 ms may pay it on their first upload, and a replay click or the first block after a world change waits for it. To check, run `nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.width.current --format=csv -lms 10` beside `worker_rate` and count the gen changes per second. If there is more than one per second, keep the link up with two one-time root settings and measure again:
 
