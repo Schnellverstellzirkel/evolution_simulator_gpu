@@ -51,7 +51,8 @@
 // Other defines (all have defaults): W, MPL, NB (rod neighbours kept per rod:
 // the parent and NB - 1 lower siblings), BLOCK, MIN_BLOCKS, SUBSTEPS,
 // MAX_ROUNDS, MSTATE_REGS, MUSCLE_UNROLL. Developer switches: NO_MUSCLES,
-// NO_CONTACT, NO_DAMP, NO_FRICTION, NO_LEDGER, USE_STASH, DIAG (residuals in
+// NO_CONTACT, NO_DAMP, NO_FRICTION, NO_LEDGER, LEDGER=0 (no enforced ledgers),
+// USE_STASH, DIAG (residuals in
 // the result).
 //
 // The synthetic bodies and the explicit forces are not tuned; a speed clamp
@@ -161,6 +162,11 @@
 #ifndef NO_FRICTION
 #define NO_FRICTION 0
 #endif
+// 1: the momentum and angular ledgers of the contact impulses are enforced
+// every substep (the stub's rule); 0: audit only (the host's audit tools).
+#ifndef LEDGER
+#define LEDGER 1
+#endif
 #if W != 1 && W != 2
 #error "W is 1 or 2"
 #endif
@@ -236,6 +242,23 @@ struct Params {
 };
 
 __device__ __forceinline__ float clampf(float x, float lo, float hi) { return fminf(fmaxf(x, lo), hi); }
+// Reciprocal by the hardware approximation: one MUFU, no refinement.
+__device__ __forceinline__ float frcp(float x) {
+    float r;
+    asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
+    return r;
+}
+// Two floats as a half pair (low, high), and back.
+__device__ __forceinline__ unsigned pack_h2(float lo, float hi) {
+    unsigned r;
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;" : "=r"(r) : "f"(hi), "f"(lo));
+    return r;
+}
+__device__ __forceinline__ float2 unpack_h2(unsigned v) {
+    float x, y;
+    asm("{\n.reg .b16 a, b;\nmov.b32 {a, b}, %2;\ncvt.f32.f16 %0, a;\ncvt.f32.f16 %1, b;\n}" : "=f"(x), "=f"(y) : "r"(v));
+    return make_float2(x, y);
+}
 __device__ __forceinline__ float xch(float v) { return __shfl_xor_sync(FULL, v, 1); }
 __device__ __forceinline__ unsigned xchu(unsigned v) { return __shfl_xor_sync(FULL, v, 1); }
 #if W == 2
@@ -267,6 +290,18 @@ __device__ __forceinline__ float2 unpack_un(unsigned u) {
 __device__ __forceinline__ float2 unpack_bf(unsigned u) {
     return make_float2(__uint_as_float(u << 16u), __uint_as_float(u & 0xffff0000u));
 }
+
+// A record field for all NPL nodes of the lane: two vector loads at W = 1.
+#if W == 1
+__device__ __forceinline__ void load_field(const float* __restrict__ lanes, size_t cidx, int fld, float (&o)[NPL]) {
+    const float4* p4 = reinterpret_cast<const float4*>(lanes + cidx * RF + fld);
+    const float4 a = __ldg(p4), b = __ldg(p4 + 1);
+    o[0] = a.x; o[1] = a.y; o[2] = a.z; o[3] = a.w; o[4] = b.x; o[5] = b.y; o[6] = b.z; o[7] = b.w;
+}
+#define LOADF(o, fld) load_field(lanes, cidx, (fld), o)
+#else
+#define LOADF(o, fld) do { _Pragma("unroll") for (int k_ = 0; k_ < NPL; k_++) { (o)[k_] = REC(fld, k_); } } while (0)
+#endif
 
 // Rod topology word: pivot node (5 bits), parent rod (5, 31 none), lower
 // siblings kept (2), grandparent node (5, the parent's pivot, 31 none),
@@ -365,7 +400,7 @@ __device__ __forceinline__ void factor(
                 const bool valid = T_VALID(t);
                 // A rod whose two nodes are both held (projection) has no
                 // pivot: it is left as it is.
-                const float id = (valid && Dacc[k] > 1e-6f) ? 1.0f / Dacc[k] : 0.0f;
+                const float id = (valid && Dacc[k] > 1e-6f) ? frcp(Dacc[k]) : 0.0f;
                 invD[k] = id;
 #pragma unroll
                 for (int a = 0; a < NB; a++) { Lf[k][a] = La[k][a] * id; }
@@ -608,7 +643,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #define MS_SET(k, v) (mstate[mb + (size_t)(k) * W] = (v))
 #endif
     float msum = 0.0f, rounds_sum = 0.0f, contact_sum = 0.0f, drift_max = 0.0f;
-    float rn_max = 0.0f, rr_max = 0.0f, ang_max = 0.0f;
+    float rn_max = 0.0f, rr_max = 0.0f, ang_max = 0.0f, pen_max = 0.0f;
     float st = 1.0f, icap = 0.0f, mtot = 1.0f;
 #pragma unroll
     for (int k = 0; k < NPL; k++) {
@@ -643,11 +678,11 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #endif
                 icap = __uint_as_float(h.y);
                 float msl = 0.0f;
+                LOADF(invm, F_INVM);
+                LOADF(px, F_X);
+                LOADF(py, F_Y);
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
-                    invm[k] = REC(F_INVM, k);
-                    px[k] = REC(F_X, k);
-                    py[k] = REC(F_Y, k);
                     topo[k] = BAKED ? TOPOK(k) : __float_as_uint(REC(F_TOPO, k));
                     vx[k] = 0.0f; vy[k] = 0.0f;
                     ax[k] = px[k];
@@ -681,7 +716,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #endif
                 step = 0u; warm = 0u; prevc = 0u; st = 1.0f;
                 msum = 0.0f; rounds_sum = 0.0f; contact_sum = 0.0f; drift_max = 0.0f;
-                rn_max = 0.0f; rr_max = 0.0f; ang_max = 0.0f;
+                rn_max = 0.0f; rr_max = 0.0f; ang_max = 0.0f; pen_max = 0.0f;
                 live = true;
             } else {
                 exhausted = true;
@@ -736,30 +771,31 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
             for (int g = 0; g < W * NPL; g++) { FRC(g, lane) = make_float2(0.0f, 0.0f); }
             __syncwarp();
             // @S geometry
-            // Rod directions, lengths and the factor, once per step when lagged.
+            // Rod directions and lengths every substep (the impulses and the
+            // right-hand sides want the current direction); the factor and
+            // the explicit forces once per step when lagged.
             float lnr[NPL];
-            if (geom_now) {
 #pragma unroll
-                for (int k = 0; k < NPL; k++) {
-                    const unsigned t = TOPOK(k);
-                    dx[k] = 0.0f; dy[k] = 0.0f; ilr[k] = 0.0f; lnr[k] = 0.0f;
-                    if (T_VALID(t)) {
-                        const unsigned a = T_PIVOT(t);
-                        const float4 na = NODEV(a);
-                        const float ddx = px[k] - na.x, ddy = py[k] - na.y;
-                        const float d2 = ddx * ddx + ddy * ddy;
-                        const float il = rsqrtf(fmaxf(d2, 1e-12f));
-                        dx[k] = ddx * il; dy[k] = ddy * il; ilr[k] = il; lnr[k] = d2 * il;
-                    }
+            for (int k = 0; k < NPL; k++) {
+                const unsigned t = TOPOK(k);
+                dx[k] = 0.0f; dy[k] = 0.0f; ilr[k] = 0.0f; lnr[k] = 0.0f;
+                if (T_VALID(t)) {
+                    const unsigned a = T_PIVOT(t);
+                    const float4 na = NODEV(a);
+                    const float ddx = px[k] - na.x, ddy = py[k] - na.y;
+                    const float d2 = ddx * ddx + ddy * ddy;
+                    const float il = rsqrtf(fmaxf(d2, 1e-12f));
+                    dx[k] = ddx * il; dy[k] = ddy * il; ilr[k] = il; lnr[k] = d2 * il;
                 }
+            }
 #if W == 2
 #pragma unroll
-                for (int q = 0; q < NPL; q++) { rdx[q] = xch(dx[q]); rdy[q] = xch(dy[q]); }
+            for (int q = 0; q < NPL; q++) { rdx[q] = xch(dx[q]); rdy[q] = xch(dy[q]); }
 #endif
+            if (geom_now) {
                 // @S factor
                 float ipv[NPL];
-#pragma unroll
-                for (int k = 0; k < NPL; k++) { ipv[k] = REC(F_PINV, k); }
+                LOADF(ipv, F_PINV);
                 factor(topo, dx, dy, rdx, rdy, ipv, invm, lg, invD, Lf);
                 // @S forces
                 // Air drag at each rod's midpoint, half to each node, and joint
@@ -767,6 +803,11 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                 // with the lagged factor once per step and held.
 #pragma unroll
                 for (int k = 0; k < NPL; k++) { fx[k] = 0.0f; fy[k] = 0.0f; }
+                float drg[NPL], mlm[NPL], mrd[NPL], rcr[NPL], rsr[NPL];
+                LOADF(drg, F_DRAG); LOADF(mlm, F_MLIM); LOADF(mrd, F_MROD);
+#if LIMITS_AS_IMPULSES
+                if (sub == 0) { LOADF(rcr, F_C0); LOADF(rsr, F_S0); }
+#endif
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
                     const unsigned t = TOPOK(k);
@@ -776,7 +817,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                         const float il = ilr[k], l = lnr[k];
                         const float wx = 0.5f * (vx[k] + na.z), wy = 0.5f * (vy[k] + na.w);
                         const float speed = sqrtf(wx * wx + wy * wy);
-                        const float strength = fminf(REC(F_DRAG, k) * l * speed, REC(F_MLIM, k));
+                        const float strength = fminf(drg[k] * l * speed, mlm[k]);
                         const float hx = -0.5f * wx * strength, hy = -0.5f * wy * strength;
                         fx[k] += hx; fy[k] += hy;
                         float fax = hx, fay = hy;
@@ -797,7 +838,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                             const float4 ng = NODEV(g);
                             w_par = (dxp * (na.w - ng.w) - dyp * (na.z - ng.z)) * ilp;
                         }
-                        const float tau = REC(F_MROD, k) * l * l * (w_rod - w_par);
+                        const float tau = mrd[k] * l * l * (w_rod - w_par);
                         const float tl = tau * il;
                         fx[k] += -dy[k] * tl; fy[k] += dx[k] * tl;
                         fax -= -dy[k] * tl; fay -= dx[k] * tl;
@@ -818,16 +859,17 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                             // ligament's compliance.
                             if (sub == 0) {
                                 const float cs = dxp * dx[k] + dyp * dy[k], sn = dxp * dy[k] - dyp * dx[k];
-                                const float rc = cs * REC(F_C0, k) + sn * REC(F_S0, k);
-                                const float rs = sn * REC(F_C0, k) - cs * REC(F_S0, k);
-                                const float th = 2.0f * rs / (1.0f + rc + 1e-3f);
+                                const float rc = cs * rcr[k] + sn * rsr[k];
+                                const float rs = sn * rcr[k] - cs * rsr[k];
+                                const float th = 2.0f * rs * frcp(1.0f + rc + 1e-3f);
                                 const float wrel = w_rod - w_par;
                                 const float hi = clampf((JOINT_LIMIT - th) * RATE, -SPIN_CAP, SPIN_CAP);
                                 const float lo = clampf((-JOINT_LIMIT - th) * RATE, -SPIN_CAP, SPIN_CAP);
                                 const float dw = clampf(wrel, lo, hi) - wrel;
                                 const float ipp = ipv[k];
                                 const float iinv = (invm[k] + ipp) * il * il + (ipp + ipp) * ilp * ilp;
-                                const float jf = dw / (iinv + LIGAMENT) * INV_HS;
+                                // With the held forces the impulse is spread over the step's substeps.
+                                const float jf = dw * frcp(iinv + LIGAMENT) * (LAGGED_FACTOR ? RATE : INV_HS);
                                 const float cx = -dy[k] * jf * il, cy = dx[k] * jf * il;
                                 const float qx = -dyp * jf * ilp, qy = dxp * jf * ilp;
                                 fx[k] += cx; fy[k] += cy;
@@ -860,6 +902,89 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                 __syncwarp();
 #endif
             }
+#if MUSCLE_MODEL && LAGGED_FACTOR && !MUSCLE_ANCHORS && !defined(NO_HOLD)
+#define MUSCLE_HELD 1
+#else
+#define MUSCLE_HELD 0
+#endif
+#if MUSCLE_HELD
+            // @S muscles
+            // Muscles: two nodes, no state. A trapezoid of period, phase and
+            // duty with a ramp of two substeps on each edge, since the step's
+            // start or the limb's last touchdown; force = cap x strength x
+            // a(t) x stamina x Hill, pull only, with the damper. The record's
+            // end fields are shared-table offsets, so a node is one add away.
+            float pw = 0.0f;
+            const float tsub = t0 + (float)sub * HS;
+#pragma unroll MUSCLE_UNROLL
+            for (int k = 0; k < MUSCLE_LOOP; k++) {
+#ifndef MC
+                if ((unsigned)k >= wm) { break; }
+                if ((unsigned)k < mc && !NO_MUSCLES) {
+#else
+                {
+#endif
+                    const float4 A = msa[2u * (mb + (size_t)k * W)];
+                    const unsigned pk = __float_as_uint(A.x);
+#if W == 1
+                    const unsigned oa = pk & 0x1fffu, ob = (pk >> 13u) & 0x1fffu;
+                    char* const col = reinterpret_cast<char*>(s_warp) + lane * 32u;
+                    const float4 e0 = *reinterpret_cast<float4*>(col + oa), e1 = *reinterpret_cast<float4*>(col + ob);
+                    const unsigned limb = (pk >> 26u) & 15u;
+#else
+                    const unsigned ea = (pk >> 5u) & 31u, eb = (pk >> 15u) & 31u;
+                    const float4 e0 = NODEAT(ea), e1 = NODEAT(eb);
+                    const unsigned limb = ((pk >> 25u) & 1u) ? ((pk >> 20u) & 31u) : 8u;
+#endif
+                    uint2* const hp = reinterpret_cast<uint2*>(mstate) + (mb + (size_t)k * W);
+                    float dirx, diry, a0, a1;
+                    if (sub == 0) {
+                        // The step's geometry and activation, held for the
+                        // substeps: the direction and the activation at the
+                        // step's two ends, as half pairs.
+                        const float4 R = msa[2u * (mb + (size_t)k * W) + 1u];
+                        const float td = __ldcg(&roff[(size_t)cidx * 16u + limb]);
+                        const float x0 = (t0 - td) * R.x + R.y;
+                        const float p0 = x0 - floorf(x0);
+                        const float x1 = x0 + DT * R.x;
+                        const float p1 = x1 - floorf(x1);
+                        a0 = clampf((R.z - fabsf(p0 - R.z)) * R.w, 0.0f, 1.0f);
+                        a1 = clampf((R.z - fabsf(p1 - R.z)) * R.w, 0.0f, 1.0f);
+                        const float ddx = e1.x - e0.x, ddy = e1.y - e0.y;
+                        const float inv = rsqrtf(ddx * ddx + ddy * ddy + 1e-12f);
+                        dirx = ddx * inv; diry = ddy * inv;
+                        *hp = make_uint2(pack_h2(dirx, diry), pack_h2(a0, a1));
+                    } else {
+                        const uint2 hv = *hp;
+                        const float2 fd = unpack_h2(hv.x);
+                        const float2 fa = unpack_h2(hv.y);
+                        dirx = fd.x; diry = fd.y; a0 = fa.x; a1 = fa.y;
+                    }
+                    const float act = a0 + (a1 - a0) * (((float)sub + 0.5f) * (1.0f / SUBSTEPS));
+                    const float rel = (e1.z - e0.z) * dirx + (e1.w - e0.w) * diry;
+                    const float cap = A.y;
+                    const float drive = cap * act * st * clampf(1.0f + rel * A.z, 0.0f, 1.0f);
+                    const float mag = clampf(drive + rel * MUSCLE_DAMPER, -cap, cap);
+                    pw += drive * fmaxf(-rel, 0.0f);
+#ifdef DIAG
+                    msum += mag * rel;
+#endif
+                    const float gx = dirx * mag, gy = diry * mag;
+                    float2 f;
+#if W == 1
+                    float2* const fa_ = reinterpret_cast<float2*>(col + oa + 16u);
+                    float2* const fb_ = reinterpret_cast<float2*>(col + ob + 16u);
+                    f = *fa_; f.x += gx; f.y += gy; *fa_ = f;
+                    f = *fb_; f.x -= gx; f.y -= gy; *fb_ = f;
+#else
+                    f = FRC(ea, lane); f.x += gx; f.y += gy; FRC(ea, lane) = f;
+                    f = FRC(eb, lane); f.x -= gx; f.y -= gy; FRC(eb, lane) = f;
+#endif
+                }
+            }
+            pw = XSUM(pw);
+            st = clampf(st - pw * HS * icap + MUSCLE_RECOVERY * p.recovery * HS * (1.0f - st), 0.0f, 1.0f);
+#else
             // @S muscles
 #if MUSCLE_MODEL
             // Muscles: two nodes, no state. A trapezoid of period, phase and
@@ -979,6 +1104,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                 }
             }
 #endif
+#endif
             __syncwarp();
             // @S free
             // Free velocities.
@@ -1034,6 +1160,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #endif
                 }
             }
+            // @S contact
             // Contacts: the deepest 4 nodes that would reach the ground.
             unsigned word = 0u;
             {
@@ -1455,10 +1582,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
             // Per-node impulses against each node's own mass, then the exact
             // rod solve as the coupling, NPASS times.
             float rad[NPL], mu[NPL];
+            LOADF(rad, F_RAD);
+            LOADF(mu, F_MU);
 #pragma unroll
-            for (int k = 0; k < NPL; k++) { rad[k] = REC(F_RAD, k); mu[k] = NO_FRICTION ? 0.0f : REC(F_MU, k) * p.friction; }
+            for (int k = 0; k < NPL; k++) { mu[k] = NO_FRICTION ? 0.0f : mu[k] * p.friction; }
             unsigned slid = 0u;
             touch = 0u;
+#if LEDGER
             // @S ledgerA
             // The ledger's first stage: momentum and angular momentum about
             // the origin before the impulses, and once per step the centre
@@ -1477,12 +1607,15 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                 }
             }
             if (sub == 0) {
-                const float im = 1.0f / fmaxf(mtot, 1e-6f);
+                const float im = frcp(fmaxf(mtot, 1e-6f));
                 smx = XSUM(smx); smy = XSUM(smy); sq = XSUM(sq);
                 cxr = smx * im; cyr = smy * im;
-                iic = 1.0f / fmaxf(sq - mtot * (cxr * cxr + cyr * cyr), 1e-6f);
+                iic = frcp(fmaxf(sq - mtot * (cxr * cxr + cyr * cyr), 1e-6f));
             }
+#endif
+#if LEDGER
             float ex = 0.0f, ey = 0.0f, tz = 0.0f;
+#endif
 #pragma unroll
             for (int pass = 0; pass < NPASS; pass++) {
                 // @S nodes
@@ -1502,9 +1635,11 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     dvt = (dvt * vx[k] > 0.0f && fabsf(tvx) <= fabsf(vx[k])) ? 0.0f : dvt;
                     vx[k] += dvt;
                     if (pass == 0) { slid |= (fabsf(want) > cone ? 1u : 0u) << k; }
+#if LEDGER
                     const float ix_ = mass[k] * dvt, iy_ = mass[k] * dvn;
                     ex += ix_; ey += iy_;
                     tz = fmaf(px[k], iy_, tz); tz = fmaf(-py[k], ix_, tz);
+#endif
                 }
                 // @S rod
 #if !BAKED
@@ -1575,6 +1710,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #endif
                 }
             }
+#if LEDGER
             // @S ledgerB
             // The ledger's second stage: the impulses of the substep must
             // have moved the momentum by exactly the contact impulses and
@@ -1589,7 +1725,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     pax += mvx; pay += mvy;
                     laz = fmaf(px[k], mvy, laz); laz = fmaf(-py[k], mvx, laz);
                 }
-                const float im = 1.0f / fmaxf(mtot, 1e-6f);
+                const float im = frcp(fmaxf(mtot, 1e-6f));
                 const float rpx = NO_LEDGER ? 0.0f : XSUM(pax - pbx - ex);
                 const float rpy = NO_LEDGER ? 0.0f : XSUM(pay - pby - ey);
                 const float rl = NO_LEDGER ? 0.0f : XSUM(laz - lbz - tz);
@@ -1605,6 +1741,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     vy[k] += on_ ? sy + wc * (px[k] - cxr) : 0.0f;
                 }
             }
+#endif
 #ifdef DIAG
             {
                 // Residuals after the impulses: normal rows against what the
@@ -1650,6 +1787,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                 vy[k] = clampf(vy[k], -SPEED_CLAMP, SPEED_CLAMP);
                 px[k] += HS * vx[k];
                 py[k] += HS * vy[k];
+#ifdef DIAG
+                pen_max = fmaxf(pen_max, rad[k] - py[k]);
+#endif
                 py[k] += PUSH_OUT * fmaxf(rad[k] - py[k], 0.0f);
                 ax[k] = (((touch >> k) & 1u) && !((slid >> k) & 1u)) ? ax[k] : px[k];
             }
@@ -1684,7 +1824,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
             for (int k = 0; k < NPL; k++) { NODE(k, lane) = make_float4(px[k], py[k], vx[k], vy[k]); }
             __syncwarp();
 #endif
-            float pdx_[NPL], pdy_[NPL], ipe[NPL], icm[NPL];
+            float pdx_[NPL], pdy_[NPL], ipe[NPL], icm[NPL], lenr[NPL], pinr[NPL];
+            LOADF(lenr, F_LEN);
+            LOADF(pinr, F_PINV);
             float z1[SOLVE_ROWS][NPL];
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
@@ -1696,12 +1838,12 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     const float4 na = NODEV(a);
                     const float ddx = px[k] - na.x, ddy = py[k] - na.y;
                     const float l = sqrtf(ddx * ddx + ddy * ddy);
-                    const float il = 1.0f / fmaxf(l, 1e-6f);
+                    const float il = frcp(fmaxf(l, 1e-6f));
                     pdx_[k] = ddx * il; pdy_[k] = ddy * il;
-                    c = l - REC(F_LEN, k);
+                    c = l - lenr[k];
                 }
                 drift_max = fmaxf(drift_max, fabsf(c));
-                ipe[k] = ((held >> T_PIVOT(t)) & 1u) ? 0.0f : REC(F_PINV, k);
+                ipe[k] = ((held >> T_PIVOT(t)) & 1u) ? 0.0f : pinr[k];
                 icm[k] = ((held >> (lg * NPL + k)) & 1u) ? 0.0f : invm[k];
                 ZSET(z1, k, -c);
             }
@@ -1761,11 +1903,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
         {
             float mm = 0.0f, mx = 0.0f, low = 1e20f;
             bool bad = false;
+            float radm[NPL];
+            LOADF(radm, F_RAD);
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
                 const float m = mass[k];
                 mm += m; mx += m * px[k];
-                if (invm[k] > 0.0f) { low = fminf(low, py[k] - REC(F_RAD, k)); }
+                if (invm[k] > 0.0f) { low = fminf(low, py[k] - radm[k]); }
                 bad |= !(fabsf(px[k]) <= 1e6f && fabsf(py[k]) <= 1e6f);
             }
 #if W == 2
@@ -1814,7 +1958,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #else
                         results[RESULT_STRIDE * cidx + 1u] = make_float4(rounds_sum, contact_sum, drift_max, ms_all);
 #endif
-                        results[RESULT_STRIDE * cidx + 2u] = make_float4(rr_max, ang_max, st, rounds_sum);
+                        results[RESULT_STRIDE * cidx + 2u] = make_float4(rr_max, ang_max, st, CONTACT_MODEL ? pen_max : rounds_sum);
                     }
                     live = false;
                 }

@@ -746,7 +746,7 @@ fn main() -> Result<()> {
     let mss = cu.upload(&b.mss)?;
     let roff = cu.alloc(count * mpl * w * 4)?;
     cu.check(unsafe { (cu.memset_d32)(roff, 0, count * mpl * w) }, "memset")?;
-    let mstate = cu.alloc(count * mpl * w * 4)?;
+    let mstate = cu.alloc(count * mpl * w * 8)?;
     let anch = cu.alloc(count * 8 * 4)?;
     let results = cu.alloc(count * 48)?;
     let counter = cu.alloc(4)?;
@@ -818,6 +818,11 @@ fn main() -> Result<()> {
             v.sort_by(f32::total_cmp);
             v[count / 2]
         };
+        let pct = |i: usize, q: f32| -> f32 {
+            let mut v: Vec<f32> = out.iter().map(|o| o[i]).filter(|v| v.is_finite()).collect();
+            v.sort_by(f32::total_cmp);
+            v[((v.len() as f32 - 1.0) * q) as usize]
+        };
         let mx = |i: usize| out.iter().map(|o| o[i]).filter(|v| v.is_finite()).fold(0.0f32, f32::max);
         let low: f64 = out.iter().map(|o| f64::from(o[2])).sum::<f64>() / count as f64;
         let stamina: f64 = out.iter().map(|o| f64::from(o[10])).sum::<f64>() / count as f64;
@@ -833,8 +838,8 @@ fn main() -> Result<()> {
         );
         if lean_contact || a.contains_key("diag") {
             println!(
-                "     DIAG rn median {:.2e} max {:.2e}, rr median {:.2e} max {:.2e}, angular ledger residual median {:.2e} max {:.2e}, stamina mean {stamina:.3}, mean x {:.2} m",
-                med(4), mx(4), med(8), mx(8), med(9), mx(9),
+                "     DIAG rn median {:.2e} max {:.2e}, rr median {:.2e} max {:.2e}, angular ledger residual median {:.2e} max {:.2e}, penetration max per creature: median {:.2e} p99 {:.2e} m, stamina mean {stamina:.3}, mean x {:.2} m",
+                med(4), mx(4), med(8), mx(8), med(9), mx(9), med(11), pct(11, 0.99),
                 out.iter().map(|o| f64::from(o[0]).max(-1e3)).sum::<f64>() / count as f64,
             );
         }
