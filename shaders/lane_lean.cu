@@ -137,6 +137,8 @@
 #ifndef MUSCLE_UNROLL
 #if MSTATE_REGS && !MUSCLE_MODEL
 #define MUSCLE_UNROLL MPL
+#elif defined(MC) && LAGGED_FACTOR
+#define MUSCLE_UNROLL 4
 #elif defined(MC)
 #define MUSCLE_UNROLL MC
 #else
@@ -185,7 +187,7 @@
 #else
 #define NPL 8
 #define LOGNPL 3
-#define SW 64
+#define SW 48
 #define FRCW 32
 #endif
 #define RATE 60.0f
@@ -293,9 +295,12 @@ __device__ __forceinline__ float2 unpack_bf(unsigned u) {
 
 // A record field for all NPL nodes of the lane: two vector loads at W = 1.
 #if W == 1
+// W = 1 records are interleaved across the warp's 32 creatures, in float4s:
+// float4 (group, quad, lane) at ((group x RF/4 + quad) x 32 + lane), so a
+// load by 32 consecutive creatures is 512 contiguous bytes.
 __device__ __forceinline__ void load_field(const float* __restrict__ lanes, size_t cidx, int fld, float (&o)[NPL]) {
-    const float4* p4 = reinterpret_cast<const float4*>(lanes + cidx * RF + fld);
-    const float4 a = __ldg(p4), b = __ldg(p4 + 1);
+    const float4* p4 = reinterpret_cast<const float4*>(lanes) + (((cidx >> 5) * (RF / 4) + (fld >> 2)) << 5) + (cidx & 31u);
+    const float4 a = __ldg(p4), b = __ldg(p4 + 32);
     o[0] = a.x; o[1] = a.y; o[2] = a.z; o[3] = a.w; o[4] = b.x; o[5] = b.y; o[6] = b.z; o[7] = b.w;
 }
 #define LOADF(o, fld) load_field(lanes, cidx, (fld), o)
@@ -590,10 +595,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
     // warps at different phases never touch each other's bytes.
     __shared__ float4 s_mem[(BLOCK / 32) * (SW / 4) * 32];
     float* const s_warp = reinterpret_cast<float*>(s_mem) + (threadIdx.x >> 5) * (SW * 32);
-#if W == 2
     float4* const s_node4 = reinterpret_cast<float4*>(s_warp);
     float2* const s_frc2 = reinterpret_cast<float2*>(s_warp + FRCW * 32);
-#endif
     const unsigned tid = threadIdx.x;
     const unsigned lane = tid & 31u;
 #if W == 2
@@ -604,15 +607,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
     const unsigned lg = 0u;
     const unsigned gl = lane;
 #endif
-#if W == 2
 #define NODE(k, col) s_node4[(k) * 32 + (col)]
 #define FRC(g, col) s_frc2[(g) * 32 + (col)]
-#else
-    // W = 1: one 32 B element per node and lane, the node (x, y, vx, vy) and
-    // its force (x, y), so a node is one offset from the lane's base.
-#define NODE(k, col) (*reinterpret_cast<float4*>(s_warp + ((k) * 32 + (col)) * 8))
-#define FRC(g, col) (*reinterpret_cast<float2*>(s_warp + ((g) * 32 + (col)) * 8 + 4))
-#endif
 #define SCR(q, col) s_warp[(q) * 32 + (col)]
 #define WAT(idx) SCR((idx) >> 1, gl + ((idx) & 1))
 #define WIJ(i, j) WAT((i) >= (j) ? (i) * ((i) + 1) / 2 + (j) : (j) * ((j) + 1) / 2 + (i))
@@ -653,7 +649,23 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #pragma unroll
     for (int k = 0; k < MPL; k++) { ms[k] = 0u; }
 #endif
+#if W == 1
+    // W = 1: the records, the muscle records (A plane, then R plane), the limb
+    // clocks and the held muscle geometry are interleaved across the warp's
+    // 32 creatures, so the loads of a warp are contiguous.
+    const size_t rplane = (size_t)((p.count + 31u) >> 5u) * MPL * 32u;
+#define REC(f, k) lanes[((((size_t)(cidx >> 5) * (RF / 4) + (((f) + (k)) >> 2)) << 5) + (cidx & 31u)) * 4u + (((f) + (k)) & 3u)]
+#define ROFF(limb) roff[((((size_t)(cidx >> 5) * 16u + (limb))) << 5) + (cidx & 31u)]
+#define MSA_A(k) msa[((size_t)(cidx >> 5) * MPL + (k)) * 32u + (cidx & 31u)]
+#define MSA_R(k) msa[rplane + ((size_t)(cidx >> 5) * MPL + (k)) * 32u + (cidx & 31u)]
+#define MHELD(k) (reinterpret_cast<uint2*>(mstate))[((size_t)(cidx >> 5) * MPL + (k)) * 32u + (cidx & 31u)]
+#else
 #define REC(f, k) lanes[((size_t)cidx * RF + (f) + (k)) * W + lg]
+#define ROFF(limb) roff[(size_t)cidx * 16u + (limb)]
+#define MSA_A(k) msa[2u * (mb + (size_t)(k) * W)]
+#define MSA_R(k) msa[2u * (mb + (size_t)(k) * W) + 1u]
+#define MHELD(k) (reinterpret_cast<uint2*>(mstate))[mb + (size_t)(k) * W]
+#endif
     // Friction anchors per node in L2, NaN when the node has none (today's
     // contact model; the lean one keeps them in registers).
 #define ANC(k) anch[((size_t)cidx * NPL + (k)) * W + lg]
@@ -699,7 +711,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #endif
 #if MUSCLE_MODEL
 #pragma unroll
-                for (int k = 0; k < NPL; k++) { roff[(size_t)cidx * 16u + lg * NPL + k] = 0.0f; }
+                for (int k = 0; k < NPL; k++) { ROFF(lg * NPL + k) = 0.0f; }
 #else
                 {
                     const size_t mb0 = (size_t)cidx * MPL * W + lg;
@@ -768,7 +780,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #pragma unroll
             for (int k = 0; k < NPL; k++) { NODE(k, lane) = make_float4(px[k], py[k], vx[k], vy[k]); }
 #pragma unroll
-            for (int g = 0; g < W * NPL; g++) { FRC(g, lane) = make_float2(0.0f, 0.0f); }
+            for (int g = 0; g < W * NPL; g++) {
+                FRC(g, lane) = make_float2(0.0f, 0.0f);
+            }
             __syncwarp();
             // @S geometry
             // Rod directions and lengths every substep (the impulses and the
@@ -924,26 +938,27 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #else
                 {
 #endif
-                    const float4 A = msa[2u * (mb + (size_t)k * W)];
+                    const float4 A = MSA_A(k);
                     const unsigned pk = __float_as_uint(A.x);
 #if W == 1
-                    const unsigned oa = pk & 0x1fffu, ob = (pk >> 13u) & 0x1fffu;
-                    char* const col = reinterpret_cast<char*>(s_warp) + lane * 32u;
-                    const float4 e0 = *reinterpret_cast<float4*>(col + oa), e1 = *reinterpret_cast<float4*>(col + ob);
-                    const unsigned limb = (pk >> 26u) & 15u;
+                    const unsigned oa = pk & 0xfffu, ob = (pk >> 12u) & 0xfffu;
+                    char* const ncol = reinterpret_cast<char*>(s_node4) + lane * 16u;
+                    char* const fcol = reinterpret_cast<char*>(s_frc2) + lane * 8u;
+                    const float4 e0 = *reinterpret_cast<float4*>(ncol + oa), e1 = *reinterpret_cast<float4*>(ncol + ob);
+                    const unsigned limb = (pk >> 24u) & 15u;
 #else
                     const unsigned ea = (pk >> 5u) & 31u, eb = (pk >> 15u) & 31u;
                     const float4 e0 = NODEAT(ea), e1 = NODEAT(eb);
                     const unsigned limb = ((pk >> 25u) & 1u) ? ((pk >> 20u) & 31u) : 8u;
 #endif
-                    uint2* const hp = reinterpret_cast<uint2*>(mstate) + (mb + (size_t)k * W);
+                    uint2* const hp = &MHELD(k);
                     float dirx, diry, a0, a1;
                     if (sub == 0) {
                         // The step's geometry and activation, held for the
                         // substeps: the direction and the activation at the
                         // step's two ends, as half pairs.
-                        const float4 R = msa[2u * (mb + (size_t)k * W) + 1u];
-                        const float td = __ldcg(&roff[(size_t)cidx * 16u + limb]);
+                        const float4 R = MSA_R(k);
+                        const float td = __ldcg(&ROFF(limb));
                         const float x0 = (t0 - td) * R.x + R.y;
                         const float p0 = x0 - floorf(x0);
                         const float x1 = x0 + DT * R.x;
@@ -972,8 +987,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     const float gx = dirx * mag, gy = diry * mag;
                     float2 f;
 #if W == 1
-                    float2* const fa_ = reinterpret_cast<float2*>(col + oa + 16u);
-                    float2* const fb_ = reinterpret_cast<float2*>(col + ob + 16u);
+                    float2* const fa_ = reinterpret_cast<float2*>(fcol + (oa >> 1));
+                    float2* const fb_ = reinterpret_cast<float2*>(fcol + (ob >> 1));
                     f = *fa_; f.x += gx; f.y += gy; *fa_ = f;
                     f = *fb_; f.x -= gx; f.y -= gy; *fb_ = f;
 #else
@@ -1002,8 +1017,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #else
                 {
 #endif
-                    const float4 A = msa[2u * (mb + (size_t)k * W)];
-                    const float4 R = msa[2u * (mb + (size_t)k * W) + 1u];
+                    const float4 A = MSA_A(k);
+                    const float4 R = MSA_R(k);
                     const unsigned pk = __float_as_uint(A.x);
 #if MUSCLE_ANCHORS
                     const unsigned na_ = pk & 31u, nb_ = (pk >> 5u) & 31u, nc_ = (pk >> 10u) & 31u, nd_ = (pk >> 15u) & 31u;
@@ -1011,19 +1026,20 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     const float2 an = unpack_un(__float_as_uint(A.w));
                     const float4 e0 = make_float4(f0.x + (f1.x - f0.x) * an.x, f0.y + (f1.y - f0.y) * an.x, f0.z + (f1.z - f0.z) * an.x, f0.w + (f1.w - f0.w) * an.x);
                     const float4 e1 = make_float4(f2.x + (f3.x - f2.x) * an.y, f2.y + (f3.y - f2.y) * an.y, f2.z + (f3.z - f2.z) * an.y, f2.w + (f3.w - f2.w) * an.y);
-                    const float td = ((pk >> 25u) & 1u) ? __ldcg(&roff[(size_t)cidx * 16u + ((pk >> 20u) & 31u)]) : 0.0f;
+                    const float td = ((pk >> 25u) & 1u) ? __ldcg(&ROFF((pk >> 20u) & 31u)) : 0.0f;
 #elif W == 1
-                    // Bits 0 to 12: end a's byte offset in the lane's column
-                    // (node x 1024), 13 to 25: end b's, 26 to 29: the limb
+                    // Bits 0 to 11: end a's byte offset in the node table
+                    // (node x 512), 12 to 23: end b's, 24 to 27: the limb
                     // whose clock sets the phase (8: none, its clock is 0).
-                    const unsigned oa = pk & 0x1fffu, ob = (pk >> 13u) & 0x1fffu;
-                    char* const col = reinterpret_cast<char*>(s_warp) + lane * 32u;
-                    const float4 e0 = *reinterpret_cast<float4*>(col + oa), e1 = *reinterpret_cast<float4*>(col + ob);
-                    const float td = __ldcg(&roff[(size_t)cidx * 16u + ((pk >> 26u) & 15u)]);
+                    const unsigned oa = pk & 0xfffu, ob = (pk >> 12u) & 0xfffu;
+                    char* const ncol = reinterpret_cast<char*>(s_node4) + lane * 16u;
+                    char* const fcol = reinterpret_cast<char*>(s_frc2) + lane * 8u;
+                    const float4 e0 = *reinterpret_cast<float4*>(ncol + oa), e1 = *reinterpret_cast<float4*>(ncol + ob);
+                    const float td = __ldcg(&ROFF((pk >> 24u) & 15u));
 #else
                     const unsigned ea = (pk >> 5u) & 31u, eb = (pk >> 15u) & 31u;
                     const float4 e0 = NODEAT(ea), e1 = NODEAT(eb);
-                    const float td = ((pk >> 25u) & 1u) ? __ldcg(&roff[(size_t)cidx * 16u + ((pk >> 20u) & 31u)]) : 0.0f;
+                    const float td = ((pk >> 25u) & 1u) ? __ldcg(&ROFF((pk >> 20u) & 31u)) : 0.0f;
 #endif
                     const float x = (tsub - td) * R.x + R.y;
                     const float ph = x - floorf(x);
@@ -1047,8 +1063,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     f = FRC(nc_, lane); f.x -= (1.0f - an.y) * gx; f.y -= (1.0f - an.y) * gy; FRC(nc_, lane) = f;
                     f = FRC(nd_, lane); f.x -= an.y * gx; f.y -= an.y * gy; FRC(nd_, lane) = f;
 #elif W == 1
-                    float2* const fa = reinterpret_cast<float2*>(col + oa + 16u);
-                    float2* const fb = reinterpret_cast<float2*>(col + ob + 16u);
+                    float2* const fa = reinterpret_cast<float2*>(fcol + (oa >> 1));
+                    float2* const fb = reinterpret_cast<float2*>(fcol + (ob >> 1));
                     f = *fa; f.x += gx; f.y += gy; *fa = f;
                     f = *fb; f.x -= gx; f.y -= gy; *fb = f;
 #else
@@ -1931,7 +1947,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #if MUSCLE_MODEL
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
-                    if ((down >> (lg * NPL + k)) & 1u) { roff[(size_t)cidx * 16u + lg * NPL + k] = t0 + DT; }
+                    if ((down >> (lg * NPL + k)) & 1u) { ROFF(lg * NPL + k) = t0 + DT; }
                 }
 #else
 #pragma unroll MUSCLE_UNROLL

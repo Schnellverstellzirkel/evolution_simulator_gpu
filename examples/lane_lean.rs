@@ -462,10 +462,16 @@ pub fn batch(count: usize, nodes: usize, muscles: usize, shape: &Shape, seed: u6
     let rf = 13 * npl;
     let (mpl, nb) = (shape.mpl, shape.nb);
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ seed.wrapping_mul(0x2545_f491_4f6c_dd1d));
+    // W = 1 interleaves the records across the warp's 32 creatures (the
+    // layout of the per-block prologue kernel); the arrays are padded to
+    // whole groups.
+    let groups = count.div_ceil(32);
+    let padded = if w == 1 { groups * 32 } else { count };
+    let rplane = groups * mpl * 32;
     let mut b = Batch {
         heads: Vec::with_capacity(count),
-        lanes: vec![0.0; count * rf * w],
-        msa: vec![[0.0; 4]; 2 * count * mpl * w],
+        lanes: vec![0.0; padded * rf * w],
+        msa: vec![[0.0; 4]; if w == 1 { 2 * rplane } else { 2 * count * mpl * w }],
         msb: vec![[0.0; 2]; count * mpl * w],
         mss: vec![[0.0; 4]; count * 2 * mpl * w],
     };
@@ -511,7 +517,8 @@ pub fn batch(count: usize, nodes: usize, muscles: usize, shape: &Shape, seed: u6
             *yi += 0.02 - low;
         }
         // Per lane record: [field][lane], fields k-major as the kernel reads.
-        let rec = &mut b.lanes[c * rf * w..(c + 1) * rf * w];
+        let (grp, ln) = (c / 32, c % 32);
+        let rec = if w == 1 { &mut b.lanes[..] } else { &mut b.lanes[c * rf * w..(c + 1) * rf * w] };
         let mut rank = vec![0usize; n];
         let mut seen = vec![0usize; n];
         for g in 1..n {
@@ -525,7 +532,14 @@ pub fn batch(count: usize, nodes: usize, muscles: usize, shape: &Shape, seed: u6
         };
         for g in 0..8 {
             let (lane, k) = (g / npl, g % npl);
-            let put = |rec: &mut [f32], field: usize, v: f32| rec[(field * npl + k) * w + lane] = v;
+            let put = |rec: &mut [f32], field: usize, v: f32| {
+                if w == 1 {
+                    let e = field * npl + k;
+                    rec[(((grp * (rf / 4) + (e >> 2)) * 32 + ln) * 4) + (e & 3)] = v;
+                } else {
+                    rec[(field * npl + k) * w + lane] = v;
+                }
+            };
             put(rec, 9, 0.0);
             put(rec, 8, 1.0);
             if g < n {
@@ -586,6 +600,7 @@ pub fn batch(count: usize, nodes: usize, muscles: usize, shape: &Shape, seed: u6
             let sensor = if rng.f() < 0.3 { (1u32 << 25) | (rng.below(n as u32) << 20) } else { 0 };
             let pk = parent[ra] as u32 | (ra as u32) << 5 | (parent[rb] as u32) << 10 | (rb as u32) << 15 | sensor;
             let idx = (c * mpl + k) * w + lane;
+            let (ia, ir) = if w == 1 { ((grp * mpl + k) * 32 + ln, rplane + (grp * mpl + k) * 32 + ln) } else { (2 * idx, 2 * idx + 1) };
             let period = rng.range(0.5, 2.0);
             let duty = rng.range(0.3, 0.7);
             if shape.lean_muscles {
@@ -593,13 +608,13 @@ pub fn batch(count: usize, nodes: usize, muscles: usize, shape: &Shape, seed: u6
                 let len = ((x[rb] - x[ra]).powi(2) + (y[rb] - y[ra]).powi(2)).sqrt().max(0.05);
                 let pk = if shape.w == 1 && !shape.anchors {
                     let limb = if sensor != 0 { (sensor >> 20) & 31 } else { 8 };
-                    (ra as u32 * 1024) | (rb as u32 * 1024) << 13 | limb << 26
+                    (ra as u32 * 512) | (rb as u32 * 512) << 12 | limb << 24
                 } else {
                     pk
                 };
-                b.msa[2 * idx] = [f32::from_bits(pk), cap, 1.0 / (8.0 * len), unorm2(ta, tb)];
+                b.msa[ia] = [f32::from_bits(pk), cap, 1.0 / (8.0 * len), unorm2(ta, tb)];
                 let rp = ramp / period;
-                b.msa[2 * idx + 1] = [1.0 / period, rng.f(), (duty + rp).min(1.0) * 0.5, 1.0 / rp];
+                b.msa[ir] = [1.0 / period, rng.f(), (duty + rp).min(1.0) * 0.5, 1.0 / rp];
             } else {
                 b.msa[idx] = [f32::from_bits(pk), unorm2(ta, tb), rng.range(2.0, 10.0), rng.range(50.0, 200.0)];
                 b.msb[idx] = [dist * rng.range(1.05, 1.3), bf2(rng.range(0.0, 2.0), rng.range(0.1, 1.0))];
@@ -744,9 +759,11 @@ fn main() -> Result<()> {
     let msa = cu.upload(&b.msa)?;
     let msb = cu.upload(&b.msb)?;
     let mss = cu.upload(&b.mss)?;
-    let roff = cu.alloc(count * mpl * w * 4)?;
-    cu.check(unsafe { (cu.memset_d32)(roff, 0, count * mpl * w) }, "memset")?;
-    let mstate = cu.alloc(count * mpl * w * 8)?;
+    let padded = if w == 1 { count.div_ceil(32) * 32 } else { count };
+    let roff_words = (padded * mpl * w).max(padded * 16);
+    let roff = cu.alloc(roff_words * 4)?;
+    cu.check(unsafe { (cu.memset_d32)(roff, 0, roff_words) }, "memset")?;
+    let mstate = cu.alloc(padded * mpl * w * 8)?;
     let anch = cu.alloc(count * 8 * 4)?;
     let results = cu.alloc(count * 48)?;
     let counter = cu.alloc(4)?;
