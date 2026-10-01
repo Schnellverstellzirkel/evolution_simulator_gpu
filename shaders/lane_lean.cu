@@ -1609,6 +1609,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                 factor(topo, pmk, dx, dy, rdx, rdy, ipv, invm, lg, invD, Lf);
             }
 #endif
+            // @S contact
             // Contacts: the deepest 4 nodes that would reach the ground.
             unsigned word = 0u;
             {
