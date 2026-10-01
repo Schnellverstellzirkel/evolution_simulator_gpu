@@ -23,3 +23,7 @@ Canonical trees (children sorted by subtree shape, neck first) on save42's bred 
 ## bucket-counters (2026-09-30, merged 2dee40f): 0.7% kept; the plan's 1.15x for bucketed queues is refuted
 
 Per-bucket take-up counters on the lane-group kernel: kernel time 3316 to 3293 ms over the three classes on the save42 dump (0.5 to 0.9% per class), results identical. Cause: pack already sorts each wave by (rounds, depth, nodes), so warps are 98 to 99.8% uniform with a single counter; no take-up change can gain more than 1 to 2% while blocks stay sorted. The persistent-kernels row's 1.15x should be re-estimated at about 1.01x unless its blocks are unsorted. Gap-excluded kernel timing (sum of per-warp step intervals under 400 us) measures under the shared lock; tools in the scratchpad.
+
+## End to end on main d7264e4 (2026-10-01, game alone, 3M per generation, autochange Slow)
+
+Generations 0 to 5: 139k, 227k, 197k, 114k, 115k, 149k creatures/s (mean nodes 5.9 to 6.9; confirmations 395 to 1,154 per generation; breeding 1.3 to 1.8 s per generation). Previous main (before the contact solve, bar-stream and frames): 92k to 167k at the same stage; the old build: 85k to 117k, falling to 27k by generation 30.
