@@ -239,6 +239,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     // same memory: the muscle forces sit at the start of the group's slice.
     float4* const mf = &scatter[threadIdx.x >> 5][gbase * 3u];
     float4* const region = scatter[threadIdx.x >> 5];
+    // The scratch starts at zero: shared memory holds what the last kernel
+    // left there.
+    for (unsigned k = 0u; k < 3u; k++) { region[3u * lane + k] = make_float4(0.0f, 0.0f, 0.0f, 0.0f); }
+    __syncwarp();
     const unsigned below = (1u << lg) - 1u;
 
     // The group's creature (the same in every lane of the group).
@@ -777,8 +781,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     for (unsigned b = 0u; b < 4u; b++) {
                         const unsigned slot = (word >> (8u * b)) & 255u;
                         const float4 f = mf[slot & (2u * W - 1u)];
-                        const float g = slot != 255u ? 1.0f : 0.0f;
-                        fm += v3(f.x, f.y, f.z) * g;
+                        // A select, not a product: a slot nobody wrote may hold
+                        // NaN bits, and NaN times zero is NaN.
+                        if (slot != 255u) { fm += v3(f.x, f.y, f.z); }
                     }
                 }
                 __syncwarp();
@@ -853,10 +858,11 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     const unsigned src = gbase + ((fc + k) & (W - 1u));
                     const float4 e0 = region[3u * src], e1 = region[3u * src + 1u];
                     const float e2 = reinterpret_cast<const float*>(region + 3u * src + 2u)[0];
-                    const float g = take ? 1.0f : 0.0f;
-                    i0 += v3(e0.x, e0.y, e0.z) * g;
-                    i1 += v3(e0.w, e1.x, e1.y) * g;
-                    bs += v3(e1.z, e1.w, e2) * g;
+                    if (take) {
+                        i0 += v3(e0.x, e0.y, e0.z);
+                        i1 += v3(e0.w, e1.x, e1.y);
+                        bs += v3(e1.z, e1.w, e2);
+                    }
                 }
             }
             PROF(6);
