@@ -40,10 +40,10 @@ alone; `EVOLUTION_WARP_PROFILE=1` makes one warp print its cycles per kernel
 section. `EVOLUTION_WARP_SUBSTEPS`, `EVOLUTION_WARP_PGS_SWEEPS`,
 `EVOLUTION_WARP_CLEAN_SWEEPS`, `EVOLUTION_WARP_PLANT_ROUNDS` and
 `EVOLUTION_WARP_PLANT_SWEEPS` override the solver settings for measuring
-them. `EVOLUTION_WARP_LEDGER`, `_ANCHOR`, `_ADAPT` and `_DIAG` (all 0) are the substep
-ladder's switches (`docs/plan-2m-measurements.md`, substep-ladder), and
-`replay_match <save> --retest <count> <out.csv>` with `replay_match --ladder` re-tests a
-save's best elites at other substep counts. `EVOLUTION_WARP_BUCKETS=1` gives each wave one take-up counter
+them. `replay_match <save> --retest <count> <out.csv>` re-tests a save's best
+elites with the settings in force, and `replay_match --ladder` compares the
+files from runs at the default, 2 and 4 substeps (`docs/plan-2m-measurements.md`,
+substep ladder). `EVOLUTION_WARP_BUCKETS=1` gives each wave one take-up counter
 instead of one per muscle-rounds bucket.
 Nothing needs configuring: the build links no CUDA library, and the engine
 loads the CUDA driver library and NVRTC when it opens. If either is missing,

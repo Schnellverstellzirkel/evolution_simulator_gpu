@@ -1,22 +1,20 @@
 //! Prints the best elites' archive distance beside their GPU replay's, which
 //! must be equal. Usage: replay_match <save> [count]
 //!
-//! The substep ladder's honesty re-test (docs/plan-2m.md, section 6 item 3):
+//! The substep honesty re-test (docs/plan-2m-measurements.md, substep ladder):
 //!
 //!   replay_match <save> --retest <count> <out.csv>
 //!
 //! scores the save's best `count` elites in one batch, full 20 s trials at the
-//! standard rate, with the kernel the `EVOLUTION_WARP_*` settings select and
-//! its diagnostic words on, and writes one row per elite: its archive
-//! distance, the re-test distance, and the trial's positive realized friction
-//! work, muscle work, the energy the friction ledger took back and its share
-//! of one-substep steps. Run it once at the rung's settings and once each at
-//! 2 and 4 substeps, then
+//! standard rate, with the kernel the `EVOLUTION_WARP_*` settings select, and
+//! writes one row per elite: its archive distance, the re-test distance and
+//! its fall time. Run it with the default settings and once each with
+//! `EVOLUTION_WARP_SUBSTEPS` at 2 and 4, then
 //!
-//!   replay_match --ladder <rung.csv> <two.csv> <four.csv> [<reference.csv>]
+//!   replay_match --ladder <base.csv> <two.csv> <four.csv>
 //!
 //! prints the honesty ratios (the distance at 2 and 4 substeps over the
-//! distance at the rung, median and p10) and the friction and muscle work.
+//! distance at the base setting, median and p10).
 mod common;
 use anyhow::{Context, Result};
 use evolution_simulator::storage;
@@ -53,8 +51,6 @@ fn main() -> Result<()> {
 }
 
 fn retest(path: &str, count: usize, out: &str) -> Result<()> {
-    // SAFETY: set before any other thread starts; the kernel source reads it.
-    unsafe { std::env::set_var("EVOLUTION_WARP_DIAG", "1") };
     let experiment = storage::load(std::path::Path::new(path))?;
     let mut engine = common::open()?;
     let mut elites: Vec<_> = experiment.archive.entries.iter().collect();
@@ -66,19 +62,15 @@ fn retest(path: &str, count: usize, out: &str) -> Result<()> {
         ..experiment.config.clone()
     };
     let results = common::score_creatures(&mut engine, &creatures, &cfg)?;
-    let mut text = String::from("id,archive,fine,distance,fall_time,friction_work,muscle_work,taken,one_substep\n");
+    let mut text = String::from("id,archive,fine,distance,fall_time\n");
     for (e, r) in elites.iter().zip(&results) {
         text += &format!(
-            "{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{}\n",
             e.creature.id,
             e.fitness,
             e.fine as u8,
             r.fitness,
-            r.fall_time,
-            r.previous_center_y,
-            r.vertical_extremum,
-            r.vertical_trend,
-            r.contact_hi
+            r.fall_time
         );
     }
     std::fs::write(out, text)?;
@@ -89,10 +81,6 @@ fn retest(path: &str, count: usize, out: &str) -> Result<()> {
 struct Row {
     archive: f32,
     distance: f32,
-    friction: f32,
-    muscle: f32,
-    taken: f32,
-    one: f32,
 }
 
 fn read(path: &str) -> Result<Vec<(u64, Row)>> {
@@ -106,10 +94,6 @@ fn read(path: &str) -> Result<Vec<(u64, Row)>> {
             Row {
                 archive: num(1),
                 distance: num(3),
-                friction: num(5),
-                muscle: num(6),
-                taken: num(7),
-                one: num(8),
             },
         ));
     }
@@ -130,31 +114,31 @@ fn sorted(mut v: Vec<f32>) -> Vec<f32> {
 }
 
 fn ladder(paths: &[String]) -> Result<()> {
-    anyhow::ensure!(paths.len() >= 3, "--ladder needs the rung, 2 and 4 substep files");
-    let rung = read(&paths[0])?;
+    anyhow::ensure!(paths.len() == 3, "--ladder needs the base, 2 and 4 substep files");
+    let base = read(&paths[0])?;
     let others: Vec<HashMap<u64, Row>> = paths[1..]
         .iter()
         .map(|p| read(p).map(|rows| rows.into_iter().collect()))
         .collect::<Result<_>>()?;
-    let names = ["2 substeps", "4 substeps", "reference"];
-    let same = rung.iter().filter(|(_, r)| r.distance.to_bits() == r.archive.to_bits()).count();
+    let names = ["2 substeps", "4 substeps"];
+    let same = base.iter().filter(|(_, r)| r.distance.to_bits() == r.archive.to_bits()).count();
     println!(
-        "{} elites; the rung re-test equals the archive distance for {} (the rest were confirmed at the fine rate)",
-        rung.len(),
+        "{} elites; the base re-test equals the archive distance for {} (the rest were confirmed at the fine rate)",
+        base.len(),
         same
     );
-    let distances = sorted(rung.iter().map(|(_, r)| r.distance).collect());
+    let distances = sorted(base.iter().map(|(_, r)| r.distance).collect());
     println!(
-        "rung distance: median {:.2} m, p10 {:.2} m, best {:.2} m",
+        "base distance: median {:.2} m, p10 {:.2} m, best {:.2} m",
         quantile(&distances, 0.5),
         quantile(&distances, 0.1),
         quantile(&distances, 1.0)
     );
     for (k, other) in others.iter().enumerate() {
-        // Ratio to the rung's own distance; elites under 0.1 m at the rung
+        // Ratio to the base distance; elites under 0.1 m at the base
         // are left out.
         let ratios = sorted(
-            rung.iter()
+            base.iter()
                 .filter(|(_, r)| r.distance > 0.1)
                 .filter_map(|(id, r)| other.get(id).map(|o| o.distance / r.distance))
                 .collect(),
@@ -171,31 +155,6 @@ fn ladder(paths: &[String]) -> Result<()> {
             ratios.len(),
             quantile(&d, 0.5),
             quantile(&d, 1.0)
-        );
-    }
-    let total = |f: fn(&Row) -> f32| rung.iter().map(|(_, r)| f(r) as f64).sum::<f64>();
-    let (friction, muscle, taken) = (total(|r| r.friction), total(|r| r.muscle), total(|r| r.taken));
-    let shares = sorted(
-        rung.iter()
-            .filter(|(_, r)| r.muscle > 0.0)
-            .map(|(_, r)| r.friction / r.muscle)
-            .collect(),
-    );
-    println!(
-        "rung: positive realized friction work {:.3}% of muscle work (sum), per elite median {:.3}% p90 {:.3}%; the ledger took back {:.3}% of muscle work; one-substep steps {:.1}%",
-        100.0 * friction / muscle.max(1e-9),
-        100.0 * quantile(&shares, 0.5),
-        100.0 * quantile(&shares, 0.9),
-        100.0 * taken / muscle.max(1e-9),
-        100.0 * rung.iter().map(|(_, r)| r.one as f64).sum::<f64>() / rung.len().max(1) as f64
-    );
-    for (k, other) in others.iter().enumerate() {
-        let f: f64 = other.values().map(|o| o.friction as f64).sum();
-        let m: f64 = other.values().map(|o| o.muscle as f64).sum();
-        println!(
-            "{}: positive realized friction work {:.3}% of muscle work",
-            names[k],
-            100.0 * f / m.max(1e-9)
         );
     }
     Ok(())
