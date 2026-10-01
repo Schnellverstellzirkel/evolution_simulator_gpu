@@ -294,12 +294,8 @@ unsafe impl GlobalAlloc for BlockAlloc {
                         self.dealloc(ptr, layout);
                         return kept;
                     }
-                    let moved = libc::mremap(
-                        ptr as *mut libc::c_void,
-                        old,
-                        new,
-                        libc::MREMAP_MAYMOVE,
-                    );
+                    let moved =
+                        libc::mremap(ptr as *mut libc::c_void, old, new, libc::MREMAP_MAYMOVE);
                     if moved == libc::MAP_FAILED {
                         return std::ptr::null_mut();
                     }
@@ -329,7 +325,15 @@ mod tests {
 
     #[test]
     fn classes_are_whole_steps_and_cover_the_size() {
-        for size in [LARGE, LARGE + 1, 5 << 20, 32 << 20, (32 << 20) + 1, 100 << 20, 1 << 30] {
+        for size in [
+            LARGE,
+            LARGE + 1,
+            5 << 20,
+            32 << 20,
+            (32 << 20) + 1,
+            100 << 20,
+            1 << 30,
+        ] {
             let c = class(size);
             assert!(c >= size && c % STEP == 0, "{size} -> {c}");
             assert!(c <= size + size / 8 + STEP, "{size} -> {c}");

@@ -28,7 +28,12 @@ fn main() -> anyhow::Result<()> {
     // A measurement must not pause itself when it runs under
     // tools/pause-game.sh, so it watches a private pause directory.
     let pause_dir = std::env::temp_dir().join(format!("worker-rate-{}", std::process::id()));
-    let worker = Worker::spawn_with_pause_dir(gpu, eframe::egui::Context::default(), pause_dir);
+    // The worker asks its context for a repaint at every snapshot, and the
+    // context keeps each request until a frame runs. The game runs one every
+    // 16 ms. Here the loop below runs empty ones, so the pending requests do
+    // not pile up and fault in fresh memory.
+    let ctx = eframe::egui::Context::default();
+    let worker = Worker::spawn_with_pause_dir(gpu, ctx.clone(), pause_dir);
     worker.send(Command::New(Config {
         population,
         seed,
@@ -42,6 +47,28 @@ fn main() -> anyhow::Result<()> {
     });
     let started = Instant::now();
     let mut marks: Vec<(usize, Instant)> = Vec::new();
+    // Minor page faults of the process at each generation mark, and the major
+    // ones (a page read back from swap, which another program's memory use
+    // can cause) kept apart.
+    let stat_fields = || -> (u64, u64) {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+        // Fields after the command name: minflt is field 10, majflt field 12.
+        let rest = stat.rsplit_once(')').map_or("", |r| r.1);
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        let n = |i: usize| f.get(i).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        (n(7), n(9))
+    };
+    let mut fault_marks: Vec<u64> = Vec::new();
+    // Resident pages at each mark: faults beyond the growth of the resident
+    // set faulted memory that was given back and faulted in again.
+    let resident = || -> u64 {
+        std::fs::read_to_string("/proc/self/statm")
+            .ok()
+            .and_then(|s| s.split_whitespace().nth(1)?.parse().ok())
+            .unwrap_or(0)
+    };
+    let mut resident_marks: Vec<u64> = Vec::new();
+    let mut major_marks: Vec<u64> = Vec::new();
     // The champion's replay, asked every 5 s from its own thread like the
     // UI's replay thread.
     type Champion = std::sync::Arc<(
@@ -91,18 +118,27 @@ fn main() -> anyhow::Result<()> {
             let n = snapshot.history.len();
             if marks.last().is_none_or(|m| m.0 != n) {
                 marks.push((n, Instant::now()));
+                let (minor, major) = stat_fields();
                 eprintln!(
-                    "{:6.1} s: {} generations, best {:.2} m",
+                    "{:6.1} s: {} generations, best {:.2} m, {} minor page faults since the last generation",
                     started.elapsed().as_secs_f64(),
                     n,
-                    snapshot.history.last().map_or(0.0, |s| s.best)
+                    snapshot.history.last().map_or(0.0, |s| s.best),
+                    minor - fault_marks.last().copied().unwrap_or(0)
                 );
+                fault_marks.push(minor);
+                major_marks.push(major);
+                resident_marks.push(resident());
+                let (late, fresh) = evolution_simulator::storage::take_breed_late();
+                let (hit, map, unmap) = evolution_simulator::block_alloc::large_blocks();
+                eprintln!("          large blocks since the start: {hit} reused, {map} mapped, {unmap} unmapped; children bred after their arena part: {late}, blocks bred into a new arena: {fresh}");
             }
             if n >= generations {
                 break snapshot.history.clone();
             }
         }
         anyhow::ensure!(started.elapsed() < Duration::from_secs(1800), "too slow");
+        let _ = ctx.run_ui(eframe::egui::RawInput::default(), |_| {});
         std::thread::sleep(Duration::from_millis(20));
     };
     done.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -122,6 +158,34 @@ fn main() -> anyhow::Result<()> {
             done as f64 / last.duration_since(first).as_secs_f64(),
             last.duration_since(first).as_secs_f64() / (n - 3) as f64
         );
+        let at = |marks_of: &Vec<u64>, g: usize| {
+            marks.iter().position(|m| m.0 == g).map(|i| marks_of[i])
+        };
+        if let (Some(a), Some(b)) = (at(&fault_marks, 3), at(&fault_marks, n)) {
+            println!(
+                "worker_rate: {:.0} minor page faults per generation over generations 3 to {n}",
+                (b - a) as f64 / (n - 3) as f64
+            );
+            if let (Some(a), Some(b)) = (at(&major_marks, 3), at(&major_marks, n)) {
+                println!(
+                    "worker_rate: {:.0} major page faults per generation (swap reads)",
+                    (b - a) as f64 / (n - 3) as f64
+                );
+            }
+            // Per generation, the faults not accounted for by new resident memory.
+            let regen: u64 = (4..=n)
+                .filter_map(|g| {
+                    let i = marks.iter().position(|m| m.0 == g)?;
+                    let faults = fault_marks[i] - fault_marks[i - 1];
+                    let grown = resident_marks[i].saturating_sub(resident_marks[i - 1]);
+                    Some(faults.saturating_sub(grown))
+                })
+                .sum();
+            println!(
+                "worker_rate: {:.0} page faults per generation beyond the growth of resident memory, generations 4 to {n}",
+                regen as f64 / (n - 3) as f64
+            );
+        }
     }
     // Every generation's statistics, bit for bit.
     use std::hash::{Hash, Hasher};
