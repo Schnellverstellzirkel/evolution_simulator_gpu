@@ -332,7 +332,7 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             seed_started.elapsed().as_secs_f64()
         );
         println!(
-            "{scope} {seed} {generation} rungs steps {:.1} stops {} {} {} of {} audit {} armed {}{} pass_misses {} {} misses {:.1} {:.1} extra_misses {:.1} {:.1} top1 {:.1} top10 {:.1} screen_top1 {:.1} screen_top10 {:.1} confirmed {} refused {}",
+            "{scope} {seed} {generation} rungs steps {:.1} stops {} {} {} of {} audit {} armed {}{} parent_skipped {} {} pass_misses {} {} misses {:.1} {:.1} extra_misses {:.1} {:.1} top1 {:.1} top10 {:.1} screen_top1 {:.1} screen_top10 {:.1}",
             rungs.steps_per_creature(),
             rungs.stops[0],
             rungs.stops[1],
@@ -341,6 +341,8 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             rungs.audit_rows,
             u8::from(rungs.armed[0]),
             u8::from(rungs.armed[1]),
+            rungs.parent_skipped[0],
+            rungs.parent_skipped[1],
             rungs.pass_misses[0],
             rungs.pass_misses[1],
             rungs.misses_per_10k(0),
@@ -351,8 +353,6 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             rungs.top10_kept,
             rungs.top1_screen,
             rungs.top10_screen,
-            rungs.confirmed,
-            rungs.refused,
         );
         best = experiment
             .archive

@@ -164,12 +164,14 @@ fn children_of_a_parent_the_rules_would_stop_skip_that_rung() {
     let rules = Rungs([Rung::NEVER, r2]);
     let slow = profile(&trace(0.2, 0.5, 1.0, 1200, [0, 0]), 0.25);
     let fast = profile(&trace(1.0, 3.0, 8.0, 1200, [0, 0]), 0.25);
-    assert_eq!(parent_exemptions(&rules, Some(&slow)), EXEMPT_R2);
-    assert_eq!(parent_exemptions(&rules, Some(&fast)), 0);
+    assert_eq!(parent_exemptions(&rules, Some(&slow), true), EXEMPT_R2);
+    assert_eq!(parent_exemptions(&rules, Some(&fast), true), 0);
+    // A weak elite that the rules stop is where the rules should work.
+    assert_eq!(parent_exemptions(&rules, Some(&slow), false), 0);
     // An elite with no profile (an old save, a trial with no trace).
-    assert_eq!(parent_exemptions(&rules, None), EXEMPT_R1 | EXEMPT_R2);
+    assert_eq!(parent_exemptions(&rules, None, true), EXEMPT_R1 | EXEMPT_R2);
     assert_eq!(
-        parent_exemptions(&rules, Some(&[0; 2 * FEATURES])),
+        parent_exemptions(&rules, Some(&[0; 2 * FEATURES]), true),
         EXEMPT_R1 | EXEMPT_R2
     );
 }

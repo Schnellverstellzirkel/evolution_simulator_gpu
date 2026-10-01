@@ -132,10 +132,6 @@ pub struct EvaluationMetrics {
     /// The standard trial's rung trace (distances at 1, 2.5, 5 and 10 s and
     /// the early features), for the generation dump.
     pub trace: crate::creature_kernel::RungTrace,
-    /// An audit creature the 5 s screen would have stopped that would enter
-    /// an archive is re-run at the fine physics first: 1 when it was, 2 when
-    /// that run refused it (`rungs::REFUSE_BELOW`).
-    pub audit_check: u8,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]

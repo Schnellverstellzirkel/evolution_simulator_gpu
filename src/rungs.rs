@@ -48,12 +48,16 @@ pub fn profile(trace: &RungTrace, period: f32) -> [u16; 2 * FEATURES] {
     out
 }
 /// Which rungs the children of an elite with `profile` skip under `rules`:
-/// the ones that would stop the elite itself, and all of them when its
-/// profile is unknown.
-pub fn parent_exemptions(rules: &Rungs, profile: Option<&[u16; 2 * FEATURES]>) -> u8 {
+/// when the elite is strong (above the median of its island), the ones that
+/// would stop the elite itself, because a rule that stops a strong elite
+/// misjudges its family; and all of them when its profile is unknown.
+pub fn parent_exemptions(rules: &Rungs, profile: Option<&[u16; 2 * FEATURES]>, strong: bool) -> u8 {
     let Some(p) = profile.filter(|p| p.iter().any(|&w| w != 0)) else {
         return EXEMPT_R1 | EXEMPT_R2;
     };
+    if !strong {
+        return 0;
+    }
     let mut bits = 0;
     for r in 0..RUNGS {
         let f: [f32; FEATURES] = std::array::from_fn(|i| f16_to_f32(p[r * FEATURES + i]));
@@ -81,9 +85,6 @@ pub const BANDS: usize = RungTrace::BAND_COUNT;
 pub const WINDOW: usize = 8;
 /// Share of the creatures that pass the 5 s bar a rung may stop.
 pub const BUDGET: f64 = 1e-3;
-/// An audit entrant whose fine re-run reaches less than this share of its
-/// standard distance is refused.
-pub const REFUSE_BELOW: f32 = 0.5;
 /// Share of the entrants the 5 s screen would have kept that a rung may stop.
 pub const ENTRANT_BUDGET: f64 = 1e-2;
 /// A rung is armed only while it is trusted: over the last `JUDGED`
@@ -320,6 +321,8 @@ pub struct Report {
     pub subject: [u32; RUNGS],
     pub stopped: [u32; RUNGS],
     pub entrant_misses: [u32; RUNGS],
+    /// Rows alive at the rung whose parent exempted them from it.
+    pub parent_skipped: [u32; RUNGS],
     /// Of the entrants a rung would have stopped, those the 5 s screen would
     /// not have stopped: the cost beyond today's game.
     pub extra_misses: [u32; RUNGS],
@@ -335,9 +338,6 @@ pub struct Report {
     pub bands_off: [u8; RUNGS],
     /// Audit rows the fit pools after the boundary.
     pub window_rows: u32,
-    /// Audit entrants confirmed at the fine physics, and refused.
-    pub confirmed: u32,
-    pub refused: u32,
 }
 impl Report {
     pub fn steps_per_creature(&self) -> f64 {
@@ -388,11 +388,6 @@ impl Audit {
     }
     pub fn record(&mut self, row: AuditRow) {
         self.rows.push(row);
-    }
-    /// An audit entrant's confirmation at the fine physics came back.
-    pub fn note_confirmation(&mut self, refused: bool) {
-        self.tally.confirmed += 1;
-        self.tally.refused += u32::from(refused);
     }
     pub fn last(&self) -> &Report {
         &self.last
@@ -479,6 +474,7 @@ impl Audit {
                 let Some(f) = row.features(r) else { continue };
                 let band = row.trace.band(r);
                 report.subject[r] += 1;
+                report.parent_skipped[r] += u32::from(row.parent_exempt & exempt_bits(r) != 0);
                 band_rows[r][band] += 1;
                 if !row.skips(r) && rules.0[r].stops(&f, band) {
                     report.stopped[r] += 1;

@@ -478,7 +478,7 @@ impl StageLog {
         if file.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
             let _ = writeln!(
                 file,
-                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second,confirmations,confirmation_busy_seconds,device_busy_seconds,device_idle_seconds,mean_nodes,share_over_8_nodes,ring_block,ring_blocks,chain_p95_seconds,boundary_seconds,starved_block_max_seconds,lane_steps_8,lane_steps_16,lane_steps_32,world_change_discarded,kernel_wait_seconds,steps_per_creature,audit_rows,rung1_stop_share,rung2_stop_share,rung3_stop_share,rung1_entrant_misses_per_10k,rung2_entrant_misses_per_10k,rung1_extra_misses_per_10k,rung2_extra_misses_per_10k,audit_top1_kept,audit_top10_kept,screen_top1_kept,screen_top10_kept,rungs_armed,bands_off,audit_confirmed,audit_refused"
+                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second,confirmations,confirmation_busy_seconds,device_busy_seconds,device_idle_seconds,mean_nodes,share_over_8_nodes,ring_block,ring_blocks,chain_p95_seconds,boundary_seconds,starved_block_max_seconds,lane_steps_8,lane_steps_16,lane_steps_32,world_change_discarded,kernel_wait_seconds,steps_per_creature,audit_rows,rung1_stop_share,rung2_stop_share,rung3_stop_share,rung1_entrant_misses_per_10k,rung2_entrant_misses_per_10k,rung1_extra_misses_per_10k,rung2_extra_misses_per_10k,audit_top1_kept,audit_top10_kept,screen_top1_kept,screen_top10_kept,rungs_armed,bands_off"
             );
         }
         Some(Self {
@@ -547,7 +547,7 @@ impl StageLog {
         let share = |stops: u64| stops as f64 / rungs.creatures.max(1) as f64;
         let _ = writeln!(
             self.file,
-            "{generation},{:.6},{:.6},{:.6},{:.3},{:.0},{:.3},{:.3},{:.3},{:.3},{:.4},{},{},{:.4},{:.4},{:.4},{},{},{},{},{:.3},{:.1},{},{:.4},{:.4},{:.4},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{}",
+            "{generation},{:.6},{:.6},{:.6},{:.3},{:.0},{:.3},{:.3},{:.3},{:.3},{:.4},{},{},{:.4},{:.4},{:.4},{},{},{},{},{:.3},{:.1},{},{:.4},{:.4},{:.4},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{}",
             self.seconds[0],
             self.seconds[1],
             self.seconds[2],
@@ -583,8 +583,6 @@ impl StageLog {
             rungs.top10_screen,
             rungs.armed.iter().filter(|&&a| a).count(),
             rungs.bands_off.iter().map(|&b| u32::from(b)).sum::<u32>(),
-            rungs.confirmed,
-            rungs.refused,
         );
         let _ = self.file.flush();
         self.reset();

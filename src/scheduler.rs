@@ -812,7 +812,6 @@ pub fn to_metrics(
         screen_x: r.screen_x,
         fine: false,
         trace: r.rung_trace(),
-        audit_check: 0,
     }
 }
 

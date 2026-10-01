@@ -621,11 +621,11 @@ impl Experiment {
                 .map_or(f32::NEG_INFINITY, QdArchive::best_fitness)
         };
         let mut need = Vec::new();
-        self.check_audit_entrants(block, standard, confirmed, &mut out, &mut need);
+        Self::exclude_audit_below_bar(block, standard, &mut out);
         let mut candidates: Vec<Vec<usize>> = vec![Vec::new(); arenas];
         for (j, m) in standard.iter().enumerate() {
             let arena = qd::arena_of_slot(block.first + j, arenas);
-            if Self::eligible(m) && m.fitness > bar(arena) {
+            if Self::eligible(&out[j]) && m.fitness > bar(arena) {
                 candidates[arena].push(j);
             }
         }
@@ -669,19 +669,11 @@ impl Experiment {
             Verdict::Confirm(need)
         }
     }
-    /// The audit lane's guard: an audit creature that the 5 s screen would
-    /// have stopped and that would enter an archive is re-run at the fine
-    /// physics first. Its score becomes the lower of the two, and a re-run
-    /// that reaches under `rungs::REFUSE_BELOW` of it keeps it out. The ones
-    /// still waiting for their re-run go to `need`.
-    fn check_audit_entrants(
-        &self,
-        block: &Block,
-        standard: &[EvaluationMetrics],
-        confirmed: &HashMap<usize, EvaluationMetrics>,
-        out: &mut [EvaluationMetrics],
-        need: &mut Vec<usize>,
-    ) {
+    /// An audit creature runs without the 5 s screen so that its trial can
+    /// calibrate the rungs. Its result is still held to the screen's rule:
+    /// one that lived past 5 s below the bar enters no archive, as it would
+    /// not have in a trial with the screen.
+    fn exclude_audit_below_bar(block: &Block, standard: &[EvaluationMetrics], out: &mut [EvaluationMetrics]) {
         let Some(bar) = block
             .config
             .screen
@@ -690,40 +682,10 @@ impl Experiment {
         else {
             return;
         };
-        let population = &*block.population;
-        let arenas = arena_count();
         for (j, m) in standard.iter().enumerate() {
-            let flags = population.flags.get(j).copied().unwrap_or(0);
-            if flags & crate::rungs::AUDIT == 0
-                || !Self::eligible(m)
-                || m.trace.steps() == 0
-                || m.screen_x >= bar
-            {
-                continue;
-            }
-            if let Some(check) = confirmed.get(&j) {
-                let refused = !check.fitness.is_finite()
-                    || check.screened
-                    || check.fitness < m.fitness * crate::rungs::REFUSE_BELOW;
-                let o = &mut out[j];
-                o.fine = check.fitness < m.fitness;
-                o.fitness = m.fitness.min(check.fitness);
-                o.excluded |= refused;
-                o.audit_check = if refused { 2 } else { 1 };
-                continue;
-            }
-            let g = &population.genomes[j];
-            let nodes = &population.nodes[g.node_start..g.node_start + g.node_count];
-            let muscles = &population.muscles[g.muscle_start..g.muscle_start + g.muscle_count];
-            let niche = qd::descriptor(nodes, muscles, m.behavior).niche();
-            let arena = qd::arena_of_slot(block.first + j, arenas);
-            let enters = self.islands.get(arena).is_none_or(|archive| {
-                archive
-                    .slot_for(&niche)
-                    .is_none_or(|slot| m.fitness > archive.entries[slot].fitness)
-            });
-            if enters {
-                need.push(j);
+            let audit = block.population.flags.get(j).copied().unwrap_or(0) & crate::rungs::AUDIT != 0;
+            if audit && m.trace.steps() > crate::rungs::SCREEN_STEPS && m.screen_x < bar {
+                out[j].excluded = true;
             }
         }
     }
@@ -848,10 +810,6 @@ impl Experiment {
         let population = &*block.population;
         for (j, m) in finals.iter().enumerate() {
             self.rungs.note(&m.trace, m.screened);
-            match m.audit_check {
-                0 => {}
-                check => self.rungs.note_confirmation(check == 2),
-            }
             let flags = population.flags.get(j).copied().unwrap_or(0);
             if flags & crate::rungs::AUDIT == 0 || m.trace.steps() == 0 {
                 continue;
@@ -2112,6 +2070,29 @@ impl Experiment {
         );
         // Each creature's flags for its trial: the audit lane, and the
         // exemption of nurseries and immigrants from the early rungs.
+        // The median fitness of each arena's behavior elites: a parent
+        // above it is a strong one.
+        let medians: Vec<f32> = if cfg.rungs.is_some() {
+            self.islands
+                .iter()
+                .map(|archive| {
+                    let mut v: Vec<f32> = archive
+                        .entries
+                        .iter()
+                        .filter(|e| !qd::is_morphology_niche(&e.niche))
+                        .map(|e| e.fitness)
+                        .collect();
+                    if v.is_empty() {
+                        f32::NEG_INFINITY
+                    } else {
+                        let mid = v.len() / 2;
+                        *v.select_nth_unstable_by(mid, f32::total_cmp).1
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         population.flags.clear();
         population.flags.extend((0..count).map(|k| {
             let slot = first + k;
@@ -2119,10 +2100,15 @@ impl Experiment {
             if crate::rungs::is_audit(cfg.seed, self.breed_round, slot) {
                 flags |= crate::rungs::AUDIT;
             }
-            // A child whose parent the rules would stop skips those rungs.
+            // A child whose parent is a strong elite that the rules would
+            // stop skips those rungs.
             if let Some(rules) = &cfg.rungs {
-                let profile = births[k].parent_id.and_then(|id| self.lineage.get(&id)).map(|a| &a.rung);
-                flags |= crate::rungs::parent_exemptions(rules, profile);
+                let parent = births[k].parent_id.and_then(|id| self.lineage.get(&id));
+                let arena = qd::arena_of_slot(slot, self.islands.len().max(arena_count()));
+                let strong = parent.is_some_and(|a| {
+                    medians.get(arena).is_none_or(|&median| a.fitness >= median)
+                });
+                flags |= crate::rungs::parent_exemptions(rules, parent.map(|a| &a.rung), strong);
             }
             if births[k].emitter == Emitter::Restart
                 || qd::arena_of_slot(slot, self.islands.len().max(arena_count())) >= island_count()
