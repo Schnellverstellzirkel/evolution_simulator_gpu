@@ -49,7 +49,8 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 46: the ring's block size and block count are saved with the experiment
 //     and recorded in every generation's statistics.
 // 47: one substep per 1/60 s step (the L0 rung of the substep ladder).
-pub const VERSION: u32 = 47;
+// 48: the growth-step body rule (a child gains at most 4 nodes and 4 muscles).
+pub const VERSION: u32 = 48;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
