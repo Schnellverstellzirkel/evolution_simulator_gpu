@@ -18,7 +18,7 @@
 //!   the neck. `repair` runs after it (in `offspring`), which clamps
 //!   genes, restores canonical order and the muscle ring, and lines the nodes
 //!   up with the bone lengths.
-use super::{Bone, Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, NodeGene, Rng, bone_point};
+use super::{Bone, Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, NodeGene, Rng, root_paths};
 use crate::config::Config;
 
 mod controller;
@@ -278,17 +278,48 @@ pub(super) fn branch_nodes(c: &Creature, bones: &[usize]) -> BoneIds {
     bones.iter().map(|&b| c.bones[b].b as usize).collect()
 }
 
-/// Muscles with both ends (`both`) or at least one end on `bones`.
+/// For each node, the bones on the way from the head to it (a bit per bone).
+pub(super) fn paths(c: &Creature) -> [u32; MAX_NODES] {
+    root_paths(c.nodes.len(), &c.bones)
+}
+
+/// A bit per bone of `bones`.
+pub(super) fn mask_of(bones: &[usize]) -> u32 {
+    bones.iter().fold(0, |mask, &b| mask | 1 << b)
+}
+
+/// The bones a muscle lies across: the ones on the way between its nodes.
+pub(super) fn span_of(paths: &[u32; MAX_NODES], m: &Muscle) -> u32 {
+    paths[m.node_a as usize] ^ paths[m.node_b as usize]
+}
+
+/// Muscles lying across at least one of `bones`, or with `both` entirely
+/// among them: every bone on the way between the muscle's nodes is in
+/// `bones`.
 pub(super) fn muscles_on(c: &Creature, bones: &[usize], both: bool) -> MuscleIds {
-    let on = |b: u32| bones.contains(&(b as usize));
+    let (paths, mask) = (paths(c), mask_of(bones));
     (0..c.muscles.len())
         .filter(|&i| {
-            let m = &c.muscles[i];
-            if both {
-                on(m.bone_a) && on(m.bone_b)
-            } else {
-                on(m.bone_a) || on(m.bone_b)
-            }
+            let span = span_of(&paths, &c.muscles[i]);
+            if both { span & !mask == 0 } else { span & mask != 0 }
+        })
+        .collect()
+}
+
+/// The muscles that are the only ones across some bone: `repair` would put
+/// a random muscle back if one of them went or moved, so operators leave them
+/// alone.
+pub(super) fn needed(c: &Creature) -> MuscleIds {
+    let paths = paths(c);
+    let spans: Bounded<u32, MAX_MUSCLES> = c.muscles.iter().map(|m| span_of(&paths, m)).collect();
+    (0..spans.len())
+        .filter(|&i| {
+            let rest = spans
+                .iter()
+                .enumerate()
+                .filter(|&(k, _)| k != i)
+                .fold(0u32, |all, (_, &s)| all | s);
+            spans[i] & !rest != 0
         })
         .collect()
 }
@@ -320,12 +351,12 @@ pub(super) fn remove_parts(c: &mut Creature, bones: &[usize], nodes: &[usize]) {
         bone.b = node_map[bone.b as usize] as u32;
     }
     c.muscles.retain_mut(|m| {
-        let (a, b) = (bone_map[m.bone_a as usize], bone_map[m.bone_b as usize]);
-        if a == usize::MAX || b == usize::MAX || a == b {
+        let (a, b) = (node_map[m.node_a as usize], node_map[m.node_b as usize]);
+        if a == usize::MAX || b == usize::MAX {
             return false;
         }
-        m.bone_a = a as u32;
-        m.bone_b = b as u32;
+        m.node_a = a as u32;
+        m.node_b = b as u32;
         true
     });
 }
@@ -346,48 +377,59 @@ fn renumber(len: usize, removed: &[usize]) -> BoneIds {
     map
 }
 
-/// A muscle's span: the distance between its attachment points in the pose.
-pub(super) fn span(c: &Creature, m: &Muscle) -> f32 {
-    let a = bone_point(c.bones[m.bone_a as usize], &c.nodes, m.anchor_a);
-    let b = bone_point(c.bones[m.bone_b as usize], &c.nodes, m.anchor_b);
-    (a[0] - b[0]).hypot(a[1] - b[1])
+/// Whether a muscle between nodes `u` and `v` lies across at least two
+/// bones (a muscle across one rigid bone does nothing).
+pub(super) fn long_enough(paths: &[u32; MAX_NODES], u: usize, v: usize) -> bool {
+    u != v && (paths[u] ^ paths[v]).count_ones() >= 2
 }
 
-/// Sets a muscle's stroke around its span in the pose, keeping the ratios of
-/// `short` and `long` to the span that `template` has (or 0.8 and 1.1).
-pub(super) fn fit_stroke(c: &Creature, m: &mut Muscle, template: Option<&Muscle>) {
-    let (short, long) = template
-        .map(|t| {
-            let s = span(c, t).max(0.05);
-            (t.short / s, t.long / s)
+/// The nodes a bone joins to `node`.
+pub(super) fn neighbours(c: &Creature, node: usize) -> BoneIds {
+    c.bones
+        .iter()
+        .filter_map(|b| {
+            if b.a as usize == node {
+                Some(b.b as usize)
+            } else if b.b as usize == node {
+                Some(b.a as usize)
+            } else {
+                None
+            }
         })
-        .unwrap_or((0.8, 1.1));
-    let length = span(c, m).max(0.05);
-    m.short = (length * short).max(0.01);
-    m.long = (length * long).max(m.short);
+        .collect()
 }
 
-/// A new muscle from `bone_a` to `bone_b` with the given anchors. Its rhythm
-/// (period, phase, duty, stiffness, sensor, reset) comes from `template`, or
-/// is random without one; its stroke fits its span.
+/// A new muscle from `node_a` to `node_b`. Its rhythm (period, phase, duty,
+/// strength, sensor, reset) comes from `template`, or is random without one.
 pub(super) fn new_muscle(
-    c: &Creature,
-    bone_a: usize,
-    bone_b: usize,
-    anchors: (f32, f32),
+    node_a: usize,
+    node_b: usize,
     template: Option<&Muscle>,
     rng: &mut Rng,
 ) -> Muscle {
     let mut m = match template {
         Some(t) => *t,
-        None => super::muscle(bone_a, bone_b, &c.bones, &c.nodes, rng),
+        None => super::muscle(node_a, node_b, rng),
     };
-    m.bone_a = bone_a as u32;
-    m.bone_b = bone_b as u32;
-    m.anchor_a = anchors.0.clamp(0.0, 1.0);
-    m.anchor_b = anchors.1.clamp(0.0, 1.0);
-    fit_stroke(c, &mut m, template);
+    m.node_a = node_a as u32;
+    m.node_b = node_b as u32;
     m
+}
+
+/// A node that stands for `node` on the other side of a muscle's ends: the
+/// node of limb bones `from` (a branch and the bone above) that sits at the
+/// same place in `to`. `None` for a node outside them.
+pub(super) fn map_node(c: &Creature, from: &[usize], to: &[usize], node: u32) -> Option<u32> {
+    from.iter().zip(to).find_map(|(&f, &t)| {
+        let (f, t) = (c.bones[f], c.bones[t]);
+        if f.a == node {
+            Some(t.a)
+        } else if f.b == node {
+            Some(t.b)
+        } else {
+            None
+        }
+    })
 }
 
 /// Copies the branch that starts at `bone` onto node `at`, placing each
@@ -412,14 +454,15 @@ pub(super) fn copy_branch(
     let above_source = parents[c.bones[bone].a as usize];
     let above_target = parents.get(at).copied().flatten();
     let inside = muscles_on(c, &bones, true);
+    // The muscles from the branch root to the bone above it: across the root
+    // joint and nothing else. The copy gets them across the joint at `at`.
     let hinge: MuscleIds = match (above_source, above_target) {
-        (Some(src), Some(_)) => muscles_on(c, &[bone], false)
-            .into_iter()
-            .filter(|&i| {
-                let m = &c.muscles[i];
-                (m.bone_a as usize == src) != (m.bone_b as usize == src) && !inside.contains(&i)
-            })
-            .collect(),
+        (Some(src), Some(_)) => {
+            let (paths, both) = (paths(c), mask_of(&[bone, src]));
+            (0..c.muscles.len())
+                .filter(|&i| span_of(&paths, &c.muscles[i]) == both)
+                .collect()
+        }
         _ => MuscleIds::new(),
     };
     if !room(c, cfg, bones.len(), inside.len() + hinge.len()) {
@@ -429,6 +472,9 @@ pub(super) fn copy_branch(
     let mut new_bone = [usize::MAX; MAX_NODES];
     let mut new_node = [usize::MAX; MAX_NODES];
     new_node[c.bones[bone].a as usize] = at;
+    if let (Some(src), Some(tgt)) = (above_source, above_target) {
+        new_node[c.bones[src].a as usize] = c.bones[tgt].a as usize;
+    }
     for &b in &bones {
         let old = c.bones[b];
         let child = old.b as usize;
@@ -455,19 +501,14 @@ pub(super) fn copy_branch(
             ..old
         });
     }
-    let remap = |b: u32| -> u32 {
-        match new_bone[b as usize] {
-            usize::MAX => above_target.expect("hinge muscles need a bone above") as u32,
-            n => n as u32,
-        }
-    };
     for i in inside.into_iter().chain(hinge) {
         let mut m = c.muscles[i];
-        m.bone_a = remap(m.bone_a);
-        m.bone_b = remap(m.bone_b);
-        if m.bone_a == m.bone_b {
+        let (a, b) = (new_node[m.node_a as usize], new_node[m.node_b as usize]);
+        if a == usize::MAX || b == usize::MAX || a == b {
             continue;
         }
+        m.node_a = a as u32;
+        m.node_b = b as u32;
         m.phase = (m.phase + phase).rem_euclid(1.0);
         c.muscles.push(m);
     }
@@ -560,6 +601,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_operator_leaves_a_valid_body_under_the_growth_step() {
+        // Breeding gives a structural child the limits of its parent plus the
+        // growth step; the body must still validate against the game's caps.
+        let cfg = Config::default();
+        let bodies = bodies(&cfg, 160);
+        let mut bad: std::collections::BTreeMap<&str, usize> = Default::default();
+        for (index, (name, _)) in OPERATORS.iter().enumerate() {
+            for (i, body) in bodies.iter().enumerate() {
+                let limited = crate::evolution::child_limits(
+                    &cfg,
+                    body,
+                    Some(crate::evolution::GrowthStep { nodes: 4, muscles: 4 }),
+                );
+                let fit = limited.as_ref().unwrap_or(&cfg);
+                let mut c = body.clone();
+                let mut rng = Rng::new(41, index as u32, i);
+                let donor = &bodies[(i * 7 + 3) % bodies.len()];
+                if !apply(index, &mut c, fit, &mut rng, &Context { donor: Some(donor) }) {
+                    continue;
+                }
+                repair(&mut c, fit, &mut rng);
+                let mut pop = Population::default();
+                pop.push(c);
+                let check = Config {
+                    population: 1,
+                    ..cfg.clone()
+                };
+                if pop.validate(&check).is_err() {
+                    *bad.entry(name).or_default() += 1;
+                }
+            }
+        }
+        assert!(bad.is_empty(), "invalid under the growth step: {bad:?}");
+    }
+
     /// Bodies at the default caps: grown toward 32 nodes and filled toward
     /// 96 muscles, where the bounded arrays are full.
     fn full_bodies(cfg: &Config, count: usize) -> Vec<Creature> {
@@ -570,10 +647,11 @@ mod tests {
                 c.id = i as u64 + 1;
                 grow_for_benchmark(&mut c, cfg, 5 + i as u64, 22 + i % 11);
                 let target = cfg.max_muscles - i % 4;
+                let paths = paths(&c);
                 while c.muscles.len() < target {
-                    let (a, b) = (rng.index(c.bones.len()), rng.index(c.bones.len()));
-                    if a != b {
-                        let m = crate::evolution::muscle(a, b, &c.bones, &c.nodes, &mut rng);
+                    let (a, b) = (rng.index(c.nodes.len()), rng.index(c.nodes.len()));
+                    if long_enough(&paths, a, b) {
+                        let m = crate::evolution::muscle(a, b, &mut rng);
                         c.muscles.push(m);
                     }
                 }
@@ -714,7 +792,7 @@ mod tests {
                 assert!((bone.a as usize) < c.nodes.len() && (bone.b as usize) < c.nodes.len());
             }
             for m in &c.muscles {
-                assert!((m.bone_a as usize) < c.bones.len() && (m.bone_b as usize) < c.bones.len());
+                assert!((m.node_a as usize) < c.nodes.len() && (m.node_b as usize) < c.nodes.len());
             }
         }
     }

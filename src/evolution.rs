@@ -55,6 +55,11 @@ pub struct Bone {
     /// Where the organ sits along the bone, from node `a` (0) to `b` (1).
     #[serde(default = "organ_middle")]
     pub organ_at: f32,
+    /// The joint stop's ligament, 0 (an inelastic stop) to 1 (the softest):
+    /// a joint driven past its range meets a spring that stores the motion's
+    /// energy and gives it back, softer as the gene grows.
+    #[serde(default)]
+    pub ligament: f32,
 }
 /// Organ masses (kg). A new organ starts light so it barely changes the gait.
 pub const MIN_ORGAN_MASS: f32 = 0.01;
@@ -85,12 +90,18 @@ impl Bone {
             max_angle: JOINT_LIMIT,
             organ_mass: 0.0,
             organ_at: 0.5,
+            ligament: 0.0,
         }
     }
     /// Keeps the joint range valid.
     pub fn clamp_range(&mut self) {
         self.min_angle = self.min_angle.clamp(-JOINT_LIMIT, 0.0);
         self.max_angle = self.max_angle.clamp(0.0, JOINT_LIMIT);
+        self.ligament = if self.ligament.is_finite() {
+            self.ligament.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
     }
 }
 /// Center of mass of the starting pose without the head (node 0) and
@@ -181,33 +192,42 @@ fn change_organ(creature: &mut Creature, rng: &mut Rng) -> bool {
     Clone, Copy, Debug, Serialize, Deserialize, PartialEq, bytemuck::Pod, bytemuck::Zeroable,
 )]
 pub struct Muscle {
-    pub bone_a: u32,
-    pub bone_b: u32,
-    /// Attachment positions measured from each bone's `a` endpoint.
-    pub anchor_a: f32,
-    pub anchor_b: f32,
-    pub short: f32,
-    pub long: f32,
+    /// The two nodes the muscle joins (never the two ends of one bone, which
+    /// a rigid bone would hold apart anyway).
+    pub node_a: u32,
+    pub node_b: u32,
+    /// Share of the muscle's force cap it uses, `STRENGTH_MIN` (a passive
+    /// muscle) to 1.
+    pub strength: f32,
     pub period: f32,
     pub phase: f32,
     pub duty: f32,
-    pub stiffness: f32,
-    /// Which of the four attachment endpoints (bone_a.a, bone_a.b, bone_b.a,
-    /// bone_b.b) senses touchdowns, or `NO_SENSOR`.
+    /// Which of the muscle's two ends (0 is `node_a`, 1 is `node_b`) senses
+    /// touchdowns, or `NO_SENSOR`.
     #[serde(default = "no_sensor")]
     pub sensor: u32,
     /// Rhythm phase the muscle jumps to when its sensor touches down.
     #[serde(default)]
     pub reset: f32,
-    /// Elastic tendon in parallel with the muscle, 0 (none) to 1 (stiffest):
-    /// once the muscle is stretched past its longest length the tendon pulls
-    /// back like a spring, storing the energy of the stretch and returning it.
-    #[serde(default)]
-    pub tendon: f32,
 }
-/// Stiffest tendon: it reaches the muscle's force cap when stretched by this
-/// share of the muscle's longest length.
-pub const TENDON_STRETCH: f32 = 0.25;
+/// The weakest strength gene: a muscle this weak is passive, a spring-less
+/// rod of muscle mass.
+pub const STRENGTH_MIN: f32 = 0.01;
+impl Muscle {
+    /// Whether the muscle drives (a strength above the passive floor).
+    pub fn active(&self) -> bool {
+        self.strength > 2.0 * STRENGTH_MIN
+    }
+    /// The muscle with its two ends swapped.
+    pub fn flipped(&self) -> Muscle {
+        Muscle {
+            node_a: self.node_b,
+            node_b: self.node_a,
+            sensor: if self.sensor < 2 { 1 - self.sensor } else { self.sensor },
+            ..*self
+        }
+    }
+}
 /// A muscle without a touchdown sensor.
 pub const NO_SENSOR: u32 = 255;
 fn no_sensor() -> u32 {
@@ -650,60 +670,37 @@ impl Population {
                 "Disconnected bone skeleton"
             );
             let muscles = &self.muscles[g.muscle_start..g.muscle_start + g.muscle_count];
-            let mut muscle_adjacency = [0u64; 64];
+            let paths = root_paths(g.node_count, bones);
+            let mut spanned = 0u32;
             for m in muscles {
                 ensure!(
-                    m.bone_a != m.bone_b
-                        && (m.bone_a as usize) < g.bone_count
-                        && (m.bone_b as usize) < g.bone_count
-                        && (0.0..=1.0).contains(&m.anchor_a)
-                        && (0.0..=1.0).contains(&m.anchor_b)
-                        && [
-                            m.anchor_a,
-                            m.anchor_b,
-                            m.short,
-                            m.long,
-                            m.period,
-                            m.phase,
-                            m.duty,
-                            m.stiffness,
-                            m.tendon,
-                        ]
-                        .iter()
-                        .all(|x| x.is_finite())
-                        && (0.0..=1.0).contains(&m.tendon)
-                        && m.short >= 0.01
-                        && m.long >= m.short
+                    m.node_a != m.node_b
+                        && (m.node_a as usize) < g.node_count
+                        && (m.node_b as usize) < g.node_count
+                        && [m.strength, m.period, m.phase, m.duty, m.reset]
+                            .iter()
+                            .all(|x| x.is_finite())
+                        && (STRENGTH_MIN..=1.0).contains(&m.strength)
                         && m.period >= if historical { 0.1 } else { min_muscle_period() }
                         && (0.05..=0.95).contains(&m.duty)
-                        && (1.0..=120.0).contains(&m.stiffness),
+                        && (m.sensor < 2 || m.sensor == NO_SENSOR),
                     "Invalid muscle attachment or parameters"
                 );
-                muscle_adjacency[m.bone_a as usize] |= 1u64 << m.bone_b;
-                muscle_adjacency[m.bone_b as usize] |= 1u64 << m.bone_a;
+                let path = paths[m.node_a as usize] ^ paths[m.node_b as usize];
+                ensure!(
+                    historical || path.count_ones() >= 2,
+                    "A muscle across one bone does nothing"
+                );
+                spanned |= path;
             }
             if historical {
                 continue;
             }
             ensure!(
-                muscle_adjacency[..g.bone_count].iter().all(|n| *n != 0),
-                "Every bone must have an attached muscle"
-            );
-            let mut reached = 1u64;
-            loop {
-                let previous = reached;
-                for (i, neighbors) in muscle_adjacency[..g.bone_count].iter().enumerate() {
-                    if reached & (1u64 << i) != 0 {
-                        reached |= neighbors;
-                    }
-                }
-                if reached == previous {
-                    break;
-                }
-            }
-            ensure!(
-                reached.count_ones() as usize == g.bone_count,
-                "Disconnected muscle network"
+                spanned.count_ones() as usize == g.bone_count,
+                "Every bone must be spanned by a muscle (genome {genome_index}: {} nodes, {} muscles)",
+                g.node_count,
+                g.muscle_count
             );
         }
         Ok(())
@@ -783,28 +780,6 @@ pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
     }
     if tail != node_count || ordered.len() != creature.bones.len() {
         return false;
-    }
-    let bones = creature.bones.len();
-    if creature.muscles.iter().any(|muscle| {
-        [muscle.bone_a, muscle.bone_b].iter().any(|bone| {
-            remap[..bones]
-                .get(*bone as usize)
-                .is_none_or(|index| *index == usize::MAX)
-        })
-    }) {
-        return false;
-    }
-    for muscle in &mut creature.muscles {
-        for (bone, anchor) in [
-            (&mut muscle.bone_a, &mut muscle.anchor_a),
-            (&mut muscle.bone_b, &mut muscle.anchor_b),
-        ] {
-            let old_index = *bone as usize;
-            if reversed[old_index] {
-                *anchor = 1.0 - *anchor;
-            }
-            *bone = remap[old_index] as u32;
-        }
     }
     creature.bones = ordered;
     true
@@ -886,51 +861,83 @@ fn align_nodes_with_bones(c: &mut Creature) {
         c.nodes[b].y = c.nodes[a].y + direction[1] * bone.rest_length;
     }
 }
-fn bone_point(bone: Bone, nodes: &[NodeGene], t: f32) -> [f32; 2] {
-    let a = nodes[bone.a as usize];
-    let b = nodes[bone.b as usize];
-    [a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t]
-}
-fn random_anchor(rng: &mut Rng) -> f32 {
-    if rng.unit() < 0.12 {
-        if rng.unit() < 0.5 { 0.0 } else { 1.0 }
-    } else {
-        rng.unit()
+/// For each node, the bones on the way from the head to it, as a bit per
+/// bone. The bones between two nodes are the symmetric difference of their
+/// paths, so a muscle's span and its length in bones are two operations.
+/// A bone's `a` is its end nearer the head.
+pub(crate) fn root_paths(nodes: usize, bones: &[Bone]) -> [u32; MAX_NODES] {
+    let mut paths = [0u32; MAX_NODES];
+    let mut known = 1u64;
+    loop {
+        let before = known;
+        for (j, b) in bones.iter().enumerate() {
+            let (a, c) = (b.a as usize, b.b as usize);
+            if a < nodes && c < nodes && j < 32 && known >> a & 1 == 1 && known >> c & 1 == 0 {
+                paths[c] = paths[a] | 1 << j;
+                known |= 1 << c;
+            }
+        }
+        if known == before {
+            return paths;
+        }
     }
 }
-fn muscle(
-    bone_a: usize,
-    bone_b: usize,
-    bones: &[Bone],
-    nodes: &[NodeGene],
-    rng: &mut Rng,
-) -> Muscle {
-    let anchor_a = random_anchor(rng);
-    let anchor_b = random_anchor(rng);
-    let a = bone_point(bones[bone_a], nodes, anchor_a);
-    let b = bone_point(bones[bone_b], nodes, anchor_b);
-    let length = (a[0] - b[0])
-        .hypot(a[1] - b[1])
-        .clamp(0.06, 0.6 * max_stroke());
+/// A random muscle between two nodes, with a rhythm and a modest strength.
+pub(crate) fn muscle(node_a: usize, node_b: usize, rng: &mut Rng) -> Muscle {
     Muscle {
-        bone_a: bone_a as u32,
-        bone_b: bone_b as u32,
-        anchor_a,
-        anchor_b,
-        short: length * rng.range(0.65, 0.95),
-        long: length * rng.range(1.05, 1.35),
+        node_a: node_a as u32,
+        node_b: node_b as u32,
+        strength: rng.range(0.03, 0.15),
         period: rng.range(0.65, 2.6),
         phase: rng.unit(),
         duty: rng.range(0.25, 0.75),
-        stiffness: rng.range(20.0, 80.0),
         sensor: if rng.unit() < 0.5 {
-            rng.index(4) as u32
+            rng.index(2) as u32
         } else {
             NO_SENSOR
         },
         reset: rng.unit(),
-        tendon: 0.0,
     }
+}
+/// A random muscle across bone `j`: a pair of nodes with `j` on the way
+/// between them and no more than one other bone on it when there is such a
+/// pair (a muscle across one joint), else any pair with `j` on its way. `None`
+/// when no pair has.
+pub(crate) fn muscle_across(
+    paths: &[u32; MAX_NODES],
+    nodes: usize,
+    j: usize,
+    rng: &mut Rng,
+) -> Option<Muscle> {
+    let pairs = |only_short: bool, sink: &mut dyn FnMut(usize, usize)| {
+        for u in 0..nodes {
+            for v in u + 1..nodes {
+                let path = paths[u] ^ paths[v];
+                let bones = path.count_ones();
+                if path >> j & 1 == 1 && bones >= 2 && (!only_short || bones == 2) {
+                    sink(u, v);
+                }
+            }
+        }
+    };
+    for only_short in [true, false] {
+        let mut count = 0usize;
+        pairs(only_short, &mut |_, _| count += 1);
+        if count == 0 {
+            continue;
+        }
+        let (mut at, target) = (0usize, rng.index(count));
+        let mut found = None;
+        pairs(only_short, &mut |u, v| {
+            if at == target {
+                found = Some((u, v));
+            }
+            at += 1;
+        });
+        let (u, v) = found?;
+        return Some(muscle(u, v, rng));
+    }
+    None
 }
 
 /// Largest tilt of the neck from vertical in the starting pose.
@@ -1012,32 +1019,20 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
     }
     shape_head(c, cfg);
 
+    // Bones in parent-first order: a muscle's span is read off root paths.
+    canonicalize_bone_order(c);
     let bone_count = c.bones.len();
+    let mut paths = root_paths(node_count, &c.bones);
     c.muscles.retain_mut(|m| {
-        let a = m.bone_a as usize;
-        let b = m.bone_b as usize;
-        if a >= bone_count || b >= bone_count || a == b {
+        let (a, b) = (m.node_a as usize, m.node_b as usize);
+        // A muscle across one bone does nothing: the bone is rigid.
+        if a >= node_count || b >= node_count || (paths[a] ^ paths[b]).count_ones() < 2 {
             return false;
         }
-        m.anchor_a = if m.anchor_a.is_finite() {
-            m.anchor_a.clamp(0.0, 1.0)
+        m.strength = if m.strength.is_finite() {
+            m.strength.clamp(STRENGTH_MIN, 1.0)
         } else {
-            0.5
-        };
-        m.anchor_b = if m.anchor_b.is_finite() {
-            m.anchor_b.clamp(0.0, 1.0)
-        } else {
-            0.5
-        };
-        m.short = if m.short.is_finite() {
-            m.short.clamp(0.01, 0.8 * max_stroke())
-        } else {
-            0.1
-        };
-        m.long = if m.long.is_finite() {
-            m.long.clamp(m.short, max_stroke())
-        } else {
-            m.short
+            0.3
         };
         m.period = if m.period.is_finite() {
             m.period.clamp(min_muscle_period(), 10.0)
@@ -1054,66 +1049,100 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
         } else {
             0.5
         };
-        m.stiffness = if m.stiffness.is_finite() {
-            m.stiffness.clamp(1.0, 120.0)
-        } else {
-            40.0
-        };
-        m.tendon = if m.tendon.is_finite() {
-            m.tendon.clamp(0.0, 1.0)
+        m.reset = if m.reset.is_finite() {
+            m.reset.rem_euclid(1.0)
         } else {
             0.0
         };
+        if m.sensor >= 2 {
+            m.sensor = NO_SENSOR;
+        }
         true
     });
     if bone_count < 2 {
         normalize_bone_lengths(c);
-        canonicalize_bone_order(c);
         align_nodes_with_bones(c);
         place_organs(c);
         return;
     }
-    // A motor-link ring keeps every rigid segment addressable to the actuator
-    // network while leaving the skeleton itself articulated at its joints.
-    for a in 0..bone_count {
-        let b = (a + 1) % bone_count;
-        if (bone_count > 2 || a < b)
-            && !c.muscles.iter().any(|m| {
-                (m.bone_a as usize == a && m.bone_b as usize == b)
-                    || (m.bone_a as usize == b && m.bone_b as usize == a)
-            })
-        {
-            // At the muscle limit, a muscle off the ring makes room, or else
-            // a second muscle on one ring pair: without it a limb's worth of
-            // duplicates could leave the network disconnected.
-            let pair = |m: &Muscle| (m.bone_a.min(m.bone_b), m.bone_a.max(m.bone_b));
-            if c.muscles.len() >= cfg.max_muscles
-                && let Some(i) = c
+    // A motor net keeps every rigid segment addressable to the actuators:
+    // each bone lies on the way between the ends of some muscle.
+    let spanned = |muscles: &[Muscle], paths: &[u32; MAX_NODES]| {
+        muscles
+            .iter()
+            .fold(0u32, |all, m| all | paths[m.node_a as usize] ^ paths[m.node_b as usize])
+    };
+    for j in 0..bone_count {
+        if spanned(&c.muscles, &paths) >> j & 1 == 1 {
+            continue;
+        }
+        // At the muscle limit, a muscle that no bone depends on makes room.
+        if c.muscles.len() >= cfg.max_muscles {
+            let all = spanned(&c.muscles, &paths);
+            let spare = (0..c.muscles.len()).find(|&i| {
+                let rest = c
                     .muscles
                     .iter()
-                    .position(|m| {
-                        let x = m.bone_a as usize;
-                        let y = m.bone_b as usize;
-                        !((x + 1) % bone_count == y || (y + 1) % bone_count == x)
-                    })
-                    .or_else(|| {
-                        (1..c.muscles.len()).find(|&i| {
-                            c.muscles[..i]
-                                .iter()
-                                .any(|m| pair(m) == pair(&c.muscles[i]))
-                        })
-                    })
-            {
+                    .enumerate()
+                    .filter(|&(k, _)| k != i)
+                    .fold(0u32, |all, (_, m)| {
+                        all | paths[m.node_a as usize] ^ paths[m.node_b as usize]
+                    });
+                rest == all
+            });
+            if let Some(i) = spare {
                 c.muscles.swap_remove(i);
             }
-            if c.muscles.len() < cfg.max_muscles {
-                c.muscles.push(muscle(a, b, &c.bones, &c.nodes, rng));
+        }
+        if c.muscles.len() < cfg.max_muscles {
+            if let Some(m) = muscle_across(&paths, node_count, j, rng) {
+                c.muscles.push(m);
+            }
+        } else {
+            // Still at the limit: stretch a muscle over the bone. One of its
+            // ends moves onto a node of the bone, and the muscle must keep
+            // every bone it spans now.
+            let (end_a, end_b) = (c.bones[j].a, c.bones[j].b);
+            let mut fix = None;
+            'search: for i in 0..c.muscles.len() {
+                let m = c.muscles[i];
+                let old = paths[m.node_a as usize] ^ paths[m.node_b as usize];
+                for to in [end_a, end_b] {
+                    for first in [true, false] {
+                        let (moved, other) = if first { (m.node_a, m.node_b) } else { (m.node_b, m.node_a) };
+                        if moved == to || other == to {
+                            continue;
+                        }
+                        let span = paths[to as usize] ^ paths[other as usize];
+                        if span.count_ones() >= 2 && span >> j & 1 == 1 && span & old == old {
+                            fix = Some((i, first, to));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            if let Some((i, first, to)) = fix {
+                if first {
+                    c.muscles[i].node_a = to;
+                } else {
+                    c.muscles[i].node_b = to;
+                }
             }
         }
     }
+    let _ = &mut paths;
+    #[cfg(debug_assertions)]
+    {
+        let paths = root_paths(node_count, &c.bones);
+        let all = c.muscles.iter().fold(0u32, |all, m| all | paths[m.node_a as usize] ^ paths[m.node_b as usize]);
+        debug_assert!(
+            c.muscles.len() >= cfg.max_muscles || all.count_ones() as usize == c.bones.len(),
+            "repair left a bone unspanned: {} nodes, {} bones, {} muscles, cap {}",
+            c.nodes.len(), c.bones.len(), c.muscles.len(), cfg.max_muscles
+        );
+    }
     snap_clock_ratios(c);
     normalize_bone_lengths(c);
-    canonicalize_bone_order(c);
     align_nodes_with_bones(c);
     place_organs(c);
 }
@@ -1147,19 +1176,21 @@ fn random_creature_from(cfg: &Config, rng: &mut Rng) -> Creature {
         b.max_angle = rng.range(0.3, JOINT_LIMIT);
         c.bones.push(b);
     }
-    for i in 0..c.bones.len() {
-        let j = (i + 1) % c.bones.len();
-        if c.bones.len() > 2 || i < j {
-            c.muscles.push(muscle(i, j, &c.bones, &c.nodes, rng));
-        }
+    // A muscle across each joint of the chain, and one along all of it.
+    for i in 0..n - 2 {
+        c.muscles.push(muscle(i, i + 2, rng));
+    }
+    if n > 3 {
+        c.muscles.push(muscle(0, n - 1, rng));
     }
     repair(&mut c, cfg, rng);
+    let paths = root_paths(c.nodes.len(), &c.bones);
     for _ in 0..rng.index(n) {
         if c.muscles.len() < cfg.max_muscles {
-            let a = rng.index(c.bones.len());
-            let b = rng.index(c.bones.len());
-            if a != b {
-                c.muscles.push(muscle(a, b, &c.bones, &c.nodes, rng));
+            let a = rng.index(c.nodes.len());
+            let b = rng.index(c.nodes.len());
+            if a != b && (paths[a] ^ paths[b]).count_ones() >= 2 {
+                c.muscles.push(muscle(a, b, rng));
             }
         }
     }
@@ -1410,7 +1441,7 @@ fn same_shape(a: &Creature, b: &Creature) -> bool {
         && a.muscles
             .iter()
             .zip(&b.muscles)
-            .all(|(x, y)| (x.bone_a, x.bone_b) == (y.bone_a, y.bone_b))
+            .all(|(x, y)| (x.node_a, x.node_b) == (y.node_a, y.node_b))
 }
 
 /// Uniform crossover of two creatures with the same body plan: each node,
@@ -1442,6 +1473,7 @@ fn crossover_into(a: &Creature, b: &Creature, rng: &mut Rng, child: &mut Creatur
             bone.max_angle = other.max_angle;
             bone.organ_mass = other.organ_mass;
             bone.organ_at = other.organ_at;
+            bone.ligament = other.ligament;
         }
     }
     let rhythm_from_b = if rng.unit() < 0.3 {
@@ -1450,7 +1482,7 @@ fn crossover_into(a: &Creature, b: &Creature, rng: &mut Rng, child: &mut Creatur
         None
     };
     for (muscle, other) in child.muscles.iter_mut().zip(&b.muscles) {
-        if (muscle.bone_a, muscle.bone_b) != (other.bone_a, other.bone_b) {
+        if (muscle.node_a, muscle.node_b) != (other.node_a, other.node_b) {
             continue;
         }
         let (period, phase) = (muscle.period, muscle.phase);
@@ -1494,7 +1526,7 @@ fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
     let attached: Muscles = creature
         .muscles
         .iter()
-        .filter(|m| m.bone_a as usize == limb || m.bone_b as usize == limb)
+        .filter(|m| m.node_a == tip || m.node_b == tip)
         .copied()
         .collect();
     if creature.muscles.len() + attached.len() > cfg.max_muscles {
@@ -1505,7 +1537,6 @@ fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
     mirror.x = (2.0 * pivot.x - mirror.x).clamp(-body_extent(), body_extent());
     let new_node = creature.nodes.len() as u32;
     creature.nodes.push(mirror);
-    let new_bone = creature.bones.len() as u32;
     // The mirrored limb bends the other way.
     creature.bones.push(Bone {
         a: joint,
@@ -1513,17 +1544,15 @@ fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
         rest_length: bone.rest_length,
         min_angle: -bone.max_angle,
         max_angle: -bone.min_angle,
+        ligament: bone.ligament,
         ..Bone::new(joint, new_node, bone.rest_length)
     });
     for mut m in attached {
-        if m.bone_a as usize == limb {
-            m.bone_a = new_bone;
+        if m.node_a == tip {
+            m.node_a = new_node;
         }
-        if m.bone_b as usize == limb {
-            m.bone_b = new_bone;
-        }
-        if m.bone_a == m.bone_b {
-            continue;
+        if m.node_b == tip {
+            m.node_b = new_node;
         }
         m.phase = (m.phase + 0.5).rem_euclid(1.0);
         creature.muscles.push(m);
@@ -1844,37 +1873,33 @@ fn mutate_genes(creature: &mut Creature, cfg: &Config, rng: &mut Rng, scale: f32
                 .clamp(MIN_ORGAN_MASS, MAX_ORGAN_MASS);
             bone.organ_at = (bone.organ_at + g.gaussian(at + 4) * 0.10 * scale).clamp(0.0, 1.0);
         }
+        // The ligament grows in, tunes, or drops out.
+        if g.unit(at + 5, 0) < 0.10 * scale.min(1.0) {
+            bone.ligament = if bone.ligament == 0.0 {
+                0.05 + g.unit(at + 5, 1) * 0.45
+            } else if g.unit(at + 5, 2) < 0.2 {
+                0.0
+            } else {
+                (bone.ligament + g.gaussian(at + 6) * 0.2).clamp(0.0, 1.0)
+            };
+        }
     }
     // The body's clock speeds up or slows down as a whole.
     let tempo = (g.gaussian(TEMPO_GENE) * 0.10 * scale).exp();
-    let (min_period, stroke) = (min_muscle_period(), max_stroke());
+    let min_period = min_muscle_period();
     let rare = scale.min(1.0);
     for (i, muscle) in creature.muscles.iter_mut().enumerate() {
         let at = MUSCLE_GENES + 16 * i as u32;
-        muscle.anchor_a = (muscle.anchor_a + g.gaussian(at) * 0.10 * scale).clamp(0.0, 1.0);
-        muscle.anchor_b = (muscle.anchor_b + g.gaussian(at + 1) * 0.10 * scale).clamp(0.0, 1.0);
-        muscle.short = (muscle.short + g.gaussian(at + 2) * 0.06 * scale).clamp(0.01, 0.8 * stroke);
-        muscle.long = (muscle.long + g.gaussian(at + 3) * 0.08 * scale).clamp(muscle.short, stroke);
         muscle.period = (muscle.period * tempo).clamp(min_period, 10.0);
         muscle.phase = (muscle.phase + g.gaussian(at + 4) * 0.12 * scale).rem_euclid(1.0);
         muscle.duty = (muscle.duty + g.gaussian(at + 5) * 0.08 * scale).clamp(0.05, 0.95);
-        muscle.stiffness =
-            (muscle.stiffness * (g.gaussian(at + 6) * 0.10 * scale).exp()).clamp(1.0, 120.0);
+        muscle.strength = (muscle.strength * (g.gaussian(at + 6) * 0.10 * scale).exp())
+            .clamp(STRENGTH_MIN, 1.0);
         muscle.reset = (muscle.reset + g.gaussian(at + 7) * 0.12 * scale).rem_euclid(1.0);
-        // The elastic tendon grows in, tunes, or drops out.
-        if g.unit(at + 8, 0) < 0.10 * rare {
-            muscle.tendon = if muscle.tendon == 0.0 {
-                0.05 + g.unit(at + 8, 1) * 0.45
-            } else if g.unit(at + 8, 2) < 0.2 {
-                0.0
-            } else {
-                (muscle.tendon + g.gaussian(at + 9) * 0.2).clamp(0.0, 1.0)
-            };
-        }
         if g.unit(at + 10, 0) < 0.05 * rare {
-            muscle.sensor = match g.index(at + 10, 1, 5) {
-                4 => NO_SENSOR,
-                endpoint => endpoint as u32,
+            muscle.sensor = match g.index(at + 10, 1, 3) {
+                2 => NO_SENSOR,
+                end => end as u32,
             };
         }
     }
@@ -2014,18 +2039,11 @@ fn rescale_body(creature: &mut Creature, rng: &mut Rng) -> bool {
         .iter()
         .map(|b| b.rest_length)
         .fold(0.0, f32::max);
-    let longest_muscle = creature.muscles.iter().map(|m| m.long).fold(0.0, f32::max);
     if longest_bone <= 0.0 {
         return false;
     }
     // Stay within the body limits instead of distorting the shape.
-    let most = (max_bone_length() / longest_bone)
-        .min(if longest_muscle > 0.0 {
-            max_stroke() / longest_muscle
-        } else {
-            f32::INFINITY
-        })
-        .min(1.5);
+    let most = (max_bone_length() / longest_bone).min(1.5);
     let scale = rng.range(0.75f32.ln(), 1.5f32.ln()).exp().min(most);
     if (scale - 1.0).abs() < 0.02 {
         return false;
@@ -2040,11 +2058,7 @@ fn rescale_body(creature: &mut Creature, rng: &mut Rng) -> bool {
     }
     let tempo = scale.sqrt();
     for muscle in &mut creature.muscles {
-        muscle.short *= scale;
-        muscle.long *= scale;
         muscle.period *= tempo;
-        // Muscle force follows its target's speed, which grows by sqrt(s).
-        muscle.stiffness /= tempo;
     }
     true
 }
@@ -2074,7 +2088,6 @@ fn split_bone(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
     };
     let mid = creature.nodes.len() as u32;
     creature.nodes.push(middle);
-    let second_index = creature.bones.len() as u32;
     let first_length = original.rest_length * 0.5;
     creature.bones[index] = Bone {
         a: original.a,
@@ -2095,24 +2108,6 @@ fn split_bone(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
         }
     }
     creature.bones.push(second);
-    for muscle in &mut creature.muscles {
-        if muscle.bone_a as usize == index {
-            if muscle.anchor_a <= 0.5 {
-                muscle.anchor_a *= 2.0;
-            } else {
-                muscle.bone_a = second_index;
-                muscle.anchor_a = (muscle.anchor_a - 0.5) * 2.0;
-            }
-        }
-        if muscle.bone_b as usize == index {
-            if muscle.anchor_b <= 0.5 {
-                muscle.anchor_b *= 2.0;
-            } else {
-                muscle.bone_b = second_index;
-                muscle.anchor_b = (muscle.anchor_b - 0.5) * 2.0;
-            }
-        }
-    }
     true
 }
 
@@ -2137,31 +2132,31 @@ fn duplicate_mirrored_node(creature: &mut Creature, cfg: &Config, rng: &mut Rng)
     duplicate.y = (duplicate.y + rng.range(-0.03, 0.03)).clamp(0.0, body_extent());
     let target = creature.nodes.len() as u32;
     creature.nodes.push(duplicate);
-    let new_bone = creature.bones.len();
     creature
         .bones
         .push(bone(source, target as usize, &creature.nodes));
-    let other_bone = rng.index(new_bone);
-    creature.muscles.push(muscle(
-        new_bone,
-        other_bone,
-        &creature.bones,
-        &creature.nodes,
-        rng,
-    ));
+    // A muscle from the new node to a node it is not a bone away from.
+    let paths = root_paths(creature.nodes.len(), &creature.bones);
+    let far: Bounded<usize, MAX_NODES> = (0..target as usize)
+        .filter(|&n| (paths[n] ^ paths[target as usize]).count_ones() >= 2)
+        .collect();
+    if !far.is_empty() {
+        let other = far[rng.index(far.len())];
+        creature.muscles.push(muscle(target as usize, other, rng));
+    }
     repair(creature, cfg, rng);
     true
 }
 
 fn phase_shift_group(creature: &mut Creature, rng: &mut Rng) -> bool {
-    if creature.bones.is_empty() || creature.muscles.is_empty() {
+    if creature.nodes.is_empty() || creature.muscles.is_empty() {
         return false;
     }
-    let bone = rng.index(creature.bones.len()) as u32;
+    let node = rng.index(creature.nodes.len()) as u32;
     let offset = rng.range(-0.25, 0.25);
     let mut changed = false;
     for muscle in &mut creature.muscles {
-        if muscle.bone_a == bone || muscle.bone_b == bone {
+        if muscle.node_a == node || muscle.node_b == node {
             muscle.phase = (muscle.phase + offset).rem_euclid(1.0);
             changed = true;
         }
@@ -2277,15 +2272,8 @@ mod tests {
         );
     }
 
-    fn muscle_point(creature: &Creature, bone_id: u32, t: f32) -> [f32; 2] {
-        let bone = creature.bones[bone_id as usize];
-        let a = creature.nodes[bone.a as usize];
-        let b = creature.nodes[bone.b as usize];
-        [a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t]
-    }
-
     #[test]
-    fn split_bone_preserves_attachments_on_both_halves() {
+    fn split_bone_keeps_muscles_on_their_nodes() {
         let cfg = Config {
             max_nodes: 4,
             ..Config::default()
@@ -2314,72 +2302,25 @@ mod tests {
             let mut creature = Creature {
                 nodes: nodes.into(),
                 bones: vec![Bone::new(0, 1, 1.0), Bone::new(1, 2, 1.0)].into(),
-                muscles: vec![
-                    Muscle {
-                        bone_a: 0,
-                        bone_b: 1,
-                        anchor_a: 0.25,
-                        anchor_b: 0.25,
-                        short: 0.1,
-                        long: 0.2,
-                        period: 1.0,
-                        phase: 0.0,
-                        duty: 0.5,
-                        stiffness: 40.0,
-                        sensor: 255,
-                        reset: 0.0,
-                        tendon: 0.0,
-                    },
-                    Muscle {
-                        bone_a: 0,
-                        bone_b: 1,
-                        anchor_a: 0.75,
-                        anchor_b: 0.75,
-                        short: 0.1,
-                        long: 0.2,
-                        period: 1.0,
-                        phase: 0.5,
-                        duty: 0.5,
-                        stiffness: 40.0,
-                        sensor: 255,
-                        reset: 0.0,
-                        tendon: 0.0,
-                    },
-                ]
-                .into(),
+                muscles: vec![muscle(0, 2, &mut Rng::new(1, 0, 0))].into(),
                 id: 1,
             };
-            let old_points: Vec<_> = creature
-                .muscles
-                .iter()
-                .map(|muscle| {
-                    [
-                        muscle_point(&creature, muscle.bone_a, muscle.anchor_a),
-                        muscle_point(&creature, muscle.bone_b, muscle.anchor_b),
-                    ]
-                })
-                .collect();
+            let ends = (creature.muscles[0].node_a, creature.muscles[0].node_b);
             let seed = (0..100)
                 .find(|&seed| Rng::new(seed, 0, 0).index(2) == split_index)
                 .unwrap();
             assert!(split_bone(&mut creature, &cfg, &mut Rng::new(seed, 0, 0)));
             assert_eq!(creature.nodes.len(), 4);
             assert_eq!(creature.bones.len(), 3);
-            for (muscle, points) in creature.muscles.iter().zip(old_points) {
-                let actual = [
-                    muscle_point(&creature, muscle.bone_a, muscle.anchor_a),
-                    muscle_point(&creature, muscle.bone_b, muscle.anchor_b),
-                ];
-                for side in 0..2 {
-                    assert!((actual[side][0] - points[side][0]).abs() < 1e-6);
-                    assert!((actual[side][1] - points[side][1]).abs() < 1e-6);
-                }
-            }
+            assert_eq!(ends, (creature.muscles[0].node_a, creature.muscles[0].node_b));
+            // The muscle now lies across three bones.
+            let paths = root_paths(4, &creature.bones);
+            assert_eq!((paths[0] ^ paths[2]).count_ones(), 3);
         }
     }
 
     #[test]
-    fn canonical_bone_order_preserves_attachment_positions() {
+    fn canonical_bone_order_leaves_muscles_on_their_nodes() {
         let mut creature = Creature {
             nodes: (0..4)
                 .map(|i| NodeGene {
@@ -2395,37 +2336,10 @@ mod tests {
                 Bone::new(2, 1, 1.0),
             ]
             .into(),
-            muscles: vec![Muscle {
-                bone_a: 0,
-                bone_b: 1,
-                anchor_a: 0.25,
-                anchor_b: 0.75,
-                short: 0.1,
-                long: 0.2,
-                period: 1.0,
-                phase: 0.0,
-                duty: 0.5,
-                stiffness: 40.0,
-                sensor: 255,
-                reset: 0.0,
-                tendon: 0.0,
-            }]
-            .into(),
+            muscles: vec![muscle(0, 3, &mut Rng::new(1, 0, 0))].into(),
             id: 1,
         };
-        let before = [
-            muscle_point(
-                &creature,
-                creature.muscles[0].bone_a,
-                creature.muscles[0].anchor_a,
-            ),
-            muscle_point(
-                &creature,
-                creature.muscles[0].bone_b,
-                creature.muscles[0].anchor_b,
-            ),
-        ];
-
+        let before = creature.muscles[0];
         assert!(canonicalize_bone_order(&mut creature));
         assert_eq!(
             creature
@@ -2435,22 +2349,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, 1), (1, 2), (2, 3)]
         );
-        let after = [
-            muscle_point(
-                &creature,
-                creature.muscles[0].bone_a,
-                creature.muscles[0].anchor_a,
-            ),
-            muscle_point(
-                &creature,
-                creature.muscles[0].bone_b,
-                creature.muscles[0].anchor_b,
-            ),
-        ];
-        for side in 0..2 {
-            assert!((before[side][0] - after[side][0]).abs() < 1e-6);
-            assert!((before[side][1] - after[side][1]).abs() < 1e-6);
-        }
+        assert_eq!(creature.muscles[0], before);
     }
 
     fn organ_point(creature: &Creature) -> Option<[f32; 2]> {
@@ -2551,26 +2450,42 @@ mod tests {
     }
 
     #[test]
-    fn tuning_grows_tendons_and_keeps_them_valid() {
+    fn tuning_grows_ligaments_and_keeps_them_valid() {
         let cfg = Config::default();
-        let mut with_tendon = 0;
+        let mut with_ligament = 0;
         let mut total = 0;
         for index in 0..300 {
             let mut rng = Rng::new(21, 0, index);
             let mut creature = random_creature_from(&cfg, &mut rng);
-            assert!(creature.muscles.iter().all(|m| m.tendon == 0.0));
+            assert!(creature.bones.iter().all(|b| b.ligament == 0.0));
+            for _ in 0..10 {
+                creature = local_mutation(creature, &cfg, &mut rng, 1.0);
+            }
+            for b in &creature.bones {
+                assert!((0.0..=1.0).contains(&b.ligament), "ligament {}", b.ligament);
+                total += 1;
+                with_ligament += usize::from(b.ligament > 0.0);
+            }
+        }
+        // Ten tuning steps at a 10% rate per bone: a few in ten bones.
+        let share = with_ligament as f32 / total as f32;
+        assert!((0.15..0.75).contains(&share), "share with a ligament {share}");
+    }
+
+    #[test]
+    fn tuning_keeps_muscles_valid_and_strengths_in_range() {
+        let cfg = Config::default();
+        for index in 0..300 {
+            let mut rng = Rng::new(22, 0, index);
+            let mut creature = random_creature_from(&cfg, &mut rng);
             for _ in 0..10 {
                 creature = local_mutation(creature, &cfg, &mut rng, 1.0);
             }
             for m in &creature.muscles {
-                assert!((0.0..=1.0).contains(&m.tendon), "tendon {}", m.tendon);
-                total += 1;
-                with_tendon += usize::from(m.tendon > 0.0);
+                assert!((STRENGTH_MIN..=1.0).contains(&m.strength), "strength {}", m.strength);
+                assert!(m.sensor < 2 || m.sensor == NO_SENSOR);
             }
         }
-        // Ten tuning steps at a 10% rate per muscle: a few in ten muscles.
-        let share = with_tendon as f32 / total as f32;
-        assert!((0.15..0.75).contains(&share), "share with a tendon {share}");
     }
 
     #[test]
@@ -2592,8 +2507,6 @@ mod tests {
                 assert!(a.rest_length <= max_bone_length() + 1e-4);
             }
             for (a, b) in after.muscles.iter().zip(&before.muscles) {
-                assert!((a.long - b.long * scale).abs() < 1e-4);
-                assert!(a.long <= max_stroke() + 1e-4);
                 assert!((a.period - b.period * scale.sqrt()).abs() < 1e-4);
             }
             // The shape is kept: every node keeps its place relative to the

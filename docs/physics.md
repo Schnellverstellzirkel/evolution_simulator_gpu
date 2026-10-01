@@ -9,15 +9,17 @@ The physics is the CUDA kernel, `shaders/warp_creature.cu`, and nothing else sim
 ## Forces and rules
 
 - Gravity, wind and air drag act on every node and bone. Bone drag is `AIR_DRAG (0.6) x length x width x speed x velocity`, limited so one step never more than halves the speed. It only takes energy away.
-- Muscles pull only. The pull follows the waveform's shortening speed, times the muscle's stiffness and energy, with a light damper. Hill's force-velocity relation scales the active pull by `1 - v / v_max`, with `v_max` of 8 muscle lengths per second. Only active contraction is charged to the energy store (120 J, recovering half the missing energy per second, before environment effects).
-- A muscle's force cap and energy store scale with the mass it drives: 100 m/s^2 times the lighter of the two subtrees it pulls together, never above 100 N.
-- Every muscle has a tendon gene (0 to 1). A muscle stretched past its longest length is pulled back by a passive spring in parallel with it. The spring stores and returns the stretch energy and is not charged to the muscle.
+- A muscle joins two nodes and has no state. It pulls only: its force is the force cap times the strength gene, its activation, the creature's stamina and Hill's factor `1 - v / v_max` (clamped to 0 to 1, with `v_max` of 8 muscle lengths per second, the length taken in the start pose), plus a light damper. The activation is a trapezoid of the muscle's period, phase and duty with a ramp of 1/60 s on each edge, so it is on for the duty and for one ramp more. A muscle that senses a node restarts its clock at the `reset` phase when that node touches down.
+- A muscle's force cap scales with the mass it drives: 100 m/s^2 times the lighter of the two subtrees at its ends (a node and everything below it), never above 100 N.
+- One stamina store per creature, in [0, 1]. Its capacity is the sum of every muscle's energy (120 J scaled by the mass the muscle drives, before environment effects). The work of all the muscles, drive times shortening speed, drains it, and it recovers half of what is missing per second. Every muscle's force is scaled by it, so a wasteful gait weakens the whole animal.
+- Muscles have mass, a fixed part plus a part per metre of their length in the start pose, half at each end. There is no tendon, anchor or stroke: a muscle's leverage comes from where its nodes are.
 - Passive joint damping with a 0.1 s time constant, sized to the inertia each joint moves.
 - Joint limits are inelastic stops. A joint that would pass its limit within the step turns only as far as the limit. A joint forced 0.5 rad past its range breaks and ends the trial like a fall.
+- A bone's ligament gene (0 to 1) turns its joint's stop into a spring and damper on the joint's own inertia, implicit and so stable at any rate. The spring's rate runs from 120 rad/s (a gene near 0) to 12 rad/s (1) with a damping ratio of 0.25. The joint stores the energy driven into the stop and gives it back. A gene of 0 is the inelastic stop. A ligament that is soft enough lets the joint pass the break angle, which ends the trial.
 - Spin cap: a bone turning faster than 15 rad/s meets an implicit drag toward rest. The drag is a pure torque, so it changes no linear momentum.
 - Ground contact: a substep is one articulated-body pass with the muscles, gravity, wind, drag and water, then one contact solve. Every node that would reach the ground within the substep gets a contact, at most the 4 deepest. The contacts are solved together at velocity level with the exact contact-space matrix and 2 sweeps of projected Gauss-Seidel from zero impulses, then 1 sweep that only takes back friction that would do positive work. A touching node may approach the ground only as fast as its gap allows, normal impulses only push, and friction stays within mu times the normal impulse and opposes sliding. There are no planting rounds, no warm start and no static friction factor.
 - Momentum balance: after each substep the body's momentum equals its old momentum plus the external impulses. The difference from first-order integration is applied as one uniform velocity.
-- First law in flight: a substep without ground contact may not gain more kinetic plus potential energy than the muscles, the wind and the tendons put in. The excess comes off the motion about the center of mass.
+- First law in flight: a substep without ground contact may not gain more kinetic plus potential energy than the muscles, the wind, the buoyancy and the ligaments' stores put in. The excess comes off the motion about the center of mass.
 
 A fall (head below the neck base), a joint break, or head acceleration averaged over about 0.1 s above 8 g ends scoring at the distance reached and disables muscle force. Fitness is horizontal center-of-mass distance and nothing else. Ground contact, cadence, body height and lifted feet are behavior descriptors for the archive.
 
@@ -36,7 +38,7 @@ Each effect changes the physics and never the objective. Levels are in `src/envi
 
 ## Cost
 
-In the CUDA kernel the contact solve (detection, the matrix walk, the sweeps and the response) is about 40% of the instructions of a substep, the muscles about 16% and the articulated-body pass about 14%. Each walker keeps its matrix rows in registers, and the response to the contact impulses comes from the torques the walkers leave at each joint. About a fifth of the instructions are branches, compares and convergence bookkeeping. `docs/rejected-ideas.md` lists what was tried to make it cheaper.
+In the CUDA kernel (measured before the lean muscle model) the contact solve (detection, the matrix walk, the sweeps and the response) is about 40% of the instructions of a substep, the muscles about 16% and the articulated-body pass about 14%. Each walker keeps its matrix rows in registers, and the response to the contact impulses comes from the torques the walkers leave at each joint. About a fifth of the instructions are branches, compares and convergence bookkeeping. `docs/rejected-ideas.md` lists what was tried to make it cheaper.
 
 ## Substeps
 
@@ -44,4 +46,4 @@ One substep per 1/60 s step, chosen by the substep ladder of 2026-10-01 (docs/pl
 
 ## Audits
 
-`examples/physics_audit.rs` prints what the GPU replay records per elite (contact-free steps, ground push, muscle energy store, broken joints). The kernel keeps no energy, friction or momentum ledgers. `tests/cuda_physics.rs` checks that bodies stay on the ground, joints stay in range, a body without drive neither travels nor rises, and a creature scores the same in any batch. `examples/first_generation.rs` scores a random population on the GPU (median, p99, best) and catches free propulsion. Run it after any physics change.
+`examples/physics_audit.rs` prints what the GPU replay records per elite (contact-free steps, ground push, muscle energy store, broken joints). The kernel keeps no energy, friction or momentum ledgers besides the momentum balance and the first law in flight. `tests/cuda_physics.rs` checks that bodies stay on the ground, joints stay in range, a body without drive neither travels nor rises, and a creature scores the same in any batch. `examples/first_generation.rs` scores a random population on the GPU (median, p99, best) and catches free propulsion. Run it after any physics change.

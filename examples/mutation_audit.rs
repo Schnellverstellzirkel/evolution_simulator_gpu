@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
                 if r.fitness.is_finite() {
                     r.fitness
                 } else {
-                    0.0
+                    -1.0e20
                 }
             })
             .collect())
@@ -69,9 +69,9 @@ fn main() -> anyhow::Result<()> {
         ),
     );
     println!(
-        "| operator | applied | child/parent median | p75 | keeps 90% | beats parent | nodes | muscles |"
+        "| operator | applied | child/parent median | p75 | keeps 90% | beats parent | nodes | muscles | failed |"
     );
-    println!("|---|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|");
     let mut rows: Vec<(String, Vec<(usize, Creature)>)> = Vec::new();
     let local: Vec<(usize, Creature)> = parents
         .iter()
@@ -114,6 +114,7 @@ fn main() -> anyhow::Result<()> {
         let mut ratios = Vec::new();
         let (mut keeps, mut beats, mut counted) = (0, 0, 0);
         let (mut nodes, mut muscles) = (0.0f32, 0.0f32);
+        let failed = scores.iter().filter(|&&s| s < -1.0e10).count();
         for ((i, child), s) in children.iter().zip(&scores) {
             nodes += child.nodes.len() as f32 - parents[*i].nodes.len() as f32;
             muscles += child.muscles.len() as f32 - parents[*i].muscles.len() as f32;
@@ -130,7 +131,7 @@ fn main() -> anyhow::Result<()> {
         let n = children.len().max(1) as f32;
         let share = |k: usize| 100.0 * k as f32 / counted.max(1) as f32;
         println!(
-            "| {name} | {:.0}% | {:.2} | {:.2} | {:.0}% | {:.0}% | {:+.2} | {:+.2} |",
+            "| {name} | {:.0}% | {:.2} | {:.2} | {:.0}% | {:.0}% | {:+.2} | {:+.2} | {} |",
             100.0 * children.len() as f32 / parents.len() as f32,
             quantile(&ratios, 0.5),
             quantile(&ratios, 0.75),
@@ -138,6 +139,7 @@ fn main() -> anyhow::Result<()> {
             share(beats),
             nodes / n,
             muscles / n,
+            failed,
         );
     }
     Ok(())

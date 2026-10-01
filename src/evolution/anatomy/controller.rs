@@ -1,26 +1,28 @@
 //! Operators that retune the controller of a whole limb or of a pair of
-//! muscles at one joint, without touching the skeleton: scale a limb's stroke,
-//! shift its posture, taper its strength along the chain, copy one limb's
-//! rhythm onto another limb with an offset, and set two muscles of one joint
-//! to alternate or to act together.
+//! muscles at one joint, without touching the skeleton: scale a limb's
+//! stroke, shift its posture, taper its strength along the chain, copy one
+//! limb's rhythm onto another limb with an offset, and set two muscles of one
+//! joint to alternate or to act together.
 //!
-//! Like the other muscle and rhythm operators they change no bone or node,
-//! so the motor ring stays as it is. They only touch active muscles (a
-//! stroke longer than zero), never the passive ring.
+//! A limb's stroke is the arc its joints may swing and the force that
+//! swings it, so the stroke operators change joint ranges and strengths. Like
+//! the other muscle and rhythm operators they change no bone length or
+//! node, so the motor net stays as it is. They only touch active muscles (a
+//! strength above the passive floor), never the passive ring.
 use super::limbs::{limb_roots, pick};
-use super::{BoneIds, Context, MuscleIds, branch, muscles_on};
+use super::{BoneIds, Context, MuscleIds, branch, muscles_on, paths, span_of};
 use crate::config::Config;
 use crate::evolution::{
-    Bounded, CLOCK_RATIOS, Creature, MAX_MUSCLES, MAX_NODES, NO_SENSOR, Rng, max_stroke,
+    Bounded, CLOCK_RATIOS, Creature, MAX_MUSCLES, MAX_NODES, NO_SENSOR, Rng, STRENGTH_MIN,
     min_muscle_period,
 };
 
-/// The active muscles (with a stroke) that have an end on the limb starting
-/// at `root`.
+/// The active muscles (with a strength above the floor) across the limb
+/// starting at `root`.
 fn active_on(c: &Creature, root: usize) -> MuscleIds {
     muscles_on(c, &branch(c, root), false)
         .into_iter()
-        .filter(|&i| c.muscles[i].long > c.muscles[i].short)
+        .filter(|&i| c.muscles[i].active())
         .collect()
 }
 
@@ -32,9 +34,10 @@ fn driven_limbs(c: &Creature) -> BoneIds {
         .collect()
 }
 
-/// Scales the stroke of every active muscle on a limb about its middle by one
-/// factor (0.6 to 1.6): the limb swings through a wider or narrower arc with
-/// the same clock, so its muscles contract more slowly or more quickly.
+/// Scales the stroke of a limb by one factor (0.6 to 1.6): the joint ranges
+/// of its bones widen or narrow about the starting pose and its active
+/// muscles pull as much harder or softer, so the limb swings through a wider
+/// or narrower arc with the same clock.
 pub(crate) fn limb_stroke_scale(
     c: &mut Creature,
     _cfg: &Config,
@@ -46,20 +49,26 @@ pub(crate) fn limb_stroke_scale(
     };
     let factor = rng.range(0.6f32.ln(), 1.6f32.ln()).exp();
     let mut changed = false;
+    for b in branch(c, root) {
+        let bone = &mut c.bones[b];
+        let old = *bone;
+        bone.min_angle *= factor;
+        bone.max_angle *= factor;
+        bone.clamp_range();
+        changed |= *bone != old;
+    }
     for i in active_on(c, root) {
         let m = &mut c.muscles[i];
-        let (middle, half) = ((m.short + m.long) * 0.5, (m.long - m.short) * 0.5 * factor);
-        let short = (middle - half).max(0.01);
-        let long = (middle + half).clamp(short, max_stroke());
-        changed |= (short, long) != (m.short, m.long);
-        (m.short, m.long) = (short, long);
+        let strength = (m.strength * factor).clamp(STRENGTH_MIN, 1.0);
+        changed |= strength != m.strength;
+        m.strength = strength;
     }
     changed
 }
 
-/// Moves both ends of every active muscle's stroke on a limb by the same
-/// share (5 to 15%) of its stroke, up or down: the limb rests more bent or
-/// more stretched and swings around a new posture.
+/// Moves the range of every joint of a limb by the same share (5 to 15%) of
+/// its width, up or down: the limb rests more bent or more stretched and
+/// swings around a new posture. The range keeps the starting pose inside it.
 pub(crate) fn limb_posture_shift(
     c: &mut Creature,
     _cfg: &Config,
@@ -71,19 +80,20 @@ pub(crate) fn limb_posture_shift(
     };
     let share = rng.range(0.05, 0.15) * if rng.unit() < 0.5 { -1.0 } else { 1.0 };
     let mut changed = false;
-    for i in active_on(c, root) {
-        let m = &mut c.muscles[i];
-        let (stroke, top) = (m.long - m.short, max_stroke());
-        let short = (m.short + share * stroke).clamp(0.01, (top - stroke).max(0.01));
-        let long = (short + stroke).min(top);
-        changed |= (short, long) != (m.short, m.long);
-        (m.short, m.long) = (short, long);
+    for b in branch(c, root) {
+        let bone = &mut c.bones[b];
+        let old = *bone;
+        let shift = share * (bone.max_angle - bone.min_angle);
+        bone.min_angle += shift;
+        bone.max_angle += shift;
+        bone.clamp_range();
+        changed |= *bone != old;
     }
     changed
 }
 
 /// Tapers the strength of a limb's active muscles along the chain, parents
-/// first: stiffness changes by a factor of 1.2 to 1.8 between the first and
+/// first: strength changes by a factor of 1.2 to 1.8 between the first and
 /// the last muscle, stronger at the root or at the tip (a hip that drives
 /// and a foot that yields, or the reverse).
 pub(crate) fn taper_limb_strength(
@@ -100,7 +110,10 @@ pub(crate) fn taper_limb_strength(
         return false;
     };
     let mut muscles = active_on(c, root);
-    let key = |i: usize| c.muscles[i].bone_a.min(c.muscles[i].bone_b);
+    // Parents first: by the first bone (in the parent-first order) a muscle
+    // lies across.
+    let paths = paths(c);
+    let key = |i: usize| span_of(&paths, &c.muscles[i]).trailing_zeros();
     muscles.sort_stable_by(|&i, &j| key(i).cmp(&key(j)));
     let ratio = rng.range(1.2, 1.8) * if rng.unit() < 0.5 { 1.0 } else { -1.0 };
     let last = (muscles.len() - 1) as f32;
@@ -109,9 +122,9 @@ pub(crate) fn taper_limb_strength(
         let along = rank as f32 / last * 2.0 - 1.0;
         let factor = ratio.abs().powf(along * ratio.signum());
         let m = &mut c.muscles[i];
-        let stiffness = (m.stiffness * factor).clamp(1.0, 120.0);
-        changed |= stiffness != m.stiffness;
-        m.stiffness = stiffness;
+        let strength = (m.strength * factor).clamp(STRENGTH_MIN, 1.0);
+        changed |= strength != m.strength;
+        m.strength = strength;
     }
     changed
 }
@@ -156,9 +169,9 @@ pub(crate) fn copy_limb_rhythm(
     changed
 }
 
-/// Two active muscles across the same pair of bones (a joint's opener and
-/// closer, or two synergists) are set half a cycle apart, or into the same
-/// phase, with the second one's duty and touchdown reset following.
+/// Two active muscles across the same bones (a joint's opener and closer, or
+/// two synergists) are set half a cycle apart, or into the same phase, with
+/// the second one's duty and touchdown reset following.
 pub(crate) fn retune_muscle_pair(
     c: &mut Creature,
     _cfg: &Config,
@@ -166,12 +179,10 @@ pub(crate) fn retune_muscle_pair(
     _cx: &Context,
 ) -> bool {
     let active: MuscleIds = (0..c.muscles.len())
-        .filter(|&i| c.muscles[i].long > c.muscles[i].short)
+        .filter(|&i| c.muscles[i].active())
         .collect();
-    let key = |i: usize| {
-        let m = &c.muscles[i];
-        (m.bone_a.min(m.bone_b), m.bone_a.max(m.bone_b))
-    };
+    let paths = paths(c);
+    let key = |i: usize| span_of(&paths, &c.muscles[i]);
     let mut pairs: Bounded<(u8, u8), { MAX_MUSCLES * MAX_MUSCLES / 2 }> = Bounded::new();
     for (n, &i) in active.iter().enumerate() {
         for &j in &active[n + 1..] {
@@ -282,12 +293,10 @@ pub(crate) fn limb_clock_lock(
     true
 }
 
-/// The foot nodes of a muscle's two bones (nodes with one bone, not the
-/// head), as sensor indices (0 and 1 are the first bone's ends, 2 and 3 the
-/// second's).
-fn sensable_feet(c: &Creature, m: &crate::evolution::Muscle) -> Bounded<u32, 4> {
-    let (a, b) = (c.bones[m.bone_a as usize], c.bones[m.bone_b as usize]);
-    [a.a, a.b, b.a, b.b]
+/// The ends of a muscle that are foot nodes (nodes with one bone, not the
+/// head), as sensor indices (0 is the first node, 1 the second).
+fn sensable_feet(c: &Creature, m: &crate::evolution::Muscle) -> Bounded<u32, 2> {
+    [m.node_a, m.node_b]
         .iter()
         .enumerate()
         .filter(|&(_, &n)| n != 0 && super::degree(c, n as usize) == 1)
@@ -304,8 +313,8 @@ pub(crate) fn reflex_on_muscle(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let options: Bounded<(usize, Bounded<u32, 4>), MAX_MUSCLES> = (0..c.muscles.len())
-        .filter(|&i| c.muscles[i].long > c.muscles[i].short && c.muscles[i].sensor == NO_SENSOR)
+    let options: Bounded<(usize, Bounded<u32, 2>), MAX_MUSCLES> = (0..c.muscles.len())
+        .filter(|&i| c.muscles[i].active() && c.muscles[i].sensor == NO_SENSOR)
         .map(|i| (i, sensable_feet(c, &c.muscles[i])))
         .filter(|(_, feet)| !feet.is_empty())
         .collect();
@@ -331,7 +340,7 @@ pub(crate) fn reflex_all_feet(
     let shift = rng.unit();
     for i in 0..c.muscles.len() {
         let m = c.muscles[i];
-        if m.long <= m.short {
+        if !m.active() {
             continue;
         }
         let Some(&sensor) = sensable_feet(c, &m).first() else {
@@ -442,7 +451,10 @@ mod tests {
             let cx = Context { donor: None };
             if op(&mut c, &cfg, &mut Rng::new(41, 0, i), &cx) {
                 applied += 1;
-                assert_eq!((&c.nodes, &c.bones), (&body.nodes, &body.bones));
+                assert_eq!(&c.nodes, &body.nodes);
+                assert!(c.bones.iter().zip(&body.bones).all(|(x, y)| {
+                    (x.a, x.b, x.rest_length) == (y.a, y.b, y.rest_length)
+                }));
                 assert_eq!(c.muscles.len(), body.muscles.len());
                 check(body, &c);
             } else {
@@ -469,41 +481,64 @@ mod tests {
         })
     }
 
+    /// Bones whose joint range differs.
+    fn reranged(before: &Creature, after: &Creature) -> Vec<usize> {
+        (0..before.bones.len())
+            .filter(|&b| before.bones[b] != after.bones[b])
+            .collect()
+    }
+
     #[test]
-    fn stroke_scale_keeps_the_middle_and_scales_one_limb() {
+    fn stroke_scale_widens_the_arc_and_the_strength_of_one_limb() {
         let applied = run(limb_stroke_scale, &grown(), |before, after| {
             let moved = changed(before, after);
-            assert!(on_one_limb(before, &moved));
+            assert!(on_one_limb(before, &moved) || moved.is_empty());
             for i in moved {
                 let (x, y) = (before.muscles[i], after.muscles[i]);
-                assert!(y.short >= 0.01 && y.long >= y.short && y.long <= max_stroke());
+                assert!((STRENGTH_MIN..=1.0).contains(&y.strength));
                 assert_eq!(
-                    (x.phase, x.stiffness, x.period),
-                    (y.phase, y.stiffness, y.period)
+                    crate::evolution::Muscle {
+                        strength: x.strength,
+                        ..y
+                    },
+                    x
                 );
-                assert!(y.long > y.short);
             }
+            // Joint ranges scale about the starting pose by one factor.
+            let bones = reranged(before, after);
+            assert!(!bones.is_empty() || !changed(before, after).is_empty());
+            let ratios: Vec<f32> = bones
+                .iter()
+                .filter(|&&b| {
+                    before.bones[b].max_angle > 0.0
+                        && after.bones[b].max_angle < crate::evolution::JOINT_LIMIT - 1e-4
+                })
+                .map(|&b| after.bones[b].max_angle / before.bones[b].max_angle)
+                .collect();
+            assert!(ratios.iter().all(|r| (0.59..=1.61).contains(r)));
+            assert!(ratios.iter().all(|r| (r - ratios[0]).abs() < 1e-3));
         });
         assert!(applied >= 120, "applied {applied}");
     }
 
     #[test]
-    fn posture_shift_keeps_every_stroke_length() {
+    fn posture_shift_keeps_every_range_width_and_the_start_inside() {
         let applied = run(limb_posture_shift, &grown(), |before, after| {
-            let moved = changed(before, after);
-            assert!(on_one_limb(before, &moved));
-            for i in moved {
-                let (x, y) = (before.muscles[i], after.muscles[i]);
-                assert!(y.short >= 0.01 && y.long <= max_stroke());
-                assert!(y.long - y.short <= (x.long - x.short) + 1e-5);
-                assert_eq!((x.phase, x.stiffness), (y.phase, y.stiffness));
+            assert_eq!(changed(before, after), Vec::<usize>::new());
+            let bones = reranged(before, after);
+            assert!(!bones.is_empty());
+            for b in bones {
+                let (x, y) = (before.bones[b], after.bones[b]);
+                assert!(y.max_angle - y.min_angle <= (x.max_angle - x.min_angle) + 1e-5);
+                assert!(y.min_angle <= 0.0 && y.max_angle >= 0.0);
+                assert!(y.max_angle <= crate::evolution::JOINT_LIMIT + 1e-5);
             }
         });
         assert!(applied >= 120, "applied {applied}");
     }
 
     #[test]
-    fn taper_changes_only_stiffness_along_one_limb() {
+    fn taper_changes_only_strength_along_one_limb() {
         let applied = run(taper_limb_strength, &grown(), |before, after| {
             let moved = changed(before, after);
             assert!(on_one_limb(before, &moved));
@@ -511,12 +546,12 @@ mod tests {
                 let (x, y) = (before.muscles[i], after.muscles[i]);
                 assert_eq!(
                     crate::evolution::Muscle {
-                        stiffness: x.stiffness,
+                        strength: x.strength,
                         ..y
                     },
                     x
                 );
-                assert!((1.0..=120.0).contains(&y.stiffness));
+                assert!((STRENGTH_MIN..=1.0).contains(&y.strength));
             }
         });
         assert!(applied >= 60, "applied {applied}");
@@ -534,7 +569,6 @@ mod tests {
                         phase: x.phase,
                         duty: x.duty,
                         reset: x.reset,
-                        tendon: 0.0,
                         ..y
                     },
                     x
@@ -553,9 +587,8 @@ mod tests {
             let y = after.muscles[j];
             let ok = (0..after.muscles.len()).any(|i| {
                 let x = after.muscles[i];
-                i != j
-                    && (x.bone_a.min(x.bone_b), x.bone_a.max(x.bone_b))
-                        == (y.bone_a.min(y.bone_b), y.bone_a.max(y.bone_b))
+                let paths = paths(after);
+                i != j && span_of(&paths, &x) == span_of(&paths, &y)
                     && [0.0f32, 0.5].iter().any(|lag| {
                         let d = (y.phase - x.phase - lag).rem_euclid(1.0);
                         !(1e-4..=1.0 - 1e-4).contains(&d)
@@ -570,7 +603,7 @@ mod tests {
     fn release_touchdown_clears_sensors_of_one_limb() {
         let mut bodies = grown();
         for c in &mut bodies {
-            if let Some(m) = c.muscles.iter_mut().find(|m| m.long > m.short) {
+            if let Some(m) = c.muscles.iter_mut().find(|m| m.active()) {
                 m.sensor = 0;
             }
         }
@@ -592,7 +625,7 @@ mod tests {
             assert!(on_one_limb(before, &moved));
             for i in moved {
                 let (x, y) = (before.muscles[i], after.muscles[i]);
-                assert_eq!((x.duty, x.stiffness), (y.duty, y.stiffness));
+                assert_eq!((x.duty, x.strength), (y.duty, y.strength));
                 assert!((y.phase - x.phase + 0.5).rem_euclid(1.0) - 0.5 < 0.0625 + 1e-4);
             }
         });
@@ -678,7 +711,7 @@ mod tests {
         for op in [reflex_all_feet as Operator, reflex_reset_shift] {
             let mut bodies = grown();
             for c in &mut bodies {
-                if let Some(m) = c.muscles.iter_mut().find(|m| m.long > m.short) {
+                if let Some(m) = c.muscles.iter_mut().find(|m| m.active()) {
                     m.sensor = 0;
                 }
             }
