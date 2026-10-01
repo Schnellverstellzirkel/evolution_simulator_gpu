@@ -620,7 +620,9 @@ impl<T: bytemuck::Pod> HostVec<T> {
     fn grow(&mut self, len: usize) {
         self.release();
         let bytes = crate::engine::padded_size((len * std::mem::size_of::<T>()) as u64) as usize;
-        let bytes = bytes.next_multiple_of(4096);
+        // From 2 MiB, a whole number of huge pages, which the kernel then
+        // aligns.
+        let bytes = bytes.next_multiple_of(if bytes >= 2 << 20 { 2 << 20 } else { 4096 });
         // SAFETY: an anonymous private mapping, owned by this HostVec until
         // `release`.
         let ptr = unsafe {
@@ -638,6 +640,8 @@ impl<T: bytemuck::Pod> HostVec<T> {
                 std::alloc::Layout::from_size_align(bytes, 4096).expect("a page layout"),
             );
         }
+        // Huge pages: one fault for 2 MiB of fresh memory.
+        unsafe { libc::madvise(ptr, bytes, libc::MADV_HUGEPAGE) };
         self.registered = bytes >= Self::REGISTER_FROM
             && REGISTER.with(|register| {
                 register.borrow().as_ref().is_some_and(|api| unsafe {
