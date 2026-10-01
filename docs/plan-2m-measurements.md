@@ -27,3 +27,7 @@ Per-bucket take-up counters on the lane-group kernel: kernel time 3316 to 3293 m
 ## End to end on main d7264e4 (2026-10-01, game alone, 3M per generation, autochange Slow)
 
 Generations 0 to 5: 139k, 227k, 197k, 114k, 115k, 149k creatures/s (mean nodes 5.9 to 6.9; confirmations 395 to 1,154 per generation; breeding 1.3 to 1.8 s per generation). Previous main (before the contact solve, bar-stream and frames): 92k to 167k at the same stage; the old build: 85k to 117k, falling to 27k by generation 30.
+
+## baked-stub (2026-10-01, merged 2e946d1): baked 629, general trimmed 914, no spill
+
+W = 2 stub, 8-node 19-muscle bodies, 2 substeps, locked 1.89 GHz, 8 warps per SM at 254 registers with no spill: general trimmed 914 warp instructions per creature-step (82M), baked on tree 0,1,1,2,4,5,6: 629 (121M; about 160M at boost, FMA cap 197M). Other top trees bake at 606 to 664. The runtime tree costs 285 (31%): tree solves 207 vs 40, rod factor 67 vs 20, shuffles 57 vs 23. What is left in baked is physics: muscles about 190, contacts about 230 plus tree rows, drag and damping 43, ledgers 36, rod directions 31; about 275 per substep plus 80 per step. By the plan's rule (500 to 800) the shared-indexed general kernel is the design and per-plan kernels do not open on today's physics. Cheaper rules, not yet checked for honesty: muscle force held per step 549, plus analytic drive 540, cold Gauss-Seidel 2 sweeps 569, all three 483. Baked issues 66 MIO instructions per creature-step (8 G/s at the measured rate, within 1.4x of the probe).
