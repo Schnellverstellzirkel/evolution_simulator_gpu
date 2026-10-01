@@ -8,17 +8,18 @@
 //! Operators here that add or remove bones close the motor ring themselves
 //! with passive muscles (`passive_ring`). Left to `repair`, the ring
 //! would get new random muscles that drive from the first step.
-use super::limbs::{clamped, fuse_pair, limb_roots, pick};
-use super::muscles::{actuation, ring, shared_node};
+use super::limbs::{clamped, fuse_pair, limb_roots, pick, split_bone_at};
+use super::muscles::actuation;
 use super::rhythm::{leaf_limbs, matching_limbs};
 use super::{
-    BoneIds, Context, Limbs, MuscleIds, branch, child_bones, copy_branch, degree, fit_stroke,
-    is_neck, muscles_on, new_muscle, parent_bones, pick_each, remove_parts, room,
+    BoneIds, Context, Limbs, MuscleIds, branch, child_bones, copy_branch, degree, is_neck,
+    long_enough, map_node, muscles_on, needed, new_muscle, parent_bones, paths, pick_each,
+    remove_parts, room, span_of,
 };
 use crate::config::Config;
 use crate::evolution::{
-    Bone, Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, NodeGene, Rng, max_bone_length,
-    min_muscle_period,
+    Bone, Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, NodeGene, Rng, STRENGTH_MIN,
+    max_bone_length, min_muscle_period, muscle_across,
 };
 
 /// Copies one limb's program (each muscle's phase and duty) onto the
@@ -67,9 +68,9 @@ pub(crate) fn swap_limb_programs(
 }
 
 /// Copies a muscle that one limb has and its same-shaped partner lacks onto
-/// the partner's matching bones, stroke fitted to the new span, and timed to
-/// the partner's program (the phase offset of the first pair of matching
-/// muscles, or half a cycle without one).
+/// the partner's matching nodes, and times it to the partner's program (the
+/// phase offset of the first pair of matching muscles, or half a cycle
+/// without one).
 pub(crate) fn copy_muscle_to_partner(
     c: &mut Creature,
     cfg: &Config,
@@ -100,21 +101,19 @@ pub(crate) fn copy_muscle_to_partner(
     };
     let (from, to) = partners.get(k);
     let old = c.muscles[p];
-    let at = |b: u32| {
-        to[from
-            .iter()
-            .position(|&x| x == b as usize)
-            .expect("limb bone")] as u32
+    let (Some(a), Some(b)) = (
+        map_node(c, from, to, old.node_a),
+        map_node(c, from, to, old.node_b),
+    ) else {
+        return false;
     };
-    let mut m = Muscle {
-        bone_a: at(old.bone_a),
-        bone_b: at(old.bone_b),
+    let m = Muscle {
+        node_a: a,
+        node_b: b,
         phase: (old.phase + offset).rem_euclid(1.0),
         reset: (old.reset + offset).rem_euclid(1.0),
-        tendon: 0.0,
         ..old
     };
-    fit_stroke(c, &mut m, Some(&old));
     c.muscles.push(m);
     true
 }
@@ -141,7 +140,7 @@ pub(crate) fn twin_limb(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Con
 /// Grows the same actuated tip on both limbs of a same-shaped pair: a short
 /// bone (the same share of each tip bone), turned the same way (mirrored when
 /// the limbs point to opposite sides), with the same narrow joint range and a
-/// muscle to the tip bone timed like a muscle of its own limb.
+/// muscle to the top of the tip bone timed like a muscle of its own limb.
 pub(crate) fn grow_matching_tips(
     c: &mut Creature,
     cfg: &Config,
@@ -167,7 +166,6 @@ pub(crate) fn grow_matching_tips(
     let share = rng.range(0.25, 0.5);
     let turn = rng.range(-1.5, 1.5);
     let (low, high) = (rng.range(0.15, 0.5), rng.range(0.15, 0.5));
-    let anchors = (rng.range(0.3, 1.0), rng.range(0.2, 0.8));
     let direction = |b: usize| {
         let bone = c.bones[b];
         c.nodes[bone.b as usize].x - c.nodes[bone.a as usize].x
@@ -188,7 +186,7 @@ pub(crate) fn grow_matching_tips(
         };
         c.bones.push(toe);
         let template = muscles_on(c, &[bone], false).first().map(|&i| c.muscles[i]);
-        let m = new_muscle(c, c.bones.len() - 1, bone, anchors, template.as_ref(), rng);
+        let m = new_muscle(c.nodes.len() - 1, old.a as usize, template.as_ref(), rng);
         c.muscles.push(m);
     }
     passive_ring(c, cfg, rng);
@@ -219,10 +217,10 @@ pub(crate) fn nudge_limb_phase(
     true
 }
 
-/// Scales the body clock's period and every muscle's stroke by one factor
-/// (0.7 to 1.4), each muscle keeping its relaxed length. A muscle's drive
-/// follows the speed of its target length, which stays the same: quicker,
-/// shorter strokes or slower, longer ones with the same force.
+/// Scales the body clock's period by one factor (0.7 to 1.4) and every
+/// muscle's strength by its inverse: a muscle's push over one cycle stays
+/// the same, so a quicker clock steps shorter and harder, a slower one longer
+/// and softer.
 pub(crate) fn cadence_stride_trade(
     c: &mut Creature,
     _cfg: &Config,
@@ -239,59 +237,77 @@ pub(crate) fn cadence_stride_trade(
     }
     for m in &mut c.muscles {
         m.period *= factor;
-        m.short = (m.long - (m.long - m.short) * factor).clamp(0.01, m.long);
+        m.strength = (m.strength / factor).clamp(STRENGTH_MIN, 1.0);
     }
     true
 }
 
-/// Moves both ends of a muscle across one joint toward the joint or away from
-/// it by one factor (0.5 to 2), and refits its stroke to the new span: the
-/// same muscle with a shorter or longer lever.
+/// Moves one end of a muscle across one joint to change its lever: toward
+/// the joint, onto a new node that splits the bone it sits on at a share
+/// (0.5 to 1) of the way from the joint, or away from it, onto the next node
+/// out along the limb.
 pub(crate) fn scale_muscle_leverage(
     c: &mut Creature,
-    _cfg: &Config,
+    cfg: &Config,
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    // How far an anchor sits from `node`, as a share of its bone.
-    let from_joint = |c: &Creature, bone: u32, anchor: f32, node: u32| {
-        if c.bones[bone as usize].a == node {
-            anchor
-        } else {
-            1.0 - anchor
-        }
-    };
-    let options: Bounded<(usize, u32), MAX_MUSCLES> = (0..c.muscles.len())
-        .filter_map(|i| {
+    let paths = paths(c);
+    // (muscle, whether its `b` end moves, the bone of the span at that end)
+    let options: Bounded<(usize, bool, usize), { 2 * MAX_MUSCLES }> = (0..c.muscles.len())
+        .flat_map(|i| [(i, false), (i, true)])
+        .filter_map(|(i, end_b)| {
             let m = c.muscles[i];
-            let node = shared_node(c, m.bone_a as usize, m.bone_b as usize)?;
-            let far = from_joint(c, m.bone_a, m.anchor_a, node)
-                .max(from_joint(c, m.bone_b, m.anchor_b, node));
-            (far >= 0.05).then_some((i, node))
+            let span = span_of(&paths, &m);
+            if span.count_ones() != 2 {
+                return None;
+            }
+            let end = if end_b { m.node_b } else { m.node_a };
+            let bone = (0..c.bones.len())
+                .find(|&b| span >> b & 1 == 1 && (c.bones[b].a == end || c.bones[b].b == end))?;
+            Some((i, end_b, bone))
         })
         .collect();
-    let Some((i, node)) = pick(&options, rng) else {
+    let Some((i, end_b, bone)) = pick(&options, rng) else {
         return false;
     };
-    let factor = rng.range(0.5f32.ln(), 2.0f32.ln()).exp();
     let old = c.muscles[i];
-    let mut m = old;
-    for (bone, anchor) in [(m.bone_a, &mut m.anchor_a), (m.bone_b, &mut m.anchor_b)] {
-        let distance = (from_joint(c, bone, *anchor, node) * factor).min(1.0);
-        *anchor = if c.bones[bone as usize].a == node {
-            distance
-        } else {
-            1.0 - distance
-        };
+    let end = if end_b { old.node_b } else { old.node_a };
+    let other = if end_b { old.node_a } else { old.node_b } as usize;
+    let b = c.bones[bone];
+    let joint = if b.a == end { b.b } else { b.a };
+    // The nodes a bone further out than the end, away from the joint.
+    let outward: BoneIds = super::neighbours(c, end as usize)
+        .into_iter()
+        .filter(|&n| n != joint as usize)
+        .collect();
+    let node = if rng.unit() < 0.5 && !outward.is_empty() {
+        // Away from the joint: the next node out.
+        outward[rng.index(outward.len())]
+    } else if room(c, cfg, 1, 0) && b.rest_length >= 0.1 {
+        // Toward the joint: a new node on the bone, 0.5 to 1 of its length
+        // from the joint.
+        let share = rng.range(0.5, 1.0);
+        let t = if b.a == joint { share } else { 1.0 - share };
+        split_bone_at(c, bone, t, rng).0
+    } else {
+        return false;
+    };
+    let paths = super::paths(c);
+    if !long_enough(&paths, node, other) {
+        return false;
     }
-    fit_stroke(c, &mut m, Some(&old));
-    c.muscles[i] = m;
-    m != old
+    if end_b {
+        c.muscles[i].node_b = node as u32;
+    } else {
+        c.muscles[i].node_a = node as u32;
+    }
+    true
 }
 
-/// Scales the stiffness of every active muscle with an end on a limb by one
-/// factor (0.6 to 1.6): the limb pushes harder or softer with the same
-/// timing and geometry.
+/// Scales the strength of every active muscle across a limb by one factor
+/// (0.6 to 1.6): the limb pushes harder or softer with the same timing and
+/// geometry.
 pub(crate) fn scale_limb_strength(
     c: &mut Creature,
     _cfg: &Config,
@@ -301,7 +317,7 @@ pub(crate) fn scale_limb_strength(
     let active = |c: &Creature, root: usize| -> MuscleIds {
         muscles_on(c, &branch(c, root), false)
             .into_iter()
-            .filter(|&i| c.muscles[i].long > c.muscles[i].short)
+            .filter(|&i| c.muscles[i].active())
             .collect()
     };
     let roots: BoneIds = limb_roots(c)
@@ -315,15 +331,15 @@ pub(crate) fn scale_limb_strength(
     let mut changed = false;
     for i in active(c, root) {
         let m = &mut c.muscles[i];
-        let stiffness = (m.stiffness * factor).clamp(1.0, 120.0);
-        changed |= stiffness != m.stiffness;
-        m.stiffness = stiffness;
+        let strength = (m.strength * factor).clamp(STRENGTH_MIN, 1.0);
+        changed |= strength != m.strength;
+        m.strength = strength;
     }
     changed
 }
 
-/// Removes the weakest of three random muscles outside the motor ring: the
-/// one with the least drive (stiffness times stroke), whose loss changes the
+/// Removes the weakest of three random muscles that no bone depends on: the
+/// one with the least drive (strength times duty), whose loss changes the
 /// gait least.
 pub(crate) fn prune_weakest_muscle(
     c: &mut Creature,
@@ -334,9 +350,8 @@ pub(crate) fn prune_weakest_muscle(
     if c.bones.len() < 3 {
         return false;
     }
-    let free: MuscleIds = (0..c.muscles.len())
-        .filter(|&i| !ring(c, &c.muscles[i]))
-        .collect();
+    let needed = needed(c);
+    let free: MuscleIds = (0..c.muscles.len()).filter(|i| !needed.contains(i)).collect();
     if free.is_empty() {
         return false;
     }
@@ -453,10 +468,10 @@ pub(crate) fn leg_to_dragging_end(
     true
 }
 
-/// Adds a muscle across the joint of the leg at the dragging end, from that
-/// leg's top bone to the bone above the joint, placed so its pull lifts the
-/// foot and timed like the working leg's strongest muscle: the dragging end
-/// lifts while the working leg pushes.
+/// Adds a muscle across the joint of the leg at the dragging end, from the
+/// tip of that leg's top bone to a node outside the leg, chosen so its pull
+/// lifts the foot and timed like the working leg's strongest muscle: the
+/// dragging end lifts while the working leg pushes.
 pub(crate) fn lift_dragging_end(
     c: &mut Creature,
     cfg: &Config,
@@ -474,9 +489,6 @@ pub(crate) fn lift_dragging_end(
     };
     let top = leg[0];
     let joint = c.bones[top].a as usize;
-    let Some(above) = parent_bones(c)[joint] else {
-        return false;
-    };
     let Some(&strongest) = muscles_on(c, &working, false)
         .iter()
         .max_by(|&&x, &&y| drive(&c.muscles[x]).total_cmp(&drive(&c.muscles[y])))
@@ -490,23 +502,27 @@ pub(crate) fn lift_dragging_end(
         c.nodes[c.bones[leg[leg.len() - 1]].b as usize],
     );
     let side = (foot.x - j.x).signum();
-    let at = rng.range(0.5, 1.0);
-    let p = crate::evolution::bone_point(c.bones[top], &c.nodes, at);
-    let lift = |anchor: f32| {
-        let q = crate::evolution::bone_point(c.bones[above], &c.nodes, anchor);
-        let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
+    // The muscle runs from the leg's top bone tip to a node outside the leg.
+    let paths = paths(c);
+    let tip = c.bones[top].b as usize;
+    let p = c.nodes[tip];
+    let lift = |to: usize| {
+        let q = c.nodes[to];
+        let (dx, dy) = (q.x - p.x, q.y - p.y);
         let length = dx.hypot(dy).max(1e-6);
-        side * ((p[0] - j.x) * dy - (p[1] - j.y) * dx) / length
+        side * ((p.x - j.x) * dy - (p.y - j.y) * dx) / length
     };
-    let best = [0.0, 0.25, 0.5, 0.75, 1.0]
-        .into_iter()
-        .max_by(|&x, &y| lift(x).total_cmp(&lift(y)))
-        .expect("five anchors");
+    let best = (0..c.nodes.len())
+        .filter(|&n| paths[n] >> top & 1 == 0 && n != joint && long_enough(&paths, tip, n))
+        .max_by(|&x, &y| lift(x).total_cmp(&lift(y)));
+    let Some(best) = best else {
+        return false;
+    };
     if lift(best) < 1e-3 {
         return false;
     }
     let template = c.muscles[strongest];
-    let m = new_muscle(c, top, above, (at, best), Some(&template), rng);
+    let m = new_muscle(tip, best, Some(&template), rng);
     c.muscles.push(m);
     true
 }
@@ -566,29 +582,24 @@ fn drag_ends(c: &Creature) -> Option<(BoneIds, DraggingEnd)> {
     Some((working, end))
 }
 
-/// A muscle's drive: stiffness times stroke. Zero for a passive muscle.
+/// A muscle's drive: strength times duty. About zero for a passive muscle.
 fn drive(m: &Muscle) -> f32 {
-    m.stiffness * (m.long - m.short)
+    m.strength * m.duty
 }
 
-/// Spring stiffness of the passive muscles `passive_ring` adds.
-const PASSIVE_STIFFNESS: f32 = 5.0;
-
-/// Adds a passive muscle (random anchors, no stroke) on each pair of
-/// consecutively numbered bones that has no muscle, as `repair` would
-/// with an active one, while there is room.
+/// Adds a passive muscle (the weakest strength) across each bone that no
+/// muscle lies across, as `repair` would with an active one, while there is
+/// room.
 fn passive_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
-    let n = c.bones.len();
-    for a in 0..n {
-        let b = (a + 1) % n;
-        let joined = c.muscles.iter().any(|m| {
-            let ends = (m.bone_a as usize, m.bone_b as usize);
-            ends == (a, b) || ends == (b, a)
-        });
-        if (n > 2 || a < b) && !joined && c.muscles.len() < cfg.max_muscles {
-            let mut m = crate::evolution::muscle(a, b, &c.bones, &c.nodes, rng);
-            m.short = m.long;
-            m.stiffness = PASSIVE_STIFFNESS;
+    let paths = paths(c);
+    let bones = c.bones.len();
+    for j in 0..bones {
+        let spanned = c.muscles.iter().fold(0u32, |all, m| all | span_of(&paths, m));
+        if spanned >> j & 1 == 1 || c.muscles.len() >= cfg.max_muscles {
+            continue;
+        }
+        if let Some(mut m) = muscle_across(&paths, c.nodes.len(), j, rng) {
+            m.strength = STRENGTH_MIN;
             c.muscles.push(m);
         }
     }
@@ -640,7 +651,7 @@ fn partners(c: &Creature) -> Partners {
 }
 
 /// Pairs each muscle of limb `to` with an unpaired muscle of limb `from` on
-/// the bones at the same positions (both limbs with the bone above them).
+/// the nodes at the same positions (both limbs with the bone above them).
 /// Returns (muscle of `from`, muscle of `to`).
 fn counterparts(
     c: &Creature,
@@ -651,12 +662,15 @@ fn counterparts(
     let mut out = Bounded::new();
     for q in muscles_on(c, to, true) {
         let m = c.muscles[q];
-        let at = |b: u32| from[to.iter().position(|&x| x == b as usize).expect("limb bone")];
-        let ends = (at(m.bone_a), at(m.bone_b));
+        let (Some(a), Some(b)) = (
+            map_node(c, to, from, m.node_a),
+            map_node(c, to, from, m.node_b),
+        ) else {
+            continue;
+        };
         let found = source.iter().position(|&p| {
             let s = c.muscles[p];
-            let (x, y) = (s.bone_a as usize, s.bone_b as usize);
-            ends == (x, y) || ends == (y, x)
+            (s.node_a, s.node_b) == (a, b) || (s.node_a, s.node_b) == (b, a)
         });
         if let Some(k) = found {
             out.push((source.swap_remove(k), q));
@@ -738,15 +752,11 @@ mod tests {
         !(1e-4..=1.0 - 1e-4).contains(&d)
     }
 
+    /// Every bone has a muscle across it.
     fn ring_is_closed(c: &Creature) -> bool {
-        let n = c.bones.len();
-        (0..n).all(|a| {
-            let b = (a + 1) % n;
-            c.muscles.iter().any(|m| {
-                let ends = (m.bone_a as usize, m.bone_b as usize);
-                ends == (a, b) || ends == (b, a)
-            })
-        })
+        let paths = paths(c);
+        let spanned = c.muscles.iter().fold(0u32, |all, m| all | span_of(&paths, m));
+        (0..c.bones.len()).all(|b| spanned >> b & 1 == 1)
     }
 
     #[test]
@@ -758,9 +768,8 @@ mod tests {
                 assert_eq!(from.len(), to.len());
                 for (p, q) in counterparts(c, &from, &to) {
                     let (s, m) = (c.muscles[p], c.muscles[q]);
-                    let at = |b: u32| to[from.iter().position(|&x| x == b as usize).unwrap()];
-                    let mapped = (at(s.bone_a), at(s.bone_b));
-                    let ends = (m.bone_a as usize, m.bone_b as usize);
+                    let mapped = (map_node(c, &from, &to, s.node_a), map_node(c, &from, &to, s.node_b));
+                    let ends = (Some(m.node_a), Some(m.node_b));
                     assert!(mapped == ends || mapped == (ends.1, ends.0));
                 }
             }
@@ -823,20 +832,15 @@ mod tests {
 
     #[test]
     fn copy_muscle_to_partner_adds_the_missing_muscle() {
-        // Twins, and then one extra muscle on the source limb only.
+        // Twins, and then one extra muscle on the source limb only: from the
+        // top of the bone above the limb to the tip of its root bone.
         let bodies: Vec<Creature> = twinned()
             .into_iter()
             .enumerate()
             .filter_map(|(i, mut c)| {
                 let (from, _) = partners(&c).into_iter().next()?;
-                let m = new_muscle(
-                    &c,
-                    from[0],
-                    from[from.len() - 1],
-                    (0.5, 0.5),
-                    None,
-                    &mut Rng::new(4, 0, i),
-                );
+                let (above, root) = (c.bones[*from.last()?], c.bones[from[0]]);
+                let m = new_muscle(above.a as usize, root.b as usize, None, &mut Rng::new(4, 0, i));
                 c.muscles.push(m);
                 Some(c)
             })
@@ -850,11 +854,13 @@ mod tests {
                 let paired = counterparts(before, from, to);
                 muscles_on(before, from, true).iter().any(|&p| {
                     let s = before.muscles[p];
-                    let at =
-                        |b: u32| to[from.iter().position(|&x| x == b as usize).unwrap()] as u32;
+                    let mapped = (
+                        map_node(before, from, to, s.node_a),
+                        map_node(before, from, to, s.node_b),
+                    );
                     paired.iter().all(|&(x, _)| x != p)
-                        && (copy.bone_a, copy.bone_b) == (at(s.bone_a), at(s.bone_b))
-                        && (copy.anchor_a, copy.anchor_b) == (s.anchor_a, s.anchor_b)
+                        && (Some(copy.node_a), Some(copy.node_b)) == mapped
+                        && copy.strength == s.strength
                 })
             });
             assert!(found);
@@ -887,7 +893,7 @@ mod tests {
             let copied = muscles_on(before, &branch(before, original), false).len();
             let active = after.muscles[before.muscles.len()..]
                 .iter()
-                .filter(|m| m.short < m.long)
+                .filter(|m| m.active())
                 .count();
             assert!(active <= copied);
         });
@@ -914,12 +920,9 @@ mod tests {
             assert!((width(p) - width(q)).abs() < 1e-5 && width(p) <= 1.0);
             // A muscle from each new bone to its tip bone.
             for (toe, bone) in [(n, x), (n + 1, y)] {
-                assert!(
-                    after
-                        .muscles
-                        .iter()
-                        .any(|m| { (m.bone_a as usize, m.bone_b as usize) == (toe, bone) })
-                );
+                assert!(after.muscles.iter().any(|m| {
+                    (m.node_a, m.node_b) == (after.bones[toe].b, before.bones[bone].a)
+                }));
             }
             assert!(ring_is_closed(after));
         });
@@ -953,18 +956,18 @@ mod tests {
     }
 
     #[test]
-    fn cadence_stride_trade_keeps_every_muscle_speed() {
+    fn cadence_stride_trade_keeps_every_muscle_push_per_cycle() {
         let bodies = grown();
         let applied = run(cadence_stride_trade, &bodies, |before, after| {
             let factor = after.muscles[0].period / before.muscles[0].period;
             assert!((0.69..=1.41).contains(&factor));
             for (x, y) in before.muscles.iter().zip(&after.muscles) {
-                assert_eq!(x.long, y.long);
+                assert_eq!((x.node_a, x.node_b), (y.node_a, y.node_b));
                 assert!((y.period / x.period - factor).abs() < 1e-4);
-                // Stroke over period stays unless the stroke hit its floor.
-                if y.short > 0.0101 {
-                    let speed = |m: &Muscle| (m.long - m.short) / m.period;
-                    assert!((speed(x) - speed(y)).abs() <= 1e-4 * speed(x).max(1.0));
+                // Strength times period stays unless the strength hit a bound.
+                if y.strength > STRENGTH_MIN * 1.01 && y.strength < 0.99 {
+                    let push = |m: &Muscle| m.strength * m.period;
+                    assert!((push(x) - push(y)).abs() <= 1e-4 * push(x).max(1.0));
                 }
             }
         });
@@ -972,42 +975,33 @@ mod tests {
     }
 
     #[test]
-    fn scale_muscle_leverage_moves_both_ends_along_their_bones() {
+    fn scale_muscle_leverage_moves_one_end_in_or_out() {
         let bodies = grown();
         let applied = run(scale_muscle_leverage, &bodies, |before, after| {
-            let changed: Vec<usize> = (0..before.muscles.len())
+            let n = before.muscles.len();
+            let changed: Vec<usize> = (0..n)
                 .filter(|&i| before.muscles[i] != after.muscles[i])
                 .collect();
             assert_eq!(changed.len(), 1);
             let (x, y) = (before.muscles[changed[0]], after.muscles[changed[0]]);
-            assert_eq!((x.bone_a, x.bone_b, x.phase), (y.bone_a, y.bone_b, y.phase));
-            let node = shared_node(before, x.bone_a as usize, x.bone_b as usize).unwrap();
-            let from_joint = |bone: u32, anchor: f32| {
-                if before.bones[bone as usize].a == node {
-                    anchor
-                } else {
-                    1.0 - anchor
-                }
+            assert_eq!(x.phase, y.phase);
+            let (from, to) = if x.node_a == y.node_a {
+                (x.node_b, y.node_b)
+            } else {
+                assert_eq!(x.node_b, y.node_b);
+                (x.node_a, y.node_a)
             };
-            // Each end moves along its bone by one factor from the joint,
-            // unless it sat on the joint or reached the far end.
-            let ratios: Vec<f32> = [
-                (x.bone_a, x.anchor_a, y.anchor_a),
-                (x.bone_b, x.anchor_b, y.anchor_b),
-            ]
-            .iter()
-            .filter_map(|&(bone, old, new)| {
-                let (d, e) = (from_joint(bone, old), from_joint(bone, new));
-                (d > 1e-3 && e < 1.0).then_some(e / d)
-            })
-            .collect();
-            assert!(ratios.iter().all(|r| (0.49..=2.01).contains(r)));
-            assert!(ratios.iter().all(|r| (r - ratios[0]).abs() < 1e-3));
-            // The stroke keeps its ratios to the span.
-            let ratio = |c: &Creature, m: &Muscle| m.long / super::super::span(c, m).max(0.05);
-            assert!((ratio(before, &x) - ratio(after, &y)).abs() < 1e-3 * ratio(before, &x));
+            if after.nodes.len() == before.nodes.len() {
+                // Out: onto a node a bone further from the joint.
+                assert!(super::super::neighbours(before, from as usize).contains(&(to as usize)));
+            } else {
+                // In: onto the node that split a bone beside the old end.
+                assert_eq!(after.nodes.len(), before.nodes.len() + 1);
+                assert_eq!(to as usize, before.nodes.len());
+                assert!(super::super::neighbours(after, from as usize).contains(&(to as usize)));
+            }
         });
-        assert!(applied >= 150, "applied {applied}");
+        assert!(applied >= 100, "applied {applied}");
     }
 
     #[test]
@@ -1023,18 +1017,18 @@ mod tests {
                     let (x, y) = (before.muscles[i], after.muscles[i]);
                     assert_eq!(
                         Muscle {
-                            stiffness: x.stiffness,
+                            strength: x.strength,
                             ..y
                         },
                         x
                     );
-                    y.stiffness / x.stiffness
+                    y.strength / x.strength
                 })
                 .collect();
             let unclamped: Vec<f32> = changed
                 .iter()
                 .zip(&factors)
-                .filter(|(i, _)| ![1.0, 120.0].contains(&after.muscles[**i].stiffness))
+                .filter(|(i, _)| ![STRENGTH_MIN, 1.0].contains(&after.muscles[**i].strength))
                 .map(|(_, f)| *f)
                 .collect();
             assert!(unclamped.iter().all(|f| (0.59..=1.61).contains(f)));
@@ -1062,12 +1056,14 @@ mod tests {
             let gone = (0..before.muscles.len())
                 .find(|&i| after.muscles.get(i) != Some(&before.muscles[i]))
                 .unwrap();
-            assert!(!ring(before, &before.muscles[gone]));
+            let needed = needed(before);
+            assert!(!needed.contains(&gone));
             let free: Vec<f32> = before
                 .muscles
                 .iter()
-                .filter(|m| !ring(before, m))
-                .map(drive)
+                .enumerate()
+                .filter(|(i, _)| !needed.contains(i))
+                .map(|(_, m)| drive(m))
                 .collect();
             ranks
                 .borrow_mut()
@@ -1193,8 +1189,9 @@ mod tests {
             let (working, end) = drag_ends(before).unwrap();
             let leg = end.leg.unwrap();
             let joint = before.bones[leg[0]].a as usize;
-            assert_eq!(m.bone_a as usize, leg[0]);
-            assert_eq!(Some(m.bone_b as usize), parent_bones(before)[joint]);
+            let top = before.bones[leg[0]];
+            assert_eq!(m.node_a, top.b);
+            assert!(!super::super::branch_nodes(before, &leg).contains(&(m.node_b as usize)));
             // Timed like a working-leg muscle.
             assert!(muscles_on(before, &working, false).iter().any(|&i| {
                 let w = before.muscles[i];
@@ -1203,13 +1200,8 @@ mod tests {
             // Its pull turns the leg so the foot rises.
             let j = before.nodes[joint];
             let foot = before.nodes[before.bones[leg[leg.len() - 1]].b as usize];
-            let p = crate::evolution::bone_point(before.bones[leg[0]], &before.nodes, m.anchor_a);
-            let q = crate::evolution::bone_point(
-                before.bones[m.bone_b as usize],
-                &before.nodes,
-                m.anchor_b,
-            );
-            let torque = (p[0] - j.x) * (q[1] - p[1]) - (p[1] - j.y) * (q[0] - p[0]);
+            let (p, q) = (before.nodes[m.node_a as usize], before.nodes[m.node_b as usize]);
+            let torque = (p.x - j.x) * (q.y - p.y) - (p.y - j.y) * (q.x - p.x);
             assert!(torque * (foot.x - j.x).signum() > 0.0);
         });
         assert!(applied >= 50, "applied {applied}");

@@ -14,8 +14,9 @@
 // counter. The wave is sorted by muscle rounds and has one counter per
 // rounds bucket; every warp starts on one bucket, so its groups run the same
 // round count, and moves to the next bucket up when its own runs dry. Each 1/RATE step is SUBSTEPS substeps. A substep is one
-// articulated-body pass with the muscles, gravity, wind, drag and water, a
-// contact solve of at most MAXC contacts by projected Gauss-Seidel on the
+// articulated-body pass with the muscles (node to node, an activation
+// trapezoid, one stamina store per creature), gravity, wind, drag and water,
+// a contact solve of at most MAXC contacts by projected Gauss-Seidel on the
 // exact contact-space matrix, the contact response, semi-implicit Euler, a
 // momentum balance and, without contact, the first-law check.
 //
@@ -30,7 +31,7 @@
 #define HS (1.0f / (RATE * SUBSTEPS))
 #define INV_HS (RATE * SUBSTEPS)
 #define LF 12u
-#define MF 16u
+#define MUSCLE_DAMPER 0.15f
 #define RMAX 4
 #define MAXC 4
 #define PI_F 3.14159265359f
@@ -183,14 +184,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     // lane), the children's articulated inertias and biases (three per
     // lane), the walkers' torques at each joint (two per lane).
     __shared__ float4 scatter[BLOCK / 32][96];
-    // Per-muscle state (energy store, rhythm offset, force of the substep) of
-    // each lane's muscles, and each group's behavior totals: touched once per
-    // round or per step, so they wait in shared memory instead of registers.
-    __shared__ float s_en[RMAX][BLOCK];
-    __shared__ float s_off[RMAX][BLOCK];
+    // The force of the substep of each lane's muscles, and each group's
+    // behavior totals: touched once per round or per step, so they wait in
+    // shared memory instead of registers.
     __shared__ float s_mag[RMAX][BLOCK];
-    // The waveform at the last substep, or -1 when it must be computed.
-    __shared__ float s_wp[RMAX][BLOCK];
     __shared__ Result s_mt[BLOCK / W];
     __shared__ uint4 s_bits[BLOCK / W];
     // Each lane's joint after the articulated-body pass (pivot arm, 1 / d,
@@ -229,6 +226,12 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     unsigned cidx = 0u, nn = 0u, depth = 0u, rounds = 0u, ew = 0u, nmus = 0u, mbase = 0u, ebase = 0u;
     unsigned step = 0u;
     float amp = 0.0f, qphase = 0.0f, inv_mass = 0.0f, inv_nodes = 0.0f;
+    // The creature's stamina store (the same in every lane of the group), the
+    // inverse of its capacity in joules, the time of this lane's node's last
+    // touchdown (-1: none yet), and the square of the rate of this lane's
+    // joint ligament (0: an inelastic stop) with the spring's stiffness it
+    // has in the substep (the joint's inertia times that).
+    float stam = 1.0f, inv_cap = 0.0f, tdn = -1.0f, lig2 = 0.0f, lig_k = 0.0f;
     // This lane's node and bone.
     float m = 0.0f, rad = 0.0f, fric = 0.0f, len = 0.0f, lo = 0.0f, hi = 0.0f, prad = 0.0f, hm = 0.0f;
     unsigned topo = 0u, mnode = 0u;
@@ -236,9 +239,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     // angle on lane 1); the head's position and velocity are lane 0's node
     // position and velocity.
     float q = 0.0f, qd = 0.0f;
-    float tpull[RMAX];
 #pragma unroll
-    for (int r = 0; r < RMAX; r++) { s_en[r][tid] = 1.0f; s_off[r][tid] = 0.0f; s_mag[r][tid] = 0.0f; s_wp[r][tid] = -1.0f; tpull[r] = 0.0f; }
+    for (int r = 0; r < RMAX; r++) { s_mag[r][tid] = 0.0f; }
     // Kinematics: absolute angle and rate, node and pivot position and velocity.
     float th = 0.0f, om = 0.0f, px = 0.0f, py = 0.0f, vx = 0.0f, vy = 0.0f;
     float ppx = 0.0f, ppy = 0.0f, pvx = 0.0f, pvy = 0.0f;
@@ -358,6 +360,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 mbase = h0.w;
                 ebase = h1.x;
                 inv_mass = __uint_as_float(h1.z);
+                inv_cap = __uint_as_float(h1.w) * p.inv_muscle_energy;
                 inv_nodes = 1.0f / (float)nn;
 #if QUAKE
                 qphase = (float)(h0.z & 0xffffu) * (1.0f / 65536.0f);
@@ -380,6 +383,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 s_anc[tid] = rec[10u * W];
                 mnode = rec[11u * W];
                 hm = lg == 1u ? s7 : 0.0f;
+                lig2 = lg >= 2u ? s7 : 0.0f;
                 if (lg == 0u) {
                     px = s6; py = s7; vx = 0.0f; vy = 0.0f; q = 0.0f;
                 } else {
@@ -387,8 +391,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 }
                 qd = 0.0f;
                 th = 0.0f; om = 0.0f;
+                stam = 1.0f; tdn = -1.0f; lig_k = 0.0f;
 #pragma unroll
-                for (int r = 0; r < RMAX; r++) { s_en[r][tid] = 1.0f; s_off[r][tid] = 0.0f; s_mag[r][tid] = 0.0f; s_wp[r][tid] = -1.0f; tpull[r] = 0.0f; }
+                for (int r = 0; r < RMAX; r++) { s_mag[r][tid] = 0.0f; }
                 reset_metrics();
                 rec_n = 0.0f; rec_t = 0.0f;
                 step = 0u;
@@ -401,7 +406,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             } else {
                 exhausted = true;
                 nn = 0u; depth = 0u; rounds = 0u; ew = 0u; nmus = 0u;
-                m = 0.0f; rad = 0.0f; fric = 0.0f; len = 0.0f; hm = 0.0f; topo = 0u;
+                m = 0.0f; rad = 0.0f; fric = 0.0f; len = 0.0f; hm = 0.0f; topo = 0u; lig2 = 0.0f;
                 inv_mass = 0.0f; inv_nodes = 0.0f;
                 q = 0.0f; qd = 0.0f;
             }
@@ -460,7 +465,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             for (int r = 0; r < RMAX; r++) {
                 const unsigned mi = (unsigned)r * W + lg;
                 if (write && (unsigned)r < rounds && mi < nmus) {
-                    frames[fb + W + mi] = make_float2(s_en[r][tid], s_mag[r][tid] + tpull[r]);
+                    frames[fb + W + mi] = make_float2(stam, s_mag[r][tid]);
                 }
             }
             const bool broken = body && lg >= 2u && (q < lo - JOINT_BREAK || q > hi + JOINT_BREAK);
@@ -530,25 +535,23 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                             if ((unsigned)r >= maxrounds) { break; }
                             const unsigned mi = (unsigned)r * W + lg;
                             const bool mon = (unsigned)r < rounds && mi < nmus;
-                            const float4* mrec = reinterpret_cast<const float4*>(muscles + mbase) + mi * 4u;
+                            const float4* mrec = reinterpret_cast<const float4*>(muscles + mbase) + mi * 2u;
                             const float4 f0 = mon ? mrec[0] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
                             const unsigned packed = __float_as_uint(f0.x);
                             const unsigned la = packed & 31u;
                             const unsigned lb = (packed >> 5u) & 31u;
                             const float4 ea = s_t0[gtid + la], eb = s_t0[gtid + lb];
-                            const float a_px = ea.x, a_py = ea.y, a_qx = ea.z, a_qy = ea.w;
-                            const float b_px = eb.x, b_py = eb.y, b_qx = eb.z, b_qy = eb.w;
                             if (mon) {
-                                const float4 f3 = mrec[3];
-                                const float anchor_a = f0.y, anchor_b = f0.z;
-                                const float tendon_k = f3.z, slack = f3.w;
-                                const float pax = a_qx + (a_px - a_qx) * anchor_a, pay = a_qy + (a_py - a_qy) * anchor_a;
-                                const float pbx = b_qx + (b_px - b_qx) * anchor_b, pby = b_qy + (b_py - b_qy) * anchor_b;
-                                const float dx = pbx - pax, dy = pby - pay;
-                                const float length_m = sqrtf(dx * dx + dy * dy);
-                                const float stretch = fmaxf(length_m - slack, 0.0f);
-                                ledger += 0.5f * tendon_k * stretch * stretch + s_mag[r][tid] * length_m;
+                                const float dx = eb.x - ea.x, dy = eb.y - ea.y;
+                                ledger += s_mag[r][tid] * sqrtf(dx * dx + dy * dy);
                             }
+                        }
+                        if (lig_k > 0.0f) {
+                            // The ligament's store at the end of the substep.
+                            const float pen = fmaxf(q - hi, 0.0f) + fminf(q - lo, 0.0f);
+                            const float store = 0.5f * lig_k * pen * pen;
+                            ledger += store;
+                            scale += store;
                         }
                         if (valid) {
                             ledger += 0.5f * m * (vx * vx + vy * vy) + m * p.gravity * py;
@@ -582,7 +585,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             s_t1[tid] = make_float4(vx, vy, pvx, pvy);
             // The first muscle round's first record, fetched early.
             float4 pf0 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-            if (0u < rounds && lg < nmus) { pf0 = reinterpret_cast<const float4*>(muscles + mbase)[lg * 4u]; }
+            if (0u < rounds && lg < nmus) { pf0 = reinterpret_cast<const float4*>(muscles + mbase)[lg * 2u]; }
             __syncwarp();
             const float ts = t_now + (float)sub * HS;
             const float ox = shf(px, 0u);
@@ -686,78 +689,58 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 }
             }
             PROF(4);
-            // Muscles, W at a time: each muscle lane pulls its two bones' ends,
-            // writes its forces on both bones to shared memory, and each bone
-            // lane gathers the forces of the muscle ends it carries.
+            // Muscles, W at a time: each muscle lane pulls its two nodes, writes
+            // the forces on both to shared memory, and each body lane gathers
+            // the forces of the muscle ends it carries. A muscle has no state:
+            // its activation is a trapezoid of the time (since the last
+            // touchdown of its sensor), and the creature's stamina scales every
+            // muscle's force. The work of all the muscles drains the stamina.
             vec3 fm = v3(0.0f, 0.0f, 0.0f);
+            float pw = 0.0f;
 #pragma unroll
             for (int r = 0; r < RMAX; r++) {
                 if ((unsigned)r >= maxrounds) { break; }
                 const unsigned mi = (unsigned)r * W + lg;
                 const bool mon = (unsigned)r < rounds && mi < nmus;
-                const float4* mrec = reinterpret_cast<const float4*>(muscles + mbase) + mi * 4u;
+                const float4* mrec = reinterpret_cast<const float4*>(muscles + mbase) + mi * 2u;
                 const float4 f0 = pf0;
                 {
                     const unsigned nx = (unsigned)(r + 1) * W + lg;
                     pf0 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-                    if ((unsigned)(r + 1) < rounds && nx < nmus) { pf0 = mrec[4u * W]; }
+                    if ((unsigned)(r + 1) < rounds && nx < nmus) { pf0 = mrec[2u * W]; }
                 }
                 const unsigned packed = __float_as_uint(f0.x);
                 const unsigned la = packed & 31u;
                 const unsigned lb = (packed >> 5u) & 31u;
+                const unsigned ls = (packed >> 10u) & 31u;
                 const float4 ea = s_t0[gtid + la], eb = s_t0[gtid + lb];
                 const float4 fa_ = s_t1[gtid + la], fb_ = s_t1[gtid + lb];
-                const float a_px = ea.x, a_py = ea.y, a_qx = ea.z, a_qy = ea.w;
-                const float a_vx = fa_.x, a_vy = fa_.y, a_wx = fa_.z, a_wy = fa_.w;
-                const float b_px = eb.x, b_py = eb.y, b_qx = eb.z, b_qy = eb.w;
-                const float b_vx = fb_.x, b_vy = fb_.y, b_wx = fb_.z, b_wy = fb_.w;
+                // The touchdown time of the node this muscle senses.
+                const float td = shf(tdn, ls);
                 float4 fa = make_float4(0.0f, 0.0f, 0.0f, 0.0f), fb = fa;
                 if (mon) {
-                    const float4 f1 = mrec[1], f2 = mrec[2], f3 = mrec[3];
-                    const float anchor_a = f0.y, anchor_b = f0.z, mamp = f0.w;
-                    const float hill = f1.x, inv_period = f1.y, phase = f1.z, duty = f1.w;
-                    const float stiffness = f2.x, inv_duty = f2.y, inv_complement = f2.z;
-                    const float cap = f3.x;
-                    const float inv_capacity = f3.y * p.inv_muscle_energy;
-                    const float tendon_k = f3.z, slack = f3.w;
-                    const float pax = a_qx + (a_px - a_qx) * anchor_a, pay = a_qy + (a_py - a_qy) * anchor_a;
-                    const float vax = a_wx + (a_vx - a_wx) * anchor_a, vay = a_wy + (a_vy - a_wy) * anchor_a;
-                    const float pbx = b_qx + (b_px - b_qx) * anchor_b, pby = b_qy + (b_py - b_qy) * anchor_b;
-                    const float vbx = b_wx + (b_vx - b_wx) * anchor_b, vby = b_wy + (b_vy - b_wy) * anchor_b;
-                    const float dx = pbx - pax, dy = pby - pay;
+                    const float4 f1 = mrec[1];
+                    const float cap = f0.y, hill = f0.z, inv_period = f0.w;
+                    const float phase = f1.x, half = f1.y, inv_ramp = f1.z, reset = f1.w;
+                    const float dx = eb.x - ea.x, dy = eb.y - ea.y;
                     const float length_m = fmaxf(sqrtf(dx * dx + dy * dy), 1e-6f);
                     const float inverse = 1.0f / length_m;
                     const float dirx = dx * inverse, diry = dy * inverse;
-                    const float relative = (vbx - vax) * dirx + (vby - vay) * diry;
-                    // The waveform's shortening speed over the substep; the
-                    // waveform at the substep's start is kept from the last one.
-                    const float w_now = wave(ts, inv_period, phase, s_off[r][tid], duty, inv_duty, inv_complement);
-                    float w_prev = s_wp[r][tid];
-                    if (w_prev < 0.0f) {
-                        w_prev = wave(fmaxf(ts - HS, 0.0f), inv_period, phase, s_off[r][tid], duty, inv_duty, inv_complement);
-                    }
-                    s_wp[r][tid] = w_now;
-                    const float target_speed = ts > 0.0f ? mamp * (w_now - w_prev) * INV_HS : 0.0f;
-                    float drive = limp ? 0.0f : fmaxf(-target_speed * stiffness * 0.25f, 0.0f) * s_en[r][tid];
-                    if (hill > 0.0f) {
-                        drive *= clampf(1.0f + relative * hill, 0.0f, 1.0f);
-                    }
-                    const float magnitude = clampf(drive + relative * 0.15f, -cap, cap);
-                    const float work = fminf(drive, cap) * fmaxf(-relative, 0.0f) * HS;
-                    s_en[r][tid] = clampf(s_en[r][tid] - work * inv_capacity
-                        + MUSCLE_RECOVERY * p.muscle_recovery * HS * (1.0f - s_en[r][tid]), 0.0f, 1.0f);
+                    const float relative = (fb_.x - fa_.x) * dirx + (fb_.y - fa_.y) * diry;
+                    const bool sensed = ((packed >> 15u) & 1u) != 0u && td >= 0.0f;
+                    const float x = sensed ? (ts - td) * inv_period + reset : ts * inv_period + phase;
+                    const float ph = x - floorf(x);
+                    const float act = limp ? 0.0f : clampf((half - fabsf(ph - half)) * inv_ramp, 0.0f, 1.0f);
+                    const float drive = cap * act * stam * clampf(1.0f + relative * hill, 0.0f, 1.0f);
+                    const float magnitude = clampf(drive + relative * MUSCLE_DAMPER, -cap, cap);
+                    pw += drive * fmaxf(-relative, 0.0f);
                     s_mag[r][tid] = magnitude;
-                    const float stretch = fmaxf(length_m - slack, 0.0f);
-                    const float tendon = tendon_k * stretch;
-                    tpull[r] = tendon;
                     // First law: the muscle's work is its force times its
-                    // shortening; the tendon's store counts as energy.
-                    ledger -= magnitude * length_m + 0.5f * tendon * stretch;
-                    scale += 0.5f * tendon * stretch;
-                    const float pull = magnitude + tendon;
-                    const float fx = dirx * pull, fy = diry * pull;
-                    const vec3 ga = force_at(pax - ox, pay - oy, fx, fy);
-                    const vec3 gb = force_at(pbx - ox, pby - oy, fx, fy);
+                    // shortening.
+                    ledger -= magnitude * length_m;
+                    const float fx = dirx * magnitude, fy = diry * magnitude;
+                    const vec3 ga = force_at(ea.x - ox, ea.y - oy, fx, fy);
+                    const vec3 gb = force_at(eb.x - ox, eb.y - oy, fx, fy);
                     fa = make_float4(ga.x, ga.y, ga.z, 0.0f);
                     fb = make_float4(-gb.x, -gb.y, -gb.z, 0.0f);
                 }
@@ -777,6 +760,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 }
                 __syncwarp();
             }
+            // The stamina pays the work of every muscle and recovers a share
+            // of what is missing.
+            stam = clampf(stam - gsum(pw) * HS * inv_cap
+                + MUSCLE_RECOVERY * p.muscle_recovery * HS * (1.0f - stam), 0.0f, 1.0f);
             bs -= fm;
 
             PROF(5);
@@ -795,19 +782,36 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 const float predicted = q + HS * qd;
                 const bool upper = predicted > hi;
                 if (upper || predicted < lo) {
-                    const float room = upper ? hi - q : lo - q;
-                    const bool past = (room < 0.0f) == upper;
-                    const float goal = (past ? room * PUSH_OUT : room) * INV_HS;
-                    if ((qd > goal) == upper) {
-                        jg += LIMIT_HARDNESS * jf * INV_HS * (qd - goal);
-                        jf *= 1.0f + LIMIT_HARDNESS;
+                    if (lig2 > 0.0f) {
+                        // A ligament: the stop is an implicit spring and damper
+                        // on the joint's own inertia, storing the energy driven
+                        // into it and giving it back.
+                        const float pen = predicted - (upper ? hi : lo);
+                        const float cd = (2.0f * LIGAMENT_DAMPING) * sqrtf(lig2);
+                        jg += cd * qd + lig2 * pen;
+                        jf += cd * HS + lig2 * HS * HS;
+                    } else {
+                        const float room = upper ? hi - q : lo - q;
+                        const bool past = (room < 0.0f) == upper;
+                        const float goal = (past ? room * PUSH_OUT : room) * INV_HS;
+                        if ((qd > goal) == upper) {
+                            jg += LIMIT_HARDNESS * jf * INV_HS * (qd - goal);
+                            jf *= 1.0f + LIMIT_HARDNESS;
+                        }
                     }
                 }
             }
+            lig_k = 0.0f;
             for (unsigned L = maxlev; L >= 2u; L--) {
                 if (lvl == L) {
                     const vec3 uv = sym_mul(i0, i1, axis);
                     const float d = sdot(axis, uv);
+                    if (lig2 > 0.0f) {
+                        // The store of the ligament at the substep's start.
+                        const float pen = fmaxf(q - hi, 0.0f) + fminf(q - lo, 0.0f);
+                        lig_k = d * lig2;
+                        ledger -= 0.5f * lig_k * pen * pen;
+                    }
                     const float u = -d * jg - sdot(axis, bs);
                     const float di = 1.0f / (d * jf);
                     uvs = uv; dis = di; uus = u;
@@ -1157,27 +1161,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             lift_bits |= contact_bits & lifted;
             const unsigned down = now & ~ground_bits;
             ground_bits = now;
-            // Touchdowns restart the rhythm of the muscles that sense them.
-            if (down != 0u && step > 0u) {
-                const float next = t_now + DT;
-#pragma unroll
-                for (int r = 0; r < RMAX; r++) {
-                    const unsigned mi = (unsigned)r * W + lg;
-                    if ((unsigned)r < rounds && mi < nmus) {
-                        const float4* mrec = reinterpret_cast<const float4*>(muscles + mbase) + mi * 4u;
-                        const unsigned packed = __float_as_uint(mrec[0].x);
-                        if ((packed >> 15u) & 1u) {
-                            const unsigned sensor = (packed >> 10u) & 31u;
-                            if ((down >> sensor) & 1u) {
-                                const float4 f1 = mrec[1];
-                                const float clock = next * f1.y + f1.z;
-                                const float x = mrec[2].w - clock;
-                                s_off[r][tid] = x - floorf(x);
-                                s_wp[r][tid] = -1.0f;
-                            }
-                        }
-                    }
-                }
+            // A touchdown restarts the rhythm of the muscles that sense that
+            // node, from the next step.
+            if (((down >> lg) & 1u) != 0u && step > 0u) {
+                tdn = t_now + DT;
             }
             {
                 const float dvx = shf(vx, 0u) - head_vx0, dvy = shf(vy, 0u) - head_vy0;

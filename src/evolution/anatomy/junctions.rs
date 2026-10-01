@@ -1,7 +1,7 @@
 //! Operators that restructure junctions and segments of the skeleton.
 use super::{
-    BoneIds, Context, branch, branch_nodes, child_bones, copy_branch, fit_stroke, is_neck,
-    muscles_on, new_muscle, parent_bones, remove_parts, room, span,
+    BoneIds, Context, branch, branch_nodes, child_bones, copy_branch, is_neck, mask_of,
+    muscles_on, new_muscle, parent_bones, paths, remove_parts, room, span_of,
 };
 use crate::config::Config;
 use crate::evolution::{Bone, Bounded, Creature, MAX_MUSCLES, Muscle, NodeGene, Rng};
@@ -39,14 +39,12 @@ pub(crate) fn split_crowded_joint(
         length += c.bones[b].rest_length / moved.len() as f32;
     }
     let offset = scale(unit(toward), (0.3 * length).clamp(0.04, 0.25));
-    let before = spans(c);
     let joint = add_node(c, node, add(pos(c, node), offset));
     add_narrow_bone(c, node, joint, rng);
     for &b in moved {
         c.bones[b].a = joint as u32;
         shift_branch(c, b, offset);
     }
-    keep_strokes(c, &before);
     true
 }
 
@@ -76,28 +74,26 @@ pub(crate) fn merge_branch_joints(
         y
     };
     let (a, b) = (c.bones[bone].a as usize, c.bones[bone].b as usize);
-    let Some(above) = parents[a] else {
+    if parents[a].is_none() {
         return false;
-    };
-    let before = spans(c);
+    }
     let offset = sub(pos(c, a), pos(c, b));
     for &child in &children[b] {
         c.bones[child].a = a as u32;
         shift_branch(c, child, offset);
     }
-    // Ends on the removed bone move to the joint at the tip of the bone
-    // above. A muscle that then joins that bone to itself goes.
+    // Ends on the removed node move to the joint at the tip of the bone
+    // above. A muscle that then joins that node to itself or to a node a
+    // bone away goes with `repair`.
     for m in &mut c.muscles {
-        if m.bone_a as usize == bone {
-            m.bone_a = above as u32;
-            m.anchor_a = 1.0;
+        if m.node_a as usize == b {
+            m.node_a = a as u32;
         }
-        if m.bone_b as usize == bone {
-            m.bone_b = above as u32;
-            m.anchor_b = 1.0;
+        if m.node_b as usize == b {
+            m.node_b = a as u32;
         }
     }
-    keep_strokes(c, &before);
+    c.muscles.retain(|m| m.node_a != m.node_b);
     remove_parts(c, &[bone], &[b]);
     true
 }
@@ -145,30 +141,31 @@ pub(crate) fn repeat_body_segment(
     }
     let phase = rng.index(4) as f32 * 0.25;
     let offset = sub(pos(c, b), pos(c, a));
-    let before = spans(c);
+    let paths = paths(c);
+    let above_top = c.bones[above].a;
     // The copy continues the trunk bone in the same direction.
     let node = add_node(c, b, add(pos(c, b), offset));
-    let copy = c.bones.len();
     c.bones.push(Bone {
         a: b as u32,
         b: node as u32,
         ..c.bones[trunk]
     });
     // Muscles across the trunk's upper joint get a copy across the new one.
-    for i in 0..c.muscles.len() {
+    let upper = mask_of(&[trunk, above]);
+    let old_count = c.muscles.len();
+    for i in 0..old_count {
         let m = c.muscles[i];
-        let ends = (m.bone_a as usize, m.bone_b as usize);
-        if ends != (trunk, above) && ends != (above, trunk) {
+        if span_of(&paths, &m) != upper {
             continue;
         }
-        let map = |x: u32| (if x as usize == trunk { copy } else { trunk }) as u32;
-        let mut new = Muscle {
-            bone_a: map(m.bone_a),
-            bone_b: map(m.bone_b),
+        // Its ends are the top of the bone above and the trunk's tip; the
+        // copy runs from the trunk's top to the copy's tip.
+        let new = Muscle {
+            node_a: if m.node_a == above_top { a as u32 } else { node as u32 },
+            node_b: if m.node_b == above_top { a as u32 } else { node as u32 },
             phase: (m.phase + phase).rem_euclid(1.0),
             ..m
         };
-        fit_stroke(c, &mut new, Some(&m));
         c.muscles.push(new);
     }
     // The rest of the body below the trunk now hangs from the copy, and the
@@ -179,25 +176,28 @@ pub(crate) fn repeat_body_segment(
         }
         c.bones[child].a = node as u32;
         shift_branch(c, child, offset);
-        for m in &mut c.muscles {
-            if m.bone_a as usize == trunk && m.bone_b as usize == child {
-                m.bone_a = copy as u32;
-            }
-            if m.bone_b as usize == trunk && m.bone_a as usize == child {
-                m.bone_b = copy as u32;
+        let joint = mask_of(&[trunk, child]);
+        for m in &mut c.muscles[..old_count] {
+            // Across the trunk and this child before: from the trunk's top
+            // to the child's tip, and now from the trunk's tip.
+            if span_of(&paths, m) == joint {
+                if m.node_a == a as u32 {
+                    m.node_a = b as u32;
+                } else if m.node_b == a as u32 {
+                    m.node_b = b as u32;
+                }
             }
         }
     }
     for &limb in &limbs {
         copy_branch(c, cfg, limb, node, |p| add(p, offset), false, phase);
     }
-    keep_strokes(c, &before);
     true
 }
 
 /// Turns a limb tip into a heel and a toe: two short bones from the tip, one
 /// pointing forward and one back, with their own joint ranges and a muscle
-/// from each to the tip bone.
+/// from each to the top of the tip bone.
 pub(crate) fn grow_heel_toe(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let children = child_bones(c);
     let parents = parent_bones(c);
@@ -218,9 +218,10 @@ pub(crate) fn grow_heel_toe(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: 
         let length = (rng.range(0.2, 0.5) * c.bones[leg].rest_length).max(0.04);
         let at = add(pos(c, tip), [direction * length, 0.0]);
         let node = add_node(c, tip, at);
-        let bone = add_narrow_bone(c, tip, node, rng);
-        let anchors = (rng.range(0.3, 1.0), rng.range(0.3, 0.9));
-        let m = new_muscle(c, bone, leg, anchors, template.as_ref(), rng);
+        add_narrow_bone(c, tip, node, rng);
+        // From the toe or heel to the top of the leg bone: across its joint
+        // and the leg's own.
+        let m = new_muscle(node, c.bones[leg].a as usize, template.as_ref(), rng);
         c.muscles.push(m);
     }
     true
@@ -250,14 +251,20 @@ pub(crate) fn grow_lever_spur(
     let at_joint: BoneIds = std::iter::once(above)
         .chain(children[joint].iter().copied())
         .collect();
-    // Muscle ends on a bone at the joint: (muscle, whether it is end a).
+    // Muscle ends on a node of a bone at the joint (but never one that would
+    // join the spur to the joint itself): (muscle, whether it is end a).
     let ends: Bounded<(usize, bool), { 2 * MAX_MUSCLES }> = c
         .muscles
         .iter()
         .enumerate()
-        .flat_map(|(i, m)| [(i, true, m.bone_a), (i, false, m.bone_b)])
-        .filter(|&(_, _, bone)| at_joint.contains(&(bone as usize)))
-        .map(|(i, first, _)| (i, first))
+        .flat_map(|(i, m)| [(i, true, m.node_a, m.node_b), (i, false, m.node_b, m.node_a)])
+        .filter(|&(_, _, node, other)| {
+            other as usize != joint
+                && at_joint
+                    .iter()
+                    .any(|&b| c.bones[b].a == node || c.bones[b].b == node)
+        })
+        .map(|(i, first, _, _)| (i, first))
         .collect();
     if ends.is_empty() {
         return false;
@@ -272,24 +279,20 @@ pub(crate) fn grow_lever_spur(
         along[0] * sin + along[1] * cos,
     ];
     let length = (rng.range(0.15, 0.35) * c.bones[above].rest_length).clamp(0.04, 0.3);
-    let before = spans(c);
     let node = add_node(c, joint, add(pos(c, joint), scale(direction, length)));
-    let spur = add_narrow_bone(c, joint, node, rng) as u32;
+    add_narrow_bone(c, joint, node, rng);
     let m = &mut c.muscles[muscle];
     if first {
-        m.bone_a = spur;
-        m.anchor_a = 1.0;
+        m.node_a = node as u32;
     } else {
-        m.bone_b = spur;
-        m.anchor_b = 1.0;
+        m.node_b = node as u32;
     }
-    keep_strokes(c, &before);
     true
 }
 
 /// Reflects a branch across the line of its root bone and swaps and negates
-/// the joint limits inside it, so the limb bends the other way. Anchors along
-/// bones stay, so its muscles keep their roles.
+/// the joint limits inside it, so the limb bends the other way. Muscles stay
+/// on their nodes, so they keep their roles.
 pub(crate) fn reverse_bend(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let children = child_bones(c);
     // The root bone lies on the mirror line and keeps its joint, so a branch
@@ -304,7 +307,6 @@ pub(crate) fn reverse_bend(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: 
     let bones = branch(c, root);
     let origin = pos(c, c.bones[root].a as usize);
     let line = unit(sub(pos(c, c.bones[root].b as usize), origin));
-    let before = spans(c);
     for node in branch_nodes(c, &bones[1..]) {
         let v = sub(pos(c, node), origin);
         let along = v[0] * line[0] + v[1] * line[1];
@@ -318,7 +320,6 @@ pub(crate) fn reverse_bend(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: 
         let bone = &mut c.bones[j];
         (bone.min_angle, bone.max_angle) = (-bone.max_angle, -bone.min_angle);
     }
-    keep_strokes(c, &before);
     true
 }
 
@@ -375,22 +376,6 @@ fn shift_branch(c: &mut Creature, bone: usize, offset: [f32; 2]) {
     for node in branch_nodes(c, &branch(c, bone)) {
         c.nodes[node].x += offset[0];
         c.nodes[node].y += offset[1];
-    }
-}
-
-/// Every muscle's span in the pose.
-fn spans(c: &Creature) -> Bounded<f32, MAX_MUSCLES> {
-    c.muscles.iter().map(|m| span(c, m)).collect()
-}
-
-/// Scales the stroke of each muscle that existed when `before` was taken by
-/// how much its span changed since, so it pulls as it did in the old pose.
-fn keep_strokes(c: &mut Creature, before: &[f32]) {
-    let after = spans(c);
-    for ((m, old), new) in c.muscles.iter_mut().zip(before).zip(after) {
-        let ratio = new.max(0.05) / old.max(0.05);
-        m.short *= ratio;
-        m.long *= ratio;
     }
 }
 
@@ -510,14 +495,10 @@ mod tests {
             assert!(child_bones(before)[tip].is_empty(), "a former leaf");
             assert!(pos(c, toe.b as usize)[0] > pos(c, tip)[0]);
             assert!(pos(c, heel.b as usize)[0] < pos(c, tip)[0]);
-            let leg = parent_bones(c)[tip].unwrap() as u32;
+            let leg = parent_bones(c)[tip].unwrap();
             for bone in [n - 2, n - 1] {
-                let bone = bone as u32;
-                assert!(
-                    c.muscles
-                        .iter()
-                        .any(|m| m.bone_a == bone && m.bone_b == leg)
-                );
+                let (toe, top) = (c.bones[bone].b, c.bones[leg].a);
+                assert!(c.muscles.iter().any(|m| m.node_a == toe && m.node_b == top));
             }
             assert!(all_fit(c));
         });
@@ -530,24 +511,17 @@ mod tests {
         let applied = run(grow_lever_spur, |before, c| {
             assert_eq!(c.nodes.len(), before.nodes.len() + 1);
             assert_eq!(c.muscles.len(), before.muscles.len());
-            let spur = (c.bones.len() - 1) as u32;
-            let bone = c.bones[spur as usize];
+            let bone = *c.bones.last().unwrap();
+            let tip = bone.b;
             assert!(-0.4 <= bone.min_angle && bone.max_angle <= 0.4);
             assert!(!child_bones(before)[bone.a as usize].is_empty());
-            let on_spur: Vec<f32> = c
+            // One muscle end sits on the spur's tip, and only that one.
+            let on_spur = c
                 .muscles
                 .iter()
-                .filter_map(|m| {
-                    if m.bone_a == spur {
-                        Some(m.anchor_a)
-                    } else if m.bone_b == spur {
-                        Some(m.anchor_b)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            assert_eq!(on_spur, vec![1.0]);
+                .map(|m| usize::from(m.node_a == tip) + usize::from(m.node_b == tip))
+                .sum::<usize>();
+            assert_eq!(on_spur, 1);
             assert!(all_fit(c));
         });
         eprintln!("grow_lever_spur: {applied} of 160");

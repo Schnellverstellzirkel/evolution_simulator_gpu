@@ -55,15 +55,15 @@ fn main() -> anyhow::Result<()> {
     println!(
         "rank  archive_m replay_m nodes muscles kg  fell_s  contact_free%  max_ground_N  min_store  broken_steps%"
     );
-    let (mut tendon_muscles, mut all_muscles) = (0usize, 0usize);
+    let (mut ligament_bones, mut all_bones) = (0usize, 0usize);
     let mut replayed = 0usize;
     for k in 0..count {
         let rank = (elites.len() - 1) * k / (count - 1).max(1);
         let (archive_m, c) = &elites[rank];
         let recording = common::record(c, &cfg)?;
         let mass: f32 = physics::nodes(c).iter().map(|n| n.mass).sum();
-        all_muscles += c.muscles.len();
-        tendon_muscles += c.muscles.iter().filter(|m| m.tendon > 0.0).count();
+        all_bones += c.bones.len();
+        ligament_bones += c.bones.iter().filter(|b| b.ligament > 0.0).count();
         let (mut free, mut broken_steps, mut steps) = (0usize, 0usize, 0usize);
         let (mut max_ground, mut min_store) = (0.0f32, 1.0f32);
         if let Some(forces) = &recording.forces {
@@ -115,8 +115,8 @@ fn main() -> anyhow::Result<()> {
     }
     println!("replayed {replayed} elites");
     println!(
-        "muscles with an elastic tendon: {tendon_muscles} of {all_muscles} ({:.0}%)",
-        100.0 * tendon_muscles as f64 / all_muscles.max(1) as f64
+        "bones with a ligament: {ligament_bones} of {all_bones} ({:.0}%)",
+        100.0 * ligament_bones as f64 / all_bones.max(1) as f64
     );
     Ok(())
 }

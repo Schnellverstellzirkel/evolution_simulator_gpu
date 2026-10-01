@@ -8,15 +8,28 @@
 //! per other bone. Node positions follow from forward kinematics, so bones
 //! keep their exact lengths and a pose is valid by construction.
 //! `docs/physics.md` describes the dynamics the kernel runs.
-use crate::{
-    config::Config,
-    evolution::{Creature, NO_SENSOR},
-    physics,
-};
+use crate::{config::Config, evolution::Creature, physics};
 
 /// How firmly a joint limit holds: its damper weighs this many times the
 /// joint's inertia per step.
 pub(crate) const LIMIT_HARDNESS: f32 = 20.0;
+/// A joint's ligament (the bone's `ligament` gene) turns its stop into a
+/// spring that stores the energy of the motion into the stop and gives it
+/// back. The spring's rate runs from `LIGAMENT_STIFFEST` rad/s at a gene
+/// just above 0 down to `LIGAMENT_SOFTEST` rad/s at 1, with a damping ratio
+/// of `LIGAMENT_DAMPING`. A gene of 0 is the inelastic stop. The rates are
+/// per second, so a finer substep sees the same spring.
+pub const LIGAMENT_STIFFEST: f32 = 120.0;
+pub const LIGAMENT_SOFTEST: f32 = 12.0;
+pub const LIGAMENT_DAMPING: f32 = 0.25;
+/// The square of the spring's rate for a ligament gene (0 for none).
+pub fn ligament_rate_squared(gene: f32) -> f32 {
+    if gene <= 0.0 {
+        return 0.0;
+    }
+    let rate = LIGAMENT_STIFFEST + (LIGAMENT_SOFTEST - LIGAMENT_STIFFEST) * gene.min(1.0);
+    rate * rate
+}
 /// Passive joint damping as a time constant (s): every joint resists its
 /// relative rotation like tissue does, with a damper sized to the inertia the
 /// joint moves.
@@ -61,33 +74,29 @@ pub const WATER_BUOYANCY: f32 = 0.7;
 pub(crate) const CONTACT_SLACK: f32 = 0.002;
 pub(crate) const LIFT_CLEARANCE: f32 = 0.01;
 
-/// One muscle's constants.
+/// One muscle's constants. A muscle joins two nodes and pulls only: its
+/// force is the cap times the strength gene, the activation, the creature's
+/// stamina and Hill's factor.
 #[derive(Clone, Debug)]
 pub(crate) struct MuscleModel {
-    pub(crate) bone_a: usize,
-    pub(crate) bone_b: usize,
-    pub(crate) anchor_a: f32,
-    pub(crate) anchor_b: f32,
+    /// The two nodes (record order).
+    pub(crate) node_a: usize,
+    pub(crate) node_b: usize,
     /// Hill's relation as a factor on the shortening speed: 1 / (v_max
-    /// times the muscle's length, at least 5 cm).
+    /// times the muscle's length in the start pose, at least 5 cm).
     pub(crate) hill: f32,
-    /// Longest length (m), where the elastic tendon starts to pull, and the
-    /// tendon's stiffness (N/m; 0 without one).
-    pub(crate) long: f32,
-    pub(crate) tendon_k: f32,
-    pub(crate) amplitude: f32,
     pub(crate) inv_period: f32,
     pub(crate) phase: f32,
     pub(crate) duty: f32,
-    pub(crate) inv_duty: f32,
-    pub(crate) inv_complement: f32,
-    pub(crate) stiffness: f32,
-    /// Force cap and energy store over the fixed `Limits` ones (at most 1):
-    /// see `DRIVEN_ACCELERATION`.
-    pub(crate) strength: f32,
+    pub(crate) reset: f32,
+    /// Force cap (N): the fixed `Limits` cap scaled by the mass the muscle
+    /// drives (`DRIVEN_ACCELERATION`) and the strength gene.
+    pub(crate) cap: f32,
+    /// The muscle's share of the creature's stamina store (J): the fixed
+    /// energy of a muscle scaled by the mass it drives.
+    pub(crate) store: f32,
     /// Node whose touchdown restarts the rhythm, if any.
     pub(crate) sensor: Option<usize>,
-    pub(crate) reset: f32,
 }
 
 /// A creature's constants for the physics. Nodes are renumbered so that
@@ -112,9 +121,9 @@ pub struct Model {
     /// Starting relative angle of every bone (the neck: its absolute angle).
     pub(crate) rest: Vec<f32>,
     pub(crate) muscles: Vec<MuscleModel>,
-    /// Each muscle's force cap and energy store as multiples of the fixed
-    /// `Limits` ones (1 unless muscle strength scales with the body).
-    pub(crate) muscle_scale: f32,
+    /// Per bone: the square of its stop's spring rate (0 for an inelastic
+    /// stop), see `ligament_rate_squared`.
+    pub(crate) ligament: Vec<f32>,
     /// Earthquake bump phase and ground amplitude for this creature.
     pub(crate) quake_phase: f32,
     pub(crate) amplitude: f32,
@@ -183,45 +192,8 @@ impl Model {
             hi.push(relative + b.max_angle);
         }
         let limits = physics::limits();
-        let muscles = c
-            .muscles
-            .iter()
-            .map(|m| {
-                let ba = c.bones[m.bone_a as usize];
-                let bb = c.bones[m.bone_b as usize];
-                let ends = [ba.a, ba.b, bb.a, bb.b];
-                MuscleModel {
-                    bone_a: m.bone_a as usize,
-                    bone_b: m.bone_b as usize,
-                    anchor_a: m.anchor_a,
-                    anchor_b: m.anchor_b,
-                    hill: if hill_speed() > 0.0 {
-                        1.0 / (hill_speed() * m.long.max(0.05))
-                    } else {
-                        0.0
-                    },
-                    long: physics::slack_length(&c.bones, &nodes, m),
-                    tendon_k: 0.0,
-                    amplitude: (m.long - m.short).min(
-                        2.0 * limits.muscle_speed * m.period * m.duty.min(1.0 - m.duty)
-                            / std::f32::consts::PI,
-                    ),
-                    inv_period: 1.0 / m.period,
-                    phase: m.phase,
-                    duty: m.duty,
-                    inv_duty: 1.0 / m.duty,
-                    inv_complement: 1.0 / (1.0 - m.duty),
-                    stiffness: m.stiffness,
-                    strength: 1.0,
-                    sensor: (m.sensor != NO_SENSOR)
-                        .then(|| record[ends[m.sensor as usize] as usize]),
-                    reset: m.reset,
-                }
-            })
-            .collect();
-        // Muscle strength follows the mass a muscle drives: the lighter of the
-        // two subtrees (a bone with everything it carries) it pulls together.
-        let mut muscles: Vec<MuscleModel> = muscles;
+        // The mass each node and everything below it weighs: what a muscle
+        // pulls at. Node `j + 1` is bone `j`'s child; the head weighs it all.
         let mut subtree: Vec<f32> = (0..c.bones.len())
             .map(|j| nodes[order[j + 1]].mass + if j == 0 { nodes[order[0]].mass } else { 0.0 })
             .collect();
@@ -230,18 +202,40 @@ impl Model {
                 subtree[p] += subtree[j];
             }
         }
-        for (m, gene) in muscles.iter_mut().zip(&c.muscles) {
-            let driven = subtree[m.bone_a].min(subtree[m.bone_b]);
-            m.strength = (DRIVEN_ACCELERATION * driven / limits.muscle_force).min(1.0);
-            // The tendon reaches the muscle's force cap when stretched by
-            // `TENDON_STRETCH` of its longest length (at the stiffest gene).
-            m.tendon_k = gene.tendon * limits.muscle_force * m.strength
-                / (crate::evolution::TENDON_STRETCH * m.long.max(0.05));
-        }
+        let carried = |node: usize| {
+            let r = record[node];
+            if r == 0 { nodes.iter().map(|n| n.mass).sum() } else { subtree[r - 1] }
+        };
+        let muscles: Vec<MuscleModel> = c
+            .muscles
+            .iter()
+            .map(|m| {
+                let ends = [m.node_a as usize, m.node_b as usize];
+                let length = physics::muscle_span(&nodes, m);
+                // A muscle's strength follows the mass it drives: the lighter
+                // of the two subtrees it pulls together.
+                let driven = carried(ends[0]).min(carried(ends[1]));
+                let scale = (DRIVEN_ACCELERATION * driven / limits.muscle_force).min(1.0);
+                MuscleModel {
+                    node_a: record[ends[0]],
+                    node_b: record[ends[1]],
+                    hill: if hill_speed() > 0.0 {
+                        1.0 / (hill_speed() * length.max(0.05))
+                    } else {
+                        0.0
+                    },
+                    inv_period: 1.0 / m.period,
+                    phase: m.phase,
+                    duty: m.duty,
+                    reset: m.reset,
+                    cap: limits.muscle_force * scale * m.strength,
+                    store: limits.muscle_energy * scale,
+                    sensor: (m.sensor < 2).then(|| record[ends[m.sensor as usize]]),
+                }
+            })
+            .collect();
         let quake = crate::physics::quake_hash(c.id);
         let still = cfg.quake <= 0.0 || !cfg.ground;
-        // Muscle strength over the fixed limits; 1 for every body today.
-        let muscle_scale = 1.0;
         Model {
             mass: order.iter().map(|&i| nodes[i].mass).collect(),
             radius: order.iter().map(|&i| nodes[i].radius).collect(),
@@ -256,7 +250,7 @@ impl Model {
             hi,
             rest,
             muscles,
-            muscle_scale,
+            ligament: c.bones.iter().map(|b| ligament_rate_squared(b.ligament)).collect(),
             quake_phase: if still {
                 0.0
             } else {

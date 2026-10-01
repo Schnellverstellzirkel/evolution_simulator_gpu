@@ -197,76 +197,56 @@ fn add_bone_masses(bones: &[Bone], nodes: &mut [Node]) {
         }
     }
 }
-/// A muscle's mass: a fixed part plus a part per metre of its slack length.
+/// A muscle's mass: a fixed part plus a part per metre of its length in the
+/// start pose.
 pub const MUSCLE_MASS_BASE: f32 = 0.05;
 pub const MUSCLE_MASS_PER_M: f32 = 1.0;
-/// Distance between a muscle's two attachment points on `nodes`.
-fn muscle_span(bones: &[Bone], nodes: &[Node], m: &Muscle) -> f32 {
-    let point = |bone: u32, t: f32| -> Option<[f32; 2]> {
-        let bone = bones.get(bone as usize)?;
-        let (a, b) = (
-            nodes.get(bone.a as usize)?.pos,
-            nodes.get(bone.b as usize)?.pos,
-        );
-        Some([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t])
-    };
-    match (point(m.bone_a, m.anchor_a), point(m.bone_b, m.anchor_b)) {
-        (Some(p), Some(q)) => ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt(),
+/// Distance between a muscle's two nodes on `nodes` (the start pose).
+pub fn muscle_span(nodes: &[Node], m: &Muscle) -> f32 {
+    match (nodes.get(m.node_a as usize), nodes.get(m.node_b as usize)) {
+        (Some(p), Some(q)) => ((p.pos[0] - q.pos[0]).powi(2) + (p.pos[1] - q.pos[1]).powi(2)).sqrt(),
         _ => 0.0,
     }
 }
-/// Where a muscle's tendon starts to pull: its longest length, or its length
-/// in the start pose when that is longer, so no tendon starts stretched. A
-/// tendon stretched in the start pose was a catapult charged for free: bodies
-/// with a 1 m muscle of 0.01 m longest length launched themselves 5 m in one
-/// step (the owner's 400-generation run, 2026-09-30).
-pub fn slack_length(bones: &[Bone], start: &[Node], m: &Muscle) -> f32 {
-    m.long.max(muscle_span(bones, start, m))
-}
 /// Adds each muscle's mass to the nodes (in the start pose): half at each
-/// attachment, shared by that bone's two nodes in proportion to where the
-/// muscle attaches.
-pub fn add_muscle_masses(bones: &[Bone], muscles: &[Muscle], nodes: &mut [Node]) {
+/// end.
+pub fn add_muscle_masses(muscles: &[Muscle], nodes: &mut [Node]) {
     for m in muscles {
-        let half = 0.5 * (MUSCLE_MASS_BASE + MUSCLE_MASS_PER_M * slack_length(bones, nodes, m));
-        for (bone, t) in [(m.bone_a, m.anchor_a), (m.bone_b, m.anchor_b)] {
-            let Some(bone) = bones.get(bone as usize) else {
-                continue;
-            };
-            let (a, b) = (bone.a as usize, bone.b as usize);
-            if a >= nodes.len() || b >= nodes.len() {
-                continue;
+        let half = 0.5 * (MUSCLE_MASS_BASE + MUSCLE_MASS_PER_M * muscle_span(nodes, m));
+        for node in [m.node_a, m.node_b] {
+            if let Some(node) = nodes.get_mut(node as usize) {
+                node.mass += half;
             }
-            let t = t.clamp(0.0, 1.0);
-            nodes[a].mass += half * (1.0 - t);
-            nodes[b].mass += half * t;
         }
     }
 }
 /// A creature's nodes with the masses of its bones, organs and muscles.
 pub fn nodes(c: &Creature) -> Vec<Node> {
     let mut nodes = body(&c.nodes, &c.bones);
-    add_muscle_masses(&c.bones, &c.muscles, &mut nodes);
+    add_muscle_masses(&c.muscles, &mut nodes);
     nodes
 }
-pub fn target(m: &Muscle, time: f32) -> f32 {
-    let phase = (time / m.period + m.phase).fract();
-    let wave = if phase < m.duty {
-        0.5 + 0.5 * (std::f32::consts::PI * phase / m.duty).cos()
-    } else {
-        0.5 - 0.5 * (std::f32::consts::PI * (phase - m.duty) / (1.0 - m.duty)).cos()
-    };
-    m.short + (m.long - m.short) * wave
+/// The ramp on each edge of a muscle's activation (s): one step, which is
+/// two substeps at the shipped count. A fixed time, so a finer substep
+/// retests the same muscle.
+pub fn muscle_ramp() -> f32 {
+    dt()
 }
-pub(crate) fn limited_target(m: &Muscle, time: f32) -> f32 {
-    // Bound the slope of the entire waveform. Clamping each frame against the
-    // previous *raw* target allowed the target to jump on the next frame.
-    let amplitude = (m.long - m.short).min(
-        2.0 * limits().muscle_speed * m.period * m.duty.min(1.0 - m.duty) / std::f32::consts::PI,
-    );
-    let mut limited = *m;
-    limited.short = m.long - amplitude;
-    target(&limited, time)
+/// A muscle's activation at `time` (0 to 1): a trapezoid of its period,
+/// phase and duty with a ramp on each edge. Its clock restarts at `since`
+/// (the time of its sensor's last touchdown) with the `reset` phase; without
+/// one, `since` is 0 and the clock starts at `phase`. The kernel
+/// computes the same thing.
+pub fn activation(m: &Muscle, time: f32, since: Option<f32>) -> f32 {
+    let (origin, phase) = match since {
+        Some(t) => (t, m.reset),
+        None => (0.0, m.phase),
+    };
+    let x = (time - origin) / m.period + phase;
+    let ph = x - x.floor();
+    let rp = muscle_ramp() / m.period;
+    let c = (m.duty + rp).min(1.0) * 0.5;
+    ((c - (ph - c).abs()) / rp).clamp(0.0, 1.0)
 }
 /// Joint range constraint for one bone, precomputed from the genome. The bone
 /// turns about its parent node `a` against a reference bone that shares that

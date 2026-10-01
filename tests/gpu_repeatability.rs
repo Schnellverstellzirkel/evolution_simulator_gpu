@@ -290,19 +290,14 @@ fn breaking_chain(variant: usize) -> evolution::Creature {
         .collect();
     let muscles = (1..bones.len())
         .map(|i| Muscle {
-            bone_a: i as u32,
-            bone_b: ((i + node_count / 2) % bones.len()) as u32,
-            anchor_a: 1.0,
-            anchor_b: 0.0,
-            short: 0.1,
-            long: 0.3,
+            node_a: i as u32,
+            node_b: ((i + node_count / 2) % node_count) as u32,
+            strength: 1.0,
             period: 0.2 + ((i + variant) % 3) as f32 * 0.05,
             phase: ((i + variant) % 7) as f32 / 7.0,
             duty: 0.5,
-            stiffness: 120.0,
             sensor: evolution::NO_SENSOR,
             reset: 0.0,
-            tendon: 0.0,
         })
         .collect();
     Creature {

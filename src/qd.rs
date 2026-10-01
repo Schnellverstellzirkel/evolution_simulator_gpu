@@ -50,7 +50,10 @@ pub(crate) const CMA_LIMIT: usize = 96;
 //     and recorded in every generation's statistics.
 // 47: one substep per 1/60 s step (the L0 rung of the substep ladder).
 // 48: the growth-step body rule (a child gains at most 4 nodes and 4 muscles).
-pub const VERSION: u32 = 48;
+// 49: physics-lean: muscles join two nodes with a strength gene and a
+//     trapezoid rhythm, one stamina store per creature, no tendon, anchors,
+//     stroke genes or per-muscle state; joints have a ligament gene.
+pub const VERSION: u32 = 49;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
@@ -393,8 +396,8 @@ fn topology_from_parts(
     let mut edges = Vec::with_capacity(bones.len() + muscles.len());
     edges.extend(bones.iter().map(|b| (b.a.min(b.b), b.a.max(b.b))));
     edges.extend(muscles.iter().map(|m| {
-        let a = offset + m.bone_a;
-        let b = offset + m.bone_b;
+        let a = offset + m.node_a;
+        let b = offset + m.node_b;
         (a.min(b), a.max(b))
     }));
     edges.sort_unstable();
@@ -1215,12 +1218,11 @@ impl CmaEmitter {
                 // Positions and muscle lengths keep the original 4 m and 1 m
                 // scales but are open-ended, so large bodies keep their shape;
                 // repair enforces the body limits.
-                let muscle_field = d.checked_sub(phase_start).map(|m| m % 8);
                 if is_phase_dimension(d, phase_start) {
                     value.rem_euclid(1.0)
                 } else if d < node_end && d % 4 == 0 {
                     value
-                } else if (d < node_end && d % 4 == 1) || matches!(muscle_field, Some(2 | 3)) {
+                } else if d < node_end && d % 4 == 1 {
                     value.max(0.0)
                 } else {
                     value.clamp(0.0, 1.0)
@@ -1419,16 +1421,21 @@ impl CmaEmitter {
 }
 
 fn is_phase_dimension(dimension: usize, phase_start: usize) -> bool {
-    dimension >= phase_start && (dimension - phase_start) % 8 == 5
+    dimension >= phase_start && (dimension - phase_start) % EXPLORING_MUSCLE_FIELDS == 1
 }
 fn wrap_phase(delta: f32) -> f32 {
     (delta + 0.5).rem_euclid(1.0) - 0.5
 }
 
-/// Most CMA coordinates of a body at the caps: 4 per node, 5 per bone, the
-/// shared period and 8 per muscle.
-const MAX_PARAMETERS: usize =
-    crate::evolution::MAX_NODES * (4 + BONE_FIELDS) + 1 + crate::evolution::MAX_MUSCLES * 8;
+/// Most CMA coordinates of a body at the caps: 4 per node, 6 per bone, the
+/// shared period and 4 per muscle.
+const MAX_PARAMETERS: usize = crate::evolution::MAX_NODES * (4 + BONE_FIELDS)
+    + 1
+    + crate::evolution::MAX_MUSCLES * MUSCLE_FIELDS;
+/// Coordinates per muscle in the exploring emitters (period, phase, duty,
+/// strength) and in the optimizers (phase, duty, log strength, reset).
+const EXPLORING_MUSCLE_FIELDS: usize = 4;
+const MUSCLE_FIELDS: usize = 4;
 /// Share of each CMA step taken along the normalized evolution path.
 const PATH_WEIGHT: f32 = 0.3;
 
@@ -1438,7 +1445,7 @@ pub(crate) fn gaussian(rng: &mut Rng) -> f32 {
 }
 fn exploring_parameters(creature: &Creature) -> Vec<f32> {
     let mut output = Vec::with_capacity(
-        creature.nodes.len() * 4 + creature.bones.len() + creature.muscles.len() * 8,
+        creature.nodes.len() * 4 + creature.bones.len() + creature.muscles.len() * EXPLORING_MUSCLE_FIELDS,
     );
     for n in &creature.nodes {
         output.extend([
@@ -1456,16 +1463,12 @@ fn exploring_parameters(creature: &Creature) -> Vec<f32> {
     }
     for m in &creature.muscles {
         output.extend([
-            m.anchor_a.clamp(0.0, 1.0),
-            m.anchor_b.clamp(0.0, 1.0),
-            ((m.short - 0.01) / 0.79).max(0.0),
-            ((m.long - 0.01) / 0.99).max(0.0),
             ((m.period - crate::evolution::min_muscle_period())
                 / (10.0 - crate::evolution::min_muscle_period()))
             .clamp(0.0, 1.0),
             m.phase.clamp(0.0, 1.0),
             ((m.duty - 0.05) / 0.90).clamp(0.0, 1.0),
-            ((m.stiffness - 1.0) / 119.0).clamp(0.0, 1.0),
+            m.strength.clamp(0.0, 1.0),
         ]);
     }
     output
@@ -1492,19 +1495,15 @@ fn exploring_parameters_into(population: &Population, index: usize, output: &mut
         i += 1;
     }
     for m in muscles {
-        output[i..i + 8].copy_from_slice(&[
-            m.anchor_a.clamp(0.0, 1.0),
-            m.anchor_b.clamp(0.0, 1.0),
-            ((m.short - 0.01) / 0.79).max(0.0),
-            ((m.long - 0.01) / 0.99).max(0.0),
+        output[i..i + EXPLORING_MUSCLE_FIELDS].copy_from_slice(&[
             ((m.period - crate::evolution::min_muscle_period())
                 / (10.0 - crate::evolution::min_muscle_period()))
             .clamp(0.0, 1.0),
             m.phase.clamp(0.0, 1.0),
             ((m.duty - 0.05) / 0.90).clamp(0.0, 1.0),
-            ((m.stiffness - 1.0) / 119.0).clamp(0.0, 1.0),
+            m.strength.clamp(0.0, 1.0),
         ]);
-        i += 8;
+        i += EXPLORING_MUSCLE_FIELDS;
     }
 }
 fn apply_exploring_parameters(creature: &mut Creature, values: &[f32]) {
@@ -1521,23 +1520,19 @@ fn apply_exploring_parameters(creature: &mut Creature, values: &[f32]) {
         i += 1;
     }
     for m in &mut creature.muscles {
-        m.anchor_a = values[i].clamp(0.0, 1.0);
-        m.anchor_b = values[i + 1].clamp(0.0, 1.0);
-        m.short = 0.01 + values[i + 2] * 0.79;
-        m.long = (0.01 + values[i + 3] * 0.99).max(m.short);
         m.period = crate::evolution::min_muscle_period()
-            + values[i + 4] * (10.0 - crate::evolution::min_muscle_period());
-        m.phase = values[i + 5].fract();
-        m.duty = 0.05 + values[i + 6] * 0.90;
-        m.stiffness = 1.0 + values[i + 7] * 119.0;
-        i += 8;
+            + values[i] * (10.0 - crate::evolution::min_muscle_period());
+        m.phase = values[i + 1].fract();
+        m.duty = 0.05 + values[i + 2] * 0.90;
+        m.strength = values[i + 3].clamp(crate::evolution::STRENGTH_MIN, 1.0);
+        i += EXPLORING_MUSCLE_FIELDS;
     }
 }
 
 /// Where each CMA coordinate lives in a body plan and how far one unit step
 /// moves it: per node x, y, diameter, friction; per bone rest length, joint
-/// range, and organ mass and position; the shared log period; per muscle
-/// anchors, lengths, phase, duty, log stiffness, and touchdown reset phase.
+/// range, ligament, and organ mass and position; the shared log period; per
+/// muscle phase, duty, log strength, and touchdown reset phase.
 /// An organ mass at or below zero means no organ, so organs can grow and
 /// vanish smoothly.
 struct Layout {
@@ -1548,12 +1543,10 @@ struct Layout {
     size: f32,
 }
 const NODE_SCALES: [f32; 4] = [0.02, 0.02, 0.005, 0.03];
-const BONE_SCALES: [f32; 5] = [0.02, 0.1, 0.1, 0.02, 0.05];
+const BONE_SCALES: [f32; 6] = [0.02, 0.1, 0.1, 0.02, 0.05, 0.05];
 const BONE_FIELDS: usize = BONE_SCALES.len();
 const PERIOD_SCALE: f32 = 0.05;
-const MUSCLE_SCALES: [f32; 8] = [0.05, 0.05, 0.02, 0.02, 0.05, 0.05, 0.1, 0.05];
-/// Which scales above are lengths, multiplied by the body's size.
-const MUSCLE_LENGTHS: [bool; 8] = [false, false, true, true, false, false, false, false];
+const MUSCLE_SCALES: [f32; MUSCLE_FIELDS] = [0.05, 0.1, 0.05, 0.05];
 impl Layout {
     fn of(template: &Creature) -> Self {
         let size = if template.bones.is_empty() {
@@ -1570,7 +1563,7 @@ impl Layout {
     /// The muscle field of coordinate `d`, if it is one.
     fn muscle_field(&self, d: usize) -> Option<usize> {
         let start = self.nodes * 4 + self.bones * BONE_FIELDS + 1;
-        (d >= start).then(|| (d - start) % 8)
+        (d >= start).then(|| (d - start) % MUSCLE_FIELDS)
     }
     fn scale(&self, d: usize) -> f32 {
         let node_end = self.nodes * 4;
@@ -1582,18 +1575,13 @@ impl Layout {
             BONE_SCALES[field] * if field == 0 { self.size } else { 1.0 }
         } else if let Some(field) = self.muscle_field(d) {
             MUSCLE_SCALES[field]
-                * if MUSCLE_LENGTHS[field] {
-                    self.size
-                } else {
-                    1.0
-                }
         } else {
             PERIOD_SCALE
         }
     }
     /// Phases wrap around the cycle.
     fn wraps(&self, d: usize) -> bool {
-        matches!(self.muscle_field(d), Some(4 | 7))
+        matches!(self.muscle_field(d), Some(0 | 3))
     }
     fn delta(&self, d: usize, value: f32, mean: f32) -> f32 {
         if self.wraps(d) {
@@ -1629,7 +1617,7 @@ fn parameters(creature: &Creature) -> Vec<f32> {
     output
 }
 fn parameter_count(nodes: usize, bones: usize, muscles: usize) -> usize {
-    nodes * 4 + bones * BONE_FIELDS + 1 + muscles * 8
+    nodes * 4 + bones * BONE_FIELDS + 1 + muscles * MUSCLE_FIELDS
 }
 fn parameters_into(population: &Population, index: usize, output: &mut [f32]) {
     let genome = &population.genomes[index];
@@ -1658,23 +1646,20 @@ fn write_parameters(
             b.max_angle,
             b.organ_mass,
             b.organ_at,
+            b.ligament,
         ]);
         i += BONE_FIELDS;
     }
     output[i] = muscles.first().map_or(1.0, |m| m.period).max(1e-3).ln();
     i += 1;
     for m in muscles {
-        output[i..i + 8].copy_from_slice(&[
-            m.anchor_a,
-            m.anchor_b,
-            m.short,
-            m.long,
+        output[i..i + MUSCLE_FIELDS].copy_from_slice(&[
             m.phase,
             m.duty,
-            m.stiffness.max(1e-3).ln(),
+            m.strength.max(1e-3).ln(),
             m.reset,
         ]);
-        i += 8;
+        i += MUSCLE_FIELDS;
     }
 }
 fn apply_parameters(creature: &mut Creature, values: &[f32]) {
@@ -1694,6 +1679,7 @@ fn apply_parameters(creature: &mut Creature, values: &[f32]) {
         // Repair keeps organs within their mass range and near the center.
         bone.organ_mass = values[i + 3].max(0.0);
         bone.organ_at = values[i + 4].clamp(0.0, 1.0);
+        bone.ligament = values[i + 5].clamp(0.0, 1.0);
         i += BONE_FIELDS;
     }
     // One log period scales the whole body clock; limbs keep their ratios.
@@ -1703,18 +1689,13 @@ fn apply_parameters(creature: &mut Creature, values: &[f32]) {
         .clamp(crate::evolution::min_muscle_period(), 10.0)
         / base;
     i += 1;
-    let stroke = crate::evolution::max_stroke();
     for m in &mut creature.muscles {
-        m.anchor_a = values[i].clamp(0.0, 1.0);
-        m.anchor_b = values[i + 1].clamp(0.0, 1.0);
-        m.short = values[i + 2].clamp(0.01, 0.8 * stroke);
-        m.long = values[i + 3].clamp(m.short, stroke);
         m.period = (m.period * scale).clamp(crate::evolution::min_muscle_period(), 10.0);
-        m.phase = values[i + 4].rem_euclid(1.0);
-        m.duty = values[i + 5].clamp(0.05, 0.95);
-        m.stiffness = values[i + 6].exp().clamp(1.0, 120.0);
-        m.reset = values[i + 7].rem_euclid(1.0);
-        i += 8;
+        m.phase = values[i].rem_euclid(1.0);
+        m.duty = values[i + 1].clamp(0.05, 0.95);
+        m.strength = values[i + 2].exp().clamp(crate::evolution::STRENGTH_MIN, 1.0);
+        m.reset = values[i + 3].rem_euclid(1.0);
+        i += MUSCLE_FIELDS;
     }
 }
 
@@ -1805,7 +1786,7 @@ mod tests {
     }
 
     #[test]
-    fn cma_phase_dimensions_follow_bones_and_eight_value_muscles() {
+    fn cma_phase_dimensions_follow_bones_and_four_value_muscles() {
         let config = Config {
             population: 2,
             random_seed: false,
@@ -1815,11 +1796,13 @@ mod tests {
         let layout = Layout::of(&template);
         let start = template.nodes.len() * 4 + template.bones.len() * super::BONE_FIELDS + 1;
         assert!(!layout.wraps(start - 1));
-        assert!(!layout.wraps(start));
+        assert!(layout.wraps(start));
+        assert!(!layout.wraps(start + 1));
+        assert!(!layout.wraps(start + 2));
+        assert!(layout.wraps(start + 3));
         assert!(layout.wraps(start + 4));
         assert!(layout.wraps(start + 7));
-        assert!(layout.wraps(start + 12));
-        assert!(!layout.wraps(start + 13));
+        assert!(!layout.wraps(start + 5));
     }
 
     #[test]

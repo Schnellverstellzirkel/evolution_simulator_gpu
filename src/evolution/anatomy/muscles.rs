@@ -1,16 +1,17 @@
 //! Operators that add, move, split, fuse and retime muscles.
+use super::limbs::{pick, split_bone_at};
 use super::{
-    BoneIds, Context, MuscleIds, branch, fit_stroke, is_neck, muscles_on, new_muscle, parent_bones,
-    pick_each, room,
+    BoneIds, Context, MuscleIds, branch, is_neck, long_enough, map_node, muscles_on, needed,
+    neighbours, new_muscle, parent_bones, paths, pick_each, room,
 };
 use crate::config::Config;
 use crate::evolution::{
-    Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, Muscles, Rng, bone_point,
+    Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, Muscles, Rng, STRENGTH_MIN,
 };
 
-/// Adds a muscle between two bones separated by one intermediate bone (for
-/// example trunk to lower leg), timed like an existing muscle on either end:
-/// one contraction moves two joints together.
+/// Adds a muscle between two nodes with two joints between them (three bones
+/// on the way), timed like an existing muscle across one of those bones: one
+/// contraction moves two joints together.
 pub(crate) fn add_biarticular_muscle(
     c: &mut Creature,
     cfg: &Config,
@@ -20,101 +21,107 @@ pub(crate) fn add_biarticular_muscle(
     if !room(c, cfg, 0, 1) {
         return false;
     }
-    let n = c.bones.len();
-    let pairs: Bounded<(usize, usize), { MAX_NODES * MAX_NODES / 2 }> = (0..n)
-        .flat_map(|x| (x + 1..n).map(move |z| (x, z)))
-        .filter(|&(x, z)| path_between(c, x, z).len() == 1)
+    let (n, paths) = (c.nodes.len(), paths(c));
+    let pairs: Bounded<(u8, u8), { MAX_NODES * MAX_NODES / 2 }> = (0..n)
+        .flat_map(|u| (u + 1..n).map(move |v| (u, v)))
+        .filter(|&(u, v)| (paths[u] ^ paths[v]).count_ones() == 3)
+        .map(|(u, v)| (u as u8, v as u8))
         .collect();
     if pairs.is_empty() {
         return false;
     }
-    let (x, z) = pairs[rng.index(pairs.len())];
-    let timing = muscles_on(c, &[x, z], false);
+    let (u, v) = pairs[rng.index(pairs.len())];
+    let (u, v) = (u as usize, v as usize);
+    let way = paths[u] ^ paths[v];
+    let bones: BoneIds = (0..c.bones.len()).filter(|&b| way >> b & 1 == 1).collect();
+    let timing = muscles_on(c, &bones, false);
     if timing.is_empty() {
         return false;
     }
     let template = c.muscles[timing[rng.index(timing.len())]];
-    let anchors = (rng.unit(), rng.unit());
-    let m = new_muscle(c, x, z, anchors, Some(&template), rng);
+    let m = new_muscle(u, v, Some(&template), rng);
     c.muscles.push(m);
     true
 }
 
-/// Moves one end of a muscle to a bone that shares a node with its current
-/// bone, near that shared node, and refits its stroke to the new span. The
-/// muscle then controls a different joint.
+/// Moves one end of a muscle to a node a bone away from it, so the muscle
+/// then controls a different joint.
 pub(crate) fn move_muscle_to_neighbor(
     c: &mut Creature,
     _cfg: &Config,
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    // (muscle, whether its `b` end moves, the bone that end moves to)
+    let (paths, needed) = (paths(c), needed(c));
+    // (muscle, whether its `b` end moves, the node that end moves to)
     let options = |push: &mut dyn FnMut((usize, bool, usize))| {
         for (i, m) in c.muscles.iter().enumerate() {
-            if ring(c, m) {
+            if needed.contains(&i) {
                 continue;
             }
-            for (end_b, bone, other) in [(false, m.bone_a, m.bone_b), (true, m.bone_b, m.bone_a)] {
-                for y in 0..c.bones.len() {
-                    if y != bone as usize
-                        && y != other as usize
-                        && shared_node(c, bone as usize, y).is_some()
-                    {
-                        push((i, end_b, y));
+            for (end_b, node, other) in [
+                (false, m.node_a as usize, m.node_b as usize),
+                (true, m.node_b as usize, m.node_a as usize),
+            ] {
+                for to in neighbours(c, node) {
+                    if to != other && long_enough(&paths, to, other) {
+                        push((i, end_b, to));
                     }
                 }
             }
         }
     };
-    let Some((i, end_b, y)) = pick_each(rng, options) else {
+    let Some((i, end_b, to)) = pick_each(rng, options) else {
         return false;
     };
-    let old = c.muscles[i];
-    let bone = (if end_b { old.bone_b } else { old.bone_a }) as usize;
-    let node = shared_node(c, bone, y).expect("neighbours share a node");
-    let near = rng.range(0.0, 0.25);
-    let anchor = if c.bones[y].a == node {
-        near
-    } else {
-        1.0 - near
-    };
-    let mut m = old;
     if end_b {
-        (m.bone_b, m.anchor_b) = (y as u32, anchor);
+        c.muscles[i].node_b = to as u32;
     } else {
-        (m.bone_a, m.anchor_a) = (y as u32, anchor);
+        c.muscles[i].node_a = to as u32;
     }
-    fit_stroke(c, &mut m, Some(&old));
-    c.muscles[i] = m;
     true
 }
 
-/// Duplicates a muscle; the copy moves one anchor or shifts its phase a
-/// little, so one connection can specialize into two.
+/// Duplicates a muscle; the copy moves one end to a neighbouring node or
+/// shifts its phase a little, so one connection can specialize into two.
 pub(crate) fn split_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if c.muscles.is_empty() || !room(c, cfg, 0, 1) {
         return false;
     }
     let old = c.muscles[rng.index(c.muscles.len())];
     let mut m = old;
+    let mut moved = false;
     if rng.unit() < 0.5 {
-        let shift = rng.range(-0.2, 0.2);
-        if rng.unit() < 0.5 {
-            m.anchor_a = (m.anchor_a + shift).clamp(0.0, 1.0);
+        let paths = paths(c);
+        let end_b = rng.unit() < 0.5;
+        let (node, other) = if end_b {
+            (old.node_b as usize, old.node_a as usize)
         } else {
-            m.anchor_b = (m.anchor_b + shift).clamp(0.0, 1.0);
+            (old.node_a as usize, old.node_b as usize)
+        };
+        let to: BoneIds = neighbours(c, node)
+            .into_iter()
+            .filter(|&n| n != other && long_enough(&paths, n, other))
+            .collect();
+        if let Some(to) = pick(&to, rng) {
+            if end_b {
+                m.node_b = to as u32;
+            } else {
+                m.node_a = to as u32;
+            }
+            moved = true;
         }
-        fit_stroke(c, &mut m, Some(&old));
-    } else {
+    }
+    if !moved {
         m.phase = (m.phase + rng.range(-0.1, 0.1)).rem_euclid(1.0);
     }
     c.muscles.push(m);
     true
 }
 
-/// Merges two muscles on the same pair of bones with nearby anchors and
-/// similar phase into one with averaged genes.
+/// Merges two muscles between the same two nodes with similar phase into
+/// one with averaged timing and the strength of both (two muscles side by
+/// side pull as one stronger one).
 pub(crate) fn fuse_similar_muscles(
     c: &mut Creature,
     _cfg: &Config,
@@ -123,8 +130,8 @@ pub(crate) fn fuse_similar_muscles(
 ) -> bool {
     // `q` seen from `p`'s side.
     let facing = |p: &Muscle, q: &Muscle| {
-        if (q.bone_a, q.bone_b) == (p.bone_b, p.bone_a) {
-            flipped(q)
+        if (q.node_a, q.node_b) == (p.node_b, p.node_a) {
+            q.flipped()
         } else {
             *q
         }
@@ -133,11 +140,7 @@ pub(crate) fn fuse_similar_muscles(
     for (i, p) in c.muscles.iter().enumerate() {
         for (j, q) in c.muscles.iter().enumerate().skip(i + 1) {
             let q = facing(p, q);
-            if (q.bone_a, q.bone_b) == (p.bone_a, p.bone_b)
-                && (p.anchor_a - q.anchor_a).abs() < 0.25
-                && (p.anchor_b - q.anchor_b).abs() < 0.25
-                && turn(p.phase, q.phase).abs() < 0.15
-            {
+            if (q.node_a, q.node_b) == (p.node_a, p.node_b) && turn(p.phase, q.phase).abs() < 0.15 {
                 pairs.push((i as u8, j as u8));
             }
         }
@@ -149,89 +152,92 @@ pub(crate) fn fuse_similar_muscles(
     let (i, j) = (i as usize, j as usize);
     let q = facing(&c.muscles[i], &c.muscles[j]);
     let p = &mut c.muscles[i];
-    let mean = |x: f32, y: f32| 0.5 * (x + y);
-    p.anchor_a = mean(p.anchor_a, q.anchor_a);
-    p.anchor_b = mean(p.anchor_b, q.anchor_b);
-    p.short = mean(p.short, q.short);
-    p.long = mean(p.long, q.long);
-    p.duty = mean(p.duty, q.duty);
-    p.stiffness = mean(p.stiffness, q.stiffness);
+    p.duty = 0.5 * (p.duty + q.duty);
+    p.strength = (p.strength + q.strength).min(1.0);
     p.phase = (p.phase + 0.5 * turn(p.phase, q.phase)).rem_euclid(1.0);
     p.reset = (p.reset + 0.5 * turn(p.reset, q.reset)).rem_euclid(1.0);
     c.muscles.remove(j);
     true
 }
 
-/// For a joint whose bones already have a muscle that closes it, adds a
-/// muscle that opens it: from the child bone to a bone on the other side of
-/// the joint (a sibling or the bone beyond), checked geometrically to rotate
-/// the child the other way, with the phase half a cycle from the closer.
+/// For a joint that already has a muscle closing it, adds a muscle that
+/// opens it: from the same node on the child side to a node outside the
+/// child's limb, checked geometrically to turn the child the other way, with
+/// the phase half a cycle from the closer.
 ///
-/// A muscle between the two bones of a joint can only close it, because its
-/// anchors lie on the bones' center lines. So the opener goes from the child
-/// to a bone outside the child's branch whose attachment point lies on the
-/// other side of the child's line in the pose. Bodies without such a bone
-/// are skipped.
+/// A muscle between the two sides of a joint can only close it when it runs
+/// along the bones, so the opener goes to a node on the other side of the
+/// child's line in the pose. Bodies without such a node are skipped.
 pub(crate) fn add_antagonist(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
     }
-    // (closer with the child bone as `bone_a`, opener's other bone, anchor)
-    let options = |push: &mut dyn FnMut((Muscle, usize, f32))| {
+    let paths = paths(c);
+    // (closer with its child-side end first, the opener's other node)
+    let options = |push: &mut dyn FnMut((Muscle, usize))| {
         for m in &c.muscles {
-            for closer in [*m, flipped(m)] {
-                let (k, q) = (closer.bone_a as usize, closer.bone_b as usize);
-                let joint = c.bones[k].a;
-                let closing = torque(c, &closer);
-                if (c.bones[q].a != joint && c.bones[q].b != joint) || closing.abs() < MIN_TORQUE {
+            let span = paths[m.node_a as usize] ^ paths[m.node_b as usize];
+            if span.count_ones() != 2 {
+                continue;
+            }
+            let (x, y) = (span.trailing_zeros() as usize, 31 - span.leading_zeros() as usize);
+            let Some(joint) = shared_node(c, x, y) else {
+                continue;
+            };
+            for k in [x, y] {
+                if c.bones[k].a != joint {
                     continue;
                 }
-                let limb = branch(c, k);
-                for r in (0..c.bones.len()).filter(|r| !limb.contains(r)) {
-                    for anchor in [0.0, 0.5, 1.0] {
-                        let opener = Muscle {
-                            bone_b: r as u32,
-                            anchor_b: anchor,
-                            ..closer
-                        };
-                        let opening = torque(c, &opener);
-                        if opening * closing < 0.0 && opening.abs() >= MIN_TORQUE {
-                            push((closer, r, anchor));
+                for closer in [*m, m.flipped()] {
+                    let (u, v) = (closer.node_a as usize, closer.node_b as usize);
+                    if paths[u] >> k & 1 == 0 || paths[v] >> k & 1 == 1 {
+                        continue;
+                    }
+                    let closing = torque(c, joint as usize, u, v);
+                    if closing.abs() < MIN_TORQUE {
+                        continue;
+                    }
+                    for r in (0..c.nodes.len()).filter(|&r| paths[r] >> k & 1 == 0) {
+                        if r != v && long_enough(&paths, u, r) {
+                            let opening = torque(c, joint as usize, u, r);
+                            if opening * closing < 0.0 && opening.abs() >= MIN_TORQUE {
+                                push((closer, r));
+                            }
                         }
                     }
                 }
             }
         }
     };
-    let Some((closer, r, anchor)) = pick_each(rng, options) else {
+    let Some((closer, r)) = pick_each(rng, options) else {
         return false;
     };
-    let k = closer.bone_a as usize;
-    let mut m = new_muscle(c, k, r, (closer.anchor_a, anchor), Some(&closer), rng);
+    let mut m = new_muscle(closer.node_a as usize, r, Some(&closer), rng);
     m.phase = (closer.phase + 0.5).rem_euclid(1.0);
     c.muscles.push(m);
     true
 }
 
 /// Exchanges the destinations of two muscles: A-B and C-D become A-D and
-/// C-B (skipping pairs that would join a bone to itself), strokes refitted.
+/// C-B (skipping pairs that would join two nodes a bone apart).
 pub(crate) fn swap_muscle_routes(
     c: &mut Creature,
     _cfg: &Config,
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let free: MuscleIds = (0..c.muscles.len())
-        .filter(|&i| !ring(c, &c.muscles[i]))
-        .collect();
+    let (paths, needed) = (paths(c), needed(c));
+    let free: MuscleIds = (0..c.muscles.len()).filter(|i| !needed.contains(i)).collect();
     let mut pairs: Bounded<(u8, u8), { MAX_MUSCLES * MAX_MUSCLES / 2 }> = Bounded::new();
     for (n, &i) in free.iter().enumerate() {
         for &j in &free[n + 1..] {
             let (p, q) = (c.muscles[i], c.muscles[j]);
-            if p.bone_a != q.bone_a
-                && p.bone_b != q.bone_b
-                && p.bone_a != q.bone_b
-                && q.bone_a != p.bone_b
+            if p.node_a != q.node_a
+                && p.node_b != q.node_b
+                && p.node_a != q.node_b
+                && q.node_a != p.node_b
+                && long_enough(&paths, p.node_a as usize, q.node_b as usize)
+                && long_enough(&paths, q.node_a as usize, p.node_b as usize)
             {
                 pairs.push((i as u8, j as u8));
             }
@@ -243,115 +249,154 @@ pub(crate) fn swap_muscle_routes(
     let (i, j) = pairs[rng.index(pairs.len())];
     let (i, j) = (i as usize, j as usize);
     let (p, q) = (c.muscles[i], c.muscles[j]);
-    for (index, old, to) in [(i, p, q), (j, q, p)] {
-        let mut m = Muscle {
-            bone_b: to.bone_b,
-            anchor_b: to.anchor_b,
-            ..old
-        };
-        fit_stroke(c, &mut m, Some(&old));
-        c.muscles[index] = m;
-    }
+    c.muscles[i].node_b = q.node_b;
+    c.muscles[j].node_b = p.node_b;
     true
 }
 
-/// Spreads the anchors of several muscles that share a bone and sit close
-/// together evenly along that bone, keeping their timing, so they act at
-/// different leverages.
+/// Spreads several muscles that end at one node over a bone at that node, at
+/// even steps along it, keeping their timing, so they act at different
+/// leverages. The bone is split at the fan points (a new node and joint for
+/// each muscle but the first), and each muscle ends at its own.
 pub(crate) fn fan_muscle_attachments(
     c: &mut Creature,
-    _cfg: &Config,
+    cfg: &Config,
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    // Every muscle end: (muscle, whether it is the `b` end, bone, anchor).
-    let ends: Bounded<(usize, bool, u32, f32), { 2 * MAX_MUSCLES }> = c
+    // Every muscle end: (muscle, whether it is the `b` end, node).
+    let ends: Bounded<(usize, bool, u32), { 2 * MAX_MUSCLES }> = c
         .muscles
         .iter()
         .enumerate()
-        .flat_map(|(i, m)| {
-            [
-                (i, false, m.bone_a, m.anchor_a),
-                (i, true, m.bone_b, m.anchor_b),
-            ]
-        })
+        .flat_map(|(i, m)| [(i, false, m.node_a), (i, true, m.node_b)])
         .collect();
-    let close = |p: &(usize, bool, u32, f32), q: &(usize, bool, u32, f32)| {
-        p.2 == q.2 && (p.3 - q.3).abs() < 0.15
+    // A bone at `node` long enough for its parts.
+    let fan_bones = |node: usize| -> BoneIds {
+        c.bones
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| (b.a as usize == node || b.b as usize == node) && b.rest_length >= 0.1)
+            .map(|(j, _)| j)
+            .collect()
     };
     let seeds: Bounded<usize, { 2 * MAX_MUSCLES }> = (0..ends.len())
-        .filter(|&s| ends.iter().filter(|e| close(&ends[s], e)).count() >= 2)
+        .filter(|&s| {
+            let node = ends[s].2;
+            ends.iter().filter(|e| e.2 == node).count() >= 2 && !fan_bones(node as usize).is_empty()
+        })
         .collect();
     if seeds.is_empty() {
         return false;
     }
-    let seed = ends[seeds[rng.index(seeds.len())]];
-    let mut group: Bounded<_, { 2 * MAX_MUSCLES }> =
-        ends.iter().filter(|e| close(&seed, e)).copied().collect();
-    group.sort_stable_by(|p, q| p.3.total_cmp(&q.3));
-    for (n, &(i, end_b, _, _)) in group.iter().enumerate() {
-        let old = c.muscles[i];
-        let mut m = old;
-        let anchor = (n as f32 + 0.5) / group.len() as f32;
-        if end_b {
-            m.anchor_b = anchor;
-        } else {
-            m.anchor_a = anchor;
+    let node = ends[seeds[rng.index(seeds.len())]].2 as usize;
+    let group: Bounded<(usize, bool), 3> = ends
+        .iter()
+        .filter(|e| e.2 as usize == node)
+        .map(|&(i, end_b, _)| (i, end_b))
+        .take(3)
+        .collect();
+    let Some(j) = pick(&fan_bones(node), rng) else {
+        return false;
+    };
+    // How many muscles fit, with a new node each but the first.
+    let g = group
+        .len()
+        .min(1 + cfg.max_nodes.min(MAX_NODES).saturating_sub(c.nodes.len()));
+    if g < 2 {
+        return false;
+    }
+    let from_pivot = c.bones[j].a as usize == node;
+    // Fan point k lies k / g of the way from `node`; as a fraction of the
+    // bone from its pivot end it is k / g or 1 - k / g.
+    let point = |k: usize| {
+        if from_pivot { k as f32 / g as f32 } else { 1.0 - k as f32 / g as f32 }
+    };
+    let mut fractions: Bounded<f32, 3> = (1..g).map(point).collect();
+    fractions.sort_stable_by(f32::total_cmp);
+    let mut made: Bounded<(f32, usize), 3> = Bounded::new();
+    let (mut whole, mut done) = (j, 0.0f32);
+    for &f in &fractions {
+        let (mid, second) = split_bone_at(c, whole, (f - done) / (1.0 - done), rng);
+        made.push((f, mid));
+        whole = second;
+        done = f;
+    }
+    // The first muscle stays at `node`; muscle k ends at fan point k.
+    let paths = paths(c);
+    for (k, &(i, end_b)) in group.iter().enumerate().take(g).skip(1) {
+        let Some(&(_, to)) = made.iter().find(|(f, _)| (f - point(k)).abs() < 1e-6) else {
+            continue;
+        };
+        let m = &mut c.muscles[i];
+        let other = if end_b { m.node_a } else { m.node_b } as usize;
+        if !long_enough(&paths, to, other) {
+            continue;
         }
-        fit_stroke(c, &mut m, Some(&old));
-        c.muscles[i] = m;
+        if end_b {
+            m.node_b = to as u32;
+        } else {
+            m.node_a = to as u32;
+        }
     }
     true
 }
 
-/// Replaces a muscle between two bones that are not neighbours with two
-/// muscles through a bone on the path between them, starting in phase.
+/// Replaces a muscle across four or more bones with two muscles through a
+/// node on the way between its ends, starting in phase.
 pub(crate) fn relay_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
     }
-    let path_of = |i: usize| {
+    let (paths, needed) = (paths(c), needed(c));
+    // Nodes on the way between a muscle's ends that leave a muscle of at
+    // least two bones on each side.
+    let via = |i: usize, sink: &mut dyn FnMut(usize)| {
         let m = c.muscles[i];
-        path_between(c, m.bone_a as usize, m.bone_b as usize)
+        let (u, v) = (m.node_a as usize, m.node_b as usize);
+        let way = paths[u] ^ paths[v];
+        for w in 0..c.nodes.len() {
+            let (first, second) = (paths[u] ^ paths[w], paths[w] ^ paths[v]);
+            if w != u
+                && w != v
+                && first & second == 0
+                && first | second == way
+                && first.count_ones() >= 2
+                && second.count_ones() >= 2
+            {
+                sink(w);
+            }
+        }
     };
     let options: MuscleIds = (0..c.muscles.len())
-        .filter(|&i| !ring(c, &c.muscles[i]) && !path_of(i).is_empty())
+        .filter(|&i| {
+            let mut any = false;
+            via(i, &mut |_| any = true);
+            !needed.contains(&i) && any
+        })
         .collect();
-    if options.is_empty() {
+    let Some(i) = pick(&options, rng) else {
         return false;
-    }
-    let i = &options[rng.index(options.len())];
-    let path = path_of(*i);
-    let old = c.muscles[*i];
-    let via = path[rng.index(path.len())];
-    let at = rng.unit();
-    // The first half keeps the muscle. The second half is the added muscle.
-    let mut first = Muscle {
-        bone_b: via as u32,
-        anchor_b: at,
-        ..old
     };
-    fit_stroke(c, &mut first, Some(&old));
-    let second = new_muscle(
-        c,
-        via,
-        old.bone_b as usize,
-        (at, old.anchor_b),
-        Some(&old),
-        rng,
-    );
-    c.muscles[*i] = first;
+    let mut ways = BoneIds::new();
+    via(i, &mut |w| ways.push(w));
+    let w = ways[rng.index(ways.len())];
+    let old = c.muscles[i];
+    // The first half keeps the muscle. The second half is the added muscle.
+    c.muscles[i].node_b = w as u32;
+    let second = new_muscle(w, old.node_b as usize, Some(&old), rng);
     c.muscles.push(second);
     true
 }
 
-/// Copies the muscle pattern of one limb (attachments, relative strokes and
-/// timing) onto another limb with the same number of bones, scaled to the
-/// recipient's lengths. The recipient keeps its skeleton.
+/// Copies the muscle pattern of one limb (ends, strength and timing) onto
+/// another limb with the same number of bones. The recipient keeps its
+/// skeleton.
 ///
 /// A limb's pattern is every muscle among its bones and the bone above it.
-/// Bones map by their order in the branch. The recipient loses its own
-/// pattern, except the ring muscles that `repair` would put back.
+/// Bones map by their order in the branch, and so do the nodes they join. The
+/// recipient loses its own pattern, except the muscles `repair` would put
+/// back.
 pub(crate) fn copy_actuation_to_limb(
     c: &mut Creature,
     cfg: &Config,
@@ -382,33 +427,19 @@ pub(crate) fn copy_actuation_to_limb(
     }
     let (x, y) = pairs[rng.index(pairs.len())];
     let (from, to) = (&limbs[x as usize], &limbs[y as usize]);
-    let dropped: MuscleIds =
-        to.2.iter()
-            .copied()
-            .filter(|&i| !ring(c, &c.muscles[i]))
-            .collect();
+    let needed = needed(c);
+    let dropped: MuscleIds = to.2.iter().copied().filter(|i| !needed.contains(i)).collect();
     if c.muscles.len() - dropped.len() + from.2.len() > cfg.max_muscles {
         return false;
     }
-    let map = |b: u32| {
-        to.1[from
-            .1
-            .iter()
-            .position(|&x| x == b as usize)
-            .expect("limb bone")]
-    };
     let copies: Muscles = from
         .2
         .iter()
-        .map(|&i| {
+        .filter_map(|&i| {
             let old = c.muscles[i];
-            let mut m = Muscle {
-                bone_a: map(old.bone_a) as u32,
-                bone_b: map(old.bone_b) as u32,
-                ..old
-            };
-            fit_stroke(c, &mut m, Some(&old));
-            m
+            let a = map_node(c, &from.1, &to.1, old.node_a)?;
+            let b = map_node(c, &from.1, &to.1, old.node_b)?;
+            (a != b).then_some(Muscle { node_a: a, node_b: b, ..old })
         })
         .collect();
     let mut index = 0;
@@ -420,11 +451,9 @@ pub(crate) fn copy_actuation_to_limb(
     true
 }
 
-/// Shrinks the strokes of every muscle in a branch by one factor (0.3 to
-/// 0.7), keeping geometry and timing: a limb that fights the gait becomes a
-/// quieter support.
-///
-/// Each muscle keeps its relaxed length (`long`) and contracts less.
+/// Weakens every active muscle across a branch by one factor (0.3 to 0.7),
+/// keeping geometry and timing: a limb that fights the gait becomes a quieter
+/// support.
 pub(crate) fn quiet_muscle_group(
     c: &mut Creature,
     _cfg: &Config,
@@ -434,7 +463,7 @@ pub(crate) fn quiet_muscle_group(
     let active = |c: &Creature, root: usize| -> MuscleIds {
         muscles_on(c, &branch(c, root), false)
             .into_iter()
-            .filter(|&i| c.muscles[i].long > c.muscles[i].short)
+            .filter(|&i| c.muscles[i].active())
             .collect()
     };
     let roots: BoneIds = (0..c.bones.len())
@@ -447,7 +476,7 @@ pub(crate) fn quiet_muscle_group(
     let factor = rng.range(0.3, 0.7);
     for i in group {
         let m = &mut c.muscles[i];
-        m.short = m.long - (m.long - m.short) * factor;
+        m.strength = (m.strength * factor).max(STRENGTH_MIN);
     }
     true
 }
@@ -455,45 +484,17 @@ pub(crate) fn quiet_muscle_group(
 /// Least torque (lever times pull, in m^2) that counts as turning a bone.
 const MIN_TORQUE: f32 = 1.0e-3;
 
-/// The torque a muscle's pull puts on its `bone_a` about that bone's parent
-/// node, in the pose. Positive turns it counterclockwise.
-fn torque(c: &Creature, m: &Muscle) -> f32 {
-    let bone = c.bones[m.bone_a as usize];
-    let joint = c.nodes[bone.a as usize];
-    let p = bone_point(bone, &c.nodes, m.anchor_a);
-    let q = bone_point(c.bones[m.bone_b as usize], &c.nodes, m.anchor_b);
-    (p[0] - joint.x) * (q[1] - p[1]) - (p[1] - joint.y) * (q[0] - p[0])
-}
-
-/// The same muscle with its ends swapped.
-fn flipped(m: &Muscle) -> Muscle {
-    Muscle {
-        bone_a: m.bone_b,
-        bone_b: m.bone_a,
-        anchor_a: m.anchor_b,
-        anchor_b: m.anchor_a,
-        // Sensor endpoints are numbered bone_a.a, bone_a.b, bone_b.a, bone_b.b.
-        sensor: if m.sensor < 4 {
-            (m.sensor + 2) % 4
-        } else {
-            m.sensor
-        },
-        ..*m
-    }
+/// The torque the pull of a muscle puts on the limb below `joint` through its
+/// end `u` toward its end `v`, about the joint, in the pose. Positive turns
+/// the limb counterclockwise.
+fn torque(c: &Creature, joint: usize, u: usize, v: usize) -> f32 {
+    let (j, p, q) = (c.nodes[joint], c.nodes[u], c.nodes[v]);
+    (p.x - j.x) * (q.y - p.y) - (p.y - j.y) * (q.x - p.x)
 }
 
 /// The signed shortest step from phase `from` to phase `to` (-0.5 to 0.5).
 fn turn(from: f32, to: f32) -> f32 {
     (to - from + 0.5).rem_euclid(1.0) - 0.5
-}
-
-/// Whether a muscle joins consecutively numbered bones. `repair` keeps
-/// a muscle on each such pair, so rerouting one would only make repair add a
-/// random muscle in its place.
-pub(super) fn ring(c: &Creature, m: &Muscle) -> bool {
-    let n = c.bones.len();
-    let (x, y) = (m.bone_a as usize, m.bone_b as usize);
-    (x + 1) % n == y || (y + 1) % n == x
 }
 
 /// The node bones `x` and `y` share, if any.
@@ -502,39 +503,8 @@ pub(super) fn shared_node(c: &Creature, x: usize, y: usize) -> Option<u32> {
     [p.a, p.b].into_iter().find(|&n| n == q.a || n == q.b)
 }
 
-/// The bones on the path between bones `x` and `z`, without them. It is
-/// empty when they share a node.
-fn path_between(c: &Creature, x: usize, z: usize) -> BoneIds {
-    let parents = parent_bones(c);
-    // A bone and the bones above it, up to the neck.
-    let up = |mut bone: usize| {
-        let mut out = BoneIds::from_slice(&[bone]);
-        while let Some(above) = parents[c.bones[bone].a as usize] {
-            out.push(above);
-            bone = above;
-        }
-        out
-    };
-    let (from_x, from_z) = (up(x), up(z));
-    if let Some(i) = from_x.iter().position(|&b| b == z) {
-        return BoneIds::from_slice(&from_x[1..i]);
-    }
-    if let Some(i) = from_z.iter().position(|&b| b == x) {
-        return BoneIds::from_slice(&from_z[1..i]);
-    }
-    // Both climb to a common bone. The path turns at that bone's lower node.
-    let common = from_x
-        .iter()
-        .enumerate()
-        .find_map(|(i, b)| from_z.iter().position(|y| y == b).map(|j| (i, j)));
-    let Some((i, j)) = common else {
-        return BoneIds::new();
-    };
-    from_x[1..i].iter().chain(&from_z[1..j]).copied().collect()
-}
-
 /// The bones of the limb that starts at `root` followed by the bone above
-/// it, and the muscles with both ends on those bones.
+/// it, and the muscles lying among those bones.
 pub(super) fn actuation(c: &Creature, root: usize) -> (BoneIds, MuscleIds) {
     let mut bones = branch(c, root);
     bones.extend(parent_bones(c)[c.bones[root].a as usize]);
@@ -544,7 +514,7 @@ pub(super) fn actuation(c: &Creature, root: usize) -> (BoneIds, MuscleIds) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Operator, tests::bodies};
+    use super::super::{Operator, span_of, tests::bodies};
     use super::*;
 
     /// Runs `op` on test bodies. A change must
@@ -561,7 +531,6 @@ mod tests {
                 if op(&mut c, &cfg, &mut rng, &cx) {
                     applied += 1;
                     assert!(c.muscles.len() <= cfg.max_muscles);
-                    assert_eq!(c.bones, body.bones);
                     check(body, &c);
                 } else {
                     assert_eq!(c.nodes, body.nodes);
@@ -585,35 +554,44 @@ mod tests {
         (p.period, p.phase, p.duty) == (q.period, q.phase, q.duty)
     }
 
+    /// Whether two nodes are joined by a bone.
+    fn adjacent(c: &Creature, x: u32, y: u32) -> bool {
+        neighbours(c, x as usize).contains(&(y as usize))
+    }
+
     #[test]
     fn biarticular_muscle_spans_two_joints() {
         let applied = each_change(add_biarticular_muscle, |before, after| {
             assert_eq!(after.muscles.len(), before.muscles.len() + 1);
+            assert_eq!(after.bones, before.bones);
             let m = after.muscles.last().unwrap();
-            let (x, z) = (m.bone_a as usize, m.bone_b as usize);
-            assert_eq!(path_between(after, x, z).len(), 1);
-            let timed_like = muscles_on(before, &[x, z], false)
+            let paths = paths(after);
+            let way = span_of(&paths, m);
+            assert_eq!(way.count_ones(), 3);
+            let bones: Vec<usize> = (0..after.bones.len()).filter(|&b| way >> b & 1 == 1).collect();
+            let timed_like = muscles_on(before, &bones, false)
                 .into_iter()
                 .any(|i| before.muscles[i].phase == m.phase);
-            assert!(timed_like, "phase comes from a muscle on either end");
+            assert!(timed_like, "phase comes from a muscle across the way");
         });
         assert!(applied >= 100, "applied {applied}");
     }
 
     #[test]
-    fn moved_muscle_end_goes_to_a_neighbouring_bone() {
+    fn moved_muscle_end_goes_to_a_neighbouring_node() {
         let applied = each_change(move_muscle_to_neighbor, |before, after| {
+            assert_eq!(after.bones, before.bones);
             let changed = differing(&before.muscles, &after.muscles);
             assert_eq!(changed.len(), 1);
             let (p, q) = (before.muscles[changed[0]], after.muscles[changed[0]]);
-            let (from, to) = if p.bone_a == q.bone_a {
-                (p.bone_b, q.bone_b)
+            let (from, to) = if p.node_a == q.node_a {
+                (p.node_b, q.node_b)
             } else {
-                assert_eq!(p.bone_b, q.bone_b);
-                (p.bone_a, q.bone_a)
+                assert_eq!(p.node_b, q.node_b);
+                (p.node_a, q.node_a)
             };
             assert_ne!(from, to);
-            assert!(shared_node(before, from as usize, to as usize).is_some());
+            assert!(adjacent(before, from, to));
             assert!(same_timing(&p, &q));
         });
         assert!(applied >= 100, "applied {applied}");
@@ -625,10 +603,11 @@ mod tests {
             assert_eq!(after.muscles.len(), before.muscles.len() + 1);
             let copy = after.muscles.last().unwrap();
             let original = before.muscles.iter().any(|m| {
-                (m.bone_a, m.bone_b) == (copy.bone_a, copy.bone_b)
-                    && (m.anchor_a - copy.anchor_a).abs() <= 0.2
-                    && (m.anchor_b - copy.anchor_b).abs() <= 0.2
-                    && turn(m.phase, copy.phase).abs() <= 0.1
+                let same = (m.node_a, m.node_b) == (copy.node_a, copy.node_b);
+                let one_end_moved = (m.node_a == copy.node_a && adjacent(before, m.node_b, copy.node_b))
+                    || (m.node_b == copy.node_b && adjacent(before, m.node_a, copy.node_a));
+                (same && turn(m.phase, copy.phase).abs() <= 0.1)
+                    || (one_end_moved && m.phase == copy.phase)
             });
             assert!(original);
         });
@@ -641,44 +620,57 @@ mod tests {
             assert_eq!(after.muscles.len() + 1, before.muscles.len());
         });
         assert!(applied > 0, "applied {applied}");
-        // A split muscle can always fuse back.
+        // A split muscle that stayed between the same nodes can fuse back.
         let cfg = Config::default();
         let cx = Context { donor: None };
+        let mut fused = 0;
         for (i, mut c) in bodies(&cfg, 40).into_iter().enumerate() {
             let mut rng = Rng::new(22, 0, i);
+            let count = c.muscles.len();
             if !split_muscle(&mut c, &cfg, &mut rng, &cx) {
                 continue;
             }
-            let count = c.muscles.len();
+            let copy = *c.muscles.last().unwrap();
+            if !c.muscles[..count].iter().any(|m| {
+                (m.node_a, m.node_b) == (copy.node_a, copy.node_b)
+                    && turn(m.phase, copy.phase).abs() < 0.15
+            }) {
+                continue;
+            }
             assert!(fuse_similar_muscles(&mut c, &cfg, &mut rng, &cx));
-            assert_eq!(c.muscles.len(), count - 1);
+            assert_eq!(c.muscles.len(), count);
+            fused += 1;
         }
+        assert!(fused > 5, "fused {fused}");
     }
 
     #[test]
-    fn antagonist_turns_the_child_bone_against_its_closer() {
+    fn antagonist_turns_the_child_limb_against_its_closer() {
         let applied = each_change(add_antagonist, |before, after| {
             assert_eq!(after.muscles.len(), before.muscles.len() + 1);
             let opener = *after.muscles.last().unwrap();
-            let k = opener.bone_a as usize;
-            let joint = before.bones[k].a;
-            assert!(!branch(before, k).contains(&(opener.bone_b as usize)));
-            let opening = torque(before, &opener);
-            assert!(opening.abs() >= MIN_TORQUE);
-            // A closer at the child's joint turns it the other way, half a
-            // cycle apart.
+            let paths = paths(before);
+            // A closer at the joint of a child bone whose limb holds the
+            // opener's first node and not its second turns the limb the other
+            // way, half a cycle apart.
             let closer = before.muscles.iter().any(|m| {
-                [*m, flipped(m)].iter().any(|m| {
-                    let q = before.bones[m.bone_b as usize];
-                    m.bone_a as usize == k
-                        && (q.a == joint || q.b == joint)
-                        && torque(before, m) * opening < 0.0
+                [*m, m.flipped()].iter().any(|m| {
+                    let span = span_of(&paths, m);
+                    if m.node_a != opener.node_a || span.count_ones() != 2 {
+                        return false;
+                    }
+                    let (x, y) = (span.trailing_zeros() as usize, 31 - span.leading_zeros() as usize);
+                    let Some(joint) = shared_node(before, x, y) else {
+                        return false;
+                    };
+                    let (u, v, r) = (m.node_a as usize, m.node_b as usize, opener.node_b as usize);
+                    torque(before, joint as usize, u, v) * torque(before, joint as usize, u, r) < 0.0
                         && turn(m.phase, opener.phase).abs() > 0.499
                 })
             });
             assert!(closer);
         });
-        assert!(applied >= 90, "applied {applied}");
+        assert!(applied >= 60, "applied {applied}");
     }
 
     #[test]
@@ -689,46 +681,54 @@ mod tests {
             let [i, j] = [changed[0], changed[1]];
             let (p, q) = (before.muscles[i], before.muscles[j]);
             let (r, s) = (after.muscles[i], after.muscles[j]);
-            assert_eq!((r.bone_a, r.bone_b), (p.bone_a, q.bone_b));
-            assert_eq!((s.bone_a, s.bone_b), (q.bone_a, p.bone_b));
+            assert_eq!((r.node_a, r.node_b), (p.node_a, q.node_b));
+            assert_eq!((s.node_a, s.node_b), (q.node_a, p.node_b));
             assert!(same_timing(&p, &r) && same_timing(&q, &s));
         });
         assert!(applied >= 100, "applied {applied}");
     }
 
     #[test]
-    fn fan_spreads_close_anchors_evenly() {
+    fn fan_spreads_muscle_ends_evenly_along_a_bone() {
         let applied = each_change(fan_muscle_attachments, |before, after| {
-            let changed = differing(&before.muscles, &after.muscles);
-            assert!(!changed.is_empty());
-            // The moved ends share one bone and sit at (k + 0.5) / n.
-            let mut moved = Vec::new();
-            for &i in &changed {
+            let (new_nodes, new_bones) = (
+                after.nodes.len() - before.nodes.len(),
+                after.bones.len() - before.bones.len(),
+            );
+            assert!((1..=2).contains(&new_nodes) && new_nodes == new_bones);
+            let moved: Vec<usize> = (0..before.muscles.len())
+                .filter(|&i| before.muscles[i] != after.muscles[i])
+                .collect();
+            assert!(!moved.is_empty() && moved.len() <= new_nodes);
+            for &i in &moved {
                 let (p, q) = (before.muscles[i], after.muscles[i]);
-                assert_eq!((p.bone_a, p.bone_b), (q.bone_a, q.bone_b));
                 assert!(same_timing(&p, &q));
-                if p.anchor_a != q.anchor_a {
-                    moved.push((q.bone_a, q.anchor_a));
-                }
-                if p.anchor_b != q.anchor_b {
-                    moved.push((q.bone_b, q.anchor_b));
-                }
+                // Exactly one end moved, onto a node the operator made.
+                let ends = [(p.node_a, q.node_a), (p.node_b, q.node_b)];
+                let moved_ends: Vec<_> = ends.iter().filter(|(x, y)| x != y).collect();
+                assert_eq!(moved_ends.len(), 1);
+                assert!(moved_ends[0].1 as usize >= before.nodes.len());
             }
-            assert!(!moved.is_empty());
-            assert!(moved.iter().all(|e| e.0 == moved[0].0));
-            let even = (moved.len().max(2)..=64).any(|n| {
-                moved.iter().all(|&(_, anchor)| {
-                    let slot = anchor * n as f32 - 0.5;
-                    (slot - slot.round()).abs() < 1e-4
-                })
-            });
-            assert!(even, "{moved:?}");
+            // The new nodes sit on the line of the bone they split, at even
+            // steps along it.
+            let n = before.nodes.len();
+            for new in n..after.nodes.len() {
+                let q = after.nodes[new];
+                let on_a_bone = before.bones.iter().any(|b| {
+                    let (a, e) = (before.nodes[b.a as usize], before.nodes[b.b as usize]);
+                    let (dx, dy) = (e.x - a.x, e.y - a.y);
+                    let t = ((q.x - a.x) * dx + (q.y - a.y) * dy) / (dx * dx + dy * dy);
+                    let off = ((q.x - a.x) - t * dx).hypot((q.y - a.y) - t * dy);
+                    off < 1e-3 && (0.3..0.7).contains(&t) || off < 1e-3 && (0.3..0.7).contains(&(1.0 - t))
+                });
+                assert!(on_a_bone, "new node {new} is on a split bone");
+            }
         });
-        assert!(applied >= 100, "applied {applied}");
+        assert!(applied >= 20, "applied {applied}");
     }
 
     #[test]
-    fn relay_routes_a_muscle_through_a_bone_between() {
+    fn relay_routes_a_muscle_through_a_node_between() {
         let applied = each_change(relay_muscle, |before, after| {
             assert_eq!(after.muscles.len(), before.muscles.len() + 1);
             let kept = &after.muscles[..before.muscles.len()];
@@ -736,29 +736,30 @@ mod tests {
             assert_eq!(changed.len(), 1);
             let old = before.muscles[changed[0]];
             let (first, second) = (after.muscles[changed[0]], *after.muscles.last().unwrap());
-            let path = path_between(before, old.bone_a as usize, old.bone_b as usize);
-            assert!(path.contains(&(first.bone_b as usize)));
             assert_eq!(
-                (first.bone_a, first.bone_b, second.bone_a, second.bone_b),
-                (old.bone_a, second.bone_a, first.bone_b, old.bone_b)
+                (first.node_a, first.node_b, second.node_a, second.node_b),
+                (old.node_a, second.node_a, first.node_b, old.node_b)
             );
+            let paths = paths(before);
+            let (u, v, w) = (old.node_a as usize, old.node_b as usize, first.node_b as usize);
+            let (up, down) = (paths[u] ^ paths[w], paths[w] ^ paths[v]);
+            assert!(up & down == 0 && up | down == paths[u] ^ paths[v], "w lies on the way");
             assert!(first.phase == old.phase && second.phase == old.phase);
         });
-        assert!(applied >= 50, "applied {applied}");
+        assert!(applied >= 10, "applied {applied}");
     }
 
     #[test]
     fn copied_actuation_matches_the_source_limb() {
         let applied = each_change(copy_actuation_to_limb, |_, after| {
             // Some pair of limbs now has every source muscle copied onto the
-            // recipient's matching bones.
+            // recipient's matching nodes.
             let limbs: Vec<_> = (0..after.bones.len())
                 .filter(|&b| !is_neck(after, b))
                 .map(|b| (b, actuation(after, b)))
                 .collect();
             let copied = limbs.iter().any(|(from, (fb, fm))| {
                 limbs.iter().any(|(to, (tb, _))| {
-                    let map = |b: u32| tb[fb.iter().position(|&x| x == b as usize).unwrap()];
                     from != to
                         && fb.len() == tb.len()
                         && !fb.contains(to)
@@ -766,22 +767,24 @@ mod tests {
                         && !fm.is_empty()
                         && fm.iter().all(|&i| {
                             let s = after.muscles[i];
+                            let (a, b) = (
+                                map_node(after, fb, tb, s.node_a),
+                                map_node(after, fb, tb, s.node_b),
+                            );
                             after.muscles.iter().any(|m| {
-                                (m.bone_a as usize, m.bone_b as usize)
-                                    == (map(s.bone_a), map(s.bone_b))
-                                    && (m.anchor_a, m.anchor_b, m.phase)
-                                        == (s.anchor_a, s.anchor_b, s.phase)
+                                Some((m.node_a, m.node_b)) == a.zip(b)
+                                    && (m.strength, m.phase) == (s.strength, s.phase)
                             })
                         })
                 })
             });
             assert!(copied);
         });
-        assert!(applied >= 50, "applied {applied}");
+        assert!(applied >= 20, "applied {applied}");
     }
 
     #[test]
-    fn quiet_group_shrinks_one_branch_by_one_factor() {
+    fn quiet_group_weakens_one_branch_by_one_factor() {
         let applied = each_change(quiet_muscle_group, |before, after| {
             let changed = differing(&before.muscles, &after.muscles);
             assert!(!changed.is_empty());
@@ -789,9 +792,9 @@ mod tests {
                 .iter()
                 .map(|&i| {
                     let (p, q) = (before.muscles[i], after.muscles[i]);
-                    assert_eq!(p.long, q.long);
                     assert!(same_timing(&p, &q));
-                    (q.long - q.short) / (p.long - p.short)
+                    assert_eq!((p.node_a, p.node_b), (q.node_a, q.node_b));
+                    q.strength / p.strength
                 })
                 .collect();
             assert!(factors.iter().all(|f| (0.29..=0.71).contains(f)));

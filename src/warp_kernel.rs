@@ -7,8 +7,8 @@
 //! neighbouring lanes and the children of one bone are consecutive. Muscles run
 //! one per lane, `W` at a time, in at most `ROUNDS` rounds.
 //!
-//! Every derived constant (masses with the bones, organs and muscles, slack
-//! lengths, muscle strengths, joint ranges, the start pose) comes from
+//! Every derived constant (masses with the bones, organs and muscles, muscle
+//! force caps, joint ranges and ligaments, the start pose) comes from
 //! `physics2::Model`.
 use crate::{
     config::Config,
@@ -23,8 +23,10 @@ use rayon::prelude::*;
 
 /// Words per lane of a creature's lane record.
 pub const LANE_FIELDS: usize = 12;
-/// Words per muscle, read as four 16-byte loads.
-pub const MUSCLE_FIELDS: usize = 16;
+/// Words per muscle, read as two 16-byte loads: the two nodes' lanes with the
+/// sensor's, the force cap, Hill's factor and 1 / period, then the phase, the
+/// middle of the activation's top, 1 / ramp and the touchdown reset.
+pub const MUSCLE_FIELDS: usize = 8;
 /// Muscle rounds a group runs: a creature on `W` lanes has at most
 /// `ROUNDS * W` muscles.
 pub const ROUNDS: usize = 4;
@@ -201,8 +203,8 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
         ));
     }
     let constants = [
-        ("MUSCLE_CAPACITY", float(limits.muscle_energy)),
         ("MUSCLE_RECOVERY", float(limits.muscle_recovery)),
+        ("LIGAMENT_DAMPING", float(physics2::LIGAMENT_DAMPING)),
         ("MAX_MUSCLE_FORCE", float(limits.muscle_force)),
         (
             "INV_JOINT_DAMPING",
@@ -285,11 +287,17 @@ fn size_of(pop: &Population, i: usize, w: usize) -> Size {
         end_of[b.b as usize] = j;
     }
     let rounds = muscles.len().div_ceil(w);
+    // A muscle end's force goes to the body that ends at its node (the head's
+    // to the neck, bone 0).
+    let mut body_of = [0usize; MAX_NODES];
+    for (j, b) in bones.iter().enumerate() {
+        body_of[b.b as usize] = j;
+    }
     let mut count = [[0u8; MAX_NODES]; ROUNDS];
     let mut most = 0usize;
     for (k, m) in muscles.iter().enumerate() {
-        for bone in [m.bone_a, m.bone_b] {
-            let c = &mut count[k / w][bone as usize];
+        for node in [m.node_a, m.node_b] {
+            let c = &mut count[k / w][body_of[node as usize]];
             *c += 1;
             most = most.max(*c as usize);
         }
@@ -387,47 +395,43 @@ fn fill_creature(
         put(5, lane, if j == 0 { 0.0f32 } else { model.hi[j] }.to_bits());
         let q = if j == 0 { start.th0 } else { start.q[j] };
         put(6, lane, q.to_bits());
-        put(7, lane, if j == 0 { model.mass[0] } else { 0.0 }.to_bits());
+        put(7, lane, if j == 0 { model.mass[0] } else { model.ligament[j] }.to_bits());
         put(8, lane, model.radius[pivot].to_bits());
         put(9, lane, topo);
         put(10, lane, ancestors[j]);
         put(11, lane, node as u32);
     }
-    // Muscles, and the ends each bone carries: four byte slots per word
-    // (muscle lane times two plus the end), 255 for none.
-    let limits = physics::limits();
+    // Muscles, and the ends each body carries: four byte slots per word
+    // (muscle lane times two plus the end), 255 for none. A muscle reads its
+    // nodes' lanes and sends its forces to the bodies that carry those nodes
+    // (the head's force goes to the neck).
     let mut filled = [[0usize; MAX_NODES]; ROUNDS];
     let words = size.words;
+    let body_lane = |node: usize| if node == 0 { lane_of_bone[0] } else { lane_of_node(node) };
+    let mut store = 0.0f32;
+    let ramp = physics::muscle_ramp();
     for (k, m) in model.muscles.iter().enumerate() {
         let (round, lane) = (k / w, k % w);
-        let la = lane_of_bone[m.bone_a];
-        let lb = lane_of_bone[m.bone_b];
+        let (la, lb) = (lane_of_node(m.node_a), lane_of_node(m.node_b));
         let sensor = m
             .sensor
             .map_or(0, |node| (lane_of_node(node) as u32) << 10 | 1 << 15);
         let packed = la as u32 | (lb as u32) << 5 | sensor;
-        let strength = m.strength * model.muscle_scale;
+        let rp = ramp * m.inv_period;
         let values = [
             f32::from_bits(packed),
-            m.anchor_a,
-            m.anchor_b,
-            m.amplitude,
+            m.cap,
             m.hill,
             m.inv_period,
             m.phase,
-            m.duty,
-            m.stiffness,
-            m.inv_duty,
-            m.inv_complement,
+            (m.duty + rp).min(1.0) * 0.5,
+            1.0 / rp,
             m.reset,
-            limits.muscle_force * strength,
-            1.0 / (limits.muscle_energy * strength),
-            m.tendon_k,
-            m.long,
         ];
+        store += m.store;
         let at = ((round * w) + lane) * MUSCLE_FIELDS;
         muscles[at..at + MUSCLE_FIELDS].copy_from_slice(&values);
-        for (end_lane, slot) in [(la, 2 * lane), (lb, 2 * lane + 1)] {
+        for (end_lane, slot) in [(body_lane(m.node_a), 2 * lane), (body_lane(m.node_b), 2 * lane + 1)] {
             let e = filled[round][end_lane];
             filled[round][end_lane] += 1;
             let at = (round * words + e / 4) * w + end_lane;
@@ -443,7 +447,7 @@ fn fill_creature(
         0,
         model.total_mass.to_bits(),
         model.inv_mass.to_bits(),
-        0,
+        (1.0 / store.max(1e-6)).to_bits(),
     ]
 }
 
