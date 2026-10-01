@@ -621,6 +621,13 @@ fn run(
     ctx: eframe::egui::Context,
     mut dev: crate::dev_pause::DevPause,
 ) {
+    // The Rayon pool must exist before this thread is pinned: a pool built
+    // lazily by a pinned thread inherits its single CPU, and all of breeding
+    // and archiving then runs on one core. The game builds its pool in `main`
+    // (`threads::pool_threads`), so this is a no-op there. Examples and tests
+    // that spawn a worker without one get the default pool, built on this
+    // thread's full CPU set.
+    let _ = rayon::current_num_threads();
     crate::threads::pin_worker();
     let helper = crate::threads::Helper::new("search");
     let measuring = bench.measuring.clone();
