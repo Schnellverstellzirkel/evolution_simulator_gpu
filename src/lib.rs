@@ -8,7 +8,7 @@ pub mod engine;
 pub mod environment;
 pub mod evolution;
 pub mod gpu;
-pub mod huge_alloc;
+pub mod block_alloc;
 pub mod physics;
 pub mod physics2;
 pub mod qd;
@@ -25,4 +25,4 @@ pub mod worker;
 pub mod world_fx;
 
 #[global_allocator]
-static ALLOCATOR: huge_alloc::HugeAlloc = huge_alloc::HugeAlloc;
+static ALLOCATOR: block_alloc::BlockAlloc = block_alloc::BlockAlloc;

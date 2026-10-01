@@ -52,3 +52,4 @@ Each idea was measured and lost. Do not redo one without a new reason. Numbers a
 - 16 general workers, or 8 CPU evaluation workers beside a healthy GPU: 129,792 and 121,273 creatures/s against 137,824.
 - GPU work units of 0.5 s, 2 s or 3 s: 168k, 180k and 168k creatures/s against 187k for 1 s.
 - One engine slot kept free for confirmation trials, with a ring of 5 blocks of 32k: 24.7k against 24.3k creatures/s side by side on a shared GPU, and the same GPU idle time, because a confirmation still waits for a running wave to free the multiprocessors.
+- Transparent huge pages for large blocks (`MADV_HUGEPAGE`, whole 2 MiB mappings): page faults fell from 450,000 to a few thousand per generation at 1M, but direct compaction stalled single generations for 2 to 5 s while the machine was fragmented. Reuse of freed blocks (`src/block_alloc.rs`) is used instead.

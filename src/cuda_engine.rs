@@ -618,30 +618,38 @@ impl<T: bytemuck::Pod> HostVec<T> {
     }
 
     fn grow(&mut self, len: usize) {
-        self.release();
         let bytes = crate::engine::padded_size((len * std::mem::size_of::<T>()) as u64) as usize;
-        // From 2 MiB, a whole number of huge pages, which the kernel then
-        // aligns.
-        let bytes = bytes.next_multiple_of(if bytes >= 2 << 20 { 2 << 20 } else { 4096 });
+        let bytes = bytes.next_multiple_of(4096);
+        let old = std::mem::replace(&mut self.bytes, 0);
         // SAFETY: an anonymous private mapping, owned by this HostVec until
-        // `release`.
+        // `release`. A mapping already held is unregistered and extended in
+        // place or moved with the pages it has (`mremap`), so memory already
+        // faulted in stays faulted in; only the new part is fresh.
         let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                bytes,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
+            if old == 0 {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    bytes,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            } else {
+                if self.registered
+                    && let Ok(api) = api()
+                {
+                    (api.cu.mem_host_unregister)(self.ptr as *mut c_void);
+                }
+                self.registered = false;
+                libc::mremap(self.ptr as *mut c_void, old, bytes, libc::MREMAP_MAYMOVE)
+            }
         };
         if ptr == libc::MAP_FAILED {
             std::alloc::handle_alloc_error(
                 std::alloc::Layout::from_size_align(bytes, 4096).expect("a page layout"),
             );
         }
-        // Huge pages: one fault for 2 MiB of fresh memory.
-        unsafe { libc::madvise(ptr, bytes, libc::MADV_HUGEPAGE) };
         self.registered = bytes >= Self::REGISTER_FROM
             && REGISTER.with(|register| {
                 register.borrow().as_ref().is_some_and(|api| unsafe {

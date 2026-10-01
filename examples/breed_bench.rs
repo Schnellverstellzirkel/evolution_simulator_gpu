@@ -30,7 +30,7 @@ use std::time::Instant;
 
 // ---- allocation counting -------------------------------------------------
 
-use evolution_simulator::huge_alloc::{allocations, count_allocations};
+use evolution_simulator::block_alloc::{allocations, count_allocations, total_allocations};
 
 // ---- clocks --------------------------------------------------------------
 
@@ -459,6 +459,7 @@ fn digest(start: &Experiment, o: &Options) -> Result<u64> {
             }
         }
         let positions: Vec<usize> = (0..slots.len()).collect();
+        let before = total_allocations();
         population.breed(
             slots.len(),
             None,
@@ -471,6 +472,12 @@ fn digest(start: &Experiment, o: &Options) -> Result<u64> {
             &e.config,
             e.generation,
             round,
+        );
+        // Every thread's allocations while the block is bred into its arena.
+        println!(
+            "block {k}: {:.4} allocations per child in Population::breed ({} children)",
+            (total_allocations() - before) as f64 / slots.len() as f64,
+            slots.len()
         );
         for g in &population.genomes {
             h = mix(h
