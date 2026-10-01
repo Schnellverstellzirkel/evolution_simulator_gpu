@@ -1,6 +1,5 @@
 //! Reads a generation dump (EVOLUTION_DUMP_GENERATION, see `storage::dump`)
-//! and prints what the plan's search tracks need from it (docs/plan-2m.md,
-//! section 6 item 2): the ring's body histogram, entrants by archive, the
+//! and prints what the search needs from it: the ring's body histogram, entrants by archive, the
 //! three tail numbers per body class (R1 stop share, entrant share by
 //! archive including the reserve, operator histogram), the nursery's
 //! entrants, entrant recall per per-cell factor at 5 s, and mean final /

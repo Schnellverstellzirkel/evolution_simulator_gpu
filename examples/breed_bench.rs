@@ -1,4 +1,4 @@
-//! Host breeding cost with no GPU (docs/plan-2m.md, section 6 item 6).
+//! Host breeding cost with no GPU.
 //!
 //! Builds archives, from a save or grown with a fake evaluator, then breeds
 //! blocks of children through the game's own planning and emitting code and

@@ -1,5 +1,5 @@
 //! The early rungs of a trial and the audit lane that calibrates them
-//! (docs/plan-2m.md, the steps lever).
+//! (the steps lever).
 //!
 //! A standard trial may stop at 1 s (R1) or 2.5 s (R2) when a linear score of
 //! six features the kernel already measures says the creature will not reach

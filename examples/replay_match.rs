@@ -1,7 +1,7 @@
 //! Prints the best elites' archive distance beside their GPU replay's, which
 //! must be equal. Usage: replay_match <save> [count]
 //!
-//! The substep honesty re-test (docs/plan-2m-measurements.md, substep ladder):
+//! The substep honesty re-test:
 //!
 //!   replay_match <save> --retest <count> <out.csv>
 //!

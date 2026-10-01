@@ -12,7 +12,7 @@ Open work only. Delete an item when it is merged into `main`. If it is a real de
 ## Interface
 
 
-## Speed toward 2M and 4M creatures/s
+## Speed toward 500k creatures/s sustained
 
 - Breed the next batch from the previous archive while the GPU works, and write children straight into the arenas. Then measure end to end at 3M on a free GPU and make an evolved 3M save [claude/speed].
 - Build local-mutation children on the GPU. A device-side contender filter has a low ceiling (`docs/rejected-ideas.md`).

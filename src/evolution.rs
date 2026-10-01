@@ -1282,8 +1282,7 @@ pub struct CandidatePlan {
     pub mate: Option<usize>,
 }
 
-/// The growth-step body rule (docs/plan-2m.md, the owner's decision 2,
-/// taken on 2026-10-01): a child gains at most this many nodes and muscles
+/// The growth-step body rule (the owner's decision of 2026-10-01): a child gains at most this many nodes and muscles
 /// over its parent, so bodies grow by steps rather than jumps. In a
 /// generation-50 dump 4% of archive entrants had jumped further.
 pub const GROWTH_STEP: Option<GrowthStep> = Some(GrowthStep {

@@ -1,5 +1,5 @@
 //! Reader of the generation dump (`storage::dump`, EVOLUTION_DUMP_GENERATION)
-//! and the rung ladder of docs/plan-2m.md applied to its rows, shared by
+//! and a rung ladder applied to its rows, shared by
 //! `dump_stats` and `rung_replay`.
 #![allow(dead_code)]
 use anyhow::{Context, Result, ensure};

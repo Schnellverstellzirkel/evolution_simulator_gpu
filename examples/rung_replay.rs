@@ -1,4 +1,4 @@
-//! Replays a candidate rung ladder (docs/plan-2m.md: R1 at 1 s, R2 at 2.5 s,
+//! Replays a candidate rung ladder (R1 at 1 s, R2 at 2.5 s,
 //! R3 at 5 s, R4 at 10 s, the 1-in-128 audit lane, nurseries and immigrants
 //! exempt from R1 and R2, optimizer children exempt from R4) on a
 //! generation dump (EVOLUTION_DUMP_GENERATION), where every trial ran in

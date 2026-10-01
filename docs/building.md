@@ -32,15 +32,14 @@ The game needs an NVIDIA GPU with the CUDA driver and NVRTC. It evaluates
 creatures through CUDA and nowhere else (`src/cuda_engine.rs`,
 `shaders/warp_creature.cu`, `src/warp_kernel.rs`). The window is drawn
 through Vulkan (wgpu), on the GPU the desktop uses.
-`examples/warp_regs.rs` prints each kernel's registers and spills from NVRTC
-alone; `EVOLUTION_WARP_PROFILE=1` makes one warp print its cycles per kernel
+`EVOLUTION_CUDA_VERBOSE=1` prints each kernel's registers, shared and local
+memory and occupancy as it loads; `EVOLUTION_WARP_PROFILE=1` makes one warp print its cycles per kernel
 section. `EVOLUTION_WARP_SUBSTEPS`, `EVOLUTION_WARP_PGS_SWEEPS`,
 `EVOLUTION_WARP_CLEAN_SWEEPS`, `EVOLUTION_WARP_PLANT_ROUNDS` and
 `EVOLUTION_WARP_PLANT_SWEEPS` override the solver settings for measuring
 them. `replay_match <save> --retest <count> <out.csv>` re-tests a save's best
 elites with the settings in force, and `replay_match --ladder` compares the
-files from runs at the default, 2 and 4 substeps (`docs/plan-2m-measurements.md`,
-substep ladder). `EVOLUTION_WARP_BUCKETS=1` gives each wave one take-up counter
+files from runs at the default, 2 and 4 substeps. `EVOLUTION_WARP_BUCKETS=1` gives each wave one take-up counter
 instead of one per muscle-rounds bucket.
 Nothing needs configuring: the build links no CUDA library, and the engine
 loads the CUDA driver library and NVRTC when it opens. If either is missing,
@@ -137,11 +136,11 @@ Check the renderer line the tool prints. If it names NVIDIA, stop, because the t
 
 Diagnostics: run `journalctl -k | grep -E "amdgpu.*(timeout|reset)"` after any Radeon experiment. The Radeon is `card2` (`0000:06:00.0`) and the RTX is `card1` (`0000:01:00.0`). `/sys/class/drm/card2/device/gpu_busy_percent` is the Radeon's load. In the amdgpu hwmon, `power1_average` is the APU package power in microwatts and `freq1_input` is the shader clock.
 
-The measurements behind this section are in `docs/plan-2m-debate/round-1-igpu.md` to `round-5-igpu.md`. Radeon physics stays closed: the 780M issues 0.2 to 0.25 of the RTX's instructions per clock, and its watts come from the package budget the CPU needs.
+Radeon physics stays closed: the 780M issues 0.2 to 0.25 of the RTX's instructions per clock, and its watts come from the package budget the CPU needs.
 
 ## Power rows
 
-These rows fix the power budget, the host tax, the sustained clock, the Radeon's cost and four root settings for the 2M/s plan (`docs/plan-2m.md`, section 6, item 1). The row numbers are the ones the plan and `docs/plan-2m-debate/round-2-os.md` use. Every row is logged by `tools/power-sample.sh` at 100 ms: SM and memory clock, GPU power, the live power limit (`enforced.power.limit`, which Dynamic Boost moves between 85 and 100 W), the limiter reasons, temperature, the APU package power (PPT) and the Radeon's clock and load. Its summary averages the samples where the RTX is at least 90% busy.
+These rows fix the power budget, the host tax, the sustained clock, the Radeon's cost and four root settings. Every row is logged by `tools/power-sample.sh` at 100 ms: SM and memory clock, GPU power, the live power limit (`enforced.power.limit`, which Dynamic Boost moves between 85 and 100 W), the limiter reasons, temperature, the APU package power (PPT) and the Radeon's clock and load. Its summary averages the samples where the RTX is at least 90% busy.
 
 The tools:
 

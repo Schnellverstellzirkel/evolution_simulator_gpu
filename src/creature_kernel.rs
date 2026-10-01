@@ -66,7 +66,7 @@ impl GpuResult {
 }
 
 /// What a trial looked like on its way, for the steps ladder
-/// (`docs/plan-2m.md`, R1 to R4): the distance at 1, 2.5, 5 and 10 s and the
+/// (R1 to R4): the distance at 1, 2.5, 5 and 10 s and the
 /// early features at 1 and 2.5 s, as fp16 pairs (low half first):
 ///
 /// - word 0: d60, d150 (m; a rung the trial did not reach holds the final

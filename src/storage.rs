@@ -2557,7 +2557,7 @@ impl Experiment {
 // and is turned down.
 /// The generation dump: `EVOLUTION_DUMP_GENERATION=<generation>[:<path>]`
 /// (or `=<path>` for the next boundary), a developer diagnostic for the
-/// steps ladder of `docs/plan-2m.md`. From that generation's start, one
+/// steps ladder. From that generation's start, one
 /// generation's worth of blocks is bred with the screen bar off, so every
 /// trial runs in full, and the island elites are queued to run again in it
 /// (they enter no archive). Each creature of those blocks writes a 64 B row
