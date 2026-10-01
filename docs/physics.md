@@ -2,7 +2,7 @@
 
 A creature is a tree of point masses (nodes) joined by rigid, massless bones. The state is the head's position and velocity, the neck's angle and angular velocity, and one relative angle and angular velocity per other bone. Node positions come from forward kinematics, so every bone keeps its exact length and every pose is valid.
 
-The dynamics are Featherstone's articulated-body algorithm in planar spatial vectors, written in world axes about the head's position at the start of the step so the numbers stay small in single precision. The neck body floats freely. Every other bone turns about its pivot relative to its parent bone. Integration is semi-implicit Euler on the joint coordinates at 60 steps per second, each step taken as 2 substeps of 1/120 s. Trials last 20 s after a short settling phase.
+The dynamics are Featherstone's articulated-body algorithm in planar spatial vectors, written in world axes about the head's position at the start of the step so the numbers stay small in single precision. The neck body floats freely. Every other bone turns about its pivot relative to its parent bone. Integration is semi-implicit Euler on the joint coordinates at 60 steps per second, one substep per step. Trials last 20 s after a short settling phase.
 
 The physics is the CUDA kernel, `shaders/warp_creature.cu`, and nothing else simulates creatures. The game needs an NVIDIA GPU with the CUDA driver and NVRTC. `src/warp_kernel.rs` packs each creature from `physics2::Model` and writes the kernel source with the constants of `physics.rs` and `physics2.rs` and the world's effects compiled in. Where the rules below say step, the kernel uses the substep's time step.
 
@@ -40,7 +40,7 @@ In the CUDA kernel the contact solve (detection, the matrix walk, the sweeps and
 
 ## Substeps
 
-Measured on 300 elites of an evolved population (60 Hz against the same kernel at 4x rate): 2 substeps give a median distance ratio of 1.03; 1 substep gives 0.05, and 1 substep with one planting round 0.79. Holding the muscle forces over both substeps gave 0.41. Random bodies gain nothing (median -0.05 m, best -0.01 m in 20 s).
+One substep per 1/60 s step, chosen by the substep ladder of 2026-10-01 (docs/plan-2m-measurements.md): evolved 30 generations at 3M on one seed, 1 substep reached 66.6 m best against 52.2 m at 2 substeps with a higher QD score; its top 300 elites re-tested at 4 substeps hold a median 39.6 m (2 substeps: 35.1 m at their own rate), 17 of 300 fall at 4 substeps against 68, and its top 50 keep 82% of their distance from a nudged pose against 1%. Random bodies gain nothing (median -0.05 m). Planted-foot slip is 0.94 of the 4-substep value. The kernel runs about 1.6x faster. A realized-friction ledger, anchored friction and spin-adaptive substeps were measured on the same ladder and lost (docs/rejected-ideas.md).
 
 ## Audits
 

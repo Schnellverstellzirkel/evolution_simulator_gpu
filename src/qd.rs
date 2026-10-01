@@ -48,7 +48,8 @@ pub(crate) const CMA_LIMIT: usize = 96;
 //     a 12-uniform gaussian, and bodies are held to 32 nodes and 96 muscles.
 // 46: the ring's block size and block count are saved with the experiment
 //     and recorded in every generation's statistics.
-pub const VERSION: u32 = 46;
+// 47: one substep per 1/60 s step (the L0 rung of the substep ladder).
+pub const VERSION: u32 = 47;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
