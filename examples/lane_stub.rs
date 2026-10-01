@@ -471,7 +471,7 @@ pub fn batch(count: usize, nodes: usize, muscles: usize, mpl: usize, nb: usize, 
         }
         for g in 0..8 {
             let (lane, k) = (g / 4, g % 4);
-            let put = |rec: &mut [f32], field: usize, v: f32| rec[(field + k) * W + lane] = v;
+            let put = |rec: &mut [f32], field: usize, v: f32| rec[lane * RF + field + k] = v;
             if g < n {
                 put(rec, 0, invm[g]);
                 put(rec, 4, rad[g]);
@@ -915,7 +915,7 @@ fn main() -> Result<()> {
             println!("checkpoint counts: {counts:?}");
             if a.contains_key("dumpw") {
                 let f = unsafe { std::slice::from_raw_parts(trace_host as *const f32, 128) };
-                let rad: Vec<f32> = (0..8).map(|g| b.lanes[(4 + g % 4) * 2 + g / 4]).collect();
+                let rad: Vec<f32> = (0..8).map(|g| b.lanes[(g / 4) * RF + 4 + g % 4]).collect();
                 check_dump_w(f, &rad);
             }
             if a.contains_key("dump") {
@@ -946,7 +946,7 @@ fn main() -> Result<()> {
             println!("bad: {} {:?}", bad.len(), &bad[..bad.len().min(40)]);
             for &i in bad.iter().take(3) {
                 let tp: Vec<String> = (0..8).map(|g| {
-                    let t = b.lanes[(i * RF + 24 + g % 4) * 2 + g / 4].to_bits();
+                    let t = b.lanes[(i * 2 + g / 4) * RF + 24 + g % 4].to_bits();
                     format!("{}:{}p{}r{}", g, t & 31, (t >> 5) & 31, (t >> 10) & 3)
                 }).collect();
                 println!("  creature {i}: steps {} topo {}", out[i][3], tp.join(" "));

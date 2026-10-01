@@ -113,6 +113,30 @@
 #ifndef PROJ_ANCHORED
 #define PROJ_ANCHORED TRIM
 #endif
+// SREG: the per-rod statics (radius, friction, pivot inverse mass, rest length,
+// mass for the drag) are read once at the take-up into registers, as vector
+// loads, instead of one scalar load per use.
+// RR_REGS: R's eight rows at the four local rods are formed once per substep
+// (32 products) instead of at each of their uses.
+// CAPPLY: the contact impulses go into the node force table (two contacts per
+// lane, one read-modify-write each) and the torque ledger reads the node
+// table, instead of predicated per-rod updates. ANC_REGS: the friction
+// anchors live in registers, updated by node masks.
+#ifndef CAPPLY
+#define CAPPLY TRIM
+#endif
+#ifndef ANC_REGS
+#define ANC_REGS TRIM
+#endif
+#ifndef RRZ1OLD
+#define RRZ1OLD 0
+#endif
+#ifndef RR_REGS
+#define RR_REGS TRIM
+#endif
+#ifndef SREG
+#define SREG TRIM
+#endif
 // NODE_NMAJOR: the node table node-major (node n of the lane pair's
 // creature at n * 16 + creature), so a runtime node's float4 is one address
 // add from n * 256, shared with its force-table slot.
@@ -178,6 +202,26 @@ __device__ __forceinline__ float frcp(float x) {
     return r;
 #else
     return 1.0f / x;
+#endif
+}
+// Reciprocal square root and square root by the hardware approximations
+// (FASTRCP): one MUFU each instead of the library's range handling.
+__device__ __forceinline__ float frsq(float x) {
+#if FASTRCP
+    float r;
+    asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
+    return r;
+#else
+    return rsqrtf(x);
+#endif
+}
+__device__ __forceinline__ float fsqrt(float x) {
+#if FASTRCP
+    float r;
+    asm("sqrt.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
+    return r;
+#else
+    return sqrtf(x);
 #endif
 }
 // A value select that keeps both operands values (a select between two array
@@ -496,6 +540,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
     float invm[NPL];
     unsigned topo_r[NPL];
     float px[NPL], py[NPL], vx[NPL], vy[NPL];
+    float srad[NPL], sipv[NPL], smu[NPL], slen[NPL], smass[NPL];
+    float anc_r[NPL];
     // With the state in registers the muscle loops end by skipping, not by
     // leaving: a loop exit keeps ms[] in local memory.
 #if MSTATE_REGS
@@ -515,14 +561,31 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #pragma unroll
     for (int k = 0; k < NPL; k++) {
         invm[k] = 0.0f; topo_r[k] = 0u; px[k] = 0.0f; py[k] = 0.0f; vx[k] = 0.0f; vy[k] = 0.0f;
+        anc_r[k] = __uint_as_float(0x7fc00000u);
+        srad[k] = 0.0f; sipv[k] = 0.0f; smu[k] = 0.0f; slen[k] = 0.0f; smass[k] = 1.0f;
     }
 #if MSTATE_REGS
 #pragma unroll
     for (int k = 0; k < MPL; k++) { ms[k] = 0u; }
 #endif
-#define REC(f, k) lanes[((size_t)cidx * RF + (f) + (k)) * W + lg]
+#define REC(f, k) lanes[((size_t)cidx * W + lg) * RF + (f) + (k)]
+#define REC4(f) (*reinterpret_cast<const float4*>(&lanes[((size_t)cidx * W + lg) * RF + (f)]))
     // Friction anchors per node in L2, NaN when the node has none.
-#define ANC(k) anch[((size_t)cidx * NPL + (k)) * W + lg]
+#if SREG
+#define R_RAD(k) srad[k]
+#define R_IPV(k) sipv[k]
+#define R_MU(k) smu[k]
+#define R_LEN(k) slen[k]
+#define R_MASS(k) smass[k]
+#else
+#define R_RAD(k) REC(4, k)
+#define R_IPV(k) REC(28, k)
+#define R_MU(k) (REC(8, k) * p.friction)
+#define R_LEN(k) REC(20, k)
+#define R_MASS(k) frcp(fmaxf(fmaxf(invm[k], REC(28, k)), 1e-6f))
+#endif
+#define ANC(k) anch[((size_t)cidx * W + lg) * NPL + (k)]
+#define ANC4 (*reinterpret_cast<const float4*>(&anch[((size_t)cidx * W + lg) * NPL]))
 #define STASH(q) (reinterpret_cast<volatile float*>(s_warp)[(18 + (q)) * 32 + lane])
 
     for (;;) {
@@ -541,8 +604,27 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     py[k] = REC(16, k);
                     topo_r[k] = __float_as_uint(REC(24, k));
                     vx[k] = 0.0f; vy[k] = 0.0f;
+#if !SREG && !ANC_REGS
                     ANC(k) = __uint_as_float(0x7fc00000u);
+#endif
                 }
+#if ANC_REGS
+#pragma unroll
+                for (int k = 0; k < NPL; k++) { anc_r[k] = __uint_as_float(0x7fc00000u); }
+#elif SREG
+                *reinterpret_cast<float4*>(&ANC(0)) = make_float4(__uint_as_float(0x7fc00000u), __uint_as_float(0x7fc00000u), __uint_as_float(0x7fc00000u), __uint_as_float(0x7fc00000u));
+#endif
+#if SREG
+                {
+                    const float4 rd = REC4(4), mu = REC4(8), ln = REC4(20), ip = REC4(28);
+                    srad[0] = rd.x; srad[1] = rd.y; srad[2] = rd.z; srad[3] = rd.w;
+                    smu[0] = mu.x * p.friction; smu[1] = mu.y * p.friction; smu[2] = mu.z * p.friction; smu[3] = mu.w * p.friction;
+                    slen[0] = ln.x; slen[1] = ln.y; slen[2] = ln.z; slen[3] = ln.w;
+                    sipv[0] = ip.x; sipv[1] = ip.y; sipv[2] = ip.z; sipv[3] = ip.w;
+#pragma unroll
+                    for (int k = 0; k < NPL; k++) { smass[k] = frcp(fmaxf(fmaxf(invm[k], sipv[k]), 1e-6f)); }
+                }
+#endif
 #pragma unroll MUSCLE_UNROLL
                 for (int k = 0; k < MPL; k++) {
                     const size_t mb = (size_t)cidx * MPL * W + lg;
@@ -654,7 +736,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                         const float vbx = e2.z + (e3.z - e2.z) * an.y, vby = e2.w + (e3.w - e2.w) * an.y;
                         const float ddx = pbx - pax, ddy = pby - pay;
 #if FASTRCP
-                        const float inverse = rsqrtf(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                        const float inverse = frsq(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
                         const float length = (ddx * ddx + ddy * ddy) * inverse;
 #else
                         const float length = fmaxf(sqrtf(ddx * ddx + ddy * ddy), 1e-6f);
@@ -702,12 +784,12 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     const unsigned a = T_PIVOT(t);
                     const float4 na = NODER(a);
                     const float ddx = px[k] - na.x, ddy = py[k] - na.y;
-                    const float il = rsqrtf(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                    const float il = frsq(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
                     const float l = (ddx * ddx + ddy * ddy) * il;
                     const float wx = 0.5f * (vx[k] + na.z), wy = 0.5f * (vy[k] + na.w);
-                    const float speed = sqrtf(wx * wx + wy * wy);
-                    const float m = frcp(fmaxf(fmaxf(invm[k], REC(28, k)), 1e-6f));
-                    const float strength = fminf(AIR_DRAG * l * (REC(4, k) * 2.0f) * speed, 0.5f * m * INV_HS);
+                    const float speed = fsqrt(wx * wx + wy * wy);
+                    const float m = R_MASS(k);
+                    const float strength = fminf(AIR_DRAG * l * (R_RAD(k) * 2.0f) * speed, 0.5f * m * INV_HS);
                     const float hx = -0.5f * wx * strength, hy = -0.5f * wy * strength;
                     fx[k] += hx; fy[k] += hy;
                     float2 fa = FRC(a, lane);
@@ -719,7 +801,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     if (g != 31u) {
                         const float4 ng = NODER(g);
                         pdx = na.x - ng.x; pdy = na.y - ng.y;
-                        pil = rsqrtf(fmaxf(pdx * pdx + pdy * pdy, 1e-12f));
+                        pil = frsq(fmaxf(pdx * pdx + pdy * pdy, 1e-12f));
                         w_par = (pdx * (na.w - ng.w) - pdy * (na.z - ng.z)) * pil * pil;
                     }
                     const float tau = -m * l * l * (w_rod - w_par) * INV_JOINT_DAMPING;
@@ -750,12 +832,12 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     const unsigned a = T_PIVOT(t);
                     const float4 na = NODER(a);
                     const float ddx = px[k] - na.x, ddy = py[k] - na.y;
-                    const float il = rsqrtf(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                    const float il = frsq(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
                     const float l = (ddx * ddx + ddy * ddy) * il;
                     const float wx = 0.5f * (vx[k] + na.z), wy = 0.5f * (vy[k] + na.w);
-                    const float speed = sqrtf(wx * wx + wy * wy);
-                    const float m = frcp(fmaxf(fmaxf(invm[k], REC(28, k)), 1e-6f));
-                    const float strength = fminf(AIR_DRAG * l * (REC(4, k) * 2.0f) * speed, 0.5f * m * INV_HS);
+                    const float speed = fsqrt(wx * wx + wy * wy);
+                    const float m = R_MASS(k);
+                    const float strength = fminf(AIR_DRAG * l * (R_RAD(k) * 2.0f) * speed, 0.5f * m * INV_HS);
                     const float hx = -0.5f * wx * strength, hy = -0.5f * wy * strength;
                     fx[k] += hx; fy[k] += hy;
                     float2 fa = FRC(a, lane);
@@ -767,7 +849,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     if (g != 31u) {
                         const float4 ng = NODER(g);
                         pdx = na.x - ng.x; pdy = na.y - ng.y;
-                        pil = rsqrtf(fmaxf(pdx * pdx + pdy * pdy, 1e-12f));
+                        pil = frsq(fmaxf(pdx * pdx + pdy * pdy, 1e-12f));
                         w_par = (pdx * (na.w - ng.w) - pdy * (na.z - ng.z)) * pil * pil;
                     }
                     const float tau = -m * l * l * (w_rod - w_par) * INV_JOINT_DAMPING;
@@ -809,7 +891,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     const float vbx = e2.z + (e3.z - e2.z) * an.y, vby = e2.w + (e3.w - e2.w) * an.y;
                     const float ddx = pbx - pax, ddy = pby - pay;
 #if FASTRCP
-                    const float inverse = rsqrtf(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                    const float inverse = frsq(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
                     const float length = (ddx * ddx + ddy * ddy) * inverse;
 #else
                     const float length = fmaxf(sqrtf(ddx * ddx + ddy * ddy), 1e-6f);
@@ -854,11 +936,19 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             }
             __syncwarp();
             // Node table with the free velocities; node statics for the rows.
+#if ANC_REGS
+#define ANCV(k) anc_r[k]
+#elif SREG
+            const float4 an4 = ANC4;
+#define ANCV(k) ((k) == 0 ? an4.x : (k) == 1 ? an4.y : (k) == 2 ? an4.z : an4.w)
+#else
+#define ANCV(k) ANC(k)
+#endif
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
                 NODEW(k) = make_float4(px[k], py[k], vx[k], vy[k]);
-                FRC(2 * k, lane) = make_float2(invm[k], REC(8, k) * p.friction);
-                FRC(2 * k + 1, lane) = make_float2(REC(4, k), ANC(k));
+                FRC(2 * k, lane) = make_float2(invm[k], R_MU(k));
+                FRC(2 * k + 1, lane) = make_float2(R_RAD(k), ANCV(k));
             }
             __syncwarp();
             // Rod directions and the rods' own rows.
@@ -877,7 +967,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     const unsigned a = T_PIVOT(t);
                     const float4 na = NODER(a);
                     const float ddx = px[k] - na.x, ddy = py[k] - na.y;
-                    const float il = rsqrtf(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                    const float il = frsq(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
                     dx[k] = ddx * il; dy[k] = ddy * il;
                     const float rvx = vx[k] - na.z, rvy = vy[k] - na.w;
                     const float rn = rvx * dx[k] + rvy * dy[k];
@@ -894,7 +984,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             {
                 float ipv[NPL];
 #pragma unroll
-                for (int k = 0; k < NPL; k++) { ipv[k] = REC(28, k); }
+                for (int k = 0; k < NPL; k++) { ipv[k] = R_IPV(k); }
                 PMK_AT
                 factor(topo, pmk, dx, dy, rdx, rdy, ipv, invm, lg, invD, Lf);
             }
@@ -904,7 +994,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 float dep[NPL], rdep[NPL];
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
-                    const float d = py[k] - REC(4, k) + HS * vy[k];
+                    const float d = py[k] - R_RAD(k) + HS * vy[k];
                     dep[k] = (invm[k] > 0.0f && d <= 0.0f && !NO_CONTACT) ? d : 1e30f;
                 }
 #pragma unroll
@@ -979,6 +1069,19 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #undef RCO
 #define RCO(k, c) rc[k][c]
 #endif
+#if RR_REGS
+            // R's rows: contact e >> 1's normal (even e, along y) and friction
+            // (odd e, along x) at each local rod, once per substep.
+            float rrm[NE][NPL];
+#pragma unroll
+            for (int e = 0; e < NE; e++) {
+#pragma unroll
+                for (int k = 0; k < NPL; k++) { rrm[e][k] = RCO(k, e >> 1) * pick((e) & 1, dx[k], dy[k]); }
+            }
+#define RR(e, k) rrm[e][k]
+#else
+#define RR(e, k) (RCO(k, (e) >> 1) * pick((e) & 1, dx[k], dy[k]))
+#endif
             // Batch A: row 0 the rods' own, rows 1 + 2c and 2 + 2c contact
             // c's normal and friction (c = 0, 1); lane 0 one slot behind.
             float mu0[NPL], me[4][NPL];
@@ -990,9 +1093,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     for (int k = 0; k < NPL; k++) {
                         float v1 = 0.0f, v0 = 0.0f;
                         if (s == 0) { v1 = rhs0[k]; }
-                        else if (s < 5) { v1 = RCO(k, (s - 1) >> 1) * pick(((s - 1)) & 1, dx[k], dy[k]); }
+                        else if (s < 5) { v1 = RR(s - 1, k); }
                         if (s == 1) { v0 = rhs0[k]; }
-                        else if (s >= 2) { v0 = RCO(k, (s - 2) >> 1) * pick(((s - 2)) & 1, dx[k], dy[k]); }
+                        else if (s >= 2) { v0 = RR(s - 2, k); }
                         z[s][k] = lg == 1u ? v1 : v0;
                     }
                 }
@@ -1018,7 +1121,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             for (int e = 0; e < NE; e++) {
                 float part = 0.0f;
 #pragma unroll
-                for (int k = 0; k < NPL; k++) { part += RCO(k, e >> 1) * pick((e) & 1, dx[k], dy[k]) * mu0[k]; }
+                for (int k = 0; k < NPL; k++) { part += RR(e, k) * mu0[k]; }
                 b0[e] -= part + xch(part);
             }
             __syncwarp();
@@ -1027,7 +1130,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             for (int f = 0; f < NE; f++) {
                 float rf[NPL];
 #pragma unroll
-                for (int k = 0; k < NPL; k++) { rf[k] = RCO(k, f >> 1) * pick((f) & 1, dx[k], dy[k]); }
+                for (int k = 0; k < NPL; k++) { rf[k] = RR(f, k); }
 #pragma unroll
                 for (int e = 0; e < 4; e++) {
                     if (e <= f) {
@@ -1048,8 +1151,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #pragma unroll
                     for (int k = 0; k < NPL; k++) {
                         float v1 = 0.0f, v0 = 0.0f;
-                        if (s < 4) { v1 = RCO(k, (4 + s) >> 1) * pick(((4 + s)) & 1, dx[k], dy[k]); }
-                        if (s >= 1) { v0 = RCO(k, (3 + s) >> 1) * pick(((3 + s)) & 1, dx[k], dy[k]); }
+                        if (s < 4) { v1 = RR(4 + s, k); }
+                        if (s >= 1) { v0 = RR(3 + s, k); }
                         z[s][k] = lg == 1u ? v1 : v0;
                     }
                 }
@@ -1065,7 +1168,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             for (int f = 4; f < NE; f++) {
                 float rf[NPL];
 #pragma unroll
-                for (int k = 0; k < NPL; k++) { rf[k] = RCO(k, f >> 1) * pick((f) & 1, dx[k], dy[k]); }
+                for (int k = 0; k < NPL; k++) { rf[k] = RR(f, k); }
 #pragma unroll
                 for (int e = 4; e < NE; e++) {
                     if (e <= f) {
@@ -1250,8 +1353,12 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
                 float r = 0.0f;
+#if !RR_REGS || RRZ1OLD
 #pragma unroll
                 for (int c = 0; c < NC; c++) { r += RCO(k, c) * (lam[2 * c] * dyg[k] + lam[2 * c + 1] * dxg[k]); }
+#else
+                for (int e = 0; e < NE; e++) { r += RR(e, k) * lam[e]; }
+#endif
                 z1[0][k] = lg == 1u ? r : 0.0f;
                 z1[1][k] = lg == 1u ? 0.0f : r;
             }
@@ -1277,6 +1384,26 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     FRC(a, lane) = f;
                 }
             }
+#if CAPPLY
+            // Contact impulses: lane lg takes contacts 2j + lg.
+            float ext_x = 0.0f, ext_y = 0.0f;
+#pragma unroll
+            for (int c = 0; c < NC; c++) { ext_x += lam[2 * c + 1]; ext_y += lam[2 * c]; }
+            // The Delassus matrix has overwritten the node table: positions
+            // again, for the torque of the contact impulses.
+#pragma unroll
+            for (int k = 0; k < NPL; k++) { NODEW(k) = make_float4(px[k], py[k], 0.0f, 0.0f); }
+#pragma unroll
+            for (int j = 0; j < NC / 2; j++) {
+                const unsigned g = (word >> (12u * j + 6u * lg)) & 31u;
+                const float ln = lg ? lam[4 * j + 2] : lam[4 * j];
+                const float lt = lg ? lam[4 * j + 3] : lam[4 * j + 1];
+                if (((word >> (12u * j + 6u * lg)) & 32u) == 0u) { continue; }
+                float2 f = FRC(g, lane);
+                f.x += lt; f.y += ln;
+                FRC(g, lane) = f;
+            }
+#else
             unsigned own = 0u;
             float ext_x = 0.0f, ext_y = 0.0f;
 #pragma unroll
@@ -1292,6 +1419,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     ext_x += lam[2 * c + 1]; ext_y += lam[2 * c];
                 }
             }
+#endif
             __syncwarp();
             // New velocities. Ledgers: the impulses of the substep must move
             // the body's momentum and its angular momentum about the centre
@@ -1325,7 +1453,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #pragma unroll
                             for (int k = 0; k < NPL; k++) {
                                 if ((1u << (g & 3u)) & (1u << k)) {
-                                    const float gap = py[k] - REC(4, k);
+                                    const float gap = py[k] - R_RAD(k);
                                     const float tgt = gap >= 0.0f ? -gap * INV_HS : -gap * PUSH_OUT * INV_HS;
                                     rn = fmaxf(rn, fabsf(vy[k] - tgt));
                                 }
@@ -1351,8 +1479,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #endif
                 const float itm = frcp(fmaxf(mm + xch(mm), 1e-6f));
                 const float ccx = (mx + xch(mx)) * itm, ccy = (my + xch(my)) * itm;
+                #if CAPPLY
+                const float sx = NO_LEDGER ? 0.0f : (ext_x - gx - xch(gx)) * itm;
+                const float sy = NO_LEDGER ? 0.0f : (ext_y - gy - xch(gy)) * itm;
+#else
                 const float sx = NO_LEDGER ? 0.0f : (ext_x + xch(ext_x) - gx - xch(gx)) * itm;
-                const float sy = NO_LEDGER ? 0.0f : (ext_y + xch(ext_y) - gy - xch(gy)) * itm;
+                                const float sy = NO_LEDGER ? 0.0f : (ext_y + xch(ext_y) - gy - xch(gy)) * itm;
+#endif
                 float lz = 0.0f, lc = 0.0f, iz = 0.0f;
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
@@ -1365,6 +1498,16 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     vy[k] += on_ ? sy : 0.0f;
                 }
                 // The contact impulses' torque about the centre of mass.
+#if CAPPLY
+#pragma unroll
+                for (int j = 0; j < NC / 2; j++) {
+                    const unsigned g = (word >> (12u * j + 6u * lg)) & 31u;
+                    const float ln = lg ? lam[4 * j + 2] : lam[4 * j];
+                    const float lt = lg ? lam[4 * j + 3] : lam[4 * j + 1];
+                    const float4 nd = NODER(g);
+                    lc += (nd.x - ccx) * ln - (nd.y - ccy) * lt;
+                }
+#else
 #pragma unroll
                 for (int c = 0; c < NC; c++) {
                     const unsigned g = CNODE(c);
@@ -1376,9 +1519,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                         }
                     }
                 }
+#endif
                 const float itot = iz + xch(iz);
                 const float lsum = lc + xch(lc) - lz - xch(lz);
-                const float wc = (itot > 0.0f && !NO_LEDGER) ? lsum / itot : 0.0f;
+                const float wc = (itot > 0.0f && !NO_LEDGER) ? lsum * frcp(itot) : 0.0f;
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
                     const bool on_ = invm[k] > 0.0f;
@@ -1397,6 +1541,26 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 px[k] += HS * vx[k];
                 py[k] += HS * vy[k];
             }
+#if ANC_REGS
+            {
+                // Node masks of the touching nodes and of those whose friction
+                // slid; a touching node takes its new position as the anchor
+                // when it slid or had none.
+                unsigned tmask = 0u, smask = 0u;
+#pragma unroll
+                for (int c = 0; c < NC; c++) {
+                    const unsigned e = (word >> (6u * c)) & 63u;
+                    const unsigned bit = 1u << (e & 31u);
+                    tmask |= (e & 32u) ? bit : 0u;
+                    smask |= (!((on >> (2 * c + 1)) & 1u)) ? bit : 0u;
+                }
+#pragma unroll
+                for (int k = 0; k < NPL; k++) {
+                    const unsigned n = lg * NPL + k;
+                    if (((tmask >> n) & 1u) && (((smask >> n) & 1u) || anc_r[k] != anc_r[k])) { anc_r[k] = px[k]; }
+                }
+            }
+#else
 #pragma unroll
             for (int c = 0; c < NC; c++) {
                 const unsigned g = CNODE(c);
@@ -1411,6 +1575,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     }
                 }
             }
+#endif
             contact_sum += (float)__popc(word & 0x820820u);
 #if PROJ_ANCHORED
 #pragma unroll
@@ -1421,6 +1586,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             }
 #endif
 #undef RCO
+#undef RR
 #undef CNODE
         }
         // Drift projection: rod lengths back to rest with the contact nodes
@@ -1435,7 +1601,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             // A node out of contact for the step loses its anchor.
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
-                if (!((held >> (lg * NPL + k)) & 1u) && ((prevc >> (lg * NPL + k)) & 1u)) { ANC(k) = __uint_as_float(0x7fc00000u); }
+                if (!((held >> (lg * NPL + k)) & 1u) && ((prevc >> (lg * NPL + k)) & 1u)) {
+#if ANC_REGS
+                    anc_r[k] = __uint_as_float(0x7fc00000u);
+#else
+                    ANC(k) = __uint_as_float(0x7fc00000u);
+#endif
+                }
             }
             __syncwarp();
 #pragma unroll
@@ -1453,17 +1625,17 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     const float4 na = NODER(a);
                     const float ddx = px[k] - na.x, ddy = py[k] - na.y;
 #if FASTRCP
-                    const float il = rsqrtf(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                    const float il = frsq(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
                     const float l = (ddx * ddx + ddy * ddy) * il;
 #else
                     const float l = sqrtf(ddx * ddx + ddy * ddy);
                     const float il = 1.0f / fmaxf(l, 1e-6f);
 #endif
                     dx[k] = ddx * il; dy[k] = ddy * il;
-                    c = l - REC(20, k);
+                    c = l - R_LEN(k);
                 }
                 drift_max = fmaxf(drift_max, fabsf(c));
-                ipe[k] = ((held >> T_PIVOT(t)) & 1u) ? 0.0f : REC(28, k);
+                ipe[k] = ((held >> T_PIVOT(t)) & 1u) ? 0.0f : R_IPV(k);
                 icm[k] = ((held >> (lg * NPL + k)) & 1u) ? 0.0f : invm[k];
                 z1[0][k] = lg == 1u ? -c : 0.0f;
                 z1[1][k] = lg == 1u ? 0.0f : -c;
@@ -1524,10 +1696,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             for (int k = 0; k < NPL; k++) {
                 const float m = invm[k] > 0.0f ? frcp(invm[k]) : 0.0f;
                 mm += m; mx += m * px[k];
-                if (invm[k] > 0.0f) { low = fminf(low, py[k] - REC(4, k)); }
+                if (invm[k] > 0.0f) { low = fminf(low, py[k] - R_RAD(k)); }
                 bad |= !(fabsf(px[k]) <= 1e6f && fabsf(py[k]) <= 1e6f);
             }
-            const float com_x = (mx + xch(mx)) / fmaxf(mm + xch(mm), 1e-6f);
+            const float com_x = (mx + xch(mx)) * frcp(fmaxf(mm + xch(mm), 1e-6f));
             low = fminf(low, xch(low));
             bad = ((__ballot_sync(FULL, bad) >> gl) & 3u) != 0u;
             const float ms_all = msum + xch(msum);
