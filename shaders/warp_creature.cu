@@ -1158,8 +1158,19 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
         rec_t = step_t * (1.0f / SUBSTEPS);
 
         PROF(12);
-        // Metrics, falls and the screen, once per step.
+        // Metrics, falls and the screen, once per step. Every lane works on its
+        // own copy of the group's totals and lane 0 writes them back, so lanes
+        // of one group that run apart never apply a change twice.
         {
+            __shared__ uint4 s_rung[BLOCK / W];
+            __shared__ unsigned s_rb[BLOCK / W];
+            __syncwarp();
+            Result mt = s_mt[tid / W];
+            const uint4 bits0 = s_bits[tid / W];
+            unsigned contact_bits = bits0.x, lift_bits = bits0.y, ground_bits = bits0.z;
+            float head_shake = __uint_as_float(bits0.w);
+            uint4 rung = s_rung[tid / W];
+            unsigned rbits = s_rb[tid / W];
             const bool bad = valid && !(fabsf(px) <= 1e6f && fabsf(py) <= 1e6f);
             const bool failed = ((__ballot_sync(FULL, bad) >> gshift) & GM) != 0u;
             const float center_y = gsum(valid ? py : 0.0f) * inv_nodes;
@@ -1203,13 +1214,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             // speeds and the contact and energy pairs wait in `s_rung` (.y,
             // .z, .w; .x is the distance half a second before a rung) and the
             // head shake pair in `ground_hi`.
-            __shared__ uint4 s_rung[BLOCK / W];
-            uint4& rung = s_rung[tid / W];
             // The early rungs' record of the trial, in the end code's bit
             // positions: the rung that stopped it (bits 6 and 7) and the
             // cadence band at 1 and 2.5 s (bits 8 to 13).
-            __shared__ unsigned s_rb[BLOCK / W];
-            unsigned& rbits = s_rb[tid / W];
             // The creature's rhythm period (a rung feature) in the low half
             // and its flags in the high half, read from its second head word
             // when a rule needs them (an audit creature runs every rule off,
@@ -1380,6 +1387,14 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
 #endif
                 }
             }
+            __syncwarp();
+            if (lg == 0u) {
+                s_mt[tid / W] = mt;
+                s_bits[tid / W] = make_uint4(contact_bits, lift_bits, ground_bits, __float_as_uint(head_shake));
+                s_rung[tid / W] = rung;
+                s_rb[tid / W] = rbits;
+            }
+            __syncwarp();
         }
 #if RECORD
         record_frame(SETTLE + step + 1u, live);
