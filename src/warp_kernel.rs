@@ -33,12 +33,21 @@ pub const MUSCLE_FIELDS: usize = 8;
 pub const ROUNDS: usize = 4;
 /// Lanes per creature.
 pub const CLASSES: [usize; 3] = [8, 16, 32];
-/// Creatures a warp runs at once: one per thread in the position-based
-/// kernel (`shaders/particle_creature.cu`); one per lane group of `class`
-/// lanes in the lane-group kernel, which `EVOLUTION_WARP_LANE_GROUP=1` runs
-/// instead for a developer's comparison.
+/// The kernel source: the position-based physics on lane groups
+/// (`shaders/xpbd_group.cu`). A developer comparing kernels may set
+/// `EVOLUTION_WARP_KERNEL` to `thread` (the same physics, one creature per
+/// thread, `shaders/particle_creature.cu`) or `featherstone` (the
+/// articulated-body physics, `shaders/warp_creature.cu`).
+fn kernel_choice() -> &'static str {
+    match std::env::var("EVOLUTION_WARP_KERNEL").as_deref() {
+        Ok("thread") => "thread",
+        Ok("featherstone") => "featherstone",
+        _ => "group",
+    }
+}
+/// Creatures a warp runs at once in a lane class.
 pub fn creatures_per_warp(class: usize) -> usize {
-    if std::env::var_os("EVOLUTION_WARP_LANE_GROUP").is_none() { 32 } else { 32 / class }
+    if kernel_choice() == "thread" { 32 } else { 32 / class }
 }
 /// Largest body the kernel runs.
 pub const MAX_NODES: usize = 32;
@@ -263,8 +272,11 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
     // a copy of it to skip rebuilds.
     match std::env::var("EVOLUTION_WARP_SOURCE").ok().and_then(|p| std::fs::read_to_string(p).ok()) {
         Some(text) => source.push_str(&text),
-        None if std::env::var_os("EVOLUTION_WARP_LANE_GROUP").is_none() => source.push_str(include_str!("../shaders/particle_creature.cu")),
-        None => source.push_str(include_str!("../shaders/warp_creature.cu")),
+        None => source.push_str(match kernel_choice() {
+            "thread" => include_str!("../shaders/particle_creature.cu"),
+            "featherstone" => include_str!("../shaders/warp_creature.cu"),
+            _ => include_str!("../shaders/xpbd_group.cu"),
+        }),
     }
     source
 }
