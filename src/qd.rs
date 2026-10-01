@@ -55,7 +55,8 @@ pub(crate) const CMA_LIMIT: usize = 96;
 //     stroke genes or per-muscle state; joints have a ligament gene.
 // 50: the audit lane and the early rungs: the save holds the audit window.
 // 51: physics-lean merged with the rungs.
-pub const VERSION: u32 = 51;
+// 52: two substeps per step for the lean muscle model.
+pub const VERSION: u32 = 52;
 const LOCAL_NEIGHBORS: usize = 5;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and

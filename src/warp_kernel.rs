@@ -39,7 +39,7 @@ pub const MAX_NODES: usize = 32;
 pub const MAX_CONTACTS: usize = 4;
 /// Substeps per step, and Gauss-Seidel sweeps per substep (then sweeps that
 /// only take back friction that would do positive work).
-pub const SUBSTEPS: u32 = 1;
+pub const SUBSTEPS: u32 = 2;
 pub const PGS_SWEEPS: u32 = 2;
 pub const CLEAN_SWEEPS: u32 = 1;
 /// Threads per block, and blocks per multiprocessor the register budget is
