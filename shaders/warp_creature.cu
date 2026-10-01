@@ -1,7 +1,7 @@
 // Physics v3 on NVIDIA GPUs: one creature per lane group (src/warp_kernel.rs
 // packs the creatures and writes the #defines in front of this text).
 //
-// A warp holds 32 / W groups of W lanes (W = 8, 16 or 32). Lane i of a group
+// A warp holds 32 / W groups of W lanes (W = 4, 8, 16 or 32). Lane i of a group
 // owns node i of its creature and the bone that ends there, so lane 0 is the
 // head and lane 1 the neck bone. Lanes are numbered breadth first over the
 // bone tree: the bones of one tree level are neighbours, and the children of
@@ -234,7 +234,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     const unsigned lg = lane % W;
     const unsigned gbase = lane - lg;
     const unsigned gshift = gbase;
-    float4* const mf = &scatter[threadIdx.x >> 5][gbase * 2u];
+    // Every phase keeps to its own lanes' slice of the warp's scratch (three
+    // float4 per lane), so groups of one warp that run apart never touch the
+    // same memory: the muscle forces sit at the start of the group's slice.
+    float4* const mf = &scatter[threadIdx.x >> 5][gbase * 3u];
     float4* const region = scatter[threadIdx.x >> 5];
     const unsigned below = (1u << lg) - 1u;
 
@@ -1043,8 +1046,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     }
                     const float inv_knn = 1.0f / knn, inv_ktt = 1.0f / ktt;
                     // The joint torques wait in shared memory during the solve.
-                    region[2u * lane] = make_float4(tjn[0], tjn[1], tjn[2], tjn[3]);
-                    region[2u * lane + 1u] = make_float4(tjt[0], tjt[1], tjt[2], tjt[3]);
+                    region[3u * lane] = make_float4(tjn[0], tjn[1], tjn[2], tjn[3]);
+                    region[3u * lane + 1u] = make_float4(tjt[0], tjt[1], tjt[2], tjt[3]);
                     PROF(9);
                     // Projected Gauss-Seidel. Walker c holds rows 2c and 2c + 1;
                     // every impulse change is broadcast to the other walkers.
@@ -1087,7 +1090,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     // forces there, and every joint the torques of the walkers
                     // that pass it.
                     {
-                        const float4 en = region[2u * lane], et = region[2u * lane + 1u];
+                        const float4 en = region[3u * lane], et = region[3u * lane + 1u];
                         const float tn4[MAXC] = {en.x, en.y, en.z, en.w};
                         const float tt4[MAXC] = {et.x, et.y, et.z, et.w};
                         float dqr = 0.0f;
