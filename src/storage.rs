@@ -65,22 +65,36 @@ pub struct RingTimes {
 
 impl Default for RingTimes {
     /// Before anything is measured: the scheduler's first rate estimate for
-    /// the RTX 4060, and host times near those of a young 3M game at 32k
-    /// blocks. A block that sets island records waits for their
-    /// confirmation trials, so its host time is one or more round trips
-    /// through the GPU: the p95 was 1.4 to 3.6 s and the boundary 0.14 to
-    /// 1.9 s over generations 0 to 7 on a GPU shared with other runs
-    /// (worker_rate, 2026-09-30). Either gives the longest ring.
+    /// the RTX 4060, and a host time per block above `CONFIRM_LIMIT`, so a
+    /// new game gets the ring of `RingShape::LEGACY`. A block that sets
+    /// island records waits for its confirmation trials, so its host time is
+    /// one or more round trips through the GPU: the p95 was 1.4 to 3.6 s and
+    /// the boundary 0.14 to 1.9 s over generations 0 to 7 on a GPU shared
+    /// with other runs (worker_rate, 2026-09-30).
     fn default() -> Self {
         Self {
             rate: 180_000.0,
-            chain: 0.2,
+            chain: 1.0,
             boundary: 0.35,
         }
     }
 }
 
 impl RingShape {
+    /// The ring of 4 blocks of 196,608 creatures the game ran with before
+    /// the ring was sized from the rate: 4.7 s of work at 167k creatures/s.
+    pub const LEGACY: RingShape = RingShape {
+        block: 196_608,
+        blocks: 4,
+    };
+    /// Host time per block (seconds) at or below which the sized ring is
+    /// used. A block asks for about 40 confirmation trials whatever its
+    /// size, so the shorter the blocks the more confirmation round trips a
+    /// generation waits for, and a ring of 1 s or less starves the GPU while
+    /// a round trip takes longer than the ring holds. Until confirmations
+    /// have slots of their own and the measured host time falls below this,
+    /// the ring is `LEGACY`.
+    pub const CONFIRM_LIMIT: f64 = 0.2;
     /// GPU seconds of work in one block.
     pub const BLOCK_SECONDS: f64 = 0.05;
     /// Smallest and largest block.
@@ -94,12 +108,16 @@ impl RingShape {
     pub const MIN_SECONDS: f64 = 0.3;
     pub const MAX_SECONDS: f64 = 1.0;
 
-    /// Block = 50 ms of GPU work between 32k and 256k creatures (a multiple
-    /// of 4,096). Ring = 5 host times per block, or the generation boundary
+    /// While the p95 host time per block is above `CONFIRM_LIMIT` the ring is
+    /// `LEGACY`. Otherwise block = 50 ms of GPU work between 32k and 256k
+    /// creatures (a multiple of 4,096). Ring = 5 host times per block, or the generation boundary
     /// plus 2 blocks when that is longer, kept between 0.3 s and 1 s of GPU
     /// work, and at least 2 blocks so the GPU runs one while the host
     /// absorbs another.
     pub fn size(times: &RingTimes) -> Self {
+        if !(times.chain <= Self::CONFIRM_LIMIT) {
+            return Self::LEGACY;
+        }
         let rate = if times.rate.is_finite() && times.rate > 0.0 {
             times.rate
         } else {
@@ -3568,15 +3586,26 @@ mod ring_shape_tests {
         let s = seconds(times(2e6, 0.01, 0.5));
         assert!((0.6..0.66).contains(&s), "{s}");
         // Never past 1 s, and at least 2 blocks.
-        let s = seconds(times(2e6, 5.0, 5.0));
+        let s = seconds(times(2e6, 0.2, 5.0));
         assert!((0.95..=1.0).contains(&s), "{s}");
-        assert_eq!(RingShape::size(&times(40_000.0, 5.0, 5.0)).blocks, 2);
-        // Today's rate: 5 blocks of 32k, just under 1 s.
-        let today = RingShape::size(&times(167_000.0, 0.3, 0.3));
+        assert_eq!(RingShape::size(&times(40_000.0, 0.2, 5.0)).blocks, 2);
+        // Today's rate with a fast host: 5 blocks of 32k, just under 1 s.
+        let today = RingShape::size(&times(167_000.0, 0.2, 0.3));
         assert_eq!((today.block, today.blocks), (32_768, 5));
+    }
+
+    #[test]
+    fn a_slow_confirmation_round_trip_keeps_the_legacy_ring() {
+        for rate in [40_000.0, 167_000.0, 2e6] {
+            for chain in [0.21, 1.0, 5.0, f64::NAN] {
+                assert_eq!(
+                    RingShape::size(&times(rate, chain, 0.3)),
+                    RingShape::LEGACY
+                );
+            }
+        }
         // Nothing measured.
-        let prior = RingShape::default();
-        assert_eq!((prior.block, prior.blocks), (32_768, 5));
+        assert_eq!(RingShape::default(), RingShape::LEGACY);
     }
 
     #[test]
