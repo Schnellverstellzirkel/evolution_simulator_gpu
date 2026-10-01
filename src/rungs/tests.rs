@@ -155,3 +155,42 @@ fn the_window_keeps_eight_generations_and_survives_a_save() {
     assert_eq!(back.fit(), audit.fit());
     assert!(audit.fit().is_some());
 }
+
+#[test]
+fn children_of_a_parent_the_rules_would_stop_skip_that_rung() {
+    let mut r2 = Rung::NEVER;
+    r2.weights[0] = 1.0;
+    r2.bias = 1.0;
+    let rules = Rungs([Rung::NEVER, r2]);
+    let slow = profile(&trace(0.2, 0.5, 1.0, 1200, [0, 0]), 0.25);
+    let fast = profile(&trace(1.0, 3.0, 8.0, 1200, [0, 0]), 0.25);
+    assert_eq!(parent_exemptions(&rules, Some(&slow)), EXEMPT_R2);
+    assert_eq!(parent_exemptions(&rules, Some(&fast)), 0);
+    // An elite with no profile (an old save, a trial with no trace).
+    assert_eq!(parent_exemptions(&rules, None), EXEMPT_R1 | EXEMPT_R2);
+    assert_eq!(
+        parent_exemptions(&rules, Some(&[0; 2 * FEATURES])),
+        EXEMPT_R1 | EXEMPT_R2
+    );
+}
+
+#[test]
+fn a_rung_that_stops_the_entrants_the_screen_keeps_is_not_armed() {
+    // Some creatures that fall before 5 s with poor features enter archives:
+    // the screen keeps them, and the fitted rule stops them.
+    let mut audit = Audit::default();
+    for g in 0..6u32 {
+        for i in 0..4000u32 {
+            let jitter = ((i + g).wrapping_mul(2654435761) >> 16) as f32 / 65536.0;
+            let mut row = row(i % 8 == 0, false, jitter);
+            if i % 8 == 1 && i % 16 == 1 {
+                row.below_bar = false;
+                row.entrant = true;
+            }
+            audit.record(row);
+        }
+        audit.boundary(None);
+    }
+    assert!(!audit.trusted(1));
+    assert!(audit.fit().is_none_or(|rules| !rules.0[1].armed()));
+}
