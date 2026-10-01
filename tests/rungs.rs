@@ -53,6 +53,8 @@ fn the_kernel_stops_what_the_host_replays_and_spares_audit_and_exempt_creatures(
         .map(|i| match i % 7 {
             0 => rungs::AUDIT,
             1 => rungs::EXEMPT,
+            2 => rungs::EXEMPT_R1,
+            3 => rungs::EXEMPT_R2,
             _ => 0,
         })
         .collect();
@@ -101,11 +103,17 @@ fn the_kernel_stops_what_the_host_replays_and_spares_audit_and_exempt_creatures(
             assert_eq!(t.band(0), ft.band(0), "creature {i}");
         }
         let features = |k: usize| rungs::features(&ft, k, period(&pop, i));
-        let expected = if flags != 0 {
+        let expected = if flags & rungs::AUDIT != 0 {
             0
-        } else if alive(f, 0) && r1.stops(&features(0), ft.band(0)) {
+        } else if flags & rungs::exempt_bits(0) == 0
+            && alive(f, 0)
+            && r1.stops(&features(0), ft.band(0))
+        {
             1
-        } else if alive(f, 1) && r2.stops(&features(1), ft.band(1)) {
+        } else if flags & rungs::exempt_bits(1) == 0
+            && alive(f, 1)
+            && r2.stops(&features(1), ft.band(1))
+        {
             2
         } else {
             0
