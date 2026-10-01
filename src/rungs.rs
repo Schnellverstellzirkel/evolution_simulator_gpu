@@ -96,8 +96,13 @@ pub const ENTRANT_BUDGET: f64 = 1e-2;
 const JUDGED: usize = 4;
 const TRUST_ENTRANTS: u32 = 60;
 const TRUST_STOPPED: f64 = 0.03;
-/// Rows of each class a rung needs before it is armed.
-const MIN_CLASS: u64 = 400;
+/// Rows a rung needs before it is armed: of the creatures that reach the 5 s
+/// bar, enough for a 1 in 1,000 quantile to rest on at least 5 rows, and of
+/// the others enough for a covariance. At 400k creatures per generation the
+/// window never holds that many, and the rungs stay off: with so few rows
+/// the fit stopped the slow walkers that the early archives grow from.
+const MIN_PASSING: u64 = 5000;
+const MIN_OTHER: u64 = 400;
 /// A band's rung turns off after `STRIKES` generations in a row with more
 /// than `BAND_MISS_LIMIT` entrant misses (entrants the 5 s screen would have
 /// kept) per 10k audit rows of the band, and
@@ -574,7 +579,7 @@ impl Audit {
                 }
             }
         }
-        if a.n < MIN_CLASS || b.n < MIN_CLASS {
+        if a.n < MIN_PASSING || b.n < MIN_OTHER {
             return None;
         }
         let mean = |s: &Sums| s.sum.map(|v| v / s.n as f64);
