@@ -143,6 +143,18 @@
 // lane, one read-modify-write each) and the torque ledger reads the node
 // table, instead of predicated per-rod updates. ANC_REGS: the friction
 // anchors live in registers, updated by node masks.
+// PREFETCH: the next muscle's records are loaded at the top of each iteration
+// of the muscle loop, one iteration ahead, so their latency overlaps the
+// arithmetic (7% less time for 14 more instructions; a prefetch to L1 and the
+// same for the waveform loop gained nothing).
+// SENSE_REGS: the touchdown sensors of a creature's muscles, 4 bits each, in
+// two registers, so the touchdown scan loads nothing.
+#ifndef PREFETCH
+#define PREFETCH TRIM
+#endif
+#ifndef SENSE_REGS
+#define SENSE_REGS TRIM
+#endif
 #ifndef CAPPLY
 #define CAPPLY TRIM
 #endif
@@ -607,6 +619,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
     float px[NPL], py[NPL], vx[NPL], vy[NPL];
     float srad[NPL], sipv[NPL], smu[NPL], slen[NPL], smass[NPL];
     float anc_r[NPL];
+    unsigned sensA = 0u, sensB = 0u;
     // With the state in registers the muscle loops end by skipping, not by
     // leaving: a loop exit keeps ms[] in local memory.
 #if MSTATE_REGS || MSTATE_FLOATS
@@ -709,6 +722,19 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     MS_SET_E(k, 1.0f); MS_SET_D(k, 0.0f);
                     roff[mb + (size_t)k * W] = 0.0f;
                 }
+#if SENSE_REGS
+                // Each muscle's touchdown sensor (flag and node) once per creature.
+                sensA = 0u; sensB = 0u;
+#pragma unroll
+                for (int k = 0; k < MPL; k++) {
+                    unsigned sv = 0u;
+                    if ((unsigned)k < mc) {
+                        const unsigned pk = __float_as_uint(mss[(size_t)cidx * (2 * MPL * W) + (2 * k + 1) * W + lg].w);
+                        sv = (((pk >> 25u) & 1u) << 3u) | ((pk >> 20u) & 7u);
+                    }
+                    if (k < 8) { sensA |= sv << (4 * k); } else { sensB |= sv << (4 * (k - 8)); }
+                }
+#endif
                 step = 0u; warm = 0u; prevc = 0u;
                 msum = 0.0f; rounds_sum = 0.0f; contact_sum = 0.0f; drift_max = 0.0f;
                 live = true;
@@ -947,12 +973,26 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 }
             }
             // Muscles.
+#if PREFETCH
+            float4 A_c = msa[mb];
+            float2 B_c = msb[mb];
+#endif
 #pragma unroll MUSCLE_UNROLL
             for (int k = 0; k < MPL; k++) {
                 if ((unsigned)k >= wm) { MS_LOOP_END; }
+#if PREFETCH
+                float4 A_n = A_c;
+                float2 B_n = B_c;
+                if (k + 1 < MPL) { A_n = msa[mb + (size_t)(k + 1) * W]; B_n = msb[mb + (size_t)(k + 1) * W]; }
+#endif
                 if ((unsigned)k < mc && !NO_MUSCLES) {
+#if PREFETCH
+                    const float4 A = A_c;
+                    const float2 B = B_c;
+#else
                     const float4 A = msa[mb + (size_t)k * W];
                     const float2 B = msb[mb + (size_t)k * W];
+#endif
                     const unsigned pk = __float_as_uint(A.x);
                     const unsigned na_ = pk & 255u, nb_ = (pk >> 8u) & 255u, nc_ = (pk >> 16u) & 255u, nd_ = pk >> 24u;
                     const float4 e0 = M_NODE(na_);
@@ -993,6 +1033,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     f = M_FRC(nc_); f.x -= (1.0f - an.y) * gx; f.y -= (1.0f - an.y) * gy; M_FRC(nc_) = f;
                     f = M_FRC(nd_); f.x -= an.y * gx; f.y -= an.y * gy; M_FRC(nd_) = f;
                 }
+#if PREFETCH
+                A_c = A_n; B_c = B_n;
+#endif
             }
             __syncwarp();
 #endif
@@ -1541,12 +1584,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #endif
                 const float itm = frcp(fmaxf(mm + xch(mm), 1e-6f));
                 const float ccx = (mx + xch(mx)) * itm, ccy = (my + xch(my)) * itm;
-                #if CAPPLY
+#if CAPPLY
+                // ext is the whole contact impulse on both lanes.
                 const float sx = NO_LEDGER ? 0.0f : (ext_x - gx - xch(gx)) * itm;
                 const float sy = NO_LEDGER ? 0.0f : (ext_y - gy - xch(gy)) * itm;
 #else
                 const float sx = NO_LEDGER ? 0.0f : (ext_x + xch(ext_x) - gx - xch(gx)) * itm;
-                                const float sy = NO_LEDGER ? 0.0f : (ext_y + xch(ext_y) - gy - xch(gy)) * itm;
+                const float sy = NO_LEDGER ? 0.0f : (ext_y + xch(ext_y) - gy - xch(gy)) * itm;
 #endif
                 float lz = 0.0f, lc = 0.0f, iz = 0.0f;
 #pragma unroll
@@ -1773,8 +1817,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #pragma unroll MUSCLE_UNROLL
                 for (int k = 0; k < MPL; k++) {
                     if ((unsigned)k < mc) {
+#if SENSE_REGS
+                        const unsigned sv = ((k < 8 ? sensA >> (4 * k) : sensB >> (4 * (k - 8)))) & 15u;
+                        if ((sv & 8u) && ((down >> (sv & 7u)) & 1u)) {
+#else
                         const unsigned pk = __float_as_uint(mss[(size_t)cidx * (2 * MPL * W) + (2 * k + 1) * W + lg].w);
                         if (((pk >> 25u) & 1u) && ((down >> ((pk >> 20u) & 31u)) & 1u)) {
+#endif
                             const float4 s0 = mss[(size_t)cidx * (2 * MPL * W) + (2 * k) * W + lg];
                             const float x = -((t0 + DT) * s0.x + s0.y);
                             roff[mb + (size_t)k * W] = x - floorf(x);
