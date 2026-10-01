@@ -6564,6 +6564,21 @@ fn write_creature_gif(
     drop(encoder);
     Ok(written)
 }
+/// Writes a GIF of a recorded trial (for examples that replay elites without
+/// the window): the frames from the settle on, sampled evenly.
+pub fn write_replay_gif(
+    creature: &Creature,
+    config: &Config,
+    frames: &[Vec<[f32; 2]>],
+    path: &std::path::Path,
+) -> anyhow::Result<usize> {
+    let last = frames.len().saturating_sub(1).min(u32::MAX as usize) as u32;
+    let first = physics::settle().min(last);
+    let total = last.saturating_sub(first) as usize + 1;
+    let stride = total.div_ceil(GIF_MAX_FRAMES).max(1);
+    let ticks: Vec<u32> = (first..=last).step_by(stride).collect();
+    write_creature_gif(creature, config, frames, &[], &ticks, None, path)
+}
 /// Samples a playback into at most `GIF_MAX_FRAMES` frames and animates them.
 fn export_creature_gif(playback: &Playback, path: &std::path::Path) -> anyhow::Result<usize> {
     let first = playback.trial_start();
