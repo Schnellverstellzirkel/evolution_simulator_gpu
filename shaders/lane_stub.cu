@@ -324,11 +324,49 @@ __device__ __forceinline__ unsigned parent_mask(unsigned t, unsigned lg) {
 #define BSEL(tab, k) (lg ? (tab)[4 + (k)] : (tab)[(k)])
 // Sibling couplings a rod keeps on either lane (the clique list).
 #define NEED_SIB(k, a) (kSr[k] >= (unsigned)(a) || kSr[4 + (k)] >= (unsigned)(a))
+// The couplings that cross from lane 1's rods to lane 0's slots (a lane 0 rod
+// has its parent and siblings on lane 0). Bit q of kXQ: lane 0's slot q is the
+// parent or a lower sibling of a lane 1 rod; kXL[q] bit a: the Schur update
+// of lane 0's L entry (q, a) comes from lane 1. Only these are exchanged.
+constexpr unsigned kTopoC[8] = {BTOPO};
+constexpr unsigned kPmC[8] = {BPM};
+__host__ __device__ constexpr unsigned cross_q() {
+    unsigned m = 0u;
+    for (int k = 0; k < NPL; k++) {
+        const unsigned t = kTopoC[4 + k];
+        if (!((t >> 17u) & 1u)) { continue; }
+        for (int q = 1; q < NPL; q++) { if (kPmC[4 + k] & (0x10u << q)) { m |= 1u << q; } }
+        for (int a = 1; a <= (int)((t >> 10u) & 3u); a++) { if (k - a < 0) { m |= 1u << ((4 + k - a) & 3); } }
+    }
+    return m;
+}
+__host__ __device__ constexpr unsigned cross_l(int q) {
+    unsigned m = 0u;
+    for (int k = 0; k < NPL; k++) {
+        const unsigned t = kTopoC[4 + k];
+        if (!((t >> 17u) & 1u)) { continue; }
+        const int sr = (int)((t >> 10u) & 3u);
+        for (int a = 1; a <= sr; a++) {
+            if (k - a < 0 && ((4 + k - a) & 3) == q) { m |= 1u; }
+            for (int b = 1; b < a; b++) { if (k - b < 0 && ((4 + k - b) & 3) == q) { m |= 1u << (a - b); } }
+        }
+    }
+    return m;
+}
+constexpr unsigned kXQ = cross_q();
+constexpr unsigned kXL1 = cross_l(1), kXL2 = cross_l(2), kXL3 = cross_l(3);
+#ifndef XPRUNE
+#define XPRUNE 1
+#endif
+#define XNEED(q) (!XPRUNE || ((kXQ >> (q)) & 1u) != 0u)
+#define XNEED_L(q, a) (!XPRUNE || ((((q) == 1 ? kXL1 : (q) == 2 ? kXL2 : kXL3) >> (a)) & 1u))
 #endif
 
 #if !BAKED
 #define NEED_SIB(k, a) true
 #define BAKED_TABLES
+#define XNEED(q) true
+#define XNEED_L(q, a) true
 #endif
 
 // The LDL^T factor of A = J M^-1 J^T over the creature's rods. `ipv` is the
@@ -378,9 +416,10 @@ __device__ __forceinline__ void factor(
             // Lane 1's Schur updates of lane 0's rods.
 #pragma unroll
             for (int q = 1; q < NPL; q++) {
+                if (!XNEED(q)) { continue; }
                 Dacc[q] += xch(oD[q]);
 #pragma unroll
-                for (int a = 0; a < NB; a++) { La[q][a] += xch(oL[q][a]); }
+                for (int a = 0; a < NB; a++) { if (XNEED_L(q, a)) { La[q][a] += xch(oL[q][a]); } }
             }
         }
         if (lg == 1u - (unsigned)phase) {
@@ -444,7 +483,7 @@ __device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&
     for (int s = 0; s < S; s++) {
         float b[NPL];
 #pragma unroll
-        for (int q = 0; q < NPL; q++) { b[q] = z[s][q] + inb[q]; }
+        for (int q = 0; q < NPL; q++) { b[q] = z[s][q]; if (q >= 1 && XNEED(q)) { b[q] += inb[q]; } }
         float out[NPL] = {0.0f, 0.0f, 0.0f, 0.0f};
 #pragma unroll
         for (int k = NPL - 1; k >= 0; k--) {
@@ -468,7 +507,7 @@ __device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&
             z[s][k] = y * invD[k];
         }
 #pragma unroll
-        for (int q = 1; q < NPL; q++) { inb[q] = xch(out[q]); }
+        for (int q = 1; q < NPL; q++) { if (XNEED(q)) { inb[q] = xch(out[q]); } }
     }
     float xin[NPL] = {0.0f, 0.0f, 0.0f, 0.0f};
 #pragma unroll
@@ -497,7 +536,7 @@ __device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&
             z[s][k] = acc;
         }
 #pragma unroll
-        for (int q = 1; q < NPL; q++) { xin[q] = xch(x[q]); }
+        for (int q = 1; q < NPL; q++) { if (XNEED(q)) { xin[q] = xch(x[q]); } }
     }
 }
 
@@ -1016,7 +1055,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 }
             }
 #pragma unroll
-            for (int q = 0; q < NPL; q++) { rdx[q] = xch(dx[q]); rdy[q] = xch(dy[q]); }
+            for (int q = 0; q < NPL; q++) { if (q >= 1 && XNEED(q)) { rdx[q] = xch(dx[q]); rdy[q] = xch(dy[q]); } else { rdx[q] = 0.0f; rdy[q] = 0.0f; } }
             float invD[NPL], Lf[NPL][NB];
             {
                 float ipv[NPL];
@@ -1664,7 +1703,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 z1[1][k] = lg == 1u ? 0.0f : -c;
             }
 #pragma unroll
-            for (int q = 0; q < NPL; q++) { rdx[q] = xch(dx[q]); rdy[q] = xch(dy[q]); }
+            for (int q = 0; q < NPL; q++) { if (q >= 1 && XNEED(q)) { rdx[q] = xch(dx[q]); rdy[q] = xch(dy[q]); } else { rdx[q] = 0.0f; rdy[q] = 0.0f; } }
             float invD[NPL], Lf[NPL][NB];
             {
                 PMK_AT
