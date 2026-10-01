@@ -1189,6 +1189,34 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             const bool broken_lane = body && lg >= 2u && (q < lo - JOINT_BREAK || q > hi + JOINT_BREAK);
             const bool broken = ((__ballot_sync(FULL, broken_lane) >> gshift) & GM) != 0u;
             const float head_y = shf(py, 0u), neck_y = shf(py, 1u);
+            // The rung trace (creature_kernel::RungTrace): the distance at 1,
+            // 2.5, 5 and 10 s and the early features at 1 and 2.5 s, as fp16
+            // pairs in the seven result words the host reads for nothing
+            // else. It records; it stops no trial. During the trial the
+            // speeds and the contact and energy pairs wait in `s_rung` (.y,
+            // .z, .w; .x is the distance half a second before a rung) and the
+            // head shake pair in `ground_hi`.
+            __shared__ uint4 s_rung[BLOCK / W];
+            uint4& rung = s_rung[tid / W];
+            auto h16 = [](float v) -> unsigned {
+                unsigned short r;
+                asm("cvt.rn.f16.f32 %0, %1;" : "=h"(r) : "f"(v));
+                return (unsigned)r;
+            };
+            const unsigned rung1 = (unsigned)(RATE) - 1u, rung2 = (unsigned)(2.5f * RATE) - 1u;
+            const unsigned rung3 = (unsigned)(5.0f * RATE) - 1u, rung4 = (unsigned)(10.0f * RATE) - 1u;
+            const unsigned half_s = (unsigned)(0.5f * RATE);
+            const bool early = step == rung1 || step == rung2;
+            float en_mean = 0.0f;
+            if (__any_sync(FULL, early)) {
+                float en = 0.0f;
+#pragma unroll
+                for (int r = 0; r < RMAX; r++) {
+                    const unsigned mi = (unsigned)r * W + lg;
+                    if ((unsigned)r < rounds && mi < nmus) { en += s_en[r][tid]; }
+                }
+                en_mean = gsum(en) / (float)max(nmus, 1u);
+            }
             if (live
 #if RECORD
                 && !done_scoring
@@ -1241,6 +1269,25 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     }
                     mt.previous_center_y = center_y;
                 }
+                if (step == 0u) { rung = make_uint4(0u, 0u, 0u, 0u); }
+                if (step + half_s == rung1 || step + half_s == rung2) { rung.x = __float_as_uint(com_x); }
+                if (early) {
+                    const bool second = step == rung2;
+                    const unsigned sh = second ? 16u : 0u;
+                    const unsigned keep = second ? 0x0000ffffu : 0xffff0000u;
+                    const float speed = (com_x - __uint_as_float(rung.x)) * (RATE / (float)half_s);
+                    const float touched = (float)__popc(contact_bits) * inv_nodes;
+                    mt.contact_hi = __uint_as_float((__float_as_uint(mt.contact_hi) & keep) | (h16(com_x) << sh));
+                    mt.ground_hi = __uint_as_float((__float_as_uint(mt.ground_hi) & keep) | (h16(head_shake) << sh));
+                    rung.y = (rung.y & keep) | (h16(speed) << sh);
+                    const unsigned pair = h16(touched) | (h16(en_mean) << 16u);
+                    if (second) { rung.w = pair; } else { rung.z = pair; }
+                }
+                if (step == rung3 || step == rung4) {
+                    const bool second = step == rung4;
+                    const unsigned keep = second ? 0x0000ffffu : 0xffff0000u;
+                    mt.lift_hi = __uint_as_float((__float_as_uint(mt.lift_hi) & keep) | (h16(com_x) << (second ? 16u : 0u)));
+                }
                 if (step == p.screen_step && !ended) {
                     mt.screen_x = com_x;
                     if (com_x < p.screen_bar) {
@@ -1260,6 +1307,24 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     last = true;
                 }
                 if (ended || last) {
+                    // A rung the trial did not reach holds the final distance.
+                    {
+                        const unsigned fin = h16(mt.fitness);
+                        unsigned d = __float_as_uint(mt.contact_hi);
+                        if (step < rung1) { d = (d & 0xffff0000u) | fin; }
+                        if (step < rung2) { d = (d & 0x0000ffffu) | (fin << 16u); }
+                        mt.contact_hi = __uint_as_float(d);
+                        d = __float_as_uint(mt.lift_hi);
+                        if (step < rung3) { d = (d & 0xffff0000u) | fin; }
+                        if (step < rung4) { d = (d & 0x0000ffffu) | (fin << 16u); }
+                        mt.lift_hi = __uint_as_float(d);
+                        const unsigned code = (fell ? 16u : 0u) | (failed ? 32u : 0u) | (mt.screened > 0.0f ? 3u : 0u);
+                        mt.previous_center_y = __uint_as_float(rung.y);
+                        mt.vertical_extremum = __uint_as_float(rung.z);
+                        mt.vertical_trend = __uint_as_float(rung.w);
+                        mt.gait_turns = mt.ground_hi;
+                        mt.ground_hi = __uint_as_float(code | (min(step + 1u, 65535u) << 16u));
+                    }
 #if RECORD
                     kept = mt;
                     done_scoring = true;

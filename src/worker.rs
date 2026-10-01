@@ -1098,6 +1098,11 @@ fn run(
                     log.add(2, breeding);
                 }
                 status = format!("Evolving · generation {}", e.generation);
+                // A developer's generation dump (EVOLUTION_DUMP_GENERATION)
+                // says where it went.
+                if let Some(text) = e.dump_notice.take() {
+                    log_event(&mut events, e.generation, EventKind::Saved, text);
+                }
                 if step.generations == 0 {
                     return Ok(());
                 }

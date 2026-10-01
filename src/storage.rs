@@ -201,6 +201,11 @@ pub struct Experiment {
     /// Seconds spent absorbing results into the archives and breeding
     /// blocks again, since the caller last took them.
     pub stage_seconds: [f64; 2],
+    /// The generation dump in progress (`EVOLUTION_DUMP_GENERATION`), a
+    /// developer diagnostic. Not saved; a clone shares it.
+    dump: Option<Arc<std::sync::Mutex<dump::Dump>>>,
+    /// What the last finished dump wrote, for the worker's event log.
+    pub dump_notice: Option<String>,
 }
 
 /// Elites waiting to be evaluated again after a world change, one queue per
@@ -412,6 +417,8 @@ impl Experiment {
             screen_window: VecDeque::new(),
             last_screen: None,
             stage_seconds: [0.0; 2],
+            dump: None,
+            dump_notice: None,
         }
     }
     /// Creatures in the ring.
@@ -560,7 +567,52 @@ impl Experiment {
             self.config.screen = self.next_screen(self.config.duration);
         }
         let started = std::time::Instant::now();
-        self.failed += self.archive_block(k, finals, stale);
+        // A block of the generation dump: its elite re-runs enter no archive,
+        // and every creature's row is written with what it entered.
+        let dump = self.dump.clone();
+        let head = dump
+            .as_ref()
+            .and_then(|d| d.lock().unwrap_or_else(|e| e.into_inner()).take_head(k));
+        let mut kinds = head.as_ref().map(|_| vec![0u8; finals.len()]);
+        let marked: Vec<EvaluationMetrics>;
+        let finals = match &head {
+            Some(head) => {
+                marked = finals
+                    .iter()
+                    .zip(head)
+                    .map(|(m, h)| EvaluationMetrics {
+                        excluded: m.excluded || h.flags & dump::RERUN != 0,
+                        ..*m
+                    })
+                    .collect();
+                &marked[..]
+            }
+            None => finals,
+        };
+        self.failed += self.archive_block(k, finals, stale, kinds.as_deref_mut());
+        if let (Some(dump), Some(head), Some(kinds)) = (&dump, &head, &kinds) {
+            let block = &self.blocks[k];
+            let mut d = dump.lock().unwrap_or_else(|e| e.into_inner());
+            // A diagnostic that cannot write gives up; the game goes on.
+            let done = d
+                .write_rows(&block.population, head, finals, kinds, stale)
+                .and_then(|()| d.finished().then(|| d.finish()).transpose());
+            drop(d);
+            match done {
+                Ok(None) => {}
+                Ok(Some(notice)) => {
+                    eprintln!("{notice}");
+                    self.dump_notice = Some(notice);
+                    self.dump = None;
+                    evolution::record_operators(false);
+                }
+                Err(err) => {
+                    eprintln!("Generation dump stopped: {err:#}");
+                    self.dump = None;
+                    evolution::record_operators(false);
+                }
+            }
+        }
         self.evaluated += finals.len();
         let ended = self.evaluated >= self.config.population;
         if ended {
@@ -571,6 +623,7 @@ impl Experiment {
         self.stage_seconds[0] += archived.duration_since(started).as_secs_f64();
         let (first, count) = (self.blocks[k].first, self.blocks[k].len());
         self.blocks[k] = self.breed_block(first, count);
+        self.note_dump_block(k);
         self.cursor = (k + 1) % self.blocks.len();
         self.stage_seconds[1] += archived.elapsed().as_secs_f64();
         Ok(ended)
@@ -621,17 +674,30 @@ impl Experiment {
     fn next_screen(&self, duration: f32) -> Option<crate::physics::Screen> {
         // A trial no longer than the screen time has nothing to screen.
         let seconds = crate::physics::screen_seconds().filter(|&s| s < duration)?;
-        let bar = crate::physics::screen_bar(
-            self.screen_window.iter().flatten().copied(),
-            crate::physics::screen_keep(),
-        );
+        let bar = if self.dump_breeding() {
+            // The generation dump runs every trial in full.
+            f32::NEG_INFINITY
+        } else {
+            crate::physics::screen_bar(
+                self.screen_window.iter().flatten().copied(),
+                crate::physics::screen_keep(),
+            )
+        };
         Some(crate::physics::Screen { seconds, bar })
     }
     /// Offers block `k`'s creatures to the archives in block order, updates
     /// CMA emitters and emitter statistics, and returns how many trials
     /// failed. Screened and excluded results, and every result of a
     /// `stale` block, enter no archive.
-    fn archive_block(&mut self, k: usize, finals: &[EvaluationMetrics], stale: bool) -> usize {
+    /// With `kinds` it also marks, per position, what the creature entered
+    /// (`dump::ISLAND`, `NURSERY`, `RESERVE`, `GLOBAL`).
+    fn archive_block(
+        &mut self,
+        k: usize,
+        finals: &[EvaluationMetrics],
+        stale: bool,
+        mut kinds: Option<&mut [u8]>,
+    ) -> usize {
         let profile = std::env::var_os("EVOLUTION_PROFILE_BREED").is_some();
         let mut timings = [0.0f64; 7];
         let mut section = std::time::Instant::now();
@@ -729,9 +795,9 @@ impl Experiment {
         // order and the islands are independent, so the streams run in
         // parallel.
         let generation = self.generation;
-        // Per island: the positions that entered, and the emitter and offer
-        // of each reserve entry.
-        type IslandResult = (Vec<usize>, Vec<(usize, qd::Offer)>);
+        // Per island: the positions that entered, the emitter and offer of
+        // each reserve entry, and the positions that entered the reserve.
+        type IslandResult = (Vec<usize>, Vec<(usize, qd::Offer)>, Vec<usize>);
         let island_results: Vec<IslandResult> = self
             .islands
             .par_iter_mut()
@@ -739,6 +805,7 @@ impl Experiment {
             .map(|(island, archive)| {
                 let mut entered = Vec::new();
                 let mut reserve_offers = Vec::new();
+                let mut reserve_entered = Vec::new();
                 // Reserve admission needs a score above the island's best
                 // behavior elite and reserve entry of the same body plan, or
                 // above the reserve's floor once it is full
@@ -825,6 +892,7 @@ impl Experiment {
                     );
                     if offer.inserted {
                         entered.push(j);
+                        reserve_entered.push(j);
                         let bar = bars
                             .entry(topology.clone())
                             .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
@@ -832,15 +900,28 @@ impl Experiment {
                         reserve_offers.push((p.emitter.index(), offer));
                     }
                 }
-                (entered, reserve_offers)
+                (entered, reserve_offers, reserve_entered)
             })
             .collect();
         let island_changed: Vec<bool> = island_results
             .iter()
-            .map(|(group, _)| !group.is_empty())
+            .map(|(group, _, _)| !group.is_empty())
             .collect();
         let mut reserve_offers = Vec::new();
-        for (arena, (group, offers)) in island_results.into_iter().enumerate() {
+        for (arena, (group, offers, reserves)) in island_results.into_iter().enumerate() {
+            if let Some(kinds) = kinds.as_deref_mut() {
+                let kind = if arena < island_count() {
+                    dump::ISLAND
+                } else {
+                    dump::NURSERY
+                };
+                for &j in &group {
+                    kinds[j] |= kind;
+                }
+                for &j in &reserves {
+                    kinds[j] = (kinds[j] & !kind) | dump::RESERVE;
+                }
+            }
             entered.extend(group);
             // Nursery entries count for no emitter: the emitter statistics
             // describe the islands' search.
@@ -951,6 +1032,9 @@ impl Experiment {
             if offer.inserted {
                 global_changed = true;
                 entered.push(j);
+                if let Some(kinds) = kinds.as_deref_mut() {
+                    kinds[j] |= dump::GLOBAL;
+                }
                 rewards[emitter_index] += offer.reward;
                 if offer.new_niche {
                     discoveries[emitter_index] += 1;
@@ -1696,6 +1780,27 @@ impl Experiment {
         let started = std::time::Instant::now();
         let planned = self.plan_offspring(&cfg, self.generation, self.breed_round, &slots);
         let planned_at = started.elapsed();
+        // The parents as they are now, for the generation dump's rows.
+        let dump_parents: Option<Vec<dump::Parent>> = self.dump_breeding().then(|| {
+            planned
+                .iter()
+                .zip(&slots)
+                .map(|(p, &slot)| {
+                    let arena = qd::arena_of_slot(slot, self.islands.len());
+                    let elite = p
+                        .plan
+                        .parent
+                        .and_then(|i| self.islands.get(arena)?.entries.get(i));
+                    dump::Parent::of(
+                        elite,
+                        p.plan
+                            .cma
+                            .and_then(|c| self.cma_emitters.get(c))
+                            .is_some_and(CmaEmitter::optimizing),
+                    )
+                })
+                .collect()
+        });
         // Reseeded elites first, then the children, emitted straight into
         // batches so no child is alive after it is copied.
         let mut lead = evolution::ChildBatch::default();
@@ -1747,6 +1852,16 @@ impl Experiment {
             ..Population::default()
         };
         population.append_batches(&order, batches);
+        if let (Some(parents), Some(dump)) = (dump_parents, &self.dump) {
+            let reseeded: Vec<usize> = order[..reseeded].to_vec();
+            dump.lock().unwrap_or_else(|e| e.into_inner()).bred(
+                first,
+                &population,
+                &births,
+                parents,
+                &reseeded,
+            );
+        }
         let total = started.elapsed();
         let add = |k: usize, d: std::time::Duration| {
             BREED_NANOS[k].fetch_add(d.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -1785,6 +1900,13 @@ impl Experiment {
         }
         cfg.screen = self.next_screen(cfg.duration);
         self.config = cfg;
+        self.start_dump()?;
+        if self.dump_breeding()
+            && let Some(screen) = &mut self.config.screen
+        {
+            // The dump generation runs every trial in full.
+            screen.bar = f32::NEG_INFINITY;
+        }
         self.evaluation_seconds = 0.0;
         if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
             eprintln!(
@@ -1943,6 +2065,72 @@ impl Experiment {
         // Distances measured in the old world say nothing about the new one.
         self.screen_window.clear();
     }
+    /// Starts the generation dump (`EVOLUTION_DUMP_GENERATION`) at the
+    /// boundary it names: every island elite is queued for a re-run, the
+    /// screen bar is off for a generation's worth of blocks, and the rows go
+    /// out as those blocks are absorbed.
+    fn start_dump(&mut self) -> Result<()> {
+        let Some((generation, path)) = dump::target() else {
+            return Ok(());
+        };
+        if self.dump.is_some()
+            || generation.is_some_and(|g| g != self.generation)
+            || dump::STARTED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(());
+        }
+        let bar = self.config.screen.map_or(f32::NEG_INFINITY, |s| s.bar);
+        let mut elites = Vec::new();
+        for (arena, island) in self.islands.iter().enumerate() {
+            elites.extend(
+                island
+                    .entries
+                    .iter()
+                    .map(|e| dump::Elite::of(arena as u8, e)),
+            );
+        }
+        elites.extend(
+            self.archive
+                .entries
+                .iter()
+                .map(|e| dump::Elite::of(u8::MAX, e)),
+        );
+        // The island elites run again in this generation (their own island's
+        // slots, as after a world change), so their rung distances are known.
+        let mut reruns = std::collections::HashSet::new();
+        for (island, archive) in self.islands.iter().enumerate().take(island_count()) {
+            for elite in &archive.entries {
+                reruns.insert(elite.creature.id);
+                self.reseed.push(island, elite.creature.clone());
+            }
+        }
+        let d = dump::Dump::create(&path, self, bar, elites, reruns, self.blocks.len())?;
+        eprintln!(
+            "Generation dump: generation {} to {}, {} elites queued for a re-run",
+            self.generation,
+            path.display(),
+            d.rerun_count()
+        );
+        evolution::record_operators(true);
+        self.dump = Some(Arc::new(std::sync::Mutex::new(d)));
+        Ok(())
+    }
+    /// Whether blocks bred now belong to the generation dump.
+    fn dump_breeding(&self) -> bool {
+        self.dump
+            .as_ref()
+            .is_some_and(|d| d.lock().unwrap_or_else(|e| e.into_inner()).breeding())
+    }
+    /// Block `k` was just bred: files it under the dump if it belongs to it.
+    fn note_dump_block(&mut self, k: usize) {
+        if let Some(dump) = &self.dump {
+            let mut d = dump.lock().unwrap_or_else(|e| e.into_inner());
+            d.assign(k);
+            if !d.breeding() {
+                evolution::record_operators(false);
+            }
+        }
+    }
     /// Whether every body in the ring and the archive fits `cfg`'s limits.
     fn bodies_fit(&self, cfg: &Config) -> bool {
         self.blocks
@@ -2086,6 +2274,391 @@ impl Experiment {
 // (`SmallSave`). A loaded game breeds its population from the archives again
 // Any other magic is an older format
 // and is turned down.
+/// The generation dump: `EVOLUTION_DUMP_GENERATION=<generation>[:<path>]`
+/// (or `=<path>` for the next boundary), a developer diagnostic for the
+/// steps ladder of `docs/plan-2m.md`. From that generation's start, one
+/// generation's worth of blocks is bred with the screen bar off, so every
+/// trial runs in full, and the island elites are queued to run again in it
+/// (they enter no archive). Each creature of those blocks writes a 64 B row
+/// as its block is absorbed; the file ends with the header and a 32 B row
+/// per elite of the archives at the start, patched in when the last block
+/// is absorbed. Little endian throughout; `examples/dump_stats.rs` and
+/// `examples/rung_replay.rs` read it.
+///
+/// Header (64 B): magic `EVODUMP1`, format u32, qd version u32, generation
+/// u32, population u32, seed u64, rows u64, elites u32, the screen bar the
+/// generation would have had f32, trial seconds f32, rate u16, islands u8,
+/// arenas u8, the cell bins (contact, cadence, height, feet) 4 x u8, 4 spare.
+///
+/// Elite (32 B): arena u8 (255 the global archive), flags u8 (1 reserve, 2
+/// fine, 4 graduate, 8 re-run measured), cell u16, nodes u8, muscles u8,
+/// emitter u8, spare u8, id u64, fitness f32, distance at 2.5, 5 and 10 s
+/// from its re-run, 3 x f32 (NaN without one).
+///
+/// Creature (64 B): slot u32, emitter u8, operator u8 (the index in
+/// `evolution::structural_operator_names`, 255 for none), flags u8
+/// (`MATE`...), entered u8 (`ISLAND`...), parent id u64 (`u64::MAX` for
+/// none), parent cell u16, final cell u16, CMA emitter u16 (`u16::MAX` for
+/// none), nodes u8, muscles u8, parent nodes u8, parent muscles u8, rhythm
+/// period f16, standard fitness f32, archive fitness f32 (after a
+/// confirmation), the seven `creature_kernel::RungTrace` words. A cell is
+/// `((contact * 8 + cadence) * 6 + height) * 5 + feet`, `u16::MAX` for none.
+pub(crate) mod dump {
+    use super::*;
+    use std::io::{Seek, SeekFrom};
+
+    pub const ISLAND: u8 = 1;
+    pub const NURSERY: u8 = 2;
+    pub const RESERVE: u8 = 4;
+    pub const GLOBAL: u8 = 8;
+
+    pub const MATE: u8 = 1;
+    pub const OPTIMIZER: u8 = 2;
+    pub const FINE: u8 = 4;
+    pub const RERUN: u8 = 8;
+    pub const SCREENED: u8 = 16;
+    pub const EXCLUDED: u8 = 32;
+    pub const PARENT_RESERVE: u8 = 64;
+
+    pub const MAGIC: &[u8; 8] = b"EVODUMP1";
+    pub const HEADER_BYTES: usize = 64;
+    pub const ELITE_BYTES: usize = 32;
+    pub const ROW_BYTES: usize = 64;
+    pub const BINS: [u8; 4] = [6, 8, 6, 5];
+
+    /// Whether a dump started in this process; there is one per run.
+    pub static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// The generation (None: the next boundary) and the file.
+    pub fn target() -> Option<(Option<u32>, std::path::PathBuf)> {
+        static TARGET: std::sync::OnceLock<Option<(Option<u32>, std::path::PathBuf)>> =
+            std::sync::OnceLock::new();
+        TARGET
+            .get_or_init(|| {
+                let value = std::env::var("EVOLUTION_DUMP_GENERATION").ok()?;
+                if let Ok(generation) = value.parse::<u32>() {
+                    return Some((
+                        Some(generation),
+                        format!("runs/dump-gen{generation}.bin").into(),
+                    ));
+                }
+                match value.split_once(':') {
+                    Some((g, path)) if g.parse::<u32>().is_ok() => {
+                        Some((g.parse().ok(), path.into()))
+                    }
+                    _ => Some((None, value.into())),
+                }
+            })
+            .clone()
+    }
+
+    fn bit(on: bool, flag: u8) -> u8 {
+        if on { flag } else { 0 }
+    }
+
+    /// A behavior cell as one number.
+    pub fn cell(niche: &qd::Niche) -> u16 {
+        let n = niche.0;
+        if qd::is_morphology_niche(niche) || n[0] >= 254 {
+            return u16::MAX;
+        }
+        ((n[0] as u16 * BINS[1] as u16 + n[1] as u16) * BINS[2] as u16 + n[3] as u16)
+            * BINS[3] as u16
+            + n[4] as u16
+    }
+
+    /// What breeding knew about a child's parent.
+    #[derive(Clone, Copy)]
+    pub struct Parent {
+        cell: u16,
+        nodes: u8,
+        muscles: u8,
+        reserve: bool,
+        optimizer: bool,
+    }
+    impl Parent {
+        pub fn of(elite: Option<&qd::Elite>, optimizer: bool) -> Self {
+            Self {
+                cell: elite.map_or(u16::MAX, |e| cell(&e.descriptor.niche())),
+                nodes: elite.map_or(0, |e| e.creature.nodes.len().min(255) as u8),
+                muscles: elite.map_or(0, |e| e.creature.muscles.len().min(255) as u8),
+                reserve: elite.is_some_and(|e| qd::is_morphology_niche(&e.niche)),
+                optimizer,
+            }
+        }
+    }
+
+    /// The host fields of a row, fixed when its block is bred.
+    #[derive(Clone, Copy)]
+    pub struct Head {
+        pub flags: u8,
+        slot: u32,
+        emitter: u8,
+        operator: u8,
+        parent: u64,
+        parent_cell: u16,
+        cma: u16,
+        nodes: u8,
+        muscles: u8,
+        parent_nodes: u8,
+        parent_muscles: u8,
+        period: u16,
+        id: u64,
+    }
+
+    pub struct Elite {
+        bytes: [u8; ELITE_BYTES],
+        id: u64,
+    }
+    impl Elite {
+        pub fn of(arena: u8, e: &qd::Elite) -> Self {
+            let mut b = [0u8; ELITE_BYTES];
+            b[0] = arena;
+            b[1] = u8::from(qd::is_morphology_niche(&e.niche))
+                | u8::from(e.fine) << 1
+                | u8::from(e.graduate) << 2;
+            b[2..4].copy_from_slice(&cell(&e.descriptor.niche()).to_le_bytes());
+            b[4] = e.creature.nodes.len().min(255) as u8;
+            b[5] = e.creature.muscles.len().min(255) as u8;
+            b[6] = e.emitter.index() as u8;
+            b[8..16].copy_from_slice(&e.creature.id.to_le_bytes());
+            b[16..20].copy_from_slice(&e.fitness.to_le_bytes());
+            for at in [20, 24, 28] {
+                b[at..at + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+            }
+            Self {
+                bytes: b,
+                id: e.creature.id,
+            }
+        }
+    }
+
+    pub struct Dump {
+        path: std::path::PathBuf,
+        file: BufWriter<File>,
+        header: [u8; HEADER_BYTES],
+        population: usize,
+        /// Creatures bred into dump blocks, and blocks still to absorb.
+        bred: usize,
+        outstanding: usize,
+        heads: Vec<Option<Vec<Head>>>,
+        pending: Option<Vec<Head>>,
+        elites: Vec<Elite>,
+        reruns: std::collections::HashSet<u64>,
+        /// Rung distances of the re-run elites, by id.
+        measured: HashMap<u64, [f32; 3]>,
+        rows: u64,
+        started: std::time::Instant,
+    }
+
+    impl Dump {
+        pub fn create(
+            path: &Path,
+            e: &Experiment,
+            bar: f32,
+            elites: Vec<Elite>,
+            reruns: std::collections::HashSet<u64>,
+            blocks: usize,
+        ) -> Result<Self> {
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir)?;
+            }
+            let mut file = BufWriter::with_capacity(
+                1 << 22,
+                File::create(path).with_context(|| format!("creating {}", path.display()))?,
+            );
+            let mut h = [0u8; HEADER_BYTES];
+            h[0..8].copy_from_slice(MAGIC);
+            h[8..12].copy_from_slice(&1u32.to_le_bytes());
+            h[12..16].copy_from_slice(&qd::VERSION.to_le_bytes());
+            h[16..20].copy_from_slice(&e.generation.to_le_bytes());
+            h[20..24].copy_from_slice(&(e.config.population as u32).to_le_bytes());
+            h[24..32].copy_from_slice(&e.config.seed.to_le_bytes());
+            h[40..44].copy_from_slice(&(elites.len() as u32).to_le_bytes());
+            h[44..48].copy_from_slice(&bar.to_le_bytes());
+            h[48..52].copy_from_slice(&e.config.duration.to_le_bytes());
+            h[52..54].copy_from_slice(&(e.config.fidelity().rate as u16).to_le_bytes());
+            h[54] = island_count() as u8;
+            h[55] = arena_count() as u8;
+            h[56..60].copy_from_slice(&BINS);
+            // The header and the elites are written again at the end, with
+            // the row count and the re-run distances.
+            file.write_all(&h)?;
+            for elite in &elites {
+                file.write_all(&elite.bytes)?;
+            }
+            Ok(Self {
+                path: path.to_owned(),
+                file,
+                header: h,
+                population: e.config.population,
+                bred: 0,
+                outstanding: 0,
+                heads: (0..blocks).map(|_| None).collect(),
+                pending: None,
+                elites,
+                reruns,
+                measured: HashMap::new(),
+                rows: 0,
+                started: std::time::Instant::now(),
+            })
+        }
+        pub fn rerun_count(&self) -> usize {
+            self.reruns.len()
+        }
+        pub fn breeding(&self) -> bool {
+            self.bred < self.population
+        }
+        pub fn finished(&self) -> bool {
+            !self.breeding() && self.outstanding == 0
+        }
+        /// A block was bred for the dump at ring slot `first`.
+        pub fn bred(
+            &mut self,
+            first: usize,
+            population: &Population,
+            births: &[Birth],
+            parents: Vec<Parent>,
+            reseeded: &[usize],
+        ) {
+            let operators = evolution::take_operators();
+            let mut heads: Vec<Head> = (0..population.genomes.len())
+                .map(|j| {
+                    let g = &population.genomes[j];
+                    let birth = births[j];
+                    let parent = parents[j];
+                    let period = if g.muscle_count > 0 {
+                        population.muscles[g.muscle_start].period
+                    } else {
+                        0.0
+                    };
+                    Head {
+                        flags: bit(birth.mate, MATE)
+                            | bit(parent.optimizer, OPTIMIZER)
+                            | bit(parent.reserve, PARENT_RESERVE),
+                        slot: (first + j) as u32,
+                        emitter: birth.emitter.index() as u8,
+                        operator: operators.get(&g.id).copied().unwrap_or(u8::MAX),
+                        parent: birth.parent_id.unwrap_or(u64::MAX),
+                        parent_cell: parent.cell,
+                        cma: birth.cma.map_or(u16::MAX, |c| c.min(65534) as u16),
+                        nodes: g.node_count.min(255) as u8,
+                        muscles: g.muscle_count.min(255) as u8,
+                        parent_nodes: parent.nodes,
+                        parent_muscles: parent.muscles,
+                        period: crate::creature_kernel::f32_to_f16(period),
+                        id: g.id,
+                    }
+                })
+                .collect();
+            for &j in reseeded {
+                let h = &mut heads[j];
+                if self.reruns.contains(&h.id) {
+                    h.flags |= RERUN;
+                }
+                h.parent = u64::MAX;
+                h.parent_cell = u16::MAX;
+                h.parent_nodes = 0;
+                h.parent_muscles = 0;
+                h.flags &= !(MATE | OPTIMIZER | PARENT_RESERVE);
+            }
+            self.bred += heads.len();
+            self.pending = Some(heads);
+        }
+        /// Files the block just bred (if it was bred for the dump) as ring
+        /// block `k`.
+        pub fn assign(&mut self, k: usize) {
+            if let Some(heads) = self.pending.take() {
+                self.heads[k] = Some(heads);
+                self.outstanding += 1;
+            }
+        }
+        pub fn take_head(&mut self, k: usize) -> Option<Vec<Head>> {
+            let head = self.heads.get_mut(k)?.take()?;
+            self.outstanding -= 1;
+            Some(head)
+        }
+        pub fn write_rows(
+            &mut self,
+            population: &Population,
+            heads: &[Head],
+            finals: &[EvaluationMetrics],
+            kinds: &[u8],
+            stale: bool,
+        ) -> Result<()> {
+            for (j, h) in heads.iter().enumerate() {
+                let m = &finals[j];
+                let g = &population.genomes[j];
+                let nodes = &population.nodes[g.node_start..g.node_start + g.node_count];
+                let muscles = &population.muscles[g.muscle_start..g.muscle_start + g.muscle_count];
+                let final_cell = cell(&qd::descriptor(nodes, muscles, m.behavior).niche());
+                let flags = h.flags
+                    | bit(m.fine, FINE)
+                    | bit(m.screened, SCREENED)
+                    | bit(m.excluded || stale, EXCLUDED);
+                if h.flags & RERUN != 0 {
+                    self.measured
+                        .insert(h.id, [1, 2, 3].map(|r| m.trace.distance(r)));
+                }
+                let mut b = [0u8; ROW_BYTES];
+                b[0..4].copy_from_slice(&h.slot.to_le_bytes());
+                b[4] = h.emitter;
+                b[5] = h.operator;
+                b[6] = flags;
+                b[7] = kinds[j];
+                b[8..16].copy_from_slice(&h.parent.to_le_bytes());
+                b[16..18].copy_from_slice(&h.parent_cell.to_le_bytes());
+                b[18..20].copy_from_slice(&final_cell.to_le_bytes());
+                b[20..22].copy_from_slice(&h.cma.to_le_bytes());
+                b[22] = h.nodes;
+                b[23] = h.muscles;
+                b[24] = h.parent_nodes;
+                b[25] = h.parent_muscles;
+                b[26..28].copy_from_slice(&h.period.to_le_bytes());
+                b[28..32].copy_from_slice(&m.trace.fitness.to_le_bytes());
+                b[32..36].copy_from_slice(&m.fitness.to_le_bytes());
+                for (w, word) in m.trace.words.iter().enumerate() {
+                    b[36 + 4 * w..40 + 4 * w].copy_from_slice(&word.to_le_bytes());
+                }
+                self.file.write_all(&b)?;
+            }
+            self.rows += heads.len() as u64;
+            Ok(())
+        }
+        /// Writes the header and the elites with their re-run distances, and
+        /// closes the file. Returns a line for the log.
+        pub fn finish(&mut self) -> Result<String> {
+            self.header[32..40].copy_from_slice(&self.rows.to_le_bytes());
+            let mut measured = 0;
+            for elite in &mut self.elites {
+                if let Some(d) = self.measured.get(&elite.id) {
+                    elite.bytes[1] |= 8;
+                    for (i, v) in d.iter().enumerate() {
+                        elite.bytes[20 + 4 * i..24 + 4 * i].copy_from_slice(&v.to_le_bytes());
+                    }
+                    measured += 1;
+                }
+            }
+            self.file.flush()?;
+            let file = self.file.get_mut();
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(&self.header)?;
+            for elite in &self.elites {
+                file.write_all(&elite.bytes)?;
+            }
+            file.sync_all()?;
+            Ok(format!(
+                "Generation dump written: {} ({} creatures, {} elites, {} of them re-run) in {:.0} s",
+                self.path.display(),
+                self.rows,
+                self.elites.len(),
+                measured,
+                self.started.elapsed().as_secs_f64()
+            ))
+        }
+    }
+}
+
 const MAGIC: &[u8; 8] = b"EVORUST8";
 
 /// What a save holds: the archives and the search state, without the

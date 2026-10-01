@@ -1634,6 +1634,26 @@ impl ChildBatch {
     }
 }
 
+/// The structural operator (its index in `structural_operator_names`) that
+/// changed each child bred while the log is on, by child id: a diagnostic
+/// for the generation dump (`storage`), off otherwise.
+static OPERATOR_LOG: std::sync::Mutex<Option<std::collections::HashMap<u64, u8>>> =
+    std::sync::Mutex::new(None);
+/// Starts or stops recording each child's structural operator.
+pub fn record_operators(on: bool) {
+    let mut log = OPERATOR_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    *log = on.then(|| log.take().unwrap_or_default());
+}
+/// The operators recorded since the last call, by child id.
+pub fn take_operators() -> std::collections::HashMap<u64, u8> {
+    OPERATOR_LOG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+        .map(std::mem::take)
+        .unwrap_or_default()
+}
+
 /// Breeds one offspring per plan, for ring `slots`, and packs the children
 /// of each run of slots into a `ChildBatch` as it goes, so no child stays
 /// alive after it is copied (`Population::append_batches`). `round` salts
@@ -1659,9 +1679,14 @@ pub fn emit_offspring_batches(
                 muscles: Vec::with_capacity(plans.len() * 12),
                 meta: Vec::with_capacity(plans.len()),
             };
+            let recording = OPERATOR_LOG
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some();
+            let mut operators = Vec::new();
             let mut child = Creature::default();
             for (&plan, &slot) in plans.iter().zip(slots) {
-                breed_child(
+                let trace = breed_child(
                     archive,
                     cma_emitters,
                     plan,
@@ -1671,7 +1696,18 @@ pub fn emit_offspring_batches(
                     round,
                     &mut child,
                 );
+                if recording && let Some(operator) = trace.operator {
+                    operators.push((child.id, operator));
+                }
                 batch.push_bred(&mut child);
+            }
+            if !operators.is_empty()
+                && let Some(log) = OPERATOR_LOG
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
+            {
+                log.extend(operators);
             }
             batch
         })

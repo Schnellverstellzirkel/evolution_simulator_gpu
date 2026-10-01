@@ -123,6 +123,9 @@ pub struct EvaluationMetrics {
     /// The fitness is the confirmation trial's (it was worse than the
     /// standard trial), so a replay runs at fine fidelity to show that trial.
     pub fine: bool,
+    /// The standard trial's rung trace (distances at 1, 2.5, 5 and 10 s and
+    /// the early features), for the generation dump.
+    pub trace: crate::creature_kernel::RungTrace,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]

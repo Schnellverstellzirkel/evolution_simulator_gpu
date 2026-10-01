@@ -251,6 +251,7 @@ fn fake_evaluate(population: &Population, cfg: &Config, target: f32) -> Vec<Eval
                 excluded: false,
                 screen_x,
                 fine: false,
+                trace: Default::default(),
             }
         })
         .collect()
