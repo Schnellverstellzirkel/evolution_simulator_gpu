@@ -620,12 +620,14 @@ impl Experiment {
                 .get(arena)
                 .map_or(f32::NEG_INFINITY, QdArchive::best_fitness)
         };
+        // Each record once: best_fitness scans the whole archive.
+        let bars: Vec<f32> = (0..arenas).map(bar).collect();
         let mut need = Vec::new();
         Self::exclude_audit_below_bar(block, standard, &mut out);
         let mut candidates: Vec<Vec<usize>> = vec![Vec::new(); arenas];
         for (j, m) in standard.iter().enumerate() {
             let arena = qd::arena_of_slot(block.first + j, arenas);
-            if Self::eligible(&out[j]) && m.fitness > bar(arena) {
+            if Self::eligible(&out[j]) && m.fitness > bars[arena] {
                 candidates[arena].push(j);
             }
         }
@@ -636,7 +638,7 @@ impl Experiment {
                     .total_cmp(&standard[a].fitness)
                     .then(a.cmp(&b))
             });
-            let mut record = bar(arena);
+            let mut record = bars[arena];
             let mut asked = 0;
             for j in members {
                 if standard[j].fitness <= record {
