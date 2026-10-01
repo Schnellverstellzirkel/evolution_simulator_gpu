@@ -52,6 +52,7 @@ fn main() -> anyhow::Result<()> {
     }
     for (warps, min_blocks) in [(16, 4), (12, 3), (8, 2)] {
         let setup = lane_stub::Setup {
+            baked: None,
             mpl: 16,
             nb: 3,
             substeps: 2,

@@ -411,7 +411,9 @@ fn bf2(lo: f32, hi: f32) -> f32 {
     f32::from_bits(t(lo) | (t(hi) << 16))
 }
 
-pub fn batch(count: usize, nodes: usize, muscles: usize, mpl: usize, nb: usize, seed: u64) -> Batch {
+/// `plan`: the parents of nodes 1 .. n - 1 for every creature (plan-uniform
+/// bodies for a BAKED kernel); without it every creature draws its own tree.
+pub fn batch(count: usize, nodes: usize, muscles: usize, mpl: usize, nb: usize, seed: u64, plan: Option<&[usize]>) -> Batch {
     const W: usize = 2;
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ seed.wrapping_mul(0x2545_f491_4f6c_dd1d));
     let mut b = Batch {
@@ -424,17 +426,21 @@ pub fn batch(count: usize, nodes: usize, muscles: usize, mpl: usize, nb: usize, 
     for c in 0..count {
         // A breadth-first tree: node 0 the head with only the neck (node 1);
         // parents never decrease; at most `nb` children per node.
-        let n = nodes.clamp(2, 8);
+        let n = plan.map_or(nodes, |p| p.len() + 1).clamp(2, 8);
         let mut parent = vec![0usize; n];
-        let mut children = vec![0usize; n];
-        children[0] = 1;
-        let mut cursor = 1;
-        for i in 2..n {
-            while children[cursor] >= nb || (children[cursor] > 0 && rng.f() < 0.45 && cursor + 1 < i) {
-                cursor += 1;
+        if let Some(p) = plan {
+            parent[1..].copy_from_slice(p);
+        } else {
+            let mut children = vec![0usize; n];
+            children[0] = 1;
+            let mut cursor = 1;
+            for i in 2..n {
+                while children[cursor] >= nb || (children[cursor] > 0 && rng.f() < 0.45 && cursor + 1 < i) {
+                    cursor += 1;
+                }
+                parent[i] = cursor;
+                children[cursor] += 1;
             }
-            parent[i] = cursor;
-            children[cursor] += 1;
         }
         let mut x = vec![0.0f32; n];
         let mut y = vec![0.0f32; n];
@@ -677,6 +683,8 @@ fn args() -> HashMap<String, String> {
 }
 
 pub struct Setup {
+    /// The baked tree (parents of nodes 1 .. n - 1), if any.
+    pub baked: Option<Vec<usize>>,
     pub mpl: usize,
     pub nb: usize,
     pub substeps: u32,
@@ -687,7 +695,7 @@ pub struct Setup {
 
 impl Setup {
     pub fn defines(&self) -> Vec<(&'static str, String)> {
-        vec![
+        let mut d = vec![
             ("W", "2".into()),
             ("MPL", self.mpl.to_string()),
             ("NB", self.nb.to_string()),
@@ -695,8 +703,55 @@ impl Setup {
             ("MAX_ROUNDS", self.rounds.to_string()),
             ("BLOCK", self.block.to_string()),
             ("MIN_BLOCKS", self.min_blocks.to_string()),
-        ]
+        ];
+        if let Some(p) = &self.baked {
+            d.extend(bake_defines(p, self.nb));
+        }
+        d
     }
+}
+
+/// The defines of a baked kernel for one bone tree: `parents` are the parents
+/// of nodes 1 .. n - 1 (breadth-first, node 1's is the head). Per node g the
+/// rod that ends at it has a topology word (BTOPO, as the lane record packs
+/// it), the one-hot of its parent rod as its own lane sees it (BPM), and its
+/// kept sibling rank (BSR); per lane the incidence table of contact nodes
+/// (BINC0, BINC1: byte n has bit k when local rod k ends at node n and bit
+/// 4 + k when n is its pivot).
+pub fn bake_defines(parents: &[usize], nb: usize) -> Vec<(&'static str, String)> {
+    let n = parents.len() + 1;
+    let parent = |g: usize| if g == 0 { 0 } else { parents[g - 1] };
+    let mut rank = [0usize; 8];
+    let mut seen = [0usize; 8];
+    for g in 1..n {
+        rank[g] = seen[parent(g)];
+        seen[parent(g)] += 1;
+    }
+    let (mut topo, mut pm, mut sr) = ([0u32; 8], [0u32; 8], [0u32; 8]);
+    let mut inc = [0u64; 2];
+    for g in 1..n {
+        let a = parent(g);
+        let prod = if a >= 1 { (a - 1) as u32 } else { 31 };
+        let gp = if a >= 1 { parent(a) as u32 } else { 31 };
+        sr[g] = rank[g].min(nb - 1) as u32;
+        topo[g] = a as u32 | prod << 5 | sr[g] << 10 | gp << 12 | 1 << 17;
+        if a >= 1 {
+            pm[g] = if a / 4 != g / 4 { 0x10 << (a % 4) } else { 1 << (a % 4) };
+        }
+        let lane = g / 4;
+        inc[lane] |= 1u64 << (8 * g + g % 4);
+        inc[lane] |= 1u64 << (8 * a + 4 + g % 4);
+    }
+    let list = |v: &[u32; 8]| v.iter().map(|x| format!("{x}u")).collect::<Vec<_>>().join(", ");
+    vec![
+        ("BAKED", "1".into()),
+        ("BN", n.to_string()),
+        ("BTOPO", list(&topo)),
+        ("BPM", list(&pm)),
+        ("BSR", list(&sr)),
+        ("BINC0", format!("{}ull", inc[0])),
+        ("BINC1", format!("{}ull", inc[1])),
+    ]
 }
 
 /// Compiles the stub; prints and returns (cubin, log).
@@ -713,7 +768,20 @@ fn main() -> Result<()> {
     let a = args();
     let get = |k: &str, d: &str| a.get(k).cloned().unwrap_or_else(|| d.to_owned());
     let num = |k: &str, d: &str| -> usize { get(k, d).parse().unwrap_or_else(|_| panic!("{k} is a number")) };
+    // plan=0,1,1,1,2,2,3: every creature gets this tree (parents of nodes
+    // 1 .. n - 1); with `baked` the kernel has it compiled in.
+    let plan: Option<Vec<usize>> = a.get("plan").map(|p| {
+        let v: Vec<usize> = p.split(',').map(|x| x.parse().expect("plan is a list of parents")).collect();
+        assert!(!v.is_empty() && v.len() <= 7 && v[0] == 0, "plan: 1 to 7 parents, node 1's is 0");
+        for i in 1..v.len() {
+            // Node i + 1's parent is an earlier node other than the head, and
+            // parents never decrease (breadth-first order).
+            assert!((1..=i).contains(&v[i]) && v[i] >= v[i - 1], "plan: breadth-first parents");
+        }
+        v
+    });
     let setup = Setup {
+        baked: if a.contains_key("baked") { Some(plan.clone().expect("baked needs plan=")) } else { None },
         mpl: num("mpl", "16"),
         nb: num("nb", "3"),
         substeps: num("substeps", "2") as u32,
@@ -758,7 +826,7 @@ fn main() -> Result<()> {
     );
 
     let started = Instant::now();
-    let b = batch(count, nodes, muscles, setup.mpl, setup.nb, seed);
+    let b = batch(count, nodes, muscles, setup.mpl, setup.nb, seed, plan.as_deref());
     eprintln!("{count} creatures ({nodes} nodes, {muscles} muscles) built in {:.1} s", started.elapsed().as_secs_f64());
     let heads = cu.upload(&b.heads)?;
     let lanes = cu.upload(&b.lanes)?;
@@ -884,6 +952,13 @@ fn main() -> Result<()> {
                 println!("  creature {i}: steps {} topo {}", out[i][3], tp.join(" "));
             }
         }
+        // A hash of every creature's result words: two kernels that compute
+        // the same arithmetic in the same order print the same hash.
+        let hash = out.iter().flatten().fold(0xcbf2_9ce4_8422_2325u64, |h, v| (h ^ u64::from(v.to_bits())).wrapping_mul(0x0100_0000_01b3));
+        if let Some(path) = a.get("results") {
+            let bytes: Vec<u8> = out.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
+            std::fs::write(path, bytes)?;
+        }
         let steps_done: f64 = out.iter().map(|o| f64::from(o[3])).sum();
         let rate = steps_done / secs;
         best = best.min(secs);
@@ -899,7 +974,7 @@ fn main() -> Result<()> {
         println!(
             "run {r}: {secs:.3} s, {:.1}M creature-steps/s, {:.0} creatures/s at {steps} steps; \
              rounds/substep {rounds:.2}, contacts/substep {contacts:.2}, lowest point mean {low:.3} m, \
-             drift median {:.2e} max {drift:.2e} m, head below neck {fallen}, non-finite {bad}",
+             drift median {:.2e} max {drift:.2e} m, head below neck {fallen}, non-finite {bad}, hash {hash:016x}",
             rate / 1e6,
             count as f64 / secs,
             drift_sorted[count / 2],

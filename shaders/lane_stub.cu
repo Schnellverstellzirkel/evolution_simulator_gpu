@@ -52,13 +52,16 @@
 #ifndef SUBSTEPS
 #define SUBSTEPS 2
 #endif
+#ifndef TRIM
+#define TRIM 0
+#endif
 #ifndef MAX_ROUNDS
-#define MAX_ROUNDS 3
+#define MAX_ROUNDS (TRIM ? 1 : 3)
 #endif
 // 1: the muscle state words live in registers; 0: in an L2 scratch, read
 // and written once per muscle and substep.
 #ifndef MSTATE_REGS
-#define MSTATE_REGS 0
+#define MSTATE_REGS TRIM
 #endif
 // Unrolling of the loops over a lane's muscles (MPL with the state in
 // registers, which index it).
@@ -80,10 +83,53 @@
 #define NO_DAMP 0
 #endif
 #ifndef USE_STASH
-#define USE_STASH 1
+#define USE_STASH (!TRIM)
 #endif
 #ifndef NO_LEDGER
 #define NO_LEDGER 0
+#endif
+// Trims of the general kernel (TRIM 1 turns them all on; each can be set
+// alone). HOIST: the parent one-hots once per step. POLISH: Gauss-Seidel
+// sweeps after the active-set rounds when a round left the set (use with
+// MAX_ROUNDS 1). RC_REGS: the rod-contact incidence values once per
+// substep in registers. FASTRCP: reciprocals and muscle lengths by the
+// hardware approximations. PROJ_ANCHORED: the projection factors and
+// solves only when a node is held, else it only measures the drift.
+#ifndef TRIM
+#define TRIM 0
+#endif
+#ifndef HOIST
+#define HOIST TRIM
+#endif
+#ifndef POLISH
+#define POLISH (TRIM ? 2 : 0)
+#endif
+#ifndef RC_REGS
+#define RC_REGS TRIM
+#endif
+#ifndef FASTRCP
+#define FASTRCP TRIM
+#endif
+#ifndef PROJ_ANCHORED
+#define PROJ_ANCHORED TRIM
+#endif
+// NODE_NMAJOR: the node table node-major (node n of the lane pair's
+// creature at n * 16 + creature), so a runtime node's float4 is one address
+// add from n * 256, shared with its force-table slot.
+#ifndef NODE_NMAJOR
+#define NODE_NMAJOR TRIM
+#endif
+// Muscle-model variants (not trims: they change the model; the owner allows
+// cheaper models, docs/plan-2m.md). MUSCLE_STEP: each muscle's force is
+// evaluated once per step (at the first substep) and held for all substeps.
+// WAVE 0: the drive target is the secant of two raised-cosine evaluations;
+// 1: the analytic derivative at mid-step (one sine); 2: a triangle wave, so
+// the drive is a constant pulse over the duty phase (no transcendental).
+#ifndef MUSCLE_STEP
+#define MUSCLE_STEP 0
+#endif
+#ifndef WAVE
+#define WAVE 0
 #endif
 #ifndef NO_FRICTION
 #define NO_FRICTION 0
@@ -96,6 +142,8 @@
 #define RATE 60.0f
 #define DT (1.0f / RATE)
 #define HS (DT / SUBSTEPS)
+// The muscles' time step: the step when they run once per step.
+#define MHS (MUSCLE_STEP ? DT : HS)
 #define INV_HS (RATE * SUBSTEPS)
 #define NC 4
 #define NE (2 * NC)
@@ -123,6 +171,18 @@ struct Params {
 };
 
 __device__ __forceinline__ float clampf(float x, float lo, float hi) { return fminf(fmaxf(x, lo), hi); }
+__device__ __forceinline__ float frcp(float x) {
+#if FASTRCP
+    float r;
+    asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
+    return r;
+#else
+    return 1.0f / x;
+#endif
+}
+// A value select that keeps both operands values (a select between two array
+// addresses would keep the arrays out of registers).
+__device__ __forceinline__ float pick(bool c, float a, float b) { return c ? a : b; }
 __device__ __forceinline__ float xch(float v) { return __shfl_xor_sync(FULL, v, 1); }
 __device__ __forceinline__ unsigned xchu(unsigned v) { return __shfl_xor_sync(FULL, v, 1); }
 __device__ __forceinline__ float wave(float t, float inv_period, float phase, float offset, float duty, float inv_duty, float inv_complement) {
@@ -132,6 +192,20 @@ __device__ __forceinline__ float wave(float t, float inv_period, float phase, fl
     const float arg = rise ? ph * inv_duty : (ph - duty) * inv_complement;
     const float half = rise ? 0.5f : -0.5f;
     return 0.5f + half * __cosf(PI_F * arg);
+}
+// The wave's time derivative: WAVE 1 the raised cosine's, WAVE 2 a
+// triangle wave's with the same extremes (a constant rate per phase).
+__device__ __forceinline__ float wave_rate(float t, float inv_period, float phase, float offset, float duty, float inv_duty, float inv_complement) {
+    const float x = t * inv_period + phase + offset;
+    const float ph = x - floorf(x);
+    const bool rise = ph < duty;
+#if WAVE == 1
+    const float arg = rise ? ph * inv_duty : (ph - duty) * inv_complement;
+    const float k = rise ? -0.5f * PI_F * inv_duty : 0.5f * PI_F * inv_complement;
+    return k * inv_period * __sinf(PI_F * arg);
+#else
+    return inv_period * (rise ? -inv_duty : inv_complement);
+#endif
 }
 // Muscle state as one word per muscle: energy as unorm16 in the low half,
 // the step's drive target as the high half of a float (bfloat16).
@@ -170,20 +244,49 @@ __device__ __forceinline__ unsigned parent_mask(unsigned t, unsigned lg) {
     return hasp ? (((tn >> 2u) != lg) ? (0x10u << (tn & 3u)) : (1u << (tn & 3u))) : 0u;
 }
 
+// BAKED: one bone tree compiled in as constants. The host (bake_defines in
+// examples/lane_stub.rs) writes, per node g (the rod that ends at it; node 0
+// has none), BTOPO (the topology word), BPM (the one-hot of the parent rod as
+// the rod's own lane sees it) and BSR (the kept sibling rank), and per lane
+// the incidence table of contact nodes, BINC0 and BINC1 (byte n: bit k when
+// local rod k ends at node n, bit 4 + k when n is its pivot). Each value used
+// is a select on the lane bit between two literals, which the compiler folds
+// into a literal, the lane predicate or its negation.
+#ifndef BAKED
+#define BAKED 0
+#endif
+#if BAKED
+#define BAKED_TABLES \
+    constexpr unsigned kTopo[8] = {BTOPO}; \
+    constexpr unsigned kPm[8] = {BPM}; \
+    constexpr unsigned kSr[8] = {BSR}; \
+    (void)kTopo; (void)kPm; (void)kSr;
+// The rod at local slot k of lane l (global node 4l + k).
+#define BSEL(tab, k) (lg ? (tab)[4 + (k)] : (tab)[(k)])
+// Sibling couplings a rod keeps on either lane (the clique list).
+#define NEED_SIB(k, a) (kSr[k] >= (unsigned)(a) || kSr[4 + (k)] >= (unsigned)(a))
+#endif
+
+#if !BAKED
+#define NEED_SIB(k, a) true
+#define BAKED_TABLES
+#endif
+
 // The LDL^T factor of A = J M^-1 J^T over the creature's rods. `ipv` is the
 // inverse mass of each local rod's pivot, `icm` of its child node; `rdx`,
 // `rdy` hold lane 0's rod directions on lane 1.
 __device__ __forceinline__ void factor(
-    const unsigned (&topo)[NPL], const float (&dx)[NPL], const float (&dy)[NPL],
+    const unsigned (&topo)[NPL], const unsigned (&pmk)[NPL], const float (&dx)[NPL], const float (&dy)[NPL],
     const float (&rdx)[NPL], const float (&rdy)[NPL], const float (&ipv)[NPL], const float (&icm)[NPL],
     unsigned lg, float (&invD)[NPL], float (&Lf)[NPL][NB]) {
+    BAKED_TABLES
     float Dacc[NPL], La[NPL][NB];
 #pragma unroll
     for (int k = 0; k < NPL; k++) {
         const unsigned t = topo[k];
         const bool valid = T_VALID(t);
         Dacc[k] = valid ? ipv[k] + icm[k] : 1.0f;
-        const unsigned pm = parent_mask(t, lg);
+        const unsigned pm = pmk[k];
         float pdx = 0.0f, pdy = 0.0f;
 #pragma unroll
         for (int q = 0; q < k; q++) {
@@ -197,8 +300,9 @@ __device__ __forceinline__ void factor(
         const unsigned sr = valid ? T_SR(t) : 0u;
 #pragma unroll
         for (int a = 1; a < NB; a++) {
-            const float sdx = (k - a >= 0) ? dx[(k - a) & 3] : rdx[(4 + k - a) & 3];
-            const float sdy = (k - a >= 0) ? dy[(k - a) & 3] : rdy[(4 + k - a) & 3];
+            if (!NEED_SIB(k, a)) { La[k][a] = 0.0f; continue; }
+            const float sdx = pick(k - a >= 0, dx[(k - a) & 3], rdx[(4 + k - a) & 3]);
+            const float sdy = pick(k - a >= 0, dy[(k - a) & 3], rdy[(4 + k - a) & 3]);
             La[k][a] = (unsigned)a <= sr ? (dx[k] * sdx + dy[k] * sdy) * ipv[k] : 0.0f;
         }
     }
@@ -227,11 +331,11 @@ __device__ __forceinline__ void factor(
                 const bool valid = T_VALID(t);
                 // A rod whose two nodes are both held (projection) has no
                 // pivot: it is left as it is.
-                const float id = (valid && Dacc[k] > 1e-6f) ? 1.0f / Dacc[k] : 0.0f;
+                const float id = (valid && Dacc[k] > 1e-6f) ? frcp(Dacc[k]) : 0.0f;
                 invD[k] = id;
 #pragma unroll
                 for (int a = 0; a < NB; a++) { Lf[k][a] = La[k][a] * id; }
-                const unsigned pm = parent_mask(t, lg);
+                const unsigned pm = pmk[k];
                 const float vp = La[k][0] * Lf[k][0];
 #pragma unroll
                 for (int q = 0; q < k; q++) {
@@ -243,6 +347,7 @@ __device__ __forceinline__ void factor(
                 }
 #pragma unroll
                 for (int a = 1; a < NB; a++) {
+                    if (!NEED_SIB(k, a)) { continue; }
                     const float va = La[k][a] * Lf[k][a];
                     const float vpa = La[k][a] * Lf[k][0];
                     if (k - a >= 0) {
@@ -272,8 +377,9 @@ __device__ __forceinline__ void factor(
 // the backward pass (lane 0 ahead, slots in reverse) both run one slot per
 // step in both lanes, with no selects and 3 shuffles per slot and pass.
 template <int S>
-__device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&topo)[NPL],
+__device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&pmk)[NPL],
     const float (&invD)[NPL], const float (&Lf)[NPL][NB], unsigned lg) {
+    BAKED_TABLES
     float inb[NPL] = {0.0f, 0.0f, 0.0f, 0.0f};
 #pragma unroll
     for (int s = 0; s < S; s++) {
@@ -283,7 +389,7 @@ __device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&
         float out[NPL] = {0.0f, 0.0f, 0.0f, 0.0f};
 #pragma unroll
         for (int k = NPL - 1; k >= 0; k--) {
-            const unsigned pm = parent_mask(topo[k], lg);
+            const unsigned pm = pmk[k];
             const float y = b[k];
             const float ly = Lf[k][0] * y;
 #pragma unroll
@@ -296,6 +402,7 @@ __device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&
             }
 #pragma unroll
             for (int a = 1; a < NB; a++) {
+                if (!NEED_SIB(k, a)) { continue; }
                 const float v = Lf[k][a] * y;
                 if (k - a >= 0) { b[(k - a) & 3] -= v; } else { out[(4 + k - a) & 3] -= v; }
             }
@@ -311,7 +418,7 @@ __device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&
         float x[NPL];
 #pragma unroll
         for (int k = 0; k < NPL; k++) {
-            const unsigned pm = parent_mask(topo[k], lg);
+            const unsigned pm = pmk[k];
             float xp = 0.0f;
 #pragma unroll
             for (int q = 0; q < k; q++) {
@@ -324,7 +431,8 @@ __device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&
             float acc = z[s][k] - Lf[k][0] * xp;
 #pragma unroll
             for (int a = 1; a < NB; a++) {
-                acc -= Lf[k][a] * ((k - a >= 0) ? x[(k - a) & 3] : xin[(4 + k - a) & 3]);
+                if (!NEED_SIB(k, a)) { continue; }
+                acc -= Lf[k][a] * pick(k - a >= 0, x[(k - a) & 3], xin[(4 + k - a) & 3]);
             }
             x[k] = acc;
             z[s][k] = acc;
@@ -369,6 +477,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
     const unsigned gl = lane & 30u;
     const unsigned gmask = 3u << gl;
 #define NODE(k, col) s_node4[(k) * 32 + (col)]
+#if NODE_NMAJOR
+#define NODEW(k) s_node4[(lg * NPL + (k)) * 16 + (lane >> 1)]
+#define NODER(n) s_node4[(n) * 16 + (lane >> 1)]
+#else
+#define NODEW(k) NODE(k, lane)
+#define NODER(n) NODE((n) & 3u, gl + ((n) >> 2u))
+#endif
 #define FRC(g, col) s_frc2[(g) * 32 + (col)]
 #define SCR(q, col) s_warp[(q) * 32 + (col)]
 #define WAT(idx) SCR((idx) >> 1, gl + ((idx) & 1))
@@ -379,8 +494,15 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
     // Registers hold the state; the statics (radius, friction, rest length,
     // pivot inverse mass) are read from the lane record in L2 when used.
     float invm[NPL];
-    unsigned topo[NPL];
+    unsigned topo_r[NPL];
     float px[NPL], py[NPL], vx[NPL], vy[NPL];
+    // With the state in registers the muscle loops end by skipping, not by
+    // leaving: a loop exit keeps ms[] in local memory.
+#if MSTATE_REGS
+#define MS_LOOP_END continue
+#else
+#define MS_LOOP_END break
+#endif
 #if MSTATE_REGS
     unsigned ms[MPL];
 #define MS_GET(k) ms[k]
@@ -392,7 +514,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
     float msum = 0.0f, rounds_sum = 0.0f, contact_sum = 0.0f, drift_max = 0.0f;
 #pragma unroll
     for (int k = 0; k < NPL; k++) {
-        invm[k] = 0.0f; topo[k] = 0u; px[k] = 0.0f; py[k] = 0.0f; vx[k] = 0.0f; vy[k] = 0.0f;
+        invm[k] = 0.0f; topo_r[k] = 0u; px[k] = 0.0f; py[k] = 0.0f; vx[k] = 0.0f; vy[k] = 0.0f;
     }
 #if MSTATE_REGS
 #pragma unroll
@@ -417,7 +539,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     invm[k] = REC(0, k);
                     px[k] = REC(12, k);
                     py[k] = REC(16, k);
-                    topo[k] = __float_as_uint(REC(24, k));
+                    topo_r[k] = __float_as_uint(REC(24, k));
                     vx[k] = 0.0f; vy[k] = 0.0f;
                     ANC(k) = __uint_as_float(0x7fc00000u);
                 }
@@ -436,41 +558,141 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 cidx = 0u;
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
-                    invm[k] = 0.0f; topo[k] = 0u; px[k] = 0.0f; py[k] = 0.0f; vx[k] = 0.0f; vy[k] = 0.0f;
+                    invm[k] = 0.0f; topo_r[k] = 0u; px[k] = 0.0f; py[k] = 0.0f; vx[k] = 0.0f; vy[k] = 0.0f;
                 }
             }
         }
         if (!__any_sync(FULL, live)) { break; }
         const unsigned wm = __reduce_max_sync(FULL, mc);
+        // The rod topology and the parent one-hots: constants per lane when
+        // BAKED, else the record's words (the one-hots hoisted with HOIST,
+        // recomputed at every use without).
+        unsigned topo[NPL];
+#if BAKED
+        BAKED_TABLES
+        unsigned pmk[NPL];
+#pragma unroll
+        for (int k = 0; k < NPL; k++) {
+            topo[k] = BSEL(kTopo, k);
+            pmk[k] = BSEL(kPm, k);
+        }
+#define PMK_AT
+#else
+#pragma unroll
+        for (int k = 0; k < NPL; k++) { topo[k] = topo_r[k]; }
+#if HOIST
+        unsigned pmk[NPL];
+#pragma unroll
+        for (int k = 0; k < NPL; k++) { pmk[k] = parent_mask(topo[k], lg); }
+#define PMK_AT
+#else
+#define PMK_AT unsigned pmk[NPL]; _Pragma("unroll") for (int k_ = 0; k_ < NPL; k_++) { pmk[k_] = parent_mask(topo[k_], lg); }
+#endif
+#endif
         const float t0 = (float)step * DT;
         const size_t mb = (size_t)cidx * MPL * W + lg;
         // The waveform and drive target, once per step.
 #pragma unroll MUSCLE_UNROLL
         for (int k = 0; k < MPL; k++) {
-            if ((unsigned)k >= wm) { break; }
+            if ((unsigned)k >= wm) { MS_LOOP_END; }
             if ((unsigned)k < mc) {
                 const float4 s0 = mss[(size_t)cidx * (2 * MPL * W) + (2 * k) * W + lg];
                 const float4 s1 = mss[(size_t)cidx * (2 * MPL * W) + (2 * k + 1) * W + lg];
                 const float off = roff[mb + (size_t)k * W];
+#if WAVE == 0
                 const float w1 = wave(t0 + DT, s0.x, s0.y, off, s0.z, s0.w, s1.x);
                 const float w0 = wave(t0, s0.x, s0.y, off, s0.z, s0.w, s1.x);
                 const float target = s1.y * (w1 - w0) * RATE;
+#else
+                const float target = s1.y * wave_rate(t0 + 0.5f * DT, s0.x, s0.y, off, s0.z, s0.w, s1.x);
+#endif
                 const float drive = fmaxf(-target * s1.z * 0.25f, 0.0f);
                 MS_SET(k, pack_ed(unpack_ed(MS_GET(k)).x, drive));
             }
         }
         unsigned cw = 0u;
+#if MUSCLE_STEP
+        float mfx[NPL], mfy[NPL];
+#endif
+#if PROJ_ANCHORED
+        // The last substep's rod factor, for a projection with no node held.
+        float pinvD[NPL], pLf[NPL][NB];
+#endif
 #pragma unroll 1
         for (int sub = 0; sub < SUBSTEPS; sub++) {
             // Node table, and a clear force table.
 #pragma unroll
-            for (int k = 0; k < NPL; k++) { NODE(k, lane) = make_float4(px[k], py[k], vx[k], vy[k]); }
+            for (int k = 0; k < NPL; k++) { NODEW(k) = make_float4(px[k], py[k], vx[k], vy[k]); }
 #pragma unroll
             for (int g = 0; g < W * NPL; g++) { FRC(g, lane) = make_float2(0.0f, 0.0f); }
             __syncwarp();
             float fx[NPL], fy[NPL];
 #pragma unroll
             for (int k = 0; k < NPL; k++) { fx[k] = 0.0f; fy[k] = 0.0f; }
+#if MUSCLE_STEP
+            // Muscles once per step, their node forces held in registers.
+            if (sub == 0) {
+                // Muscles.
+#pragma unroll MUSCLE_UNROLL
+                for (int k = 0; k < MPL; k++) {
+                    if ((unsigned)k >= wm) { MS_LOOP_END; }
+                    if ((unsigned)k < mc && !NO_MUSCLES) {
+                        const float4 A = msa[mb + (size_t)k * W];
+                        const float2 B = msb[mb + (size_t)k * W];
+                        const unsigned pk = __float_as_uint(A.x);
+                        const unsigned na_ = pk & 31u, nb_ = (pk >> 5u) & 31u, nc_ = (pk >> 10u) & 31u, nd_ = (pk >> 15u) & 31u;
+                        const float4 e0 = NODER(na_);
+                        const float4 e1 = NODER(nb_);
+                        const float4 e2 = NODER(nc_);
+                        const float4 e3 = NODER(nd_);
+                        const float2 an = unpack_un(__float_as_uint(A.y));
+                        const float2 hc = unpack_bf(__float_as_uint(B.y));
+                        const float cap = A.z, tendon_k = A.w, slack = B.x, hill = hc.x, inv_capacity = hc.y;
+                        const float pax = e0.x + (e1.x - e0.x) * an.x, pay = e0.y + (e1.y - e0.y) * an.x;
+                        const float vax = e0.z + (e1.z - e0.z) * an.x, vay = e0.w + (e1.w - e0.w) * an.x;
+                        const float pbx = e2.x + (e3.x - e2.x) * an.y, pby = e2.y + (e3.y - e2.y) * an.y;
+                        const float vbx = e2.z + (e3.z - e2.z) * an.y, vby = e2.w + (e3.w - e2.w) * an.y;
+                        const float ddx = pbx - pax, ddy = pby - pay;
+#if FASTRCP
+                        const float inverse = rsqrtf(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                        const float length = (ddx * ddx + ddy * ddy) * inverse;
+#else
+                        const float length = fmaxf(sqrtf(ddx * ddx + ddy * ddy), 1e-6f);
+                        const float inverse = 1.0f / length;
+#endif
+                        const float dirx = ddx * inverse, diry = ddy * inverse;
+                        const float relative = (vbx - vax) * dirx + (vby - vay) * diry;
+                        const float2 st = unpack_ed(MS_GET(k));
+                        float energy = st.x;
+                        float drive = st.y * energy;
+                        if (hill > 0.0f) { drive *= clampf(1.0f + relative * hill, 0.0f, 1.0f); }
+                        const float magnitude = clampf(drive + relative * 0.15f, -cap, cap);
+                        const float work = fminf(drive, cap) * fmaxf(-relative, 0.0f) * MHS;
+                        energy = clampf(energy - work * inv_capacity + MUSCLE_RECOVERY * p.recovery * MHS * (1.0f - energy), 0.0f, 1.0f);
+                        MS_SET(k, pack_ed(energy, st.y));
+                        const float stretch = fmaxf(length - slack, 0.0f);
+                        const float pull = magnitude + tendon_k * stretch;
+                        const float gx = dirx * pull, gy = diry * pull;
+                        msum += magnitude * relative;
+                        float2 f;
+                        f = FRC(na_, lane); f.x += (1.0f - an.x) * gx; f.y += (1.0f - an.x) * gy; FRC(na_, lane) = f;
+                        f = FRC(nb_, lane); f.x += an.x * gx; f.y += an.x * gy; FRC(nb_, lane) = f;
+                        f = FRC(nc_, lane); f.x -= (1.0f - an.y) * gx; f.y -= (1.0f - an.y) * gy; FRC(nc_, lane) = f;
+                        f = FRC(nd_, lane); f.x -= an.y * gx; f.y -= an.y * gy; FRC(nd_, lane) = f;
+                    }
+                }
+                __syncwarp();
+#pragma unroll
+                for (int k = 0; k < NPL; k++) {
+                    const unsigned g = lg * NPL + k;
+                    const float2 f0 = FRC(g, lane), f1 = FRC(g, lane ^ 1u);
+                    mfx[k] = f0.x + f1.x; mfy[k] = f0.y + f1.y;
+                }
+                __syncwarp();
+#pragma unroll
+                for (int g = 0; g < W * NPL; g++) { FRC(g, lane) = make_float2(0.0f, 0.0f); }
+                __syncwarp();
+            }
             // Air drag at each rod's midpoint, half to each node, and joint
             // damping as a couple on the rod and the opposite on its parent.
 #pragma unroll
@@ -478,13 +700,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 const unsigned t = topo[k];
                 if (T_VALID(t) && !NO_DAMP) {
                     const unsigned a = T_PIVOT(t);
-                    const float4 na = NODE(a & 3u, gl + (a >> 2u));
+                    const float4 na = NODER(a);
                     const float ddx = px[k] - na.x, ddy = py[k] - na.y;
                     const float il = rsqrtf(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
                     const float l = (ddx * ddx + ddy * ddy) * il;
                     const float wx = 0.5f * (vx[k] + na.z), wy = 0.5f * (vy[k] + na.w);
                     const float speed = sqrtf(wx * wx + wy * wy);
-                    const float m = 1.0f / fmaxf(fmaxf(invm[k], REC(28, k)), 1e-6f);
+                    const float m = frcp(fmaxf(fmaxf(invm[k], REC(28, k)), 1e-6f));
                     const float strength = fminf(AIR_DRAG * l * (REC(4, k) * 2.0f) * speed, 0.5f * m * INV_HS);
                     const float hx = -0.5f * wx * strength, hy = -0.5f * wy * strength;
                     fx[k] += hx; fy[k] += hy;
@@ -495,7 +717,55 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     const unsigned g = T_GP(t);
                     float w_par = 0.0f, pdx = 0.0f, pdy = 0.0f, pil = 0.0f;
                     if (g != 31u) {
-                        const float4 ng = NODE(g & 3u, gl + (g >> 2u));
+                        const float4 ng = NODER(g);
+                        pdx = na.x - ng.x; pdy = na.y - ng.y;
+                        pil = rsqrtf(fmaxf(pdx * pdx + pdy * pdy, 1e-12f));
+                        w_par = (pdx * (na.w - ng.w) - pdy * (na.z - ng.z)) * pil * pil;
+                    }
+                    const float tau = -m * l * l * (w_rod - w_par) * INV_JOINT_DAMPING;
+                    const float cf = tau * il * il;
+                    fx[k] += -ddy * cf; fy[k] += ddx * cf;
+                    fa.x -= -ddy * cf; fa.y -= ddx * cf;
+                    if (g != 31u) {
+                        // The parent rod takes -tau.
+                        const float pc = tau * pil * pil;
+                        fa.x -= -pdy * pc; fa.y -= pdx * pc;
+                        float2 fg = FRC(g, lane);
+                        fg.x += -pdy * pc; fg.y += pdx * pc;
+                        FRC(a, lane) = fa;
+                        FRC(g, lane) = fg;
+                    } else {
+                        FRC(a, lane) = fa;
+                    }
+                }
+            }
+            __syncwarp();
+#else
+            // Air drag at each rod's midpoint, half to each node, and joint
+            // damping as a couple on the rod and the opposite on its parent.
+#pragma unroll
+            for (int k = 0; k < NPL; k++) {
+                const unsigned t = topo[k];
+                if (T_VALID(t) && !NO_DAMP) {
+                    const unsigned a = T_PIVOT(t);
+                    const float4 na = NODER(a);
+                    const float ddx = px[k] - na.x, ddy = py[k] - na.y;
+                    const float il = rsqrtf(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                    const float l = (ddx * ddx + ddy * ddy) * il;
+                    const float wx = 0.5f * (vx[k] + na.z), wy = 0.5f * (vy[k] + na.w);
+                    const float speed = sqrtf(wx * wx + wy * wy);
+                    const float m = frcp(fmaxf(fmaxf(invm[k], REC(28, k)), 1e-6f));
+                    const float strength = fminf(AIR_DRAG * l * (REC(4, k) * 2.0f) * speed, 0.5f * m * INV_HS);
+                    const float hx = -0.5f * wx * strength, hy = -0.5f * wy * strength;
+                    fx[k] += hx; fy[k] += hy;
+                    float2 fa = FRC(a, lane);
+                    fa.x += hx; fa.y += hy;
+                    const float rvx = vx[k] - na.z, rvy = vy[k] - na.w;
+                    const float w_rod = (ddx * rvy - ddy * rvx) * il * il;
+                    const unsigned g = T_GP(t);
+                    float w_par = 0.0f, pdx = 0.0f, pdy = 0.0f, pil = 0.0f;
+                    if (g != 31u) {
+                        const float4 ng = NODER(g);
                         pdx = na.x - ng.x; pdy = na.y - ng.y;
                         pil = rsqrtf(fmaxf(pdx * pdx + pdy * pdy, 1e-12f));
                         w_par = (pdx * (na.w - ng.w) - pdy * (na.z - ng.z)) * pil * pil;
@@ -520,16 +790,16 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             // Muscles.
 #pragma unroll MUSCLE_UNROLL
             for (int k = 0; k < MPL; k++) {
-                if ((unsigned)k >= wm) { break; }
+                if ((unsigned)k >= wm) { MS_LOOP_END; }
                 if ((unsigned)k < mc && !NO_MUSCLES) {
                     const float4 A = msa[mb + (size_t)k * W];
                     const float2 B = msb[mb + (size_t)k * W];
                     const unsigned pk = __float_as_uint(A.x);
                     const unsigned na_ = pk & 31u, nb_ = (pk >> 5u) & 31u, nc_ = (pk >> 10u) & 31u, nd_ = (pk >> 15u) & 31u;
-                    const float4 e0 = NODE(na_ & 3u, gl + (na_ >> 2u));
-                    const float4 e1 = NODE(nb_ & 3u, gl + (nb_ >> 2u));
-                    const float4 e2 = NODE(nc_ & 3u, gl + (nc_ >> 2u));
-                    const float4 e3 = NODE(nd_ & 3u, gl + (nd_ >> 2u));
+                    const float4 e0 = NODER(na_);
+                    const float4 e1 = NODER(nb_);
+                    const float4 e2 = NODER(nc_);
+                    const float4 e3 = NODER(nd_);
                     const float2 an = unpack_un(__float_as_uint(A.y));
                     const float2 hc = unpack_bf(__float_as_uint(B.y));
                     const float cap = A.z, tendon_k = A.w, slack = B.x, hill = hc.x, inv_capacity = hc.y;
@@ -538,8 +808,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     const float pbx = e2.x + (e3.x - e2.x) * an.y, pby = e2.y + (e3.y - e2.y) * an.y;
                     const float vbx = e2.z + (e3.z - e2.z) * an.y, vby = e2.w + (e3.w - e2.w) * an.y;
                     const float ddx = pbx - pax, ddy = pby - pay;
+#if FASTRCP
+                    const float inverse = rsqrtf(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                    const float length = (ddx * ddx + ddy * ddy) * inverse;
+#else
                     const float length = fmaxf(sqrtf(ddx * ddx + ddy * ddy), 1e-6f);
                     const float inverse = 1.0f / length;
+#endif
                     const float dirx = ddx * inverse, diry = ddy * inverse;
                     const float relative = (vbx - vax) * dirx + (vby - vay) * diry;
                     const float2 st = unpack_ed(MS_GET(k));
@@ -547,8 +822,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     float drive = st.y * energy;
                     if (hill > 0.0f) { drive *= clampf(1.0f + relative * hill, 0.0f, 1.0f); }
                     const float magnitude = clampf(drive + relative * 0.15f, -cap, cap);
-                    const float work = fminf(drive, cap) * fmaxf(-relative, 0.0f) * HS;
-                    energy = clampf(energy - work * inv_capacity + MUSCLE_RECOVERY * p.recovery * HS * (1.0f - energy), 0.0f, 1.0f);
+                    const float work = fminf(drive, cap) * fmaxf(-relative, 0.0f) * MHS;
+                    energy = clampf(energy - work * inv_capacity + MUSCLE_RECOVERY * p.recovery * MHS * (1.0f - energy), 0.0f, 1.0f);
                     MS_SET(k, pack_ed(energy, st.y));
                     const float stretch = fmaxf(length - slack, 0.0f);
                     const float pull = magnitude + tendon_k * stretch;
@@ -562,12 +837,17 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 }
             }
             __syncwarp();
+#endif
             // Free velocities.
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
                 const unsigned g = lg * NPL + k;
                 const float2 f0 = FRC(g, lane), f1 = FRC(g, lane ^ 1u);
+#if MUSCLE_STEP
+                const float gx = fx[k] + f0.x + f1.x + mfx[k], gy = fy[k] + f0.y + f1.y + mfy[k];
+#else
                 const float gx = fx[k] + f0.x + f1.x, gy = fy[k] + f0.y + f1.y;
+#endif
                 const bool on = invm[k] > 0.0f;
                 vx[k] += HS * invm[k] * gx;
                 vy[k] += on ? HS * (invm[k] * gy - p.gravity) : 0.0f;
@@ -576,7 +856,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             // Node table with the free velocities; node statics for the rows.
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
-                NODE(k, lane) = make_float4(px[k], py[k], vx[k], vy[k]);
+                NODEW(k) = make_float4(px[k], py[k], vx[k], vy[k]);
                 FRC(2 * k, lane) = make_float2(invm[k], REC(8, k) * p.friction);
                 FRC(2 * k + 1, lane) = make_float2(REC(4, k), ANC(k));
             }
@@ -595,7 +875,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #endif
                 if (T_VALID(t)) {
                     const unsigned a = T_PIVOT(t);
-                    const float4 na = NODE(a & 3u, gl + (a >> 2u));
+                    const float4 na = NODER(a);
                     const float ddx = px[k] - na.x, ddy = py[k] - na.y;
                     const float il = rsqrtf(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
                     dx[k] = ddx * il; dy[k] = ddy * il;
@@ -615,7 +895,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 float ipv[NPL];
 #pragma unroll
                 for (int k = 0; k < NPL; k++) { ipv[k] = REC(28, k); }
-                factor(topo, dx, dy, rdx, rdy, ipv, invm, lg, invD, Lf);
+                PMK_AT
+                factor(topo, pmk, dx, dy, rdx, rdy, ipv, invm, lg, invD, Lf);
             }
             // Contacts: the deepest 4 nodes that would reach the ground.
             unsigned word = 0u;
@@ -649,7 +930,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             for (int c = 0; c < NC; c++) {
                 const unsigned e = (word >> (6u * c)) & 63u;
                 const unsigned g = e & 31u;
-                const float4 nd = NODE(g & 3u, gl + (g >> 2u));
+                const float4 nd = NODER(g);
                 const float2 s0 = FRC(2u * (g & 3u), gl + (g >> 2u));
                 const float2 s1 = FRC(2u * (g & 3u) + 1u, gl + (g >> 2u));
                 cim[c] = (e & 32u) ? s0.x : 0.0f;
@@ -662,6 +943,17 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             // Incidence of each local rod at each contact node, two bits per
             // pair: the rod's child (+) or its pivot (-). R's entry is this
             // times the node's inverse mass times d.y (normal) or d.x.
+#if BAKED
+            // Baked: one byte of the lane's constant incidence table per
+            // contact, indexed by the contact node.
+            unsigned inc4 = 0u;
+            {
+                const unsigned long long tb = lg ? BINC1 : BINC0;
+#pragma unroll
+                for (int c = 0; c < NC; c++) { inc4 |= (unsigned)((tb >> (8u * CNODE(c))) & 0xffull) << (8 * c); }
+            }
+#define RCO(k, c) (((inc4 >> (8 * (c) + (k))) & 1u) ? cim[c] : (((inc4 >> (8 * (c) + 4 + (k))) & 1u) ? -cim[c] : 0.0f))
+#else
             unsigned sgw = 0u;
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
@@ -676,6 +968,17 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 }
             }
 #define RCO(k, c) (((sgw >> (2 * (4 * (k) + (c)))) & 1u) ? cim[c] : (((sgw >> (2 * (4 * (k) + (c)))) & 2u) ? -cim[c] : 0.0f))
+#endif
+#if RC_REGS
+            float rc[NPL][NC];
+#pragma unroll
+            for (int k = 0; k < NPL; k++) {
+#pragma unroll
+                for (int c = 0; c < NC; c++) { rc[k][c] = RCO(k, c); }
+            }
+#undef RCO
+#define RCO(k, c) rc[k][c]
+#endif
             // Batch A: row 0 the rods' own, rows 1 + 2c and 2 + 2c contact
             // c's normal and friction (c = 0, 1); lane 0 one slot behind.
             float mu0[NPL], me[4][NPL];
@@ -687,13 +990,14 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     for (int k = 0; k < NPL; k++) {
                         float v1 = 0.0f, v0 = 0.0f;
                         if (s == 0) { v1 = rhs0[k]; }
-                        else if (s < 5) { v1 = RCO(k, (s - 1) >> 1) * (((s - 1) & 1) ? dx[k] : dy[k]); }
+                        else if (s < 5) { v1 = RCO(k, (s - 1) >> 1) * pick(((s - 1)) & 1, dx[k], dy[k]); }
                         if (s == 1) { v0 = rhs0[k]; }
-                        else if (s >= 2) { v0 = RCO(k, (s - 2) >> 1) * (((s - 2) & 1) ? dx[k] : dy[k]); }
+                        else if (s >= 2) { v0 = RCO(k, (s - 2) >> 1) * pick(((s - 2)) & 1, dx[k], dy[k]); }
                         z[s][k] = lg == 1u ? v1 : v0;
                     }
                 }
-                tree_solve<6>(z, topo, invD, Lf, lg);
+                PMK_AT
+                tree_solve<6>(z, pmk, invD, Lf, lg);
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
                     mu0[k] = lg == 1u ? z[0][k] : z[1][k];
@@ -714,7 +1018,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             for (int e = 0; e < NE; e++) {
                 float part = 0.0f;
 #pragma unroll
-                for (int k = 0; k < NPL; k++) { part += RCO(k, e >> 1) * ((e & 1) ? dx[k] : dy[k]) * mu0[k]; }
+                for (int k = 0; k < NPL; k++) { part += RCO(k, e >> 1) * pick((e) & 1, dx[k], dy[k]) * mu0[k]; }
                 b0[e] -= part + xch(part);
             }
             __syncwarp();
@@ -723,7 +1027,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             for (int f = 0; f < NE; f++) {
                 float rf[NPL];
 #pragma unroll
-                for (int k = 0; k < NPL; k++) { rf[k] = RCO(k, f >> 1) * ((f & 1) ? dx[k] : dy[k]); }
+                for (int k = 0; k < NPL; k++) { rf[k] = RCO(k, f >> 1) * pick((f) & 1, dx[k], dy[k]); }
 #pragma unroll
                 for (int e = 0; e < 4; e++) {
                     if (e <= f) {
@@ -744,12 +1048,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #pragma unroll
                     for (int k = 0; k < NPL; k++) {
                         float v1 = 0.0f, v0 = 0.0f;
-                        if (s < 4) { v1 = RCO(k, (4 + s) >> 1) * (((4 + s) & 1) ? dx[k] : dy[k]); }
-                        if (s >= 1) { v0 = RCO(k, (3 + s) >> 1) * (((3 + s) & 1) ? dx[k] : dy[k]); }
+                        if (s < 4) { v1 = RCO(k, (4 + s) >> 1) * pick(((4 + s)) & 1, dx[k], dy[k]); }
+                        if (s >= 1) { v0 = RCO(k, (3 + s) >> 1) * pick(((3 + s)) & 1, dx[k], dy[k]); }
                         z[s][k] = lg == 1u ? v1 : v0;
                     }
                 }
-                tree_solve<5>(z, topo, invD, Lf, lg);
+                PMK_AT
+                tree_solve<5>(z, pmk, invD, Lf, lg);
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
 #pragma unroll
@@ -760,7 +1065,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             for (int f = 4; f < NE; f++) {
                 float rf[NPL];
 #pragma unroll
-                for (int k = 0; k < NPL; k++) { rf[k] = RCO(k, f >> 1) * ((f & 1) ? dx[k] : dy[k]); }
+                for (int k = 0; k < NPL; k++) { rf[k] = RCO(k, f >> 1) * pick((f) & 1, dx[k], dy[k]); }
 #pragma unroll
                 for (int e = 4; e < NE; e++) {
                     if (e <= f) {
@@ -840,16 +1145,26 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 for (int i = 0; i < NE; i++) {
                     const bool ai = (on >> i) & 1u;
                     float d = ai ? WIJ(i, i) : 1.0f;
+#if TRIM
+                    // Row i unscaled (u = L D), so each term is one FFMA.
+                    float u[NE];
+#endif
 #pragma unroll
                     for (int j = 0; j < i; j++) {
                         const bool aj = (on >> j) & 1u;
                         float v = (ai && aj) ? WIJ(i, j) : 0.0f;
+#if TRIM
+#pragma unroll
+                        for (int k = 0; k < j; k++) { v -= u[k] * L[j][k]; }
+                        u[j] = v;
+#else
 #pragma unroll
                         for (int k = 0; k < j; k++) { v -= L[i][k] * L[j][k] * (1.0f / iD[k]); }
+#endif
                         L[i][j] = v * iD[j];
                         d -= v * L[i][j];
                     }
-                    iD[i] = 1.0f / d;
+                    iD[i] = frcp(d);
                 }
 #pragma unroll
                 for (int i = 0; i < NE; i++) {
@@ -881,6 +1196,44 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 again = next != on;
                 on = next;
             }
+#if POLISH
+            // The round left the set somewhere in the warp: clamp its answer
+            // into the cone and run POLISH Gauss-Seidel sweeps on W lam = b0
+            // from there; the set for the next warm start is read off the
+            // answer.
+            if (__any_sync(FULL, again)) {
+                float idg[NE];
+#pragma unroll
+                for (int i = 0; i < NE; i++) { idg[i] = cim[i >> 1] != 0.0f ? frcp(WIJ(i, i)) : 0.0f; }
+#pragma unroll 1
+                for (int sweep = 0; sweep < POLISH; sweep++) {
+#pragma unroll
+                    for (int i = 0; i < NE; i++) {
+                        float r = b0[i];
+#pragma unroll
+                        for (int j = 0; j < NE; j++) { r -= WIJ(i, j) * lam[j]; }
+                        const float l = lam[i] + r * idg[i];
+                        if (i & 1) {
+                            const float lim = cmu[i >> 1] * lam[i - 1];
+                            lam[i] = clampf(l, -lim, lim);
+                        } else {
+                            lam[i] = fmaxf(l, 0.0f);
+                        }
+                    }
+                }
+                unsigned pon = 0u, pneg = 0u;
+#pragma unroll
+                for (int c = 0; c < NC; c++) {
+                    const float ln = lam[2 * c], lt = lam[2 * c + 1];
+                    if (cim[c] != 0.0f && ln > 0.0f) {
+                        pon |= 1u << (2 * c);
+                        if (fabsf(lt) < cmu[c] * ln) { pon |= 2u << (2 * c); }
+                        else if (lt < 0.0f) { pneg |= 2u << (2 * c); }
+                    }
+                }
+                if (again) { on = pon; neg = pneg; }
+            }
+#endif
             rounds_sum += (float)rounds;
             warm = on | (neg << 8u) | 0x10000u;
             float Lg[NPL][NB], mu0g[NPL], dxg[NPL], dyg[NPL];
@@ -902,7 +1255,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 z1[0][k] = lg == 1u ? r : 0.0f;
                 z1[1][k] = lg == 1u ? 0.0f : r;
             }
-            tree_solve<2>(z1, topo, invD, Lg, lg);
+            {
+                PMK_AT
+                tree_solve<2>(z1, pmk, invD, Lg, lg);
+            }
             __syncwarp();
             // Rod impulses mu = mu0 - A^-1 R lambda to the rods' two nodes;
             // contact impulses to theirs.
@@ -952,7 +1308,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     jy[k] = iy[k] + f0.y + f1.y;
                     vx[k] += invm[k] * jx[k];
                     vy[k] += invm[k] * jy[k];
-                    const float m = invm[k] > 0.0f ? 1.0f / invm[k] : 0.0f;
+                    const float m = invm[k] > 0.0f ? frcp(invm[k]) : 0.0f;
                     mm += m; mx += m * px[k]; my += m * py[k];
                     gx += invm[k] > 0.0f ? jx[k] : 0.0f;
                     gy += invm[k] > 0.0f ? jy[k] : 0.0f;
@@ -978,13 +1334,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     }
                     __syncwarp();
 #pragma unroll
-                    for (int k = 0; k < NPL; k++) { NODE(k, lane) = make_float4(px[k], py[k], vx[k], vy[k]); }
+                    for (int k = 0; k < NPL; k++) { NODEW(k) = make_float4(px[k], py[k], vx[k], vy[k]); }
                     __syncwarp();
 #pragma unroll
                     for (int k = 0; k < NPL; k++) {
                         if (T_VALID(topo[k])) {
                             const unsigned a = T_PIVOT(topo[k]);
-                            const float4 na = NODE(a & 3u, gl + (a >> 2u));
+                            const float4 na = NODER(a);
                             rr = fmaxf(rr, fabsf((vx[k] - na.z) * dxg[k] + (vy[k] - na.w) * dyg[k] - ctg[k]));
                         }
                     }
@@ -993,7 +1349,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     msum = fmaxf(msum, rr);
                 }
 #endif
-                const float itm = 1.0f / fmaxf(mm + xch(mm), 1e-6f);
+                const float itm = frcp(fmaxf(mm + xch(mm), 1e-6f));
                 const float ccx = (mx + xch(mx)) * itm, ccy = (my + xch(my)) * itm;
                 const float sx = NO_LEDGER ? 0.0f : (ext_x + xch(ext_x) - gx - xch(gx)) * itm;
                 const float sy = NO_LEDGER ? 0.0f : (ext_y + xch(ext_y) - gy - xch(gy)) * itm;
@@ -1001,7 +1357,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
                     const bool on_ = invm[k] > 0.0f;
-                    const float m = on_ ? 1.0f / invm[k] : 0.0f;
+                    const float m = on_ ? frcp(invm[k]) : 0.0f;
                     const float rx = px[k] - ccx, ry = py[k] - ccy;
                     lz += on_ ? rx * jy[k] - ry * jx[k] : 0.0f;
                     iz += m * (rx * rx + ry * ry);
@@ -1056,6 +1412,14 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 }
             }
             contact_sum += (float)__popc(word & 0x820820u);
+#if PROJ_ANCHORED
+#pragma unroll
+            for (int k = 0; k < NPL; k++) {
+                pinvD[k] = invD[k];
+#pragma unroll
+                for (int a = 0; a < NB; a++) { pLf[k][a] = Lg[k][a]; }
+            }
+#endif
 #undef RCO
 #undef CNODE
         }
@@ -1075,7 +1439,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             }
             __syncwarp();
 #pragma unroll
-            for (int k = 0; k < NPL; k++) { NODE(k, lane) = make_float4(px[k], py[k], vx[k], vy[k]); }
+            for (int k = 0; k < NPL; k++) { NODEW(k) = make_float4(px[k], py[k], vx[k], vy[k]); }
             __syncwarp();
             float dx[NPL], dy[NPL], rdx[NPL], rdy[NPL], ipe[NPL], icm[NPL];
             float z1[2][NPL];
@@ -1086,10 +1450,15 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 float c = 0.0f;
                 if (T_VALID(t)) {
                     const unsigned a = T_PIVOT(t);
-                    const float4 na = NODE(a & 3u, gl + (a >> 2u));
+                    const float4 na = NODER(a);
                     const float ddx = px[k] - na.x, ddy = py[k] - na.y;
+#if FASTRCP
+                    const float il = rsqrtf(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                    const float l = (ddx * ddx + ddy * ddy) * il;
+#else
                     const float l = sqrtf(ddx * ddx + ddy * ddy);
                     const float il = 1.0f / fmaxf(l, 1e-6f);
+#endif
                     dx[k] = ddx * il; dy[k] = ddy * il;
                     c = l - REC(20, k);
                 }
@@ -1102,8 +1471,26 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #pragma unroll
             for (int q = 0; q < NPL; q++) { rdx[q] = xch(dx[q]); rdy[q] = xch(dy[q]); }
             float invD[NPL], Lf[NPL][NB];
-            factor(topo, dx, dy, rdx, rdy, ipe, icm, lg, invD, Lf);
-            tree_solve<2>(z1, topo, invD, Lf, lg);
+            {
+                PMK_AT
+#if PROJ_ANCHORED
+                // Held nodes change the masses: factor again. Without them
+                // the substep's factor serves (directions one substep old).
+                if (__any_sync(FULL, held != 0u)) {
+                    factor(topo, pmk, dx, dy, rdx, rdy, ipe, icm, lg, invD, Lf);
+                } else {
+#pragma unroll
+                    for (int k = 0; k < NPL; k++) {
+                        invD[k] = pinvD[k];
+#pragma unroll
+                        for (int a = 0; a < NB; a++) { Lf[k][a] = pLf[k][a]; }
+                    }
+                }
+#else
+                factor(topo, pmk, dx, dy, rdx, rdy, ipe, icm, lg, invD, Lf);
+#endif
+                tree_solve<2>(z1, pmk, invD, Lf, lg);
+            }
 #pragma unroll
             for (int g = 0; g < W * NPL; g++) { FRC(g, lane) = make_float2(0.0f, 0.0f); }
             __syncwarp();
@@ -1135,7 +1522,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
             bool bad = false;
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
-                const float m = invm[k] > 0.0f ? 1.0f / invm[k] : 0.0f;
+                const float m = invm[k] > 0.0f ? frcp(invm[k]) : 0.0f;
                 mm += m; mx += m * px[k];
                 if (invm[k] > 0.0f) { low = fminf(low, py[k] - REC(4, k)); }
                 bad |= !(fabsf(px[k]) <= 1e6f && fabsf(py[k]) <= 1e6f);
