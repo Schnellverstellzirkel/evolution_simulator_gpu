@@ -1,7 +1,7 @@
 //! Packing and kernel source of the lane-group CUDA kernel
 //! (`shaders/warp_creature.cu`).
 //!
-//! A creature runs on a group of 8, 16 or 32 lanes of one warp. Lane `i` owns
+//! A creature runs on a group of 4, 8, 16 or 32 lanes of one warp. Lane `i` owns
 //! node `i` and the bone that ends there: lane 0 is the head, lane 1 the neck.
 //! Lanes follow the bone tree breadth first, so each tree level is a run of
 //! neighbouring lanes and the children of one bone are consecutive. Muscles run
@@ -32,7 +32,7 @@ pub const MUSCLE_FIELDS: usize = 8;
 /// `ROUNDS * W` muscles.
 pub const ROUNDS: usize = 4;
 /// Lanes per creature.
-pub const CLASSES: [usize; 3] = [8, 16, 32];
+pub const CLASSES: [usize; 4] = [4, 8, 16, 32];
 /// Largest body the kernel runs.
 pub const MAX_NODES: usize = 32;
 /// Contacts per substep.
@@ -615,7 +615,9 @@ mod tests {
 
     #[test]
     fn classes_hold_nodes_and_muscles() {
-        assert_eq!(class_of(3, 2), Some(8));
+        assert_eq!(class_of(3, 2), Some(4));
+        assert_eq!(class_of(4, 16), Some(4));
+        assert_eq!(class_of(4, 17), Some(8));
         assert_eq!(class_of(8, 32), Some(8));
         assert_eq!(class_of(8, 33), Some(16));
         assert_eq!(class_of(13, 24), Some(16));

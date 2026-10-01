@@ -22,7 +22,7 @@
 
 ## Scoring and replays
 
-The GPU scores every creature, and nothing else simulates one. The game needs an NVIDIA GPU with the CUDA driver and NVRTC. `shaders/warp_creature.cu` runs one creature per group of 8, 16 or 32 lanes of a warp, by its nodes and muscles (`src/warp_kernel.rs`). A unit runs as waves of up to 262,144 creatures, one launch each, and a lane group runs its creature to the end of its trial and takes the next from the wave, so there are no trial segments. Kernels compile per lane class, world (the effects that are on), rate and recording. The engine thread submits each unit as one whole-trial run. The GPU result and the GPU confirmation trial are final.
+The GPU scores every creature, and nothing else simulates one. The game needs an NVIDIA GPU with the CUDA driver and NVRTC. `shaders/warp_creature.cu` runs one creature per group of 4, 8, 16 or 32 lanes of a warp, by its nodes and muscles (`src/warp_kernel.rs`). A unit runs as waves of up to 262,144 creatures, one launch each, and a lane group runs its creature to the end of its trial and takes the next from the wave, so there are no trial segments. Kernels compile per lane class, world (the effects that are on), rate and recording. The engine thread submits each unit as one whole-trial run. The GPU result and the GPU confirmation trial are final.
 
 `engine::replay` sends the creature to the primary GPU's engine thread. It runs the scoring kernel with a frame output (node positions, muscle energy and force, contact forces) on a slot and queue of its own, and returns the frames and the result of that same run. When the GPU does not answer in time, the replay viewer holds the first pose and says the replay is unavailable.
 

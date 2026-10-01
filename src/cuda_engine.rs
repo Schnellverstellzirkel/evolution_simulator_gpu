@@ -1,6 +1,6 @@
 //! NVIDIA GPU backend: the physics authority.
 //!
-//! It runs `shaders/warp_creature.cu`, one creature per group of 8, 16 or 32
+//! It runs `shaders/warp_creature.cu`, one creature per group of 4, 8, 16 or 32
 //! lanes (`warp_kernel`), behind `engine::gpu_engine`'s submit and poll
 //! contract. A unit is uploaded once and runs as waves of up to `warp_kernel::WAVE`
 //! creatures, one kernel launch each, on the slot's streams. Inside a wave

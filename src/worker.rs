@@ -453,7 +453,7 @@ struct StageLog {
     /// Seconds engine threads waited for kernels, at the last row.
     kernel_wait: f64,
     /// Lane-steps per lane class at the last row.
-    lane_steps: [u64; 3],
+    lane_steps: [u64; 4],
     /// Device idle seconds at the last absorbed block, and the most that
     /// passed between two absorbed blocks this generation.
     idle_at_block: f64,
@@ -478,7 +478,7 @@ impl StageLog {
         if file.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
             let _ = writeln!(
                 file,
-                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second,confirmations,confirmation_busy_seconds,device_busy_seconds,device_idle_seconds,mean_nodes,share_over_8_nodes,ring_block,ring_blocks,chain_p95_seconds,boundary_seconds,starved_block_max_seconds,lane_steps_8,lane_steps_16,lane_steps_32,world_change_discarded,kernel_wait_seconds,steps_per_creature,audit_rows,rung1_stop_share,rung2_stop_share,rung3_stop_share,rung1_entrant_misses_per_10k,rung2_entrant_misses_per_10k,rung1_extra_misses_per_10k,rung2_extra_misses_per_10k,audit_top1_kept,audit_top10_kept,screen_top1_kept,screen_top10_kept,rungs_armed,bands_off"
+                "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second,confirmations,confirmation_busy_seconds,device_busy_seconds,device_idle_seconds,mean_nodes,share_over_8_nodes,ring_block,ring_blocks,chain_p95_seconds,boundary_seconds,starved_block_max_seconds,lane_steps_4,lane_steps_8,lane_steps_16,lane_steps_32,world_change_discarded,kernel_wait_seconds,steps_per_creature,audit_rows,rung1_stop_share,rung2_stop_share,rung3_stop_share,rung1_entrant_misses_per_10k,rung2_entrant_misses_per_10k,rung1_extra_misses_per_10k,rung2_extra_misses_per_10k,audit_top1_kept,audit_top10_kept,screen_top1_kept,screen_top10_kept,rungs_armed,bands_off"
             );
         }
         Some(Self {
@@ -487,7 +487,7 @@ impl StageLog {
             seconds: [0.0; 3],
             totals: [0.0; 4],
             kernel_wait: 0.0,
-            lane_steps: [0; 3],
+            lane_steps: [0; 4],
             idle_at_block: 0.0,
             starved_block: 0.0,
             discarded: 0,
@@ -531,8 +531,8 @@ impl StageLog {
         let kernel_wait = crate::cuda_engine::kernel_wait_seconds();
         let kernel_wait_delta = kernel_wait - self.kernel_wait;
         self.kernel_wait = kernel_wait;
-        let lane_totals = sched.map_or([0; 3], |s| s.lane_steps);
-        let lanes: [u64; 3] =
+        let lane_totals = sched.map_or([0; 4], |s| s.lane_steps);
+        let lanes: [u64; 4] =
             std::array::from_fn(|k| lane_totals[k].saturating_sub(self.lane_steps[k]));
         self.lane_steps = lane_totals;
         if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
@@ -547,7 +547,7 @@ impl StageLog {
         let share = |stops: u64| stops as f64 / rungs.creatures.max(1) as f64;
         let _ = writeln!(
             self.file,
-            "{generation},{:.6},{:.6},{:.6},{:.3},{:.0},{:.3},{:.3},{:.3},{:.3},{:.4},{},{},{:.4},{:.4},{:.4},{},{},{},{},{:.3},{:.1},{},{:.4},{:.4},{:.4},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{}",
+            "{generation},{:.6},{:.6},{:.6},{:.3},{:.0},{:.3},{:.3},{:.3},{:.3},{:.4},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{:.3},{:.1},{},{:.4},{:.4},{:.4},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{}",
             self.seconds[0],
             self.seconds[1],
             self.seconds[2],
@@ -566,6 +566,7 @@ impl StageLog {
             lanes[0],
             lanes[1],
             lanes[2],
+            lanes[3],
             self.discarded,
             kernel_wait_delta,
             rungs.steps_per_creature(),
@@ -1869,7 +1870,7 @@ mod tests {
             seconds: [1.0, 2.0, 3.0],
             totals: [0.0; 4],
             kernel_wait: 0.0,
-            lane_steps: [0; 3],
+            lane_steps: [0; 4],
             idle_at_block: 0.0,
             starved_block: 0.0,
             discarded: 0,
