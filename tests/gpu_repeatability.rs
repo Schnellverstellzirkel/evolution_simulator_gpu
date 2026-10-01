@@ -172,6 +172,10 @@ fn recorded_forces_are_in_range_and_keep_the_score() {
             bone.a = relabel(bone.a);
             bone.b = relabel(bone.b);
         }
+        for muscle in &mut creature.muscles {
+            muscle.node_a = relabel(muscle.node_a);
+            muscle.node_b = relabel(muscle.node_b);
+        }
         let recording = engine::record_on_gpu(&creature, &cfg, std::time::Duration::from_secs(30))
             .expect("a GPU replay");
         assert_eq!(recording.result.fitness.to_bits(), score.fitness.to_bits());

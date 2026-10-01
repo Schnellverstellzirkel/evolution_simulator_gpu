@@ -1108,6 +1108,14 @@ impl Experiment {
         for (j, prep) in prep.into_iter().enumerate() {
             if !prep.score.is_finite() || prep.score <= FAILED {
                 failed += 1;
+                let m_dump = (finals[j].screened, finals[j].fine);
+                // A developer diagnostic: write the genes of failed trials.
+                if let Some(path) = std::env::var_os("EVOLUTION_DUMP_FAILED") {
+                    use std::io::Write;
+                    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                        let _ = writeln!(file, "{} {} {} {}", prep.score, m_dump.0, m_dump.1, serde_json::to_string(&population.creature(j)).unwrap_or_default());
+                    }
+                }
             }
             let cma = births[j].cma;
             if qd::arena_of_slot(first + j, arenas) >= island_count() {

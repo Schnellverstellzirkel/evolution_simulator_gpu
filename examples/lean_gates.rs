@@ -10,7 +10,8 @@
 //! deepest penetration. `lean_gates report <checkpoint> <base.json>
 //! <retest.json> [<base-at-generation-10.json>]` prints the gate table.
 //! `lean_gates gifs <checkpoint> <dir> [count]` writes a GIF of each of the
-//! best movers.
+//! best movers. `lean_gates export <checkpoint> <path.json> [rank]` writes an
+//! elite's genes.
 //! Replay-derived numbers come from 60 Hz frames, so they are estimates:
 //! velocities are differences of positions.
 mod common;
@@ -176,10 +177,15 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     let e = storage::load(std::path::Path::new(&args[0]))?;
     let top: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(300);
     let record = args.get(3).is_some_and(|v| v == "1");
-    let cfg = Config {
+    let mut cfg = Config {
         screen: None,
         ..e.config.clone()
     };
+    // FINE=1: the confirmation physics (4x the rate and passes) of the game.
+    if std::env::var_os("FINE").is_some() {
+        cfg = evolution_simulator::scheduler::confirm_config(&cfg);
+        cfg.screen = None;
+    }
     let elites = elites_of(&e, top);
     let mut engine = common::open()?;
     let creatures: Vec<Creature> = elites.iter().map(|x| x.creature.clone()).collect();
@@ -396,6 +402,14 @@ fn main() -> anyhow::Result<()> {
         Some("run") => run(&args[1..]),
         Some("report") => report(&args[1..]),
         Some("gifs") => gifs(&args[1..]),
+        Some("export") => {
+            // lean_gates export <checkpoint> <path.json> [rank]
+            let e = storage::load(std::path::Path::new(&args[1]))?;
+            let rank: usize = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(0);
+            let elite = elites_of(&e, rank + 1).pop().expect("an elite");
+            std::fs::write(&args[2], serde_json::to_string(&elite.creature)?)?;
+            Ok(())
+        }
         _ => anyhow::bail!("usage: lean_gates run|report|gifs ..."),
     }
 }
