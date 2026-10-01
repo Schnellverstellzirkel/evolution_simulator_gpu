@@ -510,7 +510,10 @@ pub fn batch(count: usize, nodes: usize, muscles: usize, mpl: usize, nb: usize, 
             let (pa, pb) = (at(ra, ta), at(rb, tb));
             let dist = ((pa.0 - pb.0).powi(2) + (pa.1 - pb.1).powi(2)).sqrt();
             let sensor = if rng.f() < 0.3 { (1u32 << 25) | (rng.below(n as u32) << 20) } else { 0 };
-            let pk = parent[ra] as u32 | (ra as u32) << 5 | (parent[rb] as u32) << 10 | (rb as u32) << 15 | sensor;
+            // The four end nodes as bytes of n * 32 (the kernel scales them
+            // straight into table addresses); the touchdown sensor (flag and
+            // limb) goes in the spare word of the second rhythm record.
+            let pk = (parent[ra] as u32 * 32) | (ra as u32 * 32) << 8 | (parent[rb] as u32 * 32) << 16 | (rb as u32 * 32) << 24;
             let idx = (c * mpl + k) * W + lane;
             b.msa[idx] = [f32::from_bits(pk), unorm2(ta, tb), rng.range(2.0, 10.0), rng.range(50.0, 200.0)];
             b.msb[idx] = [dist * rng.range(1.05, 1.3), bf2(rng.range(0.0, 2.0), rng.range(0.1, 1.0))];
@@ -518,7 +521,7 @@ pub fn batch(count: usize, nodes: usize, muscles: usize, mpl: usize, nb: usize, 
             let duty = rng.range(0.3, 0.7);
             let s = (c * 2 * mpl + 2 * k) * W + lane;
             b.mss[s] = [1.0 / period, rng.f(), duty, 1.0 / duty];
-            b.mss[s + W] = [1.0 / (1.0 - duty), rng.range(0.02, 0.1), rng.range(50.0, 300.0), 0.0];
+            b.mss[s + W] = [1.0 / (1.0 - duty), rng.range(0.02, 0.1), rng.range(50.0, 300.0), f32::from_bits(sensor)];
         }
     }
     b

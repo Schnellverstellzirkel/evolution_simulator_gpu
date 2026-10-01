@@ -60,13 +60,21 @@
 #endif
 // 1: the muscle state words live in registers; 0: in an L2 scratch, read
 // and written once per muscle and substep.
+#ifndef BAKED
+#define BAKED 0
+#endif
+// MSTATE_FLOATS: energy and drive as two floats per muscle in registers
+// (32 registers instead of 16; on with a baked tree, whose registers fit it).
+#ifndef MSTATE_FLOATS
+#define MSTATE_FLOATS (TRIM && BAKED)
+#endif
 #ifndef MSTATE_REGS
 #define MSTATE_REGS TRIM
 #endif
 // Unrolling of the loops over a lane's muscles (MPL with the state in
 // registers, which index it).
 #ifndef MUSCLE_UNROLL
-#if MSTATE_REGS
+#if MSTATE_REGS || MSTATE_FLOATS
 #define MUSCLE_UNROLL MPL
 #else
 #define MUSCLE_UNROLL 1
@@ -132,7 +140,7 @@
 #define RRZ1OLD 0
 #endif
 #ifndef RR_REGS
-#define RR_REGS TRIM
+#define RR_REGS 0
 #endif
 #ifndef SREG
 #define SREG TRIM
@@ -529,6 +537,17 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #define NODER(n) NODE((n) & 3u, gl + ((n) >> 2u))
 #endif
 #define FRC(g, col) s_frc2[(g) * 32 + (col)]
+// A muscle's end nodes arrive as the bytes v = 32 n: node n's float4 is at byte
+// 256 n + 16 (lane >> 1) of the node table and its force at 256 n + 8 lane of
+// the force table, so a byte scaled by 8 and added to a per-thread base is each
+// address.
+#if NODE_NMAJOR
+#define M_NODE(v) (*reinterpret_cast<const float4*>(reinterpret_cast<const char*>(s_node4) + (((v) << 3) + (lane >> 1) * 16)))
+#define M_FRC(v) (*reinterpret_cast<float2*>(reinterpret_cast<char*>(s_frc2) + (((v) << 3) + lane * 8)))
+#else
+#define M_NODE(v) NODER((v) >> 5)
+#define M_FRC(v) FRC((v) >> 5, lane)
+#endif
 #define SCR(q, col) s_warp[(q) * 32 + (col)]
 #define WAT(idx) SCR((idx) >> 1, gl + ((idx) & 1))
 #define WIJ(i, j) WAT((i) >= (j) ? (i) * ((i) + 1) / 2 + (j) : (j) * ((j) + 1) / 2 + (i))
@@ -544,18 +563,31 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
     float anc_r[NPL];
     // With the state in registers the muscle loops end by skipping, not by
     // leaving: a loop exit keeps ms[] in local memory.
-#if MSTATE_REGS
+#if MSTATE_REGS || MSTATE_FLOATS
 #define MS_LOOP_END continue
 #else
 #define MS_LOOP_END break
 #endif
-#if MSTATE_REGS
+#if MSTATE_FLOATS
+    // Energy and the step's drive target as two floats per muscle.
+    float mse[MPL], msd[MPL];
+#define MS_ENERGY(k) mse[k]
+#define MS_DRIVE(k) msd[k]
+#define MS_SET_E(k, v) (mse[k] = (v))
+#define MS_SET_D(k, v) (msd[k] = (v))
+#elif MSTATE_REGS
     unsigned ms[MPL];
 #define MS_GET(k) ms[k]
 #define MS_SET(k, v) (ms[k] = (v))
 #else
 #define MS_GET(k) mstate[mb + (size_t)(k) * W]
 #define MS_SET(k, v) (mstate[mb + (size_t)(k) * W] = (v))
+#endif
+#if !MSTATE_FLOATS
+#define MS_ENERGY(k) unpack_ed(MS_GET(k)).x
+#define MS_DRIVE(k) unpack_ed(MS_GET(k)).y
+#define MS_SET_E(k, v) MS_SET(k, pack_ed((v), unpack_ed(MS_GET(k)).y))
+#define MS_SET_D(k, v) MS_SET(k, pack_ed(unpack_ed(MS_GET(k)).x, (v)))
 #endif
     float msum = 0.0f, rounds_sum = 0.0f, contact_sum = 0.0f, drift_max = 0.0f;
 #pragma unroll
@@ -566,7 +598,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
     }
 #if MSTATE_REGS
 #pragma unroll
-    for (int k = 0; k < MPL; k++) { ms[k] = 0u; }
+    for (int k = 0; k < MPL; k++) { MS_SET_E(k, 0.0f); MS_SET_D(k, 0.0f); }
 #endif
 #define REC(f, k) lanes[((size_t)cidx * W + lg) * RF + (f) + (k)]
 #define REC4(f) (*reinterpret_cast<const float4*>(&lanes[((size_t)cidx * W + lg) * RF + (f)]))
@@ -628,7 +660,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #pragma unroll MUSCLE_UNROLL
                 for (int k = 0; k < MPL; k++) {
                     const size_t mb = (size_t)cidx * MPL * W + lg;
-                    MS_SET(k, pack_ed(1.0f, 0.0f));
+                    MS_SET_E(k, 1.0f); MS_SET_D(k, 0.0f);
                     roff[mb + (size_t)k * W] = 0.0f;
                 }
                 step = 0u; warm = 0u; prevc = 0u;
@@ -689,7 +721,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                 const float target = s1.y * wave_rate(t0 + 0.5f * DT, s0.x, s0.y, off, s0.z, s0.w, s1.x);
 #endif
                 const float drive = fmaxf(-target * s1.z * 0.25f, 0.0f);
-                MS_SET(k, pack_ed(unpack_ed(MS_GET(k)).x, drive));
+                MS_SET_D(k, drive);
             }
         }
         unsigned cw = 0u;
@@ -722,11 +754,11 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                         const float4 A = msa[mb + (size_t)k * W];
                         const float2 B = msb[mb + (size_t)k * W];
                         const unsigned pk = __float_as_uint(A.x);
-                        const unsigned na_ = pk & 31u, nb_ = (pk >> 5u) & 31u, nc_ = (pk >> 10u) & 31u, nd_ = (pk >> 15u) & 31u;
-                        const float4 e0 = NODER(na_);
-                        const float4 e1 = NODER(nb_);
-                        const float4 e2 = NODER(nc_);
-                        const float4 e3 = NODER(nd_);
+                        const unsigned na_ = pk & 255u, nb_ = (pk >> 8u) & 255u, nc_ = (pk >> 16u) & 255u, nd_ = pk >> 24u;
+                        const float4 e0 = M_NODE(na_);
+                        const float4 e1 = M_NODE(nb_);
+                        const float4 e2 = M_NODE(nc_);
+                        const float4 e3 = M_NODE(nd_);
                         const float2 an = unpack_un(__float_as_uint(A.y));
                         const float2 hc = unpack_bf(__float_as_uint(B.y));
                         const float cap = A.z, tendon_k = A.w, slack = B.x, hill = hc.x, inv_capacity = hc.y;
@@ -744,23 +776,22 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #endif
                         const float dirx = ddx * inverse, diry = ddy * inverse;
                         const float relative = (vbx - vax) * dirx + (vby - vay) * diry;
-                        const float2 st = unpack_ed(MS_GET(k));
-                        float energy = st.x;
-                        float drive = st.y * energy;
+                        float energy = MS_ENERGY(k);
+                        float drive = MS_DRIVE(k) * energy;
                         if (hill > 0.0f) { drive *= clampf(1.0f + relative * hill, 0.0f, 1.0f); }
                         const float magnitude = clampf(drive + relative * 0.15f, -cap, cap);
                         const float work = fminf(drive, cap) * fmaxf(-relative, 0.0f) * MHS;
                         energy = clampf(energy - work * inv_capacity + MUSCLE_RECOVERY * p.recovery * MHS * (1.0f - energy), 0.0f, 1.0f);
-                        MS_SET(k, pack_ed(energy, st.y));
+                        MS_SET_E(k, energy);
                         const float stretch = fmaxf(length - slack, 0.0f);
                         const float pull = magnitude + tendon_k * stretch;
                         const float gx = dirx * pull, gy = diry * pull;
                         msum += magnitude * relative;
                         float2 f;
-                        f = FRC(na_, lane); f.x += (1.0f - an.x) * gx; f.y += (1.0f - an.x) * gy; FRC(na_, lane) = f;
-                        f = FRC(nb_, lane); f.x += an.x * gx; f.y += an.x * gy; FRC(nb_, lane) = f;
-                        f = FRC(nc_, lane); f.x -= (1.0f - an.y) * gx; f.y -= (1.0f - an.y) * gy; FRC(nc_, lane) = f;
-                        f = FRC(nd_, lane); f.x -= an.y * gx; f.y -= an.y * gy; FRC(nd_, lane) = f;
+                        f = M_FRC(na_); f.x += (1.0f - an.x) * gx; f.y += (1.0f - an.x) * gy; M_FRC(na_) = f;
+                        f = M_FRC(nb_); f.x += an.x * gx; f.y += an.x * gy; M_FRC(nb_) = f;
+                        f = M_FRC(nc_); f.x -= (1.0f - an.y) * gx; f.y -= (1.0f - an.y) * gy; M_FRC(nc_) = f;
+                        f = M_FRC(nd_); f.x -= an.y * gx; f.y -= an.y * gy; M_FRC(nd_) = f;
                     }
                 }
                 __syncwarp();
@@ -877,11 +908,11 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
                     const float4 A = msa[mb + (size_t)k * W];
                     const float2 B = msb[mb + (size_t)k * W];
                     const unsigned pk = __float_as_uint(A.x);
-                    const unsigned na_ = pk & 31u, nb_ = (pk >> 5u) & 31u, nc_ = (pk >> 10u) & 31u, nd_ = (pk >> 15u) & 31u;
-                    const float4 e0 = NODER(na_);
-                    const float4 e1 = NODER(nb_);
-                    const float4 e2 = NODER(nc_);
-                    const float4 e3 = NODER(nd_);
+                    const unsigned na_ = pk & 255u, nb_ = (pk >> 8u) & 255u, nc_ = (pk >> 16u) & 255u, nd_ = pk >> 24u;
+                    const float4 e0 = M_NODE(na_);
+                    const float4 e1 = M_NODE(nb_);
+                    const float4 e2 = M_NODE(nc_);
+                    const float4 e3 = M_NODE(nd_);
                     const float2 an = unpack_un(__float_as_uint(A.y));
                     const float2 hc = unpack_bf(__float_as_uint(B.y));
                     const float cap = A.z, tendon_k = A.w, slack = B.x, hill = hc.x, inv_capacity = hc.y;
@@ -899,23 +930,22 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #endif
                     const float dirx = ddx * inverse, diry = ddy * inverse;
                     const float relative = (vbx - vax) * dirx + (vby - vay) * diry;
-                    const float2 st = unpack_ed(MS_GET(k));
-                    float energy = st.x;
-                    float drive = st.y * energy;
+                    float energy = MS_ENERGY(k);
+                    float drive = MS_DRIVE(k) * energy;
                     if (hill > 0.0f) { drive *= clampf(1.0f + relative * hill, 0.0f, 1.0f); }
                     const float magnitude = clampf(drive + relative * 0.15f, -cap, cap);
                     const float work = fminf(drive, cap) * fmaxf(-relative, 0.0f) * MHS;
                     energy = clampf(energy - work * inv_capacity + MUSCLE_RECOVERY * p.recovery * MHS * (1.0f - energy), 0.0f, 1.0f);
-                    MS_SET(k, pack_ed(energy, st.y));
+                    MS_SET_E(k, energy);
                     const float stretch = fmaxf(length - slack, 0.0f);
                     const float pull = magnitude + tendon_k * stretch;
                     const float gx = dirx * pull, gy = diry * pull;
                     msum += magnitude * relative;
                     float2 f;
-                    f = FRC(na_, lane); f.x += (1.0f - an.x) * gx; f.y += (1.0f - an.x) * gy; FRC(na_, lane) = f;
-                    f = FRC(nb_, lane); f.x += an.x * gx; f.y += an.x * gy; FRC(nb_, lane) = f;
-                    f = FRC(nc_, lane); f.x -= (1.0f - an.y) * gx; f.y -= (1.0f - an.y) * gy; FRC(nc_, lane) = f;
-                    f = FRC(nd_, lane); f.x -= an.y * gx; f.y -= an.y * gy; FRC(nd_, lane) = f;
+                    f = M_FRC(na_); f.x += (1.0f - an.x) * gx; f.y += (1.0f - an.x) * gy; M_FRC(na_) = f;
+                    f = M_FRC(nb_); f.x += an.x * gx; f.y += an.x * gy; M_FRC(nb_) = f;
+                    f = M_FRC(nc_); f.x -= (1.0f - an.y) * gx; f.y -= (1.0f - an.y) * gy; M_FRC(nc_) = f;
+                    f = M_FRC(nd_); f.x -= an.y * gx; f.y -= an.y * gy; M_FRC(nd_) = f;
                 }
             }
             __syncwarp();
@@ -1711,7 +1741,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_stub(
 #pragma unroll MUSCLE_UNROLL
                 for (int k = 0; k < MPL; k++) {
                     if ((unsigned)k < mc) {
-                        const unsigned pk = __float_as_uint(msa[mb + (size_t)k * W].x);
+                        const unsigned pk = __float_as_uint(mss[(size_t)cidx * (2 * MPL * W) + (2 * k + 1) * W + lg].w);
                         if (((pk >> 25u) & 1u) && ((down >> ((pk >> 20u) & 31u)) & 1u)) {
                             const float4 s0 = mss[(size_t)cidx * (2 * MPL * W) + (2 * k) * W + lg];
                             const float x = -((t0 + DT) * s0.x + s0.y);
