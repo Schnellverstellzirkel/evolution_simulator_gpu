@@ -1,25 +1,20 @@
-//! The lean copy of the stub of the per-lane kernel (docs/plan-2m.md, section
-//! 6 item 4, and the physics-lean track): the stub as it is on main (trim,
-//! baked) with the lean variants behind defines. Compiles
-//! `shaders/lane_lean.cu` with NVRTC, reports registers, spills, stack frame
+//! The stub of the per-lane kernel with the physics-lean variants
+//! (docs/plan-2m.md, section 6 item 4 and the physics-lean track): compiles
+//! `shaders/lane_lean_w1.cu` with NVRTC, reports registers, spills, stack frame
 //! and local memory, then runs synthetic creatures on the primary GPU and
 //! prints creature-steps per second and the residuals of the solves.
 //!
 //! Usage: lane_lean [key=value ...] [-DNAME=VALUE ...]
-//!   count=262144 steps=300 nodes=8 muscles=19 substeps=2 nb=3 mpl=16
-//!   rounds=3 block=128 min_blocks=4 repeat=3 arch=sm_89 seed=1 strength=1.0
-//!   trim          the trimmed kernel (as in lane_stub)
-//!   plan=0,1,1,2,4,5,6   every creature has this tree (the parents of nodes
-//!                 1 .. n - 1, breadth first; nodes follows from it)
-//!   baked         with plan=: compile the tree into the kernel as constants
-//!   results=PATH  write every creature's twelve result words (f32)
+//!   count=262144 steps=300 nodes=8 muscles=19 w=2 substeps=2 nb=3 mpl=16
+//!   rounds=3 block=128 min_blocks=4 repeat=3 arch=sm_89 seed=1
+//!   tree=0,1,1,1,2,3,4   the parents of nodes 1 to 7 for -DBAKED=1
 //!   report        compile and report only (no GPU time)
 //!   cubin=PATH, src=PATH, log   write the cubin, the source, the full log
 //!   first         print creature 0 and the first non-finite creatures
+//!   diag          print the DIAG residuals (build with -DDIAG)
 //! The variants are defines (see the kernel header): -DMUSCLE_MODEL=1
-//! -DMUSCLE_ANCHORS=1 -DCONTACT_MODEL=1 -DNPASS=2 -DLAGGED_FACTOR=1
-//! -DLIMITS_AS_IMPULSES=1 -DLIGAMENT=10.0f -DLEDGER=0, with substeps=4 for the
-//! lagged factor. -DDIAG prints the residuals of the solves.
+//! -DCONTACT_MODEL=1 -DNPASS=2 -DLAGGED_FACTOR=1 -DLIMITS_AS_IMPULSES=1
+//! -DLIGAMENT=10.0f -DBAKED=1 -DMUSCLE_ANCHORS=1, and w=1.
 //! `LANE_LEAN_KERNEL=path` compiles that file instead of the built-in kernel.
 //!
 //! Nothing here is the game's physics; the kernel is a stand-in with the
@@ -35,7 +30,7 @@ use std::{
     time::Instant,
 };
 
-pub const SOURCE: &str = include_str!("../shaders/lane_lean.cu");
+pub const SOURCE: &str = include_str!("../shaders/lane_lean_w1.cu");
 
 type CuResult = c_int;
 type Ptr = u64;
@@ -325,19 +320,6 @@ pub fn options(arch: &str) -> Vec<String> {
     o
 }
 
-/// The stub's source with its defines in front.
-pub fn source(defines: &[(String, String)]) -> String {
-    let mut s = String::new();
-    for (k, v) in defines {
-        s.push_str(&format!("#define {k} {v}\n"));
-    }
-    match std::env::var("LANE_LEAN_KERNEL") {
-        Ok(path) => s.push_str(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))),
-        Err(_) => s.push_str(SOURCE),
-    }
-    s
-}
-
 /// ptxas's numbers from an NVRTC log, one entry per function:
 /// registers, stack frame, spill stores and loads.
 pub fn ptxas_summary(log: &str) -> String {
@@ -382,6 +364,25 @@ pub fn max_spill(log: &str) -> u32 {
     worst
 }
 
+
+fn source_text() -> String {
+    match std::env::var("LANE_LEAN_KERNEL") {
+        Ok(path) => std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")),
+        Err(_) => SOURCE.to_owned(),
+    }
+}
+
+/// The stub's source with its defines in front. `LANE_LEAN_KERNEL=path`
+/// compiles that file instead of the built-in source.
+pub fn source(defines: &[(String, String)]) -> String {
+    let mut s = String::new();
+    for (k, v) in defines {
+        s.push_str(&format!("#define {k} {v}\n"));
+    }
+    s.push_str(&source_text());
+    s
+}
+
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
@@ -401,8 +402,6 @@ impl Rng {
     }
 }
 
-const RF: usize = 40;
-
 /// Synthetic creatures in the stub's layout.
 pub struct Batch {
     pub heads: Vec<[u32; 4]>,
@@ -421,26 +420,71 @@ fn bf2(lo: f32, hi: f32) -> f32 {
     f32::from_bits(t(lo) | (t(hi) << 16))
 }
 
-/// `plan`: the parents of nodes 1 .. n - 1 for every creature (plan-uniform
-/// bodies for a BAKED kernel); without it every creature draws its own tree.
-pub fn batch(count: usize, nodes: usize, muscles: usize, mpl: usize, nb: usize, seed: u64, plan: Option<&[usize]>, lean: Option<(f32, u32)>) -> Batch {
-    const W: usize = 2;
+/// What the generator needs to know about the build.
+#[derive(Clone)]
+pub struct Shape {
+    pub strength: f32,
+    pub w: usize,
+    pub mpl: usize,
+    pub nb: usize,
+    pub substeps: u32,
+    /// The lean muscle model's records.
+    pub lean_muscles: bool,
+    /// Muscle ends are points along bones (MUSCLE_ANCHORS).
+    pub anchors: bool,
+    /// One fixed tree (the parents of nodes 1 to 7) for every creature.
+    pub fixed_tree: Option<Vec<usize>>,
+}
+
+/// The topology words of a tree given by the parent of each node (node 0
+/// has none): pivot, parent rod, lower siblings kept, grandparent, valid.
+pub fn topo_words(parent: &[usize], n: usize, nb: usize) -> [u32; 8] {
+    let mut rank = vec![0usize; 8];
+    let mut seen = vec![0usize; 8];
+    for g in 1..n {
+        rank[g] = seen[parent[g]];
+        seen[parent[g]] += 1;
+    }
+    let mut out = [0u32; 8];
+    for g in 1..n {
+        let a = parent[g];
+        let prod = if a >= 1 { (a - 1) as u32 } else { 31 };
+        let gp = if a >= 1 { parent[a] as u32 } else { 31 };
+        let sr = rank[g].min(nb - 1) as u32;
+        out[g] = a as u32 | prod << 5 | sr << 10 | gp << 12 | 1 << 17;
+    }
+    out
+}
+
+pub fn batch(count: usize, nodes: usize, muscles: usize, shape: &Shape, seed: u64) -> Batch {
+    let w = shape.w;
+    let npl = 8 / w;
+    let rf = 13 * npl;
+    let (mpl, nb) = (shape.mpl, shape.nb);
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ seed.wrapping_mul(0x2545_f491_4f6c_dd1d));
-    let ramp = 2.0 / (60.0 * lean.map_or(2, |l| l.1) as f32);
+    // W = 1 interleaves the records across the warp's 32 creatures (the
+    // layout of the per-block prologue kernel); the arrays are padded to
+    // whole groups.
+    let groups = count.div_ceil(32);
+    let padded = if w == 1 { groups * 32 } else { count };
+    let rplane = groups * mpl * 32;
     let mut b = Batch {
         heads: Vec::with_capacity(count),
-        lanes: vec![0.0; count * RF * W],
-        msa: vec![[0.0; 4]; count * mpl * W],
-        msb: vec![[0.0; 2]; count * mpl * W],
-        mss: vec![[0.0; 4]; count * 2 * mpl * W],
+        lanes: vec![0.0; padded * rf * w],
+        msa: vec![[0.0; 4]; if w == 1 { 2 * rplane } else { 2 * count * mpl * w }],
+        msb: vec![[0.0; 2]; count * mpl * w],
+        mss: vec![[0.0; 4]; count * 2 * mpl * w],
     };
+    let ramp = 2.0 / (60.0 * shape.substeps as f32);
     for c in 0..count {
         // A breadth-first tree: node 0 the head with only the neck (node 1);
         // parents never decrease; at most `nb` children per node.
-        let n = plan.map_or(nodes, |p| p.len() + 1).clamp(2, 8);
+        let n = nodes.clamp(2, 8);
         let mut parent = vec![0usize; n];
-        if let Some(p) = plan {
-            parent[1..].copy_from_slice(p);
+        if let Some(tree) = &shape.fixed_tree {
+            for g in 1..n {
+                parent[g] = tree[g - 1];
+            }
         } else {
             let mut children = vec![0usize; n];
             children[0] = 1;
@@ -473,55 +517,75 @@ pub fn batch(count: usize, nodes: usize, muscles: usize, mpl: usize, nb: usize, 
             *yi += 0.02 - low;
         }
         // Per lane record: [field][lane], fields k-major as the kernel reads.
-        let rec = &mut b.lanes[c * RF * W..(c + 1) * RF * W];
+        let (grp, ln) = (c / 32, c % 32);
+        let rec = if w == 1 { &mut b.lanes[..] } else { &mut b.lanes[c * rf * w..(c + 1) * rf * w] };
         let mut rank = vec![0usize; n];
         let mut seen = vec![0usize; n];
         for g in 1..n {
             rank[g] = seen[parent[g]];
             seen[parent[g]] += 1;
         }
+        let unit = |a: usize, g: usize| -> (f32, f32) {
+            let (dx, dy) = (x[g] - x[a], y[g] - y[a]);
+            let l = (dx * dx + dy * dy).sqrt().max(1e-6);
+            (dx / l, dy / l)
+        };
         for g in 0..8 {
-            let (lane, k) = (g / 4, g % 4);
-            let put = |rec: &mut [f32], field: usize, v: f32| rec[lane * RF + field + k] = v;
+            let (lane, k) = (g / npl, g % npl);
+            let put = |rec: &mut [f32], field: usize, v: f32| {
+                if w == 1 {
+                    let e = field * npl + k;
+                    rec[(((grp * (rf / 4) + (e >> 2)) * 32 + ln) * 4) + (e & 3)] = v;
+                } else {
+                    rec[(field * npl + k) * w + lane] = v;
+                }
+            };
+            put(rec, 9, 0.0);
+            put(rec, 8, 1.0);
             if g < n {
                 put(rec, 0, invm[g]);
-                put(rec, 4, rad[g]);
-                put(rec, 8, rng.range(0.6, 1.0));
-                put(rec, 12, x[g]);
-                put(rec, 16, y[g]);
+                put(rec, 1, rad[g]);
+                put(rec, 2, rng.range(0.6, 1.0));
+                put(rec, 3, x[g]);
+                put(rec, 4, y[g]);
             }
             let mut topo = 0u32;
             if g >= 1 && g < n {
                 let a = parent[g];
                 let len = ((x[g] - x[a]).powi(2) + (y[g] - y[a]).powi(2)).sqrt();
-                put(rec, 20, len);
+                put(rec, 5, len);
                 let prod = if a >= 1 { (a - 1) as u32 } else { 31 };
                 let gp = if a >= 1 { parent[a] as u32 } else { 31 };
                 let sr = rank[g].min(nb - 1) as u32;
                 topo = a as u32 | prod << 5 | sr << 10 | gp << 12 | 1 << 17;
-                put(rec, 28, invm[a]);
-                put(rec, 32, 1.0);
+                put(rec, 7, invm[a]);
                 if a >= 1 {
-                    let unit = |p: usize, q: usize| -> (f32, f32) {
-                        let (dx, dy) = (x[q] - x[p], y[q] - y[p]);
-                        let l = (dx * dx + dy * dy).sqrt().max(1e-6);
-                        (dx / l, dy / l)
-                    };
                     let (dpx, dpy) = unit(parent[a], a);
                     let (dxk, dyk) = unit(a, g);
-                    put(rec, 32, dpx * dxk + dpy * dyk);
-                    put(rec, 36, dpx * dyk - dpy * dxk);
+                    put(rec, 8, dpx * dxk + dpy * dyk);
+                    put(rec, 9, dpx * dyk - dpy * dxk);
                 }
             }
-            put(rec, 24, f32::from_bits(topo));
+            put(rec, 6, f32::from_bits(topo));
+            if g >= 1 && g < n {
+                let a = parent[g];
+                let m = 1.0 / invm[g].max(invm[a]).max(1e-6);
+                put(rec, 10, 0.6 * rad[g] * 2.0);
+                put(rec, 11, 0.5 * m * 60.0 * shape.substeps as f32);
+                put(rec, 12, -m * 10.0);
+            }
         }
-        // Muscles: between two rods that share a node, alternating lanes.
-        let m = muscles.min(2 * mpl);
+        // Muscles: between two rods that share a node.
+        let m = muscles.min(w * mpl);
         let per = [m.div_ceil(2), m / 2];
+        let word = if w == 2 { n as u32 | (m as u32) << 8 | (per[0] as u32) << 16 | (per[1] as u32) << 24 } else { n as u32 | (m as u32) << 8 };
+        let total_cap: f32 = 1.0;
+        let _ = total_cap;
+        // Stamina capacity: the work a creature can spend per unit store.
         let icap = 1.0 / rng.range(60.0, 120.0);
-        b.heads.push([n as u32 | (m as u32) << 8 | (per[0] as u32) << 16 | (per[1] as u32) << 24, icap.to_bits(), 0, 0]);
+        b.heads.push([word, icap.to_bits(), 0, 0]);
         for i in 0..m {
-            let (lane, k) = (i % 2, i / 2);
+            let (lane, k) = if w == 2 { (i % 2, i / 2) } else { (0, i) };
             let ra = 1 + rng.below((n - 1) as u32) as usize;
             let rb = {
                 let near: Vec<usize> = (1..n)
@@ -534,281 +598,55 @@ pub fn batch(count: usize, nodes: usize, muscles: usize, mpl: usize, nb: usize, 
             let (pa, pb) = (at(ra, ta), at(rb, tb));
             let dist = ((pa.0 - pb.0).powi(2) + (pa.1 - pb.1).powi(2)).sqrt();
             let sensor = if rng.f() < 0.3 { (1u32 << 25) | (rng.below(n as u32) << 20) } else { 0 };
-            // The four end nodes as bytes of n * 32 (the kernel scales them
-            // straight into table addresses); the touchdown sensor (flag and
-            // limb) goes in the spare word of the second rhythm record.
-            let pk = (parent[ra] as u32 * 32) | (ra as u32 * 32) << 8 | (parent[rb] as u32 * 32) << 16 | (rb as u32 * 32) << 24;
-            let idx = (c * mpl + k) * W + lane;
+            let pk = parent[ra] as u32 | (ra as u32) << 5 | (parent[rb] as u32) << 10 | (rb as u32) << 15 | sensor;
+            let idx = (c * mpl + k) * w + lane;
+            let (ia, ir) = if w == 1 { ((grp * mpl + k) * 32 + ln, rplane + (grp * mpl + k) * 32 + ln) } else { (2 * idx, 2 * idx + 1) };
             let period = rng.range(0.5, 2.0);
             let duty = rng.range(0.3, 0.7);
-            let s = (c * 2 * mpl + 2 * k) * W + lane;
-            if let Some((strength, _)) = lean {
-                // The lean model's records: cap x strength and 1 / v_max in
-                // the A record, the trapezoid in the first rhythm record.
-                let cap = rng.range(2.0, 10.0) * strength;
+            if shape.lean_muscles {
+                let cap = rng.range(2.0, 10.0) * shape.strength;
                 let len = ((x[rb] - x[ra]).powi(2) + (y[rb] - y[ra]).powi(2)).sqrt().max(0.05);
-                b.msa[idx] = [f32::from_bits(pk), unorm2(ta, tb), cap, 1.0 / (8.0 * len)];
+                let pk = if shape.w == 1 && !shape.anchors {
+                    let limb = if sensor != 0 { (sensor >> 20) & 31 } else { 8 };
+                    (ra as u32 * 512) | (rb as u32 * 512) << 12 | limb << 24
+                } else {
+                    pk
+                };
+                b.msa[ia] = [f32::from_bits(pk), cap, 1.0 / (8.0 * len), unorm2(ta, tb)];
                 let rp = ramp / period;
-                b.mss[s] = [1.0 / period, rng.f(), (duty + rp).min(1.0) * 0.5, 1.0 / rp];
-                b.mss[s + W] = [0.0, 0.0, 0.0, f32::from_bits(sensor)];
+                b.msa[ir] = [1.0 / period, rng.f(), (duty + rp).min(1.0) * 0.5, 1.0 / rp];
             } else {
                 b.msa[idx] = [f32::from_bits(pk), unorm2(ta, tb), rng.range(2.0, 10.0), rng.range(50.0, 200.0)];
                 b.msb[idx] = [dist * rng.range(1.05, 1.3), bf2(rng.range(0.0, 2.0), rng.range(0.1, 1.0))];
+                let s = (c * 2 * mpl + 2 * k) * w + lane;
                 b.mss[s] = [1.0 / period, rng.f(), duty, 1.0 / duty];
-                b.mss[s + W] = [1.0 / (1.0 - duty), rng.range(0.02, 0.1), rng.range(50.0, 300.0), f32::from_bits(sensor)];
+                b.mss[s + w] = [1.0 / (1.0 - duty), rng.range(0.02, 0.1), rng.range(50.0, 300.0), 0.0];
             }
         }
     }
     b
 }
 
-/// Checks a dumped creature's rod solve (the source built with -DDUMP):
-/// A mu0 = rhs0 with A = J M^-1 J^T built from the definition.
-fn check_dump(f: &[f32]) {
-    let lane = |l: usize, field: usize, k: usize| f[l * 32 + field * 4 + k];
-    let mut rods = Vec::new();
-    let mut invm = [0f32; 8];
-    for l in 0..2 {
-        for k in 0..4 {
-            invm[l * 4 + k] = lane(l, 4, k);
-            let topo = lane(l, 5, k).to_bits();
-            if (topo >> 17) & 1 == 1 {
-                let child = l * 4 + k;
-                rods.push((child, (topo & 31) as usize, [lane(l, 0, k), lane(l, 1, k)], lane(l, 2, k), lane(l, 3, k), lane(l, 6, k), lane(l, 7, k), topo));
-            }
-        }
-    }
-    let n = rods.len();
-    let mut a = vec![vec![0f64; n]; n];
-    let jac = |r: &(usize, usize, [f32; 2], f32, f32, f32, f32, u32), node: usize| -> [f64; 2] {
-        let s = if node == r.0 { 1.0 } else if node == r.1 { -1.0 } else { 0.0 };
-        [s * r.2[0] as f64, s * r.2[1] as f64]
-    };
-    for i in 0..n {
-        for j in 0..n {
-            for node in 0..8 {
-                let (ji, jj) = (jac(&rods[i], node), jac(&rods[j], node));
-                a[i][j] += (ji[0] * jj[0] + ji[1] * jj[1]) * invm[node] as f64;
-            }
-        }
-    }
-    let mut worst = 0f64;
-    for i in 0..n {
-        let ax: f64 = (0..n).map(|j| a[i][j] * rods[j].4 as f64).sum();
-        let r = ax - rods[i].3 as f64;
-        worst = worst.max(r.abs());
-        println!(
-            "rod to node {} pivot {} parent {} sr {}: A_ii {:.4} 1/invD {:.4} Lp {:.4}, (A mu0 - rhs0) {:.3e} of rhs {:.3e}",
-            rods[i].0, rods[i].1, (rods[i].7 >> 5) & 31, (rods[i].7 >> 10) & 3, a[i][i],
-            if rods[i].5 != 0.0 { 1.0 / rods[i].5 } else { 0.0 }, rods[i].6, r, rods[i].3
-        );
-    }
-    println!("worst residual {worst:.3e}");
-}
-
-fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Vec<f64> {
-    let n = b.len();
-    for i in 0..n {
-        let p = (i..n).max_by(|&x, &y| a[x][i].abs().total_cmp(&a[y][i].abs())).unwrap();
-        a.swap(i, p);
-        b.swap(i, p);
-        for r in i + 1..n {
-            let f = a[r][i] / a[i][i];
-            for c in i..n {
-                a[r][c] -= f * a[i][c];
-            }
-            b[r] -= f * b[i];
-        }
-    }
-    let mut x = vec![0.0; n];
-    for i in (0..n).rev() {
-        x[i] = (b[i] - (i + 1..n).map(|c| a[i][c] * x[c]).sum::<f64>()) / a[i][i];
-    }
-    x
-}
-
-/// Checks a dumped Delassus system (the source built with -DDUMPW=step):
-/// W = W0 - R^T A^-1 R and the free contact velocities, from the definition.
-fn check_dump_w(f: &[f32], rad: &[f32]) {
-    const HS: f64 = 1.0 / 120.0;
-    let lane = |l: usize, field: usize, k: usize| f[l * 32 + field * 4 + k] as f64;
-    let (mut px, mut py, mut vx, mut vy, mut im) = ([0f64; 8], [0f64; 8], [0f64; 8], [0f64; 8], [0f64; 8]);
-    let mut rods: Vec<(usize, usize, [f64; 2])> = Vec::new();
-    for l in 0..2 {
-        for k in 0..4 {
-            let g = l * 4 + k;
-            px[g] = lane(l, 0, k); py[g] = lane(l, 1, k); vx[g] = lane(l, 2, k); vy[g] = lane(l, 3, k); im[g] = lane(l, 4, k);
-            let t = (lane(l, 5, k) as f32).to_bits();
-            if (t >> 17) & 1 == 1 {
-                rods.push((g, (t & 31) as usize, [lane(l, 6, k), lane(l, 7, k)]));
-            }
-        }
-    }
-    let word = f[64].to_bits();
-    let mut rows: Vec<(usize, [f64; 2])> = Vec::new();
-    for c in 0..4 {
-        let e = (word >> (6 * c)) & 63;
-        let g = (e & 31) as usize;
-        let on = e & 32 != 0;
-        rows.push((if on { g } else { 99 }, [0.0, 1.0]));
-        rows.push((if on { g } else { 99 }, [1.0, 0.0]));
-    }
-    let n = rods.len();
-    let jr = |j: usize, node: usize| -> [f64; 2] {
-        let s = if node == rods[j].0 { 1.0 } else if node == rods[j].1 { -1.0 } else { 0.0 };
-        [s * rods[j].2[0], s * rods[j].2[1]]
-    };
-    let je = |e: usize, node: usize| -> [f64; 2] { if rows[e].0 == node { rows[e].1 } else { [0.0, 0.0] } };
-    let dot = |a: [f64; 2], b: [f64; 2]| a[0] * b[0] + a[1] * b[1];
-    let a_mat: Vec<Vec<f64>> = (0..n).map(|i| (0..n).map(|j| (0..8).map(|g| dot(jr(i, g), jr(j, g)) * im[g]).sum()).collect()).collect();
-    let r_mat: Vec<Vec<f64>> = (0..n).map(|i| (0..8).map(|e| (0..8).map(|g| dot(jr(i, g), je(e, g)) * im[g]).sum()).collect()).collect();
-    let mut worst = 0f64;
-    let mut wd = vec![vec![0f64; 8]; 8];
-    for e in 0..8 {
-        let col: Vec<f64> = (0..n).map(|i| r_mat[i][e]).collect();
-        let m = solve_dense(a_mat.clone(), col);
-        for f2 in 0..8 {
-            let w0: f64 = (0..8).map(|g| dot(je(e, g), je(f2, g)) * im[g]).sum();
-            wd[e][f2] = w0 - (0..n).map(|i| r_mat[i][f2] * m[i]).sum::<f64>();
-        }
-    }
-    for i in 0..8 {
-        for j in 0..=i {
-            let idx = i * (i + 1) / 2 + j;
-            let mut g = f[65 + idx] as f64;
-            if i == j { g -= f[109 + i / 2] as f64 * 1.1; }
-            worst = worst.max((g - wd[i][j]).abs());
-        }
-    }
-    // Free contact velocities after the rods: w = J v* + R^T A^-1 (c - J_r v*).
-    let rhs: Vec<f64> = (0..n).map(|i| {
-        let (b, a) = (rods[i].0, rods[i].1);
-        let rel = [vx[b] - vx[a], vy[b] - vy[a]];
-        let rn = dot(rel, rods[i].2);
-        let l = ((px[b] - px[a]).powi(2) + (py[b] - py[a]).powi(2)).sqrt();
-        -rn - (dot(rel, rel) - rn * rn).max(0.0) * HS / l
-    }).collect();
-    let mu0 = solve_dense(a_mat.clone(), rhs);
-    for c in 0..4 {
-        let g = rows[2 * c].0;
-        if g == 99 { continue; }
-        let wn = vy[g] + (0..n).map(|i| r_mat[i][2 * c] * mu0[i]).sum::<f64>();
-        let gap = py[g] - rad[g] as f64;
-        let tgt = if gap >= 0.0 { -gap / HS } else { -gap * 0.2 / HS };
-        println!("slot {c} node {g}: gpu b0 normal {:.5} host {:.5}", f[101 + 2 * c], tgt - wn);
-    }
-    for i in 0..8 {
-        let gpu: Vec<String> = (0..=i).map(|j| {
-            let idx = i * (i + 1) / 2 + j;
-            let mut g = f[65 + idx] as f64;
-            if i == j { g -= f[109 + i / 2] as f64 * 1.1; }
-            format!("{g:7.3}")
-        }).collect();
-        let host: Vec<String> = (0..=i).map(|j| format!("{:7.3}", wd[i][j])).collect();
-        println!("row {i}: gpu {} | host {}", gpu.join(" "), host.join(" "));
-    }
-    println!("W: worst |gpu - host| {worst:.3e}; host diag {:?}", (0..8).map(|i| (wd[i][i] * 1e3).round() / 1e3).collect::<Vec<_>>());
-}
-
-fn args() -> (HashMap<String, String>, Vec<(String, String)>) {
-    let mut map = HashMap::new();
-    let mut defs = Vec::new();
-    for a in std::env::args().skip(1) {
-        let (k, v) = match a.split_once('=') {
+fn args() -> Vec<(String, String)> {
+    std::env::args()
+        .skip(1)
+        .map(|a| match a.split_once('=') {
             Some((k, v)) => (k.to_owned(), v.to_owned()),
             None => (a, String::new()),
-        };
-        if let Some(name) = k.strip_prefix("-D") {
-            defs.push((name.to_owned(), if v.is_empty() { "1".to_owned() } else { v }));
-        } else {
-            map.insert(k, v);
-        }
-    }
-    (map, defs)
+        })
+        .collect()
 }
 
 pub struct Setup {
-    /// Defines from the command line.
-    pub extra: Vec<(String, String)>,
-    /// The baked tree (parents of nodes 1 .. n - 1), if any.
-    pub baked: Option<Vec<usize>>,
-    /// TRIM 1.
-    pub trim: bool,
-    pub mpl: usize,
-    pub nb: usize,
-    pub substeps: u32,
-    pub rounds: u32,
+    pub defs: Vec<(String, String)>,
+    pub shape: Shape,
     pub block: u32,
-    pub min_blocks: u32,
 }
 
 impl Setup {
-    pub fn defines(&self) -> Vec<(String, String)> {
-        let mut d: Vec<(&'static str, String)> = vec![
-            ("W", "2".into()),
-            ("MPL", self.mpl.to_string()),
-            ("NB", self.nb.to_string()),
-            ("SUBSTEPS", self.substeps.to_string()),
-            ("MAX_ROUNDS", self.rounds.to_string()),
-            ("BLOCK", self.block.to_string()),
-            ("MIN_BLOCKS", self.min_blocks.to_string()),
-        ];
-        if self.trim {
-            d.push(("TRIM", "1".into()));
-        }
-        if let Some(p) = &self.baked {
-            d.extend(bake_defines(p, self.nb));
-        }
-        let mut out: Vec<(String, String)> = d.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
-        out.extend(self.extra.iter().cloned());
-        out
+    pub fn define(&self, name: &str) -> Option<&str> {
+        self.defs.iter().rev().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
     }
-    pub fn flag(&self, name: &str) -> bool {
-        self.extra.iter().rev().find(|(k, _)| k == name).is_some_and(|(_, v)| v != "0")
-    }
-}
-
-/// The defines of a baked kernel for one bone tree: `parents` are the parents
-/// of nodes 1 .. n - 1 (breadth-first, node 1's is the head). Per node g the
-/// rod that ends at it has a topology word (BTOPO, as the lane record packs
-/// it), the one-hot of its parent rod as its own lane sees it (BPM), and its
-/// kept sibling rank (BSR); per lane the incidence table of contact nodes
-/// (BINC0, BINC1: byte n has bit k when local rod k ends at node n and bit
-/// 4 + k when n is its pivot).
-pub fn bake_defines(parents: &[usize], nb: usize) -> Vec<(&'static str, String)> {
-    let n = parents.len() + 1;
-    let parent = |g: usize| if g == 0 { 0 } else { parents[g - 1] };
-    let mut rank = [0usize; 8];
-    let mut seen = [0usize; 8];
-    for g in 1..n {
-        rank[g] = seen[parent(g)];
-        seen[parent(g)] += 1;
-    }
-    let (mut topo, mut pm, mut sr) = ([0u32; 8], [0u32; 8], [0u32; 8]);
-    let mut inc = [0u64; 2];
-    for g in 1..n {
-        let a = parent(g);
-        let prod = if a >= 1 { (a - 1) as u32 } else { 31 };
-        let gp = if a >= 1 { parent(a) as u32 } else { 31 };
-        sr[g] = rank[g].min(nb - 1) as u32;
-        topo[g] = a as u32 | prod << 5 | sr[g] << 10 | gp << 12 | 1 << 17;
-        if a >= 1 {
-            pm[g] = if a / 4 != g / 4 { 0x10 << (a % 4) } else { 1 << (a % 4) };
-        }
-        let lane = g / 4;
-        inc[lane] |= 1u64 << (8 * g + g % 4);
-        inc[lane] |= 1u64 << (8 * a + 4 + g % 4);
-    }
-    let list = |v: &[u32; 8]| v.iter().map(|x| format!("{x}u")).collect::<Vec<_>>().join(", ");
-    vec![
-        ("BAKED", "1".into()),
-        ("BN", n.to_string()),
-        ("BTOPO", list(&topo)),
-        ("BPM", list(&pm)),
-        ("BSR", list(&sr)),
-        ("BINC0", format!("{}ull", inc[0])),
-        ("BINC1", format!("{}ull", inc[1])),
-    ]
 }
 
 /// Compiles the stub; prints and returns (cubin, log).
@@ -816,48 +654,70 @@ pub fn compile_stub(setup: &Setup, arch: &str) -> Result<(Vec<u8>, String)> {
     unsafe { std::env::set_var("CUDA_CACHE_DISABLE", "1") };
     let nvrtc = Nvrtc::load()?;
     let started = Instant::now();
-    let (cubin, log) = nvrtc.compile(&source(&setup.defines()), "lane_lean.cu", &options(arch))?;
+    let (cubin, log) = nvrtc.compile(&source(&setup.defs), "lane_lean_w1.cu", &options(arch))?;
     eprintln!("compiled in {:.1} s", started.elapsed().as_secs_f64());
     Ok((cubin, log))
 }
 
-fn extra_get<T: std::str::FromStr>(extra: &[(String, String)], name: &str) -> Option<T> {
-    extra.iter().rev().find(|(k, _)| k == name).and_then(|(_, v)| v.parse().ok())
-}
-
 fn main() -> Result<()> {
-    let (a, extra) = args();
+    let argv = args();
+    let a: HashMap<String, String> = argv.iter().filter(|(k, _)| !k.starts_with("-D")).cloned().collect();
     let get = |k: &str, d: &str| a.get(k).cloned().unwrap_or_else(|| d.to_owned());
     let num = |k: &str, d: &str| -> usize { get(k, d).parse().unwrap_or_else(|_| panic!("{k} is a number")) };
-    // plan=0,1,1,1,2,2,3: every creature gets this tree (parents of nodes
-    // 1 .. n - 1); with `baked` the kernel has it compiled in.
-    let plan: Option<Vec<usize>> = a.get("plan").map(|p| {
-        let v: Vec<usize> = p.split(',').map(|x| x.parse().expect("plan is a list of parents")).collect();
-        assert!(!v.is_empty() && v.len() <= 7 && v[0] == 0, "plan: 1 to 7 parents, node 1's is 0");
-        for i in 1..v.len() {
-            // Node i + 1's parent is an earlier node other than the head, and
-            // parents never decrease (breadth-first order).
-            assert!((1..=i).contains(&v[i]) && v[i] >= v[i - 1], "plan: breadth-first parents");
+    // Defines from the command line: -DNAME=VALUE.
+    let mut defs: Vec<(String, String)> = argv
+        .iter()
+        .filter(|(k, _)| k.starts_with("-D"))
+        .map(|(k, v)| (k[2..].to_owned(), if v.is_empty() { "1".to_owned() } else { v.clone() }))
+        .collect();
+    let find = |defs: &[(String, String)], n: &str| defs.iter().rev().find(|(k, _)| k == n).map(|(_, v)| v.clone());
+    let w = a.get("w").map(|v| v.parse::<usize>().unwrap()).or_else(|| find(&defs, "W").map(|v| v.parse().unwrap())).unwrap_or(2);
+    let substeps = a.get("substeps").map(|v| v.parse::<u32>().unwrap()).or_else(|| find(&defs, "SUBSTEPS").map(|v| v.parse().unwrap())).unwrap_or(2);
+    let nb = num("nb", "3");
+    let mpl = a.get("mpl").map(|v| v.parse::<usize>().unwrap()).unwrap_or(if w == 2 { 16 } else { 24 });
+    let block = num("block", "128") as u32;
+    for (k, v) in [("W", w.to_string()), ("MPL", mpl.to_string()), ("NB", nb.to_string()), ("SUBSTEPS", substeps.to_string()), ("BLOCK", block.to_string())] {
+        if find(&defs, k).is_none() || a.contains_key(&k.to_lowercase()) {
+            defs.retain(|(n, _)| n != k);
+            defs.push((k.to_owned(), v));
         }
-        v
-    });
-    let trim = a.contains_key("trim");
-    let substeps0: u32 = a.get("substeps").map(|v| v.parse().unwrap()).or_else(|| extra_get(&extra, "SUBSTEPS")).unwrap_or(2);
-    let setup = Setup {
-        extra,
-        baked: if a.contains_key("baked") { Some(plan.clone().expect("baked needs plan=")) } else { None },
-        trim,
-        mpl: num("mpl", "16"),
-        nb: num("nb", "3"),
-        substeps: substeps0,
-        rounds: num("rounds", if trim { "1" } else { "3" }) as u32,
-        block: num("block", "128") as u32,
-        min_blocks: num("min_blocks", if trim { "2" } else { "4" }) as u32,
+    }
+    for (key, name) in [("rounds", "MAX_ROUNDS"), ("min_blocks", "MIN_BLOCKS")] {
+        if let Some(v) = a.get(key) {
+            defs.retain(|(n, _)| n != name);
+            defs.push((name.to_owned(), v.clone()));
+        }
+    }
+    let baked = find(&defs, "BAKED").is_some_and(|v| v != "0");
+    let tree: Vec<usize> = get("tree", "0,1,1,1,2,3,4").split(',').map(|s| s.parse().unwrap()).collect();
+    if baked && find(&defs, "MC").is_none() {
+        defs.push(("MC".to_owned(), num("muscles", "19").to_string()));
+    }
+    if baked {
+        let words = topo_words(&{
+            let mut p = vec![0usize];
+            p.extend(&tree);
+            p
+        }, 8, nb);
+        for (i, wd) in words.iter().enumerate() {
+            defs.push((format!("BT{i}"), format!("{wd}u")));
+        }
+    }
+    let shape = Shape {
+        strength: get("strength", "1.0").parse().unwrap(),
+        w,
+        mpl,
+        nb,
+        substeps,
+        lean_muscles: find(&defs, "MUSCLE_MODEL").is_some_and(|v| v != "0"),
+        anchors: find(&defs, "MUSCLE_ANCHORS").is_some_and(|v| v != "0"),
+        fixed_tree: if baked { Some(tree) } else { None },
     };
+    let setup = Setup { defs, shape, block };
     let arch = get("arch", "sm_89");
     let (cubin, log) = compile_stub(&setup, &arch)?;
     if let Some(path) = a.get("src") {
-        std::fs::write(path, source(&setup.defines()))?;
+        std::fs::write(path, source(&setup.defs))?;
     }
     if let Some(path) = a.get("cubin") {
         std::fs::write(path, &cubin)?;
@@ -876,6 +736,7 @@ fn main() -> Result<()> {
     let muscles = num("muscles", "19");
     let repeat = num("repeat", "3");
     let seed = num("seed", "1") as u64;
+    let lean_contact = setup.define("CONTACT_MODEL").is_some_and(|v| v != "0");
 
     let cu = Cuda::load()?;
     let dev = cu.open()?;
@@ -891,17 +752,19 @@ fn main() -> Result<()> {
     );
 
     let started = Instant::now();
-    let lean = if setup.flag("MUSCLE_MODEL") { Some((get("strength", "1.0").parse::<f32>().unwrap(), setup.substeps)) } else { None };
-    let b = batch(count, nodes, muscles, setup.mpl, setup.nb, seed, plan.as_deref(), lean);
+    let b = batch(count, nodes, muscles, &setup.shape, seed);
     eprintln!("{count} creatures ({nodes} nodes, {muscles} muscles) built in {:.1} s", started.elapsed().as_secs_f64());
     let heads = cu.upload(&b.heads)?;
     let lanes = cu.upload(&b.lanes)?;
     let msa = cu.upload(&b.msa)?;
     let msb = cu.upload(&b.msb)?;
     let mss = cu.upload(&b.mss)?;
-    let roff = cu.alloc(count * setup.mpl * 2 * 4)?;
-    let mstate = cu.alloc(count * setup.mpl * 2 * 4)?;
-    let anch = cu.alloc(count * 4 * 2 * 4)?;
+    let padded = if w == 1 { count.div_ceil(32) * 32 } else { count };
+    let roff_words = (padded * mpl * w).max(padded * 16);
+    let roff = cu.alloc(roff_words * 4)?;
+    cu.check(unsafe { (cu.memset_d32)(roff, 0, roff_words) }, "memset")?;
+    let mstate = cu.alloc(padded * mpl * w * 8)?;
+    let anch = cu.alloc(count * 8 * 4)?;
     let results = cu.alloc(count * 48)?;
     let counter = cu.alloc(4)?;
     #[repr(C)]
@@ -916,18 +779,6 @@ fn main() -> Result<()> {
         screen_bar: f32,
     }
     let grid = (sms * per_sm) as u32;
-    // Developer tracing (the source built with -DTRACE): each thread writes
-    // its last checkpoint to mapped host memory, printed after `trace`
-    // seconds without waiting for the kernel.
-    let trace_secs: Option<f64> = a.get("trace").map(|v| v.parse().unwrap_or(3.0));
-    let mut trace_host: *mut c_void = std::ptr::null_mut();
-    let mut trace_dev: Ptr = 0;
-    if trace_secs.is_some() {
-        let bytes = grid as usize * setup.block as usize * 4;
-        cu.check(unsafe { (cu.host_alloc)(&mut trace_host, bytes, 2) }, "cuMemHostAlloc")?;
-        unsafe { std::ptr::write_bytes(trace_host as *mut u8, 0, bytes) };
-        cu.check(unsafe { (cu.host_device_pointer)(&mut trace_dev, trace_host, 0) }, "device pointer")?;
-    }
     let run = |n: u32| -> Result<f64> {
         let params = Params {
             count: n,
@@ -944,57 +795,17 @@ fn main() -> Result<()> {
         let mut p = params;
         let mut argv: Vec<*mut c_void> = ptrs.iter_mut().map(|x| x as *mut u64 as *mut c_void).collect();
         argv.push(&mut p as *mut Params as *mut c_void);
-        let mut tp = trace_dev;
-        if trace_secs.is_some() {
-            argv.push(&mut tp as *mut u64 as *mut c_void);
-        }
         let (mut e0, mut e1) = (std::ptr::null_mut(), std::ptr::null_mut());
         cu.check(unsafe { (cu.event_create)(&mut e0, 0) }, "event")?;
         cu.check(unsafe { (cu.event_create)(&mut e1, 0) }, "event")?;
         cu.check(unsafe { (cu.event_record)(e0, std::ptr::null_mut()) }, "record")?;
         cu.check(
             unsafe {
-                (cu.launch)(
-                    f,
-                    grid,
-                    1,
-                    1,
-                    setup.block,
-                    1,
-                    1,
-                    0,
-                    std::ptr::null_mut(),
-                    argv.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                )
+                (cu.launch)(f, grid, 1, 1, setup.block, 1, 1, 0, std::ptr::null_mut(), argv.as_mut_ptr(), std::ptr::null_mut())
             },
             "launch",
         )?;
         cu.check(unsafe { (cu.event_record)(e1, std::ptr::null_mut()) }, "record")?;
-        if let Some(secs) = trace_secs {
-            std::thread::sleep(std::time::Duration::from_secs_f64(secs));
-            let t = unsafe { std::slice::from_raw_parts(trace_host as *const u32, grid as usize * setup.block as usize) };
-            let mut counts: std::collections::BTreeMap<u32, usize> = Default::default();
-            for &v in t {
-                *counts.entry(v).or_default() += 1;
-            }
-            println!("checkpoint counts: {counts:?}");
-            if a.contains_key("dumpw") {
-                let f = unsafe { std::slice::from_raw_parts(trace_host as *const f32, 128) };
-                let rad: Vec<f32> = (0..8).map(|g| b.lanes[(g / 4) * RF + 4 + g % 4]).collect();
-                check_dump_w(f, &rad);
-            }
-            if a.contains_key("dump") {
-                let f = unsafe { std::slice::from_raw_parts(trace_host as *const f32, 64) };
-                check_dump(f);
-            }
-            for (w, chunk) in t.chunks(32).enumerate() {
-                if chunk.iter().any(|&v| v != chunk[0]) || counts.get(&chunk[0]).copied().unwrap_or(0) < 64 {
-                    println!("warp {w}: {chunk:?}");
-                }
-            }
-            std::process::exit(0);
-        }
         cu.check(unsafe { (cu.event_synchronize)(e1) }, "sync")?;
         let mut ms = 0.0f32;
         cu.check(unsafe { (cu.event_elapsed)(&mut ms, e0, e1) }, "elapsed")?;
@@ -1010,57 +821,43 @@ fn main() -> Result<()> {
             println!("creature 0: {:?}", out[0]);
             let bad: Vec<usize> = (0..count).filter(|&i| !(out[i][0] > -1e19) || !out[i][2].is_finite()).collect();
             println!("bad: {} {:?}", bad.len(), &bad[..bad.len().min(40)]);
-            for &i in bad.iter().take(3) {
-                let tp: Vec<String> = (0..8).map(|g| {
-                    let t = b.lanes[(i * 2 + g / 4) * RF + 24 + g % 4].to_bits();
-                    format!("{}:{}p{}r{}", g, t & 31, (t >> 5) & 31, (t >> 10) & 3)
-                }).collect();
-                println!("  creature {i}: steps {} topo {}", out[i][3], tp.join(" "));
-            }
-        }
-        // A hash of every creature's result words: two kernels that compute
-        // the same arithmetic in the same order print the same hash.
-        let hash = out.iter().flatten().fold(0xcbf2_9ce4_8422_2325u64, |h, v| (h ^ u64::from(v.to_bits())).wrapping_mul(0x0100_0000_01b3));
-        if let Some(path) = a.get("results") {
-            let bytes: Vec<u8> = out.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
-            std::fs::write(path, bytes)?;
         }
         let steps_done: f64 = out.iter().map(|o| f64::from(o[3])).sum();
         let rate = steps_done / secs;
         best = best.min(secs);
         let bad = out.iter().filter(|o| o[0] < -1e19 || !o[0].is_finite()).count();
         let fallen = out.iter().filter(|o| o[1] > 0.5).count();
-        let sub = steps_done * f64::from(setup.substeps);
+        let sub = steps_done * f64::from(substeps);
         let rounds: f64 = out.iter().map(|o| f64::from(o[4])).sum::<f64>() / sub;
         let contacts: f64 = out.iter().map(|o| f64::from(o[5])).sum::<f64>() / sub;
-        let drift = out.iter().map(|o| o[6]).fold(0.0f32, f32::max);
-        let mut drift_sorted: Vec<f32> = out.iter().map(|o| o[6]).collect();
-        drift_sorted.sort_by(f32::total_cmp);
+        let med = |i: usize| -> f32 {
+            let mut v: Vec<f32> = out.iter().map(|o| o[i]).collect();
+            v.sort_by(f32::total_cmp);
+            v[count / 2]
+        };
+        let pct = |i: usize, q: f32| -> f32 {
+            let mut v: Vec<f32> = out.iter().map(|o| o[i]).filter(|v| v.is_finite()).collect();
+            v.sort_by(f32::total_cmp);
+            v[((v.len() as f32 - 1.0) * q) as usize]
+        };
+        let mx = |i: usize| out.iter().map(|o| o[i]).filter(|v| v.is_finite()).fold(0.0f32, f32::max);
         let low: f64 = out.iter().map(|o| f64::from(o[2])).sum::<f64>() / count as f64;
+        let stamina: f64 = out.iter().map(|o| f64::from(o[10])).sum::<f64>() / count as f64;
         println!(
             "run {r}: {secs:.3} s, {:.1}M creature-steps/s, {:.0} creatures/s at {steps} steps; steps done {steps_done:.0}; \
-             rounds/substep {rounds:.2}, contacts/substep {contacts:.2}, lowest point mean {low:.3} m, \
-             drift median {:.2e} max {drift:.2e} m, head below neck {fallen}, non-finite {bad}, hash {hash:016x}",
+             {} touching nodes/substep {contacts:.2}, lowest point mean {low:.3} m, \
+             drift median {:.2e} max {:.2e} m, head below neck {fallen}, non-finite {bad}",
             rate / 1e6,
             count as f64 / secs,
-            drift_sorted[count / 2],
+            if lean_contact { String::new() } else { format!("rounds/substep {rounds:.2},") },
+            med(6),
+            mx(6),
         );
-        if setup.flag("DIAG") {
-            let med = |i: usize| -> f32 {
-                let mut v: Vec<f32> = out.iter().map(|o| o[i]).collect();
-                v.sort_by(f32::total_cmp);
-                v[count / 2]
-            };
-            let pct = |i: usize, q: f32| -> f32 {
-                let mut v: Vec<f32> = out.iter().map(|o| o[i]).filter(|v| v.is_finite()).collect();
-                v.sort_by(f32::total_cmp);
-                v[((v.len() as f32 - 1.0) * q) as usize]
-            };
-            let mx = |i: usize| out.iter().map(|o| o[i]).filter(|v| v.is_finite()).fold(0.0f32, f32::max);
+        if lean_contact || a.contains_key("diag") {
             println!(
-                "     DIAG rn median {:.2e} max {:.2e}, rr median {:.2e} max {:.2e}, angular ledger residual median {:.2e} max {:.2e}, penetration max per creature: median {:.2e} p99 {:.2e} m, stamina mean {:.3}",
+                "     DIAG rn median {:.2e} max {:.2e}, rr median {:.2e} max {:.2e}, angular ledger residual median {:.2e} max {:.2e}, penetration max per creature: median {:.2e} p99 {:.2e} m, stamina mean {stamina:.3}, mean x {:.2} m",
                 med(4), mx(4), med(8), mx(8), med(9), mx(9), med(11), pct(11, 0.99),
-                out.iter().map(|o| f64::from(o[10])).sum::<f64>() / count as f64,
+                out.iter().map(|o| f64::from(o[0]).max(-1e3)).sum::<f64>() / count as f64,
             );
         }
     }

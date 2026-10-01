@@ -1,26 +1,195 @@
-// Stub of the per-lane maximal-coordinate kernel with the physics-lean
-// variants (docs/plan-2m.md, section 2 and phase 2, round 7). It measures
-// registers, spills, issue rate and speed of the design before anyone
-// writes the physics; its numbers are not a physics.
+// Stub of the per-lane maximal-coordinate kernel (docs/plan-2m.md, section 6
+// item 4). It measures registers, spills, issue rate and speed of the design
+// before anyone writes the physics; its numbers are not a physics.
 //
-// W = 2: one creature per two lanes. Lane l owns nodes 4l .. 4l + 3 and the
-// rods that end at them (rod j ends at node j + 1; node 0, the head, has
-// none), so lane 0 holds the low rods and lane 1 the high ones. W = 1: one
-// creature per lane, nodes 0 to 7 in registers, no exchange. Rods are
-// numbered breadth first: a rod's parent and its lower siblings have lower
-// numbers, and siblings are consecutive.
+// One creature per W = 2 lanes. Lane l owns nodes 4l .. 4l + 3 and the rods
+// that end at them (rod j ends at node j + 1; node 0, the head, has none), so
+// lane 0 holds the low rods and lane 1 the high ones. Rods are numbered
+// breadth first: a rod's parent and its lower siblings have lower numbers,
+// and siblings are consecutive.
 //
-// The default build is the phase-0 stub (today's rules). A substep: node
-// table to shared memory; gravity, air drag and joint damping; the muscles
-// (split records read from L2, forces gathered through a private per-lane
-// shared table); the free velocities; the rod matrix A = J M^-1 J^T factored
-// as LDL^T in reverse rod order (no fill: the rods at a node form a clique);
-// the deepest 4 nodes as contacts, 2 rows each, with the 8 x 8 Delassus
-// matrix, an active-set solve, the momentum and angular-momentum ledgers and
-// semi-implicit Euler. Once per step: the waveform and drive target of every
-// muscle, a drift projection with contact nodes at infinite mass, metrics.
+// A substep: node table to shared memory; gravity, air drag and joint
+// damping; the muscles (up to MPL per lane, split records read from L2,
+// forces gathered through a private per-lane shared table in a fixed order);
+// the free velocities; the rod matrix A = J M^-1 J^T factored as LDL^T in
+// reverse rod order (no fill: the rods at a node form a clique), lane 1's
+// rods first, their Schur updates sent to lane 0 by shuffles; the deepest 4
+// nodes as contacts, 2 rows each; one batched tree solve of the rods' own
+// row and the 8 contact rows, pipelined so lane 1 runs row r while lane 0
+// runs row r - 1 (forward) and the reverse (backward), with 3 shuffles per
+// row and pass; the 8 x 8 Delassus matrix W = W0 - R^T A^-1 R in shared
+// memory; a direct active-set solve (LDL^T of the active rows, at most
+// MAX_ROUNDS rounds, warm started), run redundantly in both lanes; one more
+// tree solve for the rod impulses of the contact impulses; the momentum and
+// angular-momentum ledgers; semi-implicit Euler. Once per step: the
+// waveform and drive target of every muscle, a drift projection with contact
+// nodes at infinite mass (a second factor and a tree solve), metrics.
 //
-// The physics-lean variants (each a define, they compose):
+// Defines (all have defaults): W, MPL, NB (rod neighbours kept per rod: the
+// parent and NB - 1 lower siblings), BLOCK, MIN_BLOCKS, SUBSTEPS,
+// MAX_ROUNDS, MSTATE_REGS, MUSCLE_UNROLL. Developer switches: NO_MUSCLES,
+// NO_CONTACT, NO_DAMP, NO_FRICTION, NO_LEDGER, USE_STASH, DIAG (solve
+// residuals in the result), TRACE, DUMP, DUMPW (see examples/lane_stub.rs).
+//
+// Two builds of the same arithmetic. TRIM 1 is the general kernel with its
+// removable overhead removed: no stash, the muscle state in registers, the
+// parent one-hots once per step, one warm-started active-set round followed
+// by a two-sweep Gauss-Seidel polish, the per-rod statics read once per
+// creature, the contact impulses through the node force table, the friction
+// anchors in registers, the projection's second factor only when a node is
+// held, hardware reciprocals and square roots, muscle end nodes as table
+// offsets. BAKED 1 compiles one bone tree into the kernel (the host writes
+// BTOPO, BPM, BSR, BINC0 and BINC1, see bake_defines in examples/lane_stub.rs):
+// the topology words, parent one-hots and sibling lists become literals
+// selected by the lane bit, the contact incidence is a constant table indexed
+// by the runtime contact node, and the energy and drive of each muscle are
+// two registers. Model variants, which change the muscle model and are not
+// part of TRIM: MUSCLE_STEP, WAVE.
+//
+// The synthetic bodies and the explicit forces are not tuned; a speed clamp
+// (SPEED_CLAMP) keeps trials finite so every creature runs its full length.
+
+// This is the lean copy of the stub (physics-lean step 1): the stub as it is
+// on main (TRIM, BAKED) with the lean variants below added behind defines.
+
+#ifndef W
+#define W 2
+#endif
+#ifndef MPL
+#define MPL 16
+#endif
+#ifndef NB
+#define NB 3
+#endif
+#ifndef BLOCK
+#define BLOCK 128
+#endif
+#ifndef MIN_BLOCKS
+#define MIN_BLOCKS 4
+#endif
+#ifndef SUBSTEPS
+#define SUBSTEPS 2
+#endif
+#ifndef TRIM
+#define TRIM 0
+#endif
+#ifndef MAX_ROUNDS
+#define MAX_ROUNDS (TRIM ? 1 : 3)
+#endif
+// 1: the muscle state words live in registers; 0: in an L2 scratch, read
+// and written once per muscle and substep.
+#ifndef BAKED
+#define BAKED 0
+#endif
+// MSTATE_FLOATS: energy and drive as two floats per muscle in registers
+// (32 registers instead of 16; on with a baked tree, whose registers fit it).
+#ifndef MSTATE_FLOATS
+#define MSTATE_FLOATS (TRIM && BAKED)
+#endif
+#ifndef MSTATE_REGS
+#define MSTATE_REGS TRIM
+#endif
+// Unrolling of the loops over a lane's muscles (MPL with the state in
+// registers, which index it).
+#ifndef MUSCLE_UNROLL
+#if MSTATE_REGS || MSTATE_FLOATS
+#define MUSCLE_UNROLL MPL
+#else
+#define MUSCLE_UNROLL 1
+#endif
+#endif
+// Developer switches for finding instabilities.
+#ifndef NO_MUSCLES
+#define NO_MUSCLES 0
+#endif
+#ifndef NO_CONTACT
+#define NO_CONTACT 0
+#endif
+#ifndef NO_DAMP
+#define NO_DAMP 0
+#endif
+#ifndef USE_STASH
+#define USE_STASH (!TRIM)
+#endif
+#ifndef NO_LEDGER
+#define NO_LEDGER 0
+#endif
+// Trims of the general kernel (TRIM 1 turns them all on; each can be set
+// alone). HOIST: the parent one-hots once per step. POLISH: Gauss-Seidel
+// sweeps after the active-set rounds when a round left the set (use with
+// MAX_ROUNDS 1). RC_REGS: the rod-contact incidence values once per
+// substep in registers. FASTRCP: reciprocals and muscle lengths by the
+// hardware approximations. PROJ_ANCHORED: the projection factors and
+// solves only when a node is held, else it only measures the drift.
+#ifndef TRIM
+#define TRIM 0
+#endif
+#ifndef HOIST
+#define HOIST TRIM
+#endif
+#ifndef POLISH
+#define POLISH (TRIM ? 2 : 0)
+#endif
+#ifndef RC_REGS
+#define RC_REGS TRIM
+#endif
+#ifndef FASTRCP
+#define FASTRCP TRIM
+#endif
+#ifndef PROJ_ANCHORED
+#define PROJ_ANCHORED TRIM
+#endif
+// SREG: the per-rod statics (radius, friction, pivot inverse mass, rest length,
+// mass for the drag) are read once at the take-up into registers, as vector
+// loads, instead of one scalar load per use.
+// CAPPLY: the contact impulses go into the node force table (two contacts per
+// lane, one read-modify-write each) and the torque ledger reads the node
+// table, instead of predicated per-rod updates. ANC_REGS: the friction
+// anchors live in registers, updated by node masks.
+// PREFETCH: the next muscle's records are loaded at the top of each iteration
+// of the muscle loop, one iteration ahead, so their latency overlaps the
+// arithmetic (7% less time for 14 more instructions; a prefetch to L1 and the
+// same for the waveform loop gained nothing).
+// SENSE_REGS: the touchdown sensors of a creature's muscles, 4 bits each, in
+// two registers, so the touchdown scan loads nothing.
+#ifndef PREFETCH
+#define PREFETCH TRIM
+#endif
+#ifndef SENSE_REGS
+#define SENSE_REGS TRIM
+#endif
+#ifndef CAPPLY
+#define CAPPLY TRIM
+#endif
+#ifndef ANC_REGS
+#define ANC_REGS TRIM
+#endif
+#ifndef SREG
+#define SREG TRIM
+#endif
+// NODE_NMAJOR: the node table node-major (node n of the lane pair's
+// creature at n * 16 + creature), so a runtime node's float4 is one address
+// add from n * 256, shared with its force-table slot.
+#ifndef NODE_NMAJOR
+#define NODE_NMAJOR TRIM
+#endif
+// Muscle-model variants (not trims: they change the model; the owner allows
+// cheaper models, docs/plan-2m.md). MUSCLE_STEP: each muscle's force is
+// evaluated once per step (at the first substep) and held for all substeps.
+// WAVE 0: the drive target is the secant of two raised-cosine evaluations;
+// 1: the analytic derivative at mid-step (one sine); 2: a triangle wave, so
+// the drive is a constant pulse over the duty phase (no transcendental).
+#ifndef MUSCLE_STEP
+#define MUSCLE_STEP 0
+#endif
+#ifndef WAVE
+#define WAVE 0
+#endif
+#ifndef NO_FRICTION
+#define NO_FRICTION 0
+#endif
+// The physics-lean variants (docs/plan-2m.md, phase 2, round 7), on top of
+// TRIM and BAKED; each is a define and they compose:
 //   MUSCLE_MODEL=1       a muscle joins two nodes; force = cap x strength x
 //                        a(t) x E x Hill, pull only, with the damper; a(t) a
 //                        trapezoid of period, phase and duty with a ramp of
@@ -32,61 +201,22 @@
 //   CONTACT_MODEL=1      per-node impulses against each node's own mass for
 //   NPASS=2              every node (normal, then friction clamped to the
 //                        cone, the clean rule and the anchor), then the exact
-//                        rod solve as the coupling, NPASS times; momentum
-//                        and angular ledgers on the contact impulses; the
-//                        8 x 8 Delassus matrix, the active set and the stash
-//                        are gone. Penetration recovery is a position nudge.
-//   SUBSTEPS=4           with LAGGED_FACTOR=1 the rod directions and the LDL
-//   LAGGED_FACTOR=1      factor are built once per step, and the explicit
-//                        drag and damping forces once per step; the solves,
-//                        contacts and muscles run every substep.
+//                        rod solve as the coupling, NPASS times; the
+//                        momentum and angular ledgers on the contact
+//                        impulses; no Delassus matrix, no active set, no
+//                        stash. Penetration recovery is a position nudge.
+//   SUBSTEPS=4           with LAGGED_FACTOR=1 the rod factor is built once per
+//   LAGGED_FACTOR=1      step and the explicit drag and damping forces once
+//                        per step; the solves, contacts and muscles run
+//                        every substep.
 //   LIMITS_AS_IMPULSES=1 joint limits and the spin cap as one angular
 //   LIGAMENT=<c>         impulse per joint and step, a couple on the rod and
 //                        the opposite on its parent, with a compliance c
 //                        folded into the joint's effective inertia.
-//   BAKED=1 (W = 1)      the bone tree is compiled in as constants BT0..BT7
-//                        (the topology words), so every parent and pivot
-//                        index is a register name; muscle ends stay runtime.
-//
-// Other defines (all have defaults): W, MPL, NB (rod neighbours kept per rod:
-// the parent and NB - 1 lower siblings), BLOCK, MIN_BLOCKS, SUBSTEPS,
-// MAX_ROUNDS, MSTATE_REGS, MUSCLE_UNROLL. Developer switches: NO_MUSCLES,
-// NO_CONTACT, NO_DAMP, NO_FRICTION, NO_LEDGER, LEDGER=0 (no enforced ledgers),
-// USE_STASH, DIAG (residuals in
-// the result).
-//
-// The synthetic bodies and the explicit forces are not tuned; a speed clamp
-// (SPEED_CLAMP) keeps trials finite so every creature runs its full length.
-
-#ifndef W
-#define W 2
-#endif
-#ifndef MPL
-#if W == 2
-#define MPL 16
-#else
-#define MPL 24
-#endif
-#endif
-#ifndef NB
-#define NB 3
-#endif
-#ifndef BLOCK
-#define BLOCK 128
-#endif
-#ifndef MIN_BLOCKS
-#if W == 2
-#define MIN_BLOCKS 4
-#else
-#define MIN_BLOCKS 3
-#endif
-#endif
-#ifndef SUBSTEPS
-#define SUBSTEPS 2
-#endif
-#ifndef MAX_ROUNDS
-#define MAX_ROUNDS 3
-#endif
+// The lean muscle records: the muscle's A record is {end nodes as bytes of
+// 32 n, anchors (unorm16 pair), cap x strength, 1 / v_max}, its first rhythm
+// record {1 / period, phase, half of duty plus ramp, 1 / ramp}, and the
+// touchdown sensor stays in the second rhythm record's spare word.
 #ifndef MUSCLE_MODEL
 #define MUSCLE_MODEL 0
 #endif
@@ -108,91 +238,28 @@
 #ifndef LIGAMENT
 #define LIGAMENT 10.0f
 #endif
-#ifndef BAKED
-#define BAKED 0
-#endif
-#if BAKED
-#ifndef BT0
-#error "BAKED needs the topology words BT0 .. BT7"
-#endif
-#define BTOP(k) ((k) == 0 ? (unsigned)(BT0) : (k) == 1 ? (unsigned)(BT1) : (k) == 2 ? (unsigned)(BT2) : (k) == 3 ? (unsigned)(BT3) : (k) == 4 ? (unsigned)(BT4) : (k) == 5 ? (unsigned)(BT5) : (k) == 6 ? (unsigned)(BT6) : (unsigned)(BT7))
-#define TOPOK(k) BTOP(k)
-#else
-#define TOPOK(k) topo[k]
-#endif
-// 1: the muscle state words live in registers; 0: in an L2 scratch, read
-// and written once per muscle and substep (today's muscle model).
-#ifndef MSTATE_REGS
-#define MSTATE_REGS 0
-#endif
-// Unrolling of the loops over a lane's muscles (MPL with the state in
-// registers, which index it).
-// MC: every creature has exactly MC muscles (a baked plan), so the loop is
-// fully unrolled with no counts to test.
-#ifdef MC
-#define MUSCLE_LOOP MC
-#else
-#define MUSCLE_LOOP MPL
-#endif
-#ifndef MUSCLE_UNROLL
-#if MSTATE_REGS && !MUSCLE_MODEL
-#define MUSCLE_UNROLL MPL
-#elif defined(MC) && LAGGED_FACTOR
-#define MUSCLE_UNROLL 4
-#elif defined(MC)
-#define MUSCLE_UNROLL MC
-#else
-#define MUSCLE_UNROLL 1
-#endif
-#endif
-// Developer switches for finding instabilities.
-#ifndef NO_MUSCLES
-#define NO_MUSCLES 0
-#endif
-#ifndef NO_CONTACT
-#define NO_CONTACT 0
-#endif
-#ifndef NO_DAMP
-#define NO_DAMP 0
-#endif
-#ifndef USE_STASH
-#define USE_STASH 1
-#endif
-#ifndef NO_LEDGER
-#define NO_LEDGER 0
-#endif
-#ifndef NO_FRICTION
-#define NO_FRICTION 0
-#endif
 // 1: the momentum and angular ledgers of the contact impulses are enforced
 // every substep (the stub's rule); 0: audit only (the host's audit tools).
 #ifndef LEDGER
 #define LEDGER 1
 #endif
-#if W != 1 && W != 2
-#error "W is 1 or 2"
+#define MUSCLE_DAMPER 0.15f
+#define JOINT_LIMIT 2.2f
+#define SPIN_CAP 15.0f
+#define RESULT_STRIDE 3
+#if (MUSCLE_MODEL || CONTACT_MODEL || LAGGED_FACTOR || LIMITS_AS_IMPULSES) && MUSCLE_STEP
+#error "the lean variants run the muscles every substep (MUSCLE_STEP 0)"
 #endif
-#if W == 1 && !(CONTACT_MODEL && MUSCLE_MODEL)
-#error "W = 1 is the lean physics: it needs MUSCLE_MODEL=1 and CONTACT_MODEL=1"
-#endif
-#if BAKED && W != 1
-#error "BAKED is implemented for W = 1"
+#if W != 2
+#error "the stub implements the W = 2 exchange only"
 #endif
 
-#if W == 2
 #define NPL 4
-#define LOGNPL 2
-#define SW 44
-#define FRCW 16
-#else
-#define NPL 8
-#define LOGNPL 3
-#define SW 48
-#define FRCW 32
-#endif
 #define RATE 60.0f
 #define DT (1.0f / RATE)
 #define HS (DT / SUBSTEPS)
+// The muscles' time step: the step when they run once per step.
+#define MHS (MUSCLE_STEP ? DT : HS)
 #define INV_HS (RATE * SUBSTEPS)
 #define NC 4
 #define NE (2 * NC)
@@ -204,33 +271,12 @@
 #define AIR_DRAG 0.6f
 #define INV_JOINT_DAMPING 10.0f
 #define MUSCLE_RECOVERY 0.5f
-#define MUSCLE_DAMPER 0.15f
 #define COMPLIANCE 0.1f
-#define JOINT_LIMIT 2.2f
-#define SPIN_CAP 15.0f
+#define RF 40
+// The rest angle of each joint to its parent (cos, sin), for the limits.
+#define LIM_C0(k) REC(32, k)
+#define LIM_S0(k) REC(36, k)
 #define SPEED_CLAMP 20.0f
-// The lane record, in fields of NPL floats per lane: inverse mass, radius,
-// friction, x, y, rest length, topology word, pivot inverse mass, the rest
-// angle of the joint to the parent (cos, sin), and the rod's drag coefficient,
-// drag limit and damping gain (static per rod, folded at pack time).
-#define F_INVM 0
-#define F_RAD (1 * NPL)
-#define F_MU (2 * NPL)
-#define F_X (3 * NPL)
-#define F_Y (4 * NPL)
-#define F_LEN (5 * NPL)
-#define F_TOPO (6 * NPL)
-#define F_PINV (7 * NPL)
-#define F_C0 (8 * NPL)
-#define F_S0 (9 * NPL)
-#define F_DRAG (10 * NPL)
-#define F_MLIM (11 * NPL)
-#define F_MROD (12 * NPL)
-#define RF (13 * NPL)
-#define RESULT_STRIDE 3
-// Result words, in float4s: 0: com x, head below neck, lowest point, steps;
-// 1: rounds or normal residual, contact nodes, drift, power; 2: rod
-// residual, angular ledger residual, stamina, rounds.
 
 struct Params {
     unsigned count;
@@ -244,30 +290,40 @@ struct Params {
 };
 
 __device__ __forceinline__ float clampf(float x, float lo, float hi) { return fminf(fmaxf(x, lo), hi); }
-// Reciprocal by the hardware approximation: one MUFU, no refinement.
 __device__ __forceinline__ float frcp(float x) {
+#if FASTRCP
     float r;
     asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
     return r;
+#else
+    return 1.0f / x;
+#endif
 }
-// Two floats as a half pair (low, high), and back.
-__device__ __forceinline__ unsigned pack_h2(float lo, float hi) {
-    unsigned r;
-    asm("cvt.rn.f16x2.f32 %0, %1, %2;" : "=r"(r) : "f"(hi), "f"(lo));
+// Reciprocal square root and square root by the hardware approximations
+// (FASTRCP): one MUFU each instead of the library's range handling.
+__device__ __forceinline__ float frsq(float x) {
+#if FASTRCP
+    float r;
+    asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
     return r;
+#else
+    return rsqrtf(x);
+#endif
 }
-__device__ __forceinline__ float2 unpack_h2(unsigned v) {
-    float x, y;
-    asm("{\n.reg .b16 a, b;\nmov.b32 {a, b}, %2;\ncvt.f32.f16 %0, a;\ncvt.f32.f16 %1, b;\n}" : "=f"(x), "=f"(y) : "r"(v));
-    return make_float2(x, y);
+__device__ __forceinline__ float fsqrt(float x) {
+#if FASTRCP
+    float r;
+    asm("sqrt.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
+    return r;
+#else
+    return sqrtf(x);
+#endif
 }
+// A value select that keeps both operands values (a select between two array
+// addresses would keep the arrays out of registers).
+__device__ __forceinline__ float pick(bool c, float a, float b) { return c ? a : b; }
 __device__ __forceinline__ float xch(float v) { return __shfl_xor_sync(FULL, v, 1); }
 __device__ __forceinline__ unsigned xchu(unsigned v) { return __shfl_xor_sync(FULL, v, 1); }
-#if W == 2
-#define XSUM(v) ((v) + xch(v))
-#else
-#define XSUM(v) (v)
-#endif
 __device__ __forceinline__ float wave(float t, float inv_period, float phase, float offset, float duty, float inv_duty, float inv_complement) {
     const float x = t * inv_period + phase + offset;
     const float ph = x - floorf(x);
@@ -275,6 +331,20 @@ __device__ __forceinline__ float wave(float t, float inv_period, float phase, fl
     const float arg = rise ? ph * inv_duty : (ph - duty) * inv_complement;
     const float half = rise ? 0.5f : -0.5f;
     return 0.5f + half * __cosf(PI_F * arg);
+}
+// The wave's time derivative: WAVE 1 the raised cosine's, WAVE 2 a
+// triangle wave's with the same extremes (a constant rate per phase).
+__device__ __forceinline__ float wave_rate(float t, float inv_period, float phase, float offset, float duty, float inv_duty, float inv_complement) {
+    const float x = t * inv_period + phase + offset;
+    const float ph = x - floorf(x);
+    const bool rise = ph < duty;
+#if WAVE == 1
+    const float arg = rise ? ph * inv_duty : (ph - duty) * inv_complement;
+    const float k = rise ? -0.5f * PI_F * inv_duty : 0.5f * PI_F * inv_complement;
+    return k * inv_period * __sinf(PI_F * arg);
+#else
+    return inv_period * (rise ? -inv_duty : inv_complement);
+#endif
 }
 // Muscle state as one word per muscle: energy as unorm16 in the low half,
 // the step's drive target as the high half of a float (bfloat16).
@@ -293,21 +363,6 @@ __device__ __forceinline__ float2 unpack_bf(unsigned u) {
     return make_float2(__uint_as_float(u << 16u), __uint_as_float(u & 0xffff0000u));
 }
 
-// A record field for all NPL nodes of the lane: two vector loads at W = 1.
-#if W == 1
-// W = 1 records are interleaved across the warp's 32 creatures, in float4s:
-// float4 (group, quad, lane) at ((group x RF/4 + quad) x 32 + lane), so a
-// load by 32 consecutive creatures is 512 contiguous bytes.
-__device__ __forceinline__ void load_field(const float* __restrict__ lanes, size_t cidx, int fld, float (&o)[NPL]) {
-    const float4* p4 = reinterpret_cast<const float4*>(lanes) + (((cidx >> 5) * (RF / 4) + (fld >> 2)) << 5) + (cidx & 31u);
-    const float4 a = __ldg(p4), b = __ldg(p4 + 32);
-    o[0] = a.x; o[1] = a.y; o[2] = a.z; o[3] = a.w; o[4] = b.x; o[5] = b.y; o[6] = b.z; o[7] = b.w;
-}
-#define LOADF(o, fld) load_field(lanes, cidx, (fld), o)
-#else
-#define LOADF(o, fld) do { _Pragma("unroll") for (int k_ = 0; k_ < NPL; k_++) { (o)[k_] = REC(fld, k_); } } while (0)
-#endif
-
 // Rod topology word: pivot node (5 bits), parent rod (5, 31 none), lower
 // siblings kept (2), grandparent node (5, the parent's pivot, 31 none),
 // valid (1).
@@ -317,65 +372,117 @@ __device__ __forceinline__ void load_field(const float* __restrict__ lanes, size
 #define T_GP(t) (((t) >> 12u) & 31u)
 #define T_VALID(t) (((t) >> 17u) & 1u)
 
-// One-hot target of a rod's parent. W = 2: bit q for local rod q, bit 4 + q
-// for lane 0's rod q seen from lane 1, 0 without a parent. W = 1: bit q for
-// rod q. Bit tests instead of index compares keep the compiler from turning
-// register arrays into indexed local memory.
+// One-hot target of a rod's parent: bit q for local rod q, bit 4 + q for
+// lane 0's rod q seen from lane 1, 0 without a parent. Bit tests instead of
+// index compares keep the compiler from turning register arrays into
+// indexed local memory.
 __device__ __forceinline__ unsigned parent_mask(unsigned t, unsigned lg) {
     const unsigned p = T_PARENT(t);
     const unsigned tn = p + 1u;
     const bool hasp = T_VALID(t) && p != 31u;
-#if W == 2
     return hasp ? (((tn >> 2u) != lg) ? (0x10u << (tn & 3u)) : (1u << (tn & 3u))) : 0u;
-#else
-    (void)lg;
-    return hasp ? (1u << tn) : 0u;
-#endif
 }
+
+// BAKED: one bone tree compiled in as constants. The host (bake_defines in
+// examples/lane_stub.rs) writes, per node g (the rod that ends at it; node 0
+// has none), BTOPO (the topology word), BPM (the one-hot of the parent rod as
+// the rod's own lane sees it) and BSR (the kept sibling rank), and per lane
+// the incidence table of contact nodes, BINC0 and BINC1 (byte n: bit k when
+// local rod k ends at node n, bit 4 + k when n is its pivot). Each value used
+// is a select on the lane bit between two literals, which the compiler folds
+// into a literal, the lane predicate or its negation.
+#ifndef BAKED
+#define BAKED 0
+#endif
+#if BAKED
+#define BAKED_TABLES \
+    constexpr unsigned kTopo[8] = {BTOPO}; \
+    constexpr unsigned kPm[8] = {BPM}; \
+    constexpr unsigned kSr[8] = {BSR}; \
+    (void)kTopo; (void)kPm; (void)kSr;
+// The rod at local slot k of lane l (global node 4l + k).
+#define BSEL(tab, k) (lg ? (tab)[4 + (k)] : (tab)[(k)])
+// Sibling couplings a rod keeps on either lane (the clique list).
+#define NEED_SIB(k, a) (kSr[k] >= (unsigned)(a) || kSr[4 + (k)] >= (unsigned)(a))
+// The couplings that cross from lane 1's rods to lane 0's slots (a lane 0 rod
+// has its parent and siblings on lane 0). Bit q of kXQ: lane 0's slot q is the
+// parent or a lower sibling of a lane 1 rod; kXL[q] bit a: the Schur update
+// of lane 0's L entry (q, a) comes from lane 1. Only these are exchanged.
+constexpr unsigned kTopoC[8] = {BTOPO};
+constexpr unsigned kPmC[8] = {BPM};
+__host__ __device__ constexpr unsigned cross_q() {
+    unsigned m = 0u;
+    for (int k = 0; k < NPL; k++) {
+        const unsigned t = kTopoC[4 + k];
+        if (!((t >> 17u) & 1u)) { continue; }
+        for (int q = 1; q < NPL; q++) { if (kPmC[4 + k] & (0x10u << q)) { m |= 1u << q; } }
+        for (int a = 1; a <= (int)((t >> 10u) & 3u); a++) { if (k - a < 0) { m |= 1u << ((4 + k - a) & 3); } }
+    }
+    return m;
+}
+__host__ __device__ constexpr unsigned cross_l(int q) {
+    unsigned m = 0u;
+    for (int k = 0; k < NPL; k++) {
+        const unsigned t = kTopoC[4 + k];
+        if (!((t >> 17u) & 1u)) { continue; }
+        const int sr = (int)((t >> 10u) & 3u);
+        for (int a = 1; a <= sr; a++) {
+            if (k - a < 0 && ((4 + k - a) & 3) == q) { m |= 1u; }
+            for (int b = 1; b < a; b++) { if (k - b < 0 && ((4 + k - b) & 3) == q) { m |= 1u << (a - b); } }
+        }
+    }
+    return m;
+}
+constexpr unsigned kXQ = cross_q();
+constexpr unsigned kXL1 = cross_l(1), kXL2 = cross_l(2), kXL3 = cross_l(3);
+#ifndef XPRUNE
+#define XPRUNE 1
+#endif
+#define XNEED(q) (!XPRUNE || ((kXQ >> (q)) & 1u) != 0u)
+#define XNEED_L(q, a) (!XPRUNE || ((((q) == 1 ? kXL1 : (q) == 2 ? kXL2 : kXL3) >> (a)) & 1u))
+#endif
+
+#if !BAKED
+#define NEED_SIB(k, a) true
+#define BAKED_TABLES
+#define XNEED(q) true
+#define XNEED_L(q, a) true
+#endif
 
 // The LDL^T factor of A = J M^-1 J^T over the creature's rods. `ipv` is the
 // inverse mass of each local rod's pivot, `icm` of its child node; `rdx`,
-// `rdy` hold lane 0's rod directions on lane 1 (W = 2 only).
+// `rdy` hold lane 0's rod directions on lane 1.
 __device__ __forceinline__ void factor(
-    const unsigned (&topo)[NPL], const float (&dx)[NPL], const float (&dy)[NPL],
+    const unsigned (&topo)[NPL], const unsigned (&pmk)[NPL], const float (&dx)[NPL], const float (&dy)[NPL],
     const float (&rdx)[NPL], const float (&rdy)[NPL], const float (&ipv)[NPL], const float (&icm)[NPL],
     unsigned lg, float (&invD)[NPL], float (&Lf)[NPL][NB]) {
+    BAKED_TABLES
     float Dacc[NPL], La[NPL][NB];
 #pragma unroll
     for (int k = 0; k < NPL; k++) {
-        const unsigned t = TOPOK(k);
+        const unsigned t = topo[k];
         const bool valid = T_VALID(t);
         Dacc[k] = valid ? ipv[k] + icm[k] : 1.0f;
-        const unsigned pm = parent_mask(t, lg);
+        const unsigned pm = pmk[k];
         float pdx = 0.0f, pdy = 0.0f;
 #pragma unroll
         for (int q = 0; q < k; q++) {
             if (pm & (1u << q)) { pdx = dx[q]; pdy = dy[q]; }
         }
-#if W == 2
 #pragma unroll
         for (int q = 1; q < NPL; q++) {
             if (pm & (0x10u << q)) { pdx = rdx[q]; pdy = rdy[q]; }
         }
-#endif
         La[k][0] = -(dx[k] * pdx + dy[k] * pdy) * ipv[k];
         const unsigned sr = valid ? T_SR(t) : 0u;
 #pragma unroll
         for (int a = 1; a < NB; a++) {
-#if W == 2
-            const float sdx = (k - a >= 0) ? dx[(k - a) & (NPL - 1)] : rdx[(NPL + k - a) & (NPL - 1)];
-            const float sdy = (k - a >= 0) ? dy[(k - a) & (NPL - 1)] : rdy[(NPL + k - a) & (NPL - 1)];
+            if (!NEED_SIB(k, a)) { La[k][a] = 0.0f; continue; }
+            const float sdx = pick(k - a >= 0, dx[(k - a) & 3], rdx[(4 + k - a) & 3]);
+            const float sdy = pick(k - a >= 0, dy[(k - a) & 3], rdy[(4 + k - a) & 3]);
             La[k][a] = (unsigned)a <= sr ? (dx[k] * sdx + dy[k] * sdy) * ipv[k] : 0.0f;
-#else
-            if (k - a >= 0) {
-                La[k][a] = (unsigned)a <= sr ? (dx[k] * dx[k - a] + dy[k] * dy[k - a]) * ipv[k] : 0.0f;
-            } else {
-                La[k][a] = 0.0f;
-            }
-#endif
         }
     }
-#if W == 2
     float oD[NPL], oL[NPL][NB];
 #pragma unroll
     for (int q = 0; q < NPL; q++) {
@@ -389,19 +496,16 @@ __device__ __forceinline__ void factor(
             // Lane 1's Schur updates of lane 0's rods.
 #pragma unroll
             for (int q = 1; q < NPL; q++) {
+                if (!XNEED(q)) { continue; }
                 Dacc[q] += xch(oD[q]);
 #pragma unroll
-                for (int a = 0; a < NB; a++) { La[q][a] += xch(oL[q][a]); }
+                for (int a = 0; a < NB; a++) { if (XNEED_L(q, a)) { La[q][a] += xch(oL[q][a]); } }
             }
         }
         if (lg == 1u - (unsigned)phase) {
-#else
-    {
-        {
-#endif
 #pragma unroll
             for (int k = NPL - 1; k >= 0; k--) {
-                const unsigned t = TOPOK(k);
+                const unsigned t = topo[k];
                 const bool valid = T_VALID(t);
                 // A rod whose two nodes are both held (projection) has no
                 // pivot: it is left as it is.
@@ -409,43 +513,36 @@ __device__ __forceinline__ void factor(
                 invD[k] = id;
 #pragma unroll
                 for (int a = 0; a < NB; a++) { Lf[k][a] = La[k][a] * id; }
-                const unsigned pm = parent_mask(t, lg);
+                const unsigned pm = pmk[k];
                 const float vp = La[k][0] * Lf[k][0];
 #pragma unroll
                 for (int q = 0; q < k; q++) {
                     if (pm & (1u << q)) { Dacc[q] -= vp; }
                 }
-#if W == 2
 #pragma unroll
                 for (int q = 1; q < NPL; q++) {
                     if (pm & (0x10u << q)) { oD[q] -= vp; }
                 }
-#endif
 #pragma unroll
                 for (int a = 1; a < NB; a++) {
+                    if (!NEED_SIB(k, a)) { continue; }
                     const float va = La[k][a] * Lf[k][a];
                     const float vpa = La[k][a] * Lf[k][0];
                     if (k - a >= 0) {
-                        Dacc[(k - a) & (NPL - 1)] -= va;
-                        La[(k - a) & (NPL - 1)][0] -= vpa;
+                        Dacc[(k - a) & 3] -= va;
+                        La[(k - a) & 3][0] -= vpa;
+                    } else {
+                        oD[(4 + k - a) & 3] -= va;
+                        oL[(4 + k - a) & 3][0] -= vpa;
                     }
-#if W == 2
-                    else {
-                        oD[(NPL + k - a) & (NPL - 1)] -= va;
-                        oL[(NPL + k - a) & (NPL - 1)][0] -= vpa;
-                    }
-#endif
 #pragma unroll
                     for (int b = 1; b < a; b++) {
                         const float vab = La[k][a] * Lf[k][b];
                         if (k - b >= 0) {
-                            La[(k - b) & (NPL - 1)][a - b] -= vab;
+                            La[(k - b) & 3][a - b] -= vab;
+                        } else {
+                            oL[(4 + k - b) & 3][a - b] -= vab;
                         }
-#if W == 2
-                        else {
-                            oL[(NPL + k - b) & (NPL - 1)][a - b] -= vab;
-                        }
-#endif
                     }
                 }
             }
@@ -453,24 +550,24 @@ __device__ __forceinline__ void factor(
     }
 }
 
-#if W == 2
 // Solves A x = z in place for S - 1 rows at once. Row r sits in slot r on
 // lane 1 and in slot r + 1 on lane 0, so the forward pass (lane 1 ahead) and
 // the backward pass (lane 0 ahead, slots in reverse) both run one slot per
 // step in both lanes, with no selects and 3 shuffles per slot and pass.
 template <int S>
-__device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&topo)[NPL],
+__device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&pmk)[NPL],
     const float (&invD)[NPL], const float (&Lf)[NPL][NB], unsigned lg) {
+    BAKED_TABLES
     float inb[NPL] = {0.0f, 0.0f, 0.0f, 0.0f};
 #pragma unroll
     for (int s = 0; s < S; s++) {
         float b[NPL];
 #pragma unroll
-        for (int q = 0; q < NPL; q++) { b[q] = z[s][q] + inb[q]; }
+        for (int q = 0; q < NPL; q++) { b[q] = z[s][q]; if (q >= 1 && XNEED(q)) { b[q] += inb[q]; } }
         float out[NPL] = {0.0f, 0.0f, 0.0f, 0.0f};
 #pragma unroll
         for (int k = NPL - 1; k >= 0; k--) {
-            const unsigned pm = parent_mask(TOPOK(k), lg);
+            const unsigned pm = pmk[k];
             const float y = b[k];
             const float ly = Lf[k][0] * y;
 #pragma unroll
@@ -483,13 +580,14 @@ __device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&
             }
 #pragma unroll
             for (int a = 1; a < NB; a++) {
+                if (!NEED_SIB(k, a)) { continue; }
                 const float v = Lf[k][a] * y;
                 if (k - a >= 0) { b[(k - a) & 3] -= v; } else { out[(4 + k - a) & 3] -= v; }
             }
             z[s][k] = y * invD[k];
         }
 #pragma unroll
-        for (int q = 1; q < NPL; q++) { inb[q] = xch(out[q]); }
+        for (int q = 1; q < NPL; q++) { if (XNEED(q)) { inb[q] = xch(out[q]); } }
     }
     float xin[NPL] = {0.0f, 0.0f, 0.0f, 0.0f};
 #pragma unroll
@@ -498,7 +596,7 @@ __device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&
         float x[NPL];
 #pragma unroll
         for (int k = 0; k < NPL; k++) {
-            const unsigned pm = parent_mask(TOPOK(k), lg);
+            const unsigned pm = pmk[k];
             float xp = 0.0f;
 #pragma unroll
             for (int q = 0; q < k; q++) {
@@ -511,67 +609,16 @@ __device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&
             float acc = z[s][k] - Lf[k][0] * xp;
 #pragma unroll
             for (int a = 1; a < NB; a++) {
-                acc -= Lf[k][a] * ((k - a >= 0) ? x[(k - a) & 3] : xin[(4 + k - a) & 3]);
+                if (!NEED_SIB(k, a)) { continue; }
+                acc -= Lf[k][a] * pick(k - a >= 0, x[(k - a) & 3], xin[(4 + k - a) & 3]);
             }
             x[k] = acc;
             z[s][k] = acc;
         }
 #pragma unroll
-        for (int q = 1; q < NPL; q++) { xin[q] = xch(x[q]); }
+        for (int q = 1; q < NPL; q++) { if (XNEED(q)) { xin[q] = xch(x[q]); } }
     }
 }
-#define SOLVE_ROWS 2
-#define ZSET(z, k, v) do { (z)[0][k] = lg == 1u ? (v) : 0.0f; (z)[1][k] = lg == 1u ? 0.0f : (v); } while (0)
-#define ZGET(z, k) (lg == 1u ? (z)[0][k] : (z)[1][k])
-#else
-// One creature per lane: S independent rows, forward in reverse rod order,
-// backward in rod order, no exchange.
-template <int S>
-__device__ __forceinline__ void tree_solve(float (&z)[S][NPL], const unsigned (&topo)[NPL],
-    const float (&invD)[NPL], const float (&Lf)[NPL][NB], unsigned lg) {
-#pragma unroll
-    for (int s = 0; s < S; s++) {
-        float b[NPL];
-#pragma unroll
-        for (int q = 0; q < NPL; q++) { b[q] = z[s][q]; }
-#pragma unroll
-        for (int k = NPL - 1; k >= 0; k--) {
-            const unsigned pm = parent_mask(TOPOK(k), lg);
-            const float y = b[k];
-            const float ly = Lf[k][0] * y;
-#pragma unroll
-            for (int q = 0; q < k; q++) {
-                if (pm & (1u << q)) { b[q] -= ly; }
-            }
-#pragma unroll
-            for (int a = 1; a < NB; a++) {
-                if (k - a >= 0) { b[k - a] -= Lf[k][a] * y; }
-            }
-            z[s][k] = y * invD[k];
-        }
-        float x[NPL];
-#pragma unroll
-        for (int k = 0; k < NPL; k++) {
-            const unsigned pm = parent_mask(TOPOK(k), lg);
-            float xp = 0.0f;
-#pragma unroll
-            for (int q = 0; q < k; q++) {
-                if (pm & (1u << q)) { xp = x[q]; }
-            }
-            float acc = z[s][k] - Lf[k][0] * xp;
-#pragma unroll
-            for (int a = 1; a < NB; a++) {
-                if (k - a >= 0) { acc -= Lf[k][a] * x[k - a]; }
-            }
-            x[k] = acc;
-            z[s][k] = acc;
-        }
-    }
-}
-#define SOLVE_ROWS 1
-#define ZSET(z, k, v) ((z)[0][k] = (v))
-#define ZGET(z, k) ((z)[0][k])
-#endif
 
 extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
     const uint4* __restrict__ heads,
@@ -584,53 +631,78 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
     float* __restrict__ anch,
     float4* __restrict__ results,
     unsigned* __restrict__ counter,
-    const Params p) {
-    // SW words per lane. NODE: each lane's nodes (position, velocity). FRC:
-    // each lane's private force table over the creature's 8 nodes. Today's
-    // contact solve (W = 2) also uses the same bytes, as words SCR(q, lane
-    // column) with q < 44, for the creature's Delassus matrix (words 0 to 17
-    // of both lane columns) and each lane's rod factor, rod impulses and
-    // directions (words 18 to 41 of its own column), so they leave the
-    // registers. Every warp owns its words; the views never leave it, so
+    const Params p
+#if defined(TRACE) || defined(DUMP) || defined(DUMPW)
+    , volatile unsigned* trace
+#endif
+    ) {
+    // 176 B per lane. NODE: each lane's nodes (position, velocity). FRC:
+    // each lane's private force table over the creature's 8 nodes, then the
+    // node statics for the contact rows, then the rod impulses. During the
+    // contact solve the same bytes, as words SCR(q, lane column) with
+    // q < 44, hold the creature's Delassus matrix (words 0 to 17 of both
+    // lane columns) and each lane's rod factor, rod impulses and directions
+    // (words 18 to 41 of its own column), so they leave the registers.
+    // Every warp owns 44 words per lane; the three views never leave it, so
     // warps at different phases never touch each other's bytes.
-    __shared__ float4 s_mem[(BLOCK / 32) * (SW / 4) * 32];
-    float* const s_warp = reinterpret_cast<float*>(s_mem) + (threadIdx.x >> 5) * (SW * 32);
+    __shared__ float4 s_mem[(BLOCK / 32) * 11 * 32];
+    float* const s_warp = reinterpret_cast<float*>(s_mem) + (threadIdx.x >> 5) * (44 * 32);
     float4* const s_node4 = reinterpret_cast<float4*>(s_warp);
-    float2* const s_frc2 = reinterpret_cast<float2*>(s_warp + FRCW * 32);
+    float2* const s_frc2 = reinterpret_cast<float2*>(s_warp + 16 * 32);
     const unsigned tid = threadIdx.x;
     const unsigned lane = tid & 31u;
-#if W == 2
     const unsigned lg = tid & 1u;
     const unsigned gl = lane & 30u;
     const unsigned gmask = 3u << gl;
-#else
-    const unsigned lg = 0u;
-    const unsigned gl = lane;
-#endif
 #define NODE(k, col) s_node4[(k) * 32 + (col)]
+#if NODE_NMAJOR
+#define NODEW(k) s_node4[(lg * NPL + (k)) * 16 + (lane >> 1)]
+#define NODER(n) s_node4[(n) * 16 + (lane >> 1)]
+#else
+#define NODEW(k) NODE(k, lane)
+#define NODER(n) NODE((n) & 3u, gl + ((n) >> 2u))
+#endif
 #define FRC(g, col) s_frc2[(g) * 32 + (col)]
+// A muscle's end nodes arrive as the bytes v = 32 n: node n's float4 is at byte
+// 256 n + 16 (lane >> 1) of the node table and its force at 256 n + 8 lane of
+// the force table, so a byte scaled by 8 and added to a per-thread base is each
+// address.
+#if NODE_NMAJOR
+#define M_NODE(v) (*reinterpret_cast<const float4*>(reinterpret_cast<const char*>(s_node4) + (((v) << 3) + (lane >> 1) * 16)))
+#define M_FRC(v) (*reinterpret_cast<float2*>(reinterpret_cast<char*>(s_frc2) + (((v) << 3) + lane * 8)))
+#else
+#define M_NODE(v) NODER((v) >> 5)
+#define M_FRC(v) FRC((v) >> 5, lane)
+#endif
 #define SCR(q, col) s_warp[(q) * 32 + (col)]
 #define WAT(idx) SCR((idx) >> 1, gl + ((idx) & 1))
 #define WIJ(i, j) WAT((i) >= (j) ? (i) * ((i) + 1) / 2 + (j) : (j) * ((j) + 1) / 2 + (i))
-    // A node by its creature index: from the shared table, or from the
-    // registers when the tree is compiled in.
-#define NODEAT(a) NODE((a) & (NPL - 1), gl + ((a) >> LOGNPL))
-#if BAKED
-#define NODEV(a) make_float4(px[(a)], py[(a)], vx[(a)], vy[(a)])
-#define SCAT(a, X, Y) do { fx[(a)] += (X); fy[(a)] += (Y); } while (0)
-#else
-#define NODEV(a) NODEAT(a)
-#define SCAT(a, X, Y) do { float2 f_ = FRC((a), lane); f_.x += (X); f_.y += (Y); FRC((a), lane) = f_; } while (0)
-#endif
 
     bool live = false, exhausted = false;
     unsigned cidx = 0u, mc = 0u, step = 0u, warm = 0u, prevc = 0u;
     // Registers hold the state; the statics (radius, friction, rest length,
     // pivot inverse mass) are read from the lane record in L2 when used.
-    float invm[NPL], mass[NPL];
-    unsigned topo[NPL];
-    float px[NPL], py[NPL], vx[NPL], vy[NPL], ax[NPL];
-#if MSTATE_REGS && !MUSCLE_MODEL
+    float invm[NPL];
+    unsigned topo_r[NPL];
+    float px[NPL], py[NPL], vx[NPL], vy[NPL];
+    float srad[NPL], sipv[NPL], smu[NPL], slen[NPL], smass[NPL];
+    float anc_r[NPL];
+    unsigned sensA = 0u, sensB = 0u;
+    // With the state in registers the muscle loops end by skipping, not by
+    // leaving: a loop exit keeps ms[] in local memory.
+#if MSTATE_REGS || MSTATE_FLOATS
+#define MS_LOOP_END continue
+#else
+#define MS_LOOP_END break
+#endif
+#if MSTATE_FLOATS
+    // Energy and the step's drive target as two floats per muscle.
+    float mse[MPL], msd[MPL];
+#define MS_ENERGY(k) mse[k]
+#define MS_DRIVE(k) msd[k]
+#define MS_SET_E(k, v) (mse[k] = (v))
+#define MS_SET_D(k, v) (msd[k] = (v))
+#elif MSTATE_REGS
     unsigned ms[MPL];
 #define MS_GET(k) ms[k]
 #define MS_SET(k, v) (ms[k] = (v))
@@ -638,97 +710,119 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #define MS_GET(k) mstate[mb + (size_t)(k) * W]
 #define MS_SET(k, v) (mstate[mb + (size_t)(k) * W] = (v))
 #endif
+#if !MSTATE_FLOATS
+#define MS_ENERGY(k) unpack_ed(MS_GET(k)).x
+#define MS_DRIVE(k) unpack_ed(MS_GET(k)).y
+#define MS_SET_E(k, v) MS_SET(k, pack_ed((v), unpack_ed(MS_GET(k)).y))
+#define MS_SET_D(k, v) MS_SET(k, pack_ed(unpack_ed(MS_GET(k)).x, (v)))
+#endif
     float msum = 0.0f, rounds_sum = 0.0f, contact_sum = 0.0f, drift_max = 0.0f;
-    float rn_max = 0.0f, rr_max = 0.0f, ang_max = 0.0f, pen_max = 0.0f;
+    // The lean variants: anchors and masses in registers, one stamina store,
+    // the ledgers' total mass, the residuals the DIAG build reports.
+    float lax[NPL], pmass[NPL];
     float st = 1.0f, icap = 0.0f, mtot = 1.0f;
+    float rn_max = 0.0f, rr_max = 0.0f, ang_max = 0.0f, pen_max = 0.0f;
+    for (int k = 0; k < NPL; k++) { lax[k] = 0.0f; pmass[k] = 0.0f; }
 #pragma unroll
     for (int k = 0; k < NPL; k++) {
-        invm[k] = 0.0f; mass[k] = 0.0f; topo[k] = 0u; px[k] = 0.0f; py[k] = 0.0f; vx[k] = 0.0f; vy[k] = 0.0f; ax[k] = 0.0f;
+        invm[k] = 0.0f; topo_r[k] = 0u; px[k] = 0.0f; py[k] = 0.0f; vx[k] = 0.0f; vy[k] = 0.0f;
+        anc_r[k] = __uint_as_float(0x7fc00000u);
+        srad[k] = 0.0f; sipv[k] = 0.0f; smu[k] = 0.0f; slen[k] = 0.0f; smass[k] = 1.0f;
     }
-#if MSTATE_REGS && !MUSCLE_MODEL
+#if MSTATE_REGS
 #pragma unroll
-    for (int k = 0; k < MPL; k++) { ms[k] = 0u; }
+    for (int k = 0; k < MPL; k++) { MS_SET_E(k, 0.0f); MS_SET_D(k, 0.0f); }
 #endif
-#if W == 1
-    // W = 1: the records, the muscle records (A plane, then R plane), the limb
-    // clocks and the held muscle geometry are interleaved across the warp's
-    // 32 creatures, so the loads of a warp are contiguous.
-    const size_t rplane = (size_t)((p.count + 31u) >> 5u) * MPL * 32u;
-#define REC(f, k) lanes[((((size_t)(cidx >> 5) * (RF / 4) + (((f) + (k)) >> 2)) << 5) + (cidx & 31u)) * 4u + (((f) + (k)) & 3u)]
-#define ROFF(limb) roff[((((size_t)(cidx >> 5) * 16u + (limb))) << 5) + (cidx & 31u)]
-#define MSA_A(k) msa[((size_t)(cidx >> 5) * MPL + (k)) * 32u + (cidx & 31u)]
-#define MSA_R(k) msa[rplane + ((size_t)(cidx >> 5) * MPL + (k)) * 32u + (cidx & 31u)]
-#define MHELD(k) (reinterpret_cast<uint2*>(mstate))[((size_t)(cidx >> 5) * MPL + (k)) * 32u + (cidx & 31u)]
+#define REC(f, k) lanes[((size_t)cidx * W + lg) * RF + (f) + (k)]
+#define REC4(f) (*reinterpret_cast<const float4*>(&lanes[((size_t)cidx * W + lg) * RF + (f)]))
+    // Friction anchors per node in L2, NaN when the node has none.
+#if SREG
+#define R_RAD(k) srad[k]
+#define R_IPV(k) sipv[k]
+#define R_MU(k) smu[k]
+#define R_LEN(k) slen[k]
+#define R_MASS(k) smass[k]
 #else
-#define REC(f, k) lanes[((size_t)cidx * RF + (f) + (k)) * W + lg]
-#define ROFF(limb) roff[(size_t)cidx * 16u + (limb)]
-#define MSA_A(k) msa[2u * (mb + (size_t)(k) * W)]
-#define MSA_R(k) msa[2u * (mb + (size_t)(k) * W) + 1u]
-#define MHELD(k) (reinterpret_cast<uint2*>(mstate))[mb + (size_t)(k) * W]
+#define R_RAD(k) REC(4, k)
+#define R_IPV(k) REC(28, k)
+#define R_MU(k) (REC(8, k) * p.friction)
+#define R_LEN(k) REC(20, k)
+#define R_MASS(k) frcp(fmaxf(fmaxf(invm[k], REC(28, k)), 1e-6f))
 #endif
-    // Friction anchors per node in L2, NaN when the node has none (today's
-    // contact model; the lean one keeps them in registers).
-#define ANC(k) anch[((size_t)cidx * NPL + (k)) * W + lg]
+#define ANC(k) anch[((size_t)cidx * W + lg) * NPL + (k)]
+#define ANC4 (*reinterpret_cast<const float4*>(&anch[((size_t)cidx * W + lg) * NPL]))
 #define STASH(q) (reinterpret_cast<volatile float*>(s_warp)[(18 + (q)) * 32 + lane])
 
     for (;;) {
         if (!live && !exhausted) {
             unsigned got = 0u;
-#if W == 2
             if (lg == 0u) { got = atomicAdd(counter, 1u); }
             got = __shfl_sync(gmask, got, tid & 30u);
-#else
-            got = atomicAdd(counter, 1u);
-#endif
             if (got < p.count) {
                 cidx = got;
                 const uint4 h = heads[cidx];
-#if W == 2
                 mc = lg == 0u ? (h.x >> 16u) & 255u : h.x >> 24u;
-#else
-                mc = (h.x >> 8u) & 255u;
-#endif
-                icap = __uint_as_float(h.y);
-                float msl = 0.0f;
-                LOADF(invm, F_INVM);
-                LOADF(px, F_X);
-                LOADF(py, F_Y);
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
-                    topo[k] = BAKED ? TOPOK(k) : __float_as_uint(REC(F_TOPO, k));
+                    invm[k] = REC(0, k);
+                    px[k] = REC(12, k);
+                    py[k] = REC(16, k);
+                    topo_r[k] = __float_as_uint(REC(24, k));
                     vx[k] = 0.0f; vy[k] = 0.0f;
-                    ax[k] = px[k];
-                    mass[k] = invm[k] > 0.0f ? 1.0f / invm[k] : 0.0f;
-                    msl += mass[k];
-#if !CONTACT_MODEL
+#if !SREG && !ANC_REGS
                     ANC(k) = __uint_as_float(0x7fc00000u);
 #endif
                 }
-#if W == 2
-                mtot = msl + __shfl_xor_sync(gmask, msl, 1);
-#else
-                mtot = msl;
-#endif
-#if MUSCLE_MODEL
+#if ANC_REGS
 #pragma unroll
-                for (int k = 0; k < NPL; k++) { ROFF(lg * NPL + k) = 0.0f; }
-#else
-                {
-                    const size_t mb0 = (size_t)cidx * MPL * W + lg;
-#pragma unroll MUSCLE_UNROLL
-                    for (int k = 0; k < MPL; k++) {
-#if MSTATE_REGS
-                        ms[k] = pack_ed(1.0f, 0.0f);
-#else
-                        mstate[mb0 + (size_t)k * W] = pack_ed(1.0f, 0.0f);
+                for (int k = 0; k < NPL; k++) { anc_r[k] = __uint_as_float(0x7fc00000u); }
+#elif SREG
+                *reinterpret_cast<float4*>(&ANC(0)) = make_float4(__uint_as_float(0x7fc00000u), __uint_as_float(0x7fc00000u), __uint_as_float(0x7fc00000u), __uint_as_float(0x7fc00000u));
 #endif
-                        roff[mb0 + (size_t)k * W] = 0.0f;
+#if SREG
+                {
+                    const float4 rd = REC4(4), mu = REC4(8), ln = REC4(20), ip = REC4(28);
+                    srad[0] = rd.x; srad[1] = rd.y; srad[2] = rd.z; srad[3] = rd.w;
+                    smu[0] = mu.x * p.friction; smu[1] = mu.y * p.friction; smu[2] = mu.z * p.friction; smu[3] = mu.w * p.friction;
+                    slen[0] = ln.x; slen[1] = ln.y; slen[2] = ln.z; slen[3] = ln.w;
+                    sipv[0] = ip.x; sipv[1] = ip.y; sipv[2] = ip.z; sipv[3] = ip.w;
+#pragma unroll
+                    for (int k = 0; k < NPL; k++) { smass[k] = frcp(fmaxf(fmaxf(invm[k], sipv[k]), 1e-6f)); }
+                }
+#endif
+                icap = __uint_as_float(h.y);
+                {
+                    float msl = 0.0f;
+#pragma unroll
+                    for (int k = 0; k < NPL; k++) {
+                        lax[k] = px[k];
+                        pmass[k] = invm[k] > 0.0f ? frcp(invm[k]) : 0.0f;
+                        msl += pmass[k];
                     }
+                    mtot = msl + __shfl_xor_sync(gmask, msl, 1);
+                }
+#pragma unroll MUSCLE_UNROLL
+                for (int k = 0; k < MPL; k++) {
+                    const size_t mb = (size_t)cidx * MPL * W + lg;
+                    MS_SET_E(k, 1.0f); MS_SET_D(k, 0.0f);
+                    roff[mb + (size_t)k * W] = 0.0f;
+                }
+#if SENSE_REGS
+                // Each muscle's touchdown sensor (flag and node) once per creature.
+                sensA = 0u; sensB = 0u;
+#pragma unroll
+                for (int k = 0; k < MPL; k++) {
+                    unsigned sv = 0u;
+                    if ((unsigned)k < mc) {
+                        const unsigned pk = __float_as_uint(mss[(size_t)cidx * (2 * MPL * W) + (2 * k + 1) * W + lg].w);
+                        sv = (((pk >> 25u) & 1u) << 3u) | ((pk >> 20u) & 7u);
+                    }
+                    if (k < 8) { sensA |= sv << (4 * k); } else { sensB |= sv << (4 * (k - 8)); }
                 }
 #endif
                 step = 0u; warm = 0u; prevc = 0u; st = 1.0f;
-                msum = 0.0f; rounds_sum = 0.0f; contact_sum = 0.0f; drift_max = 0.0f;
                 rn_max = 0.0f; rr_max = 0.0f; ang_max = 0.0f; pen_max = 0.0f;
+                msum = 0.0f; rounds_sum = 0.0f; contact_sum = 0.0f; drift_max = 0.0f;
                 live = true;
             } else {
                 exhausted = true;
@@ -736,320 +830,347 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                 cidx = 0u;
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
-                    invm[k] = 0.0f; mass[k] = 0.0f; topo[k] = 0u; px[k] = 0.0f; py[k] = 0.0f; vx[k] = 0.0f; vy[k] = 0.0f; ax[k] = 0.0f;
+                    invm[k] = 0.0f; topo_r[k] = 0u; px[k] = 0.0f; py[k] = 0.0f; vx[k] = 0.0f; vy[k] = 0.0f;
                 }
             }
         }
         if (!__any_sync(FULL, live)) { break; }
         const unsigned wm = __reduce_max_sync(FULL, mc);
+        // The rod topology and the parent one-hots: constants per lane when
+        // BAKED, else the record's words (the one-hots hoisted with HOIST,
+        // recomputed at every use without).
+        unsigned topo[NPL];
+#if BAKED
+        BAKED_TABLES
+        unsigned pmk[NPL];
+#pragma unroll
+        for (int k = 0; k < NPL; k++) {
+            topo[k] = BSEL(kTopo, k);
+            pmk[k] = BSEL(kPm, k);
+        }
+#define PMK_AT
+#else
+#pragma unroll
+        for (int k = 0; k < NPL; k++) { topo[k] = topo_r[k]; }
+#if HOIST
+        unsigned pmk[NPL];
+#pragma unroll
+        for (int k = 0; k < NPL; k++) { pmk[k] = parent_mask(topo[k], lg); }
+#define PMK_AT
+#else
+#define PMK_AT unsigned pmk[NPL]; _Pragma("unroll") for (int k_ = 0; k_ < NPL; k_++) { pmk[k_] = parent_mask(topo[k_], lg); }
+#endif
+#endif
         const float t0 = (float)step * DT;
         const size_t mb = (size_t)cidx * MPL * W + lg;
 #if !MUSCLE_MODEL
         // The waveform and drive target, once per step.
 #pragma unroll MUSCLE_UNROLL
         for (int k = 0; k < MPL; k++) {
-            if ((unsigned)k >= wm) { break; }
+            if ((unsigned)k >= wm) { MS_LOOP_END; }
             if ((unsigned)k < mc) {
                 const float4 s0 = mss[(size_t)cidx * (2 * MPL * W) + (2 * k) * W + lg];
                 const float4 s1 = mss[(size_t)cidx * (2 * MPL * W) + (2 * k + 1) * W + lg];
                 const float off = roff[mb + (size_t)k * W];
+#if WAVE == 0
                 const float w1 = wave(t0 + DT, s0.x, s0.y, off, s0.z, s0.w, s1.x);
                 const float w0 = wave(t0, s0.x, s0.y, off, s0.z, s0.w, s1.x);
                 const float target = s1.y * (w1 - w0) * RATE;
+#else
+                const float target = s1.y * wave_rate(t0 + 0.5f * DT, s0.x, s0.y, off, s0.z, s0.w, s1.x);
+#endif
                 const float drive = fmaxf(-target * s1.z * 0.25f, 0.0f);
-                MS_SET(k, pack_ed(unpack_ed(MS_GET(k)).x, drive));
+                MS_SET_D(k, drive);
             }
         }
 #endif
         unsigned cw = 0u;
         unsigned touch = 0u;
-        // Per-step state: forces held over the substeps, the rod geometry and
-        // its factor (kept across the substeps when lagged), the centre of
-        // mass and inertia of the ledger.
-        float fx[NPL], fy[NPL];
-        float dx[NPL], dy[NPL], rdx[NPL], rdy[NPL], ilr[NPL], rhs0[NPL];
-        float invD[NPL], Lf[NPL][NB];
+#if CONTACT_MODEL || LAGGED_FACTOR
+        // Rod directions and factor, kept across the substeps when lagged.
+        float ldx[NPL], ldy[NPL], lrdx[NPL], lrdy[NPL], lilr[NPL], linvD[NPL], lLf[NPL][NB];
         float cxr = 0.0f, cyr = 0.0f, iic = 0.0f;
+        (void)cxr; (void)cyr; (void)iic;
+#endif
+#if LAGGED_FACTOR
+        float fx[NPL], fy[NPL];
 #pragma unroll
-        for (int k = 0; k < NPL; k++) { fx[k] = 0.0f; fy[k] = 0.0f; rdx[k] = 0.0f; rdy[k] = 0.0f; }
+        for (int k = 0; k < NPL; k++) { fx[k] = 0.0f; fy[k] = 0.0f; }
+#endif
+#if MUSCLE_STEP
+        float mfx[NPL], mfy[NPL];
+#endif
+#if PROJ_ANCHORED
+        // The last substep's rod factor, for a projection with no node held.
+        float pinvD[NPL], pLf[NPL][NB];
+#endif
 #pragma unroll 1
         for (int sub = 0; sub < SUBSTEPS; sub++) {
             const bool geom_now = !LAGGED_FACTOR || sub == 0;
+            (void)geom_now;
             // @S table
             // Node table, and a clear force table.
 #pragma unroll
-            for (int k = 0; k < NPL; k++) { NODE(k, lane) = make_float4(px[k], py[k], vx[k], vy[k]); }
+            for (int k = 0; k < NPL; k++) { NODEW(k) = make_float4(px[k], py[k], vx[k], vy[k]); }
 #pragma unroll
-            for (int g = 0; g < W * NPL; g++) {
-                FRC(g, lane) = make_float2(0.0f, 0.0f);
-            }
+            for (int g = 0; g < W * NPL; g++) { FRC(g, lane) = make_float2(0.0f, 0.0f); }
             __syncwarp();
-            // @S geometry
-            // Rod directions and lengths every substep (the impulses and the
-            // right-hand sides want the current direction); the factor and
-            // the explicit forces once per step when lagged.
-            float lnr[NPL];
+#if !LAGGED_FACTOR
+            float fx[NPL], fy[NPL];
 #pragma unroll
-            for (int k = 0; k < NPL; k++) {
-                const unsigned t = TOPOK(k);
-                dx[k] = 0.0f; dy[k] = 0.0f; ilr[k] = 0.0f; lnr[k] = 0.0f;
-                if (T_VALID(t)) {
-                    const unsigned a = T_PIVOT(t);
-                    const float4 na = NODEV(a);
-                    const float ddx = px[k] - na.x, ddy = py[k] - na.y;
-                    const float d2 = ddx * ddx + ddy * ddy;
-                    const float il = rsqrtf(fmaxf(d2, 1e-12f));
-                    dx[k] = ddx * il; dy[k] = ddy * il; ilr[k] = il; lnr[k] = d2 * il;
-                }
-            }
-#if W == 2
-#pragma unroll
-            for (int q = 0; q < NPL; q++) { rdx[q] = xch(dx[q]); rdy[q] = xch(dy[q]); }
+            for (int k = 0; k < NPL; k++) { fx[k] = 0.0f; fy[k] = 0.0f; }
 #endif
-            if (geom_now) {
-                // @S factor
-                float ipv[NPL];
-                LOADF(ipv, F_PINV);
-                factor(topo, dx, dy, rdx, rdy, ipv, invm, lg, invD, Lf);
-                // @S forces
-                // Air drag at each rod's midpoint, half to each node, and joint
-                // damping as a couple on the rod and the opposite on its parent;
-                // with the lagged factor once per step and held.
-#pragma unroll
-                for (int k = 0; k < NPL; k++) { fx[k] = 0.0f; fy[k] = 0.0f; }
-                float drg[NPL], mlm[NPL], mrd[NPL], rcr[NPL], rsr[NPL];
-                LOADF(drg, F_DRAG); LOADF(mlm, F_MLIM); LOADF(mrd, F_MROD);
-#if LIMITS_AS_IMPULSES
-                if (sub == 0) { LOADF(rcr, F_C0); LOADF(rsr, F_S0); }
-#endif
-#pragma unroll
-                for (int k = 0; k < NPL; k++) {
-                    const unsigned t = TOPOK(k);
-                    if (T_VALID(t) && !NO_DAMP) {
-                        const unsigned a = T_PIVOT(t);
-                        const float4 na = NODEV(a);
-                        const float il = ilr[k], l = lnr[k];
-                        const float wx = 0.5f * (vx[k] + na.z), wy = 0.5f * (vy[k] + na.w);
-                        const float speed = sqrtf(wx * wx + wy * wy);
-                        const float strength = fminf(drg[k] * l * speed, mlm[k]);
-                        const float hx = -0.5f * wx * strength, hy = -0.5f * wy * strength;
-                        fx[k] += hx; fy[k] += hy;
-                        float fax = hx, fay = hy;
-                        const float rvx = vx[k] - na.z, rvy = vy[k] - na.w;
-                        const float w_rod = (dx[k] * rvy - dy[k] * rvx) * il;
-                        const unsigned g = T_GP(t);
-                        float w_par = 0.0f, dxp = 0.0f, dyp = 0.0f, ilp = 0.0f;
-                        if (g != 31u) {
-#if BAKED
-                            const unsigned pr = T_PARENT(t);
-                            dxp = dx[pr]; dyp = dy[pr]; ilp = ilr[pr];
+#if MUSCLE_STEP
+            // Muscles once per step, their node forces held in registers.
+            if (sub == 0) {
+                // Muscles.
+#pragma unroll MUSCLE_UNROLL
+                for (int k = 0; k < MPL; k++) {
+                    if ((unsigned)k >= wm) { MS_LOOP_END; }
+                    if ((unsigned)k < mc && !NO_MUSCLES) {
+                        const float4 A = msa[mb + (size_t)k * W];
+                        const float2 B = msb[mb + (size_t)k * W];
+                        const unsigned pk = __float_as_uint(A.x);
+                        const unsigned na_ = pk & 255u, nb_ = (pk >> 8u) & 255u, nc_ = (pk >> 16u) & 255u, nd_ = pk >> 24u;
+                        const float4 e0 = M_NODE(na_);
+                        const float4 e1 = M_NODE(nb_);
+                        const float4 e2 = M_NODE(nc_);
+                        const float4 e3 = M_NODE(nd_);
+                        const float2 an = unpack_un(__float_as_uint(A.y));
+                        const float2 hc = unpack_bf(__float_as_uint(B.y));
+                        const float cap = A.z, tendon_k = A.w, slack = B.x, hill = hc.x, inv_capacity = hc.y;
+                        const float pax = e0.x + (e1.x - e0.x) * an.x, pay = e0.y + (e1.y - e0.y) * an.x;
+                        const float vax = e0.z + (e1.z - e0.z) * an.x, vay = e0.w + (e1.w - e0.w) * an.x;
+                        const float pbx = e2.x + (e3.x - e2.x) * an.y, pby = e2.y + (e3.y - e2.y) * an.y;
+                        const float vbx = e2.z + (e3.z - e2.z) * an.y, vby = e2.w + (e3.w - e2.w) * an.y;
+                        const float ddx = pbx - pax, ddy = pby - pay;
+#if FASTRCP
+                        const float inverse = frsq(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                        const float length = (ddx * ddx + ddy * ddy) * inverse;
 #else
-                            const float4 ng0 = NODEV(g);
-                            const float pdx = na.x - ng0.x, pdy = na.y - ng0.y;
-                            ilp = rsqrtf(fmaxf(pdx * pdx + pdy * pdy, 1e-12f));
-                            dxp = pdx * ilp; dyp = pdy * ilp;
+                        const float length = fmaxf(sqrtf(ddx * ddx + ddy * ddy), 1e-6f);
+                        const float inverse = 1.0f / length;
 #endif
-                            const float4 ng = NODEV(g);
-                            w_par = (dxp * (na.w - ng.w) - dyp * (na.z - ng.z)) * ilp;
-                        }
-                        const float tau = mrd[k] * l * l * (w_rod - w_par);
-                        const float tl = tau * il;
-                        fx[k] += -dy[k] * tl; fy[k] += dx[k] * tl;
-                        fax -= -dy[k] * tl; fay -= dx[k] * tl;
-                        float fgx = 0.0f, fgy = 0.0f;
-                        if (g != 31u) {
-                            // The parent rod takes -tau.
-                            const float tp = tau * ilp;
-                            fax -= -dyp * tp; fay -= dxp * tp;
-                            fgx = -dyp * tp; fgy = dxp * tp;
-#if LIMITS_AS_IMPULSES
-                            // The joint's limit and the spin cap, once per
-                            // step: the relative angular velocity is held in
-                            // [lo, hi], where hi is the rate that reaches the
-                            // limit within the step (or recovers from past
-                            // it) and the spin cap bounds both. The angular
-                            // impulse is a couple on the rod and the
-                            // opposite on its parent, softened by the
-                            // ligament's compliance.
-                            if (sub == 0) {
-                                const float cs = dxp * dx[k] + dyp * dy[k], sn = dxp * dy[k] - dyp * dx[k];
-                                const float rc = cs * rcr[k] + sn * rsr[k];
-                                const float rs = sn * rcr[k] - cs * rsr[k];
-                                const float th = 2.0f * rs * frcp(1.0f + rc + 1e-3f);
-                                const float wrel = w_rod - w_par;
-                                const float hi = clampf((JOINT_LIMIT - th) * RATE, -SPIN_CAP, SPIN_CAP);
-                                const float lo = clampf((-JOINT_LIMIT - th) * RATE, -SPIN_CAP, SPIN_CAP);
-                                const float dw = clampf(wrel, lo, hi) - wrel;
-                                const float ipp = ipv[k];
-                                const float iinv = (invm[k] + ipp) * il * il + (ipp + ipp) * ilp * ilp;
-                                // With the held forces the impulse is spread over the step's substeps.
-                                const float jf = dw * frcp(iinv + LIGAMENT) * (LAGGED_FACTOR ? RATE : INV_HS);
-                                const float cx = -dy[k] * jf * il, cy = dx[k] * jf * il;
-                                const float qx = -dyp * jf * ilp, qy = dxp * jf * ilp;
-                                fx[k] += cx; fy[k] += cy;
-                                fax += -cx - qx; fay += -cy - qy;
-                                fgx += qx; fgy += qy;
-                            }
-#endif
-                            SCAT(g, fgx, fgy);
-                        }
-                        SCAT(a, fax, fay);
+                        const float dirx = ddx * inverse, diry = ddy * inverse;
+                        const float relative = (vbx - vax) * dirx + (vby - vay) * diry;
+                        float energy = MS_ENERGY(k);
+                        float drive = MS_DRIVE(k) * energy;
+                        if (hill > 0.0f) { drive *= clampf(1.0f + relative * hill, 0.0f, 1.0f); }
+                        const float magnitude = clampf(drive + relative * 0.15f, -cap, cap);
+                        const float work = fminf(drive, cap) * fmaxf(-relative, 0.0f) * MHS;
+                        energy = clampf(energy - work * inv_capacity + MUSCLE_RECOVERY * p.recovery * MHS * (1.0f - energy), 0.0f, 1.0f);
+                        MS_SET_E(k, energy);
+                        const float stretch = fmaxf(length - slack, 0.0f);
+                        const float pull = magnitude + tendon_k * stretch;
+                        const float gx = dirx * pull, gy = diry * pull;
+                        msum += magnitude * relative;
+                        float2 f;
+                        f = M_FRC(na_); f.x += (1.0f - an.x) * gx; f.y += (1.0f - an.x) * gy; M_FRC(na_) = f;
+                        f = M_FRC(nb_); f.x += an.x * gx; f.y += an.x * gy; M_FRC(nb_) = f;
+                        f = M_FRC(nc_); f.x -= (1.0f - an.y) * gx; f.y -= (1.0f - an.y) * gy; M_FRC(nc_) = f;
+                        f = M_FRC(nd_); f.x -= an.y * gx; f.y -= an.y * gy; M_FRC(nd_) = f;
                     }
                 }
-#if LAGGED_FACTOR && !BAKED
-                // Fold the shared force table into the held forces.
                 __syncwarp();
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
                     const unsigned g = lg * NPL + k;
-                    const float2 f0 = FRC(g, lane);
-#if W == 2
-                    const float2 f1 = FRC(g, lane ^ 1u);
-                    fx[k] += f0.x + f1.x; fy[k] += f0.y + f1.y;
-#else
-                    fx[k] += f0.x; fy[k] += f0.y;
-#endif
+                    const float2 f0 = FRC(g, lane), f1 = FRC(g, lane ^ 1u);
+                    mfx[k] = f0.x + f1.x; mfy[k] = f0.y + f1.y;
                 }
                 __syncwarp();
 #pragma unroll
                 for (int g = 0; g < W * NPL; g++) { FRC(g, lane) = make_float2(0.0f, 0.0f); }
                 __syncwarp();
-#endif
             }
-#if MUSCLE_MODEL && LAGGED_FACTOR && !MUSCLE_ANCHORS && !defined(NO_HOLD)
-#define MUSCLE_HELD 1
-#else
-#define MUSCLE_HELD 0
-#endif
-#if MUSCLE_HELD
-            // @S muscles
-            // Muscles: two nodes, no state. A trapezoid of period, phase and
-            // duty with a ramp of two substeps on each edge, since the step's
-            // start or the limb's last touchdown; force = cap x strength x
-            // a(t) x stamina x Hill, pull only, with the damper. The record's
-            // end fields are shared-table offsets, so a node is one add away.
-            float pw = 0.0f;
-            const float tsub = t0 + (float)sub * HS;
-#pragma unroll MUSCLE_UNROLL
-            for (int k = 0; k < MUSCLE_LOOP; k++) {
-#ifndef MC
-                if ((unsigned)k >= wm) { break; }
-                if ((unsigned)k < mc && !NO_MUSCLES) {
-#else
-                {
-#endif
-                    const float4 A = MSA_A(k);
-                    const unsigned pk = __float_as_uint(A.x);
-#if W == 1
-                    const unsigned oa = pk & 0xfffu, ob = (pk >> 12u) & 0xfffu;
-                    char* const ncol = reinterpret_cast<char*>(s_node4) + lane * 16u;
-                    char* const fcol = reinterpret_cast<char*>(s_frc2) + lane * 8u;
-                    const float4 e0 = *reinterpret_cast<float4*>(ncol + oa), e1 = *reinterpret_cast<float4*>(ncol + ob);
-                    const unsigned limb = (pk >> 24u) & 15u;
-#else
-                    const unsigned ea = (pk >> 5u) & 31u, eb = (pk >> 15u) & 31u;
-                    const float4 e0 = NODEAT(ea), e1 = NODEAT(eb);
-                    const unsigned limb = ((pk >> 25u) & 1u) ? ((pk >> 20u) & 31u) : 8u;
-#endif
-                    uint2* const hp = &MHELD(k);
-                    float dirx, diry, a0, a1;
-                    if (sub == 0) {
-                        // The step's geometry and activation, held for the
-                        // substeps: the direction and the activation at the
-                        // step's two ends, as half pairs.
-                        const float4 R = MSA_R(k);
-                        const float td = __ldcg(&ROFF(limb));
-                        const float x0 = (t0 - td) * R.x + R.y;
-                        const float p0 = x0 - floorf(x0);
-                        const float x1 = x0 + DT * R.x;
-                        const float p1 = x1 - floorf(x1);
-                        a0 = clampf((R.z - fabsf(p0 - R.z)) * R.w, 0.0f, 1.0f);
-                        a1 = clampf((R.z - fabsf(p1 - R.z)) * R.w, 0.0f, 1.0f);
-                        const float ddx = e1.x - e0.x, ddy = e1.y - e0.y;
-                        const float inv = rsqrtf(ddx * ddx + ddy * ddy + 1e-12f);
-                        dirx = ddx * inv; diry = ddy * inv;
-                        *hp = make_uint2(pack_h2(dirx, diry), pack_h2(a0, a1));
-                    } else {
-                        const uint2 hv = *hp;
-                        const float2 fd = unpack_h2(hv.x);
-                        const float2 fa = unpack_h2(hv.y);
-                        dirx = fd.x; diry = fd.y; a0 = fa.x; a1 = fa.y;
+            // Air drag at each rod's midpoint, half to each node, and joint
+            // damping as a couple on the rod and the opposite on its parent.
+#pragma unroll
+            for (int k = 0; k < NPL; k++) {
+                const unsigned t = topo[k];
+                if (T_VALID(t) && !NO_DAMP) {
+                    const unsigned a = T_PIVOT(t);
+                    const float4 na = NODER(a);
+                    const float ddx = px[k] - na.x, ddy = py[k] - na.y;
+                    const float il = frsq(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                    const float l = (ddx * ddx + ddy * ddy) * il;
+                    const float wx = 0.5f * (vx[k] + na.z), wy = 0.5f * (vy[k] + na.w);
+                    const float speed = fsqrt(wx * wx + wy * wy);
+                    const float m = R_MASS(k);
+                    const float strength = fminf(AIR_DRAG * l * (R_RAD(k) * 2.0f) * speed, 0.5f * m * INV_HS);
+                    const float hx = -0.5f * wx * strength, hy = -0.5f * wy * strength;
+                    fx[k] += hx; fy[k] += hy;
+                    float2 fa = FRC(a, lane);
+                    fa.x += hx; fa.y += hy;
+                    const float rvx = vx[k] - na.z, rvy = vy[k] - na.w;
+                    const float w_rod = (ddx * rvy - ddy * rvx) * il * il;
+                    const unsigned g = T_GP(t);
+                    float w_par = 0.0f, pdx = 0.0f, pdy = 0.0f, pil = 0.0f;
+                    if (g != 31u) {
+                        const float4 ng = NODER(g);
+                        pdx = na.x - ng.x; pdy = na.y - ng.y;
+                        pil = frsq(fmaxf(pdx * pdx + pdy * pdy, 1e-12f));
+                        w_par = (pdx * (na.w - ng.w) - pdy * (na.z - ng.z)) * pil * pil;
                     }
-                    const float act = a0 + (a1 - a0) * (((float)sub + 0.5f) * (1.0f / SUBSTEPS));
-                    const float rel = (e1.z - e0.z) * dirx + (e1.w - e0.w) * diry;
-                    const float cap = A.y;
-                    const float drive = cap * act * st * clampf(1.0f + rel * A.z, 0.0f, 1.0f);
-                    const float mag = clampf(drive + rel * MUSCLE_DAMPER, -cap, cap);
-                    pw += drive * fmaxf(-rel, 0.0f);
-#ifdef DIAG
-                    msum += mag * rel;
-#endif
-                    const float gx = dirx * mag, gy = diry * mag;
-                    float2 f;
-#if W == 1
-                    float2* const fa_ = reinterpret_cast<float2*>(fcol + (oa >> 1));
-                    float2* const fb_ = reinterpret_cast<float2*>(fcol + (ob >> 1));
-                    f = *fa_; f.x += gx; f.y += gy; *fa_ = f;
-                    f = *fb_; f.x -= gx; f.y -= gy; *fb_ = f;
-#else
-                    f = FRC(ea, lane); f.x += gx; f.y += gy; FRC(ea, lane) = f;
-                    f = FRC(eb, lane); f.x -= gx; f.y -= gy; FRC(eb, lane) = f;
-#endif
+                    const float tau = -m * l * l * (w_rod - w_par) * INV_JOINT_DAMPING;
+                    const float cf = tau * il * il;
+                    fx[k] += -ddy * cf; fy[k] += ddx * cf;
+                    fa.x -= -ddy * cf; fa.y -= ddx * cf;
+                    if (g != 31u) {
+                        // The parent rod takes -tau.
+                        const float pc = tau * pil * pil;
+                        fa.x -= -pdy * pc; fa.y -= pdx * pc;
+                        float2 fg = FRC(g, lane);
+                        fg.x += -pdy * pc; fg.y += pdx * pc;
+                        FRC(a, lane) = fa;
+                        FRC(g, lane) = fg;
+                    } else {
+                        FRC(a, lane) = fa;
+                    }
                 }
             }
-            pw = XSUM(pw);
-            st = clampf(st - pw * HS * icap + MUSCLE_RECOVERY * p.recovery * HS * (1.0f - st), 0.0f, 1.0f);
+            __syncwarp();
 #else
-            // @S muscles
+            // @S forces
+            // Air drag at each rod's midpoint, half to each node, and joint
+            // damping as a couple on the rod and the opposite on its parent;
+            // with the lagged factor once per step and held.
+            if (geom_now) {
+#if LAGGED_FACTOR
+#pragma unroll
+            for (int k = 0; k < NPL; k++) { fx[k] = 0.0f; fy[k] = 0.0f; }
+#endif
+#pragma unroll
+            for (int k = 0; k < NPL; k++) {
+                const unsigned t = topo[k];
+                if (T_VALID(t) && !NO_DAMP) {
+                    const unsigned a = T_PIVOT(t);
+                    const float4 na = NODER(a);
+                    const float ddx = px[k] - na.x, ddy = py[k] - na.y;
+                    const float il = frsq(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                    const float l = (ddx * ddx + ddy * ddy) * il;
+                    const float wx = 0.5f * (vx[k] + na.z), wy = 0.5f * (vy[k] + na.w);
+                    const float speed = fsqrt(wx * wx + wy * wy);
+                    const float m = R_MASS(k);
+                    const float strength = fminf(AIR_DRAG * l * (R_RAD(k) * 2.0f) * speed, 0.5f * m * INV_HS);
+                    const float hx = -0.5f * wx * strength, hy = -0.5f * wy * strength;
+                    fx[k] += hx; fy[k] += hy;
+                    float2 fa = FRC(a, lane);
+                    fa.x += hx; fa.y += hy;
+                    const float rvx = vx[k] - na.z, rvy = vy[k] - na.w;
+                    const float w_rod = (ddx * rvy - ddy * rvx) * il * il;
+                    const unsigned g = T_GP(t);
+                    float w_par = 0.0f, pdx = 0.0f, pdy = 0.0f, pil = 0.0f;
+                    if (g != 31u) {
+                        const float4 ng = NODER(g);
+                        pdx = na.x - ng.x; pdy = na.y - ng.y;
+                        pil = frsq(fmaxf(pdx * pdx + pdy * pdy, 1e-12f));
+                        w_par = (pdx * (na.w - ng.w) - pdy * (na.z - ng.z)) * pil * pil;
+                    }
+                    const float tau = -m * l * l * (w_rod - w_par) * INV_JOINT_DAMPING;
+                    const float cf = tau * il * il;
+                    fx[k] += -ddy * cf; fy[k] += ddx * cf;
+                    fa.x -= -ddy * cf; fa.y -= ddx * cf;
+                    float2 fg = make_float2(0.0f, 0.0f);
+                    if (g != 31u) {
+                        // The parent rod takes -tau.
+                        const float pc = tau * pil * pil;
+                        fa.x -= -pdy * pc; fa.y -= pdx * pc;
+                        fg = make_float2(-pdy * pc, pdx * pc);
+#if LIMITS_AS_IMPULSES
+                        // The joint's limit and the spin cap, once per step:
+                        // the relative angular velocity is held in [lo, hi],
+                        // where hi is the rate that reaches the limit within
+                        // the step (or recovers from past it) and the spin
+                        // cap bounds both. The angular impulse is a couple on
+                        // the rod and the opposite on its parent, softened by
+                        // the ligament's compliance; with the held forces it
+                        // is spread over the step's substeps.
+                        if (sub == 0) {
+                            const float dxk = ddx * il, dyk = ddy * il, dpx = pdx * pil, dpy = pdy * pil;
+                            const float cs = dpx * dxk + dpy * dyk, sn = dpx * dyk - dpy * dxk;
+                            const float c0 = LIM_C0(k), s0 = LIM_S0(k);
+                            const float rc = cs * c0 + sn * s0;
+                            const float rs = sn * c0 - cs * s0;
+                            const float th = 2.0f * rs * frcp(1.0f + rc + 1e-3f);
+                            const float wrel = w_rod - w_par;
+                            const float hi = clampf((JOINT_LIMIT - th) * RATE, -SPIN_CAP, SPIN_CAP);
+                            const float lo = clampf((-JOINT_LIMIT - th) * RATE, -SPIN_CAP, SPIN_CAP);
+                            const float dw = clampf(wrel, lo, hi) - wrel;
+                            const float ipp = R_IPV(k);
+                            const float iinv = (invm[k] + ipp) * il * il + (ipp + ipp) * pil * pil;
+                            const float jf = dw * frcp(iinv + LIGAMENT) * (LAGGED_FACTOR ? RATE : INV_HS);
+                            const float cx = -dyk * jf * il, cy = dxk * jf * il;
+                            const float qx = -dpy * jf * pil, qy = dpx * jf * pil;
+                            fx[k] += cx; fy[k] += cy;
+                            fa.x += -cx - qx; fa.y += -cy - qy;
+                            fg.x += qx; fg.y += qy;
+                        }
+#endif
+                        float2 fgt = FRC(g, lane);
+                        fgt.x += fg.x; fgt.y += fg.y;
+                        FRC(a, lane) = fa;
+                        FRC(g, lane) = fgt;
+                    } else {
+                        FRC(a, lane) = fa;
+                    }
+                }
+            }
+#if LAGGED_FACTOR
+            // Fold the shared force table into the held forces.
+            __syncwarp();
+#pragma unroll
+            for (int k = 0; k < NPL; k++) {
+                const unsigned g = lg * NPL + k;
+                const float2 f0 = FRC(g, lane), f1 = FRC(g, lane ^ 1u);
+                fx[k] += f0.x + f1.x; fy[k] += f0.y + f1.y;
+            }
+            __syncwarp();
+#pragma unroll
+            for (int g = 0; g < W * NPL; g++) { FRC(g, lane) = make_float2(0.0f, 0.0f); }
+            __syncwarp();
+#endif
+            }
 #if MUSCLE_MODEL
+            // @S muscles
             // Muscles: two nodes, no state. A trapezoid of period, phase and
             // duty with a ramp of two substeps on each edge, since the step's
             // start or the limb's last touchdown; force = cap x strength x
-            // a(t) x stamina x Hill, pull only, with the damper. The record's
-            // end fields are shared-table offsets, so a node is one add away.
+            // a(t) x stamina x Hill, pull only, with the damper.
             float pw = 0.0f;
             const float tsub = t0 + (float)sub * HS;
 #pragma unroll MUSCLE_UNROLL
-            for (int k = 0; k < MUSCLE_LOOP; k++) {
-#ifndef MC
-                if ((unsigned)k >= wm) { break; }
+            for (int k = 0; k < MPL; k++) {
+                if ((unsigned)k >= wm) { MS_LOOP_END; }
                 if ((unsigned)k < mc && !NO_MUSCLES) {
-#else
-                {
-#endif
-                    const float4 A = MSA_A(k);
-                    const float4 R = MSA_R(k);
+                    const float4 A = msa[mb + (size_t)k * W];
+                    const float4 R = mss[(size_t)cidx * (2 * MPL * W) + (2 * k) * W + lg];
                     const unsigned pk = __float_as_uint(A.x);
+                    const unsigned na_ = pk & 255u, nb_ = (pk >> 8u) & 255u, nc_ = (pk >> 16u) & 255u, nd_ = pk >> 24u;
 #if MUSCLE_ANCHORS
-                    const unsigned na_ = pk & 31u, nb_ = (pk >> 5u) & 31u, nc_ = (pk >> 10u) & 31u, nd_ = (pk >> 15u) & 31u;
-                    const float4 f0 = NODEAT(na_), f1 = NODEAT(nb_), f2 = NODEAT(nc_), f3 = NODEAT(nd_);
-                    const float2 an = unpack_un(__float_as_uint(A.w));
+                    const float4 f0 = M_NODE(na_), f1 = M_NODE(nb_), f2 = M_NODE(nc_), f3 = M_NODE(nd_);
+                    const float2 an = unpack_un(__float_as_uint(A.y));
                     const float4 e0 = make_float4(f0.x + (f1.x - f0.x) * an.x, f0.y + (f1.y - f0.y) * an.x, f0.z + (f1.z - f0.z) * an.x, f0.w + (f1.w - f0.w) * an.x);
                     const float4 e1 = make_float4(f2.x + (f3.x - f2.x) * an.y, f2.y + (f3.y - f2.y) * an.y, f2.z + (f3.z - f2.z) * an.y, f2.w + (f3.w - f2.w) * an.y);
-                    const float td = ((pk >> 25u) & 1u) ? __ldcg(&ROFF((pk >> 20u) & 31u)) : 0.0f;
-#elif W == 1
-                    // Bits 0 to 11: end a's byte offset in the node table
-                    // (node x 512), 12 to 23: end b's, 24 to 27: the limb
-                    // whose clock sets the phase (8: none, its clock is 0).
-                    const unsigned oa = pk & 0xfffu, ob = (pk >> 12u) & 0xfffu;
-                    char* const ncol = reinterpret_cast<char*>(s_node4) + lane * 16u;
-                    char* const fcol = reinterpret_cast<char*>(s_frc2) + lane * 8u;
-                    const float4 e0 = *reinterpret_cast<float4*>(ncol + oa), e1 = *reinterpret_cast<float4*>(ncol + ob);
-                    const float td = __ldcg(&ROFF((pk >> 24u) & 15u));
 #else
-                    const unsigned ea = (pk >> 5u) & 31u, eb = (pk >> 15u) & 31u;
-                    const float4 e0 = NODEAT(ea), e1 = NODEAT(eb);
-                    const float td = ((pk >> 25u) & 1u) ? __ldcg(&ROFF((pk >> 20u) & 31u)) : 0.0f;
+                    const float4 e0 = M_NODE(nb_), e1 = M_NODE(nd_);
+#endif
+#if SENSE_REGS
+                    const unsigned sv = ((k < 8 ? sensA >> (4 * k) : sensB >> (4 * (k - 8)))) & 15u;
+                    const float td = (sv & 8u) ? __ldcg(&roff[(size_t)cidx * MPL * W + (sv & 7u)]) : 0.0f;
+#else
+                    const unsigned skw = __float_as_uint(mss[(size_t)cidx * (2 * MPL * W) + (2 * k + 1) * W + lg].w);
+                    const float td = ((skw >> 25u) & 1u) ? __ldcg(&roff[(size_t)cidx * MPL * W + ((skw >> 20u) & 7u)]) : 0.0f;
 #endif
                     const float x = (tsub - td) * R.x + R.y;
                     const float ph = x - floorf(x);
                     const float act = clampf((R.z - fabsf(ph - R.z)) * R.w, 0.0f, 1.0f);
                     const float ddx = e1.x - e0.x, ddy = e1.y - e0.y;
-                    const float inv = rsqrtf(ddx * ddx + ddy * ddy + 1e-12f);
+                    const float inv = frsq(ddx * ddx + ddy * ddy + 1e-12f);
                     const float dirx = ddx * inv, diry = ddy * inv;
                     const float rel = (e1.z - e0.z) * dirx + (e1.w - e0.w) * diry;
-                    const float cap = A.y;
-                    const float drive = cap * act * st * clampf(1.0f + rel * A.z, 0.0f, 1.0f);
+                    const float cap = A.z;
+                    const float drive = cap * act * st * clampf(1.0f + rel * A.w, 0.0f, 1.0f);
                     const float mag = clampf(drive + rel * MUSCLE_DAMPER, -cap, cap);
                     pw += drive * fmaxf(-rel, 0.0f);
 #ifdef DIAG
@@ -1058,36 +1179,47 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     const float gx = dirx * mag, gy = diry * mag;
                     float2 f;
 #if MUSCLE_ANCHORS
-                    f = FRC(na_, lane); f.x += (1.0f - an.x) * gx; f.y += (1.0f - an.x) * gy; FRC(na_, lane) = f;
-                    f = FRC(nb_, lane); f.x += an.x * gx; f.y += an.x * gy; FRC(nb_, lane) = f;
-                    f = FRC(nc_, lane); f.x -= (1.0f - an.y) * gx; f.y -= (1.0f - an.y) * gy; FRC(nc_, lane) = f;
-                    f = FRC(nd_, lane); f.x -= an.y * gx; f.y -= an.y * gy; FRC(nd_, lane) = f;
-#elif W == 1
-                    float2* const fa = reinterpret_cast<float2*>(fcol + (oa >> 1));
-                    float2* const fb = reinterpret_cast<float2*>(fcol + (ob >> 1));
-                    f = *fa; f.x += gx; f.y += gy; *fa = f;
-                    f = *fb; f.x -= gx; f.y -= gy; *fb = f;
+                    f = M_FRC(na_); f.x += (1.0f - an.x) * gx; f.y += (1.0f - an.x) * gy; M_FRC(na_) = f;
+                    f = M_FRC(nb_); f.x += an.x * gx; f.y += an.x * gy; M_FRC(nb_) = f;
+                    f = M_FRC(nc_); f.x -= (1.0f - an.y) * gx; f.y -= (1.0f - an.y) * gy; M_FRC(nc_) = f;
+                    f = M_FRC(nd_); f.x -= an.y * gx; f.y -= an.y * gy; M_FRC(nd_) = f;
 #else
-                    f = FRC(ea, lane); f.x += gx; f.y += gy; FRC(ea, lane) = f;
-                    f = FRC(eb, lane); f.x -= gx; f.y -= gy; FRC(eb, lane) = f;
+                    f = M_FRC(nb_); f.x += gx; f.y += gy; M_FRC(nb_) = f;
+                    f = M_FRC(nd_); f.x -= gx; f.y -= gy; M_FRC(nd_) = f;
 #endif
                 }
             }
-            pw = XSUM(pw);
+            pw = pw + xch(pw);
             st = clampf(st - pw * HS * icap + MUSCLE_RECOVERY * p.recovery * HS * (1.0f - st), 0.0f, 1.0f);
+            __syncwarp();
 #else
+            // Muscles.
+#if PREFETCH
+            float4 A_c = msa[mb];
+            float2 B_c = msb[mb];
+#endif
 #pragma unroll MUSCLE_UNROLL
             for (int k = 0; k < MPL; k++) {
-                if ((unsigned)k >= wm) { break; }
+                if ((unsigned)k >= wm) { MS_LOOP_END; }
+#if PREFETCH
+                float4 A_n = A_c;
+                float2 B_n = B_c;
+                if (k + 1 < MPL) { A_n = msa[mb + (size_t)(k + 1) * W]; B_n = msb[mb + (size_t)(k + 1) * W]; }
+#endif
                 if ((unsigned)k < mc && !NO_MUSCLES) {
+#if PREFETCH
+                    const float4 A = A_c;
+                    const float2 B = B_c;
+#else
                     const float4 A = msa[mb + (size_t)k * W];
                     const float2 B = msb[mb + (size_t)k * W];
+#endif
                     const unsigned pk = __float_as_uint(A.x);
-                    const unsigned na_ = pk & 31u, nb_ = (pk >> 5u) & 31u, nc_ = (pk >> 10u) & 31u, nd_ = (pk >> 15u) & 31u;
-                    const float4 e0 = NODE(na_ & 3u, gl + (na_ >> 2u));
-                    const float4 e1 = NODE(nb_ & 3u, gl + (nb_ >> 2u));
-                    const float4 e2 = NODE(nc_ & 3u, gl + (nc_ >> 2u));
-                    const float4 e3 = NODE(nd_ & 3u, gl + (nd_ >> 2u));
+                    const unsigned na_ = pk & 255u, nb_ = (pk >> 8u) & 255u, nc_ = (pk >> 16u) & 255u, nd_ = pk >> 24u;
+                    const float4 e0 = M_NODE(na_);
+                    const float4 e1 = M_NODE(nb_);
+                    const float4 e2 = M_NODE(nc_);
+                    const float4 e3 = M_NODE(nd_);
                     const float2 an = unpack_un(__float_as_uint(A.y));
                     const float2 hc = unpack_bf(__float_as_uint(B.y));
                     const float cap = A.z, tendon_k = A.w, slack = B.x, hill = hc.x, inv_capacity = hc.y;
@@ -1096,67 +1228,329 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     const float pbx = e2.x + (e3.x - e2.x) * an.y, pby = e2.y + (e3.y - e2.y) * an.y;
                     const float vbx = e2.z + (e3.z - e2.z) * an.y, vby = e2.w + (e3.w - e2.w) * an.y;
                     const float ddx = pbx - pax, ddy = pby - pay;
+#if FASTRCP
+                    const float inverse = frsq(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                    const float length = (ddx * ddx + ddy * ddy) * inverse;
+#else
                     const float length = fmaxf(sqrtf(ddx * ddx + ddy * ddy), 1e-6f);
                     const float inverse = 1.0f / length;
+#endif
                     const float dirx = ddx * inverse, diry = ddy * inverse;
                     const float relative = (vbx - vax) * dirx + (vby - vay) * diry;
-                    const float2 st = unpack_ed(MS_GET(k));
-                    float energy = st.x;
-                    float drive = st.y * energy;
+                    float energy = MS_ENERGY(k);
+                    float drive = MS_DRIVE(k) * energy;
                     if (hill > 0.0f) { drive *= clampf(1.0f + relative * hill, 0.0f, 1.0f); }
                     const float magnitude = clampf(drive + relative * 0.15f, -cap, cap);
-                    const float work = fminf(drive, cap) * fmaxf(-relative, 0.0f) * HS;
-                    energy = clampf(energy - work * inv_capacity + MUSCLE_RECOVERY * p.recovery * HS * (1.0f - energy), 0.0f, 1.0f);
-                    MS_SET(k, pack_ed(energy, st.y));
+                    const float work = fminf(drive, cap) * fmaxf(-relative, 0.0f) * MHS;
+                    energy = clampf(energy - work * inv_capacity + MUSCLE_RECOVERY * p.recovery * MHS * (1.0f - energy), 0.0f, 1.0f);
+                    MS_SET_E(k, energy);
                     const float stretch = fmaxf(length - slack, 0.0f);
                     const float pull = magnitude + tendon_k * stretch;
                     const float gx = dirx * pull, gy = diry * pull;
                     msum += magnitude * relative;
                     float2 f;
-                    f = FRC(na_, lane); f.x += (1.0f - an.x) * gx; f.y += (1.0f - an.x) * gy; FRC(na_, lane) = f;
-                    f = FRC(nb_, lane); f.x += an.x * gx; f.y += an.x * gy; FRC(nb_, lane) = f;
-                    f = FRC(nc_, lane); f.x -= (1.0f - an.y) * gx; f.y -= (1.0f - an.y) * gy; FRC(nc_, lane) = f;
-                    f = FRC(nd_, lane); f.x -= an.y * gx; f.y -= an.y * gy; FRC(nd_, lane) = f;
+                    f = M_FRC(na_); f.x += (1.0f - an.x) * gx; f.y += (1.0f - an.x) * gy; M_FRC(na_) = f;
+                    f = M_FRC(nb_); f.x += an.x * gx; f.y += an.x * gy; M_FRC(nb_) = f;
+                    f = M_FRC(nc_); f.x -= (1.0f - an.y) * gx; f.y -= (1.0f - an.y) * gy; M_FRC(nc_) = f;
+                    f = M_FRC(nd_); f.x -= an.y * gx; f.y -= an.y * gy; M_FRC(nd_) = f;
                 }
+#if PREFETCH
+                A_c = A_n; B_c = B_n;
+#endif
             }
 #endif
-#endif
             __syncwarp();
+#endif
             // @S free
             // Free velocities.
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
                 const unsigned g = lg * NPL + k;
-                const float2 f0 = FRC(g, lane);
-#if W == 2
-                const float2 f1 = FRC(g, lane ^ 1u);
-                const float gx = fx[k] + f0.x + f1.x, gy = fy[k] + f0.y + f1.y;
+                const float2 f0 = FRC(g, lane), f1 = FRC(g, lane ^ 1u);
+#if MUSCLE_STEP
+                const float gx = fx[k] + f0.x + f1.x + mfx[k], gy = fy[k] + f0.y + f1.y + mfy[k];
 #else
-                const float gx = fx[k] + f0.x, gy = fy[k] + f0.y;
+                const float gx = fx[k] + f0.x + f1.x, gy = fy[k] + f0.y + f1.y;
 #endif
                 const bool on = invm[k] > 0.0f;
                 vx[k] += HS * invm[k] * gx;
                 vy[k] += on ? HS * (invm[k] * gy - p.gravity) : 0.0f;
             }
             __syncwarp();
-#if !CONTACT_MODEL
-            // Node table with the free velocities; node statics for the rows.
+#if CONTACT_MODEL
+            // @S table
+            // The node table with the free velocities.
+#pragma unroll
+            for (int k = 0; k < NPL; k++) { NODEW(k) = make_float4(px[k], py[k], vx[k], vy[k]); }
+            __syncwarp();
+            // @S geometry
+            // Rod directions every substep (the impulses and the right-hand
+            // sides want the current direction); the factor once per step
+            // when lagged.
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
-                NODE(k, lane) = make_float4(px[k], py[k], vx[k], vy[k]);
-                FRC(2 * k, lane) = make_float2(invm[k], REC(8, k) * p.friction);
-                FRC(2 * k + 1, lane) = make_float2(REC(4, k), ANC(k));
+                const unsigned t = topo[k];
+                ldx[k] = 0.0f; ldy[k] = 0.0f; lilr[k] = 0.0f;
+                if (T_VALID(t)) {
+                    const unsigned a = T_PIVOT(t);
+                    const float4 na = NODER(a);
+                    const float ddx = px[k] - na.x, ddy = py[k] - na.y;
+                    const float il = frsq(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                    ldx[k] = ddx * il; ldy[k] = ddy * il; lilr[k] = il;
+                }
+            }
+#pragma unroll
+            for (int q = 0; q < NPL; q++) { if (q >= 1 && XNEED(q)) { lrdx[q] = xch(ldx[q]); lrdy[q] = xch(ldy[q]); } else { lrdx[q] = 0.0f; lrdy[q] = 0.0f; } }
+            if (geom_now) {
+                // @S factor
+                float ipv[NPL];
+#pragma unroll
+                for (int k = 0; k < NPL; k++) { ipv[k] = R_IPV(k); }
+                PMK_AT
+                factor(topo, pmk, ldx, ldy, lrdx, lrdy, ipv, invm, lg, linvD, lLf);
+            }
+            // @S contact
+            // Per-node impulses against each node's own mass, then the exact
+            // rod solve as the coupling, NPASS times.
+            unsigned slid = 0u;
+            touch = 0u;
+#if LEDGER
+            // @S ledgerA
+            // The ledger's first stage: momentum and angular momentum about
+            // the origin before the impulses, and once per step the centre
+            // of mass and the inertia about it.
+            float pbx = 0.0f, pby = 0.0f, lbz = 0.0f;
+            float smx = 0.0f, smy = 0.0f, sq = 0.0f;
+#pragma unroll
+            for (int k = 0; k < NPL; k++) {
+                const float mvx = pmass[k] * vx[k], mvy = pmass[k] * vy[k];
+                pbx += mvx; pby += mvy;
+                lbz = fmaf(px[k], mvy, lbz); lbz = fmaf(-py[k], mvx, lbz);
+                if (sub == 0) {
+                    const float mxk = pmass[k] * px[k], myk = pmass[k] * py[k];
+                    smx += mxk; smy += myk;
+                    sq = fmaf(mxk, px[k], sq); sq = fmaf(myk, py[k], sq);
+                }
+            }
+            if (sub == 0) {
+                const float im = frcp(fmaxf(mtot, 1e-6f));
+                smx += xch(smx); smy += xch(smy); sq += xch(sq);
+                cxr = smx * im; cyr = smy * im;
+                iic = frcp(fmaxf(sq - mtot * (cxr * cxr + cyr * cyr), 1e-6f));
+            }
+            float ex = 0.0f, ey = 0.0f, tz = 0.0f;
+#endif
+#pragma unroll
+            for (int pass = 0; pass < NPASS; pass++) {
+                // @S nodes
+#pragma unroll
+                for (int k = 0; k < NPL; k++) {
+                    const float gap = py[k] - R_RAD(k);
+                    if (pass == 0) { touch |= ((gap + HS * vy[k] <= 0.0f && invm[k] > 0.0f && !NO_CONTACT) ? 1u : 0u) << k; }
+                    const float tn = -fmaxf(gap, 0.0f) * INV_HS;
+                    const float dvn = fmaxf(tn - vy[k], 0.0f);
+                    vy[k] += dvn;
+                    const float cone = (NO_FRICTION ? 0.0f : R_MU(k)) * dvn;
+                    const float tvx = (lax[k] - px[k]) * INV_HS;
+                    const float want = tvx - vx[k];
+                    float dvt = clampf(want, -cone, cone);
+                    // The clean rule: friction never speeds up a slide the
+                    // anchor does not ask for.
+                    dvt = (dvt * vx[k] > 0.0f && fabsf(tvx) <= fabsf(vx[k])) ? 0.0f : dvt;
+                    vx[k] += dvt;
+                    if (pass == 0) { slid |= (fabsf(want) > cone ? 1u : 0u) << k; }
+#if LEDGER
+                    const float ix_ = pmass[k] * dvt, iy_ = pmass[k] * dvn;
+                    ex += ix_; ey += iy_;
+                    tz = fmaf(px[k], iy_, tz); tz = fmaf(-py[k], ix_, tz);
+#endif
+                }
+                // @S rod
+#pragma unroll
+                for (int k = 0; k < NPL; k++) { NODEW(k) = make_float4(px[k], py[k], vx[k], vy[k]); }
+                __syncwarp();
+                {
+                    float z[2][NPL];
+#pragma unroll
+                    for (int k = 0; k < NPL; k++) {
+                        const unsigned t = topo[k];
+                        float r = 0.0f;
+                        if (T_VALID(t)) {
+                            const unsigned a = T_PIVOT(t);
+                            const float4 na = NODER(a);
+                            const float rvx = vx[k] - na.z, rvy = vy[k] - na.w;
+                            const float rn = rvx * ldx[k] + rvy * ldy[k];
+                            const float perp2 = fmaxf(rvx * rvx + rvy * rvy - rn * rn, 0.0f);
+                            r = -rn - perp2 * HS * lilr[k];
+                        }
+                        z[0][k] = lg == 1u ? r : 0.0f;
+                        z[1][k] = lg == 1u ? 0.0f : r;
+                    }
+                    {
+                        PMK_AT
+                        tree_solve<2>(z, pmk, linvD, lLf, lg);
+                    }
+#pragma unroll
+                    for (int g = 0; g < W * NPL; g++) { FRC(g, lane) = make_float2(0.0f, 0.0f); }
+                    __syncwarp();
+                    float ix[NPL], iy[NPL];
+#pragma unroll
+                    for (int k = 0; k < NPL; k++) {
+                        const float mu_k = lg == 1u ? z[0][k] : z[1][k];
+                        ix[k] = ldx[k] * mu_k; iy[k] = ldy[k] * mu_k;
+                        if (T_VALID(topo[k])) {
+                            const unsigned a = T_PIVOT(topo[k]);
+                            float2 f = FRC(a, lane);
+                            f.x -= ix[k]; f.y -= iy[k];
+                            FRC(a, lane) = f;
+                        }
+                    }
+                    __syncwarp();
+#pragma unroll
+                    for (int k = 0; k < NPL; k++) {
+                        const unsigned g = lg * NPL + k;
+                        const float2 f0 = FRC(g, lane), f1 = FRC(g, lane ^ 1u);
+                        vx[k] += invm[k] * (ix[k] + f0.x + f1.x);
+                        vy[k] += invm[k] * (iy[k] + f0.y + f1.y);
+                    }
+                    __syncwarp();
+                }
+            }
+#if LEDGER
+            // @S ledgerB
+            // The ledger's second stage: the impulses of the substep must
+            // have moved the momentum by exactly the contact impulses and
+            // the angular momentum by their torque; the rounding rest goes
+            // back as one uniform velocity and one rotation about the centre
+            // of mass.
+            {
+                float pax = 0.0f, pay = 0.0f, laz = 0.0f;
+#pragma unroll
+                for (int k = 0; k < NPL; k++) {
+                    const float mvx = pmass[k] * vx[k], mvy = pmass[k] * vy[k];
+                    pax += mvx; pay += mvy;
+                    laz = fmaf(px[k], mvy, laz); laz = fmaf(-py[k], mvx, laz);
+                }
+                const float im = frcp(fmaxf(mtot, 1e-6f));
+                const float rpx = NO_LEDGER ? 0.0f : (pax - pbx - ex) + xch(pax - pbx - ex);
+                const float rpy = NO_LEDGER ? 0.0f : (pay - pby - ey) + xch(pay - pby - ey);
+                const float rl = NO_LEDGER ? 0.0f : (laz - lbz - tz) + xch(laz - lbz - tz);
+                const float sx = -rpx * im, sy = -rpy * im;
+                const float wc = (-rl + (cxr * rpy - cyr * rpx)) * iic;
+#ifdef DIAG
+                ang_max = fmaxf(ang_max, fabsf(rl));
+#endif
+#pragma unroll
+                for (int k = 0; k < NPL; k++) {
+                    const bool on_ = invm[k] > 0.0f;
+                    vx[k] += on_ ? sx - wc * (py[k] - cyr) : 0.0f;
+                    vy[k] += on_ ? sy + wc * (px[k] - cxr) : 0.0f;
+                }
+            }
+#endif
+#ifdef DIAG
+            {
+                // Residuals after the impulses: normal rows against what the
+                // gap allows, rods against their centripetal targets.
+                float rn = 0.0f, rr = 0.0f;
+#pragma unroll
+                for (int k = 0; k < NPL; k++) {
+                    const float tn = -fmaxf(py[k] - R_RAD(k), 0.0f) * INV_HS;
+                    if ((touch >> k) & 1u) { rn = fmaxf(rn, fmaxf(tn - vy[k], 0.0f)); }
+                }
+                __syncwarp();
+#pragma unroll
+                for (int k = 0; k < NPL; k++) { NODEW(k) = make_float4(px[k], py[k], vx[k], vy[k]); }
+                __syncwarp();
+#pragma unroll
+                for (int k = 0; k < NPL; k++) {
+                    if (T_VALID(topo[k])) {
+                        const unsigned a = T_PIVOT(topo[k]);
+                        const float4 na = NODER(a);
+                        const float rvx = vx[k] - na.z, rvy = vy[k] - na.w;
+                        const float rnn = rvx * ldx[k] + rvy * ldy[k];
+                        const float perp2 = fmaxf(rvx * rvx + rvy * rvy - rnn * rnn, 0.0f);
+                        rr = fmaxf(rr, fabsf(rnn + perp2 * HS * lilr[k]));
+                    }
+                }
+                __syncwarp();
+                rn_max = fmaxf(rn_max, rn);
+                rr_max = fmaxf(rr_max, rr);
+            }
+#endif
+            // @S euler
+            // Semi-implicit Euler; the penetration left is recovered by a
+            // position nudge (a split impulse); anchors are set on touching
+            // and moved by sliding. The stub's synthetic bodies and explicit
+            // forces are not a tuned physics: a speed clamp keeps every trial
+            // finite, so all creatures run their full length.
+#pragma unroll
+            for (int k = 0; k < NPL; k++) {
+                vx[k] = clampf(vx[k], -SPEED_CLAMP, SPEED_CLAMP);
+                vy[k] = clampf(vy[k], -SPEED_CLAMP, SPEED_CLAMP);
+                px[k] += HS * vx[k];
+                py[k] += HS * vy[k];
+#ifdef DIAG
+                pen_max = fmaxf(pen_max, R_RAD(k) - py[k]);
+#endif
+                py[k] += PUSH_OUT * fmaxf(R_RAD(k) - py[k], 0.0f);
+                lax[k] = (((touch >> k) & 1u) && !((slid >> k) & 1u)) ? lax[k] : px[k];
+            }
+            contact_sum += (float)__popc(touch);
+#if PROJ_ANCHORED
+#pragma unroll
+            for (int k = 0; k < NPL; k++) {
+                pinvD[k] = linvD[k];
+#pragma unroll
+                for (int a = 0; a < NB; a++) { pLf[k][a] = lLf[k][a]; }
+            }
+#endif
+#else
+            // Node table with the free velocities; node statics for the rows.
+#if ANC_REGS
+#define ANCV(k) anc_r[k]
+#elif SREG
+            const float4 an4 = ANC4;
+#define ANCV(k) ((k) == 0 ? an4.x : (k) == 1 ? an4.y : (k) == 2 ? an4.z : an4.w)
+#else
+#define ANCV(k) ANC(k)
+#endif
+#pragma unroll
+            for (int k = 0; k < NPL; k++) {
+                NODEW(k) = make_float4(px[k], py[k], vx[k], vy[k]);
+                FRC(2 * k, lane) = make_float2(invm[k], R_MU(k));
+                FRC(2 * k + 1, lane) = make_float2(R_RAD(k), ANCV(k));
             }
             __syncwarp();
-#elif !BAKED
-#pragma unroll
-            for (int k = 0; k < NPL; k++) { NODE(k, lane) = make_float4(px[k], py[k], vx[k], vy[k]); }
-            __syncwarp();
-#endif
-#if !CONTACT_MODEL
+#if LAGGED_FACTOR
+            // The rod directions and the factor once per step (hoisted).
+            float (&dx)[NPL] = ldx; float (&dy)[NPL] = ldy; float (&rdx)[NPL] = lrdx; float (&rdy)[NPL] = lrdy;
+            float (&invD)[NPL] = linvD; float (&Lf)[NPL][NB] = lLf;
+            float rhs0[NPL];
 #ifdef DIAG
             float ctg[NPL];
 #endif
+            if (sub == 0) {
+#pragma unroll
+                for (int k = 0; k < NPL; k++) {
+                    const unsigned t = topo[k];
+                    dx[k] = 0.0f; dy[k] = 0.0f; lilr[k] = 0.0f;
+                    if (T_VALID(t)) {
+                        const unsigned a = T_PIVOT(t);
+                        const float4 na = NODER(a);
+                        const float ddx = px[k] - na.x, ddy = py[k] - na.y;
+                        const float il = frsq(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                        dx[k] = ddx * il; dy[k] = ddy * il; lilr[k] = il;
+                    }
+                }
+#pragma unroll
+                for (int q = 0; q < NPL; q++) { if (q >= 1 && XNEED(q)) { rdx[q] = xch(dx[q]); rdy[q] = xch(dy[q]); } else { rdx[q] = 0.0f; rdy[q] = 0.0f; } }
+                float ipv[NPL];
+#pragma unroll
+                for (int k = 0; k < NPL; k++) { ipv[k] = R_IPV(k); }
+                PMK_AT
+                factor(topo, pmk, dx, dy, rdx, rdy, ipv, invm, lg, invD, Lf);
+            }
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
                 const unsigned t = topo[k];
@@ -1166,24 +1560,62 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #endif
                 if (T_VALID(t)) {
                     const unsigned a = T_PIVOT(t);
-                    const float4 na = NODE(a & 3u, gl + (a >> 2u));
+                    const float4 na = NODER(a);
                     const float rvx = vx[k] - na.z, rvy = vy[k] - na.w;
                     const float rn = rvx * dx[k] + rvy * dy[k];
                     const float perp2 = fmaxf(rvx * rvx + rvy * rvy - rn * rn, 0.0f);
-                    rhs0[k] = -rn - perp2 * HS * ilr[k];
+                    rhs0[k] = -rn - perp2 * HS * lilr[k];
 #ifdef DIAG
-                    ctg[k] = -perp2 * HS * ilr[k];
+                    ctg[k] = -perp2 * HS * lilr[k];
 #endif
                 }
             }
-            // @S contact
+#else
+            // Rod directions and the rods' own rows.
+            float dx[NPL], dy[NPL], rdx[NPL], rdy[NPL], rhs0[NPL];
+#ifdef DIAG
+            float ctg[NPL];
+#endif
+#pragma unroll
+            for (int k = 0; k < NPL; k++) {
+                const unsigned t = topo[k];
+                dx[k] = 0.0f; dy[k] = 0.0f; rhs0[k] = 0.0f;
+#ifdef DIAG
+                ctg[k] = 0.0f;
+#endif
+                if (T_VALID(t)) {
+                    const unsigned a = T_PIVOT(t);
+                    const float4 na = NODER(a);
+                    const float ddx = px[k] - na.x, ddy = py[k] - na.y;
+                    const float il = frsq(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                    dx[k] = ddx * il; dy[k] = ddy * il;
+                    const float rvx = vx[k] - na.z, rvy = vy[k] - na.w;
+                    const float rn = rvx * dx[k] + rvy * dy[k];
+                    const float perp2 = fmaxf(rvx * rvx + rvy * rvy - rn * rn, 0.0f);
+                    rhs0[k] = -rn - perp2 * HS * il;
+#ifdef DIAG
+                    ctg[k] = -perp2 * HS * il;
+#endif
+                }
+            }
+#pragma unroll
+            for (int q = 0; q < NPL; q++) { if (q >= 1 && XNEED(q)) { rdx[q] = xch(dx[q]); rdy[q] = xch(dy[q]); } else { rdx[q] = 0.0f; rdy[q] = 0.0f; } }
+            float invD[NPL], Lf[NPL][NB];
+            {
+                float ipv[NPL];
+#pragma unroll
+                for (int k = 0; k < NPL; k++) { ipv[k] = R_IPV(k); }
+                PMK_AT
+                factor(topo, pmk, dx, dy, rdx, rdy, ipv, invm, lg, invD, Lf);
+            }
+#endif
             // Contacts: the deepest 4 nodes that would reach the ground.
             unsigned word = 0u;
             {
                 float dep[NPL], rdep[NPL];
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
-                    const float d = py[k] - REC(4, k) + HS * vy[k];
+                    const float d = py[k] - R_RAD(k) + HS * vy[k];
                     dep[k] = (invm[k] > 0.0f && d <= 0.0f && !NO_CONTACT) ? d : 1e30f;
                 }
 #pragma unroll
@@ -1209,7 +1641,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
             for (int c = 0; c < NC; c++) {
                 const unsigned e = (word >> (6u * c)) & 63u;
                 const unsigned g = e & 31u;
-                const float4 nd = NODE(g & 3u, gl + (g >> 2u));
+                const float4 nd = NODER(g);
                 const float2 s0 = FRC(2u * (g & 3u), gl + (g >> 2u));
                 const float2 s1 = FRC(2u * (g & 3u) + 1u, gl + (g >> 2u));
                 cim[c] = (e & 32u) ? s0.x : 0.0f;
@@ -1222,6 +1654,17 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
             // Incidence of each local rod at each contact node, two bits per
             // pair: the rod's child (+) or its pivot (-). R's entry is this
             // times the node's inverse mass times d.y (normal) or d.x.
+#if BAKED
+            // Baked: one byte of the lane's constant incidence table per
+            // contact, indexed by the contact node.
+            unsigned inc4 = 0u;
+            {
+                const unsigned long long tb = lg ? BINC1 : BINC0;
+#pragma unroll
+                for (int c = 0; c < NC; c++) { inc4 |= (unsigned)((tb >> (8u * CNODE(c))) & 0xffull) << (8 * c); }
+            }
+#define RCO(k, c) (((inc4 >> (8 * (c) + (k))) & 1u) ? cim[c] : (((inc4 >> (8 * (c) + 4 + (k))) & 1u) ? -cim[c] : 0.0f))
+#else
             unsigned sgw = 0u;
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
@@ -1236,6 +1679,20 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                 }
             }
 #define RCO(k, c) (((sgw >> (2 * (4 * (k) + (c)))) & 1u) ? cim[c] : (((sgw >> (2 * (4 * (k) + (c)))) & 2u) ? -cim[c] : 0.0f))
+#endif
+#if RC_REGS
+            float rc[NPL][NC];
+#pragma unroll
+            for (int k = 0; k < NPL; k++) {
+#pragma unroll
+                for (int c = 0; c < NC; c++) { rc[k][c] = RCO(k, c); }
+            }
+#undef RCO
+#define RCO(k, c) rc[k][c]
+#endif
+            // R's row e at local rod k: contact e >> 1's normal (even e, along
+            // y) or friction (odd e, along x).
+#define RR(e, k) (RCO(k, (e) >> 1) * pick((e) & 1, dx[k], dy[k]))
             // Batch A: row 0 the rods' own, rows 1 + 2c and 2 + 2c contact
             // c's normal and friction (c = 0, 1); lane 0 one slot behind.
             float mu0[NPL], me[4][NPL];
@@ -1247,16 +1704,25 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     for (int k = 0; k < NPL; k++) {
                         float v1 = 0.0f, v0 = 0.0f;
                         if (s == 0) { v1 = rhs0[k]; }
-                        else if (s < 5) { v1 = RCO(k, (s - 1) >> 1) * (((s - 1) & 1) ? dx[k] : dy[k]); }
+                        else if (s < 5) { v1 = RR(s - 1, k); }
                         if (s == 1) { v0 = rhs0[k]; }
-                        else if (s >= 2) { v0 = RCO(k, (s - 2) >> 1) * (((s - 2) & 1) ? dx[k] : dy[k]); }
+                        else if (s >= 2) { v0 = RR(s - 2, k); }
                         z[s][k] = lg == 1u ? v1 : v0;
                     }
                 }
-                tree_solve<6>(z, topo, invD, Lf, lg);
+                PMK_AT
+                tree_solve<6>(z, pmk, invD, Lf, lg);
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
                     mu0[k] = lg == 1u ? z[0][k] : z[1][k];
+#ifdef DUMP
+                    if (cidx == 0u && step == 0u && sub == 0 && live) {
+                        volatile float* d = reinterpret_cast<volatile float*>(trace) + lg * 32;
+                        d[k] = dx[k]; d[4 + k] = dy[k]; d[8 + k] = rhs0[k]; d[12 + k] = mu0[k];
+                        d[16 + k] = invm[k]; d[20 + k] = __uint_as_float(topo[k]); d[24 + k] = invD[k];
+                        d[28 + k] = Lf[k][0];
+                    }
+#endif
 #pragma unroll
                     for (int e = 0; e < 4; e++) { me[e][k] = lg == 1u ? z[1 + e][k] : z[2 + e][k]; }
                 }
@@ -1266,7 +1732,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
             for (int e = 0; e < NE; e++) {
                 float part = 0.0f;
 #pragma unroll
-                for (int k = 0; k < NPL; k++) { part += RCO(k, e >> 1) * ((e & 1) ? dx[k] : dy[k]) * mu0[k]; }
+                for (int k = 0; k < NPL; k++) { part += RR(e, k) * mu0[k]; }
                 b0[e] -= part + xch(part);
             }
             __syncwarp();
@@ -1275,7 +1741,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
             for (int f = 0; f < NE; f++) {
                 float rf[NPL];
 #pragma unroll
-                for (int k = 0; k < NPL; k++) { rf[k] = RCO(k, f >> 1) * ((f & 1) ? dx[k] : dy[k]); }
+                for (int k = 0; k < NPL; k++) { rf[k] = RR(f, k); }
 #pragma unroll
                 for (int e = 0; e < 4; e++) {
                     if (e <= f) {
@@ -1296,12 +1762,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #pragma unroll
                     for (int k = 0; k < NPL; k++) {
                         float v1 = 0.0f, v0 = 0.0f;
-                        if (s < 4) { v1 = RCO(k, (4 + s) >> 1) * (((4 + s) & 1) ? dx[k] : dy[k]); }
-                        if (s >= 1) { v0 = RCO(k, (3 + s) >> 1) * (((3 + s) & 1) ? dx[k] : dy[k]); }
+                        if (s < 4) { v1 = RR(4 + s, k); }
+                        if (s >= 1) { v0 = RR(3 + s, k); }
                         z[s][k] = lg == 1u ? v1 : v0;
                     }
                 }
-                tree_solve<5>(z, topo, invD, Lf, lg);
+                PMK_AT
+                tree_solve<5>(z, pmk, invD, Lf, lg);
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
 #pragma unroll
@@ -1312,7 +1779,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
             for (int f = 4; f < NE; f++) {
                 float rf[NPL];
 #pragma unroll
-                for (int k = 0; k < NPL; k++) { rf[k] = RCO(k, f >> 1) * ((f & 1) ? dx[k] : dy[k]); }
+                for (int k = 0; k < NPL; k++) { rf[k] = RR(f, k); }
 #pragma unroll
                 for (int e = 4; e < NE; e++) {
                     if (e <= f) {
@@ -1327,6 +1794,23 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                 }
             }
             __syncwarp();
+#ifdef DUMPW
+            if (cidx == 0u && step == DUMPW && sub == 0 && live) {
+                volatile float* d = reinterpret_cast<volatile float*>(trace);
+#pragma unroll
+                for (int k = 0; k < NPL; k++) {
+                    d[lg * 32 + k] = px[k]; d[lg * 32 + 4 + k] = py[k]; d[lg * 32 + 8 + k] = vx[k]; d[lg * 32 + 12 + k] = vy[k];
+                    d[lg * 32 + 16 + k] = invm[k]; d[lg * 32 + 20 + k] = __uint_as_float(topo[k]);
+                    d[lg * 32 + 24 + k] = dx[k]; d[lg * 32 + 28 + k] = dy[k];
+                }
+                if (lg == 0u) {
+                    d[64] = __uint_as_float(word);
+                    for (int i = 0; i < 36; i++) { d[65 + i] = WAT(i); }
+                    for (int e = 0; e < NE; e++) { d[101 + e] = b0[e]; }
+                    for (int c = 0; c < NC; c++) { d[109 + c] = cim[c]; }
+                }
+            }
+#endif
             // The rod factor, rod impulses and directions wait in shared
             // memory while the active set runs.
 #pragma unroll
@@ -1375,16 +1859,26 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                 for (int i = 0; i < NE; i++) {
                     const bool ai = (on >> i) & 1u;
                     float d = ai ? WIJ(i, i) : 1.0f;
+#if TRIM
+                    // Row i unscaled (u = L D), so each term is one FFMA.
+                    float u[NE];
+#endif
 #pragma unroll
                     for (int j = 0; j < i; j++) {
                         const bool aj = (on >> j) & 1u;
                         float v = (ai && aj) ? WIJ(i, j) : 0.0f;
+#if TRIM
+#pragma unroll
+                        for (int k = 0; k < j; k++) { v -= u[k] * L[j][k]; }
+                        u[j] = v;
+#else
 #pragma unroll
                         for (int k = 0; k < j; k++) { v -= L[i][k] * L[j][k] * (1.0f / iD[k]); }
+#endif
                         L[i][j] = v * iD[j];
                         d -= v * L[i][j];
                     }
-                    iD[i] = 1.0f / d;
+                    iD[i] = frcp(d);
                 }
 #pragma unroll
                 for (int i = 0; i < NE; i++) {
@@ -1416,6 +1910,44 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                 again = next != on;
                 on = next;
             }
+#if POLISH
+            // The round left the set somewhere in the warp: clamp its answer
+            // into the cone and run POLISH Gauss-Seidel sweeps on W lam = b0
+            // from there; the set for the next warm start is read off the
+            // answer.
+            if (__any_sync(FULL, again)) {
+                float idg[NE];
+#pragma unroll
+                for (int i = 0; i < NE; i++) { idg[i] = cim[i >> 1] != 0.0f ? frcp(WIJ(i, i)) : 0.0f; }
+#pragma unroll 1
+                for (int sweep = 0; sweep < POLISH; sweep++) {
+#pragma unroll
+                    for (int i = 0; i < NE; i++) {
+                        float r = b0[i];
+#pragma unroll
+                        for (int j = 0; j < NE; j++) { r -= WIJ(i, j) * lam[j]; }
+                        const float l = lam[i] + r * idg[i];
+                        if (i & 1) {
+                            const float lim = cmu[i >> 1] * lam[i - 1];
+                            lam[i] = clampf(l, -lim, lim);
+                        } else {
+                            lam[i] = fmaxf(l, 0.0f);
+                        }
+                    }
+                }
+                unsigned pon = 0u, pneg = 0u;
+#pragma unroll
+                for (int c = 0; c < NC; c++) {
+                    const float ln = lam[2 * c], lt = lam[2 * c + 1];
+                    if (cim[c] != 0.0f && ln > 0.0f) {
+                        pon |= 1u << (2 * c);
+                        if (fabsf(lt) < cmu[c] * ln) { pon |= 2u << (2 * c); }
+                        else if (lt < 0.0f) { pneg |= 2u << (2 * c); }
+                    }
+                }
+                if (again) { on = pon; neg = pneg; }
+            }
+#endif
             rounds_sum += (float)rounds;
             warm = on | (neg << 8u) | 0x10000u;
             float Lg[NPL][NB], mu0g[NPL], dxg[NPL], dyg[NPL];
@@ -1433,11 +1965,14 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
             for (int k = 0; k < NPL; k++) {
                 float r = 0.0f;
 #pragma unroll
-                for (int c = 0; c < NC; c++) { r += RCO(k, c) * (lam[2 * c] * dyg[k] + lam[2 * c + 1] * dxg[k]); }
+                for (int e = 0; e < NE; e++) { r += RR(e, k) * lam[e]; }
                 z1[0][k] = lg == 1u ? r : 0.0f;
                 z1[1][k] = lg == 1u ? 0.0f : r;
             }
-            tree_solve<2>(z1, topo, invD, Lg, lg);
+            {
+                PMK_AT
+                tree_solve<2>(z1, pmk, invD, Lg, lg);
+            }
             __syncwarp();
             // Rod impulses mu = mu0 - A^-1 R lambda to the rods' two nodes;
             // contact impulses to theirs.
@@ -1456,6 +1991,26 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     FRC(a, lane) = f;
                 }
             }
+#if CAPPLY
+            // Contact impulses: lane lg takes contacts 2j + lg.
+            float ext_x = 0.0f, ext_y = 0.0f;
+#pragma unroll
+            for (int c = 0; c < NC; c++) { ext_x += lam[2 * c + 1]; ext_y += lam[2 * c]; }
+            // The Delassus matrix has overwritten the node table: positions
+            // again, for the torque of the contact impulses.
+#pragma unroll
+            for (int k = 0; k < NPL; k++) { NODEW(k) = make_float4(px[k], py[k], 0.0f, 0.0f); }
+#pragma unroll
+            for (int j = 0; j < NC / 2; j++) {
+                const unsigned g = (word >> (12u * j + 6u * lg)) & 31u;
+                const float ln = lg ? lam[4 * j + 2] : lam[4 * j];
+                const float lt = lg ? lam[4 * j + 3] : lam[4 * j + 1];
+                if (((word >> (12u * j + 6u * lg)) & 32u) == 0u) { continue; }
+                float2 f = FRC(g, lane);
+                f.x += lt; f.y += ln;
+                FRC(g, lane) = f;
+            }
+#else
             unsigned own = 0u;
             float ext_x = 0.0f, ext_y = 0.0f;
 #pragma unroll
@@ -1471,6 +2026,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     ext_x += lam[2 * c + 1]; ext_y += lam[2 * c];
                 }
             }
+#endif
             __syncwarp();
             // New velocities. Ledgers: the impulses of the substep must move
             // the body's momentum and its angular momentum about the centre
@@ -1487,7 +2043,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     jy[k] = iy[k] + f0.y + f1.y;
                     vx[k] += invm[k] * jx[k];
                     vy[k] += invm[k] * jy[k];
-                    const float m = invm[k] > 0.0f ? 1.0f / invm[k] : 0.0f;
+                    const float m = invm[k] > 0.0f ? frcp(invm[k]) : 0.0f;
                     mm += m; mx += m * px[k]; my += m * py[k];
                     gx += invm[k] > 0.0f ? jx[k] : 0.0f;
                     gy += invm[k] > 0.0f ? jy[k] : 0.0f;
@@ -1504,7 +2060,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #pragma unroll
                             for (int k = 0; k < NPL; k++) {
                                 if ((1u << (g & 3u)) & (1u << k)) {
-                                    const float gap = py[k] - REC(4, k);
+                                    const float gap = py[k] - R_RAD(k);
                                     const float tgt = gap >= 0.0f ? -gap * INV_HS : -gap * PUSH_OUT * INV_HS;
                                     rn = fmaxf(rn, fabsf(vy[k] - tgt));
                                 }
@@ -1513,13 +2069,13 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     }
                     __syncwarp();
 #pragma unroll
-                    for (int k = 0; k < NPL; k++) { NODE(k, lane) = make_float4(px[k], py[k], vx[k], vy[k]); }
+                    for (int k = 0; k < NPL; k++) { NODEW(k) = make_float4(px[k], py[k], vx[k], vy[k]); }
                     __syncwarp();
 #pragma unroll
                     for (int k = 0; k < NPL; k++) {
                         if (T_VALID(topo[k])) {
                             const unsigned a = T_PIVOT(topo[k]);
-                            const float4 na = NODE(a & 3u, gl + (a >> 2u));
+                            const float4 na = NODER(a);
                             rr = fmaxf(rr, fabsf((vx[k] - na.z) * dxg[k] + (vy[k] - na.w) * dyg[k] - ctg[k]));
                         }
                     }
@@ -1528,15 +2084,21 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     msum = fmaxf(msum, rr);
                 }
 #endif
-                const float itm = 1.0f / fmaxf(mm + xch(mm), 1e-6f);
+                const float itm = frcp(fmaxf(mm + xch(mm), 1e-6f));
                 const float ccx = (mx + xch(mx)) * itm, ccy = (my + xch(my)) * itm;
+#if CAPPLY
+                // ext is the whole contact impulse on both lanes.
+                const float sx = NO_LEDGER ? 0.0f : (ext_x - gx - xch(gx)) * itm;
+                const float sy = NO_LEDGER ? 0.0f : (ext_y - gy - xch(gy)) * itm;
+#else
                 const float sx = NO_LEDGER ? 0.0f : (ext_x + xch(ext_x) - gx - xch(gx)) * itm;
                 const float sy = NO_LEDGER ? 0.0f : (ext_y + xch(ext_y) - gy - xch(gy)) * itm;
+#endif
                 float lz = 0.0f, lc = 0.0f, iz = 0.0f;
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
                     const bool on_ = invm[k] > 0.0f;
-                    const float m = on_ ? 1.0f / invm[k] : 0.0f;
+                    const float m = on_ ? frcp(invm[k]) : 0.0f;
                     const float rx = px[k] - ccx, ry = py[k] - ccy;
                     lz += on_ ? rx * jy[k] - ry * jx[k] : 0.0f;
                     iz += m * (rx * rx + ry * ry);
@@ -1544,6 +2106,16 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     vy[k] += on_ ? sy : 0.0f;
                 }
                 // The contact impulses' torque about the centre of mass.
+#if CAPPLY
+#pragma unroll
+                for (int j = 0; j < NC / 2; j++) {
+                    const unsigned g = (word >> (12u * j + 6u * lg)) & 31u;
+                    const float ln = lg ? lam[4 * j + 2] : lam[4 * j];
+                    const float lt = lg ? lam[4 * j + 3] : lam[4 * j + 1];
+                    const float4 nd = NODER(g);
+                    lc += (nd.x - ccx) * ln - (nd.y - ccy) * lt;
+                }
+#else
 #pragma unroll
                 for (int c = 0; c < NC; c++) {
                     const unsigned g = CNODE(c);
@@ -1555,9 +2127,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                         }
                     }
                 }
+#endif
                 const float itot = iz + xch(iz);
                 const float lsum = lc + xch(lc) - lz - xch(lz);
-                const float wc = (itot > 0.0f && !NO_LEDGER) ? lsum / itot : 0.0f;
+                const float wc = (itot > 0.0f && !NO_LEDGER) ? lsum * frcp(itot) : 0.0f;
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
                     const bool on_ = invm[k] > 0.0f;
@@ -1576,6 +2149,26 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                 px[k] += HS * vx[k];
                 py[k] += HS * vy[k];
             }
+#if ANC_REGS
+            {
+                // Node masks of the touching nodes and of those whose friction
+                // slid; a touching node takes its new position as the anchor
+                // when it slid or had none.
+                unsigned tmask = 0u, smask = 0u;
+#pragma unroll
+                for (int c = 0; c < NC; c++) {
+                    const unsigned e = (word >> (6u * c)) & 63u;
+                    const unsigned bit = 1u << (e & 31u);
+                    tmask |= (e & 32u) ? bit : 0u;
+                    smask |= (!((on >> (2 * c + 1)) & 1u)) ? bit : 0u;
+                }
+#pragma unroll
+                for (int k = 0; k < NPL; k++) {
+                    const unsigned n = lg * NPL + k;
+                    if (((tmask >> n) & 1u) && (((smask >> n) & 1u) || anc_r[k] != anc_r[k])) { anc_r[k] = px[k]; }
+                }
+            }
+#else
 #pragma unroll
             for (int c = 0; c < NC; c++) {
                 const unsigned g = CNODE(c);
@@ -1590,227 +2183,20 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
                     }
                 }
             }
+#endif
             contact_sum += (float)__popc(word & 0x820820u);
+#if PROJ_ANCHORED
+#pragma unroll
+            for (int k = 0; k < NPL; k++) {
+                pinvD[k] = invD[k];
+#pragma unroll
+                for (int a = 0; a < NB; a++) { pLf[k][a] = Lg[k][a]; }
+            }
+#endif
+#endif
 #undef RCO
+#undef RR
 #undef CNODE
-#else
-            // @S contact
-            // Per-node impulses against each node's own mass, then the exact
-            // rod solve as the coupling, NPASS times.
-            float rad[NPL], mu[NPL];
-            LOADF(rad, F_RAD);
-            LOADF(mu, F_MU);
-#pragma unroll
-            for (int k = 0; k < NPL; k++) { mu[k] = NO_FRICTION ? 0.0f : mu[k] * p.friction; }
-            unsigned slid = 0u;
-            touch = 0u;
-#if LEDGER
-            // @S ledgerA
-            // The ledger's first stage: momentum and angular momentum about
-            // the origin before the impulses, and once per step the centre
-            // of mass and the inertia about it.
-            float pbx = 0.0f, pby = 0.0f, lbz = 0.0f;
-            float smx = 0.0f, smy = 0.0f, sq = 0.0f;
-#pragma unroll
-            for (int k = 0; k < NPL; k++) {
-                const float mvx = mass[k] * vx[k], mvy = mass[k] * vy[k];
-                pbx += mvx; pby += mvy;
-                lbz = fmaf(px[k], mvy, lbz); lbz = fmaf(-py[k], mvx, lbz);
-                if (sub == 0) {
-                    const float mxk = mass[k] * px[k], myk = mass[k] * py[k];
-                    smx += mxk; smy += myk;
-                    sq = fmaf(mxk, px[k], sq); sq = fmaf(myk, py[k], sq);
-                }
-            }
-            if (sub == 0) {
-                const float im = frcp(fmaxf(mtot, 1e-6f));
-                smx = XSUM(smx); smy = XSUM(smy); sq = XSUM(sq);
-                cxr = smx * im; cyr = smy * im;
-                iic = frcp(fmaxf(sq - mtot * (cxr * cxr + cyr * cyr), 1e-6f));
-            }
-#endif
-#if LEDGER
-            float ex = 0.0f, ey = 0.0f, tz = 0.0f;
-#endif
-#pragma unroll
-            for (int pass = 0; pass < NPASS; pass++) {
-                // @S nodes
-#pragma unroll
-                for (int k = 0; k < NPL; k++) {
-                    const float gap = py[k] - rad[k];
-                    if (pass == 0) { touch |= ((gap + HS * vy[k] <= 0.0f && invm[k] > 0.0f && !NO_CONTACT) ? 1u : 0u) << k; }
-                    const float tn = -fmaxf(gap, 0.0f) * INV_HS;
-                    const float dvn = fmaxf(tn - vy[k], 0.0f);
-                    vy[k] += dvn;
-                    const float cone = mu[k] * dvn;
-                    const float tvx = (ax[k] - px[k]) * INV_HS;
-                    const float want = tvx - vx[k];
-                    float dvt = clampf(want, -cone, cone);
-                    // The clean rule: friction never speeds up a slide the
-                    // anchor does not ask for.
-                    dvt = (dvt * vx[k] > 0.0f && fabsf(tvx) <= fabsf(vx[k])) ? 0.0f : dvt;
-                    vx[k] += dvt;
-                    if (pass == 0) { slid |= (fabsf(want) > cone ? 1u : 0u) << k; }
-#if LEDGER
-                    const float ix_ = mass[k] * dvt, iy_ = mass[k] * dvn;
-                    ex += ix_; ey += iy_;
-                    tz = fmaf(px[k], iy_, tz); tz = fmaf(-py[k], ix_, tz);
-#endif
-                }
-                // @S rod
-#if !BAKED
-#pragma unroll
-                for (int k = 0; k < NPL; k++) { NODE(k, lane) = make_float4(px[k], py[k], vx[k], vy[k]); }
-                __syncwarp();
-#endif
-                {
-                    float z[SOLVE_ROWS][NPL];
-#pragma unroll
-                    for (int k = 0; k < NPL; k++) {
-                        const unsigned t = TOPOK(k);
-                        float r = 0.0f;
-                        if (T_VALID(t)) {
-                            const unsigned a = T_PIVOT(t);
-                            const float4 na = NODEV(a);
-                            const float rvx = vx[k] - na.z, rvy = vy[k] - na.w;
-                            const float rn = rvx * dx[k] + rvy * dy[k];
-                            const float perp2 = fmaxf(rvx * rvx + rvy * rvy - rn * rn, 0.0f);
-                            r = -rn - perp2 * HS * ilr[k];
-                        }
-                        ZSET(z, k, r);
-                    }
-                    tree_solve<SOLVE_ROWS>(z, topo, invD, Lf, lg);
-#if BAKED
-#pragma unroll
-                    for (int k = 0; k < NPL; k++) {
-                        const unsigned t = TOPOK(k);
-                        if (T_VALID(t)) {
-                            const unsigned a = T_PIVOT(t);
-                            const float mu_k = ZGET(z, k);
-                            const float ix = dx[k] * mu_k, iy = dy[k] * mu_k;
-                            vx[k] += invm[k] * ix; vy[k] += invm[k] * iy;
-                            vx[a] -= invm[a] * ix; vy[a] -= invm[a] * iy;
-                        }
-                    }
-#else
-#pragma unroll
-                    for (int g = 0; g < W * NPL; g++) { FRC(g, lane) = make_float2(0.0f, 0.0f); }
-                    __syncwarp();
-                    float ix[NPL], iy[NPL];
-#pragma unroll
-                    for (int k = 0; k < NPL; k++) {
-                        const float mu_k = ZGET(z, k);
-                        ix[k] = dx[k] * mu_k; iy[k] = dy[k] * mu_k;
-                        if (T_VALID(TOPOK(k))) {
-                            const unsigned a = T_PIVOT(TOPOK(k));
-                            float2 f = FRC(a, lane);
-                            f.x -= ix[k]; f.y -= iy[k];
-                            FRC(a, lane) = f;
-                        }
-                    }
-                    __syncwarp();
-#pragma unroll
-                    for (int k = 0; k < NPL; k++) {
-                        const unsigned g = lg * NPL + k;
-                        const float2 f0 = FRC(g, lane);
-#if W == 2
-                        const float2 f1 = FRC(g, lane ^ 1u);
-                        vx[k] += invm[k] * (ix[k] + f0.x + f1.x);
-                        vy[k] += invm[k] * (iy[k] + f0.y + f1.y);
-#else
-                        vx[k] += invm[k] * (ix[k] + f0.x);
-                        vy[k] += invm[k] * (iy[k] + f0.y);
-#endif
-                    }
-                    __syncwarp();
-#endif
-                }
-            }
-#if LEDGER
-            // @S ledgerB
-            // The ledger's second stage: the impulses of the substep must
-            // have moved the momentum by exactly the contact impulses and
-            // the angular momentum by their torque; the rounding rest goes
-            // back as one uniform velocity and one rotation about the
-            // centre of mass.
-            {
-                float pax = 0.0f, pay = 0.0f, laz = 0.0f;
-#pragma unroll
-                for (int k = 0; k < NPL; k++) {
-                    const float mvx = mass[k] * vx[k], mvy = mass[k] * vy[k];
-                    pax += mvx; pay += mvy;
-                    laz = fmaf(px[k], mvy, laz); laz = fmaf(-py[k], mvx, laz);
-                }
-                const float im = frcp(fmaxf(mtot, 1e-6f));
-                const float rpx = NO_LEDGER ? 0.0f : XSUM(pax - pbx - ex);
-                const float rpy = NO_LEDGER ? 0.0f : XSUM(pay - pby - ey);
-                const float rl = NO_LEDGER ? 0.0f : XSUM(laz - lbz - tz);
-                const float sx = -rpx * im, sy = -rpy * im;
-                const float wc = (-rl + (cxr * rpy - cyr * rpx)) * iic;
-#ifdef DIAG
-                ang_max = fmaxf(ang_max, fabsf(rl));
-#endif
-#pragma unroll
-                for (int k = 0; k < NPL; k++) {
-                    const bool on_ = invm[k] > 0.0f;
-                    vx[k] += on_ ? sx - wc * (py[k] - cyr) : 0.0f;
-                    vy[k] += on_ ? sy + wc * (px[k] - cxr) : 0.0f;
-                }
-            }
-#endif
-#ifdef DIAG
-            {
-                // Residuals after the impulses: normal rows against what the
-                // gap allows, rods against their centripetal targets.
-                float rn = 0.0f, rr = 0.0f;
-#pragma unroll
-                for (int k = 0; k < NPL; k++) {
-                    const float tn = -fmaxf(py[k] - rad[k], 0.0f) * INV_HS;
-                    if ((touch >> k) & 1u) { rn = fmaxf(rn, fmaxf(tn - vy[k], 0.0f)); }
-                }
-#if !BAKED
-                __syncwarp();
-#pragma unroll
-                for (int k = 0; k < NPL; k++) { NODE(k, lane) = make_float4(px[k], py[k], vx[k], vy[k]); }
-                __syncwarp();
-#endif
-#pragma unroll
-                for (int k = 0; k < NPL; k++) {
-                    const unsigned t = TOPOK(k);
-                    if (T_VALID(t)) {
-                        const unsigned a = T_PIVOT(t);
-                        const float4 na = NODEV(a);
-                        const float rvx = vx[k] - na.z, rvy = vy[k] - na.w;
-                        const float rnn = rvx * dx[k] + rvy * dy[k];
-                        const float perp2 = fmaxf(rvx * rvx + rvy * rvy - rnn * rnn, 0.0f);
-                        rr = fmaxf(rr, fabsf(rnn + perp2 * HS * ilr[k]));
-                    }
-                }
-                __syncwarp();
-                rn_max = fmaxf(rn_max, rn);
-                rr_max = fmaxf(rr_max, rr);
-            }
-#endif
-            // @S euler
-            // Semi-implicit Euler; the penetration left is recovered by a
-            // position nudge (a split impulse); anchors are set on touching
-            // and moved by sliding. The stub's synthetic bodies and explicit
-            // forces are not a tuned physics: a speed clamp keeps every trial
-            // finite, so all creatures run their full length.
-#pragma unroll
-            for (int k = 0; k < NPL; k++) {
-                vx[k] = clampf(vx[k], -SPEED_CLAMP, SPEED_CLAMP);
-                vy[k] = clampf(vy[k], -SPEED_CLAMP, SPEED_CLAMP);
-                px[k] += HS * vx[k];
-                py[k] += HS * vy[k];
-#ifdef DIAG
-                pen_max = fmaxf(pen_max, rad[k] - py[k]);
-#endif
-                py[k] += PUSH_OUT * fmaxf(rad[k] - py[k], 0.0f);
-                ax[k] = (((touch >> k) & 1u) && !((slid >> k) & 1u)) ? ax[k] : px[k];
-            }
-            contact_sum += (float)__popc(touch);
-#endif
         }
         // @S projection
         // Drift projection: rod lengths back to rest with the contact nodes
@@ -1819,9 +2205,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
         {
 #if CONTACT_MODEL
             held = touch << (lg * NPL);
-#if W == 2
             held |= xchu(held);
-#endif
 #else
 #pragma unroll
             for (int c = 0; c < NC; c++) {
@@ -1831,65 +2215,77 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
             // A node out of contact for the step loses its anchor.
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
-                if (!((held >> (lg * NPL + k)) & 1u) && ((prevc >> (lg * NPL + k)) & 1u)) { ANC(k) = __uint_as_float(0x7fc00000u); }
+                if (!((held >> (lg * NPL + k)) & 1u) && ((prevc >> (lg * NPL + k)) & 1u)) {
+#if ANC_REGS
+                    anc_r[k] = __uint_as_float(0x7fc00000u);
+#else
+                    ANC(k) = __uint_as_float(0x7fc00000u);
+#endif
+                }
             }
 #endif
             __syncwarp();
-#if !BAKED
 #pragma unroll
-            for (int k = 0; k < NPL; k++) { NODE(k, lane) = make_float4(px[k], py[k], vx[k], vy[k]); }
+            for (int k = 0; k < NPL; k++) { NODEW(k) = make_float4(px[k], py[k], vx[k], vy[k]); }
             __syncwarp();
-#endif
-            float pdx_[NPL], pdy_[NPL], ipe[NPL], icm[NPL], lenr[NPL], pinr[NPL];
-            LOADF(lenr, F_LEN);
-            LOADF(pinr, F_PINV);
-            float z1[SOLVE_ROWS][NPL];
+            float dx[NPL], dy[NPL], rdx[NPL], rdy[NPL], ipe[NPL], icm[NPL];
+            float z1[2][NPL];
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
-                const unsigned t = TOPOK(k);
-                pdx_[k] = 0.0f; pdy_[k] = 0.0f;
+                const unsigned t = topo[k];
+                dx[k] = 0.0f; dy[k] = 0.0f;
                 float c = 0.0f;
                 if (T_VALID(t)) {
                     const unsigned a = T_PIVOT(t);
-                    const float4 na = NODEV(a);
+                    const float4 na = NODER(a);
                     const float ddx = px[k] - na.x, ddy = py[k] - na.y;
+#if FASTRCP
+                    const float il = frsq(fmaxf(ddx * ddx + ddy * ddy, 1e-12f));
+                    const float l = (ddx * ddx + ddy * ddy) * il;
+#else
                     const float l = sqrtf(ddx * ddx + ddy * ddy);
-                    const float il = frcp(fmaxf(l, 1e-6f));
-                    pdx_[k] = ddx * il; pdy_[k] = ddy * il;
-                    c = l - lenr[k];
+                    const float il = 1.0f / fmaxf(l, 1e-6f);
+#endif
+                    dx[k] = ddx * il; dy[k] = ddy * il;
+                    c = l - R_LEN(k);
                 }
                 drift_max = fmaxf(drift_max, fabsf(c));
-                ipe[k] = ((held >> T_PIVOT(t)) & 1u) ? 0.0f : pinr[k];
+                ipe[k] = ((held >> T_PIVOT(t)) & 1u) ? 0.0f : R_IPV(k);
                 icm[k] = ((held >> (lg * NPL + k)) & 1u) ? 0.0f : invm[k];
-                ZSET(z1, k, -c);
+                z1[0][k] = lg == 1u ? -c : 0.0f;
+                z1[1][k] = lg == 1u ? 0.0f : -c;
             }
-#if W == 2
 #pragma unroll
-            for (int q = 0; q < NPL; q++) { rdx[q] = xch(pdx_[q]); rdy[q] = xch(pdy_[q]); }
-#endif
-            factor(topo, pdx_, pdy_, rdx, rdy, ipe, icm, lg, invD, Lf);
-            tree_solve<SOLVE_ROWS>(z1, topo, invD, Lf, lg);
-#if BAKED
+            for (int q = 0; q < NPL; q++) { if (q >= 1 && XNEED(q)) { rdx[q] = xch(dx[q]); rdy[q] = xch(dy[q]); } else { rdx[q] = 0.0f; rdy[q] = 0.0f; } }
+            float invD[NPL], Lf[NPL][NB];
+            {
+                PMK_AT
+#if PROJ_ANCHORED
+                // Held nodes change the masses: factor again. Without them
+                // the substep's factor serves (directions one substep old).
+                if (__any_sync(FULL, held != 0u)) {
+                    factor(topo, pmk, dx, dy, rdx, rdy, ipe, icm, lg, invD, Lf);
+                } else {
 #pragma unroll
-            for (int k = 0; k < NPL; k++) {
-                const unsigned t = TOPOK(k);
-                if (T_VALID(t)) {
-                    const unsigned a = T_PIVOT(t);
-                    const float mu_k = ZGET(z1, k);
-                    const float ix = pdx_[k] * mu_k, iy = pdy_[k] * mu_k;
-                    px[k] += icm[k] * ix; py[k] += icm[k] * iy;
-                    px[a] -= icm[a] * ix; py[a] -= icm[a] * iy;
+                    for (int k = 0; k < NPL; k++) {
+                        invD[k] = pinvD[k];
+#pragma unroll
+                        for (int a = 0; a < NB; a++) { Lf[k][a] = pLf[k][a]; }
+                    }
                 }
-            }
 #else
+                factor(topo, pmk, dx, dy, rdx, rdy, ipe, icm, lg, invD, Lf);
+#endif
+                tree_solve<2>(z1, pmk, invD, Lf, lg);
+            }
 #pragma unroll
             for (int g = 0; g < W * NPL; g++) { FRC(g, lane) = make_float2(0.0f, 0.0f); }
             __syncwarp();
             float ix[NPL], iy[NPL];
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
-                const float mu_k = ZGET(z1, k);
-                ix[k] = pdx_[k] * mu_k; iy[k] = pdy_[k] * mu_k;
+                const float mu = lg == 1u ? z1[0][k] : z1[1][k];
+                ix[k] = dx[k] * mu; iy[k] = dy[k] * mu;
                 if (T_VALID(topo[k])) {
                     const unsigned a = T_PIVOT(topo[k]);
                     float2 f = FRC(a, lane);
@@ -1901,67 +2297,56 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) lane_lean(
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
                 const unsigned g = lg * NPL + k;
-                const float2 f0 = FRC(g, lane);
-#if W == 2
-                const float2 f1 = FRC(g, lane ^ 1u);
+                const float2 f0 = FRC(g, lane), f1 = FRC(g, lane ^ 1u);
                 px[k] += icm[k] * (ix[k] + f0.x + f1.x);
                 py[k] += icm[k] * (iy[k] + f0.y + f1.y);
-#else
-                px[k] += icm[k] * (ix[k] + f0.x);
-                py[k] += icm[k] * (iy[k] + f0.y);
-#endif
             }
             __syncwarp();
-#endif
         }
         // @S metrics
         // Metrics, the fall rule and the end of the trial, once per step.
         {
             float mm = 0.0f, mx = 0.0f, low = 1e20f;
             bool bad = false;
-            float radm[NPL];
-            LOADF(radm, F_RAD);
 #pragma unroll
             for (int k = 0; k < NPL; k++) {
-                const float m = mass[k];
+                const float m = invm[k] > 0.0f ? frcp(invm[k]) : 0.0f;
                 mm += m; mx += m * px[k];
-                if (invm[k] > 0.0f) { low = fminf(low, py[k] - radm[k]); }
+                if (invm[k] > 0.0f) { low = fminf(low, py[k] - R_RAD(k)); }
                 bad |= !(fabsf(px[k]) <= 1e6f && fabsf(py[k]) <= 1e6f);
             }
-#if W == 2
-            const float com_x = (mx + xch(mx)) / fmaxf(mm + xch(mm), 1e-6f);
+            const float com_x = (mx + xch(mx)) * frcp(fmaxf(mm + xch(mm), 1e-6f));
             low = fminf(low, xch(low));
             bad = ((__ballot_sync(FULL, bad) >> gl) & 3u) != 0u;
             const float ms_all = msum + xch(msum);
             const float head_y = __shfl_sync(FULL, py[0], tid & 30u);
             const float neck_y = __shfl_sync(FULL, py[1], tid & 30u);
-#else
-            const float com_x = mx / fmaxf(mm, 1e-6f);
-            const float ms_all = msum;
-            const float head_y = py[0];
-            const float neck_y = py[1];
-#endif
             // Touchdowns restart the rhythm of the muscles that sense them.
             const unsigned down = held & ~prevc;
             if (down != 0u && live) {
 #if MUSCLE_MODEL
 #pragma unroll
                 for (int k = 0; k < NPL; k++) {
-                    if ((down >> (lg * NPL + k)) & 1u) { ROFF(lg * NPL + k) = t0 + DT; }
+                    if ((down >> (lg * NPL + k)) & 1u) { roff[(size_t)cidx * MPL * W + lg * NPL + k] = t0 + DT; }
                 }
 #else
 #pragma unroll MUSCLE_UNROLL
                 for (int k = 0; k < MPL; k++) {
                     if ((unsigned)k < mc) {
-                        const unsigned pk = __float_as_uint(msa[mb + (size_t)k * W].x);
+#if SENSE_REGS
+                        const unsigned sv = ((k < 8 ? sensA >> (4 * k) : sensB >> (4 * (k - 8)))) & 15u;
+                        if ((sv & 8u) && ((down >> (sv & 7u)) & 1u)) {
+#else
+                        const unsigned pk = __float_as_uint(mss[(size_t)cidx * (2 * MPL * W) + (2 * k + 1) * W + lg].w);
                         if (((pk >> 25u) & 1u) && ((down >> ((pk >> 20u) & 31u)) & 1u)) {
+#endif
                             const float4 s0 = mss[(size_t)cidx * (2 * MPL * W) + (2 * k) * W + lg];
                             const float x = -((t0 + DT) * s0.x + s0.y);
                             roff[mb + (size_t)k * W] = x - floorf(x);
                         }
                     }
                 }
-#endif
+            #endif
             }
             prevc = held;
             if (live) {
