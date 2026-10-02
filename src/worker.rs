@@ -232,8 +232,11 @@ pub struct LineageStep {
 pub struct IslandSummary {
     /// Its fastest behavior elite's distance (NaN while it is empty).
     pub best: f32,
-    /// Filled behavior niches.
+    /// Filled behavior niches (a way of moving for each body class).
     pub cells: usize,
+    /// Ways of moving the island covers, counting its cells without their
+    /// body classes.
+    pub moves: usize,
     /// Its fastest behavior elite.
     pub leader: Option<Creature>,
     /// Its fastest behavior elites with their distances, best first (the
@@ -281,6 +284,7 @@ impl IslandSummary {
         Self {
             best: top.first().map_or(f32::NAN, |t| t.0),
             cells: island.behavior_count(),
+            moves: island.movement_count(),
             leader: top.first().map(|t| t.1.clone()),
             top,
             origins,

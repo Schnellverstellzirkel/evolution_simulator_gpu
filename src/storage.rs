@@ -1032,9 +1032,9 @@ impl Experiment {
             fine: bool,
             protection: u32,
             behavior_candidate: bool,
-            /// Body plan of a structural or novelty child, for its island's
-            /// morphology reserve, and its key.
-            topology: Option<qd::Topology>,
+            /// A structural or novelty child may enter its island's
+            /// morphology reserve, and has a body plan key.
+            structural: bool,
             plan: u64,
             /// Offered to no archive.
             screened: bool,
@@ -1070,9 +1070,13 @@ impl Experiment {
                 } else {
                     false
                 };
-                let topology = (valid && matches!(emitter, Emitter::Structural | Emitter::Novelty))
-                    .then(|| qd::topology_of_population(population, j));
-                let plan = topology.as_ref().map_or(0, qd::Topology::plan_key);
+                let structural =
+                    valid && matches!(emitter, Emitter::Structural | Emitter::Novelty);
+                let plan = if structural {
+                    qd::plan_key_of_population(population, j)
+                } else {
+                    0
+                };
                 let elite_before = (emitter == Emitter::Cma)
                     .then_some(birth.cma)
                     .flatten()
@@ -1086,7 +1090,7 @@ impl Experiment {
                     fine: m.fine,
                     protection: birth.protection,
                     behavior_candidate,
-                    topology,
+                    structural,
                     plan,
                     screened,
                     elite_before,
@@ -1149,7 +1153,7 @@ impl Experiment {
                     );
                     if behavior.inserted {
                         entered.push(j);
-                        if p.topology.is_some() {
+                        if p.structural {
                             let bar = bars
                                 .entry(p.plan)
                                 .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
@@ -1157,9 +1161,9 @@ impl Experiment {
                         }
                         continue;
                     }
-                    let Some(topology) = &p.topology else {
+                    if !p.structural {
                         continue;
-                    };
+                    }
                     // A reserve place goes to a new body plan, or to a better
                     // child of a reserve entry with the same plan.
                     let parent = births[j].parent_id.and_then(|id| parents.get(&id));
@@ -1186,7 +1190,7 @@ impl Experiment {
                         population,
                         j,
                         p.descriptor,
-                        topology.clone(),
+                        qd::topology_of_population(population, j),
                         p.score,
                         p.fine,
                         p.emitter,

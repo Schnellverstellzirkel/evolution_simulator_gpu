@@ -463,16 +463,48 @@ impl Topology {
         topology_from_parts(&creature.nodes, &creature.bones, &creature.muscles)
     }
     /// A 64-bit key of the body plan: two plans share one only by a
-    /// collision of the hash. Edges are sorted, so the key does not depend
-    /// on part order.
+    /// collision of the hash. The key sums one hash per edge, so it does not
+    /// depend on the order of the parts.
     pub fn plan_key(&self) -> u64 {
-        let mut key = 0x9e37_79b9_7f4a_7c15u64 ^ self.nodes as u64;
-        for &(a, b) in &self.edges {
-            key = (key.rotate_left(23) ^ (((a as u64) << 32) | b as u64))
-                .wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        }
-        key ^ (key >> 32)
+        let sum = self
+            .edges
+            .iter()
+            .fold(0u64, |sum, &(a, b)| sum.wrapping_add(edge_key(a, b)));
+        plan_key_of(self.nodes as usize, sum)
     }
+}
+
+/// The hash of one edge of a body plan (`topology_from_parts`).
+fn edge_key(a: u32, b: u32) -> u64 {
+    let mut x = ((a as u64) << 32) | b as u64;
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    x ^= x >> 29;
+    x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    x ^ (x >> 32)
+}
+fn plan_key_of(nodes: usize, edge_sum: u64) -> u64 {
+    let mut key = edge_sum ^ (nodes as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    key ^= key >> 31;
+    key = key.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    key ^ (key >> 29)
+}
+/// `topology_of_population(..).plan_key()` without building the topology.
+pub fn plan_key_of_population(population: &Population, index: usize) -> u64 {
+    let genome = &population.genomes[index];
+    let bones = &population.bones[genome.bone_start..genome.bone_start + genome.bone_count];
+    let muscles =
+        &population.muscles[genome.muscle_start..genome.muscle_start + genome.muscle_count];
+    let offset = genome.node_count as u32;
+    let mut sum = 0u64;
+    for b in bones {
+        sum = sum.wrapping_add(edge_key(b.a.min(b.b), b.a.max(b.b)));
+    }
+    for m in muscles {
+        let (a, b) = (offset + m.bone_a, offset + m.bone_b);
+        sum = sum.wrapping_add(edge_key(a.min(b), a.max(b)));
+    }
+    plan_key_of(genome.node_count, sum)
 }
 
 fn topology_from_parts(
@@ -2137,6 +2169,33 @@ mod tests {
         assert_eq!(archive.entries[0].fitness, 9.0);
         assert_eq!(archive.entries[0].visits, 3);
         assert_eq!(archive.movement_count(), 1);
+    }
+
+    #[test]
+    fn a_plan_key_is_the_same_from_a_topology_and_from_the_genes() {
+        let config = Config {
+            population: 64,
+            random_seed: false,
+            seed: 11,
+            ..Config::default()
+        };
+        let population = evolution::create(&config).unwrap();
+        let topologies: Vec<_> = (0..population.genomes.len())
+            .map(|i| super::topology_of_population(&population, i))
+            .collect();
+        for (i, topology) in topologies.iter().enumerate() {
+            assert_eq!(
+                topology.plan_key(),
+                super::plan_key_of_population(&population, i)
+            );
+        }
+        // Two bodies share a key exactly when they share a plan.
+        for (i, a) in topologies.iter().enumerate() {
+            for b in &topologies[i..] {
+                assert_eq!(a == b, a.plan_key() == b.plan_key());
+            }
+        }
+        assert!(topologies.iter().any(|t| *t != topologies[0]));
     }
 
     #[test]

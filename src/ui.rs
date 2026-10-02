@@ -3420,11 +3420,20 @@ impl App {
                                 *selected = Some(card.replay_of(&list.config));
                             }
                             response.on_hover_text(format!(
-                                "{}\n{} nodes, {} bones, {} muscles\n{}\n{}\nClick to replay",
+                                "{}\n{} nodes, {} bones, {} muscles{}\n{}\n{}\nClick to replay",
                                 species_name(&card.creature),
                                 card.creature.nodes.len(),
                                 card.creature.bones.len(),
                                 card.creature.muscles.len(),
+                                card.descriptor.map_or(String::new(), |d| {
+                                    let niche = d.niche().0;
+                                    format!(
+                                        " · {} {} body",
+                                        crate::qd::SHAPE_NAMES[usize::from(niche[2])]
+                                            .to_lowercase(),
+                                        crate::qd::SIZE_NAMES[usize::from(niche[5])].to_lowercase()
+                                    )
+                                }),
                                 card.emitter.map_or("First generation".to_owned(), |emitter| {
                                     format!("Born {}", origin_words(emitter))
                                 }),
@@ -5699,7 +5708,7 @@ fn paint_island(
     painter.text(
         rect.right_top() + Vec2::new(-12., 12.),
         Align2::RIGHT_TOP,
-        format!("{} ways of moving", number(island.cells)),
+        format!("{} ways of moving", number(island.moves)),
         FontId::proportional(13.),
         theme.muted,
     );
