@@ -5,9 +5,14 @@
 //! muscle-rounds histogram, and a hash of every creature's result bits, which
 //! two runs of one population compare.
 //!
-//! Usage: p2_speed <save.evo | dump.bin> [count] [repeats] [effects]
+//! Usage: p2_speed <save.evo | dump.bin> [count] [repeats] [effects] [screen]
 //! `effects` is a comma list of effect names (`Wind,Mud`) put on at their
-//! first level over the save's world.
+//! first level over the save's world. With `screen` as the fifth argument the
+//! timed passes run the game's standard trial: the 5 s screen stops creatures
+//! below the bar (the 5 s distance the best tenth reached in the warm-up
+//! pass, which runs every trial in full), where the default runs every trial
+//! to its end. With `fine` it runs the confirmation trial's settings
+//! (`scheduler::confirm_config`) over the whole creature list instead.
 use evolution_simulator::{
     config::Config,
     engine::{self, Engine},
@@ -16,11 +21,15 @@ use evolution_simulator::{
 };
 use std::time::{Duration, Instant};
 
-fn run(
-    engine: &mut impl Engine,
-    pop: &Population,
-    cfg: &Config,
-) -> anyhow::Result<(f64, f64, f64, u64)> {
+type Run = (
+    f64,
+    f64,
+    f64,
+    u64,
+    Vec<evolution_simulator::creature_kernel::GpuResult>,
+);
+
+fn run(engine: &mut impl Engine, pop: &Population, cfg: &Config) -> anyhow::Result<Run> {
     let start = Instant::now();
     engine.submit(pop.clone(), cfg)?;
     let done = loop {
@@ -57,6 +66,7 @@ fn run(
         steps / seconds,
         steps / done.busy_seconds.max(1e-9),
         hash,
+        done.results,
     ))
 }
 
@@ -98,6 +108,8 @@ fn main() -> anyhow::Result<()> {
         e.config.clone()
     };
     cfg.screen = None;
+    let screened = args.get(5).is_some_and(|v| v == "screen");
+    let fine = args.get(5).is_some_and(|v| v == "fine");
     for name in args.get(4).map_or("", |v| v.as_str()).split(',').filter(|n| !n.is_empty()) {
         let effect = evolution_simulator::environment::EFFECTS
             .iter()
@@ -106,12 +118,25 @@ fn main() -> anyhow::Result<()> {
         let level = effect.level(&cfg) + 1;
         effect.set_level(&mut cfg, level);
     }
+    if fine {
+        cfg = evolution_simulator::scheduler::confirm_config(&cfg);
+        cfg.screen = None;
+    }
     eprintln!("world flags {:#x}", warp_kernel::world_flags(&cfg));
     let mut engine = engine::gpu_engine("RTX 4060", 64)?;
     eprintln!("engine: {}", engine.name());
-    run(&mut engine, &pop, &cfg)?;
+    let warm = run(&mut engine, &pop, &cfg)?;
+    if screened {
+        let bar = evolution_simulator::physics::screen_bar(
+            warm.4.iter().map(|r| r.rung_trace().distance(2)),
+            evolution_simulator::physics::screen_keep(),
+        );
+        eprintln!("screen bar {bar:.2} m at 5 s");
+        cfg.screen = evolution_simulator::physics::screen_seconds()
+            .map(|seconds| evolution_simulator::physics::Screen { seconds, bar });
+    }
     for _ in 0..repeats {
-        let (creatures, steps, busy, hash) = run(&mut engine, &pop, &cfg)?;
+        let (creatures, steps, busy, hash, _) = run(&mut engine, &pop, &cfg)?;
         println!(
             "{} creatures: {creatures:.0} creatures/s, {:.1}M creature-steps/s ({:.1}M per GPU-busy second), results {hash:016x}",
             pop.genomes.len(),
@@ -134,7 +159,7 @@ fn main() -> anyhow::Result<()> {
             warp_kernel::ROUNDS
         );
         for _ in 0..repeats {
-            let (creatures, steps, busy, hash) = run(&mut engine, &sub, &cfg)?;
+            let (creatures, steps, busy, hash, _) = run(&mut engine, &sub, &cfg)?;
             println!(
                 "  {creatures:.0} creatures/s, {:.1}M creature-steps/s ({:.1}M per GPU-busy second), results {hash:016x}",
                 steps / 1e6,

@@ -7,7 +7,10 @@
 //! (rough hills, icy slope, swamp, desert, obstacle course, heavy world, then
 //! the calm world) instead: most of them are several effects away, so their
 //! kernels are not ready yet.
-//! Usage: worker_rate [population] [generations] [seed] [button seconds] [presets]
+//! With a sixth argument the game opens that save instead of a new one (its
+//! population, world and archives), and `generations` counts from the saved
+//! generation: this measures an evolved population of big bodies.
+//! Usage: worker_rate [population] [generations] [seed] [button seconds] [presets] [save]
 //! With button seconds above 0 an effect button is pressed that often: wind,
 //! mud, water, ice patches, gaps and hurdles go on one after another, then
 //! off in reverse, so every press is one level away from the world before it.
@@ -33,6 +36,16 @@ fn main() -> anyhow::Result<()> {
     let seed = arg(3, 38);
     let button = arg(4, 0);
     let presets = arg(5, 0) > 0;
+    let save = std::env::args().nth(6).map(std::path::PathBuf::from);
+    // Generations of the save, so the count and the rate start from there.
+    let base = match &save {
+        Some(path) => evolution_simulator::storage::check(path)?.generation as usize,
+        None => 0,
+    };
+    let population = match &save {
+        Some(path) => evolution_simulator::storage::check(path)?.population as usize,
+        None => population,
+    };
     let gpu = Gpu::new("RTX 4060")?;
     // A measurement must not pause itself when it runs under
     // tools/pause-game.sh, so it watches a private pause directory.
@@ -43,13 +56,16 @@ fn main() -> anyhow::Result<()> {
     // not pile up and fault in fresh memory.
     let ctx = eframe::egui::Context::default();
     let worker = Worker::spawn_with_pause_dir(gpu, ctx.clone(), pause_dir);
-    worker.send(Command::New(Config {
-        population,
-        seed,
-        random_seed: false,
-        checkpoint_interval: 0,
-        ..Config::default()
-    }));
+    match &save {
+        Some(path) => worker.send(Command::Load(path.clone())),
+        None => worker.send(Command::New(Config {
+            population,
+            seed,
+            random_seed: false,
+            checkpoint_interval: 0,
+            ..Config::default()
+        })),
+    }
     worker.send(Command::Run {
         continuous: true,
         guided: false,
@@ -161,6 +177,10 @@ fn main() -> anyhow::Result<()> {
                 worker.send(Command::Configure(config));
             }
             let n = snapshot.history.len();
+            // A loaded game shows an empty history until the save is read.
+            if n < base {
+                continue;
+            }
             if marks.last().is_none_or(|m| m.0 != n) {
                 marks.push((n, Instant::now()));
                 let (minor, major) = stat_fields();
@@ -178,7 +198,7 @@ fn main() -> anyhow::Result<()> {
                 let (hit, map, unmap) = evolution_simulator::block_alloc::large_blocks();
                 eprintln!("          large blocks since the start: {hit} reused, {map} mapped, {unmap} unmapped; children bred after their arena part: {late}, blocks bred into a new arena: {fresh}");
             }
-            if n >= generations {
+            if n >= base + generations {
                 break snapshot.history.clone();
             }
         }
@@ -194,31 +214,33 @@ fn main() -> anyhow::Result<()> {
         );
     }
     // Rate over the generations after the first two (warm-up).
-    let first = marks.iter().find(|m| m.0 == 3).map(|m| m.1);
+    let first = marks.iter().find(|m| m.0 == base + 3).map(|m| m.1);
     let last = marks.last().map(|m| (m.0, m.1));
     if let (Some(first), Some((n, last))) = (first, last) {
-        let done = (n - 3) * population;
+        let done = (n - base - 3) * population;
         println!(
-            "worker_rate: population {population}, generations 3 to {n}: {:.0} creatures/s, {:.2} s per generation",
+            "worker_rate: population {population}, generations {} to {n}: {:.0} creatures/s, {:.2} s per generation",
+            base + 3,
             done as f64 / last.duration_since(first).as_secs_f64(),
-            last.duration_since(first).as_secs_f64() / (n - 3) as f64
+            last.duration_since(first).as_secs_f64() / (n - base - 3) as f64
         );
         let at = |marks_of: &Vec<u64>, g: usize| {
             marks.iter().position(|m| m.0 == g).map(|i| marks_of[i])
         };
-        if let (Some(a), Some(b)) = (at(&fault_marks, 3), at(&fault_marks, n)) {
+        if let (Some(a), Some(b)) = (at(&fault_marks, base + 3), at(&fault_marks, n)) {
             println!(
-                "worker_rate: {:.0} minor page faults per generation over generations 3 to {n}",
-                (b - a) as f64 / (n - 3) as f64
+                "worker_rate: {:.0} minor page faults per generation over generations {} to {n}",
+                (b - a) as f64 / (n - base - 3) as f64,
+                base + 3
             );
-            if let (Some(a), Some(b)) = (at(&major_marks, 3), at(&major_marks, n)) {
+            if let (Some(a), Some(b)) = (at(&major_marks, base + 3), at(&major_marks, n)) {
                 println!(
                     "worker_rate: {:.0} major page faults per generation (swap reads)",
-                    (b - a) as f64 / (n - 3) as f64
+                    (b - a) as f64 / (n - base - 3) as f64
                 );
             }
             // Per generation, the faults not accounted for by new resident memory.
-            let regen: u64 = (4..=n)
+            let regen: u64 = (base + 4..=n)
                 .filter_map(|g| {
                     let i = marks.iter().position(|m| m.0 == g)?;
                     let faults = fault_marks[i] - fault_marks[i - 1];
@@ -227,15 +249,16 @@ fn main() -> anyhow::Result<()> {
                 })
                 .sum();
             println!(
-                "worker_rate: {:.0} page faults per generation beyond the growth of resident memory, generations 4 to {n}",
-                regen as f64 / (n - 3) as f64
+                "worker_rate: {:.0} page faults per generation beyond the growth of resident memory, generations {} to {n}",
+                regen as f64 / (n - base - 3) as f64,
+                base + 4
             );
         }
     }
     // Every generation's statistics, bit for bit.
     use std::hash::{Hash, Hasher};
     let mut digest = std::collections::hash_map::DefaultHasher::new();
-    for s in history.iter().take(generations) {
+    for s in history.iter().skip(base).take(generations) {
         (
             s.generation,
             s.best.to_bits(),
