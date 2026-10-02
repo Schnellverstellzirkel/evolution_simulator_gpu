@@ -90,7 +90,7 @@ All example tools score and replay creatures on the GPU engine (`examples/common
 - `examples/physics_audit.rs`: per elite, what the GPU replay records: contact-free steps, largest ground push, lowest muscle energy store, steps with a broken joint. The kernel keeps no solver energy, momentum or friction ledgers.
 - `examples/first_generation.rs`: random-population distances on the GPU engine.
 - `examples/replay_match.rs <save>`: the best elites' archive distance beside their replay's.
-- `examples/p2_speed.rs`, `examples/worker_rate.rs`: GPU and worker throughput.
+- `examples/p2_speed.rs`, `examples/worker_rate.rs`: GPU and worker throughput. `p2_speed <save> <count> <repeats> "" screen` times the game's standard trial (the 5 s screen) on every k-th creature of a save's ring and each lane class alone, `fine` times the confirmation trial. `worker_rate` takes a save as its sixth argument and measures the evolved game end to end.
 - `tools/pause-game.sh`: pauses the owner's game for a speed measurement (`docs/building.md`).
 
 ## Docs
