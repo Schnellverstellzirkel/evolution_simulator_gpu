@@ -478,7 +478,8 @@ struct Kernel {
 // kernels for the engine, which launches them.
 unsafe impl Send for Kernel {}
 
-/// Take-up counters per wave: one per muscle-rounds bucket.
+/// Take-up counters per wave: one per muscle-rounds bucket (`NB` in the
+/// kernel).
 const BUCKETS: usize = crate::warp_kernel::ROUNDS;
 
 /// The take-up buckets of a wave (`Takeup` in `shaders/warp_creature.cu`).

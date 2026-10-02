@@ -5,7 +5,7 @@
 //! node `i` and the bone that ends there: lane 0 is the head, lane 1 the neck.
 //! Lanes follow the bone tree breadth first, so each tree level is a run of
 //! neighbouring lanes and the children of one bone are consecutive. Muscles run
-//! one per lane, `W` at a time, in at most `ROUNDS` rounds.
+//! one per lane, `W` at a time, in at most `max_rounds(W)` rounds.
 //!
 //! Every derived constant (masses with the bones, organs and muscles, slack
 //! lengths, muscle strengths, joint ranges, the start pose) comes from
@@ -26,9 +26,21 @@ use rayon::prelude::*;
 pub const LANE_FIELDS: usize = 12;
 /// Words per muscle, read as four 16-byte loads.
 pub const MUSCLE_FIELDS: usize = 16;
-/// Muscle rounds a group runs: a creature on `W` lanes has at most
-/// `ROUNDS * W` muscles.
+/// Muscle rounds the take-up buckets tell apart (`cuda_engine::Takeup`): a
+/// creature with more rounds than this shares the last bucket.
 pub const ROUNDS: usize = 4;
+/// Most muscle rounds any lane class runs.
+pub const MAX_ROUNDS: usize = 6;
+/// Muscle rounds a group of `w` lanes runs: a creature on `w` lanes has at
+/// most `max_rounds(w) * w` muscles. A creature costs about as much per step
+/// as the lanes it holds, so the 16-lane class takes up to 96 muscles (6
+/// rounds) and a body of 16 nodes or fewer never needs the 32-lane class.
+/// The shared memory of the per-muscle state (`MAXR` in the kernel) limits
+/// the other classes to 4 rounds: 4 blocks of 128 threads must fit one
+/// multiprocessor.
+pub const fn max_rounds(w: usize) -> usize {
+    if w == 16 { MAX_ROUNDS } else { ROUNDS }
+}
 /// Lanes per creature.
 pub const CLASSES: [usize; 4] = [4, 8, 16, 32];
 /// Largest body the kernel runs.
@@ -64,12 +76,12 @@ pub struct WavePack {
 }
 
 /// The lane class of a body: the fewest lanes that hold its nodes and its
-/// muscles in `ROUNDS` rounds.
+/// muscles in `max_rounds` rounds.
 pub fn class_of(nodes: usize, muscles: usize) -> Option<usize> {
     CLASSES
         .iter()
         .copied()
-        .find(|&w| nodes <= w && muscles <= ROUNDS * w)
+        .find(|&w| nodes <= w && muscles <= max_rounds(w) * w)
 }
 
 /// World switches: an effect that is off leaves no code in the kernel.
@@ -193,6 +205,7 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
         ("SUBSTEPS".into(), format!("{}u", solver_setting("SUBSTEPS", SUBSTEPS))),
         ("PGS_SWEEPS".into(), format!("{}u", solver_setting("PGS_SWEEPS", PGS_SWEEPS))),
         ("CLEAN_SWEEPS".into(), format!("{}u", solver_setting("CLEAN_SWEEPS", CLEAN_SWEEPS))),
+        ("MAXR".into(), format!("{}", max_rounds(class))),
         ("RECORD".into(), (if record { "1" } else { "0" }).into()),
         (
             "PROFILE".into(),
@@ -290,7 +303,7 @@ fn size_of(pop: &Population, i: usize, w: usize) -> Size {
         end_of[b.b as usize] = j;
     }
     let rounds = muscles.len().div_ceil(w);
-    let mut count = [[0u8; MAX_NODES]; ROUNDS];
+    let mut count = [[0u8; MAX_NODES]; MAX_ROUNDS];
     let mut most = 0usize;
     for (k, m) in muscles.iter().enumerate() {
         for bone in [m.bone_a, m.bone_b] {
@@ -401,7 +414,7 @@ fn fill_creature(
     // Muscles, and the ends each bone carries: four byte slots per word
     // (muscle lane times two plus the end), 255 for none.
     let limits = physics::limits();
-    let mut filled = [[0usize; MAX_NODES]; ROUNDS];
+    let mut filled = [[0usize; MAX_NODES]; MAX_ROUNDS];
     let words = size.words;
     for (k, m) in model.muscles.iter().enumerate() {
         let (round, lane) = (k / w, k % w);
@@ -616,6 +629,9 @@ mod tests {
         assert_eq!(class_of(8, 32), Some(8));
         assert_eq!(class_of(8, 33), Some(16));
         assert_eq!(class_of(13, 24), Some(16));
+        assert_eq!(class_of(16, 64), Some(16));
+        assert_eq!(class_of(16, 96), Some(16));
+        assert_eq!(class_of(16, 97), Some(32));
         assert_eq!(class_of(17, 10), Some(32));
         assert_eq!(class_of(32, 96), Some(32));
         assert_eq!(class_of(33, 10), None);

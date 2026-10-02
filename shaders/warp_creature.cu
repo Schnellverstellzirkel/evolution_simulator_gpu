@@ -12,15 +12,17 @@
 // A group runs one creature from its start to its end (a fall, the screen or
 // the last step), then takes the next creature of the wave from an atomic
 // counter. The wave is sorted by muscle rounds and has one counter per
-// rounds bucket; every warp starts on one bucket, so its groups run the same
-// round count, and moves to the next bucket up when its own runs dry. Each 1/RATE step is SUBSTEPS substeps. A substep is one
+// bucket of NB (1, 2, 3, or 4 and more rounds); every warp starts on one
+// bucket, so its groups run about the same round count, and moves to the next
+// bucket up when its own runs dry. Each 1/RATE step is SUBSTEPS substeps. A substep is one
 // articulated-body pass with the muscles, gravity, wind, drag and water, a
 // contact solve of at most MAXC contacts by projected Gauss-Seidel on the
 // exact contact-space matrix, the contact response, semi-implicit Euler, a
 // momentum balance and, without contact, the first-law check.
 //
-// Defines from warp_kernel::cuda_source: W, BLOCK, RATE, SETTLE, SAMPLE,
-// SUBSTEPS, PGS_SWEEPS, CLEAN_SWEEPS, RECORD, the world flags (GROUND,
+// Defines from warp_kernel::cuda_source: W, MAXR (the most muscle rounds of
+// the class), BLOCK, RATE, SETTLE, SAMPLE, SUBSTEPS, PGS_SWEEPS,
+// CLEAN_SWEEPS, RECORD, the world flags (GROUND,
 // TERRAIN, SLOPE, GAPS, HURDLES, QUAKE, MUD, WATER, ICE, WIND, AIR) and the
 // physics constants.
 
@@ -31,7 +33,7 @@
 #define INV_HS (RATE * SUBSTEPS)
 #define LF 12u
 #define MF 16u
-#define RMAX 4
+#define NB 4
 #define MAXC 4
 #define PI_F 3.14159265359f
 #define TAU_F 6.28318530718f
@@ -74,9 +76,9 @@ struct Params {
 // wave's creatures from start[b] to end[b], sorted by muscle rounds, and
 // warps from warp[b] on (in the order warp in block, then block) start on it.
 struct Takeup {
-    unsigned start[RMAX];
-    unsigned end[RMAX];
-    unsigned warp[RMAX];
+    unsigned start[NB];
+    unsigned end[NB];
+    unsigned warp[NB];
 };
 // Same layout as creature_kernel::GpuResult.
 struct Result {
@@ -206,11 +208,11 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     // Per-muscle state (energy store, rhythm offset, force of the substep) of
     // each lane's muscles, and each group's behavior totals: touched once per
     // round or per step, so they wait in shared memory instead of registers.
-    __shared__ float s_en[RMAX][BLOCK];
-    __shared__ float s_off[RMAX][BLOCK];
-    __shared__ float s_mag[RMAX][BLOCK];
+    __shared__ float s_en[MAXR][BLOCK];
+    __shared__ float s_off[MAXR][BLOCK];
+    __shared__ float s_mag[MAXR][BLOCK];
     // The waveform at the last substep, or -1 when it must be computed.
-    __shared__ float s_wp[RMAX][BLOCK];
+    __shared__ float s_wp[MAXR][BLOCK];
     __shared__ Result s_mt[BLOCK / W];
     __shared__ uint4 s_bits[BLOCK / W];
     // Each lane's joint after the articulated-body pass (pivot arm, 1 / d,
@@ -263,9 +265,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     // angle on lane 1); the head's position and velocity are lane 0's node
     // position and velocity.
     float q = 0.0f, qd = 0.0f;
-    float tpull[RMAX];
+    float tpull[MAXR];
 #pragma unroll
-    for (int r = 0; r < RMAX; r++) { s_en[r][tid] = 1.0f; s_off[r][tid] = 0.0f; s_mag[r][tid] = 0.0f; s_wp[r][tid] = -1.0f; tpull[r] = 0.0f; }
+    for (int r = 0; r < MAXR; r++) { s_en[r][tid] = 1.0f; s_off[r][tid] = 0.0f; s_mag[r][tid] = 0.0f; s_wp[r][tid] = -1.0f; tpull[r] = 0.0f; }
     // Kinematics: absolute angle and rate, node and pivot position and velocity.
     float th = 0.0f, om = 0.0f, px = 0.0f, py = 0.0f, vx = 0.0f, vy = 0.0f;
     float ppx = 0.0f, ppy = 0.0f, pvx = 0.0f, pvy = 0.0f;
@@ -352,7 +354,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     {
         const unsigned order = (threadIdx.x >> 5) * gridDim.x + blockIdx.x;
 #pragma unroll
-        for (unsigned b = 1u; b < RMAX; b++) { if (tk.warp[b] <= order) { bucket = b; } }
+        for (unsigned b = 1u; b < NB; b++) { if (tk.warp[b] <= order) { bucket = b; } }
     }
     const unsigned* ltab = lanes;
     for (;;) {
@@ -363,8 +365,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             // up with creatures left.
             unsigned got = 0xffffffffu;
             if (lg == 0u) {
-                for (unsigned k = 0u; k < RMAX; k++) {
-                    const unsigned b = (bucket + k) % RMAX;
+                for (unsigned k = 0u; k < NB; k++) {
+                    const unsigned b = (bucket + k) % NB;
                     const unsigned size = tk.end[b] - tk.start[b];
                     if (size == 0u || *(volatile unsigned*)&counter[b] >= size) { continue; }
                     const unsigned i = atomicAdd(&counter[b], 1u);
@@ -415,7 +417,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 qd = 0.0f;
                 th = 0.0f; om = 0.0f;
 #pragma unroll
-                for (int r = 0; r < RMAX; r++) { s_en[r][tid] = 1.0f; s_off[r][tid] = 0.0f; s_mag[r][tid] = 0.0f; s_wp[r][tid] = -1.0f; tpull[r] = 0.0f; }
+                for (int r = 0; r < MAXR; r++) { s_en[r][tid] = 1.0f; s_off[r][tid] = 0.0f; s_mag[r][tid] = 0.0f; s_wp[r][tid] = -1.0f; tpull[r] = 0.0f; }
                 reset_metrics();
                 rec_n = 0.0f; rec_t = 0.0f;
                 step = 0u;
@@ -484,7 +486,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 frames[fb + W + nmus + mnode] = make_float2(rec_n, rec_t);
             }
 #pragma unroll
-            for (int r = 0; r < RMAX; r++) {
+            for (int r = 0; r < MAXR; r++) {
                 const unsigned mi = (unsigned)r * W + lg;
                 if (write && (unsigned)r < rounds && mi < nmus) {
                     frames[fb + W + mi] = make_float2(s_en[r][tid], s_mag[r][tid] + tpull[r]);
@@ -553,7 +555,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     // tendons put in.
                     if (__any_sync(FULL, live && nc == 0u)) {
     #pragma unroll
-                        for (int r = 0; r < RMAX; r++) {
+                        for (int r = 0; r < MAXR; r++) {
                             if ((unsigned)r >= maxrounds) { break; }
                             const unsigned mi = (unsigned)r * W + lg;
                             const bool mon = (unsigned)r < rounds && mi < nmus;
@@ -717,8 +719,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             // writes its forces on both bones to shared memory, and each bone
             // lane gathers the forces of the muscle ends it carries.
             vec3 fm = v3(0.0f, 0.0f, 0.0f);
-#pragma unroll
-            for (int r = 0; r < RMAX; r++) {
+#pragma unroll 1
+            for (int r = 0; r < MAXR; r++) {
                 if ((unsigned)r >= maxrounds) { break; }
                 const unsigned mi = (unsigned)r * W + lg;
                 const bool mon = (unsigned)r < rounds && mi < nmus;
@@ -1201,7 +1203,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             if (down != 0u && step > 0u) {
                 const float next = t_now + DT;
 #pragma unroll
-                for (int r = 0; r < RMAX; r++) {
+                for (int r = 0; r < MAXR; r++) {
                     const unsigned mi = (unsigned)r * W + lg;
                     if ((unsigned)r < rounds && mi < nmus) {
                         const float4* mrec = reinterpret_cast<const float4*>(muscles + mbase) + mi * 4u;
@@ -1257,7 +1259,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             if (__any_sync(FULL, early)) {
                 float en = 0.0f;
 #pragma unroll
-                for (int r = 0; r < RMAX; r++) {
+                for (int r = 0; r < MAXR; r++) {
                     const unsigned mi = (unsigned)r * W + lg;
                     if ((unsigned)r < rounds && mi < nmus) { en += s_en[r][tid]; }
                 }

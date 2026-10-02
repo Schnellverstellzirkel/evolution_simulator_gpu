@@ -6,6 +6,7 @@
 //! two runs of one population compare.
 //!
 //! Usage: p2_speed <save.evo | dump.bin> [count] [repeats] [effects] [screen]
+//! A save's creatures are every k-th one of its ring, `count` of them.
 //! `effects` is a comma list of effect names (`Wind,Mud`) put on at their
 //! first level over the save's world. With `screen` as the fifth argument the
 //! timed passes run the game's standard trial: the 5 s screen stops creatures
@@ -102,7 +103,14 @@ fn main() -> anyhow::Result<()> {
         settings
     } else {
         let e = storage::load(std::path::Path::new(path))?;
-        for i in 0..count.min(e.ring_len()) {
+        // Every k-th creature of the ring, so the sample holds the mix of
+        // every block. A slot's island is its number modulo 5 and its
+        // nursery follows a period of 10, so k stays prime to 10.
+        let mut stride = (e.ring_len() / count.max(1)).max(1);
+        while stride % 2 == 0 || stride % 5 == 0 {
+            stride += 1;
+        }
+        for i in (0..e.ring_len()).step_by(stride).take(count) {
             pop.push(e.creature(i));
         }
         e.config.clone()
@@ -149,14 +157,14 @@ fn main() -> anyhow::Result<()> {
         if sub.genomes.is_empty() {
             continue;
         }
-        let mut rounds = [0usize; warp_kernel::ROUNDS + 1];
+        let mut rounds = [0usize; warp_kernel::MAX_ROUNDS + 1];
         for g in &sub.genomes {
             rounds[g.muscle_count.div_ceil(w)] += 1;
         }
         println!(
             "{w}-lane class: {} creatures, muscle rounds 0 to {}: {rounds:?}",
             sub.genomes.len(),
-            warp_kernel::ROUNDS
+            warp_kernel::max_rounds(w)
         );
         for _ in 0..repeats {
             let (creatures, steps, busy, hash, _) = run(&mut engine, &sub, &cfg)?;
