@@ -25,7 +25,7 @@ pub(super) fn active_on(c: &Creature, root: usize) -> MuscleIds {
 }
 
 /// Limb roots that have at least one active muscle.
-pub(super) fn driven_limbs(c: &Creature) -> BoneIds {
+fn driven_limbs(c: &Creature) -> BoneIds {
     limb_roots(c)
         .into_iter()
         .filter(|&b| !active_on(c, b).is_empty())
