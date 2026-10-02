@@ -17,8 +17,8 @@
 //! The operators that add nodes also remove the idlest limb tips (`shed_tips`),
 //! so a body that takes such a move is no bigger afterwards. Without that, 16
 //! seeds of 30 generations grew the ring's bodies to 11.0 nodes against 8.2
-//! and lost 16% of their QD: bodies that only grow take more GPU lanes per
-//! creature and are harder to tune.
+//! (QD x0.84, within the noise of one arm), and a body past 8 or 16 nodes takes
+//! twice the GPU lanes of one below.
 //!
 //! A child that one of these operators made gets no parameter noise after it
 //! (`evolution::offspring`), because the move is the whole change.
@@ -1603,5 +1603,24 @@ mod tests {
             assert!(ring_closed(after));
         });
         assert!(applied >= 100, "applied to {applied}");
+    }
+
+    #[test]
+    fn branch_sizes_and_programs_agree_with_the_slow_ways() {
+        for body in twinned() {
+            let (sizes, sets) = branch_sizes(&body);
+            for b in 0..body.bones.len() {
+                let limb = branch(&body, b);
+                assert_eq!(sizes[b] as usize, limb.len());
+                assert!(limb.iter().all(|&x| sets[b] >> x & 1 == 1));
+                assert_eq!(sets[b].count_ones() as usize, limb.len());
+                if !is_neck(&body, b) {
+                    assert_eq!(
+                        has_program(&body, b, sets[b]),
+                        !actuation(&body, b).1.is_empty()
+                    );
+                }
+            }
+        }
     }
 }

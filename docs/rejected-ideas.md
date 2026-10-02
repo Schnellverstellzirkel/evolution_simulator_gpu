@@ -4,7 +4,7 @@ Each idea was measured and lost. Do not redo one without a new reason. Numbers a
 
 ## Search
 
-- Compound operators that add nodes and give none back (a mirrored limb pair, a repeated segment with a gradient, a new part with its timing): 16 seeds, 100k creatures, 30 generations, ring bodies grew to 11.0 nodes and 16.6 muscles against 8.2 and 13.7 on main, QD x0.84 and best x1.01. A body past 8 or 16 nodes takes twice the GPU lanes and is harder to tune. The three now remove the idlest limb tips for the nodes they add (bodies stay at 8.2 nodes, QD x0.98).
+- Compound operators that add nodes and give none back (a mirrored limb pair, a repeated segment with a gradient, a new part with its timing): 16 seeds, 100k creatures, 30 generations, ring bodies grew to 11.0 nodes and 16.6 muscles against 8.2 and 13.7 on main, QD x0.84 (the standard error of one arm's log ratio is 0.16) and best x1.01. A body past 8 or 16 nodes takes twice the GPU lanes. The three now remove the idlest limb tips for the nodes they add (bodies stay at 8.2 nodes, QD x0.98).
 - Removal operators (`remove_limb`, `remove_muscle`): 40 generations, 10 seeds, best 275 m against 346 m and QD 21,329 against 30,075. The owner wants more operators, so this is a note about growth, not a reason to prune.
 - Neutral new muscles for structural mutations: best 21.3 m against 25.6 m, QD 2,343 against 2,617 over 10 seeds. A split still breaks the gait.
 - Elite refresh with a fresh perturbation: best fell 18% and QD did not improve at 60 generations (3 of 10 wins).
