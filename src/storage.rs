@@ -600,7 +600,7 @@ impl Experiment {
         m.fitness.is_finite() && m.fitness > FAILED && !m.screened && !m.excluded
     }
     /// Decides block `k`'s results against the archives as they stand now.
-    /// A creature that would set a new record of its island (or nursery)
+    /// A creature that would set or tie the record of its island (or nursery)
     /// needs a confirmation trial at the fine physics, and its score is the
     /// lower of the two. The record-setters of each archive are taken
     /// fastest first, each against the record the ones before it set, so no
@@ -635,7 +635,10 @@ impl Experiment {
         let mut candidates: Vec<Vec<usize>> = vec![Vec::new(); arenas];
         for (j, m) in standard.iter().enumerate() {
             let arena = qd::arena_of_slot(block.first + j, arenas);
-            if Self::eligible(&out[j]) && m.fitness > bars[arena] {
+            // A tie with the record is confirmed too: an integrator glitch
+            // drives many bodies to one exact speed, so its ties are common,
+            // and an unconfirmed tie never had to beat the fine trial.
+            if Self::eligible(&out[j]) && m.fitness >= bars[arena] {
                 candidates[arena].push(j);
             }
         }
@@ -649,7 +652,7 @@ impl Experiment {
             let mut record = bars[arena];
             let mut asked = 0;
             for j in members {
-                if standard[j].fitness <= record {
+                if standard[j].fitness < record {
                     break;
                 }
                 let Some(check) = confirmed.get(&j) else {
