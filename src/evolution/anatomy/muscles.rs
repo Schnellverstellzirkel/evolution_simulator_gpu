@@ -466,7 +466,7 @@ fn torque(c: &Creature, m: &Muscle) -> f32 {
 }
 
 /// The same muscle with its ends swapped.
-fn flipped(m: &Muscle) -> Muscle {
+pub(super) fn flipped(m: &Muscle) -> Muscle {
     Muscle {
         bone_a: m.bone_b,
         bone_b: m.bone_a,
@@ -483,7 +483,7 @@ fn flipped(m: &Muscle) -> Muscle {
 }
 
 /// The signed shortest step from phase `from` to phase `to` (-0.5 to 0.5).
-fn turn(from: f32, to: f32) -> f32 {
+pub(super) fn turn(from: f32, to: f32) -> f32 {
     (to - from + 0.5).rem_euclid(1.0) - 0.5
 }
 

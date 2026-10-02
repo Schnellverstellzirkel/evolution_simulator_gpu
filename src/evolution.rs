@@ -1323,7 +1323,14 @@ fn offspring(
             mated(archive, plan, cfg, rng, child);
             trace.structural = true;
             trace.operator = structural_mutation_from(child, cfg, rng, archive);
-            mutate_genes(child, cfg, rng, 0.035);
+            // A compound operator's change is whole: noise on every gene
+            // after it would only blur it.
+            let compound = trace
+                .operator
+                .is_some_and(|op| (op as usize).checked_sub(CLASSIC_COUNT).is_some_and(anatomy::is_compound));
+            if !compound {
+                mutate_genes(child, cfg, rng, 0.035);
+            }
         }
         Emitter::Novelty => {
             mated(archive, plan, cfg, rng, child);

@@ -17,7 +17,7 @@ use crate::evolution::{
 
 /// The active muscles (with a stroke) that have an end on the limb starting
 /// at `root`.
-fn active_on(c: &Creature, root: usize) -> MuscleIds {
+pub(super) fn active_on(c: &Creature, root: usize) -> MuscleIds {
     muscles_on(c, &branch(c, root), false)
         .into_iter()
         .filter(|&i| c.muscles[i].long > c.muscles[i].short)
@@ -25,7 +25,7 @@ fn active_on(c: &Creature, root: usize) -> MuscleIds {
 }
 
 /// Limb roots that have at least one active muscle.
-fn driven_limbs(c: &Creature) -> BoneIds {
+pub(super) fn driven_limbs(c: &Creature) -> BoneIds {
     limb_roots(c)
         .into_iter()
         .filter(|&b| !active_on(c, b).is_empty())
@@ -285,7 +285,7 @@ pub(crate) fn limb_clock_lock(
 /// The foot nodes of a muscle's two bones (nodes with one bone, not the
 /// head), as sensor indices (0 and 1 are the first bone's ends, 2 and 3 the
 /// second's).
-fn sensable_feet(c: &Creature, m: &crate::evolution::Muscle) -> Bounded<u32, 4> {
+pub(super) fn sensable_feet(c: &Creature, m: &crate::evolution::Muscle) -> Bounded<u32, 4> {
     let (a, b) = (c.bones[m.bone_a as usize], c.bones[m.bone_b as usize]);
     [a.a, a.b, b.a, b.b]
         .iter()

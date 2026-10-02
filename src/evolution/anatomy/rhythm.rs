@@ -293,7 +293,7 @@ fn shift_limbs(c: &mut Creature, limbs: &[BoneIds], pattern: usize) -> bool {
 
 /// The muscles with an end on each part (a list of bones). A muscle on two
 /// parts belongs to the first.
-fn muscle_groups(c: &Creature, parts: &[BoneIds]) -> Bounded<MuscleIds, MAX_NODES> {
+pub(super) fn muscle_groups(c: &Creature, parts: &[BoneIds]) -> Bounded<MuscleIds, MAX_NODES> {
     let mut taken = [false; MAX_MUSCLES];
     parts
         .iter()

@@ -567,17 +567,17 @@ fn drag_ends(c: &Creature) -> Option<(BoneIds, DraggingEnd)> {
 }
 
 /// A muscle's drive: stiffness times stroke. Zero for a passive muscle.
-fn drive(m: &Muscle) -> f32 {
+pub(super) fn drive(m: &Muscle) -> f32 {
     m.stiffness * (m.long - m.short)
 }
 
 /// Spring stiffness of the passive muscles `passive_ring` adds.
-const PASSIVE_STIFFNESS: f32 = 5.0;
+pub(super) const PASSIVE_STIFFNESS: f32 = 5.0;
 
 /// Adds a passive muscle (random anchors, no stroke) on each pair of
 /// consecutively numbered bones that has no muscle, as `repair` would
 /// with an active one, while there is room.
-fn passive_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
+pub(super) fn passive_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
     let n = c.bones.len();
     for a in 0..n {
         let b = (a + 1) % n;

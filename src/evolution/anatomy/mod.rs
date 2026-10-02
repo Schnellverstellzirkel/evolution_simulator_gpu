@@ -21,6 +21,7 @@
 use super::{Bone, Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, NodeGene, Rng, bone_point};
 use crate::config::Config;
 
+mod compound;
 mod controller;
 mod extra;
 mod junctions;
@@ -106,6 +107,16 @@ pub(super) const OPERATORS: &[(&str, Operator)] = &[
     ("shift_gait_start", controller::shift_gait_start),
     ("pose_joint_at_stop", junctions::pose_joint_at_stop),
     ("brace_joint", junctions::brace_joint),
+    ("limb_length_gradient", compound::limb_length_gradient),
+    ("symmetrize_limb_pair", compound::symmetrize_limb_pair),
+    ("retime_gait_by_position", compound::retime_gait_by_position),
+    ("brace_limb_chain", compound::brace_limb_chain),
+    ("phase_cluster_move", compound::phase_cluster_move),
+    ("grow_integrated_limb", compound::grow_integrated_limb),
+    ("mirrored_limb_pair", compound::mirrored_limb_pair),
+    ("segment_chain", compound::segment_chain),
+    ("reassign_bundle", compound::reassign_bundle),
+    ("transplant_limb_program", compound::transplant_limb_program),
 ];
 
 /// Operators that share one pick slot: together they are as likely as one
@@ -147,8 +158,31 @@ const CONTROLLER_SLOT: &[&str] = &[
     "reflex_reset_shift",
 ];
 
+/// The compound operators (`compound.rs`). Each is a whole change by
+/// itself, so a child that one of them made gets no parameter noise after it:
+/// the noise would only blur a move that was built to be coherent.
+const COMPOUND: &[&str] = &[
+    "limb_length_gradient",
+    "symmetrize_limb_pair",
+    "retime_gait_by_position",
+    "brace_limb_chain",
+    "phase_cluster_move",
+    "grow_integrated_limb",
+    "mirrored_limb_pair",
+    "segment_chain",
+    "reassign_bundle",
+    "transplant_limb_program",
+];
+
+/// Whether operator `index` of `OPERATORS` is a compound one.
+pub(super) fn is_compound(index: usize) -> bool {
+    enabled().compound.get(index).copied().unwrap_or(false)
+}
+
 /// The enabled operators, as indices into `OPERATORS`.
 pub(super) struct Enabled {
+    /// For each operator, whether it is a compound one (`COMPOUND`).
+    pub compound: Vec<bool>,
     /// Operators with a pick slot each.
     pub single: Vec<usize>,
     /// Operators that share one pick slot (`SHARED_SLOT`).
@@ -165,6 +199,10 @@ pub(super) fn enabled() -> &'static Enabled {
 
 fn split(indices: Vec<usize>) -> Enabled {
     let mut enabled = Enabled {
+        compound: OPERATORS
+            .iter()
+            .map(|(name, _)| COMPOUND.contains(name))
+            .collect(),
         single: Vec::new(),
         shared: Vec::new(),
         controller: Vec::new(),
@@ -407,6 +445,22 @@ pub(super) fn copy_branch(
     mirror: bool,
     phase: f32,
 ) -> Option<usize> {
+    copy_branch_limited(c, cfg, bone, at, place, mirror, phase, usize::MAX)
+}
+
+/// `copy_branch` that brings at most `quota` muscles: when the branch and
+/// its hinge have more, the copy keeps the ones with the most drive.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn copy_branch_limited(
+    c: &mut Creature,
+    cfg: &Config,
+    bone: usize,
+    at: usize,
+    place: impl Fn([f32; 2]) -> [f32; 2],
+    mirror: bool,
+    phase: f32,
+    quota: usize,
+) -> Option<usize> {
     let bones = branch(c, bone);
     let parents = parent_bones(c);
     let above_source = parents[c.bones[bone].a as usize];
@@ -422,7 +476,14 @@ pub(super) fn copy_branch(
             .collect(),
         _ => MuscleIds::new(),
     };
-    if !room(c, cfg, bones.len(), inside.len() + hinge.len()) {
+    let mut brought: MuscleIds = inside.into_iter().chain(hinge).collect();
+    if brought.len() > quota {
+        brought.sort_stable_by(|&x, &y| {
+            extra::drive(&c.muscles[y]).total_cmp(&extra::drive(&c.muscles[x]))
+        });
+        brought.truncate(quota);
+    }
+    if !room(c, cfg, bones.len(), brought.len()) {
         return None;
     }
     // Where each copied bone and node went (`usize::MAX` for the rest).
@@ -461,7 +522,7 @@ pub(super) fn copy_branch(
             n => n as u32,
         }
     };
-    for i in inside.into_iter().chain(hinge) {
+    for i in brought {
         let mut m = c.muscles[i];
         m.bone_a = remap(m.bone_a);
         m.bone_b = remap(m.bone_b);

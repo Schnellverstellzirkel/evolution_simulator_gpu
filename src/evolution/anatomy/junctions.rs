@@ -322,24 +322,24 @@ pub(crate) fn reverse_bend(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: 
     true
 }
 
-fn pos(c: &Creature, node: usize) -> [f32; 2] {
+pub(super) fn pos(c: &Creature, node: usize) -> [f32; 2] {
     [c.nodes[node].x, c.nodes[node].y]
 }
 
-fn add(p: [f32; 2], q: [f32; 2]) -> [f32; 2] {
+pub(super) fn add(p: [f32; 2], q: [f32; 2]) -> [f32; 2] {
     [p[0] + q[0], p[1] + q[1]]
 }
 
-fn sub(p: [f32; 2], q: [f32; 2]) -> [f32; 2] {
+pub(super) fn sub(p: [f32; 2], q: [f32; 2]) -> [f32; 2] {
     [p[0] - q[0], p[1] - q[1]]
 }
 
-fn scale(p: [f32; 2], s: f32) -> [f32; 2] {
+pub(super) fn scale(p: [f32; 2], s: f32) -> [f32; 2] {
     [p[0] * s, p[1] * s]
 }
 
 /// The direction of `v`, or straight down when `v` is too short to have one.
-fn unit(v: [f32; 2]) -> [f32; 2] {
+pub(super) fn unit(v: [f32; 2]) -> [f32; 2] {
     let length = v[0].hypot(v[1]);
     if length > 1.0e-6 {
         scale(v, 1.0 / length)
@@ -349,7 +349,7 @@ fn unit(v: [f32; 2]) -> [f32; 2] {
 }
 
 /// Adds a node at `at` with the size and grip of node `like`.
-fn add_node(c: &mut Creature, like: usize, at: [f32; 2]) -> usize {
+pub(super) fn add_node(c: &mut Creature, like: usize, at: [f32; 2]) -> usize {
     c.nodes.push(NodeGene {
         x: at[0],
         y: at[1],
@@ -360,7 +360,7 @@ fn add_node(c: &mut Creature, like: usize, at: [f32; 2]) -> usize {
 
 /// Adds a bone from node `a` to node `b`, as long as they are apart in the
 /// pose, with a narrow joint range. Returns its index.
-fn add_narrow_bone(c: &mut Creature, a: usize, b: usize, rng: &mut Rng) -> usize {
+pub(super) fn add_narrow_bone(c: &mut Creature, a: usize, b: usize, rng: &mut Rng) -> usize {
     let [dx, dy] = sub(pos(c, b), pos(c, a));
     c.bones.push(Bone {
         min_angle: -rng.range(0.1, 0.4),
@@ -371,7 +371,7 @@ fn add_narrow_bone(c: &mut Creature, a: usize, b: usize, rng: &mut Rng) -> usize
 }
 
 /// Moves every node below `bone` (the child nodes of its branch) by `offset`.
-fn shift_branch(c: &mut Creature, bone: usize, offset: [f32; 2]) {
+pub(super) fn shift_branch(c: &mut Creature, bone: usize, offset: [f32; 2]) {
     for node in branch_nodes(c, &branch(c, bone)) {
         c.nodes[node].x += offset[0];
         c.nodes[node].y += offset[1];
@@ -379,13 +379,13 @@ fn shift_branch(c: &mut Creature, bone: usize, offset: [f32; 2]) {
 }
 
 /// Every muscle's span in the pose.
-fn spans(c: &Creature) -> Bounded<f32, MAX_MUSCLES> {
+pub(super) fn spans(c: &Creature) -> Bounded<f32, MAX_MUSCLES> {
     c.muscles.iter().map(|m| span(c, m)).collect()
 }
 
 /// Scales the stroke of each muscle that existed when `before` was taken by
 /// how much its span changed since, so it pulls as it did in the old pose.
-fn keep_strokes(c: &mut Creature, before: &[f32]) {
+pub(super) fn keep_strokes(c: &mut Creature, before: &[f32]) {
     let after = spans(c);
     for ((m, old), new) in c.muscles.iter_mut().zip(before).zip(after) {
         let ratio = new.max(0.05) / old.max(0.05);
@@ -590,7 +590,7 @@ mod tests {
 
 /// Turns bone `j`'s branch about its pivot by `angle` (counterclockwise),
 /// lifting the body if a node would go below the ground.
-fn turn_branch(c: &mut Creature, j: usize, angle: f32) {
+pub(super) fn turn_branch(c: &mut Creature, j: usize, angle: f32) {
     let pivot = c.nodes[c.bones[j].a as usize];
     let (sin, cos) = angle.sin_cos();
     for n in branch_nodes(c, &branch(c, j)) {
