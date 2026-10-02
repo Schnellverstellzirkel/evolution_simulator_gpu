@@ -84,6 +84,34 @@ fn main() -> anyhow::Result<()> {
             .collect())
     };
     let parents: Vec<Creature> = elites.iter().map(|e| e.creature.clone()).collect();
+    // Donors for the operators that take limbs from another elite. Breeding
+    // draws one at random from the island's archive, so by default the audit
+    // draws from the whole global archive, not only from the best elites.
+    // `AUDIT_DONOR=best` takes them from the elites audited, `tournament` takes
+    // the faster of two from the archive.
+    let everyone: Vec<&qd::Elite> = experiment
+        .archive
+        .entries
+        .iter()
+        .filter(|e| !qd::is_morphology_niche(&e.niche))
+        .collect();
+    let mode = std::env::var("AUDIT_DONOR").unwrap_or_default();
+    let donor_of = |i: usize, v: usize| -> &Creature {
+        let mut rng = Rng::new(0xd0409, v as u32, i);
+        match mode.as_str() {
+            "best" => &parents[(i * 7 + 3 + 11 * v) % parents.len()],
+            "tournament" => {
+                let (a, b) = (rng.index(everyone.len()), rng.index(everyone.len()));
+                let pick = if everyone[a].fitness >= everyone[b].fitness {
+                    a
+                } else {
+                    b
+                };
+                &everyone[pick].creature
+            }
+            _ => &everyone[rng.index(everyone.len())].creature,
+        }
+    };
     let parent_scores: Vec<f32> = score(&parents)?.into_iter().map(|(f, _)| f).collect();
     let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
     eprintln!(
@@ -133,11 +161,11 @@ fn main() -> anyhow::Result<()> {
             .enumerate()
             .flat_map(|(i, p)| {
                 let cfg = &cfg;
-                let parents = &parents;
+                let donor_of = &donor_of;
                 (0..variants).filter_map(move |v| {
                     let mut child = p.clone();
                     let mut rng = Rng::new(0xa0d17, k as u32 + 1 + v as u32 * 1000, i);
-                    let donor = &parents[(i * 7 + 3 + 11 * v) % parents.len()];
+                    let donor = donor_of(i, v);
                     // The limits breeding gives a child of this parent.
                     let limited = evolution::child_limits(cfg, p, evolution::GROWTH_STEP);
                     let changed = evolution::apply_structural_operator(
