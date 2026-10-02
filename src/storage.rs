@@ -524,6 +524,18 @@ pub fn arena_count() -> usize {
 pub fn nursery_of(island: usize) -> usize {
     island_count() + island
 }
+/// Empty archives for the islands and their nurseries. `refined` says which
+/// islands start in the refined layout. The others, and every nursery, keep
+/// one elite per way of moving.
+fn new_islands(refined: &[bool]) -> Vec<QdArchive> {
+    (0..arena_count())
+        .map(|arena| {
+            let mut archive = QdArchive::default();
+            archive.set_refined(refined.get(arena).copied().unwrap_or(false));
+            archive
+        })
+        .collect()
+}
 /// Islands that never receive immigrants and breed only from their own
 /// elites, so each one evolves its own designs.
 pub const ISOLATED_ISLANDS: usize = 4;
@@ -1579,7 +1591,7 @@ impl Experiment {
         if self.islands.len() == arena_count() {
             return;
         }
-        self.islands = vec![QdArchive::default(); arena_count()];
+        self.islands = new_islands(&[]);
         self.island_progress.clear();
         self.graduations.clear();
         self.last_migration = None;
@@ -1591,8 +1603,9 @@ impl Experiment {
     /// their body classes, and from then on a body of another shape or size
     /// has a cell of its own. Until then an archive keeps one elite per way of
     /// moving, so a climbing archive pools its lineages as it always did. The
-    /// global archive, each island and the hub decide for themselves, and a
-    /// world change starts them all over.
+    /// global archive, each island and the hub decide for themselves. A
+    /// refined archive stays refined through a world change
+    /// (`reset_search_context`), and the nurseries never refine.
     fn refine_archives(&mut self) {
         let islands = island_count().min(self.islands.len());
         let stall = OPTIMIZER_STALL as usize;
@@ -2471,20 +2484,33 @@ impl Experiment {
     }
     /// Clears the archives after the world changed. Their scores no longer
     /// hold, but each island's creatures are queued to compete again under
-    /// the new physics in that island's own slots.
+    /// the new physics in that island's own slots. An archive that was
+    /// refined starts again refined, so the re-tested elites keep the cells of
+    /// their body classes: the archive refills with evolved bodies, not
+    /// random ones, and a climb that spreads over many classes is not at stake.
+    /// Only a save written before the first elite re-enters forgets this,
+    /// because a save tells a layout by the cells its elites hold.
     fn reset_search_context(&mut self) {
         self.reseed.clear();
         // The nurseries start over; only the islands' creatures are re-tested.
+        let mut refined = Vec::new();
         for (index, island) in self.islands.iter_mut().take(island_count()).enumerate() {
+            refined.push(island.refined());
             for elite in std::mem::take(&mut island.entries) {
                 self.reseed.push(index, elite.creature);
             }
         }
+        let global_refined = self.archive.refined();
         self.archive = QdArchive::default();
+        self.archive.set_refined(global_refined);
         // Fossils are old-world elites: undoing a meteor must not bring them
         // back into the new world's archives.
         self.fossils.clear();
-        self.islands.clear();
+        self.islands = if refined.contains(&true) {
+            new_islands(&refined)
+        } else {
+            Vec::new()
+        };
         self.island_progress.clear();
         self.graduations.clear();
         self.last_migration = None;

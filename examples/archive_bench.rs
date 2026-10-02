@@ -115,6 +115,7 @@ fn main() -> Result<()> {
             .collect::<Vec<_>>()
             .join(" "),
     );
+    println!("world {}", diversity::world_line(&experiment.config));
     let progress = |experiment: &storage::Experiment| {
         let archives = std::iter::once(&experiment.archive).chain(&experiment.islands);
         archives

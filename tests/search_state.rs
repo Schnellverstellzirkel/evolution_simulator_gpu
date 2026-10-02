@@ -1019,6 +1019,56 @@ fn a_world_change_checkpoint_retests_the_same_elites() {
     }
 }
 
+#[test]
+fn a_world_change_keeps_the_layout_of_a_refined_archive() {
+    let mut experiment = Experiment::new(config(38)).unwrap();
+    run_synthetic(&mut experiment);
+    // Island 1 and the global archive are refined, the other islands are not.
+    let mut refined = plateau_archive();
+    refined.set_refined(true);
+    refined.rebin();
+    experiment.islands[1] = refined.clone();
+    experiment.archive = refined;
+    assert!(!experiment.islands[2].refined());
+    let mut changed = experiment.config.clone();
+    changed.gravity += 1.0;
+    experiment.update_config_now(changed).unwrap();
+    // Every archive is empty and keeps its layout, and every nursery is
+    // coarse. The elites of island 1 wait to be tested again.
+    assert_eq!(experiment.islands.len(), storage::arena_count());
+    for (arena, island) in experiment.islands.iter().enumerate() {
+        assert!(island.entries.is_empty());
+        assert_eq!(island.refined(), arena == 1, "arena {arena}");
+    }
+    assert!(experiment.archive.entries.is_empty() && experiment.archive.refined());
+    assert!(experiment.reseed.len() >= 1440);
+    // The elites that were tested again sit in the cells of their body classes.
+    for _ in 0..4 {
+        run_synthetic(&mut experiment);
+    }
+    let island = &experiment.islands[1];
+    assert!(island.refined() && !experiment.islands[2].refined());
+    assert!(
+        island
+            .entries
+            .iter()
+            .any(|e| e.niche.0[2] != 0 || e.niche.0[5] != 0)
+    );
+    for elite in &island.entries {
+        if !evolution_simulator::qd::is_morphology_niche(&elite.niche) {
+            assert_eq!(elite.niche, elite.descriptor.niche());
+        }
+    }
+    experiment.validate().unwrap();
+    // Without a refined archive the islands start empty, as they always did.
+    let mut plain = Experiment::new(config(38)).unwrap();
+    run_synthetic(&mut plain);
+    let mut changed = plain.config.clone();
+    changed.gravity += 1.0;
+    plain.update_config_now(changed).unwrap();
+    assert!(plain.islands.is_empty() && !plain.archive.refined());
+}
+
 fn births_ids(e: &Experiment) -> impl Iterator<Item = u64> + '_ {
     e.blocks
         .iter()

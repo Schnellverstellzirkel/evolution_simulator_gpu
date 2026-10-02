@@ -43,8 +43,13 @@ struct Options {
     /// `--seconds N`: stop after the generation that ends past N seconds of
     /// wall time (the generation count is then a limit). Not deterministic.
     seconds: Option<f64>,
-    /// `--effect Name=level`: environment effects to apply (level index).
+    /// `--effect Name=level`: environment effects to apply (level index) to a
+    /// new game, or with `--change-at` to the running one.
     effects: Vec<(String, usize)>,
+    /// `--change-at N`: change the world as a button press does, before
+    /// generation N of this run, to the `--effect` levels or, with none, to
+    /// the next autochange step.
+    change_at: Option<u32>,
     /// `--load PATH`: continue a save instead of starting a new game. The
     /// seed list then only names the run, and the population option sets
     /// the generation size.
@@ -54,7 +59,7 @@ struct Options {
 }
 
 fn usage() -> &'static str {
-    "usage: search_ab [tag] [generations] [population] [duration_seconds] [seed,seed,...] [--tag NAME] [--seed-offset N] [--seconds N] [--effect Name=level] [--load SAVE] [--every N]"
+    "usage: search_ab [tag] [generations] [population] [duration_seconds] [seed,seed,...] [--tag NAME] [--seed-offset N] [--seconds N] [--effect Name=level] [--change-at N] [--load SAVE] [--every N]"
 }
 
 fn options() -> Result<Options> {
@@ -65,6 +70,7 @@ fn options() -> Result<Options> {
     let mut save = None;
     let mut seconds = None;
     let mut effects: Vec<(String, usize)> = Vec::new();
+    let mut change_at = None;
     let mut load = None;
     let mut every = 10u32;
     let mut args = std::env::args().skip(1);
@@ -81,6 +87,13 @@ fn options() -> Result<Options> {
             let spec = args.next().context("--effect needs Name=level")?;
             let (name, level) = spec.split_once('=').context("--effect needs Name=level")?;
             effects.push((name.to_owned(), level.parse().context("effect level")?));
+        } else if arg == "--change-at" {
+            change_at = Some(
+                args.next()
+                    .context("--change-at needs a number")?
+                    .parse()
+                    .context("change at")?,
+            );
         } else if arg == "--seconds" {
             seconds = Some(
                 args.next()
@@ -140,6 +153,10 @@ fn options() -> Result<Options> {
         None => DEFAULT_SEEDS.to_vec(),
     };
     anyhow::ensure!(!seeds.is_empty(), "need at least one seed");
+    anyhow::ensure!(
+        load.is_none() || effects.is_empty() || change_at.is_some(),
+        "--effect on a loaded save needs --change-at"
+    );
     Ok(Options {
         generations,
         population,
@@ -151,6 +168,7 @@ fn options() -> Result<Options> {
         save,
         seconds,
         effects,
+        change_at,
         load,
         every,
     })
@@ -250,6 +268,18 @@ fn probe_gpu(sched: &mut scheduler::Scheduler, experiment: &Experiment) -> Resul
     Ok(())
 }
 
+/// Sets the named effects (`Name=level`) in `cfg`.
+fn set_effects(cfg: &mut Config, effects: &[(String, usize)]) -> Result<()> {
+    for (name, level) in effects {
+        let effect = evolution_simulator::environment::EFFECTS
+            .iter()
+            .find(|e| e.name.eq_ignore_ascii_case(name))
+            .with_context(|| format!("no effect named {name}"))?;
+        effect.set_level(cfg, *level);
+    }
+    Ok(())
+}
+
 /// Runs the game's loop for one seed and returns its archive best and QD score.
 fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
     let cfg = Config {
@@ -260,12 +290,8 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
         ..Config::default()
     };
     let mut cfg = cfg;
-    for (name, level) in &options.effects {
-        let effect = evolution_simulator::environment::EFFECTS
-            .iter()
-            .find(|e| e.name.eq_ignore_ascii_case(name))
-            .with_context(|| format!("no effect named {name}"))?;
-        effect.set_level(&mut cfg, *level);
+    if options.change_at.is_none() {
+        set_effects(&mut cfg, &options.effects)?;
     }
     cfg.validate()
         .with_context(|| format!("seed {seed} configuration"))?;
@@ -278,6 +304,13 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
         .with_context(|| format!("loading {path}"))?,
         None => Experiment::new(cfg).with_context(|| format!("seed {seed} experiment"))?,
     };
+    if options.load.is_some() {
+        println!(
+            "{scope} {seed} loaded generation {}: world {}",
+            experiment.generation,
+            diversity::world_line(&experiment.config)
+        );
+    }
     let first_generation = experiment.generation;
     let mut last_cpu = cpu_seconds();
     let mut best = f32::NAN;
@@ -292,6 +325,28 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             .is_some_and(|limit| seed_started.elapsed().as_secs_f64() > limit)
         {
             break;
+        }
+        if options.change_at == Some(generation - first_generation) {
+            // A button press, or an autochange step: the archives clear and
+            // the islands' elites are tested again in the new world.
+            let before = experiment.config.clone();
+            let mut cfg = before.clone();
+            if options.effects.is_empty() {
+                let step = cfg.autochange_step;
+                anyhow::ensure!(
+                    evolution_simulator::environment::apply_autochange_step(&mut cfg, step),
+                    "autochange step {step} changes nothing"
+                );
+                cfg.autochange_step = step + 1;
+            } else {
+                set_effects(&mut cfg, &options.effects)?;
+            }
+            experiment.update_config_now(cfg)?;
+            println!(
+                "{scope} {seed} {generation} world change: {}",
+                diversity::world_difference(&before, &experiment.config)
+            );
+            best = f32::NAN;
         }
         {
             // The game's path: the scheduler runs the blocks of the ring with

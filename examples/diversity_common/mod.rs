@@ -3,10 +3,51 @@
 //! space the elites cover.
 #![allow(dead_code)]
 use evolution_simulator::{
+    config::Config,
+    environment::EFFECTS,
     qd::{self, Elite, QdArchive},
     storage::Experiment,
 };
 use std::collections::{HashMap, HashSet};
+
+/// The effects that are off their calm level, and the autochange step.
+pub fn world_line(cfg: &Config) -> String {
+    let on: Vec<String> = EFFECTS
+        .iter()
+        .filter(|e| e.level(cfg) != e.calm)
+        .map(|e| format!("{} {}", e.name, e.levels[e.level(cfg)]))
+        .collect();
+    format!(
+        "{} (autochange step {})",
+        if on.is_empty() {
+            "calm".to_owned()
+        } else {
+            on.join(", ")
+        },
+        cfg.autochange_step
+    )
+}
+
+/// The effects whose level differs between two worlds.
+pub fn world_difference(before: &Config, after: &Config) -> String {
+    let changes: Vec<String> = EFFECTS
+        .iter()
+        .filter(|e| e.level(before) != e.level(after))
+        .map(|e| {
+            format!(
+                "{} {} to {}",
+                e.name,
+                e.levels[e.level(before)],
+                e.levels[e.level(after)]
+            )
+        })
+        .collect();
+    if changes.is_empty() {
+        "no effect changed".to_owned()
+    } else {
+        changes.join(", ")
+    }
+}
 
 /// What one archive holds.
 #[derive(Clone, Debug, Default)]
