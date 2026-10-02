@@ -103,32 +103,17 @@ fn main() -> anyhow::Result<()> {
     };
     let parents: Vec<Creature> = elites.iter().map(|e| e.creature.clone()).collect();
     // Donors for the operators that take limbs from another elite. Breeding
-    // draws one at random from the island's archive, so by default the audit
-    // draws one at random from the whole global archive. `AUDIT_DONOR=best`
-    // takes them from the elites audited, `tournament` takes the faster of two
-    // from the archive.
+    // draws one at random from the island's archive, so the audit draws one
+    // at random from the whole global archive.
     let everyone: Vec<&qd::Elite> = experiment
         .archive
         .entries
         .iter()
         .filter(|e| !qd::is_morphology_niche(&e.niche))
         .collect();
-    let mode = std::env::var("AUDIT_DONOR").unwrap_or_default();
     let donor_of = |i: usize, v: usize| -> &Creature {
         let mut rng = Rng::new(0xd0409, v as u32, i);
-        match mode.as_str() {
-            "best" => &parents[(i * 7 + 3 + 11 * v) % parents.len()],
-            "tournament" => {
-                let (a, b) = (rng.index(everyone.len()), rng.index(everyone.len()));
-                let pick = if everyone[a].fitness >= everyone[b].fitness {
-                    a
-                } else {
-                    b
-                };
-                &everyone[pick].creature
-            }
-            _ => &everyone[rng.index(everyone.len())].creature,
-        }
+        &everyone[rng.index(everyone.len())].creature
     };
     let parent_scores: Vec<f32> = score(&parents)?.into_iter().map(|(f, _)| f).collect();
     let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
