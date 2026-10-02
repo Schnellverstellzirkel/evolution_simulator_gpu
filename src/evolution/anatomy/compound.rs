@@ -23,8 +23,8 @@
 //! A child that one of these operators made gets no parameter noise after it
 //! (`evolution::offspring`), because the move is the whole change. In
 //! `examples/mutation_audit.rs` the noise cut the share of the 13 operators'
-//! children that enter the archive from 12.9% to 6.7% on one save and from
-//! 8.6% to 1.4% on another.
+//! children that enter the archive from 9.6% to 4.5% on one save and from
+//! 8.3% to 1.3% on another.
 use super::controller::active_on;
 use super::extra::{PASSIVE_STIFFNESS, drive};
 use super::junctions::{

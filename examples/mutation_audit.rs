@@ -14,8 +14,10 @@
 //! percentile), how many children keep 90% and how many beat their parent,
 //! the nodes and muscles the child gained, how many children would enter the
 //! global archive (a child enters when it is faster than the elite that holds
-//! its cell, or the cell is empty) and the distance those entrants add to the
-//! archive per 1,000 children.
+//! its cell), the distance those entrants add to the archive per 1,000
+//! children, and how many land in a cell nobody holds (an archive that has
+//! refined its cells has many empty ones, and a child there enters whatever
+//! its distance, so those children are not counted as entrants).
 //!
 //! Usage: cargo run --release --example mutation_audit -- <checkpoint> [elites] [seconds] [variants]
 //! Every operator runs by name, so no setting is needed to switch one on.
@@ -119,9 +121,9 @@ fn main() -> anyhow::Result<()> {
         ),
     );
     println!(
-        "| operator | applied | child/parent median | p75 | keeps 90% | beats parent | nodes | muscles | enters archive | archive gain per 1k |"
+        "| operator | applied | child/parent median | p75 | keeps 90% | beats parent | nodes | muscles | enters archive | archive gain per 1k | new cell |"
     );
-    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     // The children of one operator: (parent index, child).
     let mut rows: Vec<(String, Vec<(usize, Creature)>)> = Vec::new();
     let local: Vec<(usize, Creature)> = parents
@@ -197,14 +199,17 @@ fn main() -> anyhow::Result<()> {
         let mut ratios = Vec::new();
         let (mut keeps, mut beats, mut counted) = (0, 0, 0);
         let (mut nodes, mut muscles) = (0.0f32, 0.0f32);
-        let (mut enters, mut gain) = (0usize, 0.0f64);
+        let (mut enters, mut gain, mut fresh) = (0usize, 0.0f64, 0usize);
         for ((i, child), (s, niche)) in children.iter().zip(&scores) {
             nodes += child.nodes.len() as f32 - parents[*i].nodes.len() as f32;
             muscles += child.muscles.len() as f32 - parents[*i].muscles.len() as f32;
-            let held = occupant.get(niche).copied().unwrap_or(0.0);
-            if *s > held && *s > 0.0 {
-                enters += 1;
-                gain += f64::from(*s - held);
+            match occupant.get(niche) {
+                Some(&held) if *s > held && *s > 0.0 => {
+                    enters += 1;
+                    gain += f64::from(*s - held);
+                }
+                None if *s > 0.0 => fresh += 1,
+                _ => {}
             }
             let parent = parent_scores[*i];
             if parent < 1.0 {
@@ -219,7 +224,7 @@ fn main() -> anyhow::Result<()> {
         let n = children.len().max(1) as f32;
         let share = |k: usize| 100.0 * k as f32 / counted.max(1) as f32;
         println!(
-            "| {name} | {:.0}% | {:.2} | {:.2} | {:.0}% | {:.0}% | {:+.2} | {:+.2} | {:.2}% | {:.2} |",
+            "| {name} | {:.0}% | {:.2} | {:.2} | {:.0}% | {:.0}% | {:+.2} | {:+.2} | {:.2}% | {:.2} | {:.2}% |",
             100.0 * children.len() as f32 / (parents.len() * variants) as f32,
             quantile(&ratios, 0.5),
             quantile(&ratios, 0.75),
@@ -229,6 +234,7 @@ fn main() -> anyhow::Result<()> {
             muscles / n,
             100.0 * enters as f32 / n,
             1000.0 * gain / f64::from(n),
+            100.0 * fresh as f32 / n,
         );
     }
     Ok(())
