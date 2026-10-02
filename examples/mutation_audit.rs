@@ -86,9 +86,9 @@ fn main() -> anyhow::Result<()> {
     let parents: Vec<Creature> = elites.iter().map(|e| e.creature.clone()).collect();
     // Donors for the operators that take limbs from another elite. Breeding
     // draws one at random from the island's archive, so by default the audit
-    // draws from the whole global archive, not only from the best elites.
-    // `AUDIT_DONOR=best` takes them from the elites audited, `tournament` takes
-    // the faster of two from the archive.
+    // draws one at random from the whole global archive. `AUDIT_DONOR=best`
+    // takes them from the elites audited, `tournament` takes the faster of two
+    // from the archive.
     let everyone: Vec<&qd::Elite> = experiment
         .archive
         .entries
