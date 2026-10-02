@@ -37,11 +37,10 @@ fn main() -> anyhow::Result<()> {
                 (f, all)
             };
             let c = |i: usize| pop.creature(i);
-            let lig = share(&|i| c(i).bones.iter().any(|b| b.ligament > 0.0));
             let sen = share(&|i| c(i).muscles.iter().any(|m| m.sensor < 2));
             let big = share(&|i| c(i).nodes.len() >= 10);
             let wide = share(&|i| c(i).nodes.iter().any(|n| n.x.abs() > 3.0));
-            println!("  failing vs all: ligament {lig:?} sensors {sen:?} >=10 nodes {big:?} nodes beyond 3 m {wide:?}");
+            println!("  failing vs all: sensors {sen:?} >=10 nodes {big:?} nodes beyond 3 m {wide:?}");
         }
         if k < 2 && !diff.is_empty() {
             let mut classes = std::collections::BTreeMap::new();
