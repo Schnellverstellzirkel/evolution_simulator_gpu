@@ -260,6 +260,7 @@ fn bodies_of_other_shapes_and_sizes_keep_cells_of_their_own() {
         .collect();
     assert_eq!(classes.len(), evolution_simulator::qd::BODY_CLASSES);
     let mut archive = QdArchive::default();
+    archive.set_refined(true);
     for (round, fitness) in [3.0, 1.0, 5.0].into_iter().enumerate() {
         for (k, &(nodes, aspect)) in bodies.iter().enumerate() {
             archive.offer(
@@ -286,7 +287,7 @@ fn bodies_of_other_shapes_and_sizes_keep_cells_of_their_own() {
 }
 
 #[test]
-fn a_nursery_keeps_one_elite_per_way_of_moving_and_its_graduates_take_body_classes() {
+fn an_archive_keeps_one_elite_per_way_of_moving_until_it_is_refined() {
     let population = evolution::create(&config(38)).unwrap();
     let way = |nodes: u16, aspect_ratio: f32| Descriptor {
         ground_contact: 0.5,
@@ -297,10 +298,10 @@ fn a_nursery_keeps_one_elite_per_way_of_moving_and_its_graduates_take_body_class
         aspect_ratio,
         ..Descriptor::default()
     };
-    let mut nursery = QdArchive::default();
-    nursery.set_flat(true);
+    // A new archive, such as a nursery or one that is still climbing.
+    let mut climbing = QdArchive::default();
     for (k, &(nodes, aspect)) in [(5, 0.6), (10, 1.8), (20, 4.0)].iter().enumerate() {
-        nursery.offer(
+        climbing.offer(
             &population,
             k,
             way(nodes, aspect),
@@ -312,19 +313,20 @@ fn a_nursery_keeps_one_elite_per_way_of_moving_and_its_graduates_take_body_class
         );
     }
     // The three bodies share one way of moving, and the fastest keeps it.
-    assert_eq!(nursery.behavior_count(), 1);
-    assert_eq!(nursery.entries[0].fitness, 3.0);
-    // A graduate that is not the fastest takes the cell of its body class.
-    let mut island = QdArchive::default();
+    assert_eq!(climbing.behavior_count(), 1);
+    assert_eq!(climbing.entries[0].fitness, 3.0);
+    // Refined, the same elites take the cells of their body classes.
+    let mut refined = QdArchive::default();
+    refined.set_refined(true);
     let slower = Elite {
         fitness: 1.0,
         descriptor: way(5, 0.6),
-        ..nursery.entries[0].clone()
+        ..climbing.entries[0].clone()
     };
-    assert!(island.absorb(&slower));
-    assert!(island.absorb(&nursery.entries[0]));
-    assert_eq!(island.behavior_count(), 2);
-    assert_eq!(island.movement_count(), 1);
+    assert!(refined.absorb(&slower));
+    assert!(refined.absorb(&climbing.entries[0]));
+    assert_eq!(refined.behavior_count(), 2);
+    assert_eq!(refined.movement_count(), 1);
 }
 
 #[test]
@@ -751,17 +753,10 @@ fn a_save_from_the_previous_cell_layout_loads_with_every_elite_in_its_new_cell()
     for (index, archive) in archives.enumerate() {
         for elite in &archive.entries {
             if !evolution_simulator::qd::is_morphology_niche(&elite.niche) {
-                // The global archive is 0, the islands 1 to 5 and their
-                // nurseries 6 to 10: a nursery keeps no body classes.
-                let nursery = index > storage::island_count();
-                assert_eq!(
-                    elite.niche,
-                    if nursery {
-                        elite.descriptor.movement_niche()
-                    } else {
-                        elite.descriptor.niche()
-                    }
-                );
+                // The synthetic archives are far from their plateau, so
+                // every archive keeps one elite per way of moving.
+                let _ = index;
+                assert_eq!(elite.niche, elite.descriptor.movement_niche());
             }
         }
     }
@@ -801,6 +796,156 @@ fn a_save_keeps_the_ancestors_of_the_global_archive_and_every_elites_record() {
     }
     assert!(chains > experiment.archive.entries.len());
     assert!(restored.lineage.len() <= experiment.lineage.len());
+}
+
+/// An archive at its plateau: one elite for every way of moving, all at the
+/// same distance, with bodies of every shape and size. Each keeps the cell of
+/// the layout before the body classes.
+fn plateau_archive() -> QdArchive {
+    let mut heights = [0.0f32; 6];
+    let mut h = 0.15f32;
+    while h < 4.0 {
+        let bin = Descriptor {
+            mean_height: h,
+            ..Descriptor::default()
+        }
+        .niche()
+        .0[3] as usize;
+        if heights[bin] == 0.0 {
+            heights[bin] = h;
+        }
+        h *= 1.02;
+    }
+    assert!(heights.iter().all(|&h| h > 0.0));
+    let bodies = evolution::create(&Config {
+        population: 1440,
+        ..config(38)
+    })
+    .unwrap();
+    let mut archive = QdArchive::default();
+    let mut n = 0u32;
+    for contact in 0..6u32 {
+        for cadence in 0..8u32 {
+            for height in 0..6usize {
+                for feet in 1..=5u32 {
+                    n += 1;
+                    let descriptor = Descriptor {
+                        ground_contact: (contact as f32 + 0.5) / 6.0,
+                        gait_frequency: (cadence as f32 + 0.5) * 0.75,
+                        mean_height: heights[height],
+                        feet: feet as f32,
+                        // Bodies of both shapes and sizes.
+                        nodes: if n % 2 == 0 { 6 } else { 16 },
+                        aspect_ratio: if n % 3 == 0 { 0.8 } else { 3.0 },
+                        ..Descriptor::default()
+                    };
+                    let creature = bodies.creature(n as usize - 1);
+                    archive.entries.push(Elite {
+                        niche: descriptor.movement_niche(),
+                        descriptor,
+                        topology: evolution_simulator::qd::Topology::of(&creature),
+                        creature,
+                        fitness: 1000.0,
+                        emitter: Emitter::Cma,
+                        improved_generation: 0,
+                        protected_until: 0,
+                        visits: 0,
+                        graduate: false,
+                        fine: false,
+                    });
+                }
+            }
+        }
+    }
+    archive.rebuild_indices();
+    archive
+}
+
+#[test]
+fn an_archive_at_its_plateau_is_refined_and_a_climbing_one_is_not() {
+    let plateau = plateau_archive();
+    assert!(plateau.plateaued());
+    assert!(!plateau.refined());
+    // Half of the elites far below the best is a climbing archive.
+    let mut climbing = plateau_archive();
+    for (k, elite) in climbing.entries.iter_mut().enumerate() {
+        if k % 5 < 3 {
+            elite.fitness = 100.0;
+        }
+    }
+    climbing.rebuild_indices();
+    assert!(!climbing.plateaued());
+    // So is an archive with few of the ways of moving.
+    let mut sparse = plateau_archive();
+    sparse.entries.truncate(200);
+    sparse.rebuild_indices();
+    assert!(!sparse.plateaued());
+}
+
+#[test]
+fn the_generation_boundary_refines_the_archives_that_reached_their_plateau() {
+    let mut experiment = Experiment::new(config(38)).unwrap();
+    run_synthetic(&mut experiment);
+    experiment.islands[1] = plateau_archive();
+    let before = experiment.islands[1].behavior_count();
+    assert!(!experiment.islands[1].refined());
+    run_synthetic(&mut experiment);
+    // The plateau archive moved to the cells of its body classes; the others
+    // are still climbing.
+    assert!(experiment.islands[1].refined());
+    assert_eq!(experiment.islands[1].behavior_count(), before);
+    assert_eq!(experiment.islands[1].movement_count(), before);
+    // Elites of other shapes and sizes now sit in cells of their own classes.
+    assert!(
+        experiment.islands[1]
+            .entries
+            .iter()
+            .any(|e| e.niche.0[2] != 0 || e.niche.0[5] != 0)
+    );
+    assert!(!experiment.islands[0].refined());
+    assert!(!experiment.archive.refined());
+    for elite in &experiment.islands[1].entries {
+        if !evolution_simulator::qd::is_morphology_niche(&elite.niche) {
+            assert_eq!(elite.niche, elite.descriptor.niche());
+        }
+    }
+    experiment.validate().unwrap();
+}
+
+#[test]
+fn a_plateaued_archive_of_the_previous_layout_is_refined_when_it_loads() {
+    let mut experiment = Experiment::new(config(38)).unwrap();
+    run_synthetic(&mut experiment);
+    experiment.islands[2] = plateau_archive();
+    experiment.qd_version = evolution_simulator::qd::OLDEST_LOADABLE;
+    let checkpoint = Checkpoint::new("plateau-load");
+    storage::save(&checkpoint.0, &experiment).unwrap();
+    let restored = storage::load(&checkpoint.0).unwrap();
+    assert!(restored.islands[2].refined());
+    assert!(!restored.islands[0].refined());
+    assert_eq!(restored.islands[2].behavior_count(), 1440);
+    assert_eq!(restored.islands[2].movement_count(), 1440);
+    assert!(
+        restored.islands[2]
+            .entries
+            .iter()
+            .any(|e| e.niche.0[2] != 0 || e.niche.0[5] != 0)
+    );
+    for elite in &restored.islands[2].entries {
+        if !evolution_simulator::qd::is_morphology_niche(&elite.niche) {
+            assert_eq!(elite.niche, elite.descriptor.niche());
+        }
+    }
+    // A save of the current version tells its layout by the cells it holds.
+    let again = Checkpoint::new("plateau-again");
+    storage::save(&again.0, &restored).unwrap();
+    let reloaded = storage::load(&again.0).unwrap();
+    assert!(reloaded.islands[2].refined());
+    assert!(!reloaded.islands[0].refined());
+    assert_eq!(
+        reloaded.islands[2].behavior_count(),
+        restored.islands[2].behavior_count()
+    );
 }
 
 #[test]

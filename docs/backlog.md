@@ -25,6 +25,8 @@ Open work only. Delete an item when it is merged into `main`. If it is a real de
 
 Winners go on by default and losers are deleted.
 
+- Two runs of one seed diverge by generation 2 to 3 on the shared GPU: `search_ab --probe` at 40k creatures printed different archive and ring digests for two runs of the code of c54876a, of 09d1f73 and of `claude/cells`, while its batch probe (`PROBE_GPU=1`) found no differing bit between whole and chunked scoring on c54876a. The owner's rule is one search per seed on one GPU. Find where the runs part.
+
 - The emitter shares barely move: the weight formula adds a constant 0.55 to a mean reward near 0.002, so shares stay at the 35/35/30 prior. A reward-following bandit tied.
 - Archive and selection, on the GPU at larger populations (small CPU runs were ties or losses, see `docs/rejected-ideas.md`): age layers (ALPS), deep grids, racing, dominated novelty search, the migration interval and which elites migrate [claude/archive].
 - The solve keeps only the 4 deepest contacts per step, so a fifth touching node can sink up to 1.25 cm before it joins. Revisit with the contact solve.

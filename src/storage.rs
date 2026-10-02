@@ -1062,7 +1062,7 @@ impl Experiment {
                 let nursery = qd::arena_of_slot(first + j, arenas) >= island_count();
                 let valid = score.is_finite() && score > FAILED && !screened;
                 let behavior_candidate = if valid && !nursery {
-                    let niche = descriptor.niche();
+                    let niche = self.archive.cell_of(descriptor);
                     match self.archive.slot_for(&niche) {
                         Some(slot) => score > self.archive.entries[slot].fitness,
                         None => self.archive.behavior_count() < qd::ARCHIVE_LIMIT,
@@ -1081,7 +1081,7 @@ impl Experiment {
                     .then_some(birth.cma)
                     .flatten()
                     .filter(|_| score.is_finite() && score > FAILED)
-                    .and_then(|_| self.archive.slot_for(&descriptor.niche()))
+                    .and_then(|_| self.archive.slot_for(&self.archive.cell_of(descriptor)))
                     .map(|slot| self.archive.entries[slot].fitness);
                 Prep {
                     descriptor,
@@ -1254,7 +1254,9 @@ impl Experiment {
         let mut best_by_niche: HashMap<qd::Niche, usize> = HashMap::new();
         for (j, p) in prep.iter().enumerate() {
             if p.behavior_candidate {
-                let best = best_by_niche.entry(p.descriptor.niche()).or_insert(j);
+                let best = best_by_niche
+                    .entry(self.archive.cell_of(p.descriptor))
+                    .or_insert(j);
                 if prep[*best].score < p.score {
                     *best = j;
                 }
@@ -1301,7 +1303,10 @@ impl Experiment {
                     .then_some(cma)
                     .flatten()
                     .filter(|_| prep.score.is_finite() && prep.score > FAILED)
-                    .and_then(|_| self.archive.slot_for(&prep.descriptor.niche()))
+                    .and_then(|_| {
+                        self.archive
+                            .slot_for(&self.archive.cell_of(prep.descriptor))
+                    })
                     .map(|slot| self.archive.entries[slot].fitness)
             };
             let offer = if prep.behavior_candidate {
@@ -1575,14 +1580,25 @@ impl Experiment {
             return;
         }
         self.islands = vec![QdArchive::default(); arena_count()];
-        // A nursery keeps one elite per way of moving, as every archive did
-        // before the body classes.
-        for nursery in &mut self.islands[island_count()..] {
-            nursery.set_flat(true);
-        }
         self.island_progress.clear();
         self.graduations.clear();
         self.last_migration = None;
+    }
+    /// Refines each archive that has reached its plateau (`QdArchive::
+    /// plateaued`): its elites move to the cells of their body classes, and
+    /// from then on a body of another shape or size has a cell of its own.
+    /// Until then an archive keeps one elite per way of moving, so a climbing
+    /// archive pools its lineages as it always did. The global archive, each
+    /// island and the hub decide for themselves, and a world change starts
+    /// them all over.
+    fn refine_archives(&mut self) {
+        let islands = island_count().min(self.islands.len());
+        for archive in std::iter::once(&mut self.archive).chain(&mut self.islands[..islands]) {
+            if !archive.refined() && archive.plateaued() {
+                archive.set_refined(true);
+                archive.rebin();
+            }
+        }
     }
     /// Every `NURSERY_GENERATIONS` generations each nursery's survivors
     /// compete with their island's elites on distance alone, and the global
@@ -2267,6 +2283,7 @@ impl Experiment {
         self.push_archive_stats(failed);
         self.prune_lineage();
         self.generation += 1;
+        self.refine_archives();
         self.graduate_nurseries();
         self.migrate_islands();
         let mut cfg = self.pending.take().unwrap_or_else(|| self.config.clone());
@@ -2385,6 +2402,8 @@ impl Experiment {
             return 0;
         };
         let lost = std::mem::take(&mut self.islands[index].entries);
+        // The island starts over from new bodies, and climbs without classes.
+        self.islands[index].set_refined(false);
         self.islands[index].rebuild_indices();
         let count = lost.len();
         self.fossils
@@ -2404,6 +2423,11 @@ impl Experiment {
                     None => continue,
                 },
             };
+            let mut elite = elite;
+            if !qd::is_morphology_niche(&elite.niche) {
+                // The cell in the layout the archive has now.
+                elite.niche = archive.cell_of(elite.descriptor);
+            }
             match archive.slot_for(&elite.niche) {
                 Some(slot) if archive.entries[slot].fitness < elite.fitness => {
                     archive.entries[slot] = elite;
@@ -3235,21 +3259,30 @@ impl SmallLoad {
                 && e.cma_emitters.iter().all(|c| c.island < arena_count()),
             "Invalid island state"
         );
-        for nursery in e.islands.iter_mut().skip(island_count()) {
-            nursery.set_flat(true);
-        }
+        let refinable =
+            std::iter::once(&mut e.archive).chain(e.islands.iter_mut().take(island_count()));
         if saved_version == qd::VERSION {
-            e.archive.rebuild_indices();
-            for island in &mut e.islands {
-                island.rebuild_indices();
+            for archive in refinable {
+                archive.rebuild_indices();
+                archive.derive_refined();
+            }
+            for nursery in e.islands.iter_mut().skip(island_count()) {
+                nursery.rebuild_indices();
             }
         } else {
-            // The archives were saved under another cell layout: each elite
-            // moves to its cell now. Optimizers keep their body plan's
-            // state; the CMA emitters of single cells start over.
-            e.archive.rebin();
-            for island in &mut e.islands {
-                island.rebin();
+            // The archives were saved before the body classes: each elite
+            // moves to its cell now, and an archive at its plateau is
+            // refined. Optimizers keep their body plan's state; the CMA
+            // emitters of single cells start over.
+            for archive in refinable {
+                archive.rebin();
+                if archive.plateaued() {
+                    archive.set_refined(true);
+                    archive.rebin();
+                }
+            }
+            for nursery in e.islands.iter_mut().skip(island_count()) {
+                nursery.rebin();
             }
             e.cma_emitters.retain(CmaEmitter::optimizing);
         }

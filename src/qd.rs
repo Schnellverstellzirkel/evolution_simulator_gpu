@@ -267,11 +267,12 @@ pub struct QdArchive {
     /// The slots of the morphology reserve, by their hashed niches.
     #[serde(skip)]
     reserve_lookup: HashMap<Niche, usize>,
-    /// The archive keeps one elite per way of moving, whatever the body
-    /// (a nursery's layout; its survivors take their body classes when they
-    /// enter an island).
+    /// The archive keeps one elite per way of moving and body class. Until
+    /// it is refined it keeps one per way of moving, whatever the body: the
+    /// bodies of a climbing archive compete for its cells on distance, and a
+    /// nursery's never refine.
     #[serde(skip)]
-    flat: bool,
+    refined: bool,
     pub qd_score: f64,
     /// The behavior elites visited least, as (visits, slot), fewest first.
     #[serde(skip)]
@@ -582,18 +583,55 @@ fn cell_index(niche: &Niche) -> Option<usize> {
 }
 
 impl QdArchive {
-    /// Makes the archive keep one elite per way of moving, or one per way
-    /// of moving and body class. Set while it is empty or before `rebin`.
-    pub fn set_flat(&mut self, flat: bool) {
-        self.flat = flat;
+    /// Whether the archive keeps an elite for each body class of a way of
+    /// moving. A new archive keeps one per way of moving, and the game
+    /// refines it once most of its elites have reached the top distance.
+    pub fn refined(&self) -> bool {
+        self.refined
+    }
+    /// Sets the layout. An archive that holds elites needs `rebin` after it.
+    pub fn set_refined(&mut self, refined: bool) {
+        self.refined = refined;
+    }
+    /// Sets the layout from the elites it holds: refined when one of them is
+    /// in a cell of a body class other than the first.
+    pub fn derive_refined(&mut self) {
+        self.refined = self.behavior_indices.iter().any(|&i| {
+            let niche = &self.entries[i].niche;
+            niche.0[2] != 0 || niche.0[NEIGHBOR_AXES] != 0
+        });
     }
     /// The cell of `descriptor` in this archive.
-    fn niche_of(&self, descriptor: Descriptor) -> Niche {
-        if self.flat {
-            descriptor.movement_niche()
-        } else {
+    pub fn cell_of(&self, descriptor: Descriptor) -> Niche {
+        if self.refined {
             descriptor.niche()
+        } else {
+            descriptor.movement_niche()
         }
+    }
+    fn niche_of(&self, descriptor: Descriptor) -> Niche {
+        self.cell_of(descriptor)
+    }
+    /// Whether the archive is at its plateau: it covers most ways of moving
+    /// and half of its elites are within 1% of its best distance, so a body
+    /// can no longer win a cell on distance alone.
+    pub fn plateaued(&self) -> bool {
+        let count = self.behavior_indices.len();
+        if count < MOVEMENT_CELLS * 3 / 4 {
+            return false;
+        }
+        let fitness = |&i: &usize| self.entries[i].fitness;
+        let best = self
+            .behavior_indices
+            .iter()
+            .map(fitness)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let near = self
+            .behavior_indices
+            .iter()
+            .filter(|i| fitness(i) >= 0.99 * best)
+            .count();
+        near * 2 >= count
     }
     /// The slot of the elite in behavior cell `index`.
     fn cell_slot(&self, index: usize) -> Option<usize> {
@@ -2139,6 +2177,7 @@ mod tests {
             fine: false,
         };
         let mut archive = QdArchive::default();
+        archive.set_refined(true);
         // As an older layout kept them: no shape or size class in the niche.
         let old = [3, 1, 0, 3, 1, 0];
         archive.entries = vec![
@@ -2160,6 +2199,7 @@ mod tests {
         assert_eq!(archive.qd_score, 12.0);
         // Two elites that land in one cell under the new layout: the faster stays.
         let mut archive = QdArchive::default();
+        archive.set_refined(true);
         archive.entries = vec![
             elite(4.0, 6, 1.0, old),
             elite(9.0, 7, 1.0, [3, 1, 1, 3, 1, 0]),
