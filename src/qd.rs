@@ -614,12 +614,16 @@ impl QdArchive {
     fn niche_of(&self, descriptor: Descriptor) -> Niche {
         self.cell_of(descriptor)
     }
-    /// Whether the archive is at its plateau: it covers most ways of moving
-    /// and half of its elites are within 1% of its best distance, so a body
-    /// can no longer win a cell on distance alone.
+    /// Whether elites cover at least three quarters of the ways of moving.
+    pub fn covers_most_ways_of_moving(&self) -> bool {
+        self.movement_count() >= MOVEMENT_CELLS * 3 / 4
+    }
+    /// Whether half of the archive's elites are within 1% of its best
+    /// distance and it covers most ways of moving: a body can no longer win a
+    /// cell on distance alone.
     pub fn plateaued(&self) -> bool {
         let count = self.behavior_indices.len();
-        if count < MOVEMENT_CELLS * 3 / 4 {
+        if !self.covers_most_ways_of_moving() {
             return false;
         }
         let fitness = |&i: &usize| self.entries[i].fitness;

@@ -1584,17 +1584,39 @@ impl Experiment {
         self.graduations.clear();
         self.last_migration = None;
     }
-    /// Refines each archive that has reached its plateau (`QdArchive::
-    /// plateaued`): its elites move to the cells of their body classes, and
-    /// from then on a body of another shape or size has a cell of its own.
-    /// Until then an archive keeps one elite per way of moving, so a climbing
-    /// archive pools its lineages as it always did. The global archive, each
-    /// island and the hub decide for themselves, and a world change starts
-    /// them all over.
+    /// Refines each archive that has reached its plateau: it covers most of
+    /// the ways of moving, and either half of its elites are within 1% of its
+    /// best distance (`QdArchive::plateaued`) or its best has stood for
+    /// `OPTIMIZER_STALL` generations. Its elites then move to the cells of
+    /// their body classes, and from then on a body of another shape or size
+    /// has a cell of its own. Until then an archive keeps one elite per way of
+    /// moving, so a climbing archive pools its lineages as it always did. The
+    /// global archive, each island and the hub decide for themselves, and a
+    /// world change starts them all over.
     fn refine_archives(&mut self) {
         let islands = island_count().min(self.islands.len());
-        for archive in std::iter::once(&mut self.archive).chain(&mut self.islands[..islands]) {
-            if !archive.refined() && archive.plateaued() {
+        let stall = OPTIMIZER_STALL as usize;
+        // The global archive's best has stood through the last `stall`
+        // generations of this world.
+        let global_stalled = self.history.len() > stall && {
+            let now = &self.history[self.history.len() - 1];
+            let then = &self.history[self.history.len() - 1 - stall];
+            !then.config.physics_differs(&self.config) && now.best <= then.best
+        };
+        // Each island's best has stood for as long (the optimizer's measure).
+        let stalled: Vec<bool> = std::iter::once(global_stalled)
+            .chain((0..islands).map(|k| {
+                self.island_progress.get(k).is_some_and(|&(_, record)| {
+                    self.generation.saturating_sub(record) >= OPTIMIZER_STALL
+                })
+            }))
+            .collect();
+        let archives = std::iter::once(&mut self.archive).chain(&mut self.islands[..islands]);
+        for (archive, stalled) in archives.zip(stalled) {
+            if !archive.refined()
+                && archive.covers_most_ways_of_moving()
+                && (stalled || archive.plateaued())
+            {
                 archive.set_refined(true);
                 archive.rebin();
             }

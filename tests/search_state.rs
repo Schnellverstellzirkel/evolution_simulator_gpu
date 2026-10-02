@@ -802,6 +802,16 @@ fn a_save_keeps_the_ancestors_of_the_global_archive_and_every_elites_record() {
 /// same distance, with bodies of every shape and size. Each keeps the cell of
 /// the layout before the body classes.
 fn plateau_archive() -> QdArchive {
+    archive_of_all_ways_of_moving(|_| 1000.0)
+}
+
+/// The same archive with elites at spread distances, so that only a few are
+/// near its best.
+fn climbing_archive() -> QdArchive {
+    archive_of_all_ways_of_moving(|n| 1000.0 + n as f32 * 0.5)
+}
+
+fn archive_of_all_ways_of_moving(fitness: impl Fn(u32) -> f32) -> QdArchive {
     let mut heights = [0.0f32; 6];
     let mut h = 0.15f32;
     while h < 4.0 {
@@ -826,17 +836,17 @@ fn plateau_archive() -> QdArchive {
     let mut n = 0u32;
     for contact in 0..6u32 {
         for cadence in 0..8u32 {
-            for height in 0..6usize {
+            for &mean_height in &heights {
                 for feet in 1..=5u32 {
                     n += 1;
                     let descriptor = Descriptor {
                         ground_contact: (contact as f32 + 0.5) / 6.0,
                         gait_frequency: (cadence as f32 + 0.5) * 0.75,
-                        mean_height: heights[height],
+                        mean_height,
                         feet: feet as f32,
                         // Bodies of both shapes and sizes.
-                        nodes: if n % 2 == 0 { 6 } else { 16 },
-                        aspect_ratio: if n % 3 == 0 { 0.8 } else { 3.0 },
+                        nodes: if n.is_multiple_of(2) { 6 } else { 16 },
+                        aspect_ratio: if n.is_multiple_of(3) { 0.8 } else { 3.0 },
                         ..Descriptor::default()
                     };
                     let creature = bodies.creature(n as usize - 1);
@@ -845,7 +855,7 @@ fn plateau_archive() -> QdArchive {
                         descriptor,
                         topology: evolution_simulator::qd::Topology::of(&creature),
                         creature,
-                        fitness: 1000.0,
+                        fitness: fitness(n),
                         emitter: Emitter::Cma,
                         improved_generation: 0,
                         protected_until: 0,
@@ -909,6 +919,39 @@ fn the_generation_boundary_refines_the_archives_that_reached_their_plateau() {
             assert_eq!(elite.niche, elite.descriptor.niche());
         }
     }
+    experiment.validate().unwrap();
+}
+
+#[test]
+fn an_archive_whose_best_has_stood_for_thirty_generations_is_refined() {
+    let mut experiment = Experiment::new(config(38)).unwrap();
+    run_synthetic(&mut experiment);
+    // Island 1 and the global archive cover the ways of moving and still
+    // spread over distances: only a few elites are near their best. Island 2
+    // has stood as long with few ways of moving.
+    assert!(!climbing_archive().plateaued());
+    assert!(climbing_archive().covers_most_ways_of_moving());
+    experiment.islands[1] = climbing_archive();
+    experiment.archive = climbing_archive();
+    experiment.island_progress[1] = (1.0e6, 0);
+    experiment.island_progress[2] = (1.0e6, 0);
+    while experiment.generation < 29 {
+        run_synthetic(&mut experiment);
+    }
+    assert!(!experiment.islands[1].refined());
+    // The island's best has stood for 30 generations.
+    run_synthetic(&mut experiment);
+    assert_eq!(experiment.generation, 30);
+    assert!(experiment.islands[1].refined());
+    assert!(!experiment.archive.refined());
+    while experiment.generation < 33 {
+        run_synthetic(&mut experiment);
+    }
+    // The global archive's best has stood as long. Island 0 still sets
+    // records and island 2 covers few ways of moving: they stay as they were.
+    assert!(experiment.archive.refined());
+    assert!(!experiment.islands[0].refined());
+    assert!(!experiment.islands[2].refined());
     experiment.validate().unwrap();
 }
 

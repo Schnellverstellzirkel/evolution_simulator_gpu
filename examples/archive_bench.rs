@@ -115,6 +115,28 @@ fn main() -> Result<()> {
             .collect::<Vec<_>>()
             .join(" "),
     );
+    let progress = |experiment: &storage::Experiment| {
+        let archives = std::iter::once(&experiment.archive).chain(&experiment.islands);
+        archives
+            .take(storage::island_count() + 1)
+            .enumerate()
+            .map(|(k, a)| {
+                // Islands 1 to 5 of this list also have a record generation.
+                let record = k
+                    .checked_sub(1)
+                    .and_then(|k| experiment.island_progress.get(k))
+                    .map_or(String::new(), |p| format!(" record gen {}", p.1));
+                format!(
+                    "{k}: {} ways of moving, plateaued {}, refined {}{record}",
+                    a.movement_count(),
+                    a.plateaued(),
+                    a.refined()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    println!("{}", progress(&experiment));
     let mut total = [0.0f64; 2];
     let mut cpu_total = 0.0;
     for _ in 0..generations {
@@ -145,6 +167,7 @@ fn main() -> Result<()> {
             experiment.islands.iter().filter(|i| i.refined()).count(),
         );
     }
+    println!("{}", progress(&experiment));
     println!(
         "mean per generation: archive {:.2} s, breeding {:.2} s, {:.1} CPU s",
         total[0] / generations as f64,
