@@ -429,12 +429,14 @@ impl Descriptor {
         niche
     }
 
-    fn behavior(self) -> [f32; NEIGHBOR_AXES] {
+    /// The behavior vector novelty compares. Shape joins it once the
+    /// archive is refined, as an axis of its cells.
+    fn behavior(self, refined: bool) -> [f32; NEIGHBOR_AXES] {
         [
             self.ground_contact.clamp(0.0, 1.0),
             (self.gait_frequency / 6.0).clamp(0.0, 1.0),
-            // Shape on a log scale from 1:16 to 16:1, once it is an axis.
-            if ASPECT_BINS > 1 {
+            // Shape on a log scale from 1:16 to 16:1.
+            if refined && ASPECT_BINS > 1 {
                 ((self.aspect_ratio.max(0.0625).ln() / 16f32.ln() + 1.0) * 0.5).clamp(0.0, 1.0)
             } else {
                 0.0
@@ -1001,7 +1003,7 @@ impl QdArchive {
             .entries
             .par_iter()
             .map(|elite| ScoreRow {
-                behavior: elite.descriptor.behavior(),
+                behavior: elite.descriptor.behavior(self.refined),
                 fitness: elite.fitness,
             })
             .collect();

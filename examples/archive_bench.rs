@@ -5,13 +5,13 @@
 //! and `perf record` on it shows where they go.
 //!
 //! The stand-in score is the world's top distance for a body whose rhythm
-//! period is short enough (so many bodies tie there, to the last digits, as
+//! period is under 0.5 s (so many bodies tie there, to the last digits, as
 //! evolved bodies do) and less for a longer one. Its behavior follows the
 //! start pose: the share of nodes near the ground, the clock's frequency, the
 //! body's height and its feet. Bodies below half the top distance are
 //! screened, as the early screen stops them.
 //!
-//! Usage: archive_bench <save> <population> <generations>
+//! Usage: archive_bench <save, or `new` for a new game> <population> <generations>
 #[path = "diversity_common/mod.rs"]
 mod diversity;
 use anyhow::Result;
@@ -46,7 +46,7 @@ fn evaluate(population: &Population, _: &Config) -> Result<Vec<EvaluationMetrics
             let high = nodes.iter().map(|n| n.y).fold(f32::NEG_INFINITY, f32::max);
             let mean = nodes.iter().map(|n| n.y).sum::<f32>() / nodes.len().max(1) as f32;
             let feet = nodes.iter().filter(|n| n.y < low + 0.1).count() as f32;
-            let quality = (1.6 - 3.0 * (period - 0.21).abs()).clamp(0.0, 1.0);
+            let quality = (1.2 * (-(period - 0.21) / 1.5).exp()).min(1.0);
             // Bodies at the top tie to about seven digits, as evolved ones do.
             let fitness = if quality >= 0.999 {
                 CAP * (1.0 + 3e-7 * noise(g.id))
@@ -94,7 +94,16 @@ fn main() -> Result<()> {
         .expect("usage: archive_bench <save> <population> <generations>");
     let population: usize = args.next().expect("population").parse()?;
     let generations: u32 = args.next().expect("generations").parse()?;
-    let mut experiment = storage::load_for_population(std::path::Path::new(&path), population)?;
+    let mut experiment = if path == "new" {
+        storage::Experiment::new(Config {
+            population,
+            random_seed: false,
+            seed: 38,
+            ..Config::default()
+        })?
+    } else {
+        storage::load_for_population(std::path::Path::new(&path), population)?
+    };
     println!(
         "{path}: generation {}, global archive {} cells, islands {}",
         experiment.generation,
@@ -125,9 +134,15 @@ fn main() -> Result<()> {
             .filter(|e| e.improved_generation == generation)
             .count();
         println!(
-            "generation {generation}: archive {archive:.2} s, breeding {breeding:.2} s (whole generation {:.1} s with scoring, {cpu:.1} CPU s), global archive {} cells, {changed} changed",
+            "generation {generation}: archive {archive:.2} s, breeding {breeding:.2} s (whole generation {:.1} s with scoring, {cpu:.1} CPU s), global archive {} cells{}, islands refined {}, {changed} changed",
             started.elapsed().as_secs_f64(),
             experiment.archive.behavior_count(),
+            if experiment.archive.refined() {
+                " (refined)"
+            } else {
+                ""
+            },
+            experiment.islands.iter().filter(|i| i.refined()).count(),
         );
     }
     println!(
