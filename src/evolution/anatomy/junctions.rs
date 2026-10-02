@@ -1,7 +1,7 @@
 //! Operators that restructure junctions and segments of the skeleton.
 use super::{
-    BoneIds, Context, branch, branch_nodes, child_bones, copy_branch, fit_stroke, is_neck,
-    muscles_on, new_muscle, parent_bones, remove_parts, room, span,
+    BoneIds, Context, branch, branch_in, branch_nodes, child_bones, copy_branch, fit_stroke,
+    is_neck, muscles_on, new_muscle, parent_bones, remove_parts, room, span,
 };
 use crate::config::Config;
 use crate::evolution::{Bone, Bounded, Creature, MAX_MUSCLES, Muscle, NodeGene, Rng};
@@ -119,7 +119,7 @@ pub(crate) fn repeat_body_segment(
             .iter()
             .copied()
             .filter(|&l| {
-                branch(c, l)
+                branch_in(c, &children, l)
                     .iter()
                     .all(|&x| children[c.bones[x].b as usize].len() <= 1)
             })

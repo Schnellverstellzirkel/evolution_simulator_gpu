@@ -1,7 +1,7 @@
 //! Operators that change joint ranges, timing patterns and mass together.
 use super::{
-    BoneIds, Context, Limbs, MuscleIds, branch, child_bones, degree, is_neck, muscles_on,
-    parent_bones,
+    BoneIds, Context, Limbs, MuscleIds, branch, branch_in, child_bones, degree, is_neck,
+    muscles_on, parent_bones,
 };
 use crate::config::Config;
 use crate::evolution::{
@@ -143,9 +143,10 @@ impl IntoIterator for LimbPairs {
 /// Pairs of branches of the same shape: apart from each other, with the same
 /// bone count and bone lengths within 25% of each other, position by position.
 pub(super) fn matching_limbs(c: &Creature) -> LimbPairs {
+    let children = child_bones(c);
     let limbs: Limbs = (0..c.bones.len())
         .filter(|&b| !is_neck(c, b))
-        .map(|b| branch(c, b))
+        .map(|b| branch_in(c, &children, b))
         .collect();
     let similar = |(&p, &q): (&usize, &usize)| {
         let (a, b) = (c.bones[p].rest_length, c.bones[q].rest_length);
@@ -258,7 +259,7 @@ pub(super) fn leaf_limbs(c: &Creature) -> Limbs {
                 let top = c.bones[root].a as usize;
                 match parents[top] {
                     Some(above) if !is_neck(c, above) && children[top].len() == 1 => root = above,
-                    _ => return Some(branch(c, root)),
+                    _ => return Some(branch_in(c, &children, root)),
                 }
             }
         })

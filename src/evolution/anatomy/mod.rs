@@ -300,7 +300,12 @@ pub(super) fn is_neck(c: &Creature, bone: usize) -> bool {
 /// The branch that starts with `bone`: it and every bone below its child
 /// node, parents before children.
 pub(super) fn branch(c: &Creature, bone: usize) -> BoneIds {
-    let children = child_bones(c);
+    branch_in(c, &child_bones(c), bone)
+}
+
+/// `branch` with the child lists (`child_bones`) the caller already has, for
+/// callers that take many branches of one body.
+pub(super) fn branch_in(c: &Creature, children: &Children, bone: usize) -> BoneIds {
     let mut out = BoneIds::from_slice(&[bone]);
     let mut next = 0;
     while next < out.len() {

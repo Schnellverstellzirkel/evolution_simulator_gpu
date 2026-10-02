@@ -46,4 +46,8 @@ Filmstrips of the same save show one plan from rank 0 to rank 1000: a low triang
 
 ## Audit
 
-`examples/mutation_audit.rs` applies each operator once to each of the best elites of a save and scores parent and child over 20 s. It prints the share of the parent's distance the child keeps, how often the child beats its parent, and the change in nodes and muscles. Operators that add a limb keep a median 2 to 3% of the parent. Operators that change timing or leverage keep a median 97 to 100%. The audit ranks operators by how much of a gait they keep. It does not say which ones help the search.
+`examples/mutation_audit.rs <save> [elites] [seconds] [variants]` applies each operator to each of the best elites of a save (once per variant), within the nodes and muscles a child of that parent may add in breeding (`evolution::child_limits`), and scores parent and child in full 20 s trials in the save's world. It prints how often the operator fits the body, the share of the parent's distance the child keeps (median and 75th percentile), how many children keep 90% and how many beat their parent, the change in nodes and muscles, how many children would enter the global archive (faster than the elite that holds their cell) and the distance those entrants add per 1,000 children. `examples/operator_yield.rs` counts entrants the same way from a real generation (a generation dump).
+
+AUDIT_TABLE
+
+The audit ranks operators by how much of a gait they keep and how often a child beats the elite of its cell. It does not say which ones help the search, and the elites it starts from are the ones that are hardest to improve.

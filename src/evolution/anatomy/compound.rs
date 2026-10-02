@@ -22,7 +22,7 @@
 //!
 //! A child that one of these operators made gets no parameter noise after it
 //! (`evolution::offspring`), because the move is the whole change.
-use super::controller::{active_on, driven_limbs};
+use super::controller::active_on;
 use super::extra::{PASSIVE_STIFFNESS, drive};
 use super::junctions::{
     add, add_node, keep_strokes, pos, scale, shift_branch, spans, sub, turn_branch,
@@ -31,7 +31,7 @@ use super::limbs::{clamped, limb_roots, pick};
 use super::muscles::{actuation, ring, shared_node, turn};
 use super::rhythm::{leaf_limbs, matching_limbs, muscle_groups};
 use super::{
-    BoneIds, Children, Context, MuscleIds, Operator, branch, branch_nodes, child_bones,
+    BoneIds, Children, Context, MuscleIds, Operator, branch, branch_in, branch_nodes, child_bones,
     copy_branch_limited, degree, fit_stroke, is_neck, muscles_on, new_muscle, parent_bones,
     remove_parts, room, span,
 };
@@ -94,10 +94,15 @@ pub(super) fn close_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
 fn shed_tips(c: &mut Creature, first_new: usize, count: usize, rng: &mut Rng) -> usize {
     let (mut first_new, mut shed) = (first_new, 0);
     while shed < count && c.nodes.len() > 3 {
+        let mut degrees = [0u8; MAX_NODES];
+        for bone in &c.bones {
+            degrees[bone.a as usize] += 1;
+            degrees[bone.b as usize] += 1;
+        }
         let tips: BoneIds = (0..c.bones.len())
             .filter(|&b| {
                 let node = c.bones[b].b as usize;
-                !is_neck(c, b) && node < first_new && degree(c, node) == 1
+                !is_neck(c, b) && node < first_new && degrees[node] == 1
             })
             .collect();
         if tips.is_empty() {
@@ -605,6 +610,34 @@ pub(crate) fn reassign_bundle(
     true
 }
 
+/// For each bone, how many bones its branch has and which they are (a set of
+/// bone numbers as bits). Bones are in parent-first order, so one pass from
+/// the last bone to the first gathers every branch.
+fn branch_sizes(c: &Creature) -> ([u8; MAX_NODES], [u32; MAX_NODES]) {
+    let parents = parent_bones(c);
+    let mut sizes = [1u8; MAX_NODES];
+    let mut sets: [u32; MAX_NODES] = std::array::from_fn(|b| 1u32 << b);
+    for b in (0..c.bones.len()).rev() {
+        if let Some(above) = parents[c.bones[b].a as usize] {
+            sizes[above] += sizes[b];
+            sets[above] |= sets[b];
+        }
+    }
+    (sizes, sets)
+}
+
+/// Whether limb `root` (its branch, as the set of bones `branch`) has muscles
+/// among its bones and the bone above it: a program to give away.
+fn has_program(c: &Creature, root: usize, branch: u32) -> bool {
+    let Some(above) = parent_bones(c)[c.bones[root].a as usize] else {
+        return false;
+    };
+    let set = branch | 1 << above;
+    c.muscles
+        .iter()
+        .any(|m| set >> m.bone_a & 1 == 1 && set >> m.bone_b & 1 == 1)
+}
+
 /// The muscles limb `r` of `c` would lose to the program of limb `d` of
 /// `donor` (its muscles off the motor ring) and the copies that program makes
 /// on `c`: the donor's muscles on the bones at the same places, their strokes
@@ -687,14 +720,16 @@ pub(crate) fn transplant_limb_program(
         return false;
     };
     // Limbs by number of bones, the donor's only when they have a program.
+    let (mine_sizes, _) = branch_sizes(c);
+    let (their_sizes, their_sets) = branch_sizes(donor);
     let mine: Bounded<(u8, u8), MAX_NODES> = limb_roots(c)
         .into_iter()
-        .map(|r| (r as u8, branch(c, r).len() as u8))
+        .map(|r| (r as u8, mine_sizes[r]))
         .collect();
     let theirs: Bounded<(u8, u8), MAX_NODES> = limb_roots(donor)
         .into_iter()
-        .filter(|&d| !actuation(donor, d).1.is_empty())
-        .map(|d| (d as u8, branch(donor, d).len() as u8))
+        .filter(|&d| has_program(donor, d, their_sets[d]))
+        .map(|d| (d as u8, their_sizes[d]))
         .collect();
     let mut pairs: Bounded<(u8, u8), 1024> = Bounded::new();
     for &(r, size) in &mine {
@@ -744,6 +779,9 @@ pub(crate) fn transplant_gait(
     let mut shift = None;
     let mut limbs = 0;
     for (x, y) in mine.iter().zip(theirs.iter()) {
+        if x.len() != y.len() {
+            continue;
+        }
         let Some((out, program)) = program_of(c, donor, x[0], y[0]) else {
             continue;
         };
@@ -793,10 +831,21 @@ pub(crate) fn retune_limb_package(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let Some(root) = pick(&driven_limbs(c), rng) else {
-        return false;
+    // A driven limb at random: a limb at random, and another when it has no
+    // active muscle (the same as a pick among the driven limbs, without
+    // scanning them all).
+    let mut roots = limb_roots(c);
+    let group = loop {
+        if roots.is_empty() {
+            return false;
+        }
+        let k = rng.index(roots.len());
+        let group = active_on(c, roots[k]);
+        if !group.is_empty() {
+            break group;
+        }
+        roots.swap_remove(k);
     };
-    let group = active_on(c, root);
     let mut kinds = [0usize, 1, 2, 3, 4];
     for k in 0..kinds.len() {
         let other = k + rng.index(kinds.len() - k);
@@ -875,7 +924,7 @@ pub(crate) fn trim_body(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Con
     if shed + cut == 0 || !close_ring(&mut next, cfg, rng) {
         return false;
     }
-    *c = next;
+    c.clone_from(&next);
     true
 }
 
@@ -931,7 +980,7 @@ pub(crate) fn grow_integrated_limb(
     if shed < added || !close_ring(&mut next, cfg, rng) {
         return false;
     }
-    *c = next;
+    c.clone_from(&next);
     true
 }
 
@@ -1045,7 +1094,7 @@ pub(crate) fn mirrored_limb_pair(
     if shed + 1 < added || !close_ring(&mut next, cfg, rng) {
         return false;
     }
-    *c = next;
+    c.clone_from(&next);
     true
 }
 
@@ -1056,7 +1105,7 @@ fn leaf_limbs_at(c: &Creature, children: &Children, node: usize) -> BoneIds {
         .iter()
         .copied()
         .filter(|&l| {
-            branch(c, l)
+            branch_in(c, children, l)
                 .iter()
                 .all(|&x| children[c.bones[x].b as usize].len() <= 1)
         })
@@ -1197,7 +1246,7 @@ pub(crate) fn segment_chain(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: 
     if shed + 1 < added || !close_ring(&mut next, cfg, rng) {
         return false;
     }
-    *c = next;
+    c.clone_from(&next);
     true
 }
 
