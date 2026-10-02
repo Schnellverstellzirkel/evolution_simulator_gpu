@@ -372,20 +372,27 @@ fn archive_keeps_the_engine_score_without_rescoring() {
     // insertion must not replace its score. The confirmation trials score
     // higher, so the standard score stands.
     let mut expected = std::collections::HashMap::new();
-    e.step(&mut |pop, cfg| {
-        let mut metrics = by_slot(pop, cfg)?;
-        let confirm = cfg.fidelity.is_some();
-        for (g, m) in pop.genomes.iter().zip(&mut metrics) {
-            if confirm {
-                m.fitness += 1000.0;
-            } else {
-                m.fitness += 100.0;
-                expected.insert(g.id, m.fitness);
+    // A step absorbs one block of the ring; step until elites arrive, at most
+    // one ring.
+    for _ in 0..16 {
+        e.step(&mut |pop, cfg| {
+            let mut metrics = by_slot(pop, cfg)?;
+            let confirm = cfg.fidelity.is_some();
+            for (g, m) in pop.genomes.iter().zip(&mut metrics) {
+                if confirm {
+                    m.fitness += 1000.0;
+                } else {
+                    m.fitness += 100.0;
+                    expected.insert(g.id, m.fitness);
+                }
             }
+            Ok(metrics)
+        })
+        .unwrap();
+        if !e.archive.entries.is_empty() {
+            break;
         }
-        Ok(metrics)
-    })
-    .unwrap();
+    }
     assert!(!e.archive.entries.is_empty());
     for elite in &e.archive.entries {
         assert_eq!(elite.fitness, expected[&elite.creature.id]);
