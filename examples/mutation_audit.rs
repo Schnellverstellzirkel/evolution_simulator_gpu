@@ -5,7 +5,9 @@
 //! child of that parent may take (`evolution::child_limits`), but without
 //! the small parameter mutation that follows in breeding. Then it scores
 //! parents and children in full 20 s trials, in the checkpoint's world. A
-//! row for that parameter mutation alone is the baseline.
+//! row for that parameter mutation alone is the baseline, and every operator
+//! has a second row, `<operator> + parameter mutation`, with that mutation
+//! after it.
 //!
 //! The table prints, per operator: how often the operator fit the body, the
 //! share of the parent's distance the child keeps (median and 75th
@@ -26,24 +28,6 @@ use evolution_simulator::{
     scheduler, storage,
 };
 use std::collections::HashMap;
-
-/// The compound operators (`evolution::anatomy`), which breeding does not
-/// follow with a parameter mutation.
-const COMPOUND: [&str; 13] = [
-    "limb_length_gradient",
-    "symmetrize_limb_pair",
-    "retime_gait_by_position",
-    "brace_limb_chain",
-    "phase_cluster_move",
-    "grow_integrated_limb",
-    "mirrored_limb_pair",
-    "segment_chain",
-    "reassign_bundle",
-    "transplant_limb_program",
-    "retune_limb_package",
-    "transplant_gait",
-    "trim_body",
-];
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -155,21 +139,18 @@ fn main() -> anyhow::Result<()> {
         })
         .collect();
     rows.push(("parameter mutation 0.035 (baseline)".into(), local));
-    // Every operator alone, then each compound operator followed by the small
+    // Every operator alone, then every operator followed by the small
     // parameter mutation that the children of the other operators get in
     // breeding (a compound child gets none there).
     let names = evolution::structural_operator_names();
-    let passes: Vec<(usize, &str, bool)> = names
-        .iter()
-        .enumerate()
-        .map(|(k, name)| (k, *name, false))
-        .chain(
+    let passes: Vec<(usize, &str, bool)> = [false, true]
+        .into_iter()
+        .flat_map(|noise| {
             names
                 .iter()
                 .enumerate()
-                .filter(|(_, name)| COMPOUND.contains(name))
-                .map(|(k, name)| (k, *name, true)),
-        )
+                .map(move |(k, name)| (k, *name, noise))
+        })
         .collect();
     for (k, name, noise) in passes {
         let children: Vec<(usize, Creature)> = parents
