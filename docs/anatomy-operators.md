@@ -18,7 +18,7 @@ A limb may run on its own clock at a ratio of the base clock (1/2, 2/3, 1, 3/2 o
 
 ## Compound operators
 
-A compound operator changes several parts of a body together and keeps them consistent with each other, so a child is a larger step than one edit and still has a chance of keeping its parent's gait. A child of the structural emitter that a compound operator made gets no parameter mutation after it, because the noise would only blur a move that was built to be coherent (it also saves the noise's breeding time). The operators that add bones close the motor ring themselves, in canonical bone order, with passive springs, so `repair` adds no random active muscles (a later `repair` would add more for every pair the canonical order moves). The operators that add nodes also remove the idlest limb tips (never one of the new parts), because bodies that only grow take more GPU lanes per creature (past 8 or 16 nodes a body takes twice as many). In the hub island a donor elite came from any isolated island, so the transplant exchanges programs between islands.
+A compound operator changes several parts of a body together and keeps them consistent with each other, so a child is a larger step than one edit and still has a chance of keeping its parent's gait. A child of the structural emitter that a compound operator made gets no parameter mutation after it, because the noise halves how often such a child enters the archive (see the audit below) and it would blur a move that was built to be coherent. Skipping it also saves its breeding time. The operators that add bones close the motor ring themselves, in canonical bone order, with passive springs, so `repair` adds no random active muscles (a later `repair` would add more for every pair the canonical order moves). The operators that add nodes also remove the idlest limb tips (never one of the new parts), because bodies that only grow take more GPU lanes per creature (past 8 or 16 nodes a body takes twice as many). In the hub island a donor elite came from any isolated island, so the transplant exchanges programs between islands.
 
 - `limb_length_gradient`: the leaf limbs scale in a gradient from the front of the body to the back, the longest 1.08 to 1.7 times the shortest, with every muscle keeping its stroke relative to its span (Hornby and Pollack 2001, repeated parts with a gradient).
 - `symmetrize_limb_pair`: one limb becomes the mirror image of a limb of the same shape, with its lengths, mirrored joint ranges, node sizes and organs, and its muscles replaced by copies of the other limb's half a cycle later (Sims 1994, symmetric pairs with mirrored timing; Cheney et al. 2013, regular bodies). In three of ten moves the limb is copied without the reflection, in phase or half a cycle later.
@@ -48,6 +48,30 @@ Filmstrips of the same save show one plan from rank 0 to rank 1000: a low triang
 
 `examples/mutation_audit.rs <save> [elites] [seconds] [variants]` applies each operator to each of the best elites of a save (once per variant), within the nodes and muscles a child of that parent may add in breeding (`evolution::child_limits`), and scores parent and child in full 20 s trials in the save's world. It prints how often the operator fits the body, the share of the parent's distance the child keeps (median and 75th percentile), how many children keep 90% and how many beat their parent, the change in nodes and muscles, how many children would enter the global archive (faster than the elite that holds their cell) and the distance those entrants add per 1,000 children. `examples/operator_yield.rs` counts entrants the same way from a real generation (a generation dump).
 
-AUDIT_TABLE
+Two saves, the best 500 elites of each and 3 variants per operator, on the build that has the compound operators. Gen 590 is the owner's save from generation 590 (elites of 14.5 nodes and 55 muscles, median 46.6 m) and gen 1510 is the one from generation 1510 (9.5 nodes and 39 muscles, median 34.1 m, under six world effects). "keeps" is the median share of the parent's distance, "beats parent" the share of children faster than their parent and "enters archive" the share faster than the elite of their cell in the global archive. Each cell shows gen 590 first and gen 1510 second where two numbers share one cell.
 
-The audit ranks operators by how much of a gait they keep and how often a child beats the elite of its cell. It does not say which ones help the search, and the elites it starts from are the ones that are hardest to improve.
+| operator | fits | nodes | muscles | keeps, gen 590 | beats parent | enters archive | keeps, gen 1510 | beats parent | enters archive |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| parameter mutation alone (baseline) | 100% / 100% | +0.00 / +0.00 | +0.03 / +0.05 | 0.42 | 6% | 5.80% | 0.95 | 16% | 15.60% |
+| `graft_donor_limb` | 91% / 95% | +0.19 / +0.53 | -5.34 / -4.71 | 0.18 | 5% | 5.20% | 0.56 | 8% | 7.79% |
+| `copy_limb` | 89% / 81% | +1.22 / +1.34 | +3.19 / +3.17 | 0.66 | 9% | 8.73% | 0.87 | 4% | 4.01% |
+| `repeat_body_segment` | 7% / 9% | +2.00 / +2.00 | +3.49 / +3.13 | 0.09 | 1% | 0.95% | 0.96 | 4% | 3.91% |
+| `limb_phase_pattern` | 98% / 100% | +0.00 / +0.00 | +0.02 / +0.03 | 1.00 | 29% | 28.85% | 1.00 | 32% | 32.00% |
+| `prune_idle_limb` | 100% / 100% | -1.00 / -1.00 | -4.26 / -3.59 | 0.93 | 21% | 21.53% | 0.99 | 35% | 35.13% |
+| `limb_length_gradient` | 98% / 100% | +0.00 / +0.00 | +0.02 / +0.03 | 0.12 | 3% | 2.78% | 0.70 | 6% | 5.73% |
+| `symmetrize_limb_pair` | 76% / 73% | +0.00 / +0.00 | +0.28 / +0.44 | 0.86 | 13% | 12.93% | 0.92 | 17% | 16.48% |
+| `retime_gait_by_position` | 98% / 100% | +0.00 / +0.00 | +0.02 / +0.03 | 0.05 | 3% | 3.05% | 0.03 | 2% | 1.73% |
+| `brace_limb_chain` | 92% / 97% | +0.00 / +0.00 | +0.02 / +0.04 | 0.01 | 4% | 3.90% | 0.01 | 10% | 9.79% |
+| `phase_cluster_move` | 96% / 77% | +0.00 / +0.00 | +0.02 / +0.03 | 0.21 | 11% | 11.04% | 0.38 | 8% | 7.94% |
+| `reassign_bundle` | 80% / 97% | +0.00 / +0.00 | +0.03 / +0.04 | 0.23 | 6% | 5.86% | 0.83 | 10% | 10.12% |
+| `retune_limb_package` | 100% / 100% | +0.00 / +0.00 | +0.02 / +0.03 | 0.99 | 27% | 27.53% | 0.99 | 26% | 25.33% |
+| `grow_integrated_limb` | 99% / 100% | +0.00 / +0.00 | -2.84 / -2.60 | 0.09 | 4% | 3.79% | 0.29 | 12% | 11.88% |
+| `mirrored_limb_pair` | 97% / 99% | +0.03 / +0.01 | -7.30 / -5.89 | 0.01 | 1% | 1.37% | 0.03 | 7% | 6.95% |
+| `segment_chain` | 68% / 92% | +0.05 / +0.01 | -11.43 / -9.08 | 0.05 | 2% | 1.67% | 0.02 | 8% | 8.42% |
+| `transplant_limb_program` | 94% / 86% | +0.00 / +0.00 | +1.02 / +0.54 | 0.98 | 20% | 20.03% | 0.98 | 21% | 20.92% |
+| `transplant_gait` | 22% / 39% | +0.00 / +0.00 | -0.27 / -0.41 | 0.38 | 4% | 4.46% | 0.84 | 9% | 8.66% |
+| `trim_body` | 90% / 83% | -1.66 / -1.45 | -8.32 / -7.11 | 0.48 | 14% | 13.78% | 0.97 | 34% | 33.98% |
+
+The compound rows read as bigger moves than the rest. The four that rebuild a gait (`retime_gait_by_position`, `brace_limb_chain`, `mirrored_limb_pair`, `segment_chain`) keep a median of 1 to 5% of the parent's distance and their few good children carry the yield, while `retune_limb_package` and `transplant_limb_program` keep nearly all of it. A parameter mutation after a compound operator lowers how often its child enters the archive, so a compound child gets none. Averaged over the 13 operators the share that enters falls from 12.9% to 6.7% on the gen 1510 save and from 8.6% to 1.4% on the gen 590 save (`mutation_audit` prints a row `<operator> + parameter mutation` for each).
+
+The audit starts from the best elites, which are the densest and the hardest to improve, so it is not what breeding sees: `trim_body` has 34% of its children entering the gen 1510 archive here and 0.3% in a real generation of that save, where its parents come from every rank (`examples/operator_yield.rs` counts the real generation). The audit ranks operators by how much of a gait they keep and how often a child beats the elite of its cell. It does not say which ones help the search.

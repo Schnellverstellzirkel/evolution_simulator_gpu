@@ -1324,7 +1324,8 @@ fn offspring(
             trace.structural = true;
             trace.operator = structural_mutation_from(child, cfg, rng, archive);
             // A compound operator's change is whole: noise on every gene
-            // after it would only blur it.
+            // after it halves how often its child enters the archive
+            // (`examples/mutation_audit.rs`).
             let compound = trace.operator.is_some_and(|op| {
                 (op as usize)
                     .checked_sub(CLASSIC_COUNT)

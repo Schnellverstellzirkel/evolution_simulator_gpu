@@ -27,6 +27,24 @@ use evolution_simulator::{
 };
 use std::collections::HashMap;
 
+/// The compound operators (`evolution::anatomy`), which breeding does not
+/// follow with a parameter mutation.
+const COMPOUND: [&str; 13] = [
+    "limb_length_gradient",
+    "symmetrize_limb_pair",
+    "retime_gait_by_position",
+    "brace_limb_chain",
+    "phase_cluster_move",
+    "grow_integrated_limb",
+    "mirrored_limb_pair",
+    "segment_chain",
+    "reassign_bundle",
+    "transplant_limb_program",
+    "retune_limb_package",
+    "transplant_gait",
+    "trim_body",
+];
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let path = args
@@ -152,10 +170,23 @@ fn main() -> anyhow::Result<()> {
         })
         .collect();
     rows.push(("parameter mutation 0.035 (baseline)".into(), local));
-    for (k, name) in evolution::structural_operator_names()
-        .into_iter()
+    // Every operator alone, then each compound operator followed by the small
+    // parameter mutation that the children of the other operators get in
+    // breeding (a compound child gets none there).
+    let names = evolution::structural_operator_names();
+    let passes: Vec<(usize, &str, bool)> = names
+        .iter()
         .enumerate()
-    {
+        .map(|(k, name)| (k, *name, false))
+        .chain(
+            names
+                .iter()
+                .enumerate()
+                .filter(|(_, name)| COMPOUND.contains(name))
+                .map(|(k, name)| (k, *name, true)),
+        )
+        .collect();
+    for (k, name, noise) in passes {
         let children: Vec<(usize, Creature)> = parents
             .iter()
             .enumerate()
@@ -168,18 +199,31 @@ fn main() -> anyhow::Result<()> {
                     let donor = donor_of(i, v);
                     // The limits breeding gives a child of this parent.
                     let limited = evolution::child_limits(cfg, p, evolution::GROWTH_STEP);
+                    let limits = limited.as_ref().unwrap_or(cfg);
                     let changed = evolution::apply_structural_operator(
                         name,
                         &mut child,
-                        limited.as_ref().unwrap_or(cfg),
+                        limits,
                         &mut rng,
                         Some(donor),
                     )?;
-                    changed.then_some((i, child))
+                    if !changed {
+                        return None;
+                    }
+                    if noise {
+                        let mut rng = Rng::new(0xa0d18, k as u32 + 1 + v as u32 * 1000, i);
+                        child = evolution::mutate_locally(child, limits, &mut rng, 0.035);
+                    }
+                    Some((i, child))
                 })
             })
             .collect();
-        rows.push((name.to_string(), children));
+        let label = if noise {
+            format!("{name} + parameter mutation")
+        } else {
+            name.to_string()
+        };
+        rows.push((label, children));
     }
     for (name, children) in rows {
         let bodies: Vec<Creature> = children.iter().map(|(_, c)| c.clone()).collect();
