@@ -79,8 +79,9 @@ const GAP_S: f32 = 4.0;
 const LEVEL_HEIGHT: f32 = 26.0;
 /// How long the UI's own messages hold the status line.
 const MESSAGE_SECONDS: f32 = 8.0;
-/// Generations between autosaves when the player turns autosave on.
-const AUTOSAVE_INTERVAL: u32 = 10;
+/// Generations between autosaves when the player turns autosave on, and in
+/// an unattended run.
+pub(crate) const AUTOSAVE_INTERVAL: u32 = 10;
 /// Exported GIFs render the same scene as the viewport into this frame size.
 const GIF_WIDTH: u32 = 400;
 const GIF_HEIGHT: u32 = 224;
@@ -1456,10 +1457,6 @@ struct App {
     /// `runs/progress-gen<g>.png` every n generations; the generation of the
     /// capture in flight, and the last one taken.
     capture_every: Option<u32>,
-    /// An unattended run that opened a save (`EVOLUTION_AUTOSTART` with
-    /// `EVOLUTION_SMOKE_CHECKPOINT`): autosave goes on once the game is open,
-    /// as it does for an unattended new game.
-    autosave_on_load: bool,
     capture_generation: Option<u32>,
     captured_generation: u32,
 }
@@ -1629,8 +1626,6 @@ impl App {
                 .and_then(|v| v.parse::<u32>().ok())
                 .filter(|&v| v > 0),
             capture_generation: None,
-            autosave_on_load: autostart.is_some()
-                && std::env::var_os("EVOLUTION_SMOKE_CHECKPOINT").is_some(),
             captured_generation: 0,
         }
     }
@@ -4986,11 +4981,6 @@ impl eframe::App for App {
             {
                 self.config = next.config.clone();
                 self.initial = false;
-                if std::mem::take(&mut self.autosave_on_load) && self.config.checkpoint_interval == 0 {
-                    self.config.checkpoint_interval = AUTOSAVE_INTERVAL;
-                    self.worker.send(Command::Configure(self.config.clone()));
-                    self.config_sent = Some(Instant::now());
-                }
             } else if self.config_sent.is_none_or(|sent| {
                 // A click is acknowledged once the worker's world shows it.
                 // A snapshot published before the worker read the click must

@@ -1136,8 +1136,15 @@ fn run(
                 match load.handle.join() {
                     Ok(Ok(mut next)) => {
                         // A loaded game starts with autosave off, like a new
-                        // one, whatever interval the checkpoint carried.
-                        next.config.checkpoint_interval = 0;
+                        // one, whatever interval the checkpoint carried. An
+                        // unattended run (`EVOLUTION_AUTOSTART`) autosaves,
+                        // as an unattended new game does.
+                        next.config.checkpoint_interval =
+                            if std::env::var_os("EVOLUTION_AUTOSTART").is_some() {
+                                crate::ui::AUTOSAVE_INTERVAL
+                            } else {
+                                0
+                            };
                         let creature = next
                             .archive
                             .entries
