@@ -5589,10 +5589,10 @@ fn nursery_lines(island: &crate::worker::IslandSummary, generation: u32) -> [Str
     let every = crate::qd::NURSERY_GENERATIONS;
     let next = (generation / every + 1) * every;
     let first = if island.nursery == 0 {
-        format!("Nurseries empty. Graduates at gen {next}")
+        format!("Nurseries empty. Next: gen {next}")
     } else {
         format!(
-            "Nurseries {} bodies, best {:.1} m. Graduates at gen {next}",
+            "Nurseries {} bodies, best {:.1} m. Next: gen {next}",
             island.nursery, island.nursery_best
         )
     };
