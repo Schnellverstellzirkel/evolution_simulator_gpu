@@ -41,8 +41,12 @@ pub fn take_breed_late() -> (u64, u64) {
 /// 196,608, and the bar comes from the newest block alone.
 const SCREEN_WINDOW_DISTANCES: usize = 16_384;
 /// Confirmation trials a block asks for per archive at once while it waits
-/// for the ones it needs.
-const SPECULATIVE_CONFIRMS: usize = 8;
+/// for the ones it needs. Many record claims fail the fine trial, so asking
+/// a few at a time chained round trips while the ring waited: at 3M per
+/// generation, generations 11 to 15 ran 127k to 196k creatures/s with 8,
+/// 196k to 330k with 64 and 308k to 421k with 512. Without a limit an empty
+/// archive asks for nearly every creature (1.07M trials in generation 0).
+const SPECULATIVE_CONFIRMS: usize = 512;
 
 /// The shape of the ring: creatures per block and blocks in flight. It is
 /// chosen when an experiment starts, from the engine's rate and the host's
