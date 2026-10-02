@@ -356,13 +356,18 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             if !ring.active() {
                 ring.start(&mut experiment, sched);
             }
+            // One block per pass, as the game's worker absorbs them, so a
+            // generation ends at the same block in every run: the snapshot
+            // after it, and a `--change-at` world change, land on the same
+            // state. A step that absorbs every ready block also absorbs
+            // blocks of the next generation, as many as the GPU has done.
             while experiment.generation == generation {
                 sched.pump()?;
                 ring.step(
                     &mut experiment,
                     sched,
                     std::time::Duration::from_millis(4),
-                    usize::MAX,
+                    1,
                 )?;
             }
             if options.probe && std::env::var_os("PROBE_GPU").is_some() && generation >= 3 {
