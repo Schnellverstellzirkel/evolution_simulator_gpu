@@ -781,9 +781,13 @@ pub struct CudaEngine {
     /// Worlds (effect levels and flags) whose kernels have been queued for
     /// every class.
     worlds: HashSet<(Vec<u8>, u32)>,
-    /// Submission slots. The last one is kept for replays, with streams of
-    /// its own, so a replay never waits behind evaluation.
+    /// Submission slots: `standard` slots for standard trials, then one for
+    /// confirmation trials and last one for replays. The last two have
+    /// streams of the highest priority, so a confirmation or a replay never
+    /// waits behind queued standard work for the multiprocessors.
     slots: Vec<Slot>,
+    /// Slots of standard trials.
+    standard: usize,
     next_ticket: u64,
     pub max_capacity: usize,
     pub allocated_bytes: u64,
@@ -1370,12 +1374,12 @@ impl CudaEngine {
                 max_capacity,
                 allocated_bytes: 0,
                 last_gpu_seconds: 0.0,
+                standard: crate::engine::gpu_slots() as usize,
             };
             engine.name = format!("{device_name} (CUDA)");
-            // Evaluation slots plus one for replays.
-            let slots = crate::engine::gpu_slots() + 1;
-            for index in 0..slots {
-                let slot = engine.create_slot(index + 1 == slots)?;
+            // Standard slots, one for confirmation trials and one for replays.
+            for index in 0..engine.standard + 2 {
+                let slot = engine.create_slot(index >= engine.standard)?;
                 engine.slots.push(slot);
             }
             static EVICT: std::sync::Once = std::sync::Once::new();
@@ -1608,7 +1612,7 @@ impl CudaEngine {
                     (cu.stream_create)(
                         &mut stream,
                         CU_STREAM_NON_BLOCKING,
-                        stream_priority(slot == self.slots.len() - 1),
+                        stream_priority(slot >= self.standard),
                     ),
                     "cuStreamCreateWithPriority",
                 )?;
@@ -1742,11 +1746,17 @@ impl CudaEngine {
         before.saturating_sub(self.allocated_bytes)
     }
 
-    /// Number of evaluation submissions that can be queued without waiting.
+    /// Number of standard submissions that can be queued without waiting.
     pub fn free_slots(&self) -> usize {
-        self.evaluation_slots()
+        self.standard_slots()
             .filter(|&i| self.slots[i].pending.is_none())
             .count()
+    }
+
+    /// Whether a confirmation trial can be queued without waiting: its slot
+    /// is free, or a standard slot is.
+    pub fn confirm_free(&self) -> bool {
+        self.slots[self.confirm_slot()].pending.is_none() || self.free_slots() > 0
     }
 
     /// Submissions in flight, replays included.
@@ -1754,12 +1764,16 @@ impl CudaEngine {
         self.slots.iter().filter(|s| s.pending.is_some()).count()
     }
 
-    fn evaluation_slots(&self) -> std::ops::Range<usize> {
-        0..self.slots.len() - 1
+    fn standard_slots(&self) -> std::ops::Range<usize> {
+        0..self.standard
+    }
+
+    fn confirm_slot(&self) -> usize {
+        self.standard
     }
 
     fn replay_slot(&self) -> usize {
-        self.slots.len() - 1
+        self.standard + 1
     }
 
     /// Whether a replay can be recorded now.
@@ -1838,10 +1852,13 @@ impl CudaEngine {
             .collect::<Result<_>>()?;
         // The free slot with the most buffers to reuse: when memory is short,
         // a new allocation may fail where reuse does not.
+        let confirming = !record && crate::engine::is_confirmation(cfg);
         let slot = if record {
             self.replay_slot()
+        } else if confirming && self.slots[self.confirm_slot()].pending.is_none() {
+            self.confirm_slot()
         } else {
-            self.evaluation_slots()
+            self.standard_slots()
                 .filter(|&i| self.slots[i].pending.is_none())
                 .max_by_key(|&i| (Self::slot_bytes(&self.slots[i]), std::cmp::Reverse(i)))
                 .context("No free GPU submission slot")?

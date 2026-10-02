@@ -398,15 +398,24 @@ impl Scheduler {
             for index in 0..self.devices.len() {
                 loop {
                     let device = &self.devices[index];
-                    if device.failure.is_some() || device.engine.free_slots() == 0 {
+                    if device.failure.is_some() {
                         break;
                     }
                     let capacity = device.engine.max_nodes();
-                    // The first waiting work this engine can hold.
+                    // The first waiting work this engine can hold. A GPU has
+                    // a slot of its own for confirmation trials, so they go
+                    // whenever it is free, and standard work when a standard
+                    // slot is.
                     let fits = |w: &Work| w.max_nodes <= capacity;
-                    let work = if let Some(at) = self.confirms.iter().position(fits) {
+                    let confirm_open = device.engine.free_confirm_slots() > 0;
+                    let standard_open = device.engine.free_slots() > 0;
+                    let work = if confirm_open
+                        && let Some(at) = self.confirms.iter().position(fits)
+                    {
                         self.confirms.remove(at)
-                    } else if let Some(at) = self.work.iter().position(fits) {
+                    } else if standard_open
+                        && let Some(at) = self.work.iter().position(fits)
+                    {
                         self.work.remove(at)
                     } else {
                         None
