@@ -4,6 +4,8 @@ Open work only. Delete an item when it is merged into `main`. If it is a real de
 
 ## Physics
 
+- Hundreds of different bodies tie at one top distance in an evolved game (46.585 m in 20 s at generation 590 of the owner's game, 34.07 m at generation 1,512, each island its own value to 1e-5). The 400 fastest elites replay to distances within 2 mm of each other, and the five fastest of one island travel at the same constant speed after the first 2 s although their bodies, cells and muscle periods (0.2 to 0.47 s) differ, so the search has nothing to select on at the top. Find what limits them. Muscle strength and energy scale with the mass a muscle drives, so one power per mass would give one speed, but nothing has measured it.
+
 - CUDA occupancy is 4 warps at 16 nodes [claude/p2-cuda-speed].
 - A faster contact solve. Contacts are about 55% of a step, and the cheap changes are listed in `docs/rejected-ideas.md`. A different solver (fewer, larger operations per step) is what is left.
 - Realism physics: ground contact along bones. Bones that break under load are deferred until the contact solve is faster (the exact load costs an estimated 20 to 30% of kernel time; the CPU diagnostic is on claude/p2-bone-break).

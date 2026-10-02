@@ -511,14 +511,14 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
     );
 
     // Global archive.
-    let (cells, size_now) = snap.map_or((0, 0), |snap| (snap.archive_cells, snap.archive_size));
+    let (cells, size_now) = snap.map_or((0, 0), |snap| (snap.movement_cells, snap.archive_size));
     let hall = s.rect(262.0, 590.0, 350.0, 116.0);
     s.block(hall, CREAM, 10.0, 3.5);
     s.poly(&[(252.0, 594.0), (437.0, 562.0), (622.0, 594.0)], WOOD, 3.5);
     s.text(
         hall.shrink(9.0 * s.k),
         &format!(
-            "Global archive\n{cells} behavior niches filled, {size_now} elites.\nEvery evaluated creature is offered to it and the best one in each niche stays. It is the record: no parent comes from it. When the world changes, each island's elites are tested again on their own island, and the emitter stats and CMA state start over."
+            "Global archive\n{cells} ways of moving filled, {size_now} elites.\nEvery evaluated creature is offered to it and the best one in each way of moving and body shape and size stays. It is the record: no parent comes from it. When the world changes, each island's elites are tested again on their own island, and the emitter stats and CMA state start over."
         ),
         12.0,
         TEXT,

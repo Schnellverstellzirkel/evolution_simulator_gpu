@@ -38,7 +38,7 @@ A failed GPU is reopened and its unfinished units, including pending confirmatio
 
 ## Archives and breeding
 
-Each behavior archive has `6 x 8 x 1 x 6 x 5 = 1,440` niches: ground contact, gait cadence, vertical oscillation (one bin), logarithmic body height and lifted feet. A niche keeps its fastest eligible creature. New body plans are protected against a different topology for three generations.
+Each behavior archive has `6 x 8 x 6 x 5 x 2 x 2 = 5,760` cells: a way of moving (ground contact, gait cadence, logarithmic body height and lifted feet, 1,440 of them) for each of 4 body classes: 2 shapes by the start pose's width over height (compact under 1.5, long from 1.5) and 2 sizes by node count (small up to 10, large 11 and more). A cell keeps its fastest eligible creature, so bodies of other shapes and sizes never compete for it. New body plans are protected against a different topology for three generations. Local competition and novelty compare the cells of one size class. A nursery keeps one elite per way of moving, as the archives did before the body classes, and its survivors take their body classes when they enter their island.
 
 There are five island archives and a global archive. Ring slot `i` breeds for island `qd::island_of_slot(i, 5)`. Islands 1 to 4 are isolated: parents, mates, limb donors, reserve parents and CMA emitters all come from their own archive. Island 5 is the hub. Every 25 generations it receives copies of the fastest 10% of each isolated island's elites, and nothing flows back. The global archive collects every island's elites for display and saves, and no parent comes from it. Each island keeps a 64-entry morphology reserve of new body plans. It gets 10% of the island's structural-emitter trials and does not count toward coverage or QD score.
 
@@ -48,7 +48,7 @@ Genomes live in contiguous arenas with per-creature offsets, one set of arenas p
 
 ## Saves and catastrophes
 
-A save (magic header, then a compressed payload) holds the configuration, generation, history, archives, CMA and emitter state, lineage and the queued elites. It holds no ring. Loading starts the saved generation again with a ring bred from the archives. The header carries the physics version, so an older save is turned down before it loads. Autosave is off. Manual saves go through a temporary file that is flushed and renamed.
+A save (magic header, then a compressed payload) holds the configuration, generation, history, archives, CMA and emitter state, lineage and the queued elites. It holds no ring. Loading starts the saved generation again with a ring bred from the archives. The lineage keeps the record of every living elite without its creature (loading puts it back from the archive), and the ancestors of the global archive's elites and of each island's fastest ten. The header carries the physics version, so an older save is turned down before it loads, except a save of version 53, whose elites are placed in the cells again at load (`qd::OLDEST_LOADABLE`). Autosave is off. Manual saves go through a temporary file that is flushed and renamed.
 
 Meteor strike removes each elite with probability one half from every archive. Extinction clears the island with the slowest best elite. Both keep the removed entries as fossils in memory, and Undo returns them to empty cells or cells with a slower elite. Fossils are not saved.
 

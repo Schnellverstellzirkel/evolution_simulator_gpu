@@ -72,6 +72,16 @@ fn evaluate(population: &Population, _: &Config) -> Result<Vec<EvaluationMetrics
         .collect())
 }
 
+/// Processor time of this process (user and system): other work on a shared
+/// machine moves it less than the wall clock.
+fn cpu_seconds() -> f64 {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: getrusage fills the struct it is given.
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    let seconds = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 * 1e-6;
+    seconds(usage.ru_utime) + seconds(usage.ru_stime)
+}
+
 fn main() -> Result<()> {
     evolution_simulator::engine::lower_thread_priority();
     let _ = rayon::ThreadPoolBuilder::new()
@@ -97,10 +107,14 @@ fn main() -> Result<()> {
             .join(" "),
     );
     let mut total = [0.0f64; 2];
+    let mut cpu_total = 0.0;
     for _ in 0..generations {
         let generation = experiment.generation;
         let started = std::time::Instant::now();
+        let cpu_before = cpu_seconds();
         experiment.run_generation(&mut evaluate)?;
+        let cpu = cpu_seconds() - cpu_before;
+        cpu_total += cpu;
         let [archive, breeding] = std::mem::take(&mut experiment.stage_seconds);
         total[0] += archive;
         total[1] += breeding;
@@ -111,15 +125,16 @@ fn main() -> Result<()> {
             .filter(|e| e.improved_generation == generation)
             .count();
         println!(
-            "generation {generation}: archive {archive:.2} s, breeding {breeding:.2} s (whole generation {:.1} s with scoring), global archive {} cells, {changed} changed",
+            "generation {generation}: archive {archive:.2} s, breeding {breeding:.2} s (whole generation {:.1} s with scoring, {cpu:.1} CPU s), global archive {} cells, {changed} changed",
             started.elapsed().as_secs_f64(),
             experiment.archive.behavior_count(),
         );
     }
     println!(
-        "mean per generation: archive {:.2} s, breeding {:.2} s",
+        "mean per generation: archive {:.2} s, breeding {:.2} s, {:.1} CPU s",
         total[0] / generations as f64,
-        total[1] / generations as f64
+        total[1] / generations as f64,
+        cpu_total / generations as f64
     );
     println!(
         "global archive: {}",

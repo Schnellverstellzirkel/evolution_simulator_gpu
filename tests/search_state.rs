@@ -1,7 +1,7 @@
 use evolution_simulator::{
     config::Config,
     evolution::{self, Population},
-    qd::{Descriptor, Emitter, EvaluationMetrics, Niche, QdArchive, TrialMetrics},
+    qd::{Descriptor, Elite, Emitter, EvaluationMetrics, Niche, QdArchive, TrialMetrics},
     storage::{self, Experiment},
 };
 use serde::Serialize;
@@ -254,6 +254,11 @@ fn bodies_of_other_shapes_and_sizes_keep_cells_of_their_own() {
         (20, 1.8),
         (20, 4.0),
     ];
+    let classes: std::collections::BTreeSet<Niche> = bodies
+        .iter()
+        .map(|&(nodes, aspect)| way(nodes, aspect).niche())
+        .collect();
+    assert_eq!(classes.len(), evolution_simulator::qd::BODY_CLASSES);
     let mut archive = QdArchive::default();
     for (round, fitness) in [3.0, 1.0, 5.0].into_iter().enumerate() {
         for (k, &(nodes, aspect)) in bodies.iter().enumerate() {
@@ -269,8 +274,8 @@ fn bodies_of_other_shapes_and_sizes_keep_cells_of_their_own() {
             );
         }
     }
-    // Nine body classes share the way of moving, and each keeps its fastest.
-    assert_eq!(archive.behavior_count(), bodies.len());
+    // Every body class shares the way of moving, and each keeps its fastest.
+    assert_eq!(archive.behavior_count(), classes.len());
     assert_eq!(archive.movement_count(), 1);
     assert!(archive.entries.iter().all(|elite| elite.fitness == 5.0));
     // Bodies of one class compete for its cell, whatever their exact size.
@@ -278,6 +283,48 @@ fn bodies_of_other_shapes_and_sizes_keep_cells_of_their_own() {
     let rival = archive.offer(&population, 0, way(6, 0.5), 9.0, false, Emitter::Cma, 3, 0);
     assert!(rival.inserted && !rival.new_niche);
     assert_eq!(archive.entries.len(), before);
+}
+
+#[test]
+fn a_nursery_keeps_one_elite_per_way_of_moving_and_its_graduates_take_body_classes() {
+    let population = evolution::create(&config(38)).unwrap();
+    let way = |nodes: u16, aspect_ratio: f32| Descriptor {
+        ground_contact: 0.5,
+        gait_frequency: 1.0,
+        mean_height: 0.5,
+        feet: 2.0,
+        nodes,
+        aspect_ratio,
+        ..Descriptor::default()
+    };
+    let mut nursery = QdArchive::default();
+    nursery.set_flat(true);
+    for (k, &(nodes, aspect)) in [(5, 0.6), (10, 1.8), (20, 4.0)].iter().enumerate() {
+        nursery.offer(
+            &population,
+            k,
+            way(nodes, aspect),
+            1.0 + k as f32,
+            false,
+            Emitter::Restart,
+            0,
+            0,
+        );
+    }
+    // The three bodies share one way of moving, and the fastest keeps it.
+    assert_eq!(nursery.behavior_count(), 1);
+    assert_eq!(nursery.entries[0].fitness, 3.0);
+    // A graduate that is not the fastest takes the cell of its body class.
+    let mut island = QdArchive::default();
+    let slower = Elite {
+        fitness: 1.0,
+        descriptor: way(5, 0.6),
+        ..nursery.entries[0].clone()
+    };
+    assert!(island.absorb(&slower));
+    assert!(island.absorb(&nursery.entries[0]));
+    assert_eq!(island.behavior_count(), 2);
+    assert_eq!(island.movement_count(), 1);
 }
 
 #[test]
@@ -700,10 +747,21 @@ fn a_save_from_the_previous_cell_layout_loads_with_every_elite_in_its_new_cell()
     let restored = storage::load(&checkpoint.0).unwrap();
     assert_eq!(restored.qd_version, evolution_simulator::qd::VERSION);
     assert_eq!(restored.archive.entries.len(), elites);
-    for archive in std::iter::once(&restored.archive).chain(&restored.islands) {
+    let archives = std::iter::once(&restored.archive).chain(&restored.islands);
+    for (index, archive) in archives.enumerate() {
         for elite in &archive.entries {
             if !evolution_simulator::qd::is_morphology_niche(&elite.niche) {
-                assert_eq!(elite.niche, elite.descriptor.niche());
+                // The global archive is 0, the islands 1 to 5 and their
+                // nurseries 6 to 10: a nursery keeps no body classes.
+                let nursery = index > storage::island_count();
+                assert_eq!(
+                    elite.niche,
+                    if nursery {
+                        elite.descriptor.movement_niche()
+                    } else {
+                        elite.descriptor.niche()
+                    }
+                );
             }
         }
     }

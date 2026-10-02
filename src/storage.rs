@@ -1064,7 +1064,7 @@ impl Experiment {
                 let behavior_candidate = if valid && !nursery {
                     let niche = descriptor.niche();
                     match self.archive.slot_for(&niche) {
-                        Some(slot) => qd::beats(score, self.archive.entries[slot].fitness),
+                        Some(slot) => score > self.archive.entries[slot].fitness,
                         None => self.archive.behavior_count() < qd::ARCHIVE_LIMIT,
                     }
                 } else {
@@ -1571,6 +1571,11 @@ impl Experiment {
             return;
         }
         self.islands = vec![QdArchive::default(); arena_count()];
+        // A nursery keeps one elite per way of moving, as every archive did
+        // before the body classes.
+        for nursery in &mut self.islands[island_count()..] {
+            nursery.set_flat(true);
+        }
         self.island_progress.clear();
         self.graduations.clear();
         self.last_migration = None;
@@ -3226,6 +3231,9 @@ impl SmallLoad {
                 && e.cma_emitters.iter().all(|c| c.island < arena_count()),
             "Invalid island state"
         );
+        for nursery in e.islands.iter_mut().skip(island_count()) {
+            nursery.set_flat(true);
+        }
         if saved_version == qd::VERSION {
             e.archive.rebuild_indices();
             for island in &mut e.islands {

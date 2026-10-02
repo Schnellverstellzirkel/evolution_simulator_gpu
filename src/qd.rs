@@ -11,16 +11,19 @@ const BINS: [u8; 6] = [6, 8, ASPECT_BINS, 6, 5, NODE_BINS];
 /// novelty compare across neighboring cells. The node-count class is the
 /// last byte of a niche and only separates bodies: neighbors share it.
 const NEIGHBOR_AXES: usize = 5;
-/// Start-pose aspect classes: tall and narrow, about square, long and flat.
-const ASPECT_EDGES: [f32; 2] = [1.2, 2.5];
+/// Start-pose aspect classes: compact (less than 1.5 times as wide as tall)
+/// and long.
+const ASPECT_EDGES: [f32; 1] = [1.5];
 const ASPECT_BINS: u8 = ASPECT_EDGES.len() as u8 + 1;
-/// Node-count classes: up to 8 nodes, 9 to 12, 13 and more.
-const NODE_EDGES: [u16; 2] = [9, 13];
+/// Node-count classes: up to 10 nodes and 11 or more.
+const NODE_EDGES: [u16; 1] = [11];
 const NODE_BINS: u8 = NODE_EDGES.len() as u8 + 1;
-/// Names of the body shape classes (`ASPECT_EDGES`), tallest first, and of
-/// the body size classes (`NODE_EDGES`), smallest first.
-pub const SHAPE_NAMES: [&str; ASPECT_BINS as usize] = ["Tall", "Square", "Long"];
-pub const SIZE_NAMES: [&str; NODE_BINS as usize] = ["Small", "Medium", "Large"];
+/// Names of the body shape classes (`ASPECT_EDGES`), most compact first, and
+/// of the body size classes (`NODE_EDGES`), smallest first.
+pub const SHAPE_NAMES: [&str; ASPECT_BINS as usize] = ["Compact", "Long"];
+pub const SIZE_NAMES: [&str; NODE_BINS as usize] = ["Small", "Large"];
+/// Body classes: every shape with every size.
+pub const BODY_CLASSES: usize = (ASPECT_BINS as usize) * (NODE_BINS as usize);
 /// What a shape class covers, for hover texts.
 pub fn shape_about(class: usize) -> String {
     let low = class.checked_sub(1).map(|c| ASPECT_EDGES[c]);
@@ -109,13 +112,6 @@ pub const OLDEST_LOADABLE: u32 = 53;
 /// Whether a save of `version` loads in this game.
 pub fn loadable(version: u32) -> bool {
     (OLDEST_LOADABLE..=VERSION).contains(&version)
-}
-/// How far beyond an incumbent a child's distance must reach to replace it,
-/// as a share of the incumbent's distance (at least 1 m).
-const TIE_MARGIN: f32 = 0.0;
-/// Whether a child at `candidate` replaces the elite at `incumbent`.
-pub(crate) fn beats(candidate: f32, incumbent: f32) -> bool {
-    candidate > incumbent + TIE_MARGIN * incumbent.abs().max(1.0)
 }
 const LOCAL_NEIGHBORS: usize = 5;
 /// Elites the novelty emitter weighs: the ones visited least.
@@ -271,6 +267,11 @@ pub struct QdArchive {
     /// The slots of the morphology reserve, by their hashed niches.
     #[serde(skip)]
     reserve_lookup: HashMap<Niche, usize>,
+    /// The archive keeps one elite per way of moving, whatever the body
+    /// (a nursery's layout; its survivors take their body classes when they
+    /// enter an island).
+    #[serde(skip)]
+    flat: bool,
     pub qd_score: f64,
     /// The behavior elites visited least, as (visits, slot), fewest first.
     #[serde(skip)]
@@ -418,6 +419,15 @@ impl Descriptor {
         ])
     }
 
+    /// The cell of the way of moving alone, with the body classes left at
+    /// zero: the layout of a nursery and of saves before version 54.
+    pub fn movement_niche(self) -> Niche {
+        let mut niche = self.niche();
+        niche.0[2] = 0;
+        niche.0[NEIGHBOR_AXES] = 0;
+        niche
+    }
+
     fn behavior(self) -> [f32; NEIGHBOR_AXES] {
         [
             self.ground_contact.clamp(0.0, 1.0),
@@ -540,6 +550,19 @@ fn cell_index(niche: &Niche) -> Option<usize> {
 }
 
 impl QdArchive {
+    /// Makes the archive keep one elite per way of moving, or one per way
+    /// of moving and body class. Set while it is empty or before `rebin`.
+    pub fn set_flat(&mut self, flat: bool) {
+        self.flat = flat;
+    }
+    /// The cell of `descriptor` in this archive.
+    fn niche_of(&self, descriptor: Descriptor) -> Niche {
+        if self.flat {
+            descriptor.movement_niche()
+        } else {
+            descriptor.niche()
+        }
+    }
     /// The slot of the elite in behavior cell `index`.
     fn cell_slot(&self, index: usize) -> Option<usize> {
         self.cells
@@ -612,7 +635,7 @@ impl QdArchive {
         let mut at: HashMap<Niche, usize> = HashMap::new();
         for mut elite in std::mem::take(&mut self.entries) {
             if !is_morphology_niche(&elite.niche) {
-                elite.niche = elite.descriptor.niche();
+                elite.niche = self.niche_of(elite.descriptor);
                 if let Some(&slot) = at.get(&elite.niche) {
                     if elite.fitness > kept[slot].fitness {
                         kept[slot] = elite;
@@ -974,10 +997,10 @@ impl QdArchive {
         if !fitness.is_finite() || fitness <= crate::evolution::FAILED {
             return Offer::default();
         }
-        let niche = descriptor.niche();
+        let niche = self.niche_of(descriptor);
         if let Some(slot) = self.slot_for(&niche) {
             let current = &self.entries[slot];
-            if !beats(fitness, current.fitness) {
+            if fitness <= current.fitness {
                 return Offer::default();
             }
             let candidate_topology = topology_of_population(population, index);
@@ -1159,19 +1182,23 @@ impl QdArchive {
         }
     }
     /// Adds a copy of `elite` if its behavior niche is empty or it beats the
-    /// occupant. Used for island migration; returns whether it was kept.
+    /// occupant. Used for island migration and for a nursery's graduation;
+    /// the copy takes its cell in this archive's layout. Returns whether it
+    /// was kept.
     pub fn absorb(&mut self, elite: &Elite) -> bool {
         if is_morphology_niche(&elite.niche) {
             return false;
         }
-        if let Some(slot) = self.slot_for(&elite.niche) {
+        let niche = self.niche_of(elite.descriptor);
+        if let Some(slot) = self.slot_for(&niche) {
             let current = &self.entries[slot];
-            if !beats(elite.fitness, current.fitness) {
+            if elite.fitness <= current.fitness {
                 return false;
             }
             self.qd_score += elite.fitness.max(0.0) as f64 - current.fitness.max(0.0) as f64;
             let visits = current.visits;
             self.entries[slot] = Elite {
+                niche,
                 visits,
                 ..elite.clone()
             };
@@ -1183,11 +1210,12 @@ impl QdArchive {
             self.qd_score += elite.fitness.max(0.0) as f64;
             self.plan_keys.push(elite.topology.plan_key());
             self.entries.push(Elite {
+                niche: niche.clone(),
                 visits: 0,
                 ..elite.clone()
             });
             let slot = self.entries.len() - 1;
-            self.index_niche(&elite.niche, slot);
+            self.index_niche(&niche, slot);
             self.least_visited_dirty = true;
             self.behavior_indices.push(slot);
         }

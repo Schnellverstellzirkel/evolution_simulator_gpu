@@ -69,7 +69,7 @@ The physics:
 
 Search and game state:
 
-- `src/qd.rs`: archives, niches, behavior descriptors, the morphology reserve, `qd::VERSION`.
+- `src/qd.rs`: archives, cells (a way of moving times a body class), behavior descriptors, the morphology reserve, `qd::VERSION` and the oldest save version that still loads (`qd::OLDEST_LOADABLE`, its elites are placed in cells again at load).
 - `src/rungs.rs`: the audit lane and the early rungs (R1 at 1 s, R2 at 2.5 s), their fit at the generation boundary, the breaker per cadence band. The rule runs in the metrics block of `shaders/warp_creature.cu`.
 - `src/storage.rs`: the `Experiment` with its ring of blocks, islands, emitters, breeding, migration, record confirmations, and saves.
 - `src/ring.rs`: the blocks in flight, absorbed in ring order whatever order the GPU finishes them in.
@@ -83,7 +83,9 @@ Search and game state:
 
 All example tools score and replay creatures on the GPU engine (`examples/common/mod.rs`), take the GPU lock shared and need `EVOLUTION_DEVICES=primary`. If the primary GPU does not open they fail.
 
-- `examples/search_ab.rs`: fixed-seed search runs through the production ring on the GPU, with the early screen and the record confirmations.
+- `examples/search_ab.rs`: fixed-seed search runs through the production ring on the GPU, with the early screen and the record confirmations. It prints body plans, clades and body shape coverage of the archives, the archive and breeding seconds per generation, and `--load <save>` continues a save.
+- `examples/archive_diversity.rs <save>`: body plans, clades and body class coverage of every archive of a save.
+- `examples/archive_bench.rs <save> <population> <generations>`: the archive and breeding seconds per generation at full scale with no GPU, on stand-in scores. Run it under `perf record` to see where they go.
 - `EVOLUTION_STAGE_LOG=<path>`: one CSV row per generation (evaluation, archive and breeding seconds, end-to-end rate).
 - `examples/size_report.rs <save> [count]`: body length, mass and foot slip for the best elites, from GPU replays. It has no cost of transport column.
 - `examples/mutation_audit.rs`: how much of its parent's distance each operator's child keeps.
