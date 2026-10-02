@@ -577,7 +577,7 @@ pub(super) const PASSIVE_STIFFNESS: f32 = 5.0;
 /// Adds a passive muscle (random anchors, no stroke) on each pair of
 /// consecutively numbered bones that has no muscle, as `repair` would
 /// with an active one, while there is room.
-pub(super) fn passive_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
+fn passive_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
     let n = c.bones.len();
     for a in 0..n {
         let b = (a + 1) % n;

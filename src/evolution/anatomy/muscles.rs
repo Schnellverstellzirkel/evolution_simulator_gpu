@@ -466,7 +466,7 @@ fn torque(c: &Creature, m: &Muscle) -> f32 {
 }
 
 /// The same muscle with its ends swapped.
-pub(super) fn flipped(m: &Muscle) -> Muscle {
+fn flipped(m: &Muscle) -> Muscle {
     Muscle {
         bone_a: m.bone_b,
         bone_b: m.bone_a,

@@ -339,7 +339,7 @@ pub(super) fn scale(p: [f32; 2], s: f32) -> [f32; 2] {
 }
 
 /// The direction of `v`, or straight down when `v` is too short to have one.
-pub(super) fn unit(v: [f32; 2]) -> [f32; 2] {
+fn unit(v: [f32; 2]) -> [f32; 2] {
     let length = v[0].hypot(v[1]);
     if length > 1.0e-6 {
         scale(v, 1.0 / length)
@@ -360,7 +360,7 @@ pub(super) fn add_node(c: &mut Creature, like: usize, at: [f32; 2]) -> usize {
 
 /// Adds a bone from node `a` to node `b`, as long as they are apart in the
 /// pose, with a narrow joint range. Returns its index.
-pub(super) fn add_narrow_bone(c: &mut Creature, a: usize, b: usize, rng: &mut Rng) -> usize {
+fn add_narrow_bone(c: &mut Creature, a: usize, b: usize, rng: &mut Rng) -> usize {
     let [dx, dy] = sub(pos(c, b), pos(c, a));
     c.bones.push(Bone {
         min_angle: -rng.range(0.1, 0.4),

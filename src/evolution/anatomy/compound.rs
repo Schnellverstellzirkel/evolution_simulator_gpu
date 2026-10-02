@@ -835,20 +835,25 @@ pub(crate) fn retune_limb_package(
     changed
 }
 
-/// Trims a body in one move: the one to three idlest limb tips go (as
-/// `prune_idle_limb` picks them) and up to three of the weakest muscles off
-/// the motor ring with them. The best elites of a save gain more from losing
+/// Trims a body in one move: the idlest limb tips go (as `prune_idle_limb`
+/// picks them, one to four by the size of the body) and up to three of the
+/// weakest muscles off the motor ring with them. It applies to bodies with
+/// three or more muscles to a node. The best elites of a save gain more from losing
 /// idle parts than from any other single change (36% of the children of
 /// `prune_idle_limb` beat their parent), and an elite that carries several
 /// takes several of these steps one after the other, each a separate child.
 pub(crate) fn trim_body(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
-    if c.nodes.len() <= 4 {
+    // Only a body with muscles to spare: three or more to a node. Young
+    // bodies have under two, and every muscle of theirs pulls.
+    if c.nodes.len() <= 4 || c.muscles.len() < 3 * c.nodes.len() {
         return false;
     }
     let mut next = c.clone();
-    let shed = shed_tips(&mut next, c.nodes.len(), 1 + rng.index(3), rng);
+    // The share a body can lose grows with its size.
+    let tips = 1 + rng.index(1 + (c.nodes.len() / 8).min(3));
+    let shed = shed_tips(&mut next, c.nodes.len(), tips, rng);
     let mut cut = 0;
-    for _ in 0..rng.index(4) {
+    for _ in 0..rng.index(1 + (c.muscles.len() / 12).min(3)) {
         let weakest = (0..next.muscles.len())
             .filter(|&i| !ring(&next, &next.muscles[i]))
             .min_by(|&x, &y| drive(&next.muscles[x]).total_cmp(&drive(&next.muscles[y])));
@@ -1244,6 +1249,23 @@ mod tests {
             .collect()
     }
 
+    /// The test bodies with extra muscles (copies of their own with a changed
+    /// phase) up to three to a node, as evolved bodies have.
+    fn dense() -> Vec<Creature> {
+        grown()
+            .into_iter()
+            .map(|mut c| {
+                let want = (3 * c.nodes.len() + 2).min(MAX_MUSCLES);
+                for k in 0..want.saturating_sub(c.muscles.len()) {
+                    let mut m = c.muscles[k % c.muscles.len()];
+                    m.phase = (m.phase + 0.1 * k as f32).rem_euclid(1.0);
+                    c.muscles.push(m);
+                }
+                c
+            })
+            .collect()
+    }
+
     fn ring_closed(c: &Creature) -> bool {
         let n = c.bones.len();
         (0..n).all(|a| {
@@ -1514,7 +1536,7 @@ mod tests {
 
     #[test]
     fn trim_body_removes_tips_or_muscles_and_keeps_the_body_valid() {
-        let applied = run(trim_body, &grown(), |before, after| {
+        let applied = run(trim_body, &dense(), |before, after| {
             assert!(after.nodes.len() <= before.nodes.len());
             assert!(
                 after.nodes.len() < before.nodes.len()
