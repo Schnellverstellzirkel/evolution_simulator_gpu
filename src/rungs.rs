@@ -89,16 +89,12 @@ pub const BUDGET: f64 = 1e-3;
 pub const ENTRANT_BUDGET: f64 = 1e-2;
 /// A rung is armed only while it is trusted: over the last `JUDGED`
 /// generations, the rule fitted before each generation (the rule that would
-/// have been in force) stopped at most `TRUST_STOPPED` of the audit creatures
-/// that reach the 5 s bar, among at least `TRUST_PASSERS` of them. A rule
+/// have been in force) stopped at most `TRUST_STOPPED` of the entrants the 5 s
+/// screen would have kept, among at least `TRUST_ENTRANTS` of them. A rule
 /// fitted in the first generations, when most creatures that pass the bar
-/// barely use their muscles, stops the walkers that pass it later. The
-/// creatures above the bar are counted, not the entrants of the archives: a
-/// plateau lets few of them in, and the entrants it does let in are mostly
-/// creatures that fall early and improve a niche of weak bodies, which the
-/// rule stops by design.
+/// barely use their muscles, stops the walkers that the archives grow from.
 const JUDGED: usize = 4;
-const TRUST_PASSERS: u32 = 1000;
+const TRUST_ENTRANTS: u32 = 60;
 const TRUST_STOPPED: f64 = 0.03;
 /// Rows a rung needs before it is armed: of the creatures that reach the 5 s
 /// bar, enough for a 1 in 1,000 quantile to rest on at least 5 rows, and of
@@ -369,7 +365,7 @@ impl Report {
 pub struct Audit {
     window: VecDeque<GenAudit>,
     breakers: [[Breaker; BANDS]; RUNGS],
-    /// Per rung and generation: the audit creatures that reach the 5 s bar
+    /// Per rung and generation: the entrants the 5 s screen would have kept
     /// (alive at the rung, not exempt) and how many the rule fitted before
     /// that generation would have stopped.
     judged: [VecDeque<(u32, u32)>; RUNGS],
@@ -440,8 +436,8 @@ impl Audit {
     }
 
     /// Judges the rule the window fits before these rows (the rule that
-    /// would have been in force while they were measured), on the creatures
-    /// that reach the 5 s bar.
+    /// would have been in force while they were measured), on the entrants
+    /// the 5 s screen would have kept.
     fn trial(&mut self, rows: &[AuditRow]) {
         for r in 0..RUNGS {
             let Some(rung) = self.fit_rung(r) else {
@@ -449,10 +445,9 @@ impl Audit {
                 continue;
             };
             let (mut n, mut stopped) = (0u32, 0u32);
-            for row in rows
-                .iter()
-                .filter(|row| !row.skips(r) && row.bar_known && row.pass3 && row.alive(r))
-            {
+            for row in rows.iter().filter(|row| {
+                !row.skips(r) && row.bar_known && row.entrant && !row.below_bar && row.alive(r)
+            }) {
                 let Some(f) = row.features(r) else { continue };
                 n += 1;
                 stopped += u32::from(rung.raw_stops(&f));
@@ -468,7 +463,7 @@ impl Audit {
         let (n, stopped) = self.judged[r]
             .iter()
             .fold((0u32, 0u32), |t, &(n, s)| (t.0 + n, t.1 + s));
-        n >= TRUST_PASSERS && f64::from(stopped) <= TRUST_STOPPED * f64::from(n)
+        n >= TRUST_ENTRANTS && f64::from(stopped) <= TRUST_STOPPED * f64::from(n)
     }
 
     /// The rules in force on the audit rows of their own generation: the

@@ -176,52 +176,23 @@ fn children_of_a_parent_the_rules_would_stop_skip_that_rung() {
     );
 }
 
-/// A generation of 40,000 audit rows, one in eight reaching the 5 s bar.
-fn generation(audit: &mut Audit, g: u32, tweak: impl Fn(u32, &mut AuditRow)) {
-    for i in 0..40_000u32 {
-        let jitter = ((i + g).wrapping_mul(2654435761) >> 16) as f32 / 65536.0;
-        let mut row = row(i % 8 == 0, false, jitter);
-        tweak(i, &mut row);
-        audit.record(row);
-    }
-    audit.boundary(None);
-}
-
 #[test]
-fn a_rung_that_stops_the_creatures_above_the_bar_is_not_armed() {
+fn a_rung_that_stops_the_entrants_the_screen_keeps_is_not_armed() {
+    // Some creatures that fall before 5 s with poor features enter archives:
+    // the screen keeps them, and the fitted rule stops them.
     let mut audit = Audit::default();
-    for g in 0..4u32 {
-        generation(&mut audit, g, |_, _| {});
-    }
-    assert!(audit.trusted(0) && audit.trusted(1));
-    assert!(audit.fit().is_some_and(|rules| rules.0[1].armed()));
-    // A fifth of the creatures that pass the bar are slow at the rungs: the
-    // rule fitted before the generation stops them.
-    generation(&mut audit, 4, |i, row| {
-        if i % 8 == 0 && i % 40 == 0 {
-            let slow = self::row(false, false, 0.1);
-            row.trace = slow.trace;
-        }
-    });
-    assert!(!audit.trusted(0) && !audit.trusted(1));
-    assert!(audit.fit().is_none_or(|rules| !rules.0[0].armed() && !rules.0[1].armed()));
-}
-
-#[test]
-fn a_rung_arms_on_a_plateau_where_no_creature_enters_an_archive() {
-    // The creatures that fall early and improve a niche of weak bodies are
-    // the entrants the rules stop; the guard counts the creatures above the
-    // bar, so neither their number nor their fate decides.
-    let mut audit = Audit::default();
-    for g in 0..4u32 {
-        generation(&mut audit, g, |i, row| {
-            row.entrant = false;
+    for g in 0..6u32 {
+        for i in 0..40_000u32 {
+            let jitter = ((i + g).wrapping_mul(2654435761) >> 16) as f32 / 65536.0;
+            let mut row = row(i % 8 == 0, false, jitter);
             if i % 8 == 1 && i % 16 == 1 {
                 row.below_bar = false;
                 row.entrant = true;
             }
-        });
+            audit.record(row);
+        }
+        audit.boundary(None);
     }
-    assert!(audit.trusted(0) && audit.trusted(1));
-    assert!(audit.fit().is_some_and(|rules| rules.0[0].armed() && rules.0[1].armed()));
+    assert!(!audit.trusted(1));
+    assert!(audit.fit().is_none_or(|rules| !rules.0[1].armed()));
 }
