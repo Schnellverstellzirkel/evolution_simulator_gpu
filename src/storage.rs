@@ -47,6 +47,50 @@ const SCREEN_WINDOW_DISTANCES: usize = 16_384;
 /// 196k to 330k with 64 and 308k to 421k with 512. Without a limit an empty
 /// archive asks for nearly every creature (1.07M trials in generation 0).
 const SPECULATIVE_CONFIRMS: usize = 512;
+/// Most confirmation trials one archive asks for in one round.
+const MAX_CONFIRMS_PER_ROUND: usize = 16_384;
+
+/// How many confirmation results the verdicts of the last blocks used, per
+/// archive (decaying). A block that stands on a plateau, where every
+/// candidate that ties the record fails its fine trial, needs all of them,
+/// so the next block asks for about that many in its first round instead of
+/// `SPECULATIVE_CONFIRMS` and then again, round after round, at the front of
+/// the ring, where every round waits for the GPU. It changes what is asked
+/// for and when, never what a verdict decides: a verdict reads only the
+/// results of the candidates its own loop reaches. Not saved.
+#[derive(Default)]
+struct ConfirmHint(std::sync::Mutex<Vec<usize>>);
+
+impl Clone for ConfirmHint {
+    fn clone(&self) -> Self {
+        Self(std::sync::Mutex::new(
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        ))
+    }
+}
+
+impl ConfirmHint {
+    /// Trials `arena` asks for in a round before any result is in.
+    fn limit(&self, arena: usize) -> usize {
+        let used = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(arena)
+            .copied()
+            .unwrap_or(0);
+        (SPECULATIVE_CONFIRMS + 2 * used).min(MAX_CONFIRMS_PER_ROUND)
+    }
+    /// A block was decided: `used[arena]` results were read.
+    fn learn(&self, used: &[usize]) {
+        let mut hint = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let len = used.len().max(hint.len());
+        hint.resize(len, 0);
+        for (kept, &now) in hint.iter_mut().zip(used) {
+            *kept = now.max(*kept - *kept / 4);
+        }
+    }
+}
 
 /// The shape of the ring: creatures per block and blocks in flight. It is
 /// chosen when an experiment starts, from the engine's rate and the host's
@@ -339,6 +383,8 @@ pub struct Experiment {
     dump: Option<Arc<std::sync::Mutex<dump::Dump>>>,
     /// What the last finished dump wrote, for the worker's event log.
     pub dump_notice: Option<String>,
+    /// How many confirmation trials each archive's verdicts used lately.
+    confirm_hint: ConfirmHint,
 }
 
 /// Elites waiting to be evaluated again after a world change, one queue per
@@ -569,6 +615,7 @@ impl Experiment {
             stage_seconds: [0.0; 2],
             dump: None,
             dump_notice: None,
+            confirm_hint: ConfirmHint::default(),
         }
     }
     /// Creatures in the ring.
@@ -642,6 +689,7 @@ impl Experiment {
                 candidates[arena].push(j);
             }
         }
+        let mut used = vec![0usize; arenas];
         for (arena, mut members) in candidates.into_iter().enumerate() {
             members.sort_by(|&a, &b| {
                 standard[b]
@@ -651,6 +699,11 @@ impl Experiment {
             });
             let mut record = bars[arena];
             let mut asked = 0;
+            // Results this loop read, and whether one of them raised the
+            // record.
+            let mut read = 0;
+            let mut raised = false;
+            let speculative = self.confirm_hint.limit(arena);
             for j in members {
                 if standard[j].fitness < record {
                     break;
@@ -658,11 +711,23 @@ impl Experiment {
                 let Some(check) = confirmed.get(&j) else {
                     need.push(j);
                     asked += 1;
-                    if asked == SPECULATIVE_CONFIRMS {
+                    // Results are in and none raised the record: the
+                    // candidates left tie or beat a record that nothing
+                    // reached, so they need their trial too. A round asks
+                    // for four times as many as have failed so far, which
+                    // takes a plateau of thousands in two or three rounds
+                    // and wastes at most four times the failed prefix.
+                    let limit = if read > 0 && !raised {
+                        speculative.max(4 * read)
+                    } else {
+                        speculative
+                    };
+                    if asked >= limit.min(MAX_CONFIRMS_PER_ROUND) {
                         break;
                     }
                     continue;
                 };
+                read += 1;
                 let m = &mut out[j];
                 // The replay must show the trial the score came from.
                 m.fine = check.fitness < m.fitness;
@@ -670,11 +735,14 @@ impl Experiment {
                 // A confirmation stopped by the screen is not robust.
                 m.excluded |= check.screened || !check.fitness.is_finite();
                 if Self::eligible(m) {
+                    raised |= m.fitness > record;
                     record = record.max(m.fitness);
                 }
             }
+            used[arena] = read;
         }
         if need.is_empty() {
+            self.confirm_hint.learn(&used);
             Verdict::Final(out)
         } else {
             need.sort_unstable();
@@ -3762,6 +3830,20 @@ mod ring_shape_tests {
         // Today's rate with a fast host: 5 blocks of 32k, just under 1 s.
         let today = RingShape::size(&times(167_000.0, 0.2, 0.3));
         assert_eq!((today.block, today.blocks), (32_768, 5));
+    }
+
+    #[test]
+    fn the_confirmation_hint_follows_the_results_the_verdicts_used() {
+        let hint = ConfirmHint::default();
+        assert_eq!(hint.limit(3), SPECULATIVE_CONFIRMS);
+        hint.learn(&[0, 0, 0, 800]);
+        assert_eq!(hint.limit(3), SPECULATIVE_CONFIRMS + 1600);
+        assert_eq!(hint.limit(0), SPECULATIVE_CONFIRMS);
+        // It fades by a quarter with every block that used fewer.
+        hint.learn(&[0, 0, 0, 0]);
+        assert_eq!(hint.limit(3), SPECULATIVE_CONFIRMS + 2 * 600);
+        hint.learn(&[0, 0, 0, 100_000]);
+        assert_eq!(hint.limit(3), MAX_CONFIRMS_PER_ROUND);
     }
 
     #[test]
