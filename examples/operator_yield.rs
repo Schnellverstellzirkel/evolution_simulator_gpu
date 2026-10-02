@@ -25,6 +25,30 @@ fn main() -> anyhow::Result<()> {
     let d = read(&path)?;
     let names = evolution_simulator::evolution::structural_operator_names();
     let children: Vec<&Row> = d.rows.iter().filter(|r| r.child()).collect();
+    // The fastest elite of each cell of each archive when the generation
+    // began, for the distance a child adds: how much faster it is than the
+    // elite whose cell it entered (its own distance when the cell was empty).
+    let mut occupant: std::collections::HashMap<(u8, u16), f32> = std::collections::HashMap::new();
+    for e in &d.elites {
+        if e.reserve() || e.cell == u16::MAX {
+            continue;
+        }
+        let slot = occupant.entry((e.arena, e.cell)).or_insert(f32::MIN);
+        *slot = slot.max(e.fitness);
+    }
+    let gain = |r: &Row| -> f64 {
+        if r.entered & (ISLAND | NURSERY) == 0 || r.cell == u16::MAX {
+            return 0.0;
+        }
+        let arena = r.arena(&d.header) as u8;
+        let held = occupant.get(&(arena, r.cell)).copied().unwrap_or(0.0);
+        let score = if r.score.is_finite() {
+            r.score
+        } else {
+            r.fitness
+        };
+        f64::from((score - held.max(0.0)).max(0.0))
+    };
     let structural: Vec<&&Row> = children
         .iter()
         .filter(|r| r.operator != u8::MAX && r.emitter != RESTART)
@@ -35,28 +59,29 @@ fn main() -> anyhow::Result<()> {
         children.len(),
         structural.len()
     );
-    // operator -> (children, any, island, global, children that grew a node)
-    let mut table: HashMap<u8, [usize; 4]> = HashMap::new();
+    // operator -> (children, any, island, global), and the distance added
+    let mut table: HashMap<u8, ([usize; 4], f64)> = HashMap::new();
     for r in &structural {
         let t = table.entry(r.operator).or_default();
-        t[0] += 1;
-        t[1] += usize::from(r.entered != 0);
-        t[2] += usize::from(r.entered & ISLAND != 0);
-        t[3] += usize::from(r.entered & GLOBAL != 0);
+        t.0[0] += 1;
+        t.0[1] += usize::from(r.entered != 0);
+        t.0[2] += usize::from(r.entered & ISLAND != 0);
+        t.0[3] += usize::from(r.entered & GLOBAL != 0);
+        t.1 += gain(r);
     }
-    let mut rows: Vec<(u8, [usize; 4])> = table.into_iter().collect();
+    let mut rows: Vec<(u8, ([usize; 4], f64))> = table.into_iter().collect();
     rows.sort_by(|a, b| {
-        let rate = |t: &[usize; 4]| t[1] as f64 / t[0].max(1) as f64;
+        let rate = |t: &([usize; 4], f64)| t.1 / t.0[0].max(1) as f64;
         rate(&b.1).total_cmp(&rate(&a.1))
     });
-    println!("| operator | children | entered any | island | global |");
-    println!("|---|---:|---:|---:|---:|");
-    for (o, t) in rows {
+    println!("| operator | children | entered any | island | global | distance added per 1k |");
+    println!("|---|---:|---:|---:|---:|---:|");
+    for (o, (t, added)) in rows {
         let name = names
             .get(o as usize)
             .map_or(format!("#{o}"), |n| n.to_string());
         println!(
-            "| {name} | {} | {} ({:.2}%) | {} ({:.2}%) | {} ({:.2}%) |",
+            "| {name} | {} | {} ({:.2}%) | {} ({:.2}%) | {} ({:.2}%) | {:.1} |",
             t[0],
             t[1],
             pct(t[1], t[0]),
@@ -64,6 +89,7 @@ fn main() -> anyhow::Result<()> {
             pct(t[2], t[0]),
             t[3],
             pct(t[3], t[0]),
+            1000.0 * added / t[0].max(1) as f64,
         );
     }
     // The compound operators of `src/evolution/anatomy/compound.rs`, as one
@@ -84,15 +110,17 @@ fn main() -> anyhow::Result<()> {
         "trim_body",
     ];
     let compound = |o: u8| names.get(o as usize).is_some_and(|n| COMPOUND.contains(n));
-    let all = |f: &dyn Fn(&Row) -> bool| -> [usize; 4] {
+    let all = |f: &dyn Fn(&Row) -> bool| -> ([usize; 4], f64) {
         let mut t = [0usize; 4];
+        let mut added = 0.0;
         for r in children.iter().filter(|r| f(r)) {
             t[0] += 1;
             t[1] += usize::from(r.entered != 0);
             t[2] += usize::from(r.entered & ISLAND != 0);
             t[3] += usize::from(r.entered & GLOBAL != 0);
+            added += gain(r);
         }
-        t
+        (t, added)
     };
     for (label, t) in [
         (
@@ -110,8 +138,9 @@ fn main() -> anyhow::Result<()> {
         ),
         ("random bodies", all(&|r| r.emitter == RESTART)),
     ] {
+        let (t, added) = t;
         println!(
-            "| {label} | {} | {} ({:.2}%) | {} ({:.2}%) | {} ({:.2}%) |",
+            "| {label} | {} | {} ({:.2}%) | {} ({:.2}%) | {} ({:.2}%) | {:.1} |",
             t[0],
             t[1],
             pct(t[1], t[0]),
@@ -119,6 +148,7 @@ fn main() -> anyhow::Result<()> {
             pct(t[2], t[0]),
             t[3],
             pct(t[3], t[0]),
+            1000.0 * added / t[0].max(1) as f64,
         );
     }
     Ok(())

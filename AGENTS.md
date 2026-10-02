@@ -83,12 +83,14 @@ Search and game state:
 
 All example tools score and replay creatures on the GPU engine (`examples/common/mod.rs`), take the GPU lock shared and need `EVOLUTION_DEVICES=primary`. If the primary GPU does not open they fail.
 
-- `examples/search_ab.rs`: fixed-seed search runs through the production ring on the GPU, with the early screen and the record confirmations. It prints body plans, clades and body shape coverage of the archives, the archive and breeding seconds per generation, `--load <save>` continues a save, and `--change-at <n>` changes the world before generation n as a button press does.
+- `examples/search_ab.rs`: fixed-seed search runs through the production ring on the GPU, with the early screen and the record confirmations. It prints body plans, clades and body shape coverage of the archives, the archive and breeding seconds per generation, `--load <save>` continues a save, and `--change-at <n>` changes the world before generation n as a button press does. It prints the ring's mean GPU lanes per creature.
 - `examples/archive_diversity.rs <save>`: body plans, clades and body class coverage of every archive of a save.
 - `examples/archive_bench.rs <save> <population> <generations>`: the archive and breeding seconds per generation at full scale with no GPU, on stand-in scores. Run it under `perf record` to see where they go.
 - `EVOLUTION_STAGE_LOG=<path>`: one CSV row per generation (evaluation, archive and breeding seconds, end-to-end rate).
 - `examples/size_report.rs <save> [count]`: body length, mass and foot slip for the best elites, from GPU replays. It has no cost of transport column.
-- `examples/mutation_audit.rs`: how much of its parent's distance each operator's child keeps.
+- `examples/mutation_audit.rs`: how much of its parent's distance each operator's child keeps, how often it beats the parent and how many children would enter the global archive, within the growth step of breeding.
+- `examples/operator_yield.rs <dump>`: per operator, how many children entered an archive in a generation dump (`EVOLUTION_DUMP_GENERATION`) and the distance they added.
+- `examples/body_regularity.rs <save>`: the share of the best elites with limbs in pairs, mirrored pairs and repeated segments.
 - `examples/physics_audit.rs`: per elite, what the GPU replay records: contact-free steps, largest ground push, lowest muscle energy store, steps with a broken joint. The kernel keeps no solver energy, momentum or friction ledgers.
 - `examples/first_generation.rs`: random-population distances on the GPU engine.
 - `examples/replay_match.rs <save>`: the best elites' archive distance beside their replay's.
