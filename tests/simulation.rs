@@ -102,6 +102,7 @@ fn zero_mutation_children(cfg: &Config, parent: &Creature) -> Vec<Creature> {
             parent: Some(0),
             cma: None,
             mate: None,
+            seed: false,
         })
         .collect();
     let slots: Vec<usize> = (0..8).collect();
@@ -168,6 +169,7 @@ fn breeding_into_a_reused_arena_gives_the_same_creatures() {
             parent: Some(k % 64),
             cma: None,
             mate: None,
+            seed: false,
         })
         .collect();
     let slots: Vec<usize> = positions.iter().map(|&k| 1000 + k).collect();

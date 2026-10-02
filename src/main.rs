@@ -274,7 +274,7 @@ fn main() -> Result<()> {
                         top.len()
                     );
                 }
-                cfg.screen = Some(evolution_simulator::physics::Screen { bar, ..screen });
+                cfg.screen = Some(evolution_simulator::physics::Screen { bar, young_bar: bar, reshaped_bar: bar, ..screen });
             }
             let batch = cfg.batch_size();
             let mut out = Vec::new();

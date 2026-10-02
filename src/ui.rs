@@ -5583,16 +5583,16 @@ const ORIGIN_COLORS: [Color32; 4] = [
     Color32::from_rgb(96, 154, 196),
     Color32::from_rgb(132, 140, 76),
 ];
-/// What an island card says about its nursery: its size and best distance,
-/// when it graduates next, and what the last graduation kept.
+/// What an island card says about its nurseries: their size and best
+/// distance, when they graduate next, and what the last graduation kept.
 fn nursery_lines(island: &crate::worker::IslandSummary, generation: u32) -> [String; 2] {
     let every = crate::qd::NURSERY_GENERATIONS;
     let next = (generation / every + 1) * every;
     let first = if island.nursery == 0 {
-        format!("Nursery empty. Graduates at gen {next}")
+        format!("Nurseries empty. Graduates at gen {next}")
     } else {
         format!(
-            "Nursery {} bodies, best {:.1} m. Graduates at gen {next}",
+            "Nurseries {} bodies, best {:.1} m. Graduates at gen {next}",
             island.nursery, island.nursery_best
         )
     };

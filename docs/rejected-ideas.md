@@ -27,7 +27,13 @@ Each idea was measured and lost. Do not redo one without a new reason. Numbers a
 - Screened creatures opening empty archive cells: tied at equal time and lost per evaluation.
 - Cheaper contender checks (2x or 3x rate, or ending at 20 or 30 s): every one kept more of the score. The 2x check let exploits through, and the top 50 kept 12% of their distance from an unseen pose against 44%.
 - Stopping a trial once it cannot beat its cell: impossible, because the cell needs behavior measured over the whole trial.
-- Not measured, no verdict: age-layered populations, deep grids, racing, dominated novelty search.
+- A nursery of reshaped bodies bred from fresh structural children of island elites (a cohort that starts over every 10 generations, 5% of the slots taken from the island): QD x0.95 at generation 1,612 after a world change (35,205 against 37,044, 300k a generation). Adding such children to half the slots of the nursery that turned-away bodies feed gave x0.95 against x1.006 without them. The island's own structural children already do that work, so the slots bought nothing.
+- Three extras for the reshaped nursery, tried together on top of it, one run each at 300k from generation 1,598: a reseed of its bodies after a world change, routing the elites that lost their cell during the re-test into it, and promotion every generation. They showed no gain: the plans held by all archives were 9,808 against 9,662 without them, and QD at generation 1,633 was 39,578 against 42,999 (the game as it is: 41,359 and 38,976 on two seeds).
+- A nursery of new random bodies that is never wiped (300k a generation): its best body went from 5.4 m to 13.4 m in 60 generations against 33 m in the island, and a world change clears every archive every 200 generations. It stays a 10-generation cohort.
+- The island takes the reshaped bodies every 20 generations instead of 10 (300k from the owner's save, one seed): 747 island cells held a graduate against 1,254, and the island plans were the same.
+- A refined layout for the nursery of new random bodies as well (one seed): island plans 14,876 against 14,822 with the refined reshaped nursery alone, graduate cells 2,188 against 2,172.
+- A nursery of new random bodies at 10% and the reshaped one at 10%, both refined, so the island keeps 80% (one seed): island plans 15,172 (+10.5%), but QD only 140,140 against main's 139,830, and the effective clades of the islands rose 2% where the 5% and 10% split rose 12% (one seed each).
+- Not measured, no verdict: a ladder of age layers beyond the two nurseries, deep grids, racing, dominated novelty search.
 
 ## Physics
 

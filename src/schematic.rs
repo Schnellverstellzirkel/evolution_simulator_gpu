@@ -331,7 +331,7 @@ fn workshop(s: &Scene, index: usize, snap: Option<&Snapshot>) {
         ),
         Emitter::Structural => (
             "Anatomy mutations",
-            "44 operators add, copy, fuse and move limbs and muscles. Sometimes crosses with a same-plan mate. Children are protected for 3 generations.",
+            "44 operators add, copy, fuse and move limbs and muscles. Sometimes crosses with a same-plan mate. Children are protected for 3 generations. A new body plan the island turns away goes to a second nursery, where it is tuned until it beats the island's elites.",
         ),
         Emitter::Novelty => (
             "Novelty",

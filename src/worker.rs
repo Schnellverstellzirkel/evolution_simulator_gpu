@@ -243,14 +243,15 @@ pub struct IslandSummary {
     /// leader is the first).
     pub top: Vec<(f32, Creature)>,
     /// How many of its behavior elites each emitter bred, in `Emitter::ALL`
-    /// order. Elites that grew up in the island's nursery count as new
-    /// random bodies, whatever emitter bred them last.
+    /// order. Elites that grew up in one of the island's nurseries count as
+    /// new bodies, whatever emitter bred them last.
     pub origins: [usize; qd::EMITTER_COUNT],
-    /// Bodies in the island's nursery now.
+    /// Bodies in the island's nurseries now (new random bodies and reshaped
+    /// bodies).
     pub nursery: usize,
-    /// The nursery's fastest distance (NaN while it is empty).
+    /// The nurseries' fastest distance (NaN while both are empty).
     pub nursery_best: f32,
-    /// What the nursery graduated this session.
+    /// What the nurseries graduated this session, the two together.
     pub graduation: crate::storage::Graduation,
 }
 /// How many top elites an island summary carries.
@@ -258,7 +259,7 @@ pub const ISLAND_TOP: usize = 3;
 impl IslandSummary {
     pub fn of(
         island: &qd::QdArchive,
-        nursery: &qd::QdArchive,
+        nurseries: [&qd::QdArchive; 2],
         graduation: crate::storage::Graduation,
     ) -> Self {
         let mut origins = [0; qd::EMITTER_COUNT];
@@ -288,12 +289,13 @@ impl IslandSummary {
             leader: top.first().map(|t| t.1.clone()),
             top,
             origins,
-            nursery: nursery.behavior_count(),
-            nursery_best: if nursery.entries.is_empty() {
-                f32::NAN
-            } else {
-                nursery.best_fitness()
-            },
+            nursery: nurseries.iter().map(|n| n.behavior_count()).sum(),
+            nursery_best: nurseries
+                .iter()
+                .filter(|n| !n.entries.is_empty())
+                .map(|n| n.best_fitness())
+                .reduce(f32::max)
+                .unwrap_or(f32::NAN),
             graduation,
         }
     }
@@ -1582,10 +1584,23 @@ fn run(
                     emitter_weights: qd::emitter_weights(&e.emitter_stats),
                     islands: (0..crate::storage::island_count())
                         .filter_map(|i| {
+                            let log = |logs: &[crate::storage::Graduation]| {
+                                logs.get(i).copied().unwrap_or_default()
+                            };
+                            let (random, reshaped) =
+                                (log(&e.graduations), log(&e.reshaped_graduations));
                             Some(IslandSummary::of(
                                 e.islands.get(i)?,
-                                e.islands.get(crate::storage::nursery_of(i))?,
-                                e.graduations.get(i).copied().unwrap_or_default(),
+                                [
+                                    e.islands.get(crate::storage::nursery_of(i))?,
+                                    e.islands.get(crate::storage::reshaped_of(i))?,
+                                ],
+                                crate::storage::Graduation {
+                                    generation: random.generation.max(reshaped.generation),
+                                    sent: random.sent + reshaped.sent,
+                                    kept: random.kept + reshaped.kept,
+                                    kept_total: random.kept_total + reshaped.kept_total,
+                                },
                             ))
                         })
                         .collect(),

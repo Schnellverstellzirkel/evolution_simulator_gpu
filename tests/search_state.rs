@@ -645,6 +645,62 @@ fn a_loaded_save_breeds_one_ring_and_repeats_its_search() {
 }
 
 #[test]
+fn each_island_gives_a_twentieth_of_its_slots_to_a_nursery_and_a_tenth_to_another() {
+    use evolution_simulator::qd;
+    let (islands, arenas) = (storage::island_count(), storage::arena_count());
+    let rounds = 10 * qd::SLOT_CYCLE;
+    let mut slots = vec![0usize; arenas];
+    for slot in 0..islands * rounds {
+        slots[qd::arena_of_slot(slot, arenas)] += 1;
+    }
+    for island in 0..islands {
+        assert_eq!(slots[island], rounds - 3 * rounds / qd::SLOT_CYCLE);
+        assert_eq!(slots[storage::nursery_of(island)], rounds / qd::SLOT_CYCLE);
+        assert_eq!(slots[storage::reshaped_of(island)], 2 * rounds / qd::SLOT_CYCLE);
+    }
+    assert!(qd::is_reshaped_arena(storage::reshaped_of(0), arenas));
+    assert!(!qd::is_reshaped_arena(storage::nursery_of(0), arenas));
+}
+
+#[test]
+fn a_save_holds_the_islands_and_loads_with_empty_reshaped_nurseries() {
+    let mut experiment = Experiment::new(config(38)).unwrap();
+    for _ in 0..3 {
+        run_synthetic(&mut experiment);
+    }
+    let older = storage::island_count() * 2;
+    assert!(
+        experiment.islands[older..]
+            .iter()
+            .any(|nursery| nursery.behavior_count() > 0),
+        "the reshaped nurseries hold bodies before the save"
+    );
+    let checkpoint = Checkpoint::new("reshaped-nurseries");
+    storage::save(&checkpoint.0, &experiment).unwrap();
+    let loaded = storage::load(&checkpoint.0).unwrap();
+    assert_eq!(loaded.islands.len(), storage::arena_count());
+    // Loading breeds the ring, which counts visits of the parents, so the
+    // elites are compared by cell, creature and score.
+    let held = |archive: &QdArchive| -> Vec<(evolution_simulator::qd::Niche, u64, u32)> {
+        let mut held: Vec<_> = archive
+            .entries
+            .iter()
+            .map(|e| (e.niche.clone(), e.creature.id, e.fitness.to_bits()))
+            .collect();
+        held.sort();
+        held
+    };
+    for (arena, island) in loaded.islands.iter().enumerate() {
+        if arena < older {
+            assert_eq!(held(island), held(&experiment.islands[arena]));
+        } else {
+            assert!(island.entries.is_empty());
+        }
+    }
+    loaded.validate().unwrap();
+}
+
+#[test]
 fn checkpoint_preserves_stalled_island_optimizer() {
     let mut uninterrupted = Experiment::new(config(38)).unwrap();
     run_synthetic(&mut uninterrupted);
@@ -663,6 +719,7 @@ fn checkpoint_preserves_stalled_island_optimizer() {
         uninterrupted
             .islands
             .iter()
+            .take(storage::island_count())
             .all(|island| island.behavior_count() > 1)
     );
     uninterrupted.validate().unwrap();
@@ -773,7 +830,9 @@ fn a_save_keeps_the_ancestors_of_the_global_archive_and_every_elites_record() {
     storage::save(&checkpoint.0, &experiment).unwrap();
     let restored = storage::load(&checkpoint.0).unwrap();
     let mut chains = 0;
-    let archives = std::iter::once(&experiment.archive).chain(&experiment.islands);
+    // The save holds the islands and their nurseries of new bodies.
+    let held = experiment.islands.iter().take(storage::island_count() * 2);
+    let archives = std::iter::once(&experiment.archive).chain(held);
     for elite in archives.flat_map(|archive| &archive.entries) {
         // Every living elite has its record back, creature included.
         let record = restored.lineage.get(&elite.creature.id).unwrap();
@@ -1033,12 +1092,17 @@ fn a_world_change_keeps_the_layout_of_a_refined_archive() {
     let mut changed = experiment.config.clone();
     changed.gravity += 1.0;
     experiment.update_config_now(changed).unwrap();
-    // Every archive is empty and keeps its layout, and every nursery is
-    // coarse. The elites of island 1 wait to be tested again.
+    // Every archive is empty and keeps its layout, the nurseries of new
+    // random bodies are coarse and the nurseries of reshaped bodies refined.
+    // The elites of island 1 wait to be tested again.
     assert_eq!(experiment.islands.len(), storage::arena_count());
     for (arena, island) in experiment.islands.iter().enumerate() {
         assert!(island.entries.is_empty());
-        assert_eq!(island.refined(), arena == 1, "arena {arena}");
+        assert_eq!(
+            island.refined(),
+            arena == 1 || arena >= storage::reshaped_of(0),
+            "arena {arena}"
+        );
     }
     assert!(experiment.archive.entries.is_empty() && experiment.archive.refined());
     assert!(experiment.reseed.len() >= 1440);
@@ -1201,8 +1265,11 @@ fn an_island_migration_is_recorded_and_summarized() {
         .iter()
         .enumerate()
     {
-        let nursery = &experiment.islands[storage::nursery_of(index)];
-        let summary = IslandSummary::of(island, nursery, Default::default());
+        let nurseries = [
+            &experiment.islands[storage::nursery_of(index)],
+            &experiment.islands[storage::reshaped_of(index)],
+        ];
+        let summary = IslandSummary::of(island, nurseries, Default::default());
         assert_eq!(summary.cells, island.behavior_count());
         assert_eq!(summary.origins.iter().sum::<usize>(), summary.cells);
         assert!(!summary.top.is_empty() && summary.top.len() <= 3);
@@ -1213,7 +1280,7 @@ fn an_island_migration_is_recorded_and_summarized() {
     }
     let empty = IslandSummary::of(
         &QdArchive::default(),
-        &QdArchive::default(),
+        [&QdArchive::default(), &QdArchive::default()],
         Default::default(),
     );
     assert!(empty.best.is_nan() && empty.leader.is_none() && empty.cells == 0);
@@ -1240,12 +1307,16 @@ fn isolated_islands_only_hold_their_own_descendants() {
                 continue;
             }
             for elite in &island.entries {
-                // Only nursery slots fill a nursery, and an island archive
-                // holds nursery bodies only as marked graduates.
+                // Only nursery slots fill the nursery of new bodies (the
+                // nursery of reshaped bodies also takes the new body plans
+                // that island slots bred), and an island archive holds
+                // nursery bodies only as marked graduates.
                 let slot = evolution::slot_of_id(elite.creature.id);
                 let nursery_slot =
                     evolution_simulator::qd::is_nursery_slot(slot, storage::island_count());
-                if arena >= storage::island_count() {
+                if arena >= storage::reshaped_of(0) {
+                    assert!(!elite.graduate);
+                } else if arena >= storage::island_count() {
                     assert!(nursery_slot && !elite.graduate);
                 } else if !elite.graduate {
                     assert!(!nursery_slot);

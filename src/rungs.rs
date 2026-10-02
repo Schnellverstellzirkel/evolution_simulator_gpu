@@ -27,6 +27,13 @@ pub const EXEMPT: u8 = 2;
 /// the rules the block carries: the child is in a region the fit misjudges.
 pub const EXEMPT_R1: u8 = 4;
 pub const EXEMPT_R2: u8 = 8;
+/// A young creature (a nursery body): the early screen holds it to the young
+/// bar, the distance that the best of its own kind reached
+/// (`physics::Screen::young_bar`).
+pub const YOUNG: u8 = 16;
+/// A reshaped body of a nursery: held to the bar of its own kind
+/// (`physics::Screen::reshaped_bar`).
+pub const RESHAPED: u8 = 32;
 /// The flag bits that exempt a creature from rung `r` (0 or 1).
 pub fn exempt_bits(r: usize) -> u8 {
     EXEMPT | if r == 0 { EXEMPT_R1 } else { EXEMPT_R2 }

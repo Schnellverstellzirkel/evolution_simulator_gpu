@@ -164,10 +164,7 @@ fn an_audit_creature_runs_past_a_screen_that_stops_everyone_else() {
         duration: 6.0,
         random_seed: false,
         seed: 43,
-        screen: Some(Screen {
-            seconds: 2.0,
-            bar: f32::INFINITY,
-        }),
+        screen: Some(Screen::uniform(2.0, f32::INFINITY)),
         ..Config::default()
     };
     let mut pop = evolution::create(&cfg).unwrap();
@@ -178,6 +175,43 @@ fn an_audit_creature_runs_past_a_screen_that_stops_everyone_else() {
     for (i, r) in results.iter().enumerate() {
         let fell_first = r.fall_time > 0.0 && r.fall_time <= 2.0 + 1e-4;
         if pop.flags[i] & rungs::AUDIT != 0 || fell_first {
+            assert_eq!(r.screened, 0.0, "creature {i}");
+        } else {
+            assert!(r.screened > 0.0, "creature {i}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs the RTX 4060"]
+fn a_nursery_creature_is_held_to_the_screen_bar_of_its_own_kind() {
+    // Evolved and reshaped creatures face a bar nothing reaches, and young
+    // ones a bar that stops nobody.
+    let cfg = Config {
+        population: 700,
+        duration: 6.0,
+        random_seed: false,
+        seed: 44,
+        screen: Some(Screen {
+            seconds: 2.0,
+            bar: f32::INFINITY,
+            young_bar: f32::NEG_INFINITY,
+            reshaped_bar: f32::INFINITY,
+        }),
+        ..Config::default()
+    };
+    let mut pop = evolution::create(&cfg).unwrap();
+    pop.flags = (0..pop.genomes.len())
+        .map(|i| match i % 3 {
+            0 => 0,
+            1 => rungs::YOUNG,
+            _ => rungs::RESHAPED,
+        })
+        .collect();
+    let results = evaluate(&pop, &cfg);
+    for (i, r) in results.iter().enumerate() {
+        let fell_first = r.fall_time > 0.0 && r.fall_time <= 2.0 + 1e-4;
+        if fell_first || pop.flags[i] == rungs::YOUNG {
             assert_eq!(r.screened, 0.0, "creature {i}");
         } else {
             assert!(r.screened > 0.0, "creature {i}");

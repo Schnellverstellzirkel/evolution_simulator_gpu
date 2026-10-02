@@ -46,10 +46,7 @@ fn config(duration: f32) -> Config {
 
 fn screened(cfg: &Config, bar: f32) -> Config {
     Config {
-        screen: Some(Screen {
-            seconds: SCREEN_SECONDS,
-            bar,
-        }),
+        screen: Some(Screen::uniform(SCREEN_SECONDS, bar)),
         ..cfg.clone()
     }
 }

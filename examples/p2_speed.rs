@@ -141,7 +141,7 @@ fn main() -> anyhow::Result<()> {
         );
         eprintln!("screen bar {bar:.2} m at 5 s");
         cfg.screen = evolution_simulator::physics::screen_seconds()
-            .map(|seconds| evolution_simulator::physics::Screen { seconds, bar });
+            .map(|seconds| evolution_simulator::physics::Screen::uniform(seconds, bar));
     }
     for _ in 0..repeats {
         let (creatures, steps, busy, hash, _) = run(&mut engine, &pop, &cfg)?;

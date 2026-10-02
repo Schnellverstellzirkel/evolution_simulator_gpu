@@ -4,7 +4,7 @@ Read this before you change the code. It covers the game, the owner's rules, how
 
 ## The game
 
-Evolution Simulator is a Rust game. 2D creatures made of bones, joints and pull-only muscles evolve to travel as far as possible in 20 s trials. Each generation has 3 million creatures, and the GPU scores all of them. The search is MAP-Elites with four emitters (CMA tuning, anatomy mutations, novelty, immigrants) over 4 isolated island archives (each with a nursery that gives new random bodies 10 generations to develop before they compete in the island archive), one hub island that receives copies of their best elites, and one global archive that records everything and is never a parent source. The player watches evolution and changes the world with environment buttons.
+Evolution Simulator is a Rust game. 2D creatures made of bones, joints and pull-only muscles evolve to travel as far as possible in 20 s trials. Each generation has 3 million creatures, and the GPU scores all of them. The search is MAP-Elites with four emitters (CMA tuning, anatomy mutations, novelty, immigrants) over 4 isolated island archives (each with a nursery that gives new random bodies 10 generations to develop before they compete in the island archive, and a nursery that keeps the new body plans the island turned away until they beat its elites), one hub island that receives copies of their best elites, and one global archive that records everything and is never a parent source. The player watches evolution and changes the world with environment buttons.
 
 `cargo run --release` on `main` is the current game. It must be the best game with no flags.
 
@@ -87,6 +87,7 @@ All example tools score and replay creatures on the GPU engine (`examples/common
 - `examples/search_ab.rs`: fixed-seed search runs through the production ring on the GPU, with the early screen and the record confirmations. It prints body plans, clades and body shape coverage of the archives, the archive and breeding seconds per generation, `--load <save>` continues a save, and `--change-at <n>` changes the world before generation n as a button press does. It prints the ring's mean GPU lanes per creature.
 - `examples/archive_diversity.rs <save>`: body plans, clades and body class coverage of every archive of a save.
 - `examples/archive_bench.rs <save> <population> <generations>`: the archive and breeding seconds per generation at full scale with no GPU, on stand-in scores. Run it under `perf record` to see where they go.
+- `examples/island_report.rs <save>`: per island, nursery and reshaped nursery of a save, the body plans, skeletons, ages and ties of its elites. It needs no GPU.
 - `EVOLUTION_STAGE_LOG=<path>`: one CSV row per generation (evaluation, archive and breeding seconds, end-to-end rate).
 - `examples/size_report.rs <save> [count]`: body length, mass and foot slip for the best elites, from GPU replays. It has no cost of transport column.
 - `examples/mutation_audit.rs`: how much of its parent's distance each operator's child keeps, how often it beats the parent and how many children would enter the global archive, within the growth step of breeding.

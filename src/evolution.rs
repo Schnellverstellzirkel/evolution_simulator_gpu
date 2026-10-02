@@ -1248,6 +1248,9 @@ pub struct CandidatePlan {
     pub cma: Option<usize>,
     /// Second archive parent with the same body plan, for crossover.
     pub mate: Option<usize>,
+    /// The parent and the mate are elites of the slot's island, not of the
+    /// archive the slot breeds for: a reshaped child for a nursery.
+    pub seed: bool,
 }
 
 /// The growth-step body rule (the owner's decision of 2026-10-01): a child gains at most this many nodes and muscles
@@ -1365,8 +1368,13 @@ pub fn breed_child(
     child: &mut Creature,
 ) -> ChildTrace {
     let mut rng = Rng::stream(cfg.seed, generation, round, slot);
+    let source = if plan.seed {
+        qd::island_of_slot(slot, archive.len() / qd::ARENA_KINDS)
+    } else {
+        qd::arena_of_slot(slot, archive.len())
+    };
     offspring(
-        &archive[qd::arena_of_slot(slot, archive.len())],
+        &archive[source],
         cma_emitters,
         plan,
         cfg,

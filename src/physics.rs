@@ -334,8 +334,25 @@ pub const HEAD_SHAKE_WINDOW: f32 = 0.1;
 pub struct Screen {
     pub seconds: f32,
     pub bar: f32,
+    /// The bar of a young creature (`rungs::YOUNG`): a body from a nursery
+    /// is held to the distance its own kind reaches at the screen, because
+    /// evolved bodies reach many times what a new body does, and a bar that
+    /// stops everything below them would stop every new body.
+    pub young_bar: f32,
+    /// The bar of a reshaped body of a nursery (`rungs::RESHAPED`): the
+    /// distance that its own kind reaches.
+    pub reshaped_bar: f32,
 }
 impl Screen {
+    /// The same bar for every kind of creature.
+    pub fn uniform(seconds: f32, bar: f32) -> Self {
+        Self {
+            seconds,
+            bar,
+            young_bar: bar,
+            reshaped_bar: bar,
+        }
+    }
     /// The step at whose end the screen applies.
     pub fn tick(self, fidelity: Fidelity) -> u32 {
         fidelity.settle() + ((self.seconds * fidelity.rate as f32).round() as u32).max(1) - 1

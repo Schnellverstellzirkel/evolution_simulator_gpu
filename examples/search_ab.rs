@@ -297,11 +297,16 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
         .with_context(|| format!("seed {seed} configuration"))?;
     let mut gpu = evolution_simulator::gpu::Gpu::new("RTX 4060")?;
     let mut experiment = match &options.load {
-        Some(path) => evolution_simulator::storage::load_for_population(
-            std::path::Path::new(path),
-            options.population,
-        )
-        .with_context(|| format!("loading {path}"))?,
+        Some(path) => {
+            let mut loaded = evolution_simulator::storage::load_for_population(
+                std::path::Path::new(path),
+                options.population,
+            )
+            .with_context(|| format!("loading {path}"))?;
+            // Another seed offset is another run of the same archives.
+            loaded.config.seed = loaded.config.seed.wrapping_add(options.seed_offset);
+            loaded
+        }
         None => Experiment::new(cfg).with_context(|| format!("seed {seed} experiment"))?,
     };
     if options.load.is_some() {
@@ -426,6 +431,7 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
                     .line()
             );
         }
+        print_nurseries(scope, seed, generation, &experiment);
         let generation_best = experiment.history.last().map_or(f32::NAN, |s| s.best);
         // Mean body size of the ring: bodies that only grow make every
         // later generation slower to simulate.
@@ -584,6 +590,80 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             .join(" ")
     );
     Ok((best, qd))
+}
+
+/// The nurseries after a generation: the bodies and distinct body plans of
+/// every nursery of reshaped bodies, the distinct plans of all archives
+/// (islands, nurseries of new bodies, nurseries of reshaped bodies), and,
+/// when a graduation has just happened, what each island took of the two
+/// nurseries.
+fn print_nurseries(scope: &str, seed: u64, generation: u32, experiment: &Experiment) {
+    use evolution_simulator::{qd, storage};
+    use std::collections::HashSet;
+    let plans = |archives: &[&qd::QdArchive]| -> usize {
+        archives
+            .iter()
+            .flat_map(|a| a.entries.iter())
+            .filter(|e| !qd::is_morphology_niche(&e.niche))
+            .map(|e| &e.topology)
+            .collect::<HashSet<_>>()
+            .len()
+    };
+    let islands = storage::island_count();
+    if experiment.islands.len() != storage::arena_count() {
+        return;
+    }
+    let all: Vec<&qd::QdArchive> = experiment.islands.iter().collect();
+    let mature: Vec<&qd::QdArchive> = experiment.islands[..islands].iter().collect();
+    let reshaped: Vec<&qd::QdArchive> = (0..islands)
+        .map(|i| &experiment.islands[storage::reshaped_of(i)])
+        .collect();
+    let bodies: usize = reshaped.iter().map(|a| a.behavior_count()).sum();
+    // The cells of the islands that nursery graduates hold.
+    let cells = |keep: fn(&qd::Elite) -> bool| -> usize {
+        mature
+            .iter()
+            .flat_map(|a| a.entries.iter())
+            .filter(|e| !qd::is_morphology_niche(&e.niche) && keep(e))
+            .count()
+    };
+    println!(
+        "{scope} {seed} {generation} nurseries: reshaped bodies {bodies}, plans in the islands {}, in all archives {}, graduates in island cells {} of {}",
+        plans(&mature),
+        plans(&all),
+        cells(|e| e.graduate),
+        cells(|_| true)
+    );
+    println!(
+        "{scope} {seed} {generation} cma emitters per archive: {} of {}",
+        (0..experiment.islands.len())
+            .map(|a| experiment.cma_emitters.iter().filter(|c| c.island == a).count().to_string())
+            .collect::<Vec<_>>()
+            .join(" "),
+        experiment.cma_emitters.len()
+    );
+    println!(
+        "{scope} {seed} {generation} island qd: {}",
+        experiment.islands[..islands]
+            .iter()
+            .map(|a| format!("{:.0}", a.qd_score))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    for (name, log) in [
+        ("graduated", &experiment.graduations),
+        ("reshaped graduated", &experiment.reshaped_graduations),
+    ] {
+        let taken: Vec<String> = log
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| g.generation == experiment.generation)
+            .map(|(i, g)| format!("{i}: kept {} of {}", g.kept, g.sent))
+            .collect();
+        if !taken.is_empty() {
+            println!("{scope} {seed} {generation} {name} {}", taken.join("; "));
+        }
+    }
 }
 
 /// How much of their archive distance the 50 best global elites keep at four

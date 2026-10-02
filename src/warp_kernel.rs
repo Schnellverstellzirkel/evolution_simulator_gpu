@@ -140,6 +140,10 @@ pub struct Params {
     pub hurdles: f32,
     pub quake: f32,
     pub screen_bar: f32,
+    /// The screen bars of a young creature and of a reshaped one
+    /// (`rungs::YOUNG`, `rungs::RESHAPED`).
+    pub screen_bar_young: f32,
+    pub screen_bar_reshaped: f32,
     pub water: f32,
     pub patches: f32,
     pub air_sub: f32,
@@ -176,6 +180,12 @@ pub fn params(cfg: &Config, base: usize, count: usize, stride: usize) -> Params 
         hurdles: if ground { cfg.hurdles } else { 0.0 },
         quake: if ground { cfg.quake } else { 0.0 },
         screen_bar: cfg.screen.map_or(f32::NEG_INFINITY, |screen| screen.bar),
+        screen_bar_young: cfg
+            .screen
+            .map_or(f32::NEG_INFINITY, |screen| screen.young_bar),
+        screen_bar_reshaped: cfg
+            .screen
+            .map_or(f32::NEG_INFINITY, |screen| screen.reshaped_bar),
         water: cfg.water,
         patches: if ground { cfg.patches } else { 0.0 },
         air_sub: air.powf(1.0 / solver_setting("SUBSTEPS", SUBSTEPS) as f32),

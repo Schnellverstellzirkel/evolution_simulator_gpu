@@ -65,6 +65,8 @@ struct Params {
     float hurdles;
     float quake;
     float screen_bar;
+    float screen_bar_young;
+    float screen_bar_reshaped;
     float water;
     float patches;
     float air_sub;
@@ -1386,7 +1388,12 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 }
                 if (step == p.screen_step && !ended) {
                     mt.screen_x = com_x;
-                    if (com_x < p.screen_bar && ((head_flags() >> 16u) & 1u) == 0u) {
+                    // Flag 16 holds a young creature to the young bar, flag 32
+                    // a reshaped one to its own.
+                    const unsigned flags = head_flags() >> 16u;
+                    const float bar = (flags & 32u) != 0u ? p.screen_bar_reshaped
+                                    : (flags & 16u) != 0u ? p.screen_bar_young : p.screen_bar;
+                    if (com_x < bar && (flags & 1u) == 0u) {
                         mt.screened = t_now + DT;
                         mt.fitness = com_x;
                         ended = true;

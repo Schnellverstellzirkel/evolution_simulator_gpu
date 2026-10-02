@@ -40,6 +40,47 @@ pub fn take_breed_late() -> (u64, u64) {
 /// 0.3%, so a larger window only adds lag: a block of the game's ring holds
 /// 196,608, and the bar comes from the newest block alone.
 const SCREEN_WINDOW_DISTANCES: usize = 16_384;
+
+/// Distances at the screen of the newest absorbed blocks, one entry per
+/// block, oldest first: as few blocks as hold `SCREEN_WINDOW_DISTANCES`, and
+/// at most a ring. A bar is recomputed from them at every absorption. Each
+/// entry also counts the results of the block that belong to other kinds of
+/// creature and are not in the window.
+#[derive(Clone, Default)]
+struct ScreenWindow(VecDeque<(Vec<f32>, usize)>);
+
+impl ScreenWindow {
+    /// Adds one block's distances, and the number of results of other kinds
+    /// it had, and drops the oldest blocks that are no longer needed. The
+    /// newest blocks that hold enough distances for a steady quantile stay,
+    /// at most `ring` of them: older results lag the population more.
+    fn push(&mut self, distances: Vec<f32>, others: usize, ring: usize) {
+        self.0.push_back((distances, others));
+        let mut held: usize = self.0.iter().map(|(d, _)| d.len()).sum();
+        while let Some(oldest) = self.0.front().map(|(d, _)| d.len())
+            && (self.0.len() > ring || held - oldest >= SCREEN_WINDOW_DISTANCES)
+        {
+            self.0.pop_front();
+            held -= oldest;
+        }
+    }
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+    /// The bar that the best `keep` share of all the results of the window's
+    /// blocks reached when the results of other kinds fall short of it. With
+    /// no other kind it is the bar of the best `keep` share of the window.
+    fn bar(&self, keep: f32) -> f32 {
+        let own: usize = self.0.iter().map(|(d, _)| d.len()).sum();
+        let others: usize = self.0.iter().map(|(_, o)| *o).sum();
+        let share = if own == 0 {
+            keep
+        } else {
+            keep * (own + others) as f32 / own as f32
+        };
+        crate::physics::screen_bar(self.0.iter().flat_map(|(d, _)| d.iter().copied()), share)
+    }
+}
 /// Confirmation trials a block asks for per archive at once while it waits
 /// for the ones it needs. Many record claims fail the fine trial, so asking
 /// a few at a time chained round trips while the ring waited: at 3M per
@@ -303,6 +344,29 @@ pub struct Block {
     pub config: Arc<Config>,
 }
 impl Block {
+    /// The screen bar of creature `j` among `screen`'s: a nursery body is
+    /// held to the bar of its own kind.
+    pub fn screen_bar(&self, screen: &crate::physics::Screen, j: usize) -> f32 {
+        let flags = self.population.flags.get(j).copied().unwrap_or(0);
+        if flags & crate::rungs::RESHAPED != 0 {
+            screen.reshaped_bar
+        } else if flags & crate::rungs::YOUNG != 0 {
+            screen.young_bar
+        } else {
+            screen.bar
+        }
+    }
+    /// Which window creature `j`'s distance at the screen belongs to: 0 for
+    /// the evolved creatures, 1 for the nursery's new bodies, 2 for its
+    /// reshaped bodies.
+    fn screen_class(&self, j: usize) -> usize {
+        let flags = self.population.flags.get(j).copied().unwrap_or(0);
+        if flags & crate::rungs::RESHAPED != 0 {
+            2
+        } else {
+            usize::from(flags & crate::rungs::YOUNG != 0)
+        }
+    }
     pub fn len(&self) -> usize {
         self.population.genomes.len()
     }
@@ -344,7 +408,8 @@ pub struct Experiment {
     pub qd_version: u32,
     /// Breeding rounds so far; salts offspring random streams and ids.
     pub breed_round: u64,
-    /// Island archives, then one nursery per island. Ring slot `i` breeds
+    /// Island archives, then one nursery of new random bodies per island,
+    /// then one nursery of reshaped bodies per island. Ring slot `i` breeds
     /// for `qd::arena_of_slot(i, arena_count())`; the global `archive`
     /// collects every island's elites for display and statistics and is
     /// never a parent source.
@@ -354,8 +419,10 @@ pub struct Experiment {
     pub lineage: HashMap<u64, Ancestor>,
     /// Each island's best distance so far and the generation it was set.
     pub island_progress: Vec<(f32, u32)>,
-    /// Per island, what its nursery graduated this session.
+    /// Per island, what its nursery of new random bodies graduated this
+    /// session, and what its nursery of reshaped bodies did.
     pub graduations: Vec<Graduation>,
+    pub reshaped_graduations: Vec<Graduation>,
     /// The last migration to the hub this session: its generation, and per
     /// island how many elites it sent and how many of those the hub kept
     /// (the hub's own entry is zero). Saved after the body of a small save.
@@ -374,11 +441,12 @@ pub struct Experiment {
     pub cursor: usize,
     /// Failed trials in the current generation.
     failed: usize,
-    /// Distances at the screen of the newest absorbed blocks, one entry per
-    /// block, oldest first: as few blocks as hold `SCREEN_WINDOW_DISTANCES`,
-    /// and at most a ring. The bar is recomputed from them at every
-    /// absorption.
-    screen_window: VecDeque<Vec<f32>>,
+    /// Distances at the screen of the newest absorbed blocks, for the bar of
+    /// the evolved creatures and, apart, for the bars of the young ones
+    /// (`rungs::YOUNG`) and the reshaped ones (`rungs::RESHAPED`).
+    screen_window: ScreenWindow,
+    young_window: ScreenWindow,
+    reshaped_window: ScreenWindow,
     /// The audit lane and the early rungs it calibrates (`rungs`).
     pub rungs: crate::rungs::Audit,
     /// The last absorbed block's screen bar and the share of its results at
@@ -516,20 +584,38 @@ pub fn island_count() -> usize {
     ISOLATED_ISLANDS + 1
 }
 /// Archives that creatures breed for and compete in: the islands, then one
-/// nursery per island. `Experiment::islands` holds them in this order.
+/// nursery of new random bodies per island, then one nursery of reshaped
+/// bodies per island. `Experiment::islands` holds them in this order.
 pub fn arena_count() -> usize {
-    island_count() * 2
+    island_count() * qd::ARENA_KINDS
 }
-/// The nursery archive of `island` in `Experiment::islands`.
+/// The nursery archive of new random bodies of `island` in
+/// `Experiment::islands`.
 pub fn nursery_of(island: usize) -> usize {
     island_count() + island
 }
-/// Empty archives for the islands and their nurseries. `refined` says which
-/// islands start in the refined layout. The others, and every nursery, keep
-/// one elite per way of moving.
+/// The nursery archive of reshaped bodies of `island`.
+pub fn reshaped_of(island: usize) -> usize {
+    2 * island_count() + island
+}
+/// An empty nursery of reshaped bodies. It starts in the refined layout, so
+/// a new body plan has a cell of its own against the bodies of other shapes
+/// and sizes, and the nursery holds four times as many bodies as one that
+/// keeps one elite per way of moving.
+fn new_reshaped_nursery() -> QdArchive {
+    let mut archive = QdArchive::default();
+    archive.set_refined(true);
+    archive
+}
+/// Empty archives for the islands and their two nurseries each. `refined`
+/// says which islands start in the refined layout. The others, and the
+/// nursery of new random bodies, keep one elite per way of moving.
 fn new_islands(refined: &[bool]) -> Vec<QdArchive> {
     (0..arena_count())
         .map(|arena| {
+            if arena >= reshaped_of(0) {
+                return new_reshaped_nursery();
+            }
             let mut archive = QdArchive::default();
             archive.set_refined(refined.get(arena).copied().unwrap_or(false));
             archive
@@ -591,6 +677,8 @@ impl Experiment {
             .map(|seconds| crate::physics::Screen {
                 seconds,
                 bar: f32::NEG_INFINITY,
+                young_bar: f32::NEG_INFINITY,
+                reshaped_bar: f32::NEG_INFINITY,
             });
         let mut e = Self::empty(config);
         e.ring = ring;
@@ -626,6 +714,7 @@ impl Experiment {
             lineage: HashMap::new(),
             island_progress: Vec::new(),
             graduations: Vec::new(),
+            reshaped_graduations: Vec::new(),
             last_migration: None,
             reseed: Reseed::default(),
             fossils: Vec::new(),
@@ -633,7 +722,9 @@ impl Experiment {
             blocks: Vec::new(),
             cursor: 0,
             failed: 0,
-            screen_window: VecDeque::new(),
+            screen_window: ScreenWindow::default(),
+            young_window: ScreenWindow::default(),
+            reshaped_window: ScreenWindow::default(),
             rungs: crate::rungs::Audit::default(),
             last_screen: None,
             stage_seconds: [0.0; 2],
@@ -779,17 +870,13 @@ impl Experiment {
     /// one that lived past 5 s below the bar enters no archive, as it would
     /// not have in a trial with the screen.
     fn exclude_audit_below_bar(block: &Block, standard: &[EvaluationMetrics], out: &mut [EvaluationMetrics]) {
-        let Some(bar) = block
-            .config
-            .screen
-            .map(|s| s.bar)
-            .filter(|bar| bar.is_finite())
-        else {
+        let Some(screen) = block.config.screen else {
             return;
         };
         for (j, m) in standard.iter().enumerate() {
             let audit = block.population.flags.get(j).copied().unwrap_or(0) & crate::rungs::AUDIT != 0;
-            if audit && m.trace.steps() > crate::rungs::SCREEN_STEPS && m.screen_x < bar {
+            let bar = block.screen_bar(&screen, j);
+            if audit && bar.is_finite() && m.trace.steps() > crate::rungs::SCREEN_STEPS && m.screen_x < bar {
                 out[j].excluded = true;
             }
         }
@@ -805,6 +892,9 @@ impl Experiment {
             "Blocks are absorbed whole and in ring order"
         );
         let stale = self.blocks[k].config.physics_differs(&self.config);
+        let class: Vec<usize> = (0..finals.len())
+            .map(|j| self.blocks[k].screen_class(j))
+            .collect();
         self.last_screen = self.blocks[k]
             .config
             .screen
@@ -815,24 +905,30 @@ impl Experiment {
                 (bar, kept as f32 / finals.len().max(1) as f32)
             });
         if !stale {
-            // A result from a world that has since changed carries no distance.
-            self.screen_window.push_back(
+            // A result from a world that has since changed carries no
+            // distance. Each kind of creature sets the bar of its own kind.
+            // The bar of the evolved creatures is the one that the top 10% of
+            // every result would have reached if the nursery bodies fell
+            // short of it, as they do: a tenth of the results are nursery
+            // bodies, so about 11% of the evolved creatures pass it.
+            let distances = |wanted: usize| -> Vec<f32> {
                 finals
                     .iter()
-                    .map(|m| m.screen_x)
+                    .zip(&class)
+                    .filter(|&(_, &c)| c == wanted)
+                    .map(|(m, _)| m.screen_x)
                     .filter(|x| x.is_finite())
-                    .collect(),
-            );
-            // The newest blocks that hold enough distances for a steady
-            // quantile, at most a ring: older results lag the population more.
-            let mut held: usize = self.screen_window.iter().map(Vec::len).sum();
-            while let Some(oldest) = self.screen_window.front().map(Vec::len)
-                && (self.screen_window.len() > self.blocks.len()
-                    || held - oldest >= SCREEN_WINDOW_DISTANCES)
-            {
-                self.screen_window.pop_front();
-                held -= oldest;
-            }
+                    .collect()
+            };
+            let nursery = finals
+                .iter()
+                .zip(&class)
+                .filter(|&(m, &c)| c != 0 && m.screen_x.is_finite())
+                .count();
+            let ring = self.blocks.len();
+            self.screen_window.push(distances(0), nursery, ring);
+            self.young_window.push(distances(1), 0, ring);
+            self.reshaped_window.push(distances(2), 0, ring);
             self.config.screen = self.next_screen(self.config.duration);
         }
         let started = std::time::Instant::now();
@@ -907,13 +1003,13 @@ impl Experiment {
     /// says what each creature entered.
     fn record_rungs(&mut self, k: usize, finals: &[EvaluationMetrics], kinds: &[u8]) {
         let block = &self.blocks[k];
-        let bar = block
-            .config
-            .screen
-            .map(|s| s.bar)
-            .filter(|bar| bar.is_finite());
         let population = &*block.population;
         for (j, m) in finals.iter().enumerate() {
+            let bar = block
+                .config
+                .screen
+                .map(|s| block.screen_bar(&s, j))
+                .filter(|bar| bar.is_finite());
             self.rungs.note(&m.trace, m.screened);
             let flags = population.flags.get(j).copied().unwrap_or(0);
             if flags & crate::rungs::AUDIT == 0 || m.trace.steps() == 0 {
@@ -989,16 +1085,17 @@ impl Experiment {
     fn next_screen(&self, duration: f32) -> Option<crate::physics::Screen> {
         // A trial no longer than the screen time has nothing to screen.
         let seconds = crate::physics::screen_seconds().filter(|&s| s < duration)?;
-        let bar = if self.dump_breeding() {
+        let keep = crate::physics::screen_keep();
+        if self.dump_breeding() {
             // The generation dump runs every trial in full.
-            f32::NEG_INFINITY
-        } else {
-            crate::physics::screen_bar(
-                self.screen_window.iter().flatten().copied(),
-                crate::physics::screen_keep(),
-            )
-        };
-        Some(crate::physics::Screen { seconds, bar })
+            return Some(crate::physics::Screen::uniform(seconds, f32::NEG_INFINITY));
+        }
+        Some(crate::physics::Screen {
+            seconds,
+            bar: self.screen_window.bar(keep),
+            young_bar: self.young_window.bar(keep),
+            reshaped_bar: self.reshaped_window.bar(keep),
+        })
     }
     /// Offers block `k`'s creatures to the archives in block order, updates
     /// CMA emitters and emitter statistics, and returns how many trials
@@ -1056,6 +1153,11 @@ impl Experiment {
         }
         let arenas = self.islands.len().max(arena_count());
         let positions: Vec<usize> = (0..block.len()).collect();
+        // The archive each creature breeds for and competes in.
+        let arena_of: Vec<u8> = positions
+            .par_iter()
+            .map(|&j| qd::arena_of_slot(first + j, arenas) as u8)
+            .collect();
         let prep: Vec<Prep> = positions
             .par_iter()
             .map(|&j| {
@@ -1071,7 +1173,7 @@ impl Experiment {
                 let descriptor = qd::descriptor(nodes, muscles, m.behavior);
                 let screened = stale || m.screened || m.excluded;
                 // A nursery creature is offered to its nursery only.
-                let nursery = qd::arena_of_slot(first + j, arenas) >= island_count();
+                let nursery = arena_of[j] as usize >= island_count();
                 let valid = score.is_finite() && score > FAILED && !screened;
                 let behavior_candidate = if valid && !nursery {
                     let niche = self.archive.cell_of(descriptor);
@@ -1118,8 +1220,14 @@ impl Experiment {
         // parallel.
         let generation = self.generation;
         // Per island: the positions that entered, the emitter and offer of
-        // each reserve entry, and the positions that entered the reserve.
-        type IslandResult = (Vec<usize>, Vec<(usize, qd::Offer)>, Vec<usize>);
+        // each reserve entry, the positions that entered the reserve, and
+        // the new body plans that took neither a cell nor a reserve place.
+        type IslandResult = (
+            Vec<usize>,
+            Vec<(usize, qd::Offer)>,
+            Vec<usize>,
+            Vec<usize>,
+        );
         let island_results: Vec<IslandResult> = self
             .islands
             .par_iter_mut()
@@ -1128,6 +1236,7 @@ impl Experiment {
                 let mut entered = Vec::new();
                 let mut reserve_offers = Vec::new();
                 let mut reserve_entered = Vec::new();
+                let mut routed = Vec::new();
                 // Reserve admission needs a score above the island's best
                 // behavior elite and reserve entry of the same body plan, or
                 // above the reserve's floor once it is full
@@ -1147,7 +1256,7 @@ impl Experiment {
                     }
                 }
                 for (j, p) in prep.iter().enumerate() {
-                    if qd::arena_of_slot(first + j, arenas) != island {
+                    if arena_of[j] as usize != island {
                         continue;
                     }
                     if !p.score.is_finite() || p.score <= FAILED || p.screened {
@@ -1195,7 +1304,13 @@ impl Experiment {
                         }
                         None => floor.is_none_or(|floor| p.score > floor),
                     };
+                    // A new body plan that an island turns away goes to the
+                    // island's nursery of reshaped bodies.
+                    let routes = changed && island < island_count();
                     if !admits {
+                        if routes {
+                            routed.push(j);
+                        }
                         continue;
                     }
                     let offer = archive.offer_morphology(
@@ -1217,17 +1332,53 @@ impl Experiment {
                             .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
                         bar.1 = bar.1.max(p.score);
                         reserve_offers.push((p.emitter.index(), offer));
+                    } else if routes {
+                        routed.push(j);
                     }
                 }
-                (entered, reserve_offers, reserve_entered)
+                (entered, reserve_offers, reserve_entered, routed)
             })
             .collect();
-        let island_changed: Vec<bool> = island_results
+        // The turned away body plans compete for cells of their island's
+        // nursery of reshaped bodies, where only such bodies compete.
+        let routed: Vec<Vec<usize>> = island_results
             .iter()
-            .map(|(group, _, _)| !group.is_empty())
+            .take(island_count())
+            .map(|result| result.3.clone())
             .collect();
+        let routed_entered: Vec<Vec<usize>> = self.islands[reshaped_of(0)..]
+            .par_iter_mut()
+            .zip(routed)
+            .map(|(archive, routed)| {
+                routed
+                    .into_iter()
+                    .filter(|&j| {
+                        let p = &prep[j];
+                        archive
+                            .offer(
+                                population,
+                                j,
+                                p.descriptor,
+                                p.score,
+                                p.fine,
+                                p.emitter,
+                                generation,
+                                p.protection,
+                            )
+                            .inserted
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut island_changed: Vec<bool> = island_results
+            .iter()
+            .map(|(group, _, _, _)| !group.is_empty())
+            .collect();
+        for (island, entered) in routed_entered.iter().enumerate() {
+            island_changed[reshaped_of(island)] |= !entered.is_empty();
+        }
         let mut reserve_offers = Vec::new();
-        for (arena, (group, offers, reserves)) in island_results.into_iter().enumerate() {
+        for (arena, (group, offers, reserves, _)) in island_results.into_iter().enumerate() {
             if let Some(kinds) = kinds.as_deref_mut() {
                 let kind = if arena < island_count() {
                     dump::ISLAND
@@ -1248,11 +1399,26 @@ impl Experiment {
                 reserve_offers.extend(offers);
             }
         }
+        for group in routed_entered {
+            if let Some(kinds) = kinds.as_deref_mut() {
+                for &j in &group {
+                    kinds[j] |= dump::NURSERY;
+                }
+            }
+            entered.extend(group);
+        }
         timings[0] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
         // The scores depend only on the archive's elites, so an island that
-        // took no offer keeps the ones it has.
-        for (island, changed) in self.islands.iter_mut().zip(island_changed) {
+        // took no offer keeps the ones it has. A reshaped nursery takes
+        // offers in every block, so it refreshes once a generation instead
+        // (`end_generation`).
+        for (island, changed) in self
+            .islands
+            .iter_mut()
+            .zip(island_changed)
+            .take(reshaped_of(0))
+        {
             if changed || !island.scores_current() {
                 island.refresh_behavior_scores();
             }
@@ -1290,7 +1456,7 @@ impl Experiment {
                 failed += 1;
             }
             let cma = births[j].cma;
-            if qd::arena_of_slot(first + j, arenas) >= island_count() {
+            if arena_of[j] as usize >= island_count() {
                 // Nursery samples rank by distance alone.
                 if prep.emitter == Emitter::Cma
                     && let Some(cma) = cma
@@ -1408,9 +1574,11 @@ impl Experiment {
         entered.sort_unstable();
         entered.dedup();
         let entered_count = entered.len();
-        for j in entered {
-            self.record_ancestor(population, births[j], j, &finals[j]);
-        }
+        let records: Vec<(u64, Ancestor)> = entered
+            .par_iter()
+            .filter_map(|&j| self.ancestor_of(population, births[j], j, &finals[j]))
+            .collect();
+        self.lineage.extend(records);
         timings[6] = section.elapsed().as_secs_f64();
         if profile {
             eprintln!(
@@ -1429,26 +1597,26 @@ impl Experiment {
         }
         failed
     }
-    /// Records creature `index` of `population` (which just entered an
-    /// archive with `fitness`).
-    fn record_ancestor(
-        &mut self,
+    /// The lineage record of creature `index` of `population`, which just
+    /// entered an archive with `result`; none when it has one already. A
+    /// parent entered an archive in an earlier block, so its record is there.
+    fn ancestor_of(
+        &self,
         population: &Population,
         birth: Birth,
         index: usize,
         result: &EvaluationMetrics,
-    ) {
-        let fitness = result.fitness;
-        let creature = population.creature(index);
+    ) -> Option<(u64, Ancestor)> {
         let genome = &population.genomes[index];
+        if self.lineage.contains_key(&genome.id) {
+            return None;
+        }
+        let creature = population.creature(index);
         let period = if genome.muscle_count > 0 {
             population.muscles[genome.muscle_start].period
         } else {
             0.0
         };
-        if self.lineage.contains_key(&creature.id) {
-            return;
-        }
         let change = describe_change(
             birth
                 .parent_id
@@ -1458,17 +1626,17 @@ impl Experiment {
             birth.emitter,
             birth.mate,
         );
-        self.lineage.insert(
+        Some((
             creature.id,
             Ancestor {
                 parent: birth.parent_id,
-                fitness,
+                fitness: result.fitness,
                 generation: self.generation,
                 change,
                 creature,
                 rung: crate::rungs::profile(&result.trace, period),
             },
-        );
+        ))
     }
     /// Drops lineage records that no living elite descends from.
     fn prune_lineage(&mut self) {
@@ -1594,6 +1762,7 @@ impl Experiment {
         self.islands = new_islands(&[]);
         self.island_progress.clear();
         self.graduations.clear();
+        self.reshaped_graduations.clear();
         self.last_migration = None;
     }
     /// Refines each archive that has reached its plateau: it covers most of
@@ -1635,10 +1804,11 @@ impl Experiment {
             }
         }
     }
-    /// Every `NURSERY_GENERATIONS` generations each nursery's survivors
-    /// compete with their island's elites on distance alone, and the global
-    /// archive takes those the island kept. Then the nursery starts over
-    /// with new random bodies.
+    /// Every `NURSERY_GENERATIONS` generations each island takes the bodies
+    /// of its nurseries that beat its elites, and the global archive takes
+    /// those the island kept. The nursery of new random bodies starts over
+    /// with new random bodies. The nursery of reshaped bodies keeps every
+    /// body and goes on tuning it.
     fn graduate_nurseries(&mut self) {
         if self.islands.len() != arena_count()
             || self.generation == 0
@@ -1648,6 +1818,8 @@ impl Experiment {
         }
         self.graduations
             .resize(island_count(), Graduation::default());
+        self.reshaped_graduations
+            .resize(island_count(), Graduation::default());
         for island in 0..island_count() {
             let nursery = nursery_of(island);
             let mut cohort: Vec<qd::Elite> = std::mem::take(&mut self.islands[nursery].entries)
@@ -1655,34 +1827,74 @@ impl Experiment {
                 .filter(|e| !qd::is_morphology_niche(&e.niche))
                 .collect();
             self.islands[nursery].rebuild_indices();
-            cohort.sort_unstable_by(|a, b| {
-                b.fitness
-                    .total_cmp(&a.fitness)
-                    .then_with(|| a.niche.cmp(&b.niche))
-            });
-            let mut kept = 0;
-            for mut elite in cohort.iter().cloned() {
-                elite.graduate = true;
-                if self.islands[island].absorb(&elite) {
-                    kept += 1;
-                    self.archive.absorb(&elite);
-                }
-            }
-            self.islands[island].refresh_behavior_scores();
-            if kept > 0 {
-                self.archive.refresh_behavior_scores();
-            }
+            let sent = cohort.len();
+            let kept = self.offer_to_island(island, &mut cohort);
             let log = &mut self.graduations[island];
             *log = Graduation {
                 generation: self.generation,
-                sent: cohort.len(),
+                sent,
                 kept,
                 kept_total: log.kept_total + kept,
             };
             if let Some(progress) = self.island_progress.get_mut(nursery) {
                 *progress = (f32::NEG_INFINITY, self.generation);
             }
+            // Only the reshaped bodies the island would take are copied.
+            let home = &self.islands[island];
+            let reshaped = &self.islands[reshaped_of(island)];
+            let sent = reshaped.behavior_count();
+            let mut winners: Vec<qd::Elite> = reshaped
+                .entries
+                .iter()
+                .filter(|e| home.would_take(e))
+                .cloned()
+                .collect();
+            let kept = self.offer_to_island(island, &mut winners);
+            let log = &mut self.reshaped_graduations[island];
+            *log = Graduation {
+                generation: self.generation,
+                sent,
+                kept,
+                kept_total: log.kept_total + kept,
+            };
         }
+        // Each island that took bodies and the global archive refresh once.
+        for island in &mut self.islands[..island_count()] {
+            if !island.scores_current() {
+                island.refresh_behavior_scores();
+            }
+        }
+        if !self.archive.scores_current() {
+            self.archive.refresh_behavior_scores();
+        }
+    }
+    /// The behavior scores of the nurseries of reshaped bodies, which take
+    /// offers in every block, are refreshed once a generation.
+    fn refresh_reshaped_scores(&mut self) {
+        if self.islands.len() == arena_count() {
+            for island in 0..island_count() {
+                self.islands[reshaped_of(island)].refresh_behavior_scores();
+            }
+        }
+    }
+    /// Offers `elites` to `island`, fastest first, marked as graduates: each
+    /// takes the cell of an island elite it beats, or an empty cell, and the
+    /// global archive takes those the island kept. Returns how many it kept.
+    fn offer_to_island(&mut self, island: usize, elites: &mut [qd::Elite]) -> usize {
+        elites.sort_unstable_by(|a, b| {
+            b.fitness
+                .total_cmp(&a.fitness)
+                .then_with(|| a.niche.cmp(&b.niche))
+        });
+        let mut kept = 0;
+        for elite in elites.iter_mut() {
+            elite.graduate = true;
+            if self.islands[island].absorb(elite) {
+                kept += 1;
+                self.archive.absorb(elite);
+            }
+        }
+        kept
     }
     /// Every `MIGRATION_INTERVAL` generations the hub receives copies of the
     /// best share of each isolated island's elites. The isolated islands
@@ -1810,12 +2022,14 @@ impl Experiment {
             island: usize,
             /// A fast elite whose design's optimizer breeds this offspring.
             optimize: bool,
+            /// A reshaped child of an island elite for a reshaped nursery.
+            seeded: bool,
         }
         // Each island's elites by body plan key, grouped for crossover
         // partners: (key, slot) sorted, so a plan's elites are one run.
         let by_plan: Vec<Vec<(u64, u32)>> = self
             .islands
-            .iter()
+            .par_iter()
             .map(|island| {
                 let mut keyed: Vec<(u64, u32)> = (0..island.entries.len())
                     .map(|slot| (island.plan_key(slot), slot as u32))
@@ -1907,11 +2121,25 @@ impl Experiment {
             .par_iter()
             .map(|&i| {
                 let mut rng = Rng::new(seed, generation, i);
-                let island = qd::arena_of_slot(i, self.islands.len());
+                let arena = qd::arena_of_slot(i, self.islands.len());
+                let reshaped = qd::is_reshaped_arena(arena, self.islands.len());
+                // Bodies the island turned away fill a reshaped nursery.
+                // While it is empty its slots breed structural children of
+                // the island's elites instead.
+                let home = qd::island_of_slot(i, island_count());
+                let seeded = reshaped
+                    && !self.islands[home].entries.is_empty()
+                    && self.islands[arena].entries.is_empty();
+                // The archive the child's parent comes from.
+                let island = if seeded { home } else { arena };
                 let archive = &self.islands[island];
                 let archive_empty = archive.entries.is_empty();
-                let emitter = if archive_empty
-                    || (island >= island_count() && rng.unit() < qd::NURSERY_FRESH_SHARE)
+                let emitter = if seeded {
+                    Emitter::Structural
+                } else if archive_empty
+                    || (arena >= island_count()
+                        && !reshaped
+                        && rng.unit() < qd::NURSERY_FRESH_SHARE)
                 {
                     Emitter::Restart
                 } else {
@@ -1923,6 +2151,8 @@ impl Experiment {
                 let mut from_reserve = false;
                 let parent = if emitter == Emitter::Restart || archive_empty {
                     None
+                } else if seeded {
+                    archive.sample_local_competitive(&mut rng, avoid)
                 } else if emitter == Emitter::Structural
                     && rng.unit() < qd::MORPHOLOGY_PARENT_FRACTION
                 {
@@ -1988,6 +2218,7 @@ impl Experiment {
                     mate,
                     island,
                     optimize,
+                    seeded,
                 }
             })
             .collect();
@@ -2003,6 +2234,7 @@ impl Experiment {
                 mate,
                 island,
                 optimize,
+                seeded,
             } = prep;
             let cma_index = if emitter == Emitter::Cma {
                 if let Some(parent_index) = parent {
@@ -2124,6 +2356,7 @@ impl Experiment {
                     parent,
                     cma: cma_index,
                     mate,
+                    seed: seeded,
                 },
                 parent_id,
                 protection,
@@ -2167,7 +2400,11 @@ impl Experiment {
                 .iter()
                 .zip(&slots)
                 .map(|(p, &slot)| {
-                    let arena = qd::arena_of_slot(slot, self.islands.len());
+                    let arena = if p.plan.seed {
+                        qd::island_of_slot(slot, island_count())
+                    } else {
+                        qd::arena_of_slot(slot, self.islands.len())
+                    };
                     let elite = p
                         .plan
                         .parent
@@ -2260,20 +2497,26 @@ impl Experiment {
             if crate::rungs::is_audit(cfg.seed, self.breed_round, slot) {
                 flags |= crate::rungs::AUDIT;
             }
+            let arenas = self.islands.len().max(arena_count());
+            let arena = qd::arena_of_slot(slot, arenas);
             // A child whose parent is a strong elite that the rules would
             // stop skips those rungs.
             if let Some(rules) = &cfg.rungs {
                 let parent = births[k].parent_id.and_then(|id| self.lineage.get(&id));
-                let arena = qd::arena_of_slot(slot, self.islands.len().max(arena_count()));
                 let strong = parent.is_some_and(|a| {
                     medians.get(arena).is_none_or(|&median| a.fitness >= median)
                 });
                 flags |= crate::rungs::parent_exemptions(rules, parent.map(|a| &a.rung), strong);
             }
-            if births[k].emitter == Emitter::Restart
-                || qd::arena_of_slot(slot, self.islands.len().max(arena_count())) >= island_count()
-            {
+            if births[k].emitter == Emitter::Restart {
                 flags |= crate::rungs::EXEMPT;
+            }
+            // A nursery body is exempt from the early rungs and held to the
+            // screen bar of its own kind.
+            if qd::is_reshaped_arena(arena, arenas) {
+                flags |= crate::rungs::EXEMPT | crate::rungs::RESHAPED;
+            } else if arena >= island_count() {
+                flags |= crate::rungs::EXEMPT | crate::rungs::YOUNG;
             }
             flags
         }));
@@ -2320,6 +2563,7 @@ impl Experiment {
         self.generation += 1;
         self.refine_archives();
         self.graduate_nurseries();
+        self.refresh_reshaped_scores();
         self.migrate_islands();
         let mut cfg = self.pending.take().unwrap_or_else(|| self.config.clone());
         cfg.validate()?;
@@ -2513,12 +2757,15 @@ impl Experiment {
         };
         self.island_progress.clear();
         self.graduations.clear();
+        self.reshaped_graduations.clear();
         self.last_migration = None;
         self.emitter_stats = [EmitterStats::default(); qd::EMITTER_COUNT];
         self.cma_emitters.clear();
         // Distances measured in the old world say nothing about the new one,
         // and neither do the audit rows: the rungs disarm and refit.
         self.screen_window.clear();
+        self.young_window.clear();
+        self.reshaped_window.clear();
         self.rungs.clear();
         self.config.rungs = None;
     }
@@ -3120,6 +3367,9 @@ const MAGIC: &[u8; 8] = b"EVORUST8";
 
 /// What a save holds: the archives and the search state, without the
 /// population, its scores, or anything bred for the generation in progress.
+/// It holds the islands and the nurseries of new bodies, and none of the
+/// nurseries of reshaped bodies: they refill from the bodies the islands
+/// turn away, and a save stays as small as it was.
 #[derive(Serialize)]
 struct SmallSave<'a> {
     config: &'a Config,
@@ -3128,7 +3378,7 @@ struct SmallSave<'a> {
     history: &'a [Stats],
     archive: &'a QdArchive,
     emitter_stats: &'a [EmitterStats; qd::EMITTER_COUNT],
-    cma_emitters: &'a [CmaEmitter],
+    cma_emitters: Vec<&'a CmaEmitter>,
     qd_version: u32,
     breed_round: u64,
     islands: &'a [QdArchive],
@@ -3175,8 +3425,10 @@ struct SavedLineage<'a> {
     keep: HashMap<u64, bool>,
 }
 impl<'a> SavedLineage<'a> {
-    fn of(e: &'a Experiment) -> Self {
-        let archives = || std::iter::once(&e.archive).chain(e.islands.iter());
+    /// The lineage of the global archive and of the first `held` archives
+    /// of the experiment, the ones a save holds.
+    fn of(e: &'a Experiment, held: usize) -> Self {
+        let archives = || std::iter::once(&e.archive).chain(e.islands[..held].iter());
         let mut keep: HashMap<u64, bool> = HashMap::new();
         for elite in archives().flat_map(|archive| &archive.entries) {
             keep.insert(elite.creature.id, false);
@@ -3245,6 +3497,10 @@ impl Serialize for SavedLineage<'_> {
 }
 impl<'a> SmallSave<'a> {
     fn of(e: &'a Experiment) -> Self {
+        // The archives the save holds: each island and its nursery of new
+        // bodies.
+        let held = e.islands.len().min(island_count() * 2);
+        let islands = &e.islands[..held];
         Self {
             config: &e.config,
             pending: &e.pending,
@@ -3252,11 +3508,11 @@ impl<'a> SmallSave<'a> {
             history: &e.history,
             archive: &e.archive,
             emitter_stats: &e.emitter_stats,
-            cma_emitters: &e.cma_emitters,
+            cma_emitters: e.cma_emitters.iter().filter(|c| c.island < held).collect(),
             qd_version: e.qd_version,
             breed_round: e.breed_round,
-            islands: &e.islands,
-            lineage: SavedLineage::of(e),
+            islands,
+            lineage: SavedLineage::of(e, held),
             island_progress: &e.island_progress,
             reseed: &e.reseed,
             ring: e.ring,
@@ -3283,6 +3539,15 @@ impl SmallLoad {
         e.islands = self.islands;
         e.lineage = self.lineage;
         e.island_progress = self.island_progress;
+        // A save holds each island and its nursery of new bodies, and the
+        // nurseries of reshaped bodies start empty (`SmallSave`).
+        if e.islands.len() == island_count() * 2 {
+            e.islands.resize_with(arena_count(), new_reshaped_nursery);
+            if e.island_progress.len() == island_count() * 2 {
+                e.island_progress
+                    .resize(arena_count(), (f32::NEG_INFINITY, e.generation));
+            }
+        }
         e.reseed = self.reseed;
         e.rungs = self.audit;
         ensure!(
@@ -3679,6 +3944,14 @@ pub fn load_for_population(path: &Path, population: usize) -> Result<Experiment>
 #[doc(hidden)]
 pub fn load_any_version(path: &Path) -> Result<Experiment> {
     load_from(path, None, true, None)
+}
+
+/// `load` for diagnostics that only read the archives
+/// (`examples/island_report.rs`): the ring is one block of 64 creatures, not
+/// the saved ring, so a 3M save loads in a few hundred MB.
+#[doc(hidden)]
+pub fn load_archives(path: &Path) -> Result<Experiment> {
+    load_from(path, None, false, Some(64))
 }
 
 fn load_from(

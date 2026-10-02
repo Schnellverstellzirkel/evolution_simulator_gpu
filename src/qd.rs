@@ -126,32 +126,60 @@ const OPTIMIZER_NICHE_MARKER: u8 = 254;
 pub fn island_of_slot(slot: usize, islands: usize) -> usize {
     slot % islands.max(1)
 }
-/// One slot in `NURSERY_PERIOD` of each island's slots belongs to the
-/// island's nursery.
-pub const NURSERY_PERIOD: usize = 10;
+/// Each island's slots run in cycles of `SLOT_CYCLE` rounds. In every cycle
+/// one round belongs to the island's nursery of new random bodies and two to
+/// its nursery of reshaped bodies, and the rest to the island itself: 5%, 10%
+/// and 85% of its slots.
+pub const SLOT_CYCLE: usize = 20;
 /// Generations a nursery cohort develops on its own before its survivors
 /// enter the island archive.
 pub const NURSERY_GENERATIONS: u32 = 10;
 /// Share of nursery slots that hold a fresh random body once the nursery has
 /// members. The rest breed from the nursery's own members.
 pub const NURSERY_FRESH_SHARE: f32 = 0.5;
-/// Whether `slot` belongs to its island's nursery.
+/// The kinds of archive a slot breeds for and competes in: the island, its
+/// nursery of new random bodies, and its nursery of reshaped bodies (bodies
+/// that the island turned away: new body plans of its structural and novelty
+/// children that took no cell).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arena {
+    Island,
+    Nursery,
+    Reshaped,
+}
+/// How many kinds of archive each island has.
+pub const ARENA_KINDS: usize = 3;
+/// The kind of archive that population slot `slot` breeds for, among
+/// `islands` islands.
+pub fn arena_kind_of_slot(slot: usize, islands: usize) -> Arena {
+    match (slot / islands.max(1)) % SLOT_CYCLE {
+        0 => Arena::Nursery,
+        5 | 15 => Arena::Reshaped,
+        _ => Arena::Island,
+    }
+}
+/// Whether `slot` belongs to a nursery of its island (of either kind).
 pub fn is_nursery_slot(slot: usize, islands: usize) -> bool {
-    (slot / islands.max(1)).is_multiple_of(NURSERY_PERIOD)
+    arena_kind_of_slot(slot, islands) != Arena::Island
 }
 /// The archive that population slot `slot` breeds for and competes in, among
-/// `arenas`: the islands first, then one nursery per island in the same order.
+/// `arenas`: the islands first, then one nursery of new random bodies per
+/// island in the same order, then one nursery of reshaped bodies per island.
 pub fn arena_of_slot(slot: usize, arenas: usize) -> usize {
-    if arenas < 2 {
+    if arenas < ARENA_KINDS {
         return 0;
     }
-    let islands = arenas / 2;
+    let islands = arenas / ARENA_KINDS;
     let island = slot % islands;
-    if is_nursery_slot(slot, islands) {
-        islands + island
-    } else {
-        island
+    match arena_kind_of_slot(slot, islands) {
+        Arena::Island => island,
+        Arena::Nursery => islands + island,
+        Arena::Reshaped => 2 * islands + island,
     }
+}
+/// Whether archive `arena` of `arenas` is a nursery of reshaped bodies.
+pub fn is_reshaped_arena(arena: usize, arenas: usize) -> bool {
+    arenas >= ARENA_KINDS && arena >= 2 * (arenas / ARENA_KINDS)
 }
 pub fn optimizer_niche(island: usize, cadence: u8) -> Niche {
     let b = (island as u32).to_le_bytes();
@@ -1297,6 +1325,17 @@ impl QdArchive {
         }
         self.behavior_scores = BehaviorScores::default();
         true
+    }
+    /// Whether `absorb` would keep `elite`: its cell in this archive's
+    /// layout is empty or holds a slower elite.
+    pub fn would_take(&self, elite: &Elite) -> bool {
+        if is_morphology_niche(&elite.niche) {
+            return false;
+        }
+        match self.slot_for(&self.niche_of(elite.descriptor)) {
+            Some(slot) => elite.fitness > self.entries[slot].fitness,
+            None => self.behavior_count() < ARCHIVE_LIMIT,
+        }
     }
     fn remove_morphology_topology(&mut self, topology: &Topology, behavior_fitness: f32) {
         if let Some(slot) = self.morphology_indices.iter().copied().find(|&i| {
