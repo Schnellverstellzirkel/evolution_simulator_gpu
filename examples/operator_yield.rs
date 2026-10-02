@@ -66,6 +66,24 @@ fn main() -> anyhow::Result<()> {
             pct(t[3], t[0]),
         );
     }
+    // The compound operators of `src/evolution/anatomy/compound.rs`, as one
+    // group beside all the other structural operators.
+    const COMPOUND: [&str; 13] = [
+        "limb_length_gradient",
+        "symmetrize_limb_pair",
+        "retime_gait_by_position",
+        "brace_limb_chain",
+        "phase_cluster_move",
+        "grow_integrated_limb",
+        "mirrored_limb_pair",
+        "segment_chain",
+        "reassign_bundle",
+        "transplant_limb_program",
+        "retune_limb_package",
+        "transplant_gait",
+        "trim_body",
+    ];
+    let compound = |o: u8| names.get(o as usize).is_some_and(|n| COMPOUND.contains(n));
     let all = |f: &dyn Fn(&Row) -> bool| -> [usize; 4] {
         let mut t = [0usize; 4];
         for r in children.iter().filter(|r| f(r)) {
@@ -77,6 +95,14 @@ fn main() -> anyhow::Result<()> {
         t
     };
     for (label, t) in [
+        (
+            "all compound operators",
+            all(&|r| r.operator != u8::MAX && r.emitter != RESTART && compound(r.operator)),
+        ),
+        (
+            "all other structural operators",
+            all(&|r| r.operator != u8::MAX && r.emitter != RESTART && !compound(r.operator)),
+        ),
         ("cma emitter", all(&|r| r.emitter == 0)),
         (
             "structural or novelty, no operator",

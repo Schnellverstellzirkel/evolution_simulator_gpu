@@ -13,6 +13,15 @@
 //! consecutive bones without a muscle gets a passive spring. Left to `repair`
 //! the ring would get random active muscles, and a later `repair` would add
 //! more for every pair the canonical order moves.
+//!
+//! The operators that add nodes also remove the idlest limb tips (`shed_tips`),
+//! so a body that takes such a move is no bigger afterwards. Without that, 16
+//! seeds of 30 generations grew the ring's bodies to 11.0 nodes against 8.2
+//! and lost 16% of their QD: bodies that only grow take more GPU lanes per
+//! creature and are harder to tune.
+//!
+//! A child that one of these operators made gets no parameter noise after it
+//! (`evolution::offspring`), because the move is the whole change.
 use super::controller::{active_on, driven_limbs};
 use super::extra::{PASSIVE_STIFFNESS, drive};
 use super::junctions::{
