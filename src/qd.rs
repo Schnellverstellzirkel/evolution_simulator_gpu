@@ -1,14 +1,59 @@
 use crate::evolution::{Creature, Muscle, Population, Rng};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 pub const EMITTER_COUNT: usize = 4;
-/// Archive grid: ground contact, gait cadence, vertical bounce, mean body
-/// height, and feet (distinct nodes that touched the ground). Bounce keeps a
-/// single bin: fewer cells give each one more offspring, which found faster
-/// creatures in fixed-seed tests.
-const BINS: [u8; 5] = [6, 8, 1, 6, 5];
-pub(crate) const ARCHIVE_LIMIT: usize = 6 * 8 * 6 * 5;
+/// Archive grid: ground contact, gait cadence, body shape (the start pose's
+/// width over its height), mean body height, feet (distinct nodes that
+/// touched the ground), and body size (node count).
+const BINS: [u8; 6] = [6, 8, ASPECT_BINS, 6, 5, NODE_BINS];
+/// The axes of measured and shape behavior, which local competition and
+/// novelty compare across neighboring cells. The node-count class is the
+/// last byte of a niche and only separates bodies: neighbors share it.
+const NEIGHBOR_AXES: usize = 5;
+/// Start-pose aspect classes: tall and narrow, about square, long and flat.
+const ASPECT_EDGES: [f32; 2] = [1.2, 2.5];
+const ASPECT_BINS: u8 = ASPECT_EDGES.len() as u8 + 1;
+/// Node-count classes: up to 8 nodes, 9 to 12, 13 and more.
+const NODE_EDGES: [u16; 2] = [9, 13];
+const NODE_BINS: u8 = NODE_EDGES.len() as u8 + 1;
+/// Names of the body shape classes (`ASPECT_EDGES`), tallest first, and of
+/// the body size classes (`NODE_EDGES`), smallest first.
+pub const SHAPE_NAMES: [&str; ASPECT_BINS as usize] = ["Tall", "Square", "Long"];
+pub const SIZE_NAMES: [&str; NODE_BINS as usize] = ["Small", "Medium", "Large"];
+/// What a shape class covers, for hover texts.
+pub fn shape_about(class: usize) -> String {
+    let low = class.checked_sub(1).map(|c| ASPECT_EDGES[c]);
+    match (low, ASPECT_EDGES.get(class)) {
+        (None, Some(high)) => format!("Less than {high} times as wide as tall at the start"),
+        (Some(low), Some(high)) => format!("{low} to {high} times as wide as tall at the start"),
+        (Some(low), None) => format!("At least {low} times as wide as tall at the start"),
+        (None, None) => "Every shape".to_owned(),
+    }
+}
+/// What a size class covers, for hover texts.
+pub fn size_about(class: usize) -> String {
+    let low = class.checked_sub(1).map(|c| NODE_EDGES[c]);
+    match (low, NODE_EDGES.get(class)) {
+        (None, Some(high)) => format!("Up to {} nodes", high - 1),
+        (Some(low), Some(high)) => format!("{low} to {} nodes", high - 1),
+        (Some(low), None) => format!("{low} nodes or more"),
+        (None, None) => "Every size".to_owned(),
+    }
+}
+const fn cell_count() -> usize {
+    let mut cells = 1;
+    let mut axis = 0;
+    while axis < BINS.len() {
+        cells *= BINS[axis] as usize;
+        axis += 1;
+    }
+    cells
+}
+pub(crate) const ARCHIVE_LIMIT: usize = cell_count();
+/// Cells of the movement grid alone: contact, cadence, height and feet.
+pub(crate) const MOVEMENT_CELLS: usize =
+    (BINS[0] as usize) * (BINS[1] as usize) * (BINS[3] as usize) * (BINS[4] as usize);
 pub(crate) const MORPHOLOGY_LIMIT: usize = 64;
 pub(crate) const ARCHIVE_CAPACITY: usize = ARCHIVE_LIMIT + MORPHOLOGY_LIMIT;
 pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 1 << 20;
@@ -54,8 +99,27 @@ pub(crate) const CMA_LIMIT: usize = 96;
 //     (49 is the lean muscle model).
 // 53: back to the articulated-body muscles at one substep (owner, for
 //     speed; 49 to 52 were the lean muscle model).
-pub const VERSION: u32 = 53;
+// 54: archive cells also follow body shape and size (aspect and node-count
+//     classes). A save of version 53 loads by moving each elite to its cell
+//     in the new layout.
+pub const VERSION: u32 = 54;
+/// The oldest save version that still loads. Its archives are re-binned, and
+/// its elites keep the scores they measured.
+pub const OLDEST_LOADABLE: u32 = 53;
+/// Whether a save of `version` loads in this game.
+pub fn loadable(version: u32) -> bool {
+    (OLDEST_LOADABLE..=VERSION).contains(&version)
+}
+/// How far beyond an incumbent a child's distance must reach to replace it,
+/// as a share of the incumbent's distance (at least 1 m).
+const TIE_MARGIN: f32 = 0.0;
+/// Whether a child at `candidate` replaces the elite at `incumbent`.
+pub(crate) fn beats(candidate: f32, incumbent: f32) -> bool {
+    candidate > incumbent + TIE_MARGIN * incumbent.abs().max(1.0)
+}
 const LOCAL_NEIGHBORS: usize = 5;
+/// Elites the novelty emitter weighs: the ones visited least.
+const LEAST_VISITED: usize = 32;
 const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 /// First byte of an optimizer's niche; behavior niches never reach it and
 /// morphology niches use 255.
@@ -200,13 +264,22 @@ impl Elite {
 #[serde(default)]
 pub struct QdArchive {
     pub entries: Vec<Elite>,
+    /// The slot of the elite in each behavior cell (`EMPTY_CELL` when none),
+    /// indexed by `cell_index`; empty until the first elite arrives.
     #[serde(skip)]
-    lookup: HashMap<Niche, usize>,
+    cells: Vec<u32>,
+    /// The slots of the morphology reserve, by their hashed niches.
+    #[serde(skip)]
+    reserve_lookup: HashMap<Niche, usize>,
     pub qd_score: f64,
+    /// The behavior elites visited least, as (visits, slot), fewest first.
     #[serde(skip)]
-    least_visited: BTreeSet<(u64, usize)>,
+    least_visited: Vec<(u64, usize)>,
     #[serde(skip)]
     least_visited_dirty: bool,
+    /// `Topology::plan_key` of every entry, in entry order.
+    #[serde(skip)]
+    plan_keys: Vec<u64>,
     #[serde(skip)]
     behavior_indices: Vec<usize>,
     #[serde(skip)]
@@ -216,6 +289,14 @@ pub struct QdArchive {
     /// Cells whose elite changed since the scores were last computed.
     #[serde(skip)]
     changed_cells: Vec<Niche>,
+}
+
+/// What the scores read of an elite: its behavior vector and its distance,
+/// packed apart from the big elite records.
+#[derive(Clone, Copy)]
+struct ScoreRow {
+    behavior: [f32; NEIGHBOR_AXES],
+    fitness: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -320,25 +401,33 @@ pub fn descriptor(
 
 impl Descriptor {
     pub fn niche(self) -> Niche {
-        // Only measured behavior determines archive cells. Morphology remains
-        // attached to each descriptor for display and analysis.
         let feet = (self.feet.round() as i32).clamp(1, BINS[4] as i32) as u8 - 1;
         Niche([
             bin(self.ground_contact, 0.0, 1.0, BINS[0]),
             bin(self.gait_frequency, 0.0, 6.0, BINS[1]),
-            bin(self.vertical_oscillation, 0.0, 0.8, BINS[2]),
+            ASPECT_EDGES
+                .iter()
+                .filter(|&&edge| self.aspect_ratio >= edge)
+                .count() as u8,
             bin(height_axis(self.mean_height), 0.0, 1.0, BINS[3]),
             feet,
-            0,
+            NODE_EDGES
+                .iter()
+                .filter(|&&edge| self.nodes >= edge)
+                .count() as u8,
         ])
     }
 
-    fn behavior(self) -> [f32; 5] {
+    fn behavior(self) -> [f32; NEIGHBOR_AXES] {
         [
             self.ground_contact.clamp(0.0, 1.0),
             (self.gait_frequency / 6.0).clamp(0.0, 1.0),
-            // Bounce is not an archive axis, so it adds no novelty either.
-            0.0,
+            // Shape on a log scale from 1:16 to 16:1, once it is an axis.
+            if ASPECT_BINS > 1 {
+                ((self.aspect_ratio.max(0.0625).ln() / 16f32.ln() + 1.0) * 0.5).clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
             height_axis(self.mean_height),
             ((self.feet - 1.0) / (BINS[4] as f32 - 1.0)).clamp(0.0, 1.0),
         ]
@@ -355,36 +444,24 @@ fn bin(value: f32, low: f32, high: f32, count: u8) -> u8 {
     (((value.clamp(low, high) - low) / (high - low) * count as f32).floor() as u8).min(count - 1)
 }
 
-/// Behavior niches within `radius` grid steps of `center` (itself excluded).
-fn neighbor_niches(center: &Niche, radius: i32) -> impl Iterator<Item = Niche> + '_ {
-    let side = (2 * radius + 1) as usize;
-    let total = side.pow(BINS.len() as u32);
-    (0..total).filter_map(move |mut code| {
-        let mut cell = [0u8; 6];
-        let mut moved = false;
-        for (axis, &bins) in BINS.iter().enumerate() {
-            let offset = (code % side) as i32 - radius;
-            code /= side;
-            moved |= offset != 0;
-            let value = center.0[axis] as i32 + offset;
-            if !(0..bins as i32).contains(&value) {
-                return None;
-            }
-            cell[axis] = value as u8;
-        }
-        moved.then_some(Niche(cell))
-    })
-}
-
-fn behavior_distance(a: Descriptor, b: Descriptor) -> f32 {
-    let a = a.behavior();
-    let b = b.behavior();
+fn behavior_distance(a: &[f32; NEIGHBOR_AXES], b: &[f32; NEIGHBOR_AXES]) -> f32 {
     ((0..a.len()).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>() / a.len() as f32).sqrt()
 }
 
 impl Topology {
     pub fn of(creature: &Creature) -> Self {
         topology_from_parts(&creature.nodes, &creature.bones, &creature.muscles)
+    }
+    /// A 64-bit key of the body plan: two plans share one only by a
+    /// collision of the hash. Edges are sorted, so the key does not depend
+    /// on part order.
+    pub fn plan_key(&self) -> u64 {
+        let mut key = 0x9e37_79b9_7f4a_7c15u64 ^ self.nodes as u64;
+        for &(a, b) in &self.edges {
+            key = (key.rotate_left(23) ^ (((a as u64) << 32) | b as u64))
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+        key ^ (key >> 32)
     }
 }
 
@@ -446,25 +523,108 @@ fn morphology_niche(topology: &Topology, salt: u64) -> Niche {
     ])
 }
 
+/// A slot value for a cell with no elite.
+const EMPTY_CELL: u32 = u32::MAX;
+
+/// Where a behavior niche sits in a dense table of every cell, or None for a
+/// niche outside the grid.
+fn cell_index(niche: &Niche) -> Option<usize> {
+    let mut index = 0usize;
+    for (axis, &bins) in BINS.iter().enumerate() {
+        if niche.0[axis] >= bins {
+            return None;
+        }
+        index = index * bins as usize + niche.0[axis] as usize;
+    }
+    Some(index)
+}
+
 impl QdArchive {
+    /// The slot of the elite in behavior cell `index`.
+    fn cell_slot(&self, index: usize) -> Option<usize> {
+        self.cells
+            .get(index)
+            .filter(|&&slot| slot != EMPTY_CELL)
+            .map(|&slot| slot as usize)
+    }
+    /// Files `slot` under its niche: a behavior cell or a reserve niche.
+    fn index_niche(&mut self, niche: &Niche, slot: usize) {
+        if is_morphology_niche(niche) {
+            self.reserve_lookup.insert(niche.clone(), slot);
+        } else if let Some(index) = cell_index(niche) {
+            if self.cells.is_empty() {
+                self.cells = vec![EMPTY_CELL; ARCHIVE_LIMIT];
+            }
+            self.cells[index] = slot as u32;
+        }
+    }
+    fn unindex_niche(&mut self, niche: &Niche) {
+        if is_morphology_niche(niche) {
+            self.reserve_lookup.remove(niche);
+        } else if let Some(index) = cell_index(niche)
+            && let Some(cell) = self.cells.get_mut(index)
+        {
+            *cell = EMPTY_CELL;
+        }
+    }
     pub fn rebuild_indices(&mut self) {
-        self.lookup.clear();
-        self.least_visited.clear();
+        self.cells.clear();
+        self.reserve_lookup.clear();
         self.behavior_indices.clear();
         self.morphology_indices.clear();
-        for (i, elite) in self.entries.iter_mut().enumerate() {
-            elite.topology.edges.sort_unstable();
-            self.lookup.insert(elite.niche.clone(), i);
-            self.least_visited.insert((elite.visits, i));
-            if is_morphology_niche(&elite.niche) {
+        self.plan_keys.clear();
+        for i in 0..self.entries.len() {
+            let niche = self.entries[i].niche.clone();
+            self.entries[i].topology.edges.sort_unstable();
+            self.plan_keys.push(self.entries[i].topology.plan_key());
+            self.index_niche(&niche, i);
+            if is_morphology_niche(&niche) {
                 self.morphology_indices.push(i);
             } else {
                 self.behavior_indices.push(i);
             }
         }
-        self.least_visited_dirty = false;
+        self.least_visited_dirty = true;
         self.recompute_score();
         self.refresh_behavior_scores();
+    }
+    /// Adds `elite` to a free cell (or the reserve) and files it in the
+    /// indices. Its scores wait for the next `rebuild_indices`, which a
+    /// caller that restores many elites runs once at the end.
+    pub fn push_unscored(&mut self, elite: Elite) {
+        let slot = self.entries.len();
+        self.index_niche(&elite.niche, slot);
+        self.plan_keys.push(elite.topology.plan_key());
+        if is_morphology_niche(&elite.niche) {
+            self.morphology_indices.push(slot);
+        } else {
+            self.behavior_indices.push(slot);
+        }
+        self.entries.push(elite);
+        self.least_visited_dirty = true;
+        self.behavior_scores = BehaviorScores::default();
+    }
+    /// Moves every behavior elite to the cell its descriptor gives under the
+    /// current layout, for archives saved under an older one. When two
+    /// elites meet in a cell the faster stays. Elites keep their order.
+    pub fn rebin(&mut self) {
+        let mut kept: Vec<Elite> = Vec::with_capacity(self.entries.len());
+        let mut at: HashMap<Niche, usize> = HashMap::new();
+        for mut elite in std::mem::take(&mut self.entries) {
+            if !is_morphology_niche(&elite.niche) {
+                elite.niche = elite.descriptor.niche();
+                if let Some(&slot) = at.get(&elite.niche) {
+                    if elite.fitness > kept[slot].fitness {
+                        kept[slot] = elite;
+                    }
+                    continue;
+                }
+                at.insert(elite.niche.clone(), kept.len());
+            }
+            kept.push(elite);
+        }
+        self.entries = kept;
+        self.rebuild_indices();
     }
     pub fn best_fitness(&self) -> f32 {
         self.entries
@@ -475,8 +635,16 @@ impl QdArchive {
     pub fn behavior_count(&self) -> usize {
         self.behavior_indices.len()
     }
+    /// The body plan key of the elite in `slot` (`Topology::plan_key`).
+    pub fn plan_key(&self, slot: usize) -> u64 {
+        self.plan_keys[slot]
+    }
     pub(crate) fn slot_for(&self, niche: &Niche) -> Option<usize> {
-        self.lookup.get(niche).copied()
+        if is_morphology_niche(niche) {
+            self.reserve_lookup.get(niche).copied()
+        } else {
+            cell_index(niche).and_then(|index| self.cell_slot(index))
+        }
     }
     pub fn morphology_count(&self) -> usize {
         self.morphology_indices.len()
@@ -493,8 +661,27 @@ impl QdArchive {
                 .fold(f32::INFINITY, f32::min)
         })
     }
+    /// The ways of moving the elites cover, counting cells without their
+    /// body classes: the shape and size classes split a way of moving among
+    /// bodies, and it is still one way of moving.
+    pub fn movement_count(&self) -> usize {
+        let mut seen = vec![false; MOVEMENT_CELLS];
+        let mut count = 0;
+        for &i in &self.behavior_indices {
+            let n = &self.entries[i].niche.0;
+            let cell = ((n[0] as usize * BINS[1] as usize + n[1] as usize) * BINS[3] as usize
+                + n[3] as usize)
+                * BINS[4] as usize
+                + n[4] as usize;
+            if !std::mem::replace(&mut seen[cell], true) {
+                count += 1;
+            }
+        }
+        count
+    }
+    /// The share of the ways of moving that some elite covers.
     pub fn coverage(&self) -> f32 {
-        self.behavior_count() as f32 / ARCHIVE_LIMIT as f32
+        self.movement_count() as f32 / MOVEMENT_CELLS as f32
     }
     pub fn sample_novel(&self, rng: &mut Rng, avoid: Option<usize>) -> Option<usize> {
         if self.behavior_count() == 0 {
@@ -503,12 +690,7 @@ impl QdArchive {
         let mut selected = None;
         let mut best_score = f32::NEG_INFINITY;
         let mut tied = 0usize;
-        for &(_, index) in self
-            .least_visited
-            .iter()
-            .filter(|(_, index)| !is_morphology_niche(&self.entries[*index].niche))
-            .take(32)
-        {
+        for &(_, index) in &self.least_visited {
             if Some(index) == avoid && self.behavior_count() > 1 {
                 continue;
             }
@@ -596,35 +778,85 @@ impl QdArchive {
         self.behavior_scores.novelty.len() == self.entries.len()
             && self.behavior_scores.local_competition.len() == self.entries.len()
     }
-    /// Novelty and local competition of the behavior elite at `index`, from
-    /// the elites in the cells around it.
-    fn behavior_score_of(&self, index: usize) -> (usize, f32, f32) {
-        let elite = &self.entries[index];
-        let mut neighbors: Vec<(f32, f32)> = Vec::new();
-        for radius in 1..=2 {
-            neighbors.clear();
-            for niche in neighbor_niches(&elite.niche, radius) {
-                if let Some(&slot) = self.lookup.get(&niche) {
-                    let other = &self.entries[slot];
-                    neighbors.push((
-                        behavior_distance(elite.descriptor, other.descriptor),
-                        other.fitness,
-                    ));
+    /// Calls `visit` with the slot of the elite in every filled cell within
+    /// `radius` grid steps of `center` along the five behavior axes, in the
+    /// same node-count class (the cell itself excluded).
+    fn for_each_neighbor(&self, center: &Niche, radius: i32, mut visit: impl FnMut(usize)) {
+        const _: () = assert!(NEIGHBOR_AXES == 5);
+        let Some(own) = cell_index(center) else {
+            return;
+        };
+        if self.cells.is_empty() {
+            return;
+        }
+        let range = |axis: usize| {
+            let at = center.0[axis] as i32;
+            (at - radius).max(0) as usize..=(at + radius).min(BINS[axis] as i32 - 1) as usize
+        };
+        let (b1, b2, b3, b4, b5) = (
+            BINS[1] as usize,
+            BINS[2] as usize,
+            BINS[3] as usize,
+            BINS[4] as usize,
+            BINS[5] as usize,
+        );
+        let class = center.0[NEIGHBOR_AXES] as usize;
+        for a0 in range(0) {
+            for a1 in range(1) {
+                for a2 in range(2) {
+                    for a3 in range(3) {
+                        for a4 in range(4) {
+                            let index =
+                                ((((a0 * b1 + a1) * b2 + a2) * b3 + a3) * b4 + a4) * b5 + class;
+                            if index != own {
+                                let slot = self.cells[index];
+                                if slot != EMPTY_CELL {
+                                    visit(slot as usize);
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            if neighbors.len() >= LOCAL_NEIGHBORS {
+        }
+    }
+    /// Novelty and local competition of the behavior elite at `index`, from
+    /// the elites in the cells around it. `rows` holds every elite's
+    /// behavior vector and distance.
+    fn behavior_score_of(&self, index: usize, rows: &[ScoreRow]) -> (usize, f32, f32) {
+        // The nearest `LOCAL_NEIGHBORS` neighbors, closest first, as
+        // (distance, fitness), and how many neighbors there were.
+        let mut nearest = [(f32::INFINITY, 0.0f32); LOCAL_NEIGHBORS];
+        let mut found = 0usize;
+        let own = &rows[index];
+        for radius in 1..=2 {
+            nearest.fill((f32::INFINITY, 0.0));
+            found = 0;
+            self.for_each_neighbor(&self.entries[index].niche, radius, |slot| {
+                found += 1;
+                let other = &rows[slot];
+                let distance = behavior_distance(&own.behavior, &other.behavior);
+                if distance < nearest[LOCAL_NEIGHBORS - 1].0 {
+                    let mut at = LOCAL_NEIGHBORS - 1;
+                    while at > 0 && nearest[at - 1].0 > distance {
+                        nearest[at] = nearest[at - 1];
+                        at -= 1;
+                    }
+                    nearest[at] = (distance, other.fitness);
+                }
+            });
+            if found >= LOCAL_NEIGHBORS {
                 break;
             }
         }
-        if neighbors.is_empty() {
+        if found == 0 {
             return (index, 1.0, 1.0);
         }
-        neighbors.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-        let nearest = &neighbors[..LOCAL_NEIGHBORS.min(neighbors.len())];
+        let nearest = &nearest[..LOCAL_NEIGHBORS.min(found)];
         let novelty = nearest.iter().map(|(d, _)| *d).sum::<f32>() / nearest.len() as f32;
         let local = nearest
             .iter()
-            .map(|(_, f)| match elite.fitness.total_cmp(f) {
+            .map(|(_, f)| match own.fitness.total_cmp(f) {
                 std::cmp::Ordering::Greater => 1.0,
                 std::cmp::Ordering::Equal => 0.5,
                 std::cmp::Ordering::Less => 0.0,
@@ -663,17 +895,26 @@ impl QdArchive {
                 .filter(|&i| {
                     let niche = &self.entries[i].niche;
                     changed.iter().any(|c| {
-                        (0..BINS.len())
-                            .all(|axis| (niche.0[axis] as i32 - c.0[axis] as i32).abs() <= 2)
+                        niche.0[NEIGHBOR_AXES] == c.0[NEIGHBOR_AXES]
+                            && (0..NEIGHBOR_AXES)
+                                .all(|axis| (niche.0[axis] as i32 - c.0[axis] as i32).abs() <= 2)
                     })
                 })
                 .collect()
         } else {
             self.behavior_indices.clone()
         };
+        let rows: Vec<ScoreRow> = self
+            .entries
+            .par_iter()
+            .map(|elite| ScoreRow {
+                behavior: elite.descriptor.behavior(),
+                fitness: elite.fitness,
+            })
+            .collect();
         let scores: Vec<(usize, f32, f32)> = indices
             .par_iter()
-            .map(|&index| self.behavior_score_of(index))
+            .map(|&index| self.behavior_score_of(index, &rows))
             .collect();
         let (mut novelty, mut local_competition) = if partial {
             (
@@ -703,10 +944,19 @@ impl QdArchive {
         if !self.least_visited_dirty {
             return;
         }
-        self.least_visited.clear();
-        for (index, elite) in self.entries.iter().enumerate() {
-            self.least_visited.insert((elite.visits, index));
+        // The 32 behavior elites with the fewest visits, the lower slot first
+        // on a tie.
+        let mut all: Vec<(u64, usize)> = self
+            .behavior_indices
+            .iter()
+            .map(|&index| (self.entries[index].visits, index))
+            .collect();
+        if all.len() > LEAST_VISITED {
+            all.select_nth_unstable(LEAST_VISITED - 1);
+            all.truncate(LEAST_VISITED);
         }
+        all.sort_unstable();
+        self.least_visited = all;
         self.least_visited_dirty = false;
     }
     #[allow(clippy::too_many_arguments)]
@@ -725,9 +975,9 @@ impl QdArchive {
             return Offer::default();
         }
         let niche = descriptor.niche();
-        if let Some(&slot) = self.lookup.get(&niche) {
+        if let Some(slot) = self.slot_for(&niche) {
             let current = &self.entries[slot];
-            if fitness <= current.fitness {
+            if !beats(fitness, current.fitness) {
                 return Offer::default();
             }
             let candidate_topology = topology_of_population(population, index);
@@ -753,6 +1003,7 @@ impl QdArchive {
                 graduate: false,
                 fine,
             };
+            self.plan_keys[slot] = candidate_topology.plan_key();
             self.qd_score += fitness.max(0.0) as f64 - previous_fitness.max(0.0) as f64;
             self.note_changed_cell(self.entries[slot].niche.clone());
             self.remove_morphology_topology(&candidate_topology, fitness);
@@ -770,6 +1021,7 @@ impl QdArchive {
         let local_competition = self.local_competition_for(&niche, fitness);
         let topology = topology_of_population(population, index);
         self.qd_score += fitness.max(0.0) as f64;
+        self.plan_keys.push(topology.plan_key());
         self.entries.push(Elite {
             niche: niche.clone(),
             descriptor,
@@ -784,8 +1036,8 @@ impl QdArchive {
             fine,
         });
         let slot = self.entries.len() - 1;
-        self.lookup.insert(niche, slot);
-        self.least_visited.insert((0, slot));
+        self.index_niche(&niche, slot);
+        self.least_visited_dirty = true;
         self.behavior_indices.push(slot);
         self.note_changed_cell(self.entries[slot].niche.clone());
         self.remove_morphology_topology(&topology, fitness);
@@ -812,20 +1064,21 @@ impl QdArchive {
             return Offer::default();
         }
         let behavior_best = self
-            .entries
+            .behavior_indices
             .iter()
-            .filter(|elite| {
-                !is_morphology_niche(&elite.niche)
-                    && topology_equivalent(&topology, &elite.topology)
-            })
+            .map(|&i| &self.entries[i])
+            .filter(|elite| topology_equivalent(&topology, &elite.topology))
             .map(|elite| elite.fitness)
             .max_by(f32::total_cmp);
         if behavior_best.is_some_and(|best| fitness <= best) {
             return Offer::default();
         }
-        if let Some(slot) = self.entries.iter().position(|elite| {
-            is_morphology_niche(&elite.niche) && topology_equivalent(&topology, &elite.topology)
-        }) {
+        if let Some(slot) = self
+            .morphology_indices
+            .iter()
+            .copied()
+            .find(|&i| topology_equivalent(&topology, &self.entries[i].topology))
+        {
             let current = &self.entries[slot];
             if fitness <= current.fitness {
                 return Offer::default();
@@ -857,12 +1110,10 @@ impl QdArchive {
 
         if self.morphology_count() >= MORPHOLOGY_LIMIT {
             let victim = self
-                .entries
+                .morphology_indices
                 .iter()
-                .enumerate()
-                .filter(|(_, elite)| {
-                    is_morphology_niche(&elite.niche) && elite.visits >= MIN_MORPHOLOGY_DESCENDANTS
-                })
+                .map(|&i| (i, &self.entries[i]))
+                .filter(|(_, elite)| elite.visits >= MIN_MORPHOLOGY_DESCENDANTS)
                 .min_by(|(_, a), (_, b)| a.fitness.total_cmp(&b.fitness));
             let Some((slot, elite)) = victim else {
                 return Offer::default();
@@ -875,7 +1126,7 @@ impl QdArchive {
         let mut salt = 0u64;
         let niche = loop {
             let candidate = morphology_niche(&topology, salt);
-            match self.lookup.get(&candidate).copied() {
+            match self.reserve_lookup.get(&candidate).copied() {
                 None => break candidate,
                 Some(slot) if topology_equivalent(&topology, &self.entries[slot].topology) => {
                     return Offer::default();
@@ -896,10 +1147,10 @@ impl QdArchive {
             graduate: false,
             fine,
         };
+        self.plan_keys.push(elite.topology.plan_key());
         self.entries.push(elite);
         let slot = self.entries.len() - 1;
-        self.lookup.insert(niche, slot);
-        self.least_visited.insert((0, slot));
+        self.index_niche(&niche, slot);
         self.morphology_indices.push(slot);
         Offer {
             inserted: true,
@@ -913,9 +1164,9 @@ impl QdArchive {
         if is_morphology_niche(&elite.niche) {
             return false;
         }
-        if let Some(&slot) = self.lookup.get(&elite.niche) {
+        if let Some(slot) = self.slot_for(&elite.niche) {
             let current = &self.entries[slot];
-            if elite.fitness <= current.fitness {
+            if !beats(elite.fitness, current.fitness) {
                 return false;
             }
             self.qd_score += elite.fitness.max(0.0) as f64 - current.fitness.max(0.0) as f64;
@@ -924,37 +1175,39 @@ impl QdArchive {
                 visits,
                 ..elite.clone()
             };
+            self.plan_keys[slot] = elite.topology.plan_key();
         } else {
             if self.behavior_count() >= ARCHIVE_LIMIT {
                 return false;
             }
             self.qd_score += elite.fitness.max(0.0) as f64;
+            self.plan_keys.push(elite.topology.plan_key());
             self.entries.push(Elite {
                 visits: 0,
                 ..elite.clone()
             });
             let slot = self.entries.len() - 1;
-            self.lookup.insert(elite.niche.clone(), slot);
-            self.least_visited.insert((0, slot));
+            self.index_niche(&elite.niche, slot);
+            self.least_visited_dirty = true;
             self.behavior_indices.push(slot);
         }
         self.behavior_scores = BehaviorScores::default();
         true
     }
     fn remove_morphology_topology(&mut self, topology: &Topology, behavior_fitness: f32) {
-        if let Some(slot) = self.entries.iter().position(|elite| {
-            is_morphology_niche(&elite.niche)
-                && elite.fitness <= behavior_fitness
-                && topology_equivalent(topology, &elite.topology)
+        if let Some(slot) = self.morphology_indices.iter().copied().find(|&i| {
+            let elite = &self.entries[i];
+            elite.fitness <= behavior_fitness && topology_equivalent(topology, &elite.topology)
         }) {
             self.remove_entry(slot);
         }
     }
     fn remove_entry(&mut self, slot: usize) {
         let last = self.entries.len() - 1;
+        self.least_visited_dirty = true;
+        let removed_niche = self.entries[slot].niche.clone();
+        self.unindex_niche(&removed_niche);
         let removed = &self.entries[slot];
-        self.lookup.remove(&removed.niche);
-        self.least_visited.remove(&(removed.visits, slot));
         let removed_is_morphology = is_morphology_niche(&removed.niche);
         let indices = if removed_is_morphology {
             &mut self.morphology_indices
@@ -966,13 +1219,11 @@ impl QdArchive {
         }
         if slot != last {
             let moved = &self.entries[last];
-            self.least_visited.remove(&(moved.visits, last));
             let moved_niche = moved.niche.clone();
-            let moved_visits = moved.visits;
             let moved_is_morphology = is_morphology_niche(&moved.niche);
             self.entries.swap_remove(slot);
-            self.lookup.insert(moved_niche, slot);
-            self.least_visited.insert((moved_visits, slot));
+            self.plan_keys.swap_remove(slot);
+            self.index_niche(&moved_niche, slot);
             let indices = if moved_is_morphology {
                 &mut self.morphology_indices
             } else {
@@ -983,23 +1234,38 @@ impl QdArchive {
             }
         } else {
             self.entries.pop();
+            self.plan_keys.pop();
         }
-        self.behavior_scores = BehaviorScores::default();
+        if removed_is_morphology && self.scores_current_before_removal(last + 1) {
+            // A reserve entry takes no behavior cell, so no behavior score
+            // changes; the scores follow the entry that moved into its place.
+            if slot != last {
+                self.behavior_scores.novelty.swap_remove(slot);
+                self.behavior_scores.local_competition.swap_remove(slot);
+            } else {
+                self.behavior_scores.novelty.pop();
+                self.behavior_scores.local_competition.pop();
+            }
+        } else {
+            self.behavior_scores = BehaviorScores::default();
+        }
+    }
+    /// Whether the cached scores covered `entries` entries.
+    fn scores_current_before_removal(&self, entries: usize) -> bool {
+        self.behavior_scores.novelty.len() == entries
+            && self.behavior_scores.local_competition.len() == entries
     }
     fn local_competition_for(&self, niche: &Niche, fitness: f32) -> f32 {
         let mut compared = 0usize;
         let mut wins = 0.0f32;
-        for neighbor in neighbor_niches(niche, 1) {
-            let Some(&slot) = self.lookup.get(&neighbor) else {
-                continue;
-            };
+        self.for_each_neighbor(niche, 1, |slot| {
             compared += 1;
             wins += match fitness.total_cmp(&self.entries[slot].fitness) {
                 std::cmp::Ordering::Greater => 1.0,
                 std::cmp::Ordering::Equal => 0.5,
                 std::cmp::Ordering::Less => 0.0,
             };
-        }
+        });
         if compared == 0 {
             0.5
         } else {
@@ -1786,6 +2052,63 @@ mod tests {
             );
         }
         assert!(archive.behavior_count() > 20);
+    }
+
+    #[test]
+    fn rebinning_moves_each_elite_to_its_cell_and_keeps_the_faster_of_a_shared_one() {
+        use super::{Descriptor, Elite, Emitter, QdArchive, Topology};
+        let elite = |fitness: f32, nodes: u16, cadence: f32, niche: [u8; 6]| Elite {
+            niche: Niche(niche),
+            descriptor: Descriptor {
+                ground_contact: 0.5,
+                gait_frequency: cadence,
+                mean_height: 0.5,
+                feet: 2.0,
+                aspect_ratio: 1.5,
+                nodes,
+                ..Descriptor::default()
+            },
+            creature: Default::default(),
+            fitness,
+            emitter: Emitter::Cma,
+            improved_generation: 0,
+            protected_until: 0,
+            visits: 3,
+            topology: Topology::default(),
+            graduate: false,
+            fine: false,
+        };
+        let mut archive = QdArchive::default();
+        // As an older layout kept them: no shape or size class in the niche.
+        let old = [3, 1, 0, 3, 1, 0];
+        archive.entries = vec![
+            elite(5.0, 6, 1.0, old),
+            // Another way of moving.
+            elite(7.0, 6, 2.0, [3, 2, 0, 3, 1, 0]),
+        ];
+        archive.rebin();
+        assert_eq!(archive.behavior_count(), 2);
+        for e in &archive.entries {
+            assert_eq!(e.niche, e.descriptor.niche());
+            assert_eq!(
+                archive
+                    .slot_for(&e.niche)
+                    .map(|s| archive.entries[s].fitness),
+                Some(e.fitness)
+            );
+        }
+        assert_eq!(archive.qd_score, 12.0);
+        // Two elites that land in one cell under the new layout: the faster stays.
+        let mut archive = QdArchive::default();
+        archive.entries = vec![
+            elite(4.0, 6, 1.0, old),
+            elite(9.0, 7, 1.0, [3, 1, 1, 3, 1, 0]),
+        ];
+        archive.rebin();
+        assert_eq!(archive.behavior_count(), 1);
+        assert_eq!(archive.entries[0].fitness, 9.0);
+        assert_eq!(archive.entries[0].visits, 3);
+        assert_eq!(archive.movement_count(), 1);
     }
 
     #[test]

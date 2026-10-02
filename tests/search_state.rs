@@ -231,6 +231,56 @@ fn behavior_archive_keeps_exactly_the_fastest_creature_in_each_cell() {
 }
 
 #[test]
+fn bodies_of_other_shapes_and_sizes_keep_cells_of_their_own() {
+    let population = evolution::create(&config(38)).unwrap();
+    // One way of moving, offered by bodies of every shape and size.
+    let way = |nodes: u16, aspect_ratio: f32| Descriptor {
+        ground_contact: 0.5,
+        gait_frequency: 1.0,
+        mean_height: 0.5,
+        feet: 2.0,
+        nodes,
+        aspect_ratio,
+        ..Descriptor::default()
+    };
+    let bodies = [
+        (5, 0.6),
+        (5, 1.8),
+        (5, 4.0),
+        (10, 0.6),
+        (10, 1.8),
+        (10, 4.0),
+        (20, 0.6),
+        (20, 1.8),
+        (20, 4.0),
+    ];
+    let mut archive = QdArchive::default();
+    for (round, fitness) in [3.0, 1.0, 5.0].into_iter().enumerate() {
+        for (k, &(nodes, aspect)) in bodies.iter().enumerate() {
+            archive.offer(
+                &population,
+                round * bodies.len() + k,
+                way(nodes, aspect),
+                fitness,
+                false,
+                Emitter::Structural,
+                round as u32,
+                0,
+            );
+        }
+    }
+    // Nine body classes share the way of moving, and each keeps its fastest.
+    assert_eq!(archive.behavior_count(), bodies.len());
+    assert_eq!(archive.movement_count(), 1);
+    assert!(archive.entries.iter().all(|elite| elite.fitness == 5.0));
+    // Bodies of one class compete for its cell, whatever their exact size.
+    let before = archive.entries.len();
+    let rival = archive.offer(&population, 0, way(6, 0.5), 9.0, false, Emitter::Cma, 3, 0);
+    assert!(rival.inserted && !rival.new_niche);
+    assert_eq!(archive.entries.len(), before);
+}
+
+#[test]
 fn island_migration_never_duplicates_a_cell_or_replaces_a_faster_elite() {
     let population = evolution::create(&config(38)).unwrap();
     let mut source = QdArchive::default();
@@ -610,11 +660,89 @@ fn checkpoint_rejects_invalid_optimizer_resume_metadata() {
 #[test]
 fn a_save_from_other_physics_is_turned_down() {
     let mut experiment = Experiment::new(config(38)).unwrap();
-    experiment.qd_version -= 1;
+    experiment.qd_version = evolution_simulator::qd::OLDEST_LOADABLE - 1;
     let checkpoint = Checkpoint::new("old-physics");
     storage::save(&checkpoint.0, &experiment).unwrap();
     let error = storage::load(&checkpoint.0).err().unwrap().to_string();
     assert!(error.contains("physics version"), "{error}");
+}
+
+#[test]
+fn a_save_from_the_previous_cell_layout_loads_with_every_elite_in_its_new_cell() {
+    let mut experiment = Experiment::new(config(38)).unwrap();
+    for _ in 0..3 {
+        run_synthetic(&mut experiment);
+    }
+    // As the previous version saved them: the niche has no shape or size
+    // class, and the global archive and every island hold one elite per cell.
+    let old_layout = |archive: &mut QdArchive| {
+        let mut seen = std::collections::HashSet::new();
+        archive.entries.retain_mut(|elite| {
+            if evolution_simulator::qd::is_morphology_niche(&elite.niche) {
+                return true;
+            }
+            elite.niche.0[2] = 0;
+            elite.niche.0[5] = 0;
+            seen.insert(elite.niche.clone())
+        });
+        archive.rebuild_indices();
+    };
+    old_layout(&mut experiment.archive);
+    for island in &mut experiment.islands {
+        old_layout(island);
+    }
+    let elites = experiment.archive.entries.len();
+    assert!(elites > 1);
+    experiment.qd_version = evolution_simulator::qd::OLDEST_LOADABLE;
+    let checkpoint = Checkpoint::new("previous-layout");
+    storage::save(&checkpoint.0, &experiment).unwrap();
+    assert!(storage::check(&checkpoint.0).is_ok());
+    let restored = storage::load(&checkpoint.0).unwrap();
+    assert_eq!(restored.qd_version, evolution_simulator::qd::VERSION);
+    assert_eq!(restored.archive.entries.len(), elites);
+    for archive in std::iter::once(&restored.archive).chain(&restored.islands) {
+        for elite in &archive.entries {
+            if !evolution_simulator::qd::is_morphology_niche(&elite.niche) {
+                assert_eq!(elite.niche, elite.descriptor.niche());
+            }
+        }
+    }
+    restored.validate().unwrap();
+}
+
+#[test]
+fn a_save_keeps_the_ancestors_of_the_global_archive_and_every_elites_record() {
+    let mut experiment = Experiment::new(config(38)).unwrap();
+    for _ in 0..6 {
+        run_synthetic(&mut experiment);
+    }
+    let checkpoint = Checkpoint::new("lineage");
+    storage::save(&checkpoint.0, &experiment).unwrap();
+    let restored = storage::load(&checkpoint.0).unwrap();
+    let mut chains = 0;
+    let archives = std::iter::once(&experiment.archive).chain(&experiment.islands);
+    for elite in archives.flat_map(|archive| &archive.entries) {
+        // Every living elite has its record back, creature included.
+        let record = restored.lineage.get(&elite.creature.id).unwrap();
+        assert_eq!(record.creature.nodes, elite.creature.nodes);
+        assert_eq!(record.creature.muscles, elite.creature.muscles);
+        let before = experiment.lineage.get(&elite.creature.id).unwrap();
+        assert_eq!(record.fitness, before.fitness);
+        assert_eq!(record.rung, before.rung);
+    }
+    // The global archive's elites keep the whole chain of their ancestors.
+    for elite in &experiment.archive.entries {
+        let before = experiment.ancestry(elite.creature.id, usize::MAX);
+        let after = restored.ancestry(elite.creature.id, usize::MAX);
+        assert_eq!(before.len(), after.len());
+        for (a, b) in before.iter().zip(&after) {
+            assert_eq!(a.creature.nodes, b.creature.nodes);
+            assert_eq!(a.change, b.change);
+        }
+        chains += before.len();
+    }
+    assert!(chains > experiment.archive.entries.len());
+    assert!(restored.lineage.len() <= experiment.lineage.len());
 }
 
 #[test]

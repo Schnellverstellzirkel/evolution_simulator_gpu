@@ -250,12 +250,22 @@ pub struct Stats {
     pub archive_cells: usize,
     #[serde(default)]
     pub qd_score: f64,
+    /// The share of the ways of moving (cells without their body classes)
+    /// that an elite covers: `Stats::moves` counts them.
     #[serde(default)]
     pub archive_coverage: f32,
     #[serde(default)]
     pub emitters: [EmitterStats; qd::EMITTER_COUNT],
     /// The ring the generation ran with.
     pub ring: RingShape,
+}
+impl Stats {
+    /// The ways of moving the archive covered: its cells, counted without
+    /// the body classes. A history saved before the classes held one elite
+    /// per way of moving, so its cells are the same count.
+    pub fn moves(&self) -> usize {
+        (self.archive_coverage * qd::MOVEMENT_CELLS as f32).round() as usize
+    }
 }
 /// How a creature in the ring was bred.
 #[derive(Clone, Copy, Debug)]
@@ -533,6 +543,8 @@ const CROSS_PLAN_MATE_SHARE: f32 = 0.15;
 /// Share of those top-elite CMA offspring bred by an island optimizer
 /// (separable CMA-ES in physical units) on one of its fastest designs.
 const OPTIMIZER_SHARE: f32 = 0.5;
+/// How many of an island's fastest elites the breeding plan ranks.
+const FASTEST_ELITES: usize = 512;
 /// Generations between migrations to the hub, and the share of each
 /// isolated island's elites copied to it.
 pub const MIGRATION_INTERVAL: u32 = 25;
@@ -1021,8 +1033,9 @@ impl Experiment {
             protection: u32,
             behavior_candidate: bool,
             /// Body plan of a structural or novelty child, for its island's
-            /// morphology reserve.
+            /// morphology reserve, and its key.
             topology: Option<qd::Topology>,
+            plan: u64,
             /// Offered to no archive.
             screened: bool,
             /// Fitness of the global archive's elite in this creature's
@@ -1051,7 +1064,7 @@ impl Experiment {
                 let behavior_candidate = if valid && !nursery {
                     let niche = descriptor.niche();
                     match self.archive.slot_for(&niche) {
-                        Some(slot) => score > self.archive.entries[slot].fitness,
+                        Some(slot) => qd::beats(score, self.archive.entries[slot].fitness),
                         None => self.archive.behavior_count() < qd::ARCHIVE_LIMIT,
                     }
                 } else {
@@ -1059,6 +1072,7 @@ impl Experiment {
                 };
                 let topology = (valid && matches!(emitter, Emitter::Structural | Emitter::Novelty))
                     .then(|| qd::topology_of_population(population, j));
+                let plan = topology.as_ref().map_or(0, qd::Topology::plan_key);
                 let elite_before = (emitter == Emitter::Cma)
                     .then_some(birth.cma)
                     .flatten()
@@ -1073,6 +1087,7 @@ impl Experiment {
                     protection: birth.protection,
                     behavior_candidate,
                     topology,
+                    plan,
                     screened,
                     elite_before,
                 }
@@ -1101,13 +1116,13 @@ impl Experiment {
                 // behavior elite and reserve entry of the same body plan, or
                 // above the reserve's floor once it is full
                 // (`QdArchive::offer_morphology` makes the final check).
-                let mut parents: HashMap<u64, (qd::Topology, bool)> = HashMap::new();
-                let mut bars: HashMap<qd::Topology, (f32, f32)> = HashMap::new();
-                for elite in &archive.entries {
+                let mut parents: HashMap<u64, (u64, bool)> = HashMap::new();
+                let mut bars: HashMap<u64, (f32, f32)> = HashMap::new();
+                for (slot, elite) in archive.entries.iter().enumerate() {
                     let morphology = qd::is_morphology_niche(&elite.niche);
-                    parents.insert(elite.creature.id, (elite.topology.clone(), morphology));
+                    parents.insert(elite.creature.id, (archive.plan_key(slot), morphology));
                     let bar = bars
-                        .entry(elite.topology.clone())
+                        .entry(archive.plan_key(slot))
                         .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
                     if morphology {
                         bar.1 = bar.1.max(elite.fitness);
@@ -1134,9 +1149,9 @@ impl Experiment {
                     );
                     if behavior.inserted {
                         entered.push(j);
-                        if let Some(topology) = &p.topology {
+                        if p.topology.is_some() {
                             let bar = bars
-                                .entry(topology.clone())
+                                .entry(p.plan)
                                 .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
                             bar.0 = bar.0.max(p.score);
                         }
@@ -1148,17 +1163,14 @@ impl Experiment {
                     // A reserve place goes to a new body plan, or to a better
                     // child of a reserve entry with the same plan.
                     let parent = births[j].parent_id.and_then(|id| parents.get(&id));
-                    let changed = parent.is_some_and(|(plan, _)| {
-                        !qd::topology_equivalent_for_archive(topology, plan)
-                    });
-                    let from_reserve = parent.is_some_and(|(plan, morphology)| {
-                        *morphology && qd::topology_equivalent_for_archive(topology, plan)
-                    });
+                    let changed = parent.is_some_and(|&(plan, _)| plan != p.plan);
+                    let from_reserve =
+                        parent.is_some_and(|&(plan, morphology)| morphology && plan == p.plan);
                     if !(changed || from_reserve) {
                         continue;
                     }
                     let floor = archive.morphology_floor();
-                    let admits = match bars.get(topology) {
+                    let admits = match bars.get(&p.plan) {
                         Some(&(behavior, reserve)) if reserve > f32::NEG_INFINITY => {
                             p.score > behavior && p.score > reserve
                         }
@@ -1185,7 +1197,7 @@ impl Experiment {
                         entered.push(j);
                         reserve_entered.push(j);
                         let bar = bars
-                            .entry(topology.clone())
+                            .entry(p.plan)
                             .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
                         bar.1 = bar.1.max(p.score);
                         reserve_offers.push((p.emitter.index(), offer));
@@ -1663,41 +1675,36 @@ impl Experiment {
             island.ensure_least_visited();
         }
         let weights = qd::emitter_weights(&self.emitter_stats);
-        let mut reset_cma = HashMap::<(usize, qd::Niche, qd::Topology), usize>::new();
+        let mut reset_cma = HashMap::<(usize, qd::Niche, u64), usize>::new();
         // CMA slot lookup keyed by (island, niche, body plan): an emitter
         // samples around one island's elite, so it serves only that island.
         // The bucket stores the full key, so the per-offspring probe hashes
         // and compares without cloning the topology vector; clones are only
         // paid when a slot is created or replaced.
-        type CmaKey = (usize, qd::Niche, qd::Topology);
+        type CmaKey = (usize, qd::Niche, u64);
         struct CmaLookup {
             buckets: HashMap<u64, Vec<(CmaKey, usize)>>,
         }
         impl CmaLookup {
-            fn hash(island: usize, niche: &qd::Niche, topology: &qd::Topology) -> u64 {
+            fn hash(island: usize, niche: &qd::Niche, plan: u64) -> u64 {
                 use std::hash::{Hash, Hasher};
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 island.hash(&mut hasher);
                 niche.hash(&mut hasher);
-                topology.hash(&mut hasher);
+                plan.hash(&mut hasher);
                 hasher.finish()
             }
-            fn get(
-                &self,
-                island: usize,
-                niche: &qd::Niche,
-                topology: &qd::Topology,
-            ) -> Option<usize> {
+            fn get(&self, island: usize, niche: &qd::Niche, plan: u64) -> Option<usize> {
                 self.buckets
-                    .get(&Self::hash(island, niche, topology))?
+                    .get(&Self::hash(island, niche, plan))?
                     .iter()
-                    .find(|((i, n, t), _)| *i == island && n == niche && t == topology)
+                    .find(|((i, n, t), _)| *i == island && n == niche && *t == plan)
                     .map(|(_, index)| *index)
             }
             fn insert(&mut self, key: CmaKey, index: usize) {
                 let bucket = self
                     .buckets
-                    .entry(Self::hash(key.0, &key.1, &key.2))
+                    .entry(Self::hash(key.0, &key.1, key.2))
                     .or_default();
                 if let Some(entry) = bucket.iter_mut().find(|(stored, _)| *stored == key) {
                     entry.1 = index;
@@ -1705,19 +1712,13 @@ impl Experiment {
                     bucket.push((key, index));
                 }
             }
-            fn remove(
-                &mut self,
-                island: usize,
-                niche: &qd::Niche,
-                topology: &qd::Topology,
-                index: usize,
-            ) {
-                let hash = Self::hash(island, niche, topology);
+            fn remove(&mut self, island: usize, niche: &qd::Niche, plan: u64, index: usize) {
+                let hash = Self::hash(island, niche, plan);
                 let Some(bucket) = self.buckets.get_mut(&hash) else {
                     return;
                 };
                 bucket.retain(|((i, n, t), stored_index)| {
-                    !(*i == island && n == niche && t == topology && *stored_index == index)
+                    !(*i == island && n == niche && *t == plan && *stored_index == index)
                 });
                 if bucket.is_empty() {
                     self.buckets.remove(&hash);
@@ -1728,7 +1729,10 @@ impl Experiment {
             buckets: HashMap::new(),
         };
         for (index, cma) in self.cma_emitters.iter().enumerate() {
-            cma_lookup.insert((cma.island, cma.niche.clone(), cma.topology.clone()), index);
+            cma_lookup.insert(
+                (cma.island, cma.niche.clone(), cma.topology.plan_key()),
+                index,
+            );
         }
         let mut used_cma = vec![false; self.cma_emitters.len()];
         let mut out = Vec::with_capacity(slots.len());
@@ -1747,18 +1751,26 @@ impl Experiment {
             /// A fast elite whose design's optimizer breeds this offspring.
             optimize: bool,
         }
-        // Each island's elites grouped by body plan, for crossover partners.
-        let by_plan: Vec<HashMap<&qd::Topology, Vec<usize>>> = self
+        // Each island's elites by body plan key, grouped for crossover
+        // partners: (key, slot) sorted, so a plan's elites are one run.
+        let by_plan: Vec<Vec<(u64, u32)>> = self
             .islands
             .iter()
             .map(|island| {
-                let mut groups: HashMap<&qd::Topology, Vec<usize>> = HashMap::new();
-                for (index, elite) in island.entries.iter().enumerate() {
-                    groups.entry(&elite.topology).or_default().push(index);
-                }
-                groups
+                let mut keyed: Vec<(u64, u32)> = (0..island.entries.len())
+                    .map(|slot| (island.plan_key(slot), slot as u32))
+                    .collect();
+                keyed.sort_unstable();
+                keyed
             })
             .collect();
+        // The elites of `island` that share the body plan `key`.
+        let same_plan = |island: usize, key: u64| -> &[(u64, u32)] {
+            let keyed = &by_plan[island];
+            let first = keyed.partition_point(|&(k, _)| k < key);
+            let len = keyed[first..].partition_point(|&(k, _)| k == key);
+            &keyed[first..first + len]
+        };
         plan_times[0] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
         let seed = cfg.seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15);
@@ -1771,18 +1783,30 @@ impl Experiment {
                 let mut order: Vec<usize> = (0..island.entries.len())
                     .filter(|&i| !qd::is_morphology_niche(&island.entries[i].niche))
                     .collect();
-                order.sort_by(|&a, &b| {
+                // The exploitation pool and the optimizer targets only read
+                // the fastest few hundred.
+                let faster = |&a: &usize, &b: &usize| {
                     island.entries[b]
                         .fitness
                         .total_cmp(&island.entries[a].fitness)
-                });
+                        .then(a.cmp(&b))
+                };
+                if order.len() > FASTEST_ELITES {
+                    order.select_nth_unstable_by(FASTEST_ELITES - 1, faster);
+                    order.truncate(FASTEST_ELITES);
+                }
+                order.sort_unstable_by(faster);
                 order
             })
             .collect();
-        // Each island's fastest 1% of elites (at least 4), for exploitation.
+        // Each island's fastest elites, for exploitation: 1% of the movement
+        // grid (at least 4), however many body classes the archive holds.
         let top_parents: Vec<Vec<usize>> = orders
             .iter()
-            .map(|order| order[..(order.len() / 100).max(4).min(order.len())].to_vec())
+            .map(|order| {
+                let count = (order.len().min(qd::MOVEMENT_CELLS) / 100).max(4);
+                order[..count.min(order.len())].to_vec()
+            })
             .collect();
         // An island's optimizer works on its fastest design: a body plan with
         // a gait cadence band. When the island has not set a record for a
@@ -1876,10 +1900,9 @@ impl Experiment {
                     (Emitter::Structural | Emitter::Novelty, Some(p))
                         if !from_reserve && rng.unit() < 0.2 =>
                     {
-                        by_plan[island]
-                            .get(&archive.entries[p].topology)
+                        Some(same_plan(island, archive.plan_key(p)))
                             .filter(|group| group.len() > 1)
-                            .map(|group| group[rng.index(group.len())])
+                            .map(|group| group[rng.index(group.len())].1 as usize)
                             .filter(|&m| m != p)
                     }
                     _ => None,
@@ -1891,8 +1914,7 @@ impl Experiment {
                         if !from_reserve && rng.unit() < CROSS_PLAN_MATE_SHARE =>
                     {
                         let other = rng.index(archive.entries.len());
-                        (other != p
-                            && archive.entries[other].topology != archive.entries[p].topology)
+                        (other != p && archive.plan_key(other) != archive.plan_key(p))
                             .then_some(other)
                     }
                     _ => None,
@@ -1926,7 +1948,7 @@ impl Experiment {
                 if let Some(parent_index) = parent {
                     let elite = &self.islands[island].entries[parent_index];
                     let template = &elite.creature;
-                    let topology = &elite.topology;
+                    let plan = self.islands[island].plan_key(parent_index);
                     // Each island runs one optimizer per design. It starts from
                     // the design's fastest elite and then follows its own mean,
                     // so recentering on every lucky new best does not throw
@@ -1939,18 +1961,18 @@ impl Experiment {
                     let converged = |i: &usize| self.cma_emitters[*i].converged() && !used_cma[*i];
                     let mut index = if optimize {
                         cma_lookup
-                            .get(island, &lookup_niche, topology)
+                            .get(island, &lookup_niche, plan)
                             .filter(|i| !converged(i))
                     } else if emitter_stale {
                         reset_cma
-                            .get(&(island, lookup_niche.clone(), topology.clone()))
+                            .get(&(island, lookup_niche.clone(), plan))
                             .copied()
                     } else {
-                        cma_lookup.get(island, &lookup_niche, topology)
+                        cma_lookup.get(island, &lookup_niche, plan)
                     };
                     if index.is_none() {
                         let restart = cma_lookup
-                            .get(island, &lookup_niche, topology)
+                            .get(island, &lookup_niche, plan)
                             .filter(|_| optimize);
                         let replacement = if restart.is_some() {
                             restart
@@ -1976,7 +1998,7 @@ impl Experiment {
                                     .filter(|c| {
                                         c.optimizing()
                                             && c.island == island
-                                            && c.topology == *topology
+                                            && c.topology.plan_key() == plan
                                             && !c.converged()
                                     })
                                     .max_by_key(|c| c.last_used_generation)
@@ -2005,22 +2027,19 @@ impl Experiment {
                                 used_cma.push(false);
                             } else {
                                 let old = &self.cma_emitters[slot];
-                                let (old_island, old_niche, old_topology) =
-                                    (old.island, old.niche.clone(), old.topology.clone());
-                                if cma_lookup.get(old_island, &old_niche, &old_topology)
-                                    == Some(slot)
-                                {
-                                    cma_lookup.remove(old_island, &old_niche, &old_topology, slot);
+                                let (old_island, old_niche, old_plan) =
+                                    (old.island, old.niche.clone(), old.topology.plan_key());
+                                if cma_lookup.get(old_island, &old_niche, old_plan) == Some(slot) {
+                                    cma_lookup.remove(old_island, &old_niche, old_plan, slot);
                                 }
                                 reset_cma.retain(|_, index| *index != slot);
                                 self.cma_emitters[slot] = new;
                             }
                             let new_niche = self.cma_emitters[slot].niche.clone();
-                            let new_topology = self.cma_emitters[slot].topology.clone();
-                            cma_lookup.insert((island, new_niche, new_topology), slot);
+                            let new_plan = self.cma_emitters[slot].topology.plan_key();
+                            cma_lookup.insert((island, new_niche, new_plan), slot);
                             if emitter_stale && !optimize {
-                                reset_cma
-                                    .insert((island, lookup_niche.clone(), topology.clone()), slot);
+                                reset_cma.insert((island, lookup_niche.clone(), plan), slot);
                             }
                             index = Some(slot);
                         }
@@ -2381,11 +2400,8 @@ impl Experiment {
                     archive.entries[slot] = elite;
                 }
                 Some(_) => continue,
-                None => {
-                    archive.entries.push(elite);
-                    // Later fossils must see this cell as taken.
-                    archive.rebuild_indices();
-                }
+                // Later fossils must see this cell as taken.
+                None => archive.push_unscored(elite),
             }
             touched.insert(island);
             restored += 1;
@@ -3035,7 +3051,7 @@ struct SmallSave<'a> {
     qd_version: u32,
     breed_round: u64,
     islands: &'a [QdArchive],
-    lineage: &'a HashMap<u64, Ancestor>,
+    lineage: SavedLineage<'a>,
     island_progress: &'a [(f32, u32)],
     reseed: &'a Reseed,
     ring: RingShape,
@@ -3059,6 +3075,93 @@ struct SmallLoad {
     ring: RingShape,
     audit: crate::rungs::Audit,
 }
+/// How far back the lineage tab reads an elite's ancestors.
+pub const ANCESTRY_DEPTH: usize = 400;
+/// How many of each island's fastest elites keep their ancestors in a save,
+/// besides every elite of the global archive.
+const ISLAND_LEADERS: usize = 10;
+
+/// The lineage a save keeps, written in the layout of `HashMap<u64,
+/// Ancestor>`. Every living elite keeps its own record, because breeding
+/// reads its distance and early-rung features, but not its creature: the
+/// archive holds that, and loading puts it back. The ancestors of the global
+/// archive's elites and of each island's fastest few keep their creatures
+/// back to `ANCESTRY_DEPTH`, which is as far as anything shows them. The
+/// ancestors of the other island elites are left out.
+struct SavedLineage<'a> {
+    lineage: &'a HashMap<u64, Ancestor>,
+    /// Which records to write, and whether each writes its creature.
+    keep: HashMap<u64, bool>,
+}
+impl<'a> SavedLineage<'a> {
+    fn of(e: &'a Experiment) -> Self {
+        let archives = || std::iter::once(&e.archive).chain(e.islands.iter());
+        let mut keep: HashMap<u64, bool> = HashMap::new();
+        for elite in archives().flat_map(|archive| &archive.entries) {
+            keep.insert(elite.creature.id, false);
+        }
+        let mut shown: Vec<u64> = e.archive.entries.iter().map(|x| x.creature.id).collect();
+        for island in e.islands.iter().take(island_count()) {
+            let mut fastest: Vec<&qd::Elite> = island.entries.iter().collect();
+            fastest.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
+            shown.extend(fastest.iter().take(ISLAND_LEADERS).map(|x| x.creature.id));
+        }
+        for start in shown {
+            let mut current = e.lineage.get(&start).and_then(|a| a.parent);
+            for _ in 0..ANCESTRY_DEPTH {
+                let Some(id) = current else { break };
+                let Some(ancestor) = e.lineage.get(&id) else {
+                    break;
+                };
+                if keep.get(&id) == Some(&true) {
+                    // The rest of this chain is already kept.
+                    break;
+                }
+                // A living elite keeps its record without its creature.
+                keep.entry(id).or_insert(true);
+                current = ancestor.parent;
+            }
+        }
+        Self {
+            lineage: &e.lineage,
+            keep,
+        }
+    }
+}
+impl Serialize for SavedLineage<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        /// `Ancestor`, field for field.
+        #[derive(Serialize)]
+        struct Record<'b> {
+            parent: Option<u64>,
+            creature: &'b Creature,
+            fitness: f32,
+            generation: u32,
+            change: &'b str,
+            rung: &'b [u16; 2 * crate::rungs::FEATURES],
+        }
+        let none = Creature::default();
+        let records: Vec<(&u64, Record)> = self
+            .keep
+            .iter()
+            .filter_map(|(id, &with_creature)| {
+                let a = self.lineage.get(id)?;
+                Some((
+                    id,
+                    Record {
+                        parent: a.parent,
+                        creature: if with_creature { &a.creature } else { &none },
+                        fitness: a.fitness,
+                        generation: a.generation,
+                        change: &a.change,
+                        rung: &a.rung,
+                    },
+                ))
+            })
+            .collect();
+        serializer.collect_map(records)
+    }
+}
 impl<'a> SmallSave<'a> {
     fn of(e: &'a Experiment) -> Self {
         Self {
@@ -3072,7 +3175,7 @@ impl<'a> SmallSave<'a> {
             qd_version: e.qd_version,
             breed_round: e.breed_round,
             islands: &e.islands,
-            lineage: &e.lineage,
+            lineage: SavedLineage::of(e),
             island_progress: &e.island_progress,
             reseed: &e.reseed,
             ring: e.ring,
@@ -3084,7 +3187,9 @@ impl SmallLoad {
     /// The game the save describes, at the start of its saved generation.
     /// Its ring is bred from the archives, as the game would have bred it;
     /// without elites it starts with new random bodies.
-    fn into_experiment(self) -> Result<Experiment> {
+    /// `saved_version` is the version the file's header names: an older one
+    /// that still loads (`qd::loadable`) gets its archives re-binned.
+    fn into_experiment(self, saved_version: u32) -> Result<Experiment> {
         let mut e = Experiment::empty(self.config);
         e.pending = self.pending;
         e.generation = self.generation;
@@ -3121,9 +3226,31 @@ impl SmallLoad {
                 && e.cma_emitters.iter().all(|c| c.island < arena_count()),
             "Invalid island state"
         );
-        e.archive.rebuild_indices();
-        for island in &mut e.islands {
-            island.rebuild_indices();
+        if saved_version == qd::VERSION {
+            e.archive.rebuild_indices();
+            for island in &mut e.islands {
+                island.rebuild_indices();
+            }
+        } else {
+            // The archives were saved under another cell layout: each elite
+            // moves to its cell now. Optimizers keep their body plan's
+            // state; the CMA emitters of single cells start over.
+            e.archive.rebin();
+            for island in &mut e.islands {
+                island.rebin();
+            }
+            e.cma_emitters.retain(CmaEmitter::optimizing);
+        }
+        // The lineage records of living elites were saved without a creature.
+        for elite in std::iter::once(&e.archive)
+            .chain(&e.islands)
+            .flat_map(|archive| &archive.entries)
+        {
+            if let Some(record) = e.lineage.get_mut(&elite.creature.id)
+                && record.creature.nodes.is_empty()
+            {
+                record.creature = elite.creature.clone();
+            }
         }
         // The screen bar is not saved: the resumed generation runs every
         // trial in full until it has set a new one.
@@ -3312,7 +3439,7 @@ pub fn check(path: &Path) -> Result<SaveHeader> {
 
 fn ensure_current_version(path: &Path, header: &SaveHeader) -> Result<()> {
     ensure!(
-        header.qd_version == qd::VERSION,
+        qd::loadable(header.qd_version),
         "{} was saved under physics version {}, and this game uses version {}. Its scores no longer hold, so it cannot be loaded; start a new population instead.",
         path.display(),
         header.qd_version,
@@ -3399,7 +3526,7 @@ pub fn summary(path: &Path) -> Option<SaveSummary> {
     }
     let mut header = [0; SaveHeader::BYTES];
     file.read_exact(&mut header).ok()?;
-    if SaveHeader::from_bytes(header).qd_version != qd::VERSION {
+    if !qd::loadable(SaveHeader::from_bytes(header).qd_version) {
         return None;
     }
     let decoder = zstd::stream::read::Decoder::new(file).ok()?;
@@ -3442,7 +3569,15 @@ fn repair_history(history: Vec<Stats>, generation: u32) -> Vec<Stats> {
 }
 
 pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Experiment> {
-    load_from(path, progress, false)
+    load_from(path, progress, false, None)
+}
+
+/// `load` for a diagnostic that continues a big save on a small machine
+/// (`examples/search_ab.rs --load`): the game runs `population` creatures per
+/// generation, so its ring is bred for that and holds no more.
+#[doc(hidden)]
+pub fn load_for_population(path: &Path, population: usize) -> Result<Experiment> {
+    load_from(path, None, false, Some(population))
 }
 
 /// `load` for diagnostics that only breed from the archives
@@ -3450,10 +3585,15 @@ pub fn load_with_progress(path: &Path, progress: Option<&Progress>) -> Result<Ex
 /// too, with the scores it measured then.
 #[doc(hidden)]
 pub fn load_any_version(path: &Path) -> Result<Experiment> {
-    load_from(path, None, true)
+    load_from(path, None, true, None)
 }
 
-fn load_from(path: &Path, progress: Option<&Progress>, any_version: bool) -> Result<Experiment> {
+fn load_from(
+    path: &Path,
+    progress: Option<&Progress>,
+    any_version: bool,
+    population: Option<usize>,
+) -> Result<Experiment> {
     let file = File::open(path).context("Cannot open checkpoint")?;
     if let Some(progress) = progress {
         progress.total.store(
@@ -3472,6 +3612,7 @@ fn load_from(path: &Path, progress: Option<&Progress>, any_version: bool) -> Res
     let mut header = [0; SaveHeader::BYTES];
     file.read_exact(&mut header)
         .with_context(|| format!("{} is cut short", path.display()))?;
+    let saved_version = SaveHeader::from_bytes(header).qd_version;
     if !any_version {
         ensure_current_version(path, &SaveHeader::from_bytes(header))?;
     }
@@ -3492,10 +3633,11 @@ fn load_from(path: &Path, progress: Option<&Progress>, any_version: bool) -> Res
         decoder.read(&mut trailing)? == 0,
         "Unexpected trailing checkpoint data"
     );
-    if any_version {
-        small.qd_version = qd::VERSION;
+    small.qd_version = qd::VERSION;
+    if let Some(population) = population {
+        small.config.population = population;
     }
-    let mut experiment = small.into_experiment()?;
+    let mut experiment = small.into_experiment(saved_version)?;
     experiment.last_migration = migration.filter(|(generation, exchange)| {
         *generation <= experiment.generation && exchange.len() == island_count()
     });
@@ -3618,7 +3760,7 @@ mod migration_tests {
         assert_eq!(load(&current).unwrap().ring_len(), 8);
 
         // Saved under other physics: the header says so.
-        experiment.qd_version = qd::VERSION - 1;
+        experiment.qd_version = qd::OLDEST_LOADABLE - 1;
         save(&current, &experiment).unwrap();
         let error = check(&current).unwrap_err().to_string();
         assert!(error.contains("physics version"), "{error}");

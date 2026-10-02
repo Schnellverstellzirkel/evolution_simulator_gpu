@@ -271,12 +271,11 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
         .with_context(|| format!("seed {seed} configuration"))?;
     let mut gpu = evolution_simulator::gpu::Gpu::new("RTX 4060")?;
     let mut experiment = match &options.load {
-        Some(path) => {
-            let mut loaded = evolution_simulator::storage::load(std::path::Path::new(path))
-                .with_context(|| format!("loading {path}"))?;
-            loaded.config.population = options.population;
-            loaded
-        }
+        Some(path) => evolution_simulator::storage::load_for_population(
+            std::path::Path::new(path),
+            options.population,
+        )
+        .with_context(|| format!("loading {path}"))?,
         None => Experiment::new(cfg).with_context(|| format!("seed {seed} experiment"))?,
     };
     let first_generation = experiment.generation;
@@ -336,8 +335,16 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
         }
         let [archive_seconds, breeding_seconds] = std::mem::take(&mut experiment.stage_seconds);
         let cpu = cpu_seconds();
+        // Elites of the global archive that entered or improved in this
+        // generation and are still there: how much the archive changes.
+        let changed = experiment
+            .archive
+            .entries
+            .iter()
+            .filter(|e| e.improved_generation == generation)
+            .count();
         eprintln!(
-            "search_ab: seed {seed} generation {generation} archive {archive_seconds:.3} s breeding {breeding_seconds:.3} s cpu {:.3} s",
+            "search_ab: seed {seed} generation {generation} archive {archive_seconds:.3} s breeding {breeding_seconds:.3} s cpu {:.3} s changed {changed}",
             cpu - last_cpu
         );
         last_cpu = cpu;

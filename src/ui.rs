@@ -675,8 +675,8 @@ impl FrameMarks {
         marks
     }
 }
-/// Behavior-axis bin counts, mirroring `qd::BINS` (ground contact, cadence,
-/// bounce, height, feet). Bounce keeps one bin, so it adds no map cell.
+/// Movement-axis bin counts, mirroring `qd::BINS` (ground contact, cadence,
+/// shape, height, feet). The shape and the size classes are filters.
 const MAP_BINS: [usize; 5] = [6, 8, 1, 6, 5];
 /// Which representation the Behavior archive tab shows.
 #[derive(Clone, Copy, PartialEq)]
@@ -690,16 +690,22 @@ enum ArchiveView {
 struct CardFilter {
     /// Feet bin (0 is one foot, 4 is five or more), or every count.
     feet: Option<u8>,
-    /// Body size class (`worker::size_class`), or every size.
+    /// Body size class (`qd::SIZE_NAMES`), or every size.
     size: Option<u8>,
+    /// Body shape class (`qd::SHAPE_NAMES`), or every shape.
+    shape: Option<u8>,
 }
 impl CardFilter {
     fn shows(self, card: &crate::worker::Card) -> bool {
+        let niche = card.descriptor.map(|d| d.niche().0);
         self.feet
-            .is_none_or(|feet| card.descriptor.is_some_and(|d| d.niche().0[4] == feet))
+            .is_none_or(|feet| niche.is_some_and(|n| n[4] == feet))
             && self
                 .size
-                .is_none_or(|size| crate::worker::size_class(card.creature.nodes.len()) == size)
+                .is_none_or(|size| niche.is_some_and(|n| n[5] == size))
+            && self
+                .shape
+                .is_none_or(|shape| niche.is_some_and(|n| n[2] == shape))
     }
 }
 /// One archive elite running in the race view.
@@ -1021,15 +1027,14 @@ fn live_record(snapshot: &Snapshot) -> Option<LiveRecord> {
     })
 }
 /// Heat map of the archive: for each ground contact and cadence pair, the
-/// best creature among the height and feet bins the filters let through.
-/// One color scale spans every cell of the archive, so a color means the
-/// same distance whatever the filters. Returns the id of a clicked cell's
-/// creature.
+/// best creature among the height, feet, shape and size bins the filters
+/// (`[height, feet, shape, size]`) let through. One color scale spans every
+/// cell of the archive, so a color means the same distance whatever the
+/// filters. Returns the id of a clicked cell's creature.
 fn paint_archive_map(
     ui: &mut egui::Ui,
     cells: &[crate::worker::MapCell],
-    height_bin: Option<usize>,
-    feet_bin: Option<usize>,
+    [height_bin, feet_bin, shape_bin, size_bin]: [Option<usize>; 4],
     theme: Theme,
 ) -> Option<u64> {
     let (min, max) = cells
@@ -1044,6 +1049,8 @@ fn paint_archive_map(
     for cell in cells.iter().filter(|cell| {
         height_bin.is_none_or(|bin| usize::from(cell.niche[3]) == bin)
             && feet_bin.is_none_or(|bin| usize::from(cell.niche[4]) == bin)
+            && shape_bin.is_none_or(|bin| usize::from(cell.niche[2]) == bin)
+            && size_bin.is_none_or(|bin| usize::from(cell.niche[5]) == bin)
     }) {
         let entry = best
             .entry((cell.niche[0], cell.niche[1]))
@@ -1407,6 +1414,8 @@ struct App {
     /// Map filters; None shows every bin.
     map_height: Option<usize>,
     map_feet: Option<usize>,
+    map_shape: Option<usize>,
+    map_size: Option<usize>,
     /// Whether the worker was last asked to send the map table.
     map_sent: bool,
     /// The archive cards the player filters for.
@@ -1581,6 +1590,8 @@ impl App {
             champion_shown: false,
             map_height: None,
             map_feet: None,
+            map_shape: None,
+            map_size: None,
             map_sent: false,
             card_filter: Default::default(),
             cards: None,
@@ -2736,10 +2747,10 @@ impl App {
             );
             return;
         };
-        let cells = if snapshot.archive_cells > 0 {
-            snapshot.archive_cells
+        let cells = if snapshot.movement_cells > 0 {
+            snapshot.movement_cells
         } else {
-            row_in_world(snapshot).map_or(0, |s| s.archive_cells)
+            row_in_world(snapshot).map_or(0, Stats::moves)
         };
         // Only rows of this world count toward the gain.
         let gain = history
@@ -2791,7 +2802,7 @@ impl App {
                 number(cells),
                 theme.ink,
                 "different ways of moving kept".to_owned(),
-                "Evolution keeps the best creature for each way of moving: how much of the time it touches the ground, its stride rate, its height and how many feet it uses.",
+                "Evolution keeps the best creature for each way of moving: how much of the time it touches the ground, its stride rate, its height and how many feet it uses. Each way of moving keeps one creature for every body shape and size.",
             ),
             (
                 "Rate",
@@ -3087,6 +3098,32 @@ impl App {
                             ui.selectable_value(&mut self.map_feet, Some(bin), feet_bin_label(bin));
                         }
                     });
+                ui.label(RichText::new("Shape").small().color(theme.muted));
+                egui::ComboBox::from_id_salt("map_shape")
+                    .selected_text(
+                        self.map_shape
+                            .map_or("All", |class| crate::qd::SHAPE_NAMES[class]),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.map_shape, None, "All");
+                        for (class, name) in crate::qd::SHAPE_NAMES.iter().enumerate() {
+                            ui.selectable_value(&mut self.map_shape, Some(class), *name)
+                                .on_hover_text(crate::qd::shape_about(class));
+                        }
+                    });
+                ui.label(RichText::new("Size").small().color(theme.muted));
+                egui::ComboBox::from_id_salt("map_size")
+                    .selected_text(
+                        self.map_size
+                            .map_or("All", |class| crate::qd::SIZE_NAMES[class]),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.map_size, None, "All");
+                        for (class, name) in crate::qd::SIZE_NAMES.iter().enumerate() {
+                            ui.selectable_value(&mut self.map_size, Some(class), *name)
+                                .on_hover_text(crate::qd::size_about(class));
+                        }
+                    });
             });
         }
         let Some(snapshot) = &self.snapshot else {
@@ -3095,8 +3132,9 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.label(
                 RichText::new(format!(
-                    "{} ways of moving, sorted by",
-                    number(snapshot.archive_cells)
+                    "{} creatures in {} ways of moving, sorted by",
+                    number(snapshot.archive_cells),
+                    number(snapshot.movement_cells)
                 ))
                 .small()
                 .color(theme.muted),
@@ -3145,19 +3183,31 @@ impl App {
                     }
                 }
                 ui.add_space(GAP_M);
-                ui.label(RichText::new("Body").small().color(theme.muted));
-                for (size, label, why) in [
-                    (None, "All", "Every body size"),
-                    (Some(0), "Small", "Up to 5 nodes"),
-                    (Some(1), "Medium", "6 to 9 nodes"),
-                    (Some(2), "Large", "10 nodes or more"),
-                ] {
+                ui.label(RichText::new("Size").small().color(theme.muted));
+                if ui.selectable_label(filter.size.is_none(), "All").clicked() {
+                    filter.size = None;
+                }
+                for (class, name) in crate::qd::SIZE_NAMES.iter().enumerate() {
                     if ui
-                        .selectable_label(filter.size == size, label)
-                        .on_hover_text(why)
+                        .selectable_label(filter.size == Some(class as u8), *name)
+                        .on_hover_text(crate::qd::size_about(class))
                         .clicked()
                     {
-                        filter.size = size;
+                        filter.size = Some(class as u8);
+                    }
+                }
+                ui.add_space(GAP_M);
+                ui.label(RichText::new("Shape").small().color(theme.muted));
+                if ui.selectable_label(filter.shape.is_none(), "All").clicked() {
+                    filter.shape = None;
+                }
+                for (class, name) in crate::qd::SHAPE_NAMES.iter().enumerate() {
+                    if ui
+                        .selectable_label(filter.shape == Some(class as u8), *name)
+                        .on_hover_text(crate::qd::shape_about(class))
+                        .clicked()
+                    {
+                        filter.shape = Some(class as u8);
                     }
                 }
             });
@@ -3168,7 +3218,17 @@ impl App {
         if self.archive_view == ArchiveView::Map {
             let empty = Vec::new();
             let cells = snapshot.map.as_deref().unwrap_or(&empty);
-            map_click = paint_archive_map(ui, cells, self.map_height, self.map_feet, theme);
+            map_click = paint_archive_map(
+                ui,
+                cells,
+                [
+                    self.map_height,
+                    self.map_feet,
+                    self.map_shape,
+                    self.map_size,
+                ],
+                theme,
+            );
         } else {
             self.card_grid(ui, &mut selected);
         }
@@ -4235,10 +4295,11 @@ impl App {
         };
         ui.horizontal(|ui| {
             ui.label(format!(
-                "Generation {} · {} creatures tried · {} ways of moving kept",
+                "Generation {} · {} creatures tried · {} creatures kept in {} ways of moving",
                 stats.generation,
                 number(stats.population),
                 number(stats.archive_cells),
+                number(stats.moves()),
             ));
         });
         ui.columns(2, |cols| {

@@ -49,15 +49,6 @@ pub enum Command {
     ConfigureProbe(Instant),
     Shutdown,
 }
-/// Body size class by node count: 0 small (up to 5 nodes), 1 medium (6 to
-/// 9), 2 large (10 or more).
-pub fn size_class(nodes: usize) -> u8 {
-    match nodes {
-        0..=5 => 0,
-        6..=9 => 1,
-        _ => 2,
-    }
-}
 /// A key for a creature's body plan: its counts of nodes, bones and muscles
 /// and which parts connect to which. Lengths, masses and rhythms stay out,
 /// so a small mutation keeps the plan. The sums do not depend on part order.
@@ -370,6 +361,9 @@ pub struct Snapshot {
     pub ram_bytes: usize,
     pub elapsed: f64,
     pub archive_cells: usize,
+    /// Ways of moving the global archive covers, counting its cells
+    /// without their body classes.
+    pub movement_cells: usize,
     pub archive_size: usize,
     pub innovation_reserve_count: usize,
     pub qd_score: f64,
@@ -1104,7 +1098,7 @@ fn run(
                     }
                     Command::Lineage(id) => {
                         if let Some(e) = &exp {
-                            let chain = e.ancestry(id, 400);
+                            let chain = e.ancestry(id, crate::storage::ANCESTRY_DEPTH);
                             lineage = Some((
                                 id,
                                 chain
@@ -1569,6 +1563,7 @@ fn run(
                             .sum::<usize>(),
                     elapsed: e.evaluation_seconds,
                     archive_cells: e.archive.behavior_count(),
+                    movement_cells: e.archive.movement_count(),
                     archive_size: archive_count,
                     innovation_reserve_count: e.archive.morphology_count(),
                     qd_score: e.archive.qd_score,
@@ -1620,6 +1615,7 @@ fn run(
                     ram_bytes: 0,
                     elapsed: 0.,
                     archive_cells: 0,
+                    movement_cells: 0,
                     archive_size: 0,
                     innovation_reserve_count: 0,
                     qd_score: 0.0,
