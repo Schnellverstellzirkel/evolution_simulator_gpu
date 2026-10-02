@@ -13,6 +13,8 @@
 //!   cargo run --release --example search_ab -- <tag> [generations] [population] [duration] [seed,seed,...]
 //! Defaults: 2 generations, 64 creatures, 1.0 s trials, seeds 38,39.
 //! Wall time goes to stderr so stdout is deterministic and diffable.
+#[path = "diversity_common/mod.rs"]
+mod diversity;
 use anyhow::{Context, Result};
 use evolution_simulator::{
     config::Config, engine, evolution::Population, physics, ring::Ring, scheduler,
@@ -43,10 +45,16 @@ struct Options {
     seconds: Option<f64>,
     /// `--effect Name=level`: environment effects to apply (level index).
     effects: Vec<(String, usize)>,
+    /// `--load PATH`: continue a save instead of starting a new game. The
+    /// seed list then only names the run, and the population option sets
+    /// the generation size.
+    load: Option<String>,
+    /// `--every N`: generations between diversity lines (default 10).
+    every: u32,
 }
 
 fn usage() -> &'static str {
-    "usage: search_ab [tag] [generations] [population] [duration_seconds] [seed,seed,...] [--tag NAME] [--seed-offset N] [--seconds N] [--effect Name=level]"
+    "usage: search_ab [tag] [generations] [population] [duration_seconds] [seed,seed,...] [--tag NAME] [--seed-offset N] [--seconds N] [--effect Name=level] [--load SAVE] [--every N]"
 }
 
 fn options() -> Result<Options> {
@@ -57,6 +65,8 @@ fn options() -> Result<Options> {
     let mut save = None;
     let mut seconds = None;
     let mut effects: Vec<(String, usize)> = Vec::new();
+    let mut load = None;
+    let mut every = 10u32;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--probe" {
@@ -78,6 +88,14 @@ fn options() -> Result<Options> {
                     .parse()
                     .context("seconds")?,
             );
+        } else if arg == "--load" {
+            load = Some(args.next().context("--load needs a path")?);
+        } else if arg == "--every" {
+            every = args
+                .next()
+                .context("--every needs a number")?
+                .parse()
+                .context("every")?;
         } else if arg == "--save" {
             save = Some(args.next().context("--save needs a path")?);
         } else if arg == "--tag" {
@@ -133,6 +151,8 @@ fn options() -> Result<Options> {
         save,
         seconds,
         effects,
+        load,
+        every,
     })
 }
 
@@ -250,14 +270,24 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
     cfg.validate()
         .with_context(|| format!("seed {seed} configuration"))?;
     let mut gpu = evolution_simulator::gpu::Gpu::new("RTX 4060")?;
-    let mut experiment = Experiment::new(cfg).with_context(|| format!("seed {seed} experiment"))?;
+    let mut experiment = match &options.load {
+        Some(path) => {
+            let mut loaded = evolution_simulator::storage::load(std::path::Path::new(path))
+                .with_context(|| format!("loading {path}"))?;
+            loaded.config.population = options.population;
+            loaded
+        }
+        None => Experiment::new(cfg).with_context(|| format!("seed {seed} experiment"))?,
+    };
+    let first_generation = experiment.generation;
+    let mut last_cpu = cpu_seconds();
     let mut best = f32::NAN;
     let mut top = Vec::new();
     // Generations whose global best elite was born in a hub slot.
     let mut hub_best: Vec<u32> = Vec::new();
     let mut ring = Ring::default();
     let seed_started = Instant::now();
-    for generation in 0..options.generations {
+    for generation in first_generation..first_generation + options.generations {
         if options
             .seconds
             .is_some_and(|limit| seed_started.elapsed().as_secs_f64() > limit)
@@ -303,6 +333,31 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
                 }
             }
             println!("trace gen {generation}: ring {:016x}", h.finish());
+        }
+        let [archive_seconds, breeding_seconds] = std::mem::take(&mut experiment.stage_seconds);
+        let cpu = cpu_seconds();
+        eprintln!(
+            "search_ab: seed {seed} generation {generation} archive {archive_seconds:.3} s breeding {breeding_seconds:.3} s cpu {:.3} s",
+            cpu - last_cpu
+        );
+        last_cpu = cpu;
+        if (generation + 1 - first_generation).is_multiple_of(options.every)
+            || generation + 1 == first_generation + options.generations
+        {
+            println!(
+                "{scope} {seed} {generation} diversity: {}",
+                diversity::measure(&experiment.archive, &experiment, diversity::Part::All).line()
+            );
+            println!(
+                "{scope} {seed} {generation} diversity top 100: {}",
+                diversity::measure(&experiment.archive, &experiment, diversity::Part::Top(100))
+                    .line()
+            );
+            println!(
+                "{scope} {seed} {generation} diversity within 1% of the best: {}",
+                diversity::measure(&experiment.archive, &experiment, diversity::Part::NearBest)
+                    .line()
+            );
         }
         let generation_best = experiment.history.last().map_or(f32::NAN, |s| s.best);
         // Mean body size of the ring: bodies that only grow make every
@@ -412,6 +467,17 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
     }
     print_common_grid(scope, seed, &experiment);
     print_island_diversity(scope, seed, &experiment);
+    for (k, island) in experiment
+        .islands
+        .iter()
+        .take(evolution_simulator::storage::island_count())
+        .enumerate()
+    {
+        println!(
+            "{scope} seed {seed} island {k} diversity: {}",
+            diversity::measure(island, &experiment, diversity::Part::All).line()
+        );
+    }
     print_islands(scope, seed, &experiment, &hub_best, options.generations);
     let weights = evolution_simulator::qd::emitter_weights(&experiment.emitter_stats);
     println!(
