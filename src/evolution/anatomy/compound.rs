@@ -28,7 +28,7 @@ use super::{
 };
 use crate::config::Config;
 use crate::evolution::{
-    Bone, Bounded, Creature, MAX_NODES, Muscle, Muscles, Rng, canonicalize_bone_order,
+    Bone, Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, Muscles, Rng, canonicalize_bone_order,
     max_bone_length, max_stroke,
 };
 
@@ -587,6 +587,69 @@ pub(crate) fn reassign_bundle(
     true
 }
 
+/// The muscles limb `r` of `c` would lose to the program of limb `d` of
+/// `donor` (its muscles off the motor ring) and the copies that program makes
+/// on `c`: the donor's muscles on the bones at the same places, their strokes
+/// in proportion to their spans on `c`, everything else as it was. `None`
+/// when the limbs have a different number of bones.
+fn program_of(c: &Creature, donor: &Creature, r: usize, d: usize) -> Option<(MuscleIds, Muscles)> {
+    let (to_bones, to_muscles) = actuation(c, r);
+    let (from_bones, from_muscles) = actuation(donor, d);
+    if to_bones.len() != from_bones.len() {
+        return None;
+    }
+    let dropped: MuscleIds = to_muscles
+        .iter()
+        .copied()
+        .filter(|&i| !ring(c, &c.muscles[i]))
+        .collect();
+    let map = |b: u32| {
+        to_bones[from_bones
+            .iter()
+            .position(|&x| x == b as usize)
+            .expect("limb bone")] as u32
+    };
+    let copies: Muscles = from_muscles
+        .iter()
+        .map(|&i| {
+            let old = donor.muscles[i];
+            let mut m = Muscle {
+                bone_a: map(old.bone_a),
+                bone_b: map(old.bone_b),
+                ..old
+            };
+            let (was, now) = (span(donor, &old).max(0.05), span(c, &m).max(0.05));
+            m.short = (old.short / was * now).max(0.01);
+            m.long = (old.long / was * now).max(m.short);
+            m
+        })
+        .collect();
+    Some((dropped, copies))
+}
+
+/// Replaces the muscles in `dropped` with `copies`, after moving the copies
+/// in time (phase and touchdown reset, all by one amount) so that the copy
+/// with the most drive lands on phase `keep`, when there is one.
+fn replace_program(c: &mut Creature, dropped: &[usize], mut copies: Muscles, keep: Option<f32>) {
+    let lead = copies
+        .iter()
+        .copied()
+        .max_by(|x, y| drive(x).total_cmp(&drive(y)));
+    if let (Some(keep), Some(lead)) = (keep, lead) {
+        let shift = turn(lead.phase, keep);
+        for m in &mut copies {
+            m.phase = (m.phase + shift).rem_euclid(1.0);
+            m.reset = (m.reset + shift).rem_euclid(1.0);
+        }
+    }
+    let mut index = 0;
+    c.muscles.retain(|_| {
+        index += 1;
+        !dropped.contains(&(index - 1))
+    });
+    c.muscles.extend(copies);
+}
+
 /// Gives one of this body's limbs the muscle program of a limb of another
 /// elite that has the same number of bones: the donor's muscles (their
 /// attachment places along the bones, their strokes in proportion to their
@@ -626,60 +689,76 @@ pub(crate) fn transplant_limb_program(
     let Some(&(r, d)) = pairs.get(rng.index(pairs.len().max(1))) else {
         return false;
     };
-    let (to_bones, to_muscles) = actuation(c, r as usize);
-    let (from_bones, from_muscles) = actuation(donor, d as usize);
-    if to_bones.len() != from_bones.len() {
+    let Some((dropped, copies)) = program_of(c, donor, r as usize, d as usize) else {
         return false;
-    }
-    let dropped: MuscleIds = to_muscles
-        .iter()
-        .copied()
-        .filter(|&i| !ring(c, &c.muscles[i]))
-        .collect();
-    if c.muscles.len() - dropped.len() + from_muscles.len() > cfg.max_muscles {
+    };
+    if c.muscles.len() - dropped.len() + copies.len() > cfg.max_muscles {
         return false;
     }
     let keep = strongest(c, &dropped).map(|i| c.muscles[i].phase);
-    let map = |b: u32| {
-        to_bones[from_bones
-            .iter()
-            .position(|&x| x == b as usize)
-            .expect("limb bone")] as u32
+    replace_program(c, &dropped, copies, keep);
+    true
+}
+
+/// Gives the body the gait of another elite: its leaf limbs, from front to
+/// back, take the muscle programs of the other elite's leaf limbs at the same
+/// places in the order, where the two have the same number of bones, with the
+/// timing among the limbs the donor had, and the whole set is moved in time so
+/// that the front limb's strongest muscle keeps the phase it had. Needs two
+/// limbs that match. The skeleton stays. Where `transplant_limb_program`
+/// moves one limb's program, this moves a whole set of limbs, as modules are
+/// exchanged in Lessin, Fussell and Miikkulainen (2013). In the hub island the
+/// donor can come from any isolated island.
+pub(crate) fn transplant_gait(
+    c: &mut Creature,
+    cfg: &Config,
+    _rng: &mut Rng,
+    cx: &Context,
+) -> bool {
+    let Some(donor) = cx.donor else {
+        return false;
     };
-    let mut copies: Muscles = from_muscles
-        .iter()
-        .map(|&i| {
-            let old = donor.muscles[i];
-            let mut m = Muscle {
-                bone_a: map(old.bone_a),
-                bone_b: map(old.bone_b),
-                ..old
-            };
-            let (was, now) = (span(donor, &old).max(0.05), span(c, &m).max(0.05));
-            m.short = (old.short / was * now).max(0.01);
-            m.long = (old.long / was * now).max(m.short);
-            m
-        })
-        .collect();
-    if let Some(keep) = keep {
-        let lead = copies
-            .iter()
-            .copied()
-            .max_by(|x, y| drive(x).total_cmp(&drive(y)));
-        if let Some(lead) = lead {
-            let shift = turn(lead.phase, keep);
-            for m in &mut copies {
-                m.phase = (m.phase + shift).rem_euclid(1.0);
-                m.reset = (m.reset + shift).rem_euclid(1.0);
+    let (mine, theirs) = (limbs_front_to_back(c), limbs_front_to_back(donor));
+    let mut dropped = MuscleIds::new();
+    let mut copies = Muscles::new();
+    // The phase the front limb's strongest muscle had, and the phase its
+    // replacement has in the donor: the shift that keeps the front limb's place.
+    let mut shift = None;
+    let mut limbs = 0;
+    for (x, y) in mine.iter().zip(theirs.iter()) {
+        let Some((out, program)) = program_of(c, donor, x[0], y[0]) else {
+            continue;
+        };
+        if program.is_empty() || copies.len() + program.len() > MAX_MUSCLES {
+            continue;
+        }
+        if limbs == 0 {
+            let lead = program
+                .iter()
+                .copied()
+                .max_by(|p, q| drive(p).total_cmp(&drive(q)))
+                .map(|m| m.phase);
+            let old = strongest(c, &out).map(|i| c.muscles[i].phase);
+            shift = lead.zip(old).map(|(lead, old)| turn(lead, old));
+        }
+        for i in out {
+            if !dropped.contains(&i) && !dropped.is_full() {
+                dropped.push(i);
             }
         }
+        copies.extend_from_slice(&program);
+        limbs += 1;
     }
-    let mut index = 0;
-    c.muscles.retain(|_| {
-        index += 1;
-        !dropped.contains(&(index - 1))
-    });
-    c.muscles.extend(copies);
+    if limbs < 2 || c.muscles.len() - dropped.len() + copies.len() > cfg.max_muscles {
+        return false;
+    }
+    if let Some(shift) = shift {
+        for m in &mut copies {
+            m.phase = (m.phase + shift).rem_euclid(1.0);
+            m.reset = (m.reset + shift).rem_euclid(1.0);
+        }
+    }
+    replace_program(c, &dropped, copies, None);
     true
 }
 
@@ -747,6 +826,36 @@ pub(crate) fn retune_limb_package(
     changed
 }
 
+/// Trims a body in one move: the one to three idlest limb tips go (as
+/// `prune_idle_limb` picks them) and up to three of the weakest muscles off
+/// the motor ring with them. The best elites of a save gain more from losing
+/// idle parts than from any other single change (36% of the children of
+/// `prune_idle_limb` beat their parent), and an elite that carries several
+/// takes several of these steps one after the other, each a separate child.
+pub(crate) fn trim_body(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
+    if c.nodes.len() <= 4 {
+        return false;
+    }
+    let mut next = c.clone();
+    let shed = shed_tips(&mut next, c.nodes.len(), 1 + rng.index(3), rng);
+    let mut cut = 0;
+    for _ in 0..rng.index(4) {
+        let weakest = (0..next.muscles.len())
+            .filter(|&i| !ring(&next, &next.muscles[i]))
+            .min_by(|&x, &y| drive(&next.muscles[x]).total_cmp(&drive(&next.muscles[y])));
+        let Some(weakest) = weakest else {
+            break;
+        };
+        next.muscles.remove(weakest);
+        cut += 1;
+    }
+    if shed + cut == 0 || !close_ring(&mut next, cfg, rng) {
+        return false;
+    }
+    *c = next;
+    true
+}
+
 /// The operators that add one new part to the body (a tip, a toe and heel, a
 /// joint with a muscle across it, a copy of a limb, a lever), none of which
 /// closes the ring itself.
@@ -771,14 +880,15 @@ pub(crate) fn grow_integrated_limb(
     cx: &Context,
 ) -> bool {
     let mut next = c.clone();
-    let before = next.bones.len();
+    let (before, first_muscle) = (next.bones.len(), next.muscles.len());
     let start = rng.index(NEW_PART.len());
     let grown = (0..3).any(|k| NEW_PART[(start + k) % NEW_PART.len()](&mut next, cfg, rng, cx));
     if !grown {
         return false;
     }
     let focus: BoneIds = (before..next.bones.len()).collect();
-    let group = muscles_on(&next, &focus, false);
+    // The muscles the new part brought; one moved onto it keeps its timing.
+    let group: MuscleIds = (first_muscle..next.muscles.len()).collect();
     if let (Some(lead), Some(mine)) = (lead_muscle(&next, &group), strongest(&next, &group)) {
         let offset = [0.0, 0.25, 0.5, 0.75][rng.index(4)] + rng.range(-0.03, 0.03);
         let target = next.muscles[lead].phase + offset;
@@ -1327,6 +1437,72 @@ mod tests {
                 strength += usize::from(x.stiffness != y.stiffness);
             }
             assert!(stroke + phase + strength > 0);
+        });
+        assert!(applied >= 100, "applied to {applied}");
+    }
+
+    #[test]
+    fn shedding_tips_removes_old_leaves_and_leaves_a_valid_body() {
+        let cfg = Config::default();
+        let mut removed = 0;
+        for (i, body) in grown().iter().enumerate() {
+            let mut c = body.clone();
+            let mut rng = Rng::new(53, 0, i);
+            let nodes = c.nodes.len();
+            let shed = shed_tips(&mut c, nodes, 2, &mut rng);
+            assert!(shed <= 2 && c.nodes.len() + shed == nodes);
+            removed += shed;
+            assert!(close_ring(&mut c, &cfg, &mut rng));
+            assert!(ring_closed(&c));
+            repair(&mut c, &cfg, &mut Rng::new(55, 0, i));
+            let mut pop = Population::default();
+            pop.push(c);
+            let one = Config {
+                population: 1,
+                ..cfg.clone()
+            };
+            pop.validate(&one).expect("a valid body");
+        }
+        assert!(removed >= 200, "removed {removed} tips");
+    }
+
+    #[test]
+    fn transplant_gait_gives_the_front_limbs_the_donors_programs() {
+        let cfg = Config::default();
+        let all = twinned();
+        let donor = all[all.len() / 2].clone();
+        let mut applied = 0;
+        for (i, body) in all.iter().enumerate() {
+            let mut c = body.clone();
+            let cx = Context {
+                donor: Some(&donor),
+            };
+            if transplant_gait(&mut c, &cfg, &mut Rng::new(57, 0, i), &cx) {
+                applied += 1;
+                assert_eq!(c.bones, body.bones);
+                assert!(c.muscles.len() <= cfg.max_muscles);
+                repair(&mut c, &cfg, &mut Rng::new(59, 0, i));
+                let mut pop = Population::default();
+                pop.push(c);
+                let one = Config {
+                    population: 1,
+                    ..cfg.clone()
+                };
+                pop.validate(&one).expect("a valid body");
+            }
+        }
+        assert!(applied >= 10, "applied to {applied}");
+    }
+
+    #[test]
+    fn trim_body_removes_tips_or_muscles_and_keeps_the_body_valid() {
+        let applied = run(trim_body, &grown(), |before, after| {
+            assert!(after.nodes.len() <= before.nodes.len());
+            assert!(
+                after.nodes.len() < before.nodes.len()
+                    || after.muscles.len() < before.muscles.len()
+            );
+            assert!(ring_closed(after));
         });
         assert!(applied >= 100, "applied to {applied}");
     }

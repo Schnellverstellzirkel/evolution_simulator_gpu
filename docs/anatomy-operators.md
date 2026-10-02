@@ -1,6 +1,6 @@
 # Anatomy mutation operators
 
-The structural emitter picks one of 7 classic operators (split a bone, mirrored node, duplicate a leaf limb, retime, organ, phase shift, rescale) or one of the anatomy operators in `src/evolution/anatomy/`. All of them are on. It picks uniformly among the classic operators, the anatomy operators that have their own slot, and the shared slots, and tries again (up to four times) when the chosen operator does not fit the body. The owner wants more operator types and never fewer.
+The structural emitter picks one of 7 classic operators (split a bone, mirrored node, duplicate a leaf limb, retime, organ, phase shift, rescale), one of the anatomy operators in `src/evolution/anatomy/` or one of the compound operators below. All of them are on. It picks uniformly among the classic operators, the anatomy and compound operators that have their own slot, and the shared slots, and tries again (up to four times) when the chosen operator does not fit the body. A child gets one structural operator and then a small parameter mutation (a child of a compound operator gets none, because the move is the whole change). The owner wants more operator types and never fewer.
 
 Every operator keeps the body limits and never touches the head or the neck.
 
@@ -12,8 +12,27 @@ Every operator keeps the body limits and never touches the head or the neck.
 | rhythm (`rhythm.rs`) | move joint range from one joint to its neighbour; apply one change to two matching limbs; a phase wave down a chain; limb phase patterns (together, alternating, staggered); a limb's duty cycle around each contraction's middle; a coordinated touchdown reset; move organ mass between bones |
 | extra (`extra.rs`) | copy a leg to the dragging end of the body; lift the dragging end; twin a limb in place; the same tip on two matching limbs; remove the idlest limb tip; merge the last two bones of a limb; and, sharing one pick slot, eight gentle operators that copy, swap or shift limb programs, trade cadence against stride, and change leverage, strength or the weakest muscle |
 | controller (`controller.rs`) | limb stroke scale; limb posture shift; taper limb strength; copy limb rhythm; retune a muscle pair; release touchdown; snap limb phases; put a limb on another clock ratio; lock a limb back on the base clock; reflexes on a muscle, on all feet, and a shifted reflex reset. These share one pick slot. Starting the gait at another point of its cycle has its own slot |
+| compound (`compound.rs`) | coherent changes that touch several parts of a body at once, one line each below. Each has its own pick slot |
 
 A limb may run on its own clock at a ratio of the base clock (1/2, 2/3, 1, 3/2 or 2), so the whole gait still repeats.
+
+## Compound operators
+
+A compound operator changes several parts of a body together and keeps them consistent with each other, so a child is a larger step than one edit and still has a chance of keeping its parent's gait. A child of a compound operator gets no parameter mutation after it, because the move is the whole change. The operators that add bones close the motor ring themselves, in canonical bone order, with passive springs, so `repair` adds no random active muscles (a later `repair` would add more for every pair the canonical order moves). The operators that add nodes also remove the idlest limb tips (never one of the new parts), because bodies that only grow take more GPU lanes per creature (past 8 or 16 nodes a body takes twice as many) and are harder to tune. In the hub island a donor elite came from any isolated island, so the transplant exchanges programs between islands.
+
+- `limb_length_gradient`: the leaf limbs scale in a gradient from the front of the body to the back, the longest 1.08 to 1.7 times the shortest, with every muscle keeping its stroke relative to its span (Hornby and Pollack 2001, repeated parts with a gradient).
+- `symmetrize_limb_pair`: one limb becomes the mirror image of a limb of the same shape, with its lengths, mirrored joint ranges, node sizes and organs, and its muscles replaced by copies of the other limb's half a cycle later (Sims 1994, symmetric pairs with mirrored timing; Cheney et al. 2013, regular bodies).
+- `retime_gait_by_position`: the leaf limbs, ordered front to back, get one of five phase patterns (hop, walk, bound, a wave in either direction), and half the time the whole gait starts at another point of its cycle.
+- `brace_limb_chain`: every joint of a limb with two or more bones is set against its stop on one side with a small flex left, which bends the whole limb into a rigid shape.
+- `phase_cluster_move`: the active muscles that share a phase, whatever limb they drive, move together by 5 to 30% of a cycle, or two such groups swap places (Beyer and Schwefel 2002, correlated mutation).
+- `reassign_bundle`: two to four muscles of a bundle of five or more on one pair of bones move to a joint beside it, each keeping its timing and the shape of its stroke.
+- `retune_limb_package`: one limb's controller changes in two to four of five ways together (stroke, posture, phase, duty with the phase following, strength).
+- `grow_integrated_limb`: a new part (a tip, a toe and heel, a joint with a muscle across it, a copied limb or a lever) comes with its muscles timed against the gait's main driver, its joint braced half the time and its foot sensing touchdown some of the time.
+- `mirrored_limb_pair`: a limb of one or two bones and its mirror image hang from another node of the body, with joint ranges mirrored and a muscle across each joint, half a cycle apart (Sims 1994).
+- `segment_chain`: a trunk segment with its limbs repeats once or twice down the chain, each copy 0.8 to 1.25 times the size of the one before and its muscles a step of 0.1 to 0.3 of a cycle later (Hornby and Pollack 2001, repeated segments with a gradient; a wave of contraction down the body).
+- `transplant_limb_program`: a limb takes the muscle program of a limb of another elite with the same number of bones, moved in time so its strongest muscle keeps the phase the old one had (Lessin, Fussell and Miikkulainen 2013, whole modules exchanged).
+
+A generative grammar whose rules children inherit was not built: a rule set would be a new part of the genome and of every save and archive, and a grammar used only as a seed source tied (`docs/rejected-ideas.md`). `segment_chain`, `limb_length_gradient` and `mirrored_limb_pair` apply such productions (repeat with a gradient, scale by place, add a mirrored pair) to the body itself, and the child inherits the result.
 
 ## Where big jumps come from
 

@@ -118,6 +118,8 @@ pub(super) const OPERATORS: &[(&str, Operator)] = &[
     ("reassign_bundle", compound::reassign_bundle),
     ("transplant_limb_program", compound::transplant_limb_program),
     ("retune_limb_package", compound::retune_limb_package),
+    ("transplant_gait", compound::transplant_gait),
+    ("trim_body", compound::trim_body),
 ];
 
 /// Operators that share one pick slot: together they are as likely as one
@@ -174,6 +176,8 @@ const COMPOUND: &[&str] = &[
     "reassign_bundle",
     "transplant_limb_program",
     "retune_limb_package",
+    "transplant_gait",
+    "trim_body",
 ];
 
 /// Whether operator `index` of `OPERATORS` is a compound one.
@@ -618,6 +622,28 @@ mod tests {
                     "{name}: applied to {applied} of {} (max_nodes {})",
                     2 * bodies.len(),
                     cfg.max_nodes
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_operator_is_a_function_of_its_stream_and_its_body() {
+        let cfg = Config::default();
+        let bodies = bodies(&cfg, 40);
+        let donor = bodies[20].clone();
+        for (index, (name, _)) in OPERATORS.iter().enumerate() {
+            for (i, body) in bodies.iter().enumerate() {
+                let cx = Context {
+                    donor: Some(&donor),
+                };
+                let (mut x, mut y) = (body.clone(), body.clone());
+                let a = apply(index, &mut x, &cfg, &mut Rng::new(61, index as u32, i), &cx);
+                let b = apply(index, &mut y, &cfg, &mut Rng::new(61, index as u32, i), &cx);
+                assert_eq!(a, b, "{name} on body {i}");
+                assert!(
+                    x.nodes == y.nodes && x.bones == y.bones && x.muscles == y.muscles,
+                    "{name} on body {i} is not a function of its stream"
                 );
             }
         }
