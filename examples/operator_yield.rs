@@ -8,7 +8,9 @@
 //!
 //! Usage: operator_yield <dump.bin>
 //! A dump of a resumed run:
-//!   EVOLUTION_DUMP_GENERATION=<generation>:<path> search_ab <tag> 2 300000 20 38 --resume <save>
+//!   EVOLUTION_DUMP_GENERATION=<generation>:<path> search_ab <tag> 4 300000 20 38 --load <save>
+//! The generation after the load cannot be dumped, and the run needs two
+//! generations beyond the dumped one to absorb its blocks.
 #[path = "dump_common/mod.rs"]
 mod dump_common;
 use dump_common::*;
