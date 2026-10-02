@@ -917,12 +917,12 @@ fn muscle(
         bone_b: bone_b as u32,
         anchor_a,
         anchor_b,
-        short: length * rng.range(0.65, 0.95),
-        long: length * rng.range(1.05, 1.35),
+        short: length * rng.range(0.55, 0.85),
+        long: length * rng.range(1.15, 1.45),
         period: rng.range(0.65, 2.6),
         phase: rng.unit(),
         duty: rng.range(0.25, 0.75),
-        stiffness: rng.range(20.0, 80.0),
+        stiffness: rng.range(60.0, 120.0),
         sensor: if rng.unit() < 0.5 {
             rng.index(4) as u32
         } else {
