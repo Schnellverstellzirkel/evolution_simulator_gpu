@@ -117,6 +117,7 @@ pub(super) const OPERATORS: &[(&str, Operator)] = &[
     ("segment_chain", compound::segment_chain),
     ("reassign_bundle", compound::reassign_bundle),
     ("transplant_limb_program", compound::transplant_limb_program),
+    ("retune_limb_package", compound::retune_limb_package),
 ];
 
 /// Operators that share one pick slot: together they are as likely as one
@@ -172,6 +173,7 @@ const COMPOUND: &[&str] = &[
     "segment_chain",
     "reassign_bundle",
     "transplant_limb_program",
+    "retune_limb_package",
 ];
 
 /// Whether operator `index` of `OPERATORS` is a compound one.

@@ -13,6 +13,7 @@
 //! consecutive bones without a muscle gets a passive spring. Left to `repair`
 //! the ring would get random active muscles, and a later `repair` would add
 //! more for every pair the canonical order moves.
+use super::controller::{active_on, driven_limbs};
 use super::extra::{PASSIVE_STIFFNESS, drive};
 use super::junctions::{
     add, add_node, keep_strokes, pos, scale, shift_branch, spans, sub, turn_branch,
@@ -22,13 +23,13 @@ use super::muscles::{actuation, ring, shared_node, turn};
 use super::rhythm::{leaf_limbs, matching_limbs, muscle_groups};
 use super::{
     BoneIds, Children, Context, MuscleIds, Operator, branch, branch_nodes, child_bones,
-    copy_branch_limited, degree, fit_stroke, is_neck, muscles_on, new_muscle, parent_bones, room,
-    span,
+    copy_branch_limited, degree, fit_stroke, is_neck, muscles_on, new_muscle, parent_bones,
+    remove_parts, room, span,
 };
 use crate::config::Config;
 use crate::evolution::{
     Bone, Bounded, Creature, MAX_NODES, Muscle, Muscles, Rng, canonicalize_bone_order,
-    max_bone_length,
+    max_bone_length, max_stroke,
 };
 
 /// Puts the bones in canonical order and gives each pair of consecutive
@@ -72,6 +73,43 @@ pub(super) fn close_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
         }
     }
     true
+}
+
+/// Removes up to `count` limb tips (a bone that ends in a leaf, not the neck)
+/// among the nodes before `first_new`, each time the one with the least drive
+/// of three random ones, with its muscles. Returns how many went. Operators
+/// that grow the body use it to give back what they added, so a body that
+/// takes such a move is no bigger afterwards: bodies that only grow cost the
+/// GPU more with every creature (a body past 8 or 16 nodes takes twice the
+/// lanes).
+fn shed_tips(c: &mut Creature, first_new: usize, count: usize, rng: &mut Rng) -> usize {
+    let (mut first_new, mut shed) = (first_new, 0);
+    while shed < count && c.nodes.len() > 3 {
+        let tips: BoneIds = (0..c.bones.len())
+            .filter(|&b| {
+                let node = c.bones[b].b as usize;
+                !is_neck(c, b) && node < first_new && degree(c, node) == 1
+            })
+            .collect();
+        if tips.is_empty() {
+            break;
+        }
+        let work = |b: usize| -> f32 {
+            muscles_on(c, &[b], false)
+                .iter()
+                .map(|&i| drive(&c.muscles[i]))
+                .sum()
+        };
+        let idlest = (0..3)
+            .map(|_| tips[rng.index(tips.len())])
+            .min_by(|&x, &y| work(x).total_cmp(&work(y)))
+            .expect("three picks");
+        let node = c.bones[idlest].b as usize;
+        remove_parts(c, &[idlest], &[node]);
+        first_new -= 1;
+        shed += 1;
+    }
+    shed
 }
 
 /// The muscle of `group` with the most drive.
@@ -567,17 +605,21 @@ pub(crate) fn transplant_limb_program(
     let Some(donor) = cx.donor else {
         return false;
     };
-    let mine = limb_roots(c);
-    let theirs = limb_roots(donor);
+    // Limbs by number of bones, the donor's only when they have a program.
+    let mine: Bounded<(u8, u8), MAX_NODES> = limb_roots(c)
+        .into_iter()
+        .map(|r| (r as u8, branch(c, r).len() as u8))
+        .collect();
+    let theirs: Bounded<(u8, u8), MAX_NODES> = limb_roots(donor)
+        .into_iter()
+        .filter(|&d| !actuation(donor, d).1.is_empty())
+        .map(|d| (d as u8, branch(donor, d).len() as u8))
+        .collect();
     let mut pairs: Bounded<(u8, u8), 1024> = Bounded::new();
-    for &r in &mine {
-        let size = branch(c, r).len();
-        for &d in &theirs {
-            if !pairs.is_full()
-                && branch(donor, d).len() == size
-                && !actuation(donor, d).1.is_empty()
-            {
-                pairs.push((r as u8, d as u8));
+    for &(r, size) in &mine {
+        for &(d, other) in &theirs {
+            if size == other && !pairs.is_full() {
+                pairs.push((r, d));
             }
         }
     }
@@ -641,6 +683,70 @@ pub(crate) fn transplant_limb_program(
     true
 }
 
+/// Retunes one limb's controller in several ways at once: two to four of five
+/// changes, each applied to every active muscle that works the limb. The
+/// stroke widens or narrows about its middle, the posture shifts, the phase
+/// moves, the duty changes (with the phase following so each contraction keeps
+/// its middle) and the strength scales. The limb operators each change one of
+/// these on some limb, so a limb that needs two of them moved together takes
+/// several of them in a row, and the first is lost on the way.
+pub(crate) fn retune_limb_package(
+    c: &mut Creature,
+    _cfg: &Config,
+    rng: &mut Rng,
+    _cx: &Context,
+) -> bool {
+    let Some(root) = pick(&driven_limbs(c), rng) else {
+        return false;
+    };
+    let group = active_on(c, root);
+    let mut kinds = [0usize, 1, 2, 3, 4];
+    for k in 0..kinds.len() {
+        let other = k + rng.index(kinds.len() - k);
+        kinds.swap(k, other);
+    }
+    let top = max_stroke();
+    let mut changed = false;
+    for &kind in &kinds[..2 + rng.index(3)] {
+        let sign = if rng.unit() < 0.5 { -1.0 } else { 1.0 };
+        let (factor, share, nudge, duty) = (
+            rng.range(0.75f32.ln(), 1.35f32.ln()).exp(),
+            sign * rng.range(0.04, 0.12),
+            sign * rng.range(0.02, 0.12),
+            sign * rng.range(0.03, 0.15),
+        );
+        for &i in &group {
+            let m = &mut c.muscles[i];
+            let before = *m;
+            match kind {
+                0 => {
+                    let (middle, half) =
+                        ((m.short + m.long) * 0.5, (m.long - m.short) * 0.5 * factor);
+                    m.short = (middle - half).max(0.01);
+                    m.long = (middle + half).clamp(m.short, top);
+                }
+                1 => {
+                    let stroke = m.long - m.short;
+                    m.short = (m.short + share * stroke).clamp(0.01, (top - stroke).max(0.01));
+                    m.long = (m.short + stroke).min(top);
+                }
+                2 => {
+                    m.phase = (m.phase + nudge).rem_euclid(1.0);
+                    m.reset = (m.reset + nudge).rem_euclid(1.0);
+                }
+                3 => {
+                    let new = (m.duty + duty).clamp(0.05, 0.95);
+                    m.phase = (m.phase + 0.5 * (new - m.duty)).rem_euclid(1.0);
+                    m.duty = new;
+                }
+                _ => m.stiffness = (m.stiffness * factor).clamp(1.0, 120.0),
+            }
+            changed |= *m != before;
+        }
+    }
+    changed
+}
+
 /// The operators that add one new part to the body (a tip, a toe and heel, a
 /// joint with a muscle across it, a copy of a limb, a lever), none of which
 /// closes the ring itself.
@@ -664,29 +770,35 @@ pub(crate) fn grow_integrated_limb(
     rng: &mut Rng,
     cx: &Context,
 ) -> bool {
-    let before = c.bones.len();
+    let mut next = c.clone();
+    let before = next.bones.len();
     let start = rng.index(NEW_PART.len());
-    let grown = (0..3).any(|k| NEW_PART[(start + k) % NEW_PART.len()](c, cfg, rng, cx));
+    let grown = (0..3).any(|k| NEW_PART[(start + k) % NEW_PART.len()](&mut next, cfg, rng, cx));
     if !grown {
         return false;
     }
-    let focus: BoneIds = (before..c.bones.len()).collect();
-    let group = muscles_on(c, &focus, false);
-    if let (Some(lead), Some(mine)) = (lead_muscle(c, &group), strongest(c, &group)) {
+    let focus: BoneIds = (before..next.bones.len()).collect();
+    let group = muscles_on(&next, &focus, false);
+    if let (Some(lead), Some(mine)) = (lead_muscle(&next, &group), strongest(&next, &group)) {
         let offset = [0.0, 0.25, 0.5, 0.75][rng.index(4)] + rng.range(-0.03, 0.03);
-        let target = c.muscles[lead].phase + offset;
-        retime_group(c, &group, mine, target);
+        let target = next.muscles[lead].phase + offset;
+        retime_group(&mut next, &group, mine, target);
     }
     if !focus.is_empty() && rng.unit() < 0.5 {
         let upper = rng.unit() < 0.5;
-        brace(c, focus[0], upper, rng);
+        brace(&mut next, focus[0], upper, rng);
     }
     if rng.unit() < 0.4
-        && let Some(foot) = pick_foot(c, &focus, rng)
+        && let Some(foot) = pick_foot(&next, &focus, rng)
     {
-        reflex_foot(c, foot, rng);
+        reflex_foot(&mut next, foot, rng);
     }
-    close_ring(c, cfg, rng);
+    let added = next.nodes.len() - c.nodes.len();
+    let shed = shed_tips(&mut next, c.nodes.len(), added, rng);
+    if shed < added || !close_ring(&mut next, cfg, rng) {
+        return false;
+    }
+    *c = next;
     true
 }
 
@@ -795,7 +907,9 @@ pub(crate) fn mirrored_limb_pair(
     for (bone, shift) in [(first, base), (second, base + 0.5)] {
         hinge_muscle(&mut next, cfg, bone, &template, lead + shift, rng);
     }
-    if !close_ring(&mut next, cfg, rng) {
+    let added = next.nodes.len() - c.nodes.len();
+    let shed = shed_tips(&mut next, c.nodes.len(), added, rng);
+    if shed + 1 < added || !close_ring(&mut next, cfg, rng) {
         return false;
     }
     *c = next;
@@ -942,7 +1056,12 @@ pub(crate) fn segment_chain(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: 
         trunk = copy;
         made += 1;
     }
-    if made == 0 || !close_ring(&mut next, cfg, rng) {
+    if made == 0 {
+        return false;
+    }
+    let added = next.nodes.len() - c.nodes.len();
+    let shed = shed_tips(&mut next, c.nodes.len(), added, rng);
+    if shed + 1 < added || !close_ring(&mut next, cfg, rng) {
         return false;
     }
     *c = next;
@@ -1100,30 +1219,42 @@ mod tests {
     }
 
     #[test]
-    fn grow_integrated_limb_adds_parts_and_closes_the_ring() {
+    fn grow_integrated_limb_keeps_the_size_and_closes_the_ring() {
         let applied = run(grow_integrated_limb, &grown(), |before, after| {
-            assert!(after.bones.len() > before.bones.len());
+            // A new part comes in and the idlest tips go out.
+            assert!(after.nodes.len() <= before.nodes.len());
+            assert!(after.muscles != before.muscles);
             assert!(ring_closed(after));
         });
-        assert!(applied >= 80, "applied to {applied}");
+        assert!(applied >= 60, "applied to {applied}");
     }
 
     #[test]
-    fn mirrored_limb_pair_adds_a_limb_and_its_mirror_image() {
-        let cfg = Config::default();
+    fn mirrored_limb_pair_adds_two_limbs_and_gives_tips_back() {
         let applied = run(mirrored_limb_pair, &grown(), |before, after| {
-            let added = after.bones.len() - before.bones.len();
-            assert!(added >= 2 && added % 2 == 0, "added {added} bones");
+            // The pair adds at least two nodes and the idlest tips go, so the
+            // body grows by one node at most.
+            assert!(after.nodes.len() <= before.nodes.len() + 1);
             assert!(ring_closed(after));
-            assert!(after.nodes.len() <= cfg.max_nodes);
+            // Two bones with mirrored joint ranges hang from one node.
+            let mirrored = (0..after.bones.len()).any(|p| {
+                (p + 1..after.bones.len()).any(|q| {
+                    let (x, y) = (after.bones[p], after.bones[q]);
+                    x.a == y.a
+                        && (x.rest_length - y.rest_length).abs() < 1e-4
+                        && (x.min_angle + y.max_angle).abs() < 1e-4
+                        && (x.max_angle + y.min_angle).abs() < 1e-4
+                })
+            });
+            assert!(mirrored, "no mirrored pair");
         });
         assert!(applied >= 20, "applied to {applied}");
     }
 
     #[test]
-    fn segment_chain_repeats_a_segment_and_keeps_the_body_valid() {
+    fn segment_chain_repeats_a_segment_and_gives_tips_back() {
         let applied = run(segment_chain, &grown(), |before, after| {
-            assert!(after.bones.len() >= before.bones.len() + 2);
+            assert!(after.nodes.len() <= before.nodes.len() + 1);
             assert!(ring_closed(after));
         });
         assert!(applied >= 20, "applied to {applied}");
@@ -1182,5 +1313,21 @@ mod tests {
             }
         }
         assert!(applied >= 40, "applied to {applied}");
+    }
+
+    #[test]
+    fn retune_limb_package_changes_one_limbs_muscles_in_several_ways() {
+        let applied = run(retune_limb_package, &grown(), |before, after| {
+            assert_eq!(after.muscles.len(), before.muscles.len());
+            assert_eq!(after.bones, before.bones);
+            let (mut stroke, mut phase, mut strength) = (0, 0, 0);
+            for (x, y) in before.muscles.iter().zip(&after.muscles) {
+                stroke += usize::from((x.short, x.long) != (y.short, y.long));
+                phase += usize::from(x.phase != y.phase);
+                strength += usize::from(x.stiffness != y.stiffness);
+            }
+            assert!(stroke + phase + strength > 0);
+        });
+        assert!(applied >= 100, "applied to {applied}");
     }
 }
