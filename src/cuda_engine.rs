@@ -1029,13 +1029,19 @@ impl Drop for KernelWait {
     }
 }
 
-/// Kernels that background threads compile and load, in the order they are
-/// wanted. The kernels of the world the engine runs ("wanted") compile on up
-/// to three threads at once. The kernels of the worlds one effect level away
-/// ("idle") compile on one thread at nice 19, so the next button press finds
-/// them ready. A thread loads each kernel into the context after it compiles,
-/// because `cuModuleLoadData` waits for the kernels running on the GPU: on
-/// the engine thread it would hold up submissions for up to a second.
+/// Kernels that background threads compile, in the order they are wanted. The
+/// kernels of the world the engine runs ("wanted") compile on up to three
+/// threads at once, and a thread loads each into the context after it
+/// compiles, because `cuModuleLoadData` waits for the kernels running on the
+/// GPU: on the engine thread it would hold up submissions for up to a second.
+/// The kernels of the worlds one effect level away ("idle") only compile, on
+/// one thread at nice 19, into the disk cache, so the next button press loads
+/// them in milliseconds. A load by a background thread holds the driver
+/// while it waits for the GPU, which blocks every call of the engine thread
+/// with it, so an idle load was a drain of the whole pipeline: with the
+/// neighbours of a world not yet in the cache (a new build, or a cache that
+/// holds fewer kernels than the neighbours), 3 to 9 of them in every 10 s for
+/// minutes, 4 to 8% of the creatures per second.
 struct Prefetch {
     api: Arc<Api>,
     /// The engine's context (an address, so the struct is `Send`).
@@ -1053,10 +1059,9 @@ struct PrefetchState {
     /// each.
     running: HashMap<KernelKey, [usize; 2]>,
     done: HashMap<KernelKey, std::result::Result<Kernel, String>>,
-    /// The order kernels finished in, oldest first, for wanted and idle
-    /// threads (entries of kernels already taken stay until they reach the
-    /// front).
-    finished: [VecDeque<KernelKey>; 2],
+    /// The order wanted kernels finished in, oldest first (entries of
+    /// kernels already taken stay until they reach the front).
+    finished: VecDeque<KernelKey>,
     /// Background threads alive: wanted ones, idle ones.
     workers: [usize; 2],
     closed: bool,
@@ -1064,10 +1069,9 @@ struct PrefetchState {
 
 /// Most wanted threads at once: the three lane classes of a world.
 const WANTED_THREADS: usize = 3;
-/// Most loaded kernels waiting to be used, from wanted and from idle
-/// threads. The neighbours of one world are about 100 kernels, and each
-/// module holds device memory, so the oldest go when more finish.
-const READY_KERNELS: [usize; 2] = [48, 128];
+/// Most loaded kernels waiting to be used. Each module holds device memory,
+/// so the oldest go when more finish.
+const READY_KERNELS: usize = 48;
 
 /// Lowers the calling thread's priority to the least (Linux: per thread).
 fn nice_idle() {
@@ -1093,9 +1097,9 @@ impl Prefetch {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Compiles and loads queued kernels until the queue is empty or the
-    /// engine closes. `idle` threads take the idle queue, the others the
-    /// wanted queue.
+    /// Compiles queued kernels, and for the wanted ones loads them, until the
+    /// queue is empty or the engine closes. `idle` threads take the idle
+    /// queue, the others the wanted queue.
     fn work(&self, idle: bool) {
         let kind = usize::from(idle);
         loop {
@@ -1116,6 +1120,19 @@ impl Prefetch {
                 state.running.entry(key).or_default()[kind] += 1;
                 key
             };
+            if idle {
+                // Compiled into the disk cache and not loaded (see `Prefetch`).
+                let _ = compile_kernel(&self.api, &self.options, key, true);
+                let mut state = self.lock();
+                if let Some(counts) = state.running.get_mut(&key) {
+                    counts[kind] -= 1;
+                    if counts == &[0, 0] {
+                        state.running.remove(&key);
+                    }
+                }
+                self.ready.notify_all();
+                continue;
+            }
             let result = compile_and_load(
                 &self.api,
                 self.context as CuContext,
@@ -1137,9 +1154,9 @@ impl Prefetch {
             if let Some(Ok(extra)) = state.done.insert(key, result) {
                 unused.push(extra);
             }
-            state.finished[kind].push_back(key);
-            while state.finished[kind].len() > READY_KERNELS[kind] {
-                let Some(oldest) = state.finished[kind].pop_front() else {
+            state.finished.push_back(key);
+            while state.finished.len() > READY_KERNELS {
+                let Some(oldest) = state.finished.pop_front() else {
                     break;
                 };
                 if let Some(Ok(old)) = state.done.remove(&oldest) {
@@ -1439,8 +1456,9 @@ impl CudaEngine {
     /// lane class: scoring at the standard physics first (the engine waits
     /// for these), then the confirmation trials' fine physics, then
     /// recordings. After them, at idle priority, the same for every world
-    /// one effect level away, so the next button press finds its kernels
-    /// ready: all the scoring kernels first, then fine, then recordings.
+    /// one effect level away, compiled into the disk cache so the next
+    /// button press loads its kernels in milliseconds: all the scoring
+    /// kernels first, then fine, then recordings.
     fn prefetch_world(&mut self, cfg: &Config) {
         let flags = crate::warp_kernel::world_flags(cfg);
         let mut fidelities = vec![Fidelity::standard(), Fidelity::fine()];
