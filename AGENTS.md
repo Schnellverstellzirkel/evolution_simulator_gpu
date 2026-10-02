@@ -83,7 +83,7 @@ Search and game state:
 
 All example tools score and replay creatures on the GPU engine (`examples/common/mod.rs`), take the GPU lock shared and need `EVOLUTION_DEVICES=primary`. If the primary GPU does not open they fail.
 
-- `examples/search_ab.rs`: fixed-seed search runs through the production ring on the GPU, with the early screen and the record confirmations. It prints body plans, clades and body shape coverage of the archives, the archive and breeding seconds per generation, and `--load <save>` continues a save.
+- `examples/search_ab.rs`: fixed-seed search runs through the production ring on the GPU, with the early screen and the record confirmations. It prints body plans, clades and body shape coverage of the archives, the archive and breeding seconds per generation, `--load <save>` continues a save, and `--change-at <n>` changes the world before generation n as a button press does.
 - `examples/archive_diversity.rs <save>`: body plans, clades and body class coverage of every archive of a save.
 - `examples/archive_bench.rs <save> <population> <generations>`: the archive and breeding seconds per generation at full scale with no GPU, on stand-in scores. Run it under `perf record` to see where they go.
 - `EVOLUTION_STAGE_LOG=<path>`: one CSV row per generation (evaluation, archive and breeding seconds, end-to-end rate).

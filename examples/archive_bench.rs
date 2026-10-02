@@ -11,7 +11,12 @@
 //! body's height and its feet. Bodies below half the top distance are
 //! screened, as the early screen stops them.
 //!
-//! Usage: archive_bench <save, or `new` for a new game> <population> <generations>
+//! Usage: archive_bench <save, or `new` for a new game> <population> <generations> [change-at]
+//!
+//! With `change-at` the world changes before that generation of the run, to
+//! the next autochange step. The stand-in scores ignore the world, so the
+//! elites tested again score as before, and the run shows what an archive
+//! costs while it refills.
 #[path = "diversity_common/mod.rs"]
 mod diversity;
 use anyhow::Result;
@@ -94,6 +99,7 @@ fn main() -> Result<()> {
         .expect("usage: archive_bench <save> <population> <generations>");
     let population: usize = args.next().expect("population").parse()?;
     let generations: u32 = args.next().expect("generations").parse()?;
+    let change_at: Option<u32> = args.next().map(|n| n.parse()).transpose()?;
     let mut experiment = if path == "new" {
         storage::Experiment::new(Config {
             population,
@@ -140,7 +146,22 @@ fn main() -> Result<()> {
     println!("{}", progress(&experiment));
     let mut total = [0.0f64; 2];
     let mut cpu_total = 0.0;
-    for _ in 0..generations {
+    for step in 0..generations {
+        if change_at == Some(step) {
+            let before = experiment.config.clone();
+            let mut cfg = before.clone();
+            let next = cfg.autochange_step;
+            anyhow::ensure!(
+                evolution_simulator::environment::apply_autochange_step(&mut cfg, next),
+                "autochange step {next} changes nothing"
+            );
+            cfg.autochange_step = next + 1;
+            experiment.update_config_now(cfg)?;
+            println!(
+                "world change: {}",
+                diversity::world_difference(&before, &experiment.config)
+            );
+        }
         let generation = experiment.generation;
         let started = std::time::Instant::now();
         let cpu_before = cpu_seconds();
