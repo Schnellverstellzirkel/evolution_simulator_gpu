@@ -1,7 +1,7 @@
 //! Operators that change joint ranges, timing patterns and mass together.
 use super::{
-    BoneIds, Context, Limbs, MuscleIds, branch, child_bones, degree, is_neck, long_enough,
-    muscles_on, parent_bones, paths,
+    BoneIds, Context, Limbs, MuscleIds, branch, child_bones, degree, is_neck, muscles_on,
+    parent_bones,
 };
 use crate::config::Config;
 use crate::evolution::{
@@ -53,9 +53,8 @@ pub(crate) fn redistribute_joint_flex(
 }
 
 /// Finds two branches of the same shape (same bone count, similar lengths)
-/// and applies one random change to both: bone lengths, joint ranges, or
-/// where the muscles on the bone end (its pivot or its tip). Their timing
-/// difference stays.
+/// and applies one random change to both: bone lengths, joint ranges or
+/// anchors. Their timing difference stays.
 pub(crate) fn mutate_matching_limbs(
     c: &mut Creature,
     _cfg: &Config,
@@ -92,21 +91,13 @@ pub(crate) fn mutate_matching_limbs(
             }
         }
         _ => {
-            // Muscle ends on one node of each bone move to its other node.
-            let forward = gaussian(rng) > 0.0;
-            let paths = paths(c);
-            for b in [p, q] {
-                let (a, e) = (c.bones[b].a, c.bones[b].b);
-                let (from, to) = if forward { (a, e) } else { (e, a) };
-                for m in &mut c.muscles {
-                    if m.node_a == from && long_enough(&paths, to as usize, m.node_b as usize) {
-                        m.node_a = to;
-                        changed = true;
-                    } else if m.node_b == from
-                        && long_enough(&paths, m.node_a as usize, to as usize)
-                    {
-                        m.node_b = to;
-                        changed = true;
+            let shift = 0.1 * gaussian(rng);
+            for m in &mut c.muscles {
+                for (bone, anchor) in [(m.bone_a, &mut m.anchor_a), (m.bone_b, &mut m.anchor_b)] {
+                    if bone as usize == p || bone as usize == q {
+                        let moved = (*anchor + shift).clamp(0.0, 1.0);
+                        changed |= moved != *anchor;
+                        *anchor = moved;
                     }
                 }
             }
@@ -343,7 +334,7 @@ pub(crate) fn limb_duty_cycle(
     changed
 }
 
-/// Picks a foot (a leaf node) and makes every muscle that ends at that foot
+/// Picks a foot (a leaf node) and makes every muscle on a bone at that foot
 /// sense it, with reset phases that keep their current order, so landing
 /// restarts the limb's movement as a whole.
 pub(crate) fn touchdown_package(
@@ -352,9 +343,10 @@ pub(crate) fn touchdown_package(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
+    let parents = parent_bones(c);
     let feet: Bounded<(usize, MuscleIds), MAX_NODES> = (1..c.nodes.len())
         .filter(|&n| degree(c, n) == 1)
-        .map(|n| (n, ending_at(c, n)))
+        .filter_map(|n| Some((n, muscles_on(c, &[parents[n]?], false))))
         .filter(|(_, muscles)| !muscles.is_empty())
         .collect();
     if feet.is_empty() {
@@ -366,18 +358,17 @@ pub(crate) fn touchdown_package(
     let reset = rng.unit();
     let first = c.muscles[muscles[0]].phase;
     for &i in muscles {
+        let m = c.muscles[i];
+        let (a, b) = (c.bones[m.bone_a as usize], c.bones[m.bone_b as usize]);
+        let sensor = [a.a, a.b, b.a, b.b]
+            .iter()
+            .position(|&n| n as usize == *foot)
+            .expect("the muscle is on the foot's bone");
         let m = &mut c.muscles[i];
-        m.sensor = if m.node_a as usize == *foot { 0 } else { 1 };
+        m.sensor = sensor as u32;
         m.reset = (reset + m.phase - first).rem_euclid(1.0);
     }
     true
-}
-
-/// The muscles with an end at `node`.
-pub(super) fn ending_at(c: &Creature, node: usize) -> MuscleIds {
-    (0..c.muscles.len())
-        .filter(|&i| c.muscles[i].node_a as usize == node || c.muscles[i].node_b as usize == node)
-        .collect()
 }
 
 /// Moves part of one organ's mass to another bone (creating an organ there
@@ -504,16 +495,11 @@ mod tests {
                 .collect();
             for (m, n) in c.muscles.iter().zip(&body.muscles) {
                 assert_eq!((m.phase, m.duty, m.period), (n.phase, n.duty, n.period));
-                // A moved end went from one node of a bone to its other node.
-                for (old, new) in [(n.node_a, m.node_a), (n.node_b, m.node_b)] {
-                    if old != new {
-                        let bone = body
-                            .bones
-                            .iter()
-                            .position(|b| (b.a, b.b) == (old, new) || (b.a, b.b) == (new, old))
-                            .expect("an end moves along a bone");
-                        touched.push(bone);
-                    }
+                if m.anchor_a != n.anchor_a {
+                    touched.push(m.bone_a as usize);
+                }
+                if m.anchor_b != n.anchor_b {
+                    touched.push(m.bone_b as usize);
                 }
             }
             touched.sort_unstable();
@@ -619,17 +605,17 @@ mod tests {
         let bodies = bodies(&Config::default(), 160);
         for (i, c) in applied(touchdown_package, &bodies) {
             let body = &bodies[i];
+            let parents = parent_bones(&c);
             let sensed = |m: &Muscle| {
-                (m.sensor != NO_SENSOR).then(|| [m.node_a, m.node_b][m.sensor as usize] as usize)
+                let (a, b) = (c.bones[m.bone_a as usize], c.bones[m.bone_b as usize]);
+                (m.sensor != NO_SENSOR).then(|| [a.a, a.b, b.a, b.b][m.sensor as usize] as usize)
             };
-            let changed: Vec<usize> = (0..c.muscles.len())
-                .filter(|&m| c.muscles[m] != body.muscles[m])
-                .collect();
+            let package = |foot: usize| muscles_on(&c, &[parents[foot].unwrap()], false);
             let foot = (1..c.nodes.len())
                 .filter(|&n| degree(&c, n) == 1)
                 .find(|&foot| {
-                    let muscles = ending_at(&c, foot);
-                    changed.iter().all(|m| muscles.contains(m)) && !muscles.is_empty() && {
+                    let muscles = package(foot);
+                    !muscles.is_empty() && {
                         let lead = c.muscles[muscles[0]];
                         muscles.iter().all(|&m| {
                             let m = c.muscles[m];
@@ -639,12 +625,13 @@ mod tests {
                     }
                 })
                 .expect("one foot senses the touchdowns of its muscles");
-            let muscles = ending_at(&c, foot);
+            let muscles = package(foot);
             for (m, (after, before)) in c.muscles.iter().zip(&body.muscles).enumerate() {
                 if muscles.contains(&m) {
                     let sensor_only = Muscle {
                         sensor: before.sensor,
                         reset: before.reset,
+                        tendon: 0.0,
                         ..*after
                     };
                     assert_eq!(sensor_only, *before);

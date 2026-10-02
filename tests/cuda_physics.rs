@@ -54,23 +54,24 @@ fn config() -> Config {
 
 #[test]
 #[ignore = "needs the RTX 4060"]
-fn passive_muscles_move_nothing() {
-    // A muscle at the strength floor is passive: a body whose muscles are all
-    // at it, whatever their rhythm, neither travels nor rises.
+fn frozen_muscles_behave_like_unpowered_muscles() {
     let cfg = config();
-    let mut body = evolution::create(&cfg).unwrap().creature(0);
-    for muscle in &mut body.muscles {
-        muscle.strength = evolution::STRENGTH_MIN;
+    let mut fixed = evolution::create(&cfg).unwrap().creature(0);
+    for muscle in &mut fixed.muscles {
+        let initial = physics::target(muscle, 0.0);
+        muscle.short = initial;
+        muscle.long = initial;
     }
-    let mut reversed = body.clone();
-    for muscle in &mut reversed.muscles {
-        muscle.phase = (muscle.phase + 0.5).rem_euclid(1.0);
-        muscle.period *= 1.3;
+    let mut unpowered = fixed.clone();
+    for muscle in &mut unpowered.muscles {
+        muscle.stiffness = 0.0;
     }
-    let (first, second) = (evaluate_one(&body, &cfg), evaluate_one(&reversed, &cfg));
-    // A collapsing body settles a few centimetres back, as the passive body of the
-    // old physics did.
-    assert!(first.abs() < 0.1 && second.abs() < 0.1, "{first} m, {second} m");
+    let fixed_score = evaluate_one(&fixed, &cfg);
+    let unpowered_score = evaluate_one(&unpowered, &cfg);
+    assert!(
+        (fixed_score - unpowered_score).abs() < 1e-5,
+        "frozen {fixed_score} m, unpowered {unpowered_score} m"
+    );
 }
 
 #[test]
@@ -88,14 +89,19 @@ fn overlapping_nodes_remain_finite() {
         ].into(),
         bones: vec![Bone::new(0, 1, 0.03), Bone::new(1, 2, 0.03)].into(),
         muscles: vec![Muscle {
-            node_a: 0,
-            node_b: 2,
-            strength: 0.8,
+            bone_a: 0,
+            bone_b: 1,
+            anchor_a: 0.5,
+            anchor_b: 0.5,
+            short: 0.1,
+            long: 0.2,
             period: 1.,
             phase: 0.,
             duty: 0.5,
+            stiffness: 80.,
             sensor: 255,
             reset: 0.0,
+            tendon: 0.0,
         }].into(),
         id: 1,
     };
@@ -143,14 +149,19 @@ fn a_creature_scores_the_same_in_any_batch() {
         let muscle_links = if bones.len() > 2 { bones.len() } else { 1 };
         let muscles = (0..muscle_links)
             .map(|j| Muscle {
-                node_a: j as u32,
-                node_b: ((j + 2) % count) as u32,
-                strength: 0.2,
+                bone_a: j as u32,
+                bone_b: ((j + 1) % bones.len()) as u32,
+                anchor_a: 0.0,
+                anchor_b: 1.0,
+                short: 0.06,
+                long: 0.1,
                 period: 1.,
                 phase: 0.2,
                 duty: 0.5,
+                stiffness: 20.,
                 sensor: 255,
                 reset: 0.0,
+                tendon: 0.0,
             })
             .collect();
         mixed.push(Creature {
@@ -330,8 +341,8 @@ fn full_joint_ranges_do_not_spin_through_a_half_turn() {
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn a_body_without_drive_does_not_travel() {
-    // Muscles at the strength floor cannot drive, so nothing but the solver
-    // could move these bodies sideways on flat ground.
+    // Muscles whose target never changes cannot drive, so nothing but the
+    // solver could move these bodies sideways on flat ground.
     let cfg = Config {
         population: 32,
         duration: 5.0,
@@ -339,7 +350,7 @@ fn a_body_without_drive_does_not_travel() {
     };
     let mut pop = evolution::create(&cfg).unwrap();
     for muscle in &mut pop.muscles {
-        muscle.strength = evolution::STRENGTH_MIN;
+        muscle.short = muscle.long;
     }
     let results = evaluate(&pop, &cfg);
     let worst = results.iter().map(|r| r.fitness.abs()).fold(0.0, f32::max);
@@ -361,7 +372,7 @@ fn a_passive_body_never_rises_above_its_start() {
     };
     let mut pop = evolution::create(&cfg).unwrap();
     for muscle in &mut pop.muscles {
-        muscle.strength = evolution::STRENGTH_MIN;
+        muscle.short = muscle.long;
     }
     let settle = physics::settle() as usize;
     for i in 0..pop.genomes.len() {

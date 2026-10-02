@@ -52,10 +52,6 @@ fn run(
         .fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
             (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
         });
-    let failed = done.results.iter().filter(|r| !(r.fitness > -1e10)).count();
-    if failed > 0 {
-        eprintln!("  {failed} trials failed");
-    }
     Ok((
         pop.genomes.len() as f64 / seconds,
         steps / seconds,

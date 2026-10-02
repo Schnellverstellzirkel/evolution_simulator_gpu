@@ -1,12 +1,12 @@
 //! Operators that copy, grow, fuse, move and reshape whole limbs.
 use super::{
     BoneIds, Context, MuscleIds, branch, branch_nodes, child_bones, copy_branch, is_neck,
-    mask_of, muscles_on, new_muscle, parent_bones, paths, remove_parts, room, span_of,
+    muscles_on, new_muscle, parent_bones, remove_parts, room,
 };
 use crate::config::Config;
 use crate::evolution::{
     Bone, Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, NodeGene, Rng, body_extent,
-    max_bone_length,
+    bone_point, max_bone_length,
 };
 
 /// Two bones count as nearly aligned when the cosine of the angle between
@@ -40,8 +40,8 @@ pub(crate) fn copy_limb(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Con
 }
 
 /// Extends a limb tip with a short bone (a fraction of the tip bone), a joint
-/// with a narrow range, and a muscle from the new node to the top of the tip
-/// bone, timed like a muscle near it. A direct route to ankles and toes.
+/// with a narrow range, and a muscle from the new bone to the bone above,
+/// timed like a muscle near it. A direct route to ankles and toes.
 pub(crate) fn grow_actuated_tip(
     c: &mut Creature,
     cfg: &Config,
@@ -68,52 +68,17 @@ pub(crate) fn grow_actuated_tip(
     let mut toe = Bone::new(bone.b, c.nodes.len() as u32 - 1, length);
     narrow(&mut toe, rng);
     c.bones.push(toe);
-    // A muscle from the toe's tip to the top of the tip bone: across the toe
-    // joint and the tip bone's own.
     let template = nearby_muscle(c, &[tip], rng);
-    let m = new_muscle(c.nodes.len() - 1, bone.a as usize, template.as_ref(), rng);
+    let anchors = (rng.range(0.3, 1.0), rng.range(0.2, 0.8));
+    let m = new_muscle(c, c.bones.len() - 1, tip, anchors, template.as_ref(), rng);
     c.muscles.push(m);
     true
 }
 
-/// Splits `bone` at `t` of its length from its pivot end: a new node there,
-/// the bone shortened to the pivot's side, and a new bone with a narrow
-/// joint range from the new node to the old child node. The organ stays
-/// where it was, on whichever part holds that point, and muscles keep their
-/// nodes. Returns the new node and the new bone.
-pub(super) fn split_bone_at(c: &mut Creature, first: usize, t: f32, rng: &mut Rng) -> (usize, usize) {
-    let old = c.bones[first];
-    let (a, b) = (c.nodes[old.a as usize], c.nodes[old.b as usize]);
-    let mid = c.nodes.len() as u32;
-    c.nodes.push(NodeGene {
-        x: a.x + (b.x - a.x) * t,
-        y: a.y + (b.y - a.y) * t,
-        diameter: (a.diameter + b.diameter) * 0.5,
-        friction: (a.friction + b.friction) * 0.5,
-    });
-    let second = c.bones.len();
-    let mut lower = Bone::new(mid, old.b, old.rest_length * (1.0 - t));
-    narrow(&mut lower, rng);
-    c.bones[first].b = mid;
-    c.bones[first].rest_length = old.rest_length * t;
-    if old.organ_mass > 0.0 {
-        if old.organ_at <= t {
-            c.bones[first].organ_at = old.organ_at / t;
-        } else {
-            c.bones[first].organ_mass = 0.0;
-            c.bones[first].organ_at = 0.5;
-            lower.organ_mass = old.organ_mass;
-            lower.organ_at = (old.organ_at - t) / (1.0 - t);
-        }
-    }
-    c.bones.push(lower);
-    (mid as usize, second)
-}
-
 /// Splits a bone at a random point between 30% and 70% of its length. The new
-/// joint starts with a narrow range, muscles stay on the nodes they were on,
-/// and a muscle across the new joint (timed like one nearby) makes it an
-/// elbow or knee under control instead of a floppy hinge.
+/// joint starts with a narrow range, existing attachments stay where they are
+/// on the body, and a muscle across the new joint (timed like one nearby)
+/// makes it an elbow or knee under control instead of a floppy hinge.
 pub(crate) fn split_bone_actuated(
     c: &mut Creature,
     cfg: &Config,
@@ -133,10 +98,55 @@ pub(crate) fn split_bone_actuated(
     };
     let t = rng.range(0.3, 0.7);
     let old = c.bones[first];
-    let (_, second) = split_bone_at(c, first, t, rng);
+    let (a, b) = (c.nodes[old.a as usize], c.nodes[old.b as usize]);
+    let mid = c.nodes.len() as u32;
+    c.nodes.push(NodeGene {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+        diameter: (a.diameter + b.diameter) * 0.5,
+        friction: (a.friction + b.friction) * 0.5,
+    });
+    let second = c.bones.len();
+    // A point `at` along the old bone, as the part that holds it and the
+    // position on that part.
+    let split = |at: f32| {
+        if at <= t {
+            (first, at / t)
+        } else {
+            (second, (at - t) / (1.0 - t))
+        }
+    };
+    let mut lower = Bone::new(mid, old.b, old.rest_length * (1.0 - t));
+    narrow(&mut lower, rng);
+    c.bones[first].b = mid;
+    c.bones[first].rest_length = old.rest_length * t;
+    if old.organ_mass > 0.0 {
+        let (part, at) = split(old.organ_at);
+        if part == first {
+            c.bones[first].organ_at = at;
+        } else {
+            c.bones[first].organ_mass = 0.0;
+            c.bones[first].organ_at = 0.5;
+            lower.organ_mass = old.organ_mass;
+            lower.organ_at = at;
+        }
+    }
+    c.bones.push(lower);
+    for m in &mut c.muscles {
+        for (bone, anchor) in [
+            (&mut m.bone_a, &mut m.anchor_a),
+            (&mut m.bone_b, &mut m.anchor_b),
+        ] {
+            if *bone as usize == first {
+                let (part, at) = split(*anchor);
+                *bone = part as u32;
+                *anchor = at;
+            }
+        }
+    }
     let template = nearby_muscle(c, &[first, second], rng);
-    // From one end of the old bone to the other: across both parts.
-    let m = new_muscle(old.a as usize, old.b as usize, template.as_ref(), rng);
+    let anchors = (rng.range(0.2, 0.8), rng.range(0.2, 0.8));
+    let m = new_muscle(c, first, second, anchors, template.as_ref(), rng);
     c.muscles.push(m);
     true
 }
@@ -173,13 +183,12 @@ pub(crate) fn fuse_bones(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &C
 }
 
 /// Fuses bone `upper` and the one bone `lower` below it into one bone from
-/// the top of `upper` to the tip of `lower`. A muscle that ended at the joint
-/// between them ends at the nearer end of the fused bone.
+/// the top of `upper` to the tip of `lower`. Muscles on either keep their
+/// place on the body, projected onto the fused bone.
 pub(super) fn fuse_pair(c: &mut Creature, upper: usize, lower: usize) {
-    let joint = c.bones[upper].b;
+    let joint = c.bones[upper].b as usize;
     let end = c.bones[lower].b;
-    let top = c.bones[upper].a;
-    let start = c.nodes[top as usize];
+    let start = c.nodes[c.bones[upper].a as usize];
     let stop = c.nodes[end as usize];
     let d = [stop.x - start.x, stop.y - start.y];
     let length = d[0].hypot(d[1]);
@@ -187,23 +196,20 @@ pub(super) fn fuse_pair(c: &mut Creature, upper: usize, lower: usize) {
     let along = |p: [f32; 2]| {
         (((p[0] - start.x) * d[0] + (p[1] - start.y) * d[1]) / (length * length)).clamp(0.0, 1.0)
     };
-    let at = |b: Bone, t: f32| {
-        let (p, q) = (c.nodes[b.a as usize], c.nodes[b.b as usize]);
-        [p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t]
-    };
     let organ = [upper, lower]
         .into_iter()
         .map(|b| c.bones[b])
         .find(|b| b.organ_mass > 0.0)
-        .map(|b| (b.organ_mass, along(at(b, b.organ_at))));
-    let joint_at = along([c.nodes[joint as usize].x, c.nodes[joint as usize].y]);
+        .map(|b| (b.organ_mass, along(bone_point(b, &c.nodes, b.organ_at))));
     for m in &mut c.muscles {
-        let to = if joint_at < 0.5 { top } else { end };
-        if m.node_a == joint {
-            m.node_a = to;
-        }
-        if m.node_b == joint {
-            m.node_b = to;
+        for (bone, anchor) in [
+            (&mut m.bone_a, &mut m.anchor_a),
+            (&mut m.bone_b, &mut m.anchor_b),
+        ] {
+            if [upper, lower].contains(&(*bone as usize)) {
+                *anchor = along(bone_point(c.bones[*bone as usize], &c.nodes, *anchor));
+                *bone = upper as u32;
+            }
         }
     }
     let fused = &mut c.bones[upper];
@@ -213,9 +219,9 @@ pub(super) fn fuse_pair(c: &mut Creature, upper: usize, lower: usize) {
         fused.organ_mass = mass;
         fused.organ_at = at;
     }
-    // Muscles that joined a node to itself, or two nodes a bone apart, are
-    // for `repair` to drop; those on the joint are gone with its node.
-    remove_parts(c, &[lower], &[joint as usize]);
+    // Muscles that joined the two bones now join the fused bone to itself,
+    // and `remove_parts` drops them.
+    remove_parts(c, &[lower], &[joint]);
 }
 
 /// Moves a branch, with its internal shape and muscles, to another node of
@@ -246,28 +252,23 @@ pub(crate) fn relocate_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx:
         let node = &mut c.nodes[n];
         [node.x, node.y] = clamped(node.x + offset[0], node.y + offset[1]);
     }
-    // Muscles across the root joint (from the top of the bone above to the
-    // branch) move to the joint at the new node: from the top of the bone
-    // above it.
+    c.bones[root].a = at as u32;
     if let (Some(old), Some(new)) = (parents[from], parents[at]) {
-        let (paths, hinge) = (paths(c), mask_of(&[root, old]));
-        let (old_top, new_top) = (c.bones[old].a, c.bones[new].a);
         for m in &mut c.muscles {
-            if span_of(&paths, m) == hinge {
-                if m.node_a == old_top {
-                    m.node_a = new_top;
-                } else if m.node_b == old_top {
-                    m.node_b = new_top;
-                }
+            let (x, y) = (m.bone_a as usize, m.bone_b as usize);
+            if (x, y) == (root, old) {
+                m.bone_b = new as u32;
+            } else if (x, y) == (old, root) {
+                m.bone_a = new as u32;
             }
         }
     }
-    c.bones[root].a = at as u32;
     true
 }
 
 /// Scales every bone of a branch by one factor (0.7 to 1.4, within the bone
-/// limits), so a limb gets longer or shorter without scrambling its parts.
+/// limits) and the strokes of the muscles inside it with them, so a limb
+/// gets longer or shorter without scrambling its parts.
 pub(crate) fn reshape_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(root) = pick(&limb_roots(c), rng) else {
         return false;
@@ -290,6 +291,10 @@ pub(crate) fn reshape_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: 
     }
     for &b in &bones {
         c.bones[b].rest_length *= factor;
+    }
+    for i in muscles_on(c, &bones, true) {
+        c.muscles[i].short *= factor;
+        c.muscles[i].long *= factor;
     }
     true
 }
@@ -329,12 +334,14 @@ pub(crate) fn graft_donor_limb(
     let from = donor.nodes[donor.bones[graft].a as usize];
     let to = c.nodes[at];
     let mut node_of = [usize::MAX; MAX_NODES];
+    let mut bone_of = [usize::MAX; MAX_NODES];
     node_of[donor.bones[graft].a as usize] = at;
     for &b in &graft_bones {
         let old = donor.bones[b];
         let n = donor.nodes[old.b as usize];
         let [x, y] = clamped(to.x + n.x - from.x, to.y + n.y - from.y);
         node_of[old.b as usize] = c.nodes.len();
+        bone_of[b] = c.bones.len();
         c.nodes.push(NodeGene { x, y, ..n });
         c.bones.push(Bone {
             a: node_of[old.a as usize] as u32,
@@ -344,12 +351,8 @@ pub(crate) fn graft_donor_limb(
     }
     for i in graft_muscles {
         let mut m = donor.muscles[i];
-        let (a, b) = (node_of[m.node_a as usize], node_of[m.node_b as usize]);
-        if a == usize::MAX || b == usize::MAX {
-            continue;
-        }
-        m.node_a = a as u32;
-        m.node_b = b as u32;
+        m.bone_a = bone_of[m.bone_a as usize] as u32;
+        m.bone_b = bone_of[m.bone_b as usize] as u32;
         c.muscles.push(m);
     }
     true
@@ -457,10 +460,7 @@ mod tests {
             assert!(toe.rest_length <= (0.5 * before.bones[tip].rest_length).max(0.03) + 1e-6);
             assert!(toe.max_angle - toe.min_angle <= 1.0);
             let m = after.muscles.last().unwrap();
-            assert_eq!(
-                (m.node_a as usize, m.node_b),
-                (after.nodes.len() - 1, before.bones[tip].a)
-            );
+            assert_eq!((m.bone_a as usize, m.bone_b as usize), (new, tip));
         });
         assert!(n >= 8, "grow_actuated_tip applied to {n} of 80");
     }
@@ -480,16 +480,26 @@ mod tests {
             let t = after.bones[first].rest_length / whole;
             assert!((0.3 - 1e-4..=0.7 + 1e-4).contains(&t));
             assert!(lower.max_angle - lower.min_angle <= 1.0);
-            // Every old attachment stays on the same node.
+            // Every old attachment stays at the same point of the body.
+            let point = |c: &Creature, bone: u32, anchor: f32| {
+                bone_point(c.bones[bone as usize], &c.nodes, anchor)
+            };
             for (old, new) in before.muscles.iter().zip(&after.muscles) {
-                assert_eq!((old.node_a, old.node_b), (new.node_a, new.node_b));
+                for (x, y) in [
+                    (
+                        point(before, old.bone_a, old.anchor_a),
+                        point(after, new.bone_a, new.anchor_a),
+                    ),
+                    (
+                        point(before, old.bone_b, old.anchor_b),
+                        point(after, new.bone_b, new.anchor_b),
+                    ),
+                ] {
+                    assert!((x[0] - y[0]).abs() < 1e-4 && (x[1] - y[1]).abs() < 1e-4);
+                }
             }
-            // The new muscle runs across both parts of the old bone.
             let m = after.muscles.last().unwrap();
-            assert_eq!(
-                (m.node_a, m.node_b),
-                (before.bones[first].a, before.bones[first].b)
-            );
+            assert_eq!((m.bone_a as usize, m.bone_b as usize), (first, second));
         });
         assert!(n >= 8, "split_bone_actuated applied to {n} of 80");
     }
@@ -540,6 +550,9 @@ mod tests {
             for &b in &changed {
                 let ratio = after.bones[b].rest_length / before.bones[b].rest_length;
                 assert!((ratio - factor).abs() < 1e-4);
+            }
+            for i in muscles_on(before, &changed, true) {
+                assert!((after.muscles[i].long / before.muscles[i].long - factor).abs() < 1e-4);
             }
         });
         assert!(n >= 8, "reshape_limb applied to {n} of 80");

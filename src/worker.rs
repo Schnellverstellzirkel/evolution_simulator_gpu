@@ -78,8 +78,8 @@ pub fn body_plan(creature: &Creature) -> u64 {
     }
     for muscle in &creature.muscles {
         let (a, b) = (
-            u64::from(muscle.node_a.min(muscle.node_b)),
-            u64::from(muscle.node_a.max(muscle.node_b)),
+            u64::from(muscle.bone_a.min(muscle.bone_b)),
+            u64::from(muscle.bone_a.max(muscle.bone_b)),
         );
         plan = plan.wrapping_add(
             a.wrapping_mul(0x94d0_49bb_1331_11eb)

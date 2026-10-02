@@ -66,16 +66,17 @@ fn assert_genomes_close(a: &Creature, b: &Creature) {
         assert!(close(x.rest_length, y.rest_length));
         assert!(close(x.min_angle, y.min_angle) && close(x.max_angle, y.max_angle));
         assert!(close(x.organ_mass, y.organ_mass) && close(x.organ_at, y.organ_at));
-        assert!(close(x.ligament, y.ligament));
     }
     assert_eq!(a.muscles.len(), b.muscles.len());
     for (x, y) in a.muscles.iter().zip(&b.muscles) {
         assert_eq!(
-            (x.node_a, x.node_b, x.sensor),
-            (y.node_a, y.node_b, y.sensor)
+            (x.bone_a, x.bone_b, x.sensor),
+            (y.bone_a, y.bone_b, y.sensor)
         );
+        assert!(close(x.anchor_a, y.anchor_a) && close(x.anchor_b, y.anchor_b));
+        assert!(close(x.short, y.short) && close(x.long, y.long));
         assert!(close(x.period, y.period) && close(x.phase, y.phase));
-        assert!(close(x.duty, y.duty) && close(x.strength, y.strength));
+        assert!(close(x.duty, y.duty) && close(x.stiffness, y.stiffness));
         assert!(close(x.reset, y.reset));
     }
 }
@@ -216,35 +217,26 @@ fn mutation_keeps_valid_graphs_at_limits() {
     }
 }
 #[test]
-fn muscle_activation_is_a_continuous_periodic_trapezoid() {
+fn muscle_cycle_is_continuous_and_periodic() {
     let m = Muscle {
-        node_a: 0,
-        node_b: 2,
-        strength: 0.3,
+        bone_a: 0,
+        bone_b: 1,
+        anchor_a: 1.0,
+        anchor_b: 0.0,
+        short: 0.1,
+        long: 0.3,
         period: 2.,
         phase: 0.,
         duty: 0.4,
+        stiffness: 30.,
         sensor: 255,
         reset: 0.0,
+        tendon: 0.0,
     };
-    let ramp = physics::muscle_ramp();
-    let act = |t: f32| physics::activation(&m, t, None);
-    // Off at the start of the cycle, up to full over one ramp, full until the
-    // duty is over, then down over another ramp.
-    assert!(act(0.).abs() < 1e-6);
-    assert!((act(ramp) - 1.).abs() < 1e-4);
-    assert!((act(0.5) - 1.).abs() < 1e-6);
-    assert!((act(0.8) - 1.).abs() < 1e-4);
-    assert!(act(0.8 + ramp).abs() < 1e-4);
-    assert!(act(1.5).abs() < 1e-6);
-    assert!((act(0.79999) - act(0.80001)).abs() < 1e-3);
-    assert!((act(0.23) - act(2.23)).abs() < 1e-5);
-    // A touchdown restarts the clock at the reset phase.
-    let restarted = physics::activation(&Muscle { reset: 0.25, ..m }, 3.2, Some(3.0));
-    assert!((restarted - 1.).abs() < 1e-6);
-    for k in 0..400 {
-        assert!((0.0..=1.0).contains(&act(k as f32 * 0.013)));
-    }
+    assert!((physics::target(&m, 0.) - 0.3).abs() < 1e-6);
+    assert!((physics::target(&m, 0.8) - 0.1).abs() < 1e-6);
+    assert!((physics::target(&m, 0.79999) - physics::target(&m, 0.80001)).abs() < 1e-5);
+    assert!((physics::target(&m, 0.23) - physics::target(&m, 2.23)).abs() < 1e-6);
 }
 
 #[test]

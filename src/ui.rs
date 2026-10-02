@@ -826,7 +826,6 @@ fn imported_creature(creature: &mut Creature) -> Result<(), String> {
             b.max_angle,
             b.organ_mass,
             b.organ_at,
-            b.ligament,
         ]
         .iter()
         .all(|v| v.is_finite())
@@ -834,9 +833,9 @@ fn imported_creature(creature: &mut Creature) -> Result<(), String> {
         return Err("the file has non-finite bone values".into());
     }
     if creature.muscles.iter().any(|m| {
-        m.node_a as usize >= creature.nodes.len()
-            || m.node_b as usize >= creature.nodes.len()
-            || ![m.strength, m.period, m.phase, m.duty, m.reset]
+        m.bone_a as usize >= creature.bones.len()
+            || m.bone_b as usize >= creature.bones.len()
+            || ![m.short, m.long, m.period, m.phase, m.duty, m.stiffness]
                 .iter()
                 .all(|v| v.is_finite())
     }) {
@@ -6141,18 +6140,24 @@ fn draw_creature(
         );
     }
     for (mi, m) in c.muscles.iter().enumerate() {
-        // A muscle joins two nodes.
-        let point = |node: u32| {
-            let p = nodes[node as usize].pos;
-            origin + Vec2::new(p[0] * scale, -p[1] * scale)
+        let bone_a = c.bones[m.bone_a as usize];
+        let bone_b = c.bones[m.bone_b as usize];
+        let point = |bone: crate::evolution::Bone, t: f32| {
+            let a = [nodes[bone.a as usize].pos[0], nodes[bone.a as usize].pos[1]];
+            let b = [nodes[bone.b as usize].pos[0], nodes[bone.b as usize].pos[1]];
+            origin
+                + Vec2::new(
+                    (a[0] + (b[0] - a[0]) * t) * scale,
+                    -(a[1] + (b[1] - a[1]) * t) * scale,
+                )
         };
-        let a = point(m.node_a);
-        let b = point(m.node_b);
+        let a = point(bone_a, m.anchor_a);
+        let b = point(bone_b, m.anchor_b);
         // A fallen creature's muscles are limp.
         let contraction = if marks.fallen {
             0.
         } else {
-            physics::activation(m, marks.time, None)
+            1. - ((physics::target(m, marks.time) - m.short) / (m.long - m.short).max(1e-5))
         };
         // A tired muscle thins and goes grey.
         let energy = marks.energy.get(mi).copied().unwrap_or(1.0).clamp(0.0, 1.0);
@@ -6474,13 +6479,20 @@ impl GifScene<'_> {
             gif_disc(buffer, center, r, gif_color(ORGAN));
         }
         for m in &self.creature.muscles {
-            let a = at(positions[m.node_a as usize]);
-            let b = at(positions[m.node_b as usize]);
+            let bone_a = self.creature.bones[m.bone_a as usize];
+            let bone_b = self.creature.bones[m.bone_b as usize];
+            let point = |bone: crate::evolution::Bone, t: f32| {
+                let a = positions[bone.a as usize];
+                let b = positions[bone.b as usize];
+                at([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t])
+            };
+            let a = point(bone_a, m.anchor_a);
+            let b = point(bone_b, m.anchor_b);
             // A fallen creature's muscles are limp.
             let contraction = if fallen {
                 0.0
             } else {
-                physics::activation(m, time, None)
+                1. - ((physics::target(m, time) - m.short) / (m.long - m.short).max(1e-5))
             };
             let half = (self.camera.scale * 0.017 * (1. + 0.45 * contraction)).max(2.) * 0.5;
             gif_line(buffer, a, b, half + 1.5, dark);
@@ -6584,21 +6596,6 @@ fn write_creature_gif(
     drop(encoder);
     Ok(written)
 }
-/// Writes a GIF of a recorded trial (for examples that replay elites without
-/// the window): the frames from the settle on, sampled evenly.
-pub fn write_replay_gif(
-    creature: &Creature,
-    config: &Config,
-    frames: &[Vec<[f32; 2]>],
-    path: &std::path::Path,
-) -> anyhow::Result<usize> {
-    let last = frames.len().saturating_sub(1).min(u32::MAX as usize) as u32;
-    let first = physics::settle().min(last);
-    let total = last.saturating_sub(first) as usize + 1;
-    let stride = total.div_ceil(GIF_MAX_FRAMES).max(1);
-    let ticks: Vec<u32> = (first..=last).step_by(stride).collect();
-    write_creature_gif(creature, config, frames, &[], &ticks, None, path)
-}
 /// Samples a playback into at most `GIF_MAX_FRAMES` frames and animates them.
 fn export_creature_gif(playback: &Playback, path: &std::path::Path) -> anyhow::Result<usize> {
     let first = playback.trial_start();
@@ -6695,14 +6692,19 @@ mod tests {
             ].into(),
             bones: vec![Bone::new(0, 1, 0.5), Bone::new(1, 2, 0.5)].into(),
             muscles: vec![Muscle {
-                node_a: 0,
-                node_b: 2,
-                strength: 0.3,
+                bone_a: 0,
+                bone_b: 1,
+                anchor_a: 0.5,
+                anchor_b: 0.5,
+                short: 0.4,
+                long: 0.6,
                 period: 0.8,
                 phase: 0.0,
                 duty: 0.5,
+                stiffness: 10.0,
                 sensor: crate::evolution::NO_SENSOR,
                 reset: 0.0,
+                tendon: 0.0,
             }].into(),
             id: 7,
         }

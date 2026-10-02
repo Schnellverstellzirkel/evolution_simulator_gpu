@@ -47,10 +47,6 @@ enum Action {
         duration: Option<f32>,
         #[arg(long)]
         throughput: bool,
-        /// Also save the run at this generation, next to the checkpoint with
-        /// the generation in its extension (a diagnostic).
-        #[arg(long)]
-        snapshot_at: Option<u32>,
     },
     /// Evaluate a fixed checkpoint population repeatedly (kernel diagnostics).
     EvalBench {
@@ -109,7 +105,6 @@ fn main() -> Result<()> {
             checkpoint,
             duration,
             throughput,
-            snapshot_at,
         }) => {
             let mut e = if let Some(path) = resume {
                 storage::load(&path)?
@@ -173,9 +168,6 @@ fn main() -> Result<()> {
                         && e.generation.is_multiple_of(e.config.checkpoint_interval)
                     {
                         storage::save(&checkpoint, &e)?;
-                    }
-                    if snapshot_at == Some(e.generation) {
-                        storage::save(&checkpoint.with_extension(format!("g{}.evo", e.generation)), &e)?;
                     }
                 }
                 Ok(())

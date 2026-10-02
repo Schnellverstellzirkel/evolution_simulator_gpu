@@ -1,23 +1,20 @@
-//! Stamina, muscle force and ground reaction of a recorded trial.
+//! Muscle energy, muscle force and ground reaction of a recorded trial.
 //!
 //! The kernel records these with every frame (`engine::Recording`). When a
 //! replay holds only node positions, this module rebuilds the actuator state
 //! from them with the formulas the kernel uses: a muscle only pulls, its
-//! force scales with the creature's stamina, and the work of all the muscles
-//! drains the one store while the rest of the time refills it. Velocities
-//! come from differences between frames, so the numbers are estimates for
-//! viewing. They never feed a score.
+//! drive scales with its stored energy, and work drains the store while the
+//! rest of the time refills it. Velocities come from differences between frames, so the numbers are
+//! estimates for viewing. They never feed a score.
 
 use crate::config::Config;
 use crate::evolution::Creature;
 use crate::physics::{self, Node};
-use crate::physics2::Model;
 
 /// Per-frame view data of one trial.
 #[derive(Default)]
 pub struct Forces {
-    /// `[frame][muscle]`: the creature's stamina (the same for every muscle),
-    /// 1 is rested and 0 is spent.
+    /// `[frame][muscle]`: stored energy, 1 is rested and 0 is spent.
     pub energy: Vec<Vec<f32>>,
     /// `[frame][muscle]`: force along the muscle (N), positive pulls its ends together.
     pub muscle: Vec<Vec<f32>>,
@@ -29,6 +26,12 @@ pub struct Forces {
     /// `[frame]`: bit `j` set when bone `j`'s joint is past its break angle
     /// by the scoring kernel's test; empty for an estimate.
     pub broken: Vec<u64>,
+}
+
+fn along_bone(frame: &[[f32; 2]], bone: &crate::evolution::Bone, t: f32) -> [f32; 2] {
+    let a = frame[bone.a as usize];
+    let b = frame[bone.b as usize];
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
 }
 
 /// Rebuilds the forces of a trial. `contact[frame][node]` says which nodes
@@ -43,35 +46,30 @@ pub fn analyze(
 ) -> Forces {
     let dt = physics::dt();
     let settle = physics::settle() as usize;
-    let recovery = physics::limits().muscle_recovery * config.muscle_recovery;
-    let model = Model::new(creature, config);
-    let capacity: f32 = model.muscles.iter().map(|m| m.store).sum::<f32>() * config.muscle_energy;
+    let limits = physics::limits();
+    let capacity = limits.muscle_energy * config.muscle_energy;
+    let recovery = limits.muscle_recovery * config.muscle_recovery;
     let count = creature.muscles.len();
     let mut out = Forces::default();
-    let mut stamina = 1.0f32;
-    // The time of each node's last touchdown, once it has had one.
-    let mut touched: Vec<Option<f32>> = vec![None; nodes.len()];
+    let mut energy = vec![1.0f32; count];
     for t in 0..frames.len() {
-        out.energy.push(vec![stamina; count]);
+        out.energy.push(energy.clone());
         let mut force = vec![0.0f32; count];
         if t >= 1 && t >= settle {
             let (now, before) = (&frames[t], &frames[t - 1]);
             let time = (t - settle) as f32 * dt;
             let ended = fall.is_some_and(|f| t as u32 > f);
-            for (i, down) in touched.iter_mut().enumerate() {
-                let on = |frame: usize| contact.get(frame).and_then(|c| c.get(i)).copied().unwrap_or(false);
-                if on(t) && !on(t - 1) && t > settle {
-                    *down = Some(time);
-                }
-            }
-            let mut power = 0.0f32;
             for (j, m) in creature.muscles.iter().enumerate() {
-                let (a, b) = (m.node_a as usize, m.node_b as usize);
-                let (Some(pa), Some(pb), Some(qa), Some(qb)) =
-                    (now.get(a), now.get(b), before.get(a), before.get(b))
-                else {
+                let (Some(ba), Some(bb)) = (
+                    creature.bones.get(m.bone_a as usize),
+                    creature.bones.get(m.bone_b as usize),
+                ) else {
                     continue;
                 };
+                let pa = along_bone(now, ba, m.anchor_a);
+                let pb = along_bone(now, bb, m.anchor_b);
+                let qa = along_bone(before, ba, m.anchor_a);
+                let qb = along_bone(before, bb, m.anchor_b);
                 let d = [pb[0] - pa[0], pb[1] - pa[1]];
                 let length = d[0].hypot(d[1]).max(1e-6);
                 let dir = [d[0] / length, d[1] / length];
@@ -80,24 +78,24 @@ pub fn analyze(
                     ((pb[1] - qb[1]) - (pa[1] - qa[1])) / dt,
                 ];
                 let relative = dv[0] * dir[0] + dv[1] * dir[1];
-                let since = (m.sensor < 2)
-                    .then(|| [a, b][m.sensor as usize])
-                    .and_then(|node| touched.get(node).copied().flatten());
-                let k = &model.muscles[j];
-                let drive = k.cap
-                    * physics::activation(m, time, since)
-                    * stamina
-                    * (1.0 + relative * k.hill).clamp(0.0, 1.0);
+                let target_speed = if t > settle {
+                    (physics::limited_target(m, time)
+                        - physics::limited_target(m, (time - dt).max(0.0)))
+                        / dt
+                } else {
+                    0.0
+                };
+                let drive = (-target_speed * m.stiffness * 0.25).max(0.0) * energy[j];
                 let magnitude = if ended {
                     0.0
                 } else {
-                    (drive + relative * 0.15).clamp(-k.cap, k.cap)
+                    (drive + relative * 0.15).clamp(-limits.muscle_force, limits.muscle_force)
                 };
-                power += if ended { 0.0 } else { drive * (-relative).max(0.0) };
+                let work = (magnitude * relative).abs() * dt;
+                energy[j] = (energy[j] - work / capacity + recovery * dt * (1.0 - energy[j]))
+                    .clamp(0.0, 1.0);
                 force[j] = magnitude;
             }
-            stamina = (stamina - power * dt / capacity.max(1e-6) + recovery * dt * (1.0 - stamina))
-                .clamp(0.0, 1.0);
         }
         out.muscle.push(force);
     }
