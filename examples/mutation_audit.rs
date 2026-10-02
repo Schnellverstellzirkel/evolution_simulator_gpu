@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
                 } else {
                     0.0
                 };
-                (fitness, d.niche())
+                (fitness, experiment.archive.cell_of(d))
             })
             .collect())
     };
