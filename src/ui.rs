@@ -1443,6 +1443,12 @@ struct App {
     runs_checked: Instant,
     screenshot_pending: bool,
     screenshot_waiting: bool,
+    /// Unattended runs: `EVOLUTION_CAPTURE_EVERY=<n>` saves the window to
+    /// `runs/progress-gen<g>.png` every n generations; the generation of the
+    /// capture in flight, and the last one taken.
+    capture_every: Option<u32>,
+    capture_generation: Option<u32>,
+    captured_generation: u32,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, gpu: Gpu) -> Self {
@@ -1603,6 +1609,12 @@ impl App {
             runs_checked: Instant::now() - RUNS_REFRESH,
             screenshot_pending: false,
             screenshot_waiting: false,
+            capture_every: std::env::var("EVOLUTION_CAPTURE_EVERY")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|&v| v > 0),
+            capture_generation: None,
+            captured_generation: 0,
         }
     }
     fn theme(&self) -> Theme {
@@ -5252,6 +5264,20 @@ impl eframe::App for App {
                 None => ctx.request_repaint(),
             }
         }
+        // Unattended runs: a screenshot every `capture_every` generations.
+        if let Some(every) = self.capture_every {
+            let generation = self.snapshot.as_ref().map_or(0, |s| s.generation);
+            if generation > 0
+                && generation.is_multiple_of(every)
+                && generation != self.captured_generation
+                && !self.screenshot_waiting
+            {
+                self.captured_generation = generation;
+                self.capture_generation = Some(generation);
+                self.screenshot_pending = true;
+                self.screenshot_waiting = true;
+            }
+        }
         // Screenshot button: ask the viewport for one frame and save it as PNG.
         if self.screenshot_pending {
             self.screenshot_pending = false;
@@ -5291,6 +5317,21 @@ impl eframe::App for App {
                     .is_some_and(|data| data.is::<ScreenshotRequest>())
                 {
                     self.screenshot_waiting = false;
+                    if let Some(generation) = self.capture_generation.take() {
+                        let path = format!("runs/progress-gen{generation}.png");
+                        let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
+                        let _ = std::fs::create_dir_all("runs");
+                        if let Err(e) = image::save_buffer(
+                            &path,
+                            &bytes,
+                            image.size[0] as u32,
+                            image.size[1] as u32,
+                            image::ColorType::Rgba8,
+                        ) {
+                            eprintln!("Screenshot: {e}");
+                        }
+                        continue;
+                    }
                     match save_screenshot(&image, std::path::Path::new("runs")) {
                         Ok(path) => {
                             self.message = Some(format!("Screenshot saved to {}", path.display()));
@@ -5741,7 +5782,7 @@ fn origin_words(emitter: crate::qd::Emitter) -> &'static str {
 /// Wind to Breeze". The worker applies step `autochange_step` when a generation
 /// that is a multiple of the interval begins.
 fn autochange_forecast(config: &Config, generation: u32) -> Option<String> {
-    let interval = *crate::environment::AUTOCHANGE_INTERVALS.get(usize::from(config.autochange))?;
+    let interval = crate::environment::autochange_interval(config.autochange)?;
     if interval == 0 {
         return None;
     }

@@ -131,6 +131,21 @@ pub const QUAKE: [f32; 4] = [0.0, 0.05, 0.12, 0.25];
 /// Generations between automatic environment changes at each autochange
 /// level: Off, Slow, Normal, Fast. Level 0 leaves the world alone.
 pub const AUTOCHANGE_INTERVALS: [u32; 4] = [0, 100, 50, 20];
+
+/// Generations between automatic environment changes at autochange `level`.
+/// For an unattended run a developer may set `EVOLUTION_AUTOCHANGE_EVERY`
+/// to use that interval at every level above Off.
+pub fn autochange_interval(level: u8) -> Option<u32> {
+    let interval = *AUTOCHANGE_INTERVALS.get(usize::from(level))?;
+    let every = std::env::var("EVOLUTION_AUTOCHANGE_EVERY")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&v| v > 0);
+    Some(match every {
+        Some(every) if interval > 0 => every,
+        _ => interval,
+    })
+}
 /// Effects from the most benign to the harshest. Autochange raises each one a
 /// level in this order, then goes round again, so the world only gets harder.
 /// An effect missing here follows in `EFFECTS` order.
@@ -387,7 +402,7 @@ pub fn apply_autochange_step(cfg: &mut Config, step: u16) -> bool {
 /// resumed mid-cycle continues at the same step. Returns true when the world
 /// changed.
 pub fn advance_autochange(cfg: &mut Config, generation: u32) -> bool {
-    let Some(&interval) = AUTOCHANGE_INTERVALS.get(usize::from(cfg.autochange)) else {
+    let Some(interval) = autochange_interval(cfg.autochange) else {
         return false;
     };
     if interval == 0 || generation == 0 || !generation.is_multiple_of(interval) {
