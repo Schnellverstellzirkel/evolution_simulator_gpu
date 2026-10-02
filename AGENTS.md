@@ -16,7 +16,7 @@ Product:
 - Keep settings few. Trials last 20 s, a generation has 3M creatures, and there are no mutation controls. Environment effects are buttons. The game never changes the world by itself. It may suggest an effect.
 - No knobs. Finished work is on by default. A losing experiment is deleted, code and switch. Unfinished work stays on its branch. An environment variable may exist only as a developer diagnostic that a player never needs.
 - Never remove a shipped feature or mutation operator unless the owner asks. The owner wants more mutation operator types, never fewer.
-- Early screening: a standard trial stops at 5 s when the creature is below the bar, which is the 5 s distance the top 20% reached. A screened creature enters no archive. Replays and elite re-tests run full trials.
+- Early screening: a standard trial stops at 5 s when the creature is below the bar, which is the 5 s distance the top 10% reached. A screened creature enters no archive. Replays and elite re-tests run full trials.
 - The GPU score is final. A replay comes from the scoring kernel, so it matches its score.
 - The search is deterministic for a fixed seed on one GPU.
 - Saves are small (archives and search state), and the game writes as few files as possible. Autosave is off. Breaking old saves is fine: bump `qd::VERSION` when archive or physics semantics change, and the save header turns older saves down with a message.

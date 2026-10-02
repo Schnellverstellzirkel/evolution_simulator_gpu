@@ -404,7 +404,7 @@ fn arena(s: &Scene) {
     s.label(finish_x + 2.0, 178.0, "20 s", 12.5, TEXT);
     s.text(
         s.rect(776.0, 190.0, 214.0, 96.0),
-        "Every creature runs a 20 s trial. At 5 s a creature below the top 20% bar of the last generation is stopped and enters no archive. Survivors run on. Score is horizontal distance only.",
+        "Every creature runs a 20 s trial. At 5 s a creature below the top 10% bar of the last generation is stopped and enters no archive. Survivors run on. Score is horizontal distance only.",
         12.0,
         TEXT,
     );

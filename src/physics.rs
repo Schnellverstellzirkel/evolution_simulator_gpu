@@ -325,11 +325,12 @@ impl Screen {
 pub fn screen_seconds() -> Option<f32> {
     Some(5.0)
 }
-/// Share of creatures, by distance at the screen, that runs the full trial.
-/// At 5 s the top 20% held every creature of the final top 1% and 96% of the
-/// final top 10% on an evolved 3M population.
+/// Share of creatures, by distance at the screen, that runs the full trial
+/// (the owner's choice of 2026-10-02, for speed; it was 20%, which held
+/// every creature of the final top 1% and 96% of the final top 10% on an
+/// evolved 3M population).
 pub fn screen_keep() -> f32 {
-    0.2
+    0.1
 }
 /// The distance that the best `keep` share of `distances` reached (NaN
 /// entries are ignored), or no bar when fewer than 64 distances are known.
