@@ -298,7 +298,8 @@ fn same_tree(c: &Creature, x: &[usize], y: &[usize]) -> bool {
 /// joint, and its muscles are replaced by copies of the other limb's, half a
 /// cycle later. A body that has two similar limbs becomes a symmetric pair
 /// that alternates, as Sims' creatures did and as Cheney et al. found regular
-/// bodies do.
+/// bodies do. In three of ten moves the limb is copied without the reflection
+/// (the same pose and ranges), in phase or half a cycle later.
 pub(crate) fn symmetrize_limb_pair(
     c: &mut Creature,
     cfg: &Config,
@@ -331,23 +332,31 @@ pub(crate) fn symmetrize_limb_pair(
     if c.muscles.len() - dropped.len() + from_muscles.len() > cfg.max_muscles {
         return false;
     }
+    // Usually the mirror image, half a cycle later. Sometimes the same limb on
+    // the other joint (not reflected), in phase or half a cycle later.
+    let mirror = rng.unit() < 0.7;
+    let lag = if mirror || rng.unit() < 0.5 { 0.5 } else { 0.0 };
+    let side = if mirror { -1.0 } else { 1.0 };
     let before = spans(c);
     let origin_from = pos(c, c.bones[source[0]].a as usize);
     let origin_to = pos(c, c.bones[target[0]].a as usize);
     for (&s, &t) in source.iter().zip(target.iter()) {
         let (bone, end) = (c.bones[s], c.nodes[c.bones[s].b as usize]);
         let [x, y] = clamped(
-            origin_to[0] - (end.x - origin_from[0]),
+            origin_to[0] + side * (end.x - origin_from[0]),
             origin_to[1] + (end.y - origin_from[1]),
         );
         let node = &mut c.nodes[c.bones[t].b as usize];
         (node.x, node.y, node.diameter, node.friction) = (x, y, end.diameter, end.friction);
-        let mirrored = &mut c.bones[t];
-        mirrored.rest_length = bone.rest_length;
-        mirrored.min_angle = -bone.max_angle;
-        mirrored.max_angle = -bone.min_angle;
-        mirrored.organ_mass = bone.organ_mass;
-        mirrored.organ_at = bone.organ_at;
+        let copy = &mut c.bones[t];
+        copy.rest_length = bone.rest_length;
+        (copy.min_angle, copy.max_angle) = if mirror {
+            (-bone.max_angle, -bone.min_angle)
+        } else {
+            (bone.min_angle, bone.max_angle)
+        };
+        copy.organ_mass = bone.organ_mass;
+        copy.organ_at = bone.organ_at;
     }
     keep_strokes(c, &before);
     let map = |b: u32| {
@@ -363,8 +372,8 @@ pub(crate) fn symmetrize_limb_pair(
             let mut m = Muscle {
                 bone_a: map(old.bone_a),
                 bone_b: map(old.bone_b),
-                phase: (old.phase + 0.5).rem_euclid(1.0),
-                reset: (old.reset + 0.5).rem_euclid(1.0),
+                phase: (old.phase + lag).rem_euclid(1.0),
+                reset: (old.reset + lag).rem_euclid(1.0),
                 ..old
             };
             fit_stroke(c, &mut m, Some(&old));
@@ -1268,17 +1277,26 @@ mod tests {
         let applied = run(symmetrize_limb_pair, &twinned(), |before, after| {
             assert_eq!(after.nodes.len(), before.nodes.len());
             assert_eq!(after.bones.len(), before.bones.len());
-            // Some pair of limbs is now mirror images in lengths and ranges.
+            // Some pair of limbs is now alike in lengths and ranges: mirror
+            // images, or the same.
             let pairs = matching_limbs(after);
-            let mirrored = pairs.iter().any(|(x, y)| {
-                x.iter().zip(y.iter()).all(|(&p, &q)| {
-                    let (a, b) = (after.bones[p], after.bones[q]);
-                    (a.rest_length - b.rest_length).abs() < 1e-4
-                        && (a.min_angle + b.max_angle).abs() < 1e-4
-                        && (a.max_angle + b.min_angle).abs() < 1e-4
-                })
+            let alike = pairs.iter().any(|(x, y)| {
+                let each = |same: bool| {
+                    x.iter().zip(y.iter()).all(|(&p, &q)| {
+                        let (a, b) = (after.bones[p], after.bones[q]);
+                        let (low, high) = if same {
+                            (b.min_angle, b.max_angle)
+                        } else {
+                            (-b.max_angle, -b.min_angle)
+                        };
+                        (a.rest_length - b.rest_length).abs() < 1e-4
+                            && (a.min_angle - low).abs() < 1e-4
+                            && (a.max_angle - high).abs() < 1e-4
+                    })
+                };
+                each(true) || each(false)
             });
-            assert!(mirrored, "no mirrored pair");
+            assert!(alike, "no alike pair");
         });
         assert!(applied >= 20, "applied to {applied}");
     }
