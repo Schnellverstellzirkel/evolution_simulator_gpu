@@ -132,12 +132,23 @@ fn thin(
     (keep(frames, every), result, forces)
 }
 
+/// Whether `cfg` runs a confirmation trial: its physics is finer than the
+/// standard (`scheduler::confirm_config`).
+pub fn is_confirmation(cfg: &Config) -> bool {
+    cfg.fidelity() != crate::physics::Fidelity::standard()
+}
+
 pub trait Engine: Send {
     fn name(&self) -> String;
     /// Largest body (in nodes) this engine can evaluate.
     fn max_nodes(&self) -> usize;
-    /// Units that can be queued now without waiting.
+    /// Standard units that can be queued now without waiting.
     fn free_slots(&self) -> usize;
+    /// Confirmation units that can be queued now without waiting. They have
+    /// a slot of their own on a GPU, so standard work never holds them back.
+    fn free_confirm_slots(&self) -> usize {
+        self.free_slots()
+    }
     /// Queues a unit; `unit` holds exactly the unit's creatures, in order.
     fn submit(&mut self, unit: Population, cfg: &Config) -> Result<u64> {
         self.submit_shared(Arc::new(unit), cfg)
@@ -162,7 +173,9 @@ pub struct ThreadedEngine {
     jobs: Option<mpsc::Sender<(u64, Arc<Population>, Config)>>,
     done: mpsc::Receiver<Result<Finished, String>>,
     thread: Option<std::thread::JoinHandle<()>>,
-    queued: VecDeque<u64>,
+    /// Tickets of the units on the engine thread, and whether each is a
+    /// confirmation trial.
+    queued: VecDeque<(u64, bool)>,
     ready: VecDeque<Finished>,
     /// Retained until teardown, after all successful results have been delivered.
     failure: Option<String>,
@@ -232,7 +245,16 @@ impl Engine for ThreadedEngine {
         if self.failure.is_some() {
             0
         } else {
-            self.depth.saturating_sub(self.queued.len())
+            self.depth
+                .saturating_sub(self.queued.iter().filter(|(_, confirming)| !confirming).count())
+        }
+    }
+    fn free_confirm_slots(&self) -> usize {
+        if self.failure.is_some() {
+            0
+        } else {
+            CONFIRM_DEPTH
+                .saturating_sub(self.queued.iter().filter(|(_, confirming)| *confirming).count())
         }
     }
     fn submit_shared(&mut self, unit: Arc<Population>, cfg: &Config) -> Result<u64> {
@@ -251,7 +273,7 @@ impl Engine for ThreadedEngine {
             return Err(self.submission_error());
         }
         self.next_ticket += 1;
-        self.queued.push_back(ticket);
+        self.queued.push_back((ticket, is_confirmation(cfg)));
         Ok(ticket)
     }
     fn poll(&mut self) -> Result<Option<Finished>> {
@@ -262,7 +284,7 @@ impl Engine for ThreadedEngine {
             }
             return Ok(None);
         };
-        let position = self.queued.iter().position(|&ticket| ticket == done.ticket);
+        let position = self.queued.iter().position(|&(ticket, _)| ticket == done.ticket);
         anyhow::ensure!(position.is_some(), "{} returned an unknown unit", self.name);
         self.queued.remove(position.unwrap());
         Ok(Some(done))
@@ -300,11 +322,15 @@ pub struct Completed {
     pub gpu_seconds: f64,
 }
 
-/// Submission slots per GPU. One more unit packs on the engine thread while
-/// every slot runs.
+/// Submission slots per GPU for standard units. One more unit packs on the
+/// engine thread while every slot runs.
 pub fn gpu_slots() -> u32 {
     4
 }
+
+/// Confirmation units on the engine thread at most: one on the GPU's slot for
+/// them and one that packs.
+const CONFIRM_DEPTH: usize = 2;
 
 /// Buffer size for `size` bytes of data. Small buffers round up to a power
 /// of two, which costs little. Large ones get 25% headroom, so units of
@@ -334,7 +360,12 @@ pub fn out_of_memory(error: &anyhow::Error) -> bool {
 /// What the GPU engine thread needs from a device. `CudaEngine` implements
 /// it; tests use a fake that can run out of memory.
 trait Device {
+    /// Standard units that can be submitted now.
     fn free_slots(&self) -> usize;
+    /// Whether a confirmation trial can be submitted now.
+    fn confirm_free(&self) -> bool {
+        self.free_slots() > 0
+    }
     /// Uploads the batches and queues their whole trials. On success the
     /// device takes the batches (`batches` is left empty) and returns them
     /// in `Completed`; on failure they stay.
@@ -357,6 +388,9 @@ trait Device {
 impl Device for CudaEngine {
     fn free_slots(&self) -> usize {
         CudaEngine::free_slots(self)
+    }
+    fn confirm_free(&self) -> bool {
+        CudaEngine::confirm_free(self)
     }
     fn submit(
         &mut self,
@@ -393,6 +427,8 @@ struct PackedUnit {
 struct RunningUnit {
     ticket: u64,
     count: usize,
+    /// A confirmation trial, which has a slot of its own.
+    confirming: bool,
 }
 
 /// What to do after a submission ran out of memory.
@@ -545,7 +581,7 @@ pub fn gpu_engine(name: &str, max_nodes: usize) -> Result<ThreadedEngine> {
             };
             let name = engine.name.clone();
             let memory =
-                MemoryBackoff::new(slots, Duration::from_millis(500), Duration::from_secs(60));
+                MemoryBackoff::new(slots + 1, Duration::from_millis(500), Duration::from_secs(60));
             // Replays run on the recording variant of the kernel that scores.
             run_units(
                 engine,
@@ -576,6 +612,24 @@ pub fn gpu_engine(name: &str, max_nodes: usize) -> Result<ThreadedEngine> {
     })
 }
 
+/// Packs a job into the buffers of finished units (`spare`) where it can.
+fn pack_unit(
+    ticket: u64,
+    unit: Arc<Population>,
+    cfg: Config,
+    indices: &mut Vec<usize>,
+    spare: &mut Vec<creature_kernel::LaneBatch>,
+) -> Result<PackedUnit> {
+    indices.clear();
+    indices.extend(0..unit.genomes.len());
+    let batches = crate::warp_kernel::pack_reusing(&unit, indices, &cfg, spare)?;
+    Ok(PackedUnit {
+        ticket,
+        cfg,
+        batches,
+    })
+}
+
 /// The GPU engine thread: packs jobs, runs each as one whole-trial
 /// submission, and returns finished units until the job channel closes.
 fn run_units<D: Device>(
@@ -592,39 +646,66 @@ fn run_units<D: Device>(
     // submitted units by device ticket.
     let mut waiting: Option<PackedUnit> = None;
     let mut running: Vec<(u64, RunningUnit)> = Vec::new();
-    let mut pending: Option<(u64, Arc<Population>, Config)> = None;
+    // Jobs that arrived, by kind: a confirmation trial has a slot of its own
+    // and goes first, so it never waits behind standard units.
+    let mut standard_jobs: VecDeque<(u64, Arc<Population>, Config)> = VecDeque::new();
+    let mut confirm_jobs: VecDeque<(u64, Arc<Population>, Config)> = VecDeque::new();
     // Batches of finished units: the next unit packs into their buffers, so
     // the host memory the GPU copies from is mapped and registered once.
+    // Confirmation units are small and keep buffers apart from standard ones.
     let mut spare: Vec<creature_kernel::LaneBatch> = Vec::new();
+    let mut confirm_spare: Vec<creature_kernel::LaneBatch> = Vec::new();
     let mut indices: Vec<usize> = Vec::new();
     let spare_bytes = |spare: &[creature_kernel::LaneBatch]| -> u64 {
         spare.iter().map(|b| CudaEngine::held_bytes(b) as u64).sum()
     };
     let mut open = true;
     loop {
-        if pending.is_none() && open {
-            let idle = running.is_empty() && waiting.is_none() && recording.is_none();
+        if open {
+            let idle = running.is_empty()
+                && waiting.is_none()
+                && recording.is_none()
+                && standard_jobs.is_empty()
+                && confirm_jobs.is_empty();
+            let mut arrived = Vec::new();
             // While idle, wake every few milliseconds for replay requests.
-            let job = match (idle, &replays) {
-                (true, Some(_)) => job_rx.recv_timeout(Duration::from_millis(5)),
-                (true, None) => job_rx
-                    .recv()
-                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-                (false, _) => job_rx.try_recv().map_err(|error| match error {
-                    mpsc::TryRecvError::Empty => mpsc::RecvTimeoutError::Timeout,
-                    mpsc::TryRecvError::Disconnected => mpsc::RecvTimeoutError::Disconnected,
-                }),
-            };
-            match job {
-                Ok(job) => pending = Some(job),
-                Err(mpsc::RecvTimeoutError::Disconnected) if idle => open = false,
-                Err(_) => {}
+            match (idle, &replays) {
+                (true, Some(_)) => match job_rx.recv_timeout(Duration::from_millis(5)) {
+                    Ok(job) => arrived.push(job),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => open = false,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                },
+                (true, None) => match job_rx.recv() {
+                    Ok(job) => arrived.push(job),
+                    Err(_) => open = false,
+                },
+                (false, _) => {}
+            }
+            // Every job that is already there, so a confirmation trial is not
+            // stuck in the channel behind a standard unit that waits for a slot.
+            loop {
+                match job_rx.try_recv() {
+                    Ok(job) => arrived.push(job),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        open = false;
+                        break;
+                    }
+                }
+            }
+            for job in arrived {
+                if is_confirmation(&job.2) {
+                    confirm_jobs.push_back(job);
+                } else {
+                    standard_jobs.push_back(job);
+                }
             }
         }
         if !open
             && running.is_empty()
             && waiting.is_none()
-            && pending.is_none()
+            && standard_jobs.is_empty()
+            && confirm_jobs.is_empty()
             && recording.is_none()
         {
             break;
@@ -648,74 +729,92 @@ fn run_units<D: Device>(
                     let _ = request.reply.send(Err(format!("{error:#}")));
                 }
             }
-            allocated.store(engine.allocated_bytes() + spare_bytes(&spare), Ordering::Relaxed);
+            allocated.store(
+                engine.allocated_bytes() + spare_bytes(&spare) + spare_bytes(&confirm_spare),
+                Ordering::Relaxed,
+            );
         }
-        if engine.free_slots() > 0 && memory.may_submit(Instant::now(), running.len()) {
-            let next = match waiting.take() {
-                Some(unit) => Some(Ok(unit)),
-                None => pending.take().map(|(ticket, unit, cfg)| {
-                    indices.clear();
-                    indices.extend(0..unit.genomes.len());
-                    crate::warp_kernel::pack_reusing(&unit, &indices, &cfg, &mut spare).map(
-                        |batches| PackedUnit {
-                            ticket,
-                            cfg,
-                            batches,
-                        },
-                    )
-                }),
+        // One unit goes to the GPU: a unit that waited for memory first, then
+        // a confirmation trial (its slot is not the standard units'), then a
+        // standard unit.
+        let can_confirm = engine.confirm_free();
+        let can_standard = engine.free_slots() > 0;
+        let may_submit =
+            (can_confirm || can_standard) && memory.may_submit(Instant::now(), running.len());
+        let next: Option<Result<PackedUnit>> = if !may_submit {
+            None
+        } else if let Some(unit) = waiting.take() {
+            if if is_confirmation(&unit.cfg) { can_confirm } else { can_standard } {
+                Some(Ok(unit))
+            } else {
+                waiting = Some(unit);
+                None
+            }
+        } else if can_confirm && let Some((ticket, unit, cfg)) = confirm_jobs.pop_front() {
+            Some(pack_unit(ticket, unit, cfg, &mut indices, &mut confirm_spare))
+        } else if can_standard && let Some((ticket, unit, cfg)) = standard_jobs.pop_front() {
+            Some(pack_unit(ticket, unit, cfg, &mut indices, &mut spare))
+        } else {
+            None
+        };
+        if let Some(next) = next {
+            let mut unit = match next {
+                Ok(unit) => unit,
+                Err(err) => {
+                    let _ = done_tx.send(Err(format!("{err:#}")));
+                    return;
+                }
             };
-            if let Some(next) = next {
-                let mut unit = match next {
-                    Ok(unit) => unit,
-                    Err(err) => {
-                        let _ = done_tx.send(Err(format!("{err:#}")));
-                        return;
-                    }
-                };
-                let count = unit.batches.iter().map(|b| b.slots.len()).sum();
-                match engine.submit(&mut unit.batches, &unit.cfg) {
-                    Ok(device_ticket) => {
-                        running.push((
-                            device_ticket,
-                            RunningUnit {
-                                ticket: unit.ticket,
-                                count,
-                            },
-                        ));
-                        if let Some(line) = memory.submitted(Instant::now(), running.len()) {
-                            eprintln!("{name}: {line}");
-                        }
-                    }
-                    // Keep the unit; it runs once memory frees up.
-                    Err(err) if engine.out_of_memory(&err) => {
-                        // Spare host buffers are the first to go.
-                        let freed = engine.release_idle() + spare_bytes(&spare);
-                        spare.clear();
-                        waiting = Some(unit);
-                        match memory.out_of_memory(Instant::now(), running.len(), freed) {
-                            OutOfMemory::Retry(line) => {
-                                if let Some(line) = line {
-                                    eprintln!("{name}: {line}");
-                                }
-                            }
-                            OutOfMemory::GiveUp(waited) => {
-                                let _ = done_tx.send(Err(format!(
-                                    "{err:#} (no GPU memory for {:.0} s)",
-                                    waited.as_secs_f64()
-                                )));
-                                return;
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        let _ = done_tx.send(Err(format!("{err:#}")));
-                        return;
+            let confirming = is_confirmation(&unit.cfg);
+            let count = unit.batches.iter().map(|b| b.slots.len()).sum();
+            match engine.submit(&mut unit.batches, &unit.cfg) {
+                Ok(device_ticket) => {
+                    running.push((
+                        device_ticket,
+                        RunningUnit {
+                            ticket: unit.ticket,
+                            count,
+                            confirming,
+                        },
+                    ));
+                    if let Some(line) = memory.submitted(Instant::now(), running.len()) {
+                        eprintln!("{name}: {line}");
                     }
                 }
-                allocated.store(engine.allocated_bytes() + spare_bytes(&spare), Ordering::Relaxed);
-                continue;
+                // Keep the unit; it runs once memory frees up.
+                Err(err) if engine.out_of_memory(&err) => {
+                    // Spare host buffers are the first to go.
+                    let freed = engine.release_idle()
+                        + spare_bytes(&spare)
+                        + spare_bytes(&confirm_spare);
+                    spare.clear();
+                    confirm_spare.clear();
+                    waiting = Some(unit);
+                    match memory.out_of_memory(Instant::now(), running.len(), freed) {
+                        OutOfMemory::Retry(line) => {
+                            if let Some(line) = line {
+                                eprintln!("{name}: {line}");
+                            }
+                        }
+                        OutOfMemory::GiveUp(waited) => {
+                            let _ = done_tx.send(Err(format!(
+                                "{err:#} (no GPU memory for {:.0} s)",
+                                waited.as_secs_f64()
+                            )));
+                            return;
+                        }
+                    }
+                }
+                Err(err) => {
+                    let _ = done_tx.send(Err(format!("{err:#}")));
+                    return;
+                }
             }
+            allocated.store(
+                engine.allocated_bytes() + spare_bytes(&spare) + spare_bytes(&confirm_spare),
+                Ordering::Relaxed,
+            );
+            continue;
         }
         if running.is_empty() && recording.is_none() {
             // Nothing in flight: a unit may be waiting out a memory shortage.
@@ -750,7 +849,11 @@ fn run_units<D: Device>(
                     let _ = done_tx.send(Err("a GPU submission returned too few results".into()));
                     return;
                 }
-                spare.extend(finished.batches);
+                if unit.confirming {
+                    confirm_spare.extend(finished.batches);
+                } else {
+                    spare.extend(finished.batches);
+                }
                 let message = Finished {
                     ticket: unit.ticket,
                     results: finished.results,
