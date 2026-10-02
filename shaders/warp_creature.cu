@@ -448,6 +448,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
         const unsigned maxlev = __reduce_max_sync(FULL, depth);
         const unsigned maxrounds = __reduce_max_sync(FULL, rounds);
         const unsigned maxew = __reduce_max_sync(FULL, ew);
+        const unsigned maxsum = maxew > 0u ? maxew - 1u : 0u;
 
         // Node positions and velocities from the state, parents first.
         // `upd` false leaves the group's values as they are, so a neighbour
@@ -793,19 +794,35 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                 mf[2u * lg] = fa;
                 mf[2u * lg + 1u] = fb;
                 __syncwarp();
+                // Each lane adds up the forces on a few ends (a chunk of its
+                // own bone's ends, or of a bone with more ends than a lane
+                // takes) from the words of ends it holds; the lane of a bone
+                // with more adds the sums of the lanes that took the rest,
+                // with shuffles (warp_kernel::plan_round).
+                const unsigned nsum = ew > 0u ? ew - 1u : 0u;
                 const unsigned* elist = ends + ebase + (unsigned)r * ew * W + lg;
-                for (unsigned e = 0u; e < maxew; e++) {
-                    const unsigned word = (e < ew && (unsigned)r < rounds) ? elist[e * W] : 0xffffffffu;
+                vec3 sum = v3(0.0f, 0.0f, 0.0f);
+                for (unsigned e = 0u; e < maxsum; e++) {
+                    const unsigned word = (e < nsum && (unsigned)r < rounds) ? elist[e * W] : 0xffffffffu;
 #pragma unroll
                     for (unsigned b = 0u; b < 4u; b++) {
                         const unsigned slot = (word >> (8u * b)) & 255u;
                         const float4 f = mf[slot & (2u * W - 1u)];
                         // A select, not a product: a slot nobody wrote may hold
                         // NaN bits, and NaN times zero is NaN.
-                        if (slot != 255u) { fm += v3(f.x, f.y, f.z); }
+                        if (slot != 255u) { sum += v3(f.x, f.y, f.z); }
                     }
                 }
                 __syncwarp();
+                const unsigned srcs = ((unsigned)r < rounds && nsum > 0u) ? elist[nsum * W] : 0u;
+                const unsigned nsrc = (srcs >> 25u) & 7u;
+                const unsigned maxsrc = __reduce_max_sync(FULL, nsrc);
+                vec3 mine = ((srcs >> 28u) & 1u) != 0u ? sum : v3(0.0f, 0.0f, 0.0f);
+                for (unsigned k = 0u; k < maxsrc; k++) {
+                    const vec3 other = shv(sum, (srcs >> (5u * k)) & 31u);
+                    if (k < nsrc) { mine += other; }
+                }
+                fm += mine;
             }
             bs -= fm;
 

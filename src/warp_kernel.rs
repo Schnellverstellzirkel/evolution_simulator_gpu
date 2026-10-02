@@ -47,6 +47,10 @@ pub const CLASSES: [usize; 4] = [4, 8, 16, 32];
 pub const MAX_NODES: usize = 32;
 /// Contacts per substep.
 pub const MAX_CONTACTS: usize = 4;
+/// Words of muscle ends a lane adds up in one round, at most (four ends per
+/// word), and lanes whose sums one lane adds, at most (`plan_round`).
+const MAX_SUM_WORDS: usize = 8;
+const MAX_SOURCES: usize = 5;
 /// Substeps per step, and Gauss-Seidel sweeps per substep (then sweeps that
 /// only take back friction that would do positive work).
 pub const SUBSTEPS: u32 = 1;
@@ -272,13 +276,79 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
 }
 
 /// A creature's size in its class's buffers and its place in the sort, from
-/// its genes alone: muscle rounds, end-list words per round, tree depth.
+/// its genes alone: muscle rounds, end-list words per round (the words of
+/// ends a lane adds up, then one word of sources, or none without muscles),
+/// tree depth.
 #[derive(Clone, Copy)]
 struct Size {
     rounds: usize,
     words: usize,
     depth: u32,
     nodes: usize,
+}
+
+/// Whether the ends of one round, `counts` per lane's bone, fit chunks of
+/// `cap` ends on `w` lanes, each bone with at most `MAX_SOURCES` extra chunks.
+fn chunks_fit(counts: &[u8], w: usize, cap: usize) -> bool {
+    let mut chunks = 0;
+    for &c in counts.iter().filter(|&&c| c > 0) {
+        let n = usize::from(c).div_ceil(cap);
+        if n - 1 > MAX_SOURCES {
+            return false;
+        }
+        chunks += n;
+    }
+    chunks <= w
+}
+
+/// How the ends of one round are added up. Each bone's lane needs the sum of
+/// the forces on the ends its bone carries, and a muscle round gives it a few
+/// ends per bone but many to a hub. A lane adds up at most `cap` ends of one
+/// bone (a chunk). A bone with more ends has its other chunks added up by
+/// lanes that carry no ends this round, and its own lane adds those sums with
+/// shuffles. A round then costs the chunk size and the longest list of
+/// sources, where it cost the end count of the busiest bone.
+struct RoundSums {
+    /// Lane `l` adds up the slots `slots[l][..len[l]]` (a slot is twice the
+    /// muscle's lane plus the end).
+    slots: [[u8; 4 * MAX_SUM_WORDS]; 32],
+    len: [u8; 32],
+    /// Lane `l`'s sum belongs to its own bone.
+    own: [bool; 32],
+    /// The lanes whose sums lane `l` adds.
+    sources: [[u8; MAX_SOURCES]; 32],
+    source_count: [u8; 32],
+}
+
+/// Plans one round from the slots `ends[l][..counts[l]]` of the ends lane
+/// `l`'s bone carries, with chunks of `cap` ends. The extra chunks go to the
+/// lanes without ends, lowest first, in the order of their bones.
+fn plan_round(ends: &[[u8; 64]; 32], counts: &[u8; 32], w: usize, cap: usize) -> RoundSums {
+    let mut sums = RoundSums {
+        slots: [[255; 4 * MAX_SUM_WORDS]; 32],
+        len: [0; 32],
+        own: [false; 32],
+        sources: [[0; MAX_SOURCES]; 32],
+        source_count: [0; 32],
+    };
+    let mut free = (0..w).filter(|&l| counts[l] == 0);
+    for l in 0..w {
+        let count = usize::from(counts[l]);
+        for (c, chunk) in ends[l][..count].chunks(cap).enumerate() {
+            let lane = if c == 0 {
+                sums.own[l] = true;
+                l
+            } else {
+                let lane = free.next().expect("chunks_fit counted the lanes");
+                sums.sources[l][usize::from(sums.source_count[l])] = lane as u8;
+                sums.source_count[l] += 1;
+                lane
+            };
+            sums.slots[lane][..chunk.len()].copy_from_slice(chunk);
+            sums.len[lane] = chunk.len() as u8;
+        }
+    }
+    sums
 }
 
 fn size_of(pop: &Population, i: usize, w: usize) -> Size {
@@ -304,17 +374,19 @@ fn size_of(pop: &Population, i: usize, w: usize) -> Size {
     }
     let rounds = muscles.len().div_ceil(w);
     let mut count = [[0u8; MAX_NODES]; MAX_ROUNDS];
-    let mut most = 0usize;
     for (k, m) in muscles.iter().enumerate() {
         for bone in [m.bone_a, m.bone_b] {
-            let c = &mut count[k / w][bone as usize];
-            *c += 1;
-            most = most.max(*c as usize);
+            count[k / w][bone as usize] += 1;
         }
     }
+    // The fewest words of ends per lane that fit every round. One chunk per
+    // bone always fits at the largest size.
+    let sum_words = (1..=MAX_SUM_WORDS)
+        .find(|&words| count[..rounds].iter().all(|r| chunks_fit(r, w, 4 * words)))
+        .unwrap_or(MAX_SUM_WORDS);
     Size {
         rounds,
-        words: most.div_ceil(4),
+        words: if rounds == 0 { 0 } else { sum_words + 1 },
         depth,
         nodes: g.node_count,
     }
@@ -411,11 +483,14 @@ fn fill_creature(
         put(10, lane, ancestors[j]);
         put(11, lane, node as u32);
     }
-    // Muscles, and the ends each bone carries: four byte slots per word
-    // (muscle lane times two plus the end), 255 for none.
+    // Muscles, and per round the ends each lane adds up (`plan_round`): four
+    // byte slots per word (muscle lane times two plus the end, 255 for none),
+    // and last one word of sources: five lanes in five bits each, their count
+    // from bit 25 and bit 28 set when the sum is the lane's own bone's.
     let limits = physics::limits();
-    let mut filled = [[0usize; MAX_NODES]; MAX_ROUNDS];
     let words = size.words;
+    let mut round_ends = [[[0u8; 64]; 32]; MAX_ROUNDS];
+    let mut round_counts = [[0u8; 32]; MAX_ROUNDS];
     for (k, m) in model.muscles.iter().enumerate() {
         let (round, lane) = (k / w, k % w);
         let la = lane_of_bone[m.bone_a];
@@ -446,11 +521,36 @@ fn fill_creature(
         let at = ((round * w) + lane) * MUSCLE_FIELDS;
         muscles[at..at + MUSCLE_FIELDS].copy_from_slice(&values);
         for (end_lane, slot) in [(la, 2 * lane), (lb, 2 * lane + 1)] {
-            let e = filled[round][end_lane];
-            filled[round][end_lane] += 1;
-            let at = (round * words + e / 4) * w + end_lane;
-            let shift = 8 * (e % 4);
-            ends[at] = (ends[at] & !(0xff << shift)) | (slot as u32) << shift;
+            let e = usize::from(round_counts[round][end_lane]);
+            round_counts[round][end_lane] += 1;
+            round_ends[round][end_lane][e] = slot as u8;
+        }
+    }
+    for round in 0..size.rounds {
+        let sums = plan_round(
+            &round_ends[round],
+            &round_counts[round],
+            w,
+            4 * (words - 1),
+        );
+        for l in 0..w {
+            for e in 0..words - 1 {
+                let mut word = u32::MAX;
+                for b in 0..4 {
+                    if e * 4 + b < usize::from(sums.len[l]) {
+                        let shift = 8 * b;
+                        let slot = u32::from(sums.slots[l][e * 4 + b]);
+                        word = word & !(0xff << shift) | slot << shift;
+                    }
+                }
+                ends[(round * words + e) * w + l] = word;
+            }
+            let count = usize::from(sums.source_count[l]);
+            let mut sources = (count as u32) << 25 | u32::from(sums.own[l]) << 28;
+            for (k, &lane) in sums.sources[l][..count].iter().enumerate() {
+                sources |= u32::from(lane) << (5 * k);
+            }
+            ends[(round * words + words - 1) * w + l] = sources;
         }
     }
     [
