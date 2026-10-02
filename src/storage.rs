@@ -90,11 +90,15 @@ impl Default for RingTimes {
 }
 
 impl RingShape {
-    /// The ring of 4 blocks of 196,608 creatures the game ran with before
-    /// the ring was sized from the rate: 4.7 s of work at 167k creatures/s.
+    /// The ring of 8 blocks of 196,608 creatures, 1.6M in flight. Blocks
+    /// wait on confirmation round trips of 1 to 6 s, and more blocks in
+    /// flight keep the GPU fed meanwhile: at 3M per generation 8 blocks ran
+    /// 336k to 507k creatures/s in generations 1 to 10, 6 blocks 253k to
+    /// 550k and 4 blocks 155k to 424k (worker_rate, seed 38, 2026-10-02),
+    /// at a peak RSS of 6.2 GB.
     pub const LEGACY: RingShape = RingShape {
         block: 196_608,
-        blocks: 4,
+        blocks: 8,
     };
     /// Host time per block (seconds) at or below which the sized ring is
     /// used. A block asks for about 40 confirmation trials whatever its
