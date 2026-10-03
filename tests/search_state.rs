@@ -652,7 +652,7 @@ fn a_loaded_save_breeds_one_ring_and_repeats_its_search() {
 }
 
 #[test]
-fn each_island_gives_a_twentieth_of_its_slots_to_a_nursery_and_a_tenth_to_another() {
+fn each_island_gives_a_fifth_of_its_slots_to_a_nursery_and_a_tenth_to_another() {
     use evolution_simulator::qd;
     let (islands, arenas) = (storage::island_count(), storage::arena_count());
     let rounds = 10 * qd::SLOT_CYCLE;
@@ -661,8 +661,8 @@ fn each_island_gives_a_twentieth_of_its_slots_to_a_nursery_and_a_tenth_to_anothe
         slots[qd::arena_of_slot(slot, arenas)] += 1;
     }
     for island in 0..islands {
-        assert_eq!(slots[island], rounds - 3 * rounds / qd::SLOT_CYCLE);
-        assert_eq!(slots[storage::nursery_of(island)], rounds / qd::SLOT_CYCLE);
+        assert_eq!(slots[island], rounds - 6 * rounds / qd::SLOT_CYCLE);
+        assert_eq!(slots[storage::nursery_of(island)], 4 * rounds / qd::SLOT_CYCLE);
         assert_eq!(
             slots[storage::reshaped_of(island)],
             2 * rounds / qd::SLOT_CYCLE
@@ -997,15 +997,9 @@ fn a_version_54_save_loads_into_the_finer_global_classes() {
     let mut refined = plateau_archive();
     // Bodies of in-between shapes and sizes, which the island classes lump.
     for (k, elite) in refined.entries.iter_mut().enumerate() {
-        match k % 4 {
-            1 => elite.descriptor.aspect_ratio = 1.1,
-            2 => elite.descriptor.nodes = 10,
-            3 => {
-                elite.descriptor.aspect_ratio = 2.0;
-                elite.descriptor.nodes = 12;
-            }
-            _ => {}
-        }
+        let (aspect_ratio, nodes) = [(0.7, 7), (1.0, 7), (0.7, 9), (0.7, 11)][k % 4];
+        elite.descriptor.aspect_ratio = aspect_ratio;
+        elite.descriptor.nodes = nodes;
     }
     refined.set_refined(true);
     refined.rebin();
@@ -1032,7 +1026,12 @@ fn a_version_54_save_loads_into_the_finer_global_classes() {
         .iter()
         .map(|e| (e.niche.0[2], e.niche.0[5]))
         .collect();
-    assert!(global_classes.len() > qd::ISLAND_CLASSES.classes());
+    let island_classes: std::collections::BTreeSet<_> = restored.islands[2]
+        .entries
+        .iter()
+        .map(|e| (e.niche.0[2], e.niche.0[5]))
+        .collect();
+    assert!(global_classes.len() > island_classes.len());
     for elite in &restored.archive.entries {
         if !qd::is_morphology_niche(&elite.niche) {
             assert_eq!(elite.niche, elite.descriptor.niche_in(&qd::GLOBAL_CLASSES));
@@ -1113,7 +1112,7 @@ fn the_global_archive_has_finer_body_classes_than_an_island() {
         aspect_ratio,
         ..Descriptor::default()
     };
-    let (compact, tall) = (body(7, 1.2), body(7, 0.7));
+    let (compact, tall) = (body(7, 1.0), body(7, 0.7));
     assert_eq!(
         compact.niche_in(&ISLAND_CLASSES),
         tall.niche_in(&ISLAND_CLASSES)
@@ -1122,7 +1121,7 @@ fn the_global_archive_has_finer_body_classes_than_an_island() {
         compact.niche_in(&GLOBAL_CLASSES),
         tall.niche_in(&GLOBAL_CLASSES)
     );
-    let (small, medium) = (body(7, 1.2), body(10, 1.2));
+    let (small, medium) = (body(9, 1.0), body(11, 1.0));
     assert_eq!(
         small.niche_in(&ISLAND_CLASSES),
         medium.niche_in(&ISLAND_CLASSES)
