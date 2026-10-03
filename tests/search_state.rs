@@ -283,6 +283,8 @@ fn bodies_of_other_shapes_and_sizes_keep_cells_of_their_own() {
     // Every body class shares the way of moving, and each keeps its fastest.
     assert_eq!(archive.behavior_count(), classes.len());
     assert_eq!(archive.movement_count(), 1);
+    // The statistics of distance read one elite for the way of moving.
+    assert_eq!(archive.best_per_way_of_moving().len(), 1);
     assert!(archive.entries.iter().all(|elite| elite.fitness == 5.0));
     // Bodies of one class compete for its cell, whatever their exact size.
     let before = archive.entries.len();

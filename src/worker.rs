@@ -1481,12 +1481,12 @@ fn run(
                 }
                 let live_best = best.map_or(f32::NAN, |elite| elite.fitness.max(0.0));
                 let live_median = {
+                    // The best elite of each way of moving, like a history row.
                     let mut kept: Vec<f32> = e
                         .archive
-                        .entries
-                        .iter()
-                        .filter(|elite| !qd::is_morphology_niche(&elite.niche))
-                        .map(|elite| elite.fitness)
+                        .best_per_way_of_moving()
+                        .into_iter()
+                        .map(|slot| e.archive.entries[slot].fitness)
                         .collect();
                     if kept.is_empty() {
                         f32::NAN

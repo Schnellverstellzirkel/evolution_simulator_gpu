@@ -681,6 +681,16 @@ fn morphology_niche(topology: &Topology, salt: u64) -> Niche {
 /// A slot value for a cell with no elite.
 const EMPTY_CELL: u32 = u32::MAX;
 
+/// The way of moving of a behavior niche: its index among the cells of the
+/// movement grid, without the body classes.
+fn movement_cell(niche: &Niche) -> usize {
+    let n = &niche.0;
+    ((n[0] as usize * MOVEMENT_BINS[1] as usize + n[1] as usize) * MOVEMENT_BINS[2] as usize
+        + n[3] as usize)
+        * MOVEMENT_BINS[3] as usize
+        + n[4] as usize
+}
+
 /// Where a behavior niche sits in a dense table of every cell of a layout
 /// with `bins`, or None for a niche outside the grid.
 fn cell_index(niche: &Niche, bins: &[u8; 6]) -> Option<usize> {
@@ -881,17 +891,26 @@ impl QdArchive {
         let mut seen = vec![false; MOVEMENT_CELLS];
         let mut count = 0;
         for &i in &self.behavior_indices {
-            let n = &self.entries[i].niche.0;
-            let cell = ((n[0] as usize * MOVEMENT_BINS[1] as usize + n[1] as usize)
-                * MOVEMENT_BINS[2] as usize
-                + n[3] as usize)
-                * MOVEMENT_BINS[3] as usize
-                + n[4] as usize;
+            let cell = movement_cell(&self.entries[i].niche);
             if !std::mem::replace(&mut seen[cell], true) {
                 count += 1;
             }
         }
         count
+    }
+    /// The slots of the fastest elite of each way of moving, whatever its
+    /// body class: the statistics of distance read these, so they mean the
+    /// same for an archive with one elite per way of moving and for one with
+    /// body classes.
+    pub fn best_per_way_of_moving(&self) -> Vec<usize> {
+        let mut best: Vec<Option<usize>> = vec![None; MOVEMENT_CELLS];
+        for &i in &self.behavior_indices {
+            let slot = &mut best[movement_cell(&self.entries[i].niche)];
+            if slot.is_none_or(|j| self.entries[i].fitness > self.entries[j].fitness) {
+                *slot = Some(i);
+            }
+        }
+        best.into_iter().flatten().collect()
     }
     /// The share of the ways of moving that some elite covers.
     pub fn coverage(&self) -> f32 {

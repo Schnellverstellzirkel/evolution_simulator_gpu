@@ -1687,27 +1687,39 @@ impl Experiment {
         if self.history.len() > self.generation as usize {
             return;
         }
-        let mut elites: Vec<_> = self
+        let elites: Vec<_> = self
             .archive
             .entries
             .iter()
             .filter(|elite| !qd::is_morphology_niche(&elite.niche))
             .collect();
-        elites.sort_unstable_by(|a, b| b.fitness.total_cmp(&a.fitness));
-        let count = elites.len();
+        // The median, the worst, the mean and the percentiles read the best
+        // elite of each way of moving, so they mean what they meant before the
+        // archive had body classes. The histogram and the body types count
+        // every elite.
+        let mut ways: Vec<_> = self
+            .archive
+            .best_per_way_of_moving()
+            .into_iter()
+            .map(|slot| &self.archive.entries[slot])
+            .collect();
+        ways.sort_unstable_by(|a, b| b.fitness.total_cmp(&a.fitness));
+        let count = ways.len();
         let archive_best = self.archive.best_fitness();
         let quantile = |p: f32| {
             if count == 0 {
                 0.0
             } else {
-                elites[((1.0 - p / 100.0) * (count - 1) as f32).round() as usize].fitness
+                ways[((1.0 - p / 100.0) * (count - 1) as f32).round() as usize].fitness
             }
         };
         let mut histogram = BTreeMap::<i32, u32>::new();
         let mut species = BTreeMap::<(usize, usize), u32>::new();
         let mut sum = 0.0f64;
-        for elite in &elites {
+        for elite in &ways {
             sum += elite.fitness as f64;
+        }
+        for elite in &elites {
             *histogram
                 .entry((elite.fitness * 100.0).floor() as i32)
                 .or_default() += 1;
@@ -1746,7 +1758,7 @@ impl Experiment {
             species: species.into_iter().map(|((n, m), c)| (n, m, c)).collect(),
             representatives,
             config: self.config.clone(),
-            archive_cells: count,
+            archive_cells: elites.len(),
             qd_score: self.archive.qd_score,
             archive_coverage: self.archive.coverage(),
             emitters: self.emitter_stats,
