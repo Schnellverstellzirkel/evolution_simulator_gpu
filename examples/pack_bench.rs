@@ -24,10 +24,7 @@ fn main() -> anyhow::Result<()> {
         Some(path) => {
             let e = evolution_simulator::storage::load_any_version(std::path::Path::new(path))?;
             let block = &e.blocks[0];
-            (
-                (*block.population).clone(),
-                (*block.config).clone(),
-            )
+            ((*block.population).clone(), (*block.config).clone())
         }
         None => {
             let cfg = Config {

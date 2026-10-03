@@ -86,7 +86,8 @@ fn overlapping_nodes_remain_finite() {
                 friction: 0.5
             };
             3
-        ].into(),
+        ]
+        .into(),
         bones: vec![Bone::new(0, 1, 0.03), Bone::new(1, 2, 0.03)].into(),
         muscles: vec![Muscle {
             bone_a: 0,
@@ -102,7 +103,8 @@ fn overlapping_nodes_remain_finite() {
             sensor: 255,
             reset: 0.0,
             tendon: 0.0,
-        }].into(),
+        }]
+        .into(),
         id: 1,
     };
     assert!(evaluate_one(&c, &config()).is_finite());

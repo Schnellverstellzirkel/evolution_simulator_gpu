@@ -118,7 +118,12 @@ fn main() -> anyhow::Result<()> {
     cfg.screen = None;
     let screened = args.get(5).is_some_and(|v| v == "screen");
     let fine = args.get(5).is_some_and(|v| v == "fine");
-    for name in args.get(4).map_or("", |v| v.as_str()).split(',').filter(|n| !n.is_empty()) {
+    for name in args
+        .get(4)
+        .map_or("", |v| v.as_str())
+        .split(',')
+        .filter(|n| !n.is_empty())
+    {
         let effect = evolution_simulator::environment::EFFECTS
             .iter()
             .find(|e| e.name.eq_ignore_ascii_case(name))

@@ -362,7 +362,10 @@ pub fn one_level_away(cfg: &Config) -> Vec<Config> {
         .filter(|effect| effect.name != "Autochange environment")
     {
         let level = effect.level(cfg);
-        for next in [level.checked_sub(1), Some(level + 1)].into_iter().flatten() {
+        for next in [level.checked_sub(1), Some(level + 1)]
+            .into_iter()
+            .flatten()
+        {
             if next < effect.levels.len() {
                 let mut world = cfg.clone();
                 effect.set_level(&mut world, next);

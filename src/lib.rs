@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod block_alloc;
 pub mod bounded;
 pub mod config;
 pub mod creature_kernel;
@@ -8,7 +9,6 @@ pub mod engine;
 pub mod environment;
 pub mod evolution;
 pub mod gpu;
-pub mod block_alloc;
 pub mod physics;
 pub mod physics2;
 pub mod qd;

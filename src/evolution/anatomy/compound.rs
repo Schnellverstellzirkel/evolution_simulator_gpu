@@ -94,7 +94,7 @@ pub(super) fn close_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
 /// takes such a move is no bigger afterwards: bodies that only grow cost the
 /// GPU more with every creature (a body past 8 or 16 nodes takes twice the
 /// lanes).
-fn shed_tips(c: &mut Creature, first_new: usize, count: usize, rng: &mut Rng) -> usize {
+pub(super) fn shed_tips(c: &mut Creature, first_new: usize, count: usize, rng: &mut Rng) -> usize {
     let (mut first_new, mut shed) = (first_new, 0);
     while shed < count && c.nodes.len() > 3 {
         let mut degrees = [0u8; MAX_NODES];
@@ -130,7 +130,7 @@ fn shed_tips(c: &mut Creature, first_new: usize, count: usize, rng: &mut Rng) ->
 }
 
 /// The muscle of `group` with the most drive.
-fn strongest(c: &Creature, group: &[usize]) -> Option<usize> {
+pub(super) fn strongest(c: &Creature, group: &[usize]) -> Option<usize> {
     group
         .iter()
         .copied()
@@ -139,7 +139,7 @@ fn strongest(c: &Creature, group: &[usize]) -> Option<usize> {
 
 /// The muscle off `group` with the most drive: the main driver of the gait
 /// the group has to work with.
-fn lead_muscle(c: &Creature, group: &[usize]) -> Option<usize> {
+pub(super) fn lead_muscle(c: &Creature, group: &[usize]) -> Option<usize> {
     (0..c.muscles.len())
         .filter(|i| !group.contains(i))
         .max_by(|&x, &y| drive(&c.muscles[x]).total_cmp(&drive(&c.muscles[y])))
@@ -991,7 +991,7 @@ pub(crate) fn grow_integrated_limb(
 /// above it, timed like `template`, `phase` of a cycle after `lead`, unless
 /// a muscle already joins the two. The anchors lie 0.3 to 0.9 of the way
 /// along the limb's first bone and 0.3 to 0.8 along the bone above.
-fn hinge_muscle(
+pub(super) fn hinge_muscle(
     c: &mut Creature,
     cfg: &Config,
     root: usize,

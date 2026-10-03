@@ -125,9 +125,21 @@ struct Mode {
 
 fn mode(name: &str) -> Result<Mode> {
     Ok(match name {
-        "fma" => Mode { entry: "fmachain", ops: "128 FFMA", sass_per_iter: 131 },
-        "mio" => Mode { entry: "mio", ops: "64 FFMA, 32 LDS, 32 SHFL", sass_per_iter: 131 },
-        "int" => Mode { entry: "intmix", ops: "32 IMAD, 32 LOP3, 16 IADD3, 16 SHFL", sass_per_iter: 99 },
+        "fma" => Mode {
+            entry: "fmachain",
+            ops: "128 FFMA",
+            sass_per_iter: 131,
+        },
+        "mio" => Mode {
+            entry: "mio",
+            ops: "64 FFMA, 32 LDS, 32 SHFL",
+            sass_per_iter: 131,
+        },
+        "int" => Mode {
+            entry: "intmix",
+            ops: "32 IMAD, 32 LOP3, 16 IADD3, 16 SHFL",
+            sass_per_iter: 99,
+        },
         _ => bail!("mode must be fma, mio, int or idle"),
     })
 }
@@ -159,7 +171,17 @@ struct Cuda {
     func_get_attribute: unsafe extern "C" fn(*mut c_int, c_int, Ptr) -> CuResult,
     #[allow(clippy::type_complexity)]
     launch: unsafe extern "C" fn(
-        Ptr, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, Ptr, *mut Ptr, *mut Ptr,
+        Ptr,
+        c_uint,
+        c_uint,
+        c_uint,
+        c_uint,
+        c_uint,
+        c_uint,
+        c_uint,
+        Ptr,
+        *mut Ptr,
+        *mut Ptr,
     ) -> CuResult,
     _lib: libloading::Library,
 }
@@ -209,7 +231,10 @@ fn nvrtc_candidates() -> Vec<PathBuf> {
         let venv = Path::new(&home).join(".local/share/evolution-cuda/venv/lib");
         for python in std::fs::read_dir(&venv).into_iter().flatten().flatten() {
             let nvidia = python.path().join("site-packages/nvidia");
-            for (folder, name) in [("cu13/lib", "libnvrtc.so.13"), ("cuda_nvrtc/lib", "libnvrtc.so.12")] {
+            for (folder, name) in [
+                ("cu13/lib", "libnvrtc.so.13"),
+                ("cuda_nvrtc/lib", "libnvrtc.so.12"),
+            ] {
                 let path = nvidia.join(folder).join(name);
                 if path.exists() {
                     out.push(path);
@@ -231,9 +256,15 @@ fn compile(arch: &str) -> Result<Vec<u8>> {
         if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
                 let file = entry.path();
-                if file.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("libnvrtc-builtins.so.")) {
+                if file
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("libnvrtc-builtins.so."))
+                {
                     let flags = libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_GLOBAL;
-                    if let Ok(lib) = unsafe { libloading::os::unix::Library::open(Some(&file), flags) } {
+                    if let Ok(lib) =
+                        unsafe { libloading::os::unix::Library::open(Some(&file), flags) }
+                    {
                         libs.push(libloading::Library::from(lib));
                     }
                 }
@@ -246,16 +277,35 @@ fn compile(arch: &str) -> Result<Vec<u8>> {
     }
     let lib = found.context("NVRTC not found (see docs/building.md)")?;
     unsafe {
-        let create: unsafe extern "C" fn(*mut Prog, *const c_char, *const c_char, c_int, *const *const c_char, *const *const c_char) -> c_int =
-            sym!(lib, "nvrtcCreateProgram");
-        let compile: unsafe extern "C" fn(Prog, c_int, *const *const c_char) -> c_int = sym!(lib, "nvrtcCompileProgram");
-        let log_size: unsafe extern "C" fn(Prog, *mut usize) -> c_int = sym!(lib, "nvrtcGetProgramLogSize");
-        let get_log: unsafe extern "C" fn(Prog, *mut c_char) -> c_int = sym!(lib, "nvrtcGetProgramLog");
-        let cubin_size: unsafe extern "C" fn(Prog, *mut usize) -> c_int = sym!(lib, "nvrtcGetCUBINSize");
-        let get_cubin: unsafe extern "C" fn(Prog, *mut c_char) -> c_int = sym!(lib, "nvrtcGetCUBIN");
+        let create: unsafe extern "C" fn(
+            *mut Prog,
+            *const c_char,
+            *const c_char,
+            c_int,
+            *const *const c_char,
+            *const *const c_char,
+        ) -> c_int = sym!(lib, "nvrtcCreateProgram");
+        let compile: unsafe extern "C" fn(Prog, c_int, *const *const c_char) -> c_int =
+            sym!(lib, "nvrtcCompileProgram");
+        let log_size: unsafe extern "C" fn(Prog, *mut usize) -> c_int =
+            sym!(lib, "nvrtcGetProgramLogSize");
+        let get_log: unsafe extern "C" fn(Prog, *mut c_char) -> c_int =
+            sym!(lib, "nvrtcGetProgramLog");
+        let cubin_size: unsafe extern "C" fn(Prog, *mut usize) -> c_int =
+            sym!(lib, "nvrtcGetCUBINSize");
+        let get_cubin: unsafe extern "C" fn(Prog, *mut c_char) -> c_int =
+            sym!(lib, "nvrtcGetCUBIN");
         let source = CString::new(SOURCE)?;
         let mut prog: Prog = std::ptr::null_mut();
-        if create(&mut prog, source.as_ptr(), c"power_probe.cu".as_ptr(), 0, std::ptr::null(), std::ptr::null()) != 0 {
+        if create(
+            &mut prog,
+            source.as_ptr(),
+            c"power_probe.cu".as_ptr(),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+        ) != 0
+        {
             bail!("nvrtcCreateProgram failed");
         }
         let options = [CString::new(format!("--gpu-architecture={arch}"))?];
@@ -289,14 +339,25 @@ fn main() -> Result<()> {
     unsafe {
         check((cu.init)(0), "cuInit")?;
         check((cu.device_get)(&mut device, 0), "cuDeviceGet")?;
-        check((cu.device_get_name)(device_name.as_mut_ptr(), 256, device), "cuDeviceGetName")?;
-        check((cu.device_get_attribute)(&mut sms, 16, device), "multiprocessors")?;
+        check(
+            (cu.device_get_name)(device_name.as_mut_ptr(), 256, device),
+            "cuDeviceGetName",
+        )?;
+        check(
+            (cu.device_get_attribute)(&mut sms, 16, device),
+            "multiprocessors",
+        )?;
         check((cu.device_get_attribute)(&mut major, 75, device), "major")?;
         check((cu.device_get_attribute)(&mut minor, 76, device), "minor")?;
-        check((cu.primary_ctx_retain)(&mut context, device), "cuDevicePrimaryCtxRetain")?;
+        check(
+            (cu.primary_ctx_retain)(&mut context, device),
+            "cuDevicePrimaryCtxRetain",
+        )?;
         check((cu.ctx_set_current)(context), "cuCtxSetCurrent")?;
     }
-    let device_name = unsafe { CStr::from_ptr(device_name.as_ptr()) }.to_string_lossy().into_owned();
+    let device_name = unsafe { CStr::from_ptr(device_name.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
     eprintln!("device: {device_name}, {sms} SMs, sm_{major}{minor}");
     if name == "idle" {
         let start = Instant::now();
@@ -316,16 +377,30 @@ fn main() -> Result<()> {
     let entry = CString::new(mode.entry)?;
     let (mut blocks_per_sm, mut regs) = (0, 0);
     unsafe {
-        check((cu.module_load_data)(&mut module, cubin.as_ptr() as *const c_void), "cuModuleLoadData")?;
-        check((cu.module_get_function)(&mut function, module, entry.as_ptr()), "cuModuleGetFunction")?;
-        check((cu.occupancy)(&mut blocks_per_sm, function, BLOCK as c_int, 0), "occupancy")?;
+        check(
+            (cu.module_load_data)(&mut module, cubin.as_ptr() as *const c_void),
+            "cuModuleLoadData",
+        )?;
+        check(
+            (cu.module_get_function)(&mut function, module, entry.as_ptr()),
+            "cuModuleGetFunction",
+        )?;
+        check(
+            (cu.occupancy)(&mut blocks_per_sm, function, BLOCK as c_int, 0),
+            "occupancy",
+        )?;
         check((cu.func_get_attribute)(&mut regs, 4, function), "registers")?;
     }
     let grid = blocks_per_sm as u32 * sms as u32;
     let threads = grid as u64 * BLOCK as u64;
     let warps = threads / 32;
     let mut out: u64 = 0;
-    unsafe { check((cu.mem_alloc)(&mut out, (threads as usize + 2) * 8), "cuMemAlloc")? };
+    unsafe {
+        check(
+            (cu.mem_alloc)(&mut out, (threads as usize + 2) * 8),
+            "cuMemAlloc",
+        )?
+    };
     eprintln!(
         "{name}: {} per thread per iteration, {} SASS; {regs} registers, {blocks_per_sm} blocks of {BLOCK} per SM ({} warps per SM)",
         mode.ops,
@@ -336,16 +411,34 @@ fn main() -> Result<()> {
     let launch = |iters: i32| -> Result<(f64, f64)> {
         let mut pointer = out;
         let mut iters = iters;
-        let mut params: [Ptr; 2] = [&mut pointer as *mut u64 as Ptr, &mut iters as *mut i32 as Ptr];
+        let mut params: [Ptr; 2] = [
+            &mut pointer as *mut u64 as Ptr,
+            &mut iters as *mut i32 as Ptr,
+        ];
         let start = Instant::now();
         let mut stamp = [0u64; 2];
         unsafe {
             check(
-                (cu.launch)(function, grid, 1, 1, BLOCK, 1, 1, 0, std::ptr::null_mut(), params.as_mut_ptr(), std::ptr::null_mut()),
+                (cu.launch)(
+                    function,
+                    grid,
+                    1,
+                    1,
+                    BLOCK,
+                    1,
+                    1,
+                    0,
+                    std::ptr::null_mut(),
+                    params.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                ),
                 "cuLaunchKernel",
             )?;
             check((cu.ctx_synchronize)(), "cuCtxSynchronize")?;
-            check((cu.memcpy_dtoh)(stamp.as_mut_ptr() as *mut c_void, out, 16), "cuMemcpyDtoH")?;
+            check(
+                (cu.memcpy_dtoh)(stamp.as_mut_ptr() as *mut c_void, out, 16),
+                "cuMemcpyDtoH",
+            )?;
         }
         let mhz = stamp[0] as f64 / stamp[1].max(1) as f64 * 1e3;
         Ok((start.elapsed().as_secs_f64(), mhz))

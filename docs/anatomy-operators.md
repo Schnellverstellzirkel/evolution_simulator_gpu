@@ -13,6 +13,7 @@ Every operator keeps the body limits and never touches the head or the neck.
 | extra (`extra.rs`) | copy a leg to the dragging end of the body; lift the dragging end; twin a limb in place; the same tip on two matching limbs; remove the idlest limb tip; merge the last two bones of a limb; and, sharing one pick slot, eight gentle operators that copy, swap or shift limb programs, trade cadence against stride, and change leverage, strength or the weakest muscle |
 | controller (`controller.rs`) | limb stroke scale; limb posture shift; taper limb strength; copy limb rhythm; retune a muscle pair; release touchdown; snap limb phases; put a limb on another clock ratio; lock a limb back on the base clock; reflexes on a muscle, on all feet, and a shifted reflex reset. These share one pick slot. Starting the gait at another point of its cycle has its own slot |
 | compound (`compound.rs`) | coherent changes that touch several parts of a body at once, one line each below. Each has its own pick slot |
+| legs (`legs.rs`) | four compound operators that make mammal-like legs cheap to reach, described below. Each has its own pick slot and its child gets no parameter noise |
 
 A limb may run on its own clock at a ratio of the base clock (1/2, 2/3, 1, 3/2 or 2), so the whole gait still repeats.
 
@@ -33,6 +34,15 @@ A compound operator changes several parts of a body together and keeps them cons
 - `transplant_limb_program`: a limb takes the muscle program of a limb of another elite with the same number of bones, moved in time so its strongest muscle keeps the phase the old one had (Lessin, Fussell and Miikkulainen 2013, whole modules exchanged).
 - `transplant_gait`: the leaf limbs, front to back, take the programs of another elite's leaf limbs at the same places in the order (where the bone counts match, for two limbs or more), keeping the donor's timing among them and the front limb's place in the cycle.
 - `trim_body`: the idlest limb tips (one to four by the size of the body) and up to three of the weakest muscles off the motor ring go in one move, for bodies with three or more muscles to a node. Young bodies have fewer and need every muscle.
+
+## Leg operators
+
+These four are compound operators in `legs.rs`. They build the parts of a mammal gait: legs under the trunk, in pairs, spread along it, stepping in a fixed phase against each other (Sims 1994, Lipson and Pollack 2000, Cheney et al. 2013, Stanley 2007).
+
+- `sprout_leg`: a leg of two bones (thigh and shank) hangs from a trunk node, pointing down with a small lean and a bent knee. A hip muscle and a knee muscle drive it, the knee a quarter cycle behind the hip, and half the time a second hip muscle pulls the other way half a cycle later. The leg steps against the nearest leg: half a cycle after it, a quarter or three quarters (gallop) or with it (bound). The idlest tips go back.
+- `mirror_leg_fore_aft`: a leg of up to three bones is copied to the node nearest the mirror image of its hip about the middle of the trunk, translated or reflected, in the phase of a four-legged gait (trot: half a cycle, bound: none, gallop: a fifth of a cycle either way).
+- `spread_leg_attachment`: a leg's hip moves along the trunk to the nearest node that lies farther from the middle of the body. The leg keeps its shape and muscles.
+- `tuck_leg_under`: a leg turns so its first bone points down, within a small lean, which puts its foot under its hip. Only legs 0.1 to 1.3 rad off straight down turn.
 
 A generative grammar whose rules children inherit was not built: a rule set would be a new part of the genome and of every save and archive, and a grammar used only as a seed source tied (`docs/rejected-ideas.md`). `segment_chain`, `limb_length_gradient` and `mirrored_limb_pair` apply such productions (repeat with a gradient, scale by place, add a mirrored pair) to the body itself, and the child inherits the result.
 

@@ -107,7 +107,19 @@ fn zero_mutation_children(cfg: &Config, parent: &Creature) -> Vec<Creature> {
         .collect();
     let slots: Vec<usize> = (0..8).collect();
     let mut children = evolution::Population::default();
-    children.breed(8, None, &mut [], &[archive], &[], &plans, &slots, &slots, cfg, 0, 0);
+    children.breed(
+        8,
+        None,
+        &mut [],
+        &[archive],
+        &[],
+        &plans,
+        &slots,
+        &slots,
+        cfg,
+        0,
+        0,
+    );
     (0..8).map(|k| children.creature(k)).collect()
 }
 #[test]
@@ -121,8 +133,7 @@ fn zero_mutation_copies_genetics() {
     // body's clock yet, and breeding repairs every child. So the first
     // generation of children may differ from the random body in those
     // periods, and only a repaired body is copied exactly.
-    let repaired = zero_mutation_children(&cfg, &population.creature(0))
-        .swap_remove(0);
+    let repaired = zero_mutation_children(&cfg, &population.creature(0)).swap_remove(0);
     for child in zero_mutation_children(&cfg, &repaired) {
         assert_genomes_close(&child, &repaired);
     }
@@ -176,7 +187,17 @@ fn breeding_into_a_reused_arena_gives_the_same_creatures() {
     let lead = || vec![(5, parents.creature(7))];
     let breed = |arena: &mut evolution::Population, round: u64| {
         arena.breed(
-            count, None, &mut lead(), &archive, &[], &plans, &slots, &positions, &cfg, 3, round,
+            count,
+            None,
+            &mut lead(),
+            &archive,
+            &[],
+            &plans,
+            &slots,
+            &positions,
+            &cfg,
+            3,
+            round,
         )
     };
     let mut fresh = evolution::Population::default();

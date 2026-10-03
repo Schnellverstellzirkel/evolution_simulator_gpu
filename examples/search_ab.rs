@@ -638,7 +638,12 @@ fn print_nurseries(scope: &str, seed: u64, generation: u32, experiment: &Experim
     println!(
         "{scope} {seed} {generation} cma emitters per archive: {} of {}",
         (0..experiment.islands.len())
-            .map(|a| experiment.cma_emitters.iter().filter(|c| c.island == a).count().to_string())
+            .map(|a| experiment
+                .cma_emitters
+                .iter()
+                .filter(|c| c.island == a)
+                .count()
+                .to_string())
             .collect::<Vec<_>>()
             .join(" "),
         experiment.cma_emitters.len()

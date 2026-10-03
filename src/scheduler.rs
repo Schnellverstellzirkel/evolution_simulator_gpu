@@ -409,13 +409,10 @@ impl Scheduler {
                     let fits = |w: &Work| w.max_nodes <= capacity;
                     let confirm_open = device.engine.free_confirm_slots() > 0;
                     let standard_open = device.engine.free_slots() > 0;
-                    let work = if confirm_open
-                        && let Some(at) = self.confirms.iter().position(fits)
+                    let work = if confirm_open && let Some(at) = self.confirms.iter().position(fits)
                     {
                         self.confirms.remove(at)
-                    } else if standard_open
-                        && let Some(at) = self.work.iter().position(fits)
-                    {
+                    } else if standard_open && let Some(at) = self.work.iter().position(fits) {
                         self.work.remove(at)
                     } else {
                         None

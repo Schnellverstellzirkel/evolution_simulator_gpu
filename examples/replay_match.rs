@@ -66,11 +66,7 @@ fn retest(path: &str, count: usize, out: &str) -> Result<()> {
     for (e, r) in elites.iter().zip(&results) {
         text += &format!(
             "{},{},{},{},{}\n",
-            e.creature.id,
-            e.fitness,
-            e.fine as u8,
-            r.fitness,
-            r.fall_time
+            e.creature.id, e.fitness, e.fine as u8, r.fitness, r.fall_time
         );
     }
     std::fs::write(out, text)?;
@@ -114,14 +110,20 @@ fn sorted(mut v: Vec<f32>) -> Vec<f32> {
 }
 
 fn ladder(paths: &[String]) -> Result<()> {
-    anyhow::ensure!(paths.len() == 3, "--ladder needs the base, 2 and 4 substep files");
+    anyhow::ensure!(
+        paths.len() == 3,
+        "--ladder needs the base, 2 and 4 substep files"
+    );
     let base = read(&paths[0])?;
     let others: Vec<HashMap<u64, Row>> = paths[1..]
         .iter()
         .map(|p| read(p).map(|rows| rows.into_iter().collect()))
         .collect::<Result<_>>()?;
     let names = ["2 substeps", "4 substeps"];
-    let same = base.iter().filter(|(_, r)| r.distance.to_bits() == r.archive.to_bits()).count();
+    let same = base
+        .iter()
+        .filter(|(_, r)| r.distance.to_bits() == r.archive.to_bits())
+        .count();
     println!(
         "{} elites; the base re-test equals the archive distance for {} (the rest were confirmed at the fine rate)",
         base.len(),

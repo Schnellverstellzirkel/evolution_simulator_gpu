@@ -245,16 +245,24 @@ impl Engine for ThreadedEngine {
         if self.failure.is_some() {
             0
         } else {
-            self.depth
-                .saturating_sub(self.queued.iter().filter(|(_, confirming)| !confirming).count())
+            self.depth.saturating_sub(
+                self.queued
+                    .iter()
+                    .filter(|(_, confirming)| !confirming)
+                    .count(),
+            )
         }
     }
     fn free_confirm_slots(&self) -> usize {
         if self.failure.is_some() {
             0
         } else {
-            CONFIRM_DEPTH
-                .saturating_sub(self.queued.iter().filter(|(_, confirming)| *confirming).count())
+            CONFIRM_DEPTH.saturating_sub(
+                self.queued
+                    .iter()
+                    .filter(|(_, confirming)| *confirming)
+                    .count(),
+            )
         }
     }
     fn submit_shared(&mut self, unit: Arc<Population>, cfg: &Config) -> Result<u64> {
@@ -284,7 +292,10 @@ impl Engine for ThreadedEngine {
             }
             return Ok(None);
         };
-        let position = self.queued.iter().position(|&(ticket, _)| ticket == done.ticket);
+        let position = self
+            .queued
+            .iter()
+            .position(|&(ticket, _)| ticket == done.ticket);
         anyhow::ensure!(position.is_some(), "{} returned an unknown unit", self.name);
         self.queued.remove(position.unwrap());
         Ok(Some(done))
@@ -369,8 +380,11 @@ trait Device {
     /// Uploads the batches and queues their whole trials. On success the
     /// device takes the batches (`batches` is left empty) and returns them
     /// in `Completed`; on failure they stay.
-    fn submit(&mut self, batches: &mut Vec<creature_kernel::LaneBatch>, cfg: &Config)
-    -> Result<u64>;
+    fn submit(
+        &mut self,
+        batches: &mut Vec<creature_kernel::LaneBatch>,
+        cfg: &Config,
+    ) -> Result<u64>;
     fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>>;
     /// Frees buffers kept for reuse by slots with nothing in flight.
     fn release_idle(&mut self) -> u64;
@@ -580,8 +594,11 @@ pub fn gpu_engine(name: &str, max_nodes: usize) -> Result<ThreadedEngine> {
                 }
             };
             let name = engine.name.clone();
-            let memory =
-                MemoryBackoff::new(slots + 1, Duration::from_millis(500), Duration::from_secs(60));
+            let memory = MemoryBackoff::new(
+                slots + 1,
+                Duration::from_millis(500),
+                Duration::from_secs(60),
+            );
             // Replays run on the recording variant of the kernel that scores.
             run_units(
                 engine,
@@ -744,14 +761,24 @@ fn run_units<D: Device>(
         let next: Option<Result<PackedUnit>> = if !may_submit {
             None
         } else if let Some(unit) = waiting.take() {
-            if if is_confirmation(&unit.cfg) { can_confirm } else { can_standard } {
+            if if is_confirmation(&unit.cfg) {
+                can_confirm
+            } else {
+                can_standard
+            } {
                 Some(Ok(unit))
             } else {
                 waiting = Some(unit);
                 None
             }
         } else if can_confirm && let Some((ticket, unit, cfg)) = confirm_jobs.pop_front() {
-            Some(pack_unit(ticket, unit, cfg, &mut indices, &mut confirm_spare))
+            Some(pack_unit(
+                ticket,
+                unit,
+                cfg,
+                &mut indices,
+                &mut confirm_spare,
+            ))
         } else if can_standard && let Some((ticket, unit, cfg)) = standard_jobs.pop_front() {
             Some(pack_unit(ticket, unit, cfg, &mut indices, &mut spare))
         } else {
@@ -784,9 +811,8 @@ fn run_units<D: Device>(
                 // Keep the unit; it runs once memory frees up.
                 Err(err) if engine.out_of_memory(&err) => {
                     // Spare host buffers are the first to go.
-                    let freed = engine.release_idle()
-                        + spare_bytes(&spare)
-                        + spare_bytes(&confirm_spare);
+                    let freed =
+                        engine.release_idle() + spare_bytes(&spare) + spare_bytes(&confirm_spare);
                     spare.clear();
                     confirm_spare.clear();
                     waiting = Some(unit);

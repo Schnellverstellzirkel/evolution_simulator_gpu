@@ -293,9 +293,15 @@ fn main() -> anyhow::Result<()> {
                             && r.steps() > RUNG_STEPS[k]
                     }) {
                         n += 1;
-                        stopped += usize::from(rules.0[k].stops(&rungs::features(&r.trace, k, r.period), 0));
+                        stopped += usize::from(
+                            rules.0[k].stops(&rungs::features(&r.trace, k, r.period), 0),
+                        );
                     }
-                    println!("  rung {}: {stopped} of {n} entrants the screen keeps would stop ({:.2}%)", k + 1, 100.0 * stopped as f64 / n.max(1) as f64);
+                    println!(
+                        "  rung {}: {stopped} of {n} entrants the screen keeps would stop ({:.2}%)",
+                        k + 1,
+                        100.0 * stopped as f64 / n.max(1) as f64
+                    );
                 }
                 println!("  rules {:?}", rules.0);
             }

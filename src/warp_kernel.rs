@@ -216,13 +216,25 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
     let mut defines: Vec<(String, String)> = vec![
         ("W".into(), format!("{class}u")),
         ("BLOCK".into(), format!("{BLOCK}u")),
-        ("MIN_BLOCKS".into(), format!("{}", solver_setting("MIN_BLOCKS", MIN_BLOCKS))),
+        (
+            "MIN_BLOCKS".into(),
+            format!("{}", solver_setting("MIN_BLOCKS", MIN_BLOCKS)),
+        ),
         ("RATE".into(), format!("{:.1}f", fidelity.rate as f32)),
         ("SETTLE".into(), format!("{}u", fidelity.settle())),
         ("SAMPLE".into(), format!("{}u", fidelity.sample_interval())),
-        ("SUBSTEPS".into(), format!("{}u", solver_setting("SUBSTEPS", SUBSTEPS))),
-        ("PGS_SWEEPS".into(), format!("{}u", solver_setting("PGS_SWEEPS", PGS_SWEEPS))),
-        ("CLEAN_SWEEPS".into(), format!("{}u", solver_setting("CLEAN_SWEEPS", CLEAN_SWEEPS))),
+        (
+            "SUBSTEPS".into(),
+            format!("{}u", solver_setting("SUBSTEPS", SUBSTEPS)),
+        ),
+        (
+            "PGS_SWEEPS".into(),
+            format!("{}u", solver_setting("PGS_SWEEPS", PGS_SWEEPS)),
+        ),
+        (
+            "CLEAN_SWEEPS".into(),
+            format!("{}u", solver_setting("CLEAN_SWEEPS", CLEAN_SWEEPS)),
+        ),
         ("MAXR".into(), format!("{}", max_rounds(class))),
         ("RECORD".into(), (if record { "1" } else { "0" }).into()),
         (
@@ -283,7 +295,10 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
     }
     // A developer working on the kernel may point `EVOLUTION_WARP_SOURCE` at
     // a copy of it to skip rebuilds.
-    match std::env::var("EVOLUTION_WARP_SOURCE").ok().and_then(|p| std::fs::read_to_string(p).ok()) {
+    match std::env::var("EVOLUTION_WARP_SOURCE")
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+    {
         Some(text) => source.push_str(&text),
         None => source.push_str(include_str!("../shaders/warp_creature.cu")),
     }
@@ -383,7 +398,11 @@ fn size_of(pop: &Population, i: usize, w: usize) -> Size {
         } else {
             end_of[b.a as usize]
         };
-        level[j] = if parent == usize::MAX { 1 } else { level[parent] + 1 };
+        level[j] = if parent == usize::MAX {
+            1
+        } else {
+            level[parent] + 1
+        };
         depth = depth.max(level[j]);
         end_of[b.b as usize] = j;
     }
@@ -478,7 +497,11 @@ fn fill_creature(
             Some(p) if j > 0 => lane_of_bone[p],
             _ => 1,
         };
-        let first_child = if first[j] == usize::MAX { 0 } else { lane_of_bone[first[j]] };
+        let first_child = if first[j] == usize::MAX {
+            0
+        } else {
+            lane_of_bone[first[j]]
+        };
         let topo = lane_of_node(pivot) as u32
             | (parent_lane as u32) << 5
             | level[j] << 10
@@ -542,12 +565,7 @@ fn fill_creature(
         }
     }
     for round in 0..size.rounds {
-        let sums = plan_round(
-            &round_ends[round],
-            &round_counts[round],
-            w,
-            4 * (words - 1),
-        );
+        let sums = plan_round(&round_ends[round], &round_counts[round], w, 4 * (words - 1));
         for l in 0..w {
             for e in 0..words - 1 {
                 let mut word = u32::MAX;
@@ -655,7 +673,12 @@ pub fn pack_reusing(
                 b.slots.clear();
                 b.creatures.clear();
                 b.info.clear();
-                (b.wave.take().unwrap_or_default(), b.slots, b.creatures, b.info)
+                (
+                    b.wave.take().unwrap_or_default(),
+                    b.slots,
+                    b.creatures,
+                    b.info,
+                )
             }
             None => Default::default(),
         };
@@ -679,12 +702,16 @@ pub fn pack_reusing(
             // as its size says, and heads 2c and 2c + 1; the ranges are
             // disjoint and inside the buffers allocated above.
             unsafe {
-                let lanes = std::slice::from_raw_parts_mut(out.lanes.add(c * LANE_FIELDS * w), LANE_FIELDS * w);
+                let lanes = std::slice::from_raw_parts_mut(
+                    out.lanes.add(c * LANE_FIELDS * w),
+                    LANE_FIELDS * w,
+                );
                 let muscles = std::slice::from_raw_parts_mut(
                     out.muscles.add(muscle_at[c]),
                     z.rounds * w * MUSCLE_FIELDS,
                 );
-                let ends = std::slice::from_raw_parts_mut(out.ends.add(end_at[c]), z.rounds * z.words * w);
+                let ends =
+                    std::slice::from_raw_parts_mut(out.ends.add(end_at[c]), z.rounds * z.words * w);
                 let mut head = fill_creature(&model, cfg, hash, w, z, lanes, muscles, ends);
                 head[3] = muscle_at[c] as u32;
                 head[4] = end_at[c] as u32;

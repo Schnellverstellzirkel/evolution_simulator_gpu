@@ -212,13 +212,19 @@ fn on_a_plateau_a_rung_arms_whatever_the_creatures_that_enter_archives_look_like
     // The guard counts the creatures above the bar there, so the early
     // fallers that improve a niche of weak bodies, or no entrants at all,
     // decide nothing.
-    for tweak in [early_fallers_enter as fn(u32, &mut AuditRow), |_, row| row.entrant = false] {
+    for tweak in [early_fallers_enter as fn(u32, &mut AuditRow), |_, row| {
+        row.entrant = false
+    }] {
         let mut audit = Audit::default();
         for g in 0..4u32 {
             generation(&mut audit, g, true, tweak);
         }
         assert!(audit.trusted(0, true) && audit.trusted(1, true));
-        assert!(audit.fit(true).is_some_and(|rules| rules.0[0].armed() && rules.0[1].armed()));
+        assert!(
+            audit
+                .fit(true)
+                .is_some_and(|rules| rules.0[0].armed() && rules.0[1].armed())
+        );
     }
 }
 
@@ -238,7 +244,11 @@ fn a_rung_that_stops_the_creatures_above_the_bar_is_not_armed_on_a_plateau() {
         }
     });
     assert!(!audit.trusted(0, true) && !audit.trusted(1, true));
-    assert!(audit.fit(true).is_none_or(|rules| !rules.0[0].armed() && !rules.0[1].armed()));
+    assert!(
+        audit
+            .fit(true)
+            .is_none_or(|rules| !rules.0[0].armed() && !rules.0[1].armed())
+    );
 }
 
 #[test]
@@ -270,7 +280,9 @@ fn while_the_archives_climb_the_guard_is_the_entrant_guard_it_always_was() {
     let mut seen = [false; 2];
     let mut state = 12345u64;
     let mut next = move || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (state >> 33) as u32
     };
     for g in 0..14u32 {
@@ -281,7 +293,11 @@ fn while_the_archives_climb_the_guard_is_the_entrant_guard_it_always_was() {
                 // Entrants are mostly creatures above the bar; creatures that
                 // fall early enter now and then, more in some generations.
                 let weak = if g % 5 < 2 { 250 } else { 3000 };
-                row.entrant = if row.pass3 { next() % 4 == 0 } else { next() % weak == 0 };
+                row.entrant = if row.pass3 {
+                    next() % 4 == 0
+                } else {
+                    next() % weak == 0
+                };
                 row.below_bar = !row.pass3 && next() % 3 != 0;
                 row
             })
@@ -314,7 +330,11 @@ fn while_the_archives_climb_the_guard_is_the_entrant_guard_it_always_was() {
                 .fold((0u32, 0u32), |t, &(n, s)| (t.0 + n, t.1 + s));
             let trusted = n >= 60 && f64::from(stopped) <= 0.03 * f64::from(n);
             seen[usize::from(trusted)] = true;
-            assert_eq!(audit.trusted(r, false), trusted, "generation {g}, rung {r}: {n} entrants, {stopped} stopped");
+            assert_eq!(
+                audit.trusted(r, false),
+                trusted,
+                "generation {g}, rung {r}: {n} entrants, {stopped} stopped"
+            );
         }
     }
     // The test only means something if the guard both held and let go.

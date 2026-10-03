@@ -71,7 +71,12 @@ fn report(name: &str, archive: &qd::QdArchive, experiment: &storage::Experiment)
         let nodes = e.topology.nodes as u32;
         skeletons.insert((
             nodes,
-            e.topology.edges.iter().copied().filter(|&(a, b)| a < nodes && b < nodes).collect(),
+            e.topology
+                .edges
+                .iter()
+                .copied()
+                .filter(|&(a, b)| a < nodes && b < nodes)
+                .collect(),
         ));
         classes.insert((e.creature.nodes.len(), e.creature.muscles.len()));
         *nodes_hist.entry(e.creature.nodes.len()).or_default() += 1;
@@ -89,7 +94,10 @@ fn report(name: &str, archive: &qd::QdArchive, experiment: &storage::Experiment)
         root.push(root_generation as f32);
         graduates += usize::from(e.graduate);
         let chain = experiment.ancestry(e.creature.id, usize::MAX);
-        if chain.last().is_some_and(|a| a.change.contains("new random body")) {
+        if chain
+            .last()
+            .is_some_and(|a| a.change.contains("new random body"))
+        {
             from_random += 1;
         }
     }
@@ -104,8 +112,14 @@ fn report(name: &str, archive: &qd::QdArchive, experiment: &storage::Experiment)
     println!(
         "    {} cells tie with the best within 0.1 mm (mean nodes {:.1}, {} plans); {} fitness values shared by more than one cell, largest groups {:?}",
         tied.len(),
-        tied.iter().map(|e| e.creature.nodes.len() as f32).sum::<f32>() / tied.len().max(1) as f32,
-        tied.iter().map(|e| &e.topology).collect::<HashSet<_>>().len(),
+        tied.iter()
+            .map(|e| e.creature.nodes.len() as f32)
+            .sum::<f32>()
+            / tied.len().max(1) as f32,
+        tied.iter()
+            .map(|e| &e.topology)
+            .collect::<HashSet<_>>()
+            .len(),
         ties.len(),
         &ties[..ties.len().min(8)]
     );
@@ -114,7 +128,11 @@ fn report(name: &str, archive: &qd::QdArchive, experiment: &storage::Experiment)
         "    {} skeletons, {} node and muscle count classes; cells by node count: {}",
         skeletons.len(),
         classes.len(),
-        nodes_hist.iter().map(|(n, c)| format!("{n}:{c}")).collect::<Vec<_>>().join(" ")
+        nodes_hist
+            .iter()
+            .map(|(n, c)| format!("{n}:{c}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     );
     println!(
         "{name}: {} cells, {} body plans ({} held by one cell, largest plan {} cells), reserve {} entries of {} plans ({} not in a cell); fitness {}",
@@ -124,7 +142,10 @@ fn report(name: &str, archive: &qd::QdArchive, experiment: &storage::Experiment)
         largest,
         reserve.len(),
         reserve_plans.len(),
-        reserve_plans.iter().filter(|t| !plans.contains_key(*t)).count(),
+        reserve_plans
+            .iter()
+            .filter(|t| !plans.contains_key(*t))
+            .count(),
         quantiles(&fitness),
     );
     println!(
@@ -155,7 +176,9 @@ fn fitness_of(elites: &[&qd::Elite]) -> Vec<f32> {
 }
 
 fn main() -> Result<()> {
-    let path = std::env::args().nth(1).expect("usage: island_report <save>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: island_report <save>");
     let experiment = storage::load_archives(std::path::Path::new(&path))?;
     println!(
         "{path}: generation {}, population {}, {} lineage records",
@@ -197,6 +220,9 @@ fn main() -> Result<()> {
             all.insert(&e.topology);
         }
     }
-    println!("distinct plans over the four isolated islands (cells and reserves): {}", all.len());
+    println!(
+        "distinct plans over the four isolated islands (cells and reserves): {}",
+        all.len()
+    );
     Ok(())
 }

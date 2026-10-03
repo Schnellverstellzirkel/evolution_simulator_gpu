@@ -1689,14 +1689,14 @@ impl Population {
             canonicalize_bone_order(c);
         }
         let lead_size = lead.iter().fold([0usize; 3], |t, (_, c)| {
-            [t[0] + c.nodes.len(), t[1] + c.bones.len(), t[2] + c.muscles.len()]
+            [
+                t[0] + c.nodes.len(),
+                t[1] + c.bones.len(),
+                t[2] + c.muscles.len(),
+            ]
         });
         let parts: Vec<[usize; 3]> = std::iter::once(lead_size)
-            .chain(
-                positions
-                    .chunks(BREED_CHUNK)
-                    .map(held),
-            )
+            .chain(positions.chunks(BREED_CHUNK).map(held))
             .collect();
         let need = parts
             .iter()
@@ -1797,7 +1797,11 @@ impl Population {
             late += 1;
             fit(&mut self.nodes, at[0] + child.nodes.len(), NO_NODE);
             fit(&mut self.bones, at[1] + child.bones.len(), Bone::zeroed());
-            fit(&mut self.muscles, at[2] + child.muscles.len(), Muscle::zeroed());
+            fit(
+                &mut self.muscles,
+                at[2] + child.muscles.len(),
+                Muscle::zeroed(),
+            );
             let mut part = ArenaPart {
                 base: at,
                 at: [0; 3],

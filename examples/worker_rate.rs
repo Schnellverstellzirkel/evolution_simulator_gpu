@@ -196,7 +196,9 @@ fn main() -> anyhow::Result<()> {
                 resident_marks.push(resident());
                 let (late, fresh) = evolution_simulator::storage::take_breed_late();
                 let (hit, map, unmap) = evolution_simulator::block_alloc::large_blocks();
-                eprintln!("          large blocks since the start: {hit} reused, {map} mapped, {unmap} unmapped; children bred after their arena part: {late}, blocks bred into a new arena: {fresh}");
+                eprintln!(
+                    "          large blocks since the start: {hit} reused, {map} mapped, {unmap} unmapped; children bred after their arena part: {late}, blocks bred into a new arena: {fresh}"
+                );
             }
             if n >= base + generations {
                 break snapshot.history.clone();

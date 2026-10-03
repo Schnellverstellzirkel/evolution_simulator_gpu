@@ -879,14 +879,23 @@ impl Experiment {
     /// calibrate the rungs. Its result is still held to the screen's rule:
     /// one that lived past 5 s below the bar enters no archive, as it would
     /// not have in a trial with the screen.
-    fn exclude_audit_below_bar(block: &Block, standard: &[EvaluationMetrics], out: &mut [EvaluationMetrics]) {
+    fn exclude_audit_below_bar(
+        block: &Block,
+        standard: &[EvaluationMetrics],
+        out: &mut [EvaluationMetrics],
+    ) {
         let Some(screen) = block.config.screen else {
             return;
         };
         for (j, m) in standard.iter().enumerate() {
-            let audit = block.population.flags.get(j).copied().unwrap_or(0) & crate::rungs::AUDIT != 0;
+            let audit =
+                block.population.flags.get(j).copied().unwrap_or(0) & crate::rungs::AUDIT != 0;
             let bar = block.screen_bar(&screen, j);
-            if audit && bar.is_finite() && m.trace.steps() > crate::rungs::SCREEN_STEPS && m.screen_x < bar {
+            if audit
+                && bar.is_finite()
+                && m.trace.steps() > crate::rungs::SCREEN_STEPS
+                && m.screen_x < bar
+            {
                 out[j].excluded = true;
             }
         }
@@ -1194,8 +1203,7 @@ impl Experiment {
                 } else {
                     false
                 };
-                let structural =
-                    valid && matches!(emitter, Emitter::Structural | Emitter::Novelty);
+                let structural = valid && matches!(emitter, Emitter::Structural | Emitter::Novelty);
                 let plan = if structural {
                     qd::plan_key_of_population(population, j)
                 } else {
@@ -1232,12 +1240,7 @@ impl Experiment {
         // Per island: the positions that entered, the emitter and offer of
         // each reserve entry, the positions that entered the reserve, and
         // the new body plans that took neither a cell nor a reserve place.
-        type IslandResult = (
-            Vec<usize>,
-            Vec<(usize, qd::Offer)>,
-            Vec<usize>,
-            Vec<usize>,
-        );
+        type IslandResult = (Vec<usize>, Vec<(usize, qd::Offer)>, Vec<usize>, Vec<usize>);
         let island_results: Vec<IslandResult> = self
             .islands
             .par_iter_mut()
@@ -1999,9 +2002,7 @@ impl Experiment {
         let scale = (2.0 * level as f32 / archive.behavior_count().max(1) as f32).min(1.0);
         root_of
             .iter()
-            .map(|root| {
-                scale * (1.0 - (sizes.get(root).copied().unwrap_or(1) as f32).ln() / total)
-            })
+            .map(|root| scale * (1.0 - (sizes.get(root).copied().unwrap_or(1) as f32).ln() / total))
             .collect()
     }
     /// Chooses emitters, parents, and CMA slots for offspring in `slots`.
@@ -2477,7 +2478,10 @@ impl Experiment {
         let cfg = self.config.clone();
         self.breed_round += 1;
         let plans = self.plan_offspring(&cfg, self.generation, self.breed_round, slots);
-        (plans.into_iter().map(|p| p.plan).collect(), self.breed_round)
+        (
+            plans.into_iter().map(|p| p.plan).collect(),
+            self.breed_round,
+        )
     }
     /// Breeds a block for ring slots `first..first + count` from the current
     /// archives with the current settings, into `arena`: the genes of the
@@ -2601,9 +2605,8 @@ impl Experiment {
             // stop skips those rungs.
             if let Some(rules) = &cfg.rungs {
                 let parent = births[k].parent_id.and_then(|id| self.lineage.get(&id));
-                let strong = parent.is_some_and(|a| {
-                    medians.get(arena).is_none_or(|&median| a.fitness >= median)
-                });
+                let strong = parent
+                    .is_some_and(|a| medians.get(arena).is_none_or(|&median| a.fitness >= median));
                 flags |= crate::rungs::parent_exemptions(rules, parent.map(|a| &a.rung), strong);
             }
             if births[k].emitter == Emitter::Restart {
@@ -2654,7 +2657,9 @@ impl Experiment {
         let started = std::time::Instant::now();
         // The audit lane judges the rules this generation ran with and fits
         // the next generation's.
-        let rules = self.rungs.boundary(self.config.rungs, self.global_stalled());
+        let rules = self
+            .rungs
+            .boundary(self.config.rungs, self.global_stalled());
         let failed = std::mem::take(&mut self.failed);
         self.push_archive_stats(failed);
         self.prune_lineage();
@@ -2727,7 +2732,11 @@ impl Experiment {
                 self.reset_search_context();
             }
             cfg.screen = self.next_screen(cfg.duration);
-            cfg.rungs = if world_changed { None } else { self.config.rungs };
+            cfg.rungs = if world_changed {
+                None
+            } else {
+                self.config.rungs
+            };
             self.config = cfg;
         } else {
             self.pending = Some(cfg);
@@ -4468,10 +4477,7 @@ mod ring_shape_tests {
     fn a_slow_confirmation_round_trip_keeps_the_legacy_ring() {
         for rate in [40_000.0, 167_000.0, 2e6] {
             for chain in [0.21, 1.0, 5.0, f64::NAN] {
-                assert_eq!(
-                    RingShape::size(&times(rate, chain, 0.3)),
-                    RingShape::LEGACY
-                );
+                assert_eq!(RingShape::size(&times(rate, chain, 0.3)), RingShape::LEGACY);
             }
         }
         // Nothing measured.

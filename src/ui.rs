@@ -5397,7 +5397,8 @@ impl eframe::App for App {
                     self.screenshot_waiting = false;
                     if let Some(generation) = self.capture_generation.take() {
                         let path = format!("runs/progress-gen{generation}.png");
-                        let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
+                        let bytes: Vec<u8> =
+                            image.pixels.iter().flat_map(|p| p.to_array()).collect();
                         let _ = std::fs::create_dir_all("runs");
                         if let Err(e) = image::save_buffer(
                             &path,
@@ -6808,7 +6809,8 @@ mod tests {
                     diameter: 0.2,
                     friction: 0.8,
                 },
-            ].into(),
+            ]
+            .into(),
             bones: vec![Bone::new(0, 1, 0.5), Bone::new(1, 2, 0.5)].into(),
             muscles: vec![Muscle {
                 bone_a: 0,
@@ -6824,7 +6826,8 @@ mod tests {
                 sensor: crate::evolution::NO_SENSOR,
                 reset: 0.0,
                 tendon: 0.0,
-            }].into(),
+            }]
+            .into(),
             id: 7,
         }
     }

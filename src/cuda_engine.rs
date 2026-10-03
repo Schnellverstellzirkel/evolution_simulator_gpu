@@ -810,7 +810,12 @@ fn buffer_size(bytes: usize) -> usize {
 /// NVRTC version, so a later start loads them in milliseconds. With
 /// `use_cache` false the compile ignores an entry (it may be damaged) and
 /// writes a fresh one.
-fn compile_kernel(api: &Api, options: &[String], key: KernelKey, use_cache: bool) -> Result<Vec<u8>> {
+fn compile_kernel(
+    api: &Api,
+    options: &[String],
+    key: KernelKey,
+    use_cache: bool,
+) -> Result<Vec<u8>> {
     let source = crate::warp_kernel::cuda_source(key.class, key.flags, key.fidelity, key.record);
     let path = kernel_cache_dir().map(|dir| {
         use std::hash::{Hash, Hasher};
@@ -1015,7 +1020,12 @@ fn compile_and_load(
     let cubin = compile_kernel(api, options, key, true)?;
     match load_kernel(api, context, &cubin, key) {
         Ok(kernel) => Ok(kernel),
-        Err(_) => load_kernel(api, context, &compile_kernel(api, options, key, false)?, key),
+        Err(_) => load_kernel(
+            api,
+            context,
+            &compile_kernel(api, options, key, false)?,
+            key,
+        ),
     }
 }
 
@@ -1133,13 +1143,8 @@ impl Prefetch {
                 self.ready.notify_all();
                 continue;
             }
-            let result = compile_and_load(
-                &self.api,
-                self.context as CuContext,
-                &self.options,
-                key,
-            )
-            .map_err(|e| format!("{e:#}"));
+            let result = compile_and_load(&self.api, self.context as CuContext, &self.options, key)
+                .map_err(|e| format!("{e:#}"));
             let mut state = self.lock();
             if let Some(counts) = state.running.get_mut(&key) {
                 counts[kind] -= 1;
@@ -1252,12 +1257,22 @@ impl Prefetch {
         for key in fresh.into_iter().rev() {
             state.idle.push_front(key);
         }
-        for (kind, queued) in [state.wanted.len(), state.idle.len()].into_iter().enumerate() {
+        for (kind, queued) in [state.wanted.len(), state.idle.len()]
+            .into_iter()
+            .enumerate()
+        {
             let most = if kind == 0 { WANTED_THREADS } else { 1 };
             while state.workers[kind] < most && state.workers[kind] < queued {
                 let (prefetch, idle) = (self.clone(), kind == 1);
                 let spawned = std::thread::Builder::new()
-                    .name(if idle { "cuda-compile-idle" } else { "cuda-compile" }.into())
+                    .name(
+                        if idle {
+                            "cuda-compile-idle"
+                        } else {
+                            "cuda-compile"
+                        }
+                        .into(),
+                    )
                     .spawn(move || {
                         // Compile beside the pool, not on the engine thread's CPU.
                         crate::threads::pin_pool();
@@ -1474,12 +1489,14 @@ impl CudaEngine {
             steps
                 .iter()
                 .flat_map(|&(record, fidelity)| {
-                    crate::warp_kernel::CLASSES.into_iter().map(move |class| KernelKey {
-                        record,
-                        class,
-                        flags,
-                        fidelity,
-                    })
+                    crate::warp_kernel::CLASSES
+                        .into_iter()
+                        .map(move |class| KernelKey {
+                            record,
+                            class,
+                            flags,
+                            fidelity,
+                        })
                 })
                 .collect()
         };
@@ -1713,7 +1730,10 @@ impl CudaEngine {
     /// Bytes of host memory a batch's buffers hold.
     pub fn held_bytes(batch: &LaneBatch) -> usize {
         batch.wave.as_ref().map_or(0, |w| {
-            w.lanes.held_bytes() + w.muscles.held_bytes() + w.ends.held_bytes() + w.heads.held_bytes()
+            w.lanes.held_bytes()
+                + w.muscles.held_bytes()
+                + w.ends.held_bytes()
+                + w.heads.held_bytes()
         })
     }
 
@@ -1728,7 +1748,10 @@ impl CudaEngine {
             .sum::<u64>()
             + slot.counters.as_ref().map_or(0, |b| b.size as u64)
             + slot.pending.as_ref().map_or(0, |p| {
-                p.batches.iter().map(|b| Self::held_bytes(b) as u64).sum::<u64>()
+                p.batches
+                    .iter()
+                    .map(|b| Self::held_bytes(b) as u64)
+                    .sum::<u64>()
             })
             + slot.readback.as_ref().map_or(0, |b| b.size as u64)
             + slot.frames.as_ref().map_or(0, |b| b.size as u64)
@@ -1816,7 +1839,12 @@ impl CudaEngine {
         self.submit_as(batches, cfg, false)
     }
 
-    fn submit_as(&mut self, batches: &mut Vec<LaneBatch>, cfg: &Config, record: bool) -> Result<u64> {
+    fn submit_as(
+        &mut self,
+        batches: &mut Vec<LaneBatch>,
+        cfg: &Config,
+        record: bool,
+    ) -> Result<u64> {
         let mut uploading = false;
         match self.launch(batches, cfg, record, &mut uploading) {
             Ok((slot, frames)) => {
@@ -1893,9 +1921,7 @@ impl CudaEngine {
             }
         }
         let total = (fidelity.settle() + cfg.steps()) as usize;
-        let stride = batches
-            .first()
-            .map_or(0, creature_kernel::frame_stride);
+        let stride = batches.first().map_or(0, creature_kernel::frame_stride);
         let frame_count = if record {
             ensure!(
                 batches.len() == 1 && batches[0].slots.len() == 1,
@@ -1912,8 +1938,8 @@ impl CudaEngine {
         buffers?;
         let cu = &self.api.cu;
         let resources = &self.slots[slot];
-        let results_bytes = batches.iter().map(|b| b.slots.len()).sum::<usize>()
-            * std::mem::size_of::<GpuResult>();
+        let results_bytes =
+            batches.iter().map(|b| b.slots.len()).sum::<usize>() * std::mem::size_of::<GpuResult>();
         unsafe {
             cu.check((cu.ctx_set_current)(self.context), "cuCtxSetCurrent")?;
             // Copy every upload to the device on the main stream, straight
@@ -1962,7 +1988,8 @@ impl CudaEngine {
                 let res = resources.groups[b].as_ref().unwrap();
                 let (kernel, blocks_per_sm) = kernels[b];
                 let mut params = crate::warp_kernel::params(cfg, first, count, stride);
-                let groups_per_block = (crate::warp_kernel::BLOCK as usize / 32) * (32 / batch.capacity);
+                let groups_per_block =
+                    (crate::warp_kernel::BLOCK as usize / 32) * (32 / batch.capacity);
                 let blocks = count
                     .div_ceil(groups_per_block)
                     .min(blocks_per_sm as usize * self.multiprocessors as usize)
@@ -2231,7 +2258,8 @@ mod tests {
             let path = dir.join(format!("{i:04}.cubin"));
             std::fs::write(&path, b"x").unwrap();
             let file = std::fs::File::open(&path).unwrap();
-            file.set_modified(start + Duration::from_secs(i as u64)).unwrap();
+            file.set_modified(start + Duration::from_secs(i as u64))
+                .unwrap();
         }
         std::fs::write(dir.join("other.txt"), b"x").unwrap();
         evict_cache(&dir);

@@ -123,7 +123,8 @@ impl Scene<'_> {
         if num > 0 {
             self.badge(x + 17.0, y + 5.0 + head_h / self.k * 0.5, num);
         }
-        self.p.galley(inner.min + Vec2::new(indent, 0.0), head, TEXT);
+        self.p
+            .galley(inner.min + Vec2::new(indent, 0.0), head, TEXT);
         self.text(
             Rect::from_min_max(
                 inner.min + Vec2::new(0.0, head_h + if num > 0 { 6.0 * self.k } else { 0.0 }),

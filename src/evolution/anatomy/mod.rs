@@ -25,6 +25,7 @@ mod compound;
 mod controller;
 mod extra;
 mod junctions;
+mod legs;
 mod limbs;
 mod muscles;
 mod rhythm;
@@ -120,6 +121,10 @@ pub(super) const OPERATORS: &[(&str, Operator)] = &[
     ("retune_limb_package", compound::retune_limb_package),
     ("transplant_gait", compound::transplant_gait),
     ("trim_body", compound::trim_body),
+    ("sprout_leg", legs::sprout_leg),
+    ("mirror_leg_fore_aft", legs::mirror_leg_fore_aft),
+    ("spread_leg_attachment", legs::spread_leg_attachment),
+    ("tuck_leg_under", legs::tuck_leg_under),
 ];
 
 /// Operators that share one pick slot: together they are as likely as one
@@ -178,6 +183,10 @@ const COMPOUND: &[&str] = &[
     "retune_limb_package",
     "transplant_gait",
     "trim_body",
+    "sprout_leg",
+    "mirror_leg_fore_aft",
+    "spread_leg_attachment",
+    "tuck_leg_under",
 ];
 
 /// Whether operator `index` of `OPERATORS` is a compound one.
