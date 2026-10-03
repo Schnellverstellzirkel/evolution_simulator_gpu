@@ -38,7 +38,7 @@ pub fn hill_speed() -> f32 {
 /// is its own mass). Before, a 100 N muscle drove a 0.05 kg limb at 2,000
 /// m/s^2, turned a bone about a radian in one step and made momentum and
 /// energy the integrator did not pay for (docs/physics.md).
-pub const DRIVEN_ACCELERATION: f32 = 100.0;
+pub const DRIVEN_ACCELERATION: f32 = 200.0;
 /// Air drag on bones (N per m^3/s^2 of length x width): every bone feels
 /// `AIR_DRAG x length x width x speed x velocity` against its midpoint's
 /// velocity, with the width the mean diameter of its two nodes (a flat plate

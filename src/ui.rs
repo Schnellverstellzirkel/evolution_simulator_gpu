@@ -195,9 +195,9 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
                 if std::env::vars_os()
                     .any(|(key, _)| key.to_string_lossy().starts_with("EVOLUTION_SMOKE_"))
                 {
-                    "Evolution Simulator: agent screenshot run, not your game"
+                    "exploraMove: agent screenshot run, not your game"
                 } else {
-                    "Evolution · Creature Laboratory"
+                    "exploraMove"
                 },
             ),
         renderer: eframe::Renderer::Wgpu,
@@ -1796,10 +1796,10 @@ impl App {
                 painter.circle_filled(point, 3.5, theme.accent);
                 painter.circle_filled(point, 1.5, theme.panel);
             }
-            // The title in thin wide capitals, like a Source game's logo.
+            // The game's name (owner, 2026-10-03), in thin wide letters.
             let mut job = egui::text::LayoutJob::default();
             job.append(
-                "EVOLUTION",
+                "exploraMove",
                 0.,
                 egui::TextFormat {
                     font_id: FontId::new(27., crate::assets::hud()),

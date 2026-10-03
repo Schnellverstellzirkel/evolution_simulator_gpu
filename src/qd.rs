@@ -183,7 +183,7 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 57: the islands have 3 shapes by 3 sizes of body class (2 by 2 before), and
 //     a save is compressed with long-range matching. A save of version 56
 //     loads by moving each elite to its cell in the new layout.
-pub const VERSION: u32 = 59;
+pub const VERSION: u32 = 60;
 /// The oldest save version that still loads. Its archives are re-binned, and
 /// its elites keep the scores they measured.
 pub const OLDEST_LOADABLE: u32 = 53;

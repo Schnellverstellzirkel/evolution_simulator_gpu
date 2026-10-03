@@ -112,7 +112,7 @@ pub struct Limits {
 impl Limits {
     pub const DEFAULT: Limits = Limits {
         muscle_speed: 24.0,
-        muscle_force: 100.0,
+        muscle_force: 200.0,
         node_speed: 60.0,
         bone_spin: 40.0,
         min_period: 0.2,
