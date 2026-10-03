@@ -652,12 +652,18 @@ mod tests {
     }
 }
 
-/// The effects and levels of each wild island's world (`qd::WILD_ISLANDS`),
-/// drawn from the experiment seed: one to three effects each, every mix
-/// different, and no effect at its harshest level so each world can be
-/// walked.
-pub fn wild_levels(seed: u64) -> Vec<Vec<(usize, usize)>> {
-    let mut rng = crate::evolution::Rng::new(seed ^ 0x7769_6c64, 0, 0);
+/// The effects and levels of each wild island's world (`qd::WILD_ISLANDS`):
+/// one to three effects each, every mix different, and no effect at its
+/// harshest level so each world can be walked. The set is the same in every
+/// game, so its kernels compile once and stay in the kernel cache; a set
+/// drawn per seed compiled about 190 kernels at the start of each new game.
+pub fn wild_levels(_seed: u64) -> Vec<Vec<(usize, usize)>> {
+    static WORLDS: std::sync::OnceLock<Vec<Vec<(usize, usize)>>> = std::sync::OnceLock::new();
+    WORLDS.get_or_init(draw_wild_levels).clone()
+}
+
+fn draw_wild_levels() -> Vec<Vec<(usize, usize)>> {
+    let mut rng = crate::evolution::Rng::new(0x7769_6c64, 0, 0);
     let choices: Vec<usize> = (0..EFFECTS.len())
         .filter(|&e| EFFECTS[e].name != "Autochange environment")
         .collect();
