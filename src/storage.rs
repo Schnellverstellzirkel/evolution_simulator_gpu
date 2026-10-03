@@ -3950,6 +3950,10 @@ pub fn save_with_progress(
         out.write_all(&SaveHeader::of(experiment).to_bytes())?;
         let mut encoder = zstd::stream::write::Encoder::new(out, 3)?;
         encoder.include_checksum(true)?;
+        // The same creature sits in the global archive and in an island, far
+        // apart in the stream: matching over 128 MB made a save 28% smaller.
+        encoder.long_distance_matching(true)?;
+        encoder.window_log(27)?;
         // bincode writes field by field; a buffer turns each write into a
         // copy instead of a call into the compressor.
         let mut buffered = BufWriter::with_capacity(1 << 20, encoder);

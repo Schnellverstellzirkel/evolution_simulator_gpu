@@ -43,13 +43,13 @@ pub struct Classes {
     pub shape_names: &'static [&'static str],
     pub size_names: &'static [&'static str],
 }
-const ISLAND_ASPECT: [f32; 1] = [1.5];
-const ISLAND_NODES: [u16; 1] = [11];
+const ISLAND_ASPECT: [f32; 2] = [1.2, 2.0];
+const ISLAND_NODES: [u16; 2] = [9, 12];
 const GLOBAL_ASPECT: [f32; 3] = [0.9, 1.4, 2.5];
 const GLOBAL_NODES: [u16; 3] = [9, 11, 14];
-/// The layout of the islands: each way of moving splits among compact (under
-/// 1.5 times as wide as tall) and long bodies of up to 10 nodes and of 11 or
-/// more, 5,760 cells.
+/// The layout of the islands: each way of moving splits among 3 shapes (under
+/// 1.2 times as wide as tall, 1.2 to 2.0, longer) and 3 sizes (up to 8 nodes,
+/// 9 to 11, 12 or more), 12,960 cells.
 pub const ISLAND_CLASSES: Classes = Classes {
     aspect: &ISLAND_ASPECT,
     nodes: &ISLAND_NODES,
@@ -180,7 +180,10 @@ pub(crate) const CMA_LIMIT: usize = 96;
 //     each elite to its cell in the new layout.
 // 56: the Brambles world effect (drag on every node but the feet while it
 //     touches the ground). Older saves load with it cleared.
-pub const VERSION: u32 = 56;
+// 57: the islands have 3 shapes by 3 sizes of body class (2 by 2 before), and
+//     a save is compressed with long-range matching. A save of version 56
+//     loads by moving each elite to its cell in the new layout.
+pub const VERSION: u32 = 57;
 /// The oldest save version that still loads. Its archives are re-binned, and
 /// its elites keep the scores they measured.
 pub const OLDEST_LOADABLE: u32 = 53;
