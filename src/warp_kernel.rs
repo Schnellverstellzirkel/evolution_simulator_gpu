@@ -502,11 +502,17 @@ fn fill_creature(
         } else {
             lane_of_bone[first[j]]
         };
+        // A foot ends a leg of at least two bones: no bone below it, and the
+        // bone above it is not the neck and has no other child. The tip of a
+        // one-bone stub is no foot.
+        let foot = children[j] == 0
+            && matches!(model.parent[j], Some(p) if j > 0 && p > 0 && children[p] == 1);
         let topo = lane_of_node(pivot) as u32
             | (parent_lane as u32) << 5
             | level[j] << 10
             | (first_child as u32) << 15
-            | children[j] << 20;
+            | children[j] << 20
+            | u32::from(foot) << 26;
         put(0, lane, model.mass[node].to_bits());
         put(1, lane, model.radius[node].to_bits());
         put(2, lane, model.friction[node].to_bits());

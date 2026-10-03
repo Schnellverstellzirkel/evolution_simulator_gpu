@@ -46,8 +46,13 @@ pub(crate) fn sprout_leg(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Co
         return false;
     }
     let parents = parent_bones(c);
+    // The trunk: the nodes in no leg.
+    let legs = leaf_limbs(c);
+    let in_leg: Vec<bool> = (0..c.nodes.len())
+        .map(|n| legs.iter().any(|leg| leg.iter().any(|&b| c.bones[b].b as usize == n)))
+        .collect();
     let hips: BoneIds = (1..c.nodes.len())
-        .filter(|&n| parents[n].is_some() && c.nodes[n].y > 0.12)
+        .filter(|&n| parents[n].is_some() && !in_leg[n] && c.nodes[n].y > 0.12)
         .collect();
     let Some(&hip) = hips.get(rng.index(hips.len().max(1))) else {
         return false;

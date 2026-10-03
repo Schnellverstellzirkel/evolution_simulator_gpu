@@ -29,7 +29,8 @@ pub struct Config {
     /// this depth, which raises the effective normal push and multiplies the
     /// friction budget, so dragging feet cost more.
     pub mud: f32,
-    /// Drag (1/s) on every node that is not a foot while it touches the ground.
+    /// Drag (1/s) on every node that is not a foot (the end of a leg of at
+    /// least two bones) while it touches the ground.
     pub brambles: f32,
     /// Water line height (m) above the flat ground; 0.0 is dry. Nodes below
     /// it float and bones meet a viscous medium, so swimming strokes pay.

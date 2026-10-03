@@ -448,6 +448,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
         const unsigned lvl = (topo >> 10u) & 31u;
         const unsigned fc = (topo >> 15u) & 31u;
         const unsigned nch = (topo >> 20u) & 63u;
+        const bool foot = ((topo >> 26u) & 1u) != 0u;
         const unsigned maxlev = __reduce_max_sync(FULL, depth);
         const unsigned maxrounds = __reduce_max_sync(FULL, rounds);
         const unsigned maxew = __reduce_max_sync(FULL, ew);
@@ -668,9 +669,9 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
 #endif
 #if BRAMBLES
                 // Brambles hold back every node but the feet (the ends of
-                // bones with no child) while it touches the ground: a drag
-                // against its velocity, which only takes energy.
-                if (!(body && nch == 0u)) {
+                // legs of at least two bones) while it touches the ground: a
+                // drag against its velocity, which only takes energy.
+                if (!foot) {
                     const float2 g = terrain(px);
                     const float dry = (py - g.x) / sqrtf(1.0f + g.y * g.y) - rad;
                     if (dry < BRAMBLE_REACH) {

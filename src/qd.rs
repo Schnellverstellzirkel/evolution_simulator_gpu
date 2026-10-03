@@ -205,9 +205,11 @@ pub fn island_of_slot(slot: usize, islands: usize) -> usize {
     slot % islands.max(1)
 }
 /// Each island's slots run in cycles of `SLOT_CYCLE` rounds. In every cycle
-/// one round belongs to the island's nursery of new random bodies and two to
-/// its nursery of reshaped bodies, and the rest to the island itself: 5%, 10%
-/// and 85% of its slots.
+/// four rounds belong to the island's nursery of new random bodies and two to
+/// its nursery of reshaped bodies, and the rest to the island itself: 20%,
+/// 10% and 70% of its slots. Half of the nursery's slots hold fresh random
+/// bodies (`NURSERY_FRESH_SHARE`), so a tenth of every generation is new
+/// random bodies (owner, 2026-10-03).
 pub const SLOT_CYCLE: usize = 20;
 /// Generations a nursery cohort develops on its own before its survivors
 /// enter the island archive.
@@ -231,7 +233,7 @@ pub const ARENA_KINDS: usize = 3;
 /// `islands` islands.
 pub fn arena_kind_of_slot(slot: usize, islands: usize) -> Arena {
     match (slot / islands.max(1)) % SLOT_CYCLE {
-        0 => Arena::Nursery,
+        0 | 3 | 10 | 13 => Arena::Nursery,
         5 | 15 => Arena::Reshaped,
         _ => Arena::Island,
     }
@@ -273,7 +275,11 @@ pub(crate) const MIN_MORPHOLOGY_DESCENDANTS: u64 = 8;
 pub(crate) const MORPHOLOGY_PARENT_FRACTION: f32 = 0.10;
 // Random bodies only seed an empty archive: against evolved elites they
 // almost never enter it (0.03-0.06% of attempts in fixed-seed tests).
-const INITIAL_EMITTER_MIX: [f64; EMITTER_COUNT] = [0.35, 0.35, 0.30, 0.0];
+// Structural children are 62.5%, and 18% of the novelty children also get a
+// structural operator, so two thirds of the bred children (60% of a
+// generation, after the 10% of fresh random bodies) carry a structural
+// mutation and a third only change numbers (owner, 2026-10-03).
+const INITIAL_EMITTER_MIX: [f64; EMITTER_COUNT] = [0.145, 0.625, 0.23, 0.0];
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
