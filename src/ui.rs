@@ -1945,9 +1945,12 @@ impl App {
         let live = self.snapshot.as_ref().map(|s| s.config.clone());
         let calm = world_is_calm(&self.config);
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(world_summary(&self.config)).size(18.).strong().color(
-                if calm { theme.ink } else { theme.accent },
-            ));
+            ui.label(
+                RichText::new(world_summary(&self.config))
+                    .size(18.)
+                    .strong()
+                    .color(if calm { theme.ink } else { theme.accent }),
+            );
             if !calm
                 && ui
                     .small_button("Calm world")
@@ -2668,6 +2671,8 @@ impl App {
             });
         }
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().button_padding.x = 10.;
+            ui.spacing_mut().item_spacing.x = 6.;
             if ui
                 .button(if self.playing {
                     "Pause  (K)"
@@ -2714,6 +2719,10 @@ impl App {
                 .clicked()
             {
                 self.file("Export creature JSON");
+            }
+            // A menu does not wrap by itself, so start a new line when it will not fit.
+            if ui.available_width() < 175. {
+                ui.end_row();
             }
             speed_picker(ui, &mut self.speed, "replay_speed");
         });
@@ -2866,13 +2875,7 @@ impl App {
                 let (rect, response) =
                     ui.allocate_exact_size(Vec2::new(width, tile_height), Sense::hover());
                 let painter = ui.painter_at(rect);
-                crate::theme::plate(
-                    ui.painter(),
-                    rect.shrink(2.),
-                    theme,
-                    theme.card,
-                    false,
-                );
+                crate::theme::plate(ui.painter(), rect.shrink(2.), theme, theme.card, false);
                 crate::theme::caps_text(
                     &painter,
                     rect.left_top() + Vec2::new(14., 11.),
@@ -3076,19 +3079,19 @@ impl App {
         let theme = self.theme();
         ui.horizontal(|ui| {
             ui.heading("Ways of moving");
-            ui.label(RichText::new("Click a creature to replay it").color(theme.muted));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.selectable_value(&mut self.archive_view, ArchiveView::Map, "Map")
+                ui.choice(&mut self.archive_view, ArchiveView::Map, "Map")
                     .on_hover_text(
                         "Watch evolution fill the ways of moving. Cells are colored by distance.",
                     );
-                ui.selectable_value(&mut self.archive_view, ArchiveView::Cards, "Cards");
-                ui.selectable_value(&mut self.archive_view, ArchiveView::Islands, "Islands")
+                ui.choice(&mut self.archive_view, ArchiveView::Cards, "Cards");
+                ui.choice(&mut self.archive_view, ArchiveView::Islands, "Islands")
                     .on_hover_text(
                         "The four isolated islands and the hub, each with its best creature, its top elites and its migrants.",
                     );
             });
         });
+        ui.label(RichText::new("Click a creature to replay it.").color(theme.muted));
         if self.archive_view == ArchiveView::Islands {
             self.islands_view(ui);
             return;
@@ -3185,12 +3188,12 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.;
                 ui.label(RichText::new("Feet").small().color(theme.muted));
-                if ui.selectable_label(filter.feet.is_none(), "All").clicked() {
+                if ui.pick(filter.feet.is_none(), "All").clicked() {
                     filter.feet = None;
                 }
                 for bin in 0..MAP_BINS[4] as u8 {
                     if ui
-                        .selectable_label(
+                        .pick(
                             filter.feet == Some(bin),
                             feet_bin_label(usize::from(bin))
                                 .replace(" feet", "")
@@ -3205,12 +3208,12 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.;
                 ui.label(RichText::new("Size").small().color(theme.muted));
-                if ui.selectable_label(filter.size.is_none(), "All").clicked() {
+                if ui.pick(filter.size.is_none(), "All").clicked() {
                     filter.size = None;
                 }
                 for (class, name) in CLASSES.size_names.iter().enumerate() {
                     if ui
-                        .selectable_label(filter.size == Some(class as u8), *name)
+                        .pick(filter.size == Some(class as u8), *name)
                         .on_hover_text(CLASSES.size_about(class))
                         .clicked()
                     {
@@ -3221,12 +3224,12 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.;
                 ui.label(RichText::new("Shape").small().color(theme.muted));
-                if ui.selectable_label(filter.shape.is_none(), "All").clicked() {
+                if ui.pick(filter.shape.is_none(), "All").clicked() {
                     filter.shape = None;
                 }
                 for (class, name) in CLASSES.shape_names.iter().enumerate() {
                     if ui
-                        .selectable_label(filter.shape == Some(class as u8), *name)
+                        .pick(filter.shape == Some(class as u8), *name)
                         .on_hover_text(CLASSES.shape_about(class))
                         .clicked()
                     {
@@ -3308,7 +3311,9 @@ impl App {
         if let Some(creature) = strangest
             && ui
                 .button("Strangest body")
-                .on_hover_text("Replay the island creature whose body is the most unlike the others")
+                .on_hover_text(
+                    "Replay the island creature whose body is the most unlike the others",
+                )
                 .clicked()
         {
             self.select(creature, config.clone());
@@ -3354,12 +3359,11 @@ impl App {
                     });
                     ui.add_space(ISLAND_GAP);
                 }
-                if islands.len() > main {
-                    if let Some(pick) =
+                if islands.len() > main
+                    && let Some(pick) =
                         wild_tiles(ui, &islands[main..], &wild_wins, &config, shown, &theme)
-                    {
-                        wild_pick = Some(pick);
-                    }
+                {
+                    wild_pick = Some(pick);
                 }
             });
         if let Some((creature, world)) = wild_pick {
@@ -5462,9 +5466,15 @@ impl eframe::App for App {
                     .into_iter()
                     .enumerate()
                     {
-                        if crate::theme::tab(ui, self.tab == tab, &(key + 1).to_string(), label, theme)
-                            .on_hover_text(format!("Key {}", key + 1))
-                            .clicked()
+                        if crate::theme::tab(
+                            ui,
+                            self.tab == tab,
+                            &(key + 1).to_string(),
+                            label,
+                            theme,
+                        )
+                        .on_hover_text(format!("Key {}", key + 1))
+                        .clicked()
                         {
                             self.tab = tab;
                         }
@@ -5513,7 +5523,7 @@ impl eframe::App for App {
                         let height = ui.available_height();
                         let width = ui.available_width();
                         ui.horizontal_top(|ui| {
-                            ui.allocate_ui(Vec2::new(width * 0.6, height), |ui| {
+                            ui.allocate_ui(Vec2::new(width * 0.57, height), |ui| {
                                 ui.vertical(|ui| self.population(ui));
                             });
                             ui.allocate_ui(Vec2::new(ui.available_width(), height), |ui| {
@@ -5690,6 +5700,34 @@ fn ui_frame_interval() -> Option<Duration> {
         // Aim slightly early so vsync-paced frames land on every other 120 Hz refresh.
         (fps > 0.0).then(|| Duration::from_secs_f64(0.97 / fps))
     })
+}
+/// Choice buttons that keep their frame, so every option reads as a
+/// button and the chosen one is filled.
+trait Choices {
+    fn pick(&mut self, selected: bool, text: impl Into<egui::WidgetText>) -> egui::Response;
+    fn choice<T: PartialEq>(
+        &mut self,
+        current: &mut T,
+        value: T,
+        text: impl Into<egui::WidgetText>,
+    ) -> egui::Response;
+}
+impl Choices for egui::Ui {
+    fn pick(&mut self, selected: bool, text: impl Into<egui::WidgetText>) -> egui::Response {
+        self.add(egui::Button::new(text).selected(selected))
+    }
+    fn choice<T: PartialEq>(
+        &mut self,
+        current: &mut T,
+        value: T,
+        text: impl Into<egui::WidgetText>,
+    ) -> egui::Response {
+        let response = self.pick(*current == value, text);
+        if response.clicked() {
+            *current = value;
+        }
+        response
+    }
 }
 fn color_dot(ui: &mut egui::Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.), Sense::hover());
@@ -7204,7 +7242,9 @@ fn wild_tiles(
             ))
             .small(),
         )
-        .on_hover_text("Each wild migrant that took a hub cell counts for every effect of its island's world");
+        .on_hover_text(
+            "Each wild migrant that took a hub cell counts for every effect of its island's world",
+        );
     }
     ui.add_space(4.);
     let top = wild
