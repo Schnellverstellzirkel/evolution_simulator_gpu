@@ -1846,10 +1846,13 @@ impl App {
                     self.show_help = !self.show_help;
                 }
                 ui.menu_button("View", |ui| {
-                    if ui
-                        .add(egui::Slider::new(&mut self.ui_scale, 0.75..=1.6).text("UI scale"))
-                        .changed()
-                    {
+                    // The new scale applies when the drag ends: scaling the
+                    // UI under the pointer mid-drag moves the slider and threw
+                    // it to the other end.
+                    let slider = ui.add(
+                        egui::Slider::new(&mut self.ui_scale, 0.75..=1.6).text("UI scale"),
+                    );
+                    if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
                         ui.ctx().set_zoom_factor(self.ui_scale);
                     }
                 });
