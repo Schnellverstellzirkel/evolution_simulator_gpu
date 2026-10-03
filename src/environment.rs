@@ -40,7 +40,7 @@ pub struct Preset {
     pub levels: &'static [(&'static str, usize)],
 }
 
-pub const PRESETS: [Preset; 6] = [
+pub const PRESETS: [Preset; 7] = [
     Preset {
         name: "Rough hills",
         about: "Rocky ground on an 8% climb. Lifted feet and steady climbing win.",
@@ -70,6 +70,11 @@ pub const PRESETS: [Preset; 6] = [
         name: "Heavy world",
         about: "1.5 g with an earthquake. Compact, robust bodies gain.",
         levels: &[("Gravity", 1), ("Earthquake", 1)],
+    },
+    Preset {
+        name: "Savanna",
+        about: "Thorny scrub over rough ground. Legs that carry the trunk clear of the ground win.",
+        levels: &[("Brambles", 2), ("Ground", 1)],
     },
 ];
 
@@ -111,6 +116,9 @@ pub const SLOPE: [f32; 5] = [0.0, 0.03, 0.08, 0.15, 0.25];
 pub const WIND: [f32; 4] = [0.0, -1.0, -3.0, -6.0];
 /// Mud sink depth (m) at each level, from dry ground to deep mud.
 pub const MUD: [f32; 4] = [0.0, 0.02, 0.05, 0.10];
+/// Brambles drag (1/s) on the nodes that are not feet while they touch the
+/// ground.
+pub const BRAMBLES: [f32; 4] = [0.0, 3.0, 8.0, 20.0];
 /// Water line height (m) at each level: dry, ankle-deep puddles, shallows
 /// that cover the legs of a small body, and deep water that swallows most
 /// bodies.
@@ -149,7 +157,7 @@ pub fn autochange_interval(level: u8) -> Option<u32> {
 /// Effects from the most benign to the harshest. Autochange raises each one a
 /// level in this order, then goes round again, so the world only gets harder.
 /// An effect missing here follows in `EFFECTS` order.
-const AUTOCHANGE_ORDER: [&str; 14] = [
+const AUTOCHANGE_ORDER: [&str; 15] = [
     "Air",
     "Wind",
     "Ground",
@@ -158,6 +166,7 @@ const AUTOCHANGE_ORDER: [&str; 14] = [
     "Slope",
     "Grip",
     "Mud",
+    "Brambles",
     "Gravity",
     "Water",
     "Ice patches",
@@ -174,7 +183,7 @@ fn nearest(table: &[f32], value: f32) -> usize {
         .map_or(0, |(i, _)| i)
 }
 
-pub const EFFECTS: [Effect; 15] = [
+pub const EFFECTS: [Effect; 16] = [
     Effect {
         name: "Autochange environment",
         levels: &["Off", "Slow", "Normal", "Fast"],
@@ -280,6 +289,16 @@ pub const EFFECTS: [Effect; 15] = [
         why: "Sunk feet drag through the mud, so every stroke pays for the ground it scrapes. Lifted feet and real steps come out ahead.",
         get: |c| nearest(&MUD, c.mud),
         set: |c, level| c.mud = MUD[level],
+    },
+    Effect {
+        name: "Brambles",
+        levels: &["Clear", "Scrub", "Brambles", "Thicket"],
+        calm: 0,
+        raise: "Grow brambles",
+        lower: "Clear brambles",
+        why: "Thorny scrub catches every part of the body that touches the ground except the feet. A belly or a knee dragged along the ground is held back, so legs that carry the trunk clear of the ground and step on their feet come out ahead.",
+        get: |c| nearest(&BRAMBLES, c.brambles),
+        set: |c, level| c.brambles = BRAMBLES[level],
     },
     Effect {
         name: "Water",

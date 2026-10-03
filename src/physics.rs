@@ -625,6 +625,9 @@ pub const MUD_DRAG: f32 = 2.0;
 /// Sink depth (m) at which the mud multipliers reach their full value, i.e.
 /// the deepest mud level. Shallower mud drags proportionally less.
 pub const MUD_FULL_DEPTH: f32 = 0.10;
+/// Brambles catch a node that is not a foot once its surface is this close
+/// to the ground (m).
+pub const BRAMBLE_REACH: f32 = 0.01;
 /// Distance (m) between the starts of two ice patches.
 pub const ICE_SPACING: f32 = 6.0;
 /// How icy the ground is at `x`, from 0 (dry) to 1 (ice): bands about 2.4 m

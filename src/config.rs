@@ -29,6 +29,8 @@ pub struct Config {
     /// this depth, which raises the effective normal push and multiplies the
     /// friction budget, so dragging feet cost more.
     pub mud: f32,
+    /// Drag (1/s) on every node that is not a foot while it touches the ground.
+    pub brambles: f32,
     /// Water line height (m) above the flat ground; 0.0 is dry. Nodes below
     /// it float and bones meet a viscous medium, so swimming strokes pay.
     pub water: f32,
@@ -94,6 +96,7 @@ impl Default for Config {
             slope: 0.0,
             wind: 0.0,
             mud: 0.0,
+            brambles: 0.0,
             water: 0.0,
             patches: 0.0,
             gaps: 0.0,
@@ -139,6 +142,7 @@ struct HumanConfig {
     slope: f32,
     wind: f32,
     mud: f32,
+    brambles: f32,
     water: f32,
     patches: f32,
     gaps: f32,
@@ -177,6 +181,7 @@ impl Default for HumanConfig {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            brambles: c.brambles,
             water: c.water,
             patches: c.patches,
             gaps: c.gaps,
@@ -219,6 +224,7 @@ impl From<HumanConfig> for Config {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            brambles: c.brambles,
             water: c.water,
             patches: c.patches,
             gaps: c.gaps,
@@ -258,6 +264,7 @@ impl From<&Config> for HumanConfig {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            brambles: c.brambles,
             water: c.water,
             patches: c.patches,
             gaps: c.gaps,
@@ -296,6 +303,7 @@ struct BinaryConfig {
     slope: f32,
     wind: f32,
     mud: f32,
+    brambles: f32,
     water: f32,
     patches: f32,
     gaps: f32,
@@ -333,6 +341,7 @@ impl From<&Config> for BinaryConfig {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            brambles: c.brambles,
             water: c.water,
             patches: c.patches,
             gaps: c.gaps,
@@ -374,6 +383,7 @@ impl From<BinaryConfig> for Config {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            brambles: c.brambles,
             water: c.water,
             patches: c.patches,
             gaps: c.gaps,
@@ -473,6 +483,10 @@ impl Config {
             "Mud sink depth must be 0–0.5 m"
         );
         ensure!(
+            self.brambles.is_finite() && (0.0..=60.0).contains(&self.brambles),
+            "Brambles drag must be 0–60 per second"
+        );
+        ensure!(
             self.water.is_finite() && (0.0..=3.0).contains(&self.water),
             "Water line must be 0–3 m"
         );
@@ -549,6 +563,7 @@ impl Config {
             || self.slope != other.slope
             || self.wind != other.wind
             || self.mud != other.mud
+            || self.brambles != other.brambles
             || self.water != other.water
             || self.patches != other.patches
             || self.gaps != other.gaps

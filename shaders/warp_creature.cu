@@ -71,6 +71,7 @@ struct Params {
     float patches;
     float air_sub;
     float inv_muscle_energy;
+    float brambles;
     RungParams r1;
     RungParams r2;
 };
@@ -663,6 +664,18 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     const float2 g = terrain(px);
                     const float dry = (py - g.x) / sqrtf(1.0f + g.y * g.y) - rad;
                     fx -= m * MUD_DRAG * (clampf(-dry, 0.0f, p.mud) * (1.0f / MUD_FULL_DEPTH)) * vx;
+                }
+#endif
+#if BRAMBLES
+                // Brambles hold back every node but the feet (the ends of
+                // bones with no child) while it touches the ground: a drag
+                // against its velocity, which only takes energy.
+                if (!(body && nch == 0u)) {
+                    const float2 g = terrain(px);
+                    const float dry = (py - g.x) / sqrtf(1.0f + g.y * g.y) - rad;
+                    if (dry < BRAMBLE_REACH) {
+                        fx -= m * p.brambles * vx;
+                    }
                 }
 #endif
 #if WATER

@@ -457,6 +457,25 @@ pub fn ground(
             ));
         }
     }
+    let brambles = amount(cfg, "Brambles");
+    if brambles > 0.0 {
+        // Thorny tufts along the ground, denser in a thicket.
+        let spacing = 0.5 - 0.3 * brambles;
+        let first = (world_x(rect.left()) / spacing).floor() as i64;
+        let last = (world_x(rect.right()) / spacing).ceil() as i64;
+        for k in first..=last {
+            let meters = (k as f32 + hash(k * 11)) * spacing;
+            let x = rect.left() + (meters - world_x(rect.left())) * pixels_per_meter;
+            let base = Pos2::new(x, surface(x));
+            let height = (5.0 + 9.0 * hash(k * 13)) * (0.6 + 0.6 * brambles);
+            for s in 0..4_i64 {
+                let lean = (hash(k * 17 + s) - 0.5) * 1.6;
+                let tip = base + Vec2::new(lean * height, -height * (0.6 + 0.4 * hash(k * 19 + s)));
+                painter.line_segment([base, tip], Stroke::new(1.3, alpha((58, 66, 30), 0.85)));
+                painter.circle_filled(tip, 1.1, alpha((92, 40, 34), 0.8));
+            }
+        }
+    }
     let mud = amount(cfg, "Mud");
     if mud > 0.0 {
         // Speckles in the mud layer.

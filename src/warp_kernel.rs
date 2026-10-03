@@ -111,11 +111,13 @@ pub fn world_flags(cfg: &Config) -> u32 {
     set(8, ground && cfg.patches > 0.0);
     set(9, cfg.wind != 0.0);
     set(10, cfg.fidelity().air_per_step(cfg.air_retention) != 1.0);
+    set(11, ground && cfg.brambles > 0.0);
     flags
 }
 
-const FLAG_NAMES: [&str; 11] = [
+const FLAG_NAMES: [&str; 12] = [
     "GROUND", "TERRAIN", "SLOPE", "GAPS", "HURDLES", "QUAKE", "MUD", "WATER", "ICE", "WIND", "AIR",
+    "BRAMBLES",
 ];
 
 /// Kernel parameters; the layout of `Params` in the kernel.
@@ -148,6 +150,7 @@ pub struct Params {
     pub patches: f32,
     pub air_sub: f32,
     pub inv_muscle_energy: f32,
+    pub brambles: f32,
     /// The early rungs at 1 s and 2.5 s (`rungs::Rung`); a rule that never
     /// stops for a trial without them.
     pub r1: Rung,
@@ -190,6 +193,7 @@ pub fn params(cfg: &Config, base: usize, count: usize, stride: usize) -> Params 
         patches: if ground { cfg.patches } else { 0.0 },
         air_sub: air.powf(1.0 / solver_setting("SUBSTEPS", SUBSTEPS) as f32),
         inv_muscle_energy: 1.0 / cfg.muscle_energy,
+        brambles: if ground { cfg.brambles } else { 0.0 },
         r1: cfg.rungs.map_or(Rung::NEVER, |r| r.0[0]),
         r2: cfg.rungs.map_or(Rung::NEVER, |r| r.0[1]),
     }
@@ -250,6 +254,7 @@ pub fn cuda_source(class: usize, flags: u32, fidelity: Fidelity, record: bool) -
         ("MUD_GRIP", float(physics::MUD_GRIP)),
         ("MUD_DRAG", float(physics::MUD_DRAG)),
         ("MUD_FULL_DEPTH", float(physics::MUD_FULL_DEPTH)),
+        ("BRAMBLE_REACH", float(physics::BRAMBLE_REACH)),
         ("SPIN_CAP", float(physics2::SPIN_CAP)),
         ("INV_SPIN_CAP", float(1.0 / physics2::SPIN_CAP)),
         ("SPIN_HARDNESS", float(physics2::SPIN_HARDNESS)),

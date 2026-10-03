@@ -178,7 +178,9 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 55: the global archive has finer body classes than the islands (4 shapes by
 //     4 sizes against 2 by 2). A save of version 53 or 54 loads by moving
 //     each elite to its cell in the new layout.
-pub const VERSION: u32 = 55;
+// 56: the Brambles world effect (drag on every node but the feet while it
+//     touches the ground). Older saves load with it cleared.
+pub const VERSION: u32 = 56;
 /// The oldest save version that still loads. Its archives are re-binned, and
 /// its elites keep the scores they measured.
 pub const OLDEST_LOADABLE: u32 = 53;

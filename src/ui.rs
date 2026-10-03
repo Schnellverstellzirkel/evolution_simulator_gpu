@@ -914,12 +914,13 @@ enum FeedAction {
 const STALL_GENERATIONS: u32 = 25;
 /// The effects a stall hint suggests, in order; the first that can go one
 /// level harder wins.
-const STALL_EFFECTS: [&str; 12] = [
+const STALL_EFFECTS: [&str; 13] = [
     "Ground",
     "Hurdles",
     "Grip",
     "Slope",
     "Mud",
+    "Brambles",
     "Gaps",
     "Wind",
     "Air",
