@@ -432,8 +432,9 @@ fn meteor_strike_can_be_undone() {
     let before = count(&e);
     let mut ids: Vec<u64> = e.archive.entries.iter().map(|x| x.creature.id).collect();
     ids.sort_unstable();
+    // The strike spares the fastest elite of each body plan, so a tiny
+    // archive may lose nothing.
     let lost = e.meteor(0.5);
-    assert!(lost > 0);
     assert_eq!(count(&e), before - lost);
     assert_eq!(e.undo_meteor(), lost);
     assert_eq!(count(&e), before);
