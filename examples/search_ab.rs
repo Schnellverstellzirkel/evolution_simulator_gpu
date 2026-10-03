@@ -575,8 +575,9 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
         .enumerate()
     {
         println!(
-            "{scope} seed {seed} island {k} diversity: {}",
-            diversity::measure(island, &experiment, diversity::Part::All).line()
+            "{scope} seed {seed} island {k} diversity: {} reserve {}",
+            diversity::measure(island, &experiment, diversity::Part::All).line(),
+            island.morphology_count()
         );
     }
     print_islands(scope, seed, &experiment, &hub_best, options.generations);

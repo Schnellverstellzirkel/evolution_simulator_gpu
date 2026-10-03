@@ -134,9 +134,8 @@ fn main() -> Result<()> {
                     .and_then(|k| experiment.island_progress.get(k))
                     .map_or(String::new(), |p| format!(" record gen {}", p.1));
                 format!(
-                    "{k}: {} ways of moving, plateaued {}, refined {}{record}",
+                    "{k}: {} ways of moving, refined {}{record}",
                     a.movement_count(),
-                    a.plateaued(),
                     a.refined()
                 )
             })

@@ -447,6 +447,14 @@ pub struct Experiment {
     screen_window: ScreenWindow,
     young_window: ScreenWindow,
     reshaped_window: ScreenWindow,
+    /// How rare the clade of each island elite is (`clade_rarity_of`),
+    /// computed once per generation, for the generation it names. Not saved.
+    clade_rarity: (u32, Vec<Vec<f32>>),
+    /// The generation each island's archive started its climb: a new game,
+    /// or an island that started over. An island is refined once it is
+    /// `qd::REFINE_AFTER` generations old. Not saved: a loaded game's
+    /// islands count from generation 0, so they are old enough.
+    island_epoch: Vec<u32>,
     /// The audit lane and the early rungs it calibrates (`rungs`).
     pub rungs: crate::rungs::Audit,
     /// The last absorbed block's screen bar and the share of its results at
@@ -705,7 +713,7 @@ impl Experiment {
             evaluated: 0,
             history: vec![],
             evaluation_seconds: 0.0,
-            archive: QdArchive::default(),
+            archive: QdArchive::starting_global(),
             emitter_stats: [EmitterStats::default(); qd::EMITTER_COUNT],
             cma_emitters: vec![],
             qd_version: qd::VERSION,
@@ -725,6 +733,8 @@ impl Experiment {
             screen_window: ScreenWindow::default(),
             young_window: ScreenWindow::default(),
             reshaped_window: ScreenWindow::default(),
+            clade_rarity: (u32::MAX, Vec::new()),
+            island_epoch: Vec::new(),
             rungs: crate::rungs::Audit::default(),
             last_screen: None,
             stage_seconds: [0.0; 2],
@@ -1179,7 +1189,7 @@ impl Experiment {
                     let niche = self.archive.cell_of(descriptor);
                     match self.archive.slot_for(&niche) {
                         Some(slot) => score > self.archive.entries[slot].fitness,
-                        None => self.archive.behavior_count() < qd::ARCHIVE_LIMIT,
+                        None => self.archive.behavior_count() < self.archive.limit(),
                     }
                 } else {
                     false
@@ -1765,40 +1775,18 @@ impl Experiment {
         self.reshaped_graduations.clear();
         self.last_migration = None;
     }
-    /// Refines each archive that has reached its plateau: it covers most of
-    /// the ways of moving, and either half of its elites are within 1% of its
-    /// best distance (`QdArchive::plateaued`) or its best has stood for
-    /// `OPTIMIZER_STALL` generations. Its elites then move to the cells of
-    /// their body classes, and from then on a body of another shape or size
-    /// has a cell of its own. Until then an archive keeps one elite per way of
-    /// moving, so a climbing archive pools its lineages as it always did. The
-    /// global archive, each island and the hub decide for themselves. A
-    /// refined archive stays refined through a world change
-    /// (`reset_search_context`), and the nurseries never refine.
+    /// Refines each island whose archive is `qd::REFINE_AFTER` generations
+    /// old: its elites move to the cells of their body classes, and from then
+    /// on a body of another shape or size has a cell of its own. Until then
+    /// an island keeps one elite per way of moving, so the climb of a new game
+    /// pools its lineages as the old archive did. A refined archive stays
+    /// refined through a world change (`reset_search_context`), and the
+    /// nurseries of new random bodies never refine.
     fn refine_archives(&mut self) {
-        let islands = island_count().min(self.islands.len());
-        let stall = OPTIMIZER_STALL as usize;
-        // The global archive's best has stood through the last `stall`
-        // generations of this world.
-        let global_stalled = self.history.len() > stall && {
-            let now = &self.history[self.history.len() - 1];
-            let then = &self.history[self.history.len() - 1 - stall];
-            !then.config.physics_differs(&self.config) && now.best <= then.best
-        };
-        // Each island's best has stood for as long (the optimizer's measure).
-        let stalled: Vec<bool> = std::iter::once(global_stalled)
-            .chain((0..islands).map(|k| {
-                self.island_progress.get(k).is_some_and(|&(_, record)| {
-                    self.generation.saturating_sub(record) >= OPTIMIZER_STALL
-                })
-            }))
-            .collect();
-        let archives = std::iter::once(&mut self.archive).chain(&mut self.islands[..islands]);
-        for (archive, stalled) in archives.zip(stalled) {
-            if !archive.refined()
-                && archive.covers_most_ways_of_moving()
-                && (stalled || archive.plateaued())
-            {
+        for island in 0..island_count().min(self.islands.len()) {
+            let epoch = self.island_epoch.get(island).copied().unwrap_or(0);
+            let archive = &mut self.islands[island];
+            if !archive.refined() && self.generation.saturating_sub(epoch) >= qd::REFINE_AFTER {
                 archive.set_refined(true);
                 archive.rebin();
             }
@@ -1928,6 +1916,70 @@ impl Experiment {
         }
         self.last_migration = Some((self.generation, exchange));
         self.islands[hub].refresh_behavior_scores();
+    }
+    /// For each entry of a refined `archive`, how rare its clade is: 1 minus
+    /// the log of the number of behavior elites in the clade over the log of
+    /// all of them, where a clade is the elites that share the oldest recorded
+    /// ancestor.
+    fn clade_rarity_of(&self, archive: &QdArchive) -> Vec<f32> {
+        // A climbing archive keeps one elite per way of moving and the best
+        // lineage fills it: a bonus for rare clades would take parents from
+        // the climb. A refined archive keeps the lineages of other bodies in
+        // cells of their own, and rarity keeps them breeding.
+        if !archive.refined() {
+            return Vec::new();
+        }
+        let mut roots: HashMap<u64, u64> = HashMap::new();
+        let mut root_of = Vec::with_capacity(archive.entries.len());
+        let mut sizes: HashMap<u64, u32> = HashMap::new();
+        for elite in &archive.entries {
+            let id = elite.creature.id;
+            let mut chain = vec![id];
+            let mut current = id;
+            let root = loop {
+                if let Some(&root) = roots.get(&current) {
+                    break root;
+                }
+                match self.lineage.get(&current).and_then(|a| a.parent) {
+                    Some(parent) if self.lineage.contains_key(&parent) => {
+                        chain.push(parent);
+                        current = parent;
+                    }
+                    _ => break current,
+                }
+            };
+            for step in chain {
+                roots.insert(step, root);
+            }
+            root_of.push(root);
+            if !qd::is_morphology_niche(&elite.niche) {
+                *sizes.entry(root).or_default() += 1;
+            }
+        }
+        let total = (archive.behavior_count() as f32).ln().max(1.0);
+        // While distance still separates the elites a bonus for rare clades
+        // would take parents from the climb. It grows with the share of elites
+        // within 10% of the best, and has its full weight when half of them
+        // are: where the distances are level, rarity decides.
+        let best = archive
+            .entries
+            .iter()
+            .filter(|elite| !qd::is_morphology_niche(&elite.niche))
+            .map(|elite| elite.fitness)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let level = archive
+            .entries
+            .iter()
+            .filter(|elite| !qd::is_morphology_niche(&elite.niche))
+            .filter(|elite| elite.fitness >= 0.9 * best)
+            .count();
+        let scale = (2.0 * level as f32 / archive.behavior_count().max(1) as f32).min(1.0);
+        root_of
+            .iter()
+            .map(|root| {
+                scale * (1.0 - (sizes.get(root).copied().unwrap_or(1) as f32).ln() / total)
+            })
+            .collect()
     }
     /// Chooses emitters, parents, and CMA slots for offspring in `slots`.
     /// The breeding `round` salts the random streams, so no two blocks
@@ -2082,6 +2134,21 @@ impl Experiment {
                 order[..count.min(order.len())].to_vec()
             })
             .collect();
+        // How rare each elite's clade is in its island, from 0 (the whole
+        // archive) to 1 (one elite).
+        if qd::RARITY_WEIGHT > 0.0
+            && (self.clade_rarity.0 != generation
+                || self.clade_rarity.1.len() != self.islands.len())
+        {
+            let rarities = self
+                .islands
+                .iter()
+                .map(|island| self.clade_rarity_of(island))
+                .collect();
+            self.clade_rarity = (generation, rarities);
+        }
+        let rarities = &self.clade_rarity.1;
+        let no_rarity = Vec::new();
         // An island's optimizer works on its fastest design: a body plan with
         // a gait cadence band. When the island has not set a record for a
         // while, it turns to its next fastest designs in turn, so one stuck
@@ -2152,14 +2219,21 @@ impl Experiment {
                 let parent = if emitter == Emitter::Restart || archive_empty {
                     None
                 } else if seeded {
-                    archive.sample_local_competitive(&mut rng, avoid)
+                    archive.sample_local_competitive(
+                        &mut rng,
+                        avoid,
+                        rarities.get(island).unwrap_or(&no_rarity),
+                    )
                 } else if emitter == Emitter::Structural
                     && rng.unit() < qd::MORPHOLOGY_PARENT_FRACTION
                 {
                     // Each island keeps its own morphology reserve.
                     let drawn = archive.sample_morphology(&mut rng, avoid);
                     from_reserve = drawn.is_some();
-                    drawn.or_else(|| archive.sample_local_competitive(&mut rng, avoid))
+                    drawn.or_else(|| {
+                        let rarity = rarities.get(island).unwrap_or(&no_rarity);
+                        archive.sample_local_competitive(&mut rng, avoid, rarity)
+                    })
                 } else if emitter == Emitter::Novelty || emitter_stale {
                     archive.sample_novel(&mut rng, avoid)
                 } else if emitter == Emitter::Cma
@@ -2176,11 +2250,12 @@ impl Experiment {
                         top_parents[island][rng.index(top_parents[island].len())]
                     })
                 } else {
-                    archive.sample_local_competitive(&mut rng, avoid)
+                    let rarity = rarities.get(island).unwrap_or(&no_rarity);
+                    archive.sample_local_competitive(&mut rng, avoid, rarity)
                 };
                 let parent_id = parent.map(|index| archive.entries[index].creature.id);
                 let protection = if matches!(emitter, Emitter::Structural | Emitter::Novelty) {
-                    generation.saturating_add(3)
+                    generation.saturating_add(qd::PROTECTION_GENERATIONS)
                 } else {
                     parent
                         .map(|index| archive.entries[index].protected_until)
@@ -2681,9 +2756,14 @@ impl Experiment {
             return 0;
         };
         let lost = std::mem::take(&mut self.islands[index].entries);
-        // The island starts over from new bodies, and climbs without classes.
+        // The island starts over from new bodies, and climbs without classes
+        // until it is old enough to be refined again.
         self.islands[index].set_refined(false);
         self.islands[index].rebuild_indices();
+        if self.island_epoch.len() <= index {
+            self.island_epoch.resize(index + 1, 0);
+        }
+        self.island_epoch[index] = self.generation;
         let count = lost.len();
         self.fossils
             .extend(lost.into_iter().map(|elite| (Some(index), elite)));
@@ -2744,9 +2824,7 @@ impl Experiment {
                 self.reseed.push(index, elite.creature);
             }
         }
-        let global_refined = self.archive.refined();
-        self.archive = QdArchive::default();
-        self.archive.set_refined(global_refined);
+        self.archive = QdArchive::starting_global();
         // Fossils are old-world elites: undoing a meteor must not bring them
         // back into the new world's archives.
         self.fossils.clear();
@@ -2766,6 +2844,7 @@ impl Experiment {
         self.screen_window.clear();
         self.young_window.clear();
         self.reshaped_window.clear();
+        self.clade_rarity = (u32::MAX, Vec::new());
         self.rungs.clear();
         self.config.rungs = None;
     }
@@ -2892,8 +2971,8 @@ impl Experiment {
         );
         ensure!(
             self.qd_version == qd::VERSION
-                && self.archive.entries.len() <= qd::ARCHIVE_CAPACITY
-                && self.archive.behavior_count() <= qd::ARCHIVE_LIMIT
+                && self.archive.entries.len() <= self.archive.capacity()
+                && self.archive.behavior_count() <= self.archive.limit()
                 && self.archive.morphology_count() <= qd::MORPHOLOGY_LIMIT
                 && self.cma_emitters.len() <= qd::CMA_LIMIT
                 && self
@@ -3532,6 +3611,7 @@ impl SmallLoad {
         e.generation = self.generation;
         e.history = repair_history(self.history, self.generation);
         e.archive = self.archive;
+        e.archive.set_global(true);
         e.emitter_stats = self.emitter_stats;
         e.cma_emitters = self.cma_emitters;
         e.qd_version = self.qd_version;
@@ -3583,21 +3663,28 @@ impl SmallLoad {
                 nursery.rebuild_indices();
             }
         } else {
-            // The archives were saved before the body classes: each elite
-            // moves to its cell now, and an archive at its plateau is
-            // refined. Optimizers keep their body plan's state; the CMA
-            // emitters of single cells start over.
+            // The archives were saved under another layout: each elite moves
+            // to its cell now. A version 54 archive with elites in body
+            // classes was refined. Optimizers keep their body plan's state;
+            // the CMA emitters of single cells start over.
             for archive in refinable {
-                archive.rebin();
-                if archive.plateaued() {
-                    archive.set_refined(true);
-                    archive.rebin();
+                if saved_version >= 54 {
+                    archive.rebuild_indices();
+                    archive.derive_refined();
                 }
+                archive.rebin();
             }
             for nursery in e.islands.iter_mut().skip(island_count()) {
                 nursery.rebin();
             }
             e.cma_emitters.retain(CmaEmitter::optimizing);
+        }
+        // The global archive is always refined: it never breeds, so it has no
+        // climb to protect. The islands are refined at the next generation
+        // boundary if they are old enough.
+        if !e.archive.refined() {
+            e.archive.set_refined(true);
+            e.archive.rebin();
         }
         // The lineage records of living elites were saved without a creature.
         for elite in std::iter::once(&e.archive)

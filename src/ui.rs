@@ -676,7 +676,9 @@ impl FrameMarks {
         marks
     }
 }
-/// Movement-axis bin counts, mirroring `qd::BINS` (ground contact, cadence,
+/// The body classes of the cells the archive tab shows: the global archive's.
+const CLASSES: &crate::qd::Classes = &crate::qd::GLOBAL_CLASSES;
+/// Movement-axis bin counts, mirroring `qd::MOVEMENT_BINS` (ground contact, cadence,
 /// shape, height, feet). The shape and the size classes are filters.
 const MAP_BINS: [usize; 5] = [6, 8, 1, 6, 5];
 /// Which representation the Behavior archive tab shows.
@@ -3097,26 +3099,26 @@ impl App {
                 egui::ComboBox::from_id_salt("map_shape")
                     .selected_text(
                         self.map_shape
-                            .map_or("All", |class| crate::qd::SHAPE_NAMES[class]),
+                            .map_or("All", |class| CLASSES.shape_names[class]),
                     )
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.map_shape, None, "All");
-                        for (class, name) in crate::qd::SHAPE_NAMES.iter().enumerate() {
+                        for (class, name) in CLASSES.shape_names.iter().enumerate() {
                             ui.selectable_value(&mut self.map_shape, Some(class), *name)
-                                .on_hover_text(crate::qd::shape_about(class));
+                                .on_hover_text(CLASSES.shape_about(class));
                         }
                     });
                 ui.label(RichText::new("Size").small().color(theme.muted));
                 egui::ComboBox::from_id_salt("map_size")
                     .selected_text(
                         self.map_size
-                            .map_or("All", |class| crate::qd::SIZE_NAMES[class]),
+                            .map_or("All", |class| CLASSES.size_names[class]),
                     )
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.map_size, None, "All");
-                        for (class, name) in crate::qd::SIZE_NAMES.iter().enumerate() {
+                        for (class, name) in CLASSES.size_names.iter().enumerate() {
                             ui.selectable_value(&mut self.map_size, Some(class), *name)
-                                .on_hover_text(crate::qd::size_about(class));
+                                .on_hover_text(CLASSES.size_about(class));
                         }
                     });
             });
@@ -3182,10 +3184,10 @@ impl App {
                 if ui.selectable_label(filter.size.is_none(), "All").clicked() {
                     filter.size = None;
                 }
-                for (class, name) in crate::qd::SIZE_NAMES.iter().enumerate() {
+                for (class, name) in CLASSES.size_names.iter().enumerate() {
                     if ui
                         .selectable_label(filter.size == Some(class as u8), *name)
-                        .on_hover_text(crate::qd::size_about(class))
+                        .on_hover_text(CLASSES.size_about(class))
                         .clicked()
                     {
                         filter.size = Some(class as u8);
@@ -3196,10 +3198,10 @@ impl App {
                 if ui.selectable_label(filter.shape.is_none(), "All").clicked() {
                     filter.shape = None;
                 }
-                for (class, name) in crate::qd::SHAPE_NAMES.iter().enumerate() {
+                for (class, name) in CLASSES.shape_names.iter().enumerate() {
                     if ui
                         .selectable_label(filter.shape == Some(class as u8), *name)
-                        .on_hover_text(crate::qd::shape_about(class))
+                        .on_hover_text(CLASSES.shape_about(class))
                         .clicked()
                     {
                         filter.shape = Some(class as u8);
@@ -3424,9 +3426,9 @@ impl App {
                                     let niche = d.niche().0;
                                     format!(
                                         " · {} {} body",
-                                        crate::qd::SHAPE_NAMES[usize::from(niche[2])]
+                                        CLASSES.shape_names[usize::from(niche[2])]
                                             .to_lowercase(),
-                                        crate::qd::SIZE_NAMES[usize::from(niche[5])].to_lowercase()
+                                        CLASSES.size_names[usize::from(niche[5])].to_lowercase()
                                     )
                                 }),
                                 card.emitter.map_or("First generation".to_owned(), |emitter| {

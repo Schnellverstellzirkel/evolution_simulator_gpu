@@ -165,7 +165,7 @@ fn behavior_archive_keeps_exactly_the_fastest_creature_in_each_cell() {
         for (cell, &descriptor) in descriptors.iter().enumerate() {
             let index = round * descriptors.len() + cell;
             let fitness = score + cell as f32;
-            let niche = descriptor.niche();
+            let niche = descriptor.niche_in(&evolution_simulator::qd::ISLAND_CLASSES);
             let old = expected.get(&niche).copied();
             let should_insert = old.is_none_or(|(best, _)| fitness > best);
             let offer = archive.offer(
@@ -256,9 +256,14 @@ fn bodies_of_other_shapes_and_sizes_keep_cells_of_their_own() {
     ];
     let classes: std::collections::BTreeSet<Niche> = bodies
         .iter()
-        .map(|&(nodes, aspect)| way(nodes, aspect).niche())
+        .map(|&(nodes, aspect)| {
+            way(nodes, aspect).niche_in(&evolution_simulator::qd::ISLAND_CLASSES)
+        })
         .collect();
-    assert_eq!(classes.len(), evolution_simulator::qd::BODY_CLASSES);
+    assert_eq!(
+        classes.len(),
+        evolution_simulator::qd::ISLAND_CLASSES.classes()
+    );
     let mut archive = QdArchive::default();
     archive.set_refined(true);
     for (round, fitness) in [3.0, 1.0, 5.0].into_iter().enumerate() {
@@ -656,7 +661,10 @@ fn each_island_gives_a_twentieth_of_its_slots_to_a_nursery_and_a_tenth_to_anothe
     for island in 0..islands {
         assert_eq!(slots[island], rounds - 3 * rounds / qd::SLOT_CYCLE);
         assert_eq!(slots[storage::nursery_of(island)], rounds / qd::SLOT_CYCLE);
-        assert_eq!(slots[storage::reshaped_of(island)], 2 * rounds / qd::SLOT_CYCLE);
+        assert_eq!(
+            slots[storage::reshaped_of(island)],
+            2 * rounds / qd::SLOT_CYCLE
+        );
     }
     assert!(qd::is_reshaped_arena(storage::reshaped_of(0), arenas));
     assert!(!qd::is_reshaped_arena(storage::nursery_of(0), arenas));
@@ -806,13 +814,23 @@ fn a_save_from_the_previous_cell_layout_loads_with_every_elite_in_its_new_cell()
     let restored = storage::load(&checkpoint.0).unwrap();
     assert_eq!(restored.qd_version, evolution_simulator::qd::VERSION);
     assert_eq!(restored.archive.entries.len(), elites);
-    let archives = std::iter::once(&restored.archive).chain(&restored.islands);
-    for (index, archive) in archives.enumerate() {
+    // The global archive was refined at the load: its elites are in cells of
+    // the global classes.
+    assert!(restored.archive.refined());
+    for elite in &restored.archive.entries {
+        if !evolution_simulator::qd::is_morphology_niche(&elite.niche) {
+            assert_eq!(
+                elite.niche,
+                elite
+                    .descriptor
+                    .niche_in(&evolution_simulator::qd::GLOBAL_CLASSES)
+            );
+        }
+    }
+    // The islands are young, so each keeps one elite per way of moving.
+    for archive in &restored.islands {
         for elite in &archive.entries {
-            if !evolution_simulator::qd::is_morphology_niche(&elite.niche) {
-                // The synthetic archives are far from their plateau, so
-                // every archive keeps one elite per way of moving.
-                let _ = index;
+            if !evolution_simulator::qd::is_morphology_niche(&elite.niche) && !archive.refined() {
                 assert_eq!(elite.niche, elite.descriptor.movement_niche());
             }
         }
@@ -862,12 +880,6 @@ fn a_save_keeps_the_ancestors_of_the_global_archive_and_every_elites_record() {
 /// the layout before the body classes.
 fn plateau_archive() -> QdArchive {
     archive_of_all_ways_of_moving(|_| 1000.0)
-}
-
-/// The same archive with elites at spread distances, so that only a few are
-/// near its best.
-fn climbing_archive() -> QdArchive {
-    archive_of_all_ways_of_moving(|n| 1000.0 + n as f32 * 0.5)
 }
 
 fn archive_of_all_ways_of_moving(fitness: impl Fn(u32) -> f32) -> QdArchive {
@@ -931,122 +943,191 @@ fn archive_of_all_ways_of_moving(fitness: impl Fn(u32) -> f32) -> QdArchive {
 }
 
 #[test]
-fn an_archive_at_its_plateau_is_refined_and_a_climbing_one_is_not() {
-    let plateau = plateau_archive();
-    assert!(plateau.plateaued());
-    assert!(!plateau.refined());
-    // Half of the elites far below the best is a climbing archive.
-    let mut climbing = plateau_archive();
-    for (k, elite) in climbing.entries.iter_mut().enumerate() {
-        if k % 5 < 3 {
-            elite.fitness = 100.0;
-        }
-    }
-    climbing.rebuild_indices();
-    assert!(!climbing.plateaued());
-    // So is an archive with few of the ways of moving.
-    let mut sparse = plateau_archive();
-    sparse.entries.truncate(200);
-    sparse.rebuild_indices();
-    assert!(!sparse.plateaued());
-}
-
-#[test]
-fn the_generation_boundary_refines_the_archives_that_reached_their_plateau() {
+fn an_island_is_refined_when_its_archive_is_old_enough() {
+    use evolution_simulator::qd;
     let mut experiment = Experiment::new(config(38)).unwrap();
+    // The global archive never breeds, so it starts refined; an island climbs
+    // without classes.
+    assert!(experiment.archive.refined());
     run_synthetic(&mut experiment);
     experiment.islands[1] = plateau_archive();
     let before = experiment.islands[1].behavior_count();
-    assert!(!experiment.islands[1].refined());
+    while experiment.generation < qd::REFINE_AFTER - 1 {
+        run_synthetic(&mut experiment);
+    }
+    for island in &experiment.islands[..storage::island_count()] {
+        assert!(!island.refined());
+    }
     run_synthetic(&mut experiment);
-    // The plateau archive moved to the cells of its body classes; the others
-    // are still climbing.
-    assert!(experiment.islands[1].refined());
-    assert_eq!(experiment.islands[1].behavior_count(), before);
+    assert_eq!(experiment.generation, qd::REFINE_AFTER);
+    // Every island moved to the cells of its body classes. The elites of
+    // other shapes and sizes sit in cells of their own, and none was lost.
+    for island in &experiment.islands[..storage::island_count()] {
+        assert!(island.refined());
+    }
+    // (A nursery's cohort may take cells of body classes that were empty.)
+    assert!(experiment.islands[1].behavior_count() >= before);
     assert_eq!(experiment.islands[1].movement_count(), before);
-    // Elites of other shapes and sizes now sit in cells of their own classes.
     assert!(
         experiment.islands[1]
             .entries
             .iter()
             .any(|e| e.niche.0[2] != 0 || e.niche.0[5] != 0)
     );
-    assert!(!experiment.islands[0].refined());
-    assert!(!experiment.archive.refined());
+    // The nurseries of new random bodies stay as they were.
+    for island in 0..storage::island_count() {
+        assert!(!experiment.islands[storage::nursery_of(island)].refined());
+    }
     for elite in &experiment.islands[1].entries {
-        if !evolution_simulator::qd::is_morphology_niche(&elite.niche) {
-            assert_eq!(elite.niche, elite.descriptor.niche());
+        if !qd::is_morphology_niche(&elite.niche) {
+            assert_eq!(elite.niche, elite.descriptor.niche_in(&qd::ISLAND_CLASSES));
         }
     }
     experiment.validate().unwrap();
 }
 
 #[test]
-fn an_archive_whose_best_has_stood_for_thirty_generations_is_refined() {
+fn a_version_54_save_loads_into_the_finer_global_classes() {
+    use evolution_simulator::qd;
     let mut experiment = Experiment::new(config(38)).unwrap();
     run_synthetic(&mut experiment);
-    // Island 1 and the global archive cover the ways of moving and still
-    // spread over distances: only a few elites are near their best. Island 2
-    // has stood as long with few ways of moving.
-    assert!(!climbing_archive().plateaued());
-    assert!(climbing_archive().covers_most_ways_of_moving());
-    experiment.islands[1] = climbing_archive();
-    experiment.archive = climbing_archive();
-    experiment.island_progress[1] = (1.0e6, 0);
-    experiment.island_progress[2] = (1.0e6, 0);
-    while experiment.generation < 29 {
-        run_synthetic(&mut experiment);
+    // Island 2 and the global archive were refined in the island layout.
+    let mut refined = plateau_archive();
+    // Bodies of in-between shapes and sizes, which the island classes lump.
+    for (k, elite) in refined.entries.iter_mut().enumerate() {
+        match k % 4 {
+            1 => elite.descriptor.aspect_ratio = 1.1,
+            2 => elite.descriptor.nodes = 10,
+            3 => {
+                elite.descriptor.aspect_ratio = 2.0;
+                elite.descriptor.nodes = 12;
+            }
+            _ => {}
+        }
     }
-    assert!(!experiment.islands[1].refined());
-    // The island's best has stood for 30 generations.
-    run_synthetic(&mut experiment);
-    assert_eq!(experiment.generation, 30);
-    assert!(experiment.islands[1].refined());
-    assert!(!experiment.archive.refined());
-    while experiment.generation < 33 {
-        run_synthetic(&mut experiment);
+    refined.set_refined(true);
+    refined.rebin();
+    experiment.islands[2] = refined.clone();
+    experiment.archive = refined;
+    experiment.qd_version = 54;
+    let checkpoint = Checkpoint::new("version-54");
+    storage::save(&checkpoint.0, &experiment).unwrap();
+    let restored = storage::load(&checkpoint.0).unwrap();
+    // The island kept its refined layout, and another stayed as it was.
+    assert!(restored.islands[2].refined() && !restored.islands[0].refined());
+    assert_eq!(restored.islands[2].behavior_count(), 1440);
+    for elite in &restored.islands[2].entries {
+        if !qd::is_morphology_niche(&elite.niche) {
+            assert_eq!(elite.niche, elite.descriptor.niche_in(&qd::ISLAND_CLASSES));
+        }
     }
-    // The global archive's best has stood as long. Island 0 still sets
-    // records and island 2 covers few ways of moving: they stay as they were.
-    assert!(experiment.archive.refined());
-    assert!(!experiment.islands[0].refined());
-    assert!(!experiment.islands[2].refined());
-    experiment.validate().unwrap();
+    // The global archive moved to the cells of its own, finer, classes.
+    assert!(restored.archive.refined());
+    assert_eq!(restored.archive.behavior_count(), 1440);
+    let global_classes: std::collections::BTreeSet<_> = restored
+        .archive
+        .entries
+        .iter()
+        .map(|e| (e.niche.0[2], e.niche.0[5]))
+        .collect();
+    assert!(global_classes.len() > qd::ISLAND_CLASSES.classes());
+    for elite in &restored.archive.entries {
+        if !qd::is_morphology_niche(&elite.niche) {
+            assert_eq!(elite.niche, elite.descriptor.niche_in(&qd::GLOBAL_CLASSES));
+        }
+    }
+    restored.validate().unwrap();
 }
 
 #[test]
-fn a_plateaued_archive_of_the_previous_layout_is_refined_when_it_loads() {
+fn a_save_of_an_older_version_leaves_every_island_coarse_until_it_is_old_enough() {
     let mut experiment = Experiment::new(config(38)).unwrap();
     run_synthetic(&mut experiment);
     experiment.islands[2] = plateau_archive();
     experiment.qd_version = evolution_simulator::qd::OLDEST_LOADABLE;
-    let checkpoint = Checkpoint::new("plateau-load");
+    let checkpoint = Checkpoint::new("older-save");
     storage::save(&checkpoint.0, &experiment).unwrap();
-    let restored = storage::load(&checkpoint.0).unwrap();
-    assert!(restored.islands[2].refined());
-    assert!(!restored.islands[0].refined());
+    let mut restored = storage::load(&checkpoint.0).unwrap();
+    // Every elite is in a way of moving of its own, and the global archive is
+    // refined.
+    assert!(!restored.islands[2].refined() && restored.archive.refined());
     assert_eq!(restored.islands[2].behavior_count(), 1440);
-    assert_eq!(restored.islands[2].movement_count(), 1440);
+    // The game had run for 30 generations when it was saved, so its islands
+    // are refined at the next generation boundary.
+    restored.generation = evolution_simulator::qd::REFINE_AFTER;
+    restored.history.truncate(restored.generation as usize);
+    run_synthetic(&mut restored);
+    assert!(restored.islands[2].refined() && restored.islands[0].refined());
+    assert_eq!(restored.islands[2].behavior_count(), 1440);
     assert!(
         restored.islands[2]
             .entries
             .iter()
             .any(|e| e.niche.0[2] != 0 || e.niche.0[5] != 0)
     );
-    for elite in &restored.islands[2].entries {
-        if !evolution_simulator::qd::is_morphology_niche(&elite.niche) {
-            assert_eq!(elite.niche, elite.descriptor.niche());
-        }
-    }
-    // A save of the current version tells its layout by the cells it holds.
-    let again = Checkpoint::new("plateau-again");
-    storage::save(&again.0, &restored).unwrap();
-    let reloaded = storage::load(&again.0).unwrap();
-    assert!(reloaded.islands[2].refined());
-    assert!(!reloaded.islands[0].refined());
+}
+
+#[test]
+fn a_parent_of_a_rare_clade_is_preferred_when_the_elites_are_level() {
+    use evolution_simulator::{evolution::Rng, qd};
+    // Every elite has the same distance, so local competition cannot tell them
+    // apart, and one elite's clade is rare.
+    let archive = plateau_archive();
+    let mut rarity = vec![0.0f32; archive.entries.len()];
+    rarity[7] = 1.0;
+    let draws = |rarity: &[f32]| {
+        (0..4000)
+            .filter(|&k| {
+                let mut rng = Rng::new(38, 1, k);
+                archive.sample_local_competitive(&mut rng, None, rarity) == Some(7)
+            })
+            .count()
+    };
+    // Eight elites meet in a tournament, so a given one is drawn about 8 in
+    // 1,440 times at random and almost every time it meets the others when
+    // its clade is rare.
+    const { assert!(qd::RARITY_WEIGHT > 0.0) };
+    let level = draws(&[]);
+    let rare = draws(&rarity);
+    assert!(level < 10, "{level} draws without the bonus");
+    assert!(rare > 4 * level.max(2), "{rare} draws with the bonus");
+}
+
+#[test]
+fn the_global_archive_has_finer_body_classes_than_an_island() {
+    use evolution_simulator::qd::{GLOBAL_CLASSES, ISLAND_CLASSES};
+    assert!(GLOBAL_CLASSES.shapes() > ISLAND_CLASSES.shapes());
+    assert!(GLOBAL_CLASSES.sizes() > ISLAND_CLASSES.sizes());
+    assert_eq!(GLOBAL_CLASSES.shape_names.len(), GLOBAL_CLASSES.shapes());
+    assert_eq!(GLOBAL_CLASSES.size_names.len(), GLOBAL_CLASSES.sizes());
+    // Bodies one island class lumps together have cells of their own in the
+    // global archive.
+    let body = |nodes: u16, aspect_ratio: f32| Descriptor {
+        ground_contact: 0.5,
+        gait_frequency: 1.0,
+        mean_height: 0.5,
+        feet: 2.0,
+        nodes,
+        aspect_ratio,
+        ..Descriptor::default()
+    };
+    let (compact, tall) = (body(7, 1.2), body(7, 0.7));
     assert_eq!(
-        reloaded.islands[2].behavior_count(),
-        restored.islands[2].behavior_count()
+        compact.niche_in(&ISLAND_CLASSES),
+        tall.niche_in(&ISLAND_CLASSES)
+    );
+    assert_ne!(
+        compact.niche_in(&GLOBAL_CLASSES),
+        tall.niche_in(&GLOBAL_CLASSES)
+    );
+    let (small, medium) = (body(7, 1.2), body(10, 1.2));
+    assert_eq!(
+        small.niche_in(&ISLAND_CLASSES),
+        medium.niche_in(&ISLAND_CLASSES)
+    );
+    assert_ne!(
+        small.niche_in(&GLOBAL_CLASSES),
+        medium.niche_in(&GLOBAL_CLASSES)
     );
 }
 
@@ -1120,7 +1201,12 @@ fn a_world_change_keeps_the_layout_of_a_refined_archive() {
     );
     for elite in &island.entries {
         if !evolution_simulator::qd::is_morphology_niche(&elite.niche) {
-            assert_eq!(elite.niche, elite.descriptor.niche());
+            assert_eq!(
+                elite.niche,
+                elite
+                    .descriptor
+                    .niche_in(&evolution_simulator::qd::ISLAND_CLASSES)
+            );
         }
     }
     experiment.validate().unwrap();
@@ -1130,7 +1216,7 @@ fn a_world_change_keeps_the_layout_of_a_refined_archive() {
     let mut changed = plain.config.clone();
     changed.gravity += 1.0;
     plain.update_config_now(changed).unwrap();
-    assert!(plain.islands.is_empty() && !plain.archive.refined());
+    assert!(plain.islands.is_empty() && plain.archive.refined());
 }
 
 fn births_ids(e: &Experiment) -> impl Iterator<Item = u64> + '_ {
@@ -1299,7 +1385,9 @@ fn isolated_islands_only_hold_their_own_descendants() {
     })
     .unwrap();
     let hub = storage::hub_island();
-    let check = |experiment: &Experiment| {
+    // After a world change an island holds its elites tested again, a graduate
+    // among them without its mark.
+    let check = |experiment: &Experiment, reseeded: bool| {
         for (arena, island) in experiment.islands.iter().enumerate() {
             // A nursery belongs to one island like the island's archive.
             let index = arena % storage::island_count();
@@ -1318,7 +1406,7 @@ fn isolated_islands_only_hold_their_own_descendants() {
                     assert!(!elite.graduate);
                 } else if arena >= storage::island_count() {
                     assert!(nursery_slot && !elite.graduate);
-                } else if !elite.graduate {
+                } else if !elite.graduate && !reseeded {
                     assert!(!nursery_slot);
                 }
                 // The elite and every recorded ancestor were born here.
@@ -1344,7 +1432,7 @@ fn isolated_islands_only_hold_their_own_descendants() {
             experiment.update_config(changed).unwrap();
         }
         run_synthetic(&mut experiment);
-        check(&experiment);
+        check(&experiment, generation > storage::MIGRATION_INTERVAL + 5);
     }
     // The nurseries sent cohorts to their islands.
     assert!(experiment.graduations.iter().any(|g| g.sent > 0));

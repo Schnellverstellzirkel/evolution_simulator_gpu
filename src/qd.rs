@@ -3,62 +3,132 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const EMITTER_COUNT: usize = 4;
-/// Archive grid: ground contact, gait cadence, body shape (the start pose's
-/// width over its height), mean body height, feet (distinct nodes that
-/// touched the ground), and body size (node count).
-const BINS: [u8; 6] = [6, 8, ASPECT_BINS, 6, 5, NODE_BINS];
+/// The movement grid: ground contact, gait cadence, mean body height and
+/// feet (distinct nodes that touched the ground).
+const MOVEMENT_BINS: [u8; 4] = [6, 8, 6, 5];
 /// The axes of measured and shape behavior, which local competition and
 /// novelty compare across neighboring cells. The node-count class is the
 /// last byte of a niche and only separates bodies: neighbors share it.
 const NEIGHBOR_AXES: usize = 5;
-/// Start-pose aspect classes: compact (less than 1.5 times as wide as tall)
-/// and long.
-const ASPECT_EDGES: [f32; 1] = [1.5];
-const ASPECT_BINS: u8 = ASPECT_EDGES.len() as u8 + 1;
-/// Node-count classes: up to 10 nodes and 11 or more.
-const NODE_EDGES: [u16; 1] = [11];
-const NODE_BINS: u8 = NODE_EDGES.len() as u8 + 1;
-/// Names of the body shape classes (`ASPECT_EDGES`), most compact first, and
-/// of the body size classes (`NODE_EDGES`), smallest first.
-pub const SHAPE_NAMES: [&str; ASPECT_BINS as usize] = ["Compact", "Long"];
-pub const SIZE_NAMES: [&str; NODE_BINS as usize] = ["Small", "Large"];
-/// Body classes: every shape with every size.
-pub const BODY_CLASSES: usize = (ASPECT_BINS as usize) * (NODE_BINS as usize);
-/// What a shape class covers, for hover texts.
-pub fn shape_about(class: usize) -> String {
-    let low = class.checked_sub(1).map(|c| ASPECT_EDGES[c]);
-    match (low, ASPECT_EDGES.get(class)) {
-        (None, Some(high)) => format!("Less than {high} times as wide as tall at the start"),
-        (Some(low), Some(high)) => format!("{low} to {high} times as wide as tall at the start"),
-        (Some(low), None) => format!("At least {low} times as wide as tall at the start"),
-        (None, None) => "Every shape".to_owned(),
+/// Generations an island keeps one elite per way of moving before its
+/// archive is refined to the cells of its body classes. Refined from the
+/// first generation, the islands climbed 17% slower at generation 40; refined
+/// at generation 40 they climbed as fast as an archive that never was.
+pub const REFINE_AFTER: u32 = 30;
+/// Names of the body shape classes, most compact first, and of the body size
+/// classes, smallest first, for every count of classes.
+const SHAPE_NAME_SETS: [&[&str]; 6] = [
+    &[],
+    &["Any"],
+    &["Compact", "Long"],
+    &["Tall", "Wide", "Long"],
+    &["Tall", "Square", "Wide", "Long"],
+    &["Tall", "Square", "Wide", "Long", "Needle"],
+];
+const SIZE_NAME_SETS: [&[&str]; 6] = [
+    &[],
+    &["Any"],
+    &["Small", "Large"],
+    &["Small", "Medium", "Large"],
+    &["Small", "Medium", "Large", "Giant"],
+    &["Tiny", "Small", "Medium", "Large", "Giant"],
+];
+/// How an archive tells bodies apart once it is refined: the edges of its
+/// shape classes (the start pose's width over its height) and of its size
+/// classes (node count), and their names.
+#[derive(Clone, Copy, Debug)]
+pub struct Classes {
+    aspect: &'static [f32],
+    nodes: &'static [u16],
+    pub shape_names: &'static [&'static str],
+    pub size_names: &'static [&'static str],
+}
+const ISLAND_ASPECT: [f32; 1] = [1.5];
+const ISLAND_NODES: [u16; 1] = [11];
+const GLOBAL_ASPECT: [f32; 3] = [0.9, 1.4, 2.5];
+const GLOBAL_NODES: [u16; 3] = [9, 11, 14];
+/// The layout of the islands: each way of moving splits among compact (under
+/// 1.5 times as wide as tall) and long bodies of up to 10 nodes and of 11 or
+/// more, 5,760 cells.
+pub const ISLAND_CLASSES: Classes = Classes {
+    aspect: &ISLAND_ASPECT,
+    nodes: &ISLAND_NODES,
+    shape_names: SHAPE_NAME_SETS[ISLAND_ASPECT.len() + 1],
+    size_names: SIZE_NAME_SETS[ISLAND_NODES.len() + 1],
+};
+/// The layout of the global archive, which records every creature and is
+/// never a parent source: each way of moving splits among 4 shapes (tall under
+/// 0.9, square to 1.4, wide to 2.5, long) and 4 sizes (up to 8 nodes, 9 to 10,
+/// 11 to 13, 14 or more), 23,040 cells.
+pub const GLOBAL_CLASSES: Classes = Classes {
+    aspect: &GLOBAL_ASPECT,
+    nodes: &GLOBAL_NODES,
+    shape_names: SHAPE_NAME_SETS[GLOBAL_ASPECT.len() + 1],
+    size_names: SIZE_NAME_SETS[GLOBAL_NODES.len() + 1],
+};
+impl Classes {
+    pub const fn shapes(&self) -> usize {
+        self.aspect.len() + 1
+    }
+    pub const fn sizes(&self) -> usize {
+        self.nodes.len() + 1
+    }
+    /// Body classes: every shape with every size.
+    pub const fn classes(&self) -> usize {
+        self.shapes() * self.sizes()
+    }
+    /// Cells: every way of moving with every body class.
+    pub const fn cells(&self) -> usize {
+        MOVEMENT_CELLS * self.classes()
+    }
+    /// What a shape class covers, for hover texts.
+    pub fn shape_about(&self, class: usize) -> String {
+        let low = class.checked_sub(1).map(|c| self.aspect[c]);
+        match (low, self.aspect.get(class)) {
+            (None, Some(high)) => format!("Less than {high} times as wide as tall at the start"),
+            (Some(low), Some(high)) => {
+                format!("{low} to {high} times as wide as tall at the start")
+            }
+            (Some(low), None) => format!("At least {low} times as wide as tall at the start"),
+            (None, None) => "Every shape".to_owned(),
+        }
+    }
+    /// What a size class covers, for hover texts.
+    pub fn size_about(&self, class: usize) -> String {
+        let low = class.checked_sub(1).map(|c| self.nodes[c]);
+        match (low, self.nodes.get(class)) {
+            (None, Some(high)) => format!("Up to {} nodes", high - 1),
+            (Some(low), Some(high)) => format!("{low} to {} nodes", high - 1),
+            (Some(low), None) => format!("{low} nodes or more"),
+            (None, None) => "Every size".to_owned(),
+        }
+    }
+    /// The cells of a body of this start-pose aspect and node count, as
+    /// the shape class and the size class.
+    fn classes_of(&self, aspect: f32, nodes: u16) -> (u8, u8) {
+        (
+            self.aspect.iter().filter(|&&edge| aspect >= edge).count() as u8,
+            self.nodes.iter().filter(|&&edge| nodes >= edge).count() as u8,
+        )
+    }
+    /// The bins of each byte of a niche.
+    fn bins(&self) -> [u8; 6] {
+        [
+            MOVEMENT_BINS[0],
+            MOVEMENT_BINS[1],
+            self.shapes() as u8,
+            MOVEMENT_BINS[2],
+            MOVEMENT_BINS[3],
+            self.sizes() as u8,
+        ]
     }
 }
-/// What a size class covers, for hover texts.
-pub fn size_about(class: usize) -> String {
-    let low = class.checked_sub(1).map(|c| NODE_EDGES[c]);
-    match (low, NODE_EDGES.get(class)) {
-        (None, Some(high)) => format!("Up to {} nodes", high - 1),
-        (Some(low), Some(high)) => format!("{low} to {} nodes", high - 1),
-        (Some(low), None) => format!("{low} nodes or more"),
-        (None, None) => "Every size".to_owned(),
-    }
-}
-const fn cell_count() -> usize {
-    let mut cells = 1;
-    let mut axis = 0;
-    while axis < BINS.len() {
-        cells *= BINS[axis] as usize;
-        axis += 1;
-    }
-    cells
-}
-pub(crate) const ARCHIVE_LIMIT: usize = cell_count();
 /// Cells of the movement grid alone: contact, cadence, height and feet.
-pub(crate) const MOVEMENT_CELLS: usize =
-    (BINS[0] as usize) * (BINS[1] as usize) * (BINS[3] as usize) * (BINS[4] as usize);
+pub(crate) const MOVEMENT_CELLS: usize = (MOVEMENT_BINS[0] as usize)
+    * (MOVEMENT_BINS[1] as usize)
+    * (MOVEMENT_BINS[2] as usize)
+    * (MOVEMENT_BINS[3] as usize);
 pub(crate) const MORPHOLOGY_LIMIT: usize = 64;
-pub(crate) const ARCHIVE_CAPACITY: usize = ARCHIVE_LIMIT + MORPHOLOGY_LIMIT;
 pub(crate) const HISTORICAL_ARCHIVE_LIMIT: usize = 1 << 20;
 pub(crate) const CMA_LIMIT: usize = 96;
 // 26: a fall ends the trial; behavior totals stop at the fall and average
@@ -105,7 +175,10 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 54: archive cells also follow body shape and size (aspect and node-count
 //     classes). A save of version 53 loads by moving each elite to its cell
 //     in the new layout.
-pub const VERSION: u32 = 54;
+// 55: the global archive has finer body classes than the islands (4 shapes by
+//     4 sizes against 2 by 2). A save of version 53 or 54 loads by moving
+//     each elite to its cell in the new layout.
+pub const VERSION: u32 = 55;
 /// The oldest save version that still loads. Its archives are re-binned, and
 /// its elites keep the scores they measured.
 pub const OLDEST_LOADABLE: u32 = 53;
@@ -185,6 +258,12 @@ pub fn optimizer_niche(island: usize, cadence: u8) -> Niche {
     let b = (island as u32).to_le_bytes();
     Niche([OPTIMIZER_NICHE_MARKER, b[0], b[1], b[2], b[3], cadence])
 }
+/// Generations a new body plan is protected against a challenger of another
+/// plan.
+pub const PROTECTION_GENERATIONS: u32 = 3;
+/// How much a parent of a rare clade is preferred among the parents a
+/// tournament of a refined island compares (`Experiment::clade_rarity_of`).
+pub const RARITY_WEIGHT: f32 = 1.0;
 pub(crate) const MIN_MORPHOLOGY_DESCENDANTS: u64 = 8;
 pub(crate) const MORPHOLOGY_PARENT_FRACTION: f32 = 0.10;
 // Random bodies only seed an empty archive: against evolved elites they
@@ -301,6 +380,9 @@ pub struct QdArchive {
     /// nursery's never refine.
     #[serde(skip)]
     refined: bool,
+    /// The global archive has a layout of its own (`GLOBAL_CLASSES`).
+    #[serde(skip)]
+    global: bool,
     pub qd_score: f64,
     /// The behavior elites visited least, as (visits, slot), fewest first.
     #[serde(skip)]
@@ -430,28 +512,28 @@ pub fn descriptor(
 }
 
 impl Descriptor {
+    /// The cell of this descriptor in the global archive's layout.
     pub fn niche(self) -> Niche {
-        let feet = (self.feet.round() as i32).clamp(1, BINS[4] as i32) as u8 - 1;
+        self.niche_in(&GLOBAL_CLASSES)
+    }
+    /// The cell of this descriptor in `classes`.
+    pub fn niche_in(self, classes: &Classes) -> Niche {
+        let (shape, size) = classes.classes_of(self.aspect_ratio, self.nodes);
+        let feet = (self.feet.round() as i32).clamp(1, MOVEMENT_BINS[3] as i32) as u8 - 1;
         Niche([
-            bin(self.ground_contact, 0.0, 1.0, BINS[0]),
-            bin(self.gait_frequency, 0.0, 6.0, BINS[1]),
-            ASPECT_EDGES
-                .iter()
-                .filter(|&&edge| self.aspect_ratio >= edge)
-                .count() as u8,
-            bin(height_axis(self.mean_height), 0.0, 1.0, BINS[3]),
+            bin(self.ground_contact, 0.0, 1.0, MOVEMENT_BINS[0]),
+            bin(self.gait_frequency, 0.0, 6.0, MOVEMENT_BINS[1]),
+            shape,
+            bin(height_axis(self.mean_height), 0.0, 1.0, MOVEMENT_BINS[2]),
             feet,
-            NODE_EDGES
-                .iter()
-                .filter(|&&edge| self.nodes >= edge)
-                .count() as u8,
+            size,
         ])
     }
 
     /// The cell of the way of moving alone, with the body classes left at
     /// zero: the layout of a nursery and of saves before version 54.
     pub fn movement_niche(self) -> Niche {
-        let mut niche = self.niche();
+        let mut niche = self.niche_in(&ISLAND_CLASSES);
         niche.0[2] = 0;
         niche.0[NEIGHBOR_AXES] = 0;
         niche
@@ -464,13 +546,13 @@ impl Descriptor {
             self.ground_contact.clamp(0.0, 1.0),
             (self.gait_frequency / 6.0).clamp(0.0, 1.0),
             // Shape on a log scale from 1:16 to 16:1.
-            if refined && ASPECT_BINS > 1 {
+            if refined {
                 ((self.aspect_ratio.max(0.0625).ln() / 16f32.ln() + 1.0) * 0.5).clamp(0.0, 1.0)
             } else {
                 0.0
             },
             height_axis(self.mean_height),
-            ((self.feet - 1.0) / (BINS[4] as f32 - 1.0)).clamp(0.0, 1.0),
+            ((self.feet - 1.0) / (MOVEMENT_BINS[3] as f32 - 1.0)).clamp(0.0, 1.0),
         ]
     }
 }
@@ -599,23 +681,52 @@ fn morphology_niche(topology: &Topology, salt: u64) -> Niche {
 /// A slot value for a cell with no elite.
 const EMPTY_CELL: u32 = u32::MAX;
 
-/// Where a behavior niche sits in a dense table of every cell, or None for a
-/// niche outside the grid.
-fn cell_index(niche: &Niche) -> Option<usize> {
+/// Where a behavior niche sits in a dense table of every cell of a layout
+/// with `bins`, or None for a niche outside the grid.
+fn cell_index(niche: &Niche, bins: &[u8; 6]) -> Option<usize> {
     let mut index = 0usize;
-    for (axis, &bins) in BINS.iter().enumerate() {
-        if niche.0[axis] >= bins {
+    for (axis, &count) in bins.iter().enumerate() {
+        if niche.0[axis] >= count {
             return None;
         }
-        index = index * bins as usize + niche.0[axis] as usize;
+        index = index * count as usize + niche.0[axis] as usize;
     }
     Some(index)
 }
 
 impl QdArchive {
+    /// An empty global archive in the layout a new game starts with.
+    pub fn starting_global() -> Self {
+        Self {
+            global: true,
+            refined: true,
+            ..Self::default()
+        }
+    }
+    /// Marks the archive as the global one, which has a layout of its own.
+    pub fn set_global(&mut self, global: bool) {
+        self.global = global;
+    }
+    /// The body classes of the archive's cells, once it is refined.
+    pub fn classes(&self) -> &'static Classes {
+        if self.global {
+            &GLOBAL_CLASSES
+        } else {
+            &ISLAND_CLASSES
+        }
+    }
+    /// Cells the archive may fill.
+    pub fn limit(&self) -> usize {
+        self.classes().cells()
+    }
+    /// Elites the archive may hold: its cells and the morphology reserve.
+    pub fn capacity(&self) -> usize {
+        self.limit() + MORPHOLOGY_LIMIT
+    }
     /// Whether the archive keeps an elite for each body class of a way of
-    /// moving. A new archive keeps one per way of moving, and the game
-    /// refines it once most of its elites have reached the top distance.
+    /// moving. An island keeps one per way of moving until it is
+    /// `REFINE_AFTER` generations old, and the global archive is refined from
+    /// the start.
     pub fn refined(&self) -> bool {
         self.refined
     }
@@ -634,38 +745,13 @@ impl QdArchive {
     /// The cell of `descriptor` in this archive.
     pub fn cell_of(&self, descriptor: Descriptor) -> Niche {
         if self.refined {
-            descriptor.niche()
+            descriptor.niche_in(self.classes())
         } else {
             descriptor.movement_niche()
         }
     }
     fn niche_of(&self, descriptor: Descriptor) -> Niche {
         self.cell_of(descriptor)
-    }
-    /// Whether elites cover at least three quarters of the ways of moving.
-    pub fn covers_most_ways_of_moving(&self) -> bool {
-        self.movement_count() >= MOVEMENT_CELLS * 3 / 4
-    }
-    /// Whether half of the archive's elites are within 1% of its best
-    /// distance and it covers most ways of moving: a body can no longer win a
-    /// cell on distance alone.
-    pub fn plateaued(&self) -> bool {
-        let count = self.behavior_indices.len();
-        if !self.covers_most_ways_of_moving() {
-            return false;
-        }
-        let fitness = |&i: &usize| self.entries[i].fitness;
-        let best = self
-            .behavior_indices
-            .iter()
-            .map(fitness)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let near = self
-            .behavior_indices
-            .iter()
-            .filter(|i| fitness(i) >= 0.99 * best)
-            .count();
-        near * 2 >= count
     }
     /// The slot of the elite in behavior cell `index`.
     fn cell_slot(&self, index: usize) -> Option<usize> {
@@ -678,9 +764,9 @@ impl QdArchive {
     fn index_niche(&mut self, niche: &Niche, slot: usize) {
         if is_morphology_niche(niche) {
             self.reserve_lookup.insert(niche.clone(), slot);
-        } else if let Some(index) = cell_index(niche) {
+        } else if let Some(index) = cell_index(niche, &self.classes().bins()) {
             if self.cells.is_empty() {
-                self.cells = vec![EMPTY_CELL; ARCHIVE_LIMIT];
+                self.cells = vec![EMPTY_CELL; self.limit()];
             }
             self.cells[index] = slot as u32;
         }
@@ -688,7 +774,7 @@ impl QdArchive {
     fn unindex_niche(&mut self, niche: &Niche) {
         if is_morphology_niche(niche) {
             self.reserve_lookup.remove(niche);
-        } else if let Some(index) = cell_index(niche)
+        } else if let Some(index) = cell_index(niche, &self.classes().bins())
             && let Some(cell) = self.cells.get_mut(index)
         {
             *cell = EMPTY_CELL;
@@ -770,7 +856,7 @@ impl QdArchive {
         if is_morphology_niche(niche) {
             self.reserve_lookup.get(niche).copied()
         } else {
-            cell_index(niche).and_then(|index| self.cell_slot(index))
+            cell_index(niche, &self.classes().bins()).and_then(|index| self.cell_slot(index))
         }
     }
     pub fn morphology_count(&self) -> usize {
@@ -796,9 +882,10 @@ impl QdArchive {
         let mut count = 0;
         for &i in &self.behavior_indices {
             let n = &self.entries[i].niche.0;
-            let cell = ((n[0] as usize * BINS[1] as usize + n[1] as usize) * BINS[3] as usize
+            let cell = ((n[0] as usize * MOVEMENT_BINS[1] as usize + n[1] as usize)
+                * MOVEMENT_BINS[2] as usize
                 + n[3] as usize)
-                * BINS[4] as usize
+                * MOVEMENT_BINS[3] as usize
                 + n[4] as usize;
             if !std::mem::replace(&mut seen[cell], true) {
                 count += 1;
@@ -845,7 +932,12 @@ impl QdArchive {
                 .then(|| self.behavior_indices[rng.index(self.behavior_indices.len())])
         })
     }
-    pub fn sample_local_competitive(&self, rng: &mut Rng, avoid: Option<usize>) -> Option<usize> {
+    pub fn sample_local_competitive(
+        &self,
+        rng: &mut Rng,
+        avoid: Option<usize>,
+        rarity: &[f32],
+    ) -> Option<usize> {
         let behavior = &self.behavior_indices;
         if behavior.is_empty() {
             return None;
@@ -868,7 +960,8 @@ impl QdArchive {
                 .get(index)
                 .copied()
                 .unwrap_or(0.5);
-            let score = local + rng.unit() * 0.02;
+            let bonus = RARITY_WEIGHT * rarity.get(index).copied().unwrap_or(0.0);
+            let score = local + rng.unit() * 0.02 + bonus;
             if score > best_score {
                 selected = Some(index);
                 best_score = score;
@@ -910,7 +1003,8 @@ impl QdArchive {
     /// same node-count class (the cell itself excluded).
     fn for_each_neighbor(&self, center: &Niche, radius: i32, mut visit: impl FnMut(usize)) {
         const _: () = assert!(NEIGHBOR_AXES == 5);
-        let Some(own) = cell_index(center) else {
+        let bins = self.classes().bins();
+        let Some(own) = cell_index(center, &bins) else {
             return;
         };
         if self.cells.is_empty() {
@@ -918,14 +1012,14 @@ impl QdArchive {
         }
         let range = |axis: usize| {
             let at = center.0[axis] as i32;
-            (at - radius).max(0) as usize..=(at + radius).min(BINS[axis] as i32 - 1) as usize
+            (at - radius).max(0) as usize..=(at + radius).min(bins[axis] as i32 - 1) as usize
         };
         let (b1, b2, b3, b4, b5) = (
-            BINS[1] as usize,
-            BINS[2] as usize,
-            BINS[3] as usize,
-            BINS[4] as usize,
-            BINS[5] as usize,
+            bins[1] as usize,
+            bins[2] as usize,
+            bins[3] as usize,
+            bins[4] as usize,
+            bins[5] as usize,
         );
         let class = center.0[NEIGHBOR_AXES] as usize;
         for a0 in range(0) {
@@ -1008,6 +1102,12 @@ impl QdArchive {
     }
     pub fn refresh_behavior_scores(&mut self) {
         use rayon::prelude::*;
+        // The global archive is never a parent source, so nobody reads its
+        // scores.
+        if self.global {
+            self.changed_cells.clear();
+            return;
+        }
         let changed = std::mem::take(&mut self.changed_cells);
         if self.behavior_indices.is_empty() {
             self.behavior_scores = BehaviorScores::default();
@@ -1142,7 +1242,7 @@ impl QdArchive {
                     .clamp(0.01, 1.0),
             };
         }
-        if self.behavior_count() >= ARCHIVE_LIMIT {
+        if self.behavior_count() >= self.limit() {
             return Offer::default();
         }
         let local_competition = self.local_competition_for(&niche, fitness);
@@ -1308,7 +1408,7 @@ impl QdArchive {
             };
             self.plan_keys[slot] = elite.topology.plan_key();
         } else {
-            if self.behavior_count() >= ARCHIVE_LIMIT {
+            if self.behavior_count() >= self.limit() {
                 return false;
             }
             self.qd_score += elite.fitness.max(0.0) as f64;
@@ -1334,7 +1434,7 @@ impl QdArchive {
         }
         match self.slot_for(&self.niche_of(elite.descriptor)) {
             Some(slot) => elite.fitness > self.entries[slot].fitness,
-            None => self.behavior_count() < ARCHIVE_LIMIT,
+            None => self.behavior_count() < self.limit(),
         }
     }
     fn remove_morphology_topology(&mut self, topology: &Topology, behavior_fitness: f32) {
@@ -2233,7 +2333,7 @@ mod tests {
         archive.rebin();
         assert_eq!(archive.behavior_count(), 2);
         for e in &archive.entries {
-            assert_eq!(e.niche, e.descriptor.niche());
+            assert_eq!(e.niche, e.descriptor.niche_in(archive.classes()));
             assert_eq!(
                 archive
                     .slot_for(&e.niche)
