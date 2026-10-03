@@ -4243,7 +4243,7 @@ fn load_from(
         .deserialize_from(&mut decoder)?;
     let migration: Option<(u32, Vec<(usize, usize)>)> = bincode::DefaultOptions::new()
         .with_fixint_encoding()
-        .with_limit(8 + 64 * 16)
+        .with_limit(16 + 16 * island_count() as u64)
         .deserialize_from(&mut decoder)?;
     let mut trailing = [0u8; 1];
     ensure!(
