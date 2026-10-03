@@ -958,8 +958,8 @@ fn an_island_is_refined_when_its_archive_is_old_enough() {
     // without classes.
     assert!(experiment.archive.refined());
     run_synthetic(&mut experiment);
-    experiment.islands[1] = plateau_archive();
-    let before = experiment.islands[1].behavior_count();
+    experiment.islands[0] = plateau_archive();
+    let before = experiment.islands[0].behavior_count();
     while experiment.generation < qd::REFINE_AFTER - 1 {
         run_synthetic(&mut experiment);
     }
@@ -968,16 +968,22 @@ fn an_island_is_refined_when_its_archive_is_old_enough() {
     }
     run_synthetic(&mut experiment);
     assert_eq!(experiment.generation, qd::REFINE_AFTER);
-    // Every island moved to the cells of its body classes. The elites of
-    // other shapes and sizes sit in cells of their own, and none was lost.
-    for island in &experiment.islands[..storage::island_count()] {
-        assert!(island.refined());
+    // Island 0, the hub and the wild islands moved to the cells of their
+    // body classes (the other isolated islands follow 10 generations apart).
+    // The elites of other shapes and sizes sit in cells of their own, and
+    // none was lost.
+    for (index, island) in experiment.islands[..storage::island_count()].iter().enumerate() {
+        assert_eq!(
+            island.refined(),
+            index == 0 || index >= storage::ISOLATED_ISLANDS,
+            "island {index}"
+        );
     }
     // (A nursery's cohort may take cells of body classes that were empty.)
-    assert!(experiment.islands[1].behavior_count() >= before);
-    assert_eq!(experiment.islands[1].movement_count(), before);
+    assert!(experiment.islands[0].behavior_count() >= before);
+    assert_eq!(experiment.islands[0].movement_count(), before);
     assert!(
-        experiment.islands[1]
+        experiment.islands[0]
             .entries
             .iter()
             .any(|e| e.niche.0[2] != 0 || e.niche.0[5] != 0)
@@ -986,7 +992,7 @@ fn an_island_is_refined_when_its_archive_is_old_enough() {
     for island in 0..storage::island_count() {
         assert!(!experiment.islands[storage::nursery_of(island)].refined());
     }
-    for elite in &experiment.islands[1].entries {
+    for elite in &experiment.islands[0].entries {
         if !qd::is_morphology_niche(&elite.niche) {
             assert_eq!(elite.niche, elite.descriptor.niche_in(&qd::ISLAND_CLASSES));
         }
@@ -1061,7 +1067,8 @@ fn a_save_of_an_older_version_leaves_every_island_coarse_until_it_is_old_enough(
     assert_eq!(restored.islands[2].behavior_count(), 1440);
     // The game had run for 30 generations when it was saved, so its islands
     // are refined at the next generation boundary.
-    restored.generation = evolution_simulator::qd::REFINE_AFTER;
+    // Island 2 refines 20 generations after island 0.
+    restored.generation = evolution_simulator::qd::REFINE_AFTER + 20;
     restored.history.truncate(restored.generation as usize);
     run_synthetic(&mut restored);
     assert!(restored.islands[2].refined() && restored.islands[0].refined());

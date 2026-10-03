@@ -299,6 +299,17 @@ pub struct Stats {
     pub emitters: [EmitterStats; qd::EMITTER_COUNT],
     /// The ring the generation ran with.
     pub ring: RingShape,
+    /// Body plans among the global archive's elites, and their effective
+    /// number of clades (Hill number of order 1: exp of the Shannon entropy
+    /// of clade sizes; Hill 1973, Jost 2006).
+    #[serde(default)]
+    pub plans: usize,
+    #[serde(default)]
+    pub clades: f32,
+    /// The median age, in generations, of the global archive's body plans:
+    /// how long plans keep their place (their half life).
+    #[serde(default)]
+    pub plan_age: f32,
 }
 impl Stats {
     /// The ways of moving the archive covered: its cells, counted without
@@ -456,6 +467,17 @@ pub struct Experiment {
     /// How rare the clade of each island elite is (`clade_rarity_of`),
     /// computed once per generation, for the generation it names. Not saved.
     clade_rarity: (u32, Vec<Vec<f32>>),
+    /// Wild migrants waiting for their hub trial, by creature id, with their
+    /// wild island; and per island, how many of its migrants took a hub
+    /// cell this session. Not saved.
+    wild_exports: HashMap<u64, usize>,
+    pub wild_wins: Vec<u32>,
+    /// Wild champions sent to the hub, each with the generation until which
+    /// it breeds in the hub's slots. Not saved.
+    pub pen: Vec<(Creature, u32)>,
+    /// The generation each body plan of the global archive first appeared
+    /// in, for `Stats::plan_age`. Not saved.
+    plan_born: HashMap<u64, u32>,
     /// The generation each island's archive started its climb: a new game,
     /// or an island that started over. An island is refined once it is
     /// `qd::REFINE_AFTER` generations old. Not saved: a loaded game's
@@ -644,6 +666,11 @@ impl Refuge {
         Some(child)
     }
 }
+
+/// Generations a wild champion breeds in the hub's pen, and the share of the
+/// hub's own slots that breed from the pen.
+const PEN_GENERATIONS: u32 = 30;
+const PEN_SHARE: f32 = 0.1;
 
 /// The emitter mix of `island`: each isolated island leans a few points
 /// toward one emitter, so the islands develop different habits (Whitley,
@@ -890,6 +917,10 @@ impl Experiment {
             young_window: ScreenWindow::default(),
             reshaped_window: ScreenWindow::default(),
             clade_rarity: (u32::MAX, Vec::new()),
+            wild_exports: HashMap::new(),
+            wild_wins: Vec::new(),
+            pen: Vec::new(),
+            plan_born: HashMap::new(),
             island_epoch: Vec::new(),
             rungs: crate::rungs::Audit::default(),
             last_screen: None,
@@ -1548,6 +1579,20 @@ impl Experiment {
         for (island, entered) in routed_entered.iter().enumerate() {
             island_changed[reshaped_of(island)] |= !entered.is_empty();
         }
+        // A wild migrant that took a hub cell counts for its wild island.
+        if !self.wild_exports.is_empty()
+            && let Some((group, _, _, _)) = island_results.get(hub_island())
+        {
+            for &j in group {
+                let id = population.genomes[j].id;
+                if let Some(from) = self.wild_exports.remove(&id) {
+                    if self.wild_wins.len() < island_count() {
+                        self.wild_wins.resize(island_count(), 0);
+                    }
+                    self.wild_wins[from] += 1;
+                }
+            }
+        }
         let mut reserve_offers = Vec::new();
         for (arena, (group, offers, reserves, _)) in island_results.into_iter().enumerate() {
             if let Some(kinds) = kinds.as_deref_mut() {
@@ -1924,7 +1969,58 @@ impl Experiment {
             archive_coverage: self.archive.coverage(),
             emitters: self.emitter_stats,
             ring: self.ring,
+            plans: elites
+                .iter()
+                .map(|e| e.topology.plan_key())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            plan_age: {
+                let present: std::collections::HashSet<u64> =
+                    elites.iter().map(|e| e.topology.plan_key()).collect();
+                let generation = self.generation;
+                for &plan in &present {
+                    self.plan_born.entry(plan).or_insert(generation);
+                }
+                self.plan_born.retain(|plan, _| present.contains(plan));
+                let mut ages: Vec<u32> =
+                    self.plan_born.values().map(|&b| generation - b).collect();
+                if ages.is_empty() {
+                    0.0
+                } else {
+                    let mid = ages.len() / 2;
+                    *ages.select_nth_unstable(mid).1 as f32
+                }
+            },
+            clades: self.effective_clades(elites.iter().map(|e| e.creature.id)),
         });
+    }
+    /// The effective number of clades among `ids`: a clade is the elites
+    /// that share their oldest recorded ancestor.
+    fn effective_clades(&self, ids: impl Iterator<Item = u64>) -> f32 {
+        let mut sizes: HashMap<u64, usize> = HashMap::new();
+        let mut n = 0usize;
+        for id in ids {
+            let mut root = id;
+            for _ in 0..ANCESTRY_DEPTH {
+                match self.lineage.get(&root).and_then(|a| a.parent) {
+                    Some(parent) if self.lineage.contains_key(&parent) => root = parent,
+                    _ => break,
+                }
+            }
+            *sizes.entry(root).or_default() += 1;
+            n += 1;
+        }
+        if n == 0 {
+            return 0.0;
+        }
+        let entropy: f64 = sizes
+            .values()
+            .map(|&c| {
+                let p = c as f64 / n as f64;
+                -p * p.ln()
+            })
+            .sum();
+        entropy.exp() as f32
     }
     /// The next elite queued for the island of `slot`. A nursery slot takes
     /// none, so a re-tested elite competes in its island's archive.
@@ -1970,7 +2066,10 @@ impl Experiment {
         for island in 0..island_count().min(self.islands.len()) {
             let epoch = self.island_epoch.get(island).copied().unwrap_or(0);
             let archive = &mut self.islands[island];
-            if !archive.refined() && self.generation.saturating_sub(epoch) >= qd::REFINE_AFTER {
+            // The isolated islands refine 10 generations apart, so climbing
+            // and refined islands exist side by side (Hornby, 2006).
+            let after = qd::REFINE_AFTER + if island < ISOLATED_ISLANDS { 10 * island as u32 } else { 0 };
+            if !archive.refined() && self.generation.saturating_sub(epoch) >= after {
                 archive.set_refined(true);
                 archive.rebin();
             }
@@ -2098,20 +2197,27 @@ impl Experiment {
             let kept = group.iter().filter(|elite| to.absorb(elite)).count();
             exchange[from] = (group.len(), kept);
         }
-        // A wild island's distances come from its own world and say nothing
-        // about the hub's. Every one of its elites runs again in the hub's
-        // world as a reseed, and a copy enters the hub only when that
-        // distance wins its cell there.
+        // A wild island sends its best tenth by its own world's distance. Each
+        // runs once as it is in the hub's world and takes a cell if it is
+        // fast enough there; and it enters the hub's pen, where it breeds in
+        // the hub's slots for `PEN_GENERATIONS` generations so its line can
+        // adapt to the hub's world before it is dropped (owner).
+        let until = self.generation + PEN_GENERATIONS;
         for from in qd::MAIN_ISLANDS..island_count() {
             let island = &self.islands[from];
-            let sent: Vec<Creature> = island
+            let mut elites: Vec<&qd::Elite> = island
                 .entries
                 .iter()
                 .filter(|e| !qd::is_morphology_niche(&e.niche))
-                .map(|e| e.creature.clone())
                 .collect();
+            elites.sort_unstable_by(|a, b| b.fitness.total_cmp(&a.fitness));
+            let take = ((elites.len() as f32 * MIGRATION_SHARE).ceil() as usize).min(elites.len());
+            let sent: Vec<Creature> = elites[..take].iter().map(|e| e.creature.clone()).collect();
+            self.pen
+                .extend(sent.iter().map(|c| (c.clone(), until)));
             exchange[from] = (sent.len(), 0);
             for creature in sent {
+                self.wild_exports.insert(creature.id, from);
                 self.reseed.push(hub, creature);
             }
         }
@@ -2742,6 +2848,35 @@ impl Experiment {
             }
             lead.sort_by_key(|&(k, _)| k);
         }
+        // Wild champions in the hub's pen breed in the hub's own slots.
+        if !self.pen.is_empty() {
+            let islands = island_count();
+            let hub = hub_island();
+            let taken: std::collections::HashSet<usize> = lead.iter().map(|&(k, _)| k).collect();
+            for (k, &slot) in slots.iter().enumerate() {
+                if taken.contains(&k)
+                    || qd::is_nursery_slot(slot, islands)
+                    || qd::island_of_slot(slot, islands) != hub
+                {
+                    continue;
+                }
+                let mut rng =
+                    evolution::Rng::stream(cfg.seed ^ 0x7065_6e, self.generation, self.breed_round, slot);
+                if rng.unit() >= PEN_SHARE {
+                    continue;
+                }
+                let parent = self.pen[rng.index(self.pen.len())].0.clone();
+                let scale = if rng.unit() < 0.1 { 2.0 } else { 0.75 };
+                let mut child = evolution::mutate_locally(parent, &cfg, &mut rng, scale);
+                if rng.unit() < 0.3 {
+                    evolution::structural_mutation_any(&mut child, &cfg, &mut rng);
+                }
+                child.id = evolution::bred_id(self.breed_round, slot);
+                lead.push((k, child));
+                births[k] = Birth::RANDOM;
+            }
+            lead.sort_by_key(|&(k, _)| k);
+        }
         let mut taken = vec![false; count];
         for &(k, _) in &lead {
             taken[k] = true;
@@ -2868,6 +3003,12 @@ impl Experiment {
         self.prune_lineage();
         self.generation += 1;
         self.refuge.review(&self.islands, self.generation);
+        let generation = self.generation;
+        self.pen.retain(|&(_, until)| until > generation);
+        // Migrants that never took a hub cell are forgotten after a while.
+        if self.wild_exports.len() > 200_000 {
+            self.wild_exports.clear();
+        }
         // Body novelty, once a generation.
         self.islands
             .par_iter_mut()
@@ -3076,6 +3217,7 @@ impl Experiment {
     /// because a save tells a layout by the cells its elites hold.
     fn reset_search_context(&mut self) {
         self.reseed.clear();
+        self.wild_exports.clear();
         // The nurseries start over; only the islands' creatures are re-tested.
         let mut refined = Vec::new();
         // The refuge takes each island's best. A second change while it lasts

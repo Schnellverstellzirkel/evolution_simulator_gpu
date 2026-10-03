@@ -379,6 +379,10 @@ pub struct Snapshot {
     pub islands: Vec<IslandSummary>,
     /// The last island migration this session, if one happened.
     pub migration: Option<MigrationSummary>,
+    /// Per island, how many of its wild migrants took a hub cell.
+    pub wild_wins: Vec<u32>,
+    /// The main islands' elite with the body farthest from the others.
+    pub strangest: Option<Creature>,
     pub status: String,
     pub error: Option<String>,
 }
@@ -1609,6 +1613,14 @@ fn run(
                             ))
                         })
                         .collect(),
+                    wild_wins: e.wild_wins.clone(),
+                    strangest: e
+                        .islands
+                        .iter()
+                        .take(qd::MAIN_ISLANDS)
+                        .filter_map(|island| island.strangest())
+                        .max_by(|a, b| a.0.total_cmp(&b.0))
+                        .map(|(_, elite)| elite.creature.clone()),
                     migration: e.last_migration.clone().map(|(generation, exchange)| {
                         MigrationSummary {
                             generation,
@@ -1653,6 +1665,8 @@ fn run(
                     emitters: [EmitterStats::default(); 4],
                     emitter_weights: qd::emitter_weights(&[EmitterStats::default(); 4]),
                     islands: Vec::new(),
+                    wild_wins: Vec::new(),
+                    strangest: None,
                     migration: None,
                     status: status.clone(),
                     error: error.clone(),
@@ -1872,6 +1886,9 @@ mod tests {
                 archive_coverage: 0.0,
                 emitters: Default::default(),
                 ring: Default::default(),
+                plans: 0,
+                clades: 0.0,
+                plan_age: 0.0,
             }
         };
         let history = vec![stats(0, 0.0), stats(1, -3.0), stats(2, -3.0)];

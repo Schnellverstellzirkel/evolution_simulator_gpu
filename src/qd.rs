@@ -183,7 +183,7 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 57: the islands have 3 shapes by 3 sizes of body class (2 by 2 before), and
 //     a save is compressed with long-range matching. A save of version 56
 //     loads by moving each elite to its cell in the new layout.
-pub const VERSION: u32 = 58;
+pub const VERSION: u32 = 59;
 /// The oldest save version that still loads. Its archives are re-binned, and
 /// its elites keep the scores they measured.
 pub const OLDEST_LOADABLE: u32 = 53;
@@ -1303,6 +1303,14 @@ impl QdArchive {
             body_novelty[i] = sum / samples.max(1) as f32;
         }
         self.traits = ParentTraits { body_novelty };
+    }
+    /// The behavior elite whose body is farthest from the others (highest
+    /// body novelty), with that novelty.
+    pub fn strangest(&self) -> Option<(f32, &Elite)> {
+        self.behavior_indices
+            .iter()
+            .filter_map(|&i| Some((*self.traits.body_novelty.get(i)?, &self.entries[i])))
+            .max_by(|a, b| a.0.total_cmp(&b.0))
     }
     /// A parent far from the other bodies in body summary (body novelty, as
     /// novelty search over morphology, Lehman and Stanley 2011): the best of

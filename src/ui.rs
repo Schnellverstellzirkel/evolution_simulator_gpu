@@ -909,9 +909,15 @@ enum FeedAction {
     Undo,
     /// Set this effect (index into `EFFECTS`) to this level.
     Try(usize, usize),
+    /// Set the world of this wild island (index among the wild islands).
+    Wild(usize),
 }
 /// Generations without a record before the feed suggests a new world.
 const STALL_GENERATIONS: u32 = 25;
+/// The feed suggests a new world when the effective clades fell by this share
+/// within `COLLAPSE_WINDOW` generations of one world.
+const COLLAPSE_SHARE: f32 = 0.25;
+const COLLAPSE_WINDOW: usize = 50;
 /// The effects a stall hint suggests, in order; the first that can go one
 /// level harder wins.
 const STALL_EFFECTS: [&str; 13] = [
@@ -3287,7 +3293,21 @@ impl App {
         }
         let config = snapshot.config.clone();
         let generation = snapshot.generation;
+        let strangest = snapshot.strangest.clone();
+        if let Some(creature) = strangest
+            && ui
+                .button("Strangest body")
+                .on_hover_text("Replay the island creature whose body is the most unlike the others")
+                .clicked()
+        {
+            self.select(creature, config.clone());
+            return;
+        }
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return;
+        };
         let islands = snapshot.islands.clone();
+        let wild_wins = snapshot.wild_wins.clone();
         let migration = snapshot.migration.clone();
         let shown = self.playback.as_ref().map(|p| p.creature.id);
         let width = (ui.available_width() - ISLAND_GAP) / 2.;
@@ -3324,7 +3344,9 @@ impl App {
                     ui.add_space(ISLAND_GAP);
                 }
                 if islands.len() > main {
-                    if let Some(pick) = wild_tiles(ui, &islands[main..], &config, shown, &theme) {
+                    if let Some(pick) =
+                        wild_tiles(ui, &islands[main..], &wild_wins, &config, shown, &theme)
+                    {
                         wild_pick = Some(pick);
                     }
                 }
@@ -3600,6 +3622,62 @@ impl App {
                 });
             }
         }
+        // A diversity collapse: the effective clades of the archive fell by a
+        // quarter within 50 generations of this world. The feed suggests a
+        // new world and never presses it (Lehman and Miikkulainen, 2015: a
+        // change restarts radiation).
+        if let Some(last) = history.last() {
+            let window: Vec<&Stats> = history
+                .iter()
+                .rev()
+                .take(COLLAPSE_WINDOW)
+                .take_while(|h| !h.config.physics_differs(&snapshot.config))
+                .collect();
+            let peak = window.iter().map(|h| h.clades).fold(0.0f32, f32::max);
+            if window.len() >= 10
+                && peak > 4.0
+                && last.clades < (1.0 - COLLAPSE_SHARE) * peak
+                && let Some((effect, level)) = stall_suggestion(&self.config)
+            {
+                let effect_ref = &crate::environment::EFFECTS[effect];
+                items.push(FeedItem {
+                    generation: last.generation,
+                    text: format!(
+                        "Lineages are dying out: {:.1} effective clades, down from {peak:.1}. A new world can start a new radiation: try {} {}.",
+                        last.clades, effect_ref.name, effect_ref.levels[level]
+                    ),
+                    color: theme.accent,
+                    action: Some(FeedAction::Try(effect, level)),
+                });
+            }
+        }
+        // The wild island whose migrants took the most hub cells: its world
+        // breeds bodies that also do well in yours. The feed offers it as a
+        // world to try (Wang et al., 2019, POET transfer) and never sets it.
+        if let Some(last) = history.last()
+            && let Some((island, &wins)) = snapshot
+                .wild_wins
+                .iter()
+                .enumerate()
+                .skip(crate::qd::MAIN_ISLANDS)
+                .max_by_key(|&(i, &w)| (w, std::cmp::Reverse(i)))
+            && wins >= 3
+        {
+            let w = island - crate::qd::MAIN_ISLANDS;
+            let worlds = crate::environment::wild_levels(snapshot.config.seed);
+            if let Some(levels) = worlds.get(w) {
+                items.push(FeedItem {
+                    generation: last.generation,
+                    text: format!(
+                        "Wild island W{} sent the most creatures that won hub cells ({wins}). Its world: {}.",
+                        w + 1,
+                        crate::environment::wild_name(levels)
+                    ),
+                    color: theme.accent,
+                    action: Some(FeedAction::Wild(w)),
+                });
+            }
+        }
         // Newest first; the sort is stable, so events of one generation keep
         // their order.
         items.reverse();
@@ -3639,7 +3717,7 @@ impl App {
                             let label = match action {
                                 FeedAction::Replay(_) | FeedAction::ReplayChampion => "Replay",
                                 FeedAction::Undo => "Undo",
-                                FeedAction::Try(..) => "Try it",
+                                FeedAction::Try(..) | FeedAction::Wild(_) => "Try it",
                             };
                             if ui.small_button(label).clicked() {
                                 chosen = Some(action);
@@ -3656,6 +3734,22 @@ impl App {
                 crate::environment::EFFECTS[effect].set_level(&mut self.config, level);
                 self.worker.send(Command::Configure(self.config.clone()));
                 self.config_sent = Some(Instant::now());
+            }
+            Some(FeedAction::Wild(w)) => {
+                let worlds = crate::environment::wild_levels(self.config.seed);
+                if let Some(levels) = worlds.get(w) {
+                    for effect in crate::environment::EFFECTS
+                        .iter()
+                        .filter(|e| e.name != "Autochange environment")
+                    {
+                        effect.set_level(&mut self.config, effect.calm);
+                    }
+                    for &(e, level) in levels {
+                        crate::environment::EFFECTS[e].set_level(&mut self.config, level);
+                    }
+                    self.worker.send(Command::Configure(self.config.clone()));
+                    self.config_sent = Some(Instant::now());
+                }
             }
             None => {}
         }
@@ -4220,6 +4314,56 @@ impl App {
             theme.muted,
         );
     }
+    /// Body plans and effective clades of the global archive at generation
+    /// `index` of the history, with their trace over the last 100
+    /// generations.
+    fn diversity_meter(&self, ui: &mut egui::Ui, index: usize) {
+        let theme = self.theme();
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return;
+        };
+        let history = &snapshot.history;
+        let Some(now) = history.get(index) else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} body plans · {:.1} effective clades · plans live {:.0} generations (median)",
+                    number(now.plans),
+                    now.clades,
+                    now.plan_age
+                ))
+                .strong(),
+            )
+            .on_hover_text(
+                "Body plans: different skeletons among the kept creatures. Effective clades: how many lineages share the archive, counting a lineage by its share (exp of the Shannon entropy).",
+            );
+            let start = index.saturating_sub(99);
+            let window = &history[start..=index];
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(200., 28.), Sense::hover());
+            let painter = ui.painter();
+            painter.rect_filled(rect, 3., theme.card);
+            for (values, color) in [
+                (window.iter().map(|h| h.plans as f32).collect::<Vec<_>>(), theme.accent),
+                (window.iter().map(|h| h.clades).collect::<Vec<_>>(), theme.cold),
+            ] {
+                let top = values.iter().copied().fold(1.0f32, f32::max);
+                let n = values.len().max(2) - 1;
+                let points: Vec<egui::Pos2> = values
+                    .iter()
+                    .enumerate()
+                    .map(|(k, v)| {
+                        egui::pos2(
+                            rect.left() + rect.width() * k as f32 / n as f32,
+                            rect.bottom() - 2. - (rect.height() - 4.) * v / top,
+                        )
+                    })
+                    .collect();
+                painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, color)));
+            }
+        });
+    }
     fn species_history(&mut self, ui: &mut egui::Ui) {
         let Some(snapshot) = &self.snapshot else {
             return;
@@ -4325,6 +4469,8 @@ impl App {
                 number(stats.moves()),
             ));
         });
+        self.diversity_meter(ui, self.history_index);
+        let mut picked_type = None;
         ui.columns(2, |cols| {
             self.histogram(&mut cols[0], &stats, 155.);
             crate::theme::section(&mut cols[1], "Body types", theme);
@@ -4336,10 +4482,19 @@ impl App {
                     for &(n, m, count) in &species {
                         ui.horizontal(|ui| {
                             color_dot(ui, species_color(n, m));
-                            ui.label(format!(
-                                "{n} nodes / {} bones / {m} muscles",
-                                n.saturating_sub(1)
-                            ));
+                            // A click replays the fastest kept creature of
+                            // this body type (a species view, as NEAT shows
+                            // its species).
+                            if ui
+                                .link(format!(
+                                    "{n} nodes / {} bones / {m} muscles",
+                                    n.saturating_sub(1)
+                                ))
+                                .on_hover_text("Replay the fastest kept creature of this body type")
+                                .clicked()
+                            {
+                                picked_type = Some((n, m));
+                            }
                             ui.label(format!(
                                 "{} · {:.1}%",
                                 number(count as usize),
@@ -4350,6 +4505,23 @@ impl App {
                 });
         });
         ui.add_space(GAP_M);
+        if let Some((n, m)) = picked_type {
+            let best = self.cards.as_ref().and_then(|list| {
+                list.cards
+                    .iter()
+                    .filter(|c| c.creature.nodes.len() == n && c.creature.muscles.len() == m)
+                    .max_by(|a, b| a.score.total_cmp(&b.score))
+                    .map(|c| c.replay_of(&list.config))
+            });
+            match best {
+                Some((creature, config)) => {
+                    self.select(creature, config);
+                    self.tab = Tab::Overview;
+                    return;
+                }
+                None => self.request_cards(),
+            }
+        }
         let mut selection = None;
         ui.columns(3, |cols| {
             for (i, ui) in cols.iter_mut().enumerate() {
@@ -6976,6 +7148,7 @@ fn smoke_capture_delay() -> Duration {
 fn wild_tiles(
     ui: &mut egui::Ui,
     wild: &[crate::worker::IslandSummary],
+    wins: &[u32],
     config: &Config,
     shown: Option<u64>,
     theme: &Theme,
@@ -6989,6 +7162,37 @@ fn wild_tiles(
         ))
         .color(theme.muted),
     );
+    // Which effects the worlds of the hub winners' islands hold, by the hub
+    // cells their migrants took (Wang et al., 2019, POET).
+    let mut by_effect = vec![0u32; crate::environment::EFFECTS.len()];
+    for (w, levels) in levels.iter().enumerate() {
+        let won = wins.get(crate::qd::MAIN_ISLANDS + w).copied().unwrap_or(0);
+        for &(e, _) in levels {
+            by_effect[e] += won;
+        }
+    }
+    let mut ranked: Vec<(usize, u32)> = by_effect
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|&(_, n)| n > 0)
+        .collect();
+    ranked.sort_by_key(|&(e, n)| (std::cmp::Reverse(n), e));
+    if !ranked.is_empty() {
+        ui.label(
+            RichText::new(format!(
+                "Effects in the worlds of the hub winners: {}",
+                ranked
+                    .iter()
+                    .take(6)
+                    .map(|&(e, n)| format!("{} {n}", crate::environment::EFFECTS[e].name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+            .small(),
+        )
+        .on_hover_text("Each wild migrant that took a hub cell counts for every effect of its island's world");
+    }
     ui.add_space(4.);
     let top = wild
         .iter()
@@ -7040,8 +7244,9 @@ fn wild_tiles(
                     .get(w)
                     .map(|l| crate::environment::wild_name(l))
                     .unwrap_or_default();
+                let won = wins.get(crate::qd::MAIN_ISLANDS + w).copied().unwrap_or(0);
                 let response = response.on_hover_text(format!(
-                    "Wild island {}: {name}\nBest {best}, {} cells, {} in its nurseries",
+                    "Wild island {}: {name}\nBest {best}, {} cells, {} in its nurseries, {won} hub cells won",
                     w + 1,
                     island.cells,
                     island.nursery
