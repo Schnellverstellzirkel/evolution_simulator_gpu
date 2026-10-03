@@ -475,6 +475,15 @@ pub struct Experiment {
     /// Wild champions sent to the hub, each with the generation until which
     /// it breeds in the hub's slots. Not saved.
     pub pen: Vec<(Creature, u32)>,
+    /// The first elite of each new body plan of the main islands, newest
+    /// last, up to `FOUNDERS` (stepping stones, Stanley and Lehman 2015), and
+    /// every plan seen so far. Not saved.
+    founders: std::collections::VecDeque<Creature>,
+    founder_plans: std::collections::HashSet<u64>,
+    /// The fastest elite of each body plan of the main islands, rebuilt each
+    /// generation; the hub breeds from it (Lehman and Stanley, 2011, an
+    /// archive of stepping stones). Not saved.
+    hall: Vec<Creature>,
     /// The generation each body plan of the global archive first appeared
     /// in, for `Stats::plan_age`. Not saved.
     plan_born: HashMap<u64, u32>,
@@ -666,6 +675,23 @@ impl Refuge {
         Some(child)
     }
 }
+
+/// Generations between the stepping stones of the island ring.
+const STONE_INTERVAL: u32 = 50;
+/// Generations a graduate is protected against bodies of other plans.
+const GRADUATE_GRACE: u32 = 3;
+/// Share of the structural and novelty children of a reshaped nursery that
+/// take a limb from a body of another plan (a hybrid; Arnold, 1997).
+const RESHAPED_CROSS_SHARE: f32 = 0.3;
+
+/// Places in the founder bank, and the share of the main islands' own slots
+/// that breed from it.
+const FOUNDERS: usize = 1024;
+const FOUNDER_SHARE: f32 = 0.01;
+/// The share of the hub's own slots that breed from the hall of fame, and
+/// the most plans it holds.
+const HALL_SHARE: f32 = 0.02;
+const HALL_PLANS: usize = 2048;
 
 /// Generations a wild champion breeds in the hub's pen, and the share of the
 /// hub's own slots that breed from the pen.
@@ -920,6 +946,9 @@ impl Experiment {
             wild_exports: HashMap::new(),
             wild_wins: Vec::new(),
             pen: Vec::new(),
+            founders: std::collections::VecDeque::new(),
+            founder_plans: std::collections::HashSet::new(),
+            hall: Vec::new(),
             plan_born: HashMap::new(),
             island_epoch: Vec::new(),
             rungs: crate::rungs::Audit::default(),
@@ -1593,6 +1622,21 @@ impl Experiment {
                 }
             }
         }
+        // The first elite of a new body plan in a main island joins the
+        // founder bank.
+        if !qd::bio_off(2) {
+            for (group, _, _, _) in island_results.iter().take(qd::MAIN_ISLANDS) {
+                for &j in group {
+                    let plan = qd::plan_key_of_population(population, j);
+                    if self.founder_plans.insert(plan) {
+                        if self.founders.len() >= FOUNDERS {
+                            self.founders.pop_front();
+                        }
+                        self.founders.push_back(population.creature(j));
+                    }
+                }
+            }
+        }
         let mut reserve_offers = Vec::new();
         for (arena, (group, offers, reserves, _)) in island_results.into_iter().enumerate() {
             if let Some(kinds) = kinds.as_deref_mut() {
@@ -2158,9 +2202,17 @@ impl Experiment {
                 .then_with(|| a.niche.cmp(&b.niche))
         });
         let mut kept = 0;
+        // A graduate keeps its cell against bodies of other plans for a few
+        // generations, as a young species is protected in NEAT (Stanley and
+        // Miikkulainen, 2002). The global archive's copy has no grace.
+        let grace = self.generation + GRADUATE_GRACE;
         for elite in elites.iter_mut() {
             elite.graduate = true;
-            if self.islands[island].absorb(elite) {
+            let mut copy = elite.clone();
+            if !qd::bio_off(16) {
+                copy.protected_until = copy.protected_until.max(grace);
+            }
+            if self.islands[island].absorb(&copy) {
                 kept += 1;
                 self.archive.absorb(elite);
             }
@@ -2223,6 +2275,44 @@ impl Experiment {
         }
         self.last_migration = Some((self.generation, exchange));
         self.islands[hub].refresh_behavior_scores();
+    }
+    /// Every `STONE_INTERVAL` generations each isolated island sends one
+    /// elite to the next island in a ring: the fastest elite of its rarest
+    /// body plan, so isolation is almost kept and a rare design gets a second
+    /// home (Cantu-Paz, 2000, migration topologies).
+    fn step_stones(&mut self) {
+        if qd::bio_off(128)
+            || self.islands.len() != arena_count()
+            || self.generation == 0
+            || !self.generation.is_multiple_of(STONE_INTERVAL)
+        {
+            return;
+        }
+        let stones: Vec<Option<qd::Elite>> = (0..ISOLATED_ISLANDS)
+            .map(|island| {
+                let archive = &self.islands[island];
+                let mut counts: HashMap<u64, usize> = HashMap::new();
+                for i in 0..archive.entries.len() {
+                    if !qd::is_morphology_niche(&archive.entries[i].niche) {
+                        *counts.entry(archive.plan_key(i)).or_default() += 1;
+                    }
+                }
+                (0..archive.entries.len())
+                    .filter(|&i| !qd::is_morphology_niche(&archive.entries[i].niche))
+                    .min_by(|&a, &b| {
+                        counts[&archive.plan_key(a)]
+                            .cmp(&counts[&archive.plan_key(b)])
+                            .then(archive.entries[b].fitness.total_cmp(&archive.entries[a].fitness))
+                            .then(a.cmp(&b))
+                    })
+                    .map(|i| archive.entries[i].clone())
+            })
+            .collect();
+        for (island, stone) in stones.into_iter().enumerate() {
+            if let Some(elite) = stone {
+                self.islands[(island + 1) % ISOLATED_ISLANDS].absorb(&elite);
+            }
+        }
     }
     /// For each entry of a refined `archive`, how rare its clade is: 1 minus
     /// the log of the number of behavior elites in the clade over the log of
@@ -2487,6 +2577,32 @@ impl Experiment {
                 Some(plans[turn % plans.len()])
             })
             .collect();
+        // A second optimizer target per island: the fastest elite of its
+        // rarest clade, so local search also climbs a design the island is
+        // about to lose (Fontaine et al., 2020, CMA-ME on several targets).
+        let rare_targets: Vec<Option<usize>> = self
+            .islands
+            .iter()
+            .enumerate()
+            .map(|(island, archive)| {
+                if qd::bio_off(64) {
+                    return None;
+                }
+                let rarity = rarities.get(island)?;
+                let top = rarity.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                if !top.is_finite() || top <= 0.0 {
+                    return None;
+                }
+                (0..archive.entries.len().min(rarity.len()))
+                    .filter(|&i| rarity[i] >= top && !qd::is_morphology_niche(&archive.entries[i].niche))
+                    .max_by(|&a, &b| {
+                        archive.entries[a]
+                            .fitness
+                            .total_cmp(&archive.entries[b].fitness)
+                            .then(b.cmp(&a))
+                    })
+            })
+            .collect();
         plan_times[1] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
         let plan_prep: Vec<PlanPrep> = slots
@@ -2555,7 +2671,10 @@ impl Experiment {
                     // of its fastest designs; the rest explore around the top
                     // elites.
                     optimize = rng.unit() < OPTIMIZER_SHARE;
-                    Some(if optimize {
+                    let second = rare_targets.get(island).copied().flatten();
+                    Some(if optimize && second.is_some() && rng.unit() < 0.5 {
+                        second.expect("a rare target")
+                    } else if optimize {
                         optimizer_targets[island].unwrap_or(top_parents[island][0])
                     } else {
                         top_parents[island][rng.index(top_parents[island].len())]
@@ -2587,7 +2706,13 @@ impl Experiment {
                 // its limbs grafted on (see `evolution::mated`).
                 let mate = mate.or_else(|| match (emitter, parent) {
                     (Emitter::Structural | Emitter::Novelty, Some(p))
-                        if !from_reserve && rng.unit() < CROSS_PLAN_MATE_SHARE =>
+                        if !from_reserve
+                            && rng.unit()
+                                < if reshaped && !qd::bio_off(32) {
+                                    RESHAPED_CROSS_SHARE
+                                } else {
+                                    CROSS_PLAN_MATE_SHARE
+                                } =>
                     {
                         let other = rng.index(archive.entries.len());
                         (other != p && archive.plan_key(other) != archive.plan_key(p))
@@ -2848,6 +2973,45 @@ impl Experiment {
             }
             lead.sort_by_key(|&(k, _)| k);
         }
+        // The founder bank breeds in the main islands' own slots, and the hall
+        // of fame in the hub's.
+        if !self.founders.is_empty() || !self.hall.is_empty() {
+            let islands = island_count();
+            let hub = hub_island();
+            let taken: std::collections::HashSet<usize> = lead.iter().map(|&(k, _)| k).collect();
+            for (k, &slot) in slots.iter().enumerate() {
+                let island = qd::island_of_slot(slot, islands);
+                if taken.contains(&k) || qd::is_nursery_slot(slot, islands) || qd::is_wild(island) {
+                    continue;
+                }
+                let mut rng = evolution::Rng::stream(
+                    cfg.seed ^ 0x666f_756e_64,
+                    self.generation,
+                    self.breed_round,
+                    slot,
+                );
+                let draw = rng.unit();
+                let parent = if !self.founders.is_empty() && draw < FOUNDER_SHARE {
+                    self.founders[rng.index(self.founders.len())].clone()
+                } else if island == hub
+                    && !self.hall.is_empty()
+                    && draw < FOUNDER_SHARE + HALL_SHARE
+                {
+                    self.hall[rng.index(self.hall.len())].clone()
+                } else {
+                    continue;
+                };
+                let scale = if rng.unit() < 0.1 { 2.0 } else { 0.75 };
+                let mut child = evolution::mutate_locally(parent, &cfg, &mut rng, scale);
+                if rng.unit() < 0.3 {
+                    evolution::structural_mutation_any(&mut child, &cfg, &mut rng);
+                }
+                child.id = evolution::bred_id(self.breed_round, slot);
+                lead.push((k, child));
+                births[k] = Birth::RANDOM;
+            }
+            lead.sort_by_key(|&(k, _)| k);
+        }
         // Wild champions in the hub's pen breed in the hub's own slots.
         if !self.pen.is_empty() {
             let islands = island_count();
@@ -3005,6 +3169,25 @@ impl Experiment {
         self.refuge.review(&self.islands, self.generation);
         let generation = self.generation;
         self.pen.retain(|&(_, until)| until > generation);
+        if !qd::bio_off(4) && self.islands.len() == arena_count() {
+            let mut best: HashMap<u64, (f32, &Creature)> = HashMap::new();
+            for archive in self.islands.iter().take(qd::MAIN_ISLANDS) {
+                for (i, e) in archive.entries.iter().enumerate() {
+                    if qd::is_morphology_niche(&e.niche) {
+                        continue;
+                    }
+                    let slot = best.entry(archive.plan_key(i)).or_insert((e.fitness, &e.creature));
+                    if e.fitness > slot.0 {
+                        *slot = (e.fitness, &e.creature);
+                    }
+                }
+            }
+            let mut hall: Vec<(u64, f32, &Creature)> =
+                best.into_iter().map(|(k, (f, c))| (k, f, c)).collect();
+            hall.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            hall.truncate(HALL_PLANS);
+            self.hall = hall.into_iter().map(|(_, _, c)| c.clone()).collect();
+        }
         // Migrants that never took a hub cell are forgotten after a while.
         if self.wild_exports.len() > 200_000 {
             self.wild_exports.clear();
@@ -3017,6 +3200,7 @@ impl Experiment {
         self.graduate_nurseries();
         self.refresh_reshaped_scores();
         self.migrate_islands();
+        self.step_stones();
         let mut cfg = self.pending.take().unwrap_or_else(|| self.config.clone());
         cfg.validate()?;
         ensure!(

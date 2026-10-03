@@ -1428,15 +1428,24 @@ fn isolated_islands_only_hold_their_own_descendants() {
                 } else if !elite.graduate && !reseeded {
                     assert!(!nursery_slot);
                 }
-                // The elite and every recorded ancestor were born here.
+                // The elite and every recorded ancestor were born here, or,
+                // from generation 50, on the island before it in the ring of
+                // stepping stones.
+                let isolated = storage::ISOLATED_ISLANDS;
+                let born_ok = |born: usize| {
+                    born == index
+                        || (experiment.generation >= 50
+                            && index < isolated
+                            && born < isolated
+                            && born != hub)
+                };
                 for ancestor in experiment.ancestry(elite.creature.id, usize::MAX) {
-                    assert_eq!(
-                        birth_island(ancestor.creature.id),
-                        index,
+                    assert!(
+                        born_ok(birth_island(ancestor.creature.id)),
                         "island {index} holds a creature from another island"
                     );
                 }
-                assert_eq!(birth_island(elite.creature.id), index);
+                assert!(born_ok(birth_island(elite.creature.id)));
             }
         }
         for cma in &experiment.cma_emitters {

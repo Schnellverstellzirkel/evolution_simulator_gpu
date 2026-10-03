@@ -1138,8 +1138,38 @@ fn random_creature(cfg: &Config, generation: u32, index: usize) -> Creature {
     creature
 }
 fn random_creature_from(cfg: &Config, rng: &mut Rng) -> Creature {
-    let n = (3 + rng.index(3)).min(cfg.max_nodes);
-    let spacing = rng.range(0.18, 0.28);
+    random_shaped(cfg, rng, 3, 3, (0.18, 0.28), false)
+}
+
+/// A new random body for `island`: each isolated island starts from its own
+/// kind of body (Whitley et al., 1999, heterogeneous islands), short chains,
+/// longer chains, branched trees or long-boned bodies. The hub and the wild
+/// islands use the plain kind.
+fn random_creature_for(cfg: &Config, rng: &mut Rng, island: usize) -> Creature {
+    if qd::bio_off(1) {
+        return random_creature_from(cfg, rng);
+    }
+    match island {
+        1 => random_shaped(cfg, rng, 4, 4, (0.16, 0.24), false),
+        2 => random_shaped(cfg, rng, 4, 4, (0.18, 0.28), true),
+        3 => random_shaped(cfg, rng, 3, 2, (0.28, 0.4), false),
+        _ => random_creature_from(cfg, rng),
+    }
+}
+
+/// A random body of `low` to `low + spread - 1` nodes, `spacing` apart. A
+/// `branched` body hangs each node from a random earlier one, a chain from
+/// the one before it.
+fn random_shaped(
+    cfg: &Config,
+    rng: &mut Rng,
+    low: usize,
+    spread: usize,
+    spacing: (f32, f32),
+    branched: bool,
+) -> Creature {
+    let n = (low + rng.index(spread)).min(cfg.max_nodes);
+    let spacing = rng.range(spacing.0, spacing.1);
     let mut c = Creature {
         nodes: (0..n)
             .map(|i| NodeGene {
@@ -1154,7 +1184,8 @@ fn random_creature_from(cfg: &Config, rng: &mut Rng) -> Creature {
         id: 0,
     };
     for i in 0..n - 1 {
-        let mut b = bone(i, i + 1, &c.nodes);
+        let parent = if branched && i > 0 { rng.index(i + 1) } else { i };
+        let mut b = bone(parent, i + 1, &c.nodes);
         b.min_angle = -rng.range(0.3, JOINT_LIMIT);
         b.max_angle = rng.range(0.3, JOINT_LIMIT);
         c.bones.push(b);
@@ -1326,7 +1357,7 @@ fn offspring(
     };
     let cfg = limited.as_ref().unwrap_or(cfg);
     match plan.emitter {
-        Emitter::Restart => *child = random_creature_from(cfg, rng),
+        Emitter::Restart => *child = random_creature_for(cfg, rng, variation.island),
         Emitter::Cma => {
             if let Some(cma) = plan.cma.and_then(|index| cma_emitters.get(index)) {
                 cma.sample_into(rng, cfg.mutation, child);
@@ -1409,6 +1440,7 @@ pub fn breed_child(
     let variation = Variation {
         donors,
         bias: island_bias(cfg.seed, island),
+        island,
     };
     offspring(
         &archive[source],
@@ -1429,6 +1461,8 @@ pub fn breed_child(
 struct Variation<'a> {
     donors: &'a QdArchive,
     bias: u64,
+    /// The island the child breeds for, which shapes its new random bodies.
+    island: usize,
 }
 
 /// Each island favours its own 8 operator pick slots, drawn twice as often,
