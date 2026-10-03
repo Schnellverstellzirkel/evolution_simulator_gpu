@@ -1787,6 +1787,17 @@ impl Experiment {
         self.reshaped_graduations.clear();
         self.last_migration = None;
     }
+    /// Whether the global archive's best has stood through the last
+    /// `OPTIMIZER_STALL` generations of this world: the archives have stopped
+    /// climbing.
+    fn global_stalled(&self) -> bool {
+        let stall = OPTIMIZER_STALL as usize;
+        self.history.len() > stall && {
+            let now = &self.history[self.history.len() - 1];
+            let then = &self.history[self.history.len() - 1 - stall];
+            !then.config.physics_differs(&self.config) && now.best <= then.best
+        }
+    }
     /// Refines each island whose archive is `qd::REFINE_AFTER` generations
     /// old: its elites move to the cells of their body classes, and from then
     /// on a body of another shape or size has a cell of its own. Until then
@@ -2643,7 +2654,7 @@ impl Experiment {
         let started = std::time::Instant::now();
         // The audit lane judges the rules this generation ran with and fits
         // the next generation's.
-        let rules = self.rungs.boundary(self.config.rungs);
+        let rules = self.rungs.boundary(self.config.rungs, self.global_stalled());
         let failed = std::mem::take(&mut self.failed);
         self.push_archive_stats(failed);
         self.prune_lineage();
@@ -3713,7 +3724,7 @@ impl SmallLoad {
         // trial in full until it has set a new one.
         e.config.screen = e.next_screen(e.config.duration);
         // The rungs' rules are not saved either: they are the window's fit.
-        e.config.rungs = e.rungs.fit();
+        e.config.rungs = e.rungs.fit(e.global_stalled());
         let shared = Arc::new(e.config.clone());
         let elites =
             e.archive.entries.len() + e.islands.iter().map(|i| i.entries.len()).sum::<usize>();

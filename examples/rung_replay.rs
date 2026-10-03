@@ -272,7 +272,7 @@ fn main() -> anyhow::Result<()> {
                 entrant: r.entered != 0,
             });
         }
-        let rules = audit.boundary(None);
+        let rules = audit.boundary(None, false);
         println!(
             "the game's rules, fitted on the {} audit rows alone (one generation) and measured on the rows of the other half:",
             children.iter().filter(|r| r.audit()).count()

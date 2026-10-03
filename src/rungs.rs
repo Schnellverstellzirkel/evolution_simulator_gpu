@@ -94,14 +94,21 @@ pub const WINDOW: usize = 8;
 pub const BUDGET: f64 = 1e-3;
 /// Share of the entrants the 5 s screen would have kept that a rung may stop.
 pub const ENTRANT_BUDGET: f64 = 1e-2;
-/// A rung is armed only while it is trusted: over the last `JUDGED`
-/// generations, the rule fitted before each generation (the rule that would
-/// have been in force) stopped at most `TRUST_STOPPED` of the entrants the 5 s
-/// screen would have kept, among at least `TRUST_ENTRANTS` of them. A rule
-/// fitted in the first generations, when most creatures that pass the bar
-/// barely use their muscles, stops the walkers that the archives grow from.
+/// A rung is armed only while it is trusted, over the last `JUDGED`
+/// generations, by the rule fitted before each generation (the rule that
+/// would have been in force). While the archives still climb, it must have
+/// stopped at most `TRUST_STOPPED` of the entrants the 5 s screen would have
+/// kept, among at least `TRUST_ENTRANTS` of them: a rule fitted in the first
+/// generations, when most creatures that pass the bar barely use their
+/// muscles, stops the walkers that the archives grow from. On a plateau (the
+/// global best has stood for 30 generations) few creatures enter an archive,
+/// and those that do are mostly creatures that fall early and improve a niche
+/// of weak bodies, which a rule stops by design. There the guard counts the
+/// audit creatures that reach the 5 s bar instead, at least `TRUST_PASSERS`
+/// of them: at most `TRUST_STOPPED` may be stopped.
 const JUDGED: usize = 4;
 const TRUST_ENTRANTS: u32 = 60;
+const TRUST_PASSERS: u32 = 1000;
 const TRUST_STOPPED: f64 = 0.03;
 /// Rows a rung needs before it is armed: of the creatures that reach the 5 s
 /// bar, enough for a 1 in 1,000 quantile to rest on at least 5 rows, and of
@@ -365,6 +372,33 @@ impl Report {
     }
 }
 
+/// One generation's judgment of a rule: of the entrants the 5 s screen would
+/// have kept, how many there were and how many the rule would have stopped,
+/// and the same for the audit creatures that reach the 5 s bar. Packed in 16
+/// bits each (both counts of a pair are scaled down together past 65,535).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Judged {
+    entrants: (u32, u32),
+    passers: (u32, u32),
+}
+impl Judged {
+    fn pack(self) -> (u32, u32) {
+        let fit = |(n, stopped): (u32, u32)| {
+            let scale = n.div_ceil(0xffff).max(1);
+            (n / scale, stopped / scale)
+        };
+        let (n_in, s_in) = fit(self.entrants);
+        let (n, s) = fit(self.passers);
+        (n_in | n << 16, s_in | s << 16)
+    }
+    fn unpack((n, s): (u32, u32)) -> Self {
+        Self {
+            entrants: (n & 0xffff, s & 0xffff),
+            passers: (n >> 16, s >> 16),
+        }
+    }
+}
+
 /// The audit lane's state: the rows of the generation in progress, the
 /// window of earlier generations, the breakers, and the last report. The
 /// window and the breakers are saved.
@@ -372,9 +406,11 @@ impl Report {
 pub struct Audit {
     window: VecDeque<GenAudit>,
     breakers: [[Breaker; BANDS]; RUNGS],
-    /// Per rung and generation: the entrants the 5 s screen would have kept
-    /// (alive at the rung, not exempt) and how many the rule fitted before
-    /// that generation would have stopped.
+    /// Per rung and generation, what the rule fitted before that generation
+    /// would have stopped among the audit creatures alive at the rung and not
+    /// exempt: the two counts of `Judged`, packed into the two words (the
+    /// layout of the save is kept; an entry of an older save reads as its
+    /// entrant counts, as it was written).
     judged: [VecDeque<(u32, u32)>; RUNGS],
     #[serde(skip)]
     rows: Vec<AuditRow>,
@@ -417,8 +453,9 @@ impl Audit {
 
     /// The generation boundary: judges the rules in force on the generation's
     /// audit rows, moves the breakers, pools the rows into the window and fits
-    /// the rules the next blocks carry.
-    pub fn boundary(&mut self, in_force: Option<Rungs>) -> Option<Rungs> {
+    /// the rules the next blocks carry. `plateau` says whether the archives
+    /// have stopped climbing (`trusted`).
+    pub fn boundary(&mut self, in_force: Option<Rungs>, plateau: bool) -> Option<Rungs> {
         let rows = std::mem::take(&mut self.rows);
         let mut report = std::mem::take(&mut self.tally);
         report.audit_rows = rows.len() as u32;
@@ -430,7 +467,7 @@ impl Audit {
         while self.window.len() > WINDOW {
             self.window.pop_front();
         }
-        let rules = self.fit();
+        let rules = self.fit(plateau);
         report.window_rows = self.window_rows();
         if let Some(rules) = rules {
             for r in 0..RUNGS {
@@ -444,33 +481,52 @@ impl Audit {
 
     /// Judges the rule the window fits before these rows (the rule that
     /// would have been in force while they were measured), on the entrants
-    /// the 5 s screen would have kept.
+    /// the 5 s screen would have kept and on the creatures that reach the 5 s
+    /// bar.
     fn trial(&mut self, rows: &[AuditRow]) {
         for r in 0..RUNGS {
             let Some(rung) = self.fit_rung(r) else {
                 self.judged[r].clear();
                 continue;
             };
-            let (mut n, mut stopped) = (0u32, 0u32);
-            for row in rows.iter().filter(|row| {
-                !row.skips(r) && row.bar_known && row.entrant && !row.below_bar && row.alive(r)
-            }) {
+            let mut judged = Judged::default();
+            for row in rows
+                .iter()
+                .filter(|row| !row.skips(r) && row.bar_known && row.alive(r))
+            {
                 let Some(f) = row.features(r) else { continue };
-                n += 1;
-                stopped += u32::from(rung.raw_stops(&f));
+                let stops = u32::from(rung.raw_stops(&f));
+                if row.entrant && !row.below_bar {
+                    judged.entrants.0 += 1;
+                    judged.entrants.1 += stops;
+                }
+                if row.pass3 {
+                    judged.passers.0 += 1;
+                    judged.passers.1 += stops;
+                }
             }
-            self.judged[r].push_back((n, stopped));
+            self.judged[r].push_back(judged.pack());
             while self.judged[r].len() > JUDGED {
                 self.judged[r].pop_front();
             }
         }
     }
     /// Whether rung `r` may be armed.
-    fn trusted(&self, r: usize) -> bool {
-        let (n, stopped) = self.judged[r]
-            .iter()
-            .fold((0u32, 0u32), |t, &(n, s)| (t.0 + n, t.1 + s));
-        n >= TRUST_ENTRANTS && f64::from(stopped) <= TRUST_STOPPED * f64::from(n)
+    fn trusted(&self, r: usize, plateau: bool) -> bool {
+        let mut total = Judged::default();
+        for &packed in &self.judged[r] {
+            let j = Judged::unpack(packed);
+            total.entrants.0 += j.entrants.0;
+            total.entrants.1 += j.entrants.1;
+            total.passers.0 += j.passers.0;
+            total.passers.1 += j.passers.1;
+        }
+        let (n, stopped, least) = if plateau {
+            (total.passers.0, total.passers.1, TRUST_PASSERS)
+        } else {
+            (total.entrants.0, total.entrants.1, TRUST_ENTRANTS)
+        };
+        n >= least && f64::from(stopped) <= TRUST_STOPPED * f64::from(n)
     }
 
     /// The rules in force on the audit rows of their own generation: the
@@ -548,14 +604,14 @@ impl Audit {
 
     /// The rules the window fits, with the breakers' bands off. A rung
     /// needs enough rows of both classes and the trust of `trusted`.
-    pub fn fit(&self) -> Option<Rungs> {
+    pub fn fit(&self, plateau: bool) -> Option<Rungs> {
         if disabled() {
             return None;
         }
         let mut rules = [Rung::NEVER; RUNGS];
         let mut any = false;
         for r in 0..RUNGS {
-            if !self.trusted(r) {
+            if !self.trusted(r, plateau) {
                 continue;
             }
             if let Some(mut rung) = self.fit_rung(r) {
