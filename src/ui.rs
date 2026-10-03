@@ -76,7 +76,7 @@ fn body_height(frames: &[Vec<[f32; 2]>], nodes: &[Node]) -> f32 {
 /// The spacing scale: every gap, margin and padding is one of these.
 const GAP_S: f32 = 4.0;
 /// Height of an effect's level buttons: every effect row is this tall.
-const LEVEL_HEIGHT: f32 = 26.0;
+const LEVEL_HEIGHT: f32 = 30.0;
 /// How long the UI's own messages hold the status line.
 const MESSAGE_SECONDS: f32 = 8.0;
 /// Generations between autosaves when the player turns autosave on, and in
@@ -1104,7 +1104,7 @@ fn paint_archive_map(
             Pos2::new(x, plot.bottom() + 4.),
             Align2::CENTER_TOP,
             format!("{:.0}%", column as f32 / columns as f32 * 100.),
-            FontId::proportional(13.),
+            FontId::proportional(14.5),
             theme.muted,
         );
     }
@@ -1118,7 +1118,7 @@ fn paint_archive_map(
             Pos2::new(plot.left() - 6., y),
             Align2::RIGHT_CENTER,
             format!("{:.2}", row as f32 / rows as f32 * 6.),
-            FontId::proportional(13.),
+            FontId::proportional(14.5),
             theme.muted,
         );
     }
@@ -1163,14 +1163,14 @@ fn paint_archive_map(
             Pos2::new(legend.left() - 6., legend.center().y),
             Align2::RIGHT_CENTER,
             format!("{min:.2} m"),
-            FontId::proportional(13.),
+            FontId::proportional(14.5),
             theme.muted,
         );
         painter.text(
             Pos2::new(legend.right() + 6., legend.center().y),
             Align2::LEFT_CENTER,
             format!("{max:.2} m"),
-            FontId::proportional(13.),
+            FontId::proportional(14.5),
             theme.muted,
         );
     }
@@ -1301,7 +1301,7 @@ fn paint_lineage_tile(
         rect.right_bottom() + Vec2::new(-8., -6.),
         Align2::RIGHT_BOTTOM,
         species_name(&step.creature),
-        FontId::proportional(13.),
+        FontId::proportional(14.5),
         theme.muted,
     );
     if current {
@@ -1309,7 +1309,7 @@ fn paint_lineage_tile(
             rect.right_bottom() + Vec2::new(-8., -20.),
             Align2::RIGHT_BOTTOM,
             "selected",
-            FontId::proportional(13.),
+            FontId::proportional(14.5),
             theme.accent,
         );
     }
@@ -1319,7 +1319,7 @@ fn paint_lineage_tile(
             rect.right_top() + Vec2::new(-8., 8.),
             Align2::RIGHT_TOP,
             "Body plan",
-            11.,
+            13.,
             theme.accent,
         );
     }
@@ -1945,11 +1945,9 @@ impl App {
         let live = self.snapshot.as_ref().map(|s| s.config.clone());
         let calm = world_is_calm(&self.config);
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(world_summary(&self.config)).color(if calm {
-                theme.muted
-            } else {
-                theme.accent
-            }));
+            ui.label(RichText::new(world_summary(&self.config)).size(18.).strong().color(
+                if calm { theme.ink } else { theme.accent },
+            ));
             if !calm
                 && ui
                     .small_button("Calm world")
@@ -2170,7 +2168,7 @@ impl App {
             };
             ui.label(
                 RichText::new(mode)
-                    .small()
+                    .size(14.)
                     .strong()
                     .color(color)
                     .background_color(fill),
@@ -2436,7 +2434,7 @@ impl App {
                     pos + Vec2::new(5., 6.),
                     Align2::LEFT_TOP,
                     format!("{x} m"),
-                    FontId::proportional(13.),
+                    FontId::proportional(14.5),
                     GROUND_INK,
                 );
             }
@@ -2537,14 +2535,14 @@ impl App {
             if let Some((tick, _)) = fallen {
                 hud_block(
                     &painter,
-                    left.left_top() - Vec2::new(0., 8.),
-                    Align2::LEFT_BOTTOM,
+                    rect.center_top() + Vec2::new(0., inset),
+                    Align2::CENTER_TOP,
                     &[HudLine::text(
                         p.ending.sentence(
                             tick.saturating_sub(physics::settle()) as f32 * physics::dt(),
                         ),
-                        14.,
-                        FALLEN,
+                        16.,
+                        Color32::from_rgb(255, 120, 100),
                     )],
                 );
             }
@@ -2601,17 +2599,26 @@ impl App {
             None
         };
         if let Some(note) = center_note {
-            hud_block(
-                &painter,
-                rect.center(),
-                Align2::CENTER_CENTER,
-                &[HudLine::text(note.to_owned(), 17., HUD)],
-            );
+            let mut lines = vec![HudLine::text(note.to_owned(), 20., HUD)];
+            if self.playback.is_none() && crate::cuda_engine::compiling_world() {
+                lines.push(HudLine::text(
+                    "The GPU is compiling its kernels for this world.".to_owned(),
+                    15.,
+                    crate::theme::scene::HUD_INK,
+                ));
+                lines.push(HudLine::text(
+                    "A new game does this once, for up to a minute or two. Later starts are quick."
+                        .to_owned(),
+                    15.,
+                    crate::theme::scene::HUD_INK,
+                ));
+            }
+            hud_block(&painter, rect.center(), Align2::CENTER_CENTER, &lines);
         }
         painter.rect_stroke(
             rect,
             0,
-            Stroke::new(1., theme.card_border),
+            Stroke::new(4., theme.ink),
             egui::StrokeKind::Inside,
         );
         let mut sought = false;
@@ -2826,13 +2833,13 @@ impl App {
         // HUD counters: the label and a line of detail on the left, the
         // glowing number on the right. Narrow tiles shrink the number and
         // wrap the detail, and every tile takes the height of the tallest.
-        let value_size = (width / 8.5).clamp(24., 36.);
+        let value_size = (width / 8.5).clamp(26., 40.);
         let values: Vec<_> = tiles
             .iter()
             .map(|tile| {
                 ui.painter().layout_no_wrap(
                     tile.1.clone(),
-                    FontId::new(value_size, crate::assets::hud()),
+                    FontId::new(value_size, crate::assets::hud_bold()),
                     tile.2,
                 )
             })
@@ -2843,14 +2850,14 @@ impl App {
             .map(|(tile, value)| {
                 ui.painter().layout(
                     tile.3.clone(),
-                    FontId::proportional(12.5),
+                    FontId::proportional(14.),
                     theme.muted,
                     (width - value.size().x - 44.).max(60.),
                 )
             })
             .collect();
         let note_height = notes.iter().map(|g| g.size().y).fold(0., f32::max);
-        let tile_height = (value_size * 1.2).max(28. + note_height) + 12.;
+        let tile_height = (value_size * 1.2).max(32. + note_height) + 14.;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             for (((name, _, color, _, why), note), value) in
@@ -2859,25 +2866,30 @@ impl App {
                 let (rect, response) =
                     ui.allocate_exact_size(Vec2::new(width, tile_height), Sense::hover());
                 let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 8, crate::theme::scene::HUD_BACK);
-                painter.rect_filled(rect, 8, Color32::from_black_alpha(50));
+                crate::theme::plate(
+                    ui.painter(),
+                    rect.shrink(2.),
+                    theme,
+                    theme.card,
+                    false,
+                );
                 crate::theme::caps_text(
                     &painter,
                     rect.left_top() + Vec2::new(14., 11.),
                     Align2::LEFT_TOP,
                     name,
-                    if width < 280. { 9.5 } else { 10.5 },
-                    color.gamma_multiply(0.85),
+                    if width < 280. { 12. } else { 13. },
+                    theme.ink,
                 );
-                painter.galley(rect.left_top() + Vec2::new(14., 28.), note, theme.muted);
+                painter.galley(rect.left_top() + Vec2::new(14., 32.), note, theme.muted);
                 crate::theme::glow_text(
                     &painter,
                     Pos2::new(rect.right() - 14., rect.center().y),
                     Align2::RIGHT_CENTER,
                     value.text(),
-                    FontId::new(value_size, crate::assets::hud()),
+                    FontId::new(value_size, crate::assets::hud_bold()),
                     color,
-                    true,
+                    false,
                 );
                 response.on_hover_text(why);
             }
@@ -2890,7 +2902,7 @@ impl App {
         let mut zoom = 1.0f64;
         let mut last: Option<f64> = None;
         ui.horizontal(|ui| {
-            crate::theme::section(ui, "Best distance over time", theme)
+            crate::theme::heading(ui, "Best distance", theme)
                 .on_hover_text("Drag to pan. Double-click or Reset view fits the chart again.");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -3261,7 +3273,6 @@ impl App {
                     "Islands never mix. The hub gets copies every {} generations.",
                     crate::storage::MIGRATION_INTERVAL
                 ))
-                .small()
                 .color(theme.muted),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3689,7 +3700,7 @@ impl App {
     /// a record holder or undo a catastrophe.
     fn feed(&mut self, ui: &mut egui::Ui, height: f32) {
         let theme = self.theme();
-        crate::theme::section(ui, "What happened", theme);
+        crate::theme::heading(ui, "What happened", theme);
         let items = self.feed_items();
         let mut chosen = None;
         egui::ScrollArea::vertical()
@@ -3764,7 +3775,7 @@ impl App {
         let theme = self.theme();
         let records = world_records(&snapshot.history);
         let live = live_record(snapshot);
-        crate::theme::section(ui, "Records", theme);
+        crate::theme::heading(ui, "Records", theme);
         if records.is_empty() && live.is_none() {
             ui.label(
                 RichText::new("No records yet. The first best creature lands here.")
@@ -4184,7 +4195,7 @@ impl App {
                         } else {
                             format!("{x:.0} m")
                         },
-                        FontId::proportional(13.),
+                        FontId::proportional(14.5),
                         GROUND_INK,
                     );
                 }
@@ -4276,7 +4287,7 @@ impl App {
             board.left_top() + Vec2::new(10., 10.),
             Align2::LEFT_TOP,
             "Standings",
-            12.,
+            13.5,
             theme.muted,
         );
         let mut order: Vec<usize> = (0..self.race.len()).collect();
@@ -4310,7 +4321,7 @@ impl App {
             board.left_bottom() + Vec2::new(10., -8.),
             Align2::LEFT_BOTTOM,
             "Live distance",
-            FontId::proportional(13.),
+            FontId::proportional(14.5),
             theme.muted,
         );
     }
@@ -4373,7 +4384,7 @@ impl App {
         }
         let theme = self.theme();
         ui.horizontal_wrapped(|ui| {
-            crate::theme::section(ui, "Body types through generations", theme);
+            crate::theme::heading(ui, "Body types through generations", theme);
             ui.label(
                 RichText::new(
                     "each color is one count of nodes and muscles, named in the list below",
@@ -4473,7 +4484,7 @@ impl App {
         let mut picked_type = None;
         ui.columns(2, |cols| {
             self.histogram(&mut cols[0], &stats, 155.);
-            crate::theme::section(&mut cols[1], "Body types", theme);
+            crate::theme::heading(&mut cols[1], "Body types", theme);
             let mut species = stats.species.clone();
             species.sort_by_key(|&(_, _, n)| std::cmp::Reverse(n));
             egui::ScrollArea::vertical()
@@ -5381,7 +5392,7 @@ impl eframe::App for App {
                     match (&self.shown_message, compiling) {
                         (Some((message, _)), _) => ui.label(message),
                         (None, Some(waited)) => ui.label(format!(
-                            "Compiling the new world… {:.0} s",
+                            "Compiling GPU kernels for this world… {:.0} s. Evolution starts when they are ready. A new world compiles once.",
                             waited.as_secs_f32()
                         )),
                         (None, None) => ui.label(&s.status),
@@ -5419,9 +5430,9 @@ impl eframe::App for App {
             }
         });
         egui::Panel::left("controls")
-            .default_size(400.)
-            .min_size(300.)
-            .max_size(480.)
+            .default_size(440.)
+            .min_size(340.)
+            .max_size(520.)
             .resizable(true)
             .frame(
                 egui::Frame::new()
@@ -5725,7 +5736,7 @@ fn paint_card(
         rect.left_top() + Vec2::new(9., 26.),
         Align2::LEFT_TOP,
         species_name(&card.creature),
-        FontId::proportional(13.),
+        FontId::proportional(14.5),
         theme.ink,
     );
     if card.innovation_reserve {
@@ -5734,7 +5745,7 @@ fn paint_card(
             rect.right_top() + Vec2::new(-9., 9.),
             Align2::RIGHT_TOP,
             "New body",
-            11.,
+            13.,
             theme.cold,
         );
     }
@@ -5769,7 +5780,7 @@ fn paint_card(
 /// How a creature came to be, in the words the lineage uses.
 /// Space between island cards, and a card's height.
 const ISLAND_GAP: f32 = 10.;
-const ISLAND_HEIGHT: f32 = 300.;
+const ISLAND_HEIGHT: f32 = 346.;
 /// Words for the emitter shares of an island's elites, in `Emitter::ALL` order.
 const ORIGIN_SHORT: [&str; 4] = ["Tuned", "Reshaped", "Novel", "New"];
 /// Their colors: amber, rust, cold blue and olive.
@@ -5895,7 +5906,7 @@ fn paint_island(
         rect.right_top() + Vec2::new(-12., 12.),
         Align2::RIGHT_TOP,
         format!("{} ways of moving", number(island.moves)),
-        FontId::proportional(13.),
+        FontId::proportional(14.5),
         theme.muted,
     );
     let mut clicked = None;
@@ -5942,7 +5953,7 @@ fn paint_island(
         Pos2::new(list_left, 38.0 + rect.top()),
         Align2::LEFT_TOP,
         "Top elites",
-        FontId::proportional(12.),
+        FontId::proportional(14.),
         theme.muted,
     );
     for (row, (distance, creature)) in island.top.iter().enumerate() {
@@ -5970,7 +5981,7 @@ fn paint_island(
             row_rect.left_center() + Vec2::new(46., 0.),
             Align2::LEFT_CENTER,
             format!("{distance:.2} m"),
-            FontId::proportional(13.),
+            FontId::proportional(14.5),
             theme.ink,
         );
         if response.clicked() {
@@ -5983,7 +5994,7 @@ fn paint_island(
         at(12., 168.),
         Align2::LEFT_TOP,
         "Bred by",
-        FontId::proportional(12.),
+        FontId::proportional(14.),
         theme.muted,
     );
     let bar = Rect::from_min_size(at(12., 184.), Vec2::new(rect.width() - 24., 10.));
@@ -6018,7 +6029,7 @@ fn paint_island(
             cell + Vec2::new(14., 0.),
             Align2::LEFT_TOP,
             format!("{} {}%", ORIGIN_SHORT[i], shares[i]),
-            FontId::proportional(12.),
+            FontId::proportional(14.),
             theme.ink,
         );
     }
@@ -6026,14 +6037,17 @@ fn paint_island(
         .into_iter()
         .chain(migration_lines(migration, index, generation))
         .collect();
-    for (i, line) in lines.iter().enumerate() {
-        painter.text(
-            at(12., 236. + i as f32 * 14.),
-            Align2::LEFT_TOP,
-            line,
-            FontId::proportional(11.5),
+    let mut y = 238.;
+    for line in &lines {
+        let galley = painter.layout(
+            line.clone(),
+            FontId::proportional(14.),
             theme.muted,
+            rect.width() - 24.,
         );
+        let height = galley.size().y;
+        painter.galley(at(12., y), galley, theme.muted);
+        y += height + 2.;
     }
     clicked
 }
@@ -6210,7 +6224,7 @@ fn effect_row(
             name_rect.left_center(),
             Align2::LEFT_CENTER,
             label,
-            FontId::proportional(15.),
+            FontId::proportional(16.5),
             color,
         );
         if let (true, Some(running)) = (waiting, running) {
@@ -6224,7 +6238,7 @@ fn effect_row(
         ui.vertical(|ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(1., 1.);
-                let font = FontId::proportional(13.);
+                let font = FontId::proportional(14.);
                 let galleys: Vec<_> = effect
                     .levels
                     .iter()
@@ -6234,7 +6248,7 @@ fn effect_row(
                             .layout_no_wrap(short.to_owned(), font.clone(), theme.ink)
                     })
                     .collect();
-                const PAD: f32 = 10.;
+                const PAD: f32 = 8.;
                 let count = galleys.len().max(1) as f32;
                 let natural: f32 =
                     galleys.iter().map(|g| g.size().x + PAD).sum::<f32>() + count - 1.;
@@ -6253,8 +6267,8 @@ fn effect_row(
                     let lit = i == level;
                     let hovered = response.hovered();
                     let fill = match (lit, away, hovered) {
-                        (true, true, _) => theme.go_fill,
-                        (true, false, _) => theme.card_hover,
+                        (true, true, _) => theme.stop_fill,
+                        (true, false, _) => theme.armed_fill,
                         (false, _, true) => ui.visuals().widgets.hovered.weak_bg_fill,
                         _ => ui.visuals().widgets.inactive.weak_bg_fill,
                     };
@@ -6265,29 +6279,24 @@ fn effect_row(
                         se: if i == last { 3 } else { 0 },
                     };
                     ui.painter().rect_filled(rect, corner, fill);
-                    if lit && !away {
-                        ui.painter().rect_filled(
-                            Rect::from_min_max(
-                                Pos2::new(rect.left() + 4., rect.bottom() - 2.),
-                                Pos2::new(rect.right() - 4., rect.bottom()),
-                            ),
-                            0,
-                            theme.accent.gamma_multiply(0.8),
-                        );
-                    }
+                    ui.painter().rect_stroke(
+                        rect,
+                        corner,
+                        Stroke::new(if lit { 2.5 } else { 1.5 }, theme.ink),
+                        egui::StrokeKind::Inside,
+                    );
                     if waiting && running == Some(i) {
                         ui.painter().rect_stroke(
                             rect,
                             corner,
-                            Stroke::new(1.5, theme.cold),
+                            Stroke::new(3., theme.cold),
                             egui::StrokeKind::Inside,
                         );
                     }
                     let text_color = match (lit, away) {
                         (true, true) => theme.go_text,
                         (true, false) => theme.ink,
-                        _ if hovered => theme.ink,
-                        _ => theme.muted,
+                        _ => theme.ink,
                     };
                     let at = rect.center() - galley.size() / 2.;
                     ui.painter()
@@ -7241,7 +7250,7 @@ fn wild_tiles(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
                     format!("W{}\n{best}", w + 1),
-                    egui::FontId::proportional(12.),
+                    egui::FontId::proportional(14.),
                     theme.ink,
                 );
                 let name = levels

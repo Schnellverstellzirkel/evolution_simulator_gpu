@@ -404,8 +404,22 @@ pub fn caps_text(
 /// A section title in the side panel: a full-width dark wood strip with a
 /// mustard block and cream capitals.
 pub fn section(ui: &mut egui::Ui, text: &str, _theme: Theme) -> Response {
+    strip(ui, text, true)
+}
+
+/// The same strip as wide as its words, for a title beside other things.
+pub fn heading(ui: &mut egui::Ui, text: &str, _theme: Theme) -> Response {
+    strip(ui, text, false)
+}
+
+fn strip(ui: &mut egui::Ui, text: &str, full: bool) -> Response {
     let galley = ui.painter().layout_job(caps(text, 15.0, poster::CREAM));
-    let size = Vec2::new(ui.available_width(), (galley.size().y + 10.0).max(30.0));
+    let width = if full {
+        ui.available_width()
+    } else {
+        galley.size().x + 40.0
+    };
+    let size = Vec2::new(width, (galley.size().y + 10.0).max(30.0));
     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter();
     p.rect_filled(
@@ -416,14 +430,14 @@ pub fn section(ui: &mut egui::Ui, text: &str, _theme: Theme) -> Response {
     p.rect_filled(rect, 5, poster::WOOD_DARK);
     p.rect_filled(
         Rect::from_min_size(
-            rect.left_top() + Vec2::new(6.0, rect.height() / 2.0 - 6.0),
+            rect.left_top() + Vec2::new(8.0, rect.height() / 2.0 - 6.0),
             Vec2::splat(12.0),
         ),
         2,
         poster::MUSTARD,
     );
     p.galley(
-        Pos2::new(rect.left() + 26.0, rect.center().y - galley.size().y / 2.0),
+        Pos2::new(rect.left() + 28.0, rect.center().y - galley.size().y / 2.0),
         galley,
         poster::CREAM,
     );
