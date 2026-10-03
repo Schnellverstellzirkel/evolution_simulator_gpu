@@ -4,6 +4,8 @@ Open work only. Delete an item when it is merged into `main`. If it is a real de
 
 ## Physics
 
+- The tie at the top is not a speed cap (claude/speedcap, owner's generation 1,510 save): the kernel has no speed clamp, the tied elites run 1 to 2 m/s with heavy bodies and several 8 kg bodies launch at 13 to 18 m/s in the first 3 s and then stop dead. That points to an integrator exploit many bodies share. Replay one launcher step by step to find where the energy comes from.
+- `tests/cuda_effects.rs` (ignored, needs the GPU) fails in the calm world: its stored walkers no longer pass 5 m under the current kernel. Replace them with walkers from a current save, and add Brambles to its effect list.
 - Hundreds of different bodies tie at one top distance in an evolved game (46.585 m in 20 s at generation 590 of the owner's game, 34.07 m at generation 1,512, each island its own value to 1e-5). The 400 fastest elites replay to distances within 2 mm of each other, and the five fastest of one island travel at the same constant speed after the first 2 s although their bodies, cells and muscle periods (0.2 to 0.47 s) differ, so the search has nothing to select on at the top. Find what limits them. Muscle strength and energy scale with the mass a muscle drives, so one power per mass would give one speed, but nothing has measured it.
 
 - CUDA occupancy is 4 warps at 16 nodes [claude/p2-cuda-speed].
