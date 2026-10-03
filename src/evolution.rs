@@ -822,7 +822,19 @@ fn bone(a: usize, b: usize, nodes: &[NodeGene]) -> Bone {
 /// The period ratios a limb may run at against the body's base clock (the
 /// first muscle's period). Simple ratios keep the whole gait exactly
 /// periodic, repeating every few base cycles.
-pub const CLOCK_RATIOS: [f32; 5] = [0.5, 2.0 / 3.0, 1.0, 1.5, 2.0];
+pub const CLOCK_RATIOS: [f32; 9] = [
+    1.0 / 3.0,
+    0.5,
+    2.0 / 3.0,
+    0.75,
+    1.0,
+    4.0 / 3.0,
+    1.5,
+    2.0,
+    3.0,
+];
+/// The position of ratio 1 in `CLOCK_RATIOS`.
+const UNIT_RATIO: usize = 4;
 
 /// Every muscle runs on the body's base clock, set by the first muscle, or on
 /// a simple multiple of it (`CLOCK_RATIOS`): a period equal to a ratio (to
@@ -839,7 +851,7 @@ fn snap_clock_ratios(c: &mut Creature) {
         let log = (m.period / base).ln();
         let best = (0..CLOCK_RATIOS.len())
             .min_by(|&a, &b| (logs[a] - log).abs().total_cmp(&(logs[b] - log).abs()))
-            .unwrap_or(2);
+            .unwrap_or(UNIT_RATIO);
         let ratio = if (logs[best] - log).abs() < 0.003
             && (low..=high).contains(&(base * CLOCK_RATIOS[best]))
         {

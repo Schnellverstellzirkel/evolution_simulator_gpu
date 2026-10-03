@@ -24,6 +24,7 @@ use crate::config::Config;
 mod compound;
 mod controller;
 mod extra;
+mod gait_bio;
 mod gait_legs;
 mod gait_spine;
 mod gait_phase;
@@ -78,6 +79,7 @@ const GAIT_FILES: &[&[(&str, Operator)]] = &[
     gait_reflex::OPS,
     gait_posture::OPS,
     gait_plans::OPS,
+    gait_bio::OPS,
 ];
 
 /// The operators before the gait files.
