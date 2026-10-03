@@ -1362,10 +1362,15 @@ fn run(
                     ctx.request_repaint();
                 }
                 // Benchmarks keep autosaves off even for a loaded
-                // checkpoint, which brings its own interval.
+                // checkpoint, which brings its own interval. Right after a
+                // world change every elite is on the GPU for its re-test and
+                // the archives are empty; a save holds no creatures in
+                // flight, so that autosave would hold no elites and replace a
+                // good one. The next autosave, after the re-tests, writes.
                 if e.config.checkpoint_interval > 0
                     && std::env::var_os("EVOLUTION_BENCH_NO_AUTOSAVE").is_none()
                     && e.generation.is_multiple_of(e.config.checkpoint_interval)
+                    && !e.archive.entries.is_empty()
                     && checkpoint_thread
                         .as_ref()
                         .is_none_or(|handle| handle.is_finished())
