@@ -1624,7 +1624,7 @@ impl Experiment {
         }
         // The first elite of a new body plan in a main island joins the
         // founder bank.
-        if !qd::bio_off(2) {
+        {
             for (group, _, _, _) in island_results.iter().take(qd::MAIN_ISLANDS) {
                 for &j in group {
                     let plan = qd::plan_key_of_population(population, j);
@@ -3169,7 +3169,7 @@ impl Experiment {
         self.refuge.review(&self.islands, self.generation);
         let generation = self.generation;
         self.pen.retain(|&(_, until)| until > generation);
-        if !qd::bio_off(4) && self.islands.len() == arena_count() {
+        if self.islands.len() == arena_count() {
             let mut best: HashMap<u64, (f32, &Creature)> = HashMap::new();
             for archive in self.islands.iter().take(qd::MAIN_ISLANDS) {
                 for (i, e) in archive.entries.iter().enumerate() {

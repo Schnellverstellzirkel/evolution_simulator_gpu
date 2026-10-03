@@ -468,8 +468,6 @@ pub struct QdArchive {
 #[derive(Clone, Debug, Default)]
 struct ParentTraits {
     body_novelty: Vec<f32>,
-    /// Behavior elites per body plan, as of the last refresh.
-    plan_counts: HashMap<u64, u32>,
 }
 
 /// A short summary of a body for body novelty: node, bone and muscle counts,
@@ -1316,14 +1314,7 @@ impl QdArchive {
             }
             body_novelty[i] = sum / samples.max(1) as f32;
         }
-        let mut plan_counts = HashMap::new();
-        for &i in &self.behavior_indices {
-            *plan_counts.entry(self.plan_keys[i]).or_default() += 1;
-        }
-        self.traits = ParentTraits {
-            body_novelty,
-            plan_counts,
-        };
+        self.traits = ParentTraits { body_novelty };
     }
     /// The behavior elite whose body is farthest from the others (highest
     /// body novelty), with that novelty.
@@ -1397,13 +1388,6 @@ impl QdArchive {
             if generation < current.protected_until && candidate_topology != current.topology {
                 return Offer::default();
             }
-            // The last elite of a body plan that loses its cell to another
-            // plan moves to the reserve instead of dying (Hanski, 1999).
-            let old_plan = self.plan_keys[slot];
-            let last_of_plan = !bio_off(8)
-                && candidate_topology.plan_key() != old_plan
-                && self.traits.plan_counts.get(&old_plan).is_some_and(|&n| n <= 1);
-            let loser = last_of_plan.then(|| self.entries[slot].clone());
             let delta = fitness - current.fitness;
             let previous_fitness = current.fitness;
             let visits = current.visits;
@@ -1427,9 +1411,6 @@ impl QdArchive {
             self.qd_score += fitness.max(0.0) as f64 - previous_fitness.max(0.0) as f64;
             self.note_changed_cell(self.entries[slot].niche.clone());
             self.remove_morphology_topology(&candidate_topology, fitness);
-            if let Some(loser) = loser {
-                self.keep_in_reserve(loser);
-            }
             return Offer {
                 inserted: true,
                 new_niche: false,
@@ -1580,34 +1561,6 @@ impl QdArchive {
             new_niche: true,
             reward: 1.0,
         }
-    }
-    /// Puts `elite` in the morphology reserve while it has room, unless its
-    /// body plan is there already.
-    fn keep_in_reserve(&mut self, mut elite: Elite) {
-        if self.global
-            || self.morphology_count() >= MORPHOLOGY_LIMIT
-            || self
-                .morphology_indices
-                .iter()
-                .any(|&i| topology_equivalent(&elite.topology, &self.entries[i].topology))
-        {
-            return;
-        }
-        let mut salt = 0u64;
-        let niche = loop {
-            let candidate = morphology_niche(&elite.topology, salt);
-            if !self.reserve_lookup.contains_key(&candidate) {
-                break candidate;
-            }
-            salt = salt.wrapping_add(1);
-        };
-        elite.niche = niche.clone();
-        elite.visits = 0;
-        self.plan_keys.push(elite.topology.plan_key());
-        self.entries.push(elite);
-        let slot = self.entries.len() - 1;
-        self.index_niche(&niche, slot);
-        self.morphology_indices.push(slot);
     }
     /// Adds a copy of `elite` if its behavior niche is empty or it beats the
     /// occupant. Used for island migration and for a nursery's graduation;
