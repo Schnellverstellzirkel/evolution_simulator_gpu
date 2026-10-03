@@ -19,6 +19,11 @@ Each idea was measured and lost. Do not redo one without a new reason. Numbers a
 - Distillation of new muscles from the nearest kept muscle: QD x0.91. Lamarckian tuning of new bodies by the CMA share: best x0.87.
 - A node-count archive axis alone, on the CPU at 16k creatures per generation: best x0.77 with 0 wins of 8 seeds, and as a replacement for cadence or feet QD x0.73 and x0.65. At 500k on the GPU, a node-count class and a shape class beside the 1,440 ways of moving held best distance and QD (see `docs/design-decisions.md`). One class axis alone (3 sizes or 3 shapes, 4,320 cells) held best distance within 9% on two seeds and gave fewer clades than two classes of 2.
 - A tie margin on archive replacement (a child must beat its elite by 1e-4 of the distance): no change in clades or speed, because the archive already changes by 4 of 1,431 elites per generation at the plateau.
+- Island classes from the first generation: a fresh game at 1M creatures reached 32.0 m at generation 40 against 38.5 m with one cell per way of moving (seed 41), and every island was lower. The islands refine after 30 generations.
+- The rarity bonus for a rare clade at full weight in a climbing island: island QD 27% lower and best 35.1 against 38.5 m at generation 40 (1M, seed 41). It counts in refined islands, scaled by the share of level elites.
+- A protection of 30 generations for a new body plan against a challenger of another plan: the global archive's effective clades grew 75% on the owner's save (121 against 69), but a fresh game at 1M had a global QD 51% lower at generation 40, because the window is most of the run. The nursery of reshaped bodies protects new plans instead.
+- A margin of 0.5% for a challenger of another body plan to take a cell: no change on the owner's save (252 clades, effective 69.8, against 286 and 69.3).
+- A morphology reserve of 1,024 places: 2% more body plans and 14 MB more save on the owner's save.
 - A finer grid (8 x 10 x 8): best x0.86, QD x0.83 at 16k creatures.
 - A reserve of 256 places or 25% parent share: best x1.17 and x1.02, QD x1.01 and x0.96.
 - Periodic island extinctions: best x0.97 and QD x0.98 every 15 generations, x0.94 and x0.99 every 8 generations with half the grid.
