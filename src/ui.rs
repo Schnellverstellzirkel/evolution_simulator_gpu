@@ -3179,7 +3179,9 @@ impl App {
                         filter.feet = Some(bin);
                     }
                 }
-                ui.add_space(GAP_M);
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.;
                 ui.label(RichText::new("Size").small().color(theme.muted));
                 if ui.selectable_label(filter.size.is_none(), "All").clicked() {
                     filter.size = None;
@@ -3193,7 +3195,9 @@ impl App {
                         filter.size = Some(class as u8);
                     }
                 }
-                ui.add_space(GAP_M);
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.;
                 ui.label(RichText::new("Shape").small().color(theme.muted));
                 if ui.selectable_label(filter.shape.is_none(), "All").clicked() {
                     filter.shape = None;
