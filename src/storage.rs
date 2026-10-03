@@ -1999,18 +1999,18 @@ impl Experiment {
             let kept = group.iter().filter(|elite| to.absorb(elite)).count();
             exchange[from] = (group.len(), kept);
         }
-        // A wild island's distances come from its own world, so its best go
-        // to the hub as reseeds and are scored again in the hub's world.
+        // A wild island's distances come from its own world and say nothing
+        // about the hub's. Every one of its elites runs again in the hub's
+        // world as a reseed, and a copy enters the hub only when that
+        // distance wins its cell there.
         for from in qd::MAIN_ISLANDS..island_count() {
             let island = &self.islands[from];
-            let mut elites: Vec<&qd::Elite> = island
+            let sent: Vec<Creature> = island
                 .entries
                 .iter()
                 .filter(|e| !qd::is_morphology_niche(&e.niche))
+                .map(|e| e.creature.clone())
                 .collect();
-            elites.sort_unstable_by(|a, b| b.fitness.total_cmp(&a.fitness));
-            let take = ((elites.len() as f32 * MIGRATION_SHARE).ceil() as usize).min(elites.len());
-            let sent: Vec<Creature> = elites[..take].iter().map(|e| e.creature.clone()).collect();
             exchange[from] = (sent.len(), 0);
             for creature in sent {
                 self.reseed.push(hub, creature);
