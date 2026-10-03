@@ -12,10 +12,14 @@
 
 use crate::{
     config::Config,
+    environment, qd,
     qd::EvaluationMetrics,
     scheduler::{self, Scheduler, Trial},
-    storage::{Experiment, Verdict},
+    storage::{self, Experiment, Verdict},
 };
+/// Tag bit of a wild island's unit: it runs in a world of its own, which a
+/// world change leaves alone (`Scheduler::retarget`).
+pub const WILD: u64 = 2;
 use anyhow::Result;
 use std::{
     collections::{HashMap, VecDeque},
@@ -102,13 +106,51 @@ impl Ring {
         let seq = self.next_seq;
         self.next_seq += 1;
         let block = &e.blocks[k];
-        sched.queue(
-            seq << 1,
-            Trial::Standard,
-            Arc::clone(&block.population),
-            None,
-            Arc::clone(&block.config),
-        );
+        // The main islands run in the block's world, and each wild island's
+        // creatures in its own world, as units of their own.
+        let islands = storage::island_count();
+        let mut main = Vec::new();
+        let mut wild: Vec<Vec<usize>> = vec![Vec::new(); qd::WILD_ISLANDS];
+        for j in 0..block.len() {
+            let island = qd::island_of_slot(block.first + j, islands);
+            if qd::is_wild(island) {
+                wild[island - qd::MAIN_ISLANDS].push(j);
+            } else {
+                main.push(j);
+            }
+        }
+        if main.len() == block.len() {
+            sched.queue(
+                seq << 2,
+                Trial::Standard,
+                Arc::clone(&block.population),
+                None,
+                Arc::clone(&block.config),
+            );
+        } else {
+            if !main.is_empty() {
+                sched.queue(
+                    seq << 2,
+                    Trial::Standard,
+                    Arc::clone(&block.population),
+                    Some(main),
+                    Arc::clone(&block.config),
+                );
+            }
+            let levels = environment::wild_levels(block.config.seed);
+            for (w, members) in wild.into_iter().enumerate() {
+                if members.is_empty() {
+                    continue;
+                }
+                sched.queue(
+                    seq << 2 | WILD,
+                    Trial::Standard,
+                    Arc::clone(&block.population),
+                    Some(members),
+                    Arc::new(environment::wild_world(&block.config, &levels[w])),
+                );
+            }
+        }
         self.flights.push_back(Flight {
             seq,
             block: k,
@@ -131,7 +173,7 @@ impl Ring {
     pub fn world_changed(&mut self, e: &mut Experiment, sched: &mut Scheduler) -> usize {
         let current = Arc::new(e.config.clone());
         for tag in sched.retarget(&current) {
-            if let Some(flight) = self.flight(tag >> 1) {
+            if let Some(flight) = self.flight(tag >> 2) {
                 let k = flight.block;
                 e.retarget_block(k, &current);
             }
@@ -164,7 +206,7 @@ impl Ring {
         };
         for done in sched.collect(wait)? {
             let confirm = done.trial == Trial::Confirm;
-            let Some(flight) = self.flight(done.tag >> 1) else {
+            let Some(flight) = self.flight(done.tag >> 2) else {
                 continue;
             };
             for (j, metric) in done.members.into_iter().zip(done.metrics) {
@@ -266,7 +308,7 @@ impl Ring {
         let block = &e.blocks[flight.block];
         let config: Arc<Config> = Arc::new(scheduler::confirm_config(&block.config));
         sched.queue(
-            flight.seq << 1 | 1,
+            flight.seq << 2 | 1,
             Trial::Confirm,
             Arc::clone(&block.population),
             Some(new),

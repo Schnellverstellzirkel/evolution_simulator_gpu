@@ -655,12 +655,14 @@ fn a_loaded_save_breeds_one_ring_and_repeats_its_search() {
 fn each_island_gives_a_fifth_of_its_slots_to_a_nursery_and_a_tenth_to_another() {
     use evolution_simulator::qd;
     let (islands, arenas) = (storage::island_count(), storage::arena_count());
-    let rounds = 10 * qd::SLOT_CYCLE;
     let mut slots = vec![0usize; arenas];
-    for slot in 0..islands * rounds {
+    // Whole cycles of every main and wild island.
+    for slot in 0..10_000 * qd::SLOT_CYCLE {
         slots[qd::arena_of_slot(slot, arenas)] += 1;
     }
     for island in 0..islands {
+        let rounds =
+            slots[island] + slots[storage::nursery_of(island)] + slots[storage::reshaped_of(island)];
         assert_eq!(slots[island], rounds - 6 * rounds / qd::SLOT_CYCLE);
         assert_eq!(slots[storage::nursery_of(island)], 4 * rounds / qd::SLOT_CYCLE);
         assert_eq!(
@@ -712,7 +714,11 @@ fn a_save_holds_the_islands_and_loads_with_empty_reshaped_nurseries() {
 
 #[test]
 fn checkpoint_preserves_stalled_island_optimizer() {
-    let mut uninterrupted = Experiment::new(config(38)).unwrap();
+    let mut uninterrupted = Experiment::new(Config {
+        population: 1024,
+        ..config(38)
+    })
+    .unwrap();
     run_synthetic(&mut uninterrupted);
     run_synthetic(&mut uninterrupted);
     // Advance the record age past the 30-generation optimizer rotation without
@@ -729,7 +735,7 @@ fn checkpoint_preserves_stalled_island_optimizer() {
         uninterrupted
             .islands
             .iter()
-            .take(storage::island_count())
+            .take(evolution_simulator::qd::MAIN_ISLANDS)
             .all(|island| island.behavior_count() > 1)
     );
     uninterrupted.validate().unwrap();
@@ -1140,7 +1146,8 @@ fn a_world_change_checkpoint_retests_the_same_elites() {
     let mut changed = uninterrupted.config.clone();
     changed.gravity += 1.0;
     uninterrupted.update_config_now(changed).unwrap();
-    assert!(uninterrupted.islands.is_empty());
+    // The main islands start over; the wild islands keep their own worlds.
+    assert!(main_islands_empty(&uninterrupted));
     assert!(!uninterrupted.reseed.is_empty());
 
     let checkpoint = Checkpoint::new("world-change");
@@ -1148,7 +1155,6 @@ fn a_world_change_checkpoint_retests_the_same_elites() {
     let restored = storage::load(&checkpoint.0).unwrap();
     assert_eq!(restored.config, uninterrupted.config);
     assert!(restored.archive.entries.is_empty());
-    assert!(restored.cma_emitters.is_empty());
     // The queued elites are bred back into the loaded ring first.
     assert!(restored.reseed.is_empty());
     for creature in uninterrupted.reseed.iter() {
@@ -1179,6 +1185,9 @@ fn a_world_change_keeps_the_layout_of_a_refined_archive() {
     // The elites of island 1 wait to be tested again.
     assert_eq!(experiment.islands.len(), storage::arena_count());
     for (arena, island) in experiment.islands.iter().enumerate() {
+        if evolution_simulator::qd::is_wild(arena % storage::island_count()) {
+            continue;
+        }
         assert!(island.entries.is_empty());
         assert_eq!(
             island.refined(),
@@ -1217,7 +1226,7 @@ fn a_world_change_keeps_the_layout_of_a_refined_archive() {
     let mut changed = plain.config.clone();
     changed.gravity += 1.0;
     plain.update_config_now(changed).unwrap();
-    assert!(plain.islands.is_empty() && plain.archive.refined());
+    assert!(main_islands_empty(&plain) && plain.archive.refined());
 }
 
 fn births_ids(e: &Experiment) -> impl Iterator<Item = u64> + '_ {
@@ -1243,7 +1252,7 @@ fn a_world_change_at_the_boundary_keeps_the_state_valid() {
     // The world changed at the boundary: the archives start over and the
     // old elites wait to be tested again, the first of them in the block
     // bred right after the boundary.
-    assert!(uninterrupted.islands.iter().all(|i| i.entries.is_empty()));
+    assert!(main_islands_empty(&uninterrupted));
     assert!(!uninterrupted.reseed.is_empty());
     uninterrupted.validate().unwrap();
 
@@ -1255,7 +1264,6 @@ fn a_world_change_at_the_boundary_keeps_the_state_valid() {
     assert_eq!(restored.generation, uninterrupted.generation);
     assert_eq!(restored.evaluated, 0);
     assert!(restored.archive.entries.is_empty());
-    assert!(restored.cma_emitters.is_empty());
     for creature in uninterrupted.reseed.iter() {
         assert!(births_ids(&restored).any(|id| id == creature.id));
     }
@@ -1335,6 +1343,9 @@ fn an_island_migration_is_recorded_and_summarized() {
     for (island, &(sent, kept)) in exchange.iter().enumerate() {
         if island == storage::hub_island() {
             assert_eq!((sent, kept), (0, 0));
+        } else if evolution_simulator::qd::is_wild(island) {
+            // A wild island's best run again in the hub's world first.
+            assert_eq!(kept, 0);
         } else {
             assert!(sent > 0);
             assert!(kept <= sent);
@@ -1348,7 +1359,7 @@ fn an_island_migration_is_recorded_and_summarized() {
     assert_eq!(sent, exchange.iter().map(|e| e.0).sum::<usize>());
     assert_eq!(kept, exchange.iter().map(|e| e.1).sum::<usize>());
 
-    for (index, island) in experiment.islands[..storage::island_count()]
+    for (index, island) in experiment.islands[..evolution_simulator::qd::MAIN_ISLANDS]
         .iter()
         .enumerate()
     {
@@ -1444,4 +1455,11 @@ fn isolated_islands_only_hold_their_own_descendants() {
             .iter()
             .all(|&(sent, _)| sent > 0)
     );
+}
+
+/// Whether every archive of the main islands (and their nurseries) is empty.
+fn main_islands_empty(e: &Experiment) -> bool {
+    e.islands.iter().enumerate().all(|(arena, island)| {
+        evolution_simulator::qd::is_wild(arena % storage::island_count()) || island.entries.is_empty()
+    })
 }

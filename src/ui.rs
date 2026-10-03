@@ -3289,10 +3289,12 @@ impl App {
         let shown = self.playback.as_ref().map(|p| p.creature.id);
         let width = (ui.available_width() - ISLAND_GAP) / 2.;
         let mut selected = None;
+        let mut wild_pick = None;
         egui::ScrollArea::vertical()
             .id_salt("islands_grid")
             .show(ui, |ui| {
-                for pair in islands.chunks(2).enumerate() {
+                let main = islands.len().min(crate::qd::MAIN_ISLANDS);
+                for pair in islands[..main].chunks(2).enumerate() {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = ISLAND_GAP;
                         for (offset, island) in pair.1.iter().enumerate() {
@@ -3318,8 +3320,15 @@ impl App {
                     });
                     ui.add_space(ISLAND_GAP);
                 }
+                if islands.len() > main {
+                    if let Some(pick) = wild_tiles(ui, &islands[main..], &config, shown, &theme) {
+                        wild_pick = Some(pick);
+                    }
+                }
             });
-        if let Some(creature) = selected {
+        if let Some((creature, world)) = wild_pick {
+            self.select(creature, world);
+        } else if let Some(creature) = selected {
             self.select(creature, config);
         }
     }
@@ -6955,4 +6964,93 @@ fn smoke_capture_delay() -> Duration {
             .unwrap_or(8.0);
         Duration::from_secs_f64(seconds)
     })
+}
+
+/// The wild islands as a grid of small tiles: each tile is colored by its
+/// best distance against the best of all wild islands and names its world.
+/// A click returns the island's leader with its world, so the replay runs
+/// where the score came from.
+fn wild_tiles(
+    ui: &mut egui::Ui,
+    wild: &[crate::worker::IslandSummary],
+    config: &Config,
+    shown: Option<u64>,
+    theme: &Theme,
+) -> Option<(Creature, Config)> {
+    let levels = crate::environment::wild_levels(config.seed);
+    ui.add_space(6.);
+    ui.label(
+        RichText::new(format!(
+            "Wild islands: {} worlds of their own. Each sends its best to the hub, where they run again in your world.",
+            wild.len()
+        ))
+        .color(theme.muted),
+    );
+    ui.add_space(4.);
+    let top = wild
+        .iter()
+        .map(|w| w.best)
+        .filter(|b| b.is_finite())
+        .fold(0.0f32, f32::max)
+        .max(0.01);
+    let columns = (ui.available_width() / 96.).floor().max(4.) as usize;
+    let width = (ui.available_width() - (columns - 1) as f32 * 4.) / columns as f32;
+    let mut picked = None;
+    for (row, chunk) in wild.chunks(columns).enumerate() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.;
+            for (offset, island) in chunk.iter().enumerate() {
+                let w = row * columns + offset;
+                let (rect, response) =
+                    ui.allocate_exact_size(Vec2::new(width, 40.), Sense::click());
+                let share = if island.best.is_finite() {
+                    (island.best / top).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let fill = theme.panel.lerp_to_gamma(theme.accent, 0.15 + 0.6 * share);
+                let painter = ui.painter();
+                painter.rect_filled(rect, 4., fill);
+                let lit = response.hovered()
+                    || island.leader.as_ref().is_some_and(|c| Some(c.id) == shown);
+                if lit {
+                    painter.rect_stroke(
+                        rect,
+                        4.,
+                        egui::Stroke::new(2., theme.ink),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                let best = if island.best.is_finite() {
+                    format!("{:.1} m", island.best)
+                } else {
+                    "empty".into()
+                };
+                painter.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("W{}\n{best}", w + 1),
+                    egui::FontId::proportional(12.),
+                    theme.ink,
+                );
+                let name = levels
+                    .get(w)
+                    .map(|l| crate::environment::wild_name(l))
+                    .unwrap_or_default();
+                let response = response.on_hover_text(format!(
+                    "Wild island {}: {name}\nBest {best}, {} cells, {} in its nurseries",
+                    w + 1,
+                    island.cells,
+                    island.nursery
+                ));
+                if response.clicked()
+                    && let (Some(leader), Some(l)) = (&island.leader, levels.get(w))
+                {
+                    picked = Some((leader.clone(), crate::environment::wild_world(config, l)));
+                }
+            }
+        });
+        ui.add_space(4.);
+    }
+    picked
 }

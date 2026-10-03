@@ -360,6 +360,9 @@ impl Block {
     /// the evolved creatures, 1 for the nursery's new bodies, 2 for its
     /// reshaped bodies.
     fn screen_class(&self, j: usize) -> usize {
+        if qd::is_wild(qd::island_of_slot(self.first + j, island_count())) {
+            return 3;
+        }
         let flags = self.population.flags.get(j).copied().unwrap_or(0);
         if flags & crate::rungs::RESHAPED != 0 {
             2
@@ -642,7 +645,7 @@ fn describe_change(
 /// Island archives: `ISOLATED_ISLANDS` isolated islands, then the hub.
 /// Slot `i` breeds from and competes in island `qd::island_of_slot`.
 pub fn island_count() -> usize {
-    ISOLATED_ISLANDS + 1
+    qd::MAIN_ISLANDS + qd::WILD_ISLANDS
 }
 /// Archives that creatures breed for and compete in: the islands, then one
 /// nursery of new random bodies per island, then one nursery of reshaped
@@ -864,7 +867,8 @@ impl Experiment {
             // A tie with the record is confirmed too: an integrator glitch
             // drives many bodies to one exact speed, so its ties are common,
             // and an unconfirmed tie never had to beat the fine trial.
-            if Self::eligible(&out[j]) && m.fitness >= bars[arena] {
+            let wild = qd::is_wild(qd::island_of_slot(block.first + j, island_count()));
+            if !wild && Self::eligible(&out[j]) && m.fitness >= bars[arena] {
                 candidates[arena].push(j);
             }
         }
@@ -1246,7 +1250,8 @@ impl Experiment {
                 let descriptor = qd::descriptor(nodes, muscles, m.behavior);
                 let screened = stale || m.screened || m.excluded;
                 // A nursery creature is offered to its nursery only.
-                let nursery = arena_of[j] as usize >= island_count();
+                let nursery = arena_of[j] as usize >= island_count()
+                    || qd::is_wild(qd::island_of_slot(first + j, island_count()));
                 let valid = score.is_finite() && score > FAILED && !screened;
                 let behavior_candidate = if valid && !nursery {
                     let niche = self.archive.cell_of(descriptor);
@@ -1994,6 +1999,23 @@ impl Experiment {
             let kept = group.iter().filter(|elite| to.absorb(elite)).count();
             exchange[from] = (group.len(), kept);
         }
+        // A wild island's distances come from its own world, so its best go
+        // to the hub as reseeds and are scored again in the hub's world.
+        for from in qd::MAIN_ISLANDS..island_count() {
+            let island = &self.islands[from];
+            let mut elites: Vec<&qd::Elite> = island
+                .entries
+                .iter()
+                .filter(|e| !qd::is_morphology_niche(&e.niche))
+                .collect();
+            elites.sort_unstable_by(|a, b| b.fitness.total_cmp(&a.fitness));
+            let take = ((elites.len() as f32 * MIGRATION_SHARE).ceil() as usize).min(elites.len());
+            let sent: Vec<Creature> = elites[..take].iter().map(|e| e.creature.clone()).collect();
+            exchange[from] = (sent.len(), 0);
+            for creature in sent {
+                self.reseed.push(hub, creature);
+            }
+        }
         self.last_migration = Some((self.generation, exchange));
         self.islands[hub].refresh_behavior_scores();
     }
@@ -2670,7 +2692,9 @@ impl Experiment {
         population.flags.extend((0..count).map(|k| {
             let slot = first + k;
             let mut flags = 0u8;
-            if crate::rungs::is_audit(cfg.seed, self.breed_round, slot) {
+            if crate::rungs::is_audit(cfg.seed, self.breed_round, slot)
+                && !qd::is_wild(qd::island_of_slot(slot, island_count()))
+            {
                 flags |= crate::rungs::AUDIT;
             }
             let arenas = self.islands.len().max(arena_count());
@@ -2927,8 +2951,18 @@ impl Experiment {
         // The refuge takes each island's best. A second change while it lasts
         // keeps the older champions where the islands have none left.
         let mut champions = std::mem::take(&mut self.refuge.champions);
-        champions.resize_with(island_count(), Vec::new);
-        for (index, island) in self.islands.iter_mut().take(island_count()).enumerate() {
+        champions.resize_with(qd::MAIN_ISLANDS, Vec::new);
+        // The wild islands live in worlds of their own, which the player's
+        // change leaves alone: they keep their archives and nurseries.
+        let wild: Vec<(usize, QdArchive)> = if self.islands.len() == arena_count() {
+            (0..arena_count())
+                .filter(|&a| qd::is_wild(a % island_count()))
+                .map(|a| (a, std::mem::take(&mut self.islands[a])))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for (index, island) in self.islands.iter_mut().take(qd::MAIN_ISLANDS).enumerate() {
             let mut best: Vec<&qd::Elite> = island.entries.iter().collect();
             best.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
             if !best.is_empty() {
@@ -2947,11 +2981,14 @@ impl Experiment {
         // Fossils are old-world elites: undoing a meteor must not bring them
         // back into the new world's archives.
         self.fossils.clear();
-        self.islands = if refined.contains(&true) {
+        self.islands = if refined.contains(&true) || !wild.is_empty() {
             new_islands(&refined)
         } else {
             Vec::new()
         };
+        for (a, archive) in wild {
+            self.islands[a] = archive;
+        }
         self.island_progress.clear();
         self.graduations.clear();
         self.reshaped_graduations.clear();
@@ -3761,7 +3798,7 @@ impl SmallLoad {
         // continues the search the uninterrupted one would have run.
         e.ring = self.ring;
         ensure!(
-            e.island_progress.len() <= 64
+            e.island_progress.len() <= arena_count()
                 && (e.island_progress.is_empty() || e.island_progress.len() == e.islands.len())
                 && e.island_progress.iter().all(|&(fitness, generation)| {
                     (fitness.is_finite() || fitness == f32::NEG_INFINITY)

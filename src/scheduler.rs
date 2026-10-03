@@ -367,7 +367,7 @@ impl Scheduler {
     pub fn retarget(&mut self, config: &Arc<Config>) -> Vec<u64> {
         let mut tags = Vec::new();
         for work in &mut self.work {
-            if work.config.physics_differs(config) {
+            if work.tag & crate::ring::WILD == 0 && work.config.physics_differs(config) {
                 work.config = Arc::clone(config);
                 tags.push(work.tag);
             }

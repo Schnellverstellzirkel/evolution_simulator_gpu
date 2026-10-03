@@ -183,7 +183,7 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 57: the islands have 3 shapes by 3 sizes of body class (2 by 2 before), and
 //     a save is compressed with long-range matching. A save of version 56
 //     loads by moving each elite to its cell in the new layout.
-pub const VERSION: u32 = 57;
+pub const VERSION: u32 = 58;
 /// The oldest save version that still loads. Its archives are re-binned, and
 /// its elites keep the scores they measured.
 pub const OLDEST_LOADABLE: u32 = 53;
@@ -200,9 +200,43 @@ const MORPHOLOGY_NICHE_MARKER: u8 = u8::MAX;
 const OPTIMIZER_NICHE_MARKER: u8 = 254;
 /// The niche key of an island's optimizers for one gait cadence band;
 /// together with the body plan it identifies one optimizer.
+/// The main islands: the isolated islands and the hub. They run in the
+/// player's world.
+pub const MAIN_ISLANDS: usize = 5;
+/// Wild islands after the main ones. Each runs in its own fixed world, a
+/// random mix of environment effects drawn from the seed
+/// (`environment::wild_world`), and sends copies of its best to the hub.
+pub const WILD_ISLANDS: usize = 100;
+/// Of every `SLOT_LANES` slots, `MAIN_LANES` go to the main islands in turn
+/// and the rest to the wild islands in turn.
+const SLOT_LANES: usize = 10;
+const MAIN_LANES: usize = 8;
+/// The island of population slot `slot` among `islands`, and the island's
+/// own round of slots that slot is in (which sets its kind of arena).
+/// With the wild islands, the main islands take 80% of the slots and the
+/// wild islands share the rest.
+fn home(slot: usize, islands: usize) -> (usize, usize) {
+    if islands != MAIN_ISLANDS + WILD_ISLANDS {
+        let islands = islands.max(1);
+        return (slot % islands, slot / islands);
+    }
+    let lane = slot % SLOT_LANES;
+    let cycle = slot / SLOT_LANES;
+    if lane < MAIN_LANES {
+        let k = cycle * MAIN_LANES + lane;
+        (k % MAIN_ISLANDS, k / MAIN_ISLANDS)
+    } else {
+        let k = cycle * (SLOT_LANES - MAIN_LANES) + lane - MAIN_LANES;
+        (MAIN_ISLANDS + k % WILD_ISLANDS, k / WILD_ISLANDS)
+    }
+}
 /// The island that population slot `slot` breeds for, among `islands`.
 pub fn island_of_slot(slot: usize, islands: usize) -> usize {
-    slot % islands.max(1)
+    home(slot, islands).0
+}
+/// Whether `island` is a wild island with a world of its own.
+pub fn is_wild(island: usize) -> bool {
+    island >= MAIN_ISLANDS
 }
 /// Each island's slots run in cycles of `SLOT_CYCLE` rounds. In every cycle
 /// four rounds belong to the island's nursery of new random bodies and two to
@@ -232,7 +266,7 @@ pub const ARENA_KINDS: usize = 3;
 /// The kind of archive that population slot `slot` breeds for, among
 /// `islands` islands.
 pub fn arena_kind_of_slot(slot: usize, islands: usize) -> Arena {
-    match (slot / islands.max(1)) % SLOT_CYCLE {
+    match home(slot, islands).1 % SLOT_CYCLE {
         0 | 3 | 10 | 13 => Arena::Nursery,
         5 | 15 => Arena::Reshaped,
         _ => Arena::Island,
@@ -250,7 +284,7 @@ pub fn arena_of_slot(slot: usize, arenas: usize) -> usize {
         return 0;
     }
     let islands = arenas / ARENA_KINDS;
-    let island = slot % islands;
+    let island = island_of_slot(slot, islands);
     match arena_kind_of_slot(slot, islands) {
         Arena::Island => island,
         Arena::Nursery => islands + island,
