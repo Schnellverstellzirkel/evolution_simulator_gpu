@@ -1936,8 +1936,9 @@ fn structural_mutation_from(
     // An operator that does not fit this body leaves it unchanged; try
     // another, a few times.
     // Each shared group takes one slot, drawn after the others.
-    let groups: Bounded<&Vec<usize>, 2> = [&extra.shared, &extra.controller]
+    let groups: Bounded<&Vec<usize>, 16> = [&extra.shared, &extra.controller]
         .into_iter()
+        .chain(&extra.gait)
         .filter(|group| !group.is_empty())
         .collect();
     let slots = classic + extra.single.len() + groups.len();

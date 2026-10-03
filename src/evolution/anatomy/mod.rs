@@ -24,6 +24,15 @@ use crate::config::Config;
 mod compound;
 mod controller;
 mod extra;
+mod gait_legs;
+mod gait_spine;
+mod gait_phase;
+mod gait_muscles;
+mod gait_symmetry;
+mod gait_reflex;
+mod gait_posture;
+mod gait_plans;
+
 mod junctions;
 mod legs;
 mod limbs;
@@ -47,8 +56,32 @@ pub(super) struct Context<'a> {
 
 pub(super) type Operator = fn(&mut Creature, &Config, &mut Rng, &Context) -> bool;
 
-/// Every operator, by name.
-pub(super) const OPERATORS: &[(&str, Operator)] = &[
+/// Every operator, by name: the ones below, then those of the gait files.
+pub(super) static OPERATORS: std::sync::LazyLock<Vec<(&'static str, Operator)>> =
+    std::sync::LazyLock::new(|| {
+        BASE_OPERATORS
+            .iter()
+            .chain(GAIT_FILES.iter().flat_map(|file| file.iter()))
+            .copied()
+            .collect()
+    });
+
+/// The gait operators, one list per file. Each file's operators share one
+/// pick slot, so a hundred of them do not crowd out the others, and every one
+/// is a compound operator (a whole change, no parameter noise after it).
+const GAIT_FILES: &[&[(&str, Operator)]] = &[
+    gait_legs::OPS,
+    gait_spine::OPS,
+    gait_phase::OPS,
+    gait_muscles::OPS,
+    gait_symmetry::OPS,
+    gait_reflex::OPS,
+    gait_posture::OPS,
+    gait_plans::OPS,
+];
+
+/// The operators before the gait files.
+const BASE_OPERATORS: &[(&str, Operator)] = &[
     ("copy_limb", limbs::copy_limb),
     ("grow_actuated_tip", limbs::grow_actuated_tip),
     ("split_bone_actuated", limbs::split_bone_actuated),
@@ -189,6 +222,13 @@ const COMPOUND: &[&str] = &[
     "tuck_leg_under",
 ];
 
+/// The gait file that holds operator `name`, if any.
+fn gait_file(name: &str) -> Option<usize> {
+    GAIT_FILES
+        .iter()
+        .position(|file| file.iter().any(|(n, _)| *n == name))
+}
+
 /// Whether operator `index` of `OPERATORS` is a compound one.
 pub(super) fn is_compound(index: usize) -> bool {
     enabled().compound.get(index).copied().unwrap_or(false)
@@ -204,6 +244,8 @@ pub(super) struct Enabled {
     pub shared: Vec<usize>,
     /// Operators that share the second pick slot (`CONTROLLER_SLOT`).
     pub controller: Vec<usize>,
+    /// The operators of each gait file, one pick slot per file.
+    pub gait: Vec<Vec<usize>>,
 }
 
 /// The operators, split by pick slot.
@@ -216,15 +258,18 @@ fn split(indices: Vec<usize>) -> Enabled {
     let mut enabled = Enabled {
         compound: OPERATORS
             .iter()
-            .map(|(name, _)| COMPOUND.contains(name))
+            .map(|(name, _)| COMPOUND.contains(name) || gait_file(name).is_some())
             .collect(),
         single: Vec::new(),
         shared: Vec::new(),
         controller: Vec::new(),
+        gait: vec![Vec::new(); GAIT_FILES.len()],
     };
     for i in indices {
         let name = OPERATORS[i].0;
-        if SHARED_SLOT.contains(&name) {
+        if let Some(file) = gait_file(name) {
+            enabled.gait[file].push(i);
+        } else if SHARED_SLOT.contains(&name) {
             enabled.shared.push(i);
         } else if CONTROLLER_SLOT.contains(&name) {
             enabled.controller.push(i);
@@ -582,7 +627,10 @@ mod tests {
         assert_eq!(on.shared.len(), SHARED_SLOT.len());
         assert_eq!(on.controller.len(), CONTROLLER_SLOT.len());
         assert_eq!(
-            on.single.len() + on.shared.len() + on.controller.len(),
+            on.single.len()
+                + on.shared.len()
+                + on.controller.len()
+                + on.gait.iter().map(Vec::len).sum::<usize>(),
             OPERATORS.len()
         );
         assert!(on.single.windows(2).all(|w| w[0] < w[1]), "table order");
