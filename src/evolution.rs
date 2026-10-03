@@ -898,7 +898,7 @@ fn align_nodes_with_bones(c: &mut Creature) {
         c.nodes[b].y = c.nodes[a].y + direction[1] * bone.rest_length;
     }
 }
-fn bone_point(bone: Bone, nodes: &[NodeGene], t: f32) -> [f32; 2] {
+pub(crate) fn bone_point(bone: Bone, nodes: &[NodeGene], t: f32) -> [f32; 2] {
     let a = nodes[bone.a as usize];
     let b = nodes[bone.b as usize];
     [a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t]

@@ -230,9 +230,30 @@ impl Model {
                 subtree[p] += subtree[j];
             }
         }
+        // Muscles on the same two bones and on the same side of the joint
+        // share one strength: copies stacked on one joint (six on one pair
+        // made a limb snap back and forth with six muscles' force) add timing,
+        // not force. A flexor and an extensor sit on opposite sides and keep
+        // a strength each.
+        let group = |gene: &crate::evolution::Muscle| {
+            let (a, b) = (gene.bone_a as usize, gene.bone_b as usize);
+            let (ba, bb) = (c.bones[a], c.bones[b]);
+            let pa = crate::evolution::bone_point(ba, &c.nodes, gene.anchor_a);
+            let pb = crate::evolution::bone_point(bb, &c.nodes, gene.anchor_b);
+            let shared = [ba.a, ba.b].into_iter().find(|n| *n == bb.a || *n == bb.b);
+            let j = match shared {
+                Some(n) => [c.nodes[n as usize].x, c.nodes[n as usize].y],
+                None => [0.5 * (pa[0] + pb[0]), 0.5 * (pa[1] + pb[1]) - 1.0],
+            };
+            let cross = (pa[0] - j[0]) * (pb[1] - j[1]) - (pa[1] - j[1]) * (pb[0] - j[0]);
+            (a.min(b), a.max(b), cross >= 0.0)
+        };
+        let groups: Vec<(usize, usize, bool)> = c.muscles.iter().map(group).collect();
         for (m, gene) in muscles.iter_mut().zip(&c.muscles) {
             let driven = subtree[m.bone_a].min(subtree[m.bone_b]);
-            m.strength = (DRIVEN_ACCELERATION * driven / limits.muscle_force).min(1.0);
+            let key = group(gene);
+            let sharing = groups.iter().filter(|&&g| g == key).count().max(1) as f32;
+            m.strength = (DRIVEN_ACCELERATION * driven / limits.muscle_force).min(1.0) / sharing;
             // The tendon reaches the muscle's force cap when stretched by
             // `TENDON_STRETCH` of its longest length (at the stiffest gene).
             m.tendon_k = gene.tendon * limits.muscle_force * m.strength
