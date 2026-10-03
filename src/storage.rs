@@ -431,6 +431,9 @@ pub struct Experiment {
     /// in the new world, each queued for its own island. Breeding hands them
     /// out before new offspring.
     pub reseed: Reseed,
+    /// Each island's champions from before the last environment change, and
+    /// the generation until which they keep breeding. Not saved.
+    pub refuge: Refuge,
     /// Elites a meteor wiped out, with their island (None for the global
     /// archive), kept so the strike can be undone. Not saved.
     pub fossils: Vec<(Option<usize>, qd::Elite)>,
@@ -508,6 +511,56 @@ impl Reseed {
     /// Whether every queue belongs to an existing island.
     fn fits(&self, islands: usize) -> bool {
         self.queues.len() <= islands
+    }
+}
+
+/// The champions of each island from before an environment change. A world
+/// change can kill every old design at once when the first re-test finds
+/// them slow, and random bodies take the islands. For `REFUGE_GENERATIONS`
+/// generations a share of each island's slots breed children of its old
+/// champions, so an old design gets time to retune its gait to the new world
+/// (a refugium, as in island models with migration from a reservoir).
+#[derive(Clone, Debug, Default)]
+pub struct Refuge {
+    champions: Vec<Vec<Creature>>,
+    until: u32,
+}
+/// Generations the old champions keep breeding after a world change.
+const REFUGE_GENERATIONS: u32 = 5;
+/// The best elites of each island that go into the refuge.
+const REFUGE_CHAMPIONS: usize = 64;
+/// Share of an island's own slots that breed from its refuge.
+const REFUGE_SHARE: f32 = 0.15;
+
+impl Refuge {
+    /// A child of one of `island`'s champions for `slot`, while the refuge
+    /// lasts and the draw picks this slot.
+    fn child(
+        &self,
+        island: usize,
+        slot: usize,
+        cfg: &Config,
+        generation: u32,
+        round: u64,
+    ) -> Option<Creature> {
+        if generation >= self.until {
+            return None;
+        }
+        let champions = self.champions.get(island).filter(|c| !c.is_empty())?;
+        let mut rng = evolution::Rng::stream(cfg.seed ^ 0x7265_6675_6765, generation, round, slot);
+        if rng.unit() >= REFUGE_SHARE {
+            return None;
+        }
+        let parent = champions[rng.index(champions.len())].clone();
+        // Half the children keep the old body and retune the gait, the rest
+        // also take a structural mutation.
+        let scale = if rng.unit() < 0.1 { 2.0 } else { 0.75 };
+        let mut child = evolution::mutate_locally(parent, cfg, &mut rng, scale);
+        if rng.unit() < 0.5 {
+            evolution::structural_mutation_any(&mut child, cfg, &mut rng);
+        }
+        child.id = evolution::bred_id(round, slot);
+        Some(child)
     }
 }
 
@@ -725,6 +778,7 @@ impl Experiment {
             reshaped_graduations: Vec::new(),
             last_migration: None,
             reseed: Reseed::default(),
+            refuge: Refuge::default(),
             fossils: Vec::new(),
             ring: RingShape::default(),
             blocks: Vec::new(),
@@ -2541,6 +2595,26 @@ impl Experiment {
                 }
             }
         }
+        // After a world change the old champions keep breeding in their
+        // island's own slots for a few generations.
+        if self.generation < self.refuge.until {
+            let islands = island_count();
+            let reseeded: std::collections::HashSet<usize> = lead.iter().map(|&(k, _)| k).collect();
+            for (k, &slot) in slots.iter().enumerate() {
+                if reseeded.contains(&k) || qd::is_nursery_slot(slot, islands) {
+                    continue;
+                }
+                let island = qd::island_of_slot(slot, islands);
+                if let Some(child) =
+                    self.refuge
+                        .child(island, slot, &cfg, self.generation, self.breed_round)
+                {
+                    lead.push((k, child));
+                    births[k] = Birth::RANDOM;
+                }
+            }
+            lead.sort_by_key(|&(k, _)| k);
+        }
         let mut taken = vec![false; count];
         for &(k, _) in &lead {
             taken[k] = true;
@@ -2850,7 +2924,20 @@ impl Experiment {
         self.reseed.clear();
         // The nurseries start over; only the islands' creatures are re-tested.
         let mut refined = Vec::new();
+        // The refuge takes each island's best. A second change while it lasts
+        // keeps the older champions where the islands have none left.
+        let mut champions = std::mem::take(&mut self.refuge.champions);
+        champions.resize_with(island_count(), Vec::new);
         for (index, island) in self.islands.iter_mut().take(island_count()).enumerate() {
+            let mut best: Vec<&qd::Elite> = island.entries.iter().collect();
+            best.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
+            if !best.is_empty() {
+                champions[index] = best
+                    .iter()
+                    .take(REFUGE_CHAMPIONS)
+                    .map(|e| e.creature.clone())
+                    .collect();
+            }
             refined.push(island.refined());
             for elite in std::mem::take(&mut island.entries) {
                 self.reseed.push(index, elite.creature);
@@ -2879,6 +2966,10 @@ impl Experiment {
         self.clade_rarity = (u32::MAX, Vec::new());
         self.rungs.clear();
         self.config.rungs = None;
+        self.refuge = Refuge {
+            champions,
+            until: self.generation + REFUGE_GENERATIONS,
+        };
     }
     /// Starts the generation dump (`EVOLUTION_DUMP_GENERATION`) at the
     /// boundary it names: every island elite is queued for a re-run, the

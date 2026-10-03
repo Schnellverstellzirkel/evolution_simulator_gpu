@@ -1928,9 +1928,28 @@ fn structural_mutation_from(
     rng: &mut Rng,
     archive: &QdArchive,
 ) -> Option<u8> {
+    structural_mutation_among(creature, cfg, rng, &archive.entries)
+}
+
+/// A structural mutation with no archive at hand (the refuge of old
+/// champions after a world change), repaired as breeding does. Returns
+/// whether the body changed.
+pub fn structural_mutation_any(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
+    let changed = structural_mutation_among(creature, cfg, rng, &[]).is_some();
+    if changed {
+        repair(creature, cfg, rng);
+    }
+    changed
+}
+
+fn structural_mutation_among(
+    creature: &mut Creature,
+    cfg: &Config,
+    rng: &mut Rng,
+    donors: &[crate::qd::Elite],
+) -> Option<u8> {
     let extra = anatomy::enabled();
-    let donor = (!archive.entries.is_empty())
-        .then(|| &archive.entries[rng.index(archive.entries.len())].creature);
+    let donor = (!donors.is_empty()).then(|| &donors[rng.index(donors.len())].creature);
     let cx = anatomy::Context { donor };
     let classic = CLASSIC_COUNT;
     // An operator that does not fit this body leaves it unchanged; try
