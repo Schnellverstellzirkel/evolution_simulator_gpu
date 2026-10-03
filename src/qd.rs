@@ -446,6 +446,36 @@ pub struct QdArchive {
     /// Cells whose elite changed since the scores were last computed.
     #[serde(skip)]
     changed_cells: Vec<Niche>,
+    /// What parent choice reads besides distance, refreshed with the scores.
+    #[serde(skip)]
+    traits: ParentTraits,
+}
+
+/// Per elite, in entry order: how far its body is from the others (body
+/// novelty), refreshed once a generation.
+#[derive(Clone, Debug, Default)]
+struct ParentTraits {
+    body_novelty: Vec<f32>,
+}
+
+/// A short summary of a body for body novelty: node, bone and muscle counts,
+/// leaf count and total bone length.
+fn body_embedding(c: &Creature) -> [f32; 5] {
+    let mut has_child = [false; crate::evolution::MAX_NODES];
+    for b in c.bones.iter() {
+        if let Some(x) = has_child.get_mut(b.a as usize) {
+            *x = true;
+        }
+    }
+    let leaves = (1..c.nodes.len()).filter(|&n| !has_child[n]).count();
+    let length: f32 = c.bones.iter().map(|b| b.rest_length).sum();
+    [
+        c.nodes.len() as f32 / 4.0,
+        c.bones.len() as f32 / 4.0,
+        c.muscles.len() as f32 / 8.0,
+        leaves as f32 / 2.0,
+        length / 2.0,
+    ]
 }
 
 /// What the scores read of an elite: its behavior vector and its distance,
@@ -460,6 +490,9 @@ struct ScoreRow {
 struct BehaviorScores {
     novelty: Vec<f32>,
     local_competition: Vec<f32>,
+    /// How open the elite's surroundings are: 1 / (1 + filled neighbor cells
+    /// one step away), so a frontier elite scores high.
+    frontier: Vec<f32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -979,7 +1012,15 @@ impl QdArchive {
                 .copied()
                 .unwrap_or(0.0);
             let visits = self.entries[index].visits;
-            let score = novelty + 0.08 / (1.0 + visits as f32).sqrt();
+            // Frontier parents first: an elite with empty cells around it
+            // can open them (Lehman and Stanley, 2011).
+            let frontier = self
+                .behavior_scores
+                .frontier
+                .get(index)
+                .copied()
+                .unwrap_or(0.0);
+            let score = novelty + 0.08 / (1.0 + visits as f32).sqrt() + 0.05 * frontier;
             if score > best_score {
                 selected = Some(index);
                 best_score = score;
@@ -1108,11 +1149,12 @@ impl QdArchive {
     /// Novelty and local competition of the behavior elite at `index`, from
     /// the elites in the cells around it. `rows` holds every elite's
     /// behavior vector and distance.
-    fn behavior_score_of(&self, index: usize, rows: &[ScoreRow]) -> (usize, f32, f32) {
+    fn behavior_score_of(&self, index: usize, rows: &[ScoreRow]) -> (usize, f32, f32, f32) {
         // The nearest `LOCAL_NEIGHBORS` neighbors, closest first, as
         // (distance, fitness), and how many neighbors there were.
         let mut nearest = [(f32::INFINITY, 0.0f32); LOCAL_NEIGHBORS];
         let mut found = 0usize;
+        let mut near = 0usize;
         let own = &rows[index];
         for radius in 1..=2 {
             nearest.fill((f32::INFINITY, 0.0));
@@ -1130,12 +1172,16 @@ impl QdArchive {
                     nearest[at] = (distance, other.fitness);
                 }
             });
+            if radius == 1 {
+                near = found;
+            }
             if found >= LOCAL_NEIGHBORS {
                 break;
             }
         }
+        let frontier = 1.0 / (1.0 + near as f32);
         if found == 0 {
-            return (index, 1.0, 1.0);
+            return (index, 1.0, 1.0, frontier);
         }
         let nearest = &nearest[..LOCAL_NEIGHBORS.min(found)];
         let novelty = nearest.iter().map(|(d, _)| *d).sum::<f32>() / nearest.len() as f32;
@@ -1148,7 +1194,7 @@ impl QdArchive {
             })
             .sum::<f32>()
             / nearest.len() as f32;
-        (index, novelty, local)
+        (index, novelty, local, frontier)
     }
     /// Records that the elite of `niche` changed. While the cached scores
     /// still cover every elite they stay, and the next refresh recomputes
@@ -1158,6 +1204,7 @@ impl QdArchive {
             let len = self.entries.len();
             self.behavior_scores.novelty.resize(len, 0.0);
             self.behavior_scores.local_competition.resize(len, 0.5);
+            self.behavior_scores.frontier.resize(len, 0.0);
             self.changed_cells.push(niche);
         } else {
             self.behavior_scores = BehaviorScores::default();
@@ -1175,6 +1222,7 @@ impl QdArchive {
         let changed = std::mem::take(&mut self.changed_cells);
         if self.behavior_indices.is_empty() {
             self.behavior_scores = BehaviorScores::default();
+            self.traits = ParentTraits::default();
             return;
         }
         // Only elites within two cells of a changed cell can see a difference.
@@ -1203,26 +1251,71 @@ impl QdArchive {
                 fitness: elite.fitness,
             })
             .collect();
-        let scores: Vec<(usize, f32, f32)> = indices
+        let scores: Vec<(usize, f32, f32, f32)> = indices
             .par_iter()
             .map(|&index| self.behavior_score_of(index, &rows))
             .collect();
-        let (mut novelty, mut local_competition) = if partial {
+        let len = self.entries.len();
+        let (mut novelty, mut local_competition, mut frontier) = if partial {
+            let mut f = std::mem::take(&mut self.behavior_scores.frontier);
+            f.resize(len, 0.0);
             (
                 std::mem::take(&mut self.behavior_scores.novelty),
                 std::mem::take(&mut self.behavior_scores.local_competition),
+                f,
             )
         } else {
-            (vec![0.0; self.entries.len()], vec![0.5; self.entries.len()])
+            (vec![0.0; len], vec![0.5; len], vec![0.0; len])
         };
-        for (index, n, l) in scores {
+        for (index, n, l, f) in scores {
             novelty[index] = n;
             local_competition[index] = l;
+            frontier[index] = f;
         }
         self.behavior_scores = BehaviorScores {
             novelty,
             local_competition,
+            frontier,
         };
+    }
+    /// Recomputes the body novelty: the mean distance of a body summary to
+    /// 32 other elites spread evenly over the archive.
+    pub fn refresh_traits(&mut self) {
+        let len = self.entries.len();
+        let behavior = &self.behavior_indices;
+        let bodies: Vec<[f32; 5]> = behavior
+            .iter()
+            .map(|&i| body_embedding(&self.entries[i].creature))
+            .collect();
+        let samples = bodies.len().min(32);
+        let mut body_novelty = vec![0.0; len];
+        for (k, &i) in behavior.iter().enumerate() {
+            let mut sum = 0.0;
+            for s in 0..samples {
+                let other = &bodies[(k + 1 + s * bodies.len() / samples.max(1)) % bodies.len()];
+                sum += bodies[k]
+                    .iter()
+                    .zip(other)
+                    .map(|(a, b)| (a - b) * (a - b))
+                    .sum::<f32>()
+                    .sqrt();
+            }
+            body_novelty[i] = sum / samples.max(1) as f32;
+        }
+        self.traits = ParentTraits { body_novelty };
+    }
+    /// A parent far from the other bodies in body summary (body novelty, as
+    /// novelty search over morphology, Lehman and Stanley 2011): the best of
+    /// 8 behavior elites drawn at random.
+    pub fn sample_body_novel(&self, rng: &mut Rng) -> Option<usize> {
+        let behavior = &self.behavior_indices;
+        if behavior.is_empty() || self.traits.body_novelty.is_empty() {
+            return None;
+        }
+        let novelty = |i: usize| self.traits.body_novelty.get(i).copied().unwrap_or(0.0);
+        (0..8)
+            .map(|_| behavior[rng.index(behavior.len())])
+            .max_by(|&a, &b| novelty(a).total_cmp(&novelty(b)))
     }
     pub fn visit(&mut self, index: usize) {
         self.entries[index].visits += 1;

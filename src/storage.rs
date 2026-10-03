@@ -567,6 +567,27 @@ impl Refuge {
     }
 }
 
+/// The emitter mix of `island`: each isolated island leans a few points
+/// toward one emitter, so the islands develop different habits (Whitley,
+/// 1999). The hub, the wild islands and the nurseries keep the mix.
+fn island_weights(weights: &[f64; qd::EMITTER_COUNT], island: usize) -> [f64; qd::EMITTER_COUNT] {
+    // (from, to): five points move from one emitter to another.
+    let lean = match island {
+        0 => Some((Emitter::Structural, Emitter::Cma)),
+        1 => Some((Emitter::Novelty, Emitter::Structural)),
+        2 => Some((Emitter::Cma, Emitter::Novelty)),
+        3 => Some((Emitter::Cma, Emitter::Structural)),
+        _ => None,
+    };
+    let mut out = *weights;
+    if let Some((from, to)) = lean {
+        let moved = out[from.index()].min(0.05);
+        out[from.index()] -= moved;
+        out[to.index()] += moved;
+    }
+    out
+}
+
 /// What one island's nursery graduated this session.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Graduation {
@@ -2310,7 +2331,7 @@ impl Experiment {
                 {
                     Emitter::Restart
                 } else {
-                    qd::choose_emitter(&mut rng, &weights)
+                    qd::choose_emitter(&mut rng, &island_weights(&weights, island))
                 };
                 let emitter_stale = self.emitter_stats[emitter.index()].stale();
                 let avoid = None;
@@ -2334,6 +2355,12 @@ impl Experiment {
                         let rarity = rarities.get(island).unwrap_or(&no_rarity);
                         archive.sample_local_competitive(&mut rng, avoid, rarity)
                     })
+                } else if emitter == Emitter::Novelty && rng.unit() < 0.5 {
+                    // Half the novelty parents are far from the others in
+                    // body, not in behavior.
+                    archive
+                        .sample_body_novel(&mut rng)
+                        .or_else(|| archive.sample_novel(&mut rng, avoid))
                 } else if emitter == Emitter::Novelty || emitter_stale {
                     archive.sample_novel(&mut rng, avoid)
                 } else if emitter == Emitter::Cma
@@ -2762,6 +2789,10 @@ impl Experiment {
         self.push_archive_stats(failed);
         self.prune_lineage();
         self.generation += 1;
+        // Body novelty, once a generation.
+        self.islands
+            .par_iter_mut()
+            .for_each(QdArchive::refresh_traits);
         self.refine_archives();
         self.graduate_nurseries();
         self.refresh_reshaped_scores();

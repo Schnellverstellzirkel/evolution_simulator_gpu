@@ -1308,6 +1308,7 @@ pub struct ChildTrace {
 #[allow(clippy::too_many_arguments)]
 fn offspring(
     archive: &QdArchive,
+    variation: Variation,
     cma_emitters: &[CmaEmitter],
     plan: CandidatePlan,
     cfg: &Config,
@@ -1337,7 +1338,13 @@ fn offspring(
         Emitter::Structural => {
             mated(archive, plan, cfg, rng, child);
             trace.structural = true;
-            trace.operator = structural_mutation_from(child, cfg, rng, archive);
+            trace.operator = structural_mutation_among(
+                child,
+                cfg,
+                rng,
+                &variation.donors.entries,
+                variation.bias,
+            );
             // A compound operator's change is whole: noise on every gene
             // after it halves how often its child enters the archive
             // (`examples/mutation_audit.rs`).
@@ -1357,7 +1364,13 @@ fn offspring(
             mutate_genes(child, cfg, rng, scale);
             if rng.unit() < 0.18 {
                 trace.structural = true;
-                trace.operator = structural_mutation_from(child, cfg, rng, archive);
+                trace.operator = structural_mutation_among(
+                    child,
+                    cfg,
+                    rng,
+                    &variation.donors.entries,
+                    variation.bias,
+                );
             }
         }
     }
@@ -1385,8 +1398,21 @@ pub fn breed_child(
     } else {
         qd::arena_of_slot(slot, archive.len())
     };
+    let island = qd::island_of_slot(slot, archive.len() / qd::ARENA_KINDS);
+    // The hub grafts limbs from the isolated islands too: genes reach the hub
+    // only, so the isolated islands stay isolated (Whitley et al., 1999).
+    let donors = if island == qd::MAIN_ISLANDS - 1 && archive.len() > qd::MAIN_ISLANDS {
+        &archive[slot / archive.len().max(1) % (qd::MAIN_ISLANDS - 1)]
+    } else {
+        &archive[source]
+    };
+    let variation = Variation {
+        donors,
+        bias: island_bias(cfg.seed, island),
+    };
     offspring(
         &archive[source],
+        variation,
         cma_emitters,
         plan,
         cfg,
@@ -1395,6 +1421,21 @@ pub fn breed_child(
         GROWTH_STEP,
         child,
     )
+}
+
+/// Where a structural mutation takes donor limbs from, and the island's
+/// operator bias (`island_bias`).
+#[derive(Clone, Copy)]
+struct Variation<'a> {
+    donors: &'a QdArchive,
+    bias: u64,
+}
+
+/// Each island favours its own 8 operator pick slots, drawn twice as often,
+/// like species with different mutation biases (Cantu-Paz, 2000). Every
+/// operator stays in every island.
+fn island_bias(seed: u64, island: usize) -> u64 {
+    (seed ^ 0x6269_6173).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (island as u64 + 1)
 }
 
 /// The plan's parent, crossed with its mate when it has one, into `child`.
@@ -1934,20 +1975,21 @@ pub fn grow_for_benchmark(creature: &mut Creature, cfg: &Config, seed: u64, targ
 /// elite of the archive).
 /// Returns the operator that changed the body, as an index into
 /// `structural_operator_names`, or `None` when none fit.
+#[cfg(test)]
 fn structural_mutation_from(
     creature: &mut Creature,
     cfg: &Config,
     rng: &mut Rng,
     archive: &QdArchive,
 ) -> Option<u8> {
-    structural_mutation_among(creature, cfg, rng, &archive.entries)
+    structural_mutation_among(creature, cfg, rng, &archive.entries, 0)
 }
 
 /// A structural mutation with no archive at hand (the refuge of old
 /// champions after a world change), repaired as breeding does. Returns
 /// whether the body changed.
 pub fn structural_mutation_any(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
-    let changed = structural_mutation_among(creature, cfg, rng, &[]).is_some();
+    let changed = structural_mutation_among(creature, cfg, rng, &[], 0).is_some();
     if changed {
         repair(creature, cfg, rng);
     }
@@ -1959,9 +2001,19 @@ fn structural_mutation_among(
     cfg: &Config,
     rng: &mut Rng,
     donors: &[crate::qd::Elite],
+    bias: u64,
 ) -> Option<u8> {
     let extra = anatomy::enabled();
-    let donor = (!donors.is_empty()).then(|| &donors[rng.index(donors.len())].creature);
+    // The donor is the most different body of 4 drawn (Lehman and Stanley,
+    // 2011): a graft then brings the most new structure.
+    let size = |c: &Creature| c.nodes.len() as i32 * 4 + c.muscles.len() as i32;
+    let own = size(creature);
+    let donor = (!donors.is_empty()).then(|| {
+        (0..4)
+            .map(|_| &donors[rng.index(donors.len())].creature)
+            .max_by_key(|d| (size(d) - own).abs())
+            .expect("four draws")
+    });
     let cx = anatomy::Context { donor };
     let classic = CLASSIC_COUNT;
     // An operator that does not fit this body leaves it unchanged; try
@@ -1974,7 +2026,12 @@ fn structural_mutation_among(
         .collect();
     let slots = classic + extra.single.len() + groups.len();
     for _ in 0..4 {
-        let pick = rng.index(slots);
+        let pick = if bias != 0 && rng.unit() < 0.25 {
+            let k = rng.index(8) as u64;
+            (bias.wrapping_mul(k * 2 + 1).rotate_left(17) % slots as u64) as usize
+        } else {
+            rng.index(slots)
+        };
         let operator = if pick < classic {
             pick
         } else if let Some(&index) = extra.single.get(pick - classic) {

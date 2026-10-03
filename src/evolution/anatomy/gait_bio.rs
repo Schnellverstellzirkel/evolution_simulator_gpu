@@ -55,7 +55,9 @@ fn organ_bones(c: &Creature) -> BoneIds {
 fn pick_leg(c: &Creature, rng: &mut Rng, bones: usize, driven: bool) -> Option<BoneIds> {
     let legs = leaf_limbs(c);
     let fit: BoneIds = (0..legs.len())
-        .filter(|&i| legs[i].len() >= bones && (!driven || !muscles_on(c, &legs[i], false).is_empty()))
+        .filter(|&i| {
+            legs[i].len() >= bones && (!driven || !muscles_on(c, &legs[i], false).is_empty())
+        })
         .collect();
     pick(&fit, rng).map(|i| legs[i])
 }
