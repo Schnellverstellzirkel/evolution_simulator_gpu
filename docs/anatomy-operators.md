@@ -14,6 +14,7 @@ Every operator keeps the body limits and never touches the head or the neck.
 | controller (`controller.rs`) | limb stroke scale; limb posture shift; taper limb strength; copy limb rhythm; retune a muscle pair; release touchdown; snap limb phases; put a limb on another clock ratio; lock a limb back on the base clock; reflexes on a muscle, on all feet, and a shifted reflex reset. These share one pick slot. Starting the gait at another point of its cycle has its own slot |
 | compound (`compound.rs`) | coherent changes that touch several parts of a body at once, one line each below. Each has its own pick slot |
 | legs (`legs.rs`) | four compound operators that make mammal-like legs cheap to reach, described below. Each has its own pick slot and its child gets no parameter noise |
+| gait (`gait_*.rs`) | 106 compound operators in eight files that build gaits, listed below. Each file's operators share one pick slot |
 
 A limb may run on its own clock at a ratio of the base clock (1/2, 2/3, 1, 3/2 or 2), so the whole gait still repeats.
 
@@ -43,6 +44,19 @@ These four are compound operators in `legs.rs`. They build the parts of a mammal
 - `mirror_leg_fore_aft`: a leg of up to three bones is copied to the node nearest the mirror image of its hip about the middle of the trunk, translated or reflected, in the phase of a four-legged gait (trot: half a cycle, bound: none, gallop: a fifth of a cycle either way).
 - `spread_leg_attachment`: a leg's hip moves along the trunk to the nearest node that lies farther from the middle of the body. The leg keeps its shape and muscles.
 - `tuck_leg_under`: a leg turns so its first bone points down, within a small lean, which puts its foot under its hip. Only legs 0.1 to 1.3 rad off straight down turn.
+
+## Gait operators
+
+These 106 compound operators were added on 2026-10-03 to make interesting, efficient gaits likely by mutation. They live in eight files, and each file's operators share one pick slot. A leg is a leaf limb (`rhythm::leaf_limbs`), the trunk is the nodes in no leg and a foot ends a leg of at least two bones; the head can sit anywhere. None has been audited or measured yet.
+
+- `gait_legs.rs` (knees, ankles, feet and leg proportions): `lengthen_lower_leg`, `add_ankle_joint`, `bend_stick_leg_at_knee`, `lock_knee_extension`, `fold_leg_zigzag`, `straighten_leg_column`, `flatten_foot_sole`, `raise_heel_digitigrade`, `tendon_the_ankle`, `grow_forward_foot`, `set_leg_proportions`, `harden_or_pad_foot`, `lag_knee_behind_hip`.
+- `gait_spine.rs` (a flexing back, tails and necks that balance a gait): `spine_flex_muscle`, `spine_lock_to_legs`, `split_spine_bone`, `grow_counterweight_tail`, `weight_tail_tip`, `plant_tail_prop`, `tail_swing_against_legs`, `neck_bob_muscle`, `split_neck_bone`, `stiffen_trunk_joints`, `loosen_trunk_joints`, `spine_phase_wave`, `elastic_spine`, `arch_back`.
+- `gait_phase.rs` (whole gait phase patterns and duty factors; timing only): `quarter_beat_walk`, `diagonal_trot`, `lateral_pace`, `three_beat_canter`, `spread_gallop`, `half_bound`, `alternating_tripod`, `paired_leg_wave`, `double_ripple_wave`, `shared_duty_factor`, `fore_hind_duty_split`, `snap_leg_lags`, `reverse_leg_sequence`, `change_leading_leg`.
+- `gait_muscles.rs` (antagonists, two-joint muscles, stance and swing muscles, springs): `reciprocal_extensor`, `hip_knee_strap`, `stance_swing_split`, `stance_swing_roles`, `improve_lever_arm`, `muscle_to_all_legs`, `stance_cocontraction`, `elastic_shank_tendon`, `lock_antagonist_pairs`, `push_off_muscle`, `repurpose_idle_muscle`, `catapult_release`, `second_hip_anchor`.
+- `gait_symmetry.rs` (pairs, mirrored halves and repeated segments): `clone_best_leg`, `mirror_body_halves`, `repeat_equal_segment`, `repeat_segment_mirrored`, `equalize_leg_reach`, `average_leg_pair`, `share_program_alternating`, `share_program_wave`, `twin_leg_antiphase`, `mirror_hip_position`, `step_leg_along_trunk`, `share_joint_ranges`, `copy_foot_to_all_legs`.
+- `gait_reflex.rs` (touchdown reflexes and bridge muscles that let one leg's landing fire another): `landing_starts_stroke`, `quick_lift_reflex`, `cross_leg_trigger`, `fore_to_hind_trigger`, `mutual_leg_trigger`, `reflex_wave_along_legs`, `alternate_legs_with_reflex`, `fore_hind_pairing`, `landing_flexes_trunk`, `touchdown_stiffener`, `spread_leg_reflex`, `trigger_chain_along_legs`, `stance_duty_with_reflex`.
+- `gait_posture.rs` (the trunk carried clear of the ground, feet under the load): `straighten_leg_knee`, `foot_under_hip`, `hip_toward_mass_centre`, `centre_leg_rest_angles`, `raise_stance_height`, `crouch_legs`, `organs_to_trunk`, `organs_to_hip`, `sink_organ_mass`, `shorten_dragging_tip`, `widen_stance_fore_aft`, `zigzag_leg_bend`, `ground_hanging_foot`.
+- `gait_plans.rs` (whole body plans in one move and moves between them): `quadruped_plan`, `hexapod_tripod`, `kangaroo_hopper`, `myriapod_wave`, `gibbon_swinger`, `counterweight_runner`, `shed_leg_pair`, `append_leg_pair`, `fuse_legs_into_one`, `split_leg_in_two`, `reduce_to_biped`, `pronking_stot`, `unguligrade_legs`.
 
 A generative grammar whose rules children inherit was not built: a rule set would be a new part of the genome and of every save and archive, and a grammar used only as a seed source tied (`docs/rejected-ideas.md`). `segment_chain`, `limb_length_gradient` and `mirrored_limb_pair` apply such productions (repeat with a gradient, scale by place, add a mirrored pair) to the body itself, and the child inherits the result.
 

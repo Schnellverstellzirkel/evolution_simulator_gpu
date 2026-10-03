@@ -39,7 +39,9 @@ Winners go on by default and losers are deleted.
 - A generative body grammar whose rules children inherit and mutate, tested on the GPU at 100k (a grammar used only as a seed source tied, and a varied first population lost; see `docs/rejected-ideas.md`) [claude/encoding]. `segment_chain`, `limb_length_gradient` and `mirrored_limb_pair` already apply such productions to the body and the child inherits the product. A rule set stored with the creature would be a new part of every save and archive.
 - A mutation strength that evolves with each lineage (a step size carried by the creature, Beyer and Schwefel 2002). It needs a new field in the genome and in every save, so it waits for a save version bump.
 - The 0.035 parameter mutation after a structural operator lowers how often the child enters the archive in `mutation_audit`: for the 66 older operators 18.6% alone against 2.4% with it on the generation-590 save and 16.7% against 7.1% on the generation-1510 save (the distance added per 1,000 children falls 55% and 21%). On young saves (generation 20, before the archives refined) the entries fell 4 to 5 points and the distance added rose 3 to 7%. A compound child already gets none. Not tested in breeding: drop it for every child an operator changed and compare paired resumes of a late and a young save.
-- Controllers: an optional neural controller driven by rhythm and touchdown sensors, a rhythm controller per limb (today `repair` copies the first muscle's period to every muscle, so the body shares one clock), and touchdown reflexes.
+- Controllers: an optional neural controller driven by rhythm and touchdown sensors.
+
+- The ~100 gait operators (`gait_*.rs`) and the owner's 10/60/30 split of a generation are not measured: run `mutation_audit` and `operator_yield` on them and a fresh game, and check breeding allocations, because five of the gait files and `sprout_leg` use heap vectors where the older operators use bounded types.
 
 ## World
 
