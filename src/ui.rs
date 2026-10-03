@@ -1785,32 +1785,33 @@ impl App {
                 logo.right_bottom() + Vec2::new(-4., -4.),
             ];
             let painter = ui.painter();
-            painter.circle_filled(logo.center(), 16., theme.accent.gamma_multiply(0.06));
+            let amber = crate::theme::poster::MUSTARD;
             for i in 0..3 {
                 painter.line_segment(
                     [points[i], points[(i + 1) % 3]],
-                    Stroke::new(2., theme.accent),
+                    Stroke::new(3., amber),
                 );
             }
             for point in points {
-                painter.circle_filled(point, 3.5, theme.accent);
-                painter.circle_filled(point, 1.5, theme.panel);
+                painter.circle_filled(point, 4.5, amber);
+                painter.circle_filled(point, 1.8, crate::theme::poster::WOOD_DARK);
             }
-            // The game's name (owner, 2026-10-03), in thin wide letters.
+            // The game's name (owner, 2026-10-03), in chunky condensed letters.
             let mut job = egui::text::LayoutJob::default();
             job.append(
                 "exploraMove",
                 0.,
                 egui::TextFormat {
-                    font_id: FontId::new(27., crate::assets::hud()),
-                    color: Color32::from_rgb(236, 236, 230),
-                    extra_letter_spacing: 5.,
+                    font_id: FontId::new(32., crate::assets::hud_bold()),
+                    color: crate::theme::poster::CREAM,
+                    extra_letter_spacing: 1.,
                     ..Default::default()
                 },
             );
             let title = ui.painter().layout_job(job);
             let (title_rect, _) = ui.allocate_exact_size(title.size(), Sense::hover());
-            ui.painter().galley(title_rect.min, title, theme.ink);
+            ui.painter()
+                .galley(title_rect.min, title, crate::theme::poster::CREAM);
             ui.add_space(GAP_L);
             let running = self.active();
             let (text, fill, ink, why) = if running {
@@ -1830,9 +1831,9 @@ impl App {
             };
             if ui
                 .add(
-                    egui::Button::new(RichText::new(text).strong().color(ink))
+                    egui::Button::new(RichText::new(text).size(18.).strong().color(ink))
                         .fill(fill)
-                        .min_size(Vec2::new(150., 34.)),
+                        .min_size(Vec2::new(210., 40.)),
                 )
                 .on_hover_text(why)
                 .clicked()
@@ -1907,10 +1908,10 @@ impl App {
                     }
                 });
                 let (state, busy) = self.save_state();
-                ui.label(RichText::new(state).small().color(if busy {
-                    theme.accent
+                ui.label(RichText::new(state).color(if busy {
+                    crate::theme::poster::MUSTARD
                 } else {
-                    theme.muted
+                    crate::theme::poster::PAPER
                 }))
                 .on_hover_text("File > Save writes the experiment to runs/. The game writes nothing on its own unless autosave is on.");
                 if busy {
@@ -1925,8 +1926,7 @@ impl App {
                             number(s.config.population),
                             s.config.duration
                         ))
-                        .small()
-                        .color(theme.muted),
+                        .color(crate::theme::poster::PAPER),
                     );
                 }
             });
@@ -5331,18 +5331,22 @@ impl eframe::App for App {
         // behind the Half-Life 2 menus; the panels are dark glass over it.
         crate::theme::backdrop(ui.painter(), ui.ctx().content_rect());
         egui::Panel::top("top")
-            .exact_size(64.)
+            .exact_size(68.)
             .frame(
                 egui::Frame::new()
-                    .fill(theme.panel)
+                    .fill(crate::theme::poster::WOOD_DARK)
                     .inner_margin(egui::Margin::symmetric(GAP_L as i8, 15)),
             )
             .show(ui, |ui| {
-                crate::theme::wear(
-                    ui.painter(),
-                    ui.max_rect().expand2(Vec2::new(GAP_L, 15.)),
-                    theme,
-                    3.,
+                // A mustard stripe under the bar, like the poster's border.
+                let bar = ui.max_rect().expand2(Vec2::new(GAP_L, 15.));
+                ui.painter().rect_filled(
+                    Rect::from_min_max(
+                        Pos2::new(bar.left(), bar.bottom() - 4.),
+                        bar.right_bottom(),
+                    ),
+                    0,
+                    crate::theme::poster::MUSTARD,
                 );
                 self.top(ui)
             });
@@ -5436,7 +5440,7 @@ impl eframe::App for App {
             )
             .show(ui, |ui| {
                 let strip = ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.;
+                    ui.spacing_mut().item_spacing.x = GAP_M;
                     for (key, (tab, label)) in [
                         (Tab::Overview, "Overview"),
                         (Tab::Population, "Ways of moving"),
@@ -5447,7 +5451,7 @@ impl eframe::App for App {
                     .into_iter()
                     .enumerate()
                     {
-                        if crate::theme::tab(ui, self.tab == tab, label, theme)
+                        if crate::theme::tab(ui, self.tab == tab, &(key + 1).to_string(), label, theme)
                             .on_hover_text(format!("Key {}", key + 1))
                             .clicked()
                         {
@@ -5455,13 +5459,13 @@ impl eframe::App for App {
                         }
                     }
                 });
-                // A thin rule under the tabs, across the panel.
+                // A thick rule under the tabs, across the panel.
                 ui.painter().hline(
                     ui.max_rect().x_range(),
-                    strip.response.rect.bottom() + 1.,
-                    Stroke::new(1., theme.card_border),
+                    strip.response.rect.bottom() + 5.,
+                    Stroke::new(3., theme.ink),
                 );
-                ui.add_space(GAP_M);
+                ui.add_space(GAP_L);
                 match self.tab {
                     Tab::Overview => {
                         self.metrics(ui);

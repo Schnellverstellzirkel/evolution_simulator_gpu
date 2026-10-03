@@ -1,12 +1,13 @@
-//! The look of the game, after Half-Life 2 and the Source engine menus:
-//! translucent dark panels with hairline borders over a blurred picture of
-//! the city, the menus' orange for what the pointer arms, the HUD's
-//! yellow digits with a soft glow in smoked-glass boxes, and cold Combine
-//! blue for what is secondary. Everything here is a few shapes or one
-//! textured quad, so it costs next to nothing per frame.
+//! The look of the game: a warm painted poster, after Team Fortress 2
+//! promotional art. Cream cards and tan paper with thick dark brown
+//! outlines, mustard for what is armed, brick red for what matters, BLU
+//! blue for what is secondary, chunky condensed titles and dark text on
+//! light panels. The replay scene keeps its own colors and smoked-glass
+//! HUD, framed like a picture on the poster. Everything here is a few
+//! shapes or one textured quad, so it costs next to nothing per frame.
 use crate::assets::{self, Art};
 use eframe::egui::{
-    self, Align2, Color32, FontFamily, FontId, Pos2, Rect, Response, Sense, Stroke, Vec2,
+    self, Align2, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, Vec2,
     epaint::{Mesh, Vertex},
     text::{LayoutJob, TextFormat},
 };
@@ -50,12 +51,11 @@ pub mod scene {
     /// Force arrows: muscle pulls and ground pushes.
     pub const FORCE_MUSCLE: Color32 = Color32::from_rgb(255, 150, 30);
     pub const FORCE_GROUND: Color32 = Color32::from_rgb(90, 180, 240);
-    /// The HUD: yellow digits and labels on smoked glass (Half-Life 2's
-    /// FgColor 255 220 0 and BgColor 0 0 0 76).
+    /// The HUD: yellow digits and labels on dark glass over the scene.
     pub const HUD: Color32 = Color32::from_rgb(255, 220, 0);
     pub const HUD_DIM: Color32 = Color32::from_rgb(230, 196, 40);
     pub const HUD_INK: Color32 = Color32::from_rgb(228, 222, 206);
-    pub const HUD_BACK: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 96);
+    pub const HUD_BACK: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 150);
     /// The damaged HUD: a red wash behind red digits.
     pub const HUD_DAMAGED: Color32 = Color32::from_rgba_premultiplied(80, 0, 0, 150);
     /// The centre of mass and its trail.
@@ -65,22 +65,22 @@ pub mod scene {
 /// Interface colors.
 #[derive(Clone, Copy)]
 pub struct Theme {
-    /// Side panel, top bar, status line: dark glass over the backdrop.
+    /// Side panel and status line: tan paper.
     pub panel: Color32,
-    /// The central area: a lighter veil over the backdrop.
+    /// The central area: clear, so the sunburst shows.
     pub canvas: Color32,
     pub card: Color32,
     pub card_hover: Color32,
     pub card_border: Color32,
-    /// A faint line along the top edge of a plate.
+    /// A pale line along the top edge of a plate.
     pub bevel: Color32,
     pub ink: Color32,
     pub muted: Color32,
-    /// The Source menus' armed orange: the numbers and choices that matter.
+    /// Brick red: the numbers and choices that matter.
     pub accent: Color32,
-    /// Combine blue: secondary lines and what waits.
+    /// BLU blue: secondary lines and what waits.
     pub cold: Color32,
-    /// Rust: warnings (a failed trial, a catastrophe, a world-change mark).
+    /// Rust orange: warnings (a failed trial, a catastrophe, a world-change mark).
     pub warn: Color32,
     /// A fall or an error.
     pub danger: Color32,
@@ -92,43 +92,57 @@ pub struct Theme {
     /// The Pause evolution button: fill and text.
     pub stop_fill: Color32,
     pub stop_text: Color32,
-    /// The armed (selected) fill and text of a menu item.
+    /// The armed (selected) fill and text: mustard with dark text.
     pub armed_fill: Color32,
     pub armed_text: Color32,
 }
 
-const fn glass(r: u8, g: u8, b: u8, a: u8) -> Color32 {
-    // Premultiplied: the color scaled by its alpha.
-    Color32::from_rgba_premultiplied(
-        (r as u16 * a as u16 / 255) as u8,
-        (g as u16 * a as u16 / 255) as u8,
-        (b as u16 * a as u16 / 255) as u8,
-        a,
-    )
+/// The poster palette. The "How evolution works" window uses the same.
+pub mod poster {
+    use eframe::egui::Color32;
+    /// Dark brown outlines and text.
+    pub const INK: Color32 = Color32::from_rgb(50, 34, 26);
+    /// Text of second rank: still 6:1 on cream.
+    pub const INK_SOFT: Color32 = Color32::from_rgb(98, 72, 52);
+    /// The paper behind everything and its sunburst rays.
+    pub const PAPER: Color32 = Color32::from_rgb(232, 210, 160);
+    pub const PAPER_RAY: Color32 = Color32::from_rgb(240, 222, 176);
+    /// The side panel and the status line.
+    pub const TAN: Color32 = Color32::from_rgb(218, 190, 134);
+    /// Cards and panels.
+    pub const PANEL: Color32 = Color32::from_rgb(251, 242, 216);
+    pub const CREAM: Color32 = Color32::from_rgb(255, 247, 226);
+    pub const RED: Color32 = Color32::from_rgb(184, 56, 50);
+    pub const BLU: Color32 = Color32::from_rgb(70, 108, 138);
+    pub const MUSTARD: Color32 = Color32::from_rgb(228, 166, 52);
+    pub const GRASS: Color32 = Color32::from_rgb(108, 122, 54);
+    /// The top bar: dark wood.
+    pub const WOOD_DARK: Color32 = Color32::from_rgb(58, 40, 30);
 }
 
 impl Theme {
     pub fn get() -> Self {
+        use poster::*;
         Self {
-            panel: glass(14, 15, 15, 222),
-            canvas: glass(8, 9, 9, 120),
-            card: glass(0, 0, 0, 132),
-            card_hover: glass(52, 40, 18, 176),
-            card_border: glass(255, 255, 255, 34),
-            bevel: glass(255, 255, 255, 20),
-            ink: Color32::from_rgb(216, 216, 210),
-            muted: Color32::from_rgb(150, 150, 146),
-            accent: Color32::from_rgb(255, 176, 0),
-            cold: Color32::from_rgb(110, 184, 220),
-            warn: Color32::from_rgb(220, 120, 60),
-            danger: Color32::from_rgb(236, 64, 48),
-            record: Color32::from_rgb(255, 120, 40),
-            go_fill: Color32::from_rgb(134, 91, 19),
-            go_text: Color32::from_rgb(255, 214, 120),
-            stop_fill: Color32::from_rgb(96, 30, 22),
-            stop_text: Color32::from_rgb(255, 176, 150),
-            armed_fill: Color32::from_rgb(134, 91, 19),
-            armed_text: Color32::from_rgb(255, 196, 40),
+            panel: TAN,
+            canvas: Color32::TRANSPARENT,
+            card: PANEL,
+            card_hover: Color32::from_rgb(255, 236, 184),
+            card_border: INK,
+            bevel: Color32::from_rgba_premultiplied(255, 255, 255, 120),
+            ink: INK,
+            muted: INK_SOFT,
+            accent: Color32::from_rgb(170, 48, 40),
+            cold: Color32::from_rgb(52, 90, 122),
+            warn: Color32::from_rgb(168, 80, 24),
+            danger: Color32::from_rgb(176, 36, 30),
+            record: Color32::from_rgb(168, 76, 24),
+            go_fill: GRASS,
+            go_text: CREAM,
+            stop_fill: RED,
+            stop_text: CREAM,
+            armed_fill: MUSTARD,
+            armed_text: INK,
         }
     }
 }
@@ -143,87 +157,78 @@ pub const CONTROL_HEIGHT: f32 = 34.0;
 fn widget(
     fill: Color32,
     stroke: Color32,
+    stroke_width: f32,
     text: Color32,
     text_width: f32,
 ) -> egui::style::WidgetVisuals {
     egui::style::WidgetVisuals {
         bg_fill: fill,
         weak_bg_fill: fill,
-        bg_stroke: Stroke::new(1.0, stroke),
-        corner_radius: egui::CornerRadius::same(2),
+        bg_stroke: Stroke::new(stroke_width, stroke),
+        corner_radius: egui::CornerRadius::same(5),
         fg_stroke: Stroke::new(text_width, text),
         expansion: 0.0,
     }
 }
 
-/// Applies the style: Source menu colors, the game's fonts, and panels of
-/// dark glass so the city shows through behind them.
+/// Applies the style: poster colors, the game's fonts, thick dark outlines
+/// on every control and light panels with dark text.
 pub fn apply_style(ctx: &egui::Context) {
+    use poster::*;
     let theme = Theme::get();
-    ctx.set_theme(egui::Theme::Dark);
+    ctx.set_theme(egui::Theme::Light);
     let mut style = (*ctx.global_style()).clone();
     style.spacing.item_spacing = Vec2::new(GAP_M, GAP_M);
-    style.spacing.button_padding = Vec2::new(12.0, 7.0);
+    style.spacing.button_padding = Vec2::new(14.0, 7.0);
     style.spacing.interact_size = Vec2::new(40.0, CONTROL_HEIGHT);
-    style.spacing.slider_width = 120.0;
+    style.spacing.slider_width = 140.0;
     style.spacing.window_margin = egui::Margin::same(GAP_L as i8);
     style.spacing.menu_margin = egui::Margin::same(GAP_M as i8);
-    let mut visuals = egui::Visuals::dark();
+    let mut visuals = egui::Visuals::light();
     visuals.override_text_color = Some(theme.ink);
     visuals.weak_text_color = Some(theme.muted);
     visuals.panel_fill = theme.panel;
-    visuals.window_fill = glass(20, 21, 21, 238);
-    visuals.faint_bg_color = glass(255, 255, 255, 10);
-    visuals.extreme_bg_color = glass(0, 0, 0, 120);
-    visuals.text_edit_bg_color = Some(glass(0, 0, 0, 170));
-    visuals.code_bg_color = glass(0, 0, 0, 120);
-    visuals.hyperlink_color = theme.accent;
+    visuals.window_fill = PANEL;
+    visuals.faint_bg_color = Color32::from_rgba_premultiplied(40, 26, 14, 14);
+    visuals.extreme_bg_color = CREAM;
+    visuals.text_edit_bg_color = Some(CREAM);
+    visuals.code_bg_color = Color32::from_rgb(240, 226, 190);
+    visuals.hyperlink_color = theme.cold;
     visuals.warn_fg_color = theme.warn;
     visuals.error_fg_color = theme.danger;
-    visuals.selection.bg_fill = theme.armed_fill;
-    visuals.selection.stroke = Stroke::new(1.0, theme.armed_text);
+    visuals.selection.bg_fill = MUSTARD;
+    visuals.selection.stroke = Stroke::new(1.5, INK);
     visuals.slider_trailing_fill = true;
-    let bright = Color32::from_rgb(255, 255, 250);
-    visuals.widgets.noninteractive = widget(theme.panel, glass(255, 255, 255, 26), theme.ink, 1.0);
-    visuals.widgets.inactive = widget(
-        glass(60, 62, 62, 200),
-        glass(255, 255, 255, 40),
-        theme.ink,
-        1.0,
-    );
-    visuals.widgets.hovered = widget(glass(76, 64, 40, 220), glass(255, 176, 0, 150), bright, 1.5);
-    visuals.widgets.active = widget(theme.armed_fill, theme.accent, theme.armed_text, 2.0);
-    visuals.widgets.open = widget(
-        glass(44, 46, 46, 235),
-        glass(255, 255, 255, 40),
-        bright,
-        1.0,
-    );
-    visuals.window_corner_radius = egui::CornerRadius::same(6);
-    visuals.menu_corner_radius = egui::CornerRadius::same(4);
-    visuals.window_stroke = Stroke::new(1.0, glass(255, 255, 255, 46));
+    visuals.widgets.noninteractive = widget(PANEL, Color32::from_rgb(150, 118, 84), 1.0, INK, 1.0);
+    visuals.widgets.inactive = widget(CREAM, INK, 1.5, INK, 1.0);
+    visuals.widgets.hovered = widget(Color32::from_rgb(255, 232, 170), INK, 2.0, INK, 1.5);
+    visuals.widgets.active = widget(MUSTARD, INK, 2.0, INK, 2.0);
+    visuals.widgets.open = widget(Color32::from_rgb(255, 232, 170), INK, 2.0, INK, 1.0);
+    visuals.window_corner_radius = egui::CornerRadius::same(10);
+    visuals.menu_corner_radius = egui::CornerRadius::same(8);
+    visuals.window_stroke = Stroke::new(3.0, INK);
     visuals.window_shadow = egui::Shadow {
-        offset: [0, 8],
-        blur: 26,
+        offset: [4, 6],
+        blur: 0,
         spread: 0,
-        color: Color32::from_black_alpha(170),
+        color: Color32::from_rgba_premultiplied(40, 26, 14, 90),
     };
     visuals.popup_shadow = egui::Shadow {
-        offset: [0, 4],
-        blur: 12,
+        offset: [3, 4],
+        blur: 0,
         spread: 0,
-        color: Color32::from_black_alpha(140),
+        color: Color32::from_rgba_premultiplied(40, 26, 14, 80),
     };
     style.visuals = visuals;
-    // Type scale: small print 13 px, body and buttons 15 px, headings 22 px.
+    // Type scale: small print 14 px, body and buttons 16 px, headings 25 px.
     for (style_name, font) in [
-        (egui::TextStyle::Small, FontId::proportional(13.0)),
-        (egui::TextStyle::Body, FontId::proportional(15.0)),
-        (egui::TextStyle::Button, FontId::proportional(15.0)),
-        (egui::TextStyle::Monospace, FontId::monospace(13.0)),
+        (egui::TextStyle::Small, FontId::proportional(14.0)),
+        (egui::TextStyle::Body, FontId::proportional(16.0)),
+        (egui::TextStyle::Button, FontId::proportional(16.0)),
+        (egui::TextStyle::Monospace, FontId::monospace(14.0)),
         (
             egui::TextStyle::Heading,
-            FontId::new(22.0, assets::hud_bold()),
+            FontId::new(25.0, assets::hud_bold()),
         ),
     ] {
         style.text_styles.insert(style_name, font);
@@ -260,53 +265,60 @@ pub fn tiled(
     painter.image(art.texture(painter.ctx()), rect, uv, tint);
 }
 
-/// The blurred city behind the whole window, like the live scene behind a
-/// Half-Life 2 menu. It covers `rect` and keeps its aspect.
+/// The paper behind the whole window: warm tan with a sunburst of paler
+/// rays, like the poster. It covers `rect`.
 pub fn backdrop(painter: &egui::Painter, rect: Rect) {
-    let size = Art::Backdrop.size(painter.ctx());
-    let scale = (rect.width() / size.x).max(rect.height() / size.y);
-    let shown = size * scale;
-    let min = rect.center() - shown / 2.0;
-    painter.image(
-        Art::Backdrop.texture(painter.ctx()),
-        Rect::from_min_size(min, shown),
-        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-        Color32::WHITE,
-    );
+    painter.rect_filled(rect, 0, poster::PAPER);
+    let center = Pos2::new(rect.center().x, rect.top() + rect.height() * 0.35);
+    let reach = rect.size().length();
+    let rays = 28;
+    for i in (0..rays).step_by(2) {
+        let a0 = i as f32 / rays as f32 * std::f32::consts::TAU;
+        let a1 = (i + 1) as f32 / rays as f32 * std::f32::consts::TAU;
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                center,
+                center + Vec2::new(a0.cos(), a0.sin()) * reach,
+                center + Vec2::new(a1.cos(), a1.sin()) * reach,
+            ],
+            poster::PAPER_RAY,
+            Stroke::NONE,
+        ));
+    }
 }
 
-/// Kept for the plates: nothing to add over the glass panels.
+/// Kept for the plates: nothing to add over the flat panels.
 pub fn wear(_painter: &egui::Painter, _rect: Rect, _theme: Theme, _seed: f32) {}
 
-/// A panel of dark glass: the fill, a hairline border and a faint top edge.
-/// `lit` draws the border in the armed orange.
+/// A card: a soft drop shadow, the fill and a thick dark outline. `lit`
+/// draws the outline in brick red and thicker.
 pub fn plate(painter: &egui::Painter, rect: Rect, theme: Theme, fill: Color32, lit: bool) {
-    painter.rect_filled(rect, 4, fill);
-    painter.line_segment(
-        [
-            rect.left_top() + Vec2::new(4.0, 0.5),
-            rect.right_top() + Vec2::new(-4.0, 0.5),
-        ],
-        Stroke::new(1.0, theme.bevel),
+    painter.rect_filled(
+        rect.translate(Vec2::new(3.0, 4.0)),
+        7,
+        Color32::from_rgba_premultiplied(40, 26, 14, 60),
     );
+    painter.rect_filled(rect, 7, fill);
     painter.rect_stroke(
         rect,
-        4,
+        7,
         Stroke::new(
-            if lit { 1.5 } else { 1.0 },
-            if lit {
-                theme.accent.gamma_multiply(0.8)
-            } else {
-                theme.card_border
-            },
+            if lit { 3.0 } else { 2.0 },
+            if lit { theme.accent } else { theme.card_border },
         ),
         egui::StrokeKind::Inside,
     );
 }
 
-/// A HUD box: smoked glass with rounded corners, as Half-Life 2 draws it.
+/// A HUD box over the scene: dark glass with rounded corners.
 pub fn hud_panel(painter: &egui::Painter, rect: Rect) {
     painter.rect_filled(rect, 8, scene::HUD_BACK);
+    painter.rect_stroke(
+        rect,
+        8,
+        Stroke::new(1.5, Color32::from_rgba_premultiplied(0, 0, 0, 160)),
+        egui::StrokeKind::Outside,
+    );
 }
 
 /// Paints a galley with a soft glow around it, like the HUD numbers'
@@ -389,66 +401,91 @@ pub fn caps_text(
     rect
 }
 
-/// A section title in the side panel: a short orange bar, then capitals.
-pub fn section(ui: &mut egui::Ui, text: &str, theme: Theme) -> Response {
-    let galley = ui.painter().layout_job(caps(text, 12.0, theme.ink));
-    let size = Vec2::new(galley.size().x + 12.0, galley.size().y.max(18.0));
+/// A section title in the side panel: a full-width dark wood strip with a
+/// mustard block and cream capitals.
+pub fn section(ui: &mut egui::Ui, text: &str, _theme: Theme) -> Response {
+    let galley = ui.painter().layout_job(caps(text, 15.0, poster::CREAM));
+    let size = Vec2::new(ui.available_width(), (galley.size().y + 10.0).max(30.0));
     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
-    let bar = Rect::from_min_size(
-        Pos2::new(rect.left(), rect.center().y - 6.0),
-        Vec2::new(3.0, 12.0),
+    let p = ui.painter();
+    p.rect_filled(
+        rect.translate(Vec2::new(2.0, 3.0)),
+        5,
+        Color32::from_rgba_premultiplied(40, 26, 14, 60),
     );
-    ui.painter().rect_filled(bar, 0, theme.accent);
-    ui.painter().galley(
-        Pos2::new(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0),
+    p.rect_filled(rect, 5, poster::WOOD_DARK);
+    p.rect_filled(
+        Rect::from_min_size(
+            rect.left_top() + Vec2::new(6.0, rect.height() / 2.0 - 6.0),
+            Vec2::splat(12.0),
+        ),
+        2,
+        poster::MUSTARD,
+    );
+    p.galley(
+        Pos2::new(rect.left() + 26.0, rect.center().y - galley.size().y / 2.0),
         galley,
-        theme.ink,
+        poster::CREAM,
     );
     response
 }
 
-/// One tab of the tab strip, drawn like an item of the Half-Life 2 main
-/// menu: plain words, brighter when armed, the open one in orange with a
-/// thin rule under it.
-pub fn tab(ui: &mut egui::Ui, selected: bool, text: &str, theme: Theme) -> Response {
-    let font = FontId::new(19.0, FontFamily::Proportional);
+/// One tab of the tab strip: a chunky poster tab with a key cap showing
+/// its shortcut. The open one is mustard, the others cream.
+pub fn tab(ui: &mut egui::Ui, selected: bool, key: &str, text: &str, theme: Theme) -> Response {
+    let font = FontId::new(21.0, assets::hud_bold());
     let galley = ui
         .painter()
         .layout_no_wrap(text.to_owned(), font, theme.ink);
-    let size = galley.size() + Vec2::new(22.0, 16.0);
+    let key_galley = ui.painter().layout_no_wrap(
+        key.to_owned(),
+        FontId::new(13.0, assets::hud_bold()),
+        poster::CREAM,
+    );
+    let cap = 20.0;
+    let size = Vec2::new(galley.size().x + cap + 34.0, 40.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let hovered = response.hovered();
-    let color = if selected {
-        theme.accent
+    let fill = if selected {
+        poster::MUSTARD
     } else if hovered {
-        Color32::WHITE
+        Color32::from_rgb(255, 232, 170)
     } else {
-        theme.muted
+        poster::CREAM
     };
-    let at = rect.center() - galley.size() / 2.0 - Vec2::new(0.0, 1.0);
-    // A drop shadow keeps the words readable over the city.
-    ui.painter().galley_with_override_text_color(
-        at + Vec2::new(1.0, 1.5),
-        galley.clone(),
-        Color32::from_black_alpha(160),
-    );
-    glow_galley(
-        ui.painter(),
-        at,
-        galley,
-        color,
-        if selected { 0.8 } else { 0.0 },
-    );
+    let p = ui.painter();
     if selected {
-        ui.painter().rect_filled(
-            Rect::from_min_max(
-                Pos2::new(rect.left() + 8.0, rect.bottom() - 3.0),
-                Pos2::new(rect.right() - 8.0, rect.bottom() - 1.0),
-            ),
-            0,
-            theme.accent,
+        p.rect_filled(
+            rect.translate(Vec2::new(2.0, 3.0)),
+            8,
+            Color32::from_rgba_premultiplied(40, 26, 14, 70),
         );
     }
+    p.rect(
+        rect,
+        8,
+        fill,
+        Stroke::new(if selected { 3.0 } else { 2.0 }, theme.ink),
+        egui::StrokeKind::Inside,
+    );
+    let cap_rect = Rect::from_center_size(
+        Pos2::new(rect.left() + 12.0 + cap / 2.0, rect.center().y),
+        Vec2::splat(cap),
+    );
+    p.rect_filled(cap_rect, 4, poster::WOOD_DARK);
+    p.galley(
+        cap_rect.center() - key_galley.size() / 2.0,
+        key_galley,
+        poster::CREAM,
+    );
+    p.galley(
+        Pos2::new(
+            cap_rect.right() + 8.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        theme.ink,
+    );
     response
 }
 
@@ -564,7 +601,7 @@ impl HudLine {
     pub fn label(text: &str) -> Self {
         Self {
             text: text.to_owned(),
-            size: 10.5,
+            size: 12.5,
             color: scene::HUD_DIM,
             caps: true,
             glow: false,
@@ -668,7 +705,7 @@ pub fn counter(
     };
     let label = painter.layout_job(caps(
         counter.label,
-        (size * 0.3).max(9.0),
+        (size * 0.34).max(11.0),
         color.gamma_multiply(0.9),
     ));
     let digits = painter.layout_no_wrap(

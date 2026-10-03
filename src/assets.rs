@@ -33,11 +33,9 @@ pub enum Art {
     Sphere,
     /// A soft round glow in white.
     Glow,
-    /// The blurred, darkened city behind the whole window.
-    Backdrop,
 }
 
-const ALL: [Art; 18] = [
+const ALL: [Art; 17] = [
     Art::SkyCity,
     Art::SkyStorm,
     Art::SkyDusk,
@@ -55,7 +53,6 @@ const ALL: [Art; 18] = [
     Art::Rust,
     Art::Sphere,
     Art::Glow,
-    Art::Backdrop,
 ];
 
 impl Art {
@@ -78,13 +75,12 @@ impl Art {
             Art::Rust => include_bytes!("../assets/ui/textures/rust.jpg"),
             Art::Sphere => include_bytes!("../assets/ui/sprites/sphere.png"),
             Art::Glow => include_bytes!("../assets/ui/sprites/glow.png"),
-            Art::Backdrop => include_bytes!("../assets/ui/backdrop.jpg"),
         }
     }
 
-    /// Tiling images repeat past their edges; sprites and the backdrop clamp.
+    /// Tiling images repeat past their edges; sprites clamp.
     fn tiles(self) -> bool {
-        !matches!(self, Art::Sphere | Art::Glow | Art::Backdrop)
+        !matches!(self, Art::Sphere | Art::Glow)
     }
 
     fn slot(self) -> &'static OnceLock<(TextureHandle, [usize; 2])> {

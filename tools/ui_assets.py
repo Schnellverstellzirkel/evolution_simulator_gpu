@@ -8,8 +8,8 @@ The source dir holds the downloaded originals:
   sky/<id>.jpg                     Poly Haven tonemapped HDRIs (CC0)
   fonts/...                        DejaVu (Bitstream Vera license), Barlow (OFL)
 
-Everything else (the City 17 style skyline layers, the sprites, the menu
-backdrop) is painted here from code, so the output is reproducible.
+Everything else (the City 17 style skyline layers and the sprites) is
+painted here from code, so the output is reproducible.
 """
 import math
 import random
@@ -522,38 +522,6 @@ def near_layer(rng):
     save_png(grime(shade_layer(c.done(), top_light=1.0, base_dark=0.85), 1.0), "skyline/near.png")
 
 
-# ---------------------------------------------------------- menu backdrop
-
-
-def backdrop():
-    """The picture behind the whole window, like the live scene behind a
-    Half-Life 2 menu: the city under the overcast sky, blurred and dark."""
-    W, H = 1920, 1080
-    sky_img = Image.open(OUT / "sky" / "city.jpg")
-    sw, sh = sky_img.size
-    crop = sky_img.crop((1400, 0, 1400 + int(sh * W / H * 1.0), sh)).resize((W, int(H * 0.78)), Image.LANCZOS)
-    canvas = Image.new("RGBA", (W, H), (40, 44, 44, 255))
-    canvas.paste(crop, (0, 0))
-    horizon = int(H * 0.78)
-    for name, scale, shift in (("far", 0.95, 900), ("mid", 0.55, 300), ("near", 0.75, 1200)):
-        layer = Image.open(OUT / "skyline" / f"{name}.png")
-        lw, lh = layer.size
-        th = int(H * scale)
-        tw = int(lw * th / lh)
-        layer = layer.resize((tw, th), Image.LANCZOS)
-        x = -shift
-        while x < W:
-            canvas.alpha_composite(layer, (x, horizon - th))
-            x += tw
-    ground = Image.open(OUT / "textures" / "cobble.jpg").resize((256, 256))
-    for gx in range(0, W, 256):
-        for gy in range(horizon, H, 256):
-            canvas.paste(ground, (gx, gy))
-    img = canvas.convert("RGB").filter(ImageFilter.GaussianBlur(7))
-    img = grade(img, desat=0.2, gain=0.42)
-    save_jpg(img, "backdrop.jpg", quality=82)
-
-
 def main():
     rng = random.Random(17)
     sky("kloofendal_overcast_puresky", "city", desat=0.28, tint=(0.93, 1.0, 0.98))
@@ -572,7 +540,6 @@ def main():
     far_layer(rng)
     mid_layer(rng)
     near_layer(rng)
-    backdrop()
 
 
 if __name__ == "__main__":
