@@ -270,10 +270,10 @@ fn loaded(path: &Path) -> Result<Experiment> {
 }
 
 fn elite_sizes(e: &Experiment) -> (usize, f64, f64) {
-    let elites: Vec<&Creature> = e
+    let elites: Vec<Creature> = e
         .islands
         .iter()
-        .flat_map(|a| a.entries.iter().map(|x| &x.creature))
+        .flat_map(|a| a.entries.iter().map(|x| x.creature.unpack()))
         .collect();
     let n = elites.len().max(1) as f64;
     (

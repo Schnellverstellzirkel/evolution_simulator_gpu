@@ -1,4 +1,4 @@
-use crate::evolution::{Creature, Muscle, Population, Rng};
+use crate::evolution::{Creature, Muscle, Population, Rng, StoredCreature};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -385,7 +385,7 @@ pub fn is_morphology_niche(niche: &Niche) -> bool {
 pub struct Elite {
     pub niche: Niche,
     pub descriptor: Descriptor,
-    pub creature: Creature,
+    pub creature: StoredCreature,
     pub fitness: f32,
     pub emitter: Emitter,
     pub improved_generation: u32,
@@ -416,7 +416,7 @@ impl Elite {
     /// The creature and world of the trial this elite's fitness came from:
     /// the standard trial, or the confirmation trial at the fine physics.
     pub fn replay_of(&self, cfg: &crate::config::Config) -> (Creature, crate::config::Config) {
-        replay_of(&self.creature, self.fine, cfg)
+        replay_of(&self.creature.unpack(), self.fine, cfg)
     }
 }
 
@@ -1297,7 +1297,7 @@ impl QdArchive {
         let behavior = &self.behavior_indices;
         let bodies: Vec<[f32; 5]> = behavior
             .iter()
-            .map(|&i| body_embedding(&self.entries[i].creature))
+            .map(|&i| body_embedding(&self.entries[i].creature.unpack()))
             .collect();
         let samples = bodies.len().min(32);
         let mut body_novelty = vec![0.0; len];
@@ -1397,7 +1397,7 @@ impl QdArchive {
             *elite = Elite {
                 niche,
                 descriptor,
-                creature: population.creature(index),
+                creature: population.creature(index).into(),
                 fitness,
                 emitter,
                 improved_generation: generation,
@@ -1429,7 +1429,7 @@ impl QdArchive {
         self.entries.push(Elite {
             niche: niche.clone(),
             descriptor,
-            creature: population.creature(index),
+            creature: population.creature(index).into(),
             fitness,
             emitter,
             improved_generation: generation,
@@ -1493,7 +1493,7 @@ impl QdArchive {
             self.entries[slot] = Elite {
                 niche,
                 descriptor,
-                creature: population.creature(index),
+                creature: population.creature(index).into(),
                 fitness,
                 emitter,
                 improved_generation: generation,
@@ -1541,7 +1541,7 @@ impl QdArchive {
         let elite = Elite {
             niche: niche.clone(),
             descriptor,
-            creature: population.creature(index),
+            creature: population.creature(index).into(),
             fitness,
             emitter,
             improved_generation: generation,

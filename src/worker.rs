@@ -280,7 +280,7 @@ impl IslandSummary {
         ranked.truncate(ISLAND_TOP);
         let top: Vec<(f32, Creature)> = ranked
             .iter()
-            .map(|elite| (elite.fitness, elite.creature.clone()))
+            .map(|elite| (elite.fitness, elite.creature.unpack()))
             .collect();
         Self {
             best: top.first().map_or(f32::NAN, |t| t.0),
@@ -1121,7 +1121,7 @@ fn run(
                                             .get(k + 1)
                                             .map_or(0.0, |parent| a.fitness - parent.fitness),
                                         change: a.change.clone(),
-                                        creature: a.creature.clone(),
+                                        creature: a.creature.unpack(),
                                     })
                                     .collect(),
                             ));
@@ -1158,7 +1158,7 @@ fn run(
                             .max_by(|a, b| a.fitness.total_cmp(&b.fitness))
                             .map_or_else(
                                 || next.blocks[0].population.creature(0),
-                                |elite| elite.creature.clone(),
+                                |elite| elite.creature.unpack(),
                             );
                         preview = Some((creature, next.config.clone()));
                         events = Arc::new(Vec::new());
@@ -1536,7 +1536,7 @@ fn run(
                                         emitter: Some(elite.emitter),
                                         visits: elite.visits,
                                         innovation_reserve: qd::is_morphology_niche(&elite.niche),
-                                        creature: elite.creature.clone(),
+                                        creature: elite.creature.unpack(),
                                         fine: elite.fine,
                                     }
                                 })
@@ -1575,11 +1575,11 @@ fn run(
                             .entries
                             .iter()
                             .map(|elite| {
-                                elite.creature.nodes.len()
+                                elite.creature.node_count()
                                     * std::mem::size_of::<crate::evolution::NodeGene>()
-                                    + elite.creature.bones.len()
+                                    + elite.creature.bone_count()
                                         * std::mem::size_of::<crate::evolution::Bone>()
-                                    + elite.creature.muscles.len()
+                                    + elite.creature.muscle_count()
                                         * std::mem::size_of::<crate::evolution::Muscle>()
                             })
                             .sum::<usize>(),
@@ -1620,7 +1620,7 @@ fn run(
                         .take(qd::MAIN_ISLANDS)
                         .filter_map(|island| island.strangest())
                         .max_by(|a, b| a.0.total_cmp(&b.0))
-                        .map(|(_, elite)| elite.creature.clone()),
+                        .map(|(_, elite)| elite.creature.unpack()),
                     migration: e.last_migration.clone().map(|(generation, exchange)| {
                         MigrationSummary {
                             generation,

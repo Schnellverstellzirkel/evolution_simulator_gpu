@@ -26,7 +26,10 @@ pub fn min_muscle_period() -> f32 {
     crate::physics::limits().min_period
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, PartialEq, bytemuck::Pod, bytemuck::Zeroable,
+)]
 pub struct NodeGene {
     pub x: f32,
     pub y: f32,
@@ -255,6 +258,91 @@ impl Clone for Creature {
         self.bones.clone_from(&source.bones);
         self.muscles.clone_from(&source.muscles);
         self.id = source.id;
+    }
+}
+/// A creature kept in an archive or a lineage: the same genes in one
+/// allocation of exactly their size, where a `Creature` is always 6.4 KB.
+/// An evolved body is about a third of that, and a game holds millions of
+/// them. It serializes as a `Creature`, so saves do not change.
+#[derive(Clone, Debug, Default)]
+pub struct StoredCreature {
+    pub id: u64,
+    node_n: u32,
+    bone_n: u32,
+    genes: Box<[u32]>,
+}
+impl StoredCreature {
+    pub fn new(creature: &Creature) -> Self {
+        let mut genes: Vec<u32> = Vec::with_capacity(
+            (std::mem::size_of_val(&creature.nodes[..])
+                + std::mem::size_of_val(&creature.bones[..])
+                + std::mem::size_of_val(&creature.muscles[..]))
+                / 4,
+        );
+        genes.extend_from_slice(bytemuck::cast_slice(&creature.nodes));
+        genes.extend_from_slice(bytemuck::cast_slice(&creature.bones));
+        genes.extend_from_slice(bytemuck::cast_slice(&creature.muscles));
+        Self {
+            id: creature.id,
+            node_n: creature.nodes.len() as u32,
+            bone_n: creature.bones.len() as u32,
+            genes: genes.into_boxed_slice(),
+        }
+    }
+    pub fn node_count(&self) -> usize {
+        self.node_n as usize
+    }
+    pub fn bone_count(&self) -> usize {
+        self.bone_n as usize
+    }
+    pub fn muscle_count(&self) -> usize {
+        let used = self.node_n as usize * (std::mem::size_of::<NodeGene>() / 4)
+            + self.bone_n as usize * (std::mem::size_of::<Bone>() / 4);
+        (self.genes.len() - used) / (std::mem::size_of::<Muscle>() / 4)
+    }
+    /// True for the empty placeholder a lineage record holds before its
+    /// creature is put back.
+    pub fn is_empty(&self) -> bool {
+        self.node_n == 0
+    }
+    /// Writes the genes into `creature`, which it overwrites.
+    pub fn unpack_into(&self, creature: &mut Creature) {
+        let nodes_end = self.node_n as usize * (std::mem::size_of::<NodeGene>() / 4);
+        let bones_end = nodes_end + self.bone_n as usize * (std::mem::size_of::<Bone>() / 4);
+        creature.nodes.clone_from(&Bounded::from_slice(bytemuck::cast_slice(&self.genes[..nodes_end])));
+        creature.bones.clone_from(&Bounded::from_slice(bytemuck::cast_slice(&self.genes[nodes_end..bones_end])));
+        creature.muscles.clone_from(&Bounded::from_slice(bytemuck::cast_slice(&self.genes[bones_end..])));
+        creature.id = self.id;
+    }
+    pub fn unpack(&self) -> Creature {
+        let nodes_end = self.node_n as usize * (std::mem::size_of::<NodeGene>() / 4);
+        let bones_end = nodes_end + self.bone_n as usize * (std::mem::size_of::<Bone>() / 4);
+        Creature {
+            nodes: Bounded::from_slice(bytemuck::cast_slice(&self.genes[..nodes_end])),
+            bones: Bounded::from_slice(bytemuck::cast_slice(&self.genes[nodes_end..bones_end])),
+            muscles: Bounded::from_slice(bytemuck::cast_slice(&self.genes[bones_end..])),
+            id: self.id,
+        }
+    }
+}
+impl From<Creature> for StoredCreature {
+    fn from(creature: Creature) -> Self {
+        Self::new(&creature)
+    }
+}
+impl From<&Creature> for StoredCreature {
+    fn from(creature: &Creature) -> Self {
+        Self::new(creature)
+    }
+}
+impl Serialize for StoredCreature {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.unpack().serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for StoredCreature {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Creature::deserialize(deserializer).map(|creature| Self::new(&creature))
     }
 }
 /// Splits `all` into consecutive parts of the given sizes.
@@ -1336,7 +1424,7 @@ fn offspring(
     let limited = match plan.emitter {
         Emitter::Structural | Emitter::Novelty => plan
             .parent
-            .and_then(|p| child_limits(cfg, &archive.entries[p].creature, step)),
+            .and_then(|p| child_limits(cfg, &archive.entries[p].creature.unpack(), step)),
         Emitter::Restart | Emitter::Cma => None,
     };
     let cfg = limited.as_ref().unwrap_or(cfg);
@@ -1346,7 +1434,9 @@ fn offspring(
             if let Some(cma) = plan.cma.and_then(|index| cma_emitters.get(index)) {
                 cma.sample_into(rng, cfg.mutation, child);
             } else {
-                child.clone_from(&archive.entries[plan.parent.expect("CMA parent")].creature);
+                archive.entries[plan.parent.expect("CMA parent")]
+                    .creature
+                    .unpack_into(child);
                 mutate_genes(child, cfg, rng, 0.12);
             }
         }
@@ -1461,10 +1551,14 @@ fn mated(
     rng: &mut Rng,
     child: &mut Creature,
 ) {
-    let parent = &archive.entries[plan.parent.expect("archive parent")].creature;
+    let parent = archive.entries[plan.parent.expect("archive parent")]
+        .creature
+        .unpack();
+    let parent = &parent;
     match plan.mate {
         Some(mate) => {
-            let mate = &archive.entries[mate].creature;
+            let mate = archive.entries[mate].creature.unpack();
+            let mate = &mate;
             if same_shape(parent, mate) {
                 crossover_into(parent, mate, rng, child);
             } else {
@@ -2023,12 +2117,14 @@ fn structural_mutation_among(
     // 2011): a graft then brings the most new structure.
     let size = |c: &Creature| c.nodes.len() as i32 * 4 + c.muscles.len() as i32;
     let own = size(creature);
-    let donor = (!donors.is_empty()).then(|| {
+    let donor_body = (!donors.is_empty()).then(|| {
         (0..4)
             .map(|_| &donors[rng.index(donors.len())].creature)
-            .max_by_key(|d| (size(d) - own).abs())
+            .max_by_key(|d| (d.node_count() as i32 * 4 + d.muscle_count() as i32 - own).abs())
             .expect("four draws")
+            .unpack()
     });
+    let donor = donor_body.as_ref();
     let cx = anatomy::Context { donor };
     let classic = CLASSIC_COUNT;
     // An operator that does not fit this body leaves it unchanged; try

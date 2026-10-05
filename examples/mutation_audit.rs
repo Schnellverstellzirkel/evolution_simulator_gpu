@@ -87,7 +87,7 @@ fn main() -> anyhow::Result<()> {
             })
             .collect())
     };
-    let parents: Vec<Creature> = elites.iter().map(|e| e.creature.clone()).collect();
+    let parents: Vec<Creature> = elites.iter().map(|e| e.creature.unpack()).collect();
     // Donors for the operators that take limbs from another elite. Breeding
     // draws one at random from the island's archive, so the audit draws one
     // at random from the whole global archive.
@@ -97,9 +97,9 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .filter(|e| !qd::is_morphology_niche(&e.niche))
         .collect();
-    let donor_of = |i: usize, v: usize| -> &Creature {
+    let donor_of = |i: usize, v: usize| -> Creature {
         let mut rng = Rng::new(0xd0409, v as u32, i);
-        &everyone[rng.index(everyone.len())].creature
+        everyone[rng.index(everyone.len())].creature.unpack()
     };
     let parent_scores: Vec<f32> = score(&parents)?.into_iter().map(|(f, _)| f).collect();
     let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
@@ -173,7 +173,7 @@ fn main() -> anyhow::Result<()> {
                         &mut child,
                         limits,
                         &mut rng,
-                        Some(donor),
+                        Some(&donor),
                     )?;
                     if !changed {
                         return None;

@@ -106,9 +106,9 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .map(|e| {
             (
-                shape(&e.creature),
-                e.creature.nodes.len(),
-                e.creature.muscles.len(),
+                shape(&e.creature.unpack()),
+                e.creature.node_count(),
+                e.creature.muscle_count(),
             )
         })
         .collect();

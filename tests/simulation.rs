@@ -86,7 +86,7 @@ fn zero_mutation_children(cfg: &Config, parent: &Creature) -> Vec<Creature> {
     archive.entries.push(Elite {
         niche: Default::default(),
         descriptor: Default::default(),
-        creature: parent.clone(),
+        creature: parent.clone().into(),
         fitness: 1.0,
         emitter: Emitter::Cma,
         improved_generation: 0,
@@ -152,7 +152,7 @@ fn breeding_into_a_reused_arena_gives_the_same_creatures() {
         archive.entries.push(Elite {
             niche: Default::default(),
             descriptor: Default::default(),
-            creature: parents.creature(i),
+            creature: parents.creature(i).into(),
             fitness: 1.0,
             emitter: Emitter::Structural,
             improved_generation: 0,

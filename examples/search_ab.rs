@@ -694,7 +694,7 @@ fn print_robustness(
     }
     let mut unit = Population::default();
     for elite in &elites {
-        let mut creature = elite.creature.clone();
+        let mut creature = elite.creature.unpack();
         // A second pose from the same rule: the id seeds the perturbation.
         creature.id ^= 0x9e37_79b9;
         perturb(&mut creature);
@@ -920,7 +920,7 @@ fn top_bodies(experiment: &Experiment, count: usize) -> Vec<BodySize> {
     elites
         .into_iter()
         .map(|elite| {
-            let creature = &elite.creature;
+            let creature = &elite.creature.unpack();
             let mass: f32 = physics::body(&creature.nodes, &creature.bones)
                 .iter()
                 .map(|node| node.mass)

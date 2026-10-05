@@ -82,7 +82,7 @@ fn class(value: f32, edges: &[f32]) -> usize {
 /// An elite's body measures: node count, aspect of its start pose, total
 /// bone length (m) and limbs (leaves of the bone tree).
 pub fn body(elite: &Elite) -> (usize, f32, f32, usize) {
-    let c = &elite.creature;
+    let c = &elite.creature.unpack();
     let length: f32 = c.bones.iter().map(|b| b.rest_length).sum();
     let mut degree = vec![0usize; c.nodes.len()];
     for b in c.bones.iter() {

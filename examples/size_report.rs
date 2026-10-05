@@ -126,7 +126,7 @@ fn main() -> anyhow::Result<()> {
     let mut lengths = Vec::new();
     let mut shares = Vec::new();
     for (rank, elite) in elites.iter().take(count).enumerate() {
-        let c = &elite.creature;
+        let c = &elite.creature.unpack();
         let nodes = physics::nodes(c);
         let mass: f32 = nodes.iter().map(|n| n.mass).sum();
         let length: f32 = c.bones.iter().map(|b| b.rest_length).sum();

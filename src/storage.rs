@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    evolution::{self, CandidatePlan, Creature, FAILED, Population, Rng},
+    evolution::{self, CandidatePlan, Creature, FAILED, Population, Rng, StoredCreature},
     qd::{self, CmaEmitter, Emitter, EmitterStats, EvaluationMetrics, QdArchive},
 };
 use anyhow::{Context, Result, ensure};
@@ -597,7 +597,7 @@ fn plan_champions(archive: &QdArchive) -> Vec<Creature> {
         .into_iter()
         .filter(|&i| seen.insert(archive.plan_key(i)))
         .take(REFUGE_CHAMPIONS)
-        .map(|i| archive.entries[i].creature.clone())
+        .map(|i| archive.entries[i].creature.unpack())
         .collect()
 }
 /// Generations the old champions keep breeding after a world change.
@@ -735,7 +735,7 @@ pub struct Graduation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Ancestor {
     pub parent: Option<u64>,
-    pub creature: Creature,
+    pub creature: StoredCreature,
     pub fitness: f32,
     pub generation: u32,
     /// What changed from the parent, for display.
@@ -1877,11 +1877,12 @@ impl Experiment {
         } else {
             0.0
         };
+        let parent_body = birth
+            .parent_id
+            .and_then(|id| self.lineage.get(&id))
+            .map(|a| a.creature.unpack());
         let change = describe_change(
-            birth
-                .parent_id
-                .and_then(|id| self.lineage.get(&id))
-                .map(|a| &a.creature),
+            parent_body.as_ref(),
             &creature,
             birth.emitter,
             birth.mate,
@@ -1893,7 +1894,7 @@ impl Experiment {
                 fitness: result.fitness,
                 generation: self.generation,
                 change,
-                creature,
+                creature: creature.into(),
                 rung: crate::rungs::profile(&result.trace, period),
             },
         ))
@@ -1974,7 +1975,7 @@ impl Experiment {
                 .entry((elite.fitness * 100.0).floor() as i32)
                 .or_default() += 1;
             *species
-                .entry((elite.creature.nodes.len(), elite.creature.muscles.len()))
+                .entry((elite.creature.node_count(), elite.creature.muscle_count()))
                 .or_default() += 1;
         }
         let mut percentiles: Vec<_> = PERCENTILES.iter().map(|&p| quantile(p)).collect();
@@ -1987,7 +1988,7 @@ impl Experiment {
             vec![self.blocks[0].population.creature(0); 3]
         } else {
             [all_elites.len() - 1, (all_elites.len() - 1) / 2, 0]
-                .map(|i| all_elites[i].creature.clone())
+                .map(|i| all_elites[i].creature.unpack())
                 .to_vec()
         };
         self.history.push(Stats {
@@ -2264,7 +2265,7 @@ impl Experiment {
                 .collect();
             elites.sort_unstable_by(|a, b| b.fitness.total_cmp(&a.fitness));
             let take = ((elites.len() as f32 * MIGRATION_SHARE).ceil() as usize).min(elites.len());
-            let sent: Vec<Creature> = elites[..take].iter().map(|e| e.creature.clone()).collect();
+            let sent: Vec<Creature> = elites[..take].iter().map(|e| e.creature.unpack()).collect();
             self.pen
                 .extend(sent.iter().map(|c| (c.clone(), until)));
             exchange[from] = (sent.len(), 0);
@@ -2750,7 +2751,7 @@ impl Experiment {
             let cma_index = if emitter == Emitter::Cma {
                 if let Some(parent_index) = parent {
                     let elite = &self.islands[island].entries[parent_index];
-                    let template = &elite.creature;
+                    let template = elite.creature.unpack();
                     let plan = self.islands[island].plan_key(parent_index);
                     // Each island runs one optimizer per design. It starts from
                     // the design's fastest elite and then follows its own mean,
@@ -3170,7 +3171,7 @@ impl Experiment {
         let generation = self.generation;
         self.pen.retain(|&(_, until)| until > generation);
         if self.islands.len() == arena_count() {
-            let mut best: HashMap<u64, (f32, &Creature)> = HashMap::new();
+            let mut best: HashMap<u64, (f32, &StoredCreature)> = HashMap::new();
             for archive in self.islands.iter().take(qd::MAIN_ISLANDS) {
                 for (i, e) in archive.entries.iter().enumerate() {
                     if qd::is_morphology_niche(&e.niche) {
@@ -3182,11 +3183,11 @@ impl Experiment {
                     }
                 }
             }
-            let mut hall: Vec<(u64, f32, &Creature)> =
+            let mut hall: Vec<(u64, f32, &StoredCreature)> =
                 best.into_iter().map(|(k, (f, c))| (k, f, c)).collect();
             hall.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
             hall.truncate(HALL_PLANS);
-            self.hall = hall.into_iter().map(|(_, _, c)| c.clone()).collect();
+            self.hall = hall.into_iter().map(|(_, _, c)| c.unpack()).collect();
         }
         // Migrants that never took a hub cell are forgotten after a while.
         if self.wild_exports.len() > 200_000 {
@@ -3426,7 +3427,7 @@ impl Experiment {
             }
             refined.push(island.refined());
             for elite in std::mem::take(&mut island.entries) {
-                self.reseed.push(index, elite.creature);
+                self.reseed.push(index, elite.creature.unpack());
             }
         }
         self.archive = QdArchive::starting_global();
@@ -3493,7 +3494,7 @@ impl Experiment {
         for (island, archive) in self.islands.iter().enumerate().take(island_count()) {
             for elite in &archive.entries {
                 reruns.insert(elite.creature.id);
-                self.reseed.push(island, elite.creature.clone());
+                self.reseed.push(island, elite.creature.unpack());
             }
         }
         let d = dump::Dump::create(&path, self, bar, elites, reruns, self.blocks.len())?;
@@ -3530,8 +3531,8 @@ impl Experiment {
             .flat_map(|b| &b.population.genomes)
             .all(|g| g.node_count <= cfg.max_nodes && g.muscle_count <= cfg.max_muscles)
             && self.archive.entries.iter().all(|elite| {
-                elite.creature.nodes.len() <= cfg.max_nodes
-                    && elite.creature.muscles.len() <= cfg.max_muscles
+                elite.creature.node_count() <= cfg.max_nodes
+                    && elite.creature.muscle_count() <= cfg.max_muscles
             })
     }
     pub fn validate(&self) -> Result<()> {
@@ -3773,8 +3774,8 @@ pub(crate) mod dump {
         pub fn of(elite: Option<&qd::Elite>, optimizer: bool) -> Self {
             Self {
                 cell: elite.map_or(u16::MAX, |e| cell(&e.descriptor.niche())),
-                nodes: elite.map_or(0, |e| e.creature.nodes.len().min(255) as u8),
-                muscles: elite.map_or(0, |e| e.creature.muscles.len().min(255) as u8),
+                nodes: elite.map_or(0, |e| e.creature.node_count().min(255) as u8),
+                muscles: elite.map_or(0, |e| e.creature.muscle_count().min(255) as u8),
                 reserve: elite.is_some_and(|e| qd::is_morphology_niche(&e.niche)),
                 optimizer,
             }
@@ -3811,8 +3812,8 @@ pub(crate) mod dump {
                 | u8::from(e.fine) << 1
                 | u8::from(e.graduate) << 2;
             b[2..4].copy_from_slice(&cell(&e.descriptor.niche()).to_le_bytes());
-            b[4] = e.creature.nodes.len().min(255) as u8;
-            b[5] = e.creature.muscles.len().min(255) as u8;
+            b[4] = e.creature.node_count().min(255) as u8;
+            b[5] = e.creature.muscle_count().min(255) as u8;
             b[6] = e.emitter.index() as u8;
             b[8..16].copy_from_slice(&e.creature.id.to_le_bytes());
             b[16..20].copy_from_slice(&e.fitness.to_le_bytes());
@@ -4158,13 +4159,13 @@ impl Serialize for SavedLineage<'_> {
         #[derive(Serialize)]
         struct Record<'b> {
             parent: Option<u64>,
-            creature: &'b Creature,
+            creature: &'b StoredCreature,
             fitness: f32,
             generation: u32,
             change: &'b str,
             rung: &'b [u16; 2 * crate::rungs::FEATURES],
         }
-        let none = Creature::default();
+        let none = StoredCreature::default();
         let records: Vec<(&u64, Record)> = self
             .keep
             .iter()
@@ -4304,7 +4305,7 @@ impl SmallLoad {
             .flat_map(|archive| &archive.entries)
         {
             if let Some(record) = e.lineage.get_mut(&elite.creature.id)
-                && record.creature.nodes.is_empty()
+                && record.creature.is_empty()
             {
                 record.creature = elite.creature.clone();
             }

@@ -862,8 +862,8 @@ fn a_save_keeps_the_ancestors_of_the_global_archive_and_every_elites_record() {
     for elite in archives.flat_map(|archive| &archive.entries) {
         // Every living elite has its record back, creature included.
         let record = restored.lineage.get(&elite.creature.id).unwrap();
-        assert_eq!(record.creature.nodes, elite.creature.nodes);
-        assert_eq!(record.creature.muscles, elite.creature.muscles);
+        assert_eq!(record.creature.unpack().nodes, elite.creature.unpack().nodes);
+        assert_eq!(record.creature.unpack().muscles, elite.creature.unpack().muscles);
         let before = experiment.lineage.get(&elite.creature.id).unwrap();
         assert_eq!(record.fitness, before.fitness);
         assert_eq!(record.rung, before.rung);
@@ -874,7 +874,7 @@ fn a_save_keeps_the_ancestors_of_the_global_archive_and_every_elites_record() {
         let after = restored.ancestry(elite.creature.id, usize::MAX);
         assert_eq!(before.len(), after.len());
         for (a, b) in before.iter().zip(&after) {
-            assert_eq!(a.creature.nodes, b.creature.nodes);
+            assert_eq!(a.creature.unpack().nodes, b.creature.unpack().nodes);
             assert_eq!(a.change, b.change);
         }
         chains += before.len();
@@ -933,7 +933,7 @@ fn archive_of_all_ways_of_moving(fitness: impl Fn(u32) -> f32) -> QdArchive {
                         niche: descriptor.movement_niche(),
                         descriptor,
                         topology: evolution_simulator::qd::Topology::of(&creature),
-                        creature,
+                        creature: creature.into(),
                         fitness: fitness(n),
                         emitter: Emitter::Cma,
                         improved_generation: 0,

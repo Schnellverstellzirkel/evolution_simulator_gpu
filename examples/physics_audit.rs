@@ -37,7 +37,7 @@ fn main() -> anyhow::Result<()> {
                 .archive
                 .entries
                 .iter()
-                .map(|x| (x.fitness, x.creature.clone()))
+                .map(|x| (x.fitness, x.creature.unpack()))
                 .collect();
             (e.config.clone(), list)
         };

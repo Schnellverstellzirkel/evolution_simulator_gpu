@@ -14,7 +14,7 @@ fn ages(experiment: &storage::Experiment, elite: &qd::Elite) -> (u32, u32) {
     let chain = experiment.ancestry(elite.creature.id, usize::MAX);
     let mut plan_start = elite.improved_generation;
     for ancestor in &chain {
-        if qd::Topology::of(&ancestor.creature) == elite.topology {
+        if qd::Topology::of(&ancestor.creature.unpack()) == elite.topology {
             plan_start = plan_start.min(ancestor.generation);
         } else {
             break;
@@ -78,8 +78,8 @@ fn report(name: &str, archive: &qd::QdArchive, experiment: &storage::Experiment)
                 .filter(|&(a, b)| a < nodes && b < nodes)
                 .collect(),
         ));
-        classes.insert((e.creature.nodes.len(), e.creature.muscles.len()));
-        *nodes_hist.entry(e.creature.nodes.len()).or_default() += 1;
+        classes.insert((e.creature.node_count(), e.creature.muscle_count()));
+        *nodes_hist.entry(e.creature.node_count()).or_default() += 1;
     }
     let largest = plans.values().copied().max().unwrap_or(0);
     let single = plans.values().filter(|&&n| n == 1).count();
@@ -113,7 +113,7 @@ fn report(name: &str, archive: &qd::QdArchive, experiment: &storage::Experiment)
         "    {} cells tie with the best within 0.1 mm (mean nodes {:.1}, {} plans); {} fitness values shared by more than one cell, largest groups {:?}",
         tied.len(),
         tied.iter()
-            .map(|e| e.creature.nodes.len() as f32)
+            .map(|e| e.creature.node_count() as f32)
             .sum::<f32>()
             / tied.len().max(1) as f32,
         tied.iter()

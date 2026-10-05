@@ -56,7 +56,7 @@ fn retest(path: &str, count: usize, out: &str) -> Result<()> {
     let mut elites: Vec<_> = experiment.archive.entries.iter().collect();
     elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
     elites.truncate(count);
-    let creatures: Vec<_> = elites.iter().map(|e| e.creature.clone()).collect();
+    let creatures: Vec<_> = elites.iter().map(|e| e.creature.unpack()).collect();
     let cfg = evolution_simulator::config::Config {
         screen: None,
         ..experiment.config.clone()
