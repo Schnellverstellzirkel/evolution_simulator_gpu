@@ -1,6 +1,8 @@
+pub use crate::bounded::Bounded;
 use crate::config::Config;
 use crate::qd::{self, CmaEmitter, Emitter, QdArchive};
 use anyhow::{Result, ensure};
+use bytemuck::Zeroable;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -90,11 +92,6 @@ impl Bone {
         self.min_angle = self.min_angle.clamp(-JOINT_LIMIT, 0.0);
         self.max_angle = self.max_angle.clamp(0.0, JOINT_LIMIT);
     }
-    fn mutate_range(&mut self, step: f32, rng: &mut Rng) {
-        self.min_angle += qd::gaussian(rng) * step;
-        self.max_angle += qd::gaussian(rng) * step;
-        self.clamp_range();
-    }
 }
 /// Center of mass of the starting pose without the head (node 0) and
 /// without organs: the point organs must stay near.
@@ -156,7 +153,7 @@ fn place_organs(c: &mut Creature) {
 }
 /// Adds a light organ to a bone that can hold one, or removes an organ.
 fn change_organ(creature: &mut Creature, rng: &mut Rng) -> bool {
-    let with: Vec<usize> = (0..creature.bones.len())
+    let with: Bounded<usize, MAX_NODES> = (0..creature.bones.len())
         .filter(|&i| creature.bones[i].organ_mass > 0.0)
         .collect();
     if !with.is_empty() && rng.unit() < 0.3 {
@@ -166,7 +163,7 @@ fn change_organ(creature: &mut Creature, rng: &mut Rng) -> bool {
         return true;
     }
     let center = organ_center(&creature.nodes);
-    let free: Vec<(usize, (f32, f32))> = (0..creature.bones.len())
+    let free: Bounded<(usize, (f32, f32)), MAX_NODES> = (0..creature.bones.len())
         .filter(|&i| creature.bones[i].organ_mass <= 0.0)
         .filter_map(|i| organ_range(&creature.bones[i], &creature.nodes, center).map(|r| (i, r)))
         .collect();
@@ -216,18 +213,7 @@ pub const NO_SENSOR: u32 = 255;
 fn no_sensor() -> u32 {
     NO_SENSOR
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub(crate) struct LegacyMuscle {
-    pub a: u32,
-    pub b: u32,
-    pub short: f32,
-    pub long: f32,
-    pub period: f32,
-    pub phase: f32,
-    pub duty: f32,
-    pub stiffness: f32,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Genome {
     pub node_start: usize,
     pub node_count: usize,
@@ -236,15 +222,40 @@ pub struct Genome {
     pub muscle_start: usize,
     pub muscle_count: usize,
     pub id: u64,
-    pub mutability: f32,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Most nodes a body may have (`Config::max_nodes` is at most this).
+pub const MAX_NODES: usize = 32;
+/// Most muscles a body may have (`Config::max_muscles` is at most this).
+pub const MAX_MUSCLES: usize = 96;
+pub type Nodes = Bounded<NodeGene, MAX_NODES>;
+pub type Bones = Bounded<Bone, MAX_NODES>;
+pub type Muscles = Bounded<Muscle, MAX_MUSCLES>;
+/// A body's genes, held inline in bounded arrays: a creature is about 6.4 KB
+/// and breeding one never allocates.
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Creature {
-    pub nodes: Vec<NodeGene>,
-    pub bones: Vec<Bone>,
-    pub muscles: Vec<Muscle>,
+    pub nodes: Nodes,
+    pub bones: Bones,
+    pub muscles: Muscles,
     pub id: u64,
-    pub mutability: f32,
+}
+/// `clone_from` copies only the genes in use into the existing arrays, where
+/// the derived one would build a whole new creature and move it.
+impl Clone for Creature {
+    fn clone(&self) -> Self {
+        Self {
+            nodes: Bounded::from_slice(&self.nodes),
+            bones: Bounded::from_slice(&self.bones),
+            muscles: Bounded::from_slice(&self.muscles),
+            id: self.id,
+        }
+    }
+    fn clone_from(&mut self, source: &Self) {
+        self.nodes.clone_from(&source.nodes);
+        self.bones.clone_from(&source.bones);
+        self.muscles.clone_from(&source.muscles);
+        self.id = source.id;
+    }
 }
 /// Splits `all` into consecutive parts of the given sizes.
 fn split<T>(mut all: &mut [T], sizes: impl Iterator<Item = usize>) -> Vec<&mut [T]> {
@@ -256,52 +267,96 @@ fn split<T>(mut all: &mut [T], sizes: impl Iterator<Item = usize>) -> Vec<&mut [
     }
     out
 }
-/// Spare gene arenas that `Population::compact_with` fills and swaps in.
-#[derive(Default)]
-pub struct Arena {
-    nodes: Vec<NodeGene>,
-    bones: Vec<Bone>,
-    muscles: Vec<Muscle>,
-}
-impl Arena {
-    /// Bytes the spare arenas hold, by capacity.
-    pub fn bytes(&self) -> usize {
-        self.nodes.capacity() * std::mem::size_of::<NodeGene>()
-            + self.bones.capacity() * std::mem::size_of::<Bone>()
-            + self.muscles.capacity() * std::mem::size_of::<Muscle>()
-    }
-}
-/// Spare memory is not state: a copy starts empty.
-impl Clone for Arena {
-    fn clone(&self) -> Self {
-        Self::default()
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Population {
     pub genomes: Vec<Genome>,
     pub nodes: Vec<NodeGene>,
     pub bones: Vec<Bone>,
     pub muscles: Vec<Muscle>,
+    /// How each creature's trial treats it (`rungs::AUDIT`, `rungs::EXEMPT`),
+    /// one byte per genome, set when its block is bred. Empty means no flags.
+    #[serde(default)]
+    pub flags: Vec<u8>,
 }
 
-/// Each creature has its own deterministic stream: thread scheduling cannot change evolution.
-pub struct Rng(u64);
+/// The splitmix64 finalizer: a bijection on 64 bits that mixes every input
+/// bit into every output bit.
+#[inline(always)]
+fn finalize(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z ^ (z >> 31)
+}
+/// Draw `draw` of gene `gene` in the stream with `key`: SplitMix64 started
+/// at the key, at counter `gene << 32 | draw`. The key comes from four rounds
+/// of the finalizer over the stream's coordinates (`stream_key`), so streams
+/// start at unrelated points, and within one stream every (gene, draw) pair
+/// gets its own counter.
+#[inline(always)]
+fn keyed(key: u64, gene: u32, draw: u32) -> u64 {
+    let counter = (gene as u64) << 32 | draw as u64;
+    finalize(key.wrapping_add(counter.wrapping_mul(0x9e3779b97f4a7c15)))
+}
+/// A stream key from its coordinates, absorbed one at a time.
+fn stream_key(seed: u64, generation: u64, round: u64, slot: u64) -> u64 {
+    let mut key = finalize(seed.wrapping_add(0x632be59bd9b4e019));
+    for word in [generation, round, slot] {
+        key = finalize(key ^ word.wrapping_mul(0xd1342543de82ef95));
+    }
+    key
+}
+/// The gene index the cursor draws of a stream use.
+const CURSOR: u32 = u32::MAX;
+/// 1 / 65535: twelve 16-bit uniforms on 0..65535, scaled by this, have
+/// variance 1 to 3e-5.
+const GAUSSIAN_SCALE: f32 = 1.0 / 65535.0;
+/// Twelve 16-bit uniforms from three draws, summed and centered: a gaussian
+/// with mean exactly 0 and variance 1, cut at 6. The sum is an integer, so
+/// the value is the same on any machine.
+#[inline(always)]
+fn twelve_uniforms(words: [u64; 3]) -> f32 {
+    let mut sum = 0i64;
+    for w in words {
+        sum += (w & 0xffff) as i64
+            + (w >> 16 & 0xffff) as i64
+            + (w >> 32 & 0xffff) as i64
+            + (w >> 48) as i64;
+    }
+    (sum - 6 * 65535) as f32 * GAUSSIAN_SCALE
+}
+
+/// Counter-based random numbers. A stream is keyed by its coordinates (the
+/// seed, the generation, the breeding round and the ring slot), and every
+/// value is a hash of the key and the value's own index: a child is a
+/// function of its slot and its plan, whatever thread breeds it and in
+/// whatever order.
+///
+/// The cursor (`next_u64`, `unit`, `gaussian`) walks the stream in order, as
+/// structural operators read it. `genes` hands out a sub-stream whose values
+/// are keyed by gene index, so parametric noise on a gene does not depend on
+/// the draws before it.
+pub struct Rng {
+    key: u64,
+    counter: u32,
+}
 impl Rng {
     pub fn new(seed: u64, generation: u32, index: usize) -> Self {
-        Self(
-            seed ^ (generation as u64).wrapping_mul(0xd1342543de82ef95)
-                ^ (index as u64).wrapping_mul(0x9e3779b97f4a7c15),
-        )
+        Self::stream(seed, generation, 0, index)
     }
+    /// The stream of the child bred for ring `slot` in breeding `round`.
+    pub fn stream(seed: u64, generation: u32, round: u64, slot: usize) -> Self {
+        Self {
+            key: stream_key(seed, generation as u64, round, slot as u64),
+            counter: 0,
+        }
+    }
+    #[inline]
     pub fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
-        z ^ (z >> 31)
+        let value = keyed(self.key, CURSOR, self.counter);
+        self.counter = self.counter.wrapping_add(1);
+        value
     }
+    #[inline]
     pub fn unit(&mut self) -> f32 {
         (self.next_u64() >> 40) as f32 / 16_777_216.0
     }
@@ -314,16 +369,54 @@ impl Rng {
     pub fn delta(&mut self) -> f32 {
         self.range(-1.0, 1.0).powi(7)
     }
+    /// A standard gaussian from three cursor draws (`twelve_uniforms`).
+    #[inline]
+    pub fn gaussian(&mut self) -> f32 {
+        twelve_uniforms([self.next_u64(), self.next_u64(), self.next_u64()])
+    }
+    /// A new sub-stream keyed by gene index, for one pass of parametric
+    /// noise over a body. Takes one cursor draw.
+    pub fn genes(&mut self) -> Genes {
+        Genes {
+            key: self.next_u64(),
+        }
+    }
+}
+/// Random values keyed by gene index (`Rng::genes`). Gene `g` gets draws
+/// `0, 1, 2` for its gaussian and `3..` for its uniforms.
+#[derive(Clone, Copy)]
+pub struct Genes {
+    key: u64,
+}
+impl Genes {
+    #[inline(always)]
+    pub fn gaussian(self, gene: u32) -> f32 {
+        twelve_uniforms([
+            keyed(self.key, gene, 0),
+            keyed(self.key, gene, 1),
+            keyed(self.key, gene, 2),
+        ])
+    }
+    /// Uniform on [0, 1): draw `3 + k` of `gene`.
+    #[inline(always)]
+    pub fn unit(self, gene: u32, k: u32) -> f32 {
+        (keyed(self.key, gene, 3 + k) >> 40) as f32 / 16_777_216.0
+    }
+    #[inline(always)]
+    pub fn index(self, gene: u32, k: u32, n: usize) -> usize {
+        (keyed(self.key, gene, 3 + k) % n as u64) as usize
+    }
 }
 impl Population {
     pub fn creature(&self, index: usize) -> Creature {
         let g = &self.genomes[index];
         Creature {
-            nodes: self.nodes[g.node_start..g.node_start + g.node_count].to_vec(),
-            bones: self.bones[g.bone_start..g.bone_start + g.bone_count].to_vec(),
-            muscles: self.muscles[g.muscle_start..g.muscle_start + g.muscle_count].to_vec(),
+            nodes: Bounded::from_slice(&self.nodes[g.node_start..g.node_start + g.node_count]),
+            bones: Bounded::from_slice(&self.bones[g.bone_start..g.bone_start + g.bone_count]),
+            muscles: Bounded::from_slice(
+                &self.muscles[g.muscle_start..g.muscle_start + g.muscle_count],
+            ),
             id: g.id,
-            mutability: g.mutability,
         }
     }
     pub fn push(&mut self, c: Creature) {
@@ -337,319 +430,10 @@ impl Population {
             muscle_start: self.muscles.len(),
             muscle_count: c.muscles.len(),
             id: c.id,
-            mutability: c.mutability,
         });
         self.nodes.extend(c.nodes);
         self.bones.extend(c.bones);
         self.muscles.extend(c.muscles);
-    }
-    pub(crate) fn canonicalize_bones(&mut self) -> Result<()> {
-        for index in 0..self.genomes.len() {
-            let genome = &self.genomes[index];
-            let node_end = genome.node_start.checked_add(genome.node_count);
-            let bone_end = genome.bone_start.checked_add(genome.bone_count);
-            let muscle_end = genome.muscle_start.checked_add(genome.muscle_count);
-            ensure!(
-                node_end.is_some_and(|end| end <= self.nodes.len())
-                    && bone_end.is_some_and(|end| end <= self.bones.len())
-                    && muscle_end.is_some_and(|end| end <= self.muscles.len()),
-                "Invalid genome offset"
-            );
-            let mut creature = self.creature(index);
-            if canonicalize_bone_order(&mut creature) {
-                let genome = &self.genomes[index];
-                self.bones[genome.bone_start..genome.bone_start + genome.bone_count]
-                    .copy_from_slice(&creature.bones);
-                self.muscles[genome.muscle_start..genome.muscle_start + genome.muscle_count]
-                    .copy_from_slice(&creature.muscles);
-            }
-        }
-        Ok(())
-    }
-    pub(crate) fn migrate_actuator_geometry(&mut self, cfg: &Config) {
-        let mut migrated = Population::default();
-        for index in 0..self.genomes.len() {
-            let mut creature = self.creature(index);
-            let mut rng = Rng::new(cfg.seed, 0, index);
-            repair(&mut creature, cfg, &mut rng);
-            migrated.push(creature);
-        }
-        *self = migrated;
-    }
-    /// Puts `c` into population slot `slot`. Its genes are appended to the
-    /// arenas; `compact` later drops the replaced genes.
-    pub fn replace(&mut self, slot: usize, c: Creature) {
-        let mut c = c;
-        canonicalize_bone_order(&mut c);
-        self.genomes[slot] = Genome {
-            node_start: self.nodes.len(),
-            node_count: c.nodes.len(),
-            bone_start: self.bones.len(),
-            bone_count: c.bones.len(),
-            muscle_start: self.muscles.len(),
-            muscle_count: c.muscles.len(),
-            id: c.id,
-            mutability: c.mutability,
-        };
-        self.nodes.extend(c.nodes);
-        self.bones.extend(c.bones);
-        self.muscles.extend(c.muscles);
-    }
-    /// Rebuilds the arenas without genes of replaced creatures.
-    pub fn compact(&mut self) {
-        self.compact_with(&mut Arena::default());
-    }
-    /// Rebuilds the arenas without genes of replaced creatures, copying the
-    /// live genes in parallel into `spare`, whose memory is already mapped
-    /// after the first generation; the old arenas become the next spare.
-    /// Genes keep their creature order, so the result equals `compact`.
-    pub fn compact_with(&mut self, spare: &mut Arena) {
-        const CHUNK: usize = 4096;
-        let Population {
-            genomes,
-            nodes,
-            bones,
-            muscles,
-        } = self;
-        let sizes: Vec<[usize; 3]> = genomes
-            .par_chunks(CHUNK)
-            .map(|chunk| {
-                chunk.iter().fold([0; 3], |t, g| {
-                    [
-                        t[0] + g.node_count,
-                        t[1] + g.bone_count,
-                        t[2] + g.muscle_count,
-                    ]
-                })
-            })
-            .collect();
-        let mut starts = Vec::with_capacity(sizes.len());
-        let mut total = [0usize; 3];
-        for size in &sizes {
-            starts.push(total);
-            for k in 0..3 {
-                total[k] += size[k];
-            }
-        }
-        fn sized<T: Copy>(spare: &mut Vec<T>, len: usize, fill: Option<T>) {
-            spare.clear();
-            if let Some(fill) = fill {
-                spare.resize(len, fill);
-            }
-        }
-        sized(&mut spare.nodes, total[0], nodes.first().copied());
-        sized(&mut spare.bones, total[1], bones.first().copied());
-        sized(&mut spare.muscles, total[2], muscles.first().copied());
-        let node_parts = split(&mut spare.nodes, sizes.iter().map(|s| s[0]));
-        let bone_parts = split(&mut spare.bones, sizes.iter().map(|s| s[1]));
-        let muscle_parts = split(&mut spare.muscles, sizes.iter().map(|s| s[2]));
-        let (old_nodes, old_bones, old_muscles) = (&*nodes, &*bones, &*muscles);
-        genomes
-            .par_chunks_mut(CHUNK)
-            .zip(node_parts)
-            .zip(bone_parts)
-            .zip(muscle_parts)
-            .zip(starts)
-            .for_each(|((((chunk, node_part), bone_part), muscle_part), start)| {
-                let mut at = [0usize; 3];
-                for g in chunk {
-                    node_part[at[0]..at[0] + g.node_count]
-                        .copy_from_slice(&old_nodes[g.node_start..g.node_start + g.node_count]);
-                    bone_part[at[1]..at[1] + g.bone_count]
-                        .copy_from_slice(&old_bones[g.bone_start..g.bone_start + g.bone_count]);
-                    muscle_part[at[2]..at[2] + g.muscle_count].copy_from_slice(
-                        &old_muscles[g.muscle_start..g.muscle_start + g.muscle_count],
-                    );
-                    g.node_start = start[0] + at[0];
-                    g.bone_start = start[1] + at[1];
-                    g.muscle_start = start[2] + at[2];
-                    at[0] += g.node_count;
-                    at[1] += g.bone_count;
-                    at[2] += g.muscle_count;
-                }
-            });
-        std::mem::swap(nodes, &mut spare.nodes);
-        std::mem::swap(bones, &mut spare.bones);
-        std::mem::swap(muscles, &mut spare.muscles);
-        // Breeding appends a generation of children before the next
-        // compaction: room for them now (with an eighth more, as bodies
-        // grow) means no doubling reallocation later. The spare keeps only
-        // what that compaction fills, so the old arena's children do not stay
-        // resident.
-        fn resize_room<T>(live: &mut Vec<T>, spare: &mut Vec<T>, len: usize) {
-            live.reserve_exact(len + len / 8);
-            spare.clear();
-            spare.shrink_to(len + len / 8);
-        }
-        resize_room(nodes, &mut spare.nodes, total[0]);
-        resize_room(bones, &mut spare.bones, total[1]);
-        resize_room(muscles, &mut spare.muscles, total[2]);
-    }
-    /// `replace` for many slots at once: canonicalizes and copies the genes
-    /// in parallel, then appends them in slot order, so the arenas end up
-    /// exactly as after replacing the slots one by one.
-    pub fn replace_many(&mut self, slots: &[usize], mut creatures: Vec<Creature>) {
-        const CHUNK: usize = 4096;
-        let counts: Vec<[u32; 3]> = creatures
-            .par_iter()
-            .map(|c| {
-                [
-                    c.nodes.len() as u32,
-                    c.bones.len() as u32,
-                    c.muscles.len() as u32,
-                ]
-            })
-            .collect();
-        let sizes: Vec<[usize; 3]> = counts
-            .par_chunks(CHUNK)
-            .map(|part| {
-                part.iter().fold([0; 3], |t, c| {
-                    [
-                        t[0] + c[0] as usize,
-                        t[1] + c[1] as usize,
-                        t[2] + c[2] as usize,
-                    ]
-                })
-            })
-            .collect();
-        let added = sizes
-            .iter()
-            .fold([0; 3], |t, s| [t[0] + s[0], t[1] + s[1], t[2] + s[2]]);
-        // One pass: each run of children puts its bones in canonical order,
-        // writes its genes into its own part of the arenas' spare room and
-        // frees the children while they are still in cache. The first touch
-        // of fresh memory is most of the cost, so all threads share it.
-        self.nodes.reserve(added[0]);
-        self.bones.reserve(added[1]);
-        self.muscles.reserve(added[2]);
-        let node_parts = split(
-            &mut self.nodes.spare_capacity_mut()[..added[0]],
-            sizes.iter().map(|s| s[0]),
-        );
-        let bone_parts = split(
-            &mut self.bones.spare_capacity_mut()[..added[1]],
-            sizes.iter().map(|s| s[1]),
-        );
-        let muscle_parts = split(
-            &mut self.muscles.spare_capacity_mut()[..added[2]],
-            sizes.iter().map(|s| s[2]),
-        );
-        creatures
-            .par_chunks_mut(CHUNK)
-            .zip(node_parts)
-            .zip(bone_parts)
-            .zip(muscle_parts)
-            .for_each(|(((chunk, nodes), bones), muscles)| {
-                let mut at = [0; 3];
-                for c in chunk {
-                    canonicalize_bone_order(c);
-                    for (dst, &src) in nodes[at[0]..].iter_mut().zip(&c.nodes) {
-                        dst.write(src);
-                    }
-                    for (dst, &src) in bones[at[1]..].iter_mut().zip(&c.bones) {
-                        dst.write(src);
-                    }
-                    for (dst, &src) in muscles[at[2]..].iter_mut().zip(&c.muscles) {
-                        dst.write(src);
-                    }
-                    at = [
-                        at[0] + c.nodes.len(),
-                        at[1] + c.bones.len(),
-                        at[2] + c.muscles.len(),
-                    ];
-                    drop(std::mem::take(&mut c.nodes));
-                    drop(std::mem::take(&mut c.bones));
-                    drop(std::mem::take(&mut c.muscles));
-                }
-            });
-        let mut at = [self.nodes.len(), self.bones.len(), self.muscles.len()];
-        // SAFETY: the parts cover the first `added` spare elements of each
-        // arena, and every run wrote all of its part.
-        unsafe {
-            self.nodes.set_len(at[0] + added[0]);
-            self.bones.set_len(at[1] + added[1]);
-            self.muscles.set_len(at[2] + added[2]);
-        }
-        for ((&slot, c), count) in slots.iter().zip(&creatures).zip(&counts) {
-            let (n, b, m) = (count[0] as usize, count[1] as usize, count[2] as usize);
-            self.genomes[slot] = Genome {
-                node_start: at[0],
-                node_count: n,
-                bone_start: at[1],
-                bone_count: b,
-                muscle_start: at[2],
-                muscle_count: m,
-                id: c.id,
-                mutability: c.mutability,
-            };
-            at = [at[0] + n, at[1] + b, at[2] + m];
-        }
-    }
-    /// `replace_many` for children packed into batches: batch after batch
-    /// go to `slots` in order, and the arenas end up exactly as after
-    /// `replace_many` with the same children.
-    pub fn append_batches(&mut self, slots: &[usize], batches: Vec<ChildBatch>) {
-        let sizes: Vec<[usize; 3]> = batches
-            .iter()
-            .map(|b| [b.nodes.len(), b.bones.len(), b.muscles.len()])
-            .collect();
-        let added = sizes
-            .iter()
-            .fold([0; 3], |t, s| [t[0] + s[0], t[1] + s[1], t[2] + s[2]]);
-        self.nodes.reserve(added[0]);
-        self.bones.reserve(added[1]);
-        self.muscles.reserve(added[2]);
-        let node_parts = split(
-            &mut self.nodes.spare_capacity_mut()[..added[0]],
-            sizes.iter().map(|s| s[0]),
-        );
-        let bone_parts = split(
-            &mut self.bones.spare_capacity_mut()[..added[1]],
-            sizes.iter().map(|s| s[1]),
-        );
-        let muscle_parts = split(
-            &mut self.muscles.spare_capacity_mut()[..added[2]],
-            sizes.iter().map(|s| s[2]),
-        );
-        batches
-            .par_iter()
-            .zip(node_parts)
-            .zip(bone_parts)
-            .zip(muscle_parts)
-            .for_each(|(((batch, nodes), bones), muscles)| {
-                for (dst, &src) in nodes.iter_mut().zip(&batch.nodes) {
-                    dst.write(src);
-                }
-                for (dst, &src) in bones.iter_mut().zip(&batch.bones) {
-                    dst.write(src);
-                }
-                for (dst, &src) in muscles.iter_mut().zip(&batch.muscles) {
-                    dst.write(src);
-                }
-            });
-        let mut at = [self.nodes.len(), self.bones.len(), self.muscles.len()];
-        // SAFETY: the parts cover the first `added` spare elements of each
-        // arena, and every batch wrote all of its part.
-        unsafe {
-            self.nodes.set_len(at[0] + added[0]);
-            self.bones.set_len(at[1] + added[1]);
-            self.muscles.set_len(at[2] + added[2]);
-        }
-        let metas = batches.iter().flat_map(|b| &b.meta);
-        for (&slot, meta) in slots.iter().zip(metas) {
-            let [n, b, m] = meta.counts.map(|c| c as usize);
-            self.genomes[slot] = Genome {
-                node_start: at[0],
-                node_count: n,
-                bone_start: at[1],
-                bone_count: b,
-                muscle_start: at[2],
-                muscle_count: m,
-                id: meta.id,
-                mutability: meta.mutability,
-            };
-            at = [at[0] + n, at[1] + b, at[2] + m];
-        }
     }
     /// Copies `indices` into a standalone population; creature `k` of the
     /// result is `indices[k]` of `self`.
@@ -678,6 +462,11 @@ impl Population {
             nodes: Vec::with_capacity(total[0]),
             bones: Vec::with_capacity(total[1]),
             muscles: Vec::with_capacity(total[2]),
+            flags: if self.flags.is_empty() {
+                Vec::new()
+            } else {
+                indices.iter().map(|&i| self.flags[i]).collect()
+            },
         };
         let mut starts = Vec::with_capacity(sizes.len());
         let mut at = [0usize; 3];
@@ -790,10 +579,6 @@ impl Population {
                         .checked_add(g.muscle_count)
                         .is_some_and(|x| x <= self.muscles.len()),
                 "Invalid genome offset"
-            );
-            ensure!(
-                g.mutability.is_finite() && (0.0..=2.0).contains(&g.mutability),
-                "Invalid mutability"
             );
             for n in &self.nodes[g.node_start..g.node_start + g.node_count] {
                 ensure!(
@@ -926,7 +711,7 @@ impl Population {
 }
 pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
     let node_count = creature.nodes.len();
-    if !(1..=64).contains(&node_count) || creature.bones.len() != node_count - 1 {
+    if !(1..=MAX_NODES).contains(&node_count) || creature.bones.len() != node_count - 1 {
         return false;
     }
     let mut ordered_nodes = 1u64;
@@ -947,28 +732,34 @@ pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
     if already_ordered && ordered_nodes.count_ones() as usize == node_count {
         return true;
     }
-    let mut adjacency = vec![Vec::<(usize, usize)>::new(); node_count];
-    for (index, bone) in creature.bones.iter().enumerate() {
-        let a = bone.a as usize;
-        let b = bone.b as usize;
-        if a >= node_count || b >= node_count || a == b {
-            return false;
-        }
-        adjacency[a].push((b, index));
-        adjacency[b].push((a, index));
+    if creature.bones.iter().any(|bone| {
+        let (a, b) = (bone.a as usize, bone.b as usize);
+        a >= node_count || b >= node_count || a == b
+    }) {
+        return false;
     }
-    let mut visited = [false; 64];
-    let mut queue = [0usize; 64];
+    let mut visited = [false; MAX_NODES];
+    let mut queue = [0usize; MAX_NODES];
     let mut head = 0;
     let mut tail = 1;
-    let mut ordered = Vec::with_capacity(creature.bones.len());
-    let mut remap = vec![usize::MAX; creature.bones.len()];
-    let mut reversed = vec![false; creature.bones.len()];
+    let mut ordered = Bones::new();
+    let mut remap = [usize::MAX; MAX_NODES];
+    let mut reversed = [false; MAX_NODES];
     visited[0] = true;
     while head < tail {
         let parent = queue[head];
         head += 1;
-        for &(child, old_index) in &adjacency[parent] {
+        // The parent's bones in bone order: the order an adjacency list
+        // built bone by bone would hold them in.
+        for old_index in 0..creature.bones.len() {
+            let bone = creature.bones[old_index];
+            let child = if bone.a as usize == parent {
+                bone.b as usize
+            } else if bone.b as usize == parent {
+                bone.a as usize
+            } else {
+                continue;
+            };
             if visited[child] {
                 continue;
             }
@@ -993,9 +784,10 @@ pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
     if tail != node_count || ordered.len() != creature.bones.len() {
         return false;
     }
+    let bones = creature.bones.len();
     if creature.muscles.iter().any(|muscle| {
         [muscle.bone_a, muscle.bone_b].iter().any(|bone| {
-            remap
+            remap[..bones]
                 .get(*bone as usize)
                 .is_none_or(|index| *index == usize::MAX)
         })
@@ -1027,6 +819,49 @@ fn bone(a: usize, b: usize, nodes: &[NodeGene]) -> Bone {
         dx.hypot(dy).clamp(0.03, max_bone_length()),
     )
 }
+/// The period ratios a limb may run at against the body's base clock (the
+/// first muscle's period). Simple ratios keep the whole gait exactly
+/// periodic, repeating every few base cycles.
+pub const CLOCK_RATIOS: [f32; 9] = [
+    1.0 / 3.0,
+    0.5,
+    2.0 / 3.0,
+    0.75,
+    1.0,
+    4.0 / 3.0,
+    1.5,
+    2.0,
+    3.0,
+];
+/// The position of ratio 1 in `CLOCK_RATIOS`.
+const UNIT_RATIO: usize = 4;
+
+/// Every muscle runs on the body's base clock, set by the first muscle, or on
+/// a simple multiple of it (`CLOCK_RATIOS`): a period equal to a ratio (to
+/// 0.3%, so ratios survive the arithmetic of mutation) keeps it, and any other
+/// period falls back to the base, so muscles that repair or an operator adds
+/// with a random period join the body's clock.
+fn snap_clock_ratios(c: &mut Creature) {
+    let Some(base) = c.muscles.first().map(|m| m.period) else {
+        return;
+    };
+    let (low, high) = (min_muscle_period(), 10.0);
+    let logs = CLOCK_RATIOS.map(f32::ln);
+    for m in &mut c.muscles {
+        let log = (m.period / base).ln();
+        let best = (0..CLOCK_RATIOS.len())
+            .min_by(|&a, &b| (logs[a] - log).abs().total_cmp(&(logs[b] - log).abs()))
+            .unwrap_or(UNIT_RATIO);
+        let ratio = if (logs[best] - log).abs() < 0.003
+            && (low..=high).contains(&(base * CLOCK_RATIOS[best]))
+        {
+            CLOCK_RATIOS[best]
+        } else {
+            1.0
+        };
+        m.period = base * ratio;
+    }
+}
 pub(crate) fn normalize_bone_lengths(c: &mut Creature) {
     for bone in &mut c.bones {
         let a = c.nodes[bone.a as usize];
@@ -1039,24 +874,13 @@ pub(crate) fn normalize_bone_lengths(c: &mut Creature) {
 }
 fn align_nodes_with_bones(c: &mut Creature) {
     // The starting positions are needed while the new ones are written in
-    // place. Bodies are at most 64 nodes, so the common case copies onto the
-    // stack instead of cloning the node vector.
-    let stack = (c.nodes.len() <= 64).then(|| {
-        let mut flat = [0.0f32; 128];
-        for (index, node) in c.nodes.iter().enumerate() {
-            flat[2 * index] = node.x;
-            flat[2 * index + 1] = node.y;
-        }
-        flat
-    });
-    let heap = stack.is_none().then(|| c.nodes.clone());
-    let original = |index: usize| -> (f32, f32) {
-        match (&stack, &heap) {
-            (Some(flat), _) => (flat[2 * index], flat[2 * index + 1]),
-            (_, Some(nodes)) => (nodes[index].x, nodes[index].y),
-            _ => unreachable!("one coordinate source"),
-        }
-    };
+    // place, so they are copied onto the stack first.
+    let mut flat = [0.0f32; 2 * MAX_NODES];
+    for (index, node) in c.nodes.iter().enumerate() {
+        flat[2 * index] = node.x;
+        flat[2 * index + 1] = node.y;
+    }
+    let original = |index: usize| -> (f32, f32) { (flat[2 * index], flat[2 * index + 1]) };
     for bone in &c.bones {
         let a = bone.a as usize;
         let b = bone.b as usize;
@@ -1074,7 +898,7 @@ fn align_nodes_with_bones(c: &mut Creature) {
         c.nodes[b].y = c.nodes[a].y + direction[1] * bone.rest_length;
     }
 }
-fn bone_point(bone: Bone, nodes: &[NodeGene], t: f32) -> [f32; 2] {
+pub(crate) fn bone_point(bone: Bone, nodes: &[NodeGene], t: f32) -> [f32; 2] {
     let a = nodes[bone.a as usize];
     let b = nodes[bone.b as usize];
     [a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t]
@@ -1105,12 +929,12 @@ fn muscle(
         bone_b: bone_b as u32,
         anchor_a,
         anchor_b,
-        short: length * rng.range(0.65, 0.95),
-        long: length * rng.range(1.05, 1.35),
+        short: length * rng.range(0.55, 0.85),
+        long: length * rng.range(1.15, 1.45),
         period: rng.range(0.65, 2.6),
         phase: rng.unit(),
         duty: rng.range(0.25, 0.75),
-        stiffness: rng.range(20.0, 80.0),
+        stiffness: rng.range(60.0, 120.0),
         sensor: if rng.unit() < 0.5 {
             rng.index(4) as u32
         } else {
@@ -1119,78 +943,6 @@ fn muscle(
         reset: rng.unit(),
         tendon: 0.0,
     }
-}
-pub(crate) fn migrate_legacy_creature(
-    nodes: Vec<NodeGene>,
-    legacy_muscles: &[LegacyMuscle],
-    id: u64,
-    mutability: f32,
-    cfg: &Config,
-) -> Creature {
-    let mut creature = Creature {
-        bones: (0..nodes.len().saturating_sub(1))
-            .map(|i| bone(i, i + 1, &nodes))
-            .collect(),
-        nodes,
-        muscles: Vec::with_capacity(legacy_muscles.len()),
-        id,
-        mutability,
-    };
-    let mut rng = Rng::new(cfg.seed, 0, id as usize);
-    for old in legacy_muscles {
-        let a = old.a as usize;
-        let b = old.b as usize;
-        if a >= creature.nodes.len() || b >= creature.nodes.len() || a == b {
-            continue;
-        }
-        let mut choices = Vec::new();
-        for (bone_a, bone) in creature.bones.iter().enumerate() {
-            let anchor_a = if bone.a as usize == a {
-                Some(0.0)
-            } else if bone.b as usize == a {
-                Some(1.0)
-            } else {
-                None
-            };
-            let Some(anchor_a) = anchor_a else { continue };
-            for (bone_b, other) in creature.bones.iter().enumerate() {
-                if bone_a == bone_b {
-                    continue;
-                }
-                let anchor_b = if other.a as usize == b {
-                    Some(0.0)
-                } else if other.b as usize == b {
-                    Some(1.0)
-                } else {
-                    None
-                };
-                if let Some(anchor_b) = anchor_b {
-                    choices.push((bone_a, bone_b, anchor_a, anchor_b));
-                }
-            }
-        }
-        if choices.is_empty() {
-            continue;
-        }
-        let (bone_a, bone_b, anchor_a, anchor_b) = choices[rng.index(choices.len())];
-        creature.muscles.push(Muscle {
-            bone_a: bone_a as u32,
-            bone_b: bone_b as u32,
-            anchor_a,
-            anchor_b,
-            short: old.short,
-            long: old.long,
-            period: old.period,
-            phase: old.phase,
-            duty: old.duty,
-            stiffness: old.stiffness,
-            sensor: NO_SENSOR,
-            reset: 0.0,
-            tendon: 0.0,
-        });
-    }
-    repair(&mut creature, cfg, &mut rng);
-    creature
 }
 
 /// Largest tilt of the neck from vertical in the starting pose.
@@ -1228,7 +980,7 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
         node.diameter = node.diameter.clamp(cfg.min_size, cfg.max_size);
         node.friction = node.friction.clamp(cfg.min_friction, cfg.max_friction);
     }
-    let node_count = c.nodes.len().min(64);
+    let node_count = c.nodes.len();
     // Incremental connectivity over the <= 64 nodes: accepted bones always
     // join two components, so the union-find answers the reachability test
     // that a per-candidate graph walk used to run.
@@ -1371,13 +1123,7 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
             }
         }
     }
-    // Every muscle runs on the body's one clock, set by the first muscle.
-    // Muscles differ only in phase, so every gait repeats exactly.
-    if let Some(first) = c.muscles.first().map(|m| m.period) {
-        for m in &mut c.muscles {
-            m.period = first;
-        }
-    }
+    snap_clock_ratios(c);
     normalize_bone_lengths(c);
     canonicalize_bone_order(c);
     align_nodes_with_bones(c);
@@ -1392,8 +1138,22 @@ fn random_creature(cfg: &Config, generation: u32, index: usize) -> Creature {
     creature
 }
 fn random_creature_from(cfg: &Config, rng: &mut Rng) -> Creature {
-    let n = (3 + rng.index(3)).min(cfg.max_nodes);
-    let spacing = rng.range(0.18, 0.28);
+    random_shaped(cfg, rng, 3, 3, (0.18, 0.28), false)
+}
+
+/// A random body of `low` to `low + spread - 1` nodes, `spacing` apart. A
+/// `branched` body hangs each node from a random earlier one, a chain from
+/// the one before it.
+fn random_shaped(
+    cfg: &Config,
+    rng: &mut Rng,
+    low: usize,
+    spread: usize,
+    spacing: (f32, f32),
+    branched: bool,
+) -> Creature {
+    let n = (low + rng.index(spread)).min(cfg.max_nodes);
+    let spacing = rng.range(spacing.0, spacing.1);
     let mut c = Creature {
         nodes: (0..n)
             .map(|i| NodeGene {
@@ -1403,13 +1163,13 @@ fn random_creature_from(cfg: &Config, rng: &mut Rng) -> Creature {
                 friction: rng.range(cfg.min_friction, cfg.max_friction),
             })
             .collect(),
-        bones: Vec::with_capacity(n - 1),
-        muscles: vec![],
+        bones: Bones::new(),
+        muscles: Muscles::new(),
         id: 0,
-        mutability: 1.0,
     };
     for i in 0..n - 1 {
-        let mut b = bone(i, i + 1, &c.nodes);
+        let parent = if branched && i > 0 { rng.index(i + 1) } else { i };
+        let mut b = bone(parent, i + 1, &c.nodes);
         b.min_angle = -rng.range(0.3, JOINT_LIMIT);
         b.max_angle = rng.range(0.3, JOINT_LIMIT);
         c.bones.push(b);
@@ -1432,75 +1192,80 @@ fn random_creature_from(cfg: &Config, rng: &mut Rng) -> Creature {
     }
     c
 }
+/// Builds creatures `0..count` in parallel, in index order.
 fn collect_parallel(count: usize, make: impl Fn(usize) -> Creature + Sync) -> Population {
-    collect_parallel_streaming(count, count.max(1), make, |_, _| Ok(()))
-        .expect("infallible slice callback")
-}
-/// Builds creatures `0..count` in slices of `slice` creatures (each slice in
-/// parallel) and calls `on_slice` with the population built so far after each
-/// slice. Indices and contents do not depend on the slice size.
-fn collect_parallel_streaming(
-    count: usize,
-    slice: usize,
-    make: impl Fn(usize) -> Creature + Sync,
-    mut on_slice: impl FnMut(&Population, std::ops::Range<usize>) -> Result<()>,
-) -> Result<Population> {
     let mut out = Population {
         genomes: Vec::with_capacity(count),
         ..Default::default()
     };
-    for start in (0..count).step_by(slice.max(1)) {
-        let end = (start + slice).min(count);
-        // Bounded temporary arenas, not a Vec<Creature> with millions of allocations retained.
-        let chunks: Vec<Population> = (start..end)
-            .step_by(4096)
-            .collect::<Vec<_>>()
-            .into_par_iter()
-            .map(|chunk| {
-                // Typical bodies are 3 to 8 nodes; a low estimate only costs a
-                // growth reallocation, never a different result.
-                let estimate = (chunk + 4096).min(end) - chunk;
-                let mut p = Population {
-                    nodes: Vec::with_capacity(estimate * 8),
-                    bones: Vec::with_capacity(estimate * 8),
-                    muscles: Vec::with_capacity(estimate * 10),
-                    ..Default::default()
-                };
-                for i in chunk..(chunk + 4096).min(end) {
-                    p.push(make(i));
-                }
-                p
-            })
-            .collect();
-        // Reserve the merged arenas exactly so the copies below do not
-        // reallocate the growing gene vectors.
-        let node_total: usize = chunks.iter().map(|chunk| chunk.nodes.len()).sum();
-        let bone_total: usize = chunks.iter().map(|chunk| chunk.bones.len()).sum();
-        let muscle_total: usize = chunks.iter().map(|chunk| chunk.muscles.len()).sum();
-        out.nodes.reserve_exact(node_total);
-        out.bones.reserve_exact(bone_total);
-        out.muscles.reserve_exact(muscle_total);
-        for mut chunk in chunks {
-            let ns = out.nodes.len();
-            let bs = out.bones.len();
-            let ms = out.muscles.len();
-            for g in &mut chunk.genomes {
-                g.node_start += ns;
-                g.bone_start += bs;
-                g.muscle_start += ms;
+    // Bounded temporary arenas, not a Vec<Creature> with millions of allocations retained.
+    let chunks: Vec<Population> = (0..count)
+        .step_by(4096)
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|chunk| {
+            // Typical bodies are 3 to 8 nodes; a low estimate only costs a
+            // growth reallocation, never a different result.
+            let estimate = (chunk + 4096).min(count) - chunk;
+            let mut p = Population {
+                nodes: Vec::with_capacity(estimate * 8),
+                bones: Vec::with_capacity(estimate * 8),
+                muscles: Vec::with_capacity(estimate * 10),
+                ..Default::default()
+            };
+            for i in chunk..(chunk + 4096).min(count) {
+                p.push(make(i));
             }
-            out.genomes.extend(chunk.genomes);
-            out.nodes.extend(chunk.nodes);
-            out.bones.extend(chunk.bones);
-            out.muscles.extend(chunk.muscles);
+            p
+        })
+        .collect();
+    // Reserve the merged arenas exactly so the copies below do not
+    // reallocate the growing gene vectors.
+    out.nodes
+        .reserve_exact(chunks.iter().map(|chunk| chunk.nodes.len()).sum());
+    out.bones
+        .reserve_exact(chunks.iter().map(|chunk| chunk.bones.len()).sum());
+    out.muscles
+        .reserve_exact(chunks.iter().map(|chunk| chunk.muscles.len()).sum());
+    for mut chunk in chunks {
+        let ns = out.nodes.len();
+        let bs = out.bones.len();
+        let ms = out.muscles.len();
+        for g in &mut chunk.genomes {
+            g.node_start += ns;
+            g.bone_start += bs;
+            g.muscle_start += ms;
         }
-        on_slice(&out, start..end)?;
+        out.genomes.extend(chunk.genomes);
+        out.nodes.extend(chunk.nodes);
+        out.bones.extend(chunk.bones);
+        out.muscles.extend(chunk.muscles);
     }
-    Ok(out)
+    out
 }
 pub fn create(cfg: &Config) -> Result<Population> {
     cfg.validate()?;
     Ok(collect_parallel(cfg.population, |i| initial(cfg, i)))
+}
+/// New random bodies for ring slots `first..first + count`.
+pub fn random_block(cfg: &Config, first: usize, count: usize) -> Population {
+    collect_parallel(count, |k| initial(cfg, first + k))
+}
+/// Ring slots have fewer than 2^24 places, so a bred creature's id holds its
+/// breeding round and its slot, and no two bred creatures share an id.
+const SLOT_BITS: u32 = 24;
+const BRED: u64 = 1 << 63;
+/// Id of the child bred for ring `slot` in breeding round `round`.
+pub fn bred_id(round: u64, slot: usize) -> u64 {
+    BRED | (round << SLOT_BITS) | slot as u64
+}
+/// The ring slot a creature was born in, from its id.
+pub fn slot_of_id(id: u64) -> usize {
+    if id & BRED != 0 {
+        (id & ((1 << SLOT_BITS) - 1)) as usize
+    } else {
+        id.saturating_sub(1) as usize
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1510,131 +1275,210 @@ pub struct CandidatePlan {
     pub cma: Option<usize>,
     /// Second archive parent with the same body plan, for crossover.
     pub mate: Option<usize>,
-    /// `parent` indexes the global archive's morphology reserve instead of
-    /// the offspring's island archive.
-    pub reserve: bool,
+    /// The parent and the mate are elites of the slot's island, not of the
+    /// archive the slot breeds for: a reshaped child for a nursery.
+    pub seed: bool,
 }
 
-pub fn emit_archive_batch(
-    current: &Population,
-    archive: &[QdArchive],
-    reserve: &QdArchive,
-    cma_emitters: &[CmaEmitter],
-    plans: &[CandidatePlan],
-    cfg: &Config,
-    generation: u32,
-) -> Result<Population> {
-    emit_archive_batch_streaming(
-        current,
-        archive,
-        reserve,
-        cma_emitters,
-        plans,
-        cfg,
-        generation,
-        cfg.population.max(1),
-        |_, _| Ok(()),
-    )
+/// The growth-step body rule (the owner's decision of 2026-10-01): a child gains at most this many nodes and muscles
+/// over its parent, so bodies grow by steps rather than jumps. In a
+/// generation-50 dump 4% of archive entrants had jumped further.
+pub const GROWTH_STEP: Option<GrowthStep> = Some(GrowthStep {
+    nodes: 4,
+    muscles: 4,
+});
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GrowthStep {
+    pub nodes: usize,
+    pub muscles: usize,
 }
-/// Like `emit_archive_batch`, but hands each finished slice of offspring to
-/// `on_slice` so evaluation can start while the rest is bred.
+
+/// The body limits a child of `parent` must fit: the config caps, lowered to
+/// the parent's size plus `step` when there is one. Every operator's fit
+/// check reads `cfg.max_nodes` and `cfg.max_muscles`, so tighter limits
+/// reach them as a config (`None` when the config's own caps apply).
+pub fn child_limits(cfg: &Config, parent: &Creature, step: Option<GrowthStep>) -> Option<Config> {
+    let step = step?;
+    let nodes = cfg.max_nodes.min(parent.nodes.len() + step.nodes);
+    let muscles = cfg.max_muscles.min(parent.muscles.len() + step.muscles);
+    (nodes < cfg.max_nodes || muscles < cfg.max_muscles).then(|| Config {
+        max_nodes: nodes,
+        max_muscles: muscles,
+        ..cfg.clone()
+    })
+}
+
+/// What breeding did to one child, for `examples/breed_bench.rs`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChildTrace {
+    /// The child went through `structural_mutation_from`.
+    pub structural: bool,
+    /// The structural operator that changed it, as an index into
+    /// `structural_operator_names`.
+    pub operator: Option<u8>,
+}
+
+/// Breeds one offspring from its plan with the given random stream into
+/// `child`, which it overwrites.
 #[allow(clippy::too_many_arguments)]
-pub fn emit_archive_batch_streaming(
-    current: &Population,
-    archive: &[QdArchive],
-    reserve: &QdArchive,
-    cma_emitters: &[CmaEmitter],
-    plans: &[CandidatePlan],
-    cfg: &Config,
-    generation: u32,
-    slice: usize,
-    on_slice: impl FnMut(&Population, std::ops::Range<usize>) -> Result<()>,
-) -> Result<Population> {
-    ensure_archive_batch_memory(current, &archive[0], cfg)?;
-    ensure!(plans.len() == cfg.population, "Invalid emitter plan count");
-    collect_parallel_streaming(
-        cfg.population,
-        slice,
-        |i| {
-            let mut rng = Rng::new(cfg.seed, generation, i);
-            let id = (generation as u64) * cfg.population as u64 + i as u64 + 1;
-            offspring(
-                &archive[i % archive.len()],
-                reserve,
-                cma_emitters,
-                plans[i],
-                cfg,
-                &mut rng,
-                id,
-            )
-        },
-        on_slice,
-    )
-}
-
-/// Breeds one offspring from its plan with the given random stream.
 fn offspring(
     archive: &QdArchive,
-    reserve: &QdArchive,
+    variation: Variation,
     cma_emitters: &[CmaEmitter],
     plan: CandidatePlan,
     cfg: &Config,
     rng: &mut Rng,
     id: u64,
-) -> Creature {
-    let mut creature = match plan.emitter {
-        Emitter::Restart => random_creature_from(cfg, rng),
+    step: Option<GrowthStep>,
+    child: &mut Creature,
+) -> ChildTrace {
+    let mut trace = ChildTrace::default();
+    let limited = match plan.emitter {
+        Emitter::Structural | Emitter::Novelty => plan
+            .parent
+            .and_then(|p| child_limits(cfg, &archive.entries[p].creature, step)),
+        Emitter::Restart | Emitter::Cma => None,
+    };
+    let cfg = limited.as_ref().unwrap_or(cfg);
+    match plan.emitter {
+        Emitter::Restart => *child = random_creature_from(cfg, rng),
         Emitter::Cma => {
             if let Some(cma) = plan.cma.and_then(|index| cma_emitters.get(index)) {
-                cma.sample_scaled(rng, cfg.mutation)
+                cma.sample_into(rng, cfg.mutation, child);
             } else {
-                let parent = &archive.entries[plan.parent.expect("CMA parent")].creature;
-                local_mutation(parent.clone(), cfg, rng, 0.12)
+                child.clone_from(&archive.entries[plan.parent.expect("CMA parent")].creature);
+                mutate_genes(child, cfg, rng, 0.12);
             }
         }
         Emitter::Structural => {
-            let parent = mated(if plan.reserve { reserve } else { archive }, plan, cfg, rng);
-            let mut child = parent;
-            let _ = structural_mutation_from(&mut child, cfg, rng, archive);
-            local_mutation(child, cfg, rng, 0.035)
+            mated(archive, plan, cfg, rng, child);
+            trace.structural = true;
+            trace.operator = structural_mutation_among(
+                child,
+                cfg,
+                rng,
+                &variation.donors.entries,
+                variation.bias,
+            );
+            // A compound operator's change is whole: noise on every gene
+            // after it halves how often its child enters the archive
+            // (`examples/mutation_audit.rs`).
+            let compound = trace.operator.is_some_and(|op| {
+                (op as usize)
+                    .checked_sub(CLASSIC_COUNT)
+                    .is_some_and(anatomy::is_compound)
+            });
+            if !compound {
+                mutate_genes(child, cfg, rng, 0.035);
+            }
         }
         Emitter::Novelty => {
-            let parent = mated(if plan.reserve { reserve } else { archive }, plan, cfg, rng);
+            mated(archive, plan, cfg, rng, child);
             // Occasional large jumps help lineages cross fitness valleys.
             let scale = if rng.unit() < 0.05 { 2.25 } else { 0.75 };
-            let mut child = local_mutation(parent, cfg, rng, scale);
+            mutate_genes(child, cfg, rng, scale);
             if rng.unit() < 0.18 {
-                let _ = structural_mutation_from(&mut child, cfg, rng, archive);
+                trace.structural = true;
+                trace.operator = structural_mutation_among(
+                    child,
+                    cfg,
+                    rng,
+                    &variation.donors.entries,
+                    variation.bias,
+                );
             }
-            child
         }
-    };
-    creature.id = id;
-    repair(&mut creature, cfg, rng);
-    creature
+    }
+    child.id = id;
+    repair(child, cfg, rng);
+    trace
 }
 
-/// The plan's parent, crossed with its mate when it has one.
-fn mated(archive: &QdArchive, plan: CandidatePlan, cfg: &Config, rng: &mut Rng) -> Creature {
+/// Breeds the child of ring `slot` in breeding `round` from its plan into
+/// `child`, as `Population::breed` does, and says what breeding did.
+#[allow(clippy::too_many_arguments)]
+pub fn breed_child(
+    archive: &[QdArchive],
+    cma_emitters: &[CmaEmitter],
+    plan: CandidatePlan,
+    slot: usize,
+    cfg: &Config,
+    generation: u32,
+    round: u64,
+    child: &mut Creature,
+) -> ChildTrace {
+    let mut rng = Rng::stream(cfg.seed, generation, round, slot);
+    let source = if plan.seed {
+        qd::island_of_slot(slot, archive.len() / qd::ARENA_KINDS)
+    } else {
+        qd::arena_of_slot(slot, archive.len())
+    };
+    let island = qd::island_of_slot(slot, archive.len() / qd::ARENA_KINDS);
+    // The hub grafts limbs from the isolated islands too: genes reach the hub
+    // only, so the isolated islands stay isolated (Whitley et al., 1999).
+    let donors = if island == qd::MAIN_ISLANDS - 1 && archive.len() > qd::MAIN_ISLANDS {
+        &archive[slot / archive.len().max(1) % (qd::MAIN_ISLANDS - 1)]
+    } else {
+        &archive[source]
+    };
+    let variation = Variation {
+        donors,
+        bias: island_bias(cfg.seed, island),
+    };
+    offspring(
+        &archive[source],
+        variation,
+        cma_emitters,
+        plan,
+        cfg,
+        &mut rng,
+        bred_id(round, slot),
+        GROWTH_STEP,
+        child,
+    )
+}
+
+/// Where a structural mutation takes donor limbs from, and the island's
+/// operator bias (`island_bias`).
+#[derive(Clone, Copy)]
+struct Variation<'a> {
+    donors: &'a QdArchive,
+    bias: u64,
+}
+
+/// Each island favours its own 8 operator pick slots, drawn twice as often,
+/// like species with different mutation biases (Cantu-Paz, 2000). Every
+/// operator stays in every island.
+fn island_bias(seed: u64, island: usize) -> u64 {
+    (seed ^ 0x6269_6173).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (island as u64 + 1)
+}
+
+/// The plan's parent, crossed with its mate when it has one, into `child`.
+fn mated(
+    archive: &QdArchive,
+    plan: CandidatePlan,
+    cfg: &Config,
+    rng: &mut Rng,
+    child: &mut Creature,
+) {
     let parent = &archive.entries[plan.parent.expect("archive parent")].creature;
     match plan.mate {
         Some(mate) => {
             let mate = &archive.entries[mate].creature;
             if same_shape(parent, mate) {
-                crossover(parent, mate, rng)
+                crossover_into(parent, mate, rng, child);
             } else {
                 // Different body plans: graft one of the mate's limbs, with
                 // its muscles and rhythm, onto a copy of the parent.
-                let mut child = parent.clone();
+                child.clone_from(parent);
                 for _ in 0..4 {
-                    if anatomy::graft_from(&mut child, cfg, rng, mate) {
+                    if anatomy::graft_from(child, cfg, rng, mate) {
                         break;
                     }
                 }
-                child
             }
         }
-        None => parent.clone(),
+        None => child.clone_from(parent),
     }
 }
 
@@ -1658,12 +1502,18 @@ fn same_shape(a: &Creature, b: &Creature) -> bool {
 /// bone, and muscle comes from one parent. Sometimes the whole muscle rhythm
 /// (periods and phases) comes from one parent so gaits stay coherent.
 pub fn crossover(a: &Creature, b: &Creature, rng: &mut Rng) -> Creature {
-    let mut child = a.clone();
+    let mut child = Creature::default();
+    crossover_into(a, b, rng, &mut child);
+    child
+}
+/// `crossover` into `child`, which it overwrites.
+fn crossover_into(a: &Creature, b: &Creature, rng: &mut Rng, child: &mut Creature) {
+    child.clone_from(a);
     if a.nodes.len() != b.nodes.len()
         || a.bones.len() != b.bones.len()
         || a.muscles.len() != b.muscles.len()
     {
-        return child;
+        return;
     }
     for (node, other) in child.nodes.iter_mut().zip(&b.nodes) {
         if rng.unit() < 0.5 {
@@ -1698,7 +1548,6 @@ pub fn crossover(a: &Creature, b: &Creature, rng: &mut Rng) -> Creature {
             None => {}
         }
     }
-    child
 }
 
 /// Copies a leaf limb as its mirror image around its joint, with copies of the
@@ -1714,7 +1563,7 @@ fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
             .filter(|b| b.a == node || b.b == node)
             .count()
     };
-    let leaves: Vec<usize> = (0..creature.bones.len())
+    let leaves: Bounded<usize, MAX_NODES> = (0..creature.bones.len())
         .filter(|&i| degree(creature.bones[i].b) == 1 || degree(creature.bones[i].a) == 1)
         .collect();
     if leaves.is_empty() {
@@ -1727,7 +1576,7 @@ fn duplicate_limb(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
     } else {
         (bone.b, bone.a)
     };
-    let attached: Vec<Muscle> = creature
+    let attached: Muscles = creature
         .muscles
         .iter()
         .filter(|m| m.bone_a as usize == limb || m.bone_b as usize == limb)
@@ -1779,204 +1628,345 @@ fn retime_rhythm(creature: &mut Creature, rng: &mut Rng) -> bool {
     true
 }
 
-/// Steady-state breeding: one offspring per plan, for population `slots`.
-/// `round` salts the random streams and keeps creature ids unique.
-#[allow(clippy::too_many_arguments)]
-pub fn emit_offspring(
-    archive: &[QdArchive],
-    reserve: &QdArchive,
-    cma_emitters: &[CmaEmitter],
-    plans: &[CandidatePlan],
-    slots: &[usize],
-    cfg: &Config,
-    generation: u32,
-    round: u64,
-) -> Vec<Creature> {
-    let seed = cfg.seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x5bd1_e995;
-    plans
-        .par_iter()
-        .zip(slots)
-        .map(|(&plan, &slot)| {
-            let mut rng = Rng::new(seed, generation, slot);
-            let id = (round << 32) ^ ((generation as u64) << 24) ^ slot as u64 ^ (1 << 63);
-            offspring(
-                &archive[slot % archive.len()],
-                reserve,
-                cma_emitters,
-                plan,
-                cfg,
-                &mut rng,
-                id,
-            )
-        })
-        .collect()
+/// The structural operator (its index in `structural_operator_names`) that
+/// changed each child bred while the log is on, by child id: a diagnostic
+/// for the generation dump (`storage`), off otherwise.
+static OPERATOR_LOG: std::sync::Mutex<Option<std::collections::HashMap<u64, u8>>> =
+    std::sync::Mutex::new(None);
+/// Starts or stops recording each child's structural operator.
+pub fn record_operators(on: bool) {
+    let mut log = OPERATOR_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    *log = on.then(|| log.take().unwrap_or_default());
+}
+/// The operators recorded since the last call, by child id.
+pub fn take_operators() -> std::collections::HashMap<u64, u8> {
+    OPERATOR_LOG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+        .map(std::mem::take)
+        .unwrap_or_default()
 }
 
-/// Children of one run of slots, genes packed into three vectors. A batch
-/// holds a few thousand children in three allocations, where one `Creature`
-/// per child took three each.
-#[derive(Default)]
-pub struct ChildBatch {
-    nodes: Vec<NodeGene>,
-    bones: Vec<Bone>,
-    muscles: Vec<Muscle>,
-    meta: Vec<ChildMeta>,
+/// Children bred per task. Each run of this many children gets its own part
+/// of the block's gene arena.
+const BREED_CHUNK: usize = 4096;
+
+/// A node gene with every field zero, to fill arena space not yet written.
+const NO_NODE: NodeGene = NodeGene {
+    x: 0.0,
+    y: 0.0,
+    diameter: 0.0,
+    friction: 0.0,
+};
+
+/// One run of children's part of a block's gene arena: the arena indices
+/// where it starts, the genes written so far, and the free space left.
+struct ArenaPart<'a> {
+    base: [usize; 3],
+    at: [usize; 3],
+    nodes: &'a mut [NodeGene],
+    bones: &'a mut [Bone],
+    muscles: &'a mut [Muscle],
 }
 
-struct ChildMeta {
-    id: u64,
-    mutability: f32,
-    counts: [u32; 3],
-}
-
-impl ChildBatch {
-    /// Puts the child's bones in canonical order and appends it; the child's
-    /// own vectors are freed right away, while still in cache.
-    pub fn push(&mut self, mut child: Creature) {
-        canonicalize_bone_order(&mut child);
-        self.meta.push(ChildMeta {
-            id: child.id,
-            mutability: child.mutability,
-            counts: [
-                child.nodes.len() as u32,
-                child.bones.len() as u32,
-                child.muscles.len() as u32,
-            ],
-        });
-        self.nodes.extend_from_slice(&child.nodes);
-        self.bones.extend_from_slice(&child.bones);
-        self.muscles.extend_from_slice(&child.muscles);
+impl ArenaPart<'_> {
+    /// Writes `c`'s genes after the ones already here and returns its genome,
+    /// or `None` when the part has no room left for it.
+    fn put(&mut self, c: &Creature) -> Option<Genome> {
+        let counts = [c.nodes.len(), c.bones.len(), c.muscles.len()];
+        let room = [self.nodes.len(), self.bones.len(), self.muscles.len()];
+        if (0..3).any(|k| self.at[k] + counts[k] > room[k]) {
+            return None;
+        }
+        let [n, b, m] = self.at;
+        self.nodes[n..n + counts[0]].copy_from_slice(&c.nodes);
+        self.bones[b..b + counts[1]].copy_from_slice(&c.bones);
+        self.muscles[m..m + counts[2]].copy_from_slice(&c.muscles);
+        let genome = Genome {
+            node_start: self.base[0] + n,
+            node_count: counts[0],
+            bone_start: self.base[1] + b,
+            bone_count: counts[1],
+            muscle_start: self.base[2] + m,
+            muscle_count: counts[2],
+            id: c.id,
+        };
+        self.at = [n + counts[0], b + counts[1], m + counts[2]];
+        Some(genome)
     }
 }
 
-/// `emit_offspring` that packs the children of each run of slots into a
-/// `ChildBatch` as it goes, so no child stays alive after it is copied.
-/// `Population::append_batches` writes the same arenas `replace_many` does.
-#[allow(clippy::too_many_arguments)]
-pub fn emit_offspring_batches(
-    archive: &[QdArchive],
-    reserve: &QdArchive,
-    cma_emitters: &[CmaEmitter],
-    plans: &[CandidatePlan],
-    slots: &[usize],
-    cfg: &Config,
-    generation: u32,
-    round: u64,
-) -> Vec<ChildBatch> {
-    const CHUNK: usize = 4096;
-    let seed = cfg.seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x5bd1_e995;
-    plans
-        .par_chunks(CHUNK)
-        .zip(slots.par_chunks(CHUNK))
-        .map(|(plans, slots)| {
-            let mut batch = ChildBatch {
-                nodes: Vec::with_capacity(plans.len() * 8),
-                bones: Vec::with_capacity(plans.len() * 8),
-                muscles: Vec::with_capacity(plans.len() * 12),
-                meta: Vec::with_capacity(plans.len()),
-            };
-            for (&plan, &slot) in plans.iter().zip(slots) {
-                let mut rng = Rng::new(seed, generation, slot);
-                let id = (round << 32) ^ ((generation as u64) << 24) ^ slot as u64 ^ (1 << 63);
-                batch.push(offspring(
-                    &archive[slot % archive.len()],
-                    reserve,
-                    cma_emitters,
-                    plan,
-                    cfg,
-                    &mut rng,
-                    id,
-                ));
-            }
-            batch
-        })
-        .collect()
-}
+/// Genome slots written by parallel tasks, each at its own block position.
+#[derive(Clone, Copy)]
+struct GenomeOut(*mut Genome);
+unsafe impl Send for GenomeOut {}
+unsafe impl Sync for GenomeOut {}
 
-pub fn ensure_archive_batch_memory(
-    current: &Population,
-    archive: &QdArchive,
-    cfg: &Config,
-) -> Result<()> {
-    let archive_bytes = archive
-        .entries
-        .iter()
-        .map(|elite| {
-            elite.creature.nodes.len() * std::mem::size_of::<NodeGene>()
-                + elite.creature.bones.len() * std::mem::size_of::<Bone>()
-                + elite.creature.muscles.len() * std::mem::size_of::<Muscle>()
-                + std::mem::size_of::<Creature>()
-        })
-        .sum::<usize>();
-    let temporary = current
-        .bytes()
-        .saturating_mul(4)
-        .saturating_add(archive_bytes.saturating_mul(3))
-        .saturating_add(cfg.population.saturating_mul(96));
-    ensure!(
-        temporary < cfg.ram_budget_mib * 1024 * 1024,
-        "Evolution would exceed the RAM budget; save and raise the budget before continuing"
-    );
-    Ok(())
+impl Population {
+    /// Breeds a ring block into this population, which becomes the block's
+    /// genes: `count` creatures, the elites of `lead` at their positions and
+    /// one child per plan at `positions`, bred for ring `slots` (`round`
+    /// salts the random streams and keeps creature ids unique).
+    ///
+    /// The population is the block's gene arena and is reused from one
+    /// breeding to the next, so its memory is allocated and touched once.
+    /// Every run of `BREED_CHUNK` children gets a part of the arena sized
+    /// from the genes the same positions held last time (from `hint` when
+    /// this population held no block of this size), plus a quarter, and
+    /// writes each child there as soon as it is bred. A child that does not
+    /// fit goes after all parts. Returns how many children went there.
+    #[allow(clippy::too_many_arguments)]
+    pub fn breed(
+        &mut self,
+        count: usize,
+        hint: Option<&Population>,
+        lead: &mut [(usize, Creature)],
+        archive: &[QdArchive],
+        cma_emitters: &[CmaEmitter],
+        plans: &[CandidatePlan],
+        slots: &[usize],
+        positions: &[usize],
+        cfg: &Config,
+        generation: u32,
+        round: u64,
+    ) -> usize {
+        assert_eq!(plans.len(), slots.len());
+        assert_eq!(plans.len(), positions.len());
+        assert_eq!(lead.len() + plans.len(), count);
+        // Genes per part: what the part's positions held last time.
+        let last: &Population = match hint {
+            Some(h) if self.genomes.len() != count => h,
+            _ => self,
+        };
+        let known = last.genomes.len() == count;
+        let held = |chunk: &[usize]| -> [usize; 3] {
+            let t = chunk.iter().fold([0usize; 3], |t, &k| {
+                let s = if known {
+                    let g = &last.genomes[k];
+                    [g.node_count, g.bone_count, g.muscle_count]
+                } else {
+                    // A new arena: a typical body.
+                    [8, 7, 16]
+                };
+                [t[0] + s[0], t[1] + s[1], t[2] + s[2]]
+            });
+            t.map(|x| x + x / 4 + 256)
+        };
+        for (_, c) in lead.iter_mut() {
+            canonicalize_bone_order(c);
+        }
+        let lead_size = lead.iter().fold([0usize; 3], |t, (_, c)| {
+            [
+                t[0] + c.nodes.len(),
+                t[1] + c.bones.len(),
+                t[2] + c.muscles.len(),
+            ]
+        });
+        let parts: Vec<[usize; 3]> = std::iter::once(lead_size)
+            .chain(positions.chunks(BREED_CHUNK).map(held))
+            .collect();
+        let need = parts
+            .iter()
+            .fold([0usize; 3], |t, s| [t[0] + s[0], t[1] + s[1], t[2] + s[2]]);
+        // Grow the arena once, with room for the next block's growth too.
+        fn fit<T: Copy>(v: &mut Vec<T>, need: usize, zero: T) {
+            if v.len() < need {
+                v.reserve_exact((need + need / 4).saturating_sub(v.len()));
+                v.resize(need, zero);
+            }
+        }
+        fit(&mut self.nodes, need[0], NO_NODE);
+        fit(&mut self.bones, need[1], Bone::zeroed());
+        fit(&mut self.muscles, need[2], Muscle::zeroed());
+        if self.genomes.len() != count {
+            self.genomes.clear();
+            self.genomes.resize(count, Genome::default());
+        }
+        let node_parts = split(&mut self.nodes[..need[0]], parts.iter().map(|s| s[0]));
+        let bone_parts = split(&mut self.bones[..need[1]], parts.iter().map(|s| s[1]));
+        let muscle_parts = split(&mut self.muscles[..need[2]], parts.iter().map(|s| s[2]));
+        let mut base = [0usize; 3];
+        let mut arena_parts: Vec<ArenaPart> = Vec::with_capacity(parts.len());
+        for (((nodes, bones), muscles), size) in node_parts
+            .into_iter()
+            .zip(bone_parts)
+            .zip(muscle_parts)
+            .zip(&parts)
+        {
+            arena_parts.push(ArenaPart {
+                base,
+                at: [0; 3],
+                nodes,
+                bones,
+                muscles,
+            });
+            base = [base[0] + size[0], base[1] + size[1], base[2] + size[2]];
+        }
+        let mut arena_parts = arena_parts.into_iter();
+        let mut lead_part = arena_parts.next().expect("the lead part");
+        for (k, c) in lead.iter() {
+            self.genomes[*k] = lead_part.put(c).expect("the lead part holds the lead");
+        }
+        let genomes = GenomeOut(self.genomes.as_mut_ptr());
+        let spilled: Vec<Vec<(usize, Creature)>> = arena_parts
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .zip(plans.par_chunks(BREED_CHUNK))
+            .zip(slots.par_chunks(BREED_CHUNK))
+            .zip(positions.par_chunks(BREED_CHUNK))
+            .map(|(((mut part, plans), slots), positions)| {
+                let genomes = genomes;
+                let mut spill = Vec::new();
+                let recording = OPERATOR_LOG
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some();
+                let mut operators = Vec::new();
+                let mut child = Creature::default();
+                for ((&plan, &slot), &k) in plans.iter().zip(slots).zip(positions) {
+                    let trace = breed_child(
+                        archive,
+                        cma_emitters,
+                        plan,
+                        slot,
+                        cfg,
+                        generation,
+                        round,
+                        &mut child,
+                    );
+                    if recording && let Some(operator) = trace.operator {
+                        operators.push((child.id, operator));
+                    }
+                    canonicalize_bone_order(&mut child);
+                    match part.put(&child) {
+                        // SAFETY: positions are distinct and below `count`,
+                        // the genome vector's length, and nothing else
+                        // touches the vector while the tasks run.
+                        Some(genome) => unsafe { *genomes.0.add(k) = genome },
+                        None => spill.push((k, child.clone())),
+                    }
+                }
+                if !operators.is_empty()
+                    && let Some(log) = OPERATOR_LOG
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_mut()
+                {
+                    log.extend(operators);
+                }
+                spill
+            })
+            .collect();
+        // Children that did not fit their part go after every part.
+        let mut at = need;
+        let mut late = 0;
+        for (k, child) in spilled.into_iter().flatten() {
+            late += 1;
+            fit(&mut self.nodes, at[0] + child.nodes.len(), NO_NODE);
+            fit(&mut self.bones, at[1] + child.bones.len(), Bone::zeroed());
+            fit(
+                &mut self.muscles,
+                at[2] + child.muscles.len(),
+                Muscle::zeroed(),
+            );
+            let mut part = ArenaPart {
+                base: at,
+                at: [0; 3],
+                nodes: &mut self.nodes[at[0]..],
+                bones: &mut self.bones[at[1]..],
+                muscles: &mut self.muscles[at[2]..],
+            };
+            self.genomes[k] = part.put(&child).expect("room was made");
+            at = [
+                at[0] + child.nodes.len(),
+                at[1] + child.bones.len(),
+                at[2] + child.muscles.len(),
+            ];
+        }
+        late
+    }
 }
 
 fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f32) -> Creature {
+    mutate_genes(&mut creature, cfg, rng, scale);
+    creature
+}
+
+/// Where each gene's noise is keyed (`Genes`): node `i` field `f` at
+/// `4 i + f`, bone `i` at `BONE_GENES + 8 i`, the body tempo at `TEMPO_GENE`,
+/// muscle `i` at `MUSCLE_GENES + 16 i`.
+const BONE_GENES: u32 = 4 * MAX_NODES as u32;
+const TEMPO_GENE: u32 = BONE_GENES + 8 * MAX_NODES as u32;
+const MUSCLE_GENES: u32 = TEMPO_GENE + 128;
+
+/// Gaussian noise on every gene at `scale` (times the config's mutation
+/// strength), clamped to the gene's range. Each gene's noise is keyed by its
+/// index, so it does not depend on the body's other genes or on the order
+/// they are visited in.
+fn mutate_genes(creature: &mut Creature, cfg: &Config, rng: &mut Rng, scale: f32) {
     let scale = scale * cfg.mutation;
     if scale <= 0.0 {
-        return creature;
+        return;
     }
-    for node in &mut creature.nodes {
-        node.x = (node.x + qd::gaussian(rng) * 0.10 * scale).clamp(-body_extent(), body_extent());
-        node.y = (node.y + qd::gaussian(rng) * 0.08 * scale).clamp(0.0, body_extent());
+    let g = rng.genes();
+    let extent = body_extent();
+    for (i, node) in creature.nodes.iter_mut().enumerate() {
+        let at = 4 * i as u32;
+        node.x = (node.x + g.gaussian(at) * 0.10 * scale).clamp(-extent, extent);
+        node.y = (node.y + g.gaussian(at + 1) * 0.08 * scale).clamp(0.0, extent);
         node.diameter =
-            (node.diameter + qd::gaussian(rng) * 0.025 * scale).clamp(cfg.min_size, cfg.max_size);
-        node.friction = (node.friction + qd::gaussian(rng) * 0.10 * scale)
+            (node.diameter + g.gaussian(at + 2) * 0.025 * scale).clamp(cfg.min_size, cfg.max_size);
+        node.friction = (node.friction + g.gaussian(at + 3) * 0.10 * scale)
             .clamp(cfg.min_friction, cfg.max_friction);
     }
-    for bone in &mut creature.bones {
+    let max_bone = max_bone_length();
+    for (i, bone) in creature.bones.iter_mut().enumerate() {
+        let at = BONE_GENES + 8 * i as u32;
         bone.rest_length =
-            (bone.rest_length + qd::gaussian(rng) * 0.035 * scale).clamp(0.03, max_bone_length());
-        bone.mutate_range(0.15 * scale, rng);
+            (bone.rest_length + g.gaussian(at) * 0.035 * scale).clamp(0.03, max_bone);
+        bone.min_angle += g.gaussian(at + 1) * 0.15 * scale;
+        bone.max_angle += g.gaussian(at + 2) * 0.15 * scale;
+        bone.clamp_range();
         if bone.organ_mass > 0.0 {
-            bone.organ_mass = (bone.organ_mass * (qd::gaussian(rng) * 0.15 * scale).exp())
+            bone.organ_mass = (bone.organ_mass * (g.gaussian(at + 3) * 0.15 * scale).exp())
                 .clamp(MIN_ORGAN_MASS, MAX_ORGAN_MASS);
-            bone.organ_at = (bone.organ_at + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
+            bone.organ_at = (bone.organ_at + g.gaussian(at + 4) * 0.10 * scale).clamp(0.0, 1.0);
         }
     }
     // The body's clock speeds up or slows down as a whole.
-    let tempo = (qd::gaussian(rng) * 0.10 * scale).exp();
-    for muscle in &mut creature.muscles {
-        muscle.anchor_a = (muscle.anchor_a + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
-        muscle.anchor_b = (muscle.anchor_b + qd::gaussian(rng) * 0.10 * scale).clamp(0.0, 1.0);
-        muscle.short =
-            (muscle.short + qd::gaussian(rng) * 0.06 * scale).clamp(0.01, 0.8 * max_stroke());
-        muscle.long =
-            (muscle.long + qd::gaussian(rng) * 0.08 * scale).clamp(muscle.short, max_stroke());
-        muscle.period = (muscle.period * tempo).clamp(min_muscle_period(), 10.0);
-        muscle.phase = (muscle.phase + qd::gaussian(rng) * 0.12 * scale).rem_euclid(1.0);
-        muscle.duty = (muscle.duty + qd::gaussian(rng) * 0.08 * scale).clamp(0.05, 0.95);
+    let tempo = (g.gaussian(TEMPO_GENE) * 0.10 * scale).exp();
+    let (min_period, stroke) = (min_muscle_period(), max_stroke());
+    let rare = scale.min(1.0);
+    for (i, muscle) in creature.muscles.iter_mut().enumerate() {
+        let at = MUSCLE_GENES + 16 * i as u32;
+        muscle.anchor_a = (muscle.anchor_a + g.gaussian(at) * 0.10 * scale).clamp(0.0, 1.0);
+        muscle.anchor_b = (muscle.anchor_b + g.gaussian(at + 1) * 0.10 * scale).clamp(0.0, 1.0);
+        muscle.short = (muscle.short + g.gaussian(at + 2) * 0.06 * scale).clamp(0.01, 0.8 * stroke);
+        muscle.long = (muscle.long + g.gaussian(at + 3) * 0.08 * scale).clamp(muscle.short, stroke);
+        muscle.period = (muscle.period * tempo).clamp(min_period, 10.0);
+        muscle.phase = (muscle.phase + g.gaussian(at + 4) * 0.12 * scale).rem_euclid(1.0);
+        muscle.duty = (muscle.duty + g.gaussian(at + 5) * 0.08 * scale).clamp(0.05, 0.95);
         muscle.stiffness =
-            (muscle.stiffness * (qd::gaussian(rng) * 0.10 * scale).exp()).clamp(1.0, 120.0);
-        muscle.reset = (muscle.reset + qd::gaussian(rng) * 0.12 * scale).rem_euclid(1.0);
+            (muscle.stiffness * (g.gaussian(at + 6) * 0.10 * scale).exp()).clamp(1.0, 120.0);
+        muscle.reset = (muscle.reset + g.gaussian(at + 7) * 0.12 * scale).rem_euclid(1.0);
         // The elastic tendon grows in, tunes, or drops out.
-        if rng.unit() < 0.10 * scale.min(1.0) {
+        if g.unit(at + 8, 0) < 0.10 * rare {
             muscle.tendon = if muscle.tendon == 0.0 {
-                rng.range(0.05, 0.5)
-            } else if rng.unit() < 0.2 {
+                0.05 + g.unit(at + 8, 1) * 0.45
+            } else if g.unit(at + 8, 2) < 0.2 {
                 0.0
             } else {
-                (muscle.tendon + qd::gaussian(rng) * 0.2).clamp(0.0, 1.0)
+                (muscle.tendon + g.gaussian(at + 9) * 0.2).clamp(0.0, 1.0)
             };
         }
-        if rng.unit() < 0.05 * scale.min(1.0) {
-            muscle.sensor = match rng.index(5) {
+        if g.unit(at + 10, 0) < 0.05 * rare {
+            muscle.sensor = match g.index(at + 10, 1, 5) {
                 4 => NO_SENSOR,
                 endpoint => endpoint as u32,
             };
         }
     }
-    creature.mutability = (creature.mutability * (qd::gaussian(rng) * 0.05).exp()).clamp(0.05, 2.0);
-    creature
 }
 
 /// Benchmark workload helper: grows a body with the game's own structural
@@ -1997,46 +1987,84 @@ pub fn grow_for_benchmark(creature: &mut Creature, cfg: &Config, seed: u64, targ
 
 /// `structural_mutation_in_place` for a child bred from `archive`. The
 /// anatomy operators join the classic ones (and graft limbs from another
-/// elite of the archive); with `EVOLUTION_ANATOMY=0` it is exactly the
-/// classic mutation.
+/// elite of the archive).
+/// Returns the operator that changed the body, as an index into
+/// `structural_operator_names`, or `None` when none fit.
+#[cfg(test)]
 fn structural_mutation_from(
     creature: &mut Creature,
     cfg: &Config,
     rng: &mut Rng,
     archive: &QdArchive,
-) -> bool {
-    let extra = anatomy::enabled();
-    if extra.is_empty() {
-        return structural_mutation_in_place(creature, cfg, rng);
+) -> Option<u8> {
+    structural_mutation_among(creature, cfg, rng, &archive.entries, 0)
+}
+
+/// A structural mutation with no archive at hand (the refuge of old
+/// champions after a world change), repaired as breeding does. Returns
+/// whether the body changed.
+pub fn structural_mutation_any(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
+    let changed = structural_mutation_among(creature, cfg, rng, &[], 0).is_some();
+    if changed {
+        repair(creature, cfg, rng);
     }
-    let donor = (!archive.entries.is_empty())
-        .then(|| &archive.entries[rng.index(archive.entries.len())].creature);
+    changed
+}
+
+fn structural_mutation_among(
+    creature: &mut Creature,
+    cfg: &Config,
+    rng: &mut Rng,
+    donors: &[crate::qd::Elite],
+    bias: u64,
+) -> Option<u8> {
+    let extra = anatomy::enabled();
+    // The donor is the most different body of 4 drawn (Lehman and Stanley,
+    // 2011): a graft then brings the most new structure.
+    let size = |c: &Creature| c.nodes.len() as i32 * 4 + c.muscles.len() as i32;
+    let own = size(creature);
+    let donor = (!donors.is_empty()).then(|| {
+        (0..4)
+            .map(|_| &donors[rng.index(donors.len())].creature)
+            .max_by_key(|d| (size(d) - own).abs())
+            .expect("four draws")
+    });
     let cx = anatomy::Context { donor };
     let classic = CLASSIC_COUNT;
     // An operator that does not fit this body leaves it unchanged; try
     // another, a few times.
     // Each shared group takes one slot, drawn after the others.
-    let groups: Vec<&Vec<usize>> = [&extra.shared, &extra.controller]
+    let groups: Bounded<&Vec<usize>, 16> = [&extra.shared, &extra.controller]
         .into_iter()
+        .chain(&extra.gait)
         .filter(|group| !group.is_empty())
         .collect();
     let slots = classic + extra.single.len() + groups.len();
     for _ in 0..4 {
-        let pick = rng.index(slots);
-        let changed = if pick < classic {
-            classic_operator(pick, creature, cfg, rng)
+        let pick = if bias != 0 && rng.unit() < 0.25 {
+            let k = rng.index(8) as u64;
+            (bias.wrapping_mul(k * 2 + 1).rotate_left(17) % slots as u64) as usize
+        } else {
+            rng.index(slots)
+        };
+        let operator = if pick < classic {
+            pick
         } else if let Some(&index) = extra.single.get(pick - classic) {
-            anatomy::apply(index, creature, cfg, rng, &cx)
+            classic + index
         } else {
             let group = groups[pick - classic - extra.single.len()];
-            let index = group[rng.index(group.len())];
-            anatomy::apply(index, creature, cfg, rng, &cx)
+            classic + group[rng.index(group.len())]
+        };
+        let changed = if operator < classic {
+            classic_operator(operator, creature, cfg, rng)
+        } else {
+            anatomy::apply(operator - classic, creature, cfg, rng, &cx)
         };
         if changed {
-            return true;
+            return Some(operator as u8);
         }
     }
-    false
+    None
 }
 
 /// Names of the classic structural operators, in `classic_operator` order.
@@ -2088,11 +2116,6 @@ pub fn mutate_locally(creature: Creature, cfg: &Config, rng: &mut Rng, scale: f3
     let mut child = local_mutation(creature, cfg, rng, scale);
     repair(&mut child, cfg, rng);
     child
-}
-
-fn structural_mutation_in_place(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
-    let pick = rng.index(CLASSIC_COUNT);
-    classic_operator(pick, creature, cfg, rng)
 }
 
 fn classic_operator(pick: usize, creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
@@ -2158,7 +2181,7 @@ fn split_bone(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
     {
         return false;
     }
-    let eligible: Vec<usize> = creature
+    let eligible: Bounded<usize, MAX_NODES> = creature
         .bones
         .iter()
         .enumerate()
@@ -2304,55 +2327,6 @@ mod tests {
     }
 
     #[test]
-    fn compaction_leaves_room_for_a_generation_and_keeps_a_small_spare() {
-        let cfg = Config {
-            population: 64,
-            random_seed: false,
-            seed: 5,
-            ..Config::default()
-        };
-        let mut population = create(&cfg).unwrap();
-        let children: Vec<Creature> = (0..cfg.population)
-            .map(|i| population.creature(i))
-            .collect();
-        let slots: Vec<usize> = (0..cfg.population).collect();
-        // Fill the spare with a large arena, as after a generation of breeding.
-        population.replace_many(&slots, children.clone());
-        population.replace_many(&slots, children.clone());
-        let mut spare = Arena::default();
-        population.compact_with(&mut spare);
-        population.replace_many(&slots, children.clone());
-        population.compact_with(&mut spare);
-        let live = population.bytes() - population.genomes.capacity() * size_of::<Genome>();
-        assert!(
-            spare.bytes() <= live,
-            "the spare keeps {} bytes for {live} live",
-            spare.bytes()
-        );
-        let arenas = (
-            population.nodes.as_ptr(),
-            population.bones.as_ptr(),
-            population.muscles.as_ptr(),
-        );
-        population.replace_many(&slots, children.clone());
-        assert_eq!(
-            arenas,
-            (
-                population.nodes.as_ptr(),
-                population.bones.as_ptr(),
-                population.muscles.as_ptr(),
-            ),
-            "a generation of children must fit without moving the arenas"
-        );
-        for (i, child) in children.iter().enumerate() {
-            let stored = population.creature(i);
-            assert_eq!(stored.nodes, child.nodes);
-            assert_eq!(stored.bones, child.bones);
-            assert_eq!(stored.muscles, child.muscles);
-        }
-    }
-
-    #[test]
     fn bone_length_cannot_expand_far_beyond_its_starting_frame() {
         let mut creature = Creature {
             nodes: vec![
@@ -2368,11 +2342,11 @@ mod tests {
                     diameter: 0.08,
                     friction: 0.5,
                 },
-            ],
-            bones: vec![Bone::new(0, 1, 9.6)],
-            muscles: vec![],
+            ]
+            .into(),
+            bones: vec![Bone::new(0, 1, 9.6)].into(),
+            muscles: vec![].into(),
             id: 0,
-            mutability: 1.0,
         };
         normalize_bone_lengths(&mut creature);
         assert_eq!(creature.bones[0].rest_length, 0.625);
@@ -2404,11 +2378,11 @@ mod tests {
                     diameter: 0.03,
                     friction: 0.2,
                 },
-            ],
-            bones: vec![Bone::new(0, 1, 2.0), Bone::new(1, 2, 2.0)],
-            muscles: vec![],
+            ]
+            .into(),
+            bones: vec![Bone::new(0, 1, 2.0), Bone::new(1, 2, 2.0)].into(),
+            muscles: vec![].into(),
             id: 0,
-            mutability: 1.0,
         };
         repair(&mut creature, &cfg, &mut Rng::new(42, 0, 0));
         for node in &creature.nodes {
@@ -2463,8 +2437,8 @@ mod tests {
                 },
             ];
             let mut creature = Creature {
-                nodes,
-                bones: vec![Bone::new(0, 1, 1.0), Bone::new(1, 2, 1.0)],
+                nodes: nodes.into(),
+                bones: vec![Bone::new(0, 1, 1.0), Bone::new(1, 2, 1.0)].into(),
                 muscles: vec![
                     Muscle {
                         bone_a: 0,
@@ -2496,9 +2470,9 @@ mod tests {
                         reset: 0.0,
                         tendon: 0.0,
                     },
-                ],
+                ]
+                .into(),
                 id: 1,
-                mutability: 1.0,
             };
             let old_points: Vec<_> = creature
                 .muscles
@@ -2544,7 +2518,8 @@ mod tests {
                 Bone::new(2, 3, 1.0),
                 Bone::new(1, 0, 1.0),
                 Bone::new(2, 1, 1.0),
-            ],
+            ]
+            .into(),
             muscles: vec![Muscle {
                 bone_a: 0,
                 bone_b: 1,
@@ -2559,9 +2534,9 @@ mod tests {
                 sensor: 255,
                 reset: 0.0,
                 tendon: 0.0,
-            }],
+            }]
+            .into(),
             id: 1,
-            mutability: 1.0,
         };
         let before = [
             muscle_point(
@@ -2624,7 +2599,8 @@ mod tests {
                 if rng.unit() < 0.5 {
                     change_organ(&mut creature, &mut rng);
                 }
-                let _ = structural_mutation_in_place(&mut creature, &cfg, &mut rng);
+                let pick = rng.index(CLASSIC_COUNT);
+                let _ = classic_operator(pick, &mut creature, &cfg, &mut rng);
                 creature = local_mutation(creature, &cfg, &mut rng, 0.75);
                 repair(&mut creature, &cfg, &mut rng);
                 let center = organ_center(&creature.nodes);
@@ -2766,7 +2742,7 @@ mod tests {
         let bone = creature.bones[1];
         creature.bones[1].organ_mass = 0.2;
         creature.bones[1].organ_at = 0.25;
-        let mut bare = creature.bones.clone();
+        let mut bare = creature.bones;
         bare[1].organ_mass = 0.0;
         let plain = crate::physics::body(&creature.nodes, &bare);
         let with = crate::physics::body(&creature.nodes, &creature.bones);
@@ -2812,6 +2788,80 @@ mod tests {
             })
             .collect();
         assert!((mass(&doubled) - nodes_only - 4.0 * expected).abs() < 1e-3);
+    }
+
+    #[test]
+    fn twelve_uniform_gaussians_have_unit_variance() {
+        let mut rng = Rng::stream(1, 2, 3, 4);
+        let genes = rng.genes();
+        for draw in [
+            (0..200_000).map(|_| rng.gaussian()).collect::<Vec<f32>>(),
+            (0..200_000).map(|g| genes.gaussian(g)).collect(),
+        ] {
+            let n = draw.len() as f64;
+            let mean = draw.iter().map(|&x| x as f64).sum::<f64>() / n;
+            let variance = draw.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n;
+            assert!(mean.abs() < 0.01, "mean {mean}");
+            assert!((variance - 1.0).abs() < 0.02, "variance {variance}");
+            assert!(draw.iter().all(|x| x.abs() <= 6.0));
+        }
+    }
+
+    #[test]
+    fn gene_noise_does_not_depend_on_other_draws() {
+        // A gene's noise is keyed by its index: it is the same whichever
+        // genes were drawn before it, and streams of other slots differ.
+        let a = Rng::stream(5, 1, 2, 3).genes();
+        let b = Rng::stream(5, 1, 2, 3).genes();
+        let forward: Vec<f32> = (0..64).map(|g| a.gaussian(g)).collect();
+        let backward: Vec<f32> = (0..64).rev().map(|g| b.gaussian(g)).collect();
+        assert!(forward.iter().eq(backward.iter().rev()));
+        let other = Rng::stream(5, 1, 2, 4).genes();
+        assert!((0..64).any(|g| other.gaussian(g) != a.gaussian(g)));
+        // The same child from its slot's stream, bred twice.
+        let cfg = Config::default();
+        let body = random_creature_from(&cfg, &mut Rng::new(1, 0, 0));
+        let mut x = body.clone();
+        let mut y = body.clone();
+        mutate_genes(&mut x, &cfg, &mut Rng::stream(9, 3, 7, 11), 1.0);
+        mutate_genes(&mut y, &cfg, &mut Rng::stream(9, 3, 7, 11), 1.0);
+        assert_eq!(x.nodes, y.nodes);
+        assert_eq!(x.muscles, y.muscles);
+    }
+
+    #[test]
+    fn the_growth_step_limits_what_a_child_gains() {
+        let cfg = Config::default();
+        let step = GrowthStep {
+            nodes: 4,
+            muscles: 4,
+        };
+        let archive = QdArchive::default();
+        let mut grew = 0;
+        for index in 0..300 {
+            let mut rng = Rng::new(17, 0, index);
+            let mut parent = random_creature_from(&cfg, &mut rng);
+            grow_for_benchmark(&mut parent, &cfg, index as u64, 3 + index % 12);
+            let limited = child_limits(&cfg, &parent, Some(step));
+            let fit = limited.as_ref().unwrap_or(&cfg);
+            let mut child = parent.clone();
+            for _ in 0..12 {
+                let _ = structural_mutation_from(&mut child, fit, &mut rng, &archive);
+                repair(&mut child, fit, &mut rng);
+            }
+            assert!(child.nodes.len() <= parent.nodes.len() + 4);
+            assert!(child.muscles.len() <= parent.muscles.len() + 4);
+            grew += usize::from(child.nodes.len() > parent.nodes.len());
+        }
+        assert!(grew > 50, "only {grew} children grew");
+        assert!(
+            child_limits(
+                &cfg,
+                &Creature::clone(&random_creature_from(&cfg, &mut Rng::new(1, 1, 1))),
+                None
+            )
+            .is_none()
+        );
     }
 
     #[test]

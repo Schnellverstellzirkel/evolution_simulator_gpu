@@ -8,13 +8,16 @@
 //! so the motor ring stays as it is. They only touch active muscles (a
 //! stroke longer than zero), never the passive ring.
 use super::limbs::{limb_roots, pick};
-use super::{Context, branch, muscles_on};
+use super::{BoneIds, Context, MuscleIds, branch, muscles_on};
 use crate::config::Config;
-use crate::evolution::{Creature, NO_SENSOR, Rng, max_stroke};
+use crate::evolution::{
+    Bounded, CLOCK_RATIOS, Creature, MAX_MUSCLES, MAX_NODES, NO_SENSOR, Rng, max_stroke,
+    min_muscle_period,
+};
 
 /// The active muscles (with a stroke) that have an end on the limb starting
 /// at `root`.
-fn active_on(c: &Creature, root: usize) -> Vec<usize> {
+pub(super) fn active_on(c: &Creature, root: usize) -> MuscleIds {
     muscles_on(c, &branch(c, root), false)
         .into_iter()
         .filter(|&i| c.muscles[i].long > c.muscles[i].short)
@@ -22,7 +25,7 @@ fn active_on(c: &Creature, root: usize) -> Vec<usize> {
 }
 
 /// Limb roots that have at least one active muscle.
-fn driven_limbs(c: &Creature) -> Vec<usize> {
+fn driven_limbs(c: &Creature) -> BoneIds {
     limb_roots(c)
         .into_iter()
         .filter(|&b| !active_on(c, b).is_empty())
@@ -89,7 +92,7 @@ pub(crate) fn taper_limb_strength(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let limbs: Vec<usize> = driven_limbs(c)
+    let limbs: BoneIds = driven_limbs(c)
         .into_iter()
         .filter(|&b| active_on(c, b).len() > 1)
         .collect();
@@ -97,7 +100,8 @@ pub(crate) fn taper_limb_strength(
         return false;
     };
     let mut muscles = active_on(c, root);
-    muscles.sort_by_key(|&i| c.muscles[i].bone_a.min(c.muscles[i].bone_b));
+    let key = |i: usize| c.muscles[i].bone_a.min(c.muscles[i].bone_b);
+    muscles.sort_stable_by(|&i, &j| key(i).cmp(&key(j)));
     let ratio = rng.range(1.2, 1.8) * if rng.unit() < 0.5 { 1.0 } else { -1.0 };
     let last = (muscles.len() - 1) as f32;
     let mut changed = false;
@@ -124,18 +128,19 @@ pub(crate) fn copy_limb_rhythm(
     _cx: &Context,
 ) -> bool {
     let limbs = driven_limbs(c);
-    let mut pairs = Vec::new();
+    let mut pairs: Bounded<(u8, u8), { MAX_NODES * MAX_NODES }> = Bounded::new();
     for &from in &limbs {
         let a = branch(c, from);
         for &to in &limbs {
             if !branch(c, to).iter().any(|b| a.contains(b)) {
-                pairs.push((from, to));
+                pairs.push((from as u8, to as u8));
             }
         }
     }
     let Some((from, to)) = pick(&pairs, rng) else {
         return false;
     };
+    let (from, to) = (from as usize, to as usize);
     let source = active_on(c, from);
     let target = active_on(c, to);
     let offset = [0.25, 0.5, 0.75][rng.index(3)] + rng.range(-0.04, 0.04);
@@ -160,24 +165,25 @@ pub(crate) fn retune_muscle_pair(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let active: Vec<usize> = (0..c.muscles.len())
+    let active: MuscleIds = (0..c.muscles.len())
         .filter(|&i| c.muscles[i].long > c.muscles[i].short)
         .collect();
     let key = |i: usize| {
         let m = &c.muscles[i];
         (m.bone_a.min(m.bone_b), m.bone_a.max(m.bone_b))
     };
-    let mut pairs = Vec::new();
+    let mut pairs: Bounded<(u8, u8), { MAX_MUSCLES * MAX_MUSCLES / 2 }> = Bounded::new();
     for (n, &i) in active.iter().enumerate() {
         for &j in &active[n + 1..] {
             if key(i) == key(j) {
-                pairs.push((i, j));
+                pairs.push((i as u8, j as u8));
             }
         }
     }
     let Some((i, j)) = pick(&pairs, rng) else {
         return false;
     };
+    let (i, j) = (i as usize, j as usize);
     let lag = if rng.unit() < 0.5 { 0.5 } else { 0.0 };
     let lead = c.muscles[i];
     let m = &mut c.muscles[j];
@@ -188,6 +194,187 @@ pub(crate) fn retune_muscle_pair(
     changed
 }
 
+/// Puts the muscles of a limb on a different clock: a simple multiple of the
+/// body's base clock (`CLOCK_RATIOS`), so the limb steps faster or slower than
+/// the rest and the whole gait still repeats exactly. Skipped when the change
+/// would leave some muscle at a ratio outside that set.
+pub(crate) fn limb_clock_ratio(
+    c: &mut Creature,
+    _cfg: &Config,
+    rng: &mut Rng,
+    _cx: &Context,
+) -> bool {
+    let Some(root) = pick(&driven_limbs(c), rng) else {
+        return false;
+    };
+    let limb = active_on(c, root);
+    let Some(anchor) = (0..c.muscles.len()).find(|i| !limb.contains(i)) else {
+        return false;
+    };
+    // The rest of the body's clock is the reference the ratio applies to.
+    let period = c.muscles[anchor].period * CLOCK_RATIOS[rng.index(CLOCK_RATIOS.len())];
+    if !(min_muscle_period()..=10.0).contains(&period)
+        || limb.iter().all(|&i| c.muscles[i].period == period)
+    {
+        return false;
+    }
+    let mut periods: Bounded<f32, MAX_MUSCLES> = c.muscles.iter().map(|m| m.period).collect();
+    for &i in &limb {
+        periods[i] = period;
+    }
+    let base = periods[0];
+    let in_set = |p: f32| {
+        CLOCK_RATIOS
+            .iter()
+            .any(|r| ((p / base).ln() - r.ln()).abs() < 0.003)
+    };
+    if !periods.iter().all(|&p| in_set(p)) {
+        return false;
+    }
+    for (m, p) in c.muscles.iter_mut().zip(periods) {
+        m.period = p;
+    }
+    true
+}
+
+/// Starts the same gait at another point of its cycle: every muscle's clock
+/// moves ahead by one common time, so the steady gait is unchanged and only
+/// the start differs. On the best elites of a 120-generation save, 83 of 124
+/// parent-to-child jumps of 1.5x and 10 m or more were reached again by one of
+/// 7 start offsets of the parent alone, and an offset left the top 100 at a
+/// median 8% of their distance: whether a gait catches depends on its start.
+pub(crate) fn shift_gait_start(
+    c: &mut Creature,
+    _cfg: &Config,
+    rng: &mut Rng,
+    _cx: &Context,
+) -> bool {
+    let Some(longest) = c.muscles.iter().map(|m| m.period).reduce(f32::max) else {
+        return false;
+    };
+    let dt = rng.range(0.05, 0.95) * longest;
+    for m in &mut c.muscles {
+        m.phase = (m.phase + dt / m.period).rem_euclid(1.0);
+    }
+    true
+}
+
+/// Puts every muscle of a limb back on the body's base clock.
+pub(crate) fn limb_clock_lock(
+    c: &mut Creature,
+    _cfg: &Config,
+    rng: &mut Rng,
+    _cx: &Context,
+) -> bool {
+    let Some(base) = c.muscles.first().map(|m| m.period) else {
+        return false;
+    };
+    let off: BoneIds = driven_limbs(c)
+        .into_iter()
+        .filter(|&b| active_on(c, b).iter().any(|&i| c.muscles[i].period != base))
+        .collect();
+    let Some(root) = pick(&off, rng) else {
+        return false;
+    };
+    for i in active_on(c, root) {
+        c.muscles[i].period = base;
+    }
+    true
+}
+
+/// The foot nodes of a muscle's two bones (nodes with one bone, not the
+/// head), as sensor indices (0 and 1 are the first bone's ends, 2 and 3 the
+/// second's).
+fn sensable_feet(c: &Creature, m: &crate::evolution::Muscle) -> Bounded<u32, 4> {
+    let (a, b) = (c.bones[m.bone_a as usize], c.bones[m.bone_b as usize]);
+    [a.a, a.b, b.a, b.b]
+        .iter()
+        .enumerate()
+        .filter(|&(_, &n)| n != 0 && super::degree(c, n as usize) == 1)
+        .map(|(k, _)| k as u32)
+        .collect()
+}
+
+/// A muscle without a sensor starts to sense the touchdown of a foot at one
+/// of its ends, with a random cycle position to restart at: a reflex that
+/// fires the muscle when its foot lands.
+pub(crate) fn reflex_on_muscle(
+    c: &mut Creature,
+    _cfg: &Config,
+    rng: &mut Rng,
+    _cx: &Context,
+) -> bool {
+    let options: Bounded<(usize, Bounded<u32, 4>), MAX_MUSCLES> = (0..c.muscles.len())
+        .filter(|&i| c.muscles[i].long > c.muscles[i].short && c.muscles[i].sensor == NO_SENSOR)
+        .map(|i| (i, sensable_feet(c, &c.muscles[i])))
+        .filter(|(_, feet)| !feet.is_empty())
+        .collect();
+    if options.is_empty() {
+        return false;
+    }
+    let (i, feet) = &options[rng.index(options.len())];
+    let m = &mut c.muscles[*i];
+    m.sensor = feet[rng.index(feet.len())];
+    m.reset = rng.unit();
+    true
+}
+
+/// Every active muscle with an end on a foot senses that foot's touchdown,
+/// all at once, keeping the muscles' phase order in their reset positions.
+pub(crate) fn reflex_all_feet(
+    c: &mut Creature,
+    _cfg: &Config,
+    rng: &mut Rng,
+    _cx: &Context,
+) -> bool {
+    let mut changed = false;
+    let shift = rng.unit();
+    for i in 0..c.muscles.len() {
+        let m = c.muscles[i];
+        if m.long <= m.short {
+            continue;
+        }
+        let Some(&sensor) = sensable_feet(c, &m).first() else {
+            continue;
+        };
+        let reset = (m.phase + shift).rem_euclid(1.0);
+        changed |= (m.sensor, m.reset) != (sensor, reset);
+        c.muscles[i].sensor = sensor;
+        c.muscles[i].reset = reset;
+    }
+    changed
+}
+
+/// Moves the reset position of every sensing muscle on a limb by one step (5
+/// to 25% of a cycle), so the reflex restarts the limb earlier or later in
+/// its cycle without changing its clock.
+pub(crate) fn reflex_reset_shift(
+    c: &mut Creature,
+    _cfg: &Config,
+    rng: &mut Rng,
+    _cx: &Context,
+) -> bool {
+    let limbs: BoneIds = limb_roots(c)
+        .into_iter()
+        .filter(|&b| {
+            muscles_on(c, &branch(c, b), false)
+                .iter()
+                .any(|&i| c.muscles[i].sensor != NO_SENSOR)
+        })
+        .collect();
+    let Some(root) = pick(&limbs, rng) else {
+        return false;
+    };
+    let step = rng.range(0.05, 0.25) * if rng.unit() < 0.5 { -1.0 } else { 1.0 };
+    for i in muscles_on(c, &branch(c, root), false) {
+        let m = &mut c.muscles[i];
+        if m.sensor != NO_SENSOR {
+            m.reset = (m.reset + step).rem_euclid(1.0);
+        }
+    }
+    true
+}
+
 /// Clears the touchdown sensors of every muscle on a limb that has any, so
 /// the limb runs on the clock alone (the reverse of `touchdown_package`).
 pub(crate) fn release_touchdown(
@@ -196,7 +383,7 @@ pub(crate) fn release_touchdown(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let limbs: Vec<usize> = limb_roots(c)
+    let limbs: BoneIds = limb_roots(c)
         .into_iter()
         .filter(|&b| {
             muscles_on(c, &branch(c, b), false)
@@ -222,7 +409,7 @@ pub(crate) fn snap_limb_phases(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let limbs: Vec<usize> = driven_limbs(c)
+    let limbs: BoneIds = driven_limbs(c)
         .into_iter()
         .filter(|&b| active_on(c, b).len() > 1)
         .collect();
@@ -410,5 +597,105 @@ mod tests {
             }
         });
         assert!(applied >= 40, "applied {applied}");
+    }
+
+    #[test]
+    fn limb_clock_ratio_keeps_every_period_on_the_ratio_set() {
+        let applied = run(limb_clock_ratio, &grown(), |before, after| {
+            let base = after.muscles[0].period;
+            for m in &after.muscles {
+                assert!(
+                    CLOCK_RATIOS
+                        .iter()
+                        .any(|r| ((m.period / base).ln() - r.ln()).abs() < 0.003),
+                    "ratio {}",
+                    m.period / base
+                );
+            }
+            assert!(changed(before, after).iter().all(|&i| {
+                let (x, y) = (before.muscles[i], after.muscles[i]);
+                crate::evolution::Muscle {
+                    period: x.period,
+                    ..y
+                } == x
+            }));
+        });
+        assert!(applied >= 30, "applied {applied}");
+    }
+
+    #[test]
+    fn a_repaired_body_keeps_its_limb_clocks() {
+        let cfg = Config::default();
+        let mut kept = 0;
+        for (i, mut c) in grown().into_iter().enumerate() {
+            let cx = Context { donor: None };
+            if !limb_clock_ratio(&mut c, &cfg, &mut Rng::new(5, 0, i), &cx) {
+                continue;
+            }
+            let before: Vec<f32> = c.muscles.iter().map(|m| m.period).collect();
+            crate::evolution::repair(&mut c, &cfg, &mut Rng::new(6, 0, i));
+            let after: Vec<f32> = c.muscles.iter().map(|m| m.period).collect();
+            if before == after && after.iter().any(|&p| p != after[0]) {
+                kept += 1;
+            }
+        }
+        assert!(kept >= 20, "kept {kept}");
+    }
+
+    #[test]
+    fn limb_clock_lock_puts_a_limb_on_the_base_clock() {
+        let cfg = Config::default();
+        let bodies: Vec<Creature> = grown()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, mut c)| {
+                let cx = Context { donor: None };
+                limb_clock_ratio(&mut c, &cfg, &mut Rng::new(9, 0, i), &cx).then_some(c)
+            })
+            .collect();
+        let applied = run(limb_clock_lock, &bodies, |before, after| {
+            let base = after.muscles[0].period;
+            let moved = changed(before, after);
+            assert!(moved.iter().all(|&i| after.muscles[i].period == base));
+        });
+        assert!(applied >= 10, "applied {applied}");
+    }
+
+    #[test]
+    fn reflex_on_muscle_senses_a_foot_of_its_own_bones() {
+        let applied = run(reflex_on_muscle, &grown(), |before, after| {
+            let moved = changed(before, after);
+            assert_eq!(moved.len(), 1);
+            let m = after.muscles[moved[0]];
+            assert_eq!(before.muscles[moved[0]].sensor, NO_SENSOR);
+            assert!(sensable_feet(after, &m).contains(&m.sensor));
+        });
+        assert!(applied >= 100, "applied {applied}");
+    }
+
+    #[test]
+    fn reflex_all_feet_and_reset_shift_only_touch_sensors_and_resets() {
+        for op in [reflex_all_feet as Operator, reflex_reset_shift] {
+            let mut bodies = grown();
+            for c in &mut bodies {
+                if let Some(m) = c.muscles.iter_mut().find(|m| m.long > m.short) {
+                    m.sensor = 0;
+                }
+            }
+            let applied = run(op, &bodies, |before, after| {
+                for i in changed(before, after) {
+                    let (x, y) = (before.muscles[i], after.muscles[i]);
+                    assert_eq!(
+                        crate::evolution::Muscle {
+                            sensor: x.sensor,
+                            reset: x.reset,
+                            ..y
+                        },
+                        x
+                    );
+                }
+            });
+            assert!(applied >= 20, "applied {applied}");
+        }
     }
 }

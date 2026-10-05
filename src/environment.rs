@@ -33,14 +33,14 @@ impl Effect {
 }
 
 /// A named world: every effect it lists is set to the given level and every
-/// other effect goes back to calm. The Seasons schedule is left alone.
+/// other effect goes back to calm. The autochange level is left alone.
 pub struct Preset {
     pub name: &'static str,
     pub about: &'static str,
     pub levels: &'static [(&'static str, usize)],
 }
 
-pub const PRESETS: [Preset; 6] = [
+pub const PRESETS: [Preset; 7] = [
     Preset {
         name: "Rough hills",
         about: "Rocky ground on an 8% climb. Lifted feet and steady climbing win.",
@@ -71,13 +71,21 @@ pub const PRESETS: [Preset; 6] = [
         about: "1.5 g with an earthquake. Compact, robust bodies gain.",
         levels: &[("Gravity", 1), ("Earthquake", 1)],
     },
+    Preset {
+        name: "Savanna",
+        about: "Thorny scrub over rough ground. Legs that carry the trunk clear of the ground win.",
+        levels: &[("Brambles", 2), ("Ground", 1)],
+    },
 ];
 
 impl Preset {
-    /// Sets every effect except the Seasons schedule: the listed ones to
+    /// Sets every effect except the autochange level: the listed ones to
     /// their level, the rest to calm.
     pub fn apply(&self, cfg: &mut Config) {
-        for effect in EFFECTS.iter().filter(|e| e.name != "Seasons") {
+        for effect in EFFECTS
+            .iter()
+            .filter(|e| e.name != "Autochange environment")
+        {
             let level = self
                 .levels
                 .iter()
@@ -108,6 +116,9 @@ pub const SLOPE: [f32; 5] = [0.0, 0.03, 0.08, 0.15, 0.25];
 pub const WIND: [f32; 4] = [0.0, -1.0, -3.0, -6.0];
 /// Mud sink depth (m) at each level, from dry ground to deep mud.
 pub const MUD: [f32; 4] = [0.0, 0.02, 0.05, 0.10];
+/// Brambles drag (1/s) on the nodes that are not feet while they touch the
+/// ground.
+pub const BRAMBLES: [f32; 4] = [0.0, 3.0, 8.0, 20.0];
 /// Water line height (m) at each level: dry, ankle-deep puddles, shallows
 /// that cover the legs of a small body, and deep water that swallows most
 /// bodies.
@@ -125,13 +136,44 @@ pub const HURDLES: [f32; 4] = [0.0, 0.08, 0.20, 0.35];
 /// Earthquake base bump height (m) at each level. Each creature jitters the
 /// phase and height with its own deterministic stream.
 pub const QUAKE: [f32; 4] = [0.0, 0.05, 0.12, 0.25];
-/// Generations between automatic season steps at each seasons level:
-/// Off, Slow, Normal, Fast. Level 0 leaves the world alone.
-pub const SEASON_INTERVALS: [u32; 4] = [0, 20, 10, 5];
-/// Effects the season rotation visits first, in this order. Every other table
-/// effect follows in `EFFECTS` order, and the Seasons row itself never
-/// rotates, so adding an effect to the table adds it to the seasons.
-const SEASON_FIRST: [&str; 5] = ["Wind", "Ground", "Grip", "Mud", "Slope"];
+/// Generations between automatic environment changes at each autochange
+/// level: Off, Slow, Normal, Fast. Level 0 leaves the world alone.
+pub const AUTOCHANGE_INTERVALS: [u32; 4] = [0, 100, 50, 20];
+
+/// Generations between automatic environment changes at autochange `level`.
+/// For an unattended run a developer may set `EVOLUTION_AUTOCHANGE_EVERY`
+/// to use that interval at every level above Off.
+pub fn autochange_interval(level: u8) -> Option<u32> {
+    let interval = *AUTOCHANGE_INTERVALS.get(usize::from(level))?;
+    let every = std::env::var("EVOLUTION_AUTOCHANGE_EVERY")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&v| v > 0);
+    Some(match every {
+        Some(every) if interval > 0 => every,
+        _ => interval,
+    })
+}
+/// Effects from the most benign to the harshest. Autochange raises each one a
+/// level in this order, then goes round again, so the world only gets harder.
+/// An effect missing here follows in `EFFECTS` order.
+const AUTOCHANGE_ORDER: [&str; 15] = [
+    "Air",
+    "Wind",
+    "Ground",
+    "Heat wave",
+    "Drought",
+    "Slope",
+    "Grip",
+    "Mud",
+    "Brambles",
+    "Gravity",
+    "Water",
+    "Ice patches",
+    "Hurdles",
+    "Gaps",
+    "Earthquake",
+];
 
 fn nearest(table: &[f32], value: f32) -> usize {
     table
@@ -141,16 +183,16 @@ fn nearest(table: &[f32], value: f32) -> usize {
         .map_or(0, |(i, _)| i)
 }
 
-pub const EFFECTS: [Effect; 15] = [
+pub const EFFECTS: [Effect; 16] = [
     Effect {
-        name: "Seasons",
+        name: "Autochange environment",
         levels: &["Off", "Slow", "Normal", "Fast"],
         calm: 0,
-        raise: "Faster seasons",
-        lower: "Slower seasons",
+        raise: "Faster autochange",
+        lower: "Slower autochange",
         why: "The world advances one effect one level every 20, 10, or 5 generations, walking through wind, ground, grip, mud, slope, and every other effect before returning to calm. Gaits meet a changing world instead of one fixed challenge.",
-        get: |c| usize::from(c.seasons),
-        set: |c, level| c.seasons = level as u8,
+        get: |c| usize::from(c.autochange),
+        set: |c, level| c.autochange = level as u8,
     },
     Effect {
         name: "Ground",
@@ -249,6 +291,16 @@ pub const EFFECTS: [Effect; 15] = [
         set: |c, level| c.mud = MUD[level],
     },
     Effect {
+        name: "Brambles",
+        levels: &["Clear", "Scrub", "Brambles", "Thicket"],
+        calm: 0,
+        raise: "Grow brambles",
+        lower: "Clear brambles",
+        why: "Thorny scrub catches every part of the body that touches the ground except the feet. A belly or a knee dragged along the ground is held back, so legs that carry the trunk clear of the ground and step on their feet come out ahead.",
+        get: |c| nearest(&BRAMBLES, c.brambles),
+        set: |c, level| c.brambles = BRAMBLES[level],
+    },
+    Effect {
         name: "Water",
         levels: &["Dry", "Puddles", "Shallows", "Deep water"],
         calm: 0,
@@ -300,58 +352,86 @@ pub const EFFECTS: [Effect; 15] = [
     },
 ];
 
-/// The deterministic season rotation: one entry per scheduled step, each
-/// setting exactly one effect to one level. Every effect except Seasons is
-/// visited once per lap, and each effect's run ends back at its calm level,
-/// so the calm world returns after every cycle.
-pub fn season_rotation() -> Vec<(usize, usize)> {
-    let mut order: Vec<usize> = SEASON_FIRST
+/// Every world one effect level away from `cfg`'s: each effect one level
+/// up and one level down, the rest unchanged. The kernels of these worlds
+/// are the ones the next button press may need (`cuda_engine`).
+pub fn one_level_away(cfg: &Config) -> Vec<Config> {
+    let mut worlds = Vec::new();
+    for effect in EFFECTS
+        .iter()
+        .filter(|effect| effect.name != "Autochange environment")
+    {
+        let level = effect.level(cfg);
+        for next in [level.checked_sub(1), Some(level + 1)]
+            .into_iter()
+            .flatten()
+        {
+            if next < effect.levels.len() {
+                let mut world = cfg.clone();
+                effect.set_level(&mut world, next);
+                worlds.push(world);
+            }
+        }
+    }
+    worlds
+}
+
+/// The deterministic autochange ladder: one entry per step, each raising one
+/// effect to its next level above calm. Round one adds every effect at its
+/// mildest level, from the most benign, and later rounds make them harsher.
+pub fn autochange_ladder() -> Vec<(usize, usize)> {
+    let mut order: Vec<usize> = AUTOCHANGE_ORDER
         .iter()
         .filter_map(|name| EFFECTS.iter().position(|effect| effect.name == *name))
         .collect();
     for (index, effect) in EFFECTS.iter().enumerate() {
-        if effect.name != "Seasons" && !order.contains(&index) {
+        if effect.name != "Autochange environment" && !order.contains(&index) {
             order.push(index);
         }
     }
-    let mut rotation = Vec::new();
-    for index in order {
-        let effect = &EFFECTS[index];
-        let levels = effect.levels.len();
-        for step in 1..=levels {
-            rotation.push((index, (effect.calm + step) % levels));
+    let rounds = EFFECTS.iter().map(|e| e.levels.len()).max().unwrap_or(0);
+    let mut ladder = Vec::new();
+    for round in 1..rounds {
+        for &index in &order {
+            let effect = &EFFECTS[index];
+            if effect.calm + round < effect.levels.len() {
+                ladder.push((index, effect.calm + round));
+            }
         }
     }
-    rotation
+    ladder
 }
 
-/// Applies rotation step `step` to `cfg`. Returns true when any physics field
-/// changed.
-pub fn apply_season_step(cfg: &mut Config, step: u16) -> bool {
-    let rotation = season_rotation();
-    let Some(&(index, level)) = rotation.get(usize::from(step) % rotation.len()) else {
+/// Applies ladder step `step` to `cfg`, never lowering an effect the player
+/// made harsher. Past the ladder's end the world stays. Returns true when any
+/// physics field changed.
+pub fn apply_autochange_step(cfg: &mut Config, step: u16) -> bool {
+    let ladder = autochange_ladder();
+    let Some(&(index, level)) = ladder.get(usize::from(step)) else {
         return false;
     };
     let effect = &EFFECTS[index];
     let before = effect.level(cfg);
-    effect.set_level(cfg, level);
+    if before < level {
+        effect.set_level(cfg, level);
+    }
     effect.level(cfg) != before
 }
 
-/// Applies one season step when `generation` begins, if the seasons level is
+/// Applies one autochange step when `generation` begins, if the autochange level is
 /// on and the generation is a multiple of its interval. The schedule depends
-/// only on `cfg.seasons` and `generation`, never on wall time, so a checkpoint
+/// only on `cfg.autochange` and `generation`, never on wall time, so a checkpoint
 /// resumed mid-cycle continues at the same step. Returns true when the world
 /// changed.
-pub fn advance_seasons(cfg: &mut Config, generation: u32) -> bool {
-    let Some(&interval) = SEASON_INTERVALS.get(usize::from(cfg.seasons)) else {
+pub fn advance_autochange(cfg: &mut Config, generation: u32) -> bool {
+    let Some(interval) = autochange_interval(cfg.autochange) else {
         return false;
     };
     if interval == 0 || generation == 0 || !generation.is_multiple_of(interval) {
         return false;
     }
-    let changed = apply_season_step(cfg, cfg.season_step);
-    cfg.season_step = cfg.season_step.wrapping_add(1);
+    let changed = apply_autochange_step(cfg, cfg.autochange_step);
+    cfg.autochange_step = cfg.autochange_step.wrapping_add(1);
     changed
 }
 
@@ -360,23 +440,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_level_round_trips_and_validates() {
+    fn the_worlds_one_level_away_differ_by_one_effect() {
+        let calm = Config::default();
+        let away = one_level_away(&calm);
+        // Every effect but the autochange has a level above the calm one,
+        // and the grip (calm level 1 of 5) one below as well.
+        assert!(away.len() >= EFFECTS.len() - 1);
+        for world in &away {
+            let changed = EFFECTS
+                .iter()
+                .filter(|e| e.level(world) != e.level(&calm))
+                .count();
+            assert_eq!(changed, 1);
+        }
+        // The kernels need few distinct worlds: most effects change no flag.
+        let mut flags: Vec<u32> = away.iter().map(crate::warp_kernel::world_flags).collect();
+        flags.sort();
+        flags.dedup();
+        assert!(flags.len() < away.len());
+    }
+
+    #[test]
+    fn every_level_round_trips() {
         for effect in &EFFECTS {
             for level in 0..effect.levels.len() {
                 let mut cfg = Config::default();
                 effect.set_level(&mut cfg, level);
                 assert_eq!(effect.level(&cfg), level, "{}", effect.name);
-                cfg.validate().unwrap();
             }
         }
     }
 
     #[test]
-    fn presets_name_real_effects_and_validate() {
+    fn presets_name_real_effects() {
         for preset in &PRESETS {
             let mut cfg = Config::default();
             preset.apply(&mut cfg);
-            cfg.validate().unwrap();
             for &(name, level) in preset.levels {
                 let effect = EFFECTS.iter().find(|e| e.name == name).unwrap();
                 assert!(level < effect.levels.len(), "{}", preset.name);
@@ -502,117 +601,121 @@ mod tests {
         assert!(cfg.muscle_recovery < 1.0, "drought must slow recovery");
     }
 
-    fn with_seasons(seasons: u8) -> Config {
+    fn with_autochange(autochange: u8) -> Config {
         Config {
-            seasons,
+            autochange,
             ..Config::default()
         }
     }
 
     #[test]
-    fn seasons_step_on_the_generation_schedule() {
-        let interval = SEASON_INTERVALS[2];
-        let mut cfg = with_seasons(2);
+    fn autochange_steps_on_the_generation_schedule() {
+        let interval = AUTOCHANGE_INTERVALS[2];
+        let mut cfg = with_autochange(2);
         for generation in 1..interval {
-            assert!(!advance_seasons(&mut cfg, generation));
+            assert!(!advance_autochange(&mut cfg, generation));
         }
         assert_eq!(
             cfg,
-            with_seasons(2),
+            with_autochange(2),
             "nothing may change before the interval"
         );
-        assert!(advance_seasons(&mut cfg, interval));
-        assert_eq!(cfg.season_step, 1);
+        assert!(advance_autochange(&mut cfg, interval));
+        assert_eq!(cfg.autochange_step, 1);
+        let air = EFFECTS.iter().find(|e| e.name == "Air").unwrap();
         assert_eq!(
-            cfg.wind, WIND[1],
-            "the first step is the wind's first level"
+            air.level(&cfg),
+            1,
+            "the first step is the air's first level"
         );
-        let mut off = with_seasons(0);
+        let mut off = with_autochange(0);
         for generation in (0..200).step_by(5) {
-            assert!(!advance_seasons(&mut off, generation));
+            assert!(!advance_autochange(&mut off, generation));
         }
-        assert_eq!(off, with_seasons(0), "the off level never steps");
+        assert_eq!(off, with_autochange(0), "the off level never steps");
     }
 
     #[test]
-    fn each_season_step_changes_one_effect_and_the_lap_returns_to_calm() {
-        let interval = SEASON_INTERVALS[2];
-        let rotation = season_rotation();
-        assert!(rotation.len() > 1);
-        let mut cfg = with_seasons(2);
-        for step in 0..rotation.len() {
-            let generation = (step as u32 + 1) * interval;
-            let before = cfg.clone();
-            assert!(advance_seasons(&mut cfg, generation));
-            let changed = EFFECTS
-                .iter()
-                .filter(|effect| effect.level(&cfg) != effect.level(&before))
-                .count();
-            assert_eq!(changed, 1, "step {step} must touch exactly one effect");
-        }
-        for effect in &EFFECTS {
-            if effect.name == "Seasons" {
-                assert_eq!(effect.level(&cfg), 2, "the seasons setting must not rotate");
-                continue;
-            }
-            assert_eq!(
-                effect.level(&cfg),
-                effect.calm,
-                "{} must be calm after a full lap",
-                effect.name
-            );
-        }
-        assert_eq!(usize::from(cfg.season_step), rotation.len());
-        let mut next_lap = cfg.clone();
-        advance_seasons(&mut next_lap, (rotation.len() as u32 + 1) * interval);
-        let mut first_lap = with_seasons(2);
-        advance_seasons(&mut first_lap, interval);
-        for effect in &EFFECTS {
-            assert_eq!(
-                effect.level(&next_lap),
-                effect.level(&first_lap),
-                "{} repeats the same lap",
-                effect.name
-            );
-        }
-    }
-
-    #[test]
-    fn the_season_lap_visits_every_effect_but_seasons() {
-        let rotation = season_rotation();
-        let seats = EFFECTS.iter().filter(|e| e.name != "Seasons").count();
-        let mut visited: Vec<usize> = rotation.iter().map(|&(index, _)| index).collect();
-        visited.sort_unstable();
-        visited.dedup();
-        assert_eq!(visited.len(), seats);
-        for (index, effect) in EFFECTS.iter().enumerate() {
-            let levels: Vec<usize> = rotation
-                .iter()
-                .filter(|&&(i, _)| i == index)
-                .map(|&(_, level)| level)
-                .collect();
-            if effect.name == "Seasons" {
-                assert!(levels.is_empty(), "the Seasons row must not rotate");
-                continue;
-            }
-            assert_eq!(levels.len(), effect.levels.len(), "{}", effect.name);
-            assert_eq!(*levels.last().unwrap(), effect.calm, "{}", effect.name);
-        }
-    }
-
-    #[test]
-    fn seasons_do_not_depend_on_wall_time() {
-        let interval = SEASON_INTERVALS[1];
+    fn autochange_does_not_depend_on_wall_time() {
+        let interval = AUTOCHANGE_INTERVALS[1];
         let run = |pause: bool| {
-            let mut cfg = with_seasons(1);
+            let mut cfg = with_autochange(1);
             for generation in 1..=interval * 6 {
                 if pause {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
-                advance_seasons(&mut cfg, generation);
+                advance_autochange(&mut cfg, generation);
             }
             cfg
         };
         assert_eq!(run(false), run(true));
     }
+}
+
+/// The effects and levels of each wild island's world (`qd::WILD_ISLANDS`):
+/// one to three effects each, every mix different, and no effect at its
+/// harshest level so each world can be walked. The set is the same in every
+/// game, so its kernels compile once and stay in the kernel cache; a set
+/// drawn per seed compiled about 190 kernels at the start of each new game.
+pub fn wild_levels(_seed: u64) -> Vec<Vec<(usize, usize)>> {
+    static WORLDS: std::sync::OnceLock<Vec<Vec<(usize, usize)>>> = std::sync::OnceLock::new();
+    WORLDS.get_or_init(draw_wild_levels).clone()
+}
+
+fn draw_wild_levels() -> Vec<Vec<(usize, usize)>> {
+    let mut rng = crate::evolution::Rng::new(0x7769_6c64, 0, 0);
+    let choices: Vec<usize> = (0..EFFECTS.len())
+        .filter(|&e| EFFECTS[e].name != "Autochange environment")
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut worlds = Vec::with_capacity(crate::qd::WILD_ISLANDS);
+    while worlds.len() < crate::qd::WILD_ISLANDS {
+        let count = 1 + rng.index(3);
+        let mut mix: Vec<(usize, usize)> = Vec::new();
+        while mix.len() < count {
+            let e = choices[rng.index(choices.len())];
+            if mix.iter().any(|&(x, _)| x == e) {
+                continue;
+            }
+            let effect = &EFFECTS[e];
+            let levels: Vec<usize> = (0..effect.levels.len() - 1)
+                .filter(|&l| l != effect.calm)
+                .collect();
+            if levels.is_empty() {
+                continue;
+            }
+            mix.push((e, levels[rng.index(levels.len())]));
+        }
+        mix.sort_unstable();
+        if seen.insert(mix.clone()) {
+            worlds.push(mix);
+        }
+    }
+    worlds
+}
+
+/// The settings of a wild island's world: `base` with every effect calm
+/// except the island's own mix. The wild worlds have no early screen and no
+/// rungs, because the main world's bars say nothing about them.
+pub fn wild_world(base: &Config, levels: &[(usize, usize)]) -> Config {
+    let mut cfg = base.clone();
+    for effect in EFFECTS.iter() {
+        effect.set_level(&mut cfg, effect.calm);
+    }
+    for &(e, level) in levels {
+        EFFECTS[e].set_level(&mut cfg, level);
+    }
+    cfg.autochange = 0;
+    cfg.screen = None;
+    cfg.rungs = None;
+    cfg
+}
+
+/// A short name of a wild world, such as "Mud: Muddy, Wind: Breeze".
+pub fn wild_name(levels: &[(usize, usize)]) -> String {
+    levels
+        .iter()
+        .map(|&(e, l)| format!("{}: {}", EFFECTS[e].name, EFFECTS[e].levels[l]))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

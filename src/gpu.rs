@@ -1,37 +1,24 @@
 //! Evaluation front end. All creature evaluation runs through the scheduler,
-//! which routes work to Vulkan GPUs and keeps CPU evaluation for CPU-only runs
-//! or failover after GPU loss.
+//! which routes work to the CUDA engines of the NVIDIA GPUs.
 use crate::{config::Config, evolution::Population, qd::EvaluationMetrics, scheduler::Scheduler};
 use anyhow::{Result, ensure};
-
-/// Physics steps per GPU dispatch. Short ranges let display work interleave;
-/// the Vulkan engine keeps them nearly free.
-pub const DEFAULT_STEP_RANGE: u32 = 64;
 
 pub struct Gpu {
     pub name: String,
     pub allocated_bytes: u64,
     pub sched: Option<Scheduler>,
-    /// Why the primary GPU was not used, shown once when a session starts.
-    pub startup_warning: Option<String>,
 }
 
 impl Gpu {
-    /// Opens the named primary GPU plus the other evaluation engines. A
-    /// primary that cannot open falls back to the CPU instead of failing.
+    /// Opens the named primary GPU plus the other evaluation engines. Fails
+    /// when the primary GPU does not open.
     pub fn new(name: &str) -> Result<Self> {
         let sched = Scheduler::new(name)?;
-        let startup_warning = sched.startup_failure().map(str::to_owned);
         Ok(Self {
             name: sched.names(),
             allocated_bytes: 0,
             sched: Some(sched),
-            startup_warning,
         })
-    }
-    /// The UI passes its render device; evaluation opens its own devices.
-    pub fn from_device(_device: wgpu::Device, _queue: wgpu::Queue, name: String) -> Result<Self> {
-        Self::new(&name)
     }
     /// Current evaluation backends, including changes after device recovery.
     pub fn names(&self) -> String {
@@ -74,7 +61,8 @@ impl Gpu {
     pub fn async_capable(&self) -> bool {
         self.sched.is_some()
     }
-    pub fn async_in_flight(&self) -> usize {
-        self.sched.as_ref().map_or(0, |s| s.in_flight())
+    /// Units on the evaluation engines now.
+    pub fn on_engines(&self) -> usize {
+        self.sched.as_ref().map_or(0, Scheduler::on_engines)
     }
 }

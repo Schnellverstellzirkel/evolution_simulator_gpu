@@ -43,10 +43,14 @@ impl Fidelity {
             velocity_passes,
         }
     }
-    /// Four times the standard rate and solver passes.
+    /// Twice the standard rate and solver passes, for the confirmation trial
+    /// of a creature that would set an island record.
     pub fn fine() -> Self {
         let standard = Self::standard();
         Self {
+            // Only new records run a confirmation trial, so it can afford 4x:
+            // a 2x check once let integrator exploits through
+            // (docs/design-decisions.md).
             rate: (standard.rate * 4).min(960),
             bone_passes: standard.bone_passes * 4,
             velocity_passes: standard.velocity_passes * 4,
@@ -108,7 +112,7 @@ pub struct Limits {
 impl Limits {
     pub const DEFAULT: Limits = Limits {
         muscle_speed: 24.0,
-        muscle_force: 100.0,
+        muscle_force: 200.0,
         node_speed: 60.0,
         bone_spin: 40.0,
         min_period: 0.2,
@@ -193,8 +197,57 @@ fn add_bone_masses(bones: &[Bone], nodes: &mut [Node]) {
         }
     }
 }
+/// A muscle's mass: a fixed part plus a part per metre of its slack length.
+pub const MUSCLE_MASS_BASE: f32 = 0.05;
+pub const MUSCLE_MASS_PER_M: f32 = 1.0;
+/// Distance between a muscle's two attachment points on `nodes`.
+fn muscle_span(bones: &[Bone], nodes: &[Node], m: &Muscle) -> f32 {
+    let point = |bone: u32, t: f32| -> Option<[f32; 2]> {
+        let bone = bones.get(bone as usize)?;
+        let (a, b) = (
+            nodes.get(bone.a as usize)?.pos,
+            nodes.get(bone.b as usize)?.pos,
+        );
+        Some([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t])
+    };
+    match (point(m.bone_a, m.anchor_a), point(m.bone_b, m.anchor_b)) {
+        (Some(p), Some(q)) => ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt(),
+        _ => 0.0,
+    }
+}
+/// Where a muscle's tendon starts to pull: its longest length, or its length
+/// in the start pose when that is longer, so no tendon starts stretched. A
+/// tendon stretched in the start pose was a catapult charged for free: bodies
+/// with a 1 m muscle of 0.01 m longest length launched themselves 5 m in one
+/// step (the owner's 400-generation run, 2026-09-30).
+pub fn slack_length(bones: &[Bone], start: &[Node], m: &Muscle) -> f32 {
+    m.long.max(muscle_span(bones, start, m))
+}
+/// Adds each muscle's mass to the nodes (in the start pose): half at each
+/// attachment, shared by that bone's two nodes in proportion to where the
+/// muscle attaches.
+pub fn add_muscle_masses(bones: &[Bone], muscles: &[Muscle], nodes: &mut [Node]) {
+    for m in muscles {
+        let half = 0.5 * (MUSCLE_MASS_BASE + MUSCLE_MASS_PER_M * slack_length(bones, nodes, m));
+        for (bone, t) in [(m.bone_a, m.anchor_a), (m.bone_b, m.anchor_b)] {
+            let Some(bone) = bones.get(bone as usize) else {
+                continue;
+            };
+            let (a, b) = (bone.a as usize, bone.b as usize);
+            if a >= nodes.len() || b >= nodes.len() {
+                continue;
+            }
+            let t = t.clamp(0.0, 1.0);
+            nodes[a].mass += half * (1.0 - t);
+            nodes[b].mass += half * t;
+        }
+    }
+}
+/// A creature's nodes with the masses of its bones, organs and muscles.
 pub fn nodes(c: &Creature) -> Vec<Node> {
-    body(&c.nodes, &c.bones)
+    let mut nodes = body(&c.nodes, &c.bones);
+    add_muscle_masses(&c.bones, &c.muscles, &mut nodes);
+    nodes
 }
 pub fn target(m: &Muscle, time: f32) -> f32 {
     let phase = (time / m.period + m.phase).fract();
@@ -215,13 +268,6 @@ pub(crate) fn limited_target(m: &Muscle, time: f32) -> f32 {
     limited.short = m.long - amplitude;
     target(&limited, time)
 }
-thread_local! {
-    /// Diagnostic ledger of horizontal momentum changes by source:
-    /// [integration speed cap, ground contact, velocity-pass speed cap,
-    ///  velocity-pass constraints, projection/rebuild center-of-mass shift x mass].
-    pub static MOMENTUM_LEDGER: std::cell::Cell<[f64; 5]> = const { std::cell::Cell::new([0.0; 5]) };
-}
-
 /// Joint range constraint for one bone, precomputed from the genome. The bone
 /// turns about its parent node `a` against a reference bone that shares that
 /// node: the parent's own bone, or for bones leaving the root, the first root
@@ -262,9 +308,16 @@ pub const STANCE_GRIP: f32 = 10.0;
 /// as planted, so friction may push the body forward from them. Faster, the
 /// feet slide and friction can only oppose the slide.
 pub const PLANTED_SPEED: f32 = 0.01;
-/// Grip of a planted stance (`STANCE_GRIP`).
-pub fn stance_grip() -> f32 {
-    STANCE_GRIP
+/// Static friction: a foot that barely slides can take `1 + STATIC_EXTRA`
+/// times the kinetic friction bound. The extra fades linearly to nothing
+/// between 1 cm/s and 2 cm/s of slide, so no step chatters across a switch.
+/// The kernels write the same numbers as literals (0.25, 0.02, 100.0).
+pub const STATIC_EXTRA: f32 = 0.25;
+/// Slide speed (m/s) at which the static extra is gone.
+pub const STATIC_FADE_END: f32 = 0.02;
+/// The static factor, `1 + STATIC_EXTRA * clamp((STATIC_FADE_END - |v|) * 100, 0, 1)`.
+pub fn static_factor(slide: f32) -> f32 {
+    1.0 + 0.25 * ((0.02 - slide.abs()) * 100.0).clamp(0.0, 1.0)
 }
 /// Head shaking limit: the head's acceleration, averaged over about
 /// `HEAD_SHAKE_WINDOW` seconds, may not pass 8 g (m/s^2). A creature that
@@ -281,27 +334,40 @@ pub const HEAD_SHAKE_WINDOW: f32 = 0.1;
 pub struct Screen {
     pub seconds: f32,
     pub bar: f32,
+    /// The bar of a young creature (`rungs::YOUNG`): a body from a nursery
+    /// is held to the distance its own kind reaches at the screen, because
+    /// evolved bodies reach many times what a new body does, and a bar that
+    /// stops everything below them would stop every new body.
+    pub young_bar: f32,
+    /// The bar of a reshaped body of a nursery (`rungs::RESHAPED`): the
+    /// distance that its own kind reaches.
+    pub reshaped_bar: f32,
 }
 impl Screen {
+    /// The same bar for every kind of creature.
+    pub fn uniform(seconds: f32, bar: f32) -> Self {
+        Self {
+            seconds,
+            bar,
+            young_bar: bar,
+            reshaped_bar: bar,
+        }
+    }
     /// The step at whose end the screen applies.
     pub fn tick(self, fidelity: Fidelity) -> u32 {
         fidelity.settle() + ((self.seconds * fidelity.rate as f32).round() as u32).max(1) - 1
     }
 }
-/// Seconds after settling at which trials are screened
-/// (`EVOLUTION_SCREEN`, default 5; `0` turns screening off).
+/// Seconds after settling at which trials are screened.
 pub fn screen_seconds() -> Option<f32> {
-    let seconds = std::env::var("EVOLUTION_SCREEN")
-        .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(5.0);
-    (seconds > 0.0).then_some(seconds)
+    Some(5.0)
 }
-/// Share of creatures, by distance at the screen, that runs the full trial.
-/// At 5 s the top 20% held every creature of the final top 1% and 96% of the
-/// final top 10% on an evolved 3M population.
+/// Share of creatures, by distance at the screen, that runs the full trial
+/// (the owner's choice of 2026-10-02, for speed; it was 20%, which held
+/// every creature of the final top 1% and 96% of the final top 10% on an
+/// evolved 3M population).
 pub fn screen_keep() -> f32 {
-    0.2
+    0.1
 }
 /// The distance that the best `keep` share of `distances` reached (NaN
 /// entries are ignored), or no bar when fewer than 64 distances are known.
@@ -317,31 +383,6 @@ pub fn screen_bar(distances: impl Iterator<Item = f32>, keep: f32) -> f32 {
 /// broken joint ends the trial like a fall, so no gait can profit from
 /// muscles forcing joints round like wheels.
 pub const JOINT_BREAK: f32 = 0.5;
-/// Cosine of the angle from the middle of a joint's range at which it
-/// breaks, from the cosine and sine of half its range.
-pub fn joint_break_cos(half: [f32; 2]) -> f32 {
-    let (sin, cos) = JOINT_BREAK.sin_cos();
-    half[0] * cos - half[1] * sin
-}
-/// Whether a joint in `positions` is forced past its range by more than
-/// `JOINT_BREAK`.
-pub fn broken_joint(positions: &[[f32; 2]], bones: &[Bone], joints: &[Joint]) -> bool {
-    bones.iter().zip(joints).any(|(bone, joint)| {
-        let Some(reference) = joint.reference else {
-            return false;
-        };
-        let pivot = positions[bone.a as usize];
-        let at = |i: usize| [positions[i][0] - pivot[0], positions[i][1] - pivot[1]];
-        let (u, v) = (at(reference), at(bone.b as usize));
-        let norm = ((u[0] * u[0] + u[1] * u[1]) * (v[0] * v[0] + v[1] * v[1])).sqrt();
-        if norm < 1e-12 {
-            return false;
-        }
-        let cos = (u[0] * v[0] + u[1] * v[1]) / norm;
-        let sin = (u[0] * v[1] - u[1] * v[0]) / norm;
-        cos * joint.center[0] + sin * joint.center[1] < joint_break_cos(joint.half)
-    })
-}
 /// Joint constraints for a canonical (parent-first) skeleton.
 /// Reference node of bone `index`'s joint: its parent bone's pivot, or for a
 /// bone at the root the first root bone's child. `None` for a free joint. It
@@ -584,6 +625,9 @@ pub const MUD_DRAG: f32 = 2.0;
 /// Sink depth (m) at which the mud multipliers reach their full value, i.e.
 /// the deepest mud level. Shallower mud drags proportionally less.
 pub const MUD_FULL_DEPTH: f32 = 0.10;
+/// Brambles catch a node that is not a foot once its surface is this close
+/// to the ground (m).
+pub const BRAMBLE_REACH: f32 = 0.01;
 /// Distance (m) between the starts of two ice patches.
 pub const ICE_SPACING: f32 = 6.0;
 /// How icy the ground is at `x`, from 0 (dry) to 1 (ice): bands about 2.4 m
@@ -608,99 +652,6 @@ pub fn fitness(n: &[Node]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reusable_body_and_joint_outputs_match_allocating_wrappers() {
-        let genes = [
-            NodeGene {
-                x: 0.0,
-                y: 1.0,
-                diameter: 0.08,
-                friction: 0.7,
-            },
-            NodeGene {
-                x: 0.7,
-                y: 1.2,
-                diameter: 0.10,
-                friction: 0.9,
-            },
-            NodeGene {
-                x: 1.1,
-                y: 1.0,
-                diameter: 0.06,
-                friction: 0.5,
-            },
-        ];
-        let mut first = Bone::new(0, 1, 0.73);
-        first.organ_mass = 0.2;
-        first.organ_at = 0.3;
-        let mut second = Bone::new(1, 2, 0.45);
-        second.min_angle = -0.4;
-        second.max_angle = 0.6;
-        let bones = [first, second];
-
-        let expected_body = body(&genes, &bones);
-        let mut reused_body = vec![Node::default(); genes.len()];
-        body_into(&genes, &bones, &mut reused_body);
-        assert_eq!(
-            bytemuck::cast_slice::<Node, u8>(&reused_body),
-            bytemuck::cast_slice::<Node, u8>(&expected_body)
-        );
-
-        let expected_joints = joints(&genes, &bones);
-        let mut reused_joints = vec![Joint::FREE; bones.len()];
-        joints_from_body(&genes, &bones, &reused_body, &mut reused_joints);
-        for (expected, actual) in expected_joints.iter().zip(&reused_joints) {
-            assert_eq!(actual.reference, expected.reference);
-            assert_eq!(
-                actual.center.map(f32::to_bits),
-                expected.center.map(f32::to_bits)
-            );
-            assert_eq!(
-                actual.half.map(f32::to_bits),
-                expected.half.map(f32::to_bits)
-            );
-            assert_eq!(actual.child_share.to_bits(), expected.child_share.to_bits());
-            assert_eq!(actual.child_mass.to_bits(), expected.child_mass.to_bits());
-            assert_eq!(
-                actual.reference_mass.to_bits(),
-                expected.reference_mass.to_bits()
-            );
-        }
-    }
-
-    #[test]
-    fn muscle_targets_change_at_a_bounded_rate() {
-        let muscle = Muscle {
-            bone_a: 0,
-            bone_b: 1,
-            anchor_a: 0.5,
-            anchor_b: 0.5,
-            short: 0.01,
-            long: 1.0,
-            period: 0.1,
-            phase: 0.0,
-            duty: 0.5,
-            stiffness: 20.0,
-            sensor: 255,
-            reset: 0.0,
-            tendon: 0.0,
-        };
-        for time in [0.025, 0.075] {
-            assert!(
-                (limited_target(&muscle, time) - limited_target(&muscle, (time - dt()).max(0.0)))
-                    .abs()
-                    <= limits().muscle_speed * dt() + 1e-6
-            );
-        }
-        for tick in 1..120 {
-            let time = tick as f32 * dt();
-            assert!(
-                (limited_target(&muscle, time) - limited_target(&muscle, time - dt())).abs()
-                    <= limits().muscle_speed * dt() + 1e-6
-            );
-        }
-    }
 
     #[test]
     fn terrain_slope_matches_its_height() {
@@ -854,31 +805,6 @@ mod tests {
                 - ground(x - h, 0.03, 0.05, 0.0, 0.25, 0.37).0)
                 / (2.0 * h);
             assert!((slope - numeric).abs() < 1e-2, "{x}: {slope} vs {numeric}");
-        }
-    }
-
-    #[test]
-    fn joints_break_only_well_past_their_range() {
-        let genes: Vec<NodeGene> = [[0.0, 1.0], [1.0, 1.0], [2.0, 1.0]]
-            .iter()
-            .map(|p| NodeGene {
-                x: p[0],
-                y: p[1],
-                diameter: 0.1,
-                friction: 1.0,
-            })
-            .collect();
-        let mut bones = vec![Bone::new(0, 1, 1.0), Bone::new(1, 2, 1.0)];
-        bones[1].min_angle = -0.3;
-        bones[1].max_angle = 0.3;
-        let joints = joints(&genes, &bones);
-        // Bend the second bone by `turn` from its starting direction.
-        let bent = |turn: f32| vec![[0.0, 1.0], [1.0, 1.0], [1.0 + turn.cos(), 1.0 + turn.sin()]];
-        for turn in [0.0, 0.3, -0.3, 0.7, -0.7] {
-            assert!(!broken_joint(&bent(turn), &bones, &joints), "turn {turn}");
-        }
-        for turn in [0.9, -0.9, 2.0, -3.0] {
-            assert!(broken_joint(&bent(turn), &bones, &joints), "turn {turn}");
         }
     }
 

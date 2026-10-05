@@ -1,10 +1,10 @@
 //! Muscle energy, muscle force and ground reaction of a recorded trial.
 //!
-//! The recorded frames hold only node positions, whichever engine scored the
-//! trial. This module rebuilds the actuator state from them with the same
-//! formulas the kernels use: a muscle only pulls, its drive scales with its
-//! stored energy, and work drains the store while the rest of the time refills
-//! it. Velocities come from differences between frames, so the numbers are
+//! The kernel records these with every frame (`engine::Recording`). When a
+//! replay holds only node positions, this module rebuilds the actuator state
+//! from them with the formulas the kernel uses: a muscle only pulls, its
+//! drive scales with its stored energy, and work drains the store while the
+//! rest of the time refills it. Velocities come from differences between frames, so the numbers are
 //! estimates for viewing. They never feed a score.
 
 use crate::config::Config;
@@ -23,6 +23,9 @@ pub struct Forces {
     /// `[frame][node]`: friction force on the node (N) when the frames carry
     /// the recorded contact forces; empty for an estimate.
     pub friction: Vec<Vec<f32>>,
+    /// `[frame]`: bit `j` set when bone `j`'s joint is past its break angle
+    /// by the scoring kernel's test; empty for an estimate.
+    pub broken: Vec<u64>,
 }
 
 fn along_bone(frame: &[[f32; 2]], bone: &crate::evolution::Bone, t: f32) -> [f32; 2] {

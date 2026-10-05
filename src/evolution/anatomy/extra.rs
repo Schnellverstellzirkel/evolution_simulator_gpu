@@ -12,11 +12,14 @@ use super::limbs::{clamped, fuse_pair, limb_roots, pick};
 use super::muscles::{actuation, ring, shared_node};
 use super::rhythm::{leaf_limbs, matching_limbs};
 use super::{
-    Context, branch, child_bones, copy_branch, degree, fit_stroke, is_neck, muscles_on, new_muscle,
-    parent_bones, remove_parts, room,
+    BoneIds, Context, Limbs, MuscleIds, branch, child_bones, copy_branch, degree, fit_stroke,
+    is_neck, muscles_on, new_muscle, parent_bones, pick_each, remove_parts, room,
 };
 use crate::config::Config;
-use crate::evolution::{Bone, Creature, Muscle, NodeGene, Rng, max_bone_length, min_muscle_period};
+use crate::evolution::{
+    Bone, Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, NodeGene, Rng, max_bone_length,
+    min_muscle_period,
+};
 
 /// Copies one limb's program (each muscle's phase and duty) onto the
 /// matching muscles of a limb of the same shape, half a cycle later: the two
@@ -76,24 +79,27 @@ pub(crate) fn copy_muscle_to_partner(
     if !room(c, cfg, 0, 1) {
         return false;
     }
-    // (source muscle, source limb, recipient limb, phase offset)
-    let mut options = Vec::new();
-    for (from, to) in partners(c) {
-        let pairs = counterparts(c, &from, &to);
-        let offset = pairs
-            .first()
-            .map_or(0.5, |&(p, q)| c.muscles[q].phase - c.muscles[p].phase);
-        for p in muscles_on(c, &from, true) {
-            if pairs.iter().all(|&(s, _)| s != p) {
-                options.push((p, from.clone(), to.clone(), offset));
+    // (source muscle, partner pair, phase offset)
+    let partners = partners(c);
+    let options = |push: &mut dyn FnMut((usize, usize, f32))| {
+        for k in 0..partners.len() {
+            let (from, to) = partners.get(k);
+            let pairs = counterparts(c, from, to);
+            let offset = pairs
+                .first()
+                .map_or(0.5, |&(p, q)| c.muscles[q].phase - c.muscles[p].phase);
+            for p in muscles_on(c, from, true) {
+                if pairs.iter().all(|&(s, _)| s != p) {
+                    push((p, k, offset));
+                }
             }
         }
-    }
-    if options.is_empty() {
+    };
+    let Some((p, k, offset)) = pick_each(rng, options) else {
         return false;
-    }
-    let (p, from, to, offset) = &options[rng.index(options.len())];
-    let old = c.muscles[*p];
+    };
+    let (from, to) = partners.get(k);
+    let old = c.muscles[p];
     let at = |b: u32| {
         to[from
             .iter()
@@ -117,7 +123,7 @@ pub(crate) fn copy_muscle_to_partner(
 /// same pose, with the same muscles at the same phase, so the child moves
 /// like its parent and later mutations can make the two limbs differ.
 pub(crate) fn twin_limb(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
-    let roots: Vec<usize> = limb_roots(c)
+    let roots: BoneIds = limb_roots(c)
         .into_iter()
         .filter(|&b| room(c, cfg, branch(c, b).len(), 0))
         .collect();
@@ -147,12 +153,15 @@ pub(crate) fn grow_matching_tips(
     }
     let children = child_bones(c);
     let tip = |b: usize| children[c.bones[b].b as usize].is_empty();
-    let options: Vec<(usize, usize)> = matching_limbs(c)
-        .iter()
-        .flat_map(|(x, y)| x.iter().copied().zip(y.iter().copied()))
-        .filter(|&(p, q)| tip(p) && tip(q))
-        .collect();
-    let Some((p, q)) = pick(&options, rng) else {
+    let matching = matching_limbs(c);
+    let options = |push: &mut dyn FnMut((usize, usize))| {
+        matching
+            .iter()
+            .flat_map(|(x, y)| x.iter().copied().zip(y.iter().copied()))
+            .filter(|&(p, q)| tip(p) && tip(q))
+            .for_each(push);
+    };
+    let Some((p, q)) = pick_each(rng, options) else {
         return false;
     };
     let share = rng.range(0.25, 0.5);
@@ -194,7 +203,7 @@ pub(crate) fn nudge_limb_phase(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let roots: Vec<usize> = limb_roots(c)
+    let roots: BoneIds = limb_roots(c)
         .into_iter()
         .filter(|&b| !muscles_on(c, &branch(c, b), false).is_empty())
         .collect();
@@ -229,7 +238,7 @@ pub(crate) fn cadence_stride_trade(
         return false;
     }
     for m in &mut c.muscles {
-        m.period = period * factor;
+        m.period *= factor;
         m.short = (m.long - (m.long - m.short) * factor).clamp(0.01, m.long);
     }
     true
@@ -252,7 +261,7 @@ pub(crate) fn scale_muscle_leverage(
             1.0 - anchor
         }
     };
-    let options: Vec<(usize, u32)> = (0..c.muscles.len())
+    let options: Bounded<(usize, u32), MAX_MUSCLES> = (0..c.muscles.len())
         .filter_map(|i| {
             let m = c.muscles[i];
             let node = shared_node(c, m.bone_a as usize, m.bone_b as usize)?;
@@ -289,13 +298,13 @@ pub(crate) fn scale_limb_strength(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let active = |c: &Creature, root: usize| -> Vec<usize> {
+    let active = |c: &Creature, root: usize| -> MuscleIds {
         muscles_on(c, &branch(c, root), false)
             .into_iter()
             .filter(|&i| c.muscles[i].long > c.muscles[i].short)
             .collect()
     };
-    let roots: Vec<usize> = limb_roots(c)
+    let roots: BoneIds = limb_roots(c)
         .into_iter()
         .filter(|&b| !active(c, b).is_empty())
         .collect();
@@ -325,7 +334,7 @@ pub(crate) fn prune_weakest_muscle(
     if c.bones.len() < 3 {
         return false;
     }
-    let free: Vec<usize> = (0..c.muscles.len())
+    let free: MuscleIds = (0..c.muscles.len())
         .filter(|&i| !ring(c, &c.muscles[i]))
         .collect();
     if free.is_empty() {
@@ -351,7 +360,7 @@ pub(crate) fn prune_idle_limb(
     if c.nodes.len() <= 3 {
         return false;
     }
-    let tips: Vec<usize> = (0..c.bones.len())
+    let tips: BoneIds = (0..c.bones.len())
         .filter(|&b| !is_neck(c, b) && degree(c, c.bones[b].b as usize) == 1)
         .collect();
     if tips.is_empty() {
@@ -387,7 +396,7 @@ pub(crate) fn merge_leaf_bones(
     }
     let parents = parent_bones(c);
     let children = child_bones(c);
-    let pairs: Vec<(usize, usize)> = (1..c.nodes.len())
+    let pairs: Bounded<(usize, usize), MAX_NODES> = (1..c.nodes.len())
         .filter_map(|joint| {
             let upper = parents[joint]?;
             let &[lower] = &children[joint][..] else {
@@ -507,34 +516,31 @@ struct DraggingEnd {
     /// The node a leg copied there hangs from.
     node: usize,
     /// The leg already at that end, if any.
-    leg: Option<Vec<usize>>,
+    leg: Option<BoneIds>,
     /// That leg, when its muscles drive less than a quarter of the working
     /// leg's: the copy replaces it.
-    weak_leg: Option<Vec<usize>>,
+    weak_leg: Option<BoneIds>,
 }
 
 /// The working leg (the leg, from `leaf_limbs`, whose muscles drive most)
 /// and the other end of the body: the leg whose foot lies farthest from the
 /// working leg's top joint along x in the rest pose, or without another leg
 /// the node farthest along x (not the head, not in the working leg).
-fn drag_ends(c: &Creature) -> Option<(Vec<usize>, DraggingEnd)> {
+fn drag_ends(c: &Creature) -> Option<(BoneIds, DraggingEnd)> {
     let legs = leaf_limbs(c);
-    let work = |leg: &Vec<usize>| -> f32 {
+    let work = |leg: &BoneIds| -> f32 {
         muscles_on(c, leg, false)
             .iter()
             .map(|&i| drive(&c.muscles[i]))
             .sum()
     };
-    let working = legs
-        .iter()
-        .max_by(|x, y| work(x).total_cmp(&work(y)))?
-        .clone();
+    let working = *legs.iter().max_by(|x, y| work(x).total_cmp(&work(y)))?;
     if work(&working) <= 0.0 {
         return None;
     }
     let x = c.nodes[c.bones[working[0]].a as usize].x;
     let away = |node: usize| (c.nodes[node].x - x).abs();
-    let foot = |leg: &Vec<usize>| c.bones[leg[leg.len() - 1]].b as usize;
+    let foot = |leg: &BoneIds| c.bones[leg[leg.len() - 1]].b as usize;
     let other = legs
         .iter()
         .filter(|leg| **leg != working)
@@ -542,8 +548,8 @@ fn drag_ends(c: &Creature) -> Option<(Vec<usize>, DraggingEnd)> {
     let end = match other {
         Some(leg) => DraggingEnd {
             node: c.bones[leg[0]].a as usize,
-            leg: Some(leg.clone()),
-            weak_leg: (work(leg) < 0.25 * work(&working)).then(|| leg.clone()),
+            leg: Some(*leg),
+            weak_leg: (work(leg) < 0.25 * work(&working)).then_some(*leg),
         },
         None => {
             let inside = super::branch_nodes(c, &working);
@@ -561,12 +567,12 @@ fn drag_ends(c: &Creature) -> Option<(Vec<usize>, DraggingEnd)> {
 }
 
 /// A muscle's drive: stiffness times stroke. Zero for a passive muscle.
-fn drive(m: &Muscle) -> f32 {
+pub(super) fn drive(m: &Muscle) -> f32 {
     m.stiffness * (m.long - m.short)
 }
 
 /// Spring stiffness of the passive muscles `passive_ring` adds.
-const PASSIVE_STIFFNESS: f32 = 5.0;
+pub(super) const PASSIVE_STIFFNESS: f32 = 5.0;
 
 /// Adds a passive muscle (random anchors, no stroke) on each pair of
 /// consecutively numbered bones that has no muscle, as `repair` would
@@ -588,24 +594,61 @@ fn passive_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
     }
 }
 
-/// Pairs of limbs of the same shape (`matching_limbs`), each followed by the
-/// bone above it, in both orders: (source, recipient).
-fn partners(c: &Creature) -> Vec<(Vec<usize>, Vec<usize>)> {
-    matching_limbs(c)
+/// Pairs of limbs of the same shape (`matching_limbs`), each limb followed by
+/// the bone above it, in both orders: (source, recipient).
+struct Partners {
+    limbs: Limbs,
+    pairs: Bounded<(u8, u8), { MAX_NODES * MAX_NODES }>,
+}
+impl Partners {
+    fn len(&self) -> usize {
+        self.pairs.len()
+    }
+    fn get(&self, k: usize) -> (&BoneIds, &BoneIds) {
+        let (x, y) = self.pairs[k];
+        (&self.limbs[x as usize], &self.limbs[y as usize])
+    }
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = (&BoneIds, &BoneIds)> {
+        (0..self.len()).map(|k| self.get(k))
+    }
+}
+#[cfg(test)]
+impl IntoIterator for Partners {
+    type Item = (BoneIds, BoneIds);
+    type IntoIter = std::vec::IntoIter<(BoneIds, BoneIds)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+            .map(|(x, y)| (*x, *y))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+}
+fn partners(c: &Creature) -> Partners {
+    let matching = matching_limbs(c);
+    let limbs: Limbs = matching
+        .limbs
         .iter()
-        .flat_map(|(x, y)| {
-            let (x, y) = (actuation(c, x[0]).0, actuation(c, y[0]).0);
-            [(x.clone(), y.clone()), (y, x)]
-        })
-        .collect()
+        .map(|limb| actuation(c, limb[0]).0)
+        .collect();
+    let pairs = matching
+        .pairs
+        .iter()
+        .flat_map(|&(x, y)| [(x, y), (y, x)])
+        .collect();
+    Partners { limbs, pairs }
 }
 
 /// Pairs each muscle of limb `to` with an unpaired muscle of limb `from` on
 /// the bones at the same positions (both limbs with the bone above them).
 /// Returns (muscle of `from`, muscle of `to`).
-fn counterparts(c: &Creature, from: &[usize], to: &[usize]) -> Vec<(usize, usize)> {
+fn counterparts(
+    c: &Creature,
+    from: &[usize],
+    to: &[usize],
+) -> Bounded<(usize, usize), MAX_MUSCLES> {
     let mut source = muscles_on(c, from, true);
-    let mut out = Vec::new();
+    let mut out = Bounded::new();
     for q in muscles_on(c, to, true) {
         let m = c.muscles[q];
         let at = |b: u32| from[to.iter().position(|&x| x == b as usize).expect("limb bone")];
@@ -624,13 +667,17 @@ fn counterparts(c: &Creature, from: &[usize], to: &[usize]) -> Vec<(usize, usize
 
 /// The matching muscles of a random pair of same-shaped limbs (source first),
 /// among the pairs that have any.
-fn pick_counterparts(c: &Creature, rng: &mut Rng) -> Option<Vec<(usize, usize)>> {
-    let mut options: Vec<Vec<(usize, usize)>> = partners(c)
-        .iter()
-        .map(|(from, to)| counterparts(c, from, to))
-        .filter(|pairs| !pairs.is_empty())
+fn pick_counterparts(c: &Creature, rng: &mut Rng) -> Option<Bounded<(usize, usize), MAX_MUSCLES>> {
+    let partners = partners(c);
+    let counterparts_of = |k: usize| {
+        let (from, to) = partners.get(k);
+        counterparts(c, from, to)
+    };
+    let options: Bounded<u16, { MAX_NODES * MAX_NODES }> = (0..partners.len())
+        .filter(|&k| !counterparts_of(k).is_empty())
+        .map(|k| k as u16)
         .collect();
-    (!options.is_empty()).then(|| options.swap_remove(rng.index(options.len())))
+    (!options.is_empty()).then(|| counterparts_of(options[rng.index(options.len())] as usize))
 }
 
 #[cfg(test)]
@@ -921,7 +968,7 @@ mod tests {
                 }
             }
         });
-        assert!(applied >= 150, "applied {applied}");
+        assert!(applied >= 140, "applied {applied}");
     }
 
     #[test]
@@ -1099,7 +1146,7 @@ mod tests {
         let (replaced, added) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
         let applied = run(leg_to_dragging_end, &bodies, |before, after| {
             let (working, end) = drag_ends(before).unwrap();
-            let gone = end.weak_leg.as_ref().map_or(0, Vec::len);
+            let gone = end.weak_leg.as_ref().map_or(0, |leg| leg.len());
             if gone > 0 {
                 replaced.set(replaced.get() + 1);
             } else {

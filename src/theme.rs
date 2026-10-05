@@ -1,0 +1,781 @@
+//! The look of the game: a warm painted poster, after Team Fortress 2
+//! promotional art. Cream cards and tan paper with thick dark brown
+//! outlines, mustard for what is armed, brick red for what matters, BLU
+//! blue for what is secondary, chunky condensed titles and dark text on
+//! light panels. The replay scene keeps its own colors and smoked-glass
+//! HUD, framed like a picture on the poster. Everything here is a few
+//! shapes or one textured quad, so it costs next to nothing per frame.
+use crate::assets::{self, Art};
+use eframe::egui::{
+    self, Align2, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, Vec2,
+    epaint::{Mesh, Vertex},
+    text::{LayoutJob, TextFormat},
+};
+
+/// Colors of the scene: the replay, the race lanes and the thumbnails.
+pub mod scene {
+    use eframe::egui::Color32;
+    /// Haze at the horizon, and the sky color where no texture reaches.
+    pub const SKY_TOP: Color32 = Color32::from_rgb(70, 80, 84);
+    pub const SKY_HORIZON: Color32 = Color32::from_rgb(132, 140, 140);
+    /// Street ground, from the surface down.
+    pub const GROUND_TOP: Color32 = Color32::from_rgb(88, 86, 80);
+    pub const GROUND_DEEP: Color32 = Color32::from_rgb(34, 34, 32);
+    /// The worn lip along the ground surface.
+    pub const GROUND_EDGE: Color32 = Color32::from_rgb(158, 152, 132);
+    /// Meter labels and ticks on the ground.
+    pub const GROUND_INK: Color32 = Color32::from_rgb(196, 190, 170);
+    /// Faint meter lines across the sky.
+    pub const GRID: Color32 = Color32::from_rgba_premultiplied(14, 14, 14, 14);
+    /// Sludge of the mud layer, its lower edge and its wet shine.
+    pub const MUD: Color32 = Color32::from_rgb(60, 44, 26);
+    pub const MUD_EDGE: Color32 = Color32::from_rgb(34, 25, 14);
+    pub const MUD_SHEEN: Color32 = Color32::from_rgba_premultiplied(66, 52, 34, 120);
+    /// Creature parts: steel bones, flesh muscles, dark outlines.
+    pub const OUTLINE: Color32 = Color32::from_rgb(10, 10, 10);
+    pub const BONE: Color32 = Color32::from_rgb(170, 174, 170);
+    pub const BONE_SHINE: Color32 = Color32::from_rgb(226, 230, 224);
+    pub const ORGAN: Color32 = Color32::from_rgb(168, 72, 64);
+    pub const MUSCLE_REST: Color32 = Color32::from_rgb(196, 120, 100);
+    pub const MUSCLE_ACTIVE: Color32 = Color32::from_rgb(160, 22, 16);
+    pub const MUSCLE_TIRED: Color32 = Color32::from_rgb(118, 116, 108);
+    /// Node shells: slick steel blue for low friction, brass for high.
+    pub const NODE_SLICK: Color32 = Color32::from_rgb(150, 178, 196);
+    pub const NODE_GRIPPY: Color32 = Color32::from_rgb(204, 170, 104);
+    /// The head's eye glows like a HUD light.
+    pub const EYE: Color32 = Color32::from_rgb(255, 220, 120);
+    /// Ring around a node on the ground.
+    pub const TOUCHDOWN: Color32 = Color32::from_rgb(255, 204, 64);
+    /// A fall, a broken joint: the HUD's damage red.
+    pub const FALLEN: Color32 = Color32::from_rgb(232, 52, 36);
+    /// Force arrows: muscle pulls and ground pushes.
+    pub const FORCE_MUSCLE: Color32 = Color32::from_rgb(255, 150, 30);
+    pub const FORCE_GROUND: Color32 = Color32::from_rgb(90, 180, 240);
+    /// The HUD: yellow digits and labels on dark glass over the scene.
+    pub const HUD: Color32 = Color32::from_rgb(255, 220, 0);
+    pub const HUD_DIM: Color32 = Color32::from_rgb(230, 196, 40);
+    pub const HUD_INK: Color32 = Color32::from_rgb(228, 222, 206);
+    pub const HUD_BACK: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 150);
+    /// The damaged HUD: a red wash behind red digits.
+    pub const HUD_DAMAGED: Color32 = Color32::from_rgba_premultiplied(80, 0, 0, 150);
+    /// The centre of mass and its trail.
+    pub const TRAIL: Color32 = Color32::from_rgb(255, 210, 60);
+}
+
+/// Interface colors.
+#[derive(Clone, Copy)]
+pub struct Theme {
+    /// Side panel and status line: tan paper.
+    pub panel: Color32,
+    /// The central area: clear, so the sunburst shows.
+    pub canvas: Color32,
+    pub card: Color32,
+    pub card_hover: Color32,
+    pub card_border: Color32,
+    /// A pale line along the top edge of a plate.
+    pub bevel: Color32,
+    pub ink: Color32,
+    pub muted: Color32,
+    /// Brick red: the numbers and choices that matter.
+    pub accent: Color32,
+    /// BLU blue: secondary lines and what waits.
+    pub cold: Color32,
+    /// Rust orange: warnings (a failed trial, a catastrophe, a world-change mark).
+    pub warn: Color32,
+    /// A fall or an error.
+    pub danger: Color32,
+    /// Record markers on the charts.
+    pub record: Color32,
+    /// The Evolve button: fill and text.
+    pub go_fill: Color32,
+    pub go_text: Color32,
+    /// The Pause evolution button: fill and text.
+    pub stop_fill: Color32,
+    pub stop_text: Color32,
+    /// The armed (selected) fill and text: mustard with dark text.
+    pub armed_fill: Color32,
+    pub armed_text: Color32,
+}
+
+/// The poster palette. The "How evolution works" window uses the same.
+pub mod poster {
+    use eframe::egui::Color32;
+    /// Dark brown outlines and text.
+    pub const INK: Color32 = Color32::from_rgb(50, 34, 26);
+    /// Text of second rank: still 6:1 on cream.
+    pub const INK_SOFT: Color32 = Color32::from_rgb(98, 72, 52);
+    /// The paper behind everything and its sunburst rays.
+    pub const PAPER: Color32 = Color32::from_rgb(232, 210, 160);
+    pub const PAPER_RAY: Color32 = Color32::from_rgb(240, 222, 176);
+    /// The side panel and the status line.
+    pub const TAN: Color32 = Color32::from_rgb(218, 190, 134);
+    /// Cards and panels.
+    pub const PANEL: Color32 = Color32::from_rgb(251, 242, 216);
+    pub const CREAM: Color32 = Color32::from_rgb(255, 247, 226);
+    pub const RED: Color32 = Color32::from_rgb(184, 56, 50);
+    pub const BLU: Color32 = Color32::from_rgb(70, 108, 138);
+    pub const MUSTARD: Color32 = Color32::from_rgb(228, 166, 52);
+    pub const GRASS: Color32 = Color32::from_rgb(108, 122, 54);
+    /// The top bar: dark wood.
+    pub const WOOD_DARK: Color32 = Color32::from_rgb(58, 40, 30);
+}
+
+impl Theme {
+    pub fn get() -> Self {
+        use poster::*;
+        Self {
+            panel: TAN,
+            canvas: Color32::TRANSPARENT,
+            card: PANEL,
+            card_hover: Color32::from_rgb(255, 236, 184),
+            card_border: INK,
+            bevel: Color32::from_rgba_premultiplied(255, 255, 255, 120),
+            ink: INK,
+            muted: INK_SOFT,
+            accent: Color32::from_rgb(170, 48, 40),
+            cold: Color32::from_rgb(52, 90, 122),
+            warn: Color32::from_rgb(168, 80, 24),
+            danger: Color32::from_rgb(176, 36, 30),
+            record: Color32::from_rgb(168, 76, 24),
+            go_fill: GRASS,
+            go_text: CREAM,
+            stop_fill: RED,
+            stop_text: CREAM,
+            armed_fill: MUSTARD,
+            armed_text: INK,
+        }
+    }
+}
+
+/// The spacing scale the style uses; ui.rs shares it.
+pub const GAP_M: f32 = 8.0;
+pub const GAP_L: f32 = 16.0;
+/// Height of every button, menu and selectable in a row, and the starting
+/// height of a row, so a row's items share one center line.
+pub const CONTROL_HEIGHT: f32 = 34.0;
+
+fn widget(
+    fill: Color32,
+    stroke: Color32,
+    stroke_width: f32,
+    text: Color32,
+    text_width: f32,
+) -> egui::style::WidgetVisuals {
+    egui::style::WidgetVisuals {
+        bg_fill: fill,
+        weak_bg_fill: fill,
+        bg_stroke: Stroke::new(stroke_width, stroke),
+        corner_radius: egui::CornerRadius::same(5),
+        fg_stroke: Stroke::new(text_width, text),
+        expansion: 0.0,
+    }
+}
+
+/// Applies the style: poster colors, the game's fonts, thick dark outlines
+/// on every control and light panels with dark text.
+pub fn apply_style(ctx: &egui::Context) {
+    use poster::*;
+    let theme = Theme::get();
+    ctx.set_theme(egui::Theme::Light);
+    let mut style = (*ctx.global_style()).clone();
+    style.spacing.item_spacing = Vec2::new(GAP_M, GAP_M);
+    style.spacing.button_padding = Vec2::new(14.0, 7.0);
+    style.spacing.interact_size = Vec2::new(40.0, CONTROL_HEIGHT);
+    style.spacing.slider_width = 140.0;
+    style.spacing.window_margin = egui::Margin::same(GAP_L as i8);
+    style.spacing.menu_margin = egui::Margin::same(GAP_M as i8);
+    let mut visuals = egui::Visuals::light();
+    visuals.override_text_color = Some(theme.ink);
+    visuals.weak_text_color = Some(theme.muted);
+    visuals.panel_fill = theme.panel;
+    visuals.window_fill = PANEL;
+    visuals.faint_bg_color = Color32::from_rgba_premultiplied(40, 26, 14, 14);
+    visuals.extreme_bg_color = CREAM;
+    visuals.text_edit_bg_color = Some(CREAM);
+    visuals.code_bg_color = Color32::from_rgb(240, 226, 190);
+    visuals.hyperlink_color = theme.cold;
+    visuals.warn_fg_color = theme.warn;
+    visuals.error_fg_color = theme.danger;
+    visuals.selection.bg_fill = MUSTARD;
+    visuals.selection.stroke = Stroke::new(1.5, INK);
+    visuals.slider_trailing_fill = true;
+    visuals.widgets.noninteractive = widget(PANEL, Color32::from_rgb(150, 118, 84), 1.0, INK, 1.0);
+    visuals.widgets.inactive = widget(CREAM, INK, 1.5, INK, 1.0);
+    visuals.widgets.hovered = widget(Color32::from_rgb(255, 232, 170), INK, 2.0, INK, 1.5);
+    visuals.widgets.active = widget(MUSTARD, INK, 2.0, INK, 2.0);
+    visuals.widgets.open = widget(Color32::from_rgb(255, 232, 170), INK, 2.0, INK, 1.0);
+    visuals.window_corner_radius = egui::CornerRadius::same(10);
+    visuals.menu_corner_radius = egui::CornerRadius::same(8);
+    visuals.window_stroke = Stroke::new(3.0, INK);
+    visuals.window_shadow = egui::Shadow {
+        offset: [4, 6],
+        blur: 0,
+        spread: 0,
+        color: Color32::from_rgba_premultiplied(40, 26, 14, 90),
+    };
+    visuals.popup_shadow = egui::Shadow {
+        offset: [3, 4],
+        blur: 0,
+        spread: 0,
+        color: Color32::from_rgba_premultiplied(40, 26, 14, 80),
+    };
+    style.visuals = visuals;
+    // Type scale: small print 14 px, body and buttons 16 px, headings 25 px.
+    for (style_name, font) in [
+        (egui::TextStyle::Small, FontId::proportional(14.0)),
+        (egui::TextStyle::Body, FontId::proportional(16.0)),
+        (egui::TextStyle::Button, FontId::proportional(16.0)),
+        (egui::TextStyle::Monospace, FontId::monospace(14.0)),
+        (
+            egui::TextStyle::Heading,
+            FontId::new(25.0, assets::hud_bold()),
+        ),
+    ] {
+        style.text_styles.insert(style_name, font);
+    }
+    ctx.set_global_style(style);
+}
+
+/// A cheap deterministic value in [0, 1) for a small integer.
+pub fn hash(n: i64) -> f32 {
+    let mut x = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x >> 29;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 32;
+    (x & 0xFFFF) as f32 / 65536.0
+}
+
+/// A textured quad: `art` tiled so one repeat covers `tile` points, shifted
+/// by `offset` repeats, tinted by `tint` (premultiplied).
+pub fn tiled(
+    painter: &egui::Painter,
+    rect: Rect,
+    art: Art,
+    tile: Vec2,
+    offset: Vec2,
+    tint: Color32,
+) {
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return;
+    }
+    let uv = Rect::from_min_size(
+        Pos2::new(offset.x, offset.y),
+        Vec2::new(rect.width() / tile.x, rect.height() / tile.y),
+    );
+    painter.image(art.texture(painter.ctx()), rect, uv, tint);
+}
+
+/// The paper behind the whole window: warm tan with a sunburst of paler
+/// rays, like the poster. It covers `rect`.
+pub fn backdrop(painter: &egui::Painter, rect: Rect) {
+    painter.rect_filled(rect, 0, poster::PAPER);
+    let center = Pos2::new(rect.center().x, rect.top() + rect.height() * 0.35);
+    let reach = rect.size().length();
+    let rays = 28;
+    for i in (0..rays).step_by(2) {
+        let a0 = i as f32 / rays as f32 * std::f32::consts::TAU;
+        let a1 = (i + 1) as f32 / rays as f32 * std::f32::consts::TAU;
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                center,
+                center + Vec2::new(a0.cos(), a0.sin()) * reach,
+                center + Vec2::new(a1.cos(), a1.sin()) * reach,
+            ],
+            poster::PAPER_RAY,
+            Stroke::NONE,
+        ));
+    }
+}
+
+/// Kept for the plates: nothing to add over the flat panels.
+pub fn wear(_painter: &egui::Painter, _rect: Rect, _theme: Theme, _seed: f32) {}
+
+/// A card: a soft drop shadow, the fill and a thick dark outline. `lit`
+/// draws the outline in brick red and thicker.
+pub fn plate(painter: &egui::Painter, rect: Rect, theme: Theme, fill: Color32, lit: bool) {
+    painter.rect_filled(
+        rect.translate(Vec2::new(3.0, 4.0)),
+        7,
+        Color32::from_rgba_premultiplied(40, 26, 14, 60),
+    );
+    painter.rect_filled(rect, 7, fill);
+    painter.rect_stroke(
+        rect,
+        7,
+        Stroke::new(
+            if lit { 3.0 } else { 2.0 },
+            if lit { theme.accent } else { theme.card_border },
+        ),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// A HUD box over the scene: dark glass with rounded corners.
+pub fn hud_panel(painter: &egui::Painter, rect: Rect) {
+    painter.rect_filled(rect, 8, scene::HUD_BACK);
+    painter.rect_stroke(
+        rect,
+        8,
+        Stroke::new(1.5, Color32::from_rgba_premultiplied(0, 0, 0, 160)),
+        egui::StrokeKind::Outside,
+    );
+}
+
+/// Paints a galley with a soft glow around it, like the HUD numbers'
+/// blurred twin font. `strength` scales the glow.
+fn glow_galley(
+    painter: &egui::Painter,
+    at: Pos2,
+    galley: std::sync::Arc<egui::Galley>,
+    color: Color32,
+    strength: f32,
+) {
+    if strength > 0.0 {
+        let a = |x: f32| (x * strength).clamp(0.0, 255.0) as u8;
+        let halo =
+            |alpha: u8| Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+        for (radius, alpha, steps) in [(3.5_f32, a(10.0), 12), (1.8, a(22.0), 8)] {
+            for i in 0..steps {
+                let angle = i as f32 / steps as f32 * std::f32::consts::TAU;
+                painter.galley_with_override_text_color(
+                    at + Vec2::new(angle.cos(), angle.sin()) * radius,
+                    galley.clone(),
+                    halo(alpha),
+                );
+            }
+        }
+    }
+    painter.galley_with_override_text_color(at, galley, color);
+}
+
+/// Text with a faint glow, like the numbers of a HUD. Returns its rect.
+pub fn glow_text(
+    painter: &egui::Painter,
+    pos: Pos2,
+    align: Align2,
+    text: impl ToString,
+    font: FontId,
+    color: Color32,
+    glow: bool,
+) -> Rect {
+    let galley = painter.layout_no_wrap(text.to_string(), font, color);
+    let rect = align.anchor_size(pos, galley.size());
+    glow_galley(
+        painter,
+        rect.min,
+        galley,
+        color,
+        if glow { 1.0 } else { 0.0 },
+    );
+    rect
+}
+
+/// Letter-spaced capitals, the voice of every label on the HUD.
+pub fn caps(text: &str, size: f32, color: Color32) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    job.append(
+        &text.to_uppercase(),
+        0.0,
+        TextFormat {
+            font_id: FontId::new(size, assets::label_bold()),
+            color,
+            extra_letter_spacing: size * 0.08,
+            ..Default::default()
+        },
+    );
+    job
+}
+
+/// Paints letter-spaced capitals and returns their rect.
+pub fn caps_text(
+    painter: &egui::Painter,
+    pos: Pos2,
+    align: Align2,
+    text: &str,
+    size: f32,
+    color: Color32,
+) -> Rect {
+    let galley = painter.layout_job(caps(text, size, color));
+    let rect = align.anchor_size(pos, galley.size());
+    painter.galley(rect.min, galley, color);
+    rect
+}
+
+/// A section title in the side panel: a full-width dark wood strip with a
+/// mustard block and cream capitals.
+pub fn section(ui: &mut egui::Ui, text: &str, _theme: Theme) -> Response {
+    strip(ui, text, true)
+}
+
+/// The same strip as wide as its words, for a title beside other things.
+pub fn heading(ui: &mut egui::Ui, text: &str, _theme: Theme) -> Response {
+    strip(ui, text, false)
+}
+
+fn strip(ui: &mut egui::Ui, text: &str, full: bool) -> Response {
+    let galley = ui.painter().layout_job(caps(text, 15.0, poster::CREAM));
+    let width = if full {
+        ui.available_width()
+    } else {
+        galley.size().x + 40.0
+    };
+    let size = Vec2::new(width, (galley.size().y + 10.0).max(30.0));
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(
+        rect.translate(Vec2::new(2.0, 3.0)),
+        5,
+        Color32::from_rgba_premultiplied(40, 26, 14, 60),
+    );
+    p.rect_filled(rect, 5, poster::WOOD_DARK);
+    p.rect_filled(
+        Rect::from_min_size(
+            rect.left_top() + Vec2::new(8.0, rect.height() / 2.0 - 6.0),
+            Vec2::splat(12.0),
+        ),
+        2,
+        poster::MUSTARD,
+    );
+    p.galley(
+        Pos2::new(rect.left() + 28.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        poster::CREAM,
+    );
+    response
+}
+
+/// One tab of the tab strip: a chunky poster tab with a key cap showing
+/// its shortcut. The open one is mustard, the others cream.
+pub fn tab(ui: &mut egui::Ui, selected: bool, key: &str, text: &str, theme: Theme) -> Response {
+    let font = FontId::new(21.0, assets::hud_bold());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, theme.ink);
+    let key_galley = ui.painter().layout_no_wrap(
+        key.to_owned(),
+        FontId::new(13.0, assets::hud_bold()),
+        poster::CREAM,
+    );
+    let cap = 20.0;
+    let size = Vec2::new(galley.size().x + cap + 34.0, 40.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let hovered = response.hovered();
+    let fill = if selected {
+        poster::MUSTARD
+    } else if hovered {
+        Color32::from_rgb(255, 232, 170)
+    } else {
+        poster::CREAM
+    };
+    let p = ui.painter();
+    if selected {
+        p.rect_filled(
+            rect.translate(Vec2::new(2.0, 3.0)),
+            8,
+            Color32::from_rgba_premultiplied(40, 26, 14, 70),
+        );
+    }
+    p.rect(
+        rect,
+        8,
+        fill,
+        Stroke::new(if selected { 3.0 } else { 2.0 }, theme.ink),
+        egui::StrokeKind::Inside,
+    );
+    let cap_rect = Rect::from_center_size(
+        Pos2::new(rect.left() + 12.0 + cap / 2.0, rect.center().y),
+        Vec2::splat(cap),
+    );
+    p.rect_filled(cap_rect, 4, poster::WOOD_DARK);
+    p.galley(
+        cap_rect.center() - key_galley.size() / 2.0,
+        key_galley,
+        poster::CREAM,
+    );
+    p.galley(
+        Pos2::new(
+            cap_rect.right() + 8.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        theme.ink,
+    );
+    response
+}
+
+/// Adds a band between an outer and an inner rect to a mesh: `outer` color
+/// at the outer edge, `inner` at the inner one.
+fn ring(mesh: &mut Mesh, outer: Rect, inner: Rect, outer_color: Color32, inner_color: Color32) {
+    let base = mesh.vertices.len() as u32;
+    for (pos, color) in [
+        (outer.left_top(), outer_color),
+        (outer.right_top(), outer_color),
+        (outer.right_bottom(), outer_color),
+        (outer.left_bottom(), outer_color),
+        (inner.left_top(), inner_color),
+        (inner.right_top(), inner_color),
+        (inner.right_bottom(), inner_color),
+        (inner.left_bottom(), inner_color),
+    ] {
+        mesh.vertices.push(Vertex {
+            pos,
+            uv: egui::epaint::WHITE_UV,
+            color,
+        });
+    }
+    for side in 0..4u32 {
+        let (a, b) = (side, (side + 1) % 4);
+        mesh.indices.extend_from_slice(&[
+            base + a,
+            base + b,
+            base + 4 + b,
+            base + a,
+            base + 4 + b,
+            base + 4 + a,
+        ]);
+    }
+}
+
+/// Darkens the edges of a scene. `strength` is the alpha at the very edge.
+pub fn vignette(painter: &egui::Painter, rect: Rect, strength: f32) {
+    let mut mesh = Mesh::default();
+    let size = rect.size();
+    let mid = rect.shrink2(size * 0.04);
+    let inner = rect.shrink2(size * Vec2::new(0.22, 0.30));
+    let edge = Color32::from_black_alpha((strength.clamp(0.0, 1.0) * 255.0) as u8);
+    let half = Color32::from_black_alpha((strength.clamp(0.0, 1.0) * 110.0) as u8);
+    ring(&mut mesh, rect, mid, edge, half);
+    ring(&mut mesh, mid, inner, half, Color32::TRANSPARENT);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// The fine film-grain texture, made once and kept in the context.
+fn grain_texture(ctx: &egui::Context) -> egui::TextureId {
+    let id = egui::Id::new("theme_grain");
+    if let Some(handle) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return handle.id();
+    }
+    const SIZE: usize = 128;
+    let pixels = (0..SIZE * SIZE)
+        .map(|i| {
+            let d = (hash(i as i64 + 17) - 0.5) * 2.0;
+            let a = (d.abs() * 255.0) as u8;
+            if d >= 0.0 {
+                Color32::from_rgba_premultiplied(a, a, a, a)
+            } else {
+                Color32::from_rgba_premultiplied(0, 0, 0, a)
+            }
+        })
+        .collect();
+    let options = egui::TextureOptions {
+        magnification: egui::TextureFilter::Linear,
+        minification: egui::TextureFilter::Linear,
+        wrap_mode: egui::TextureWrapMode::Repeat,
+        mipmap_mode: None,
+    };
+    let handle = ctx.load_texture(
+        "theme-grain",
+        egui::ColorImage::new([SIZE, SIZE], pixels),
+        options,
+    );
+    let tex = handle.id();
+    ctx.data_mut(|d| d.insert_temp(id, handle));
+    tex
+}
+
+/// Film grain over a scene. `time` moves the pattern, so the grain lives
+/// while the scene plays and holds still while it is paused.
+pub fn grain(painter: &egui::Painter, rect: Rect, time: f32, alpha: f32) {
+    if alpha <= 0.0 {
+        return;
+    }
+    let step = (time * 24.0).floor() as i64;
+    let tex = grain_texture(painter.ctx());
+    let uv = Rect::from_min_size(
+        Pos2::new(hash(step), hash(step + 101)),
+        Vec2::new(rect.width() / 110.0, rect.height() / 110.0),
+    );
+    let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
+    painter.image(tex, rect, uv, Color32::from_rgba_premultiplied(a, a, a, a));
+}
+
+/// One line of a HUD block.
+pub struct HudLine {
+    pub text: String,
+    pub size: f32,
+    pub color: Color32,
+    /// Bold letter-spaced capitals, for labels.
+    pub caps: bool,
+    /// The HUD digit face with its glow, for the numbers.
+    pub glow: bool,
+}
+
+impl HudLine {
+    /// A small capital label in HUD yellow.
+    pub fn label(text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            size: 12.5,
+            color: scene::HUD_DIM,
+            caps: true,
+            glow: false,
+        }
+    }
+    /// A big glowing number.
+    pub fn value(text: String, size: f32, color: Color32) -> Self {
+        Self {
+            text,
+            size,
+            color,
+            caps: false,
+            glow: true,
+        }
+    }
+    /// Plain text.
+    pub fn text(text: String, size: f32, color: Color32) -> Self {
+        Self {
+            text,
+            size,
+            color,
+            caps: false,
+            glow: false,
+        }
+    }
+}
+
+/// A HUD box holding lines of text, anchored at `anchor` by `align`, with
+/// the text aligned to the same side. Returns the box's rect.
+pub fn hud_block(painter: &egui::Painter, anchor: Pos2, align: Align2, lines: &[HudLine]) -> Rect {
+    const PAD: Vec2 = Vec2::new(12.0, 8.0);
+    let galleys: Vec<_> = lines
+        .iter()
+        .map(|line| {
+            if line.caps {
+                painter.layout_job(caps(&line.text, line.size, line.color))
+            } else if line.glow {
+                painter.layout_no_wrap(
+                    line.text.clone(),
+                    FontId::new(line.size, assets::hud()),
+                    line.color,
+                )
+            } else {
+                painter.layout_no_wrap(
+                    line.text.clone(),
+                    FontId::proportional(line.size),
+                    line.color,
+                )
+            }
+        })
+        .collect();
+    let width = galleys.iter().map(|g| g.size().x).fold(0.0, f32::max);
+    let height: f32 = galleys.iter().map(|g| g.size().y).sum();
+    let rect = align.anchor_size(anchor, Vec2::new(width, height) + PAD * 2.0);
+    hud_panel(painter, rect);
+    let mut y = rect.top() + PAD.y;
+    for (line, galley) in lines.iter().zip(galleys) {
+        let x = match align.x() {
+            egui::Align::Max => rect.right() - PAD.x - galley.size().x,
+            egui::Align::Center => rect.center().x - galley.size().x / 2.0,
+            egui::Align::Min => rect.left() + PAD.x,
+        };
+        let at = Pos2::new(x, y);
+        y += galley.size().y;
+        glow_galley(
+            painter,
+            at,
+            galley,
+            line.color,
+            if line.glow { 1.0 } else { 0.0 },
+        );
+    }
+    rect
+}
+
+/// A Half-Life 2 counter: a smoked-glass box with its label low on the
+/// left and big glowing digits beside it, like HEALTH and SUIT. `unit`
+/// follows the digits small, `extra` sits right of them like the reserve
+/// count of the ammo box. `damaged` turns it red, as the HUD does when hit.
+pub struct Counter<'a> {
+    pub label: &'a str,
+    pub digits: String,
+    pub unit: &'a str,
+    pub extra: Option<String>,
+    pub damaged: bool,
+}
+
+/// Paints a counter anchored at `anchor` by `align` and returns its rect.
+/// `size` is the digit height.
+pub fn counter(
+    painter: &egui::Painter,
+    anchor: Pos2,
+    align: Align2,
+    counter: &Counter,
+    size: f32,
+) -> Rect {
+    let color = if counter.damaged {
+        scene::FALLEN
+    } else {
+        scene::HUD
+    };
+    let label = painter.layout_job(caps(
+        counter.label,
+        (size * 0.34).max(11.0),
+        color.gamma_multiply(0.9),
+    ));
+    let digits = painter.layout_no_wrap(
+        counter.digits.clone(),
+        FontId::new(size, assets::hud()),
+        color,
+    );
+    let unit = painter.layout_no_wrap(
+        counter.unit.to_owned(),
+        FontId::new(size * 0.42, assets::hud()),
+        color,
+    );
+    let extra = counter.extra.as_ref().map(|text| {
+        painter.layout_no_wrap(text.clone(), FontId::new(size * 0.5, assets::hud()), color)
+    });
+    let pad = size * 0.3;
+    let gap = size * 0.28;
+    let width = pad
+        + label.size().x
+        + gap
+        + digits.size().x
+        + unit.size().x
+        + extra.as_ref().map_or(0.0, |g| g.size().x + gap * 1.4)
+        + pad;
+    let height = digits.size().y + size * 0.08;
+    let rect = align.anchor_size(anchor, Vec2::new(width, height));
+    painter.rect_filled(
+        rect,
+        (size * 0.26) as u8,
+        if counter.damaged {
+            scene::HUD_DAMAGED
+        } else {
+            scene::HUD_BACK
+        },
+    );
+    let baseline = rect.bottom() - size * 0.22;
+    let mut x = rect.left() + pad;
+    painter.galley(
+        Pos2::new(x, baseline - label.size().y),
+        label.clone(),
+        color,
+    );
+    x += label.size().x + gap;
+    let digits_width = digits.size().x;
+    glow_galley(painter, Pos2::new(x, rect.top()), digits, color, 1.0);
+    x += digits_width;
+    painter.galley(
+        Pos2::new(x + 1.0, baseline - unit.size().y + size * 0.05),
+        unit.clone(),
+        color,
+    );
+    x += unit.size().x;
+    if let Some(extra) = extra {
+        x += gap * 1.4;
+        let at = Pos2::new(x, baseline - extra.size().y + size * 0.08);
+        glow_galley(painter, at, extra, color, 0.8);
+    }
+    rect
+}

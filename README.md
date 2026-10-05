@@ -2,7 +2,7 @@
 
 A Rust game in which 2D creatures made of bones, joints, and muscles evolve to travel as far as possible. The graphical game starts with **3 million creatures per generation** and **20-second trials**. Fitness is horizontal center-of-mass distance in meters. Gait, height, and ground contact describe archive niches; they do not multiply or penalize the score.
 
-The search combines MAP-Elites, CMA optimizers, structural mutations, novelty search, and immigrants across four island archives. Vulkan compute is the scoring authority in the full-performance run; the CPU engine remains available for fallback, diagnostics, and recorded playback. An egui dashboard shows the archive, history, lineage, and replays.
+The search combines MAP-Elites, CMA optimizers, structural mutations, novelty search, and immigrants across four isolated island archives and a hub. A CUDA kernel on an NVIDIA GPU simulates and scores every creature and records the replays. An egui dashboard shows the archive, history, lineage, and replays.
 
 ## Original work and license
 
@@ -11,13 +11,13 @@ This project adapts Carykh's **Evolution Simulator** by Cary Huang.
 - Original source: [OpenProcessing sketch](https://openprocessing.org/@carykh/205807)
 - Original license: [CC BY-SA 3.0 Unported](https://creativecommons.org/licenses/by-sa/3.0/)
 - Modified by: Amipo (Schnellverstellzirkel)
-- Changes: rebuilt in Rust with GPU and CPU simulation, quality-diversity search, evolving body plans, environment effects, and an interactive dashboard.
+- Changes: rebuilt in Rust with GPU simulation, quality-diversity search, evolving body plans, environment effects, and an interactive dashboard.
 
 The license text is in [LICENSE](LICENSE). The original Processing sketch is preserved in [old_code.txt](old_code.txt).
 
 ## Build and run
 
-The runtime uses Vulkan for compute and rendering. Linux uses Wayland or X11 for the dashboard; Windows uses the native window system. Rust 1.95 or newer is required by the GUI dependencies. On Ubuntu, install the native build dependencies:
+The game needs an NVIDIA GPU with the CUDA driver and NVRTC: creatures are simulated on CUDA only, and the game stops with an error without them. The CUDA driver library comes with the NVIDIA driver, and NVRTC with a CUDA toolkit or NVIDIA's pip wheel ([building](docs/building.md)). The window is drawn through Vulkan. Linux uses Wayland or X11 for the dashboard; Windows uses the native window system. Rust 1.95 or newer is required by the GUI dependencies. On Ubuntu, install the native build dependencies:
 
 ```bash
 sudo apt-get install build-essential pkg-config libwayland-dev libxkbcommon-dev \
@@ -27,15 +27,13 @@ sudo apt-get install build-essential pkg-config libwayland-dev libxkbcommon-dev 
 Use this environment for all builds, tests, game runs, and benchmarks on the owner's workstation:
 
 ```bash
-export CARGO_BUILD_JOBS=8
-export RAYON_NUM_THREADS=8
 export EVOLUTION_DEVICES=primary
-nice -n 10 cargo run --release
+cargo run --release
 ```
 
-The default compute adapter name is `RTX 4060`; `--gpu NAME` selects another primary adapter. Secondary GPUs are off by default; `EVOLUTION_DEVICES=radeon` opts the integrated Radeon into evaluation. `EVOLUTION_DEVICES=primary` prevents adding secondary evaluation devices. Keep that setting on this workstation: the Radeon drives the desktop and must not evaluate creatures. Evaluation and general Rayon workers share a budget of half the available logical CPUs, capped at eight. By default the GPU evaluates and all eight go to general workers (archive insertion, breeding, packing). In a GPU run, CPU engines stand by for GPU failure and never contribute scores while a GPU is healthy. `EVOLUTION_CPU_THREADS=N` sizes that failover pool; `RAYON_NUM_THREADS` is limited to the remaining budget.
+The default GPU name is `RTX 4060`; `--gpu NAME` selects another NVIDIA GPU. Secondary GPUs are off by default; `EVOLUTION_DEVICES=NAME` adds other NVIDIA GPUs to evaluation, and `EVOLUTION_DEVICES=primary` keeps them off. Keep that setting on this workstation, because the Radeon 780M draws the desktop and the game window and never evaluates creatures ([building](docs/building.md#the-radeon-780m) has the reasons). General Rayon workers (archive insertion, breeding, packing) take every logical CPU but two, at low priority; `RAYON_NUM_THREADS` can lower that.
 
-If the primary GPU cannot open, evaluation falls back to the CPU and reports why once; without a separate CPU pool that fallback shares the general Rayon pool. A GPU that fails during a run is retired and its unfinished units, including pending fine checks, are retried on the CPU with the same creatures and settings. A failed CPU stops the session with a persistent error after completed results are stored.
+If the primary GPU cannot open, the game stops and says why. A GPU that fails during a run is reopened and its unfinished units, including pending confirmation trials, run again with the same creatures and settings. A GPU that does not reopen stops the session with a persistent error after completed results are stored.
 
 For local iteration, use the named profile:
 
@@ -48,15 +46,15 @@ nice -n 10 cargo run --profile release-fast
 
 ## Playing
 
-Press **Evolve** in the top bar, or Space, to run generation after generation; Space or **Pause evolution** stops. The replay follows the champion: the best creature of the newest generation. When a new record makes a new champion, the view switches to it at once, on the Overview and in the player beside Ways of moving. Pick any creature (an archive card, a map cell, a record, an ancestor) to watch it instead, and **Back to champion** returns. K or a click on the replay pauses it, the arrow keys step one frame, drag pans and scroll zooms. Ctrl+S opens Save, F1 opens help.
+Press **Evolve** in the top bar, or Space, to run generation after generation; Space or **Pause evolution** stops. The replay follows the champion: the best creature so far. When a new record makes a new champion, the view switches to it at once, mid-generation too, on the Overview and in the player beside Ways of moving. Pick any creature (an archive card, a map cell, a record, an ancestor) to watch it instead, and **Back to champion** returns. K or a click on the replay pauses it, the arrow keys step one frame, drag pans and scroll zooms. Ctrl+S opens Save, F1 opens help.
 
-The top bar shows the population and trial length; the game keeps them at three million and 20 seconds, with no mutation controls. Diagnostic CLI runs and JSON presets can use other sizes or durations. The File menu opens, saves and exports; the New experiment dialog takes a seed; the View menu holds the dark theme and UI scale. **Diagnostics** in the status line opens a drawer with search and machine numbers and the step-by-step **One generation** and **Guided step** buttons; guided mode pauses between evaluation, archive insertion, and breeding.
+The top bar shows the population and trial length; the game keeps them at three million and 20 seconds, with no mutation controls. Diagnostic CLI runs and JSON presets can use other sizes or durations. The File menu opens, saves and exports; the New experiment dialog takes a seed; the View menu holds the UI scale. **Diagnostics** in the status line opens a drawer with search and machine numbers and the **One generation** button, which runs one generation and pauses.
 
 Each environment effect is a row with one button per level. A click sets that level, and **Calm world** resets them all:
 
 | Effect | Levels |
 | --- | --- |
-| Seasons | Off, slow, normal, fast (20, 10, 5 generations per step) |
+| Autochange environment | Off, slow, normal, fast: adds one effect every 100, 50 or 20 generations, most benign first, and keeps them |
 | Ground | Flat, pebbles (3 cm), rough (8 cm), rocky (15 cm), boulders (25 cm) |
 | Gravity | Earth, 1.5 g, 2 g, 3 g |
 | Air | Thin, breezy, thick, syrup |
@@ -66,25 +64,26 @@ Each environment effect is a row with one button per level. A click sets that le
 | Slope | Flat, 3%, 8%, 15%, 25% uphill |
 | Wind | Calm, breeze, strong, gale (headwind) |
 | Mud | Dry, damp, muddy, deep mud |
+| Brambles | Clear, scrub, brambles, thicket: every part that is not a foot is held back while it touches the ground |
 | Gaps | Solid, narrow, wide, chasms |
 | Hurdles | Clear, low, high, walls |
 | Earthquake | Still, tremors, quakes, big one |
 
-Hurdles raise periodic steps that a gait must climb or leap. The earthquake gives every creature its own bump phase and height, derived from its id, so no gait can memorize one pattern. The seasons alternate the world on schedule: every 20, 10, or 5 generations, exactly one effect advances one level, walking through wind, ground, grip, mud, and slope first and then the rest, with every effect's cycle returning the world to calm. The rotation step is saved with the experiment, so a resumed run continues mid-cycle, and Off is the default. A world change invalidates the old scores and queues archive elites for evaluation under the new conditions. Effects change the physics; the objective remains distance.
+Hurdles raise periodic steps that a gait must climb or leap. The earthquake gives every creature its own bump phase and height, derived from its id, so no gait can memorize one pattern. The autochange alternate the world on schedule: every 20, 10, or 5 generations, exactly one effect advances one level, walking through wind, ground, grip, mud, and slope first and then the rest, with every effect's cycle returning the world to calm. The rotation step is saved with the experiment, so a resumed run continues mid-cycle, and Off is the default. A world change invalidates the old scores and queues archive elites for evaluation under the new conditions. Effects change the physics; the objective remains distance.
 
-The **Catastrophe** row adds **Meteor strike**, which removes about half the elites at random from each archive, and **Extinction**, which clears the island with the slowest best creature. **Undo** restores saved fossils where their cells are empty or hold slower elites. Fossils are kept in memory for the current session; catastrophe undo history is not saved in checkpoints.
+The **Catastrophe** row adds **Meteor strike**, which removes about half the elites at random from each archive, and **Extinction**, which clears the island with the slowest best creature. An isolated island restarts from new random bodies, and the hub refills from its next copies. **Undo** restores saved fossils where their cells are empty or hold slower elites. Fossils are kept in memory for the current session; catastrophe undo history is not saved in checkpoints.
 
 ## Creatures and search
 
-Bodies begin with 3–5 nodes connected by a tree of bones. Defaults allow growth to 32 nodes and 96 muscles; configuration supports up to 64 nodes and 256 muscles. Bones and muscle lengths are capped at 2 m by default. Muscles attach along bones, share a rhythm period, and provide active drive only while contracting. Their energy stores deplete with work and recover over time. Bone mass grows with length squared and is included in each engine's node masses. Touchdown sensors can reset muscle rhythms when a foot lands.
+Bodies begin with 3 to 5 nodes connected by a tree of bones. Bodies grow to 32 nodes and 96 muscles by default, and bones and muscles are at most 2 m long. Muscles attach along bones, share one rhythm period, and pull only while contracting. Their energy stores deplete with work and recover over time. Bone mass grows with length squared. Touchdown sensors can reset muscle rhythms when a foot lands. The physics is an articulated tree in reduced coordinates, so every bone keeps its exact length. See [physics](docs/physics.md).
 
-Grounded nodes resist movement during bone and velocity constraints, so the body can pivot over planted feet. A friction cap limits the center-of-mass displacement this can produce, and ground support includes floor clamps and whole-body lift. A fall, a joint driven too far past its range, or head acceleration averaged over about 0.1 seconds exceeding 8 g ends scoring at the distance reached. These physical limits leave distance as the sole objective.
+A fall, a joint driven too far past its range, or head acceleration above 8 g ends scoring at the distance reached. Distance is the only objective.
 
-Each behavior archive has 1,440 possible niches for ground contact, gait cadence, mean body height, and feet that touch down and lift off. Vertical oscillation is recorded but has one archive bin. A separate 64-entry morphology reserve gives new topologies offspring opportunities without adding to behavior coverage or QD score. Four islands retain separate parent pools and exchange their fastest tenth of elites every 25 generations. CMA, structural, and novelty emitter shares adapt to archive discoveries and improvements; immigrants seed empty archives.
+Each island's behavior archive starts with 1,440 ways of moving (ground contact, gait cadence, body height and feet that touch down and lift off). After 30 generations it is refined to 12,960 cells: each way of moving gets a cell for 9 body classes, 3 shapes by the start pose's width over height and 3 sizes by node count, so a long large body and a compact small one no longer compete for a cell. A refined island prefers a parent of a rare lineage when the distances of its elites are level, so a lineage that the best one has not taken over keeps breeding. Four islands are fully isolated: they never receive migrants and their children take parents and mates only from their own archive. Every 25 generations a fifth island, the hub, receives copies of each isolated island's fastest tenth of elites and breeds from them with its own. Nothing flows back. The global archive records every island's elites for display and saves, and no parent comes from it. It has finer body classes than the islands, 4 shapes by 4 sizes for each way of moving (23,040 cells), from the first generation. Each island keeps a 64-entry reserve of new body plans. About 60% of each generation carries a structural mutation, 30% only changes numbers and 10% are new random bodies. Each island also keeps two protected archives. A nursery of new random bodies lets them compete only against each other for 10 generations before the survivors enter the island archive. A nursery of reshaped bodies keeps the new body plans that the island turned away and tunes them until they beat its elites.
 
-Potential archive entrants receive a perturbed trial at four times the standard physics rate and solver passes. The selected evaluation engine's standard result and this check determine archive fitness and behavior. In the full-performance run, both are GPU evaluations; CPU playback or comparison never edits the score or descriptor.
+A standard trial stops at 5 s when the creature is below the bar, the 5 s distance the top 10% reached. A screened creature enters no archive. A creature that would set a new record of its island also gets a confirmation trial at four times the physics rate, and its fitness is the lower distance. Both are GPU evaluations and the GPU score is final.
 
-Replays are recorded by the GPU that scores the archive (`engine::replay`): the scoring kernel with a frame output, on a submission slot and queue of its own, so the replay shows the trial and the distance the archive holds. A CPU-only game replays on the CPU engine (`cpu_engine::replay`). Cross-engine comparisons are optional diagnostics, not a physics-change acceptance gate. See [architecture](docs/architecture.md) for the execution paths.
+Replays are recorded by the GPU that scores the archive (`engine::replay`): the scoring kernel with a frame output, so the replay shows the trial and the distance the archive holds. See [architecture](docs/architecture.md) and [design decisions](docs/design-decisions.md).
 
 ## Headless experiments and diagnostics
 
@@ -98,14 +97,7 @@ nice -n 10 cargo run --release --example size_report -- runs/seed-38-100k.evo 10
 nice -n 10 cargo run --release --example search_ab -- 2 64 0.5 38,39 --tag baseline
 ```
 
-`--generations` counts additional generations when resuming. `--config PATH` loads a JSON preset, `--duration` overrides trial duration for a new experiment, and `--checkpoint PATH` chooses the save destination. Ctrl+C requests a stop and checkpoint after the current evaluation call returns. `size_report` reports elite geometry, mass, travel, and foot slip; `EVOLUTION_LEDGER=1` adds momentum diagnostics. `search_ab` runs fixed-seed CPU-only A/B generations and prints best distance, QD score, archive cells, and the top-50 body mix; see [search research](docs/search-research.md).
-
-```bash
-nice -n 10 cargo run --release -- benchmark --populations 1000,100000 --duration 60 --generations 3
-nice -n 10 cargo run --release -- analyze runs/seed-38-100k.evo --output runs/analysis.json --champion runs/champion.json
-```
-
-`benchmark --cpu` adds CPU timings. `search-benchmark` supports fixed seeds and paired search variants; see [search benchmark notes](docs/search-benchmark.md). Historical results in that document and [search research](docs/search-research.md) predate the current physics and should be remeasured before drawing conclusions about today's search.
+`--generations` counts additional generations when resuming. `--config PATH` loads a JSON preset, `--duration` overrides trial duration for a new experiment, and `--checkpoint PATH` chooses the save destination. Ctrl+C requests a stop and checkpoint after the current evaluation call returns. `size_report` reports elite geometry, mass, travel, and foot slip from GPU replays. `search_ab` runs fixed-seed generations through the production archive and breeding path and prints best distance, QD score, archive cells, and the top-50 body mix.
 
 For complete-generation timing in the graphical app:
 
@@ -117,21 +109,18 @@ This starts evolution, prints stage timings, and closes after the requested gene
 
 ## Save and resume
 
-Versioned `.evo` files store the current population, evaluation progress, archives, emitter and CMA state, settings, seed, lineage, and history using a compressed binary payload. Temporary writes are flushed and renamed. V4 checkpoints also retain island optimizer progress so continuation preserves its stall history; V3 files remain readable. Compatible older checkpoints can keep their population while obsolete archives are cleared and reevaluated. Current physics uses QD version 19, so archives from the earlier version-16 baseline are invalidated on load; not every historical format is guaranteed to load.
+A save holds the settings, generation, history, archives, emitter and CMA state and lineage. It holds no creatures in flight, so it is small, and loading breeds them again from the archives. Each save starts with a header that carries the physics version, so an older save is turned down with a message before it loads. A save of version 53 or newer loads, with its elites placed in the new cells.
 
-The dashboard writes no files on its own: autosave is off by default, and a loaded game starts with it off. When the player turns on File > Autosave every 10 generations, autosaves go to `runs/seed-<seed>-auto.evo` in a background thread, and the three newest experiment autosaves are kept. Manual saves can preserve partial-generation progress. Wait for a requested manual save to report completion before closing the app. Headless runs write to their chosen checkpoint path and also export history CSV.
+The dashboard writes no files on its own: autosave is off by default, and a loaded game starts with it off. When the player turns on File > Autosave every 10 generations, autosaves go to `runs/seed-<seed>-auto.evo` in a background thread, and the three newest experiment autosaves are kept. Wait for a requested manual save to report completion before closing the app. Headless runs write to their chosen checkpoint path and also export history CSV.
 
 ## Checks
 
-Use the workstation environment above, with serial test execution to avoid overlapping CPU evaluation pools:
+Use the workstation environment above:
 
 ```bash
 nice -n 10 cargo fmt --all --check
 nice -n 10 cargo clippy --locked --all-targets -- -D warnings
-RUST_TEST_THREADS=1 nice -n 10 cargo test --locked --release
-RUST_TEST_THREADS=1 nice -n 10 cargo test --locked --release --test simulation -- --ignored
 ```
 
-GitHub Actions runs formatting, clippy, and release CPU tests on Ubuntu, with the portable CPU vector implementation. GPU tests remain ignored during CI and must be run explicitly on the workstation. CPU/GPU comparisons are optional diagnostics, not a GPU physics gate. Physics changes also require the random-population propulsion diagnostic, `nice -n 10 cargo run --release --example first_generation`, with the same workstation environment. This is a diagnostic against solver-created propulsion, not a proof of energy conservation.
 
-See [architecture](docs/architecture.md), [validation](docs/validation.md), [performance log](docs/performance-log.md), and the owner's current [agent notes](AGENTS.md) for implementation details, measured results, and open work.
+See [architecture](docs/architecture.md), [physics](docs/physics.md), [building](docs/building.md), [design decisions](docs/design-decisions.md), [rejected ideas](docs/rejected-ideas.md), and the owner's [agent notes](AGENTS.md). Open work is in [backlog](docs/backlog.md).

@@ -1,10 +1,10 @@
 //! Operators that restructure junctions and segments of the skeleton.
 use super::{
-    Context, branch, branch_nodes, child_bones, copy_branch, fit_stroke, is_neck, muscles_on,
-    new_muscle, parent_bones, remove_parts, room, span,
+    BoneIds, Context, branch, branch_in, branch_nodes, child_bones, copy_branch, fit_stroke,
+    is_neck, muscles_on, new_muscle, parent_bones, remove_parts, room, span,
 };
 use crate::config::Config;
-use crate::evolution::{Bone, Creature, Muscle, NodeGene, Rng};
+use crate::evolution::{Bone, Bounded, Creature, MAX_MUSCLES, Muscle, NodeGene, Rng};
 
 /// Where three or more bones meet, puts a short new bone between the node
 /// and a new node, and moves some of the child branches to the new node, so
@@ -16,7 +16,7 @@ pub(crate) fn split_crowded_joint(
     _cx: &Context,
 ) -> bool {
     let children = child_bones(c);
-    let crowded: Vec<usize> = (1..c.nodes.len())
+    let crowded: BoneIds = (1..c.nodes.len())
         .filter(|&n| children[n].len() >= 2)
         .collect();
     if crowded.is_empty() || !room(c, cfg, 1, 0) {
@@ -24,7 +24,7 @@ pub(crate) fn split_crowded_joint(
     }
     let node = crowded[rng.index(crowded.len())];
     // At least one child branch moves and at least one stays.
-    let mut kids = children[node].clone();
+    let mut kids = children[node];
     for i in 0..kids.len() {
         let j = i + rng.index(kids.len() - i);
         kids.swap(i, j);
@@ -61,7 +61,7 @@ pub(crate) fn merge_branch_joints(
 ) -> bool {
     let children = child_bones(c);
     let parents = parent_bones(c);
-    let eligible: Vec<usize> = (0..c.bones.len())
+    let eligible: BoneIds = (0..c.bones.len())
         .filter(|&j| !is_neck(c, j) && children[c.bones[j].b as usize].len() >= 2)
         .collect();
     if eligible.is_empty() {
@@ -114,18 +114,18 @@ pub(crate) fn repeat_body_segment(
     let children = child_bones(c);
     let parents = parent_bones(c);
     // A leaf limb is a child branch without junctions: a chain to one tip.
-    let limbs_at = |node: usize| -> Vec<usize> {
+    let limbs_at = |node: usize| -> BoneIds {
         children[node]
             .iter()
             .copied()
             .filter(|&l| {
-                branch(c, l)
+                branch_in(c, &children, l)
                     .iter()
                     .all(|&x| children[c.bones[x].b as usize].len() <= 1)
             })
             .collect()
     };
-    let trunks: Vec<usize> = (0..c.bones.len())
+    let trunks: BoneIds = (0..c.bones.len())
         .filter(|&j| !is_neck(c, j) && !limbs_at(c.bones[j].b as usize).is_empty())
         .collect();
     if trunks.is_empty() {
@@ -137,7 +137,7 @@ pub(crate) fn repeat_body_segment(
         return false;
     };
     let limbs = limbs_at(b);
-    let segment: Vec<usize> = std::iter::once(trunk)
+    let segment: BoneIds = std::iter::once(trunk)
         .chain(limbs.iter().flat_map(|&l| branch(c, l)))
         .collect();
     if !room(c, cfg, segment.len(), muscles_on(c, &segment, false).len()) {
@@ -201,7 +201,7 @@ pub(crate) fn repeat_body_segment(
 pub(crate) fn grow_heel_toe(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let children = child_bones(c);
     let parents = parent_bones(c);
-    let tips: Vec<usize> = (1..c.nodes.len())
+    let tips: BoneIds = (1..c.nodes.len())
         .filter(|&n| children[n].is_empty())
         .collect();
     if tips.is_empty() || !room(c, cfg, 2, 2) {
@@ -237,7 +237,7 @@ pub(crate) fn grow_lever_spur(
 ) -> bool {
     let children = child_bones(c);
     let parents = parent_bones(c);
-    let joints: Vec<usize> = (1..c.nodes.len())
+    let joints: BoneIds = (1..c.nodes.len())
         .filter(|&n| !children[n].is_empty())
         .collect();
     if joints.is_empty() || !room(c, cfg, 1, 0) {
@@ -247,11 +247,11 @@ pub(crate) fn grow_lever_spur(
     let Some(above) = parents[joint] else {
         return false;
     };
-    let at_joint: Vec<usize> = std::iter::once(above)
+    let at_joint: BoneIds = std::iter::once(above)
         .chain(children[joint].iter().copied())
         .collect();
     // Muscle ends on a bone at the joint: (muscle, whether it is end a).
-    let ends: Vec<(usize, bool)> = c
+    let ends: Bounded<(usize, bool), { 2 * MAX_MUSCLES }> = c
         .muscles
         .iter()
         .enumerate()
@@ -294,7 +294,7 @@ pub(crate) fn reverse_bend(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: 
     let children = child_bones(c);
     // The root bone lies on the mirror line and keeps its joint, so a branch
     // needs a bone below the root to change.
-    let roots: Vec<usize> = (0..c.bones.len())
+    let roots: BoneIds = (0..c.bones.len())
         .filter(|&j| !is_neck(c, j) && !children[c.bones[j].b as usize].is_empty())
         .collect();
     if roots.is_empty() {
@@ -322,19 +322,19 @@ pub(crate) fn reverse_bend(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: 
     true
 }
 
-fn pos(c: &Creature, node: usize) -> [f32; 2] {
+pub(super) fn pos(c: &Creature, node: usize) -> [f32; 2] {
     [c.nodes[node].x, c.nodes[node].y]
 }
 
-fn add(p: [f32; 2], q: [f32; 2]) -> [f32; 2] {
+pub(super) fn add(p: [f32; 2], q: [f32; 2]) -> [f32; 2] {
     [p[0] + q[0], p[1] + q[1]]
 }
 
-fn sub(p: [f32; 2], q: [f32; 2]) -> [f32; 2] {
+pub(super) fn sub(p: [f32; 2], q: [f32; 2]) -> [f32; 2] {
     [p[0] - q[0], p[1] - q[1]]
 }
 
-fn scale(p: [f32; 2], s: f32) -> [f32; 2] {
+pub(super) fn scale(p: [f32; 2], s: f32) -> [f32; 2] {
     [p[0] * s, p[1] * s]
 }
 
@@ -349,7 +349,7 @@ fn unit(v: [f32; 2]) -> [f32; 2] {
 }
 
 /// Adds a node at `at` with the size and grip of node `like`.
-fn add_node(c: &mut Creature, like: usize, at: [f32; 2]) -> usize {
+pub(super) fn add_node(c: &mut Creature, like: usize, at: [f32; 2]) -> usize {
     c.nodes.push(NodeGene {
         x: at[0],
         y: at[1],
@@ -371,7 +371,7 @@ fn add_narrow_bone(c: &mut Creature, a: usize, b: usize, rng: &mut Rng) -> usize
 }
 
 /// Moves every node below `bone` (the child nodes of its branch) by `offset`.
-fn shift_branch(c: &mut Creature, bone: usize, offset: [f32; 2]) {
+pub(super) fn shift_branch(c: &mut Creature, bone: usize, offset: [f32; 2]) {
     for node in branch_nodes(c, &branch(c, bone)) {
         c.nodes[node].x += offset[0];
         c.nodes[node].y += offset[1];
@@ -379,13 +379,13 @@ fn shift_branch(c: &mut Creature, bone: usize, offset: [f32; 2]) {
 }
 
 /// Every muscle's span in the pose.
-fn spans(c: &Creature) -> Vec<f32> {
+pub(super) fn spans(c: &Creature) -> Bounded<f32, MAX_MUSCLES> {
     c.muscles.iter().map(|m| span(c, m)).collect()
 }
 
 /// Scales the stroke of each muscle that existed when `before` was taken by
 /// how much its span changed since, so it pulls as it did in the old pose.
-fn keep_strokes(c: &mut Creature, before: &[f32]) {
+pub(super) fn keep_strokes(c: &mut Creature, before: &[f32]) {
     let after = spans(c);
     for ((m, old), new) in c.muscles.iter_mut().zip(before).zip(after) {
         let ratio = new.max(0.05) / old.max(0.05);
@@ -586,4 +586,77 @@ mod tests {
         eprintln!("reverse_bend: {applied} of 160");
         assert!(applied >= 120, "applied to {applied} of 160");
     }
+}
+
+/// Turns bone `j`'s branch about its pivot by `angle` (counterclockwise),
+/// lifting the body if a node would go below the ground.
+pub(super) fn turn_branch(c: &mut Creature, j: usize, angle: f32) {
+    let pivot = c.nodes[c.bones[j].a as usize];
+    let (sin, cos) = angle.sin_cos();
+    for n in branch_nodes(c, &branch(c, j)) {
+        let (dx, dy) = (c.nodes[n].x - pivot.x, c.nodes[n].y - pivot.y);
+        c.nodes[n].x = pivot.x + dx * cos - dy * sin;
+        c.nodes[n].y = pivot.y + dx * sin + dy * cos;
+    }
+    let low = c.nodes.iter().map(|n| n.y).fold(0.0, f32::min);
+    for n in &mut c.nodes {
+        n.y -= low;
+    }
+}
+
+/// A joint (not the neck) and one of its stops, the stop as an angle from
+/// the starting pose.
+fn joint_and_stop(c: &Creature, rng: &mut Rng) -> Option<(usize, f32)> {
+    let joints: BoneIds = (0..c.bones.len())
+        .filter(|&j| !is_neck(c, j) && c.bones[j].max_angle - c.bones[j].min_angle > 0.05)
+        .collect();
+    let j = *joints.get(rng.index(joints.len().max(1)))?;
+    let b = c.bones[j];
+    Some((
+        j,
+        if rng.unit() < 0.5 {
+            b.min_angle
+        } else {
+            b.max_angle
+        },
+    ))
+}
+
+/// Starts a joint near one of its stops and measures its range from there, so
+/// the stops stay where they were and only the starting pose changes. The
+/// best elites of a 120-generation save ran with their joints 0.3 to 0.6 rad
+/// from the pose their genome starts in, so every trial began by folding.
+pub(crate) fn pose_joint_at_stop(
+    c: &mut Creature,
+    _cfg: &Config,
+    rng: &mut Rng,
+    _cx: &Context,
+) -> bool {
+    let Some((j, stop)) = joint_and_stop(c, rng) else {
+        return false;
+    };
+    let angle = stop * rng.range(0.5, 1.0);
+    turn_branch(c, j, angle);
+    c.bones[j].min_angle -= angle;
+    c.bones[j].max_angle -= angle;
+    true
+}
+
+/// Sets a joint against one of its stops and leaves it only a small flex back
+/// from it, so the skeleton holds a braced shape by itself. The best elites of
+/// a 120-generation save held 40 to 80% of their joints against a stop with
+/// muscles (as much steady force as oscillating force) and hopped as one
+/// rigid frame; mid-ranked elites held 8 to 18% and slid.
+pub(crate) fn brace_joint(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
+    let Some((j, stop)) = joint_and_stop(c, rng) else {
+        return false;
+    };
+    turn_branch(c, j, stop);
+    let flex = rng.range(0.03, 0.2);
+    (c.bones[j].min_angle, c.bones[j].max_angle) = if stop > 0.0 {
+        (-flex, 0.0)
+    } else {
+        (0.0, flex)
+    };
+    true
 }

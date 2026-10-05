@@ -29,6 +29,9 @@ pub struct Config {
     /// this depth, which raises the effective normal push and multiplies the
     /// friction budget, so dragging feet cost more.
     pub mud: f32,
+    /// Drag (1/s) on every node that is not a foot (the end of a leg of at
+    /// least two bones) while it touches the ground.
+    pub brambles: f32,
     /// Water line height (m) above the flat ground; 0.0 is dry. Nodes below
     /// it float and bones meet a viscous medium, so swimming strokes pay.
     pub water: f32,
@@ -48,13 +51,13 @@ pub struct Config {
     /// meets a different bump phase and amplitude, derived deterministically
     /// from its id, so a gait cannot memorize one bump pattern.
     pub quake: f32,
-    /// Seasons level: 0 off, 1 slow, 2 normal, 3 fast. When on, the world
-    /// advances one step of the `environment::season_rotation` every 20, 10,
+    /// Autochange level: 0 off, 1 slow, 2 normal, 3 fast. When on, the world
+    /// advances one step of the `environment::autochange_ladder` every 20, 10,
     /// or 5 generations.
-    pub seasons: u8,
-    /// Season rotation steps applied so far. Saved in checkpoints, so a
+    pub autochange: u8,
+    /// Autochange ladder steps applied so far. Saved in checkpoints, so a
     /// resumed game continues mid-cycle at the same step.
-    pub season_step: u16,
+    pub autochange_step: u16,
     pub min_size: f32,
     pub max_size: f32,
     pub min_friction: f32,
@@ -71,6 +74,9 @@ pub struct Config {
     /// Early screening of standard trials, set by the experiment each
     /// generation; `None` runs every trial in full. Runtime only, never saved.
     pub screen: Option<crate::physics::Screen>,
+    /// The early rungs of standard trials (`rungs`), set by the experiment
+    /// each generation; `None` runs no rung. Runtime only, never saved.
+    pub rungs: Option<crate::rungs::Rungs>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -91,13 +97,14 @@ impl Default for Config {
             slope: 0.0,
             wind: 0.0,
             mud: 0.0,
+            brambles: 0.0,
             water: 0.0,
             patches: 0.0,
             gaps: 0.0,
             hurdles: 0.0,
             quake: 0.0,
-            seasons: 0,
-            season_step: 0,
+            autochange: 0,
+            autochange_step: 0,
             min_size: 0.06,
             max_size: 0.12,
             min_friction: 0.65,
@@ -113,6 +120,7 @@ impl Default for Config {
             checkpoint_interval: 0,
             fidelity: None,
             screen: None,
+            rungs: None,
         }
     }
 }
@@ -135,13 +143,14 @@ struct HumanConfig {
     slope: f32,
     wind: f32,
     mud: f32,
+    brambles: f32,
     water: f32,
     patches: f32,
     gaps: f32,
     hurdles: f32,
     quake: f32,
-    seasons: u8,
-    season_step: u16,
+    autochange: u8,
+    autochange_step: u16,
     min_size: f32,
     max_size: f32,
     min_friction: f32,
@@ -173,13 +182,14 @@ impl Default for HumanConfig {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            brambles: c.brambles,
             water: c.water,
             patches: c.patches,
             gaps: c.gaps,
             hurdles: c.hurdles,
             quake: c.quake,
-            seasons: c.seasons,
-            season_step: c.season_step,
+            autochange: c.autochange,
+            autochange_step: c.autochange_step,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -199,6 +209,7 @@ impl From<HumanConfig> for Config {
         Self {
             fidelity: None,
             screen: None,
+            rungs: None,
             population: c.population,
             seed: c.seed,
             random_seed: c.random_seed,
@@ -214,13 +225,14 @@ impl From<HumanConfig> for Config {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            brambles: c.brambles,
             water: c.water,
             patches: c.patches,
             gaps: c.gaps,
             hurdles: c.hurdles,
             quake: c.quake,
-            seasons: c.seasons,
-            season_step: c.season_step,
+            autochange: c.autochange,
+            autochange_step: c.autochange_step,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -253,13 +265,14 @@ impl From<&Config> for HumanConfig {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            brambles: c.brambles,
             water: c.water,
             patches: c.patches,
             gaps: c.gaps,
             hurdles: c.hurdles,
             quake: c.quake,
-            seasons: c.seasons,
-            season_step: c.season_step,
+            autochange: c.autochange,
+            autochange_step: c.autochange_step,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -291,13 +304,14 @@ struct BinaryConfig {
     slope: f32,
     wind: f32,
     mud: f32,
+    brambles: f32,
     water: f32,
     patches: f32,
     gaps: f32,
     hurdles: f32,
     quake: f32,
-    seasons: u8,
-    season_step: u16,
+    autochange: u8,
+    autochange_step: u16,
     min_size: f32,
     max_size: f32,
     min_friction: f32,
@@ -328,13 +342,14 @@ impl From<&Config> for BinaryConfig {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            brambles: c.brambles,
             water: c.water,
             patches: c.patches,
             gaps: c.gaps,
             hurdles: c.hurdles,
             quake: c.quake,
-            seasons: c.seasons,
-            season_step: c.season_step,
+            autochange: c.autochange,
+            autochange_step: c.autochange_step,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -354,6 +369,7 @@ impl From<BinaryConfig> for Config {
         Self {
             fidelity: None,
             screen: None,
+            rungs: None,
             population: c.population,
             seed: c.seed,
             random_seed: c.random_seed,
@@ -368,14 +384,15 @@ impl From<BinaryConfig> for Config {
             slope: c.slope,
             wind: c.wind,
             mud: c.mud,
+            brambles: c.brambles,
             water: c.water,
             patches: c.patches,
             gaps: c.gaps,
             hurdles: c.hurdles,
             quake: c.quake,
             ground_friction: c.ground_friction,
-            seasons: c.seasons,
-            season_step: c.season_step,
+            autochange: c.autochange,
+            autochange_step: c.autochange_step,
             min_size: c.min_size,
             max_size: c.max_size,
             min_friction: c.min_friction,
@@ -467,6 +484,10 @@ impl Config {
             "Mud sink depth must be 0–0.5 m"
         );
         ensure!(
+            self.brambles.is_finite() && (0.0..=60.0).contains(&self.brambles),
+            "Brambles drag must be 0–60 per second"
+        );
+        ensure!(
             self.water.is_finite() && (0.0..=3.0).contains(&self.water),
             "Water line must be 0–3 m"
         );
@@ -487,8 +508,8 @@ impl Config {
             "Quake bump height must be 0–1 m"
         );
         ensure!(
-            usize::from(self.seasons) < crate::environment::SEASON_INTERVALS.len(),
-            "Unknown seasons level"
+            usize::from(self.autochange) < crate::environment::AUTOCHANGE_INTERVALS.len(),
+            "Unknown autochange level"
         );
         ensure!(
             self.min_size.is_finite()
@@ -507,10 +528,12 @@ impl Config {
             "Node friction bounds must be ordered within 0–1"
         );
         ensure!(
-            (3..=64).contains(&self.max_nodes)
-                && (3..=256).contains(&self.max_muscles)
+            (3..=crate::evolution::MAX_NODES).contains(&self.max_nodes)
+                && (3..=crate::evolution::MAX_MUSCLES).contains(&self.max_muscles)
                 && self.max_muscles >= self.max_nodes,
-            "Body limits: 3–64 nodes; at least as many muscles, up to 256"
+            "Body limits: 3 to {} nodes; at least as many muscles, up to {}",
+            crate::evolution::MAX_NODES,
+            crate::evolution::MAX_MUSCLES
         );
         ensure!(
             (32..=6144).contains(&self.gpu_budget_mib),
@@ -541,6 +564,7 @@ impl Config {
             || self.slope != other.slope
             || self.wind != other.wind
             || self.mud != other.mud
+            || self.brambles != other.brambles
             || self.water != other.water
             || self.patches != other.patches
             || self.gaps != other.gaps
@@ -559,11 +583,7 @@ impl Config {
     pub fn batch_size(&self) -> usize {
         // Fewer readback fences keep the GPU busier. Responsive mode still stays
         // small enough that pausing and editing settings never feels delayed.
-        let maximum = std::env::var("EVOLUTION_GPU_BATCH")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|&value| value > 0)
-            .unwrap_or(if self.throughput { 100_000 } else { 8192 });
+        let maximum = if self.throughput { 100_000 } else { 8192 };
         // Leave space for power-of-two buffer growth and staging resources.
         let padded_nodes = self.max_nodes.next_power_of_two().max(8);
         // A muscle genome is stored once, with up to four u32 node references;

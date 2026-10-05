@@ -1,11 +1,12 @@
 //! Operators that copy, grow, fuse, move and reshape whole limbs.
 use super::{
-    Context, branch, branch_nodes, child_bones, copy_branch, is_neck, muscles_on, new_muscle,
-    parent_bones, remove_parts, room,
+    BoneIds, Context, MuscleIds, branch, branch_nodes, child_bones, copy_branch, is_neck,
+    muscles_on, new_muscle, parent_bones, remove_parts, room,
 };
 use crate::config::Config;
 use crate::evolution::{
-    Bone, Creature, Muscle, NodeGene, Rng, body_extent, bone_point, max_bone_length,
+    Bone, Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, NodeGene, Rng, body_extent,
+    bone_point, max_bone_length,
 };
 
 /// Two bones count as nearly aligned when the cosine of the angle between
@@ -17,7 +18,7 @@ const ALIGNED: f32 = 0.9;
 /// another joint, mirrored or not, with the copied muscles shifted by one of
 /// 0, 1/4, 1/2 or 3/4 of a cycle. A working bent leg becomes a second leg.
 pub(crate) fn copy_limb(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
-    let roots: Vec<usize> = limb_roots(c)
+    let roots: BoneIds = limb_roots(c)
         .into_iter()
         .filter(|&b| room(c, cfg, branch(c, b).len(), 0))
         .collect();
@@ -51,7 +52,7 @@ pub(crate) fn grow_actuated_tip(
         return false;
     }
     let children = child_bones(c);
-    let tips: Vec<usize> = limb_roots(c)
+    let tips: BoneIds = limb_roots(c)
         .into_iter()
         .filter(|&b| children[c.bones[b].b as usize].is_empty())
         .collect();
@@ -88,7 +89,7 @@ pub(crate) fn split_bone_actuated(
         return false;
     }
     // Both parts must stay at least 3 cm long.
-    let long: Vec<usize> = limb_roots(c)
+    let long: BoneIds = limb_roots(c)
         .into_iter()
         .filter(|&b| c.bones[b].rest_length >= 0.1)
         .collect();
@@ -159,7 +160,7 @@ pub(crate) fn fuse_bones(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &C
     }
     let parents = parent_bones(c);
     let children = child_bones(c);
-    let pairs: Vec<(usize, usize)> = (1..c.nodes.len())
+    let pairs: Bounded<(usize, usize), MAX_NODES> = (1..c.nodes.len())
         .filter_map(|joint| {
             let upper = parents[joint]?;
             let &[lower] = &children[joint][..] else {
@@ -227,19 +228,20 @@ pub(super) fn fuse_pair(c: &mut Creature, upper: usize, lower: usize) {
 /// the body (not inside the branch, not the head). Muscles from the branch
 /// root to the old bone above move to the bone above the new node.
 pub(crate) fn relocate_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
-    let moves: Vec<(usize, usize)> = limb_roots(c)
+    let moves: Bounded<(u8, u8), { MAX_NODES * MAX_NODES }> = limb_roots(c)
         .into_iter()
         .flat_map(|root| {
             let inside = branch_nodes(c, &branch(c, root));
             let from = c.bones[root].a as usize;
             (1..c.nodes.len())
                 .filter(move |n| *n != from && !inside.contains(n))
-                .map(move |n| (root, n))
+                .map(move |n| (root as u8, n as u8))
         })
         .collect();
     let Some((root, at)) = pick(&moves, rng) else {
         return false;
     };
+    let (root, at) = (root as usize, at as usize);
     let from = c.bones[root].a as usize;
     let parents = parent_bones(c);
     let offset = [
@@ -318,12 +320,12 @@ pub(crate) fn graft_donor_limb(
     // the node the graft goes on.
     let (gone, at) = match pick(&limb_roots(c), rng) {
         Some(root) if rng.unit() < 0.5 => (branch(c, root), c.bones[root].a as usize),
-        _ => (Vec::new(), 1 + rng.index(c.nodes.len() - 1)),
+        _ => (BoneIds::new(), 1 + rng.index(c.nodes.len() - 1)),
     };
     let gone_nodes = branch_nodes(c, &gone);
     let gone_muscles = muscles_on(c, &gone, false).len();
-    if c.nodes.len() - gone_nodes.len() + graft_bones.len() > cfg.max_nodes.min(64)
-        || c.muscles.len() - gone_muscles + graft_muscles.len() > cfg.max_muscles
+    if c.nodes.len() - gone_nodes.len() + graft_bones.len() > cfg.max_nodes.min(MAX_NODES)
+        || c.muscles.len() - gone_muscles + graft_muscles.len() > cfg.max_muscles.min(MAX_MUSCLES)
     {
         return false;
     }
@@ -331,8 +333,8 @@ pub(crate) fn graft_donor_limb(
     let at = at - gone_nodes.iter().filter(|&&n| n < at).count();
     let from = donor.nodes[donor.bones[graft].a as usize];
     let to = c.nodes[at];
-    let mut node_of = vec![usize::MAX; donor.nodes.len()];
-    let mut bone_of = vec![usize::MAX; donor.bones.len()];
+    let mut node_of = [usize::MAX; MAX_NODES];
+    let mut bone_of = [usize::MAX; MAX_NODES];
     node_of[donor.bones[graft].a as usize] = at;
     for &b in &graft_bones {
         let old = donor.bones[b];
@@ -357,7 +359,7 @@ pub(crate) fn graft_donor_limb(
 }
 
 /// Bones that can start a limb: every bone but the neck.
-pub(super) fn limb_roots(c: &Creature) -> Vec<usize> {
+pub(super) fn limb_roots(c: &Creature) -> BoneIds {
     (0..c.bones.len()).filter(|&b| !is_neck(c, b)).collect()
 }
 
@@ -382,7 +384,7 @@ pub(super) fn narrow(bone: &mut Bone, rng: &mut Rng) {
 /// body when none is on them.
 fn nearby_muscle(c: &Creature, bones: &[usize], rng: &mut Rng) -> Option<Muscle> {
     let near = muscles_on(c, bones, false);
-    let pool = if near.is_empty() {
+    let pool: MuscleIds = if near.is_empty() {
         (0..c.muscles.len()).collect()
     } else {
         near
@@ -576,7 +578,7 @@ mod tests {
                         })
                     })
                 })
-                .max_by_key(Vec::len)
+                .max_by_key(|limb| limb.len())
                 .expect("the body ends with a donor branch");
             if after.nodes.len() == before.nodes.len() + limb.len() {
                 added += 1;

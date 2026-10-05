@@ -1,10 +1,10 @@
 # Agent guide
 
-Read this before you change the code. It covers the game, the owner's rules, how work is organized, and how to build, test and measure on this machine. Open work is listed in `docs/backlog.md`.
+Read this before you change the code. It covers the game, the owner's rules, how work is organized, and how to build and measure on this machine. Open work is listed in `docs/backlog.md`.
 
 ## The game
 
-Evolution Simulator is a Rust game. 2D creatures made of bones, joints and pull-only muscles evolve to travel as far as possible in 20 s trials. Each generation has 3 million creatures, and the GPU scores all of them. The search is MAP-Elites with four emitters (CMA tuning, anatomy mutations, novelty, immigrants) over 4 island archives in a ring plus one global archive. The player watches evolution and changes the world with environment buttons.
+Evolution Simulator is a Rust game. 2D creatures made of bones, joints and pull-only muscles evolve to travel as far as possible in 20 s trials. Each generation has 3 million creatures, and the GPU scores all of them. The search is MAP-Elites with four emitters (CMA tuning, anatomy mutations, novelty, immigrants) over 4 isolated island archives (each with a nursery that gives new random bodies 10 generations to develop before they compete in the island archive, and a nursery that keeps the new body plans the island turned away until they beat its elites), one hub island that receives copies of their best elites, and one global archive that records everything and is never a parent source. The player watches evolution and changes the world with environment buttons.
 
 `cargo run --release` on `main` is the current game. It must be the best game with no flags.
 
@@ -16,19 +16,20 @@ Product:
 - Keep settings few. Trials last 20 s, a generation has 3M creatures, and there are no mutation controls. Environment effects are buttons. The game never changes the world by itself. It may suggest an effect.
 - No knobs. Finished work is on by default. A losing experiment is deleted, code and switch. Unfinished work stays on its branch. An environment variable may exist only as a developer diagnostic that a player never needs.
 - Never remove a shipped feature or mutation operator unless the owner asks. The owner wants more mutation operator types, never fewer.
-- Early screening: a standard trial stops at 5 s when the creature is below the bar, which is the 5 s distance the top 20% reached. A screened creature enters no archive. Replays and elite re-tests run full trials.
-- The GPU score is final. CPU and GPU agreement is a diagnostic, not a gate. A replay comes from the scoring kernel, so it matches its score.
+- Early screening: a standard trial stops at 5 s when the creature is below the bar, which is the 5 s distance the top 10% reached. A screened creature enters no archive. Replays and elite re-tests run full trials.
+- The GPU score is final. A replay comes from the scoring kernel, so it matches its score.
 - The search is deterministic for a fixed seed on one GPU.
 - Saves are small (archives and search state), and the game writes as few files as possible. Autosave is off. Breaking old saves is fine: bump `qd::VERSION` when archive or physics semantics change, and the save header turns older saves down with a message.
-- Speed matters. The goal is 2M, then 4M, evaluated creatures per second in the graphical game at 60 FPS.
-- Search changes rest on evidence (papers and practice) and must not break the search. Test each one with a paired A/B at equal evaluation budgets over 3 seeds, and report best distance, QD score and the top-50 body mix.
-- Physics v2 is the game (since 2026-09-29). New physics features go into v2. A physics change updates every GPU kernel, WGSL and CUDA together. CPU ports may differ.
+- Biodiversity comes first: many body plans and lineages that keep their place, and new designs that get a real chance. A change that raises biodiversity may lower the rate, down to a floor of 100k evaluated creatures per second in the graphical game, as long as it does not lose best distance.
+- Speed matters next. The goal is 500k evaluated creatures per second, sustained, in the graphical game at 60 FPS.
+- The current game is the reference, not the past. A change stays if the game is better or faster now, shown by a direct measurement of that change on its own. Any measured speedup is kept and merged, however small: 1.05x is a win. A track's gate (3x, 2x, 45% issue) is its ambition and decides what to try next, never whether measured gains are thrown away. No comparison to an earlier version is needed, and nobody writes experiment reports. Search changes rest on papers and practice and must not break the search.
+- No golden reference. The physics, the muscle model and the kernel that exist today are vibecoded and are not a reference: any of them may be replaced by a cheaper one. The only physics requirement is the spirit of the game: creatures evolve interesting, efficient shapes and gaits, and no glitchy movers (random bodies that travel, feet that slide, energy from nowhere). Bit-equality between two implementations or kernel variants never matters. The one determinism rule is that one build on one GPU gives one search per seed.
+- There is one physics (`docs/physics.md`): the CUDA kernel, `shaders/warp_creature.cu`. Nothing else simulates creatures. The game needs an NVIDIA GPU with the CUDA driver and NVRTC.
 - Posture rules (for example what counts as a fall) need the owner's approval.
 
 Working:
 
 - Commit small and push often, about every 20 minutes of work. Plain commit messages say what changed, why, and what was measured.
-- Run the full test suite once per push, not after every edit. Stop an A/B once 3 seeds decide it.
 - Write plainly in commits, docs and reports.
 
 ## How work is organized
@@ -46,64 +47,69 @@ Use absolute paths, because `git -C` resolves a relative worktree path against t
 
 ## This machine
 
-- 16 threads, an RTX 4060 laptop GPU for compute, and a Radeon 780M that drives the desktop. Never evaluate creatures on the Radeon, because heavy Radeon use once crashed the desktop. Set `EVOLUTION_DEVICES=primary` for every run of the game, the tests and benchmarks.
-- Agents share at most half the machine. Build with `nice -n 19` and `CARGO_BUILD_JOBS=2`. Run long CPU jobs (the full test suite, A/B runs, benchmarks) through `tools/cpu-slot.sh <command>`, which waits for one of two shared 4-thread slots. The game itself may use the whole machine.
-- GPU runs share the GPU through `/home/amipo/workspace/evolutionSimulator/target/gpu.lock`. Tests, smoke windows and evolutions that do not measure speed take it shared (`flock -s`), so they run side by side. Speed measurements take it exclusive (`flock -x`), so they run alone. Run at most 2 GPU processes per agent at once, because the owner's game holds 5 to 7.5 GB of the RTX 4060's 8 GB and CUDA fails to open when memory runs out. Since 2026-09-29 the owner allows agent GPU work while their game runs: keep GPU memory low, and retry smaller after an out-of-memory error. `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv` shows who is on the GPU.
+- 16 threads, an RTX 4060 laptop GPU for compute, and a Radeon 780M that drives the desktop. Never evaluate creatures on the Radeon, because heavy Radeon use once crashed the desktop. Set `EVOLUTION_DEVICES=primary` for every run of the game and the tools.
+- Builds, tests and runs may use the whole CPU. The game's general Rayon pool (breeding, archive insertion, packing) takes every logical CPU but two, at nice 10.
+- GPU runs share the GPU through `/home/amipo/workspace/evolutionSimulator/target/gpu.lock`. Smoke windows and evolutions that do not measure speed take it shared (`flock -s`), so they run side by side. Speed measurements take it exclusive (`flock -x`), so they run alone. Run at most 2 GPU processes per agent at once, because the owner's game holds 5 to 7.5 GB of the RTX 4060's 8 GB and CUDA fails to open when memory runs out. Since 2026-09-29 the owner allows agent GPU work while their game runs: keep GPU memory low, and retry smaller after an out-of-memory error. `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv` shows who is on the GPU.
+- Speed measurements pause the owner's game while they run: `flock -x target/gpu.lock tools/pause-game.sh <bench>`. The game stops evaluating and breeding and closes its GPU engines, so the GPU memory is free, and it resumes when the command ends. A pause lasts at most 5 minutes, so a measurement must fit in 5 minutes or be split. After a pause the game runs at least 2 minutes before it pauses again. `docs/building.md` has the details.
 - Screenshot runs (`EVOLUTION_SMOKE_*`, see `src/ui.rs`) open real windows on the owner's desktop titled "agent screenshot run, not your game". Keep them to seconds and look at every screenshot yourself.
 
-## Build, test, run
+## Build
 
 - Iteration build: `cargo build --profile release-fast` (LTO off, 256 codegen units, incremental). Use the normal release profile (thin LTO) for performance measurements.
-- Before committing: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test --release`.
-- GPU tests are `#[ignore]`d. Run them with `cargo test --release --test simulation -- --ignored`, plus `tests/gpu_repeatability.rs` and the ignored tests in `tests/screening.rs`.
-- Run `examples/first_generation` before pushing any physics change. It reports random-population distances (median, p99, best) and catches free propulsion.
-- `docs/building.md` has the build details and the list of environment variables.
+- `docs/building.md` has the build details and the environment variables.
 
 ## Code map
 
-Physics v2 is the game's physics:
+The physics:
 
-- `shaders/physics2_creature.wgsl` is the GPU kernel for Vulkan, driven by `src/vk_engine.rs` and `src/gpu.rs`.
-- `shaders/physics2_creature.cu` is its CUDA mirror, used on NVIDIA when the driver and NVRTC load, driven by `src/cuda_engine.rs`. It mirrors the WGSL section by section; change both together.
-- `src/physics2.rs` is the scalar CPU prototype: the reference the GPU kernels and the fast CPU engine are tested against, the engine of single CPU replays, and the home of the kernel source builders, the packing (`pack`) and the recording edits for replays.
-- `src/cpu_v2.rs` is the fast CPU engine (16 creatures with one skeleton per SIMD group, `src/simd.rs`), bit-equal to the prototype (`tests/physics2_lanes.rs`). It scores CPU-only games and GPU failover. `src/cpu_engine.rs` is the thin front (`evaluate`, `replay`, `trajectory`, `transport_cost`).
+- `shaders/warp_creature.cu` is the CUDA kernel, the only physics, driven by `src/cuda_engine.rs`. A creature runs on a group of 4, 8, 16 or 32 lanes (lane i owns node i and the bone ending there, state in registers, tree passes level by level), and each 1/60 s step is one substep (`docs/physics.md`). `src/warp_kernel.rs` packs creatures for it from `physics2::Model` and writes its source with the world's effects compiled in.
+- `src/physics2.rs` holds the physics constants and `Model`, a creature's constants and starting state, from which `warp_kernel::pack` fills every kernel record.
 - `src/physics.rs` holds what the physics and the UI share: limits, fidelity, node and joint constants, the ground functions (bumps, slope, gaps, hurdles, quake), screening.
-- `src/engine.rs` picks the backend and records replays with the scoring kernel (frames carry the muscle energy, muscle force and contact forces). `src/creature_kernel.rs` holds the GPU data layout (`LaneBatch`, `Params`, `GpuResult`, `frame_stride`) and builds the CUDA sources.
-- `docs/physics-v2.md` describes the model: contacts (the deepest 4 per step), friction that may never do positive work, the plant pass, and muscle strength scaled to the mass a muscle moves.
+- `src/engine.rs` runs each GPU on its own thread, one whole-trial submission per unit, and records replays with the scoring kernel (frames carry the muscle energy, muscle force and contact forces). `src/gpu.rs` is the evaluation front end. `src/creature_kernel.rs` holds `GpuResult`, `LaneBatch` and `frame_stride`.
+- `docs/physics.md` describes the model: contacts (the deepest 4 per step), friction that may never do positive work, the plant pass, and muscle strength scaled to the mass a muscle moves.
 
 Search and game state:
 
-- `src/qd.rs`: archives, niches, behavior descriptors, the morphology reserve, `qd::VERSION`.
-- `src/storage.rs`: the `Experiment` with its islands, emitters, breeding, migration, fine checks, and saves.
+- `src/qd.rs`: archives, cells (a way of moving times a body class, `qd::Classes`: the islands and the global archive each have their layout), behavior descriptors, the morphology reserve, `qd::VERSION` and the oldest save version that still loads (`qd::OLDEST_LOADABLE`, its elites are placed in cells again at load).
+- `src/rungs.rs`: the audit lane and the early rungs (R1 at 1 s, R2 at 2.5 s), their fit at the generation boundary, the breaker per cadence band. The rule runs in the metrics block of `shaders/warp_creature.cu`.
+- `src/storage.rs`: the `Experiment` with its ring of blocks, islands, emitters, breeding, migration, record confirmations, and saves.
+- `src/ring.rs`: the blocks in flight, absorbed in ring order whatever order the GPU finishes them in.
 - `src/evolution.rs` and `src/evolution/anatomy/`: the genome and the mutation operators (see `docs/anatomy-operators.md`).
-- `src/scheduler.rs`: routes work to healthy GPUs, with the CPU as failover.
+- `src/scheduler.rs`: routes work to the GPUs and reopens a GPU that fails. A GPU that does not reopen stops evolution.
 - `src/worker.rs`: the worker thread and the snapshot the UI draws.
 - `src/environment.rs`: environment effects and presets. Add new effects here.
-- `src/ui.rs`: the egui interface. `src/config.rs`: settings.
+- `src/ui.rs`: the egui interface. `src/theme.rs`: its palette, style and HUD pieces. `src/world_fx.rs`: the replay backdrop and the look of each environment effect. `src/assets.rs`: the art under `assets/ui/`, which `tools/ui_assets.py` builds from CC0 sources (`assets/ui/CREDITS.md`). `src/config.rs`: settings.
 
 ## Measurement tools
 
-- `examples/search_ab.rs`: paired fixed-seed search runs through the production archive and breeding path, on the CPU or with `--gpu` through the game's GPU path. At 100k creatures a 6-seed mean detects only about 30% in QD; use 12 or more seeds for smaller effects (`docs/search-research.md` section 15).
+All example tools score and replay creatures on the GPU engine (`examples/common/mod.rs`), take the GPU lock shared and need `EVOLUTION_DEVICES=primary`. If the primary GPU does not open they fail.
+
+- `examples/search_ab.rs`: fixed-seed search runs through the production ring on the GPU, with the early screen and the record confirmations. It prints body plans, clades and body shape coverage of the archives, the archive and breeding seconds per generation, `--load <save>` continues a save, and `--change-at <n>` changes the world before generation n as a button press does. It prints the ring's mean GPU lanes per creature.
+- `examples/archive_diversity.rs <save>`: body plans, clades and body class coverage of every archive of a save.
+- `examples/archive_bench.rs <save> <population> <generations>`: the archive and breeding seconds per generation at full scale with no GPU, on stand-in scores. Run it under `perf record` to see where they go.
+- `examples/island_report.rs <save>`: per island, nursery and reshaped nursery of a save, the body plans, skeletons, ages and ties of its elites. It needs no GPU.
 - `EVOLUTION_STAGE_LOG=<path>`: one CSV row per generation (evaluation, archive and breeding seconds, end-to-end rate).
-- `examples/size_report.rs <save> [count]`: body length, mass and foot slip for the best elites. `EVOLUTION_LEDGER=1` adds where forward momentum comes from.
-- `examples/mutation_audit.rs`: how much of its parent's distance each operator's child keeps.
-- `examples/physics_audit.rs`: energy, friction and momentum ledgers per elite under v2. `tests/physics_audit.rs` guards against solver-made energy and friction exploits.
-- `examples/effect_cost.rs`, `examples/mem_report.rs`, `examples/body_stats.rs`, `examples/momentum_ledger.rs`.
+- `examples/size_report.rs <save> [count]`: body length, mass and foot slip for the best elites, from GPU replays. It has no cost of transport column.
+- `examples/mutation_audit.rs`: how much of its parent's distance each operator's child keeps, how often it beats the parent and how many children would enter the global archive, within the growth step of breeding.
+- `examples/operator_yield.rs <dump>`: per operator, how many children entered an archive in a generation dump (`EVOLUTION_DUMP_GENERATION`) and the distance they added.
+- `examples/body_regularity.rs <save>`: the share of the best elites with limbs in pairs, mirrored pairs and repeated segments.
+- `examples/physics_audit.rs`: per elite, what the GPU replay records: contact-free steps, largest ground push, lowest muscle energy store, steps with a broken joint. The kernel keeps no solver energy, momentum or friction ledgers.
+- `examples/first_generation.rs`: random-population distances on the GPU engine.
+- `examples/replay_match.rs <save>`: the best elites' archive distance beside their replay's.
+- `examples/p2_speed.rs`, `examples/worker_rate.rs`: GPU and worker throughput. `p2_speed <save> <count> <repeats> "" screen` times the game's standard trial (the 5 s screen) on every k-th creature of a save's ring and each lane class alone, `fine` times the confirmation trial. `worker_rate` takes a save as its sixth argument and measures the evolved game end to end.
+- `tools/pause-game.sh`: pauses the owner's game for a speed measurement (`docs/building.md`).
 
 ## Docs
 
 - `README.md`: for players.
-- `docs/architecture.md`, `docs/building.md`, `docs/validation.md`.
-- `docs/search-research.md`: every search experiment and its numbers. Add yours.
-- `docs/performance-log.md`: every performance measurement, including rejected ideas. Add yours.
-- `docs/research-2026-09-29.md`: literature survey with ranked ideas for search quality and throughput.
-- `docs/hpc-assessment.md`, `docs/data-architecture.md`, `docs/phase0-measurements.md`: GPU limits and the v2 data design.
-- `docs/anatomy-operators.md`, `docs/ux-audit.md`.
+- `docs/architecture.md`, `docs/physics.md`, `docs/building.md`, `docs/anatomy-operators.md`.
+- `docs/design-decisions.md`: what the game does in search, physics and speed, and the number behind each choice.
+- `docs/rejected-ideas.md`: real dead ends with their numbers. Add one or two lines only when someone would retry the idea.
 - `docs/backlog.md`: open work.
 
 ## Measured and rejected
 
-Do not redo these without a new reason. The numbers are in `docs/performance-log.md` and `docs/search-research.md`.
+The full list is in `docs/rejected-ideas.md`. Do not redo these without a new reason:
 
 - 30 Hz physics: the search gains were integrator exploits. 60 Hz stays.
 - Muscle mass (5 variants): none held muscle counts down, and best distance fell by half.

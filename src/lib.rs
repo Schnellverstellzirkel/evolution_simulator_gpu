@@ -1,23 +1,29 @@
+pub mod assets;
+pub mod block_alloc;
+pub mod bounded;
 pub mod config;
-pub mod cpu_engine;
-pub mod cpu_v2;
 pub mod creature_kernel;
 pub mod cuda_engine;
+pub mod dev_pause;
 pub mod engine;
 pub mod environment;
 pub mod evolution;
 pub mod gpu;
-pub mod loading;
 pub mod physics;
 pub mod physics2;
 pub mod qd;
 pub mod replay_forces;
+pub mod ring;
+pub mod rungs;
 pub mod scheduler;
 pub mod schematic;
-pub mod search_benchmark;
-pub mod simd;
 pub mod storage;
+pub mod theme;
+pub mod threads;
 pub mod ui;
-pub mod vk_engine;
+pub mod warp_kernel;
 pub mod worker;
 pub mod world_fx;
+
+#[global_allocator]
+static ALLOCATOR: block_alloc::BlockAlloc = block_alloc::BlockAlloc;

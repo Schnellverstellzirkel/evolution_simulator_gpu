@@ -1,43 +1,57 @@
-//! NVIDIA GPU backend.
+//! NVIDIA GPU backend: the physics authority.
 //!
-//! It runs `shaders/physics_creature.cu`, a CUDA C++ port of the WGSL
-//! creature kernel, on the same `LaneBatch` packing, `Params` and trial
-//! segments as `VkEngine`, and it keeps `VkEngine`'s submit and poll contract.
-//! The reason for it is register control: Vulkan offers no way to cap
-//! registers per thread, and above 128 registers an SM holds 12 one-warp
-//! workgroups instead of 16 (`docs/phase0-measurements.md`).
+//! It runs `shaders/warp_creature.cu`, one creature per group of 4, 8, 16 or 32
+//! lanes (`warp_kernel`), behind `engine::gpu_engine`'s submit and poll
+//! contract. A unit is uploaded once and runs as waves of up to `warp_kernel::WAVE`
+//! creatures, one kernel launch each, on the slot's streams. Inside a wave
+//! every lane group runs its creature to the end of its trial and then takes
+//! the next one, so there are no trial segments.
 //!
 //! Nothing CUDA is linked at build time. The driver API (`libcuda`) and NVRTC
-//! (`libnvrtc`) are loaded when the engine opens, so the game builds and runs
-//! unchanged on machines without them; `engine::gpu_engine` then falls back to
-//! Vulkan. NVRTC comes from the system CUDA toolkit or from NVIDIA's pip
-//! wheel; see `docs/building.md`. Kernels compile to a cubin for the device's
-//! architecture when the engine opens, one per node capacity, and on first
-//! use for other fidelities.
+//! (`libnvrtc`) are loaded when the engine opens, so the game builds without
+//! them, but it needs them to run. NVRTC comes from the system CUDA toolkit
+//! or from NVIDIA's pip wheel; see `docs/building.md`. Kernels compile to a cubin for the device's
+//! architecture, one per lane class, world (the effects that are on), rate
+//! and recording, in the background when the engine opens and when a new
+//! world first appears.
 //!
-//! It is the default on NVIDIA GPUs: `engine::gpu_engine` opens it whenever
-//! the driver and NVRTC load, and uses Vulkan otherwise. Developer overrides,
-//! never needed to play: `EVOLUTION_CUDA=0` keeps Vulkan,
-//! `EVOLUTION_CUDA_MAXREG` caps registers per thread (default 128, 0 for the
-//! compiler's choice), `EVOLUTION_CUDA_WG` fixes threads per block (by
-//! default each capacity gets the size with the most resident warps),
-//! `EVOLUTION_CUDA_STREAMS` limits streams per unit, `EVOLUTION_NVRTC` names
-//! the NVRTC library, `EVOLUTION_CUDA_FLAGS` adds NVRTC options, and
-//! `EVOLUTION_CUDA_VERBOSE` reports compile times.
+//! Developer diagnostics, never needed to play: `EVOLUTION_NVRTC` names the
+//! NVRTC library, and `EVOLUTION_CUDA_VERBOSE` reports compile times.
 use crate::{
     config::Config,
-    creature_kernel::{self, CAPACITIES, GpuResult, LaneBatch},
+    creature_kernel::{self, GpuResult, LaneBatch},
+    engine::Completed,
     physics::Fidelity,
-    vk_engine::Completed,
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     ffi::{CStr, CString, c_char, c_int, c_uint, c_void},
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
+
+/// Wall nanoseconds engine threads have waited for a kernel (compiling or
+/// loading one the engine did not have yet), and how many are waiting now.
+static KERNEL_WAIT_NANOS: AtomicU64 = AtomicU64::new(0);
+static KERNEL_WAITERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Seconds engine threads have waited for kernels since the process began.
+/// A GPU with work queued does not run during this time, so a world change
+/// that needs a kernel nobody compiled yet shows up here.
+pub fn kernel_wait_seconds() -> f64 {
+    KERNEL_WAIT_NANOS.load(Ordering::Relaxed) as f64 * 1e-9
+}
+
+/// Whether an engine thread waits for a kernel now (the status line says
+/// the new world is compiling).
+pub fn compiling_world() -> bool {
+    KERNEL_WAITERS.load(Ordering::Relaxed) > 0
+}
 
 type CuResult = c_int;
 type CuDevice = c_int;
@@ -53,13 +67,14 @@ const CUDA_SUCCESS: CuResult = 0;
 const CUDA_ERROR_OUT_OF_MEMORY: CuResult = 2;
 const CUDA_ERROR_NOT_READY: CuResult = 600;
 const CU_STREAM_NON_BLOCKING: c_uint = 1;
+/// CUDA stream priority: lower numbers run first, 0 is the default.
+fn stream_priority(replay: bool) -> c_int {
+    if replay { -100 } else { 0 }
+}
 const CU_EVENT_DISABLE_TIMING: c_uint = 2;
 const CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT: c_int = 16;
 const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR: c_int = 75;
 const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR: c_int = 76;
-const CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES: c_int = 1;
-const CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES: c_int = 3;
-const CU_FUNC_ATTRIBUTE_NUM_REGS: c_int = 4;
 
 /// The CUDA driver API functions the engine uses.
 struct Driver {
@@ -75,16 +90,16 @@ struct Driver {
     module_load_data: unsafe extern "C" fn(*mut CuModule, *const c_void) -> CuResult,
     module_unload: unsafe extern "C" fn(CuModule) -> CuResult,
     module_get_function: unsafe extern "C" fn(*mut CuFunction, CuModule, *const c_char) -> CuResult,
-    func_get_attribute: unsafe extern "C" fn(*mut c_int, c_int, CuFunction) -> CuResult,
-    occupancy: unsafe extern "C" fn(*mut c_int, CuFunction, c_int, usize) -> CuResult,
     mem_alloc: unsafe extern "C" fn(*mut CuDevicePtr, usize) -> CuResult,
     mem_free: unsafe extern "C" fn(CuDevicePtr) -> CuResult,
     mem_alloc_host: unsafe extern "C" fn(*mut *mut c_void, usize) -> CuResult,
     mem_free_host: unsafe extern "C" fn(*mut c_void) -> CuResult,
+    mem_host_register: unsafe extern "C" fn(*mut c_void, usize, c_uint) -> CuResult,
+    mem_host_unregister: unsafe extern "C" fn(*mut c_void) -> CuResult,
     memcpy_htod_async:
         unsafe extern "C" fn(CuDevicePtr, *const c_void, usize, CuStream) -> CuResult,
     memcpy_dtoh_async: unsafe extern "C" fn(*mut c_void, CuDevicePtr, usize, CuStream) -> CuResult,
-    stream_create: unsafe extern "C" fn(*mut CuStream, c_uint) -> CuResult,
+    stream_create: unsafe extern "C" fn(*mut CuStream, c_uint, c_int) -> CuResult,
     stream_destroy: unsafe extern "C" fn(CuStream) -> CuResult,
     stream_wait_event: unsafe extern "C" fn(CuStream, CuEvent, c_uint) -> CuResult,
     event_create: unsafe extern "C" fn(*mut CuEvent, c_uint) -> CuResult,
@@ -92,6 +107,9 @@ struct Driver {
     event_record: unsafe extern "C" fn(CuEvent, CuStream) -> CuResult,
     event_query: unsafe extern "C" fn(CuEvent) -> CuResult,
     event_elapsed_time: unsafe extern "C" fn(*mut f32, CuEvent, CuEvent) -> CuResult,
+    func_get_attribute: unsafe extern "C" fn(*mut c_int, c_int, CuFunction) -> CuResult,
+    memset_d32_async: unsafe extern "C" fn(CuDevicePtr, c_uint, usize, CuStream) -> CuResult,
+    occupancy: unsafe extern "C" fn(*mut c_int, CuFunction, c_int, usize) -> CuResult,
     #[allow(clippy::type_complexity)]
     launch_kernel: unsafe extern "C" fn(
         CuFunction,
@@ -175,15 +193,15 @@ impl Driver {
                 module_load_data: symbol!(library, "cuModuleLoadData"),
                 module_unload: symbol!(library, "cuModuleUnload"),
                 module_get_function: symbol!(library, "cuModuleGetFunction"),
-                func_get_attribute: symbol!(library, "cuFuncGetAttribute"),
-                occupancy: symbol!(library, "cuOccupancyMaxActiveBlocksPerMultiprocessor"),
                 mem_alloc: symbol!(library, "cuMemAlloc_v2"),
                 mem_free: symbol!(library, "cuMemFree_v2"),
                 mem_alloc_host: symbol!(library, "cuMemAllocHost_v2"),
                 mem_free_host: symbol!(library, "cuMemFreeHost"),
+                mem_host_register: symbol!(library, "cuMemHostRegister_v2"),
+                mem_host_unregister: symbol!(library, "cuMemHostUnregister"),
                 memcpy_htod_async: symbol!(library, "cuMemcpyHtoDAsync_v2"),
                 memcpy_dtoh_async: symbol!(library, "cuMemcpyDtoHAsync_v2"),
-                stream_create: symbol!(library, "cuStreamCreate"),
+                stream_create: symbol!(library, "cuStreamCreateWithPriority"),
                 stream_destroy: symbol!(library, "cuStreamDestroy_v2"),
                 stream_wait_event: symbol!(library, "cuStreamWaitEvent"),
                 event_create: symbol!(library, "cuEventCreate"),
@@ -191,6 +209,9 @@ impl Driver {
                 event_record: symbol!(library, "cuEventRecord"),
                 event_query: symbol!(library, "cuEventQuery"),
                 event_elapsed_time: symbol!(library, "cuEventElapsedTime"),
+                func_get_attribute: symbol!(library, "cuFuncGetAttribute"),
+                memset_d32_async: symbol!(library, "cuMemsetD32Async"),
+                occupancy: symbol!(library, "cuOccupancyMaxActiveBlocksPerMultiprocessor"),
                 launch_kernel: symbol!(library, "cuLaunchKernel"),
                 get_error_name: symbol!(library, "cuGetErrorName"),
                 _library: library,
@@ -432,154 +453,115 @@ fn api() -> Result<Arc<Api>> {
     .map_err(|e| anyhow::anyhow!(e))
 }
 
-/// Whether the GPU engine tries CUDA before Vulkan. It does unless the
-/// developer override `EVOLUTION_CUDA` is `0`, `false` or `off`.
-pub fn enabled() -> bool {
-    !std::env::var("EVOLUTION_CUDA").is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off"
-        )
-    })
-}
+/// Streams per submission slot. Wave w of a unit runs on stream w modulo
+/// this.
+const STREAM_LIMIT: usize = 8;
 
-/// Whether `EVOLUTION_CUDA` asks for CUDA (`1`, `true` or `on`), so tests can
-/// refuse a Vulkan fallback.
-pub fn forced() -> bool {
-    std::env::var("EVOLUTION_CUDA").is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on"
-        )
-    })
-}
-
-/// Register cap per thread: `EVOLUTION_CUDA_MAXREG`, 0 for the compiler's
-/// choice, which is the default: the v2 kernels use 222 to 255 registers up
-/// to 32 nodes, and caps of 96 to 168 measured no faster
-/// (docs/performance-log.md).
-pub fn register_cap() -> Option<u32> {
-    let cap = std::env::var("EVOLUTION_CUDA_MAXREG")
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .unwrap_or(0);
-    (cap > 0).then(|| cap.clamp(24, 255))
-}
-
-/// Threads per block (`EVOLUTION_CUDA_WG`: 32, 64 or 128), or `None` to
-/// choose per node capacity (the default). Each block holds one creature per
-/// thread, and CUDA reserves 1 KB of shared memory per block, which larger
-/// blocks share.
-pub fn workgroup_size() -> Option<u32> {
-    std::env::var("EVOLUTION_CUDA_WG")
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .filter(|v| matches!(v, 32 | 64 | 128))
-}
-
-/// Streams per submission slot (`EVOLUTION_CUDA_STREAMS`, default 16). Batch
-/// b of a unit runs on stream b modulo this; 1 runs a unit's batches one
-/// after another.
-fn stream_limit() -> usize {
-    std::env::var("EVOLUTION_CUDA_STREAMS")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(16)
-}
-
-/// Whether the three shared node arrays of a `threads`-thread block fit the
-/// 48 KB a block may declare statically.
-fn fits(capacity: usize, threads: u32) -> bool {
-    threads == 32 || shared_per_thread(capacity) * threads as usize <= 48 * 1024
-}
-
-/// Shared memory per thread in bytes: the per-lane table (bodies above 32
-/// nodes keep it in local memory).
-fn shared_per_thread(capacity: usize) -> usize {
-    if creature_kernel::cuda_table_local(capacity) {
-        0
-    } else {
-        4 * (10 * capacity - 6)
-    }
-}
-
-/// The recording kernel's source for `capacity` nodes.
-fn recording_source(
-    capacity: usize,
-    threads: u32,
+/// A kernel: recording or scoring, lanes per creature, world flags
+/// (`warp_kernel::world_flags`) and fidelity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct KernelKey {
+    record: bool,
+    class: usize,
+    flags: u32,
     fidelity: Fidelity,
-    launch_bounds: bool,
-) -> String {
-    creature_kernel::cuda_record_source(capacity, threads, fidelity, launch_bounds)
-}
-
-/// The scoring kernel's source for `capacity` nodes.
-fn scoring_source(
-    capacity: usize,
-    threads: u32,
-    fidelity: Fidelity,
-    launch_bounds: bool,
-) -> String {
-    creature_kernel::cuda_source(capacity, threads, fidelity, launch_bounds)
-}
-
-/// Resident warps per SM for `capacity`-node kernels in `threads`-thread
-/// blocks at `registers` per thread, by the occupancy rule measured in
-/// `docs/phase0-measurements.md` plus the 1 KB of shared memory CUDA reserves
-/// per block. It matches the driver's occupancy calculator for every kernel
-/// `examples/cuda_stats.rs` reports.
-fn predicted_warps(capacity: usize, threads: u32, registers: u32) -> u32 {
-    let warps_per_block = threads / 32;
-    let register_warps = 4 * (16_384 / (32 * registers.next_multiple_of(8)));
-    let shared_blocks = 102_400 / (shared_per_thread(capacity) as u32 * threads + 1024);
-    let blocks = (register_warps / warps_per_block)
-        .min(shared_blocks)
-        .min(24)
-        .min(48 / warps_per_block);
-    blocks * warps_per_block
-}
-
-/// Threads per block for `capacity`-node kernels: `requested`, halved until
-/// it fits, or else the block size with the most resident warps, and the
-/// largest of equals. At 128 registers, 128-thread blocks measured faster
-/// than 32-thread blocks at equal occupancy (docs/performance-log.md).
-fn block_size(capacity: usize, requested: Option<u32>, registers: Option<u32>) -> u32 {
-    if let Some(mut threads) = requested {
-        while !fits(capacity, threads) {
-            threads /= 2;
-        }
-        return threads;
-    }
-    // Uncapped, the v2 kernels use 222 to 255 registers up to 32 nodes.
-    let registers = registers.unwrap_or(255);
-    [128, 64, 32]
-        .into_iter()
-        .filter(|&t| fits(capacity, t))
-        .max_by_key(|&t| (predicted_warps(capacity, t, registers), t))
-        .unwrap_or(32)
-}
-
-/// What the compiler made of one kernel, for `examples/cuda_stats.rs`.
-#[derive(Clone, Debug)]
-pub struct KernelStats {
-    pub registers: i32,
-    /// Local memory per thread in bytes (stack frame and spills).
-    pub local_bytes: i32,
-    pub shared_bytes: i32,
-    /// Threads per block.
-    pub threads: u32,
-    /// Resident warps per SM by the driver's occupancy calculator.
-    pub warps_per_sm: i32,
-    /// The ptxas lines of the compiler log.
-    pub log: String,
 }
 
 struct Kernel {
     module: CuModule,
     function: CuFunction,
-    /// Threads per block (`block_size`).
-    threads: u32,
+    /// Blocks of `warp_kernel::BLOCK` threads resident per multiprocessor.
+    blocks_per_sm: u32,
+}
+
+// A module belongs to the context, not to a thread: background threads load
+// kernels for the engine, which launches them.
+unsafe impl Send for Kernel {}
+
+/// Take-up counters per wave: one per muscle-rounds bucket (`NB` in the
+/// kernel).
+const BUCKETS: usize = crate::warp_kernel::ROUNDS;
+
+/// The take-up buckets of a wave (`Takeup` in `shaders/warp_creature.cu`).
+/// Bucket `b` holds the wave's creatures with `b + 1` muscle rounds (bodies
+/// without muscles join the first) as `start[b]..end[b]`, and the warps from
+/// `warp[b]` start on it. A warp takes only from its bucket until it runs dry,
+/// so its groups run one round count, where one counter for the wave soon
+/// fills a warp with creatures from the whole wave and runs it at their
+/// largest round count.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Takeup {
+    start: [u32; BUCKETS],
+    end: [u32; BUCKETS],
+    warp: [u32; BUCKETS],
+}
+
+impl Takeup {
+    /// Buckets for the `count` creatures of a batch from `first` (`heads`
+    /// sorted by rounds, as `warp_kernel::pack` writes them) run by `warps`
+    /// warps. Each bucket with creatures gets at least one warp and the rest
+    /// in proportion to its creatures times their rounds plus one, a round
+    /// being about as long as the rest of a step. `buckets` 1 (the
+    /// developer diagnostic `EVOLUTION_WARP_BUCKETS=1`) gives one counter.
+    fn new(heads: &[[u32; 4]], first: usize, count: usize, warps: usize, buckets: usize) -> Self {
+        let bucket_of = |c: usize| {
+            let rounds = ((heads[2 * (first + c)][0] >> 16) & 255) as usize;
+            if buckets < BUCKETS {
+                0
+            } else {
+                rounds.clamp(1, BUCKETS) - 1
+            }
+        };
+        let mut counts = [0usize; BUCKETS];
+        let mut sorted = true;
+        let mut last = 0;
+        for c in 0..count {
+            let b = bucket_of(c);
+            sorted &= b >= last;
+            last = b;
+            counts[b] += 1;
+        }
+        if !sorted {
+            counts = [0; BUCKETS];
+            counts[0] = count;
+        }
+        let weight: [usize; BUCKETS] = std::array::from_fn(|b| counts[b] * (b + 2));
+        let total = weight.iter().sum::<usize>().max(1);
+        let mut shares: [usize; BUCKETS] = std::array::from_fn(|b| {
+            if counts[b] == 0 {
+                0
+            } else {
+                (warps * weight[b] / total).max(1)
+            }
+        });
+        while shares.iter().sum::<usize>() > warps {
+            let Some(b) = (0..BUCKETS)
+                .filter(|&b| shares[b] > 1)
+                .max_by_key(|&b| shares[b])
+            else {
+                break;
+            };
+            shares[b] -= 1;
+        }
+        let spare = warps.saturating_sub(shares.iter().sum());
+        let heaviest = (0..BUCKETS).max_by_key(|&b| weight[b]).unwrap_or(0);
+        shares[heaviest] += spare;
+        let mut take = Takeup {
+            start: [0; BUCKETS],
+            end: [0; BUCKETS],
+            warp: [0; BUCKETS],
+        };
+        let (mut at, mut warp) = (0usize, 0usize);
+        for b in 0..BUCKETS {
+            take.start[b] = at as u32;
+            at += counts[b];
+            take.end[b] = at as u32;
+            take.warp[b] = warp as u32;
+            warp += shares[b];
+        }
+        take
+    }
 }
 
 struct DeviceBuf {
@@ -592,19 +574,173 @@ struct HostBuf {
     size: usize,
 }
 
-struct GroupRes {
-    nodes: DeviceBuf,
-    muscles: DeviceBuf,
-    bones: DeviceBuf,
-    results: DeviceBuf,
-    info: DeviceBuf,
-    tiles: DeviceBuf,
+thread_local! {
+    /// The driver, on a thread where an engine's context is current, so
+    /// `HostVec` can register the memory it maps.
+    static REGISTER: std::cell::RefCell<Option<Arc<Api>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Per-submission resources, as in `VkEngine`. Each batch of a unit runs on
-/// its own stream, so its step ranges follow one another while other batches
-/// fill the SMs beside it; the slot's main stream uploads, joins the batch
-/// streams, and reads the results back.
+/// Host memory the GPU copies from directly, with no staging copy: it is
+/// mapped once, registered with the driver once (`cuMemHostRegister`, so it
+/// stays page-locked and a copy from it runs asynchronously on the copy
+/// engine), and reused from one unit to the next. It grows with headroom
+/// and never shrinks. Registration needs an engine's thread, where its
+/// context is current; small buffers and memory mapped on other threads
+/// (tests) stay ordinary pages, which the driver copies through its own
+/// staging.
+pub struct HostVec<T: bytemuck::Pod> {
+    ptr: *mut T,
+    len: usize,
+    /// Elements that fit in the mapping.
+    capacity: usize,
+    /// Mapped bytes; zero when nothing is mapped.
+    bytes: usize,
+    registered: bool,
+}
+
+// A HostVec owns its memory like a Vec.
+unsafe impl<T: bytemuck::Pod + Send> Send for HostVec<T> {}
+unsafe impl<T: bytemuck::Pod + Sync> Sync for HostVec<T> {}
+
+impl<T: bytemuck::Pod> Default for HostVec<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: bytemuck::Pod> HostVec<T> {
+    /// Below this many bytes a buffer is not registered: the driver's own
+    /// staging copies it about as fast.
+    const REGISTER_FROM: usize = 1 << 16;
+
+    pub const fn new() -> Self {
+        Self {
+            ptr: std::ptr::NonNull::dangling().as_ptr(),
+            len: 0,
+            capacity: 0,
+            bytes: 0,
+            registered: false,
+        }
+    }
+
+    /// Makes this `len` copies of `value`, in the memory it has when that is
+    /// large enough.
+    pub fn reset(&mut self, len: usize, value: T) {
+        if len > self.capacity {
+            self.grow(len);
+        }
+        self.len = len;
+        self.fill(value);
+    }
+
+    /// Whether the driver copies from this memory directly.
+    pub fn registered(&self) -> bool {
+        self.registered
+    }
+
+    /// Bytes of memory held.
+    pub fn held_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn grow(&mut self, len: usize) {
+        let bytes = crate::engine::padded_size((len * std::mem::size_of::<T>()) as u64) as usize;
+        let bytes = bytes.next_multiple_of(4096);
+        let old = std::mem::replace(&mut self.bytes, 0);
+        // SAFETY: an anonymous private mapping, owned by this HostVec until
+        // `release`. A mapping already held is unregistered and extended in
+        // place or moved with the pages it has (`mremap`), so memory already
+        // faulted in stays faulted in; only the new part is fresh.
+        let ptr = unsafe {
+            if old == 0 {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    bytes,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            } else {
+                if self.registered
+                    && let Ok(api) = api()
+                {
+                    (api.cu.mem_host_unregister)(self.ptr as *mut c_void);
+                }
+                self.registered = false;
+                libc::mremap(self.ptr as *mut c_void, old, bytes, libc::MREMAP_MAYMOVE)
+            }
+        };
+        if ptr == libc::MAP_FAILED {
+            std::alloc::handle_alloc_error(
+                std::alloc::Layout::from_size_align(bytes, 4096).expect("a page layout"),
+            );
+        }
+        self.registered = bytes >= Self::REGISTER_FROM
+            && REGISTER.with(|register| {
+                register.borrow().as_ref().is_some_and(|api| unsafe {
+                    (api.cu.mem_host_register)(ptr, bytes, 0) == CUDA_SUCCESS
+                })
+            });
+        self.ptr = ptr as *mut T;
+        self.bytes = bytes;
+        self.capacity = bytes / std::mem::size_of::<T>().max(1);
+    }
+
+    fn release(&mut self) {
+        if self.bytes == 0 {
+            return;
+        }
+        // SAFETY: the mapping and its registration are this HostVec's; no
+        // copy reads it any more (the engine keeps a unit's buffers until
+        // its submission finished).
+        unsafe {
+            if self.registered
+                && let Ok(api) = api()
+            {
+                (api.cu.mem_host_unregister)(self.ptr as *mut c_void);
+            }
+            libc::munmap(self.ptr as *mut c_void, self.bytes);
+        }
+        // Field by field: assigning a whole HostVec would drop this one again.
+        self.ptr = std::ptr::NonNull::dangling().as_ptr();
+        self.len = 0;
+        self.capacity = 0;
+        self.bytes = 0;
+        self.registered = false;
+    }
+}
+
+impl<T: bytemuck::Pod> std::ops::Deref for HostVec<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        // SAFETY: `len` elements are initialized (`reset`).
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl<T: bytemuck::Pod> std::ops::DerefMut for HostVec<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        // SAFETY: as in `deref`, and `&mut self` is unique.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl<T: bytemuck::Pod> Drop for HostVec<T> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// One batch's buffers: lane records, muscles, muscle-end lists, heads and
+/// results.
+struct GroupRes {
+    bufs: [DeviceBuf; 5],
+}
+
+/// Per-submission resources. Each wave runs on one of the
+/// slot's streams; the main stream uploads, joins the wave streams and reads
+/// the results back.
 struct Slot {
     main: CuStream,
     streams: Vec<CuStream>,
@@ -613,7 +749,8 @@ struct Slot {
     stop: CuEvent,
     done: CuEvent,
     groups: Vec<Option<GroupRes>>,
-    staging: Option<HostBuf>,
+    /// One creature counter per wave and take-up bucket.
+    counters: Option<DeviceBuf>,
     readback: Option<HostBuf>,
     /// Recorded replay frames; only the replay slot has one.
     frames: Option<DeviceBuf>,
@@ -622,11 +759,12 @@ struct Slot {
 
 struct Pending {
     ticket: u64,
-    layout: Vec<(Vec<usize>, Vec<usize>)>,
+    /// The unit's batches: their buffers are copied from until the
+    /// submission finishes, then go back to the caller for reuse.
+    batches: Vec<LaneBatch>,
     result_count: usize,
-    state: Option<Vec<(usize, usize)>>,
     /// Recorded frames: their byte offset in the readback buffer and their
-    /// count of node positions.
+    /// count of float pairs.
     frames: Option<(usize, usize)>,
 }
 
@@ -637,19 +775,20 @@ pub struct CudaEngine {
     pub name: String,
     arch: String,
     multiprocessors: i32,
-    /// Scoring kernels by fidelity and node capacity.
-    kernels: HashMap<(Fidelity, usize), Kernel>,
-    /// Recording kernels (`creature_kernel::cuda_record_source`) by fidelity
-    /// and node capacity.
-    recording: HashMap<(Fidelity, usize), Kernel>,
+    kernels: HashMap<KernelKey, Kernel>,
     /// Kernels compiling on background threads.
     prefetch: Arc<Prefetch>,
-    /// Submission slots. The last one is kept for replays, with streams of
-    /// its own, so a replay never waits behind evaluation.
+    /// Worlds (effect levels and flags) whose kernels have been queued for
+    /// every class.
+    worlds: HashSet<(Vec<u8>, u32)>,
+    /// Submission slots: `standard` slots for standard trials, then one for
+    /// confirmation trials and last one for replays. The last two have
+    /// streams of the highest priority, so a confirmation or a replay never
+    /// waits behind queued standard work for the multiprocessors.
     slots: Vec<Slot>,
+    /// Slots of standard trials.
+    standard: usize,
     next_ticket: u64,
-    workgroup: Option<u32>,
-    max_registers: Option<u32>,
     pub max_capacity: usize,
     pub allocated_bytes: u64,
     pub last_gpu_seconds: f64,
@@ -659,35 +798,25 @@ pub struct CudaEngine {
 // the engine; it makes the context current on that thread when it opens.
 unsafe impl Send for CudaEngine {}
 
-/// Rounds a buffer size up the way `VkEngine` does, so buffers are reused
+/// Rounds a buffer size up (`engine::padded_size`), so buffers are reused
 /// across units of slightly different sizes.
 fn buffer_size(bytes: usize) -> usize {
-    crate::vk_engine::padded_size(bytes as u64) as usize
+    crate::engine::padded_size(bytes as u64) as usize
 }
-
-/// A kernel to compile: recording or scoring, fidelity, node capacity.
-type KernelKey = (bool, Fidelity, usize);
 
 /// NVRTC's source for one kernel, compiled to a cubin. It needs no CUDA
 /// context, so any thread may run it. Compiled kernels are kept on disk
-/// (`kernel_cache_dir`), keyed by a hash of the source, the options, the
-/// NVRTC version and the GPU's architecture, so a later start loads them in
-/// milliseconds. With `use_cache` false the compile ignores an entry (it
-/// may be damaged) and writes a fresh one.
+/// (`kernel_cache_dir`), keyed by a hash of the source, the options and the
+/// NVRTC version, so a later start loads them in milliseconds. With
+/// `use_cache` false the compile ignores an entry (it may be damaged) and
+/// writes a fresh one.
 fn compile_kernel(
     api: &Api,
     options: &[String],
-    (record, fidelity, capacity): KernelKey,
-    threads: u32,
-    launch_bounds: bool,
+    key: KernelKey,
     use_cache: bool,
 ) -> Result<Vec<u8>> {
-    let task = crate::loading::start(kernel_label("CUDA", record, fidelity, capacity));
-    let source = if record {
-        recording_source(capacity, threads, fidelity, launch_bounds)
-    } else {
-        scoring_source(capacity, threads, fidelity, launch_bounds)
-    };
+    let source = crate::warp_kernel::cuda_source(key.class, key.flags, key.fidelity, key.record);
     let path = kernel_cache_dir().map(|dir| {
         use std::hash::{Hash, Hasher};
         let mut halves = [0u64; 2];
@@ -699,17 +828,29 @@ fn compile_kernel(
         dir.join(format!("{:016x}{:016x}.cubin", halves[0], halves[1]))
     });
     if use_cache
-        && let Some(bytes) = path.as_ref().and_then(|p| std::fs::read(p).ok())
+        && let Some(path) = &path
+        && let Ok(bytes) = std::fs::read(path)
         && !bytes.is_empty()
     {
-        task.finish(true);
+        // A kernel in use stays young, so eviction by age (`evict_cache`)
+        // keeps it.
+        if let Ok(file) = std::fs::File::open(path) {
+            let _ = file.set_modified(std::time::SystemTime::now());
+        }
         return Ok(bytes);
     }
-    let cubin = api
+    let started = Instant::now();
+    let (cubin, log) = api
         .nvrtc
         .compile(&source, options)
-        .with_context(|| format!("{capacity}-node CUDA kernel"))
-        .map(|(cubin, _)| cubin)?;
+        .with_context(|| format!("{}-lane CUDA kernel", key.class))?;
+    if std::env::var_os("EVOLUTION_CUDA_VERBOSE").is_some() {
+        eprintln!(
+            "CUDA: compiled {key:?} in {:.1} s\n{}",
+            started.elapsed().as_secs_f64(),
+            log.trim()
+        );
+    }
     if let Some(path) = path {
         // Through a temporary file and a rename, so a reader never sees a
         // half-written kernel. A failed write only costs the next start.
@@ -723,22 +864,84 @@ fn compile_kernel(
             let _ = std::fs::remove_file(&temporary);
         }
     }
-    task.finish(false);
     Ok(cubin)
 }
 
-/// The loading screen's name for a kernel.
-pub(crate) fn kernel_label(
-    backend: &str,
-    record: bool,
-    fidelity: Fidelity,
-    capacity: usize,
-) -> String {
-    format!(
-        "{backend} {} kernel, bodies up to {capacity} nodes, {} Hz",
-        if record { "replay" } else { "scoring" },
-        fidelity.rate
-    )
+/// Compiles the lane-group kernel for `class` lanes and `cfg`'s world on
+/// this machine's NVRTC and returns ptxas's report (registers, spills,
+/// stack), for developers measuring register use. Needs no GPU time.
+pub fn compile_report(class: usize, cfg: &Config, record: bool, arch: &str) -> Result<String> {
+    let api = api()?;
+    let options = vec![
+        format!("--gpu-architecture={arch}"),
+        "--std=c++17".into(),
+        "--prec-div=false".into(),
+        "--prec-sqrt=false".into(),
+        "--fmad=true".into(),
+        "--extra-device-vectorization".into(),
+        "--ptxas-options=-v".into(),
+    ];
+    let mut options = options;
+    if let Ok(extra) = std::env::var("EVOLUTION_NVRTC_EXTRA") {
+        options.extend(extra.split_whitespace().map(String::from));
+    }
+    let source = crate::warp_kernel::cuda_source(
+        class,
+        crate::warp_kernel::world_flags(cfg),
+        cfg.fidelity(),
+        record,
+    );
+    let (_, log) = api.nvrtc.compile(&source, &options)?;
+    Ok(log
+        .lines()
+        .filter(|l| {
+            std::env::var_os("EVOLUTION_NVRTC_LOG").is_some()
+                || l.contains("registers")
+                || l.contains("spill")
+                || l.contains("stack")
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// Compiled kernels kept on disk, about 300 to 900 KB each.
+const CACHE_FILES: usize = 200;
+
+/// Deletes the oldest compiled kernels beyond `CACHE_FILES`, and temporary
+/// files a crashed compile left. Every source edit makes new kernels for
+/// every world, and nothing else ever removes the old ones. A kernel another
+/// process still wants is compiled again.
+fn evict_cache(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut kernels = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(modified) = entry.metadata().ok().and_then(|m| m.modified().ok()) else {
+            continue;
+        };
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("cubin") => kernels.push((modified, path)),
+            Some(e)
+                if e.starts_with("tmp")
+                    && now
+                        .duration_since(modified)
+                        .is_ok_and(|age| age > Duration::from_secs(3600)) =>
+            {
+                let _ = std::fs::remove_file(&path);
+            }
+            _ => {}
+        }
+    }
+    if kernels.len() > CACHE_FILES {
+        kernels.sort();
+        let extra = kernels.len() - CACHE_FILES;
+        for (_, path) in kernels.drain(..extra) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// Where compiled kernels are kept: `EVOLUTION_KERNEL_CACHE`, else the
@@ -754,116 +957,349 @@ fn kernel_cache_dir() -> Option<PathBuf> {
     Some(base.join("evolution-simulator").join("cuda"))
 }
 
-/// Kernels that background threads compile, in the order they are wanted.
-/// Compiling from a cold compiler cache takes seconds for a 3 to 8 node
-/// kernel, 25 s for 16 nodes, and much more above that.
-#[derive(Default)]
+/// Loads a cubin into `context` (the calling thread makes it current).
+fn load_kernel(api: &Api, context: CuContext, cubin: &[u8], key: KernelKey) -> Result<Kernel> {
+    let cu = &api.cu;
+    unsafe {
+        cu.check((cu.ctx_set_current)(context), "cuCtxSetCurrent")?;
+        let mut module = std::ptr::null_mut();
+        let loading = Instant::now();
+        cu.check(
+            (cu.module_load_data)(&mut module, cubin.as_ptr() as *const c_void),
+            "cuModuleLoadData",
+        )?;
+        let load_seconds = loading.elapsed().as_secs_f64();
+        let mut function = std::ptr::null_mut();
+        if let Err(error) = cu.check(
+            (cu.module_get_function)(&mut function, module, c"advance".as_ptr()),
+            "cuModuleGetFunction",
+        ) {
+            (cu.module_unload)(module);
+            return Err(error);
+        }
+        let mut blocks = 0;
+        cu.check(
+            (cu.occupancy)(&mut blocks, function, crate::warp_kernel::BLOCK as c_int, 0),
+            "cuOccupancyMaxActiveBlocksPerMultiprocessor",
+        )?;
+        if std::env::var_os("EVOLUTION_CUDA_VERBOSE").is_some() {
+            // CU_FUNC_ATTRIBUTE_NUM_REGS, _SHARED_SIZE_BYTES, _LOCAL_SIZE_BYTES
+            let attribute = |which: c_int| {
+                let mut value = 0;
+                (cu.func_get_attribute)(&mut value, which, function);
+                value
+            };
+            eprintln!(
+                "CUDA: {}-lane {} kernel: {} registers, {} B shared, {} B local per thread, {} blocks of {} threads per SM, module loaded in {:.3} s",
+                key.class,
+                if key.record { "recording" } else { "scoring" },
+                attribute(4),
+                attribute(1),
+                attribute(3),
+                blocks,
+                crate::warp_kernel::BLOCK,
+                load_seconds
+            );
+        }
+        Ok(Kernel {
+            module,
+            function,
+            blocks_per_sm: blocks.max(1) as u32,
+        })
+    }
+}
+
+/// A kernel from the disk cache or NVRTC, loaded into `context`. A damaged
+/// cache entry fails to load: the kernel is compiled again.
+fn compile_and_load(
+    api: &Api,
+    context: CuContext,
+    options: &[String],
+    key: KernelKey,
+) -> Result<Kernel> {
+    let cubin = compile_kernel(api, options, key, true)?;
+    match load_kernel(api, context, &cubin, key) {
+        Ok(kernel) => Ok(kernel),
+        Err(_) => load_kernel(
+            api,
+            context,
+            &compile_kernel(api, options, key, false)?,
+            key,
+        ),
+    }
+}
+
+/// Counts the time an engine thread spends getting a kernel.
+struct KernelWait(Instant);
+
+impl Drop for KernelWait {
+    fn drop(&mut self) {
+        KERNEL_WAIT_NANOS.fetch_add(self.0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        KERNEL_WAITERS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Kernels that background threads compile, in the order they are wanted. The
+/// kernels of the world the engine runs ("wanted") compile on up to three
+/// threads at once, and a thread loads each into the context after it
+/// compiles, because `cuModuleLoadData` waits for the kernels running on the
+/// GPU: on the engine thread it would hold up submissions for up to a second.
+/// The kernels of the worlds one effect level away ("idle") only compile, on
+/// one thread at nice 19, into the disk cache, so the next button press loads
+/// them in milliseconds. A load by a background thread holds the driver
+/// while it waits for the GPU, which blocks every call of the engine thread
+/// with it, so an idle load was a drain of the whole pipeline: with the
+/// neighbours of a world not yet in the cache (a new build, or a cache that
+/// holds fewer kernels than the neighbours), 3 to 9 of them in every 10 s for
+/// minutes, 4 to 8% of the creatures per second.
 struct Prefetch {
+    api: Arc<Api>,
+    /// The engine's context (an address, so the struct is `Send`).
+    context: usize,
+    options: Vec<String>,
     state: Mutex<PrefetchState>,
     ready: Condvar,
 }
 
 #[derive(Default)]
 struct PrefetchState {
-    queue: VecDeque<(KernelKey, u32)>,
-    running: HashSet<KernelKey>,
-    done: HashMap<KernelKey, std::result::Result<Vec<u8>, String>>,
-    /// Background threads alive.
-    workers: usize,
+    wanted: VecDeque<KernelKey>,
+    idle: VecDeque<KernelKey>,
+    /// Kernels a thread is on, with the number of wanted and idle threads on
+    /// each.
+    running: HashMap<KernelKey, [usize; 2]>,
+    done: HashMap<KernelKey, std::result::Result<Kernel, String>>,
+    /// The order wanted kernels finished in, oldest first (entries of
+    /// kernels already taken stay until they reach the front).
+    finished: VecDeque<KernelKey>,
+    /// Background threads alive: wanted ones, idle ones.
+    workers: [usize; 2],
     closed: bool,
 }
 
+/// Most wanted threads at once: the three lane classes of a world.
+const WANTED_THREADS: usize = 3;
+/// Most loaded kernels waiting to be used. Each module holds device memory,
+/// so the oldest go when more finish.
+const READY_KERNELS: usize = 48;
+
+/// Lowers the calling thread's priority to the least (Linux: per thread).
+fn nice_idle() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        libc::setpriority(libc::PRIO_PROCESS, tid, 19);
+    }
+}
+
 impl Prefetch {
-    /// Compiles queued kernels until the queue is empty or the engine closes.
-    fn work(&self, api: &Api, options: &[String], launch_bounds: bool) {
+    fn new(api: Arc<Api>, context: CuContext, options: Vec<String>) -> Arc<Self> {
+        Arc::new(Self {
+            api,
+            context: context as usize,
+            options,
+            state: Mutex::default(),
+            ready: Condvar::new(),
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PrefetchState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Compiles queued kernels, and for the wanted ones loads them, until the
+    /// queue is empty or the engine closes. `idle` threads take the idle
+    /// queue, the others the wanted queue.
+    fn work(&self, idle: bool) {
+        let kind = usize::from(idle);
         loop {
-            let (key, threads) = {
-                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if state.closed {
-                    state.workers -= 1;
-                    self.ready.notify_all();
-                    return;
-                }
-                let Some(job) = state.queue.pop_front() else {
-                    state.workers -= 1;
+            let key = {
+                let mut state = self.lock();
+                let next = if state.closed {
+                    None
+                } else if idle {
+                    state.idle.pop_front()
+                } else {
+                    state.wanted.pop_front()
+                };
+                let Some(key) = next else {
+                    state.workers[kind] -= 1;
                     self.ready.notify_all();
                     return;
                 };
-                state.running.insert(job.0);
-                job
+                state.running.entry(key).or_default()[kind] += 1;
+                key
             };
-            let result = compile_kernel(api, options, key, threads, launch_bounds, true)
+            if idle {
+                // Compiled into the disk cache and not loaded (see `Prefetch`).
+                let _ = compile_kernel(&self.api, &self.options, key, true);
+                let mut state = self.lock();
+                if let Some(counts) = state.running.get_mut(&key) {
+                    counts[kind] -= 1;
+                    if counts == &[0, 0] {
+                        state.running.remove(&key);
+                    }
+                }
+                self.ready.notify_all();
+                continue;
+            }
+            let result = compile_and_load(&self.api, self.context as CuContext, &self.options, key)
                 .map_err(|e| format!("{e:#}"));
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.running.remove(&key);
-            state.done.insert(key, result);
+            let mut state = self.lock();
+            if let Some(counts) = state.running.get_mut(&key) {
+                counts[kind] -= 1;
+                if counts == &[0, 0] {
+                    state.running.remove(&key);
+                }
+            }
+            // A second thread on one kernel (a neighbour that became wanted)
+            // leaves a module nobody needs. Unloading waits for the kernels
+            // running on the GPU, so it happens outside the lock.
+            let mut unused = Vec::new();
+            if let Some(Ok(extra)) = state.done.insert(key, result) {
+                unused.push(extra);
+            }
+            state.finished.push_back(key);
+            while state.finished.len() > READY_KERNELS {
+                let Some(oldest) = state.finished.pop_front() else {
+                    break;
+                };
+                if let Some(Ok(old)) = state.done.remove(&oldest) {
+                    unused.push(old);
+                }
+            }
             self.ready.notify_all();
+            drop(state);
+            for kernel in &unused {
+                self.unload(kernel);
+            }
         }
     }
 
-    /// The compiled kernel, waiting if a thread is on it. None when nobody
-    /// is: the caller compiles it (a queued job is taken off the queue).
-    fn take(&self, key: KernelKey) -> Option<Result<Vec<u8>>> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+    fn unload(&self, kernel: &Kernel) {
+        let cu = &self.api.cu;
+        unsafe {
+            (cu.ctx_set_current)(self.context as CuContext);
+            (cu.module_unload)(kernel.module);
+        }
+    }
+
+    /// The kernel, waiting if a thread is on it. None when nobody is: the
+    /// caller compiles it (a queued job is taken off its queue).
+    fn take(&self, key: KernelKey) -> Option<Result<Kernel>> {
+        let mut state = self.lock();
         loop {
             if let Some(result) = state.done.remove(&key) {
                 return Some(result.map_err(|e| anyhow::anyhow!(e)));
             }
-            if state.running.contains(&key) {
+            if state.running.contains_key(&key) {
                 state = self.ready.wait(state).unwrap_or_else(|e| e.into_inner());
                 continue;
             }
-            state.queue.retain(|(k, _)| *k != key);
+            state.wanted.retain(|k| *k != key);
+            state.idle.retain(|k| *k != key);
             return None;
         }
     }
 
-    /// Queues `jobs` not already queued, running or done, and starts
-    /// threads (at most three at a time) to compile them.
-    fn enqueue(
-        self: &Arc<Self>,
-        jobs: Vec<(KernelKey, u32)>,
-        api: &Arc<Api>,
-        options: &Arc<Vec<String>>,
-        launch_bounds: bool,
-    ) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+    /// The loaded kernels among `keys`, without waiting for any.
+    fn take_ready(&self, keys: &[KernelKey]) -> Vec<(KernelKey, Kernel)> {
+        let mut state = self.lock();
+        keys.iter()
+            .filter_map(|key| match state.done.remove(key) {
+                Some(Ok(kernel)) => Some((*key, kernel)),
+                Some(Err(error)) => {
+                    // Left for `take`, which reports it.
+                    state.done.insert(*key, Err(error));
+                    None
+                }
+                None => None,
+            })
+            .collect()
+    }
+
+    /// Queues `wanted` and `idle` ahead of everything queued in their queues
+    /// (in their own order), and starts threads. A kernel already queued, running or done stays where
+    /// it is, except that an idle one now wanted moves up (a thread at
+    /// nice 19 may be slow, so a wanted thread compiles it too).
+    fn enqueue(self: &Arc<Self>, wanted: Vec<KernelKey>, idle: Vec<KernelKey>) {
+        let mut state = self.lock();
         if state.closed {
             return;
         }
-        for (key, threads) in jobs {
-            let known = state.done.contains_key(&key)
-                || state.running.contains(&key)
-                || state.queue.iter().any(|(k, _)| *k == key);
-            if !known {
-                let (record, fidelity, capacity) = key;
-                crate::loading::queued(&kernel_label("CUDA", record, fidelity, capacity));
-                state.queue.push_back((key, threads));
-            }
+        let fresh: Vec<KernelKey> = wanted
+            .into_iter()
+            .filter(|key| {
+                if state.done.contains_key(key)
+                    || state.wanted.contains(key)
+                    || state.running.get(key).is_some_and(|counts| counts[0] > 0)
+                {
+                    return false;
+                }
+                state.idle.retain(|k| k != key);
+                true
+            })
+            .collect();
+        for key in fresh.into_iter().rev() {
+            state.wanted.push_front(key);
         }
-        while state.workers < 3 && state.workers < state.queue.len() + state.running.len() {
-            let (prefetch, api, options) = (self.clone(), api.clone(), options.clone());
-            let spawned = std::thread::Builder::new()
-                .name("cuda-compile".into())
-                .spawn(move || prefetch.work(&api, &options, launch_bounds));
-            if spawned.is_err() {
-                break;
+        // The newest world's neighbours go first: the player's next press is
+        // one of them, not one of an earlier world's.
+        let fresh: Vec<KernelKey> = idle
+            .into_iter()
+            .filter(|key| {
+                !(state.done.contains_key(key)
+                    || state.running.contains_key(key)
+                    || state.wanted.contains(key))
+            })
+            .collect();
+        state.idle.retain(|key| !fresh.contains(key));
+        for key in fresh.into_iter().rev() {
+            state.idle.push_front(key);
+        }
+        for (kind, queued) in [state.wanted.len(), state.idle.len()]
+            .into_iter()
+            .enumerate()
+        {
+            let most = if kind == 0 { WANTED_THREADS } else { 1 };
+            while state.workers[kind] < most && state.workers[kind] < queued {
+                let (prefetch, idle) = (self.clone(), kind == 1);
+                let spawned = std::thread::Builder::new()
+                    .name(
+                        if idle {
+                            "cuda-compile-idle"
+                        } else {
+                            "cuda-compile"
+                        }
+                        .into(),
+                    )
+                    .spawn(move || {
+                        // Compile beside the pool, not on the engine thread's CPU.
+                        crate::threads::pin_pool();
+                        if idle {
+                            nice_idle();
+                        }
+                        prefetch.work(idle)
+                    });
+                if spawned.is_err() {
+                    break;
+                }
+                state.workers[kind] += 1;
             }
-            state.workers += 1;
         }
     }
 
     /// Stops the background threads once their current kernels finish, and
     /// waits for them, at most `patience`: a compiler thread still inside
-    /// NVRTC when the process exits crashes it.
-    fn close(&self, patience: Duration) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+    /// NVRTC when the process exits crashes it. Returns the kernels that
+    /// were loaded and not used, for the caller to unload.
+    fn close(&self, patience: Duration) -> Vec<Kernel> {
+        let mut state = self.lock();
         state.closed = true;
-        for ((record, fidelity, capacity), _) in state.queue.drain(..) {
-            crate::loading::cancel(&kernel_label("CUDA", record, fidelity, capacity));
-        }
+        state.wanted.clear();
+        state.idle.clear();
         let deadline = Instant::now() + patience;
-        while state.workers > 0 {
+        while state.workers.iter().sum::<usize>() > 0 {
             let Some(left) = deadline.checked_duration_since(Instant::now()) else {
                 break;
             };
@@ -873,28 +1309,37 @@ impl Prefetch {
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
+        state.done.drain().filter_map(|(_, r)| r.ok()).collect()
     }
+}
+
+/// NVRTC options for a device of architecture `arch`.
+fn nvrtc_options(arch: &str) -> Vec<String> {
+    let mut options = vec![
+        format!("--gpu-architecture={arch}"),
+        "--std=c++17".into(),
+        "--prec-div=false".into(),
+        "--prec-sqrt=false".into(),
+        "--fmad=true".into(),
+        "--extra-device-vectorization".into(),
+        "--ptxas-options=-v".into(),
+    ];
+    // A developer's extra options, such as -lineinfo for a profiler.
+    if let Ok(extra) = std::env::var("EVOLUTION_NVRTC_EXTRA") {
+        options.extend(extra.split_whitespace().map(String::from));
+    }
+    options
 }
 
 impl CudaEngine {
     /// Opens the first CUDA device whose name contains `name`
-    /// (case-insensitive) and compiles the standard kernels for bodies up to
-    /// `max_capacity` nodes.
+    /// (case-insensitive) and starts compiling the kernels of the default
+    /// world. Bodies above `warp_kernel::MAX_NODES` nodes stay elsewhere.
     pub fn new(name: &str, max_capacity: usize) -> Result<Self> {
-        Self::open(name, max_capacity, register_cap(), true)
+        Self::open(name, max_capacity.min(crate::warp_kernel::MAX_NODES))
     }
 
-    /// Opens the device without compiling kernels, for statistics.
-    pub fn open_for_stats(name: &str) -> Result<Self> {
-        Self::open(name, 64, None, false)
-    }
-
-    fn open(
-        name: &str,
-        max_capacity: usize,
-        max_registers: Option<u32>,
-        build: bool,
-    ) -> Result<Self> {
+    fn open(name: &str, max_capacity: usize) -> Result<Self> {
         let api = api()?;
         let cu = &api.cu;
         unsafe {
@@ -943,7 +1388,9 @@ impl CudaEngine {
                 (cu.primary_ctx_release)(device);
                 return Err(error);
             }
-            let workgroup = workgroup_size();
+            // Host buffers mapped on this thread register with the context.
+            REGISTER.with(|register| *register.borrow_mut() = Some(api.clone()));
+            let options = nvrtc_options(&arch);
             let mut engine = Self {
                 name: String::new(),
                 api: api.clone(),
@@ -952,40 +1399,42 @@ impl CudaEngine {
                 arch,
                 multiprocessors,
                 kernels: HashMap::new(),
-                recording: HashMap::new(),
-                prefetch: Arc::new(Prefetch::default()),
+                prefetch: Prefetch::new(api.clone(), context, options),
+                worlds: HashSet::new(),
                 slots: Vec::new(),
                 next_ticket: 0,
-                workgroup,
-                max_registers,
                 max_capacity,
                 allocated_bytes: 0,
                 last_gpu_seconds: 0.0,
+                standard: crate::engine::gpu_slots() as usize,
             };
-            let threads = workgroup.map_or_else(|| "auto".into(), |n| n.to_string());
-            engine.name = match max_registers {
-                Some(n) => format!("{device_name} (CUDA, {n} registers, blocks {threads})"),
-                None => format!("{device_name} (CUDA, blocks {threads})"),
-            };
-            // Evaluation slots plus one for replays.
-            for _ in 0..crate::vk_engine::gpu_slots() + 1 {
-                let slot = engine.create_slot()?;
+            engine.name = format!("{device_name} (CUDA)");
+            // Standard slots, one for confirmation trials and one for replays.
+            for index in 0..engine.standard + 2 {
+                let slot = engine.create_slot(index >= engine.standard)?;
                 engine.slots.push(slot);
             }
-            if build {
-                engine.start_prefetch();
-            }
+            static EVICT: std::sync::Once = std::sync::Once::new();
+            EVICT.call_once(|| {
+                if let Some(dir) = kernel_cache_dir() {
+                    evict_cache(&dir);
+                }
+            });
+            engine.prefetch_world(&Config::default());
             Ok(engine)
         }
     }
 
-    fn create_slot(&self) -> Result<Slot> {
+    /// A slot's streams. The replay slot's streams have the highest
+    /// priority, so a recording gets the GPU's blocks ahead of queued scoring
+    /// work (priorities out of range are clamped to the greatest one).
+    fn create_slot(&self, replay: bool) -> Result<Slot> {
         let cu = &self.api.cu;
         unsafe {
             let mut main = std::ptr::null_mut();
             cu.check(
-                (cu.stream_create)(&mut main, CU_STREAM_NON_BLOCKING),
-                "cuStreamCreate",
+                (cu.stream_create)(&mut main, CU_STREAM_NON_BLOCKING, stream_priority(replay)),
+                "cuStreamCreateWithPriority",
             )?;
             let event = |flags| -> Result<CuEvent> {
                 let mut event = std::ptr::null_mut();
@@ -1000,7 +1449,7 @@ impl CudaEngine {
                 stop: event(0)?,
                 done: event(CU_EVENT_DISABLE_TIMING)?,
                 groups: Vec::new(),
-                staging: None,
+                counters: None,
                 readback: None,
                 frames: None,
                 pending: None,
@@ -1008,240 +1457,121 @@ impl CudaEngine {
         }
     }
 
-    /// NVRTC options for this device and register cap.
-    fn options(&self, max_registers: Option<u32>) -> Vec<String> {
-        let mut options = vec![
-            format!("--gpu-architecture={}", self.arch),
-            "--std=c++17".into(),
-            // Division and square roots as the Vulkan driver compiles WGSL:
-            // approximate, not IEEE rounded.
-            "--prec-div=false".into(),
-            "--prec-sqrt=false".into(),
-            "--fmad=true".into(),
-            "--ptxas-options=-v".into(),
-        ];
-        if let Some(n) = max_registers {
-            options.push(format!("--maxrregcount={n}"));
+    /// NVRTC options for this device.
+    fn options(&self) -> Vec<String> {
+        nvrtc_options(&self.arch)
+    }
+
+    /// The kernel for `key`, compiled and loaded on this thread.
+    fn load_here(&self, key: KernelKey) -> Result<Kernel> {
+        compile_and_load(&self.api, self.context, &self.options(), key)
+    }
+
+    /// Queues the kernels of `cfg`'s world on the background compiler, every
+    /// lane class: scoring at the standard physics first (the engine waits
+    /// for these), then the confirmation trials' fine physics, then
+    /// recordings. After them, at idle priority, the same for every world
+    /// one effect level away, compiled into the disk cache so the next
+    /// button press loads its kernels in milliseconds: all the scoring
+    /// kernels first, then fine, then recordings.
+    fn prefetch_world(&mut self, cfg: &Config) {
+        let flags = crate::warp_kernel::world_flags(cfg);
+        let mut fidelities = vec![Fidelity::standard(), Fidelity::fine()];
+        if !fidelities.contains(&cfg.fidelity()) {
+            fidelities.push(cfg.fidelity());
         }
-        if let Ok(extra) = std::env::var("EVOLUTION_CUDA_FLAGS") {
-            options.extend(extra.split_whitespace().map(str::to_owned));
-        }
-        options
-    }
-
-    /// Compiles `source` in NVRTC (no context needed).
-    fn compile(api: &Api, source: &str, options: &[String]) -> Result<(Vec<u8>, String)> {
-        api.nvrtc.compile(source, options)
-    }
-
-    /// Loads a cubin, built for `threads`-thread blocks, into this engine's
-    /// context.
-    fn load(&self, cubin: &[u8], threads: u32) -> Result<Kernel> {
-        let cu = &self.api.cu;
-        unsafe {
-            cu.check((cu.ctx_set_current)(self.context), "cuCtxSetCurrent")?;
-            let mut module = std::ptr::null_mut();
-            cu.check(
-                (cu.module_load_data)(&mut module, cubin.as_ptr() as *const c_void),
-                "cuModuleLoadData",
-            )?;
-            let mut function = std::ptr::null_mut();
-            if let Err(error) = cu.check(
-                (cu.module_get_function)(&mut function, module, c"advance".as_ptr()),
-                "cuModuleGetFunction",
-            ) {
-                (cu.module_unload)(module);
-                return Err(error);
-            }
-            Ok(Kernel {
-                module,
-                function,
-                threads,
-            })
-        }
-    }
-
-    /// Resident warps per SM of `kernel`, by the driver's occupancy calculator.
-    fn resident_warps(&self, kernel: &Kernel) -> Result<i32> {
-        let cu = &self.api.cu;
-        let mut blocks = 0;
-        cu.check(
-            unsafe { (cu.occupancy)(&mut blocks, kernel.function, kernel.threads as c_int, 0) },
-            "cuOccupancyMaxActiveBlocksPerMultiprocessor",
-        )?;
-        Ok(blocks * (kernel.threads as i32 / 32))
-    }
-
-    /// The compile jobs for `capacities`, in the order they are wanted: the
-    /// scoring kernels at the standard fidelity, the recording kernels for
-    /// replays, then the fine-check kernels.
-    fn jobs_for(&self, capacities: &[usize]) -> Vec<(KernelKey, u32)> {
-        let mut jobs = Vec::new();
-        for (record, fidelity) in [
-            (false, Fidelity::standard()),
-            (true, Fidelity::standard()),
-            (false, Fidelity::fine()),
-        ] {
-            for &capacity in capacities {
-                let built = if record {
-                    self.recording.contains_key(&(fidelity, capacity))
-                } else {
-                    self.kernels.contains_key(&(fidelity, capacity))
-                };
-                if !built {
-                    let threads = block_size(capacity, self.workgroup, self.max_registers);
-                    jobs.push(((record, fidelity, capacity), threads));
+        // Kernels of a world in the order of (record, fidelity) steps.
+        let steps: Vec<(bool, Fidelity)> = [false, true]
+            .into_iter()
+            .flat_map(|record| fidelities.iter().map(move |&f| (record, f)))
+            .collect();
+        let keys = |flags: u32, steps: &[(bool, Fidelity)]| -> Vec<KernelKey> {
+            steps
+                .iter()
+                .flat_map(|&(record, fidelity)| {
+                    crate::warp_kernel::CLASSES
+                        .into_iter()
+                        .map(move |class| KernelKey {
+                            record,
+                            class,
+                            flags,
+                            fidelity,
+                        })
+                })
+                .collect()
+        };
+        let levels: Vec<u8> = crate::environment::EFFECTS
+            .iter()
+            .map(|effect| effect.level(cfg) as u8)
+            .collect();
+        let mut world = keys(flags, &steps);
+        if self.worlds.insert((levels, flags)) {
+            let wanted = world
+                .iter()
+                .copied()
+                .filter(|key| !self.kernels.contains_key(key))
+                .collect();
+            let mut near = Vec::new();
+            for neighbour in crate::environment::one_level_away(cfg) {
+                let neighbour_flags = crate::warp_kernel::world_flags(&neighbour);
+                if neighbour_flags != flags && !near.contains(&neighbour_flags) {
+                    near.push(neighbour_flags);
                 }
             }
+            // Standard scoring, fine scoring, then recordings at the
+            // standard physics, each across all the neighbours.
+            let mut idle = Vec::new();
+            for step in [
+                &steps[..1],
+                &steps[1..2],
+                &steps[fidelities.len()..fidelities.len() + 1],
+            ] {
+                for &neighbour_flags in &near {
+                    idle.extend(
+                        keys(neighbour_flags, step)
+                            .into_iter()
+                            .filter(|key| !self.kernels.contains_key(key)),
+                    );
+                }
+            }
+            self.prefetch.enqueue(wanted, idle);
         }
-        jobs
+        // Kernels of this world that finished loading are the engine's from
+        // now on (the background threads drop the ones nobody takes).
+        world.retain(|key| !self.kernels.contains_key(key));
+        for (key, kernel) in self.prefetch.take_ready(&world) {
+            self.kernels.insert(key, kernel);
+        }
     }
 
-    /// Queues `capacities` on the background compiler.
-    fn prefetch_capacities(&self, capacities: &[usize]) {
-        let jobs = self.jobs_for(capacities);
-        let options = Arc::new(self.options(self.max_registers));
-        self.prefetch
-            .enqueue(jobs, &self.api, &options, self.max_registers.is_none());
-    }
-
-    /// Starts compiling the small bodies' kernels (up to 8 nodes) on
-    /// background threads, so the first units wait for what they need and
-    /// no more: from a cold compiler cache a 3 to 8 node kernel takes 2 to 7
-    /// s, 16 nodes 25 s, and more above. Larger kernels start when the
-    /// next size below them is first used (`build_kernel`), or on demand.
-    fn start_prefetch(&self) {
-        let small: Vec<usize> = CAPACITIES
-            .iter()
-            .copied()
-            .filter(|&c| c <= 8 && c <= self.max_capacity)
-            .collect();
-        self.prefetch_capacities(&small);
-    }
-
-    /// Builds the kernel for `capacity` at `fidelity` (scoring, or with
-    /// `record` recording): from the background compiler if it has it or is
-    /// on it, else here.
-    fn build_kernel(&mut self, fidelity: Fidelity, capacity: usize, record: bool) -> Result<()> {
-        let max_registers = self.max_registers;
-        let threads = block_size(capacity, self.workgroup, max_registers);
-        let started = Instant::now();
-        let key = (record, fidelity, capacity);
-        let compile = |engine: &Self, use_cache: bool| {
-            compile_kernel(
-                &engine.api,
-                &engine.options(max_registers),
-                key,
-                threads,
-                max_registers.is_none(),
-                use_cache,
-            )
-        };
-        let cubin = match self.prefetch.take(key) {
-            Some(result) => result?,
-            None => compile(self, true)?,
-        };
-        // A damaged cache entry fails to load: compile it again.
-        let kernel = match self.load(&cubin, threads) {
-            Ok(kernel) => kernel,
-            Err(_) => self.load(&compile(self, false)?, threads)?,
-        };
-        if record {
-            self.recording.insert((fidelity, capacity), kernel);
-        } else {
-            self.kernels.insert((fidelity, capacity), kernel);
+    /// The kernel for `key`: from the background compiler if it has it or is
+    /// on it, else compiled here.
+    fn kernel(&mut self, key: KernelKey) -> Result<(CuFunction, u32)> {
+        if !self.kernels.contains_key(&key) {
+            let started = Instant::now();
+            KERNEL_WAITERS.fetch_add(1, Ordering::Relaxed);
+            let _waiting = KernelWait(started);
+            let kernel = match self.prefetch.take(key) {
+                Some(result) => result?,
+                None => self.load_here(key)?,
+            };
+            if std::env::var_os("EVOLUTION_CUDA_VERBOSE").is_some() {
+                eprintln!(
+                    "CUDA: {key:?} ready after {:.2} s with NVRTC {} ({})",
+                    started.elapsed().as_secs_f64(),
+                    self.api.nvrtc.version_string(),
+                    self.api.nvrtc.path.display()
+                );
+            }
+            self.kernels.insert(key, kernel);
         }
-        // Bodies grow: start the next size up in the background.
-        if capacity >= 8
-            && let Some(&next) = CAPACITIES
-                .iter()
-                .find(|&&c| c > capacity && c <= self.max_capacity)
-        {
-            self.prefetch_capacities(&[next]);
-        }
-        if std::env::var_os("EVOLUTION_CUDA_VERBOSE").is_some() {
-            eprintln!(
-                "CUDA: {} kernel for {capacity} nodes at {fidelity:?} ready after {:.2} s with NVRTC {} ({})",
-                if record { "recording" } else { "scoring" },
-                started.elapsed().as_secs_f64(),
-                self.api.nvrtc.version_string(),
-                self.api.nvrtc.path.display()
-            );
-        }
-        Ok(())
-    }
-
-    /// Compiles the kernel for `capacity` at `fidelity` with `max_registers`,
-    /// in the block size the engine would use, and reports what the compiler
-    /// made of it. The kernel is not kept.
-    pub fn kernel_stats(
-        &self,
-        capacity: usize,
-        fidelity: Fidelity,
-        max_registers: Option<u32>,
-    ) -> Result<KernelStats> {
-        let threads = block_size(capacity, self.workgroup, max_registers);
-        let source = scoring_source(capacity, threads, fidelity, max_registers.is_none());
-        let (cubin, log) = Self::compile(&self.api, &source, &self.options(max_registers))?;
-        let kernel = self.load(&cubin, threads)?;
-        let cu = &self.api.cu;
-        let attribute = |attribute| -> Result<i32> {
-            let mut value = 0;
-            cu.check(
-                unsafe { (cu.func_get_attribute)(&mut value, attribute, kernel.function) },
-                "cuFuncGetAttribute",
-            )?;
-            Ok(value)
-        };
-        let stats = (|| -> Result<KernelStats> {
-            let warps = self.resident_warps(&kernel)?;
-            Ok(KernelStats {
-                registers: attribute(CU_FUNC_ATTRIBUTE_NUM_REGS)?,
-                local_bytes: attribute(CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES)?,
-                shared_bytes: attribute(CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)?,
-                threads: kernel.threads,
-                warps_per_sm: warps,
-                log: log
-                    .lines()
-                    .filter(|l| l.contains("ptxas"))
-                    .map(|l| l.trim().to_owned())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            })
-        })();
-        unsafe { (cu.module_unload)(kernel.module) };
-        stats
+        let kernel = &self.kernels[&key];
+        Ok((kernel.function, kernel.blocks_per_sm))
     }
 
     /// Streaming multiprocessors on the device.
     pub fn multiprocessors(&self) -> i32 {
         self.multiprocessors
-    }
-
-    /// The scoring or, with `record`, recording kernel for `capacity` at
-    /// `fidelity`, and its block size.
-    fn kernel(
-        &mut self,
-        fidelity: Fidelity,
-        capacity: usize,
-        record: bool,
-    ) -> Result<(CuFunction, u32)> {
-        let key = (fidelity, capacity);
-        let missing = if record {
-            !self.recording.contains_key(&key)
-        } else {
-            !self.kernels.contains_key(&key)
-        };
-        if missing {
-            self.build_kernel(fidelity, capacity, record)?;
-        }
-        let kernel = if record {
-            self.recording.get(&key)
-        } else {
-            self.kernels.get(&key)
-        }
-        .context("CUDA kernel missing")?;
-        Ok((kernel.function, kernel.threads))
     }
 
     fn alloc_device(&self, bytes: usize) -> Result<DeviceBuf> {
@@ -1277,36 +1607,49 @@ impl CudaEngine {
 
     fn drop_group(&mut self, slot: usize, group: usize) {
         if let Some(res) = self.slots[slot].groups[group].take() {
-            for buf in [
-                res.nodes,
-                res.muscles,
-                res.bones,
-                res.results,
-                res.info,
-                res.tiles,
-            ] {
+            for buf in res.bufs {
                 self.free_device(buf);
             }
         }
     }
 
-    /// Grows the slot's device buffers, streams and host buffers to fit
-    /// `batches`. Returns the upload size.
+    /// Bytes each buffer of a batch needs: lanes, muscles, ends, heads,
+    /// results.
+    fn needs(batch: &LaneBatch) -> Result<[usize; 5]> {
+        let wave = batch
+            .wave
+            .as_ref()
+            .context("The CUDA kernel needs a batch from warp_kernel::pack")?;
+        Ok([
+            std::mem::size_of_val(&*wave.lanes),
+            std::mem::size_of_val(&*wave.muscles),
+            std::mem::size_of_val(&*wave.ends),
+            std::mem::size_of_val(&*wave.heads),
+            batch.slots.len() * std::mem::size_of::<GpuResult>(),
+        ])
+    }
+
+    /// Grows the slot's device buffers, streams and readback buffer to fit
+    /// `batches` in `waves` waves.
     fn ensure_buffers(
         &mut self,
         slot: usize,
         batches: &[LaneBatch],
-        read_state: bool,
+        waves: usize,
         frame_bytes: usize,
-    ) -> Result<usize> {
+    ) -> Result<()> {
         let api = self.api.clone();
         let cu = &api.cu;
-        while self.slots[slot].streams.len() < batches.len().min(stream_limit()) {
+        while self.slots[slot].streams.len() < waves.min(STREAM_LIMIT) {
             unsafe {
                 let mut stream = std::ptr::null_mut();
                 cu.check(
-                    (cu.stream_create)(&mut stream, CU_STREAM_NON_BLOCKING),
-                    "cuStreamCreate",
+                    (cu.stream_create)(
+                        &mut stream,
+                        CU_STREAM_NON_BLOCKING,
+                        stream_priority(slot >= self.standard),
+                    ),
+                    "cuStreamCreateWithPriority",
                 )?;
                 let mut event = std::ptr::null_mut();
                 cu.check(
@@ -1320,34 +1663,14 @@ impl CudaEngine {
         if self.slots[slot].groups.len() < batches.len() {
             self.slots[slot].groups.resize_with(batches.len(), || None);
         }
-        let mut upload = 0usize;
-        let mut readback = 0usize;
+        let mut readback = frame_bytes;
         for (group, batch) in batches.iter().enumerate() {
-            let need = [
-                std::mem::size_of_val(batch.nodes.as_slice()),
-                std::mem::size_of_val(batch.muscles.as_slice()),
-                std::mem::size_of_val(batch.bones.as_slice()),
-                batch.info.len() * std::mem::size_of::<GpuResult>(),
-                std::mem::size_of_val(batch.info.as_slice()),
-                std::mem::size_of_val(batch.tiles.as_slice()),
-            ];
-            upload += need.iter().sum::<usize>();
-            readback += need[3];
-            if read_state {
-                readback += need[0] + need[1];
-            }
-            if let Some(res) = &self.slots[slot].groups[group] {
-                let have = [
-                    res.nodes.size,
-                    res.muscles.size,
-                    res.bones.size,
-                    res.results.size,
-                    res.info.size,
-                    res.tiles.size,
-                ];
-                if have.iter().zip(need).all(|(h, n)| *h >= n) {
-                    continue;
-                }
+            let need = Self::needs(batch)?;
+            readback += need[4];
+            if let Some(res) = &self.slots[slot].groups[group]
+                && res.bufs.iter().zip(need).all(|(h, n)| h.size >= n)
+            {
+                continue;
             }
             self.drop_group(slot, group);
             // Nothing leaks when an allocation fails part way.
@@ -1363,21 +1686,22 @@ impl CudaEngine {
                     }
                 }
             }
-            let Ok([nodes, muscles, bones, results, info, tiles]) =
-                <[DeviceBuf; 6]>::try_from(made)
-            else {
+            let Ok(bufs) = <[DeviceBuf; 5]>::try_from(made) else {
                 unreachable!("one buffer per binding");
             };
-            self.slots[slot].groups[group] = Some(GroupRes {
-                nodes,
-                muscles,
-                bones,
-                results,
-                info,
-                tiles,
-            });
+            self.slots[slot].groups[group] = Some(GroupRes { bufs });
         }
-        readback += frame_bytes;
+        let counter_bytes = 4 * BUCKETS * waves;
+        if self.slots[slot]
+            .counters
+            .as_ref()
+            .is_none_or(|b| b.size < counter_bytes)
+        {
+            if let Some(old) = self.slots[slot].counters.take() {
+                self.free_device(old);
+            }
+            self.slots[slot].counters = Some(self.alloc_device(counter_bytes)?);
+        }
         if frame_bytes > 0
             && self.slots[slot]
                 .frames
@@ -1390,16 +1714,6 @@ impl CudaEngine {
             self.slots[slot].frames = Some(self.alloc_device(frame_bytes)?);
         }
         if self.slots[slot]
-            .staging
-            .as_ref()
-            .is_none_or(|b| b.size < upload)
-        {
-            if let Some(old) = self.slots[slot].staging.take() {
-                self.free_host(old);
-            }
-            self.slots[slot].staging = Some(self.alloc_host(upload)?);
-        }
-        if self.slots[slot]
             .readback
             .as_ref()
             .is_none_or(|b| b.size < readback)
@@ -1410,24 +1724,35 @@ impl CudaEngine {
             self.slots[slot].readback = Some(self.alloc_host(readback)?);
         }
         self.recount_allocated();
-        Ok(upload)
+        Ok(())
     }
 
-    /// Bytes of device and pinned host buffers a slot keeps for reuse.
+    /// Bytes of host memory a batch's buffers hold.
+    pub fn held_bytes(batch: &LaneBatch) -> usize {
+        batch.wave.as_ref().map_or(0, |w| {
+            w.lanes.held_bytes()
+                + w.muscles.held_bytes()
+                + w.ends.held_bytes()
+                + w.heads.held_bytes()
+        })
+    }
+
+    /// Bytes of device and pinned host buffers a slot keeps for reuse, and
+    /// of the host buffers of the unit it runs.
     fn slot_bytes(slot: &Slot) -> u64 {
         slot.groups
             .iter()
             .flatten()
-            .map(|g| {
-                (g.nodes.size
-                    + g.muscles.size
-                    + g.bones.size
-                    + g.results.size
-                    + g.info.size
-                    + g.tiles.size) as u64
-            })
+            .flat_map(|g| g.bufs.iter())
+            .map(|b| b.size as u64)
             .sum::<u64>()
-            + slot.staging.as_ref().map_or(0, |b| b.size as u64)
+            + slot.counters.as_ref().map_or(0, |b| b.size as u64)
+            + slot.pending.as_ref().map_or(0, |p| {
+                p.batches
+                    .iter()
+                    .map(|b| Self::held_bytes(b) as u64)
+                    .sum::<u64>()
+            })
             + slot.readback.as_ref().map_or(0, |b| b.size as u64)
             + slot.frames.as_ref().map_or(0, |b| b.size as u64)
     }
@@ -1448,8 +1773,8 @@ impl CudaEngine {
             for group in 0..self.slots[slot].groups.len() {
                 self.drop_group(slot, group);
             }
-            if let Some(b) = self.slots[slot].staging.take() {
-                self.free_host(b);
+            if let Some(b) = self.slots[slot].counters.take() {
+                self.free_device(b);
             }
             if let Some(b) = self.slots[slot].readback.take() {
                 self.free_host(b);
@@ -1462,11 +1787,17 @@ impl CudaEngine {
         before.saturating_sub(self.allocated_bytes)
     }
 
-    /// Number of evaluation submissions that can be queued without waiting.
+    /// Number of standard submissions that can be queued without waiting.
     pub fn free_slots(&self) -> usize {
-        self.evaluation_slots()
+        self.standard_slots()
             .filter(|&i| self.slots[i].pending.is_none())
             .count()
+    }
+
+    /// Whether a confirmation trial can be queued without waiting: its slot
+    /// is free, or a standard slot is.
+    pub fn confirm_free(&self) -> bool {
+        self.slots[self.confirm_slot()].pending.is_none() || self.free_slots() > 0
     }
 
     /// Submissions in flight, replays included.
@@ -1474,12 +1805,16 @@ impl CudaEngine {
         self.slots.iter().filter(|s| s.pending.is_some()).count()
     }
 
-    fn evaluation_slots(&self) -> std::ops::Range<usize> {
-        0..self.slots.len() - 1
+    fn standard_slots(&self) -> std::ops::Range<usize> {
+        0..self.standard
+    }
+
+    fn confirm_slot(&self) -> usize {
+        self.standard
     }
 
     fn replay_slot(&self) -> usize {
-        self.slots.len() - 1
+        self.standard + 1
     }
 
     /// Whether a replay can be recorded now.
@@ -1487,234 +1822,217 @@ impl CudaEngine {
         self.slots[self.replay_slot()].pending.is_none()
     }
 
-    /// Queues a whole trial of one batch on the replay slot with the
-    /// recording kernel, which writes every creature's frames. The result
-    /// arrives through `poll` with `Completed::frames`. The trial is the one
-    /// `submit` scores, computed the same way. The contract is
-    /// `VkEngine::record`'s.
-    pub fn record(
-        &mut self,
-        batch: &LaneBatch,
-        cfg: &Config,
-        total: u32,
-        chunk: u32,
-    ) -> Result<u64> {
+    /// The whole trial of the one creature in `batch` on the replay slot with
+    /// the recording kernel, which writes every frame. The result arrives
+    /// through `poll` with `Completed::frames`; it is the trial `submit`
+    /// scores, computed the same way.
+    pub fn record(&mut self, batch: LaneBatch, cfg: &Config) -> Result<u64> {
         ensure!(self.replay_free(), "A replay is already being recorded");
-        // Physics v2 trials start at the settling tick, as scoring does, and
-        // rebuild their node table from joint state at every dispatch, so
-        // bit-exact frames need scoring's dispatch boundaries.
-        let (start, cuts) = (cfg.fidelity().settle(), crate::engine::segment_ends(cfg));
-        self.submit_as(
-            std::slice::from_ref(batch),
-            cfg,
-            start,
-            total,
-            total,
-            chunk,
-            false,
-            true,
-            &cuts,
-        )
+        self.submit_as(&mut vec![batch], cfg, true)
     }
 
-    /// Uploads the batches and queues ticks `start..end` of trials that last
-    /// `total` ticks, in `chunk`-tick ranges, without waiting. The contract
-    /// is `VkEngine::submit`'s.
-    #[allow(clippy::too_many_arguments)]
-    pub fn submit(
-        &mut self,
-        batches: &[LaneBatch],
-        cfg: &Config,
-        start: u32,
-        end: u32,
-        total: u32,
-        chunk: u32,
-        read_state: bool,
-    ) -> Result<u64> {
-        self.submit_as(
-            batches,
-            cfg,
-            start,
-            end,
-            total,
-            chunk,
-            read_state,
-            false,
-            &[],
-        )
+    /// Uploads the batches and queues their whole trials, without waiting.
+    /// On success the engine takes the batches, copies straight from their
+    /// buffers, and hands them back with the results (`Completed::batches`)
+    /// for the next unit to reuse; on failure they stay with the caller.
+    pub fn submit(&mut self, batches: &mut Vec<LaneBatch>, cfg: &Config) -> Result<u64> {
+        self.submit_as(batches, cfg, false)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn submit_as(
         &mut self,
+        batches: &mut Vec<LaneBatch>,
+        cfg: &Config,
+        record: bool,
+    ) -> Result<u64> {
+        let mut uploading = false;
+        match self.launch(batches, cfg, record, &mut uploading) {
+            Ok((slot, frames)) => {
+                let ticket = self.next_ticket;
+                self.next_ticket += 1;
+                let batches = std::mem::take(batches);
+                self.slots[slot].pending = Some(Pending {
+                    ticket,
+                    result_count: batches.iter().map(|b| b.slots.len()).sum(),
+                    batches,
+                    frames,
+                });
+                self.recount_allocated();
+                Ok(ticket)
+            }
+            Err(error) => {
+                if uploading {
+                    // Copies from the caller's buffers may still run: let
+                    // them finish before the caller can reuse or free them.
+                    unsafe { (self.api.cu.ctx_synchronize)() };
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Queues the uploads, trials and readback of `batches` on a free slot.
+    /// Returns the slot and, for a recording, where its frames are read
+    /// back. `uploading` turns true once copies from the batches are queued.
+    fn launch(
+        &mut self,
         batches: &[LaneBatch],
         cfg: &Config,
-        start: u32,
-        end: u32,
-        total: u32,
-        chunk: u32,
-        read_state: bool,
         record: bool,
-        cuts: &[u32],
-    ) -> Result<u64> {
-        ensure!(
-            !batches.is_empty() && start < end && end <= total,
-            "Empty GPU batch"
-        );
-        ensure!(
-            batches.iter().all(|b| b.capacity <= self.max_capacity),
-            "Body too large for this device's kernels"
-        );
+        uploading: &mut bool,
+    ) -> Result<(usize, Option<(usize, usize)>)> {
+        ensure!(!batches.is_empty(), "Empty GPU batch");
+        let flags = crate::warp_kernel::world_flags(cfg);
         let fidelity = cfg.fidelity();
+        self.prefetch_world(cfg);
         let kernels: Vec<(CuFunction, u32)> = batches
             .iter()
-            .map(|batch| self.kernel(fidelity, batch.capacity, record))
+            .map(|batch| {
+                self.kernel(KernelKey {
+                    record,
+                    class: batch.capacity,
+                    flags,
+                    fidelity,
+                })
+            })
             .collect::<Result<_>>()?;
         // The free slot with the most buffers to reuse: when memory is short,
         // a new allocation may fail where reuse does not.
+        let confirming = !record && crate::engine::is_confirmation(cfg);
         let slot = if record {
             self.replay_slot()
+        } else if confirming && self.slots[self.confirm_slot()].pending.is_none() {
+            self.confirm_slot()
         } else {
-            self.evaluation_slots()
+            self.standard_slots()
                 .filter(|&i| self.slots[i].pending.is_none())
                 .max_by_key(|&i| (Self::slot_bytes(&self.slots[i]), std::cmp::Reverse(i)))
                 .context("No free GPU submission slot")?
         };
-        // Node positions for every creature, before each step and after the last.
-        let frame_count: usize = if record {
-            batches
-                .iter()
-                .map(|b| b.info.len() * creature_kernel::frame_stride(b) * (total as usize + 1))
-                .sum()
+        // Waves: (batch, first creature, count), the largest bodies first.
+        let mut waves: Vec<(usize, usize, usize)> = Vec::new();
+        for (b, batch) in batches.iter().enumerate() {
+            let count = batch.slots.len();
+            let mut at = 0;
+            while at < count {
+                let n = (count - at).min(crate::warp_kernel::WAVE);
+                waves.push((b, at, n));
+                at += n;
+            }
+        }
+        let total = (fidelity.settle() + cfg.steps()) as usize;
+        let stride = batches.first().map_or(0, creature_kernel::frame_stride);
+        let frame_count = if record {
+            ensure!(
+                batches.len() == 1 && batches[0].slots.len() == 1,
+                "A recording holds one creature"
+            );
+            stride * (total + 1)
         } else {
             0
         };
         let frame_bytes = frame_count * std::mem::size_of::<[f32; 2]>();
-        let buffers = self.ensure_buffers(slot, batches, read_state, frame_bytes);
+        let buckets = crate::warp_kernel::solver_setting("BUCKETS", BUCKETS as u32) as usize;
+        let buffers = self.ensure_buffers(slot, batches, waves.len(), frame_bytes);
         self.recount_allocated();
         buffers?;
         let cu = &self.api.cu;
         let resources = &self.slots[slot];
-        let staging = resources.staging.as_ref().unwrap();
-        // The frames follow the results in the readback buffer (a recording
-        // reads no node state).
-        let frames_offset =
-            batches.iter().map(|b| b.info.len()).sum::<usize>() * std::mem::size_of::<GpuResult>();
+        let results_bytes =
+            batches.iter().map(|b| b.slots.len()).sum::<usize>() * std::mem::size_of::<GpuResult>();
         unsafe {
             cu.check((cu.ctx_set_current)(self.context), "cuCtxSetCurrent")?;
-            // Stage every upload in pinned memory, then copy it to the device
-            // on the main stream.
-            let mut offset = 0usize;
-            let mut copy = |data: &[u8], dst: CuDevicePtr| -> Result<()> {
+            // Copy every upload to the device on the main stream, straight
+            // from the batch's registered buffers.
+            *uploading = true;
+            let copy = |data: &[u8], dst: CuDevicePtr| -> Result<()> {
                 if data.is_empty() {
                     return Ok(());
                 }
-                assert!(offset + data.len() <= staging.size);
-                let src = staging.ptr.add(offset);
-                std::ptr::copy_nonoverlapping(data.as_ptr(), src, data.len());
                 cu.check(
-                    (cu.memcpy_htod_async)(dst, src as *const c_void, data.len(), resources.main),
+                    (cu.memcpy_htod_async)(
+                        dst,
+                        data.as_ptr() as *const c_void,
+                        data.len(),
+                        resources.main,
+                    ),
                     "cuMemcpyHtoDAsync",
-                )?;
-                offset += data.len();
-                Ok(())
+                )
             };
             for (group, batch) in batches.iter().enumerate() {
                 let res = resources.groups[group].as_ref().unwrap();
-                copy(bytemuck::cast_slice(&batch.nodes), res.nodes.ptr)?;
-                copy(bytemuck::cast_slice(&batch.muscles), res.muscles.ptr)?;
-                copy(bytemuck::cast_slice(&batch.bones), res.bones.ptr)?;
-                copy(bytemuck::cast_slice(&batch.info), res.info.ptr)?;
-                copy(bytemuck::cast_slice(&batch.tiles), res.tiles.ptr)?;
-                if let Some(results) = &batch.results {
-                    copy(bytemuck::cast_slice(results), res.results.ptr)?;
-                }
+                let wave = batch.wave.as_ref().unwrap();
+                copy(bytemuck::cast_slice(&wave.lanes[..]), res.bufs[0].ptr)?;
+                copy(bytemuck::cast_slice(&wave.muscles[..]), res.bufs[1].ptr)?;
+                copy(bytemuck::cast_slice(&wave.ends[..]), res.bufs[2].ptr)?;
+                copy(bytemuck::cast_slice(&wave.heads[..]), res.bufs[3].ptr)?;
             }
+            let counters = resources.counters.as_ref().unwrap();
+            cu.check(
+                (cu.memset_d32_async)(counters.ptr, 0, BUCKETS * waves.len(), resources.main),
+                "cuMemsetD32Async",
+            )?;
             cu.check(
                 (cu.event_record)(resources.start, resources.main),
                 "cuEventRecord",
             )?;
-            // Batch b runs on stream b, modulo the streams the slot has.
-            let streams = batches.len().min(resources.streams.len());
+            let streams = waves.len().min(resources.streams.len());
             for &stream in &resources.streams[..streams] {
                 cu.check(
                     (cu.stream_wait_event)(stream, resources.start, 0),
                     "cuStreamWaitEvent",
                 )?;
             }
-            // Large buckets first, as in VkEngine; each range of every batch
-            // is queued before the next range of any.
-            let mut order: Vec<usize> = (0..batches.len()).collect();
-            order.sort_by_key(|&b| std::cmp::Reverse(batches[b].info.len() * batches[b].capacity));
-            // Dispatches: (first tick, steps), in `chunk`-tick pieces that
-            // never cross a cut.
-            let mut spans: Vec<(u32, u32)> = Vec::new();
-            let mut at = start;
-            while at < end {
-                let stop = cuts
-                    .iter()
-                    .copied()
-                    .find(|&c| c > at && c < end)
-                    .unwrap_or(end);
-                let steps = (stop - at).min(chunk);
-                spans.push((at, steps));
-                at += steps;
-            }
-            for (tick, steps) in spans {
-                for &b in &order {
-                    let batch = &batches[b];
-                    let res = resources.groups[b].as_ref().unwrap();
-                    let mut params = creature_kernel::launch_params(
-                        cfg,
-                        batch.capacity,
-                        batch.info.len(),
-                        tick,
-                        steps,
-                        total,
-                    );
-                    if record {
-                        params.stride = creature_kernel::frame_stride(batch) as u32;
-                    }
-                    let mut pointers = [
-                        res.nodes.ptr,
-                        res.muscles.ptr,
-                        res.bones.ptr,
-                        res.results.ptr,
-                        res.info.ptr,
-                        res.tiles.ptr,
-                    ];
-                    // A recording kernel takes the frames buffer as an eighth
-                    // argument; a scoring kernel reads only the first seven.
-                    let mut frames = resources.frames.as_ref().map_or(0, |f| f.ptr);
-                    let mut args: [*mut c_void; 8] = [
-                        &mut pointers[0] as *mut u64 as *mut c_void,
-                        &mut pointers[1] as *mut u64 as *mut c_void,
-                        &mut pointers[2] as *mut u64 as *mut c_void,
-                        &mut params as *mut creature_kernel::Params as *mut c_void,
-                        &mut pointers[3] as *mut u64 as *mut c_void,
-                        &mut pointers[4] as *mut u64 as *mut c_void,
-                        &mut pointers[5] as *mut u64 as *mut c_void,
-                        &mut frames as *mut u64 as *mut c_void,
-                    ];
-                    let (kernel, threads) = kernels[b];
-                    let groups = batch.info.len().div_ceil(threads as usize) as c_uint;
-                    cu.check(
-                        (cu.launch_kernel)(
-                            kernel,
-                            groups,
-                            1,
-                            1,
-                            threads,
-                            1,
-                            1,
-                            0,
-                            resources.streams[b % streams],
-                            args.as_mut_ptr(),
-                            std::ptr::null_mut(),
-                        ),
-                        "cuLaunchKernel",
-                    )?;
-                }
+            for (w, &(b, first, count)) in waves.iter().enumerate() {
+                let batch = &batches[b];
+                let res = resources.groups[b].as_ref().unwrap();
+                let (kernel, blocks_per_sm) = kernels[b];
+                let mut params = crate::warp_kernel::params(cfg, first, count, stride);
+                let groups_per_block =
+                    (crate::warp_kernel::BLOCK as usize / 32) * (32 / batch.capacity);
+                let blocks = count
+                    .div_ceil(groups_per_block)
+                    .min(blocks_per_sm as usize * self.multiprocessors as usize)
+                    .max(1);
+                let warps = blocks * crate::warp_kernel::BLOCK as usize / 32;
+                let heads = &batch.wave.as_ref().unwrap().heads;
+                let mut takeup = Takeup::new(heads, first, count, warps, buckets);
+                let mut pointers = [
+                    res.bufs[0].ptr,
+                    res.bufs[1].ptr,
+                    res.bufs[2].ptr,
+                    res.bufs[3].ptr,
+                    res.bufs[4].ptr,
+                    counters.ptr + (4 * BUCKETS * w) as u64,
+                ];
+                let mut frames = resources.frames.as_ref().map_or(0, |f| f.ptr);
+                let mut args: [*mut c_void; 9] = [
+                    &mut pointers[0] as *mut u64 as *mut c_void,
+                    &mut pointers[1] as *mut u64 as *mut c_void,
+                    &mut pointers[2] as *mut u64 as *mut c_void,
+                    &mut pointers[3] as *mut u64 as *mut c_void,
+                    &mut pointers[4] as *mut u64 as *mut c_void,
+                    &mut pointers[5] as *mut u64 as *mut c_void,
+                    &mut params as *mut crate::warp_kernel::Params as *mut c_void,
+                    &mut takeup as *mut Takeup as *mut c_void,
+                    &mut frames as *mut u64 as *mut c_void,
+                ];
+                cu.check(
+                    (cu.launch_kernel)(
+                        kernel,
+                        blocks as c_uint,
+                        1,
+                        1,
+                        crate::warp_kernel::BLOCK,
+                        1,
+                        1,
+                        0,
+                        resources.streams[w % streams],
+                        args.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                    ),
+                    "cuLaunchKernel",
+                )?;
             }
             for b in 0..streams {
                 cu.check(
@@ -1752,19 +2070,9 @@ impl CudaEngine {
             for (group, batch) in batches.iter().enumerate() {
                 let res = resources.groups[group].as_ref().unwrap();
                 read(
-                    res.results.ptr,
-                    batch.info.len() * std::mem::size_of::<GpuResult>(),
+                    res.bufs[4].ptr,
+                    batch.slots.len() * std::mem::size_of::<GpuResult>(),
                 )?;
-            }
-            if read_state {
-                for (group, batch) in batches.iter().enumerate() {
-                    let res = resources.groups[group].as_ref().unwrap();
-                    read(res.nodes.ptr, std::mem::size_of_val(batch.nodes.as_slice()))?;
-                    read(
-                        res.muscles.ptr,
-                        std::mem::size_of_val(batch.muscles.as_slice()),
-                    )?;
-                }
             }
             if record {
                 read(
@@ -1777,28 +2085,11 @@ impl CudaEngine {
                 "cuEventRecord",
             )?;
         }
-        let ticket = self.next_ticket;
-        self.next_ticket += 1;
-        self.slots[slot].pending = Some(Pending {
-            ticket,
-            layout: batches
-                .iter()
-                .map(|b| (b.slots.clone(), b.creatures.clone()))
-                .collect(),
-            result_count: batches.iter().map(|b| b.info.len()).sum(),
-            state: read_state.then(|| {
-                batches
-                    .iter()
-                    .map(|b| (b.nodes.len(), b.muscles.len()))
-                    .collect()
-            }),
-            frames: record.then_some((frames_offset, frame_count)),
-        });
-        Ok(ticket)
+        Ok((slot, record.then_some((results_bytes, frame_count))))
     }
 
     /// Returns the oldest finished submission's results, waiting up to
-    /// `timeout` for one. The contract is `VkEngine::poll`'s.
+    /// `timeout` for one.
     pub fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>> {
         let mut pending: Vec<(u64, usize)> = self
             .slots
@@ -1848,40 +2139,26 @@ impl CudaEngine {
         unsafe {
             let flat: &[GpuResult] =
                 std::slice::from_raw_parts(readback.ptr as *const GpuResult, pending.result_count);
-            let mut batches = Vec::with_capacity(pending.layout.len());
+            // Batch results in unit order.
+            let mut results = vec![GpuResult::default(); pending.result_count];
             let mut start = 0;
-            for (slots, creatures) in pending.layout {
-                let end = start + slots.len();
-                batches.push((slots, creatures, flat[start..end].to_vec()));
+            for batch in &pending.batches {
+                let end = start + batch.slots.len();
+                for (&slot, result) in batch.slots.iter().zip(&flat[start..end]) {
+                    results[slot] = *result;
+                }
                 start = end;
             }
-            let state = pending.state.map(|sizes| {
-                let mut at = readback
-                    .ptr
-                    .add(pending.result_count * std::mem::size_of::<GpuResult>());
-                sizes
-                    .into_iter()
-                    .map(|(nodes, muscles)| {
-                        let node_state =
-                            std::slice::from_raw_parts(at as *const crate::physics::Node, nodes)
-                                .to_vec();
-                        at = at.add(nodes * std::mem::size_of::<crate::physics::Node>());
-                        let muscle_state =
-                            std::slice::from_raw_parts(at as *const f32, muscles).to_vec();
-                        at = at.add(muscles * std::mem::size_of::<f32>());
-                        (node_state, muscle_state)
-                    })
-                    .collect()
-            });
             let frames = pending.frames.map(|(offset, count)| {
                 std::slice::from_raw_parts(readback.ptr.add(offset) as *const [f32; 2], count)
                     .to_vec()
             });
             self.last_gpu_seconds = gpu_seconds;
+            self.recount_allocated();
             Ok(Some(Completed {
                 ticket: pending.ticket,
-                batches,
-                state,
+                results,
+                batches: pending.batches,
                 frames,
                 gpu_seconds,
             }))
@@ -1891,19 +2168,24 @@ impl CudaEngine {
 
 impl Drop for CudaEngine {
     fn drop(&mut self) {
-        self.prefetch.close(Duration::from_secs(30));
+        let unused = self.prefetch.close(Duration::from_secs(30));
         let api = self.api.clone();
         let cu = &api.cu;
         unsafe {
             (cu.ctx_set_current)(self.context);
             (cu.ctx_synchronize)();
+            for kernel in &unused {
+                (cu.module_unload)(kernel.module);
+            }
         }
         for slot in 0..self.slots.len() {
+            // Unregistered while the context lives.
+            self.slots[slot].pending.take();
             for group in 0..self.slots[slot].groups.len() {
                 self.drop_group(slot, group);
             }
-            if let Some(b) = self.slots[slot].staging.take() {
-                self.free_host(b);
+            if let Some(b) = self.slots[slot].counters.take() {
+                self.free_device(b);
             }
             if let Some(b) = self.slots[slot].readback.take() {
                 self.free_host(b);
@@ -1926,10 +2208,76 @@ impl Drop for CudaEngine {
                 }
                 (cu.stream_destroy)(slot.main);
             }
-            for kernel in self.kernels.values().chain(self.recording.values()) {
+            for kernel in self.kernels.values() {
                 (cu.module_unload)(kernel.module);
             }
+            REGISTER.with(|register| register.borrow_mut().take());
             (cu.primary_ctx_release)(self.device);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn heads(rounds: &[u32]) -> Vec<[u32; 4]> {
+        rounds
+            .iter()
+            .flat_map(|&r| [[r << 16, 0, 0, 0], [0; 4]])
+            .collect()
+    }
+
+    #[test]
+    fn takeup_buckets_follow_the_rounds_and_share_the_warps() {
+        let h = heads(&[0, 1, 1, 2, 2, 2, 4]);
+        let t = Takeup::new(&h, 0, 7, 20, BUCKETS);
+        assert_eq!(t.start, [0, 3, 6, 6]);
+        assert_eq!(t.end, [3, 6, 6, 7]);
+        // Weights 3 x 2, 3 x 3, 0, 1 x 5 of 20: 6, 9, 0 and 5 warps.
+        assert_eq!(t.warp, [0, 6, 15, 15]);
+        // A wave from the middle of a batch, and fewer warps than buckets.
+        let t = Takeup::new(&h, 3, 4, 2, BUCKETS);
+        assert_eq!((t.start, t.end), ([0, 0, 3, 3], [0, 3, 3, 4]));
+        assert_eq!(t.warp, [0, 0, 1, 1]);
+        // One counter.
+        let t = Takeup::new(&h, 0, 7, 20, 1);
+        assert_eq!(
+            (t.start, t.end, t.warp),
+            ([0, 7, 7, 7], [7, 7, 7, 7], [0, 20, 20, 20])
+        );
+    }
+
+    #[test]
+    fn eviction_keeps_the_newest_kernels() {
+        let dir = std::env::temp_dir().join(format!("evolution-cache-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let start = std::time::SystemTime::now() - Duration::from_secs(10_000);
+        for i in 0..CACHE_FILES + 5 {
+            let path = dir.join(format!("{i:04}.cubin"));
+            std::fs::write(&path, b"x").unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            file.set_modified(start + Duration::from_secs(i as u64))
+                .unwrap();
+        }
+        std::fs::write(dir.join("other.txt"), b"x").unwrap();
+        evict_cache(&dir);
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), CACHE_FILES + 1);
+        assert!(names.contains(&"other.txt".to_string()));
+        assert!(!names.contains(&"0004.cubin".to_string()));
+        assert!(names.contains(&"0005.cubin".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unsorted_heads_take_one_counter() {
+        let t = Takeup::new(&heads(&[2, 1]), 0, 2, 8, BUCKETS);
+        assert_eq!((t.start, t.end), ([0, 2, 2, 2], [2, 2, 2, 2]));
     }
 }

@@ -1,12 +1,11 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use evolution_simulator::{
     config::Config,
-    engine::{self, Engine},
     gpu::Gpu,
-    search_benchmark,
-    storage::{self, Experiment, Stage},
-    ui,
+    ring::Ring,
+    storage::{self, Experiment},
+    threads, ui,
 };
 use std::{
     path::PathBuf,
@@ -14,7 +13,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[derive(Parser)]
@@ -49,50 +48,6 @@ enum Action {
         #[arg(long)]
         throughput: bool,
     },
-    /// Record real GPU and optional CPU timings to CSV.
-    Benchmark {
-        #[arg(
-            long,
-            value_delimiter = ',',
-            default_value = "1000,100000,1000000,3000000"
-        )]
-        populations: Vec<usize>,
-        #[arg(long, default_value_t = 15.0)]
-        duration: f32,
-        #[arg(long, default_value_t = 1)]
-        generations: u32,
-        #[arg(long)]
-        cpu: bool,
-        #[arg(long, default_value = "runs/benchmark.csv")]
-        output: PathBuf,
-    },
-    /// Compare fixed-seed evolutionary search runs and export morphology, lineage, and timing data.
-    SearchBenchmark {
-        #[arg(long, value_delimiter = ',', default_value = "38,39,40,41,42")]
-        seeds: Vec<u64>,
-        #[arg(long, default_value_t = 1000)]
-        population: usize,
-        #[arg(long, default_value_t = 300)]
-        generations: u32,
-        #[arg(long)]
-        config: Option<PathBuf>,
-        #[arg(long)]
-        duration: Option<f32>,
-        #[arg(
-            long,
-            value_delimiter = ',',
-            default_value = "1,5,10,20,50,100,150,200"
-        )]
-        milestones: Vec<f32>,
-        #[arg(long, default_value = "benchmarks/search-baseline")]
-        output_dir: PathBuf,
-        #[arg(long, value_enum, default_value_t = SearchVariant::MorphologyReserve)]
-        variant: SearchVariant,
-        /// Evaluate with the production CPU SIMD engine instead of initializing Vulkan.
-        /// Thread count comes from EVOLUTION_CPU_THREADS (default: logical CPUs minus four).
-        #[arg(long)]
-        cpu: bool,
-    },
     /// Evaluate a fixed checkpoint population repeatedly (kernel diagnostics).
     EvalBench {
         #[arg(long, default_value = "bench/w3-seed38-100k.evo")]
@@ -114,7 +69,7 @@ enum Action {
         /// Override the trial duration (diagnostics only).
         #[arg(long)]
         duration: Option<f32>,
-        /// Evaluate directly on the named Vulkan device (bodies up to 16 nodes).
+        /// Evaluate directly on the named GPU (bodies up to 64 nodes).
         #[arg(long)]
         engine: Option<String>,
         /// Screen like the game: a first pass of standard trials without a
@@ -127,30 +82,16 @@ enum Action {
         #[arg(long)]
         max_nodes: Option<usize>,
     },
-    /// Summarize an existing checkpoint's record curve and archive morphology.
-    Analyze {
-        checkpoint: PathBuf,
-        #[arg(long)]
-        output: Option<PathBuf>,
-        #[arg(long)]
-        champion: Option<PathBuf>,
-    },
-}
-#[derive(Clone, Copy, Debug, Default, ValueEnum)]
-enum SearchVariant {
-    BehaviorOnly,
-    #[default]
-    MorphologyReserve,
 }
 fn main() -> Result<()> {
-    // Evaluation and general workers share half the logical CPUs, at most
-    // eight. The owner allows the game the whole machine, but at 3M creatures
-    // 16 general workers (129.8k creatures/s) or 8 plus 8 CPU evaluation
-    // workers (121.3k) were no faster than 8 (137.8k): the GPU bounds the
-    // game and busy CPU cores slow it.
+    // The Rayon pool breeds on every CPU but two: the first runs the
+    // worker thread and the second the GPU engine thread, so commands and
+    // frames always find a core during a breeding burst. Pool threads are
+    // SCHED_BATCH at nice 10 (`threads`).
+    threads::init();
     rayon::ThreadPoolBuilder::new()
-        .num_threads(engine::rayon_threads())
-        .start_handler(|_| engine::lower_thread_priority())
+        .num_threads(threads::pool_threads())
+        .start_handler(|_| threads::pool_thread_start())
         .build_global()?;
     let cli = Cli::parse();
     let result = match cli.command {
@@ -200,228 +141,42 @@ fn main() -> Result<()> {
             let signal = stop.clone();
             ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))?;
             let until = e.generation.saturating_add(generations);
+            let sched = gpu.sched.as_mut().expect("scheduler");
+            let mut ring = Ring::default();
             let run_result: Result<()> = (|| {
+                ring.start(&mut e, sched);
                 while e.generation < until && !stop.load(Ordering::Relaxed) {
-                    match e.stage {
-                        Stage::Ready | Stage::Evaluating => {
-                            e.stage = Stage::Evaluating;
-                            // The scheduler keeps every engine busy across a whole
-                            // generation; smaller batches would add a tail each.
-                            let batch = if gpu.async_capable() {
-                                e.config.population
-                            } else {
-                                e.config.batch_size()
-                            };
-                            let end = (e.evaluated + batch).min(e.config.population);
-                            let start = Instant::now();
-                            let metrics = gpu.evaluate_with_metrics(
-                                &e.population,
-                                &(e.evaluated..end).collect::<Vec<_>>(),
-                                &e.config,
-                            )?;
-                            e.evaluation_seconds += start.elapsed().as_secs_f64();
-                            for (offset, metric) in metrics.iter().enumerate() {
-                                e.record_result(e.evaluated + offset, metric);
-                            }
-                            e.evaluated = end;
-                            if end == e.config.population {
-                                e.stage = Stage::Evaluated;
-                            } else if end.is_multiple_of(batch * 16) {
-                                eprintln!(
-                                    "Generation {}: {:.1}%",
-                                    e.generation,
-                                    100.0 * end as f64 / e.config.population as f64
-                                );
-                            }
-                        }
-                        Stage::Evaluated | Stage::Ranked | Stage::Selected => {
-                            e.archive_batch()?;
-                            let s = e.history.last().unwrap();
-                            println!(
-                                "generation={} best={:.4}m median={:.4}m niches={} qd={:.2} failed={} evaluation={:.3}s",
-                                s.generation,
-                                s.best,
-                                s.median,
-                                s.archive_cells,
-                                s.qd_score,
-                                s.failed,
-                                s.seconds
-                            );
-                        }
-                        Stage::Archived => {
-                            e.prepare_next_batch()?;
-                            if e.config.checkpoint_interval > 0
-                                && e.generation.is_multiple_of(e.config.checkpoint_interval)
-                            {
-                                storage::save(&checkpoint, &e)?;
-                            }
-                        }
+                    let started = Instant::now();
+                    sched.pump()?;
+                    let step = ring.step(&mut e, sched, Duration::from_millis(20), usize::MAX)?;
+                    e.evaluation_seconds += started.elapsed().as_secs_f64();
+                    if step.generations == 0 {
+                        continue;
+                    }
+                    let s = e.history.last().unwrap();
+                    println!(
+                        "generation={} best={:.4}m median={:.4}m niches={} qd={:.2} failed={} evaluation={:.3}s",
+                        s.generation,
+                        s.best,
+                        s.median,
+                        s.archive_cells,
+                        s.qd_score,
+                        s.failed,
+                        s.seconds
+                    );
+                    if e.config.checkpoint_interval > 0
+                        && e.generation.is_multiple_of(e.config.checkpoint_interval)
+                    {
+                        storage::save(&checkpoint, &e)?;
                     }
                 }
                 Ok(())
             })();
+            ring.stop(sched);
             storage::save(&checkpoint, &e)?;
             storage::export_csv(&checkpoint.with_extension("csv"), &e.history)?;
             eprintln!("Saved {}", checkpoint.display());
             run_result
-        }
-        Some(Action::Benchmark {
-            populations,
-            duration,
-            generations,
-            cpu,
-            output,
-        }) => {
-            if let Some(parent) = output.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let mut csv = csv::Writer::from_path(&output)?;
-            csv.write_record([
-                "gpu",
-                "population",
-                "generation",
-                "duration_s",
-                "creation_s",
-                "gpu_evaluation_s",
-                "cpu_evaluation_s",
-                "generation_s",
-                "evaluations_per_s",
-                "population_bytes",
-                "gpu_allocated_bytes",
-                "failed",
-            ])?;
-            let mut gpu = Gpu::new(&cli.gpu)?;
-            let mut cpu_benchmark = if cpu {
-                let cpu = engine::cpu_engine(engine::cpu_threads().max(1))?;
-                eprintln!(
-                    "CPU benchmark: {}; CPU wall time includes population copying, dispatch, and result collection",
-                    cpu.name()
-                );
-                Some(cpu)
-            } else {
-                None
-            };
-            for count in populations {
-                let cfg = Config {
-                    population: count,
-                    seed: 38,
-                    random_seed: false,
-                    duration,
-                    throughput: true,
-                    ..Default::default()
-                };
-                let start = Instant::now();
-                let mut e = Experiment::new(cfg)?;
-                let creation = start.elapsed().as_secs_f64();
-                // Warm the pipeline and buffers before collecting GPU execution timings.
-                gpu.evaluate(
-                    &e.population,
-                    &(0..count.min(1024)).collect::<Vec<_>>(),
-                    &e.config,
-                )?;
-                for generation in 0..generations {
-                    let total = Instant::now();
-                    let start = Instant::now();
-                    let batch = e.config.batch_size();
-                    for begin in (0..count).step_by(batch) {
-                        let end = (begin + batch).min(count);
-                        let metrics = gpu.evaluate_with_metrics(
-                            &e.population,
-                            &(begin..end).collect::<Vec<_>>(),
-                            &e.config,
-                        )?;
-                        for (offset, metric) in metrics.iter().enumerate() {
-                            e.record_result(begin + offset, metric);
-                        }
-                    }
-                    let gpu_seconds = start.elapsed().as_secs_f64();
-                    e.evaluation_seconds = gpu_seconds;
-                    e.evaluated = count;
-                    let cpu_seconds = if let Some(cpu) = cpu_benchmark.as_mut() {
-                        let start = Instant::now();
-                        // Keep the complete diagnostic wall time separate from
-                        // generation timing, including the owned population copy.
-                        cpu.submit(e.population.clone(), &e.config)?;
-                        let result = loop {
-                            if let Some(done) = cpu.poll()? {
-                                break done;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                        };
-                        std::hint::black_box(result);
-                        Some(start.elapsed().as_secs_f64())
-                    } else {
-                        None
-                    };
-                    e.archive_batch()?;
-                    let failed = e.history.last().unwrap().failed;
-                    let bytes = e.population.bytes();
-                    e.prepare_next_batch()?;
-                    let generation_seconds =
-                        total.elapsed().as_secs_f64() - cpu_seconds.unwrap_or(0.0);
-                    csv.serialize((
-                        &gpu.name,
-                        count,
-                        generation,
-                        duration,
-                        creation,
-                        gpu_seconds,
-                        cpu_seconds,
-                        generation_seconds,
-                        count as f64 / gpu_seconds,
-                        bytes,
-                        gpu.allocated_bytes,
-                        failed,
-                    ))?;
-                    csv.flush()?;
-                    println!(
-                        "{} creatures | generation {} | GPU {:.3}s | complete {:.3}s | {:.0}/s | RAM {:.1} MiB | failed {}{}",
-                        count,
-                        generation,
-                        gpu_seconds,
-                        generation_seconds,
-                        count as f64 / gpu_seconds,
-                        bytes as f64 / 1048576.,
-                        failed,
-                        cpu_seconds
-                            .map(|t| format!(" | CPU {t:.3}s ({:.1}×)", t / gpu_seconds))
-                            .unwrap_or_default()
-                    );
-                }
-            }
-            println!("Benchmark saved to {}", output.display());
-            Ok(())
-        }
-        Some(Action::SearchBenchmark {
-            seeds,
-            population,
-            generations,
-            config,
-            duration,
-            milestones,
-            output_dir,
-            variant,
-            cpu,
-        }) => {
-            let mut cfg: Config = if let Some(path) = config {
-                serde_json::from_reader(std::fs::File::open(path)?)?
-            } else {
-                Config::default()
-            };
-            cfg.population = population;
-            if let Some(duration) = duration {
-                cfg.duration = duration;
-            }
-            search_benchmark::run(search_benchmark::RunOptions {
-                gpu_name: &cli.gpu,
-                config: cfg,
-                seeds: &seeds,
-                generations,
-                milestones: &milestones,
-                output_dir: &output_dir,
-                morphology_reserve_enabled: matches!(variant, SearchVariant::MorphologyReserve),
-                cpu_only: cpu,
-            })
         }
         Some(Action::EvalBench {
             checkpoint,
@@ -441,14 +196,19 @@ fn main() -> Result<()> {
                 cfg.duration = duration;
             }
             cfg.throughput = true;
-            let mut source: Vec<usize> = (0..cfg.population).collect();
-            if let Some(max) = max_nodes {
-                source.retain(|&i| e.population.genomes[i].node_count as usize <= max);
-            }
+            // The loaded game's ring, bred from its archives.
+            let source: Vec<_> = e
+                .blocks
+                .iter()
+                .flat_map(|b| (0..b.len()).map(move |j| (b, j)))
+                .filter(|(b, j)| {
+                    max_nodes.is_none_or(|max| b.population.genomes[*j].node_count <= max)
+                })
+                .collect();
             let count = limit.unwrap_or(source.len()).min(source.len());
             let mut population = evolution_simulator::evolution::Population::default();
-            for &i in &source[..count] {
-                let mut c = e.population.creature(i);
+            for &(block, j) in &source[..count] {
+                let mut c = block.population.creature(j);
                 if let Some(target) = grow {
                     evolution_simulator::evolution::grow_for_benchmark(&mut c, &cfg, 38, target);
                 }
@@ -467,18 +227,10 @@ fn main() -> Result<()> {
                 steps_nodes as f64 / count as f64,
                 histogram
             );
-            // `--engine cpu` runs the CPU SIMD engine alone; another name opens that
-            // Vulkan device alone (bodies up to 16 nodes).
+            // `--engine <name>` opens that GPU alone (bodies up to 64 nodes).
             let mut engine: Option<Box<dyn evolution_simulator::engine::Engine>> = match engine {
-                Some(name) if name == "cpu" => {
-                    Some(Box::new(evolution_simulator::engine::cpu_engine(
-                        evolution_simulator::engine::cpu_threads().max(1),
-                    )?))
-                }
                 Some(name) => Some(Box::new(evolution_simulator::engine::gpu_engine(
-                    &name,
-                    64,
-                    evolution_simulator::gpu::DEFAULT_STEP_RANGE,
+                    &name, 64,
                 )?)),
                 None => None,
             };
@@ -493,7 +245,7 @@ fn main() -> Result<()> {
                     .as_mut()
                     .context("--screened needs the default GPU path")?;
                 let start = Instant::now();
-                let sample = gpu.sched.as_mut().context("scheduler")?.evaluate_single(
+                let sample = gpu.sched.as_mut().context("scheduler")?.evaluate(
                     &population,
                     &indices,
                     &cfg,
@@ -522,7 +274,12 @@ fn main() -> Result<()> {
                         top.len()
                     );
                 }
-                cfg.screen = Some(evolution_simulator::physics::Screen { bar, ..screen });
+                cfg.screen = Some(evolution_simulator::physics::Screen {
+                    bar,
+                    young_bar: bar,
+                    reshaped_bar: bar,
+                    ..screen
+                });
             }
             let batch = cfg.batch_size();
             let mut out = Vec::new();
@@ -621,15 +378,6 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some(Action::Analyze {
-            checkpoint,
-            output,
-            champion,
-        }) => search_benchmark::write_checkpoint_analysis(
-            &checkpoint,
-            output.as_deref(),
-            champion.as_deref(),
-        ),
     };
     result.context("Evolution Simulator")
 }

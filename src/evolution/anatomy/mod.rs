@@ -2,11 +2,9 @@
 //! muscles together: copy, grow, fuse, reconnect and retime whole limbs, so a
 //! child keeps more of its parent's gait than a single random edit allows.
 //!
-//! Every operator is on by default (docs/anatomy-operators.md has the audit
-//! and the search A/B). `EVOLUTION_ANATOMY=0` turns them off for
-//! comparisons, and a comma-separated list of operator names enables only
-//! those. The structural emitter picks uniformly among the classic
-//! operators, the enabled ones below, one slot that the `SHARED_SLOT`
+//! Every operator is on (docs/anatomy-operators.md has the audit and the
+//! search A/B). The structural emitter picks uniformly among the classic
+//! operators, the ones below, one slot that the `SHARED_SLOT`
 //! operators share and one for the `CONTROLLER_SLOT` operators, and tries up to four times when the chosen operator
 //! does not apply to the body.
 //!
@@ -20,15 +18,36 @@
 //!   the neck. `repair` runs after it (in `offspring`), which clamps
 //!   genes, restores canonical order and the muscle ring, and lines the nodes
 //!   up with the bone lengths.
-use super::{Bone, Creature, Muscle, NodeGene, Rng, bone_point};
+use super::{Bone, Bounded, Creature, MAX_MUSCLES, MAX_NODES, Muscle, NodeGene, Rng, bone_point};
 use crate::config::Config;
 
+mod compound;
 mod controller;
 mod extra;
+mod gait_bio;
+mod gait_legs;
+mod gait_spine;
+mod gait_phase;
+mod gait_muscles;
+mod gait_symmetry;
+mod gait_reflex;
+mod gait_posture;
+mod gait_plans;
+
 mod junctions;
+mod legs;
 mod limbs;
 mod muscles;
 mod rhythm;
+
+/// Indices of bones or nodes of one body.
+pub(super) type BoneIds = Bounded<usize, MAX_NODES>;
+/// Indices of muscles of one body.
+pub(super) type MuscleIds = Bounded<usize, MAX_MUSCLES>;
+/// For each node, the bones it is the parent of (`child_bones`).
+pub(super) type Children = [BoneIds; MAX_NODES];
+/// Lists of bones, one per limb.
+pub(super) type Limbs = Bounded<BoneIds, MAX_NODES>;
 
 /// What an operator may use besides the creature.
 pub(super) struct Context<'a> {
@@ -38,8 +57,33 @@ pub(super) struct Context<'a> {
 
 pub(super) type Operator = fn(&mut Creature, &Config, &mut Rng, &Context) -> bool;
 
-/// Every operator, by name. The names are what `EVOLUTION_ANATOMY` lists.
-pub(super) const OPERATORS: &[(&str, Operator)] = &[
+/// Every operator, by name: the ones below, then those of the gait files.
+pub(super) static OPERATORS: std::sync::LazyLock<Vec<(&'static str, Operator)>> =
+    std::sync::LazyLock::new(|| {
+        BASE_OPERATORS
+            .iter()
+            .chain(GAIT_FILES.iter().flat_map(|file| file.iter()))
+            .copied()
+            .collect()
+    });
+
+/// The gait operators, one list per file. Each file's operators share one
+/// pick slot, so a hundred of them do not crowd out the others, and every one
+/// is a compound operator (a whole change, no parameter noise after it).
+const GAIT_FILES: &[&[(&str, Operator)]] = &[
+    gait_legs::OPS,
+    gait_spine::OPS,
+    gait_phase::OPS,
+    gait_muscles::OPS,
+    gait_symmetry::OPS,
+    gait_reflex::OPS,
+    gait_posture::OPS,
+    gait_plans::OPS,
+    gait_bio::OPS,
+];
+
+/// The operators before the gait files.
+const BASE_OPERATORS: &[(&str, Operator)] = &[
     ("copy_limb", limbs::copy_limb),
     ("grow_actuated_tip", limbs::grow_actuated_tip),
     ("split_bone_actuated", limbs::split_bone_actuated),
@@ -91,6 +135,31 @@ pub(super) const OPERATORS: &[(&str, Operator)] = &[
     ("retune_muscle_pair", controller::retune_muscle_pair),
     ("release_touchdown", controller::release_touchdown),
     ("snap_limb_phases", controller::snap_limb_phases),
+    ("limb_clock_ratio", controller::limb_clock_ratio),
+    ("limb_clock_lock", controller::limb_clock_lock),
+    ("reflex_on_muscle", controller::reflex_on_muscle),
+    ("reflex_all_feet", controller::reflex_all_feet),
+    ("reflex_reset_shift", controller::reflex_reset_shift),
+    ("shift_gait_start", controller::shift_gait_start),
+    ("pose_joint_at_stop", junctions::pose_joint_at_stop),
+    ("brace_joint", junctions::brace_joint),
+    ("limb_length_gradient", compound::limb_length_gradient),
+    ("symmetrize_limb_pair", compound::symmetrize_limb_pair),
+    ("retime_gait_by_position", compound::retime_gait_by_position),
+    ("brace_limb_chain", compound::brace_limb_chain),
+    ("phase_cluster_move", compound::phase_cluster_move),
+    ("grow_integrated_limb", compound::grow_integrated_limb),
+    ("mirrored_limb_pair", compound::mirrored_limb_pair),
+    ("segment_chain", compound::segment_chain),
+    ("reassign_bundle", compound::reassign_bundle),
+    ("transplant_limb_program", compound::transplant_limb_program),
+    ("retune_limb_package", compound::retune_limb_package),
+    ("transplant_gait", compound::transplant_gait),
+    ("trim_body", compound::trim_body),
+    ("sprout_leg", legs::sprout_leg),
+    ("mirror_leg_fore_aft", legs::mirror_leg_fore_aft),
+    ("spread_leg_attachment", legs::spread_leg_attachment),
+    ("tuck_leg_under", legs::tuck_leg_under),
 ];
 
 /// Operators that share one pick slot: together they are as likely as one
@@ -125,39 +194,84 @@ const CONTROLLER_SLOT: &[&str] = &[
     "retune_muscle_pair",
     "release_touchdown",
     "snap_limb_phases",
+    "limb_clock_ratio",
+    "limb_clock_lock",
+    "reflex_on_muscle",
+    "reflex_all_feet",
+    "reflex_reset_shift",
 ];
+
+/// The compound operators (`compound.rs`). Each is a whole change by
+/// itself, so a child that one of them made gets no parameter noise after it:
+/// the noise would only blur a move that was built to be coherent.
+const COMPOUND: &[&str] = &[
+    "limb_length_gradient",
+    "symmetrize_limb_pair",
+    "retime_gait_by_position",
+    "brace_limb_chain",
+    "phase_cluster_move",
+    "grow_integrated_limb",
+    "mirrored_limb_pair",
+    "segment_chain",
+    "reassign_bundle",
+    "transplant_limb_program",
+    "retune_limb_package",
+    "transplant_gait",
+    "trim_body",
+    "sprout_leg",
+    "mirror_leg_fore_aft",
+    "spread_leg_attachment",
+    "tuck_leg_under",
+];
+
+/// The gait file that holds operator `name`, if any.
+fn gait_file(name: &str) -> Option<usize> {
+    GAIT_FILES
+        .iter()
+        .position(|file| file.iter().any(|(n, _)| *n == name))
+}
+
+/// Whether operator `index` of `OPERATORS` is a compound one.
+pub(super) fn is_compound(index: usize) -> bool {
+    enabled().compound.get(index).copied().unwrap_or(false)
+}
 
 /// The enabled operators, as indices into `OPERATORS`.
 pub(super) struct Enabled {
+    /// For each operator, whether it is a compound one (`COMPOUND`).
+    pub compound: Vec<bool>,
     /// Operators with a pick slot each.
     pub single: Vec<usize>,
     /// Operators that share one pick slot (`SHARED_SLOT`).
     pub shared: Vec<usize>,
     /// Operators that share the second pick slot (`CONTROLLER_SLOT`).
     pub controller: Vec<usize>,
+    /// The operators of each gait file, one pick slot per file.
+    pub gait: Vec<Vec<usize>>,
 }
 
-impl Enabled {
-    pub fn is_empty(&self) -> bool {
-        self.single.is_empty() && self.shared.is_empty() && self.controller.is_empty()
-    }
-}
-
-/// The operators `EVOLUTION_ANATOMY` enables.
+/// The operators, split by pick slot.
 pub(super) fn enabled() -> &'static Enabled {
     static ENABLED: std::sync::OnceLock<Enabled> = std::sync::OnceLock::new();
-    ENABLED.get_or_init(|| split(parse(std::env::var("EVOLUTION_ANATOMY").ok().as_deref())))
+    ENABLED.get_or_init(|| split((0..OPERATORS.len()).collect()))
 }
 
 fn split(indices: Vec<usize>) -> Enabled {
     let mut enabled = Enabled {
+        compound: OPERATORS
+            .iter()
+            .map(|(name, _)| COMPOUND.contains(name) || gait_file(name).is_some())
+            .collect(),
         single: Vec::new(),
         shared: Vec::new(),
         controller: Vec::new(),
+        gait: vec![Vec::new(); GAIT_FILES.len()],
     };
     for i in indices {
         let name = OPERATORS[i].0;
-        if SHARED_SLOT.contains(&name) {
+        if let Some(file) = gait_file(name) {
+            enabled.gait[file].push(i);
+        } else if SHARED_SLOT.contains(&name) {
             enabled.shared.push(i);
         } else if CONTROLLER_SLOT.contains(&name) {
             enabled.controller.push(i);
@@ -166,23 +280,6 @@ fn split(indices: Vec<usize>) -> Enabled {
         }
     }
     enabled
-}
-
-fn parse(value: Option<&str>) -> Vec<usize> {
-    let all = || (0..OPERATORS.len()).collect();
-    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
-        return all();
-    };
-    if matches!(value, "1" | "all" | "on" | "true") {
-        return all();
-    }
-    if matches!(value, "0" | "off" | "none" | "false") {
-        return Vec::new();
-    }
-    value
-        .split(',')
-        .filter_map(|name| OPERATORS.iter().position(|(n, _)| *n == name.trim()))
-        .collect()
 }
 
 /// Runs operator `index` of `OPERATORS`.
@@ -199,6 +296,28 @@ pub(super) fn apply(
 // Shared helpers. They read the skeleton from `a` (parent) and `b` (child),
 // so they also work on bones an operator appended.
 
+/// Picks one of the options `each` passes to its sink, as picking from the
+/// collected list would (one `rng.index` draw over their count), without
+/// storing them: `each` runs twice, once to count and once to find the one
+/// picked. For option lists too long to hold on the stack.
+pub(super) fn pick_each<T>(rng: &mut Rng, each: impl Fn(&mut dyn FnMut(T))) -> Option<T> {
+    let mut count = 0usize;
+    each(&mut |_| count += 1);
+    if count == 0 {
+        return None;
+    }
+    let target = rng.index(count);
+    let mut seen = 0usize;
+    let mut chosen = None;
+    each(&mut |item| {
+        if seen == target {
+            chosen = Some(item);
+        }
+        seen += 1;
+    });
+    chosen
+}
+
 /// Bones at a node.
 pub(super) fn degree(c: &Creature, node: usize) -> usize {
     c.bones
@@ -208,8 +327,8 @@ pub(super) fn degree(c: &Creature, node: usize) -> usize {
 }
 
 /// For each node, the bone whose child it is (`None` for the head).
-pub(super) fn parent_bones(c: &Creature) -> Vec<Option<usize>> {
-    let mut parent = vec![None; c.nodes.len()];
+pub(super) fn parent_bones(c: &Creature) -> Bounded<Option<usize>, MAX_NODES> {
+    let mut parent = Bounded::filled(c.nodes.len(), None);
     for (index, bone) in c.bones.iter().enumerate() {
         if let Some(slot) = parent.get_mut(bone.b as usize) {
             *slot = Some(index);
@@ -219,10 +338,10 @@ pub(super) fn parent_bones(c: &Creature) -> Vec<Option<usize>> {
 }
 
 /// For each node, the bones it is the parent of.
-pub(super) fn child_bones(c: &Creature) -> Vec<Vec<usize>> {
-    let mut children = vec![Vec::new(); c.nodes.len()];
+pub(super) fn child_bones(c: &Creature) -> Children {
+    let mut children: Children = std::array::from_fn(|_| BoneIds::new());
     for (index, bone) in c.bones.iter().enumerate() {
-        if let Some(list) = children.get_mut(bone.a as usize) {
+        if let Some(list) = children[..c.nodes.len()].get_mut(bone.a as usize) {
             list.push(index);
         }
     }
@@ -236,25 +355,36 @@ pub(super) fn is_neck(c: &Creature, bone: usize) -> bool {
 
 /// The branch that starts with `bone`: it and every bone below its child
 /// node, parents before children.
-pub(super) fn branch(c: &Creature, bone: usize) -> Vec<usize> {
-    let children = child_bones(c);
-    let mut out = vec![bone];
+pub(super) fn branch(c: &Creature, bone: usize) -> BoneIds {
+    branch_in(c, &child_bones(c), bone)
+}
+
+/// `branch` with the child lists (`child_bones`) the caller already has, for
+/// callers that take many branches of one body.
+pub(super) fn branch_in(c: &Creature, children: &Children, bone: usize) -> BoneIds {
+    let mut out = BoneIds::from_slice(&[bone]);
     let mut next = 0;
     while next < out.len() {
         let node = c.bones[out[next]].b as usize;
-        out.extend(children.get(node).into_iter().flatten().copied());
+        out.extend(
+            children[..c.nodes.len()]
+                .get(node)
+                .into_iter()
+                .flatten()
+                .copied(),
+        );
         next += 1;
     }
     out
 }
 
 /// The child nodes of a branch's bones (every node below its root joint).
-pub(super) fn branch_nodes(c: &Creature, bones: &[usize]) -> Vec<usize> {
+pub(super) fn branch_nodes(c: &Creature, bones: &[usize]) -> BoneIds {
     bones.iter().map(|&b| c.bones[b].b as usize).collect()
 }
 
 /// Muscles with both ends (`both`) or at least one end on `bones`.
-pub(super) fn muscles_on(c: &Creature, bones: &[usize], both: bool) -> Vec<usize> {
+pub(super) fn muscles_on(c: &Creature, bones: &[usize], both: bool) -> MuscleIds {
     let on = |b: u32| bones.contains(&(b as usize));
     (0..c.muscles.len())
         .filter(|&i| {
@@ -271,7 +401,8 @@ pub(super) fn muscles_on(c: &Creature, bones: &[usize], both: bool) -> Vec<usize
 /// Whether the body has room for `nodes` more nodes and `muscles` more
 /// muscles.
 pub(super) fn room(c: &Creature, cfg: &Config, nodes: usize, muscles: usize) -> bool {
-    c.nodes.len() + nodes <= cfg.max_nodes.min(64) && c.muscles.len() + muscles <= cfg.max_muscles
+    c.nodes.len() + nodes <= cfg.max_nodes.min(MAX_NODES)
+        && c.muscles.len() + muscles <= cfg.max_muscles.min(MAX_MUSCLES)
 }
 
 /// Removes `bones` and `nodes` (and every muscle on a removed bone), and
@@ -306,8 +437,8 @@ pub(super) fn remove_parts(c: &mut Creature, bones: &[usize], nodes: &[usize]) {
 
 /// New index of each of `len` items after `removed` go (`usize::MAX` for a
 /// removed one).
-fn renumber(len: usize, removed: &[usize]) -> Vec<usize> {
-    let mut map = vec![0; len];
+fn renumber(len: usize, removed: &[usize]) -> BoneIds {
+    let mut map = BoneIds::filled(len, 0);
     let mut next = 0;
     for (index, slot) in map.iter_mut().enumerate() {
         if removed.contains(&index) {
@@ -381,12 +512,28 @@ pub(super) fn copy_branch(
     mirror: bool,
     phase: f32,
 ) -> Option<usize> {
+    copy_branch_limited(c, cfg, bone, at, place, mirror, phase, usize::MAX)
+}
+
+/// `copy_branch` that brings at most `quota` muscles: when the branch and
+/// its hinge have more, the copy keeps the ones with the most drive.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn copy_branch_limited(
+    c: &mut Creature,
+    cfg: &Config,
+    bone: usize,
+    at: usize,
+    place: impl Fn([f32; 2]) -> [f32; 2],
+    mirror: bool,
+    phase: f32,
+    quota: usize,
+) -> Option<usize> {
     let bones = branch(c, bone);
     let parents = parent_bones(c);
     let above_source = parents[c.bones[bone].a as usize];
     let above_target = parents.get(at).copied().flatten();
     let inside = muscles_on(c, &bones, true);
-    let hinge: Vec<usize> = match (above_source, above_target) {
+    let hinge: MuscleIds = match (above_source, above_target) {
         (Some(src), Some(_)) => muscles_on(c, &[bone], false)
             .into_iter()
             .filter(|&i| {
@@ -394,14 +541,22 @@ pub(super) fn copy_branch(
                 (m.bone_a as usize == src) != (m.bone_b as usize == src) && !inside.contains(&i)
             })
             .collect(),
-        _ => Vec::new(),
+        _ => MuscleIds::new(),
     };
-    if !room(c, cfg, bones.len(), inside.len() + hinge.len()) {
+    let mut brought: MuscleIds = inside.into_iter().chain(hinge).collect();
+    if brought.len() > quota {
+        brought.sort_stable_by(|&x, &y| {
+            extra::drive(&c.muscles[y]).total_cmp(&extra::drive(&c.muscles[x]))
+        });
+        brought.truncate(quota);
+    }
+    if !room(c, cfg, bones.len(), brought.len()) {
         return None;
     }
-    let mut new_bone = std::collections::HashMap::new();
-    let mut new_node = std::collections::HashMap::new();
-    new_node.insert(c.bones[bone].a as usize, at);
+    // Where each copied bone and node went (`usize::MAX` for the rest).
+    let mut new_bone = [usize::MAX; MAX_NODES];
+    let mut new_node = [usize::MAX; MAX_NODES];
+    new_node[c.bones[bone].a as usize] = at;
     for &b in &bones {
         let old = c.bones[b];
         let child = old.b as usize;
@@ -413,15 +568,15 @@ pub(super) fn copy_branch(
             y: y.clamp(0.0, super::body_extent()),
             ..n
         });
-        new_node.insert(child, node);
+        new_node[child] = node;
         let (min, max) = if mirror {
             (-old.max_angle, -old.min_angle)
         } else {
             (old.min_angle, old.max_angle)
         };
-        new_bone.insert(b, c.bones.len());
+        new_bone[b] = c.bones.len();
         c.bones.push(Bone {
-            a: new_node[&(old.a as usize)] as u32,
+            a: new_node[old.a as usize] as u32,
             b: node as u32,
             min_angle: min,
             max_angle: max,
@@ -429,12 +584,12 @@ pub(super) fn copy_branch(
         });
     }
     let remap = |b: u32| -> u32 {
-        match new_bone.get(&(b as usize)) {
-            Some(&n) => n as u32,
-            None => above_target.expect("hinge muscles need a bone above") as u32,
+        match new_bone[b as usize] {
+            usize::MAX => above_target.expect("hinge muscles need a bone above") as u32,
+            n => n as u32,
         }
     };
-    for i in inside.into_iter().chain(hinge) {
+    for i in brought {
         let mut m = c.muscles[i];
         m.bone_a = remap(m.bone_a);
         m.bone_b = remap(m.bone_b);
@@ -444,7 +599,7 @@ pub(super) fn copy_branch(
         m.phase = (m.phase + phase).rem_euclid(1.0);
         c.muscles.push(m);
     }
-    Some(new_bone[&bone])
+    Some(new_bone[bone])
 }
 
 #[cfg(test)]
@@ -466,27 +621,21 @@ mod tests {
     }
 
     #[test]
-    fn operator_names_parse_and_are_unique() {
-        assert_eq!(parse(None).len(), OPERATORS.len());
-        assert_eq!(parse(Some("")).len(), OPERATORS.len());
-        assert!(parse(Some("0")).is_empty());
-        assert!(parse(Some("off")).is_empty());
-        assert_eq!(parse(Some("all")).len(), OPERATORS.len());
-        assert_eq!(parse(Some("1")).len(), OPERATORS.len());
-        assert_eq!(parse(Some("fuse_bones, copy_limb")), vec![3, 0]);
+    fn operator_names_are_unique() {
         for (i, (name, _)) in OPERATORS.iter().enumerate() {
             assert_eq!(OPERATORS.iter().position(|(n, _)| n == name), Some(i));
         }
-        let on = split(parse(None));
+        let on = enabled();
         assert_eq!(on.shared.len(), SHARED_SLOT.len());
         assert_eq!(on.controller.len(), CONTROLLER_SLOT.len());
         assert_eq!(
-            on.single.len() + on.shared.len() + on.controller.len(),
+            on.single.len()
+                + on.shared.len()
+                + on.controller.len()
+                + on.gait.iter().map(Vec::len).sum::<usize>(),
             OPERATORS.len()
         );
         assert!(on.single.windows(2).all(|w| w[0] < w[1]), "table order");
-        let some = split(parse(Some("copy_limb,nudge_limb_phase")));
-        assert_eq!((some.single.len(), some.shared.len()), (1, 1));
     }
 
     #[test]
@@ -539,6 +688,104 @@ mod tests {
                     cfg.max_nodes
                 );
             }
+        }
+    }
+
+    #[test]
+    fn an_operator_is_a_function_of_its_stream_and_its_body() {
+        let cfg = Config::default();
+        let bodies = bodies(&cfg, 40);
+        let donor = bodies[20].clone();
+        for (index, (name, _)) in OPERATORS.iter().enumerate() {
+            for (i, body) in bodies.iter().enumerate() {
+                let cx = Context {
+                    donor: Some(&donor),
+                };
+                let (mut x, mut y) = (body.clone(), body.clone());
+                let a = apply(index, &mut x, &cfg, &mut Rng::new(61, index as u32, i), &cx);
+                let b = apply(index, &mut y, &cfg, &mut Rng::new(61, index as u32, i), &cx);
+                assert_eq!(a, b, "{name} on body {i}");
+                assert!(
+                    x.nodes == y.nodes && x.bones == y.bones && x.muscles == y.muscles,
+                    "{name} on body {i} is not a function of its stream"
+                );
+            }
+        }
+    }
+
+    /// Bodies at the default caps: grown toward 32 nodes and filled toward
+    /// 96 muscles, where the bounded arrays are full.
+    fn full_bodies(cfg: &Config, count: usize) -> Vec<Creature> {
+        (0..count)
+            .map(|i| {
+                let mut rng = Rng::new(3, 2, i);
+                let mut c = random_creature_from(cfg, &mut rng);
+                c.id = i as u64 + 1;
+                grow_for_benchmark(&mut c, cfg, 5 + i as u64, 22 + i % 11);
+                let target = cfg.max_muscles - i % 4;
+                while c.muscles.len() < target {
+                    let (a, b) = (rng.index(c.bones.len()), rng.index(c.bones.len()));
+                    if a != b {
+                        let m = crate::evolution::muscle(a, b, &c.bones, &c.nodes, &mut rng);
+                        c.muscles.push(m);
+                    }
+                }
+                repair(&mut c, cfg, &mut rng);
+                c
+            })
+            .collect()
+    }
+
+    #[test]
+    fn operators_fit_the_bounded_arrays_at_the_caps() {
+        let cfg = Config::default();
+        assert_eq!(
+            (cfg.max_nodes, cfg.max_muscles),
+            (MAX_NODES, MAX_MUSCLES),
+            "the default caps are the array capacities"
+        );
+        let bodies = full_bodies(&cfg, 48);
+        assert!(bodies.iter().any(|c| c.nodes.len() == MAX_NODES));
+        assert!(bodies.iter().any(|c| c.muscles.len() == MAX_MUSCLES));
+        let check = Config {
+            population: 1,
+            ..cfg.clone()
+        };
+        for (index, (name, _)) in OPERATORS.iter().enumerate() {
+            for (i, body) in bodies.iter().enumerate() {
+                for variant in 0..3u32 {
+                    let mut c = body.clone();
+                    let mut rng = Rng::new(29, index as u32 + 1000 * variant, i);
+                    let donor = &bodies[(i + 1 + variant as usize) % bodies.len()];
+                    let cx = Context { donor: Some(donor) };
+                    if !apply(index, &mut c, &cfg, &mut rng, &cx) {
+                        continue;
+                    }
+                    repair(&mut c, &cfg, &mut rng);
+                    let mut pop = Population::default();
+                    pop.push(c.clone());
+                    if let Err(error) = pop.validate(&check) {
+                        panic!("{name} on full body {i}: {error:#}");
+                    }
+                }
+            }
+        }
+        // Lineages that stay at the caps: random operators one after another.
+        for (i, body) in bodies.iter().enumerate().take(24) {
+            let mut c = body.clone();
+            let mut rng = Rng::new(31, 0, i);
+            for _ in 0..100 {
+                let donor = &bodies[rng.index(bodies.len())];
+                let cx = Context { donor: Some(donor) };
+                let index = rng.index(OPERATORS.len());
+                if apply(index, &mut c, &cfg, &mut rng, &cx) {
+                    c = crate::evolution::local_mutation(c, &cfg, &mut rng, 0.1);
+                    repair(&mut c, &cfg, &mut rng);
+                }
+            }
+            let mut pop = Population::default();
+            pop.push(c);
+            pop.validate(&check).unwrap();
         }
     }
 

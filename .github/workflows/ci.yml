@@ -21,9 +21,8 @@ env:
   RAYON_NUM_THREADS: "8"
   RUST_TEST_THREADS: "1"
   EVOLUTION_DEVICES: primary
-  EVOLUTION_CPU_THREADS: "6"
-  # Override .cargo/config.toml's native CPU selection: hosted runners need
-  # no AVX-512 support, and this checks the portable CPU implementation.
+  # Override .cargo/config.toml's native CPU selection: hosted runners may
+  # lack the workstation's instructions.
   RUSTFLAGS: "-C target-cpu=x86-64"
 
 jobs:
@@ -46,6 +45,6 @@ jobs:
         run: nice -n 10 cargo +stable fmt --all --check
       - name: Clippy
         run: nice -n 10 cargo +stable clippy --locked --all-targets -- -D warnings
-      - name: CPU tests
+      - name: Tests
         # GPU tests remain #[ignore] and are run explicitly on the workstation.
         run: nice -n 10 cargo +stable test --locked --release --all-targets

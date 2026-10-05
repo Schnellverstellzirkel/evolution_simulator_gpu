@@ -1,4 +1,4 @@
-//! Common interface for every evaluation device (GPUs through Vulkan, CPU SIMD).
+//! Common interface for the evaluation devices: NVIDIA GPUs through CUDA.
 //!
 //! An engine accepts units of creatures, evaluates them asynchronously on its
 //! own thread, and returns raw per-creature results in unit order. Callers
@@ -9,7 +9,6 @@ use crate::{
     creature_kernel::{self, GpuResult},
     cuda_engine::CudaEngine,
     evolution::{Creature, Population},
-    vk_engine::{Completed, VkEngine},
 };
 use anyhow::{Context, Result};
 use std::{
@@ -67,52 +66,89 @@ pub fn record_on_gpu(creature: &Creature, cfg: &Config, timeout: Duration) -> Op
     match answer.recv_timeout(timeout) {
         Ok(Ok(recording)) => Some(recording),
         Ok(Err(error)) => {
-            eprintln!("GPU replay failed, the CPU replays instead: {error}");
+            eprintln!("GPU replay failed: {error}");
             None
         }
         Err(_) => {
-            eprintln!("GPU replay did not answer in time; the CPU replays instead");
+            eprintln!("GPU replay did not answer in time");
             None
         }
     }
 }
 
 /// A creature's full trial for the replay viewer and the result scored in
-/// the same run, from the engine that scores the archive: the GPU when one
-/// evaluates, the CPU engine in a CPU-only game. A replay runs the full
-/// trial, without the early screen.
-pub fn replay(creature: &Creature, cfg: &Config) -> (Vec<Vec<[f32; 2]>>, GpuResult) {
-    let (frames, result, _) = replay_forces(creature, cfg);
-    (frames, result)
+/// the same run, recorded by the scoring kernel on the GPU that scores the
+/// archive, with the muscle energy, muscle force and ground contact forces it
+/// recorded with each frame. A replay runs the full trial, without the early
+/// screen. None when the GPU did not answer within `patience`.
+pub fn replay(creature: &Creature, cfg: &Config, patience: Duration) -> Option<Replay> {
+    let cfg = Config {
+        screen: None,
+        rungs: None,
+        ..cfg.clone()
+    };
+    // A fine trial records several frames per standard step; the viewer
+    // plays standard steps, so it keeps one frame per standard step.
+    let every = (cfg.fidelity().rate / crate::physics::Fidelity::standard().rate).max(1) as usize;
+    let recording = record_on_gpu(creature, &cfg, patience)?;
+    Some(thin(
+        recording.frames,
+        recording.result,
+        recording.forces,
+        every,
+    ))
 }
 
-/// `replay` with the muscle energy, muscle force and ground contact forces
-/// the engine recorded with each frame.
-pub fn replay_forces(
-    creature: &Creature,
-    cfg: &Config,
-) -> (
+pub type Replay = (
     Vec<Vec<[f32; 2]>>,
     GpuResult,
     Option<crate::replay_forces::Forces>,
-) {
-    let cfg = Config {
-        screen: None,
-        ..cfg.clone()
-    };
-    if let Some(recording) = record_on_gpu(creature, &cfg, Duration::from_secs(3)) {
-        return (recording.frames, recording.result, recording.forces);
+);
+/// Keeps every `every`-th frame (the first and the last always).
+fn thin(
+    frames: Vec<Vec<[f32; 2]>>,
+    result: GpuResult,
+    forces: Option<crate::replay_forces::Forces>,
+    every: usize,
+) -> Replay {
+    if every <= 1 {
+        return (frames, result, forces);
     }
-    let (frames, result, forces) = crate::physics2::replay_forces(creature, &cfg);
-    (frames, result, Some(forces))
+    fn keep<T>(v: Vec<T>, every: usize) -> Vec<T> {
+        let last = v.len().saturating_sub(1);
+        v.into_iter()
+            .enumerate()
+            .filter(|(i, _)| i % every == 0 || *i == last)
+            .map(|(_, x)| x)
+            .collect()
+    }
+    let forces = forces.map(|f| crate::replay_forces::Forces {
+        energy: keep(f.energy, every),
+        muscle: keep(f.muscle, every),
+        ground: keep(f.ground, every),
+        friction: keep(f.friction, every),
+        broken: keep(f.broken, every),
+    });
+    (keep(frames, every), result, forces)
+}
+
+/// Whether `cfg` runs a confirmation trial: its physics is finer than the
+/// standard (`scheduler::confirm_config`).
+pub fn is_confirmation(cfg: &Config) -> bool {
+    cfg.fidelity() != crate::physics::Fidelity::standard()
 }
 
 pub trait Engine: Send {
     fn name(&self) -> String;
     /// Largest body (in nodes) this engine can evaluate.
     fn max_nodes(&self) -> usize;
-    /// Units that can be queued now without waiting.
+    /// Standard units that can be queued now without waiting.
     fn free_slots(&self) -> usize;
+    /// Confirmation units that can be queued now without waiting. They have
+    /// a slot of their own on a GPU, so standard work never holds them back.
+    fn free_confirm_slots(&self) -> usize {
+        self.free_slots()
+    }
     /// Queues a unit; `unit` holds exactly the unit's creatures, in order.
     fn submit(&mut self, unit: Population, cfg: &Config) -> Result<u64> {
         self.submit_shared(Arc::new(unit), cfg)
@@ -137,7 +173,9 @@ pub struct ThreadedEngine {
     jobs: Option<mpsc::Sender<(u64, Arc<Population>, Config)>>,
     done: mpsc::Receiver<Result<Finished, String>>,
     thread: Option<std::thread::JoinHandle<()>>,
-    queued: VecDeque<u64>,
+    /// Tickets of the units on the engine thread, and whether each is a
+    /// confirmation trial.
+    queued: VecDeque<(u64, bool)>,
     ready: VecDeque<Finished>,
     /// Retained until teardown, after all successful results have been delivered.
     failure: Option<String>,
@@ -207,7 +245,24 @@ impl Engine for ThreadedEngine {
         if self.failure.is_some() {
             0
         } else {
-            self.depth.saturating_sub(self.queued.len())
+            self.depth.saturating_sub(
+                self.queued
+                    .iter()
+                    .filter(|(_, confirming)| !confirming)
+                    .count(),
+            )
+        }
+    }
+    fn free_confirm_slots(&self) -> usize {
+        if self.failure.is_some() {
+            0
+        } else {
+            CONFIRM_DEPTH.saturating_sub(
+                self.queued
+                    .iter()
+                    .filter(|(_, confirming)| *confirming)
+                    .count(),
+            )
         }
     }
     fn submit_shared(&mut self, unit: Arc<Population>, cfg: &Config) -> Result<u64> {
@@ -226,7 +281,7 @@ impl Engine for ThreadedEngine {
             return Err(self.submission_error());
         }
         self.next_ticket += 1;
-        self.queued.push_back(ticket);
+        self.queued.push_back((ticket, is_confirmation(cfg)));
         Ok(ticket)
     }
     fn poll(&mut self) -> Result<Option<Finished>> {
@@ -237,7 +292,10 @@ impl Engine for ThreadedEngine {
             }
             return Ok(None);
         };
-        let position = self.queued.iter().position(|&ticket| ticket == done.ticket);
+        let position = self
+            .queued
+            .iter()
+            .position(|&(ticket, _)| ticket == done.ticket);
         anyhow::ensure!(position.is_some(), "{} returned an unknown unit", self.name);
         self.queued.remove(position.unwrap());
         Ok(Some(done))
@@ -254,7 +312,7 @@ impl Engine for ThreadedEngine {
 
 impl Drop for ThreadedEngine {
     fn drop(&mut self) {
-        // Join before the process tears down Vulkan and the thread pools.
+        // Join before the process tears down CUDA and the thread pools.
         self.jobs.take();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -262,65 +320,70 @@ impl Drop for ThreadedEngine {
     }
 }
 
-/// A unit on its way through the trial segments of `segment_ends`.
-struct SegmentedUnit {
-    ticket: u64,
-    /// Final results by unit position, filled as creatures finish.
-    results: Vec<GpuResult>,
-    ends: Vec<u32>,
-    /// Index into `ends` of the segment that runs next.
-    segment: usize,
-    cfg: Config,
-    busy: f64,
-    /// The creatures still running, packed for the next segment.
-    batches: Vec<creature_kernel::LaneBatch>,
+/// Results of one completed submission.
+pub struct Completed {
+    pub ticket: u64,
+    /// The raw GPU result of every creature, in unit order.
+    pub results: Vec<GpuResult>,
+    /// The unit's batches, whose buffers the next unit packs into.
+    pub batches: Vec<creature_kernel::LaneBatch>,
+    /// For a recording (`CudaEngine::record`): node positions as
+    /// `[creature][frame][node]`, with the batch's node stride.
+    pub frames: Option<Vec<[f32; 2]>>,
+    pub gpu_seconds: f64,
 }
 
-/// Ticks at which a GPU trial pauses to drop fallen creatures, ending with
-/// the trial's last tick. A fall ends a trial, so every step a fallen
-/// creature would take after it is wasted; at a segment boundary the others
-/// are repacked into dense warps. `EVOLUTION_SEGMENTS` lists the pauses in
-/// seconds after settling (default `2,10`; empty or `0` for none). On an
-/// evolved 3M population 38% of creatures fall, most within a second, and
-/// pauses at 2 s and 10 s skip 34% of all steps.
-pub(crate) fn segment_ends(cfg: &Config) -> Vec<u32> {
-    let fidelity = cfg.fidelity();
-    let total = fidelity.settle() + cfg.steps();
-    let seconds: Vec<f32> = match std::env::var("EVOLUTION_SEGMENTS") {
-        Ok(list) => list
-            .split(',')
-            .filter_map(|v| v.trim().parse().ok())
-            .filter(|&v: &f32| v > 0.0)
-            .collect(),
-        Err(_) => vec![2.0, 10.0],
-    };
-    let mut ends: Vec<u32> = seconds
-        .into_iter()
-        .map(|s| fidelity.settle() + (s * fidelity.rate as f32).round() as u32)
-        // Screened creatures leave right after the screen step.
-        .chain(cfg.screen.map(|screen| screen.tick(fidelity) + 1))
-        .filter(|&tick| tick < total)
-        .collect();
-    ends.sort_unstable();
-    ends.dedup();
-    ends.push(total);
-    ends
+/// Submission slots per GPU for standard units. One more unit packs on the
+/// engine thread while every slot runs.
+pub fn gpu_slots() -> u32 {
+    4
 }
 
-/// What the GPU engine thread needs from a device. `VkEngine` and
-/// `CudaEngine` implement it; tests use a fake that can run out of memory.
-trait SegmentDevice {
+/// Confirmation units on the engine thread at most: one on the GPU's slot for
+/// them and one that packs.
+const CONFIRM_DEPTH: usize = 2;
+
+/// Buffer size for `size` bytes of data. Small buffers round up to a power
+/// of two, which costs little. Large ones get 25% headroom, so units of
+/// slightly different sizes reuse them, without the up to 2x waste of a
+/// power of two.
+pub fn padded_size(size: u64) -> u64 {
+    const LARGE: u64 = 1 << 20;
+    let size = size.max(256);
+    if size <= LARGE {
+        size.next_power_of_two()
+    } else {
+        (size + size / 4).next_multiple_of(LARGE)
+    }
+}
+
+/// True when `error` comes from a failed device or pinned host memory
+/// allocation, which another process holding GPU memory can cause for a
+/// while.
+pub fn out_of_memory(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::cuda_engine::CudaError>()
+            .is_some_and(crate::cuda_engine::CudaError::out_of_memory)
+    })
+}
+
+/// What the GPU engine thread needs from a device. `CudaEngine` implements
+/// it; tests use a fake that can run out of memory.
+trait Device {
+    /// Standard units that can be submitted now.
     fn free_slots(&self) -> usize;
-    #[allow(clippy::too_many_arguments)]
+    /// Whether a confirmation trial can be submitted now.
+    fn confirm_free(&self) -> bool {
+        self.free_slots() > 0
+    }
+    /// Uploads the batches and queues their whole trials. On success the
+    /// device takes the batches (`batches` is left empty) and returns them
+    /// in `Completed`; on failure they stay.
     fn submit(
         &mut self,
-        batches: &[creature_kernel::LaneBatch],
+        batches: &mut Vec<creature_kernel::LaneBatch>,
         cfg: &Config,
-        start: u32,
-        end: u32,
-        total: u32,
-        chunk: u32,
-        read_state: bool,
     ) -> Result<u64>;
     fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>>;
     /// Frees buffers kept for reuse by slots with nothing in flight.
@@ -328,70 +391,27 @@ trait SegmentDevice {
     fn allocated_bytes(&self) -> u64;
     /// Whether a replay can be recorded now.
     fn replay_free(&self) -> bool;
-    /// Queues a whole recorded trial of one batch (`VkEngine::record`).
-    fn record(
-        &mut self,
-        batch: &creature_kernel::LaneBatch,
-        cfg: &Config,
-        total: u32,
-        chunk: u32,
-    ) -> Result<u64>;
-}
-
-impl SegmentDevice for VkEngine {
-    fn free_slots(&self) -> usize {
-        VkEngine::free_slots(self)
-    }
-    fn submit(
-        &mut self,
-        batches: &[creature_kernel::LaneBatch],
-        cfg: &Config,
-        start: u32,
-        end: u32,
-        total: u32,
-        chunk: u32,
-        read_state: bool,
-    ) -> Result<u64> {
-        VkEngine::submit(self, batches, cfg, start, end, total, chunk, read_state)
-    }
-    fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>> {
-        VkEngine::poll(self, timeout)
-    }
-    fn release_idle(&mut self) -> u64 {
-        VkEngine::release_idle(self)
-    }
-    fn allocated_bytes(&self) -> u64 {
-        self.allocated_bytes
-    }
-    fn replay_free(&self) -> bool {
-        VkEngine::replay_free(self)
-    }
-    fn record(
-        &mut self,
-        batch: &creature_kernel::LaneBatch,
-        cfg: &Config,
-        total: u32,
-        chunk: u32,
-    ) -> Result<u64> {
-        VkEngine::record(self, batch, cfg, total, chunk)
+    /// Queues a whole recorded trial of one batch (`CudaEngine::record`).
+    fn record(&mut self, batch: creature_kernel::LaneBatch, cfg: &Config) -> Result<u64>;
+    /// Whether a failed submission ran out of memory.
+    fn out_of_memory(&self, error: &anyhow::Error) -> bool {
+        out_of_memory(error)
     }
 }
 
-impl SegmentDevice for CudaEngine {
+impl Device for CudaEngine {
     fn free_slots(&self) -> usize {
         CudaEngine::free_slots(self)
     }
+    fn confirm_free(&self) -> bool {
+        CudaEngine::confirm_free(self)
+    }
     fn submit(
         &mut self,
-        batches: &[creature_kernel::LaneBatch],
+        batches: &mut Vec<creature_kernel::LaneBatch>,
         cfg: &Config,
-        start: u32,
-        end: u32,
-        total: u32,
-        chunk: u32,
-        read_state: bool,
     ) -> Result<u64> {
-        CudaEngine::submit(self, batches, cfg, start, end, total, chunk, read_state)
+        CudaEngine::submit(self, batches, cfg)
     }
     fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>> {
         CudaEngine::poll(self, timeout)
@@ -405,15 +425,24 @@ impl SegmentDevice for CudaEngine {
     fn replay_free(&self) -> bool {
         CudaEngine::replay_free(self)
     }
-    fn record(
-        &mut self,
-        batch: &creature_kernel::LaneBatch,
-        cfg: &Config,
-        total: u32,
-        chunk: u32,
-    ) -> Result<u64> {
-        CudaEngine::record(self, batch, cfg, total, chunk)
+    fn record(&mut self, batch: creature_kernel::LaneBatch, cfg: &Config) -> Result<u64> {
+        CudaEngine::record(self, batch, cfg)
     }
+}
+
+/// A packed unit waiting for a free slot or for GPU memory.
+struct PackedUnit {
+    ticket: u64,
+    cfg: Config,
+    batches: Vec<creature_kernel::LaneBatch>,
+}
+
+/// A unit on the GPU: its ticket and how many creatures it holds.
+struct RunningUnit {
+    ticket: u64,
+    count: usize,
+    /// A confirmation trial, which has a slot of its own.
+    confirming: bool,
 }
 
 /// What to do after a submission ran out of memory.
@@ -425,8 +454,8 @@ enum OutOfMemory {
     GiveUp(Duration),
 }
 
-/// Rides out failed GPU memory allocations instead of retiring the GPU,
-/// which would leave the rest of the session on the CPU. Another process
+/// Rides out failed GPU memory allocations instead of failing the GPU,
+/// which would stop evolution. Another process
 /// can hold GPU memory for a while. While other units run, a unit that does
 /// not fit waits for one of them to finish, and fewer units run at once from
 /// then on; one more is tried every `RAISE_AFTER`. With nothing running, it
@@ -538,37 +567,10 @@ impl MemoryBackoff {
     }
 }
 
-/// The GPU a `gpu_engine` thread runs on.
-enum Backend {
-    Cuda(Box<CudaEngine>),
-    Vulkan(Box<VkEngine>),
-}
-
-/// Opens the GPU named `name` through CUDA when it is an NVIDIA GPU whose
-/// driver and NVRTC load (1.6 to 1.8 times Vulkan's kernel rate on the
-/// RTX 4060, docs/performance-log.md), and through Vulkan otherwise.
-fn open_backend(name: &str, max_nodes: usize) -> Result<(Backend, String)> {
-    if crate::cuda_engine::enabled() {
-        let task = crate::loading::start(format!("Opening {name} with CUDA"));
-        match CudaEngine::new(name, max_nodes) {
-            Ok(engine) => {
-                task.finish(false);
-                let name = engine.name.clone();
-                return Ok((Backend::Cuda(Box::new(engine)), name));
-            }
-            Err(error) => eprintln!("CUDA not used ({error:#}); running on Vulkan"),
-        }
-    }
-    let task = crate::loading::start(format!("Opening {name} with Vulkan"));
-    let engine = VkEngine::new(name, max_nodes)?;
-    task.finish(false);
-    let name = engine.name.clone();
-    Ok((Backend::Vulkan(Box::new(engine)), name))
-}
-
-/// Opens a GPU running the creature-per-lane kernel on its own thread.
-/// The thread packs the next unit while earlier units run on the GPU.
-pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<ThreadedEngine> {
+/// Opens the NVIDIA GPU named `name` on its own thread, with kernels for
+/// bodies up to `max_nodes` nodes. The thread packs the next unit while
+/// earlier units run on the GPU.
+pub fn gpu_engine(name: &str, max_nodes: usize) -> Result<ThreadedEngine> {
     let (ready_tx, ready_rx) = mpsc::channel();
     let (jobs, job_rx) = mpsc::channel::<(u64, Arc<Population>, Config)>();
     let (done_tx, done) = mpsc::channel();
@@ -576,49 +578,40 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
     let allocated = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let thread_allocated = allocated.clone();
     let device_name = name.to_owned();
-    let slots = crate::vk_engine::gpu_slots() as usize;
+    let slots = gpu_slots() as usize;
     let thread = std::thread::Builder::new()
         .name(format!("gpu-{name}"))
         .spawn(move || {
-            let (engine, name) = match open_backend(&device_name, max_nodes) {
-                Ok(opened) => {
-                    let _ = ready_tx.send(Ok(opened.1.clone()));
-                    opened
+            crate::threads::pin_engine();
+            let engine = match CudaEngine::new(&device_name, max_nodes) {
+                Ok(engine) => {
+                    let _ = ready_tx.send(Ok((engine.name.clone(), engine.max_capacity)));
+                    engine
                 }
                 Err(err) => {
                     let _ = ready_tx.send(Err(err));
                     return;
                 }
             };
-            let memory =
-                MemoryBackoff::new(slots, Duration::from_millis(500), Duration::from_secs(60));
-            match engine {
-                // Each backend records replays with the recording variant of
-                // the kernel that scores.
-                Backend::Cuda(engine) => run_segments(
-                    *engine,
-                    &name,
-                    job_rx,
-                    done_tx,
-                    Some(replay_rx),
-                    &thread_allocated,
-                    step_range,
-                    memory,
-                ),
-                Backend::Vulkan(engine) => run_segments(
-                    *engine,
-                    &name,
-                    job_rx,
-                    done_tx,
-                    Some(replay_rx),
-                    &thread_allocated,
-                    step_range,
-                    memory,
-                ),
-            }
+            let name = engine.name.clone();
+            let memory = MemoryBackoff::new(
+                slots + 1,
+                Duration::from_millis(500),
+                Duration::from_secs(60),
+            );
+            // Replays run on the recording variant of the kernel that scores.
+            run_units(
+                engine,
+                &name,
+                job_rx,
+                done_tx,
+                Some(replay_rx),
+                &thread_allocated,
+                memory,
+            );
         })
         .context("GPU engine thread")?;
-    let device_name = ready_rx.recv().context("GPU engine thread stopped")??;
+    let (device_name, max_nodes) = ready_rx.recv().context("GPU engine thread stopped")??;
     Ok(ThreadedEngine {
         name: device_name,
         max_nodes,
@@ -636,50 +629,100 @@ pub fn gpu_engine(name: &str, max_nodes: usize, step_range: u32) -> Result<Threa
     })
 }
 
-/// The GPU engine thread: packs jobs, runs them in trial segments, and
-/// returns finished units until the job channel closes.
-#[allow(clippy::too_many_arguments)]
-fn run_segments<D: SegmentDevice>(
+/// Packs a job into the buffers of finished units (`spare`) where it can.
+fn pack_unit(
+    ticket: u64,
+    unit: Arc<Population>,
+    cfg: Config,
+    indices: &mut Vec<usize>,
+    spare: &mut Vec<creature_kernel::LaneBatch>,
+) -> Result<PackedUnit> {
+    indices.clear();
+    indices.extend(0..unit.genomes.len());
+    let batches = crate::warp_kernel::pack_reusing(&unit, indices, &cfg, spare)?;
+    Ok(PackedUnit {
+        ticket,
+        cfg,
+        batches,
+    })
+}
+
+/// The GPU engine thread: packs jobs, runs each as one whole-trial
+/// submission, and returns finished units until the job channel closes.
+fn run_units<D: Device>(
     mut engine: D,
     name: &str,
     job_rx: mpsc::Receiver<(u64, Arc<Population>, Config)>,
     done_tx: mpsc::Sender<Result<Finished, String>>,
     replays: Option<mpsc::Receiver<ReplayRequest>>,
     allocated: &AtomicU64,
-    step_range: u32,
     mut memory: MemoryBackoff,
 ) {
     let mut recording: Option<InFlightReplay> = None;
-    // Units whose next trial segment waits for a free slot (they go before
-    // new jobs), and submitted segments by device ticket.
-    let mut waiting: VecDeque<SegmentedUnit> = VecDeque::new();
-    let mut running: Vec<(u64, SegmentedUnit)> = Vec::new();
-    let mut pending: Option<(u64, Arc<Population>, Config)> = None;
+    // A packed unit that waits for memory (it goes before new jobs), and
+    // submitted units by device ticket.
+    let mut waiting: Option<PackedUnit> = None;
+    let mut running: Vec<(u64, RunningUnit)> = Vec::new();
+    // Jobs that arrived, by kind: a confirmation trial has a slot of its own
+    // and goes first, so it never waits behind standard units.
+    let mut standard_jobs: VecDeque<(u64, Arc<Population>, Config)> = VecDeque::new();
+    let mut confirm_jobs: VecDeque<(u64, Arc<Population>, Config)> = VecDeque::new();
+    // Batches of finished units: the next unit packs into their buffers, so
+    // the host memory the GPU copies from is mapped and registered once.
+    // Confirmation units are small and keep buffers apart from standard ones.
+    let mut spare: Vec<creature_kernel::LaneBatch> = Vec::new();
+    let mut confirm_spare: Vec<creature_kernel::LaneBatch> = Vec::new();
+    let mut indices: Vec<usize> = Vec::new();
+    let spare_bytes = |spare: &[creature_kernel::LaneBatch]| -> u64 {
+        spare.iter().map(|b| CudaEngine::held_bytes(b) as u64).sum()
+    };
     let mut open = true;
     loop {
-        if pending.is_none() && open {
-            let idle = running.is_empty() && waiting.is_empty() && recording.is_none();
+        if open {
+            let idle = running.is_empty()
+                && waiting.is_none()
+                && recording.is_none()
+                && standard_jobs.is_empty()
+                && confirm_jobs.is_empty();
+            let mut arrived = Vec::new();
             // While idle, wake every few milliseconds for replay requests.
-            let job = match (idle, &replays) {
-                (true, Some(_)) => job_rx.recv_timeout(Duration::from_millis(5)),
-                (true, None) => job_rx
-                    .recv()
-                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-                (false, _) => job_rx.try_recv().map_err(|error| match error {
-                    mpsc::TryRecvError::Empty => mpsc::RecvTimeoutError::Timeout,
-                    mpsc::TryRecvError::Disconnected => mpsc::RecvTimeoutError::Disconnected,
-                }),
-            };
-            match job {
-                Ok(job) => pending = Some(job),
-                Err(mpsc::RecvTimeoutError::Disconnected) if idle => open = false,
-                Err(_) => {}
+            match (idle, &replays) {
+                (true, Some(_)) => match job_rx.recv_timeout(Duration::from_millis(5)) {
+                    Ok(job) => arrived.push(job),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => open = false,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                },
+                (true, None) => match job_rx.recv() {
+                    Ok(job) => arrived.push(job),
+                    Err(_) => open = false,
+                },
+                (false, _) => {}
+            }
+            // Every job that is already there, so a confirmation trial is not
+            // stuck in the channel behind a standard unit that waits for a slot.
+            loop {
+                match job_rx.try_recv() {
+                    Ok(job) => arrived.push(job),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        open = false;
+                        break;
+                    }
+                }
+            }
+            for job in arrived {
+                if is_confirmation(&job.2) {
+                    confirm_jobs.push_back(job);
+                } else {
+                    standard_jobs.push_back(job);
+                }
             }
         }
         if !open
             && running.is_empty()
-            && waiting.is_empty()
-            && pending.is_none()
+            && waiting.is_none()
+            && standard_jobs.is_empty()
+            && confirm_jobs.is_empty()
             && recording.is_none()
         {
             break;
@@ -690,7 +733,7 @@ fn run_segments<D: SegmentDevice>(
             && engine.replay_free()
             && let Some(request) = replays.as_ref().and_then(|rx| rx.try_recv().ok())
         {
-            match start_recording(&mut engine, &request, step_range) {
+            match start_recording(&mut engine, &request) {
                 Ok((ticket, layout, total)) => {
                     recording = Some(InFlightReplay {
                         ticket,
@@ -703,82 +746,101 @@ fn run_segments<D: SegmentDevice>(
                     let _ = request.reply.send(Err(format!("{error:#}")));
                 }
             }
-            allocated.store(engine.allocated_bytes(), Ordering::Relaxed);
+            allocated.store(
+                engine.allocated_bytes() + spare_bytes(&spare) + spare_bytes(&confirm_spare),
+                Ordering::Relaxed,
+            );
         }
-        if engine.free_slots() > 0 && memory.may_submit(Instant::now(), running.len()) {
-            let next = match waiting.pop_front() {
-                Some(unit) => Some(Ok(unit)),
-                None => pending.take().map(|(ticket, unit, cfg)| {
-                    let indices: Vec<usize> = (0..unit.genomes.len()).collect();
-                    crate::physics2::pack(&unit, &indices, &cfg).map(|batches| SegmentedUnit {
-                        ticket,
-                        results: vec![GpuResult::default(); indices.len()],
-                        ends: segment_ends(&cfg),
-                        segment: 0,
-                        cfg,
-                        busy: 0.0,
-                        batches,
-                    })
-                }),
+        // One unit goes to the GPU: a unit that waited for memory first, then
+        // a confirmation trial (its slot is not the standard units'), then a
+        // standard unit.
+        let can_confirm = engine.confirm_free();
+        let can_standard = engine.free_slots() > 0;
+        let may_submit =
+            (can_confirm || can_standard) && memory.may_submit(Instant::now(), running.len());
+        let next: Option<Result<PackedUnit>> = if !may_submit {
+            None
+        } else if let Some(unit) = waiting.take() {
+            if if is_confirmation(&unit.cfg) {
+                can_confirm
+            } else {
+                can_standard
+            } {
+                Some(Ok(unit))
+            } else {
+                waiting = Some(unit);
+                None
+            }
+        } else if can_confirm && let Some((ticket, unit, cfg)) = confirm_jobs.pop_front() {
+            Some(pack_unit(
+                ticket,
+                unit,
+                cfg,
+                &mut indices,
+                &mut confirm_spare,
+            ))
+        } else if can_standard && let Some((ticket, unit, cfg)) = standard_jobs.pop_front() {
+            Some(pack_unit(ticket, unit, cfg, &mut indices, &mut spare))
+        } else {
+            None
+        };
+        if let Some(next) = next {
+            let mut unit = match next {
+                Ok(unit) => unit,
+                Err(err) => {
+                    let _ = done_tx.send(Err(format!("{err:#}")));
+                    return;
+                }
             };
-            if let Some(next) = next {
-                let mut unit = match next {
-                    Ok(unit) => unit,
-                    Err(err) => {
-                        let _ = done_tx.send(Err(format!("{err:#}")));
-                        return;
-                    }
-                };
-                let total = *unit.ends.last().expect("segment ends");
-                // There is no settling phase: trials start at the settling tick.
-                let first = unit.cfg.fidelity().settle();
-                let start = unit.segment.checked_sub(1).map_or(first, |s| unit.ends[s]);
-                let end = unit.ends[unit.segment];
-                match engine.submit(
-                    &unit.batches,
-                    &unit.cfg,
-                    start,
-                    end,
-                    total,
-                    step_range,
-                    end < total,
-                ) {
-                    Ok(vk_ticket) => {
-                        for batch in &mut unit.batches {
-                            batch.release_uploaded();
-                        }
-                        running.push((vk_ticket, unit));
-                        if let Some(line) = memory.submitted(Instant::now(), running.len()) {
-                            eprintln!("{name}: {line}");
-                        }
-                    }
-                    // Keep the unit; it runs once memory frees up.
-                    Err(err) if crate::vk_engine::out_of_memory(&err) => {
-                        let freed = engine.release_idle();
-                        waiting.push_front(unit);
-                        match memory.out_of_memory(Instant::now(), running.len(), freed) {
-                            OutOfMemory::Retry(line) => {
-                                if let Some(line) = line {
-                                    eprintln!("{name}: {line}");
-                                }
-                            }
-                            OutOfMemory::GiveUp(waited) => {
-                                let _ = done_tx.send(Err(format!(
-                                    "{err:#} (no GPU memory for {:.0} s)",
-                                    waited.as_secs_f64()
-                                )));
-                                return;
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        let _ = done_tx.send(Err(format!("{err:#}")));
-                        return;
+            let confirming = is_confirmation(&unit.cfg);
+            let count = unit.batches.iter().map(|b| b.slots.len()).sum();
+            match engine.submit(&mut unit.batches, &unit.cfg) {
+                Ok(device_ticket) => {
+                    running.push((
+                        device_ticket,
+                        RunningUnit {
+                            ticket: unit.ticket,
+                            count,
+                            confirming,
+                        },
+                    ));
+                    if let Some(line) = memory.submitted(Instant::now(), running.len()) {
+                        eprintln!("{name}: {line}");
                     }
                 }
-                allocated.store(engine.allocated_bytes(), Ordering::Relaxed);
-                continue;
+                // Keep the unit; it runs once memory frees up.
+                Err(err) if engine.out_of_memory(&err) => {
+                    // Spare host buffers are the first to go.
+                    let freed =
+                        engine.release_idle() + spare_bytes(&spare) + spare_bytes(&confirm_spare);
+                    spare.clear();
+                    confirm_spare.clear();
+                    waiting = Some(unit);
+                    match memory.out_of_memory(Instant::now(), running.len(), freed) {
+                        OutOfMemory::Retry(line) => {
+                            if let Some(line) = line {
+                                eprintln!("{name}: {line}");
+                            }
+                        }
+                        OutOfMemory::GiveUp(waited) => {
+                            let _ = done_tx.send(Err(format!(
+                                "{err:#} (no GPU memory for {:.0} s)",
+                                waited.as_secs_f64()
+                            )));
+                            return;
+                        }
+                    }
+                }
+                Err(err) => {
+                    let _ = done_tx.send(Err(format!("{err:#}")));
+                    return;
+                }
             }
+            allocated.store(
+                engine.allocated_bytes() + spare_bytes(&spare) + spare_bytes(&confirm_spare),
+                Ordering::Relaxed,
+            );
+            continue;
         }
         if running.is_empty() && recording.is_none() {
             // Nothing in flight: a unit may be waiting out a memory shortage.
@@ -800,52 +862,31 @@ fn run_segments<D: SegmentDevice>(
                     .send(recorded(&finished, replay.layout, replay.total));
             }
             Ok(Some(finished)) => {
-                // Units on separate queues can finish out of order.
+                // Units on separate streams can finish out of order.
                 let Some(position) = running
                     .iter()
-                    .position(|(vk_ticket, _)| *vk_ticket == finished.ticket)
+                    .position(|(device_ticket, _)| *device_ticket == finished.ticket)
                 else {
                     let _ = done_tx.send(Err("unknown GPU submission finished".into()));
                     return;
                 };
-                let (_, mut unit) = running.swap_remove(position);
-                unit.busy += finished.gpu_seconds;
-                let last = unit.segment + 1 == unit.ends.len();
-                // Fallen creatures are final; the rest continue in the
-                // next segment, repacked into dense warps.
-                let mut next = Vec::new();
-                for (b, (slots, _, results)) in finished.batches.iter().enumerate() {
-                    let mut keep = Vec::new();
-                    for (j, result) in results.iter().enumerate() {
-                        if last || result.fall_time > 0.0 || result.screened > 0.0 {
-                            unit.results[slots[j]] = *result;
-                        } else {
-                            keep.push(j);
-                        }
-                    }
-                    if !keep.is_empty() {
-                        let Some((nodes, muscles)) =
-                            finished.state.as_ref().and_then(|state| state.get(b))
-                        else {
-                            let _ = done_tx.send(Err("GPU segment state missing".into()));
-                            return;
-                        };
-                        next.push(unit.batches[b].repack(&keep, nodes, muscles, results));
-                    }
+                let (_, unit) = running.swap_remove(position);
+                if finished.results.len() != unit.count {
+                    let _ = done_tx.send(Err("a GPU submission returned too few results".into()));
+                    return;
                 }
-                if next.is_empty() {
-                    let message = Finished {
-                        ticket: unit.ticket,
-                        results: std::mem::take(&mut unit.results),
-                        busy_seconds: unit.busy,
-                    };
-                    if done_tx.send(Ok(message)).is_err() {
-                        return;
-                    }
+                if unit.confirming {
+                    confirm_spare.extend(finished.batches);
                 } else {
-                    unit.batches = next;
-                    unit.segment += 1;
-                    waiting.push_front(unit);
+                    spare.extend(finished.batches);
+                }
+                let message = Finished {
+                    ticket: unit.ticket,
+                    results: finished.results,
+                    busy_seconds: finished.gpu_seconds,
+                };
+                if done_tx.send(Ok(message)).is_err() {
+                    return;
                 }
             }
             Ok(None) => {}
@@ -869,10 +910,12 @@ struct InFlightReplay {
 /// How one recorded frame is laid out (`creature_kernel::frame_stride`): the
 /// body's `nodes` positions at the start of `stride` slots, then, when
 /// `stride` is longer than `capacity`, an (energy, force) pair per muscle and
-/// a (normal, friction) contact force per node.
-#[derive(Clone, Copy)]
+/// a (normal, friction) contact force per node, and last the bits of the
+/// broken joints. The kernel numbers nodes so
+/// that bone `j` ends at node `j + 1`; `order[k]` is the creature's own number
+/// of kernel node `k`, as in `physics2::Model`.
 struct FrameLayout {
-    nodes: usize,
+    order: Vec<usize>,
     capacity: usize,
     muscles: usize,
     stride: usize,
@@ -880,25 +923,29 @@ struct FrameLayout {
 
 /// Packs a replay request's creature and queues its recording. Returns the
 /// device ticket, the frame layout and the trial length.
-fn start_recording<D: SegmentDevice>(
+fn start_recording<D: Device>(
     engine: &mut D,
     request: &ReplayRequest,
-    step_range: u32,
 ) -> Result<(u64, FrameLayout, u32)> {
     let mut population = Population::default();
     population.push(request.creature.clone());
-    let batches = crate::physics2::pack(&population, &[0], &request.cfg)?;
+    let mut batches = crate::warp_kernel::pack(&population, &[0], &request.cfg)?;
     anyhow::ensure!(batches.len() == 1, "A replay packs into one batch");
     let fidelity = request.cfg.fidelity();
     let total = fidelity.settle() + request.cfg.steps();
-    let batch = &batches[0];
-    let ticket = engine.record(batch, &request.cfg, total, step_range)?;
+    let batch = batches.pop().expect("one batch");
+    // The kernel's node numbering, from the bone order `pack` gave it.
+    let mut creature = request.creature.clone();
+    crate::evolution::canonicalize_bone_order(&mut creature);
     let layout = FrameLayout {
-        nodes: request.creature.nodes.len(),
+        order: std::iter::once(0)
+            .chain(creature.bones.iter().map(|b| b.b as usize))
+            .collect(),
         capacity: batch.capacity,
         muscles: batch.info.first().map_or(0, |i| i[2] as usize),
-        stride: creature_kernel::frame_stride(batch),
+        stride: creature_kernel::frame_stride(&batch),
     };
+    let ticket = engine.record(batch, &request.cfg)?;
     Ok((ticket, layout, total))
 }
 
@@ -906,28 +953,42 @@ fn start_recording<D: SegmentDevice>(
 /// last, each with the body's node positions.
 fn recorded(finished: &Completed, layout: FrameLayout, total: u32) -> Result<Recording, String> {
     let FrameLayout {
-        nodes,
+        order,
         capacity,
         muscles,
         stride,
     } = layout;
+    let nodes = order.len();
+    // Values per kernel node, put back in the creature's node numbering.
+    let renumber = |value: &dyn Fn(usize) -> f32| {
+        let mut out = vec![0.0; nodes];
+        for (k, &node) in order.iter().enumerate() {
+            out[node] = value(k);
+        }
+        out
+    };
     let flat = finished
         .frames
         .as_ref()
         .ok_or("the recording returned no frames")?;
     let result = *finished
-        .batches
+        .results
         .first()
-        .and_then(|(_, _, results)| results.first())
         .ok_or("the recording returned no result")?;
     let count = total as usize + 1;
     if flat.len() < count * stride {
         return Err("the recording returned too few frames".into());
     }
     let frames = (0..count)
-        .map(|t| flat[t * stride..t * stride + nodes].to_vec())
+        .map(|t| {
+            let mut frame = vec![[0.0; 2]; nodes];
+            for (k, &node) in order.iter().enumerate() {
+                frame[node] = flat[t * stride + k];
+            }
+            frame
+        })
         .collect();
-    let forces = (stride >= capacity + muscles + nodes && stride > capacity).then(|| {
+    let forces = (stride > capacity + muscles + nodes).then(|| {
         let slot = |t: usize, k: usize| flat[t * stride + capacity + k];
         crate::replay_forces::Forces {
             energy: (0..count)
@@ -937,10 +998,16 @@ fn recorded(finished: &Completed, layout: FrameLayout, total: u32) -> Result<Rec
                 .map(|t| (0..muscles).map(|k| slot(t, k)[1]).collect())
                 .collect(),
             ground: (0..count)
-                .map(|t| (0..nodes).map(|i| slot(t, muscles + i)[0]).collect())
+                .map(|t| renumber(&|k| slot(t, muscles + k)[0]))
                 .collect(),
             friction: (0..count)
-                .map(|t| (0..nodes).map(|i| slot(t, muscles + i)[1]).collect())
+                .map(|t| renumber(&|k| slot(t, muscles + k)[1]))
+                .collect(),
+            broken: (0..count)
+                .map(|t| {
+                    let [lo, hi] = flat[t * stride + stride - 1];
+                    u64::from(lo.to_bits()) | u64::from(hi.to_bits()) << 32
+                })
                 .collect(),
         }
     });
@@ -955,52 +1022,24 @@ fn worker_budget(logical: usize) -> usize {
     (logical / 2).clamp(1, 8)
 }
 
-fn rayon_thread_count(
-    logical: usize,
-    requested: Option<usize>,
-    cpu_requested: Option<usize>,
-) -> usize {
-    let remaining = worker_budget(logical) - cpu_thread_count(logical, cpu_requested);
-    requested
-        .filter(|&n| n > 0)
-        .unwrap_or(remaining)
-        .min(remaining)
-}
-
-fn cpu_thread_count(logical: usize, requested: Option<usize>) -> usize {
-    // By default the CPU evaluates nothing beside the GPU: at 3M creatures a
-    // separate six-thread pool slowed the game (56k against 64k creatures/s
-    // end to end) because archive insertion and breeding lost their threads.
-    // Breeding and packing need a general worker even during CPU evaluation.
-    requested
-        .unwrap_or(0)
-        .min(worker_budget(logical).saturating_sub(1))
+fn rayon_thread_count(logical: usize, requested: Option<usize>) -> usize {
+    let budget = worker_budget(logical);
+    requested.filter(|&n| n > 0).unwrap_or(budget).min(budget)
 }
 
 fn logical_cpus() -> usize {
     std::thread::available_parallelism().map_or(2, usize::from)
 }
 
-fn thread_override(name: &str) -> Option<usize> {
-    std::env::var(name).ok().and_then(|v| v.parse().ok())
-}
-
-/// Breeding and general worker count after reserving the CPU evaluation workers.
-/// Both pools share at most eight threads and half the logical CPUs.
-/// `RAYON_NUM_THREADS` can reduce, but cannot exceed, the remaining budget.
+/// General worker count (archive insertion, breeding, packing): half the
+/// logical CPUs, at most eight. `RAYON_NUM_THREADS` can reduce it.
 pub fn rayon_threads() -> usize {
     rayon_thread_count(
         logical_cpus(),
-        thread_override("RAYON_NUM_THREADS"),
-        thread_override("EVOLUTION_CPU_THREADS"),
+        std::env::var("RAYON_NUM_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok()),
     )
-}
-
-/// Evaluation workers, defaulting to six while leaving one general worker.
-/// `EVOLUTION_CPU_THREADS=0` or a one-worker budget disables the scheduler's CPU
-/// engine, leaving the general pool available for breeding and packing.
-pub fn cpu_threads() -> usize {
-    cpu_thread_count(logical_cpus(), thread_override("EVOLUTION_CPU_THREADS"))
 }
 
 /// Best-effort worker priority reduction so evaluation yields to the desktop.
@@ -1025,97 +1064,6 @@ pub fn lower_thread_priority() {
             set_thread_priority(get_current_thread(), THREAD_PRIORITY_LOWEST);
         }
     }
-}
-
-/// A CPU engine that evaluates on the general Rayon pool instead of starting
-/// its own. Used when the primary GPU cannot open and no separate CPU
-/// evaluation pool is configured: evaluation then shares the breeding pool.
-pub fn cpu_engine_shared() -> Result<ThreadedEngine> {
-    let threads = rayon::current_num_threads();
-    let (jobs, job_rx) = mpsc::channel::<(u64, Arc<Population>, Config)>();
-    let (done_tx, done) = mpsc::channel();
-    let thread = std::thread::Builder::new()
-        .name("cpu-eval-shared".into())
-        .spawn(move || {
-            lower_thread_priority();
-            for (ticket, unit, cfg) in job_rx {
-                let started = Instant::now();
-                let results = crate::cpu_engine::evaluate(&unit, &cfg);
-                let message = Finished {
-                    ticket,
-                    results,
-                    busy_seconds: started.elapsed().as_secs_f64(),
-                };
-                if done_tx.send(Ok(message)).is_err() {
-                    break;
-                }
-            }
-        })
-        .context("shared CPU evaluation dispatcher")?;
-    Ok(ThreadedEngine {
-        name: format!(
-            "CPU (general pool, {threads} threads, {}-lane SIMD)",
-            crate::simd::LANES
-        ),
-        max_nodes: 64,
-        depth: 2,
-        jobs: Some(jobs),
-        done,
-        thread: Some(thread),
-        queued: VecDeque::new(),
-        ready: VecDeque::new(),
-        failure: None,
-        next_ticket: 0,
-        allocated: Default::default(),
-        replays: None,
-    })
-}
-
-/// Starts a CPU engine on low-priority threads, leaving one general worker in
-/// the shared budget. Explicit CPU-only callers can still run one evaluation
-/// worker when the budget is one; the scheduler disables that extra pool.
-pub fn cpu_engine(threads: usize) -> Result<ThreadedEngine> {
-    let threads = cpu_thread_count(logical_cpus(), Some(threads)).max(1);
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .thread_name(|i| format!("cpu-eval-{i}"))
-        // Evaluation yields to the UI, the compositor, and breeding.
-        .start_handler(|_| lower_thread_priority())
-        .build()
-        .context("CPU evaluation thread pool")?;
-    let (jobs, job_rx) = mpsc::channel::<(u64, Arc<Population>, Config)>();
-    let (done_tx, done) = mpsc::channel();
-    let thread = std::thread::Builder::new()
-        .name("cpu-eval-dispatch".into())
-        .spawn(move || {
-            for (ticket, unit, cfg) in job_rx {
-                let started = Instant::now();
-                let results = pool.install(|| crate::cpu_engine::evaluate(&unit, &cfg));
-                let message = Finished {
-                    ticket,
-                    results,
-                    busy_seconds: started.elapsed().as_secs_f64(),
-                };
-                if done_tx.send(Ok(message)).is_err() {
-                    break;
-                }
-            }
-        })
-        .context("CPU evaluation dispatcher")?;
-    Ok(ThreadedEngine {
-        name: format!("CPU ({threads} threads, {}-lane SIMD)", crate::simd::LANES),
-        max_nodes: 64,
-        depth: 2,
-        jobs: Some(jobs),
-        done,
-        thread: Some(thread),
-        queued: VecDeque::new(),
-        ready: VecDeque::new(),
-        failure: None,
-        next_ticket: 0,
-        allocated: Default::default(),
-        replays: None,
-    })
 }
 
 #[cfg(test)]
@@ -1207,27 +1155,6 @@ mod tests {
         assert_eq!(received_ticket, ticket);
         assert_eq!(received_unit.nodes.as_ptr(), node_storage);
         assert_eq!(received_unit.nodes[0].x, 1.25);
-    }
-
-    #[test]
-    fn shared_cpu_engine_evaluates_units_on_the_general_pool() {
-        let mut engine = cpu_engine_shared().unwrap();
-        let cfg = Config {
-            population: 4,
-            duration: 0.1,
-            random_seed: false,
-            ..Config::default()
-        };
-        let pop = Arc::new(crate::evolution::create(&cfg).unwrap());
-        let ticket = engine.submit_shared(Arc::clone(&pop), &cfg).unwrap();
-        let done = loop {
-            if let Some(done) = engine.poll().unwrap() {
-                break done;
-            }
-            engine.wait(Duration::from_millis(20));
-        };
-        assert_eq!(done.ticket, ticket);
-        assert_eq!(done.results.len(), cfg.population);
     }
 
     #[test]
@@ -1382,8 +1309,8 @@ mod tests {
         assert_eq!(worker.jobs.try_recv().unwrap().0, ticket);
     }
 
-    /// Slice positions and population indices of each submitted batch.
-    type Layout = Vec<(Vec<usize>, Vec<usize>)>;
+    /// The batches of each submission.
+    type Layout = Vec<creature_kernel::LaneBatch>;
     /// Node stride and trial length of a recording.
     type Stretch = (usize, u32);
 
@@ -1412,59 +1339,57 @@ mod tests {
         }
     }
 
-    impl SegmentDevice for FakeDevice {
+    /// The fake device's out-of-memory error.
+    #[derive(Debug)]
+    struct NoMemory;
+    impl std::fmt::Display for NoMemory {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("out of fake GPU memory")
+        }
+    }
+    impl std::error::Error for NoMemory {}
+
+    impl Device for FakeDevice {
         fn free_slots(&self) -> usize {
             self.slots - self.in_flight.len()
         }
         fn submit(
             &mut self,
-            batches: &[creature_kernel::LaneBatch],
+            batches: &mut Vec<creature_kernel::LaneBatch>,
             _cfg: &Config,
-            _start: u32,
-            _end: u32,
-            _total: u32,
-            _chunk: u32,
-            _read_state: bool,
         ) -> Result<u64> {
             if self.script.pop_front().unwrap_or(false) {
-                return Err(
-                    anyhow::Error::from(ash::vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)
-                        .context("GPU buffers"),
-                );
+                return Err(anyhow::Error::from(NoMemory).context("GPU buffers"));
             }
             let ticket = self.next;
             self.next += 1;
-            let layout = batches
-                .iter()
-                .map(|b| (b.slots.clone(), b.creatures.clone()))
-                .collect();
-            self.in_flight.push_back((ticket, layout, None));
+            self.in_flight
+                .push_back((ticket, std::mem::take(batches), None));
             self.most_in_flight
                 .fetch_max(self.in_flight.len() as u64, Ordering::Relaxed);
             Ok(ticket)
         }
         fn poll(&mut self, _timeout: Duration) -> Result<Option<Completed>> {
-            // Every creature falls, so each unit finishes in one segment.
             Ok(self
                 .in_flight
                 .pop_front()
-                .map(|(ticket, layout, recorded)| Completed {
+                .map(|(ticket, batches, recorded)| Completed {
                     ticket,
-                    batches: layout
-                        .into_iter()
-                        .map(|(slots, creatures)| {
-                            let results = creatures
-                                .iter()
-                                .map(|&i| GpuResult {
+                    results: {
+                        let count = batches.iter().map(|b| b.slots.len()).sum();
+                        let mut results = vec![GpuResult::default(); count];
+                        for b in &batches {
+                            for (&slot, &i) in b.slots.iter().zip(&b.creatures) {
+                                results[slot] = GpuResult {
                                     fitness: i as f32,
                                     fall_time: 1.0,
                                     ..GpuResult::default()
-                                })
-                                .collect();
-                            (slots, creatures, results)
-                        })
-                        .collect(),
-                    state: None,
+                                };
+                            }
+                        }
+                        results
+                    },
+                    batches,
                     // Frame t puts node j at (t, j).
                     frames: recorded.map(|(stride, total)| {
                         (0..=total)
@@ -1487,22 +1412,17 @@ mod tests {
                 .iter()
                 .any(|(_, _, recorded)| recorded.is_some())
         }
-        fn record(
-            &mut self,
-            batch: &creature_kernel::LaneBatch,
-            _cfg: &Config,
-            total: u32,
-            _chunk: u32,
-        ) -> Result<u64> {
+        fn record(&mut self, batch: creature_kernel::LaneBatch, cfg: &Config) -> Result<u64> {
+            let total = cfg.fidelity().settle() + cfg.steps();
             let ticket = self.next;
             self.next += 1;
-            let layout = vec![(batch.slots.clone(), batch.creatures.clone())];
-            self.in_flight.push_back((
-                ticket,
-                layout,
-                Some((creature_kernel::frame_stride(batch), total)),
-            ));
+            let stretch = (creature_kernel::frame_stride(&batch), total);
+            self.in_flight
+                .push_back((ticket, vec![batch], Some(stretch)));
             Ok(ticket)
+        }
+        fn out_of_memory(&self, error: &anyhow::Error) -> bool {
+            error.chain().any(|cause| cause.is::<NoMemory>())
         }
     }
 
@@ -1528,14 +1448,13 @@ mod tests {
         }
         drop(jobs);
         let memory = MemoryBackoff::new(device.slots, Duration::from_millis(2), limit);
-        run_segments(
+        run_units(
             device,
             "fake GPU",
             job_rx,
             done_tx,
             None,
             &AtomicU64::new(0),
-            64,
             memory,
         );
         done.try_iter().collect()
@@ -1556,14 +1475,13 @@ mod tests {
         let creature = pop.creature(3);
         let thread = std::thread::spawn(move || {
             let memory = MemoryBackoff::new(2, Duration::from_millis(2), Duration::from_secs(10));
-            run_segments(
+            run_units(
                 FakeDevice::new(2, &[]),
                 "fake GPU",
                 job_rx,
                 done_tx,
                 Some(replay_rx),
                 &AtomicU64::new(0),
-                64,
                 memory,
             );
         });
@@ -1596,25 +1514,7 @@ mod tests {
     }
 
     #[test]
-    fn out_of_memory_is_recognized_through_error_context() {
-        use ash::vk;
-        for code in [
-            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
-            vk::Result::ERROR_OUT_OF_HOST_MEMORY,
-        ] {
-            let error = anyhow::Error::from(code).context("GPU buffers");
-            assert!(crate::vk_engine::out_of_memory(&error));
-            assert!(crate::vk_engine::out_of_memory(&anyhow::Error::from(code)));
-        }
-        let lost = anyhow::Error::from(vk::Result::ERROR_DEVICE_LOST).context("fence");
-        assert!(!crate::vk_engine::out_of_memory(&lost));
-        let text = anyhow::anyhow!("A device memory allocation has failed");
-        assert!(!crate::vk_engine::out_of_memory(&text));
-    }
-
-    #[test]
     fn large_buffers_get_a_quarter_of_headroom_and_small_ones_a_power_of_two() {
-        use crate::vk_engine::padded_size;
         assert_eq!(padded_size(0), 256);
         assert_eq!(padded_size(300), 512);
         assert_eq!(padded_size(1 << 20), 1 << 20);
@@ -1732,42 +1632,12 @@ mod tests {
     }
 
     #[test]
-    fn worker_defaults_leave_half_the_machine_free() {
-        for (logical, rayon, cpu) in [(1, 1, 0), (3, 1, 0), (8, 4, 0), (16, 8, 0), (64, 8, 0)] {
-            assert_eq!(rayon_thread_count(logical, None, None), rayon);
-            assert_eq!(cpu_thread_count(logical, None), cpu);
+    fn general_workers_take_half_the_machine_at_most_eight() {
+        for (logical, workers) in [(1, 1), (3, 1), (8, 4), (16, 8), (64, 8)] {
+            assert_eq!(rayon_thread_count(logical, None), workers);
         }
-    }
-
-    #[test]
-    fn thread_overrides_respect_the_desktop_budget() {
-        assert_eq!(rayon_thread_count(16, Some(3), Some(6)), 2);
-        assert_eq!(rayon_thread_count(16, Some(0), None), 8);
-        assert_eq!(rayon_thread_count(16, Some(usize::MAX), None), 8);
-        assert_eq!(rayon_thread_count(16, None, Some(0)), 8);
-        assert_eq!(rayon_thread_count(16, Some(3), Some(0)), 3);
-        assert_eq!(rayon_thread_count(16, Some(3), Some(2)), 3);
-        assert_eq!(cpu_thread_count(16, Some(0)), 0);
-        assert_eq!(cpu_thread_count(16, Some(2)), 2);
-        assert_eq!(cpu_thread_count(8, Some(6)), 3);
-        assert_eq!(cpu_thread_count(16, Some(usize::MAX)), 7);
-        assert_eq!(cpu_thread_count(1, Some(6)), 0);
-    }
-
-    #[test]
-    fn concurrent_worker_pools_share_one_budget() {
-        for logical in [1, 2, 3, 4, 8, 12, 16, 32, 64] {
-            for cpu_request in [None, Some(0), Some(1), Some(6), Some(usize::MAX)] {
-                for rayon_request in [None, Some(0), Some(1), Some(8), Some(usize::MAX)] {
-                    let cpu = cpu_thread_count(logical, cpu_request);
-                    let rayon = rayon_thread_count(logical, rayon_request, cpu_request);
-                    assert!(rayon >= 1, "general workers must make progress");
-                    assert!(
-                        cpu + rayon <= 8 && cpu + rayon <= (logical / 2).max(1),
-                        "{logical} logical CPUs: {cpu} evaluation + {rayon} general workers"
-                    );
-                }
-            }
-        }
+        assert_eq!(rayon_thread_count(16, Some(3)), 3);
+        assert_eq!(rayon_thread_count(16, Some(0)), 8);
+        assert_eq!(rayon_thread_count(16, Some(usize::MAX)), 8);
     }
 }
