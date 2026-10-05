@@ -816,6 +816,7 @@ fn compile_kernel(
     key: KernelKey,
     use_cache: bool,
 ) -> Result<Vec<u8>> {
+    let task = crate::loading::start(kernel_label(key));
     let source = crate::warp_kernel::cuda_source(key.class, key.flags, key.fidelity, key.record);
     let path = kernel_cache_dir().map(|dir| {
         use std::hash::{Hash, Hasher};
@@ -837,6 +838,7 @@ fn compile_kernel(
         if let Ok(file) = std::fs::File::open(path) {
             let _ = file.set_modified(std::time::SystemTime::now());
         }
+        task.finish(true);
         return Ok(bytes);
     }
     let started = Instant::now();
@@ -864,7 +866,24 @@ fn compile_kernel(
             let _ = std::fs::remove_file(&temporary);
         }
     }
+    task.finish(false);
     Ok(cubin)
+}
+
+/// How the loading screen names a kernel: what it does, how many lanes a
+/// creature gets and which effects the world compiles in.
+fn kernel_label(key: KernelKey) -> String {
+    let physics = if key.fidelity == Fidelity::standard() {
+        ""
+    } else {
+        " (fine physics)"
+    };
+    format!(
+        "{} kernel{physics} · {} lanes · {}",
+        if key.record { "replay" } else { "scoring" },
+        key.class,
+        crate::warp_kernel::world_label(key.flags)
+    )
 }
 
 /// Compiles the lane-group kernel for `class` lanes and `cfg`'s world on
@@ -904,8 +923,12 @@ pub fn compile_report(class: usize, cfg: &Config, record: bool, arch: &str) -> R
         .join("\n"))
 }
 
-/// Compiled kernels kept on disk, about 300 to 900 KB each.
-const CACHE_FILES: usize = 200;
+/// Compiled kernels kept on disk, about 300 to 900 KB each. The starting
+/// worlds alone are 212 kernels: the default world's 16 and the scoring
+/// kernels of the 100 wild islands' 49 distinct worlds (`prefetch_islands`),
+/// which every start reads again, so a smaller cap would delete and compile
+/// them again at every start.
+const CACHE_FILES: usize = 600;
 
 /// Deletes the oldest compiled kernels beyond `CACHE_FILES`, and temporary
 /// files a crashed compile left. Every source edit makes new kernels for
@@ -1065,20 +1088,31 @@ struct Prefetch {
 struct PrefetchState {
     wanted: VecDeque<KernelKey>,
     idle: VecDeque<KernelKey>,
-    /// Kernels a thread is on, with the number of wanted and idle threads on
-    /// each.
-    running: HashMap<KernelKey, [usize; 2]>,
+    /// Kernels of the islands' worlds that compile into the disk cache at
+    /// the start, on several threads, and are not loaded.
+    warm: VecDeque<KernelKey>,
+    /// Kernels a thread is on, with the number of wanted, idle and warm
+    /// threads on each.
+    running: HashMap<KernelKey, [usize; 3]>,
     done: HashMap<KernelKey, std::result::Result<Kernel, String>>,
     /// The order wanted kernels finished in, oldest first (entries of
     /// kernels already taken stay until they reach the front).
     finished: VecDeque<KernelKey>,
-    /// Background threads alive: wanted ones, idle ones.
-    workers: [usize; 2],
+    /// Background threads alive: wanted ones, idle ones, warm ones.
+    workers: [usize; 3],
     closed: bool,
 }
 
 /// Most wanted threads at once: the three lane classes of a world.
 const WANTED_THREADS: usize = 3;
+/// Most threads that compile the islands' kernels into the cache at the
+/// start. The machine is idle then, and the window waits for them.
+fn warm_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .saturating_sub(2)
+        .clamp(2, 5)
+}
 /// Most loaded kernels waiting to be used. Each module holds device memory,
 /// so the oldest go when more finish.
 const READY_KERNELS: usize = 48;
@@ -1108,19 +1142,20 @@ impl Prefetch {
     }
 
     /// Compiles queued kernels, and for the wanted ones loads them, until the
-    /// queue is empty or the engine closes. `idle` threads take the idle
-    /// queue, the others the wanted queue.
-    fn work(&self, idle: bool) {
-        let kind = usize::from(idle);
+    /// queue is empty or the engine closes. Kind 0 threads take the wanted
+    /// queue, kind 1 (idle) the idle queue and kind 2 (warm) the warm queue.
+    fn work(&self, kind: usize) {
         loop {
             let key = {
                 let mut state = self.lock();
                 let next = if state.closed {
                     None
-                } else if idle {
-                    state.idle.pop_front()
                 } else {
-                    state.wanted.pop_front()
+                    match kind {
+                        0 => state.wanted.pop_front(),
+                        1 => state.idle.pop_front(),
+                        _ => state.warm.pop_front(),
+                    }
                 };
                 let Some(key) = next else {
                     state.workers[kind] -= 1;
@@ -1130,13 +1165,13 @@ impl Prefetch {
                 state.running.entry(key).or_default()[kind] += 1;
                 key
             };
-            if idle {
+            if kind != 0 {
                 // Compiled into the disk cache and not loaded (see `Prefetch`).
                 let _ = compile_kernel(&self.api, &self.options, key, true);
                 let mut state = self.lock();
                 if let Some(counts) = state.running.get_mut(&key) {
                     counts[kind] -= 1;
-                    if counts == &[0, 0] {
+                    if counts == &[0, 0, 0] {
                         state.running.remove(&key);
                     }
                 }
@@ -1148,7 +1183,7 @@ impl Prefetch {
             let mut state = self.lock();
             if let Some(counts) = state.running.get_mut(&key) {
                 counts[kind] -= 1;
-                if counts == &[0, 0] {
+                if counts == &[0, 0, 0] {
                     state.running.remove(&key);
                 }
             }
@@ -1198,6 +1233,7 @@ impl Prefetch {
             }
             state.wanted.retain(|k| *k != key);
             state.idle.retain(|k| *k != key);
+            state.warm.retain(|k| *k != key);
             return None;
         }
     }
@@ -1218,11 +1254,17 @@ impl Prefetch {
             .collect()
     }
 
-    /// Queues `wanted` and `idle` ahead of everything queued in their queues
-    /// (in their own order), and starts threads. A kernel already queued, running or done stays where
-    /// it is, except that an idle one now wanted moves up (a thread at
-    /// nice 19 may be slow, so a wanted thread compiles it too).
-    fn enqueue(self: &Arc<Self>, wanted: Vec<KernelKey>, idle: Vec<KernelKey>) {
+    /// Queues `wanted`, `idle` and `warm` ahead of everything queued in their
+    /// queues (in their own order), and starts threads. A kernel already
+    /// queued, running or done stays where it is, except that an idle or warm
+    /// one now wanted moves up (a thread at nice 19 may be slow, so a wanted
+    /// thread compiles it too).
+    fn enqueue(
+        self: &Arc<Self>,
+        wanted: Vec<KernelKey>,
+        idle: Vec<KernelKey>,
+        warm: Vec<KernelKey>,
+    ) {
         let mut state = self.lock();
         if state.closed {
             return;
@@ -1237,10 +1279,12 @@ impl Prefetch {
                     return false;
                 }
                 state.idle.retain(|k| k != key);
+                state.warm.retain(|k| k != key);
                 true
             })
             .collect();
         for key in fresh.into_iter().rev() {
+            crate::loading::queued(&kernel_label(key), crate::loading::Group::Needed);
             state.wanted.push_front(key);
         }
         // The newest world's neighbours go first: the player's next press is
@@ -1255,31 +1299,39 @@ impl Prefetch {
             .collect();
         state.idle.retain(|key| !fresh.contains(key));
         for key in fresh.into_iter().rev() {
+            crate::loading::queued(&kernel_label(key), crate::loading::Group::Idle);
             state.idle.push_front(key);
         }
-        for (kind, queued) in [state.wanted.len(), state.idle.len()]
+        // The islands' kernels go behind the world's own, in order.
+        let fresh: Vec<KernelKey> = warm
+            .into_iter()
+            .filter(|key| {
+                !(state.done.contains_key(key)
+                    || state.running.contains_key(key)
+                    || state.wanted.contains(key)
+                    || state.warm.contains(key))
+            })
+            .collect();
+        for key in fresh {
+            crate::loading::queued(&kernel_label(key), crate::loading::Group::Startup);
+            state.warm.push_back(key);
+        }
+        for (kind, queued) in [state.wanted.len(), state.idle.len(), state.warm.len()]
             .into_iter()
             .enumerate()
         {
-            let most = if kind == 0 { WANTED_THREADS } else { 1 };
+            let most = [WANTED_THREADS, 1, warm_threads()][kind];
             while state.workers[kind] < most && state.workers[kind] < queued {
-                let (prefetch, idle) = (self.clone(), kind == 1);
+                let prefetch = self.clone();
                 let spawned = std::thread::Builder::new()
-                    .name(
-                        if idle {
-                            "cuda-compile-idle"
-                        } else {
-                            "cuda-compile"
-                        }
-                        .into(),
-                    )
+                    .name(["cuda-compile", "cuda-compile-idle", "cuda-compile-warm"][kind].into())
                     .spawn(move || {
                         // Compile beside the pool, not on the engine thread's CPU.
                         crate::threads::pin_pool();
-                        if idle {
+                        if kind == 1 {
                             nice_idle();
                         }
-                        prefetch.work(idle)
+                        prefetch.work(kind)
                     });
                 if spawned.is_err() {
                     break;
@@ -1296,8 +1348,17 @@ impl Prefetch {
     fn close(&self, patience: Duration) -> Vec<Kernel> {
         let mut state = self.lock();
         state.closed = true;
-        state.wanted.clear();
-        state.idle.clear();
+        let queued: Vec<KernelKey> = [
+            std::mem::take(&mut state.wanted),
+            std::mem::take(&mut state.idle),
+            std::mem::take(&mut state.warm),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for key in queued {
+            crate::loading::cancel(&kernel_label(key));
+        }
         let deadline = Instant::now() + patience;
         while state.workers.iter().sum::<usize>() > 0 {
             let Some(left) = deadline.checked_duration_since(Instant::now()) else {
@@ -1420,7 +1481,16 @@ impl CudaEngine {
                     evict_cache(&dir);
                 }
             });
+            // The game starts in the default world, and its 100 wild islands
+            // each run in a world of their own. Their scoring kernels compile
+            // into the disk cache now, on several threads, because a block
+            // of an island waits for its kernels and 100 worlds compile one
+            // after another in the first generations otherwise. The loading
+            // screen follows these jobs.
+            crate::loading::begin_startup();
             engine.prefetch_world(&Config::default());
+            engine.prefetch_islands();
+            crate::loading::end_startup();
             Ok(engine)
         }
     }
@@ -1534,7 +1604,7 @@ impl CudaEngine {
                     );
                 }
             }
-            self.prefetch.enqueue(wanted, idle);
+            self.prefetch.enqueue(wanted, idle, Vec::new());
         }
         // Kernels of this world that finished loading are the engine's from
         // now on (the background threads drop the ones nobody takes).
@@ -1542,6 +1612,34 @@ impl CudaEngine {
         for (key, kernel) in self.prefetch.take_ready(&world) {
             self.kernels.insert(key, kernel);
         }
+    }
+
+    /// Queues the scoring kernels of the wild islands' worlds
+    /// (`environment::wild_levels`, the same 100 in every game) to compile
+    /// into the disk cache. A cached kernel loads in milliseconds when its
+    /// island first needs it.
+    fn prefetch_islands(&mut self) {
+        let base = Config::default();
+        let mut seen = HashSet::new();
+        let mut keys = Vec::new();
+        for levels in crate::environment::wild_levels(0) {
+            let cfg = crate::environment::wild_world(&base, &levels);
+            let (flags, fidelity) = (crate::warp_kernel::world_flags(&cfg), cfg.fidelity());
+            if seen.insert((flags, fidelity)) {
+                keys.extend(
+                    crate::warp_kernel::CLASSES
+                        .into_iter()
+                        .map(|class| KernelKey {
+                            record: false,
+                            class,
+                            flags,
+                            fidelity,
+                        }),
+                );
+            }
+        }
+        keys.retain(|key| !self.kernels.contains_key(key));
+        self.prefetch.enqueue(Vec::new(), Vec::new(), keys);
     }
 
     /// The kernel for `key`: from the background compiler if it has it or is
@@ -2246,6 +2344,24 @@ mod tests {
             (t.start, t.end, t.warp),
             ([0, 7, 7, 7], [7, 7, 7, 7], [0, 20, 20, 20])
         );
+    }
+
+    /// The kernels of the starting worlds (the default world's, and the
+    /// scoring kernels of the wild islands' worlds) must fit the cache twice
+    /// over, or every start would delete some and compile them again.
+    #[test]
+    fn the_starting_kernels_fit_the_cache_twice_over() {
+        let base = Config::default();
+        let mut worlds = HashSet::new();
+        for levels in crate::environment::wild_levels(0) {
+            let cfg = crate::environment::wild_world(&base, &levels);
+            worlds.insert((crate::warp_kernel::world_flags(&cfg), cfg.fidelity()));
+        }
+        // The default world: scoring and recording at both fidelities.
+        let default = 4 * crate::warp_kernel::CLASSES.len();
+        let kernels = worlds.len() * crate::warp_kernel::CLASSES.len() + default;
+        assert!(kernels > 100, "{kernels} kernels: are the wild worlds there?");
+        assert!(2 * kernels <= CACHE_FILES, "{kernels} kernels, cache {CACHE_FILES}");
     }
 
     #[test]

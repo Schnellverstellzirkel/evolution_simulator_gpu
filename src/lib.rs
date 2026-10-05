@@ -9,6 +9,7 @@ pub mod engine;
 pub mod environment;
 pub mod evolution;
 pub mod gpu;
+pub mod loading;
 pub mod physics;
 pub mod physics2;
 pub mod qd;

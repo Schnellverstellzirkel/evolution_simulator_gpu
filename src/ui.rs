@@ -10,11 +10,12 @@ use crate::{
     config::Config,
     creature_kernel,
     evolution::{Creature, FAILED},
-    gpu::Gpu,
     physics::{self, Node},
     storage::Stats,
     worker::{Command, EventKind, Snapshot, Worker},
 };
+mod loading;
+
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points, VLine};
 use image::{
@@ -212,9 +213,11 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
         "Evolution Laboratory",
         options,
         Box::new(|cc| {
-            // Evaluation opens its own CUDA devices; the render device only draws.
-            let gpu = Gpu::new(&compute_name)?;
-            Ok(Box::new(App::new(cc, gpu)))
+            // Evaluation opens its own CUDA devices on the worker's thread
+            // while the window shows its loading screen; the render device
+            // only draws.
+            let worker = Worker::open(compute_name, cc.egui_ctx.clone());
+            Ok(Box::new(App::new(cc, worker)))
         }),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
@@ -1406,6 +1409,11 @@ struct App {
     smoke_start_pending: bool,
     smoke_preset: Option<usize>,
     started: Instant,
+    /// The player closed the loading card; compiling goes on in a corner
+    /// note.
+    loading_hidden: bool,
+    /// A screenshot run shows made-up loading jobs (`loading::demo`).
+    loading_demo: bool,
     capture_requested: bool,
     capture_path: Option<String>,
     /// Ancestors of the selected creature, newest first.
@@ -1470,9 +1478,15 @@ struct App {
     captured_generation: u32,
 }
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, gpu: Gpu) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, worker: Worker) -> Self {
         let ctx = &cc.egui_ctx;
-        let worker = Worker::spawn(gpu, ctx.clone());
+        // Screenshot runs of the loading screen (no GPU needed).
+        // `toast` shows the corner note instead of the card.
+        let demo = std::env::var("EVOLUTION_SMOKE_LOADING").ok();
+        let loading_demo = demo.is_some();
+        if loading_demo {
+            crate::loading::demo();
+        }
         let mut initial_config = Config::default();
         if let Ok(n) = std::env::var("EVOLUTION_SMOKE_POPULATION")
             && let Ok(n) = n.parse()
@@ -1587,6 +1601,8 @@ impl App {
                 .ok()
                 .and_then(|n| n.parse().ok()),
             started: Instant::now(),
+            loading_hidden: demo.as_deref() == Some("toast"),
+            loading_demo,
             capture_requested: false,
             capture_path: std::env::var("EVOLUTION_SMOKE_CAPTURE").ok(),
             lineage: Vec::new(),
@@ -1640,6 +1656,49 @@ impl App {
     }
     fn theme(&self) -> Theme {
         Theme::get()
+    }
+    /// The loading card while the devices open or the starting worlds'
+    /// kernels compile (the player may close it), while the first generation
+    /// waits for the kernels of its world, and a corner note for compiles
+    /// nobody waits for.
+    fn loading_screen(&mut self, ctx: &egui::Context) {
+        let theme = self.theme();
+        let failed = self
+            .worker
+            .failed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let first = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.running && s.history.is_empty() && s.completed == 0);
+        let startup = crate::loading::progress(crate::loading::Group::Startup).busy();
+        let wait = if self.loading_demo {
+            (!self.loading_hidden).then_some(loading::Wait::Starting)
+        } else if let Some(error) = failed.as_deref() {
+            Some(loading::Wait::Failed(error))
+        } else if !self.worker.opened.load(Ordering::Relaxed) {
+            Some(loading::Wait::Opening)
+        } else if !self.loading_hidden && startup {
+            Some(loading::Wait::Starting)
+        } else if !self.loading_hidden && first && crate::cuda_engine::compiling_world() {
+            Some(loading::Wait::World)
+        } else {
+            None
+        };
+        match wait {
+            Some(wait) => {
+                let card = loading::Card {
+                    wait,
+                    since: self.started,
+                };
+                if loading::screen(ctx, theme, &card) {
+                    self.loading_hidden = true;
+                }
+            }
+            None => loading::toast(ctx, theme, self.loading_hidden),
+        }
     }
     fn active(&self) -> bool {
         self.snapshot.as_ref().is_some_and(|s| s.running)
@@ -5542,6 +5601,7 @@ impl eframe::App for App {
             });
         self.dialogs(&ctx);
         self.help_window(&ctx);
+        self.loading_screen(&ctx);
         crate::schematic::show(&ctx, self.snapshot.as_ref(), &mut self.schematic_open);
         if self.playing || self.active() {
             // Playback and live evolution redraw at the frame cap; the rest of

@@ -583,8 +583,13 @@ pub fn gpu_engine(name: &str, max_nodes: usize) -> Result<ThreadedEngine> {
         .name(format!("gpu-{name}"))
         .spawn(move || {
             crate::threads::pin_engine();
+            let opening = crate::loading::start_in(
+                format!("Opening {device_name} with CUDA"),
+                Some(crate::loading::Group::Startup),
+            );
             let engine = match CudaEngine::new(&device_name, max_nodes) {
                 Ok(engine) => {
+                    opening.finish(false);
                     let _ = ready_tx.send(Ok((engine.name.clone(), engine.max_capacity)));
                     engine
                 }

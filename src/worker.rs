@@ -398,6 +398,10 @@ pub struct Worker {
     pub breeding: Arc<Mutex<Vec<(Instant, Instant, bool)>>>,
     /// A pause developers asked for from outside the game (`dev_pause`).
     pub dev_pause: Arc<crate::dev_pause::Shared>,
+    /// Set once the evaluation devices have opened (or failed to).
+    pub opened: Arc<AtomicBool>,
+    /// Why the devices could not open, when they could not.
+    pub failed: Arc<Mutex<Option<String>>>,
     join: Option<std::thread::JoinHandle<()>>,
 }
 impl Worker {
@@ -406,6 +410,19 @@ impl Worker {
     }
     /// `spawn`, watching `pause_dir` for developer pause requests.
     pub fn spawn_with_pause_dir(gpu: Gpu, ctx: eframe::egui::Context, pause_dir: PathBuf) -> Self {
+        Self::start(ctx, pause_dir, move || Ok(gpu))
+    }
+    /// Opens the evaluation devices on the worker's own thread, so the window
+    /// can draw its loading screen while they open. Commands sent before
+    /// then wait in the channel.
+    pub fn open(primary: String, ctx: eframe::egui::Context) -> Self {
+        Self::start(ctx, crate::dev_pause::dir(), move || Gpu::new(&primary))
+    }
+    fn start(
+        ctx: eframe::egui::Context,
+        pause_dir: PathBuf,
+        open: impl FnOnce() -> anyhow::Result<Gpu> + Send + 'static,
+    ) -> Self {
         let dev_pause = Arc::new(crate::dev_pause::Shared::default());
         let dev = crate::dev_pause::DevPause::new(pause_dir, dev_pause.clone());
         let (tx, rx) = mpsc::channel();
@@ -419,9 +436,23 @@ impl Worker {
             measuring: measuring.clone(),
             breeding: breeding.clone(),
         };
+        let opened = Arc::new(AtomicBool::new(false));
+        let failed = Arc::new(Mutex::new(None));
+        let (open_flag, open_error) = (opened.clone(), failed.clone());
         let join = std::thread::Builder::new()
             .name("evolution".into())
-            .spawn(move || run(gpu, rx, output, paused, bench, ctx, dev))
+            .spawn(move || {
+                let gpu = open();
+                open_flag.store(true, Ordering::Relaxed);
+                match gpu {
+                    Ok(gpu) => run(gpu, rx, output, paused, bench, ctx, dev),
+                    Err(error) => {
+                        *open_error.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(format!("{error:#}"));
+                        ctx.request_repaint();
+                    }
+                }
+            })
             .expect("Start simulation worker");
         Self {
             tx,
@@ -430,6 +461,8 @@ impl Worker {
             measuring,
             breeding,
             dev_pause,
+            opened,
+            failed,
             join: Some(join),
         }
     }

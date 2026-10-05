@@ -120,6 +120,34 @@ const FLAG_NAMES: [&str; 12] = [
     "BRAMBLES",
 ];
 
+/// The effects compiled into a world's kernel, in words for the loading
+/// screen ("Mud, Wind"), or "calm" when it has none beyond flat ground.
+pub fn world_label(flags: u32) -> String {
+    let on: Vec<String> = FLAG_NAMES
+        .iter()
+        .enumerate()
+        // Ground is in every world that has a floor, and quakes set the
+        // terrain switch too, so it names a rough floor only without them.
+        .filter(|&(bit, _)| {
+            flags & (1 << bit) != 0 && (bit > 1 || (bit == 1 && flags & (1 << 5) == 0))
+        })
+        .map(|(_, name)| {
+            let lower = name.to_lowercase();
+            let mut chars = lower.chars();
+            chars
+                .next()
+                .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect();
+    if on.is_empty() {
+        "calm".to_owned()
+    } else {
+        on.join(", ")
+    }
+}
+
+
 /// Kernel parameters; the layout of `Params` in the kernel.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -767,6 +795,16 @@ pub fn pack_reusing(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_world_is_named_by_its_effects() {
+        // Bit 0 is ground, 1 terrain, 5 quake, 6 mud, 9 wind.
+        assert_eq!(world_label(1), "calm");
+        assert_eq!(world_label(1 | 1 << 6 | 1 << 9), "Mud, Wind");
+        assert_eq!(world_label(1 | 1 << 1), "Terrain");
+        assert_eq!(world_label(1 | 1 << 1 | 1 << 5), "Quake");
+        assert_eq!(world_label(0), "calm");
+    }
+
     use super::*;
 
     #[test]
