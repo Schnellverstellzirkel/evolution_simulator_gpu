@@ -375,7 +375,7 @@ fn time_block(
         .zip(slots.par_chunks(CHUNK))
         .map(|(plans, slots)| {
             let mut tally = Tally::new();
-            let mut records: Vec<(usize, u64, u64, Option<u8>, bool)> =
+            let mut records: Vec<(usize, u64, u64, Option<u16>, bool)> =
                 Vec::with_capacity(plans.len());
             let mut child = Creature::default();
             let (c0, t0) = (thread_cycles(), thread_ns());

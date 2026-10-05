@@ -53,7 +53,7 @@ fn main() -> anyhow::Result<()> {
     };
     let structural: Vec<&&Row> = children
         .iter()
-        .filter(|r| r.operator != u8::MAX && r.emitter != RESTART)
+        .filter(|r| r.operator != u16::MAX && r.emitter != RESTART)
         .collect();
     println!(
         "dump {path}: generation {}, {} children, {} made by a structural operator",
@@ -62,7 +62,7 @@ fn main() -> anyhow::Result<()> {
         structural.len()
     );
     // operator -> (children, any, island, global), and the distance added
-    let mut table: HashMap<u8, ([usize; 4], f64)> = HashMap::new();
+    let mut table: HashMap<u16, ([usize; 4], f64)> = HashMap::new();
     for r in &structural {
         let t = table.entry(r.operator).or_default();
         t.0[0] += 1;
@@ -71,7 +71,7 @@ fn main() -> anyhow::Result<()> {
         t.0[3] += usize::from(r.entered & GLOBAL != 0);
         t.1 += gain(r);
     }
-    let mut rows: Vec<(u8, ([usize; 4], f64))> = table.into_iter().collect();
+    let mut rows: Vec<(u16, ([usize; 4], f64))> = table.into_iter().collect();
     rows.sort_by(|a, b| {
         let rate = |t: &([usize; 4], f64)| t.1 / t.0[0].max(1) as f64;
         rate(&b.1).total_cmp(&rate(&a.1))
@@ -111,7 +111,7 @@ fn main() -> anyhow::Result<()> {
         "transplant_gait",
         "trim_body",
     ];
-    let compound = |o: u8| names.get(o as usize).is_some_and(|n| COMPOUND.contains(n));
+    let compound = |o: u16| names.get(o as usize).is_some_and(|n| COMPOUND.contains(n));
     let all = |f: &dyn Fn(&Row) -> bool| -> ([usize; 4], f64) {
         let mut t = [0usize; 4];
         let mut added = 0.0;
@@ -127,16 +127,16 @@ fn main() -> anyhow::Result<()> {
     for (label, t) in [
         (
             "all compound operators",
-            all(&|r| r.operator != u8::MAX && r.emitter != RESTART && compound(r.operator)),
+            all(&|r| r.operator != u16::MAX && r.emitter != RESTART && compound(r.operator)),
         ),
         (
             "all other structural operators",
-            all(&|r| r.operator != u8::MAX && r.emitter != RESTART && !compound(r.operator)),
+            all(&|r| r.operator != u16::MAX && r.emitter != RESTART && !compound(r.operator)),
         ),
         ("cma emitter", all(&|r| r.emitter == 0)),
         (
             "structural or novelty, no operator",
-            all(&|r| r.operator == u8::MAX && (r.emitter == 1 || r.emitter == 2)),
+            all(&|r| r.operator == u16::MAX && (r.emitter == 1 || r.emitter == 2)),
         ),
         ("random bodies", all(&|r| r.emitter == RESTART)),
     ] {

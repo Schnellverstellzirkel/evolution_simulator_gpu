@@ -169,16 +169,16 @@ fn main() -> anyhow::Result<()> {
             e(GLOBAL),
             pct(e(GLOBAL), rows.len())
         );
-        let mut ops: HashMap<u8, (usize, usize)> = HashMap::new();
+        let mut ops: HashMap<u16, (usize, usize)> = HashMap::new();
         for r in &rows {
             let o = ops.entry(r.operator).or_default();
             o.0 += 1;
             o.1 += usize::from(r.entered != 0);
         }
-        let mut ops: Vec<(u8, (usize, usize))> = ops.into_iter().collect();
+        let mut ops: Vec<(u16, (usize, usize))> = ops.into_iter().collect();
         ops.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(a.0.cmp(&b.0)));
-        let label = |o: u8| {
-            if o == u8::MAX {
+        let label = |o: u16| {
+            if o == u16::MAX {
                 "none".to_owned()
             } else {
                 names

@@ -26,13 +26,21 @@ mod controller;
 mod extra;
 mod gait_bio;
 mod gait_legs;
-mod gait_spine;
-mod gait_phase;
 mod gait_muscles;
-mod gait_symmetry;
-mod gait_reflex;
-mod gait_posture;
+mod gait_phase;
 mod gait_plans;
+mod gait_posture;
+mod gait_reflex;
+mod gait_spine;
+mod gait_symmetry;
+mod idea_blend;
+mod idea_elastic;
+mod idea_shape;
+mod idea_surface;
+mod idea_topology;
+mod idea_timing;
+mod idea_wild;
+mod ideas;
 
 mod junctions;
 mod legs;
@@ -80,6 +88,13 @@ const GAIT_FILES: &[&[(&str, Operator)]] = &[
     gait_posture::OPS,
     gait_plans::OPS,
     gait_bio::OPS,
+    idea_surface::OPS,
+    idea_elastic::OPS,
+    idea_timing::OPS,
+    idea_topology::OPS,
+    idea_blend::OPS,
+    idea_wild::OPS,
+    idea_shape::OPS,
 ];
 
 /// The operators before the gait files.

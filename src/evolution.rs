@@ -1315,7 +1315,7 @@ pub struct ChildTrace {
     pub structural: bool,
     /// The structural operator that changed it, as an index into
     /// `structural_operator_names`.
-    pub operator: Option<u8>,
+    pub operator: Option<u16>,
 }
 
 /// Breeds one offspring from its plan with the given random stream into
@@ -1631,7 +1631,7 @@ fn retime_rhythm(creature: &mut Creature, rng: &mut Rng) -> bool {
 /// The structural operator (its index in `structural_operator_names`) that
 /// changed each child bred while the log is on, by child id: a diagnostic
 /// for the generation dump (`storage`), off otherwise.
-static OPERATOR_LOG: std::sync::Mutex<Option<std::collections::HashMap<u64, u8>>> =
+static OPERATOR_LOG: std::sync::Mutex<Option<std::collections::HashMap<u64, u16>>> =
     std::sync::Mutex::new(None);
 /// Starts or stops recording each child's structural operator.
 pub fn record_operators(on: bool) {
@@ -1639,7 +1639,7 @@ pub fn record_operators(on: bool) {
     *log = on.then(|| log.take().unwrap_or_default());
 }
 /// The operators recorded since the last call, by child id.
-pub fn take_operators() -> std::collections::HashMap<u64, u8> {
+pub fn take_operators() -> std::collections::HashMap<u64, u16> {
     OPERATOR_LOG
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1996,7 +1996,7 @@ fn structural_mutation_from(
     cfg: &Config,
     rng: &mut Rng,
     archive: &QdArchive,
-) -> Option<u8> {
+) -> Option<u16> {
     structural_mutation_among(creature, cfg, rng, &archive.entries, 0)
 }
 
@@ -2017,7 +2017,7 @@ fn structural_mutation_among(
     rng: &mut Rng,
     donors: &[crate::qd::Elite],
     bias: u64,
-) -> Option<u8> {
+) -> Option<u16> {
     let extra = anatomy::enabled();
     // The donor is the most different body of 4 drawn (Lehman and Stanley,
     // 2011): a graft then brings the most new structure.
@@ -2034,7 +2034,7 @@ fn structural_mutation_among(
     // An operator that does not fit this body leaves it unchanged; try
     // another, a few times.
     // Each shared group takes one slot, drawn after the others.
-    let groups: Bounded<&Vec<usize>, 16> = [&extra.shared, &extra.controller]
+    let groups: Bounded<&Vec<usize>, 32> = [&extra.shared, &extra.controller]
         .into_iter()
         .chain(&extra.gait)
         .filter(|group| !group.is_empty())
@@ -2061,7 +2061,7 @@ fn structural_mutation_among(
             anatomy::apply(operator - classic, creature, cfg, rng, &cx)
         };
         if changed {
-            return Some(operator as u8);
+            return Some(operator as u16);
         }
     }
     None
@@ -2862,6 +2862,30 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    /// There are more than 255 structural operators, so an operator's index
+    /// must not be a byte: a wrapped index would name the wrong operator in
+    /// the lineage and in the compound test that decides whether the child
+    /// gets parameter noise.
+    #[test]
+    fn operator_indices_past_255_are_kept_whole() {
+        let cfg = Config::default();
+        let names = structural_operator_names();
+        assert!(names.len() > 256, "{} operators", names.len());
+        assert!(names.len() < 0xFFF, "the generation dump keeps 12 bits");
+        let archive = QdArchive::default();
+        let mut highest = 0u16;
+        for index in 0..4000 {
+            let mut rng = Rng::new(23, 0, index);
+            let mut body = random_creature_from(&cfg, &mut rng);
+            grow_for_benchmark(&mut body, &cfg, index as u64, 4 + index % 12);
+            if let Some(operator) = structural_mutation_from(&mut body, &cfg, &mut rng, &archive) {
+                assert!((operator as usize) < names.len(), "operator {operator}");
+                highest = highest.max(operator);
+            }
+        }
+        assert!(highest > 255, "no operator past 255 was ever picked: {highest}");
     }
 
     #[test]

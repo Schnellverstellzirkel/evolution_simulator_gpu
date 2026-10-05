@@ -56,11 +56,15 @@ impl Elite {
     }
 }
 
+/// `Row::operator` when no structural operator changed the child.
+pub const NO_OPERATOR: u16 = u16::MAX;
+
 #[derive(Clone, Copy)]
 pub struct Row {
     pub slot: u32,
     pub emitter: u8,
-    pub operator: u8,
+    /// The index in `structural_operator_names`, `NO_OPERATOR` for none.
+    pub operator: u16,
     pub flags: u8,
     pub entered: u8,
     pub parent: u64,
@@ -175,9 +179,12 @@ pub fn read(path: &str) -> Result<DumpFile> {
         .map(|b| Row {
             slot: u32_at(b, 0),
             emitter: b[4],
-            operator: b[5],
+            operator: match b[5] as u16 | (((b[7] >> 4) as u16) << 8) {
+                0xFFF => NO_OPERATOR,
+                index => index,
+            },
             flags: b[6],
-            entered: b[7],
+            entered: b[7] & 15,
             parent: u64_at(b, 8),
             parent_cell: u16_at(b, 16),
             cell: u16_at(b, 18),

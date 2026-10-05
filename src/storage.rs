@@ -3687,9 +3687,10 @@ impl Experiment {
 /// emitter u8, spare u8, id u64, fitness f32, distance at 2.5, 5 and 10 s
 /// from its re-run, 3 x f32 (NaN without one).
 ///
-/// Creature (64 B): slot u32, emitter u8, operator u8 (the index in
-/// `evolution::structural_operator_names`, 255 for none), flags u8
-/// (`MATE`...), entered u8 (`ISLAND`...), parent id u64 (`u64::MAX` for
+/// Creature (64 B): slot u32, emitter u8, operator u8 (the low byte of the
+/// index in `evolution::structural_operator_names`; 0xFFF for none, whose
+/// high four bits are the high nibble of the `entered` byte), flags u8
+/// (`MATE`...), entered u8 (`ISLAND`... in the low nibble), parent id u64 (`u64::MAX` for
 /// none), parent cell u16, final cell u16, CMA emitter u16 (`u16::MAX` for
 /// none), nodes u8, muscles u8, parent nodes u8, parent muscles u8, rhythm
 /// period f16, standard fitness f32, archive fitness f32 (after a
@@ -3786,7 +3787,7 @@ pub(crate) mod dump {
         pub flags: u8,
         slot: u32,
         emitter: u8,
-        operator: u8,
+        operator: u16,
         parent: u64,
         parent_cell: u16,
         cma: u16,
@@ -3930,7 +3931,7 @@ pub(crate) mod dump {
                             | bit(parent.reserve, PARENT_RESERVE),
                         slot: (first + j) as u32,
                         emitter: birth.emitter.index() as u8,
-                        operator: operators.get(&g.id).copied().unwrap_or(u8::MAX),
+                        operator: operators.get(&g.id).copied().unwrap_or(u16::MAX),
                         parent: birth.parent_id.unwrap_or(u64::MAX),
                         parent_cell: parent.cell,
                         cma: birth.cma.map_or(u16::MAX, |c| c.min(65534) as u16),
@@ -3995,9 +3996,11 @@ pub(crate) mod dump {
                 let mut b = [0u8; ROW_BYTES];
                 b[0..4].copy_from_slice(&h.slot.to_le_bytes());
                 b[4] = h.emitter;
-                b[5] = h.operator;
+                // The operator index has 12 bits (0xFFF for none): the low
+                // byte, and the high four bits above `entered`'s own four.
+                b[5] = h.operator as u8;
                 b[6] = flags;
-                b[7] = kinds[j];
+                b[7] = kinds[j] | (((h.operator >> 8) as u8 & 15) << 4);
                 b[8..16].copy_from_slice(&h.parent.to_le_bytes());
                 b[16..18].copy_from_slice(&h.parent_cell.to_le_bytes());
                 b[18..20].copy_from_slice(&final_cell.to_le_bytes());
