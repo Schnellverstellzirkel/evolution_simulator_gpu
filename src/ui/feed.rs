@@ -9,7 +9,8 @@ use super::{
 use crate::{
     config::Config,
     storage::Stats,
-    worker::{Command, EventKind},
+    theme::Theme,
+    worker::{Command, EventKind, Snapshot},
 };
 use eframe::egui::{self, Color32, RichText};
 use std::time::Instant;
@@ -66,9 +67,23 @@ impl App {
             return Vec::new();
         };
         let theme = self.theme();
+        let mut items = Vec::new();
+        Self::push_event_items(snapshot, theme, &mut items);
+        let records = Self::push_record_items(snapshot, theme, &mut items);
+        self.push_stall_item(snapshot, &records, theme, &mut items);
+        self.push_collapse_item(snapshot, theme, &mut items);
+        Self::push_wild_item(snapshot, theme, &mut items);
+        // Newest first; the sort is stable, so events of one generation keep
+        // their order.
+        items.reverse();
+        items.sort_by_key(|item| std::cmp::Reverse(item.generation));
+        items.truncate(60);
+        items
+    }
+    /// The worker's events: world changes, autochange, catastrophes, saves.
+    fn push_event_items(snapshot: &Snapshot, theme: Theme, items: &mut Vec<FeedItem>) {
         let history = &snapshot.history;
         let row = |generation: u32| history.iter().rev().find(|s| s.generation == generation);
-        let mut items = Vec::new();
         for event in snapshot.events.iter() {
             let mut text = event.text.clone();
             let (color, action) = match event.kind {
@@ -107,6 +122,15 @@ impl App {
                 action,
             });
         }
+    }
+    /// The records of the history and the champion's live record. Returns the
+    /// history's records for the stall check.
+    fn push_record_items(
+        snapshot: &Snapshot,
+        theme: Theme,
+        items: &mut Vec<FeedItem>,
+    ) -> Vec<(usize, f32, bool)> {
+        let history = &snapshot.history;
         let records = world_records(history);
         for &(index, best, first_in_world) in &records {
             let stats = &history[index];
@@ -149,6 +173,17 @@ impl App {
                 action: Some(FeedAction::ReplayChampion),
             });
         }
+        records
+    }
+    /// The hint to try a harder world when no record came for a while.
+    fn push_stall_item(
+        &self,
+        snapshot: &Snapshot,
+        records: &[(usize, f32, bool)],
+        theme: Theme,
+        items: &mut Vec<FeedItem>,
+    ) {
+        let history = &snapshot.history;
         // A stall: no record in this world for a while. The feed suggests a
         // harder world instead of changing the search silently.
         // Only a record of the live world counts: after a world change the old
@@ -173,6 +208,10 @@ impl App {
                 });
             }
         }
+    }
+    /// The hint to try a new world when the archive's clades fell.
+    fn push_collapse_item(&self, snapshot: &Snapshot, theme: Theme, items: &mut Vec<FeedItem>) {
+        let history = &snapshot.history;
         // A diversity collapse: the effective clades of the archive fell by a
         // quarter within 50 generations of this world. The feed suggests a
         // new world and never presses it (Lehman and Miikkulainen, 2015: a
@@ -202,6 +241,10 @@ impl App {
                 });
             }
         }
+    }
+    /// The offer of the wild island's world whose migrants won most hub cells.
+    fn push_wild_item(snapshot: &Snapshot, theme: Theme, items: &mut Vec<FeedItem>) {
+        let history = &snapshot.history;
         // The wild island whose migrants took the most hub cells: its world
         // breeds bodies that also do well in yours. The feed offers it as a
         // world to try (Wang et al., 2019, POET transfer) and never sets it.
@@ -229,12 +272,6 @@ impl App {
                 });
             }
         }
-        // Newest first; the sort is stable, so events of one generation keep
-        // their order.
-        items.reverse();
-        items.sort_by_key(|item| std::cmp::Reverse(item.generation));
-        items.truncate(60);
-        items
     }
     /// The event feed: what happened, newest first, with a button to replay
     /// a record holder or undo a catastrophe.
