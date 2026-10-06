@@ -15,8 +15,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
+mod autosave;
 mod benchmark;
 mod stage_log;
+use autosave::Autosave;
 use benchmark::{Bench, Benchmark};
 use stage_log::{RingMeter, StageLog};
 pub enum Command {
@@ -591,8 +593,7 @@ struct Loop {
     ring: crate::ring::Ring,
     stage_log: Option<StageLog>,
     benchmark: Benchmark,
-    /// A background autosave, which reports the file and generation it wrote.
-    checkpoint_thread: Option<std::thread::JoinHandle<Option<(PathBuf, u32)>>>,
+    autosave: Autosave,
     selected: Option<(Creature, Config)>,
     /// The archive state the map table was built from.
     map_key: (u64, usize, u64),
@@ -649,7 +650,7 @@ impl Loop {
             ring: crate::ring::Ring::default(),
             stage_log: StageLog::open(),
             benchmark: Benchmark::new(bench),
-            checkpoint_thread: None,
+            autosave: Autosave::default(),
             selected: None,
             map_key: (u64::MAX, usize::MAX, 0u64),
             map: None,
@@ -725,10 +726,8 @@ impl Loop {
             // No command waits for the engines: a save holds only the
             // archives, settings apply to the blocks bred after them, and a
             // new or loaded game drops the ring.
-            if matches!(command, Command::New(_) | Command::Load(_))
-                && let Some(handle) = self.checkpoint_thread.take()
-            {
-                let _ = handle.join();
+            if matches!(command, Command::New(_) | Command::Load(_)) {
+                self.autosave.join();
             }
             self.changed = true;
             self.error = None;
@@ -1167,42 +1166,7 @@ impl Loop {
                 if self.benchmark.generation_done(e, sched, &self.ctx) {
                     self.running = false;
                 }
-                // Benchmarks keep autosaves off even for a loaded
-                // checkpoint, which brings its own interval. Right after a
-                // world change every elite is on the GPU for its re-test and
-                // the archives are empty; a save holds no creatures in
-                // flight, so that autosave would hold no elites and replace a
-                // good one. The next autosave, after the re-tests, writes.
-                if e.config.checkpoint_interval > 0
-                    && std::env::var_os("EVOLUTION_BENCH_NO_AUTOSAVE").is_none()
-                    && e.generation.is_multiple_of(e.config.checkpoint_interval)
-                    && !e.archive.entries.is_empty()
-                    && self
-                        .checkpoint_thread
-                        .as_ref()
-                        .is_none_or(|handle| handle.is_finished())
-                {
-                    if let Some(handle) = self.checkpoint_thread.take() {
-                        let _ = handle.join();
-                    }
-                    let path = PathBuf::from(format!("runs/seed-{}-auto.evo", e.config.seed));
-                    // The ring is shared, not copied: the save holds only
-                    // the archives and the search state.
-                    let snapshot = e.clone();
-                    self.checkpoint_thread = Some(std::thread::spawn(move || {
-                        crate::threads::pin_pool();
-                        if let Err(err) = storage::save(&path, &snapshot) {
-                            eprintln!("Background checkpoint failed: {err:#}");
-                            return None;
-                        }
-                        if let Some(dir) = path.parent() {
-                            // One autosave per experiment piles up: keep the
-                            // three most recent experiments' autosaves.
-                            storage::rotate_autosaves(dir, 3);
-                        }
-                        Some((path, snapshot.generation))
-                    }));
-                }
+                self.autosave.start_if_due(e);
                 if self.run_until.is_some_and(|until| e.generation >= until) {
                     self.running = false;
                     self.status = format!("Paused after generation {}", e.generation - 1);
@@ -1227,13 +1191,7 @@ impl Loop {
         }
         // A finished autosave goes into the event log, so the UI can say
         // when the experiment was last saved.
-        if self
-            .checkpoint_thread
-            .as_ref()
-            .is_some_and(|handle| handle.is_finished())
-            && let Some(handle) = self.checkpoint_thread.take()
-            && let Ok(Some((path, generation))) = handle.join()
-        {
+        if let Some((path, generation)) = self.autosave.finished() {
             log_event(
                 &mut self.events,
                 generation,
@@ -1522,9 +1480,7 @@ impl Loop {
     }
     /// The loop has ended: waits for a running autosave.
     fn finish(mut self) {
-        if let Some(handle) = self.checkpoint_thread.take() {
-            let _ = handle.join();
-        }
+        self.autosave.join();
     }
 }
 fn run(
