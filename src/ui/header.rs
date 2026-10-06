@@ -1,7 +1,7 @@
 //! The top bar (the game's name, Evolve and the File and View menus) and the
 //! Help window it opens.
 
-use super::{AUTOSAVE_INTERVAL, App, GAP_S, list_saves, text::number};
+use super::{AUTOSAVE_INTERVAL, App, GAP_S, dialogs::list_saves, text::number};
 use crate::{theme::GAP_L, worker::Command};
 use eframe::egui::{self, Align2, FontId, RichText, Sense, Stroke, Vec2};
 use std::time::{Duration, Instant};
