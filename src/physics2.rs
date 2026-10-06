@@ -1,12 +1,10 @@
 //! The physics model of a creature: the constants the CUDA kernel is built
-//! with and `Model`, the creature's constants and starting state, from which
-//! `warp_kernel::pack` fills the kernel's records.
+//! with and `Model`, the creature's constants and starting pose, from which
+//! `kernel::pack` fills the kernel's records.
 //!
-//! A creature is a tree of point masses (its nodes) joined by rigid,
-//! massless bones. The state is the head's position and velocity, the neck's
-//! angle and angular velocity, and one relative angle and angular velocity
-//! per other bone. Node positions follow from forward kinematics, so bones
-//! keep their exact lengths and a pose is valid by construction.
+//! `Model` numbers the nodes so that bone `j` ends at node `j + 1` and node 0
+//! is the head. The start pose comes from the bones' rest angles, with the
+//! center of mass over x = 0 and the lowest node on the ground.
 //! `docs/physics.md` describes the dynamics the kernel runs.
 use crate::{
     config::Config,
@@ -14,9 +12,6 @@ use crate::{
     physics,
 };
 
-/// How firmly a joint limit holds: its damper weighs this many times the
-/// joint's inertia per step.
-pub(crate) const LIMIT_HARDNESS: f32 = 20.0;
 /// Passive joint damping as a time constant (s): every joint resists its
 /// relative rotation like tissue does, with a damper sized to the inertia the
 /// joint moves.
@@ -371,17 +366,3 @@ impl Model {
     }
 }
 
-/// Fastest a bone may turn (rad/s). At 60 Hz a bone at the cap turns 0.25
-/// rad per step. The contact solve predicts each node's velocity at the end
-/// of the step from the pose at its start, and that prediction misses by
-/// about the square of the turn per step: at the current physics's 40 rad/s
-/// (0.67 rad per step) evolution whipped a short bone into the ground, the
-/// solve planted its tip, and the next pose had the tip sliding forward with
-/// the friction that planted it still pushing (docs/physics.md).
-pub const SPIN_CAP: f32 = 15.0;
-/// How firmly the spin cap holds: its damper weighs this many times the
-/// bone's rotational inertia about its pivot.
-pub(crate) const SPIN_HARDNESS: f32 = 20.0;
-/// Share of a node's depth inside the ground that the contact removes per
-/// step.
-pub(crate) const PUSH_OUT: f32 = 0.2;

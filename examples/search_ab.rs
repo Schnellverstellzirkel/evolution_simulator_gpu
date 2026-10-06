@@ -450,14 +450,14 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
             mean(|g| g.node_count),
             mean(|g| g.muscle_count)
         );
-        // The lanes each ring creature takes on the GPU (`warp_kernel::class_of`):
+        // The lanes each ring creature takes on the GPU (`kernel::class_of`):
         // the mean is the cost of a creature in lanes, so a body that grows
         // past 8 or 16 nodes doubles its share of the GPU.
         let mut lanes = [0usize; 4];
         for g in &genomes {
-            let class = evolution_simulator::warp_kernel::class_of(g.node_count, g.muscle_count)
+            let class = evolution_simulator::kernel::class_of(g.node_count, g.muscle_count)
                 .and_then(|w| {
-                    evolution_simulator::warp_kernel::CLASSES
+                    evolution_simulator::kernel::CLASSES
                         .iter()
                         .position(|&c| c == w)
                 })
@@ -467,7 +467,7 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
         let total = genomes.len().max(1) as f64;
         println!(
             "{scope} {seed} {generation} lanes mean {:.2} shares {:.3} {:.3} {:.3} {:.3}",
-            evolution_simulator::warp_kernel::CLASSES
+            evolution_simulator::kernel::CLASSES
                 .iter()
                 .zip(lanes)
                 .map(|(&w, n)| w as f64 * n as f64)

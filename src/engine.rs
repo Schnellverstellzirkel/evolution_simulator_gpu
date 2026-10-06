@@ -644,7 +644,7 @@ fn pack_unit(
 ) -> Result<PackedUnit> {
     indices.clear();
     indices.extend(0..unit.genomes.len());
-    let batches = crate::warp_kernel::pack_reusing(&unit, indices, &cfg, spare)?;
+    let batches = crate::kernel::pack_reusing(&unit, indices, &cfg, spare)?;
     Ok(PackedUnit {
         ticket,
         cfg,
@@ -934,7 +934,7 @@ fn start_recording<D: Device>(
 ) -> Result<(u64, FrameLayout, u32)> {
     let mut population = Population::default();
     population.push(request.creature.clone());
-    let mut batches = crate::warp_kernel::pack(&population, &[0], &request.cfg)?;
+    let mut batches = crate::kernel::pack(&population, &[0], &request.cfg)?;
     anyhow::ensure!(batches.len() == 1, "A replay packs into one batch");
     let fidelity = request.cfg.fidelity();
     let total = fidelity.settle() + request.cfg.steps();

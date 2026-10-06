@@ -24,7 +24,7 @@ Product:
 - Speed matters next. The goal is 500k evaluated creatures per second, sustained, in the graphical game at 60 FPS.
 - The current game is the reference, not the past. A change stays if the game is better or faster now, shown by a direct measurement of that change on its own. Any measured speedup is kept and merged, however small: 1.05x is a win. A track's gate (3x, 2x, 45% issue) is its ambition and decides what to try next, never whether measured gains are thrown away. No comparison to an earlier version is needed, and nobody writes experiment reports. Search changes rest on papers and practice and must not break the search.
 - No golden reference. The physics, the muscle model and the kernel that exist today are vibecoded and are not a reference: any of them may be replaced by a cheaper one. The only physics requirement is the spirit of the game: creatures evolve interesting, efficient shapes and gaits, and no glitchy movers (random bodies that travel, feet that slide, energy from nowhere). Bit-equality between two implementations or kernel variants never matters. The one determinism rule is that one build on one GPU gives one search per seed.
-- There is one physics (`docs/physics.md`): the CUDA kernel, `shaders/warp_creature.cu`. Nothing else simulates creatures. The game needs an NVIDIA GPU with the CUDA driver and NVRTC.
+- There is one physics (`docs/physics.md`): the CUDA kernel, `shaders/creature.cu`. Nothing else simulates creatures. The game needs an NVIDIA GPU with the CUDA driver and NVRTC.
 - Posture rules (for example what counts as a fall) need the owner's approval.
 
 Working:
@@ -62,8 +62,8 @@ Use absolute paths, because `git -C` resolves a relative worktree path against t
 
 The physics:
 
-- `shaders/warp_creature.cu` is the CUDA kernel, the only physics, driven by `src/cuda_engine.rs`. A creature runs on a group of 4, 8, 16 or 32 lanes (lane i owns node i and the bone ending there, state in registers, tree passes level by level), and each 1/60 s step is one substep (`docs/physics.md`). `src/warp_kernel.rs` packs creatures for it from `physics2::Model` and writes its source with the world's effects compiled in.
-- `src/physics2.rs` holds the physics constants and `Model`, a creature's constants and starting state, from which `warp_kernel::pack` fills every kernel record.
+- `shaders/creature.cu` is the CUDA kernel, the only physics, driven by `src/cuda_engine.rs`. One thread simulates one creature with position-based dynamics, 8 substeps per 1/60 s step (`docs/physics.md`). `src/kernel.rs` packs creatures for it from `physics2::Model` and writes its source with the world's effects compiled in.
+- `src/physics2.rs` holds physics constants and `Model`, a creature's constants and start pose, from which `kernel::pack` fills every kernel record.
 - `src/physics.rs` holds what the physics and the UI share: limits, fidelity, node and joint constants, the ground functions (bumps, slope, gaps, hurdles, quake), screening.
 - `src/engine.rs` runs each GPU on its own thread, one whole-trial submission per unit, and records replays with the scoring kernel (frames carry the muscle energy, muscle force and contact forces). `src/gpu.rs` is the evaluation front end. `src/creature_kernel.rs` holds `GpuResult`, `LaneBatch` and `frame_stride`.
 - `docs/physics.md` describes the model: contacts (the deepest 4 per step), friction that may never do positive work, the plant pass, and muscle strength scaled to the mass a muscle moves.
@@ -71,7 +71,7 @@ The physics:
 Search and game state:
 
 - `src/qd.rs`: archives, cells (a way of moving times a body class, `qd::Classes`: the islands and the global archive each have their layout), behavior descriptors, the morphology reserve, `qd::VERSION` and the oldest save version that still loads (`qd::OLDEST_LOADABLE`, its elites are placed in cells again at load).
-- `src/rungs.rs`: the audit lane and the early rungs (R1 at 1 s, R2 at 2.5 s), their fit at the generation boundary, the breaker per cadence band. The rule runs in the metrics block of `shaders/warp_creature.cu`.
+- `src/rungs.rs`: the audit lane and the early rungs (R1 at 1 s, R2 at 2.5 s), their fit at the generation boundary, the breaker per cadence band. The rule runs in the metrics block of `shaders/creature.cu`.
 - `src/storage.rs`: the `Experiment` with its ring of blocks, islands, emitters, breeding, migration, record confirmations, and saves.
 - `src/ring.rs`: the blocks in flight, absorbed in ring order whatever order the GPU finishes them in.
 - `src/evolution.rs` and `src/evolution/anatomy/`: the genome and the mutation operators (see `docs/anatomy-operators.md`).
@@ -96,7 +96,7 @@ All example tools score and replay creatures on the GPU engine (`examples/common
 - `examples/physics_audit.rs`: per elite, what the GPU replay records: contact-free steps, largest ground push, lowest muscle energy store, steps with a broken joint. The kernel keeps no solver energy, momentum or friction ledgers.
 - `examples/first_generation.rs`: random-population distances on the GPU engine.
 - `examples/replay_match.rs <save>`: the best elites' archive distance beside their replay's.
-- `examples/p2_speed.rs`, `examples/worker_rate.rs`: GPU and worker throughput. `p2_speed <save> <count> <repeats> "" screen` times the game's standard trial (the 5 s screen) on every k-th creature of a save's ring and each lane class alone, `fine` times the confirmation trial. `worker_rate` takes a save as its sixth argument and measures the evolved game end to end.
+- `examples/p2_speed.rs`, `examples/worker_rate.rs`: GPU and worker throughput. `p2_speed <save> <count> <repeats> "" screen` times the game's standard trial (the 5 s screen) on every k-th creature of a save's ring, `fine` times the confirmation trial. `worker_rate` takes a save as its sixth argument and measures the evolved game end to end.
 - `tools/pause-game.sh`: pauses the owner's game for a speed measurement (`docs/building.md`).
 
 ## Docs

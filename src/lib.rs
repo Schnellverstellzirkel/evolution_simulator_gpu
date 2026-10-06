@@ -22,7 +22,7 @@ pub mod storage;
 pub mod theme;
 pub mod threads;
 pub mod ui;
-pub mod warp_kernel;
+pub mod kernel;
 pub mod worker;
 pub mod world_fx;
 

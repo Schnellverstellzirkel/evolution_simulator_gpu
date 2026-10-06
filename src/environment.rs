@@ -454,7 +454,7 @@ mod tests {
             assert_eq!(changed, 1);
         }
         // The kernels need few distinct worlds: most effects change no flag.
-        let mut flags: Vec<u32> = away.iter().map(crate::warp_kernel::world_flags).collect();
+        let mut flags: Vec<u32> = away.iter().map(crate::kernel::world_flags).collect();
         flags.sort();
         flags.dedup();
         assert!(flags.len() < away.len());

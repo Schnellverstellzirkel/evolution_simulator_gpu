@@ -203,7 +203,7 @@ pub fn features(trace: &RungTrace, r: usize, period: f32) -> [f32; FEATURES] {
         f16_to_f32(f32_to_f16(period)),
     ]
 }
-/// The half-precision word the kernel reads for a period (`warp_kernel::pack`).
+/// The half-precision word the kernel reads for a period (`kernel::pack`).
 pub fn period_half(period: f32) -> u16 {
     f32_to_f16(period)
 }

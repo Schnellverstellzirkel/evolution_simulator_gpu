@@ -3,7 +3,7 @@
 use evolution_simulator::{
     engine::{self, Engine},
     evolution::Population,
-    storage, warp_kernel,
+    storage, kernel,
 };
 use std::time::Duration;
 fn main() -> anyhow::Result<()> {
@@ -71,7 +71,7 @@ fn main() -> anyhow::Result<()> {
             let mut firsts = diff.iter().take(8).copied().collect::<Vec<_>>();
             for &i in &diff {
                 let g = &pop.genomes[i];
-                let w = warp_kernel::class_of(g.node_count, g.muscle_count).unwrap_or(0);
+                let w = kernel::class_of(g.node_count, g.muscle_count).unwrap_or(0);
                 *classes
                     .entry((w, g.muscle_count.div_ceil(w.max(1))))
                     .or_insert(0usize) += 1;

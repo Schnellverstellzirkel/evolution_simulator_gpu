@@ -30,7 +30,7 @@ EVOLUTION_DEVICES=primary cargo run --release
 
 The game needs an NVIDIA GPU with the CUDA driver and NVRTC. It evaluates
 creatures through CUDA and nowhere else (`src/cuda_engine.rs`,
-`shaders/warp_creature.cu`, `src/warp_kernel.rs`). The window is drawn
+`shaders/creature.cu`, `src/kernel.rs`). The window is drawn
 through Vulkan (wgpu), on the GPU the desktop uses.
 `EVOLUTION_CUDA_VERBOSE=1` prints each kernel's registers, shared and local
 memory and occupancy as it loads; `EVOLUTION_WARP_PROFILE=1` makes one warp print its cycles per kernel

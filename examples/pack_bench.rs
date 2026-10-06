@@ -1,10 +1,10 @@
 //! Host cost of packing one ring block for the GPU, on the CPU alone: the
 //! pack into new buffers followed by a copy into a staging buffer (the path
 //! before host arenas), against the pack into the buffers of the previous
-//! unit (`warp_kernel::pack_reusing`), which the engine copies from directly.
+//! unit (`kernel::pack_reusing`), which the engine copies from directly.
 //! Prints wall seconds and page faults per block for each.
 //! Usage: pack_bench [creatures] [repeats] [save]
-use evolution_simulator::{config::Config, evolution, warp_kernel};
+use evolution_simulator::{config::Config, evolution, kernel};
 use std::time::Instant;
 
 fn faults() -> u64 {
@@ -40,7 +40,7 @@ fn main() -> anyhow::Result<()> {
     let mut spare = Vec::new();
     for round in 0..repeats {
         let (f0, t0) = (faults(), Instant::now());
-        let batches = warp_kernel::pack(&pop, &indices, &cfg)?;
+        let batches = kernel::pack(&pop, &indices, &cfg)?;
         let mut bytes = 0;
         for b in &batches {
             let w = b.wave.as_ref().unwrap();
@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
         drop(batches);
         let fresh = (t0.elapsed().as_secs_f64(), faults() - f0);
         let (f0, t0) = (faults(), Instant::now());
-        let batches = warp_kernel::pack_reusing(&pop, &indices, &cfg, &mut spare)?;
+        let batches = kernel::pack_reusing(&pop, &indices, &cfg, &mut spare)?;
         let reused = (t0.elapsed().as_secs_f64(), faults() - f0);
         spare.extend(batches);
         println!(

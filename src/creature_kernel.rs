@@ -1,5 +1,5 @@
 //! What the GPU kernel returns per creature (`GpuResult`), the packed batch
-//! the engine uploads (`LaneBatch`, filled by `warp_kernel::pack`), and the
+//! the engine uploads (`LaneBatch`, filled by `kernel::pack`), and the
 //! layout of a recorded frame.
 use crate::physics::Node;
 
@@ -45,7 +45,7 @@ impl GpuResult {
     pub fn feet(&self) -> u32 {
         self.lift_lo.to_bits().count_ones()
     }
-    /// The rung trace the CUDA lane-group kernel writes into the seven words
+    /// The rung trace the CUDA kernel writes into the seven words
     /// the host reads for nothing else (`contact_hi`, `lift_hi`, `ground_hi`
     /// and the four gait working words), with the standard fitness.
     pub fn rung_trace(&self) -> RungTrace {
@@ -215,14 +215,14 @@ pub struct LaneBatch {
     pub info: Vec<[u32; 4]>,
     pub tiles: Vec<[u32; 4]>,
     pub muscles: Vec<f32>,
-    /// Fields per muscle in `muscles` (`warp_kernel::MUSCLE_FIELDS`).
+    /// Fields per muscle in `muscles` (`kernel::MUSCLE_FIELDS`).
     pub muscle_fields: usize,
     pub bones: Vec<f32>,
     /// Behavior totals to resume from; `None` starts from zero.
     pub results: Option<Vec<GpuResult>>,
-    /// The lane-group CUDA kernel's records (`warp_kernel::pack`); the
+    /// The CUDA kernel's records (`kernel::pack`); the
     /// per-lane fields above are then empty.
-    pub wave: Option<crate::warp_kernel::WavePack>,
+    pub wave: Option<crate::kernel::WavePack>,
 }
 
 /// Length in `[f32; 2]` slots of one recorded frame of `batch`: the node

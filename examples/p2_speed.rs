@@ -18,7 +18,7 @@ use evolution_simulator::{
     config::Config,
     engine::{self, Engine},
     evolution::Population,
-    storage, warp_kernel,
+    storage, kernel,
 };
 use std::time::{Duration, Instant};
 
@@ -71,16 +71,6 @@ fn run(engine: &mut impl Engine, pop: &Population, cfg: &Config) -> anyhow::Resu
     ))
 }
 
-/// The creatures of `pop` in lane class `w`.
-fn class_subset(pop: &Population, w: usize) -> Population {
-    let mut sub = Population::default();
-    for (i, g) in pop.genomes.iter().enumerate() {
-        if warp_kernel::class_of(g.node_count, g.muscle_count) == Some(w) {
-            sub.push(pop.creature(i));
-        }
-    }
-    sub
-}
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -135,7 +125,7 @@ fn main() -> anyhow::Result<()> {
         cfg = evolution_simulator::scheduler::confirm_config(&cfg);
         cfg.screen = None;
     }
-    eprintln!("world flags {:#x}", warp_kernel::world_flags(&cfg));
+    eprintln!("world flags {:#x}", kernel::world_flags(&cfg));
     let mut engine = engine::gpu_engine("RTX 4060", 64)?;
     eprintln!("engine: {}", engine.name());
     let warm = run(&mut engine, &pop, &cfg)?;
@@ -156,29 +146,6 @@ fn main() -> anyhow::Result<()> {
             steps / 1e6,
             busy / 1e6
         );
-    }
-    for w in warp_kernel::CLASSES {
-        let sub = class_subset(&pop, w);
-        if sub.genomes.is_empty() {
-            continue;
-        }
-        let mut rounds = [0usize; warp_kernel::MAX_ROUNDS + 1];
-        for g in &sub.genomes {
-            rounds[g.muscle_count.div_ceil(w)] += 1;
-        }
-        println!(
-            "{w}-lane class: {} creatures, muscle rounds 0 to {}: {rounds:?}",
-            sub.genomes.len(),
-            warp_kernel::max_rounds(w)
-        );
-        for _ in 0..repeats {
-            let (creatures, steps, busy, hash, _) = run(&mut engine, &sub, &cfg)?;
-            println!(
-                "  {creatures:.0} creatures/s, {:.1}M creature-steps/s ({:.1}M per GPU-busy second), results {hash:016x}",
-                steps / 1e6,
-                busy / 1e6
-            );
-        }
     }
     Ok(())
 }

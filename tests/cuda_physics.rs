@@ -118,7 +118,7 @@ fn a_creature_scores_the_same_in_any_batch() {
     let cfg = Config {
         population: 8,
         duration: 0.5,
-        max_nodes: evolution_simulator::warp_kernel::MAX_NODES,
+        max_nodes: evolution_simulator::kernel::MAX_NODES,
         max_muscles: 256,
         min_size: 0.01,
         min_friction: 0.0,

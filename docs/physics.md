@@ -1,25 +1,27 @@
 # Physics
 
-A creature is a tree of point masses (nodes) joined by rigid, massless bones. The state is the head's position and velocity, the neck's angle and angular velocity, and one relative angle and angular velocity per other bone. Node positions come from forward kinematics, so every bone keeps its exact length and every pose is valid.
+A creature is a tree of point masses (nodes) joined by bones. The physics is the CUDA kernel `shaders/creature.cu`, and nothing else simulates creatures. One GPU thread simulates one creature from its start pose to the end of its trial in plain loops. `src/kernel.rs` packs each creature from `physics2::Model` into a flat record and writes the kernel source with the world's effects compiled in. The game needs an NVIDIA GPU with the CUDA driver and NVRTC.
 
-The dynamics are Featherstone's articulated-body algorithm in planar spatial vectors, written in world axes about the head's position at the start of the step so the numbers stay small in single precision. The neck body floats freely. Every other bone turns about its pivot relative to its parent bone. Integration is semi-implicit Euler on the joint coordinates at 60 steps per second, one substep per step. Trials last 20 s after a short settling phase.
+## Step
 
-The physics is the CUDA kernel, `shaders/warp_creature.cu`, and nothing else simulates creatures. The game needs an NVIDIA GPU with the CUDA driver and NVRTC. `src/warp_kernel.rs` packs each creature from `physics2::Model` and writes the kernel source with the constants of `physics.rs` and `physics2.rs` and the world's effects compiled in. Where the rules below say step, the kernel uses the substep's time step.
+The kernel uses position-based dynamics with small substeps (Mueller and others, "Small Steps in Physics Simulation", 2019). A trial runs 60 steps per second, and each step is 8 substeps (480 per second). A confirmation trial runs 240 steps per second with the same 8 substeps. Each substep:
+
+1. Forces change the node velocities: gravity, wind, air and water drag, buoyancy, mud, brambles and the muscles.
+2. Every node moves by its velocity.
+3. Constraints move the nodes, once each in this order. Every bone gets its length back. Every joint goes back inside its range. Every node inside the ground moves out along the ground's normal, and friction takes back up to mu times that move of the node's slide over the substep.
+4. Each node's velocity becomes its move over the substep divided by the substep. Then joint damping takes a share of every joint's turning speed.
+
+Constraints only move nodes toward a valid pose, and friction only takes back sliding, so no part of a step adds energy. The muscles are the only source of work. Every node is its own ground contact and there is no limit on how many touch the ground.
 
 ## Forces and rules
 
-- Gravity, wind and air drag act on every node and bone. Bone drag is `AIR_DRAG (0.6) x length x width x speed x velocity`, limited so one step never more than halves the speed. It only takes energy away.
-- Muscles pull only. The pull follows the waveform's shortening speed, times the muscle's stiffness and energy, with a light damper. Hill's force-velocity relation scales the active pull by `1 - v / v_max`, with `v_max` of 8 muscle lengths per second. Only active contraction is charged to the energy store (120 J, recovering half the missing energy per second, before environment effects).
-- A muscle's force cap and energy store scale with the mass it drives: 100 m/s^2 times the lighter of the two subtrees it pulls together, never above 100 N.
-- Every muscle has a tendon gene (0 to 1). A muscle stretched past its longest length is pulled back by a passive spring in parallel with it. The spring stores and returns the stretch energy and is not charged to the muscle.
-- Passive joint damping with a 0.1 s time constant, sized to the inertia each joint moves.
-- Joint limits are inelastic stops. A joint that would pass its limit within the step turns only as far as the limit. A joint forced 0.5 rad past its range breaks and ends the trial like a fall.
-- Spin cap: a bone turning faster than 15 rad/s meets an implicit drag toward rest. The drag is a pure torque, so it changes no linear momentum.
-- Ground contact: a substep is one articulated-body pass with the muscles, gravity, wind, drag and water, then one contact solve. Every node that would reach the ground within the substep gets a contact, at most the 4 deepest. The contacts are solved together at velocity level with the exact contact-space matrix and 2 sweeps of projected Gauss-Seidel from zero impulses, then 1 sweep that only takes back friction that would do positive work. A touching node may approach the ground only as fast as its gap allows, normal impulses only push, and friction stays within mu times the normal impulse and opposes sliding. A node inside the ground is not pushed out by a velocity goal: after integration the head moves up by `PUSH_OUT` (0.2) of the deepest node's depth, a position change that gives no velocity, no energy and no normal impulse to lean friction on. There are no planting rounds, no warm start and no static friction factor.
-- Momentum balance: after each substep the body's momentum equals its old momentum plus the external impulses. The difference from first-order integration is applied as one uniform velocity.
-- First law in flight: a substep without ground contact may not gain more kinetic plus potential energy than the muscles, the wind and the tendons put in. The excess comes off the motion about the center of mass.
+- A muscle pulls its two anchors together. Its drive follows the rhythm's shortening speed over the step, times its stiffness and its energy store. Hill's relation scales the drive by `1 - v / v_max` with `v_max` of 8 muscle lengths per second. A light damper resists its length change. Only active shortening is charged to the store, which recovers. A muscle's force cap and store scale with the lighter of the two subtrees it pulls together, at most 100 N.
+- A muscle stretched past its slack length is pulled back by a passive tendon, not charged to the store.
+- A joint's range is a hard limit on the relative angle of a bone and its parent bone. A joint forced 0.5 rad past its range breaks and ends the trial like a fall.
+- Joint damping with a 0.1 s time constant. It pushes the joint's nodes with equal and opposite velocities, so it keeps the body's momentum.
+- Bone drag is `AIR_DRAG (0.6) x length x width x speed x velocity` at the bone's midpoint, shared by its two nodes, never more than half the bone's speed in one substep.
 
-A fall (head below the neck base), a joint break, or head acceleration averaged over about 0.1 s above 8 g ends scoring at the distance reached and disables muscle force. Fitness is horizontal center-of-mass distance and nothing else. Ground contact, cadence, body height and lifted feet are behavior descriptors for the archive.
+A fall (head below the neck base), a joint break, a non-finite position, or head acceleration averaged over about 0.1 s above 8 g ends scoring at the distance reached. In a recording the muscles then go limp and the trial plays to its end. Fitness is horizontal center-of-mass distance and nothing else. Ground contact, cadence, body height and lifted feet are behavior descriptors for the archive.
 
 ## Environment effects
 
@@ -36,14 +38,8 @@ Each effect changes the physics and never the objective. Levels are in `src/envi
 
 ## Cost
 
-In the CUDA kernel the contact solve (detection, the matrix walk, the sweeps and the response) is about 40% of the instructions of a substep, the muscles about 16% and the articulated-body pass about 14%. Each walker keeps its matrix rows in registers, and the response to the contact impulses comes from the torques the walkers leave at each joint. About a fifth of the instructions are branches, compares and convergence bookkeeping. `docs/rejected-ideas.md` lists what was tried to make it cheaper.
-
-## Substeps
-
-One substep per 1/60 s step, with the muscles of the articulated-body model (the owner's choice of 2026-10-02, for speed). The lean muscle model, whose muscles join two nodes, was the game for one day: at one substep it found integrator gains (record confirmations rose to 21,000 to 28,000 per generation and evolved creatures jiggled and slid), and at two substeps it ran 130k to 160k creatures/s end to end against 170k to 210k for these muscles at one substep, though it evolved further (27.8 m against 14.3 m at generation 7 on seed 38).
-
-The single substep was chosen by the substep ladder of 2026-10-01: evolved 30 generations at 3M on one seed, 1 substep reached 66.6 m best against 52.2 m at 2 substeps with a higher QD score; its top 300 elites re-tested at 4 substeps hold a median 39.6 m (2 substeps: 35.1 m at their own rate), 17 of 300 fall at 4 substeps against 68, and its top 50 keep 82% of their distance from a nudged pose against 1%. Random bodies gain nothing (median -0.05 m). Planted-foot slip is 0.94 of the 4-substep value. The kernel runs about 1.6x faster. A realized-friction ledger, anchored friction and spin-adaptive substeps were measured on the same ladder and lost (docs/rejected-ideas.md).
+One thread per creature keeps each creature's nodes, bones and muscle state in the thread's local memory. On 30,000 evolved creatures of a fresh 20-generation game the kernel runs about 19M creature-steps per second (150M substeps). The muscles take about half of that time.
 
 ## Audits
 
-`examples/physics_audit.rs` prints what the GPU replay records per elite (contact-free steps, ground push, muscle energy store, broken joints). The kernel keeps no energy, friction or momentum ledgers. `tests/cuda_physics.rs` checks that bodies stay on the ground, joints stay in range, a body without drive neither travels nor rises, and a creature scores the same in any batch. `examples/first_generation.rs` scores a random population on the GPU (median, p99, best) and catches free propulsion. Run it after any physics change.
+`examples/physics_audit.rs` prints what the GPU replay records per elite (contact-free steps, ground push, muscle energy store, broken joints). `examples/fine_check.rs` replays an archive's best elites at the standard trial and at the fine one, and counts the elites that keep their distance.

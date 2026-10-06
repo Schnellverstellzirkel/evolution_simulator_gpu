@@ -1,17 +1,17 @@
 //! NVIDIA GPU backend: the physics authority.
 //!
-//! It runs `shaders/warp_creature.cu`, one creature per group of 4, 8, 16 or 32
-//! lanes (`warp_kernel`), behind `engine::gpu_engine`'s submit and poll
-//! contract. A unit is uploaded once and runs as waves of up to `warp_kernel::WAVE`
-//! creatures, one kernel launch each, on the slot's streams. Inside a wave
-//! every lane group runs its creature to the end of its trial and then takes
-//! the next one, so there are no trial segments.
+//! It runs `shaders/creature.cu`, one creature per thread (`kernel`), behind
+//! `engine::gpu_engine`'s submit and poll contract. A unit is uploaded once
+//! and runs as waves of up to `kernel::WAVE` creatures, one kernel launch
+//! each, on the slot's streams. Inside a wave every thread runs its creature
+//! to the end of its trial and then takes the next one, so there are no trial
+//! segments.
 //!
 //! Nothing CUDA is linked at build time. The driver API (`libcuda`) and NVRTC
 //! (`libnvrtc`) are loaded when the engine opens, so the game builds without
 //! them, but it needs them to run. NVRTC comes from the system CUDA toolkit
 //! or from NVIDIA's pip wheel; see `docs/building.md`. Kernels compile to a cubin for the device's
-//! architecture, one per lane class, world (the effects that are on), rate
+//! architecture, one per world (the effects that are on), rate
 //! and recording, in the background when the engine opens and when a new
 //! world first appears.
 //!
@@ -458,7 +458,7 @@ fn api() -> Result<Arc<Api>> {
 const STREAM_LIMIT: usize = 8;
 
 /// A kernel: recording or scoring, lanes per creature, world flags
-/// (`warp_kernel::world_flags`) and fidelity.
+/// (`kernel::world_flags`) and fidelity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct KernelKey {
     record: bool,
@@ -470,7 +470,7 @@ struct KernelKey {
 struct Kernel {
     module: CuModule,
     function: CuFunction,
-    /// Blocks of `warp_kernel::BLOCK` threads resident per multiprocessor.
+    /// Blocks of `kernel::BLOCK` threads resident per multiprocessor.
     blocks_per_sm: u32,
 }
 
@@ -480,9 +480,9 @@ unsafe impl Send for Kernel {}
 
 /// Take-up counters per wave: one per muscle-rounds bucket (`NB` in the
 /// kernel).
-const BUCKETS: usize = crate::warp_kernel::ROUNDS;
+const BUCKETS: usize = crate::kernel::ROUNDS;
 
-/// The take-up buckets of a wave (`Takeup` in `shaders/warp_creature.cu`).
+/// The take-up buckets of a wave (`Takeup` in `shaders/creature.cu`).
 /// Bucket `b` holds the wave's creatures with `b + 1` muscle rounds (bodies
 /// without muscles join the first) as `start[b]..end[b]`, and the warps from
 /// `warp[b]` start on it. A warp takes only from its bucket until it runs dry,
@@ -499,7 +499,7 @@ struct Takeup {
 
 impl Takeup {
     /// Buckets for the `count` creatures of a batch from `first` (`heads`
-    /// sorted by rounds, as `warp_kernel::pack` writes them) run by `warps`
+    /// sorted by rounds, as `kernel::pack` writes them) run by `warps`
     /// warps. Each bucket with creatures gets at least one warp and the rest
     /// in proportion to its creatures times their rounds plus one, a round
     /// being about as long as the rest of a step. `buckets` 1 (the
@@ -817,7 +817,7 @@ fn compile_kernel(
     use_cache: bool,
 ) -> Result<Vec<u8>> {
     let task = crate::loading::start(kernel_label(key));
-    let source = crate::warp_kernel::cuda_source(key.class, key.flags, key.fidelity, key.record);
+    let source = crate::kernel::cuda_source(key.class, key.flags, key.fidelity, key.record);
     let path = kernel_cache_dir().map(|dir| {
         use std::hash::{Hash, Hasher};
         let mut halves = [0u64; 2];
@@ -882,11 +882,11 @@ fn kernel_label(key: KernelKey) -> String {
         "{} kernel{physics} · {} lanes · {}",
         if key.record { "replay" } else { "scoring" },
         key.class,
-        crate::warp_kernel::world_label(key.flags)
+        crate::kernel::world_label(key.flags)
     )
 }
 
-/// Compiles the lane-group kernel for `class` lanes and `cfg`'s world on
+/// Compiles the creature kernel for `class` lanes and `cfg`'s world on
 /// this machine's NVRTC and returns ptxas's report (registers, spills,
 /// stack), for developers measuring register use. Needs no GPU time.
 pub fn compile_report(class: usize, cfg: &Config, record: bool, arch: &str) -> Result<String> {
@@ -904,9 +904,9 @@ pub fn compile_report(class: usize, cfg: &Config, record: bool, arch: &str) -> R
     if let Ok(extra) = std::env::var("EVOLUTION_NVRTC_EXTRA") {
         options.extend(extra.split_whitespace().map(String::from));
     }
-    let source = crate::warp_kernel::cuda_source(
+    let source = crate::kernel::cuda_source(
         class,
-        crate::warp_kernel::world_flags(cfg),
+        crate::kernel::world_flags(cfg),
         cfg.fidelity(),
         record,
     );
@@ -1002,7 +1002,7 @@ fn load_kernel(api: &Api, context: CuContext, cubin: &[u8], key: KernelKey) -> R
         }
         let mut blocks = 0;
         cu.check(
-            (cu.occupancy)(&mut blocks, function, crate::warp_kernel::BLOCK as c_int, 0),
+            (cu.occupancy)(&mut blocks, function, crate::kernel::BLOCK as c_int, 0),
             "cuOccupancyMaxActiveBlocksPerMultiprocessor",
         )?;
         if std::env::var_os("EVOLUTION_CUDA_VERBOSE").is_some() {
@@ -1020,7 +1020,7 @@ fn load_kernel(api: &Api, context: CuContext, cubin: &[u8], key: KernelKey) -> R
                 attribute(1),
                 attribute(3),
                 blocks,
-                crate::warp_kernel::BLOCK,
+                crate::kernel::BLOCK,
                 load_seconds
             );
         }
@@ -1395,9 +1395,9 @@ fn nvrtc_options(arch: &str) -> Vec<String> {
 impl CudaEngine {
     /// Opens the first CUDA device whose name contains `name`
     /// (case-insensitive) and starts compiling the kernels of the default
-    /// world. Bodies above `warp_kernel::MAX_NODES` nodes stay elsewhere.
+    /// world. Bodies above `kernel::MAX_NODES` nodes stay elsewhere.
     pub fn new(name: &str, max_capacity: usize) -> Result<Self> {
-        Self::open(name, max_capacity.min(crate::warp_kernel::MAX_NODES))
+        Self::open(name, max_capacity.min(crate::kernel::MAX_NODES))
     }
 
     fn open(name: &str, max_capacity: usize) -> Result<Self> {
@@ -1545,7 +1545,7 @@ impl CudaEngine {
     /// button press loads its kernels in milliseconds: all the scoring
     /// kernels first, then fine, then recordings.
     fn prefetch_world(&mut self, cfg: &Config) {
-        let flags = crate::warp_kernel::world_flags(cfg);
+        let flags = crate::kernel::world_flags(cfg);
         let mut fidelities = vec![Fidelity::standard(), Fidelity::fine()];
         if !fidelities.contains(&cfg.fidelity()) {
             fidelities.push(cfg.fidelity());
@@ -1559,7 +1559,7 @@ impl CudaEngine {
             steps
                 .iter()
                 .flat_map(|&(record, fidelity)| {
-                    crate::warp_kernel::CLASSES
+                    crate::kernel::CLASSES
                         .into_iter()
                         .map(move |class| KernelKey {
                             record,
@@ -1583,7 +1583,7 @@ impl CudaEngine {
                 .collect();
             let mut near = Vec::new();
             for neighbour in crate::environment::one_level_away(cfg) {
-                let neighbour_flags = crate::warp_kernel::world_flags(&neighbour);
+                let neighbour_flags = crate::kernel::world_flags(&neighbour);
                 if neighbour_flags != flags && !near.contains(&neighbour_flags) {
                     near.push(neighbour_flags);
                 }
@@ -1624,10 +1624,10 @@ impl CudaEngine {
         let mut keys = Vec::new();
         for levels in crate::environment::wild_levels(0) {
             let cfg = crate::environment::wild_world(&base, &levels);
-            let (flags, fidelity) = (crate::warp_kernel::world_flags(&cfg), cfg.fidelity());
+            let (flags, fidelity) = (crate::kernel::world_flags(&cfg), cfg.fidelity());
             if seen.insert((flags, fidelity)) {
                 keys.extend(
-                    crate::warp_kernel::CLASSES
+                    crate::kernel::CLASSES
                         .into_iter()
                         .map(|class| KernelKey {
                             record: false,
@@ -1717,7 +1717,7 @@ impl CudaEngine {
         let wave = batch
             .wave
             .as_ref()
-            .context("The CUDA kernel needs a batch from warp_kernel::pack")?;
+            .context("The CUDA kernel needs a batch from kernel::pack")?;
         Ok([
             std::mem::size_of_val(&*wave.lanes),
             std::mem::size_of_val(&*wave.muscles),
@@ -1980,7 +1980,7 @@ impl CudaEngine {
         uploading: &mut bool,
     ) -> Result<(usize, Option<(usize, usize)>)> {
         ensure!(!batches.is_empty(), "Empty GPU batch");
-        let flags = crate::warp_kernel::world_flags(cfg);
+        let flags = crate::kernel::world_flags(cfg);
         let fidelity = cfg.fidelity();
         self.prefetch_world(cfg);
         let kernels: Vec<(CuFunction, u32)> = batches
@@ -2013,7 +2013,7 @@ impl CudaEngine {
             let count = batch.slots.len();
             let mut at = 0;
             while at < count {
-                let n = (count - at).min(crate::warp_kernel::WAVE);
+                let n = (count - at).min(crate::kernel::WAVE);
                 waves.push((b, at, n));
                 at += n;
             }
@@ -2030,7 +2030,7 @@ impl CudaEngine {
             0
         };
         let frame_bytes = frame_count * std::mem::size_of::<[f32; 2]>();
-        let buckets = crate::warp_kernel::solver_setting("BUCKETS", BUCKETS as u32) as usize;
+        let buckets = crate::kernel::solver_setting("BUCKETS", BUCKETS as u32) as usize;
         let buffers = self.ensure_buffers(slot, batches, waves.len(), frame_bytes);
         self.recount_allocated();
         buffers?;
@@ -2085,14 +2085,14 @@ impl CudaEngine {
                 let batch = &batches[b];
                 let res = resources.groups[b].as_ref().unwrap();
                 let (kernel, blocks_per_sm) = kernels[b];
-                let mut params = crate::warp_kernel::params(cfg, first, count, stride);
+                let mut params = crate::kernel::params(cfg, first, count, stride);
                 let groups_per_block =
-                    (crate::warp_kernel::BLOCK as usize / 32) * (32 / batch.capacity);
+                    (crate::kernel::BLOCK as usize / 32) * (32 / batch.capacity);
                 let blocks = count
                     .div_ceil(groups_per_block)
                     .min(blocks_per_sm as usize * self.multiprocessors as usize)
                     .max(1);
-                let warps = blocks * crate::warp_kernel::BLOCK as usize / 32;
+                let warps = blocks * crate::kernel::BLOCK as usize / 32;
                 let heads = &batch.wave.as_ref().unwrap().heads;
                 let mut takeup = Takeup::new(heads, first, count, warps, buckets);
                 let mut pointers = [
@@ -2111,7 +2111,7 @@ impl CudaEngine {
                     &mut pointers[3] as *mut u64 as *mut c_void,
                     &mut pointers[4] as *mut u64 as *mut c_void,
                     &mut pointers[5] as *mut u64 as *mut c_void,
-                    &mut params as *mut crate::warp_kernel::Params as *mut c_void,
+                    &mut params as *mut crate::kernel::Params as *mut c_void,
                     &mut takeup as *mut Takeup as *mut c_void,
                     &mut frames as *mut u64 as *mut c_void,
                 ];
@@ -2121,7 +2121,7 @@ impl CudaEngine {
                         blocks as c_uint,
                         1,
                         1,
-                        crate::warp_kernel::BLOCK,
+                        crate::kernel::BLOCK,
                         1,
                         1,
                         0,
@@ -2355,11 +2355,11 @@ mod tests {
         let mut worlds = HashSet::new();
         for levels in crate::environment::wild_levels(0) {
             let cfg = crate::environment::wild_world(&base, &levels);
-            worlds.insert((crate::warp_kernel::world_flags(&cfg), cfg.fidelity()));
+            worlds.insert((crate::kernel::world_flags(&cfg), cfg.fidelity()));
         }
         // The default world: scoring and recording at both fidelities.
-        let default = 4 * crate::warp_kernel::CLASSES.len();
-        let kernels = worlds.len() * crate::warp_kernel::CLASSES.len() + default;
+        let default = 4 * crate::kernel::CLASSES.len();
+        let kernels = worlds.len() * crate::kernel::CLASSES.len() + default;
         assert!(kernels > 100, "{kernels} kernels: are the wild worlds there?");
         assert!(2 * kernels <= CACHE_FILES, "{kernels} kernels, cache {CACHE_FILES}");
     }

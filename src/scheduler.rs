@@ -212,7 +212,7 @@ pub struct Scheduler {
     pub confirms_submitted: u64,
     pub confirm_busy_seconds: f64,
     /// Lane-steps of standard trials since start, per lane class
-    /// (`warp_kernel::CLASSES`): steps a creature ran times its lanes.
+    /// (`kernel::CLASSES`): steps a creature ran times its lanes.
     pub lane_steps: [u64; 4],
     /// Messages for the player (a GPU lost and reopened), taken by the worker.
     notices: Vec<String>,
@@ -774,9 +774,9 @@ fn trial_steps(r: &GpuResult, cfg: &Config) -> u32 {
 
 /// Adds each creature's steps times the lanes of its class to `totals`.
 fn count_lane_steps(totals: &mut [u64; 4], pop: &Population, results: &[GpuResult], cfg: &Config) {
-    let classes = crate::warp_kernel::CLASSES;
+    let classes = crate::kernel::CLASSES;
     for (genome, r) in pop.genomes.iter().zip(results) {
-        let Some(lanes) = crate::warp_kernel::class_of(genome.node_count, genome.muscle_count)
+        let Some(lanes) = crate::kernel::class_of(genome.node_count, genome.muscle_count)
         else {
             continue;
         };
