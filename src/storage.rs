@@ -1899,24 +1899,55 @@ impl Experiment {
             },
         ))
     }
-    /// Drops lineage records that no living elite descends from.
+    /// Bounds the lineage. A record stays while a living elite is at most
+    /// `ANCESTRY_DEPTH` steps from it, which is as far as the clade count and
+    /// the lineage tab read. Its creature stays only for the elites the tab
+    /// shows and their ancestors (the global archive and each
+    /// island's fastest `ISLAND_LEADERS`); the other records keep their links
+    /// and numbers and lose their genes, as in a save.
     fn prune_lineage(&mut self) {
-        let mut keep: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        let elites = self
-            .archive
-            .entries
-            .iter()
-            .chain(self.islands.iter().flat_map(|island| island.entries.iter()));
-        for elite in elites {
-            let mut id = Some(elite.creature.id);
-            while let Some(current) = id {
-                if !keep.insert(current) {
+        use std::collections::HashSet;
+        let elites = || {
+            self.archive
+                .entries
+                .iter()
+                .chain(self.islands.iter().flat_map(|island| island.entries.iter()))
+        };
+        let living: Vec<u64> = elites().map(|elite| elite.creature.id).collect();
+        let mut shown: Vec<u64> = self.archive.entries.iter().map(|x| x.creature.id).collect();
+        for island in &self.islands {
+            let mut fastest: Vec<&qd::Elite> = island.entries.iter().collect();
+            fastest.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
+            shown.extend(fastest.iter().take(ISLAND_LEADERS).map(|x| x.creature.id));
+        }
+        // The ids within `ANCESTRY_DEPTH` steps of `start`, level by level.
+        let reach = |start: &[u64], within: &mut HashSet<u64>| {
+            let mut frontier: Vec<u64> = start.iter().copied().filter(|id| within.insert(*id)).collect();
+            for _ in 0..ANCESTRY_DEPTH {
+                let mut next = Vec::new();
+                for id in &frontier {
+                    if let Some(parent) = self.lineage.get(id).and_then(|a| a.parent)
+                        && within.insert(parent)
+                    {
+                        next.push(parent);
+                    }
+                }
+                if next.is_empty() {
                     break;
                 }
-                id = self.lineage.get(&current).and_then(|a| a.parent);
+                frontier = next;
+            }
+        };
+        let mut keep: HashSet<u64> = HashSet::new();
+        reach(&living, &mut keep);
+        let mut with_genes: HashSet<u64> = HashSet::new();
+        reach(&shown, &mut with_genes);
+        self.lineage.retain(|id, _| keep.contains(id));
+        for (id, record) in self.lineage.iter_mut() {
+            if !with_genes.contains(id) && !record.creature.is_empty() {
+                record.creature = StoredCreature::default();
             }
         }
-        self.lineage.retain(|id, _| keep.contains(id));
     }
     /// Ancestor chain of a creature, newest first (at most `limit` steps).
     pub fn ancestry(&self, id: u64, limit: usize) -> Vec<&Ancestor> {

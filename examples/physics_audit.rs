@@ -33,8 +33,12 @@ fn main() -> anyhow::Result<()> {
             (cfg, list)
         } else {
             let e = storage::load(std::path::Path::new(&path))?;
-            let list = e
-                .archive
+            // EVOLUTION_ISLAND=n audits island n's elites in place of the global archive's.
+            let archive = match std::env::var("EVOLUTION_ISLAND").ok().and_then(|v| v.parse::<usize>().ok()) {
+                Some(island) => &e.islands[island],
+                None => &e.archive,
+            };
+            let list = archive
                 .entries
                 .iter()
                 .map(|x| (x.fitness, x.creature.unpack()))
