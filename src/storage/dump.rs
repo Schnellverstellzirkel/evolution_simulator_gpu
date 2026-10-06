@@ -7,7 +7,7 @@
 //! as its block is absorbed; the file ends with the header and a 32 B row
 //! per elite of the archives at the start, patched in when the last block
 //! is absorbed. Little endian throughout; `examples/dump_stats.rs` and
-//! `examples/rung_replay.rs` read it.
+//! `examples/operator_yield.rs` read it.
 //!
 //! Header (64 B): magic `EVODUMP1`, format u32, qd version u32, generation
 //! u32, population u32, seed u64, rows u64, elites u32, the screen bar the
