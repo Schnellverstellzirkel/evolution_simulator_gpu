@@ -522,6 +522,550 @@ impl App {
         }
     }
 }
+impl App {
+    /// Once a frame, the checks that need no input: the disk usage of runs/,
+    /// the delayed start of a screenshot run and its preset.
+    fn frame_housekeeping(&mut self, now: Instant) {
+        if self.runs_checked.elapsed() >= RUNS_REFRESH {
+            self.runs_checked = now;
+            self.runs_bytes = directory_bytes(std::path::Path::new("runs"));
+        }
+        if self.smoke_start_pending && self.started.elapsed() >= Duration::from_millis(250) {
+            self.worker.send(Command::Run {
+                continuous: true,
+                guided: false,
+            });
+            self.smoke_start_pending = false;
+        }
+        // Screenshot runs: EVOLUTION_SMOKE_PRESET=<number> applies that
+        // preset after 4 s, so the chart and feed have a world change.
+        if let Some(index) = self.smoke_preset
+            && self.started.elapsed() >= Duration::from_secs(4)
+        {
+            self.smoke_preset = None;
+            if let Some(preset) = crate::environment::PRESETS.get(index) {
+                preset.apply(&mut self.config);
+                self.worker.send(Command::Configure(self.config.clone()));
+            }
+        }
+    }
+    /// Counts the frame, and while a benchmark measures, probes the worker
+    /// and asks for replays.
+    fn record_frame(&mut self, dt: f32, now: Instant) {
+        self.frame_times.push_back(dt);
+        if self.frame_times.len() > 240 {
+            self.frame_times.pop_front();
+        }
+        if self.worker.measuring.load(Ordering::Relaxed) {
+            if self.bench_frames.is_empty() {
+                self.bench_faults = crate::threads::major_faults();
+            }
+            self.bench_frames.push(dt);
+            self.bench_frame_starts
+                .push(now - Duration::from_secs_f32(dt));
+            // EVOLUTION_BENCH_REPLAY: ask for the champion's replay every 6 s
+            // and time how long it takes to appear.
+            if std::env::var_os("EVOLUTION_BENCH_REPLAY").is_some()
+                && self.bench_last_replay.elapsed() >= Duration::from_secs(6)
+                && self.replay_wait.is_none()
+                && let Some((creature, config)) = self.champion()
+            {
+                self.bench_last_replay = now;
+                self.set_preview(creature, config);
+            }
+            if self.bench_last_ping.elapsed() >= Duration::from_millis(100) {
+                self.bench_last_ping = now;
+                self.bench_pings += 1;
+                // Every tenth probe re-applies the settings, like an
+                // environment button, when EVOLUTION_BENCH_SETTINGS_PROBE is set.
+                if self.bench_pings.is_multiple_of(10)
+                    && std::env::var_os("EVOLUTION_BENCH_SETTINGS_PROBE").is_some()
+                {
+                    self.worker.send(Command::ConfigureProbe(now));
+                } else {
+                    self.worker.send(Command::Ping(now));
+                }
+            }
+        }
+    }
+    /// Takes the replay the worker recorded, when it is ready.
+    fn receive_replay(&mut self) {
+        if let Some((rx, asked)) = &self.replay_wait
+            && let Ok(ready) = rx.try_recv()
+        {
+            self.replay_seconds.push(asked.elapsed().as_secs_f32());
+            self.playback = Some(ready);
+            self.replay_wait = None;
+        }
+    }
+    /// Takes the worker's newest snapshot: its world, preview, cards, selection
+    /// and lineage.
+    fn absorb_snapshot(&mut self) {
+        let next = self.worker.view.lock().unwrap().take();
+        if let Some(mut next) = next {
+            if self.initial
+                && next.epoch > 0
+                && self
+                    .snapshot
+                    .as_ref()
+                    .is_none_or(|old| old.epoch != next.epoch)
+            {
+                self.config = next.config.clone();
+                self.initial = false;
+            } else if self.config_sent.is_none_or(|sent| {
+                // A click is acknowledged once the worker's world shows it.
+                // A snapshot published before the worker read the click must
+                // not put the panel back (autochange would flip to Off), so wait
+                // for the match, and give up after a while.
+                let acknowledged = worlds_match(
+                    &next.pending.clone().unwrap_or_else(|| next.config.clone()),
+                    &self.config,
+                );
+                sent.elapsed() > Duration::from_secs(if acknowledged { 2 } else { 15 })
+            }) && self
+                .snapshot
+                .as_ref()
+                .is_none_or(|old| old.epoch == next.epoch)
+            {
+                // The worker owns the world: autochange advance it, and a change
+                // waits in `pending` until the next generation. The panel
+                // shows the world the player asked for.
+                self.config = next.pending.clone().unwrap_or_else(|| next.config.clone());
+            }
+            if let Some((c, cfg)) = next.preview.take() {
+                // The worker picks the creature of a new game (a random one)
+                // and of a loaded game (its best elite).
+                // Neither is known to be the champion: the history's best
+                // takes over at once below when it differs.
+                self.show_champion(c, cfg);
+                self.champion_shown = false;
+            }
+            self.absorb_events(&next);
+            if let Some(list) = next.cards.take() {
+                self.cards_requested = None;
+                if self.race_pending && self.race_picks.is_empty() {
+                    self.build_top_race(&list);
+                }
+                self.cards = Some(list);
+            }
+            if let Some((c, cfg)) = next.selected.take() {
+                // A creature the player clicked on the archive map; it plays
+                // in the player docked beside the map.
+                self.select(c, cfg);
+            }
+            if let Some((id, lineage)) = next.lineage.take() {
+                if self.playback.as_ref().is_some_and(|p| p.creature.id == id) {
+                    self.lineage = lineage;
+                }
+                self.lineage_pending = false;
+            }
+            self.snapshot = Some(next);
+            self.follow_champion();
+            self.maybe_build_race();
+        }
+    }
+    /// Asks the worker for the archive map table and the lineage when the tab
+    /// shows them.
+    fn request_tab_data(&mut self) {
+        // The worker sends the archive map table only while the map shows.
+        let want_map = self.tab == Tab::Population && self.archive_view == ArchiveView::Map;
+        if want_map != self.map_sent {
+            self.map_sent = want_map;
+            self.worker.send(Command::MapTable(want_map));
+        }
+        let lineage_request =
+            if (self.tab == Tab::Overview || self.tab == Tab::Lineage) && self.lineage.is_empty() {
+                self.playback
+                    .as_ref()
+                    .map(|p| p.creature.id)
+                    .filter(|&id| self.lineage_requested != Some(id))
+            } else {
+                None
+            };
+        if let Some(id) = lineage_request {
+            self.lineage_requested = Some(id);
+            self.lineage_pending = true;
+            self.worker.send(Command::Lineage(id));
+        }
+    }
+    /// The keyboard shortcuts, unless a text field has the keyboard.
+    fn handle_keys(&mut self, ctx: &egui::Context) {
+        if !ctx.egui_wants_keyboard_input() {
+            let pressed = |key| ctx.input(|i| i.key_pressed(key));
+            if pressed(egui::Key::Num1) {
+                self.tab = Tab::Overview;
+            }
+            if pressed(egui::Key::Num2) {
+                self.tab = Tab::Population;
+            }
+            if pressed(egui::Key::Num3) {
+                self.tab = Tab::History;
+            }
+            if pressed(egui::Key::Num4) {
+                self.tab = Tab::Race;
+            }
+            if pressed(egui::Key::Num5) {
+                self.tab = Tab::Lineage;
+            }
+            if pressed(egui::Key::F1) || pressed(egui::Key::Questionmark) {
+                self.show_help = !self.show_help;
+            }
+            if pressed(egui::Key::Space) {
+                if self.active() {
+                    self.pause();
+                } else {
+                    self.run(true, false);
+                }
+            }
+            if pressed(egui::Key::K) {
+                self.playing = !self.playing;
+            }
+            if let Some(p) = &mut self.playback {
+                let elapsed = p.tick.saturating_sub(p.trial_start());
+                if pressed(egui::Key::ArrowLeft) {
+                    p.seek(elapsed.saturating_sub(1));
+                    self.playing = false;
+                }
+                if pressed(egui::Key::ArrowRight) {
+                    p.seek(elapsed.saturating_add(1));
+                    self.playing = false;
+                }
+            }
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
+                self.file("Save experiment");
+            }
+        }
+    }
+    /// Advances the replays by the frame's time, and the camera with them.
+    fn advance_replays(&mut self, dt: f32) {
+        if self.playing {
+            let frame_dt = physics::dt();
+            if frame_dt.is_finite() && frame_dt > 0.0 {
+                let speed = self.speed;
+                let advance = |p: &mut Playback| {
+                    p.accumulator = (p.accumulator + dt.clamp(0.0, 0.1) * speed).min(1.0);
+                    let start = Instant::now();
+                    while p.accumulator >= frame_dt && start.elapsed() < Duration::from_millis(5) {
+                        if p.tick >= p.last_frame() {
+                            p.reset();
+                        }
+                        p.advance();
+                        p.accumulator -= frame_dt;
+                    }
+                };
+                if let Some(p) = &mut self.playback {
+                    advance(p);
+                    p.show_between();
+                }
+                if self.tab == Tab::Race {
+                    for lane in &mut self.race {
+                        advance(&mut lane.playback);
+                        lane.playback.show_between();
+                    }
+                }
+            }
+        }
+        // The camera follows the averaged center of mass, paused or not, so
+        // a seek also recenters it.
+        if self.follow
+            && let Some(p) = &self.playback
+        {
+            self.camera[0] = p.camera_x();
+        }
+    }
+    /// The top bar over a mustard stripe.
+    fn top_panel(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("top")
+            .exact_size(68.)
+            .frame(
+                egui::Frame::new()
+                    .fill(crate::theme::poster::WOOD_DARK)
+                    .inner_margin(egui::Margin::symmetric(GAP_L as i8, 15)),
+            )
+            .show(ui, |ui| {
+                // A mustard stripe under the bar, like the poster's border.
+                let bar = ui.max_rect().expand2(Vec2::new(GAP_L, 15.));
+                ui.painter().rect_filled(
+                    Rect::from_min_max(
+                        Pos2::new(bar.left(), bar.bottom() - 4.),
+                        bar.right_bottom(),
+                    ),
+                    0,
+                    crate::theme::poster::MUSTARD,
+                );
+                self.top(ui)
+            });
+    }
+    /// The status line at the bottom with the diagnostics toggle.
+    fn status_panel(&mut self, ui: &mut egui::Ui, theme: Theme) {
+        egui::Panel::bottom("status").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if let Some(message) = self.message.take() {
+                    self.shown_message = Some((message, Instant::now()));
+                }
+                if self
+                    .shown_message
+                    .as_ref()
+                    .is_some_and(|(_, at)| at.elapsed().as_secs_f32() > MESSAGE_SECONDS)
+                {
+                    self.shown_message = None;
+                }
+                if let Some(s) = &self.snapshot {
+                    color_dot(ui, theme.accent);
+                    // A world whose kernels nobody compiled yet makes the GPU
+                    // wait for them. Waits under a third of a second are
+                    // loads of kernels that are ready, not worth a message.
+                    if crate::cuda_engine::compiling_world() {
+                        self.compiling_since.get_or_insert_with(Instant::now);
+                        ui.ctx().request_repaint_after(Duration::from_millis(250));
+                    } else {
+                        self.compiling_since = None;
+                    }
+                    let compiling = self
+                        .compiling_since
+                        .map(|since| since.elapsed())
+                        .filter(|waited| *waited > Duration::from_millis(300));
+                    match (&self.shown_message, compiling) {
+                        (Some((message, _)), _) => ui.label(message),
+                        (None, Some(waited)) => ui.label(format!(
+                            "Compiling GPU kernels for this world… {:.0} s. Evolution starts when they are ready. A new world compiles once.",
+                            waited.as_secs_f32()
+                        )),
+                        (None, None) => ui.label(&s.status),
+                    };
+                    if self.shown_message.is_some() {
+                        ui.ctx().request_repaint_after(Duration::from_millis(500));
+                    }
+                    if let Some(error) = &s.error {
+                        ui.colored_label(theme.danger, error);
+                    }
+                    ui.label(
+                        RichText::new(format!("{:.0} creatures/s", s.end_to_end))
+                            .small()
+                            .color(theme.muted),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button(if self.show_perf {
+                                "Hide diagnostics"
+                            } else {
+                                "Diagnostics"
+                            })
+                            .on_hover_text("Search and machine numbers for developers")
+                            .clicked()
+                        {
+                            self.show_perf = !self.show_perf;
+                        }
+                    });
+                }
+            });
+            if self.show_perf
+                && let Some(s) = &self.snapshot
+            {
+                self.diagnostics(ui, s);
+            }
+        });
+    }
+    /// The tab strip and the tab shown below it.
+    fn central_panel(&mut self, ui: &mut egui::Ui, theme: Theme) {
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme.canvas)
+                    .inner_margin(GAP_L as i8),
+            )
+            .show(ui, |ui| {
+                self.tab_strip(ui, theme);
+                match self.tab {
+                    Tab::Overview => self.overview_tab(ui),
+                    Tab::Population => self.population_tab(ui),
+                    Tab::History => {
+                        egui::ScrollArea::vertical().show(ui, |ui| self.history(ui));
+                    }
+                    Tab::Race => self.race_view(ui),
+                    Tab::Lineage => self.lineage_view(ui),
+                }
+            });
+    }
+    /// The five tab buttons and the rule under them.
+    fn tab_strip(&mut self, ui: &mut egui::Ui, theme: Theme) {
+        let strip = ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = GAP_M;
+            for (key, (tab, label)) in [
+                (Tab::Overview, "Overview"),
+                (Tab::Population, "Ways of moving"),
+                (Tab::History, "History"),
+                (Tab::Race, "Race"),
+                (Tab::Lineage, "Lineage"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if crate::theme::tab(ui, self.tab == tab, &(key + 1).to_string(), label, theme)
+                    .on_hover_text(format!("Key {}", key + 1))
+                    .clicked()
+                {
+                    self.tab = tab;
+                }
+            }
+        });
+        // A thick rule under the tabs, across the panel.
+        ui.painter().hline(
+            ui.max_rect().x_range(),
+            strip.response.rect.bottom() + 5.,
+            Stroke::new(3., theme.ink),
+        );
+        ui.add_space(GAP_L);
+    }
+    /// Overview: metrics, the replay, the trend chart and the event feed.
+    fn overview_tab(&mut self, ui: &mut egui::Ui) {
+        self.metrics(ui);
+        ui.add_space(GAP_M);
+        // The chart keeps a fixed height below the replay and
+        // its controls; the replay takes the rest.
+        const CHART: f32 = 175.;
+        const REPLAY_CONTROLS: f32 = 120.;
+        self.viewport(
+            ui,
+            (ui.available_height() - CHART - REPLAY_CONTROLS).max(180.),
+        );
+        ui.add_space(GAP_M);
+        // The chart and the event feed share the bottom row.
+        let height = (ui.available_height() - 34.).max(80.);
+        let width = ui.available_width();
+        ui.horizontal_top(|ui| {
+            let down = egui::Layout::top_down(egui::Align::Min);
+            ui.allocate_ui_with_layout(Vec2::new(width * 0.62, height + 34.), down, |ui| {
+                self.trend(ui, height)
+            });
+            ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), height + 34.), down, |ui| {
+                self.feed(ui, height + 10.)
+            });
+        });
+    }
+    /// Ways of moving: the archive on the left, the replay docked on the right.
+    fn population_tab(&mut self, ui: &mut egui::Ui) {
+        // The archive on the left, the replay docked on the
+        // right, so browsing never leaves the tab.
+        let height = ui.available_height();
+        let width = ui.available_width();
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui(Vec2::new(width * 0.57, height), |ui| {
+                ui.vertical(|ui| self.population(ui));
+            });
+            ui.allocate_ui(Vec2::new(ui.available_width(), height), |ui| {
+                ui.vertical(|ui| {
+                    self.viewport(ui, (height * 0.55).max(180.));
+                });
+            });
+        });
+    }
+    /// Starts the screenshots the run asked for: every few generations, the
+    /// button, the seek and the capture hook.
+    fn request_screenshots(&mut self, ctx: &egui::Context) {
+        // Unattended runs: a screenshot every `capture_every` generations.
+        if let Some(every) = self.capture_every {
+            let generation = self.snapshot.as_ref().map_or(0, |s| s.generation);
+            if generation > 0
+                && generation.is_multiple_of(every)
+                && generation != self.captured_generation
+                && !self.screenshot_waiting
+            {
+                self.captured_generation = generation;
+                self.capture_generation = Some(generation);
+                self.screenshot_pending = true;
+                self.screenshot_waiting = true;
+            }
+        }
+        // Screenshot button: ask the viewport for one frame and save it as PNG.
+        if self.screenshot_pending {
+            self.screenshot_pending = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                ScreenshotRequest,
+            )));
+        }
+        // Developer screenshots: EVOLUTION_SMOKE_SEEK=<seconds> holds the replay at that time.
+        if self.capture_path.is_some()
+            && let Some(seconds) = std::env::var("EVOLUTION_SMOKE_SEEK")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+            && let Some(p) = self.playback.as_mut()
+        {
+            p.seek((seconds * physics::rate() as f32) as u32);
+            self.playing = false;
+        }
+        // Explicit opt-in capture hook for repeatable native rendering/performance checks.
+        if self.capture_path.is_some()
+            && self.started.elapsed() > smoke_capture_delay()
+            && !self.capture_requested
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            self.capture_requested = true;
+        }
+    }
+    /// Saves the screenshots egui sends back.
+    fn handle_screenshot_events(&mut self, ctx: &egui::Context) {
+        if self.screenshot_waiting || self.capture_path.is_some() {
+            for event in ctx.input(|i| i.events.clone()) {
+                let egui::Event::Screenshot {
+                    user_data, image, ..
+                } = event
+                else {
+                    continue;
+                };
+                if user_data
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.is::<ScreenshotRequest>())
+                {
+                    self.screenshot_waiting = false;
+                    if let Some(generation) = self.capture_generation.take() {
+                        let path = format!("runs/progress-gen{generation}.png");
+                        let bytes: Vec<u8> =
+                            image.pixels.iter().flat_map(|p| p.to_array()).collect();
+                        let _ = std::fs::create_dir_all("runs");
+                        if let Err(e) = image::save_buffer(
+                            &path,
+                            &bytes,
+                            image.size[0] as u32,
+                            image.size[1] as u32,
+                            image::ColorType::Rgba8,
+                        ) {
+                            eprintln!("Screenshot: {e}");
+                        }
+                        continue;
+                    }
+                    match save_screenshot(&image, std::path::Path::new("runs")) {
+                        Ok(path) => {
+                            self.message = Some(format!("Screenshot saved to {}", path.display()));
+                            self.runs_checked = Instant::now() - RUNS_REFRESH;
+                        }
+                        Err(error) => self.message = Some(format!("Screenshot failed: {error}")),
+                    }
+                } else if let Some(path) = self.capture_path.clone() {
+                    let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
+                    if let Err(e) = image::save_buffer(
+                        &path,
+                        &bytes,
+                        image.size[0] as u32,
+                        image.size[1] as u32,
+                        image::ColorType::Rgba8,
+                    ) {
+                        eprintln!("Screenshot: {e}");
+                    }
+                    let mut frames: Vec<_> = self.frame_times.iter().copied().collect();
+                    frames.sort_by(f32::total_cmp);
+                    let p95 = frames.get(frames.len() * 95 / 100).copied().unwrap_or(0.) * 1000.;
+                    eprintln!(
+                        "Native UI: {} frames, p95 {p95:.2} ms, screenshot {path}",
+                        frames.len()
+                    );
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+}
 impl eframe::App for App {
     fn on_exit(&mut self) {
         if self.bench_frames.is_empty() {
@@ -599,327 +1143,24 @@ impl eframe::App for App {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
-        if self.runs_checked.elapsed() >= RUNS_REFRESH {
-            self.runs_checked = now;
-            self.runs_bytes = directory_bytes(std::path::Path::new("runs"));
-        }
-        if self.smoke_start_pending && self.started.elapsed() >= Duration::from_millis(250) {
-            self.worker.send(Command::Run {
-                continuous: true,
-                guided: false,
-            });
-            self.smoke_start_pending = false;
-        }
-        // Screenshot runs: EVOLUTION_SMOKE_PRESET=<number> applies that
-        // preset after 4 s, so the chart and feed have a world change.
-        if let Some(index) = self.smoke_preset
-            && self.started.elapsed() >= Duration::from_secs(4)
-        {
-            self.smoke_preset = None;
-            if let Some(preset) = crate::environment::PRESETS.get(index) {
-                preset.apply(&mut self.config);
-                self.worker.send(Command::Configure(self.config.clone()));
-            }
-        }
-        self.frame_times.push_back(dt);
-        if self.frame_times.len() > 240 {
-            self.frame_times.pop_front();
-        }
-        if self.worker.measuring.load(Ordering::Relaxed) {
-            if self.bench_frames.is_empty() {
-                self.bench_faults = crate::threads::major_faults();
-            }
-            self.bench_frames.push(dt);
-            self.bench_frame_starts
-                .push(now - Duration::from_secs_f32(dt));
-            // EVOLUTION_BENCH_REPLAY: ask for the champion's replay every 6 s
-            // and time how long it takes to appear.
-            if std::env::var_os("EVOLUTION_BENCH_REPLAY").is_some()
-                && self.bench_last_replay.elapsed() >= Duration::from_secs(6)
-                && self.replay_wait.is_none()
-                && let Some((creature, config)) = self.champion()
-            {
-                self.bench_last_replay = now;
-                self.set_preview(creature, config);
-            }
-            if self.bench_last_ping.elapsed() >= Duration::from_millis(100) {
-                self.bench_last_ping = now;
-                self.bench_pings += 1;
-                // Every tenth probe re-applies the settings, like an
-                // environment button, when EVOLUTION_BENCH_SETTINGS_PROBE is set.
-                if self.bench_pings.is_multiple_of(10)
-                    && std::env::var_os("EVOLUTION_BENCH_SETTINGS_PROBE").is_some()
-                {
-                    self.worker.send(Command::ConfigureProbe(now));
-                } else {
-                    self.worker.send(Command::Ping(now));
-                }
-            }
-        }
-        if let Some((rx, asked)) = &self.replay_wait
-            && let Ok(ready) = rx.try_recv()
-        {
-            self.replay_seconds.push(asked.elapsed().as_secs_f32());
-            self.playback = Some(ready);
-            self.replay_wait = None;
-        }
-        let next = self.worker.view.lock().unwrap().take();
-        if let Some(mut next) = next {
-            if self.initial
-                && next.epoch > 0
-                && self
-                    .snapshot
-                    .as_ref()
-                    .is_none_or(|old| old.epoch != next.epoch)
-            {
-                self.config = next.config.clone();
-                self.initial = false;
-            } else if self.config_sent.is_none_or(|sent| {
-                // A click is acknowledged once the worker's world shows it.
-                // A snapshot published before the worker read the click must
-                // not put the panel back (autochange would flip to Off), so wait
-                // for the match, and give up after a while.
-                let acknowledged = worlds_match(
-                    &next.pending.clone().unwrap_or_else(|| next.config.clone()),
-                    &self.config,
-                );
-                sent.elapsed() > Duration::from_secs(if acknowledged { 2 } else { 15 })
-            }) && self
-                .snapshot
-                .as_ref()
-                .is_none_or(|old| old.epoch == next.epoch)
-            {
-                // The worker owns the world: autochange advance it, and a change
-                // waits in `pending` until the next generation. The panel
-                // shows the world the player asked for.
-                self.config = next.pending.clone().unwrap_or_else(|| next.config.clone());
-            }
-            if let Some((c, cfg)) = next.preview.take() {
-                // The worker picks the creature of a new game (a random one)
-                // and of a loaded game (its best elite).
-                // Neither is known to be the champion: the history's best
-                // takes over at once below when it differs.
-                self.show_champion(c, cfg);
-                self.champion_shown = false;
-            }
-            self.absorb_events(&next);
-            if let Some(list) = next.cards.take() {
-                self.cards_requested = None;
-                if self.race_pending && self.race_picks.is_empty() {
-                    self.build_top_race(&list);
-                }
-                self.cards = Some(list);
-            }
-            if let Some((c, cfg)) = next.selected.take() {
-                // A creature the player clicked on the archive map; it plays
-                // in the player docked beside the map.
-                self.select(c, cfg);
-            }
-            if let Some((id, lineage)) = next.lineage.take() {
-                if self.playback.as_ref().is_some_and(|p| p.creature.id == id) {
-                    self.lineage = lineage;
-                }
-                self.lineage_pending = false;
-            }
-            self.snapshot = Some(next);
-            self.follow_champion();
-            self.maybe_build_race();
-        }
-        // The worker sends the archive map table only while the map shows.
-        let want_map = self.tab == Tab::Population && self.archive_view == ArchiveView::Map;
-        if want_map != self.map_sent {
-            self.map_sent = want_map;
-            self.worker.send(Command::MapTable(want_map));
-        }
-        let lineage_request =
-            if (self.tab == Tab::Overview || self.tab == Tab::Lineage) && self.lineage.is_empty() {
-                self.playback
-                    .as_ref()
-                    .map(|p| p.creature.id)
-                    .filter(|&id| self.lineage_requested != Some(id))
-            } else {
-                None
-            };
-        if let Some(id) = lineage_request {
-            self.lineage_requested = Some(id);
-            self.lineage_pending = true;
-            self.worker.send(Command::Lineage(id));
-        }
-        if !ctx.egui_wants_keyboard_input() {
-            let pressed = |key| ctx.input(|i| i.key_pressed(key));
-            if pressed(egui::Key::Num1) {
-                self.tab = Tab::Overview;
-            }
-            if pressed(egui::Key::Num2) {
-                self.tab = Tab::Population;
-            }
-            if pressed(egui::Key::Num3) {
-                self.tab = Tab::History;
-            }
-            if pressed(egui::Key::Num4) {
-                self.tab = Tab::Race;
-            }
-            if pressed(egui::Key::Num5) {
-                self.tab = Tab::Lineage;
-            }
-            if pressed(egui::Key::F1) || pressed(egui::Key::Questionmark) {
-                self.show_help = !self.show_help;
-            }
-            if pressed(egui::Key::Space) {
-                if self.active() {
-                    self.pause();
-                } else {
-                    self.run(true, false);
-                }
-            }
-            if pressed(egui::Key::K) {
-                self.playing = !self.playing;
-            }
-            if let Some(p) = &mut self.playback {
-                let elapsed = p.tick.saturating_sub(p.trial_start());
-                if pressed(egui::Key::ArrowLeft) {
-                    p.seek(elapsed.saturating_sub(1));
-                    self.playing = false;
-                }
-                if pressed(egui::Key::ArrowRight) {
-                    p.seek(elapsed.saturating_add(1));
-                    self.playing = false;
-                }
-            }
-            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
-                self.file("Save experiment");
-            }
-        }
+        self.frame_housekeeping(now);
+        self.record_frame(dt, now);
+        self.receive_replay();
+        self.absorb_snapshot();
+        self.request_tab_data();
+        self.handle_keys(&ctx);
         if self.tab != self.prev_tab {
             self.prev_tab = self.tab;
             self.opened_tab(self.tab);
         }
-        if self.playing {
-            let frame_dt = physics::dt();
-            if frame_dt.is_finite() && frame_dt > 0.0 {
-                let speed = self.speed;
-                let advance = |p: &mut Playback| {
-                    p.accumulator = (p.accumulator + dt.clamp(0.0, 0.1) * speed).min(1.0);
-                    let start = Instant::now();
-                    while p.accumulator >= frame_dt && start.elapsed() < Duration::from_millis(5) {
-                        if p.tick >= p.last_frame() {
-                            p.reset();
-                        }
-                        p.advance();
-                        p.accumulator -= frame_dt;
-                    }
-                };
-                if let Some(p) = &mut self.playback {
-                    advance(p);
-                    p.show_between();
-                }
-                if self.tab == Tab::Race {
-                    for lane in &mut self.race {
-                        advance(&mut lane.playback);
-                        lane.playback.show_between();
-                    }
-                }
-            }
-        }
-        // The camera follows the averaged center of mass, paused or not, so
-        // a seek also recenters it.
-        if self.follow
-            && let Some(p) = &self.playback
-        {
-            self.camera[0] = p.camera_x();
-        }
+        self.advance_replays(dt);
         let theme = self.theme();
         // The blurred city behind everything, as the game world shows
         // behind the Half-Life 2 menus; the panels are dark glass over it.
         crate::theme::backdrop(ui.painter(), ui.ctx().content_rect());
-        egui::Panel::top("top")
-            .exact_size(68.)
-            .frame(
-                egui::Frame::new()
-                    .fill(crate::theme::poster::WOOD_DARK)
-                    .inner_margin(egui::Margin::symmetric(GAP_L as i8, 15)),
-            )
-            .show(ui, |ui| {
-                // A mustard stripe under the bar, like the poster's border.
-                let bar = ui.max_rect().expand2(Vec2::new(GAP_L, 15.));
-                ui.painter().rect_filled(
-                    Rect::from_min_max(
-                        Pos2::new(bar.left(), bar.bottom() - 4.),
-                        bar.right_bottom(),
-                    ),
-                    0,
-                    crate::theme::poster::MUSTARD,
-                );
-                self.top(ui)
-            });
+        self.top_panel(ui);
         self.dev_pause_bar(ui);
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if let Some(message) = self.message.take() {
-                    self.shown_message = Some((message, Instant::now()));
-                }
-                if self
-                    .shown_message
-                    .as_ref()
-                    .is_some_and(|(_, at)| at.elapsed().as_secs_f32() > MESSAGE_SECONDS)
-                {
-                    self.shown_message = None;
-                }
-                if let Some(s) = &self.snapshot {
-                    color_dot(ui, theme.accent);
-                    // A world whose kernels nobody compiled yet makes the GPU
-                    // wait for them. Waits under a third of a second are
-                    // loads of kernels that are ready, not worth a message.
-                    if crate::cuda_engine::compiling_world() {
-                        self.compiling_since.get_or_insert_with(Instant::now);
-                        ui.ctx().request_repaint_after(Duration::from_millis(250));
-                    } else {
-                        self.compiling_since = None;
-                    }
-                    let compiling = self
-                        .compiling_since
-                        .map(|since| since.elapsed())
-                        .filter(|waited| *waited > Duration::from_millis(300));
-                    match (&self.shown_message, compiling) {
-                        (Some((message, _)), _) => ui.label(message),
-                        (None, Some(waited)) => ui.label(format!(
-                            "Compiling GPU kernels for this world… {:.0} s. Evolution starts when they are ready. A new world compiles once.",
-                            waited.as_secs_f32()
-                        )),
-                        (None, None) => ui.label(&s.status),
-                    };
-                    if self.shown_message.is_some() {
-                        ui.ctx().request_repaint_after(Duration::from_millis(500));
-                    }
-                    if let Some(error) = &s.error {
-                        ui.colored_label(theme.danger, error);
-                    }
-                    ui.label(
-                        RichText::new(format!("{:.0} creatures/s", s.end_to_end))
-                            .small()
-                            .color(theme.muted),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .small_button(if self.show_perf {
-                                "Hide diagnostics"
-                            } else {
-                                "Diagnostics"
-                            })
-                            .on_hover_text("Search and machine numbers for developers")
-                            .clicked()
-                        {
-                            self.show_perf = !self.show_perf;
-                        }
-                    });
-                }
-            });
-            if self.show_perf
-                && let Some(s) = &self.snapshot
-            {
-                self.diagnostics(ui, s);
-            }
-        });
+        self.status_panel(ui, theme);
         egui::Panel::left("controls")
             .default_size(440.)
             .min_size(340.)
@@ -934,99 +1175,7 @@ impl eframe::App for App {
                 crate::theme::wear(ui.painter(), ui.max_rect().expand(GAP_L), theme, 7.);
                 self.controls(ui)
             });
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(theme.canvas)
-                    .inner_margin(GAP_L as i8),
-            )
-            .show(ui, |ui| {
-                let strip = ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = GAP_M;
-                    for (key, (tab, label)) in [
-                        (Tab::Overview, "Overview"),
-                        (Tab::Population, "Ways of moving"),
-                        (Tab::History, "History"),
-                        (Tab::Race, "Race"),
-                        (Tab::Lineage, "Lineage"),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    {
-                        if crate::theme::tab(
-                            ui,
-                            self.tab == tab,
-                            &(key + 1).to_string(),
-                            label,
-                            theme,
-                        )
-                        .on_hover_text(format!("Key {}", key + 1))
-                        .clicked()
-                        {
-                            self.tab = tab;
-                        }
-                    }
-                });
-                // A thick rule under the tabs, across the panel.
-                ui.painter().hline(
-                    ui.max_rect().x_range(),
-                    strip.response.rect.bottom() + 5.,
-                    Stroke::new(3., theme.ink),
-                );
-                ui.add_space(GAP_L);
-                match self.tab {
-                    Tab::Overview => {
-                        self.metrics(ui);
-                        ui.add_space(GAP_M);
-                        // The chart keeps a fixed height below the replay and
-                        // its controls; the replay takes the rest.
-                        const CHART: f32 = 175.;
-                        const REPLAY_CONTROLS: f32 = 120.;
-                        self.viewport(
-                            ui,
-                            (ui.available_height() - CHART - REPLAY_CONTROLS).max(180.),
-                        );
-                        ui.add_space(GAP_M);
-                        // The chart and the event feed share the bottom row.
-                        let height = (ui.available_height() - 34.).max(80.);
-                        let width = ui.available_width();
-                        ui.horizontal_top(|ui| {
-                            let down = egui::Layout::top_down(egui::Align::Min);
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(width * 0.62, height + 34.),
-                                down,
-                                |ui| self.trend(ui, height),
-                            );
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(ui.available_width(), height + 34.),
-                                down,
-                                |ui| self.feed(ui, height + 10.),
-                            );
-                        });
-                    }
-                    Tab::Population => {
-                        // The archive on the left, the replay docked on the
-                        // right, so browsing never leaves the tab.
-                        let height = ui.available_height();
-                        let width = ui.available_width();
-                        ui.horizontal_top(|ui| {
-                            ui.allocate_ui(Vec2::new(width * 0.57, height), |ui| {
-                                ui.vertical(|ui| self.population(ui));
-                            });
-                            ui.allocate_ui(Vec2::new(ui.available_width(), height), |ui| {
-                                ui.vertical(|ui| {
-                                    self.viewport(ui, (height * 0.55).max(180.));
-                                });
-                            });
-                        });
-                    }
-                    Tab::History => {
-                        egui::ScrollArea::vertical().show(ui, |ui| self.history(ui));
-                    }
-                    Tab::Race => self.race_view(ui),
-                    Tab::Lineage => self.lineage_view(ui),
-                }
-            });
+        self.central_panel(ui, theme);
         self.dialogs(&ctx);
         self.help_window(&ctx);
         self.loading_screen(&ctx);
@@ -1039,104 +1188,8 @@ impl eframe::App for App {
                 None => ctx.request_repaint(),
             }
         }
-        // Unattended runs: a screenshot every `capture_every` generations.
-        if let Some(every) = self.capture_every {
-            let generation = self.snapshot.as_ref().map_or(0, |s| s.generation);
-            if generation > 0
-                && generation.is_multiple_of(every)
-                && generation != self.captured_generation
-                && !self.screenshot_waiting
-            {
-                self.captured_generation = generation;
-                self.capture_generation = Some(generation);
-                self.screenshot_pending = true;
-                self.screenshot_waiting = true;
-            }
-        }
-        // Screenshot button: ask the viewport for one frame and save it as PNG.
-        if self.screenshot_pending {
-            self.screenshot_pending = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
-                ScreenshotRequest,
-            )));
-        }
-        // Developer screenshots: EVOLUTION_SMOKE_SEEK=<seconds> holds the replay at that time.
-        if self.capture_path.is_some()
-            && let Some(seconds) = std::env::var("EVOLUTION_SMOKE_SEEK")
-                .ok()
-                .and_then(|s| s.parse::<f32>().ok())
-            && let Some(p) = self.playback.as_mut()
-        {
-            p.seek((seconds * physics::rate() as f32) as u32);
-            self.playing = false;
-        }
-        // Explicit opt-in capture hook for repeatable native rendering/performance checks.
-        if self.capture_path.is_some()
-            && self.started.elapsed() > smoke_capture_delay()
-            && !self.capture_requested
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
-            self.capture_requested = true;
-        }
-        if self.screenshot_waiting || self.capture_path.is_some() {
-            for event in ctx.input(|i| i.events.clone()) {
-                let egui::Event::Screenshot {
-                    user_data, image, ..
-                } = event
-                else {
-                    continue;
-                };
-                if user_data
-                    .data
-                    .as_ref()
-                    .is_some_and(|data| data.is::<ScreenshotRequest>())
-                {
-                    self.screenshot_waiting = false;
-                    if let Some(generation) = self.capture_generation.take() {
-                        let path = format!("runs/progress-gen{generation}.png");
-                        let bytes: Vec<u8> =
-                            image.pixels.iter().flat_map(|p| p.to_array()).collect();
-                        let _ = std::fs::create_dir_all("runs");
-                        if let Err(e) = image::save_buffer(
-                            &path,
-                            &bytes,
-                            image.size[0] as u32,
-                            image.size[1] as u32,
-                            image::ColorType::Rgba8,
-                        ) {
-                            eprintln!("Screenshot: {e}");
-                        }
-                        continue;
-                    }
-                    match save_screenshot(&image, std::path::Path::new("runs")) {
-                        Ok(path) => {
-                            self.message = Some(format!("Screenshot saved to {}", path.display()));
-                            self.runs_checked = Instant::now() - RUNS_REFRESH;
-                        }
-                        Err(error) => self.message = Some(format!("Screenshot failed: {error}")),
-                    }
-                } else if let Some(path) = self.capture_path.clone() {
-                    let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
-                    if let Err(e) = image::save_buffer(
-                        &path,
-                        &bytes,
-                        image.size[0] as u32,
-                        image.size[1] as u32,
-                        image::ColorType::Rgba8,
-                    ) {
-                        eprintln!("Screenshot: {e}");
-                    }
-                    let mut frames: Vec<_> = self.frame_times.iter().copied().collect();
-                    frames.sort_by(f32::total_cmp);
-                    let p95 = frames.get(frames.len() * 95 / 100).copied().unwrap_or(0.) * 1000.;
-                    eprintln!(
-                        "Native UI: {} frames, p95 {p95:.2} ms, screenshot {path}",
-                        frames.len()
-                    );
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            }
-        }
+        self.request_screenshots(&ctx);
+        self.handle_screenshot_events(&ctx);
         // eframe's frame time: the previous frame's update, tessellation
         // and paint, without the wait for vsync.
         if self.worker.measuring.load(Ordering::Relaxed)
