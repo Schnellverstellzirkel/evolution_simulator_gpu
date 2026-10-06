@@ -18,7 +18,7 @@ use evolution_simulator::{
     config::Config,
     engine::{self, Engine},
     evolution::Population,
-    storage, kernel,
+    kernel, storage,
 };
 use std::time::{Duration, Instant};
 
@@ -70,7 +70,6 @@ fn run(engine: &mut impl Engine, pop: &Population, cfg: &Config) -> anyhow::Resu
         done.results,
     ))
 }
-
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();

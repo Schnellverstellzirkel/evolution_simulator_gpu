@@ -365,4 +365,3 @@ impl Model {
         [c[0] * self.inv_mass, c[1] * self.inv_mass]
     }
 }
-

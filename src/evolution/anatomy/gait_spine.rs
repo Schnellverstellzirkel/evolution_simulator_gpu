@@ -364,7 +364,14 @@ pub(crate) fn grow_counterweight_tail(
     let phase = lead.phase + 0.5;
     let before = next.muscles.len();
     hinge_muscle(&mut next, cfg, first, &lead, phase.rem_euclid(1.0), rng);
-    hinge_muscle(&mut next, cfg, first + 1, &lead, (phase + 0.25).rem_euclid(1.0), rng);
+    hinge_muscle(
+        &mut next,
+        cfg,
+        first + 1,
+        &lead,
+        (phase + 0.25).rem_euclid(1.0),
+        rng,
+    );
     if next.muscles.len() == before {
         return false;
     }

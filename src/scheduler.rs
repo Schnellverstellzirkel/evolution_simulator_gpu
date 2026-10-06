@@ -776,8 +776,7 @@ fn trial_steps(r: &GpuResult, cfg: &Config) -> u32 {
 fn count_lane_steps(totals: &mut [u64; 4], pop: &Population, results: &[GpuResult], cfg: &Config) {
     let classes = crate::kernel::CLASSES;
     for (genome, r) in pop.genomes.iter().zip(results) {
-        let Some(lanes) = crate::kernel::class_of(genome.node_count, genome.muscle_count)
-        else {
+        let Some(lanes) = crate::kernel::class_of(genome.node_count, genome.muscle_count) else {
             continue;
         };
         let class = classes.iter().position(|&w| w == lanes).unwrap_or(0);

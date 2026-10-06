@@ -664,7 +664,9 @@ impl Experiment {
                     if qd::is_morphology_niche(&e.niche) {
                         continue;
                     }
-                    let slot = best.entry(archive.plan_key(i)).or_insert((e.fitness, &e.creature));
+                    let slot = best
+                        .entry(archive.plan_key(i))
+                        .or_insert((e.fitness, &e.creature));
                     if e.fitness > slot.0 {
                         *slot = (e.fitness, &e.creature);
                     }

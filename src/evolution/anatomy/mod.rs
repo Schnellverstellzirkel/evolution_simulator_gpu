@@ -37,8 +37,8 @@ mod idea_blend;
 mod idea_elastic;
 mod idea_shape;
 mod idea_surface;
-mod idea_topology;
 mod idea_timing;
+mod idea_topology;
 mod idea_wild;
 mod ideas;
 

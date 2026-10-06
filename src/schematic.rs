@@ -167,7 +167,13 @@ impl Scene<'_> {
         if num > 0 {
             self.badge(x + 32.0, y + 23.0, num);
             let color = if accent == MUSTARD { INK } else { CREAM };
-            self.title((x + 62.0, y + 24.0), Align2::LEFT_CENTER, title, 27.0, color);
+            self.title(
+                (x + 62.0, y + 24.0),
+                Align2::LEFT_CENTER,
+                title,
+                27.0,
+                color,
+            );
         }
     }
     /// Body text inside a card from its header down.
@@ -269,12 +275,8 @@ impl Scene<'_> {
                 self.p.line_segment([a, b], Stroke::new(4.5 * self.k, INK));
                 for (end, sign) in [(a, -1.0), (b, 1.0)] {
                     for (dx, dy) in [(sign * 3.0, sign * 1.0), (-sign * 1.0, -sign * 3.5)] {
-                        self.p.circle(
-                            end + Vec2::new(dx, dy) * self.k,
-                            3.6 * self.k,
-                            CREAM,
-                            ink,
-                        );
+                        self.p
+                            .circle(end + Vec2::new(dx, dy) * self.k, 3.6 * self.k, CREAM, ink);
                     }
                 }
             }
@@ -297,13 +299,15 @@ impl Scene<'_> {
             }
             // A cracked egg: a new random body.
             _ => {
-                self.p.circle(
-                    c + Vec2::new(0.0, 1.5) * self.k,
-                    9.0 * self.k,
-                    CREAM,
-                    ink,
-                );
-                let zig = [(-6.0, 1.0), (-2.5, -3.0), (1.0, 1.0), (4.5, -3.0), (7.0, 0.5)];
+                self.p
+                    .circle(c + Vec2::new(0.0, 1.5) * self.k, 9.0 * self.k, CREAM, ink);
+                let zig = [
+                    (-6.0, 1.0),
+                    (-2.5, -3.0),
+                    (1.0, 1.0),
+                    (4.5, -3.0),
+                    (7.0, 0.5),
+                ];
                 let pts: Vec<Pos2> = zig
                     .iter()
                     .map(|&(dx, dy)| c + Vec2::new(dx, dy) * self.k)
@@ -383,10 +387,7 @@ fn island(s: &Scene, snap: Option<&Snapshot>, index: usize) {
         ROCK,
         3.5,
     );
-    for ((ax, ay), (bx, by)) in [
-        ((-60.0, 40.0), (-20.0, 66.0)),
-        ((52.0, 36.0), (30.0, 64.0)),
-    ] {
+    for ((ax, ay), (bx, by)) in [((-60.0, 40.0), (-20.0, 66.0)), ((52.0, 36.0), (30.0, 64.0))] {
         s.p.line_segment(
             [s.at(cx + ax, cy + ay), s.at(cx + bx, cy + by)],
             Stroke::new(4.0 * s.k, ROCK_DARK),
@@ -416,7 +417,12 @@ fn island(s: &Scene, snap: Option<&Snapshot>, index: usize) {
         (0.0, 38.0),
     ];
     for (i, (dx, dy)) in plots.iter().enumerate() {
-        s.flat(s.rect(cx + dx - 26.0, cy + dy - 4.0, 52.0, 20.0), DIRT, 7.0, 2.5);
+        s.flat(
+            s.rect(cx + dx - 26.0, cy + dy - 4.0, 52.0, 20.0),
+            DIRT,
+            7.0,
+            2.5,
+        );
         if i != 1 && i < planted {
             let phase = s.t * 3.0 + (index * 6 + i) as f32 * 1.3;
             s.critter(
@@ -438,7 +444,12 @@ fn island(s: &Scene, snap: Option<&Snapshot>, index: usize) {
     let upper = index < 2;
     // Upper islands carry their sign on a post above, lower ones hang it
     // below the rock, so no sign covers the hub or the routes.
-    let area = (cx - 120.0, if upper { cy - 192.0 } else { cy + 76.0 }, 240.0, 100.0);
+    let area = (
+        cx - 120.0,
+        if upper { cy - 192.0 } else { cy + 76.0 },
+        240.0,
+        100.0,
+    );
     if upper {
         s.p.line_segment(
             [s.at(cx, area.1 + area.3), s.at(cx, cy - 86.0)],
@@ -489,7 +500,11 @@ fn boat(s: &Scene, x: f32, y: f32, tint: Color32, bob: f32) {
     );
     s.p.line_segment([s.at(x, y), s.at(x, y - 34.0)], Stroke::new(4.0 * s.k, INK));
     s.poly(
-        &[(x + 2.0, y - 34.0), (x + 24.0, y - 12.0), (x + 2.0, y - 12.0)],
+        &[
+            (x + 2.0, y - 34.0),
+            (x + 24.0, y - 12.0),
+            (x + 2.0, y - 12.0),
+        ],
         tint,
         2.5,
     );

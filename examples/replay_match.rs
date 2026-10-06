@@ -60,4 +60,3 @@ fn retest(path: &str, count: usize, out: &str) -> Result<()> {
     println!("{}: {} elites re-tested", out, results.len());
     Ok(())
 }
-

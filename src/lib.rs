@@ -9,6 +9,7 @@ pub mod engine;
 pub mod environment;
 pub mod evolution;
 pub mod gpu;
+pub mod kernel;
 pub mod loading;
 pub mod physics;
 pub mod physics2;
@@ -22,7 +23,6 @@ pub mod storage;
 pub mod theme;
 pub mod threads;
 pub mod ui;
-pub mod kernel;
 pub mod worker;
 pub mod world_fx;
 

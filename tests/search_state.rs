@@ -661,10 +661,14 @@ fn each_island_gives_a_fifth_of_its_slots_to_a_nursery_and_a_tenth_to_another() 
         slots[qd::arena_of_slot(slot, arenas)] += 1;
     }
     for island in 0..islands {
-        let rounds =
-            slots[island] + slots[storage::nursery_of(island)] + slots[storage::reshaped_of(island)];
+        let rounds = slots[island]
+            + slots[storage::nursery_of(island)]
+            + slots[storage::reshaped_of(island)];
         assert_eq!(slots[island], rounds - 6 * rounds / qd::SLOT_CYCLE);
-        assert_eq!(slots[storage::nursery_of(island)], 4 * rounds / qd::SLOT_CYCLE);
+        assert_eq!(
+            slots[storage::nursery_of(island)],
+            4 * rounds / qd::SLOT_CYCLE
+        );
         assert_eq!(
             slots[storage::reshaped_of(island)],
             2 * rounds / qd::SLOT_CYCLE
@@ -862,8 +866,14 @@ fn a_save_keeps_the_ancestors_of_the_global_archive_and_every_elites_record() {
     for elite in archives.flat_map(|archive| &archive.entries) {
         // Every living elite has its record back, creature included.
         let record = restored.lineage.get(&elite.creature.id).unwrap();
-        assert_eq!(record.creature.unpack().nodes, elite.creature.unpack().nodes);
-        assert_eq!(record.creature.unpack().muscles, elite.creature.unpack().muscles);
+        assert_eq!(
+            record.creature.unpack().nodes,
+            elite.creature.unpack().nodes
+        );
+        assert_eq!(
+            record.creature.unpack().muscles,
+            elite.creature.unpack().muscles
+        );
         let before = experiment.lineage.get(&elite.creature.id).unwrap();
         assert_eq!(record.fitness, before.fitness);
         assert_eq!(record.rung, before.rung);
@@ -973,7 +983,10 @@ fn an_island_is_refined_when_its_archive_is_old_enough() {
     // refines: it keeps one elite per way of moving (`refine_archives`).
     // The elites of other shapes and sizes sit in cells of their own, and
     // none was lost.
-    for (index, island) in experiment.islands[..storage::island_count()].iter().enumerate() {
+    for (index, island) in experiment.islands[..storage::island_count()]
+        .iter()
+        .enumerate()
+    {
         assert_eq!(
             island.refined(),
             index == 0 || index == storage::hub_island(),
@@ -1486,6 +1499,7 @@ fn isolated_islands_only_hold_their_own_descendants() {
 /// Whether every archive of the main islands (and their nurseries) is empty.
 fn main_islands_empty(e: &Experiment) -> bool {
     e.islands.iter().enumerate().all(|(arena, island)| {
-        evolution_simulator::qd::is_wild(arena % storage::island_count()) || island.entries.is_empty()
+        evolution_simulator::qd::is_wild(arena % storage::island_count())
+            || island.entries.is_empty()
     })
 }

@@ -375,12 +375,7 @@ pub(crate) fn organs_to_trunk(
 /// to the hip. Mass near the hip adds little to the leg's moment of inertia, so
 /// the swing needs less torque and goes faster (Hildebrand: the muscle mass of
 /// a running limb sits at its top, and the lower bones are light).
-pub(crate) fn organs_to_hip(
-    c: &mut Creature,
-    _cfg: &Config,
-    rng: &mut Rng,
-    _cx: &Context,
-) -> bool {
+pub(crate) fn organs_to_hip(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let center = organ_center(&c.nodes);
     let legs: Vec<BoneIds> = feet_legs(c)
         .into_iter()

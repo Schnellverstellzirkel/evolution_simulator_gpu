@@ -137,7 +137,13 @@ fn tune_leg(c: &mut Creature, limb: &[usize], stiffness: f32, tendon: f32) {
 /// A trunk node to hang a new leg from, the best of three random ones:
 /// few legs there, far from the other hips and near the height of the hip
 /// of `from`.
-fn pick_site(c: &Creature, legs: &[BoneIds], from: usize, rng: &mut Rng, other: bool) -> Option<usize> {
+fn pick_site(
+    c: &Creature,
+    legs: &[BoneIds],
+    from: usize,
+    rng: &mut Rng,
+    other: bool,
+) -> Option<usize> {
     let hips: BoneIds = legs.iter().map(|l| c.bones[l[0]].a as usize).collect();
     let sites: BoneIds = trunk_nodes(c)
         .into_iter()
@@ -329,7 +335,12 @@ pub(crate) fn myriapod_wave(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: 
 /// push together. Any other legs shrink to 0.6 to 0.85 and step a quarter
 /// cycle off. A tail grows from the rear of the trunk and swings half a cycle
 /// from the hop, with a weight near its end, to balance the body.
-pub(crate) fn kangaroo_hopper(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
+pub(crate) fn kangaroo_hopper(
+    c: &mut Creature,
+    cfg: &Config,
+    rng: &mut Rng,
+    _cx: &Context,
+) -> bool {
     let legs = walkers(c);
     if legs.len() < 2 || !room(c, cfg, 1, 2) {
         return false;
@@ -487,7 +498,12 @@ pub(crate) fn shed_leg_pair(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: 
 /// reflected, half a cycle apart from each other, the first half a cycle
 /// from the leg they were copied from. A body with a pair of legs becomes a
 /// body with two, as a hexapod or a centipede gains a segment.
-pub(crate) fn append_leg_pair(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
+pub(crate) fn append_leg_pair(
+    c: &mut Creature,
+    cfg: &Config,
+    rng: &mut Rng,
+    _cx: &Context,
+) -> bool {
     let legs = walkers(c);
     if legs.is_empty() {
         return false;
@@ -593,7 +609,12 @@ pub(crate) fn split_leg_in_two(
 /// most drive stay, 1.1 times longer, step half a cycle apart, and every other
 /// leg goes. Walking on two legs frees the rest of the body for a balance arm
 /// or a tail, and costs fewer nodes.
-pub(crate) fn reduce_to_biped(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
+pub(crate) fn reduce_to_biped(
+    c: &mut Creature,
+    cfg: &Config,
+    rng: &mut Rng,
+    _cx: &Context,
+) -> bool {
     let mut legs = walkers(c);
     if legs.len() < 3 {
         return false;
@@ -646,7 +667,12 @@ pub(crate) fn pronking_stot(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: 
 /// 0.9 as long, and a tendon of at least 0.3 in the leg's muscles. Long light
 /// distal segments and short muscled proximal ones are how hoofed runners
 /// lengthen their stride without a heavier swing (Hildebrand, Alexander).
-pub(crate) fn unguligrade_legs(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
+pub(crate) fn unguligrade_legs(
+    c: &mut Creature,
+    cfg: &Config,
+    rng: &mut Rng,
+    _cx: &Context,
+) -> bool {
     let legs: Limbs = walkers(c).into_iter().filter(|l| l.len() >= 2).collect();
     if legs.is_empty() {
         return false;
@@ -658,7 +684,10 @@ pub(crate) fn unguligrade_legs(c: &mut Creature, cfg: &Config, rng: &mut Rng, _c
         let (upper, lower) = (leg[0], leg[1]);
         let hip = next.nodes[next.bones[upper].a as usize];
         let knee = next.nodes[next.bones[upper].b as usize];
-        let offset = [(knee.x - hip.x) * (proximal - 1.0), (knee.y - hip.y) * (proximal - 1.0)];
+        let offset = [
+            (knee.x - hip.x) * (proximal - 1.0),
+            (knee.y - hip.y) * (proximal - 1.0),
+        ];
         next.nodes[next.bones[upper].b as usize].x += offset[0];
         next.nodes[next.bones[upper].b as usize].y += offset[1];
         next.bones[upper].rest_length *= proximal;
@@ -670,8 +699,8 @@ pub(crate) fn unguligrade_legs(c: &mut Creature, cfg: &Config, rng: &mut Rng, _c
         let node = &mut next.nodes[tip];
         node.x = top.x + (node.x - top.x) * distal;
         node.y = top.y + (node.y - top.y) * distal;
-        next.bones[last].rest_length = (next.bones[last].rest_length * distal)
-            .clamp(0.03, max_bone_length());
+        next.bones[last].rest_length =
+            (next.bones[last].rest_length * distal).clamp(0.03, max_bone_length());
     }
     lift(&mut next);
     for n in &mut next.nodes {

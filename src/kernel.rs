@@ -294,7 +294,8 @@ fn fill_creature(model: &Model, cfg: &Config, record: &mut [u32], muscles: &mut 
         // bone above it is not the neck and has no other child.
         let foot = i > 0 && {
             let j = i - 1;
-            children[j] == 0 && matches!(model.parent[j], Some(p) if j > 0 && p > 0 && children[p] == 1)
+            children[j] == 0
+                && matches!(model.parent[j], Some(p) if j > 0 && p > 0 && children[p] == 1)
         };
         let r = &mut record[i * NODE_WORDS..(i + 1) * NODE_WORDS];
         r[0] = model.mass[i].to_bits();

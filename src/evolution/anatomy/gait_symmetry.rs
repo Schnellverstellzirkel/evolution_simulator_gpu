@@ -70,7 +70,11 @@ fn same_pose(c: &Creature, x: &[usize], y: &[usize], mirror: bool) -> bool {
     x.iter().zip(y.iter()).all(|(&p, &q)| {
         let (bp, bq) = (c.bones[p], c.bones[q]);
         let (np, nq) = (pos(c, bp.b as usize), pos(c, bq.b as usize));
-        let dx = if mirror { -(np[0] - hx[0]) } else { np[0] - hx[0] };
+        let dx = if mirror {
+            -(np[0] - hx[0])
+        } else {
+            np[0] - hx[0]
+        };
         let (lo, hi) = if mirror {
             (-bp.max_angle, -bp.min_angle)
         } else {
@@ -106,7 +110,11 @@ fn replant(c: &mut Creature, cfg: &Config, jobs: &[Job], rng: &mut Rng) -> bool 
         let from = pos(c, c.bones[job.source].a as usize);
         let to = pos(c, at);
         let place = |p: [f32; 2]| {
-            let dx = if job.mirror { from[0] - p[0] } else { p[0] - from[0] };
+            let dx = if job.mirror {
+                from[0] - p[0]
+            } else {
+                p[0] - from[0]
+            };
             [to[0] + dx, to[1] + p[1] - from[1]]
         };
         if copy_branch_limited(
@@ -439,8 +447,10 @@ fn polar(c: &Creature, limb: &[usize]) -> (Bounded<f32, MAX_NODES>, Bounded<f32,
         let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
         let angle = dx.atan2(-dy);
         lengths.push(dx.hypot(dy));
-        turns.push((angle - before + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
-            - std::f32::consts::PI);
+        turns.push(
+            (angle - before + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI,
+        );
         before = angle;
     }
     (lengths, turns)
@@ -556,7 +566,11 @@ fn share_program(c: &mut Creature, shift: impl Fn(i32, usize) -> Option<f32>) ->
     let rank_best = group.iter().position(|&i| i == best).unwrap_or(0) as i32;
     let (_, source_muscles) = actuation(c, legs[best][0]);
     let key = |limb: &[usize], m: &Muscle| {
-        let at = |b: u32| limb.iter().position(|&x| x == b as usize).unwrap_or(usize::MAX);
+        let at = |b: u32| {
+            limb.iter()
+                .position(|&x| x == b as usize)
+                .unwrap_or(usize::MAX)
+        };
         (at(m.bone_a), at(m.bone_b))
     };
     let mut changed = false;
@@ -757,7 +771,11 @@ pub(crate) fn step_leg_along_trunk(
         .filter(|&(j, l)| j != i && hip(c, l) != hip(c, leg))
         .map(|(_, l)| (c.nodes[hip(c, l)].x - x).abs())
         .fold(f32::MAX, f32::min);
-    let gap = if gap < f32::MAX { gap.max(0.08) } else { 0.35 * span };
+    let gap = if gap < f32::MAX {
+        gap.max(0.08)
+    } else {
+        0.35 * span
+    };
     let direction = if rng.unit() < 0.5 { 1.0 } else { -1.0 };
     let wanted = x + direction * gap;
     let inside = branch_nodes(c, leg);
@@ -842,7 +860,7 @@ pub(crate) fn copy_foot_to_all_legs(
     let Some(best) = best_leg(c, &legs) else {
         return false;
     };
-        let source = c.nodes[foot(c, &legs[best])];
+    let source = c.nodes[foot(c, &legs[best])];
     let mut changed = false;
     for (i, leg) in legs.iter().enumerate() {
         if i == best {

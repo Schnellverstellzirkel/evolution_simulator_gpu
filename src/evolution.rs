@@ -309,9 +309,21 @@ impl StoredCreature {
     pub fn unpack_into(&self, creature: &mut Creature) {
         let nodes_end = self.node_n as usize * (std::mem::size_of::<NodeGene>() / 4);
         let bones_end = nodes_end + self.bone_n as usize * (std::mem::size_of::<Bone>() / 4);
-        creature.nodes.clone_from(&Bounded::from_slice(bytemuck::cast_slice(&self.genes[..nodes_end])));
-        creature.bones.clone_from(&Bounded::from_slice(bytemuck::cast_slice(&self.genes[nodes_end..bones_end])));
-        creature.muscles.clone_from(&Bounded::from_slice(bytemuck::cast_slice(&self.genes[bones_end..])));
+        creature
+            .nodes
+            .clone_from(&Bounded::from_slice(bytemuck::cast_slice(
+                &self.genes[..nodes_end],
+            )));
+        creature
+            .bones
+            .clone_from(&Bounded::from_slice(bytemuck::cast_slice(
+                &self.genes[nodes_end..bones_end],
+            )));
+        creature
+            .muscles
+            .clone_from(&Bounded::from_slice(bytemuck::cast_slice(
+                &self.genes[bones_end..],
+            )));
         creature.id = self.id;
     }
     pub fn unpack(&self) -> Creature {
@@ -1256,7 +1268,11 @@ fn random_shaped(
         id: 0,
     };
     for i in 0..n - 1 {
-        let parent = if branched && i > 0 { rng.index(i + 1) } else { i };
+        let parent = if branched && i > 0 {
+            rng.index(i + 1)
+        } else {
+            i
+        };
         let mut b = bone(parent, i + 1, &c.nodes);
         b.min_angle = -rng.range(0.3, JOINT_LIMIT);
         b.max_angle = rng.range(0.3, JOINT_LIMIT);
@@ -2983,7 +2999,10 @@ mod tests {
                 highest = highest.max(operator);
             }
         }
-        assert!(highest > 255, "no operator past 255 was ever picked: {highest}");
+        assert!(
+            highest > 255,
+            "no operator past 255 was ever picked: {highest}"
+        );
     }
 
     #[test]

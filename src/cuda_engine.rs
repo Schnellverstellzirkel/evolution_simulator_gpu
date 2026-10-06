@@ -1599,16 +1599,12 @@ impl CudaEngine {
             let cfg = crate::environment::wild_world(&base, &levels);
             let (flags, fidelity) = (crate::kernel::world_flags(&cfg), cfg.fidelity());
             if seen.insert((flags, fidelity)) {
-                keys.extend(
-                    crate::kernel::CLASSES
-                        .into_iter()
-                        .map(|class| KernelKey {
-                            record: false,
-                            class,
-                            flags,
-                            fidelity,
-                        }),
-                );
+                keys.extend(crate::kernel::CLASSES.into_iter().map(|class| KernelKey {
+                    record: false,
+                    class,
+                    flags,
+                    fidelity,
+                }));
             }
         }
         keys.retain(|key| !self.kernels.contains_key(key));
@@ -2059,8 +2055,7 @@ impl CudaEngine {
                 let res = resources.groups[b].as_ref().unwrap();
                 let (kernel, blocks_per_sm) = kernels[b];
                 let mut params = crate::kernel::params(cfg, first, count, stride);
-                let groups_per_block =
-                    (crate::kernel::BLOCK as usize / 32) * (32 / batch.capacity);
+                let groups_per_block = (crate::kernel::BLOCK as usize / 32) * (32 / batch.capacity);
                 let blocks = count
                     .div_ceil(groups_per_block)
                     .min(blocks_per_sm as usize * self.multiprocessors as usize)
@@ -2333,8 +2328,15 @@ mod tests {
         // The default world: scoring and recording at both fidelities.
         let default = 4 * crate::kernel::CLASSES.len();
         let kernels = worlds.len() * crate::kernel::CLASSES.len() + default;
-        assert!(worlds.len() > 25, "{} worlds: are the wild worlds there?", worlds.len());
-        assert!(2 * kernels <= CACHE_FILES, "{kernels} kernels, cache {CACHE_FILES}");
+        assert!(
+            worlds.len() > 25,
+            "{} worlds: are the wild worlds there?",
+            worlds.len()
+        );
+        assert!(
+            2 * kernels <= CACHE_FILES,
+            "{kernels} kernels, cache {CACHE_FILES}"
+        );
     }
 
     #[test]
