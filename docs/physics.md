@@ -4,7 +4,7 @@ A creature is a tree of point masses (nodes) joined by bones. The physics is the
 
 ## Step
 
-The kernel uses position-based dynamics with small substeps (Mueller and others, "Small Steps in Physics Simulation", 2019). A trial runs 60 steps per second, and each step is 8 substeps (480 per second). A confirmation trial runs 240 steps per second with the same 8 substeps. Each substep:
+The kernel uses position-based dynamics with small substeps (Mueller and others, "Small Steps in Physics Simulation", 2019). A trial runs 60 steps per second, and each step is 16 substeps (960 per second). A confirmation trial runs 120 steps per second with the same 16 substeps. Each substep:
 
 1. Forces change the node velocities: gravity, wind, air and water drag, buoyancy, mud, brambles and the muscles.
 2. Every node moves by its velocity.
@@ -38,7 +38,9 @@ Each effect changes the physics and never the objective. Levels are in `src/envi
 
 ## Cost
 
-One thread per creature keeps each creature's nodes, bones and muscle state in the thread's local memory. On 30,000 evolved creatures of a fresh 20-generation game the kernel runs about 19M creature-steps per second (150M substeps). The muscles take about half of that time.
+One thread per creature keeps each creature's nodes, bones and muscle state in the thread's local memory. On 27,000 evolved creatures of a fresh 20-generation game the kernel runs about 18,000 creatures per second with the 5 s screen (10M creature-steps per second in full trials), several times slower than the old lane-group kernel at one substep. The muscles take about half of the time.
+
+Sixteen substeps were chosen because the standard trial then agrees with the confirmation trial. On a fresh game of 20 generations at 300k creatures per generation, 95% to 99% of the top 1,000 elites of an archive keep 80% of their distance at the confirmation trial, and the ratio of the two distances has a median of 1.00 with a tenth below 0.94 to 0.96. At 8 substeps 80% to 84% kept it, with a tenth below 0.5 to 0.7. The old kernel kept 45% to 60% at generation 40 and none late in a game.
 
 ## Audits
 

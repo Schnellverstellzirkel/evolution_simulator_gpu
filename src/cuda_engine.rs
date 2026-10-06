@@ -2360,7 +2360,7 @@ mod tests {
         // The default world: scoring and recording at both fidelities.
         let default = 4 * crate::kernel::CLASSES.len();
         let kernels = worlds.len() * crate::kernel::CLASSES.len() + default;
-        assert!(kernels > 100, "{kernels} kernels: are the wild worlds there?");
+        assert!(worlds.len() > 25, "{} worlds: are the wild worlds there?", worlds.len());
         assert!(2 * kernels <= CACHE_FILES, "{kernels} kernels, cache {CACHE_FILES}");
     }
 

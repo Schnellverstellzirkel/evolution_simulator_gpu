@@ -34,8 +34,9 @@ pub const CLASSES: [usize; 1] = [MAX_NODES];
 /// Take-up buckets of a wave (`Takeup` in the kernel and the engine). Every
 /// creature goes to the first.
 pub const ROUNDS: usize = 4;
-/// Substeps per step: 8 at the standard 60 steps per second.
-pub const SUBSTEPS: u32 = 8;
+/// Substeps per step: 16 at the standard 60 steps per second (960 per
+/// second).
+pub const SUBSTEPS: u32 = 16;
 /// Threads per block, and blocks per multiprocessor the kernel is built for.
 pub const BLOCK: u32 = 128;
 pub const MIN_BLOCKS: u32 = 4;

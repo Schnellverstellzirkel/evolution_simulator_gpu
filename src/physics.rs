@@ -43,15 +43,13 @@ impl Fidelity {
             velocity_passes,
         }
     }
-    /// Twice the standard rate and solver passes, for the confirmation trial
-    /// of a creature that would set an island record.
+    /// Twice the standard rate, for the confirmation trial of an archive
+    /// entrant. Each step runs the kernel's substeps, so the confirmation
+    /// trial runs 1,920 substeps per second against 960.
     pub fn fine() -> Self {
         let standard = Self::standard();
         Self {
-            // Only new records run a confirmation trial, so it can afford 4x:
-            // a 2x check once let integrator exploits through
-            // (docs/design-decisions.md).
-            rate: (standard.rate * 4).min(960),
+            rate: standard.rate * 2,
             bone_passes: standard.bone_passes * 4,
             velocity_passes: standard.velocity_passes * 4,
         }

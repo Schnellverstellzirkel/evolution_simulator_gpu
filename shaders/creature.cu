@@ -30,6 +30,8 @@
 #define PI_F 3.14159265359f
 #define TAU_F 6.28318530718f
 #define NONE 0xffffffffu
+// Steps per 1/60 s, the clock of the head shake measure.
+#define HEAD_SAMPLE ((unsigned)(RATE / 60.0f + 0.5f))
 // Buckets of the take-up counters (`Takeup`); this kernel uses them in order.
 #define NB 4
 // Words of a node record and a bone record, floats of a muscle record.
@@ -568,6 +570,8 @@ __device__ void record_frame(float2* __restrict__ frames, unsigned t, const Body
 struct Tally {
     unsigned contact_bits, lift_bits, ground_bits;
     float head_shake;
+    // The head's position and velocity at the last 60 Hz sample.
+    float2 head_at, head_vel;
     // The rung trace while the trial runs: the distance half a second
     // before a rung, the speed pair, and the contact and energy pairs.
     unsigned rung_x, rung_speed, rung_early, rung_late;
@@ -656,6 +660,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
         mt.screened = 0.0f;
         Tally tl;
         tl.contact_bits = 0u; tl.lift_bits = 0u; tl.ground_bits = 0u; tl.head_shake = 0.0f;
+        tl.head_at = b.pos[0]; tl.head_vel = make_float2(0.0f, 0.0f);
         tl.rung_x = 0u; tl.rung_speed = 0u; tl.rung_early = 0u; tl.rung_late = 0u; tl.rung_bits = 0u;
         bool limp = false;
 
@@ -664,7 +669,6 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
         const unsigned half_s = (unsigned)(0.5f * RATE);
         for (unsigned step = 0u; step < p.steps; step++) {
             const float t_now = (float)step * DT;
-            const float head_vx0 = b.vel[0].x, head_vy0 = b.vel[0].y;
             for (unsigned i = 0u; i < b.nodes; i++) { b.normal_force[i] = 0.0f; b.friction_force[i] = 0.0f; }
             muscle_demands(b, mus, t_now, limp);
             for (unsigned s = 0u; s < SUBSTEPS; s++) {
@@ -708,11 +712,18 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     }
                 }
             }
-            // Head shake: the head's acceleration over about HEAD_SHAKE_WINDOW.
-            if (t_now >= HEAD_SHAKE_WINDOW) {
-                const float dvx = b.vel[0].x - head_vx0, dvy = b.vel[0].y - head_vy0;
-                const float accel = sqrtf(dvx * dvx + dvy * dvy) * RATE;
-                tl.head_shake += (accel - tl.head_shake) * fminf(1.0f / (HEAD_SHAKE_WINDOW * RATE), 1.0f);
+            // Head shake: the head's acceleration averaged over about
+            // HEAD_SHAKE_WINDOW. The head's velocity is its move over each
+            // 1/60 s, so the measure is the same at every step rate.
+            if ((step + 1u) % HEAD_SAMPLE == 0u) {
+                const float2 v = make_float2((b.pos[0].x - tl.head_at.x) * 60.0f, (b.pos[0].y - tl.head_at.y) * 60.0f);
+                const float ax = (v.x - tl.head_vel.x) * 60.0f, ay = (v.y - tl.head_vel.y) * 60.0f;
+                if (t_now >= HEAD_SHAKE_WINDOW) {
+                    const float accel = sqrtf(ax * ax + ay * ay);
+                    tl.head_shake += (accel - tl.head_shake) * fminf(1.0f / (HEAD_SHAKE_WINDOW * 60.0f), 1.0f);
+                }
+                tl.head_at = b.pos[0];
+                tl.head_vel = v;
             }
             const bool broken = broken_joints(b) != 0ull;
 #if RECORD

@@ -62,7 +62,7 @@ Use absolute paths, because `git -C` resolves a relative worktree path against t
 
 The physics:
 
-- `shaders/creature.cu` is the CUDA kernel, the only physics, driven by `src/cuda_engine.rs`. One thread simulates one creature with position-based dynamics, 8 substeps per 1/60 s step (`docs/physics.md`). `src/kernel.rs` packs creatures for it from `physics2::Model` and writes its source with the world's effects compiled in.
+- `shaders/creature.cu` is the CUDA kernel, the only physics, driven by `src/cuda_engine.rs`. One thread simulates one creature with position-based dynamics, 16 substeps per 1/60 s step (`docs/physics.md`). `src/kernel.rs` packs creatures for it from `physics2::Model` and writes its source with the world's effects compiled in.
 - `src/physics2.rs` holds physics constants and `Model`, a creature's constants and start pose, from which `kernel::pack` fills every kernel record.
 - `src/physics.rs` holds what the physics and the UI share: limits, fidelity, node and joint constants, the ground functions (bumps, slope, gaps, hurdles, quake), screening.
 - `src/engine.rs` runs each GPU on its own thread, one whole-trial submission per unit, and records replays with the scoring kernel (frames carry the muscle energy, muscle force and contact forces). `src/gpu.rs` is the evaluation front end. `src/creature_kernel.rs` holds `GpuResult`, `LaneBatch` and `frame_stride`.
