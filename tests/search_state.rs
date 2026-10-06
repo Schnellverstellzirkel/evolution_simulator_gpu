@@ -1444,16 +1444,16 @@ fn isolated_islands_only_hold_their_own_descendants() {
                 // record keeps its genes only for the chains the lineage tab
                 // shows (`prune_lineage`), and the others hold an empty
                 // creature with id 0, which reads as born on island 0.
-                let mut chain = Some(elite.creature.id);
-                while let Some(id) = chain {
-                    let Some(record) = experiment.lineage.get(&id) else {
-                        break;
-                    };
+                let chain = experiment.ancestry_ids(elite.creature.id, usize::MAX);
+                assert_eq!(
+                    chain.len(),
+                    experiment.ancestry(elite.creature.id, usize::MAX).len()
+                );
+                for id in chain {
                     assert!(
                         born_ok(birth_island(id)),
                         "island {index} holds a creature from another island"
                     );
-                    chain = record.parent;
                 }
                 assert!(born_ok(birth_island(elite.creature.id)));
             }

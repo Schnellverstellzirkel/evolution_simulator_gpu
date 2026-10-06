@@ -833,11 +833,12 @@ fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
             elites
         })
         .collect();
+    // By the ids that key the records: a pruned record's creature has id 0.
     let root = |id: u64| {
         experiment
-            .ancestry(id, usize::MAX)
+            .ancestry_ids(id, usize::MAX)
             .last()
-            .map(|a| a.creature.id)
+            .copied()
             .unwrap_or(id)
     };
     let plans: Vec<HashSet<&evolution_simulator::qd::Topology>> = tops

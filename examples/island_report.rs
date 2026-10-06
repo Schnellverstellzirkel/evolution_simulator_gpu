@@ -13,7 +13,12 @@ fn ages(experiment: &storage::Experiment, elite: &qd::Elite) -> (u32, u32) {
     let now = experiment.generation;
     let chain = experiment.ancestry(elite.creature.id, usize::MAX);
     let mut plan_start = elite.improved_generation;
+    // A pruned record keeps no genes (`prune_lineage`), so the plan age
+    // counts back only to the last ancestor that has them.
     for ancestor in &chain {
+        if ancestor.creature.is_empty() {
+            break;
+        }
         if qd::Topology::of(&ancestor.creature.unpack()) == elite.topology {
             plan_start = plan_start.min(ancestor.generation);
         } else {

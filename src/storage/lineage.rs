@@ -177,6 +177,25 @@ impl Experiment {
         }
         chain
     }
+    /// The ids of a creature's ancestor chain, newest first (at most `limit`
+    /// steps), as `ancestry` walks it. Use these rather than the records'
+    /// `creature.id`: a record outside the chains the lineage tab shows keeps
+    /// no genes (`prune_lineage`), and its stored creature has id 0.
+    pub fn ancestry_ids(&self, id: u64, limit: usize) -> Vec<u64> {
+        let mut ids = Vec::new();
+        let mut current = Some(id);
+        while let Some(id) = current {
+            let Some(ancestor) = self.lineage.get(&id) else {
+                break;
+            };
+            ids.push(id);
+            if ids.len() >= limit {
+                break;
+            }
+            current = ancestor.parent;
+        }
+        ids
+    }
     /// The effective number of clades among `ids`: a clade is the elites
     /// that share their oldest recorded ancestor.
     pub(super) fn effective_clades(&self, ids: impl Iterator<Item = u64>) -> f32 {
