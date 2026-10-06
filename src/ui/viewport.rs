@@ -2,8 +2,9 @@
 //! the player picked, the camera and zoom, and the playback controls.
 
 use super::{
-    App, RACE_PICKS, Tab,
+    App, Tab,
     playback::{FrameMarks, Playback},
+    race::RACE_PICKS,
     records::row_in_world,
     scene::draw_creature,
     text::{number, species_name},
