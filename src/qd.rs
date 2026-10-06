@@ -8,6 +8,9 @@ use std::collections::HashMap;
 //     came from the old contact.
 // 62: the wild islands and their reshaped nurseries keep one elite per way of
 //     moving and never refine (memory). Saves of 61 and older load as they are.
+// 63: every entrant above half its archive's best gets its fine trial and
+//     enters with the lower score. Older saves hold standard-trial scores that
+//     no replay reaches.
 pub const EMITTER_COUNT: usize = 4;
 /// The movement grid: ground contact, gait cadence, mean body height and
 /// feet (distinct nodes that touched the ground).
@@ -189,7 +192,7 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 57: the islands have 3 shapes by 3 sizes of body class (2 by 2 before), and
 //     a save is compressed with long-range matching. A save of version 56
 //     loads by moving each elite to its cell in the new layout.
-pub const VERSION: u32 = 62;
+pub const VERSION: u32 = 63;
 /// The oldest save version that still loads. Its archives are re-binned, and
 /// its elites keep the scores they measured.
 pub const OLDEST_LOADABLE: u32 = 53;

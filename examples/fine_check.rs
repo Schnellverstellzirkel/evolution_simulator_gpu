@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
     let fine = Config { screen: None, rungs: None, ..evolution_simulator::scheduler::confirm_config(&e.config) };
     let a = common::score_creatures(&mut engine, &creatures, &standard)?;
     let b = common::score_creatures(&mut engine, &creatures, &fine)?;
-    let (mut kept, mut lost, mut stale) = (0, 0, 0);
+    let (mut kept, mut lost, mut stale, mut held) = (0, 0, 0, 0);
     for (i, x) in elites.iter().enumerate() {
         let (s, f) = (a[i].fitness, b[i].fitness);
         if (s - x.fitness).abs() > 0.05 * x.fitness.abs().max(1.0) {
@@ -28,9 +28,10 @@ fn main() -> anyhow::Result<()> {
             }
         }
         if f >= 0.8 * s { kept += 1 } else { lost += 1 }
+        if f >= 0.8 * x.fitness { held += 1 }
     }
     let mut sd: Vec<f32> = a.iter().map(|r| r.fitness).collect(); sd.sort_by(|x, y| x.total_cmp(y));
     println!("median standard distance {:.2}", sd[sd.len() / 2]);
-    println!("archive {} top {}: archive best {:.2}, standard best {:.2}, fine best {:.2}; keep >=80% at fine: {kept}, lose: {lost}; archive score differs from a standard replay: {stale}", args[2], elites.len(), elites[0].fitness, a.iter().map(|r| r.fitness).fold(f32::MIN, f32::max), b.iter().map(|r| r.fitness).fold(f32::MIN, f32::max));
+    println!("archive {} top {}: archive best {:.2}, standard best {:.2}, fine best {:.2}; keep >=80% at fine: {kept}, lose: {lost}; archive score differs from a standard replay: {stale}; fine replay reaches 80% of the STORED score: {held} of {}", args[2], elites.len(), elites[0].fitness, a.iter().map(|r| r.fitness).fold(f32::MIN, f32::max), b.iter().map(|r| r.fitness).fold(f32::MIN, f32::max), elites.len());
     Ok(())
 }

@@ -88,6 +88,8 @@ impl ScreenWindow {
 /// 196k to 330k with 64 and 308k to 421k with 512. Without a limit an empty
 /// archive asks for nearly every creature (1.07M trials in generation 0).
 const SPECULATIVE_CONFIRMS: usize = 512;
+/// An entrant gets its fine trial when it is at least this share of its archive's best.
+const ENTRANT_SHARE: f32 = 0.5;
 /// Most confirmation trials one archive asks for in one round.
 const MAX_CONFIRMS_PER_ROUND: usize = 16_384;
 
@@ -987,6 +989,79 @@ impl Experiment {
     fn eligible(m: &EvaluationMetrics) -> bool {
         m.fitness.is_finite() && m.fitness > FAILED && !m.screened && !m.excluded
     }
+    /// The positions of block `block`'s creatures that would take a cell: the
+    /// best of each cell of an archive among the block's creatures, when it
+    /// beats the elite there or the cell is empty. A wild island's creatures
+    /// are not asked for.
+    fn entrants(&self, block: &Block, results: &[EvaluationMetrics]) -> Vec<usize> {
+        let population = &*block.population;
+        let arenas = arena_count();
+        let islands = &self.islands;
+        let fallback = QdArchive::default();
+        let keyed: Vec<(usize, Option<(usize, qd::Niche)>, Option<qd::Niche>)> = (0..results.len())
+            .collect::<Vec<usize>>()
+            .par_iter()
+            .copied()
+            .filter(|&j| Self::eligible(&results[j]))
+            .filter(|&j| !qd::is_wild(qd::island_of_slot(block.first + j, island_count())))
+            .map(|j| {
+                let genome = &population.genomes[j];
+                let nodes =
+                    &population.nodes[genome.node_start..genome.node_start + genome.node_count];
+                let muscles = &population.muscles
+                    [genome.muscle_start..genome.muscle_start + genome.muscle_count];
+                let descriptor = qd::descriptor(nodes, muscles, results[j].behavior);
+                let arena = qd::arena_of_slot(block.first + j, arenas);
+                let own = islands.get(arena).unwrap_or(&fallback).cell_of(descriptor);
+                let global = (arena < island_count()).then(|| self.archive.cell_of(descriptor));
+                (j, Some((arena, own)), global)
+            })
+            .collect();
+        // Best creature of each cell: (fitness, position).
+        let mut island_best: HashMap<(usize, qd::Niche), (f32, usize)> = HashMap::new();
+        let mut global_best: HashMap<qd::Niche, (f32, usize)> = HashMap::new();
+        for (j, own, global) in keyed {
+            let fitness = results[j].fitness;
+            let better = |held: &(f32, usize)| fitness > held.0;
+            if let Some(key) = own {
+                let held = island_best.entry(key).or_insert((fitness, j));
+                if better(held) {
+                    *held = (fitness, j);
+                }
+            }
+            if let Some(key) = global {
+                let held = global_best.entry(key).or_insert((fitness, j));
+                if better(held) {
+                    *held = (fitness, j);
+                }
+            }
+        }
+        let beats = |archive: &QdArchive, niche: &qd::Niche, fitness: f32| match archive
+            .slot_for(niche)
+        {
+            Some(slot) => fitness > archive.entries[slot].fitness,
+            None => archive.behavior_count() < archive.limit(),
+        };
+        // Only the fast ones matter: a flaw of one substep lifts a creature to
+        // the top of its archive, and a slow entrant that runs on one stays
+        // slow.
+        let global_bar = ENTRANT_SHARE * self.archive.best_fitness();
+        let mut out: Vec<usize> = Vec::new();
+        for ((arena, niche), (fitness, j)) in island_best {
+            let bar = islands.get(arena).map_or(0.0, |a| ENTRANT_SHARE * a.best_fitness());
+            if fitness >= bar && islands.get(arena).is_none_or(|a| beats(a, &niche, fitness)) {
+                out.push(j);
+            }
+        }
+        for (niche, (fitness, j)) in global_best {
+            if fitness >= global_bar && beats(&self.archive, &niche, fitness) {
+                out.push(j);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
     /// Decides block `k`'s results against the archives as they stand now.
     /// A creature that would set or tie the record of its island (or nursery)
     /// needs a confirmation trial at the fine physics, and its score is the
@@ -1032,6 +1107,7 @@ impl Experiment {
             }
         }
         let mut used = vec![0usize; arenas];
+        let mut applied: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for (arena, mut members) in candidates.into_iter().enumerate() {
             members.sort_by(|&a, &b| {
                 standard[b]
@@ -1070,6 +1146,7 @@ impl Experiment {
                     continue;
                 };
                 read += 1;
+                applied.insert(j);
                 let m = &mut out[j];
                 // The replay must show the trial the score came from.
                 m.fine = check.fitness < m.fitness;
@@ -1082,6 +1159,38 @@ impl Experiment {
                 }
             }
             used[arena] = read;
+        }
+        // Every creature that would take a cell in an archive gets its fine
+        // trial before it does, and its score is the lower of the two. A
+        // standard trial alone is not enough for an entrant: evolution finds
+        // the flaws of one substep, and in a game of 180 generations nearly
+        // every elite of every island ran on one and lost its distance at the
+        // fine trial. Only the best creature of each cell of the block can
+        // take it, so this asks for about as many trials as cells change.
+        let entrants = self.entrants(block, &out);
+        let mut rest: Vec<usize> = Vec::new();
+        for j in entrants {
+            if applied.contains(&j) {
+                continue;
+            }
+            match confirmed.get(&j) {
+                Some(check) => {
+                    let m = &mut out[j];
+                    m.fine = check.fitness < m.fitness;
+                    m.fitness = m.fitness.min(check.fitness);
+                    m.excluded |= check.screened || !check.fitness.is_finite();
+                }
+                None => rest.push(j),
+            }
+        }
+        rest.sort_by(|&a, &b| standard[b].fitness.total_cmp(&standard[a].fitness).then(a.cmp(&b)));
+        for (k, &j) in rest.iter().enumerate() {
+            if k < MAX_CONFIRMS_PER_ROUND {
+                need.push(j);
+            } else {
+                // Not asked for, so it enters no archive.
+                out[j].excluded = true;
+            }
         }
         if need.is_empty() {
             self.confirm_hint.learn(&used);
