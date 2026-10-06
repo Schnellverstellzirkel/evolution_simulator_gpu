@@ -31,9 +31,6 @@ pub const MUSCLE_FIELDS: usize = 20;
 /// Lane classes the engine compiles a kernel for. A creature is one thread,
 /// so there is one class, named by the node slots of its frames.
 pub const CLASSES: [usize; 1] = [MAX_NODES];
-/// Take-up buckets of a wave (`Takeup` in the kernel and the engine). Every
-/// creature goes to the first.
-pub const ROUNDS: usize = 4;
 /// Substeps per step: 16 at the standard 60 steps per second (960 per
 /// second).
 pub const SUBSTEPS: u32 = 16;
@@ -277,9 +274,8 @@ pub fn cuda_source(_class: usize, flags: u32, fidelity: Fidelity, record: bool) 
 
 /// Writes one creature's node and bone records and its muscle records, and
 /// returns its two head words:
-/// `[nodes | 1 << 16, muscles, quake hash, record offset]` and
+/// `[nodes, muscles, quake hash, record offset]` and
 /// `[muscle offset, total mass, 1 / total mass, rung period and flags]`.
-/// The `1 << 16` puts every creature in the first take-up bucket.
 fn fill_creature(model: &Model, cfg: &Config, record: &mut [u32], muscles: &mut [f32]) {
     let start = model.start(cfg);
     let bones = model.pivot.len();
@@ -451,7 +447,7 @@ pub fn pack_reusing(
                 std::slice::from_raw_parts_mut(out.muscles.add(muscle_at[c]), muscle_size);
             fill_creature(&model, cfg, record, muscles);
             *out.heads.add(2 * c) = [
-                g.node_count as u32 | 1 << 16,
+                g.node_count as u32,
                 g.muscle_count as u32,
                 physics::quake_hash(g.id),
                 record_at[c] as u32,

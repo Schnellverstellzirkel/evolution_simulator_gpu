@@ -32,8 +32,6 @@
 #define NONE 0xffffffffu
 // Steps per 1/60 s, the clock of the head shake measure.
 #define HEAD_SAMPLE ((unsigned)(RATE / 60.0f + 0.5f))
-// Buckets of the take-up counters (`Takeup`); this kernel uses them in order.
-#define NB 4
 // Words of a node record and a bone record, floats of a muscle record.
 #define NODE_WORDS 6u
 #define BONE_WORDS 6u
@@ -76,13 +74,6 @@ struct Params {
     float brambles;
     RungParams r1;
     RungParams r2;
-};
-// Same layout as cuda_engine::Takeup: bucket b holds the wave's creatures
-// from start[b] to end[b].
-struct Takeup {
-    unsigned start[NB];
-    unsigned end[NB];
-    unsigned warp[NB];
 };
 // Same layout as creature_kernel::GpuResult.
 struct Result {
@@ -600,8 +591,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     const uint4* __restrict__ heads,
     Result* __restrict__ results,
     unsigned* __restrict__ counter,
-    const Params p,
-    const Takeup tk
+    const Params p
 #if RECORD
     , float2* __restrict__ frames
 #endif
@@ -609,14 +599,8 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
     Body b;
     for (;;) {
         // The next creature of the wave.
-        unsigned got = NONE;
-        for (unsigned k = 0u; k < NB && got == NONE; k++) {
-            const unsigned size = tk.end[k] - tk.start[k];
-            if (size == 0u || *(volatile unsigned*)&counter[k] >= size) { continue; }
-            const unsigned i = atomicAdd(&counter[k], 1u);
-            if (i < size) { got = tk.start[k] + i; }
-        }
-        if (got == NONE || got >= p.count) { return; }
+        const unsigned got = atomicAdd(counter, 1u);
+        if (got >= p.count) { return; }
         const unsigned cidx = p.base + got;
         const uint4 h0 = heads[2u * cidx];
         const uint4 h1 = heads[2u * cidx + 1u];
