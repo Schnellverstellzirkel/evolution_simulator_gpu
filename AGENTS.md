@@ -78,7 +78,7 @@ Search and game state:
 - `src/scheduler.rs`: routes work to the GPUs and reopens a GPU that fails. A GPU that does not reopen stops evolution.
 - `src/worker.rs`: the worker thread and the snapshot the UI draws.
 - `src/environment.rs`: environment effects and presets. Add new effects here.
-- `src/ui.rs`: the egui interface. `src/theme.rs`: its palette, style and HUD pieces. `src/world_fx.rs`: the replay backdrop and the look of each environment effect. `src/assets.rs`: the art under `assets/ui/`, which `tools/ui_assets.py` builds from CC0 sources (`assets/ui/CREDITS.md`). `src/config.rs`: settings.
+- `src/ui.rs` and `src/ui/`: the egui interface. `ui.rs` holds `launch`, `App` and the frame loop; each tab and seam has a file under `src/ui/`, listed in the module doc of `ui.rs`. The `EVOLUTION_SMOKE_*` switches are read in `ui.rs`, except `EVOLUTION_SMOKE_VIEW_ZOOM` (`ui/viewport.rs`) and `EVOLUTION_SMOKE_ENERGY` (`ui/playback.rs`). `src/theme.rs`: its palette, style and HUD pieces. `src/world_fx.rs`: the replay backdrop and the look of each environment effect. `src/assets.rs`: the art under `assets/ui/`, which `tools/ui_assets.py` builds from CC0 sources (`assets/ui/CREDITS.md`). `src/config.rs`: settings.
 
 ## Measurement tools
 

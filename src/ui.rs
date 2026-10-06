@@ -1,3 +1,18 @@
+//! The egui interface. This file holds `launch`, `App` (the state of the whole
+//! window), its constructor and the frame loop (`ui`). Everything else lives in
+//! the modules below, and each of them adds an `impl App` block for its part:
+//!
+//! - The tabs: `overview` (metrics, trend chart and histogram), `feed` (its
+//!   event feed), `records` (what counts as a record), `population` (Ways of
+//!   moving: cards and the archive map), `islands` (its island view), `history`,
+//!   `race` and `lineage`.
+//! - The replay: `viewport` (the player and the creature it shows), `playback`
+//!   (one creature's recorded replay) and `scene` (painting a creature).
+//! - The window: `header` (top bar and Help), `controls` (the side panel),
+//!   `diagnostics`, `dialogs` (the File menu's dialogs), `export` (GIF and
+//!   screenshots) and `loading` (the loading screen).
+//! - Shared helpers: `text` (words and numbers) and `widgets`; `test_support`
+//!   holds the creature of the unit tests.
 mod controls;
 mod diagnostics;
 mod dialogs;
