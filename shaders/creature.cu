@@ -205,7 +205,9 @@ struct Body {
     float mass[MAXN], inv_m[MAXN], radius[MAXN], fric[MAXN];
     unsigned feet;
     // Position, velocity, position at the start of the substep, force.
-    float2 pos[MAXN], vel[MAXN], prev[MAXN], force[MAXN];
+    float2 pos[MAXN], vel[MAXN], prev[MAXN];
+    // The muscles' forces of the substep.
+    float2 muscle_force[MAXN];
     // Bones: bone j joins node pivot[j] to node j + 1.
     unsigned char pivot[MAXN], parent[MAXN];
     float length[MAXN], lo[MAXN], hi[MAXN];
@@ -216,74 +218,107 @@ struct Body {
     float normal_force[MAXN], friction_force[MAXN];
 };
 
-// The relative angle of bone j to its parent bone, near the middle of its
-// range, and the gradient of that angle with respect to the four node
-// positions it depends on (merged when two of them are the same node).
-struct JointGrad {
-    unsigned node[4];
-    float gx[4], gy[4];
+// Joint j: the relative angle of bone j to its parent bone, near the middle
+// of its range, and its gradient. A joint moves three nodes: the tip of
+// bone j (`tip`), the parent bone's far end (`far`) and the node they share
+// (`hub`), whose gradient is minus the sum of the other two because the
+// angle does not change when the body moves.
+struct Joint {
+    unsigned tip, far, hub;
+    float2 g_tip, g_far, g_hub;
     float angle;
 };
-__device__ JointGrad joint_grad(const Body& b, unsigned j) {
-    JointGrad g;
+__device__ Joint joint(const Body& b, unsigned j, bool with_angle = true) {
+    Joint k;
     const unsigned pj = b.parent[j];
-    const unsigned cj = j + 1u, pv = b.pivot[j];
-    const unsigned cp = pj + 1u, pp = b.pivot[pj];
-    const float ux = b.pos[cp].x - b.pos[pp].x, uy = b.pos[cp].y - b.pos[pp].y;
-    const float vx = b.pos[cj].x - b.pos[pv].x, vy = b.pos[cj].y - b.pos[pv].y;
-    const float uu = fmaxf(ux * ux + uy * uy, 1e-12f), vv = fmaxf(vx * vx + vy * vy, 1e-12f);
+    k.tip = j + 1u;
+    k.hub = b.pivot[j];
+    // A bone at the head turns against the neck, which also starts there.
+    const bool at_head = k.hub == b.pivot[pj];
+    k.far = at_head ? pj + 1u : b.pivot[pj];
+    // u is the parent bone, v this bone, each from its pivot to its tip.
+    const float2 u = make_float2(b.pos[pj + 1u].x - b.pos[b.pivot[pj]].x, b.pos[pj + 1u].y - b.pos[b.pivot[pj]].y);
+    const float2 v = make_float2(b.pos[k.tip].x - b.pos[k.hub].x, b.pos[k.tip].y - b.pos[k.hub].y);
+    const float uu = fmaxf(u.x * u.x + u.y * u.y, 1e-12f), vv = fmaxf(v.x * v.x + v.y * v.y, 1e-12f);
     // The angle from u to v, one atan2 of their cross and dot products.
-    const float turn = atan2f(ux * vy - uy * vx, ux * vx + uy * vy);
-    const float mid = 0.5f * (b.lo[j] + b.hi[j]);
-    g.angle = mid + wrapf(turn - mid);
-    // d(atan2(v))/dv = perp(v) / |v|^2, perp(v) = (-vy, vx).
-    const float gvx = -vy / vv, gvy = vx / vv;
-    const float gux = -uy / uu, guy = ux / uu;
-    g.node[0] = cj; g.gx[0] = gvx;  g.gy[0] = gvy;
-    g.node[1] = pv; g.gx[1] = -gvx; g.gy[1] = -gvy;
-    g.node[2] = cp; g.gx[2] = -gux; g.gy[2] = -guy;
-    g.node[3] = pp; g.gx[3] = gux;  g.gy[3] = guy;
-    for (int k = 1; k < 4; k++) {
-        for (int l = 0; l < k; l++) {
-            if (g.node[k] == g.node[l] && g.node[l] != NONE) {
-                g.gx[l] += g.gx[k];
-                g.gy[l] += g.gy[k];
-                g.node[k] = NONE;
-            }
-        }
+    k.angle = 0.0f;
+    if (with_angle) {
+        const float turn = atan2f(u.x * v.y - u.y * v.x, u.x * v.x + u.y * v.y);
+        const float mid = 0.5f * (b.lo[j] + b.hi[j]);
+        k.angle = mid + wrapf(turn - mid);
     }
-    return g;
+    // d(atan2(w))/dw = perp(w) / |w|^2, perp(w) = (-w.y, w.x). The angle is
+    // atan2(v) - atan2(u): the tip of v counts +, the tip of u counts -, and
+    // the pivot of u counts +.
+    k.g_tip = make_float2(-v.y / vv, v.x / vv);
+    const float2 g_u = make_float2(-u.y / uu, u.x / uu);
+    k.g_far = at_head ? make_float2(-g_u.x, -g_u.y) : g_u;
+    k.g_hub = make_float2(-(k.g_tip.x + k.g_far.x), -(k.g_tip.y + k.g_far.y));
+    return k;
 }
 
-// The muscle record `k` of a creature whose muscles start at `m`.
-struct Muscle {
-    unsigned bone_a, bone_b, sensor;
-    float anchor_a, anchor_b, amplitude, hill, inv_period, phase, duty, inv_duty, inv_complement;
-    float stiffness, reset, cap, inv_capacity, tendon_k, slack;
+// The joint's stiffness denominator: the inverse masses times the squared
+// gradients.
+__device__ float joint_weight(const Body& b, const Joint& k) {
+    return b.inv_m[k.tip] * (k.g_tip.x * k.g_tip.x + k.g_tip.y * k.g_tip.y)
+         + b.inv_m[k.far] * (k.g_far.x * k.g_far.x + k.g_far.y * k.g_far.y)
+         + b.inv_m[k.hub] * (k.g_hub.x * k.g_hub.x + k.g_hub.y * k.g_hub.y);
+}
+
+// Adds `lambda` times each node's inverse mass times its gradient to `field`
+// (positions or velocities).
+__device__ void joint_push(const Body& b, const Joint& k, float lambda, float2* field) {
+    field[k.tip].x += b.inv_m[k.tip] * lambda * k.g_tip.x;
+    field[k.tip].y += b.inv_m[k.tip] * lambda * k.g_tip.y;
+    field[k.far].x += b.inv_m[k.far] * lambda * k.g_far.x;
+    field[k.far].y += b.inv_m[k.far] * lambda * k.g_far.y;
+    field[k.hub].x += b.inv_m[k.hub] * lambda * k.g_hub.x;
+    field[k.hub].y += b.inv_m[k.hub] * lambda * k.g_hub.y;
+}
+
+// A muscle record is five 16-byte lines (`kernel::fill_creature`). The
+// first two hold what every substep reads, the rest what only the rhythm
+// reads once a step.
+struct MusclePull {
+    // The two bones' pivot and tip nodes.
+    unsigned a0, a1, b0, b1;
+    float anchor_a, anchor_b, hill, cap, inv_capacity, tendon_k, slack;
 };
-__device__ Muscle load_muscle(const float* __restrict__ m) {
-    // Five 16-byte loads: a record is 80 bytes and starts on a 16-byte line.
+__device__ MusclePull load_pull(const float* __restrict__ m) {
     const float4* q = reinterpret_cast<const float4*>(m);
-    const float4 r0 = q[0], r1 = q[1], r2 = q[2], r3 = q[3], r4 = q[4];
-    Muscle u;
-    u.bone_a = __float_as_uint(r0.x);
-    u.bone_b = __float_as_uint(r0.y);
-    u.anchor_a = r0.z;
-    u.anchor_b = r0.w;
-    u.amplitude = r1.x;
-    u.hill = r1.y;
-    u.inv_period = r1.z;
-    u.phase = r1.w;
-    u.duty = r2.x;
-    u.inv_duty = r2.y;
-    u.inv_complement = r2.z;
-    u.stiffness = r2.w;
-    u.reset = r3.x;
-    u.sensor = __float_as_uint(r3.y);
-    u.cap = r3.z;
-    u.inv_capacity = r3.w;
-    u.tendon_k = r4.x;
-    u.slack = r4.y;
+    const float4 r0 = q[0], r1 = q[1];
+    const unsigned nodes = __float_as_uint(r0.x);
+    MusclePull u;
+    u.a0 = nodes & 255u;
+    u.a1 = (nodes >> 8u) & 255u;
+    u.b0 = (nodes >> 16u) & 255u;
+    u.b1 = nodes >> 24u;
+    u.anchor_a = r0.y;
+    u.anchor_b = r0.z;
+    u.hill = r0.w;
+    u.cap = r1.x;
+    u.inv_capacity = r1.y;
+    u.tendon_k = r1.z;
+    u.slack = r1.w;
+    return u;
+}
+struct MuscleRhythm {
+    float amplitude, inv_period, phase, duty, inv_duty, inv_complement, stiffness, reset;
+    unsigned sensor;
+};
+__device__ MuscleRhythm load_rhythm(const float* __restrict__ m) {
+    const float4* q = reinterpret_cast<const float4*>(m);
+    const float4 r2 = q[2], r3 = q[3], r4 = q[4];
+    MuscleRhythm u;
+    u.amplitude = r2.x;
+    u.inv_period = r2.y;
+    u.phase = r2.z;
+    u.duty = r2.w;
+    u.inv_duty = r3.x;
+    u.inv_complement = r3.y;
+    u.stiffness = r3.z;
+    u.reset = r3.w;
+    u.sensor = __float_as_uint(r4.x);
     return u;
 }
 
@@ -291,7 +326,7 @@ __device__ Muscle load_muscle(const float* __restrict__ m) {
 // shortening speed over the step, and a limp muscle has none.
 __device__ void muscle_demands(Body& b, const float* __restrict__ muscles, float t, bool limp) {
     for (unsigned k = 0u; k < b.muscles; k++) {
-        const Muscle u = load_muscle(muscles + k * MUSCLE_WORDS);
+        const MuscleRhythm u = load_rhythm(muscles + k * MUSCLE_WORDS);
         const float before = rhythm(t, u.inv_period, u.phase, b.offset[k], u.duty, u.inv_duty, u.inv_complement);
         const float after = rhythm(t + DT, u.inv_period, u.phase, b.offset[k], u.duty, u.inv_duty, u.inv_complement);
         const float shortening = u.amplitude * (after - before) * RATE;
@@ -299,13 +334,13 @@ __device__ void muscle_demands(Body& b, const float* __restrict__ muscles, float
     }
 }
 
-// Applies the muscles' forces for one substep.
+// Sets the muscles' forces for one substep.
 __device__ void muscle_forces(Body& b, const float* __restrict__ muscles, const Params& p) {
+    for (unsigned i = 0u; i < b.nodes; i++) { b.muscle_force[i] = make_float2(0.0f, 0.0f); }
     for (unsigned k = 0u; k < b.muscles; k++) {
-        const Muscle u = load_muscle(muscles + k * MUSCLE_WORDS);
+        const MusclePull u = load_pull(muscles + k * MUSCLE_WORDS);
         // The anchors: a share of each bone's length from its pivot.
-        const unsigned a0 = b.pivot[u.bone_a], a1 = u.bone_a + 1u;
-        const unsigned b0 = b.pivot[u.bone_b], b1 = u.bone_b + 1u;
+        const unsigned a0 = u.a0, a1 = u.a1, b0 = u.b0, b1 = u.b1;
         const float ax = b.pos[a0].x + (b.pos[a1].x - b.pos[a0].x) * u.anchor_a;
         const float ay = b.pos[a0].y + (b.pos[a1].y - b.pos[a0].y) * u.anchor_a;
         const float avx = b.vel[a0].x + (b.vel[a1].x - b.vel[a0].x) * u.anchor_a;
@@ -332,53 +367,54 @@ __device__ void muscle_forces(Body& b, const float* __restrict__ muscles, const 
         // The tendon pulls back once the muscle is stretched past its slack.
         const float tendon = u.tendon_k * fmaxf(len - u.slack, 0.0f);
         const float pull = active + tendon;
+#if RECORD
         b.pull[k] = pull;
+#endif
         const float fx = ex * pull, fy = ey * pull;
-        b.force[a0].x += fx * (1.0f - u.anchor_a);
-        b.force[a0].y += fy * (1.0f - u.anchor_a);
-        b.force[a1].x += fx * u.anchor_a;
-        b.force[a1].y += fy * u.anchor_a;
-        b.force[b0].x -= fx * (1.0f - u.anchor_b);
-        b.force[b0].y -= fy * (1.0f - u.anchor_b);
-        b.force[b1].x -= fx * u.anchor_b;
-        b.force[b1].y -= fy * u.anchor_b;
+        b.muscle_force[a0].x += fx * (1.0f - u.anchor_a);
+        b.muscle_force[a0].y += fy * (1.0f - u.anchor_a);
+        b.muscle_force[a1].x += fx * u.anchor_a;
+        b.muscle_force[a1].y += fy * u.anchor_a;
+        b.muscle_force[b0].x -= fx * (1.0f - u.anchor_b);
+        b.muscle_force[b0].y -= fy * (1.0f - u.anchor_b);
+        b.muscle_force[b1].x -= fx * u.anchor_b;
+        b.muscle_force[b1].y -= fy * u.anchor_b;
     }
 }
 
-// Forces of the world on each node and bone: gravity, wind, mud, brambles,
-// water and air drag.
-__device__ void world_forces(Body& b, const Params& p) {
-    for (unsigned i = 0u; i < b.nodes; i++) {
-        const float m = b.mass[i];
-        float fx = 0.0f, fy = -p.gravity * m;
+// The world's force on node i: gravity, wind, mud, brambles and buoyancy.
+__device__ float2 node_force(const Body& b, unsigned i, const Params& p) {
+    const float m = b.mass[i];
+    float fx = 0.0f, fy = -p.gravity * m;
 #if WIND
-        fx += p.wind * m;
+    fx += p.wind * m;
 #endif
 #if MUD || BRAMBLES
-        const float2 g = ground(b.pos[i].x, b.amp, b.qphase, p);
-        const float dry = (b.pos[i].y - g.x) / sqrtf(1.0f + g.y * g.y) - b.radius[i];
+    const float2 g = ground(b.pos[i].x, b.amp, b.qphase, p);
+    const float dry = (b.pos[i].y - g.x) / sqrtf(1.0f + g.y * g.y) - b.radius[i];
 #endif
 #if MUD
-        fx -= m * MUD_DRAG * (clampf(-dry, 0.0f, p.mud) * (1.0f / MUD_FULL_DEPTH)) * b.vel[i].x;
+    fx -= m * MUD_DRAG * (clampf(-dry, 0.0f, p.mud) * (1.0f / MUD_FULL_DEPTH)) * b.vel[i].x;
 #endif
 #if BRAMBLES
-        // Brambles hold back every node but the feet while it touches the
-        // ground: a drag against its velocity.
-        if (((b.feet >> i) & 1u) == 0u && dry < BRAMBLE_REACH) {
-            fx -= m * p.brambles * b.vel[i].x;
-        }
+    // Brambles hold back every node but the feet while it touches the
+    // ground: a drag against its velocity.
+    if (((b.feet >> i) & 1u) == 0u && dry < BRAMBLE_REACH) {
+        fx -= m * p.brambles * b.vel[i].x;
+    }
 #endif
 #if WATER
-        {
-            const float wet = clampf((p.water - (b.pos[i].y - b.radius[i])) / (2.0f * b.radius[i]), 0.0f, 1.0f);
-            fy += WATER_BUOYANCY * m * p.gravity * wet;
-        }
-#endif
-        b.force[i].x += fx;
-        b.force[i].y += fy;
+    {
+        const float wet = clampf((p.water - (b.pos[i].y - b.radius[i])) / (2.0f * b.radius[i]), 0.0f, 1.0f);
+        fy += WATER_BUOYANCY * m * p.gravity * wet;
     }
-    // Drag on each bone at its midpoint, shared by its two nodes, never more
-    // than half the bone's speed in one substep.
+#endif
+    return make_float2(fx, fy);
+}
+
+// Air and water drag on each bone at its midpoint, shared by its two nodes,
+// never more than half the bone's speed in one substep.
+__device__ void bone_drag(Body& b, const Params& p) {
     for (unsigned j = 0u; j < b.bones; j++) {
         const unsigned i0 = b.pivot[j], i1 = j + 1u;
         const float wx = 0.5f * (b.vel[i0].x + b.vel[i1].x), wy = 0.5f * (b.vel[i0].y + b.vel[i1].y);
@@ -402,10 +438,11 @@ __device__ void world_forces(Body& b, const Params& p) {
             dfy -= sy * k_water + ly * k_water * WATER_ALONG;
         }
 #endif
-        b.force[i0].x += 0.5f * dfx;
-        b.force[i0].y += 0.5f * dfy;
-        b.force[i1].x += 0.5f * dfx;
-        b.force[i1].y += 0.5f * dfy;
+        const float s0 = 0.5f * H * b.inv_m[i0], s1 = 0.5f * H * b.inv_m[i1];
+        b.vel[i0].x += s0 * dfx;
+        b.vel[i0].y += s0 * dfy;
+        b.vel[i1].x += s1 * dfx;
+        b.vel[i1].y += s1 * dfy;
     }
 }
 
@@ -428,61 +465,50 @@ __device__ void solve_bones(Body& b) {
 __device__ void solve_joints(Body& b) {
     for (unsigned j = 1u; j < b.bones; j++) {
         if (b.parent[j] == 0xffu) { continue; }
-        const JointGrad g = joint_grad(b, j);
+        const Joint k = joint(b, j);
         float error = 0.0f;
-        if (g.angle < b.lo[j]) { error = g.angle - b.lo[j]; }
-        if (g.angle > b.hi[j]) { error = g.angle - b.hi[j]; }
+        if (k.angle < b.lo[j]) { error = k.angle - b.lo[j]; }
+        if (k.angle > b.hi[j]) { error = k.angle - b.hi[j]; }
         if (error == 0.0f) { continue; }
-        float s = 0.0f;
-        for (int k = 0; k < 4; k++) {
-            if (g.node[k] == NONE) { continue; }
-            s += b.inv_m[g.node[k]] * (g.gx[k] * g.gx[k] + g.gy[k] * g.gy[k]);
-        }
-        if (s <= 0.0f) { continue; }
-        const float lambda = -error / s;
-        for (int k = 0; k < 4; k++) {
-            if (g.node[k] == NONE) { continue; }
-            const unsigned i = g.node[k];
-            b.pos[i].x += b.inv_m[i] * lambda * g.gx[k];
-            b.pos[i].y += b.inv_m[i] * lambda * g.gy[k];
-        }
+        const float w = joint_weight(b, k);
+        if (w > 0.0f) { joint_push(b, k, -error / w, b.pos); }
     }
 }
 
-// Every node inside the ground moves out along the ground's normal, and
+// Node i, if inside the ground, moves out along the ground's normal, and
 // friction takes back up to mu times that move of its slide over the
-// substep. Returns the moves for the contact forces.
-__device__ void solve_ground(Body& b, const Params& p) {
+// substep. The moves give the contact forces of a recording.
+__device__ void solve_ground(Body& b, unsigned i, const Params& p) {
 #if GROUND
-    for (unsigned i = 0u; i < b.nodes; i++) {
-        const float2 g = ground(b.pos[i].x, b.amp, b.qphase, p);
-        const float secant = sqrtf(1.0f + g.y * g.y);
-        const float nx = -g.y / secant, ny = 1.0f / secant;
-        const float dry = (b.pos[i].y - g.x) / secant - b.radius[i];
+    const float2 g = ground(b.pos[i].x, b.amp, b.qphase, p);
+    const float secant = sqrtf(1.0f + g.y * g.y);
+    const float nx = -g.y / secant, ny = 1.0f / secant;
+    const float dry = (b.pos[i].y - g.x) / secant - b.radius[i];
 #if MUD
-        const float depth = -(dry + p.mud);
-        const float sink = clampf(-dry, 0.0f, p.mud) * (1.0f / MUD_FULL_DEPTH);
-        float mu = b.fric[i] * p.friction * (1.0f + MUD_GRIP * sink) * (1.0f + MUD_NORMAL * sink);
+    const float depth = -(dry + p.mud);
+    const float sink = clampf(-dry, 0.0f, p.mud) * (1.0f / MUD_FULL_DEPTH);
+    float mu = b.fric[i] * p.friction * (1.0f + MUD_GRIP * sink) * (1.0f + MUD_NORMAL * sink);
 #else
-        const float depth = -dry;
-        float mu = b.fric[i] * p.friction;
+    const float depth = -dry;
+    float mu = b.fric[i] * p.friction;
 #endif
-        if (depth <= 0.0f) { continue; }
+    if (depth <= 0.0f) { return; }
 #if ICE
-        mu *= 1.0f - p.patches * ice_at(b.pos[i].x);
+    mu *= 1.0f - p.patches * ice_at(b.pos[i].x);
 #endif
-        b.pos[i].x += nx * depth;
-        b.pos[i].y += ny * depth;
-        // The slide along the ground since the substep began.
-        const float tx = ny, ty = -nx;
-        const float slide = (b.pos[i].x - b.prev[i].x) * tx + (b.pos[i].y - b.prev[i].y) * ty;
-        const float budget = mu * depth;
-        const float back = fabsf(slide) <= budget ? slide : copysignf(budget, slide);
-        b.pos[i].x -= tx * back;
-        b.pos[i].y -= ty * back;
-        b.normal_force[i] += b.mass[i] * depth * INV_H * INV_H;
-        b.friction_force[i] += b.mass[i] * back * INV_H * INV_H;
-    }
+    b.pos[i].x += nx * depth;
+    b.pos[i].y += ny * depth;
+    // The slide along the ground since the substep began.
+    const float tx = ny, ty = -nx;
+    const float slide = (b.pos[i].x - b.prev[i].x) * tx + (b.pos[i].y - b.prev[i].y) * ty;
+    const float budget = mu * depth;
+    const float back = fabsf(slide) <= budget ? slide : copysignf(budget, slide);
+    b.pos[i].x -= tx * back;
+    b.pos[i].y -= ty * back;
+#if RECORD
+    b.normal_force[i] += b.mass[i] * depth * INV_H * INV_H;
+    b.friction_force[i] += b.mass[i] * back * INV_H * INV_H;
+#endif
 #endif
 }
 
@@ -492,46 +518,35 @@ __device__ void damp_joints(Body& b) {
     const float share = fminf(H * INV_JOINT_DAMPING, 1.0f);
     for (unsigned j = 1u; j < b.bones; j++) {
         if (b.parent[j] == 0xffu) { continue; }
-        const JointGrad g = joint_grad(b, j);
-        float rate = 0.0f, s = 0.0f;
-        for (int k = 0; k < 4; k++) {
-            if (g.node[k] == NONE) { continue; }
-            const unsigned i = g.node[k];
-            rate += g.gx[k] * b.vel[i].x + g.gy[k] * b.vel[i].y;
-            s += b.inv_m[i] * (g.gx[k] * g.gx[k] + g.gy[k] * g.gy[k]);
-        }
-        if (s <= 0.0f) { continue; }
-        const float lambda = -share * rate / s;
-        for (int k = 0; k < 4; k++) {
-            if (g.node[k] == NONE) { continue; }
-            const unsigned i = g.node[k];
-            b.vel[i].x += b.inv_m[i] * lambda * g.gx[k];
-            b.vel[i].y += b.inv_m[i] * lambda * g.gy[k];
-        }
+        const Joint k = joint(b, j, false);
+        const float rate = k.g_tip.x * b.vel[k.tip].x + k.g_tip.y * b.vel[k.tip].y
+                         + k.g_far.x * b.vel[k.far].x + k.g_far.y * b.vel[k.far].y
+                         + k.g_hub.x * b.vel[k.hub].x + k.g_hub.y * b.vel[k.hub].y;
+        const float w = joint_weight(b, k);
+        if (w > 0.0f) { joint_push(b, k, -share * rate / w, b.vel); }
     }
 }
 
-// One substep.
+// One substep: forces, prediction, constraints, velocities.
 __device__ void substep(Body& b, const float* __restrict__ muscles, const Params& p) {
-    for (unsigned i = 0u; i < b.nodes; i++) { b.force[i].x = 0.0f; b.force[i].y = 0.0f; }
-    world_forces(b, p);
     muscle_forces(b, muscles, p);
+    bone_drag(b, p);
     for (unsigned i = 0u; i < b.nodes; i++) {
-        b.vel[i].x += H * b.force[i].x * b.inv_m[i];
-        b.vel[i].y += H * b.force[i].y * b.inv_m[i];
+        const float2 f = node_force(b, i, p);
+        b.vel[i].x += H * (f.x + b.muscle_force[i].x) * b.inv_m[i];
+        b.vel[i].y += H * (f.y + b.muscle_force[i].y) * b.inv_m[i];
 #if AIR
         b.vel[i].x *= p.air_sub;
         b.vel[i].y *= p.air_sub;
 #endif
-        b.prev[i].x = b.pos[i].x;
-        b.prev[i].y = b.pos[i].y;
+        b.prev[i] = b.pos[i];
         b.pos[i].x += H * b.vel[i].x;
         b.pos[i].y += H * b.vel[i].y;
     }
     solve_bones(b);
     solve_joints(b);
-    solve_ground(b, p);
     for (unsigned i = 0u; i < b.nodes; i++) {
+        solve_ground(b, i, p);
         b.vel[i].x = (b.pos[i].x - b.prev[i].x) * INV_H;
         b.vel[i].y = (b.pos[i].y - b.prev[i].y) * INV_H;
     }
@@ -543,8 +558,8 @@ __device__ unsigned long long broken_joints(const Body& b) {
     unsigned long long bits = 0ull;
     for (unsigned j = 1u; j < b.bones; j++) {
         if (b.parent[j] == 0xffu) { continue; }
-        const JointGrad g = joint_grad(b, j);
-        if (g.angle < b.lo[j] - JOINT_BREAK || g.angle > b.hi[j] + JOINT_BREAK) { bits |= 1ull << j; }
+        const float angle = joint(b, j).angle;
+        if (angle < b.lo[j] - JOINT_BREAK || angle > b.hi[j] + JOINT_BREAK) { bits |= 1ull << j; }
     }
     return bits;
 }
@@ -669,15 +684,19 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
         const unsigned half_s = (unsigned)(0.5f * RATE);
         for (unsigned step = 0u; step < p.steps; step++) {
             const float t_now = (float)step * DT;
+#if RECORD
             for (unsigned i = 0u; i < b.nodes; i++) { b.normal_force[i] = 0.0f; b.friction_force[i] = 0.0f; }
+#endif
             muscle_demands(b, mus, t_now, limp);
             for (unsigned s = 0u; s < SUBSTEPS; s++) {
                 substep(b, mus, p);
             }
+#if RECORD
             for (unsigned i = 0u; i < b.nodes; i++) {
                 b.normal_force[i] *= 1.0f / SUBSTEPS;
                 b.friction_force[i] *= 1.0f / SUBSTEPS;
             }
+#endif
 
             // What the step leaves: distance, height, contacts.
             bool failed = false;
@@ -706,7 +725,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             if (down != 0u && step > 0u) {
                 const float next = t_now + DT;
                 for (unsigned k = 0u; k < b.muscles; k++) {
-                    const Muscle u = load_muscle(mus + k * MUSCLE_WORDS);
+                    const MuscleRhythm u = load_rhythm(mus + k * MUSCLE_WORDS);
                     if (u.sensor != NONE && ((down >> u.sensor) & 1u)) {
                         b.offset[k] = fracf(u.reset - (next * u.inv_period + u.phase));
                     }

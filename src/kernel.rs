@@ -26,7 +26,7 @@ pub const NODE_WORDS: usize = 6;
 /// Words per bone record: pivot node, length, parent bone, joint range low
 /// and high, and one spare.
 pub const BONE_WORDS: usize = 6;
-/// Floats per muscle record (`Muscle` in the kernel).
+/// Floats per muscle record (`MusclePull` and `MuscleRhythm` in the kernel).
 pub const MUSCLE_FIELDS: usize = 20;
 /// Lane classes the engine compiles a kernel for. A creature is one thread,
 /// so there is one class, named by the node slots of its frames.
@@ -321,13 +321,21 @@ fn fill_creature(model: &Model, cfg: &Config, record: &mut [u32], muscles: &mut 
     for (k, m) in model.muscles.iter().enumerate() {
         let strength = m.strength * model.muscle_scale;
         let sensor = m.sensor.map_or(u32::MAX, |node| node as u32);
+        let a0 = model.pivot[m.bone_a] as u32;
+        let b0 = model.pivot[m.bone_b] as u32;
+        let nodes = a0 | (m.bone_a as u32 + 1) << 8 | b0 << 16 | (m.bone_b as u32 + 1) << 24;
         let values = [
-            f32::from_bits(m.bone_a as u32),
-            f32::from_bits(m.bone_b as u32),
+            // What every substep reads.
+            f32::from_bits(nodes),
             m.anchor_a,
             m.anchor_b,
-            m.amplitude,
             m.hill,
+            limits.muscle_force * strength,
+            1.0 / (limits.muscle_energy * strength),
+            m.tendon_k,
+            m.long,
+            // What the rhythm reads once a step.
+            m.amplitude,
             m.inv_period,
             m.phase,
             m.duty,
@@ -336,10 +344,7 @@ fn fill_creature(model: &Model, cfg: &Config, record: &mut [u32], muscles: &mut 
             m.stiffness,
             m.reset,
             f32::from_bits(sensor),
-            limits.muscle_force * strength,
-            1.0 / (limits.muscle_energy * strength),
-            m.tendon_k,
-            m.long,
+            0.0,
             0.0,
             0.0,
         ];

@@ -108,6 +108,7 @@ struct Driver {
     event_query: unsafe extern "C" fn(CuEvent) -> CuResult,
     event_elapsed_time: unsafe extern "C" fn(*mut f32, CuEvent, CuEvent) -> CuResult,
     func_get_attribute: unsafe extern "C" fn(*mut c_int, c_int, CuFunction) -> CuResult,
+    func_set_attribute: unsafe extern "C" fn(CuFunction, c_int, c_int) -> CuResult,
     memset_d32_async: unsafe extern "C" fn(CuDevicePtr, c_uint, usize, CuStream) -> CuResult,
     occupancy: unsafe extern "C" fn(*mut c_int, CuFunction, c_int, usize) -> CuResult,
     #[allow(clippy::type_complexity)]
@@ -210,6 +211,7 @@ impl Driver {
                 event_query: symbol!(library, "cuEventQuery"),
                 event_elapsed_time: symbol!(library, "cuEventElapsedTime"),
                 func_get_attribute: symbol!(library, "cuFuncGetAttribute"),
+                func_set_attribute: symbol!(library, "cuFuncSetAttribute"),
                 memset_d32_async: symbol!(library, "cuMemsetD32Async"),
                 occupancy: symbol!(library, "cuOccupancyMaxActiveBlocksPerMultiprocessor"),
                 launch_kernel: symbol!(library, "cuLaunchKernel"),
@@ -963,6 +965,14 @@ fn load_kernel(api: &Api, context: CuContext, cubin: &[u8], key: KernelKey) -> R
             (cu.module_unload)(module);
             return Err(error);
         }
+        // The kernel uses no shared memory and keeps each creature in local
+        // memory, so the multiprocessor's memory goes to the L1 cache
+        // (CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, percent).
+        let carveout = crate::kernel::solver_setting("CARVEOUT", 0) as c_int;
+        cu.check(
+            (cu.func_set_attribute)(function, 9, carveout),
+            "cuFuncSetAttribute",
+        )?;
         let mut blocks = 0;
         cu.check(
             (cu.occupancy)(&mut blocks, function, crate::kernel::BLOCK as c_int, 0),
