@@ -1,6 +1,6 @@
 //! Reader of the generation dump (`storage::dump`, EVOLUTION_DUMP_GENERATION)
 //! and a rung ladder applied to its rows, shared by
-//! `dump_stats` and `rung_replay`.
+//! `dump_stats`.
 #![allow(dead_code)]
 use anyhow::{Context, Result, ensure};
 use evolution_simulator::creature_kernel::{RungTrace, f16_to_f32};
