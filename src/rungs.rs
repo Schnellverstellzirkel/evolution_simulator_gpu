@@ -146,7 +146,7 @@ pub fn is_audit(seed: u64, round: u64, slot: usize) -> bool {
     x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    (x ^ (x >> 31)) % AUDIT_ONE_IN == 0
+    (x ^ (x >> 31)).is_multiple_of(AUDIT_ONE_IN)
 }
 
 /// One rung's rule, as the kernel reads it (`Params` in the kernel): stop when
@@ -169,6 +169,7 @@ impl Rung {
     };
     pub fn score(&self, f: &[f32; FEATURES]) -> f32 {
         let mut s = 0.0f32;
+        #[allow(clippy::needless_range_loop)]
         for i in 0..FEATURES {
             s = self.weights[i].mul_add(f[i], s);
         }
@@ -610,6 +611,7 @@ impl Audit {
         }
         let mut rules = [Rung::NEVER; RUNGS];
         let mut any = false;
+        #[allow(clippy::needless_range_loop)]
         for r in 0..RUNGS {
             if !self.trusted(r, plateau) {
                 continue;
@@ -668,6 +670,7 @@ impl Audit {
         }
         w.iter_mut().for_each(|v| *v /= largest);
         let mut rung = Rung::NEVER;
+        #[allow(clippy::needless_range_loop)]
         for i in 0..FEATURES {
             rung.weights[i] = w[i] as f32;
         }
@@ -705,6 +708,7 @@ fn solve(mut m: Vec<Vec<f64>>, mut v: Vec<f64>) -> Vec<f64> {
         for r in 0..k {
             if r != c {
                 let f = m[r][c] / d;
+                #[allow(clippy::needless_range_loop)]
                 for j in c..k {
                     m[r][j] -= f * m[c][j];
                 }

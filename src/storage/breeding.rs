@@ -370,12 +370,12 @@ impl Experiment {
                     // elites.
                     optimize = rng.unit() < OPTIMIZER_SHARE;
                     let second = rare_targets.get(island).copied().flatten();
-                    Some(if optimize && second.is_some() && rng.unit() < 0.5 {
-                        second.expect("a rare target")
-                    } else if optimize {
-                        optimizer_targets[island].unwrap_or(top_parents[island][0])
-                    } else {
-                        top_parents[island][rng.index(top_parents[island].len())]
+                    Some(match second {
+                        Some(target) if optimize && rng.unit() < 0.5 => target,
+                        _ if optimize => {
+                            optimizer_targets[island].unwrap_or(top_parents[island][0])
+                        }
+                        _ => top_parents[island][rng.index(top_parents[island].len())],
                     })
                 } else {
                     let rarity = rarities.get(island).unwrap_or(&no_rarity);
@@ -688,7 +688,7 @@ impl Experiment {
                     continue;
                 }
                 let mut rng = evolution::Rng::stream(
-                    cfg.seed ^ 0x666f_756e_64,
+                    cfg.seed ^ 0x0066_6f75_6e64,
                     self.generation,
                     self.breed_round,
                     slot,
@@ -728,7 +728,7 @@ impl Experiment {
                     continue;
                 }
                 let mut rng = evolution::Rng::stream(
-                    cfg.seed ^ 0x7065_6e,
+                    cfg.seed ^ 0x0070_656e,
                     self.generation,
                     self.breed_round,
                     slot,

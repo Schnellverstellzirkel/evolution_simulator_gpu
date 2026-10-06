@@ -161,7 +161,9 @@ pub fn read(path: &str) -> Result<DumpFile> {
         header.rows
     );
     let elites = bytes[64..elite_end]
-        .chunks_exact(32)
+        .as_chunks::<32>()
+        .0
+        .iter()
         .map(|b| Elite {
             arena: b[0],
             flags: b[1],
@@ -175,7 +177,9 @@ pub fn read(path: &str) -> Result<DumpFile> {
         })
         .collect();
     let rows = bytes[elite_end..]
-        .chunks_exact(64)
+        .as_chunks::<64>()
+        .0
+        .iter()
         .map(|b| Row {
             slot: u32_at(b, 0),
             emitter: b[4],
@@ -354,6 +358,7 @@ pub fn fisher(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<f64> {
     }
     let n = (a.len() + b.len()).saturating_sub(2).max(1) as f64;
     let trace: f64 = (0..k).map(|i| s[i][i] / n).sum::<f64>() / k.max(1) as f64;
+    #[allow(clippy::needless_range_loop)]
     for i in 0..k {
         for j in 0..k {
             s[i][j] /= n;
@@ -379,6 +384,7 @@ fn solve(mut m: Vec<Vec<f64>>, mut v: Vec<f64>) -> Vec<f64> {
         for r in 0..k {
             if r != c {
                 let f = m[r][c] / d;
+                #[allow(clippy::needless_range_loop)]
                 for j in c..k {
                     m[r][j] -= f * m[c][j];
                 }

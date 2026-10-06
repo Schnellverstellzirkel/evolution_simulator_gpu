@@ -302,6 +302,7 @@ fn while_the_archives_climb_the_guard_is_the_entrant_guard_it_always_was() {
                 row
             })
             .collect();
+        #[allow(clippy::needless_range_loop)]
         for r in 0..RUNGS {
             let Some(rung) = audit.fit_rung(r) else {
                 history[r].clear();
@@ -324,6 +325,7 @@ fn while_the_archives_climb_the_guard_is_the_entrant_guard_it_always_was() {
             audit.record(row);
         }
         audit.boundary(None, false);
+        #[allow(clippy::needless_range_loop)]
         for r in 0..RUNGS {
             let (n, stopped) = history[r]
                 .iter()

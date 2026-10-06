@@ -308,7 +308,11 @@ fn alternate_legs_with_reflex(
     };
     let mut changed = false;
     for (rank, leg) in legs.iter().enumerate() {
-        let offset = if (rank + first) % 2 == 0 { 0.0 } else { 0.5 };
+        let offset = if (rank + first).is_multiple_of(2) {
+            0.0
+        } else {
+            0.5
+        };
         changed |= retime(c, leg, base + offset);
         changed |= arm(c, leg, at_stroke_start);
     }

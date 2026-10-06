@@ -435,6 +435,74 @@ pub fn advance_autochange(cfg: &mut Config, generation: u32) -> bool {
     changed
 }
 
+/// The effects and levels of each wild island's world (`qd::WILD_ISLANDS`):
+/// one to three effects each, every mix different, and no effect at its
+/// harshest level so each world can be walked. The set is the same in every
+/// game, so its kernels compile once and stay in the kernel cache; a set
+/// drawn per seed compiled about 190 kernels at the start of each new game.
+pub fn wild_levels(_seed: u64) -> Vec<Vec<(usize, usize)>> {
+    static WORLDS: std::sync::OnceLock<Vec<Vec<(usize, usize)>>> = std::sync::OnceLock::new();
+    WORLDS.get_or_init(draw_wild_levels).clone()
+}
+
+fn draw_wild_levels() -> Vec<Vec<(usize, usize)>> {
+    let mut rng = crate::evolution::Rng::new(0x7769_6c64, 0, 0);
+    let choices: Vec<usize> = (0..EFFECTS.len())
+        .filter(|&e| EFFECTS[e].name != "Autochange environment")
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut worlds = Vec::with_capacity(crate::qd::WILD_ISLANDS);
+    while worlds.len() < crate::qd::WILD_ISLANDS {
+        let count = 1 + rng.index(3);
+        let mut mix: Vec<(usize, usize)> = Vec::new();
+        while mix.len() < count {
+            let e = choices[rng.index(choices.len())];
+            if mix.iter().any(|&(x, _)| x == e) {
+                continue;
+            }
+            let effect = &EFFECTS[e];
+            let levels: Vec<usize> = (0..effect.levels.len() - 1)
+                .filter(|&l| l != effect.calm)
+                .collect();
+            if levels.is_empty() {
+                continue;
+            }
+            mix.push((e, levels[rng.index(levels.len())]));
+        }
+        mix.sort_unstable();
+        if seen.insert(mix.clone()) {
+            worlds.push(mix);
+        }
+    }
+    worlds
+}
+
+/// The settings of a wild island's world: `base` with every effect calm
+/// except the island's own mix. The wild worlds have no early screen and no
+/// rungs, because the main world's bars say nothing about them.
+pub fn wild_world(base: &Config, levels: &[(usize, usize)]) -> Config {
+    let mut cfg = base.clone();
+    for effect in EFFECTS.iter() {
+        effect.set_level(&mut cfg, effect.calm);
+    }
+    for &(e, level) in levels {
+        EFFECTS[e].set_level(&mut cfg, level);
+    }
+    cfg.autochange = 0;
+    cfg.screen = None;
+    cfg.rungs = None;
+    cfg
+}
+
+/// A short name of a wild world, such as "Mud: Muddy, Wind: Breeze".
+pub fn wild_name(levels: &[(usize, usize)]) -> String {
+    levels
+        .iter()
+        .map(|&(e, l)| format!("{}: {}", EFFECTS[e].name, EFFECTS[e].levels[l]))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,72 +718,4 @@ mod tests {
         };
         assert_eq!(run(false), run(true));
     }
-}
-
-/// The effects and levels of each wild island's world (`qd::WILD_ISLANDS`):
-/// one to three effects each, every mix different, and no effect at its
-/// harshest level so each world can be walked. The set is the same in every
-/// game, so its kernels compile once and stay in the kernel cache; a set
-/// drawn per seed compiled about 190 kernels at the start of each new game.
-pub fn wild_levels(_seed: u64) -> Vec<Vec<(usize, usize)>> {
-    static WORLDS: std::sync::OnceLock<Vec<Vec<(usize, usize)>>> = std::sync::OnceLock::new();
-    WORLDS.get_or_init(draw_wild_levels).clone()
-}
-
-fn draw_wild_levels() -> Vec<Vec<(usize, usize)>> {
-    let mut rng = crate::evolution::Rng::new(0x7769_6c64, 0, 0);
-    let choices: Vec<usize> = (0..EFFECTS.len())
-        .filter(|&e| EFFECTS[e].name != "Autochange environment")
-        .collect();
-    let mut seen = std::collections::HashSet::new();
-    let mut worlds = Vec::with_capacity(crate::qd::WILD_ISLANDS);
-    while worlds.len() < crate::qd::WILD_ISLANDS {
-        let count = 1 + rng.index(3);
-        let mut mix: Vec<(usize, usize)> = Vec::new();
-        while mix.len() < count {
-            let e = choices[rng.index(choices.len())];
-            if mix.iter().any(|&(x, _)| x == e) {
-                continue;
-            }
-            let effect = &EFFECTS[e];
-            let levels: Vec<usize> = (0..effect.levels.len() - 1)
-                .filter(|&l| l != effect.calm)
-                .collect();
-            if levels.is_empty() {
-                continue;
-            }
-            mix.push((e, levels[rng.index(levels.len())]));
-        }
-        mix.sort_unstable();
-        if seen.insert(mix.clone()) {
-            worlds.push(mix);
-        }
-    }
-    worlds
-}
-
-/// The settings of a wild island's world: `base` with every effect calm
-/// except the island's own mix. The wild worlds have no early screen and no
-/// rungs, because the main world's bars say nothing about them.
-pub fn wild_world(base: &Config, levels: &[(usize, usize)]) -> Config {
-    let mut cfg = base.clone();
-    for effect in EFFECTS.iter() {
-        effect.set_level(&mut cfg, effect.calm);
-    }
-    for &(e, level) in levels {
-        EFFECTS[e].set_level(&mut cfg, level);
-    }
-    cfg.autochange = 0;
-    cfg.screen = None;
-    cfg.rungs = None;
-    cfg
-}
-
-/// A short name of a wild world, such as "Mud: Muddy, Wind: Breeze".
-pub fn wild_name(levels: &[(usize, usize)]) -> String {
-    levels
-        .iter()
-        .map(|&(e, l)| format!("{}: {}", EFFECTS[e].name, EFFECTS[e].levels[l]))
-        .collect::<Vec<_>>()
-        .join(", ")
 }

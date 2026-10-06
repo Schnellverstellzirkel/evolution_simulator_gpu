@@ -256,7 +256,7 @@ pub(crate) fn tuck_leg_under(
     let legs: BoneIds = leaf_limbs(c)
         .iter()
         .map(|limb| limb[0])
-        .filter(|&b| !is_neck(c, b) && children[c.bones[b].a as usize].len() >= 1)
+        .filter(|&b| !is_neck(c, b) && !children[c.bones[b].a as usize].is_empty())
         .collect();
     let Some(&root) = legs.get(rng.index(legs.len().max(1))) else {
         return false;

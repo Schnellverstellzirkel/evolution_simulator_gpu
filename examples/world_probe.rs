@@ -54,7 +54,7 @@ fn main() -> anyhow::Result<()> {
         ("rungs off", Config { rungs: None, ..e.config.clone() }),
         ("screen and rungs off", Config { screen: None, rungs: None, ..e.config.clone() }),
     ] {
-        let r = common::score_creatures(&mut engine, &[creature.clone()], &cfg)?;
+        let r = common::score_creatures(&mut engine, std::slice::from_ref(&creature), &cfg)?;
         println!("{name}: {:.3} fall {:.2}", r[0].fitness, r[0].fall_time);
     }
     for k in (0..=top).rev() {
@@ -64,7 +64,7 @@ fn main() -> anyhow::Result<()> {
             environment::EFFECTS[idx].set_level(&mut cfg, level - 1);
         }
         let cfg = Config { screen: None, rungs: None, ..cfg };
-        let r = common::score_creatures(&mut engine, &[creature.clone()], &cfg)?;
+        let r = common::score_creatures(&mut engine, std::slice::from_ref(&creature), &cfg)?;
         println!("world after {k} steps: {:.3} (brambles {} wind {} slope {} friction {})", r[0].fitness, cfg.brambles, cfg.wind, cfg.slope, cfg.ground_friction);
     }
     Ok(())

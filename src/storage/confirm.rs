@@ -114,7 +114,9 @@ impl Experiment {
         let arenas = arena_count();
         let islands = &self.islands;
         let fallback = QdArchive::default();
-        let keyed: Vec<(usize, Option<(usize, qd::Niche)>, Option<qd::Niche>)> = (0..results.len())
+        // A result's index, its island and island cell, and its global cell.
+        type Keyed = (usize, Option<(usize, qd::Niche)>, Option<qd::Niche>);
+        let keyed: Vec<Keyed> = (0..results.len())
             .collect::<Vec<usize>>()
             .par_iter()
             .copied()

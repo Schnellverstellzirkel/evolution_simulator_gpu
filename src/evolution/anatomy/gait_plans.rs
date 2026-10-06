@@ -423,7 +423,7 @@ pub(crate) fn counterweight_runner(
     }
     let total = |l: &BoneIds| l.iter().map(|&b| c.bones[b].rest_length).sum::<f32>();
     legs.sort_stable_by(|p, q| total(q).total_cmp(&total(p)));
-    let mut pair = [legs[0].clone(), legs[1].clone()];
+    let mut pair = [legs[0], legs[1]];
     pair.sort_by(|p, q| hip_x(c, p).total_cmp(&hip_x(c, q)));
     let (Some(start), Some(template)) = (limb_phase(c, &pair[0]), template_of(c, &pair)) else {
         return false;

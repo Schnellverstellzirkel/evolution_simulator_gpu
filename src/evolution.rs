@@ -1910,6 +1910,8 @@ impl Population {
             .zip(slots.par_chunks(BREED_CHUNK))
             .zip(positions.par_chunks(BREED_CHUNK))
             .map(|(((mut part, plans), slots), positions)| {
+                // Captures the whole `Send` wrapper, not its pointer field.
+                #[allow(clippy::redundant_locals)]
                 let genomes = genomes;
                 let mut spill = Vec::new();
                 let recording = OPERATOR_LOG

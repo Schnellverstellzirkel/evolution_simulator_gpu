@@ -91,6 +91,7 @@ impl StageLog {
             e.rungs.last(),
         );
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn write_row(
         &mut self,
         generation: u32,

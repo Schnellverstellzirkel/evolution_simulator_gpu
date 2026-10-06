@@ -335,7 +335,7 @@ mod tests {
             1 << 30,
         ] {
             let c = class(size);
-            assert!(c >= size && c % STEP == 0, "{size} -> {c}");
+            assert!(c >= size && c.is_multiple_of(STEP), "{size} -> {c}");
             assert!(c <= size + size / 8 + STEP, "{size} -> {c}");
         }
     }

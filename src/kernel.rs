@@ -422,6 +422,8 @@ pub fn pack_reusing(
         heads: wave.heads.as_mut_ptr(),
     };
     sorted.par_iter().enumerate().for_each(|(c, &(_, i))| {
+        // Captures the whole `Send` wrapper, not its pointer fields.
+        #[allow(clippy::redundant_locals)]
         let out = out;
         let g = &pop.genomes[i];
         let creature = pop.creature(i);

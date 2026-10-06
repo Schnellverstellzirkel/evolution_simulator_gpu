@@ -84,7 +84,7 @@ impl RingShape {
     /// work, and at least 2 blocks so the GPU runs one while the host
     /// absorbs another.
     pub fn size(times: &RingTimes) -> Self {
-        if !(times.chain <= Self::CONFIRM_LIMIT) {
+        if times.chain.is_nan() || times.chain > Self::CONFIRM_LIMIT {
             return Self::LEGACY;
         }
         let rate = if times.rate.is_finite() && times.rate > 0.0 {

@@ -97,7 +97,7 @@ fn main() -> anyhow::Result<()> {
         // every block. A slot's island is its number modulo 5 and its
         // nursery follows a period of 10, so k stays prime to 10.
         let mut stride = (e.ring_len() / count.max(1)).max(1);
-        while stride % 2 == 0 || stride % 5 == 0 {
+        while stride.is_multiple_of(2) || stride.is_multiple_of(5) {
             stride += 1;
         }
         for i in (0..e.ring_len()).step_by(stride).take(count) {

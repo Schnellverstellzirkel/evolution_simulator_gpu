@@ -257,6 +257,7 @@ impl Experiment {
         // the hub's slots for `PEN_GENERATIONS` generations so its line can
         // adapt to the hub's world before it is dropped (owner).
         let until = self.generation + PEN_GENERATIONS;
+        #[allow(clippy::needless_range_loop)]
         for from in qd::MAIN_ISLANDS..island_count() {
             let island = &self.islands[from];
             let mut elites: Vec<&qd::Elite> = island

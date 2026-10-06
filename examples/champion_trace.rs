@@ -39,6 +39,7 @@ fn main() -> anyhow::Result<()> {
     let (mut pos, mut neg) = (0.0f64, 0.0f64);
     let mut per_node = vec![0.0f64; rec.frames[0].len()];
     for k in 1..rec.frames.len() {
+        #[allow(clippy::needless_range_loop)]
         for j in 0..rec.frames[k].len() {
             let vx = (rec.frames[k][j][0] - rec.frames[k - 1][j][0]) / dt;
             let fr = f.friction.get(k).and_then(|v| v.get(j)).copied().unwrap_or(0.0);

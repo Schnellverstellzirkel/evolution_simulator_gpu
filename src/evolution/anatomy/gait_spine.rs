@@ -165,7 +165,6 @@ fn split_bone(c: &mut Creature, j: usize, frac: f32, rng: &mut Rng) -> usize {
         max_angle: rng.range(0.15, 0.5),
         organ_mass: 0.0,
         organ_at: 0.5,
-        ..old
     });
     if old.organ_mass > 0.0 && old.organ_at > frac {
         c.bones[new].organ_mass = old.organ_mass;
@@ -178,6 +177,7 @@ fn split_bone(c: &mut Creature, j: usize, frac: f32, rng: &mut Rng) -> usize {
     for m in c.muscles.iter_mut() {
         let originals = [m.bone_a as usize, m.bone_b as usize];
         let mut moved = [false; 2];
+        #[allow(clippy::needless_range_loop)]
         for end in 0..2 {
             let (bone, anchor) = if end == 0 {
                 (&mut m.bone_a, &mut m.anchor_a)

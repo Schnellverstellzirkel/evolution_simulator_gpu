@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
         println!("rank {i}: stored {:.3} replay {:.3} improved_gen {} age {} visits {} protected_until {} fine {} graduate {} emitter {:?}", x.fitness, r[i].fitness, x.improved_generation, e.generation.saturating_sub(x.improved_generation), x.visits, x.protected_until, x.fine, x.graduate, x.emitter);
     }
     for k in 0..3 {
-        let r = common::score_creatures(&mut engine, &[champ.clone()], &cfg)?;
+        let r = common::score_creatures(&mut engine, std::slice::from_ref(&champ), &cfg)?;
         println!("alone #{k}: {:.3}", r[0].fitness);
     }
     for n in [8usize, 64, 400] {

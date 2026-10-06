@@ -122,6 +122,7 @@ fn main() -> anyhow::Result<()> {
 
     // The three tail numbers per body class.
     println!("tail numbers by body class (R1 fitted on half the rows at 1e-3, today's R3):");
+    #[allow(clippy::needless_range_loop)]
     for class in 0..3 {
         let rows: Vec<&Row> = children
             .iter()

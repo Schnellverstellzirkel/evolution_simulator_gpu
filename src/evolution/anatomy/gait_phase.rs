@@ -56,7 +56,7 @@ fn legs_front_to_back(c: &Creature) -> Vec<Leg> {
                 .filter(|&i| drive(&c.muscles[i]) > 0.0)
                 .collect();
             Some(Leg {
-                muscles: group.clone(),
+                muscles: *group,
                 lead: strongest(c, &active)?,
             })
         })
@@ -452,7 +452,7 @@ pub(crate) fn change_leading_leg(
     };
     let origin = c.muscles[legs[0].lead].phase;
     let mut targets: Vec<f32> = offsets(c, &legs).iter().map(|d| origin + d).collect();
-    for pair in targets.chunks_exact_mut(2) {
+    for pair in targets.as_chunks_mut::<2>().0 {
         pair.swap(0, 1);
     }
     set_targets(c, &legs, &targets)
