@@ -814,7 +814,7 @@ pub fn nursery_of(island: usize) -> usize {
 pub fn reshaped_of(island: usize) -> usize {
     2 * island_count() + island
 }
-/// An empty nursery of reshaped bodies. It starts in the refined layout, so
+/// An empty nursery of reshaped bodies of a main island. It starts in the refined layout, so
 /// a new body plan has a cell of its own against the bodies of other shapes
 /// and sizes, and the nursery holds four times as many bodies as one that
 /// keeps one elite per way of moving.
@@ -829,7 +829,7 @@ fn new_reshaped_nursery() -> QdArchive {
 fn new_islands(refined: &[bool]) -> Vec<QdArchive> {
     (0..arena_count())
         .map(|arena| {
-            if arena >= reshaped_of(0) {
+            if arena >= reshaped_of(0) && !qd::is_wild(arena - reshaped_of(0)) {
                 return new_reshaped_nursery();
             }
             let mut archive = QdArchive::default();
@@ -2140,6 +2140,11 @@ impl Experiment {
     /// nurseries of new random bodies never refine.
     fn refine_archives(&mut self) {
         for island in 0..island_count().min(self.islands.len()) {
+            // A wild island keeps one elite per way of moving: a hundred
+            // refined islands with two refined nurseries each held 20 GB.
+            if qd::is_wild(island) {
+                continue;
+            }
             let epoch = self.island_epoch.get(island).copied().unwrap_or(0);
             let archive = &mut self.islands[island];
             // The isolated islands refine 10 generations apart, so climbing
