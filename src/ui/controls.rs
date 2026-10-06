@@ -26,6 +26,27 @@ impl App {
         let mut undoing = false;
         crate::theme::section(ui, "World", theme);
         let live = self.snapshot.as_ref().map(|s| s.config.clone());
+        world_changed |= self.world_block(ui, theme, &live);
+        let (changed, undone) = self.presets_block(ui, theme);
+        world_changed |= changed;
+        undoing |= undone;
+        world_changed |= self.effects_block(ui, theme, &live);
+        self.catastrophes_block(ui, theme);
+        if world_changed {
+            if !undoing && world_before.physics_differs(&self.config) {
+                self.world_undo.push(world_before);
+                if self.world_undo.len() > 20 {
+                    self.world_undo.remove(0);
+                }
+            }
+            self.worker.send(Command::Configure(self.config.clone()));
+            self.config_sent = Some(Instant::now());
+        }
+    }
+    /// What the world is, what differs from the running one and the active
+    /// effects with their undo. Returns whether the player changed the world.
+    fn world_block(&mut self, ui: &mut egui::Ui, theme: Theme, live: &Option<Config>) -> bool {
+        let mut world_changed = false;
         let calm = world_is_calm(&self.config);
         ui.horizontal_wrapped(|ui| {
             ui.label(
@@ -86,6 +107,13 @@ impl App {
             effect.set_level(&mut self.config, effect.calm);
             world_changed = true;
         }
+        world_changed
+    }
+    /// The presets and the undo of the last change. Returns whether the
+    /// world changed and whether it changed by an undo.
+    fn presets_block(&mut self, ui: &mut egui::Ui, theme: Theme) -> (bool, bool) {
+        let mut world_changed = false;
+        let mut undoing = false;
         ui.add_space(GAP_S);
         crate::theme::section(ui, "Presets", theme);
         ui.horizontal_wrapped(|ui| {
@@ -116,6 +144,12 @@ impl App {
                 world_changed = true;
             }
         });
+        (world_changed, undoing)
+    }
+    /// The level bars of every effect and the autochange forecast. Returns
+    /// whether the player changed the world.
+    fn effects_block(&mut self, ui: &mut egui::Ui, theme: Theme, live: &Option<Config>) -> bool {
+        let mut world_changed = false;
         ui.add_space(GAP_S);
         crate::theme::section(ui, "Effects", theme);
         ui.label(
@@ -150,6 +184,10 @@ impl App {
         if let Some(forecast) = autochange_forecast(&self.config, generation) {
             ui.label(RichText::new(forecast).small().color(theme.muted));
         }
+        world_changed
+    }
+    /// The catastrophe buttons.
+    fn catastrophes_block(&self, ui: &mut egui::Ui, theme: Theme) {
         let fossils = self.snapshot.as_ref().map_or(0, |s| s.fossils);
         ui.add_space(GAP_M);
         crate::theme::section(ui, "Catastrophes", theme).on_hover_text(
@@ -189,16 +227,6 @@ impl App {
                 self.worker.send(Command::UndoMeteor);
             }
         });
-        if world_changed {
-            if !undoing && world_before.physics_differs(&self.config) {
-                self.world_undo.push(world_before);
-                if self.world_undo.len() > 20 {
-                    self.world_undo.remove(0);
-                }
-            }
-            self.worker.send(Command::Configure(self.config.clone()));
-            self.config_sent = Some(Instant::now());
-        }
     }
 }
 /// The next autochange step while autochange is on: "Next change at generation 60:
