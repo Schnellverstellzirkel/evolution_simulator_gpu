@@ -36,7 +36,7 @@ pub const CLASSES: [usize; 1] = [MAX_NODES];
 pub const SUBSTEPS: u32 = 16;
 /// Threads per block, and blocks per multiprocessor the kernel is built for.
 pub const BLOCK: u32 = 128;
-pub const MIN_BLOCKS: u32 = 4;
+pub const MIN_BLOCKS: u32 = 3;
 /// Creatures per kernel launch (a wave).
 pub const WAVE: usize = 262_144;
 
