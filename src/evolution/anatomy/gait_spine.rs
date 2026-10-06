@@ -13,7 +13,7 @@
 //! phase (Ijspeert 2008). Sims (1994) and Lipson and Pollack (2000) showed
 //! that bodies of segments with a joint between them move well.
 use super::Operator;
-use super::compound::{close_ring, hinge_muscle, lead_muscle, shed_tips, strongest};
+use super::compound::{close_ring, hinge_muscle, lead_muscle, shed_tips, shift_group, strongest};
 use super::junctions::{add, add_node, keep_strokes, pos, scale, spans, sub, turn_branch};
 use super::limbs::{clamped, pick};
 use super::muscles::{shared_node, turn};
@@ -140,11 +140,7 @@ fn retime_to(c: &mut Creature, group: &[usize], target: f32) -> bool {
     if shift.abs() < 0.01 {
         return false;
     }
-    for &i in group {
-        let m = &mut c.muscles[i];
-        m.phase = (m.phase + shift).rem_euclid(1.0);
-        m.reset = (m.reset + shift).rem_euclid(1.0);
-    }
+    shift_group(c, group, shift);
     true
 }
 

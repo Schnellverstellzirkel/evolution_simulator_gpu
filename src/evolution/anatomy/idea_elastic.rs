@@ -12,8 +12,9 @@
 //! behaves like a mass on a spring leg), Mochon and McMahon (1980, a walking
 //! leg swings as a pendulum) and Pratt and Williamson (1995, a spring in
 //! series with an actuator).
-use super::ideas::{by_drive, coin, drive, set, shared_node, some_leg};
+use super::ideas::{by_drive, coin, drive, set, some_leg};
 use super::limbs::pick;
+use super::muscles::shared_node;
 use super::rhythm::leaf_limbs;
 use super::{Context, Operator, fit_stroke, muscles_on, span};
 use crate::config::Config;

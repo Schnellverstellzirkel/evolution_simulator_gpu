@@ -635,6 +635,17 @@ mod tests {
             .collect()
     }
 
+    /// The 160 test bodies at the default limits.
+    pub(super) fn grown() -> Vec<Creature> {
+        bodies(&Config::default(), 160)
+    }
+
+    /// Whether two phases are the same point of the cycle.
+    pub(super) fn same_phase(a: f32, b: f32) -> bool {
+        let d = (a - b).rem_euclid(1.0);
+        !(1e-4..=1.0 - 1e-4).contains(&d)
+    }
+
     #[test]
     fn operator_names_are_unique() {
         for (i, (name, _)) in OPERATORS.iter().enumerate() {

@@ -15,11 +15,11 @@
 //! the legs and sets the timing in one move. A leg here is a leaf limb that
 //! reaches low (a walker), and walkers are ordered by the x of their hips,
 //! rear first.
-use super::compound::{close_ring, hinge_muscle, shed_tips, strongest};
-use super::extra::drive;
-use super::junctions::{add_node, keep_strokes, shift_branch, spans, turn_branch};
+use super::compound::{close_ring, hinge_muscle, limb_phase, shed_tips, shift_group, strongest};
+use super::extra::limb_drive;
+use super::junctions::{add_node, keep_strokes, lift, shift_branch, spans, turn_branch};
 use super::limbs::clamped;
-use super::rhythm::{leaf_limbs, muscle_groups};
+use super::rhythm::{foot, leaf_limbs, muscle_groups};
 use super::{
     BoneIds, Context, Limbs, Operator, branch, branch_nodes, copy_branch_limited, muscles_on,
     parent_bones, remove_parts, room,
@@ -45,10 +45,6 @@ pub(super) const OPS: &[(&str, Operator)] = &[
     ("unguligrade_legs", unguligrade_legs),
 ];
 
-fn tip_node(c: &Creature, limb: &[usize]) -> usize {
-    c.bones[limb[limb.len() - 1]].b as usize
-}
-
 fn hip_x(c: &Creature, limb: &[usize]) -> f32 {
     c.nodes[c.bones[limb[0]].a as usize].x
 }
@@ -57,7 +53,7 @@ fn hip_x(c: &Creature, limb: &[usize]) -> f32 {
 /// the body), rear first.
 fn walkers(c: &Creature) -> Limbs {
     let all = leaf_limbs(c);
-    let tip_y = |l: &BoneIds| c.nodes[tip_node(c, l)].y;
+    let tip_y = |l: &BoneIds| c.nodes[foot(c, l)].y;
     let low = all.iter().map(tip_y).fold(f32::MAX, f32::min);
     let top = c.nodes.iter().map(|n| n.y).fold(0.0, f32::max);
     let mut out: Limbs = all
@@ -67,7 +63,7 @@ fn walkers(c: &Creature) -> Limbs {
     out.sort_stable_by(|p, q| {
         hip_x(c, p)
             .total_cmp(&hip_x(c, q))
-            .then(c.nodes[tip_node(c, p)].x.total_cmp(&c.nodes[tip_node(c, q)].x))
+            .then(c.nodes[foot(c, p)].x.total_cmp(&c.nodes[foot(c, q)].x))
     });
     out
 }
@@ -81,19 +77,6 @@ fn trunk_nodes(c: &Creature) -> BoneIds {
     (1..c.nodes.len()).filter(|n| !inside.contains(n)).collect()
 }
 
-/// The phase of the strongest muscle on a limb.
-fn limb_phase(c: &Creature, limb: &[usize]) -> Option<f32> {
-    let on = muscles_on(c, limb, false);
-    strongest(c, &on).map(|i| c.muscles[i].phase)
-}
-
-fn limb_drive(c: &Creature, limb: &[usize]) -> f32 {
-    muscles_on(c, limb, false)
-        .iter()
-        .map(|&i| drive(&c.muscles[i]))
-        .sum()
-}
-
 /// Moves the muscles of leg `i` (phase and touchdown reset together) so the
 /// leg's strongest muscle runs at `base + pattern(i)`.
 fn retime(c: &mut Creature, legs: &[BoneIds], base: f32, pattern: impl Fn(usize) -> f32) {
@@ -103,11 +86,7 @@ fn retime(c: &mut Creature, legs: &[BoneIds], base: f32, pattern: impl Fn(usize)
             continue;
         };
         let shift = base + pattern(i) - c.muscles[anchor].phase;
-        for &m in group {
-            let m = &mut c.muscles[m];
-            m.phase = (m.phase + shift).rem_euclid(1.0);
-            m.reset = (m.reset + shift).rem_euclid(1.0);
-        }
+        shift_group(c, group, shift);
     }
 }
 
@@ -115,14 +94,6 @@ fn retime(c: &mut Creature, legs: &[BoneIds], base: f32, pattern: impl Fn(usize)
 /// legs, a tripod gait for six.
 fn alternate(i: usize) -> f32 {
     0.5 * ((i / 2 + i % 2) % 2) as f32
-}
-
-/// Raises the body so no node lies below the ground.
-fn lift(c: &mut Creature) {
-    let low = c.nodes.iter().map(|n| n.y).fold(0.0, f32::min);
-    for n in &mut c.nodes {
-        n.y -= low;
-    }
 }
 
 /// Scales the leg that starts at the first bone of `limb` about its hip.

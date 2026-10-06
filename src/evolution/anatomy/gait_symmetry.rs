@@ -11,15 +11,15 @@
 //! walk is alternation, a metachronal wave is a constant lag per segment).
 //! Animals repeat one leg design along the body and run it under a shared
 //! program, so these operators move a body toward that form in one step.
-use super::compound::{close_ring, shed_tips, strongest};
-use super::extra::drive;
+use super::compound::{close_ring, limb_phase, scale_bones, shed_tips};
+use super::extra::{drive, limb_drive};
 use super::junctions::{add, add_node, keep_strokes, pos, shift_branch, spans, sub};
 use super::limbs::{clamped, pick};
 use super::muscles::actuation;
-use super::rhythm::leaf_limbs;
+use super::rhythm::{foot, hip, leaf_limbs, leaf_limbs_at, tip_x};
 use super::{
-    BoneIds, Children, Context, Operator, branch, branch_in, branch_nodes, child_bones,
-    copy_branch_limited, fit_stroke, is_neck, muscles_on, parent_bones, remove_parts, room,
+    BoneIds, Context, Operator, branch, branch_nodes, child_bones, copy_branch_limited, fit_stroke,
+    is_neck, parent_bones, remove_parts, room,
 };
 use crate::config::Config;
 use crate::evolution::{Bone, Bounded, Creature, MAX_NODES, Muscle, Rng, max_bone_length};
@@ -43,14 +43,9 @@ pub(super) const OPS: &[(&str, Operator)] = &[
 
 // Helpers.
 
-/// The node a leg hangs from.
-fn hip(c: &Creature, limb: &[usize]) -> usize {
-    c.bones[limb[0]].a as usize
-}
-
 /// How far a leg's tip lies in front of its hip (negative: behind).
 fn reach_x(c: &Creature, limb: &[usize]) -> f32 {
-    c.nodes[c.bones[limb[limb.len() - 1]].b as usize].x - c.nodes[hip(c, limb)].x
+    tip_x(c, limb) - c.nodes[hip(c, limb)].x
 }
 
 /// Whether two legs point to opposite sides, so one is the other's mirror image.
@@ -58,25 +53,11 @@ fn opposed(c: &Creature, x: &[usize], y: &[usize]) -> bool {
     reach_x(c, x) * reach_x(c, y) < -1.0e-4
 }
 
-/// The drive of every muscle with an end on a leg.
-fn leg_drive(c: &Creature, limb: &[usize]) -> f32 {
-    muscles_on(c, limb, false)
-        .iter()
-        .map(|&i| drive(&c.muscles[i]))
-        .sum()
-}
-
-/// The phase of the strongest muscle on a leg.
-fn lead_phase(c: &Creature, limb: &[usize]) -> Option<f32> {
-    let on = muscles_on(c, limb, false);
-    strongest(c, &on).map(|i| c.muscles[i].phase)
-}
-
 /// The index in `legs` of the leg with the most drive, if it has any.
 fn best_leg(c: &Creature, legs: &[BoneIds]) -> Option<usize> {
     let best = (0..legs.len())
-        .max_by(|&x, &y| leg_drive(c, &legs[x]).total_cmp(&leg_drive(c, &legs[y])))?;
-    (leg_drive(c, &legs[best]) > 0.0).then_some(best)
+        .max_by(|&x, &y| limb_drive(c, &legs[x]).total_cmp(&limb_drive(c, &legs[y])))?;
+    (limb_drive(c, &legs[best]) > 0.0).then_some(best)
 }
 
 /// Whether leg `y` already is leg `x` (or its mirror image with `mirror`):
@@ -183,7 +164,7 @@ pub(crate) fn clone_best_leg(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx:
         return false;
     };
     let source = &legs[best];
-    let source_phase = lead_phase(c, source);
+    let source_phase = limb_phase(c, source);
     let mut jobs: Bounded<Job, MAX_NODES> = Bounded::new();
     for (i, leg) in legs.iter().enumerate() {
         if i == best {
@@ -193,7 +174,7 @@ pub(crate) fn clone_best_leg(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx:
         if same_pose(c, source, leg, mirror) {
             continue;
         }
-        let phase = match (lead_phase(c, leg), source_phase) {
+        let phase = match (limb_phase(c, leg), source_phase) {
             (Some(own), Some(lead)) => own - lead,
             _ => 0.0,
         };
@@ -259,19 +240,6 @@ pub(crate) fn mirror_body_halves(
     replant(c, cfg, &jobs, rng)
 }
 
-/// The child bones of `node` that are limbs without junctions.
-fn limbs_at(c: &Creature, children: &Children, node: usize) -> BoneIds {
-    children[node]
-        .iter()
-        .copied()
-        .filter(|&l| {
-            branch_in(c, children, l)
-                .iter()
-                .all(|&x| children[c.bones[x].b as usize].len() <= 1)
-        })
-        .collect()
-}
-
 /// Copies the trunk bone `trunk` with the leg limbs on its child node and
 /// inserts the copy after it, the same size as the original. The copy's
 /// muscles run `phase` of a cycle later, and with `mirror` its limbs are
@@ -288,7 +256,7 @@ fn repeat_segment(
     let parents = parent_bones(c);
     let (a, b) = (c.bones[trunk].a as usize, c.bones[trunk].b as usize);
     let above = parents[a]?;
-    let limbs = limbs_at(c, &children, b);
+    let limbs = leaf_limbs_at(c, &children, b);
     if limbs.is_empty() || is_neck(c, trunk) {
         return None;
     }
@@ -364,7 +332,9 @@ fn repeat_segment(
 fn repeat_one(c: &mut Creature, cfg: &Config, rng: &mut Rng, phase: f32, mirror: bool) -> bool {
     let children = child_bones(c);
     let trunks: BoneIds = (0..c.bones.len())
-        .filter(|&j| !is_neck(c, j) && !limbs_at(c, &children, c.bones[j].b as usize).is_empty())
+        .filter(|&j| {
+            !is_neck(c, j) && !leaf_limbs_at(c, &children, c.bones[j].b as usize).is_empty()
+        })
         .collect();
     let Some(trunk) = pick(&trunks, rng) else {
         return false;
@@ -416,33 +386,6 @@ fn reach(c: &Creature, limb: &[usize]) -> f32 {
     limb.iter().map(|&b| c.bones[b].rest_length).sum()
 }
 
-/// Scales a leg about its hip by `factor` within the bone limits. The caller
-/// keeps the strokes.
-fn scale_leg(c: &mut Creature, limb: &[usize], factor: f32) -> bool {
-    let (mut low, mut high) = (0.0f32, f32::INFINITY);
-    for &b in limb {
-        let length = c.bones[b].rest_length;
-        low = low.max(0.03 / length);
-        high = high.min(max_bone_length() / length);
-    }
-    let factor = factor.clamp(low, high.max(low));
-    if (factor - 1.0).abs() < 0.02 {
-        return false;
-    }
-    let pivot = pos(c, hip(c, limb));
-    for n in branch_nodes(c, limb) {
-        let node = &mut c.nodes[n];
-        [node.x, node.y] = clamped(
-            pivot[0] + (node.x - pivot[0]) * factor,
-            pivot[1] + (node.y - pivot[1]) * factor,
-        );
-    }
-    for &b in limb {
-        c.bones[b].rest_length *= factor;
-    }
-    true
-}
-
 /// Makes two legs of unequal reach equal: the shorter leg grows to the
 /// reach of the longer (six times in ten) or the longer shrinks to the
 /// shorter, with every muscle keeping its stroke relative to its span. Legs
@@ -476,9 +419,9 @@ pub(crate) fn equalize_leg_reach(
     let ratio = reach(c, &legs[long]) / reach(c, &legs[short]);
     let before = spans(c);
     let changed = if rng.unit() < 0.6 {
-        scale_leg(c, &legs[short], ratio)
+        scale_bones(c, &legs[short], ratio)
     } else {
-        scale_leg(c, &legs[long], 1.0 / ratio)
+        scale_bones(c, &legs[long], 1.0 / ratio)
     };
     if changed {
         keep_strokes(c, &before);
@@ -607,7 +550,7 @@ fn share_program(c: &mut Creature, shift: impl Fn(i32, usize) -> Option<f32>) ->
     let mut group: BoneIds = (0..legs.len())
         .filter(|&i| legs[i].len() == legs[best].len())
         .collect();
-    let tip = |i: usize| c.nodes[c.bones[legs[i][legs[i].len() - 1]].b as usize].x;
+    let tip = |i: usize| tip_x(c, &legs[i]);
     group.sort_stable_by(|&p, &q| tip(p).total_cmp(&tip(q)));
     let n = group.len();
     let rank_best = group.iter().position(|&i| i == best).unwrap_or(0) as i32;
@@ -899,8 +842,7 @@ pub(crate) fn copy_foot_to_all_legs(
     let Some(best) = best_leg(c, &legs) else {
         return false;
     };
-    let foot = |l: &[usize]| c.bones[l[l.len() - 1]].b as usize;
-    let source = c.nodes[foot(&legs[best])];
+        let source = c.nodes[foot(c, &legs[best])];
     let mut changed = false;
     for (i, leg) in legs.iter().enumerate() {
         if i == best {

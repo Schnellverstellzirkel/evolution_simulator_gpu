@@ -11,13 +11,14 @@
 //! (1988 and 2003, elastic legs, passive joints and hopping), Thompson (1917,
 //! allometry and taper), Bateson (1894, homeosis) and Ohno (1970, gene
 //! duplication followed by divergence).
+use super::ideas::{bone_length, some_leg};
 use super::limbs::pick;
-use super::rhythm::{leaf_limbs, matching_limbs};
+use super::muscles::shift_phase;
+use super::rhythm::{leaf_limbs, matching_limbs, organ_bones};
 use super::{BoneIds, Context, MuscleIds, Operator, branch, muscles_on, room};
 use crate::config::Config;
 use crate::evolution::{
-    Creature, JOINT_LIMIT, MAX_ORGAN_MASS, MIN_ORGAN_MASS, Rng, max_bone_length, max_stroke,
-    min_muscle_period,
+    Creature, JOINT_LIMIT, MAX_ORGAN_MASS, MIN_ORGAN_MASS, Rng, max_stroke, min_muscle_period,
 };
 
 /// This file's operators, by name. Add each new one here.
@@ -44,39 +45,11 @@ pub(super) const OPS: &[(&str, Operator)] = &[
 
 // Helpers.
 
-/// The bones that carry an organ.
-fn organ_bones(c: &Creature) -> BoneIds {
-    (0..c.bones.len())
-        .filter(|&b| c.bones[b].organ_mass > 0.0)
-        .collect()
-}
-
-/// A random leg with at least `bones` bones and, with `driven`, a muscle on it.
-fn pick_leg(c: &Creature, rng: &mut Rng, bones: usize, driven: bool) -> Option<BoneIds> {
-    let legs = leaf_limbs(c);
-    let fit: BoneIds = (0..legs.len())
-        .filter(|&i| {
-            legs[i].len() >= bones && (!driven || !muscles_on(c, &legs[i], false).is_empty())
-        })
-        .collect();
-    pick(&fit, rng).map(|i| legs[i])
-}
-
 /// How deep along `limb` a muscle sits: the position of its deepest bone in
 /// the limb, from 0 at the root.
 fn depth_in(c: &Creature, limb: &[usize], m: usize) -> usize {
     let at = |b: u32| limb.iter().position(|&x| x == b as usize).unwrap_or(0);
     at(c.muscles[m].bone_a).max(at(c.muscles[m].bone_b))
-}
-
-/// Shifts a muscle's phase, wrapping to [0, 1).
-fn shift_phase(c: &mut Creature, m: usize, by: f32) {
-    c.muscles[m].phase = (c.muscles[m].phase + by).rem_euclid(1.0);
-}
-
-/// A bone length kept within the body's limits.
-fn bone_length(length: f32) -> f32 {
-    length.clamp(0.05, max_bone_length())
 }
 
 // Ballast: where the organ mass sits.
@@ -125,7 +98,7 @@ fn ballast_split(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) 
 
 /// Gathers a leg's organ mass at its tip, so the leg swings like a flail.
 fn ballast_flail_tip(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
-    let Some(leg) = pick_leg(c, rng, 2, false) else {
+    let Some(leg) = some_leg(c, rng, 2, false) else {
         return false;
     };
     let total: f32 = leg.iter().map(|&b| c.bones[b].organ_mass).sum();
@@ -165,7 +138,7 @@ fn ballast_trade(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) 
 /// Muscle duty changes in steps from a leg's root to its tip, so the tip works
 /// a shorter (or longer) share of the cycle than the root.
 fn duty_sweep_along_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
-    let Some(leg) = pick_leg(c, rng, 2, true) else {
+    let Some(leg) = some_leg(c, rng, 2, true) else {
         return false;
     };
     let on = muscles_on(c, &leg, false);
@@ -241,7 +214,7 @@ fn phase_follow_neighbor(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &C
 /// Every muscle of a leg gets a tendon, stiffer toward the foot, so the leg
 /// stores and returns energy like a spring.
 fn spring_leg(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
-    let Some(leg) = pick_leg(c, rng, 2, true) else {
+    let Some(leg) = some_leg(c, rng, 2, true) else {
         return false;
     };
     let on = muscles_on(c, &leg, false);
@@ -270,7 +243,7 @@ fn passive_joint(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) 
 
 /// The tendons of a leg's muscles follow a gradient from root to tip.
 fn tendon_gradient(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
-    let Some(leg) = pick_leg(c, rng, 2, true) else {
+    let Some(leg) = some_leg(c, rng, 2, true) else {
         return false;
     };
     let on = muscles_on(c, &leg, false);
@@ -288,7 +261,7 @@ fn tendon_gradient(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context
 /// Two joints of a leg widen their ranges toward the joint limit by 20 to
 /// 60%, so the leg can sweep farther.
 fn widen_range_pair(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
-    let Some(leg) = pick_leg(c, rng, 2, false) else {
+    let Some(leg) = some_leg(c, rng, 2, false) else {
         return false;
     };
     let first = rng.index(leg.len() - 1);
@@ -330,7 +303,7 @@ fn asymmetric_range_for_hop(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx:
 /// A leg's bone lengths scale with the cube root of the mass each bone
 /// carries (the bones below it), so roots grow and tips shrink.
 fn allometric_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
-    let Some(leg) = pick_leg(c, rng, 2, false) else {
+    let Some(leg) = some_leg(c, rng, 2, false) else {
         return false;
     };
     let n = leg.len() as f32;
@@ -346,7 +319,7 @@ fn allometric_limb(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context
 
 /// Bones of a leg get shorter (or longer) step by step from root to tip.
 fn taper_by_depth(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
-    let Some(leg) = pick_leg(c, rng, 2, false) else {
+    let Some(leg) = some_leg(c, rng, 2, false) else {
         return false;
     };
     let ratio = if rng.unit() < 0.5 {
@@ -368,7 +341,7 @@ fn taper_by_depth(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context)
 /// stiffness, tendon), so a limb takes another part's role in the same body.
 fn homeotic_swap(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = leaf_limbs(c);
-    let Some(leg) = pick_leg(c, rng, 1, true) else {
+    let Some(leg) = some_leg(c, rng, 1, true) else {
         return false;
     };
     let on_leg = muscles_on(c, &leg, false);
@@ -397,7 +370,7 @@ fn homeotic_swap(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) 
 /// Copies a leg onto its own hip and lets the copy diverge: its timing, its
 /// bone lengths and its joint ranges change, so the twin can take a new role.
 fn diverged_twin(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
-    let Some(leg) = pick_leg(c, rng, 1, true) else {
+    let Some(leg) = some_leg(c, rng, 1, true) else {
         return false;
     };
     let quota = muscles_on(c, &leg, false).len();

@@ -1,6 +1,7 @@
 //! Operators that change joint ranges, timing patterns and mass together.
+use super::muscles::shift_phase;
 use super::{
-    BoneIds, Context, Limbs, MuscleIds, branch, branch_in, child_bones, degree, is_neck,
+    BoneIds, Children, Context, Limbs, MuscleIds, branch, branch_in, child_bones, degree, is_neck,
     muscles_on, parent_bones,
 };
 use crate::config::Config;
@@ -266,6 +267,54 @@ pub(super) fn leaf_limbs(c: &Creature) -> Limbs {
         .collect()
 }
 
+/// The child bones of `node` that are limbs without junctions: chains that
+/// end in one tip.
+pub(super) fn leaf_limbs_at(c: &Creature, children: &Children, node: usize) -> BoneIds {
+    children[node]
+        .iter()
+        .copied()
+        .filter(|&l| {
+            branch_in(c, children, l)
+                .iter()
+                .all(|&x| children[c.bones[x].b as usize].len() <= 1)
+        })
+        .collect()
+}
+
+/// The node a limb's last bone ends on: its foot or tip.
+pub(super) fn foot(c: &Creature, limb: &[usize]) -> usize {
+    c.bones[limb[limb.len() - 1]].b as usize
+}
+
+/// The node a limb hangs from: its hip.
+pub(super) fn hip(c: &Creature, limb: &[usize]) -> usize {
+    c.bones[limb[0]].a as usize
+}
+
+/// Where a limb's last bone ends along x in the starting pose.
+pub(super) fn tip_x(c: &Creature, limb: &[usize]) -> f32 {
+    c.nodes[foot(c, limb)].x
+}
+
+/// Where a limb's last bone ends in height in the starting pose.
+pub(super) fn tip_y(c: &Creature, limb: &[usize]) -> f32 {
+    c.nodes[foot(c, limb)].y
+}
+
+/// The leaf limbs from front (large x) to back.
+pub(super) fn limbs_front_to_back(c: &Creature) -> Limbs {
+    let mut limbs = leaf_limbs(c);
+    limbs.sort_stable_by(|x, y| tip_x(c, y).total_cmp(&tip_x(c, x)));
+    limbs
+}
+
+/// The bones that carry an organ.
+pub(super) fn organ_bones(c: &Creature) -> BoneIds {
+    (0..c.bones.len())
+        .filter(|&b| c.bones[b].organ_mass > 0.0)
+        .collect()
+}
+
 /// Shifts the muscles of each limb together so that the first muscle of limb
 /// `i` sits at the first limb's phase plus the pattern's offset for `i`:
 /// 0 all together, 1 alternating halves, 2 evenly staggered.
@@ -286,7 +335,7 @@ fn shift_limbs(c: &mut Creature, limbs: &[BoneIds], pattern: usize) -> bool {
         };
         let shift = start + offset - c.muscles[lead].phase;
         for &m in group {
-            c.muscles[m].phase = (c.muscles[m].phase + shift).rem_euclid(1.0);
+            shift_phase(c, m, shift);
         }
     }
     true
@@ -380,9 +429,7 @@ pub(crate) fn redistribute_organ_mass(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let organs: BoneIds = (0..c.bones.len())
-        .filter(|&b| c.bones[b].organ_mass > 0.0)
-        .collect();
+    let organs = organ_bones(c);
     if organs.is_empty() {
         return false;
     }
@@ -422,19 +469,13 @@ pub(crate) fn redistribute_organ_mass(
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::bodies;
+    use super::super::tests::{bodies, same_phase};
     use super::super::{Context, Operator};
     use super::*;
     use crate::evolution::{Muscle, NO_SENSOR, Population, repair};
 
     fn cx() -> Context<'static> {
         Context { donor: None }
-    }
-
-    /// Whether two phases are the same point of the cycle.
-    fn same_phase(a: f32, b: f32) -> bool {
-        let d = (a - b).rem_euclid(1.0);
-        !(1e-4..=1.0 - 1e-4).contains(&d)
     }
 
     /// Runs `op` on a copy of each body and returns the changed copies with

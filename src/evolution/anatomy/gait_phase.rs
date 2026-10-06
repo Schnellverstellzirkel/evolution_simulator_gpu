@@ -13,10 +13,10 @@
 //! against. The gait names follow Hildebrand's footfall patterns, Alexander's
 //! duty factors and the central pattern generator view of gaits (Collins and
 //! Stewart 1993, couplings between oscillators fix the phase lags).
-use super::compound::strongest;
+use super::compound::{shift_group, strongest};
 use super::extra::drive;
 use super::muscles::turn;
-use super::rhythm::{leaf_limbs, muscle_groups};
+use super::rhythm::{limbs_front_to_back, muscle_groups};
 use super::{Context, MuscleIds};
 use crate::config::Config;
 use crate::evolution::{Creature, Rng};
@@ -47,10 +47,7 @@ struct Leg {
 
 /// The legs with a driven muscle, from front to back.
 fn legs_front_to_back(c: &Creature) -> Vec<Leg> {
-    let tip_x = |limb: &[usize]| c.nodes[c.bones[limb[limb.len() - 1]].b as usize].x;
-    let mut limbs = leaf_limbs(c);
-    limbs.sort_stable_by(|x, y| tip_x(y).total_cmp(&tip_x(x)));
-    muscle_groups(c, &limbs)
+    muscle_groups(c, &limbs_front_to_back(c))
         .iter()
         .filter_map(|group| {
             let active: MuscleIds = group
@@ -116,11 +113,7 @@ fn retime_leg(c: &mut Creature, leg: &Leg, target: f32) -> bool {
     if shift.abs() < 1.0e-4 {
         return false;
     }
-    for &i in &leg.muscles {
-        let m = &mut c.muscles[i];
-        m.phase = (m.phase + shift).rem_euclid(1.0);
-        m.reset = (m.reset + shift).rem_euclid(1.0);
-    }
+    shift_group(c, &leg.muscles, shift);
     true
 }
 

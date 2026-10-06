@@ -18,7 +18,7 @@
 //! and its child gets no parameter noise.
 use super::compound::strongest;
 use super::limbs::pick;
-use super::rhythm::leaf_limbs;
+use super::rhythm::{foot, leaf_limbs, tip_x};
 use super::{
     BoneIds, Context, Limbs, MuscleIds, Operator, is_neck, muscles_on, new_muscle, room, span,
 };
@@ -41,16 +41,6 @@ pub(super) const OPS: &[(&str, Operator)] = &[
     ("trigger_chain_along_legs", trigger_chain_along_legs),
     ("stance_duty_with_reflex", stance_duty_with_reflex),
 ];
-
-/// The node a leg's last bone ends on.
-fn foot(c: &Creature, leg: &[usize]) -> usize {
-    c.bones[leg[leg.len() - 1]].b as usize
-}
-
-/// How far forward the foot starts.
-fn tip_x(c: &Creature, leg: &[usize]) -> f32 {
-    c.nodes[foot(c, leg)].x
-}
 
 /// The legs (leaf limbs of at least two bones), from the rearmost foot to the
 /// foremost.

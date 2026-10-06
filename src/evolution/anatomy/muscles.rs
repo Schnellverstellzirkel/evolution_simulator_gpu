@@ -457,7 +457,7 @@ const MIN_TORQUE: f32 = 1.0e-3;
 
 /// The torque a muscle's pull puts on its `bone_a` about that bone's parent
 /// node, in the pose. Positive turns it counterclockwise.
-fn torque(c: &Creature, m: &Muscle) -> f32 {
+pub(super) fn torque(c: &Creature, m: &Muscle) -> f32 {
     let bone = c.bones[m.bone_a as usize];
     let joint = c.nodes[bone.a as usize];
     let p = bone_point(bone, &c.nodes, m.anchor_a);
@@ -466,7 +466,7 @@ fn torque(c: &Creature, m: &Muscle) -> f32 {
 }
 
 /// The same muscle with its ends swapped.
-fn flipped(m: &Muscle) -> Muscle {
+pub(super) fn flipped(m: &Muscle) -> Muscle {
     Muscle {
         bone_a: m.bone_b,
         bone_b: m.bone_a,
@@ -485,6 +485,18 @@ fn flipped(m: &Muscle) -> Muscle {
 /// The signed shortest step from phase `from` to phase `to` (-0.5 to 0.5).
 pub(super) fn turn(from: f32, to: f32) -> f32 {
     (to - from + 0.5).rem_euclid(1.0) - 0.5
+}
+
+/// Moves the phase and the touchdown reset of `m` by `shift` cycles.
+pub(super) fn shift_timing(m: &mut Muscle, shift: f32) {
+    m.phase = (m.phase + shift).rem_euclid(1.0);
+    m.reset = (m.reset + shift).rem_euclid(1.0);
+}
+
+/// Moves the phase of muscle `m` of the body by `by` cycles, wrapping to
+/// [0, 1). Its touchdown reset stays.
+pub(super) fn shift_phase(c: &mut Creature, m: usize, by: f32) {
+    c.muscles[m].phase = (c.muscles[m].phase + by).rem_euclid(1.0);
 }
 
 /// Whether a muscle joins consecutively numbered bones. `repair` keeps

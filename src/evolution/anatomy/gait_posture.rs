@@ -19,7 +19,7 @@
 //! pose the creature starts in changes.
 use super::junctions::{keep_strokes, spans, turn_branch};
 use super::limbs::clamped;
-use super::rhythm::leaf_limbs;
+use super::rhythm::{foot, hip, leaf_limbs};
 use super::{BoneIds, Context, Operator, branch, branch_nodes, parent_bones};
 use crate::config::Config;
 use crate::evolution::{
@@ -56,16 +56,6 @@ fn heading(c: &Creature, b: usize) -> f32 {
 /// Legs with a foot: leaf limbs of at least two bones.
 fn feet_legs(c: &Creature) -> Vec<BoneIds> {
     leaf_limbs(c).into_iter().filter(|l| l.len() >= 2).collect()
-}
-
-/// The foot node of a leg.
-fn foot(c: &Creature, leg: &[usize]) -> usize {
-    c.bones[leg[leg.len() - 1]].b as usize
-}
-
-/// The hip node of a leg.
-fn hip(c: &Creature, leg: &[usize]) -> usize {
-    c.bones[leg[0]].a as usize
 }
 
 /// Turns the branch of bone `j` by `t` in the starting pose and moves the

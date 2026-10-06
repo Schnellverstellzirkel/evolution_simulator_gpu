@@ -31,12 +31,13 @@ use super::junctions::{
     add, add_node, keep_strokes, pos, scale, shift_branch, spans, sub, turn_branch,
 };
 use super::limbs::{clamped, limb_roots, pick};
-use super::muscles::{actuation, ring, shared_node, turn};
-use super::rhythm::{leaf_limbs, matching_limbs, muscle_groups};
+use super::muscles::{actuation, ring, shared_node, shift_timing, turn};
+use super::rhythm::{
+    leaf_limbs, leaf_limbs_at, limbs_front_to_back, matching_limbs, muscle_groups, tip_y,
+};
 use super::{
-    BoneIds, Children, Context, MuscleIds, Operator, branch, branch_in, branch_nodes, child_bones,
-    copy_branch_limited, degree, fit_stroke, is_neck, muscles_on, new_muscle, parent_bones,
-    remove_parts, room, span,
+    BoneIds, Context, MuscleIds, Operator, branch, branch_nodes, child_bones, copy_branch_limited,
+    degree, fit_stroke, is_neck, muscles_on, new_muscle, parent_bones, remove_parts, room, span,
 };
 use crate::config::Config;
 use crate::evolution::{
@@ -145,6 +146,12 @@ pub(super) fn lead_muscle(c: &Creature, group: &[usize]) -> Option<usize> {
         .max_by(|&x, &y| drive(&c.muscles[x]).total_cmp(&drive(&c.muscles[y])))
 }
 
+/// The phase of the strongest muscle on `limb`.
+pub(super) fn limb_phase(c: &Creature, limb: &[usize]) -> Option<f32> {
+    let on = muscles_on(c, limb, false);
+    strongest(c, &on).map(|i| c.muscles[i].phase)
+}
+
 /// Moves every muscle of `group` (phase and touchdown reset) by one common
 /// amount, so that `anchor` lands on phase `target` and the group keeps its
 /// own timing. Returns whether anything moved.
@@ -159,37 +166,18 @@ fn retime_group(c: &mut Creature, group: &[usize], anchor: usize, target: f32) -
 
 /// Moves the phase and the touchdown reset of every muscle of `group` by
 /// `shift` cycles.
-fn shift_group(c: &mut Creature, group: &[usize], shift: f32) {
+pub(super) fn shift_group(c: &mut Creature, group: &[usize], shift: f32) {
     for &i in group {
-        let m = &mut c.muscles[i];
-        m.phase = (m.phase + shift).rem_euclid(1.0);
-        m.reset = (m.reset + shift).rem_euclid(1.0);
+        shift_timing(&mut c.muscles[i], shift);
     }
 }
 
-/// Where a limb's last bone ends along x in the starting pose.
-fn tip_x(c: &Creature, limb: &[usize]) -> f32 {
-    c.nodes[c.bones[limb[limb.len() - 1]].b as usize].x
-}
-
-/// Where a limb's last bone ends in height in the starting pose.
-fn tip_y(c: &Creature, limb: &[usize]) -> f32 {
-    c.nodes[c.bones[limb[limb.len() - 1]].b as usize].y
-}
-
-/// The leaf limbs from front (large x) to back.
-fn limbs_front_to_back(c: &Creature) -> super::Limbs {
-    let mut limbs = leaf_limbs(c);
-    limbs.sort_stable_by(|x, y| tip_x(c, y).total_cmp(&tip_x(c, x)));
-    limbs
-}
-
-/// Scales the branch that starts at `root` about its joint by `factor`
-/// (within the bone limits). The caller keeps the strokes (`keep_strokes`).
-fn scale_limb(c: &mut Creature, root: usize, factor: f32) -> bool {
-    let bones = branch(c, root);
+/// Scales `bones`, a branch or a limb's chain, about the joint its first
+/// bone hangs from by `factor` (within the bone limits). The caller keeps the
+/// strokes (`keep_strokes`).
+pub(super) fn scale_bones(c: &mut Creature, bones: &[usize], factor: f32) -> bool {
     let (mut low, mut high) = (0.0f32, f32::INFINITY);
-    for &b in &bones {
+    for &b in bones {
         let length = c.bones[b].rest_length;
         low = low.max(0.03 / length);
         high = high.min(max_bone_length() / length);
@@ -198,18 +186,23 @@ fn scale_limb(c: &mut Creature, root: usize, factor: f32) -> bool {
     if (factor - 1.0).abs() < 0.02 {
         return false;
     }
-    let pivot = c.nodes[c.bones[root].a as usize];
-    for n in branch_nodes(c, &bones) {
+    let pivot = c.nodes[c.bones[bones[0]].a as usize];
+    for n in branch_nodes(c, bones) {
         let node = &mut c.nodes[n];
         [node.x, node.y] = clamped(
             pivot.x + (node.x - pivot.x) * factor,
             pivot.y + (node.y - pivot.y) * factor,
         );
     }
-    for &b in &bones {
+    for &b in bones {
         c.bones[b].rest_length *= factor;
     }
     true
+}
+
+/// `scale_bones` for the branch that starts at `root`.
+fn scale_limb(c: &mut Creature, root: usize, factor: f32) -> bool {
+    scale_bones(c, &branch(c, root), factor)
 }
 
 /// Sets joint `j` against one of its stops and leaves it a small flex back
@@ -1101,20 +1094,6 @@ pub(crate) fn mirrored_limb_pair(
     true
 }
 
-/// The child bones of `node` that are limbs without junctions: chains that
-/// end in one tip.
-fn leaf_limbs_at(c: &Creature, children: &Children, node: usize) -> BoneIds {
-    children[node]
-        .iter()
-        .copied()
-        .filter(|&l| {
-            branch_in(c, children, l)
-                .iter()
-                .all(|&x| children[c.bones[x].b as usize].len() <= 1)
-        })
-        .collect()
-}
-
 /// Copies the trunk bone `trunk` with the leaf limbs on its child node and
 /// inserts the copy after it in the chain, as `repeat_body_segment` does, with
 /// a gradient: the copy is `taper` times the size of the original (its bone,
@@ -1255,7 +1234,7 @@ pub(crate) fn segment_chain(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: 
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Operator, tests::bodies};
+    use super::super::{Operator, tests::grown};
     use super::*;
     use crate::evolution::{Population, repair};
 
@@ -1286,10 +1265,6 @@ mod tests {
             }
         }
         applied
-    }
-
-    fn grown() -> Vec<Creature> {
-        bodies(&Config::default(), 160)
     }
 
     /// The test bodies with their first muscle-bearing limb twinned, so every

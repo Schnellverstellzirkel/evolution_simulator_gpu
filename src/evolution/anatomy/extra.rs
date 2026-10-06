@@ -10,7 +10,7 @@
 //! would get new random muscles that drive from the first step.
 use super::limbs::{clamped, fuse_pair, limb_roots, pick};
 use super::muscles::{actuation, ring, shared_node};
-use super::rhythm::{leaf_limbs, matching_limbs};
+use super::rhythm::{foot, leaf_limbs, matching_limbs};
 use super::{
     BoneIds, Context, Limbs, MuscleIds, branch, child_bones, copy_branch, degree, fit_stroke,
     is_neck, muscles_on, new_muscle, parent_bones, pick_each, remove_parts, room,
@@ -540,11 +540,10 @@ fn drag_ends(c: &Creature) -> Option<(BoneIds, DraggingEnd)> {
     }
     let x = c.nodes[c.bones[working[0]].a as usize].x;
     let away = |node: usize| (c.nodes[node].x - x).abs();
-    let foot = |leg: &BoneIds| c.bones[leg[leg.len() - 1]].b as usize;
     let other = legs
         .iter()
         .filter(|leg| **leg != working)
-        .max_by(|p, q| away(foot(p)).total_cmp(&away(foot(q))));
+        .max_by(|p, q| away(foot(c, p)).total_cmp(&away(foot(c, q))));
     let end = match other {
         Some(leg) => DraggingEnd {
             node: c.bones[leg[0]].a as usize,
@@ -569,6 +568,14 @@ fn drag_ends(c: &Creature) -> Option<(BoneIds, DraggingEnd)> {
 /// A muscle's drive: stiffness times stroke. Zero for a passive muscle.
 pub(super) fn drive(m: &Muscle) -> f32 {
     m.stiffness * (m.long - m.short)
+}
+
+/// The summed drive of the muscles with an end on `limb`.
+pub(super) fn limb_drive(c: &Creature, limb: &[usize]) -> f32 {
+    muscles_on(c, limb, false)
+        .iter()
+        .map(|&i| drive(&c.muscles[i]))
+        .sum()
 }
 
 /// Spring stiffness of the passive muscles `passive_ring` adds.
@@ -682,7 +689,10 @@ fn pick_counterparts(c: &Creature, rng: &mut Rng) -> Option<Bounded<(usize, usiz
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Operator, tests::bodies};
+    use super::super::{
+        Operator,
+        tests::{grown, same_phase},
+    };
     use super::*;
 
     /// Runs `op` on 160 grown bodies . A changed body must pass `check(before, after)`; an
@@ -706,10 +716,6 @@ mod tests {
         applied
     }
 
-    fn grown() -> Vec<Creature> {
-        bodies(&Config::default(), 160)
-    }
-
     /// The test bodies with their first muscle-bearing limb twinned, so every
     /// one has a pair of same-shaped limbs with matching muscles.
     fn twinned() -> Vec<Creature> {
@@ -731,11 +737,6 @@ mod tests {
                 Some(c)
             })
             .collect()
-    }
-
-    fn same_phase(a: f32, b: f32) -> bool {
-        let d = (a - b).rem_euclid(1.0);
-        !(1e-4..=1.0 - 1e-4).contains(&d)
     }
 
     fn ring_is_closed(c: &Creature) -> bool {

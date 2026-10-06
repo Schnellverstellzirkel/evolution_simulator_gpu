@@ -14,7 +14,7 @@
 use super::compound::strongest;
 use super::extra::drive;
 use super::limbs::pick;
-use super::muscles::{ring, shared_node, turn};
+use super::muscles::{flipped, ring, shared_node, shift_timing, torque, turn};
 use super::rhythm::leaf_limbs;
 use super::{
     BoneIds, Context, MuscleIds, Operator, branch, child_bones, fit_stroke, is_neck, muscles_on,
@@ -83,23 +83,6 @@ fn joined(c: &Creature, x: usize, z: usize) -> bool {
     })
 }
 
-/// The same muscle with its ends swapped.
-fn flipped(m: &Muscle) -> Muscle {
-    Muscle {
-        bone_a: m.bone_b,
-        bone_b: m.bone_a,
-        anchor_a: m.anchor_b,
-        anchor_b: m.anchor_a,
-        // Sensor endpoints are numbered bone_a.a, bone_a.b, bone_b.a, bone_b.b.
-        sensor: if m.sensor < 4 {
-            (m.sensor + 2) % 4
-        } else {
-            m.sensor
-        },
-        ..*m
-    }
-}
-
 /// The muscle with `bone` as its `bone_a`, if it has an end on `bone`.
 fn facing(m: &Muscle, bone: usize) -> Option<Muscle> {
     if m.bone_a as usize == bone {
@@ -111,25 +94,9 @@ fn facing(m: &Muscle, bone: usize) -> Option<Muscle> {
     }
 }
 
-/// The torque a muscle's pull puts on its `bone_a` about that bone's parent
-/// node, in the pose. Positive turns it counterclockwise.
-fn torque(c: &Creature, m: &Muscle) -> f32 {
-    let bone = c.bones[m.bone_a as usize];
-    let joint = c.nodes[bone.a as usize];
-    let p = bone_point(bone, &c.nodes, m.anchor_a);
-    let q = bone_point(c.bones[m.bone_b as usize], &c.nodes, m.anchor_b);
-    (p[0] - joint.x) * (q[1] - p[1]) - (p[1] - joint.y) * (q[0] - p[0])
-}
-
 /// The phase halfway between two phases, along the shorter way round.
 fn mean_phase(x: f32, y: f32) -> f32 {
     (x + 0.5 * turn(x, y)).rem_euclid(1.0)
-}
-
-/// Moves the phase and the touchdown reset of `m` by `shift` cycles.
-fn shift_timing(m: &mut Muscle, shift: f32) {
-    m.phase = (m.phase + shift).rem_euclid(1.0);
-    m.reset = (m.reset + shift).rem_euclid(1.0);
 }
 
 /// A closing muscle of a leg joint, a bone `r` outside the joint's limb and

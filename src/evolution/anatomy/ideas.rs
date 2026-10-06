@@ -1,4 +1,4 @@
-//! Helpers the idea files (`idea_*.rs`) share.
+//! Helpers the idea files (`idea_*.rs`) and `gait_bio.rs` share.
 use super::limbs::clamped;
 use super::limbs::pick;
 use super::rhythm::leaf_limbs;
@@ -50,10 +50,9 @@ pub(super) fn bulk(cfg: &Config, t: f32) -> f32 {
     cfg.min_size + t.clamp(0.0, 1.0) * (cfg.max_size - cfg.min_size)
 }
 
-/// The node two bones share, if they share one.
-pub(super) fn shared_node(c: &Creature, x: usize, y: usize) -> Option<u32> {
-    let (p, q) = (c.bones[x], c.bones[y]);
-    [p.a, p.b].into_iter().find(|n| *n == q.a || *n == q.b)
+/// A bone length kept within the body's limits.
+pub(super) fn bone_length(length: f32) -> f32 {
+    length.clamp(0.05, max_bone_length())
 }
 
 /// A leg with at least `bones` bones and, with `driven`, a muscle on it.

@@ -14,7 +14,7 @@
 //! Sims (1994, evolved block sizes).
 use super::ideas::{body_nodes, bulk, coin, drive, grip, inner_nodes, leaf_nodes, set};
 use super::limbs::pick;
-use super::rhythm::matching_limbs;
+use super::rhythm::{foot, matching_limbs};
 use super::{BoneIds, Context, Operator, child_bones, muscles_on};
 use crate::config::Config;
 use crate::evolution::{Creature, MAX_ORGAN_MASS, MIN_ORGAN_MASS, Rng};
@@ -74,8 +74,7 @@ fn ratchet_pair(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) ->
     }
     let (x, y) = pairs.get(rng.index(pairs.len()));
     let (grips, slides) = if coin(rng) { (x, y) } else { (y, x) };
-    let tip = |limb: &BoneIds| c.bones[limb[limb.len() - 1]].b as usize;
-    let (g, s) = (tip(grips), tip(slides));
+    let (g, s) = (foot(c, grips), foot(c, slides));
     let mut changed = false;
     set(&mut c.nodes[g].friction, cfg.max_friction, &mut changed);
     set(&mut c.nodes[s].friction, cfg.min_friction, &mut changed);

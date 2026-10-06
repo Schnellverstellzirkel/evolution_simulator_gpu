@@ -8,12 +8,12 @@
 //! The sources are Alexander (2003, leg segments in a ratio that suits the
 //! gait), Thompson (1917, growth by proportion), and Sims (1994, joint
 //! ranges as a gene). The golden ratio is a try, not a theory.
-use super::ideas::{coin, scale_branch, set, some_leg};
+use super::ideas::{bone_length, coin, scale_branch, set, some_leg};
 use super::limbs::pick;
 use super::rhythm::leaf_limbs;
 use super::{BoneIds, Context, Operator, is_neck};
 use crate::config::Config;
-use crate::evolution::{Creature, JOINT_LIMIT, Rng, max_bone_length};
+use crate::evolution::{Creature, JOINT_LIMIT, Rng};
 
 /// This file's operators, by name. Add each new one here.
 pub(super) const OPS: &[(&str, Operator)] = &[
@@ -30,10 +30,6 @@ pub(super) const OPS: &[(&str, Operator)] = &[
     ("lock_one_joint", lock_one_joint),
     ("open_one_joint", open_one_joint),
 ];
-
-fn bone_length(length: f32) -> f32 {
-    length.clamp(0.05, max_bone_length())
-}
 
 /// The bones of a leg get lengths in a golden-ratio progression, longest at
 /// the root (or at the foot), with the leg's total length kept.

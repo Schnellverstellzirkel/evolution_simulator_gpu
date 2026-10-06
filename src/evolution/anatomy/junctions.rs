@@ -1,7 +1,8 @@
 //! Operators that restructure junctions and segments of the skeleton.
+use super::rhythm::leaf_limbs_at;
 use super::{
-    BoneIds, Context, branch, branch_in, branch_nodes, child_bones, copy_branch, fit_stroke,
-    is_neck, muscles_on, new_muscle, parent_bones, remove_parts, room, span,
+    BoneIds, Context, branch, branch_nodes, child_bones, copy_branch, fit_stroke, is_neck,
+    muscles_on, new_muscle, parent_bones, remove_parts, room, span,
 };
 use crate::config::Config;
 use crate::evolution::{Bone, Bounded, Creature, MAX_MUSCLES, Muscle, NodeGene, Rng};
@@ -113,20 +114,10 @@ pub(crate) fn repeat_body_segment(
 ) -> bool {
     let children = child_bones(c);
     let parents = parent_bones(c);
-    // A leaf limb is a child branch without junctions: a chain to one tip.
-    let limbs_at = |node: usize| -> BoneIds {
-        children[node]
-            .iter()
-            .copied()
-            .filter(|&l| {
-                branch_in(c, &children, l)
-                    .iter()
-                    .all(|&x| children[c.bones[x].b as usize].len() <= 1)
-            })
-            .collect()
-    };
     let trunks: BoneIds = (0..c.bones.len())
-        .filter(|&j| !is_neck(c, j) && !limbs_at(c.bones[j].b as usize).is_empty())
+        .filter(|&j| {
+            !is_neck(c, j) && !leaf_limbs_at(c, &children, c.bones[j].b as usize).is_empty()
+        })
         .collect();
     if trunks.is_empty() {
         return false;
@@ -136,7 +127,7 @@ pub(crate) fn repeat_body_segment(
     let Some(above) = parents[a] else {
         return false;
     };
-    let limbs = limbs_at(b);
+    let limbs = leaf_limbs_at(c, &children, b);
     let segment: BoneIds = std::iter::once(trunk)
         .chain(limbs.iter().flat_map(|&l| branch(c, l)))
         .collect();
@@ -391,6 +382,14 @@ pub(super) fn keep_strokes(c: &mut Creature, before: &[f32]) {
         let ratio = new.max(0.05) / old.max(0.05);
         m.short *= ratio;
         m.long *= ratio;
+    }
+}
+
+/// Raises the whole body if a node would lie below the ground.
+pub(super) fn lift(c: &mut Creature) {
+    let low = c.nodes.iter().map(|n| n.y).fold(0.0, f32::min);
+    for n in &mut c.nodes {
+        n.y -= low;
     }
 }
 

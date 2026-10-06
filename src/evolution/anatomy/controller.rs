@@ -431,7 +431,7 @@ pub(crate) fn snap_limb_phases(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Operator, tests::bodies};
+    use super::super::{Operator, tests::grown};
     use super::*;
 
     fn run(op: Operator, bodies: &[Creature], check: impl Fn(&Creature, &Creature)) -> usize {
@@ -450,10 +450,6 @@ mod tests {
             }
         }
         applied
-    }
-
-    fn grown() -> Vec<Creature> {
-        bodies(&Config::default(), 160)
     }
 
     fn changed(before: &Creature, after: &Creature) -> Vec<usize> {

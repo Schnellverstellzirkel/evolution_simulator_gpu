@@ -8,10 +8,10 @@
 //! and Stanley (2007, regularity from repetition and symmetry). Like the other
 //! compound operators, each is a whole change, and the ones that add nodes
 //! give the idlest tips back.
-use super::compound::{close_ring, hinge_muscle, lead_muscle, shed_tips, strongest};
+use super::compound::{close_ring, hinge_muscle, lead_muscle, limb_phase, shed_tips, strongest};
 use super::junctions::{add_node, keep_strokes, spans, turn_branch};
 use super::limbs::clamped;
-use super::rhythm::leaf_limbs;
+use super::rhythm::{leaf_limbs, tip_x};
 use super::{
     BoneIds, Context, MuscleIds, branch, branch_nodes, child_bones, copy_branch_limited, is_neck,
     muscles_on, parent_bones, room,
@@ -21,16 +21,9 @@ use crate::evolution::{Bone, Creature, Rng};
 
 /// The leaf limb whose tip is nearest to `x` along the body, if any.
 fn nearest_leg(c: &Creature, x: f32) -> Option<BoneIds> {
-    let tip = |limb: &BoneIds| c.nodes[c.bones[limb[limb.len() - 1]].b as usize].x;
     leaf_limbs(c)
         .into_iter()
-        .min_by(|p, q| (tip(p) - x).abs().total_cmp(&(tip(q) - x).abs()))
-}
-
-/// The phase of the strongest muscle on `limb`.
-fn limb_phase(c: &Creature, limb: &[usize]) -> Option<f32> {
-    let on = muscles_on(c, limb, false);
-    strongest(c, &on).map(|i| c.muscles[i].phase)
+        .min_by(|p, q| (tip_x(c, p) - x).abs().total_cmp(&(tip_x(c, q) - x).abs()))
 }
 
 /// Hangs a new leg of two bones from a node of the trunk: a thigh that points

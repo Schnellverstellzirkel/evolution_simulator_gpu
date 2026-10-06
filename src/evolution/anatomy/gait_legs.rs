@@ -14,7 +14,7 @@
 use super::compound::{close_ring, lead_muscle, shed_tips, strongest};
 use super::extra::drive;
 use super::junctions::{
-    add, add_node, keep_strokes, pos, scale, shift_branch, spans, sub, turn_branch,
+    add, add_node, keep_strokes, lift, pos, scale, shift_branch, spans, sub, turn_branch,
 };
 use super::limbs::narrow;
 use super::muscles::turn;
@@ -62,14 +62,6 @@ fn bend(c: &Creature, upper: usize, lower: usize) -> f32 {
 /// The angle turn (-pi to pi) that takes direction `from` to direction `to`.
 fn angle_between(from: [f32; 2], to: [f32; 2]) -> f32 {
     (from[0] * to[1] - from[1] * to[0]).atan2(from[0] * to[0] + from[1] * to[1])
-}
-
-/// Raises the whole body if a node would lie below the ground.
-fn lift(c: &mut Creature) {
-    let low = c.nodes.iter().map(|n| n.y).fold(0.0, f32::min);
-    for n in &mut c.nodes {
-        n.y -= low;
-    }
 }
 
 /// Whether every node is inside the region where nodes may start.
