@@ -11,7 +11,7 @@ use super::{
 use crate::{
     physics,
     theme::{
-        GAP_L,
+        GAP_L, Theme,
         scene::{FALLEN, GROUND_INK},
     },
 };
@@ -104,76 +104,13 @@ impl App {
         }
     }
     /// The top archived elites running side by side, with live standings.
+    /// The top archived elites running side by side, with live standings.
     pub(super) fn race_view(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
-        ui.horizontal(|ui| {
-            ui.heading("Race");
-            ui.label(
-                RichText::new("The fastest kept creatures run their trials side by side.")
-                    .color(theme.muted),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.race_picks.is_empty() {
-                    if ui
-                        .button("New race")
-                        .on_hover_text("Take the current top five kept creatures")
-                        .clicked()
-                    {
-                        self.restart_race();
-                    }
-                } else {
-                    if ui
-                        .button("Top five")
-                        .on_hover_text("Forget your picks and race the top five kept creatures")
-                        .clicked()
-                    {
-                        self.race_picks.clear();
-                        self.restart_race();
-                    }
-                    ui.label(
-                        RichText::new(
-                            "Your picks against the champion. Race it under any replay adds one.",
-                        )
-                        .small()
-                        .color(theme.muted),
-                    );
-                }
-            });
-        });
-        ui.horizontal(|ui| {
-            if ui
-                .button(if self.playing {
-                    "Pause  (K)"
-                } else {
-                    "Play  (K)"
-                })
-                .clicked()
-            {
-                self.playing = !self.playing;
-            }
-            if ui.button("Replay").clicked() {
-                for lane in &mut self.race {
-                    lane.playback.reset();
-                }
-                self.race_camera = 0.0;
-            }
-            speed_picker(ui, &mut self.speed, "race_speed");
-        });
+        self.race_header(ui, theme);
+        self.race_controls(ui);
         if self.race.is_empty() {
-            ui.add_space(GAP_L);
-            let waiting = self.race_pending
-                && self
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.archive_size > 0);
-            ui.label(
-                RichText::new(if waiting {
-                    "Loading the fastest kept creatures…"
-                } else {
-                    "No archived creatures yet. Run a generation, then start a new race."
-                })
-                .color(theme.muted),
-            );
+            self.race_empty_note(ui, theme);
             return;
         }
         let distances: Vec<f32> = self
@@ -215,162 +152,286 @@ impl App {
         let dt = ui.ctx().input(|i| i.stable_dt).clamp(0.0, 0.1);
         self.race_camera += (target - self.race_camera) * (dt * 4.0).min(1.0);
         let camera = self.race_camera;
+        let scene = RaceScene {
+            painter: &painter,
+            lanes_rect,
+            lane_height,
+            zoom,
+            camera,
+            visible,
+            leader,
+            distances: &distances,
+            theme,
+        };
         for (i, lane) in self.race.iter().enumerate() {
-            let lane_rect = Rect::from_min_max(
-                Pos2::new(
-                    lanes_rect.left(),
-                    lanes_rect.top() + i as f32 * lane_height + 2.,
-                ),
-                Pos2::new(
-                    lanes_rect.right(),
-                    lanes_rect.top() + (i + 1) as f32 * lane_height - 2.,
-                ),
+            Self::paint_race_lane(i, lane, &scene);
+        }
+        self.paint_race_standings(&painter, rect, lanes_rect, &distances, theme);
+    }
+    /// The title row: the New race or Top five button and what it means.
+    fn race_header(&mut self, ui: &mut egui::Ui, theme: Theme) {
+        ui.horizontal(|ui| {
+            ui.heading("Race");
+            ui.label(
+                RichText::new("The fastest kept creatures run their trials side by side.")
+                    .color(theme.muted),
             );
-            let is_leader = i == leader;
-            // Each lane is a strip of the world: its sky and skyline over a
-            // street, the leader's lane framed in orange.
-            let ground = lane_rect.bottom() - 16.;
-            let lane_painter = painter.with_clip_rect(lane_rect);
-            let lane_config = &lane.playback.config;
-            let clock = lane.playback.tick as f32 / physics::rate() as f32;
-            crate::world_fx::backdrop(
-                &lane_painter,
-                lane_rect,
-                ground,
-                camera * zoom + i as f32 * 900.,
-                clock,
-                lane_config,
-                None,
-            );
-            let span = [
-                Pos2::new(lane_rect.left(), ground),
-                Pos2::new(lane_rect.right(), ground),
-            ];
-            crate::world_fx::ground_body(
-                &lane_painter,
-                lane_rect,
-                lane_config,
-                &span,
-                &[camera, camera + lane_rect.width() / zoom],
-                zoom,
-            );
-            // A tick about every 150 px: 0.5, 1, 2, 5 or 10 m.
-            let step = [0.5f32, 1.0, 2.0, 5.0, 10.0]
-                .into_iter()
-                .find(|step| step * zoom >= 150.0)
-                .unwrap_or(10.0);
-            let mut x = (camera / step).ceil() * step;
-            while x <= camera + visible {
-                let px = lane_rect.left() + (x - camera) * zoom;
-                lane_painter.line_segment(
-                    [
-                        Pos2::new(px, ground),
-                        Pos2::new(px, lane_rect.bottom() - 5.),
-                    ],
-                    Stroke::new(1., GROUND_INK),
-                );
-                lane_painter.line_segment(
-                    [Pos2::new(px, lane_rect.top()), Pos2::new(px, ground)],
-                    Stroke::new(1., crate::theme::scene::GRID),
-                );
-                if i == 0 {
-                    lane_painter.text(
-                        Pos2::new(px + 3., ground - 2.),
-                        Align2::LEFT_BOTTOM,
-                        if step < 1.0 {
-                            format!("{x:.1} m")
-                        } else {
-                            format!("{x:.0} m")
-                        },
-                        FontId::proportional(14.5),
-                        GROUND_INK,
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.race_picks.is_empty() {
+                    if ui
+                        .button("New race")
+                        .on_hover_text("Take the current top five kept creatures")
+                        .clicked()
+                    {
+                        self.restart_race();
+                    }
+                } else {
+                    if ui
+                        .button("Top five")
+                        .on_hover_text("Forget your picks and race the top five kept creatures")
+                        .clicked()
+                    {
+                        self.race_picks.clear();
+                        self.restart_race();
+                    }
+                    ui.label(
+                        RichText::new(
+                            "Your picks against the champion. Race it under any replay adds one.",
+                        )
+                        .small()
+                        .color(theme.muted),
                     );
                 }
-                x += step;
-            }
-            let origin = Pos2::new(lane_rect.left() - camera * zoom, ground);
-            let playback = &lane.playback;
-            let marks = FrameMarks::of(playback);
-            draw_creature(
-                &lane_painter,
-                &playback.nodes,
-                &playback.creature,
-                origin,
-                zoom,
-                &marks,
-            );
-            crate::theme::vignette(&lane_painter, lane_rect, 0.35);
-            use crate::theme::{
-                HudLine, hud_block,
-                scene::{HUD, HUD_DIM},
-            };
-            hud_block(
-                &lane_painter,
-                lane_rect.left_top() + Vec2::splat(6.),
-                Align2::LEFT_TOP,
-                &[
-                    HudLine::text(
-                        format!("{}. {}", i + 1, species_name(&lane.playback.creature)),
-                        15.,
-                        if is_leader {
-                            HUD
-                        } else {
-                            crate::theme::scene::HUD_INK
-                        },
-                    ),
-                    HudLine::text(
-                        format!(
-                            "finishes at {:.2} m · {}",
-                            lane.playback.distance, lane.label
-                        ),
-                        12.,
-                        HUD_DIM,
-                    ),
-                ],
-            );
-            let mut right = vec![HudLine::value(
-                format!("{:.2} m", distances[i]),
-                18.,
-                if is_leader {
-                    HUD
+            });
+        });
+    }
+    /// The Play and Replay buttons and the speed menu.
+    fn race_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui
+                .button(if self.playing {
+                    "Pause  (K)"
                 } else {
-                    crate::theme::scene::HUD_INK
-                },
-            )];
-            if playback.fallen().is_some() {
-                right.push(HudLine::text(
-                    playback.ending.short().to_owned(),
-                    13.,
-                    FALLEN,
-                ));
+                    "Play  (K)"
+                })
+                .clicked()
+            {
+                self.playing = !self.playing;
             }
-            hud_block(
-                &lane_painter,
-                lane_rect.right_top() + Vec2::new(-6., 6.),
-                Align2::RIGHT_TOP,
-                &right,
+            if ui.button("Replay").clicked() {
+                for lane in &mut self.race {
+                    lane.playback.reset();
+                }
+                self.race_camera = 0.0;
+            }
+            speed_picker(ui, &mut self.speed, "race_speed");
+        });
+    }
+    /// What the tab says while no lane runs.
+    fn race_empty_note(&self, ui: &mut egui::Ui, theme: Theme) {
+        ui.add_space(GAP_L);
+        let waiting = self.race_pending
+            && self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.archive_size > 0);
+        ui.label(
+            RichText::new(if waiting {
+                "Loading the fastest kept creatures…"
+            } else {
+                "No archived creatures yet. Run a generation, then start a new race."
+            })
+            .color(theme.muted),
+        );
+    }
+    /// One lane: its world strip, ruler, creature, readouts and frame.
+    fn paint_race_lane(i: usize, lane: &RaceLane, scene: &RaceScene) {
+        let painter = scene.painter;
+        let lanes_rect = scene.lanes_rect;
+        let lane_height = scene.lane_height;
+        let zoom = scene.zoom;
+        let camera = scene.camera;
+        let visible = scene.visible;
+        let leader = scene.leader;
+        let distances = scene.distances;
+        let theme = scene.theme;
+        let lane_rect = Rect::from_min_max(
+            Pos2::new(
+                lanes_rect.left(),
+                lanes_rect.top() + i as f32 * lane_height + 2.,
+            ),
+            Pos2::new(
+                lanes_rect.right(),
+                lanes_rect.top() + (i + 1) as f32 * lane_height - 2.,
+            ),
+        );
+        let is_leader = i == leader;
+        // Each lane is a strip of the world: its sky and skyline over a
+        // street, the leader's lane framed in orange.
+        let ground = lane_rect.bottom() - 16.;
+        let lane_painter = painter.with_clip_rect(lane_rect);
+        let lane_config = &lane.playback.config;
+        let clock = lane.playback.tick as f32 / physics::rate() as f32;
+        crate::world_fx::backdrop(
+            &lane_painter,
+            lane_rect,
+            ground,
+            camera * zoom + i as f32 * 900.,
+            clock,
+            lane_config,
+            None,
+        );
+        let span = [
+            Pos2::new(lane_rect.left(), ground),
+            Pos2::new(lane_rect.right(), ground),
+        ];
+        crate::world_fx::ground_body(
+            &lane_painter,
+            lane_rect,
+            lane_config,
+            &span,
+            &[camera, camera + lane_rect.width() / zoom],
+            zoom,
+        );
+        // A tick about every 150 px: 0.5, 1, 2, 5 or 10 m.
+        let step = [0.5f32, 1.0, 2.0, 5.0, 10.0]
+            .into_iter()
+            .find(|step| step * zoom >= 150.0)
+            .unwrap_or(10.0);
+        let mut x = (camera / step).ceil() * step;
+        while x <= camera + visible {
+            let px = lane_rect.left() + (x - camera) * zoom;
+            lane_painter.line_segment(
+                [
+                    Pos2::new(px, ground),
+                    Pos2::new(px, lane_rect.bottom() - 5.),
+                ],
+                Stroke::new(1., GROUND_INK),
             );
-            painter.rect_stroke(
-                lane_rect,
-                2,
-                Stroke::new(
-                    if is_leader { 2. } else { 1. },
-                    if is_leader {
-                        theme.accent
+            lane_painter.line_segment(
+                [Pos2::new(px, lane_rect.top()), Pos2::new(px, ground)],
+                Stroke::new(1., crate::theme::scene::GRID),
+            );
+            if i == 0 {
+                lane_painter.text(
+                    Pos2::new(px + 3., ground - 2.),
+                    Align2::LEFT_BOTTOM,
+                    if step < 1.0 {
+                        format!("{x:.1} m")
                     } else {
-                        theme.card_border
+                        format!("{x:.0} m")
+                    },
+                    FontId::proportional(14.5),
+                    GROUND_INK,
+                );
+            }
+            x += step;
+        }
+        let origin = Pos2::new(lane_rect.left() - camera * zoom, ground);
+        let playback = &lane.playback;
+        let marks = FrameMarks::of(playback);
+        draw_creature(
+            &lane_painter,
+            &playback.nodes,
+            &playback.creature,
+            origin,
+            zoom,
+            &marks,
+        );
+        crate::theme::vignette(&lane_painter, lane_rect, 0.35);
+        Self::paint_race_lane_hud(&lane_painter, i, lane, lane_rect, is_leader, distances);
+        painter.rect_stroke(
+            lane_rect,
+            2,
+            Stroke::new(
+                if is_leader { 2. } else { 1. },
+                if is_leader {
+                    theme.accent
+                } else {
+                    theme.card_border
+                },
+            ),
+            egui::StrokeKind::Inside,
+        );
+    }
+    /// A lane's readouts: the creature's name and finish, the live distance and
+    /// how it ended.
+    fn paint_race_lane_hud(
+        lane_painter: &egui::Painter,
+        i: usize,
+        lane: &RaceLane,
+        lane_rect: Rect,
+        is_leader: bool,
+        distances: &[f32],
+    ) {
+        let playback = &lane.playback;
+        use crate::theme::{
+            HudLine, hud_block,
+            scene::{HUD, HUD_DIM},
+        };
+        hud_block(
+            lane_painter,
+            lane_rect.left_top() + Vec2::splat(6.),
+            Align2::LEFT_TOP,
+            &[
+                HudLine::text(
+                    format!("{}. {}", i + 1, species_name(&lane.playback.creature)),
+                    15.,
+                    if is_leader {
+                        HUD
+                    } else {
+                        crate::theme::scene::HUD_INK
                     },
                 ),
-                egui::StrokeKind::Inside,
-            );
+                HudLine::text(
+                    format!(
+                        "finishes at {:.2} m · {}",
+                        lane.playback.distance, lane.label
+                    ),
+                    12.,
+                    HUD_DIM,
+                ),
+            ],
+        );
+        let mut right = vec![HudLine::value(
+            format!("{:.2} m", distances[i]),
+            18.,
+            if is_leader {
+                HUD
+            } else {
+                crate::theme::scene::HUD_INK
+            },
+        )];
+        if playback.fallen().is_some() {
+            right.push(HudLine::text(
+                playback.ending.short().to_owned(),
+                13.,
+                FALLEN,
+            ));
         }
+        hud_block(
+            lane_painter,
+            lane_rect.right_top() + Vec2::new(-6., 6.),
+            Align2::RIGHT_TOP,
+            &right,
+        );
+    }
+    /// The standings board beside the lanes.
+    fn paint_race_standings(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        lanes_rect: Rect,
+        distances: &[f32],
+        theme: Theme,
+    ) {
         let board = Rect::from_min_max(
             Pos2::new(lanes_rect.right() + 12., rect.top()),
             rect.right_bottom(),
         );
-        crate::theme::plate(&painter, board, theme, theme.card, false);
+        crate::theme::plate(painter, board, theme, theme.card, false);
         crate::theme::caps_text(
-            &painter,
+            painter,
             board.left_top() + Vec2::new(10., 10.),
             Align2::LEFT_TOP,
             "Standings",
@@ -412,4 +473,17 @@ impl App {
             theme.muted,
         );
     }
+}
+/// What every lane of one frame shares: the zoom and camera of the strips,
+/// who leads and each lane's distance.
+struct RaceScene<'a> {
+    painter: &'a egui::Painter,
+    lanes_rect: Rect,
+    lane_height: f32,
+    zoom: f32,
+    camera: f32,
+    visible: f32,
+    leader: usize,
+    distances: &'a [f32],
+    theme: Theme,
 }
