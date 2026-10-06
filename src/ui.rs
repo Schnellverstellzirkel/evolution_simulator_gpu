@@ -1,21 +1,25 @@
-use crate::theme::{
-    GAP_L, GAP_M, Theme, apply_style,
-    scene::{
-        BONE, EYE, FALLEN, FORCE_GROUND, FORCE_MUSCLE, GROUND_EDGE, GROUND_INK, GROUND_TOP,
-        MUSCLE_ACTIVE, MUSCLE_REST, MUSCLE_TIRED, NODE_GRIPPY, NODE_SLICK, ORGAN, OUTLINE,
-        SKY_HORIZON, SKY_TOP, TOUCHDOWN,
-    },
-};
+mod loading;
+#[cfg(test)]
+mod test_support;
+mod text;
+mod widgets;
+
 use crate::{
     config::Config,
     creature_kernel,
     evolution::{Creature, FAILED},
     physics::{self, Node},
     storage::Stats,
+    theme::{
+        GAP_L, GAP_M, Theme, apply_style,
+        scene::{
+            BONE, EYE, FALLEN, FORCE_GROUND, FORCE_MUSCLE, GROUND_EDGE, GROUND_INK, GROUND_TOP,
+            MUSCLE_ACTIVE, MUSCLE_REST, MUSCLE_TIRED, NODE_GRIPPY, NODE_SLICK, ORGAN, OUTLINE,
+            SKY_HORIZON, SKY_TOP, TOUCHDOWN,
+        },
+    },
     worker::{Command, EventKind, Snapshot, Worker},
 };
-mod loading;
-
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points, VLine};
 use image::{
@@ -28,6 +32,8 @@ use std::{
     sync::{Arc, atomic::Ordering, mpsc},
     time::{Duration, Instant},
 };
+use text::{ago, file_size, number, seconds_text, species_name};
+use widgets::{Choices, color_dot, heat_color, mix_color, species_color, speed_picker};
 const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
 /// Share of the viewport height under the ground line, room for the HUD.
 const GROUND_SHARE: f32 = 0.25;
@@ -115,21 +121,6 @@ fn directory_bytes(root: &std::path::Path) -> u64 {
         }
     }
     total
-}
-fn file_size(bytes: u64) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-    let bytes = bytes as f64;
-    if bytes >= GIB {
-        format!("{:.2} GiB", bytes / GIB)
-    } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes / MIB)
-    } else if bytes >= KIB {
-        format!("{:.0} KiB", bytes / KIB)
-    } else {
-        format!("{bytes:.0} B")
-    }
 }
 fn save_screenshot(capture: &egui::ColorImage, dir: &std::path::Path) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
@@ -723,18 +714,6 @@ struct RaceLane {
 /// Creatures the player sends to the race with "Race it", at most this many
 /// beside the champion.
 const RACE_PICKS: usize = 4;
-/// Cold-to-hot color for a normalized map value.
-fn heat_color(t: f32) -> Color32 {
-    // Cold steel blue through amber to hot rust.
-    let cold = Color32::from_rgb(52, 84, 110);
-    let mid = Color32::from_rgb(226, 170, 64);
-    let hot = Color32::from_rgb(196, 70, 40);
-    if t < 0.5 {
-        mix_color(cold, mid, t * 2.0)
-    } else {
-        mix_color(mid, hot, (t - 0.5) * 2.0)
-    }
-}
 /// Height range of one archive height bin; mirrors `qd::height_axis`.
 fn height_bin_range(bin: usize) -> (f32, f32) {
     let low = 0.15f32;
@@ -766,53 +745,6 @@ fn body_plan_changed(
     parent: Option<&crate::worker::LineageStep>,
 ) -> bool {
     parent.is_some_and(|parent| body_counts(&step.creature) != body_counts(&parent.creature))
-}
-/// Invented stems for automatic species names. A stable body-plan hash picks
-/// one; the gait word is added after it.
-const SPECIES_STEMS: [&str; 16] = [
-    "Vex", "Tor", "Quil", "Nym", "Zeb", "Cro", "Fen", "Lum", "Tar", "Wisp", "Brak", "Ovi", "Pyr",
-    "Sable", "Dro", "Ril",
-];
-/// Syllables between the stem and the size word.
-const SPECIES_LINKS: [&str; 8] = ["a", "o", "i", "u", "e", "y", "ar", "en"];
-/// Short deterministic species name from the body plan (see
-/// `worker::body_plan`) and a gait word from the muscles' rhythm. It uses
-/// only creature data, so archive cards, lineage tiles and race lanes agree
-/// without asking the worker.
-fn species_name(creature: &Creature) -> String {
-    // The body plan decides the name, so a creature keeps it through the
-    // small mutations that tune lengths and rhythms. A stem and a linking
-    // syllable give 128 names per size class.
-    let plan = crate::worker::body_plan(creature);
-    let mixed = plan ^ (plan >> 29) ^ (plan >> 47);
-    let stem = SPECIES_STEMS[(mixed % SPECIES_STEMS.len() as u64) as usize];
-    let link = SPECIES_LINKS[((mixed >> 8) % SPECIES_LINKS.len() as u64) as usize];
-    let form = match creature.bones.len() {
-        0..=2 => "ling",
-        3..=4 => "pod",
-        5..=7 => "form",
-        8..=11 => "morph",
-        _ => "titan",
-    };
-    format!("{stem}{link}{form} {}", gait_word(creature))
-}
-/// Cadence bucket from the muscles' rhythm periods, in cycles per second.
-fn gait_word(creature: &Creature) -> &'static str {
-    if creature.muscles.is_empty() {
-        return "Drifter";
-    }
-    let mean_period =
-        creature.muscles.iter().map(|m| m.period).sum::<f32>() / creature.muscles.len() as f32;
-    let hertz = 1.0 / mean_period.max(0.05);
-    if hertz < 0.5 {
-        "Crawler"
-    } else if hertz < 1.0 {
-        "Walker"
-    } else if hertz < 2.0 {
-        "Trotter"
-    } else {
-        "Sprinter"
-    }
 }
 /// Validates an imported creature JSON before it reaches the replay engine.
 /// Rejects bodies the physics cannot step, with a short reason.
@@ -893,13 +825,6 @@ fn list_saves(dir: &std::path::Path) -> Vec<SaveEntry> {
         .collect();
     saves.sort_by_key(|save| std::cmp::Reverse(save.modified));
     saves
-}
-/// "3 min ago" from a file time.
-fn ago(time: Option<std::time::SystemTime>) -> String {
-    time.and_then(|t| t.elapsed().ok()).map_or_else(
-        || "unknown time".to_owned(),
-        |age| format!("{} ago", seconds_text(age.as_secs_f64())),
-    )
 }
 /// What a line of the event feed lets the player do.
 #[derive(Clone, Copy)]
@@ -5761,38 +5686,6 @@ fn ui_frame_interval() -> Option<Duration> {
         (fps > 0.0).then(|| Duration::from_secs_f64(0.97 / fps))
     })
 }
-/// Choice buttons that keep their frame, so every option reads as a
-/// button and the chosen one is filled.
-trait Choices {
-    fn pick(&mut self, selected: bool, text: impl Into<egui::WidgetText>) -> egui::Response;
-    fn choice<T: PartialEq>(
-        &mut self,
-        current: &mut T,
-        value: T,
-        text: impl Into<egui::WidgetText>,
-    ) -> egui::Response;
-}
-impl Choices for egui::Ui {
-    fn pick(&mut self, selected: bool, text: impl Into<egui::WidgetText>) -> egui::Response {
-        self.add(egui::Button::new(text).selected(selected))
-    }
-    fn choice<T: PartialEq>(
-        &mut self,
-        current: &mut T,
-        value: T,
-        text: impl Into<egui::WidgetText>,
-    ) -> egui::Response {
-        let response = self.pick(*current == value, text);
-        if response.clicked() {
-            *current = value;
-        }
-        response
-    }
-}
-fn color_dot(ui: &mut egui::Ui, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.), Sense::hover());
-    ui.painter().circle_filled(rect.center(), 3., color);
-}
 fn paint_card(
     painter: &egui::Painter,
     card: &crate::worker::Card,
@@ -6417,65 +6310,6 @@ fn effect_row(
     }
     picked.is_some()
 }
-/// Playback speed as one compact menu of five speeds, the height of a
-/// button, so a row of replay controls stays one line.
-fn speed_picker(ui: &mut egui::Ui, speed: &mut f32, id: &str) {
-    let label = |value: f32| {
-        if value < 1.0 {
-            format!("Speed {value}×")
-        } else {
-            format!("Speed {value:.0}×")
-        }
-    };
-    egui::ComboBox::from_id_salt(id)
-        .selected_text(label(*speed))
-        .show_ui(ui, |ui| {
-            for value in [0.25, 0.5, 1.0, 2.0, 4.0] {
-                ui.selectable_value(speed, value, label(value));
-            }
-        })
-        .response
-        .on_hover_text("Playback speed of the replay");
-}
-/// A short duration for people: "8 s", "3 min", "2 h".
-fn seconds_text(seconds: f64) -> String {
-    if !seconds.is_finite() || seconds < 0.0 {
-        "a while".to_owned()
-    } else if seconds < 90.0 {
-        format!("{:.0} s", seconds.max(1.0))
-    } else if seconds < 90.0 * 60.0 {
-        format!("{:.0} min", seconds / 60.0)
-    } else {
-        format!("{:.0} h", seconds / 3600.0)
-    }
-}
-fn number(n: usize) -> String {
-    let text = n.to_string();
-    let mut out = String::new();
-    for (i, c) in text.chars().enumerate() {
-        if i > 0 && (text.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-fn species_color(n: usize, m: usize) -> Color32 {
-    // Muted hues, like paint on old machinery.
-    egui::ecolor::HsvaGamma {
-        h: ((n * 257 + m) as f32 * 0.618034).fract(),
-        s: 0.45,
-        v: 0.72,
-        a: 1.,
-    }
-    .into()
-}
-/// Linear blend between two colors; `t` is clamped to [0, 1].
-fn mix_color(a: Color32, b: Color32, t: f32) -> Color32 {
-    let t = t.clamp(0.0, 1.0);
-    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
-}
 /// A node's shell: slick steel blue at the lowest friction a gene allows,
 /// brass at the highest.
 fn node_color(friction: f32) -> Color32 {
@@ -7031,7 +6865,8 @@ fn export_creature_gif(playback: &Playback, path: &std::path::Path) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::evolution::{Bone, Muscle, NodeGene};
+
+    use crate::ui::test_support::test_creature;
     #[test]
     fn the_follow_camera_ignores_the_stride_and_keeps_up_with_the_walk() {
         // One node walking at 2 m/s, swinging 0.3 m back and forth once per
@@ -7083,49 +6918,6 @@ mod tests {
         assert_eq!(scaled_range(10.0..=20.0, 2.0), 5.0..=25.0);
         assert_eq!(scaled_range(-4.0..=4.0, 1.0), -4.0..=4.0);
     }
-    fn test_creature() -> Creature {
-        Creature {
-            nodes: vec![
-                NodeGene {
-                    x: 0.0,
-                    y: 0.0,
-                    diameter: 0.2,
-                    friction: 0.8,
-                },
-                NodeGene {
-                    x: 0.5,
-                    y: 0.0,
-                    diameter: 0.2,
-                    friction: 0.8,
-                },
-                NodeGene {
-                    x: 1.0,
-                    y: 0.0,
-                    diameter: 0.2,
-                    friction: 0.8,
-                },
-            ]
-            .into(),
-            bones: vec![Bone::new(0, 1, 0.5), Bone::new(1, 2, 0.5)].into(),
-            muscles: vec![Muscle {
-                bone_a: 0,
-                bone_b: 1,
-                anchor_a: 0.5,
-                anchor_b: 0.5,
-                short: 0.4,
-                long: 0.6,
-                period: 0.8,
-                phase: 0.0,
-                duty: 0.5,
-                stiffness: 10.0,
-                sensor: crate::evolution::NO_SENSOR,
-                reset: 0.0,
-                tendon: 0.0,
-            }]
-            .into(),
-            id: 7,
-        }
-    }
     #[test]
     fn imported_creatures_round_trip_through_json() {
         let mut creature = test_creature();
@@ -7149,40 +6941,6 @@ mod tests {
         assert!(!follows_champion(true, Some(7), Some(42)));
         // No finished generation, no champion.
         assert!(!follows_champion(false, Some(7), None));
-    }
-    #[test]
-    fn body_plans_ignore_lengths_and_rhythms() {
-        use crate::worker::body_plan;
-        let creature = test_creature();
-        let mut tuned = creature.clone();
-        tuned.bones[0].rest_length = 0.9;
-        tuned.muscles[0].period = 0.3;
-        tuned.nodes[1].x = 0.7;
-        assert_eq!(body_plan(&creature), body_plan(&tuned));
-        let mut more = creature.clone();
-        more.muscles.push(more.muscles[0]);
-        assert_ne!(body_plan(&creature), body_plan(&more));
-    }
-    #[test]
-    fn species_names_follow_the_body_plan() {
-        let creature = test_creature();
-        let name = species_name(&creature);
-        let mut reversed = creature.clone();
-        reversed.bones.reverse();
-        assert_eq!(name, species_name(&reversed));
-        let mut longer = creature.clone();
-        longer.nodes.push(NodeGene {
-            x: 1.5,
-            y: 0.0,
-            diameter: 0.2,
-            friction: 0.8,
-        });
-        longer.bones.push(Bone::new(2, 3, 0.5));
-        assert_ne!(name, species_name(&longer));
-        let mut tuned = creature.clone();
-        tuned.bones[1].rest_length = 0.8;
-        tuned.muscles[0].phase = 0.4;
-        assert_eq!(name, species_name(&tuned), "tuning keeps the name");
     }
     #[test]
     fn a_preparing_replay_holds_the_first_pose_and_survives_playback() {
