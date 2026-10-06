@@ -968,14 +968,15 @@ fn an_island_is_refined_when_its_archive_is_old_enough() {
     }
     run_synthetic(&mut experiment);
     assert_eq!(experiment.generation, qd::REFINE_AFTER);
-    // Island 0, the hub and the wild islands moved to the cells of their
-    // body classes (the other isolated islands follow 10 generations apart).
+    // Island 0 and the hub moved to the cells of their body classes (the other
+    // isolated islands follow 10 generations apart). A wild island never
+    // refines: it keeps one elite per way of moving (`refine_archives`).
     // The elites of other shapes and sizes sit in cells of their own, and
     // none was lost.
     for (index, island) in experiment.islands[..storage::island_count()].iter().enumerate() {
         assert_eq!(
             island.refined(),
-            index == 0 || index >= storage::ISOLATED_ISLANDS,
+            index == 0 || index == storage::hub_island(),
             "island {index}"
         );
     }
