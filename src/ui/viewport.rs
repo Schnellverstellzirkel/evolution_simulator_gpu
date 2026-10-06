@@ -137,7 +137,9 @@ impl App {
         }
         back
     }
-    pub(super) fn viewport(&mut self, ui: &mut egui::Ui, height: f32) {
+    /// The replay header: the mode label, the creature's name and its buttons
+    /// (on the same line when the view is wide, else on a line of their own).
+    fn viewport_header(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
         let mut back = false;
         // A narrow replay (docked beside the archive) puts its buttons on a
@@ -207,10 +209,10 @@ impl App {
         if back {
             self.back_to_champion();
         }
-        let (rect, response) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width(), height.max(120.)),
-            Sense::click_and_drag(),
-        );
+    }
+    /// The replay's input: a click pauses, scrolling zooms, a drag pans, and
+    /// the player's own zoom is kept or replaced by the fitted one.
+    fn viewport_camera(&mut self, ui: &mut egui::Ui, rect: Rect, response: egui::Response) {
         if response.clicked() {
             self.playing = !self.playing;
         }
@@ -242,13 +244,16 @@ impl App {
         {
             self.zoom = zoom;
         }
+    }
+    /// The scene's frame of reference for this frame: the painter, the camera's
+    /// origin and the ground of the world the replay ran in.
+    fn scene_frame(&self, ui: &egui::Ui, rect: Rect) -> SceneFrame<'_> {
         let painter = ui.painter_at(rect);
         // All scene primitives are tessellated into egui's batched wgpu render pass.
         let origin = Pos2::new(
             rect.center().x - self.camera[0] * self.zoom,
             rect.bottom() - rect.height() * GROUND_SHARE + self.camera[1] * self.zoom,
         );
-        let world = |x: f32, y: f32| Pos2::new(origin.x + x * self.zoom, origin.y - y * self.zoom);
         let cfg = self
             .playback
             .as_ref()
@@ -278,19 +283,57 @@ impl App {
         } else {
             0.0
         };
-        let height_at = |x: f32, with_hurdles: bool| {
-            crate::physics::ground(
-                x,
-                amplitude,
-                slope,
-                gaps,
-                if with_hurdles { hurdles } else { 0.0 },
-                phase,
-            )
-            .0
-        };
         let start = (rect.left() - origin.x) / self.zoom;
         let end = (rect.right() - origin.x) / self.zoom;
+        let left = start.floor() as i32;
+        let right = end.ceil() as i32;
+        SceneFrame {
+            painter,
+            rect,
+            origin,
+            zoom: self.zoom,
+            cfg,
+            clock,
+            amplitude,
+            slope,
+            gaps,
+            hurdles,
+            mud,
+            phase,
+            start,
+            end,
+            left,
+            right,
+        }
+    }
+    /// Paints the replay's scene under the HUD: sky, ground, water, the
+    /// creature and the weather over it.
+    fn paint_scene(&self, ctx: &egui::Context, f: &SceneFrame) {
+        let painter = &f.painter;
+        let rect = f.rect;
+        let cfg = f.cfg;
+        let clock = f.clock;
+        self.paint_sky_and_grid(f);
+        self.paint_ground(f);
+        self.paint_water(f);
+        self.paint_ruler(f);
+        self.paint_replay_creature(ctx, f);
+        crate::world_fx::weather(painter, rect, cfg, clock, self.camera[0] * self.zoom);
+        // Film look over the scene, under the HUD.
+        crate::theme::vignette(painter, rect, 0.55);
+        crate::theme::grain(painter, rect, clock, 0.055);
+    }
+    /// The backdrop, the sky and the one-meter grid lines.
+    fn paint_sky_and_grid(&self, f: &SceneFrame) {
+        let painter = &f.painter;
+        let rect = f.rect;
+        let origin = f.origin;
+        let cfg = f.cfg;
+        let clock = f.clock;
+        let left = f.left;
+        let right = f.right;
+        let world = |x: f32, y: f32| f.world(x, y);
+        let height_at = |x: f32, with_hurdles: bool| f.height_at(x, with_hurdles);
         // The skyline stands on the ground under the middle of the view.
         let horizon = if cfg.ground {
             world(
@@ -302,7 +345,7 @@ impl App {
             origin.y
         };
         crate::world_fx::backdrop(
-            &painter,
+            painter,
             rect,
             horizon,
             self.camera[0] * self.zoom,
@@ -310,9 +353,7 @@ impl App {
             cfg,
             (cfg.water > 0.0).then(|| world(0., cfg.water).y),
         );
-        crate::world_fx::sky(&painter, rect, cfg, clock);
-        let left = start.floor() as i32;
-        let right = end.ceil() as i32;
+        crate::world_fx::sky(painter, rect, cfg, clock);
         for x in left..=right {
             let pos = world(x as f32, 0.);
             painter.line_segment(
@@ -323,6 +364,23 @@ impl App {
                 Stroke::new(1., crate::theme::scene::GRID),
             );
         }
+    }
+    /// The ground: its fill, mud, edge, structures and what the feet kick up.
+    fn paint_ground(&self, f: &SceneFrame) {
+        let painter = &f.painter;
+        let rect = f.rect;
+        let origin = f.origin;
+        let cfg = f.cfg;
+        let clock = f.clock;
+        let start = f.start;
+        let end = f.end;
+        let mud = f.mud;
+        let amplitude = f.amplitude;
+        let slope = f.slope;
+        let gaps = f.gaps;
+        let hurdles = f.hurdles;
+        let world = |x: f32, y: f32| f.world(x, y);
+        let height_at = |x: f32, with_hurdles: bool| f.height_at(x, with_hurdles);
         if cfg.ground {
             // Sample the ground every few pixels (flat ground needs only its
             // ends) and fill down to the frame with the world's street.
@@ -347,7 +405,7 @@ impl App {
                 }
                 x += step;
             }
-            crate::world_fx::ground_body(&painter, rect, cfg, &line, &meters, self.zoom);
+            crate::world_fx::ground_body(painter, rect, cfg, &line, &meters, self.zoom);
             if mud > 0.0 {
                 let fill = crate::theme::scene::MUD;
                 for i in 0..line.len().saturating_sub(1) {
@@ -373,7 +431,7 @@ impl App {
                 Stroke::new(1.5, Color32::from_black_alpha(110)),
             ));
             painter.add(egui::Shape::line(line, Stroke::new(1.5, GROUND_EDGE)));
-            crate::world_fx::structures(&painter, rect, cfg, &world, &height_at, (start, end));
+            crate::world_fx::structures(painter, rect, cfg, &world, &height_at, (start, end));
             let surface = |sx: f32| world(0., height_at((sx - origin.x) / self.zoom, true)).y;
             let feet: Vec<crate::world_fx::Foot> = self
                 .playback
@@ -401,7 +459,7 @@ impl App {
                 })
                 .unwrap_or_default();
             crate::world_fx::ground(
-                &painter,
+                painter,
                 rect,
                 cfg,
                 clock,
@@ -411,8 +469,17 @@ impl App {
                 &feet,
             );
         }
+    }
+    /// The water level of a flooded world.
+    fn paint_water(&self, f: &SceneFrame) {
+        let painter = &f.painter;
+        let rect = f.rect;
+        let origin = f.origin;
+        let cfg = f.cfg;
+        let clock = f.clock;
+        let world = |x: f32, y: f32| f.world(x, y);
         crate::world_fx::water(
-            &painter,
+            painter,
             rect,
             cfg,
             clock,
@@ -420,6 +487,13 @@ impl App {
             &|sx| (sx - origin.x) / self.zoom,
             self.zoom,
         );
+    }
+    /// A tick every meter along the ground, with a label now and then.
+    fn paint_ruler(&self, f: &SceneFrame) {
+        let painter = &f.painter;
+        let left = f.left;
+        let right = f.right;
+        let world = |x: f32, y: f32| f.world(x, y);
         // A tick every meter, a label every 1, 2, 5 or 10 m so labels
         // never run into each other.
         let every = [1, 2, 5, 10, 20]
@@ -439,6 +513,13 @@ impl App {
                 );
             }
         }
+    }
+    /// The creature of the replay with its trail and contact shadows.
+    fn paint_replay_creature(&self, ctx: &egui::Context, f: &SceneFrame) {
+        let painter = &f.painter;
+        let origin = f.origin;
+        let world = |x: f32, y: f32| f.world(x, y);
+        let height_at = |x: f32, with_hurdles: bool| f.height_at(x, with_hurdles);
         if let Some(p) = &self.playback {
             // Center-of-mass trail from the last two seconds of recorded
             // frames, fading with age.
@@ -471,7 +552,7 @@ impl App {
             }
             // Soft contact shadows, darker and tighter the nearer a node is
             // to the ground under it.
-            let glow = crate::assets::Art::Glow.texture(ui.ctx());
+            let glow = crate::assets::Art::Glow.texture(ctx);
             for n in &p.nodes {
                 let ground = height_at(n.pos[0], true);
                 let lift = (n.pos[1] - n.radius - ground).max(0.0);
@@ -490,12 +571,15 @@ impl App {
             }
             let mut marks = FrameMarks::of(p);
             marks.arrows = self.show_forces;
-            draw_creature(&painter, &p.nodes, &p.creature, origin, self.zoom, &marks);
+            draw_creature(painter, &p.nodes, &p.creature, origin, self.zoom, &marks);
         }
-        crate::world_fx::weather(&painter, rect, cfg, clock, self.camera[0] * self.zoom);
-        // Film look over the scene, under the HUD.
-        crate::theme::vignette(&painter, rect, 0.55);
-        crate::theme::grain(&painter, rect, clock, 0.055);
+    }
+    /// The HUD over the scene: counters, the world, the generation and the
+    /// note in the middle.
+    fn paint_hud(&self, f: &SceneFrame) {
+        let theme = self.theme();
+        let painter = &f.painter;
+        let rect = f.rect;
         use crate::theme::{Counter, HudLine, counter, hud_block, scene::HUD};
         // The HUD, laid out like Half-Life 2's: the creature's counters low
         // on the left like HEALTH and SUIT, the generation low on the right
@@ -507,7 +591,7 @@ impl App {
             let fallen = p.fallen();
             let distance = fallen.map_or_else(|| physics::fitness(&p.nodes), |(_, d)| d);
             let left = counter(
-                &painter,
+                painter,
                 rect.left_bottom() + Vec2::new(inset, -inset),
                 Align2::LEFT_BOTTOM,
                 &Counter {
@@ -520,7 +604,7 @@ impl App {
                 size,
             );
             counter(
-                &painter,
+                painter,
                 left.right_bottom() + Vec2::new(inset, 0.),
                 Align2::LEFT_BOTTOM,
                 &Counter {
@@ -534,7 +618,7 @@ impl App {
             );
             if let Some((tick, _)) = fallen {
                 hud_block(
-                    &painter,
+                    painter,
                     rect.center_top() + Vec2::new(0., inset),
                     Align2::CENTER_TOP,
                     &[HudLine::text(
@@ -549,7 +633,7 @@ impl App {
             let live = self.snapshot.as_ref().map(|s| &s.config);
             let earlier = live.is_some_and(|live| live.physics_differs(&p.config));
             hud_block(
-                &painter,
+                painter,
                 rect.right_top() + Vec2::new(-inset, inset),
                 Align2::RIGHT_TOP,
                 &[
@@ -574,7 +658,7 @@ impl App {
                 )
             };
             counter(
-                &painter,
+                painter,
                 anchor,
                 align,
                 &Counter {
@@ -613,7 +697,7 @@ impl App {
                     crate::theme::scene::HUD_INK,
                 ));
             }
-            hud_block(&painter, rect.center(), Align2::CENTER_CENTER, &lines);
+            hud_block(painter, rect.center(), Align2::CENTER_CENTER, &lines);
         }
         painter.rect_stroke(
             rect,
@@ -621,8 +705,11 @@ impl App {
             Stroke::new(4., theme.ink),
             egui::StrokeKind::Inside,
         );
+    }
+    /// The time slider and the clock under the scene. Returns whether the
+    /// player moved the slider.
+    fn viewport_timeline(&mut self, ui: &mut egui::Ui) -> bool {
         let mut sought = false;
-        let mut race_it = None;
         if let Some(p) = &mut self.playback {
             let last_frame = p.last_frame();
             let trial_start = p.trial_start();
@@ -667,6 +754,12 @@ impl App {
                 ));
             });
         }
+        sought
+    }
+    /// The button row under the timeline. Returns the creature and world the
+    /// player asked to race.
+    fn viewport_controls(&mut self, ui: &mut egui::Ui) -> Option<(Creature, Config)> {
+        let mut race_it = None;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().button_padding.x = 10.;
             ui.spacing_mut().item_spacing.x = 6.;
@@ -723,18 +816,36 @@ impl App {
             }
             speed_picker(ui, &mut self.speed, "replay_speed");
         });
+        race_it
+    }
+    /// Puts a creature in the race and opens the Race tab.
+    fn race_viewport_creature(&mut self, creature: Creature, config: Config) {
+        self.race_picks.retain(|(pick, _)| pick.id != creature.id);
+        self.race_picks.push((creature, config));
+        if self.race_picks.len() > RACE_PICKS {
+            self.race_picks.remove(0);
+        }
+        self.tab = Tab::Race;
+        self.prev_tab = Tab::Race;
+        self.restart_race();
+    }
+    pub(super) fn viewport(&mut self, ui: &mut egui::Ui, height: f32) {
+        self.viewport_header(ui);
+        let (rect, response) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), height.max(120.)),
+            Sense::click_and_drag(),
+        );
+        self.viewport_camera(ui, rect, response);
+        let frame = self.scene_frame(ui, rect);
+        self.paint_scene(ui.ctx(), &frame);
+        self.paint_hud(&frame);
+        let sought = self.viewport_timeline(ui);
+        let race_it = self.viewport_controls(ui);
         if sought {
             self.playing = false;
         }
         if let Some((creature, config)) = race_it {
-            self.race_picks.retain(|(pick, _)| pick.id != creature.id);
-            self.race_picks.push((creature, config));
-            if self.race_picks.len() > RACE_PICKS {
-                self.race_picks.remove(0);
-            }
-            self.tab = Tab::Race;
-            self.prev_tab = Tab::Race;
-            self.restart_race();
+            self.race_viewport_creature(creature, config);
         }
     }
     /// Replays the best creature recorded for one history entry, through the
@@ -755,6 +866,44 @@ impl App {
             self.select(creature, config);
             self.tab = Tab::Overview;
         }
+    }
+}
+/// What the scene's painting methods share in one frame: the painter, the
+/// camera and the world's ground.
+struct SceneFrame<'a> {
+    painter: egui::Painter,
+    rect: Rect,
+    origin: Pos2,
+    zoom: f32,
+    cfg: &'a Config,
+    clock: f32,
+    amplitude: f32,
+    slope: f32,
+    gaps: f32,
+    hurdles: f32,
+    mud: f32,
+    phase: f32,
+    start: f32,
+    end: f32,
+    left: i32,
+    right: i32,
+}
+impl SceneFrame<'_> {
+    /// The screen position of a point of the world.
+    fn world(&self, x: f32, y: f32) -> Pos2 {
+        Pos2::new(self.origin.x + x * self.zoom, self.origin.y - y * self.zoom)
+    }
+    /// The ground's height at x, with or without its hurdles.
+    fn height_at(&self, x: f32, with_hurdles: bool) -> f32 {
+        crate::physics::ground(
+            x,
+            self.amplitude,
+            self.slope,
+            self.gaps,
+            if with_hurdles { self.hurdles } else { 0.0 },
+            self.phase,
+        )
+        .0
     }
 }
 /// Pixels per meter of the default zoom: the creature's height fills
