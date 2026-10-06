@@ -12,7 +12,7 @@ use crate::{
     config::Config,
     evolution::{Creature, FAILED},
     theme::Theme,
-    worker::Command,
+    worker::{Command, Snapshot},
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use std::{
@@ -58,6 +58,51 @@ impl CardFilter {
 impl App {
     pub(super) fn population(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
+        self.population_header(ui, theme);
+        if self.archive_view == ArchiveView::Islands {
+            self.islands_view(ui);
+            return;
+        }
+        if self.archive_view == ArchiveView::Map {
+            self.map_filters(ui, theme);
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        Self::sorted_by_note(ui, snapshot, theme);
+        if self.archive_view == ArchiveView::Cards {
+            let mut filter = self.card_filter;
+            Self::card_filters(ui, &mut filter, theme);
+            self.card_filter = filter;
+        }
+        let mut selected = None;
+        let mut map_click = None;
+        if self.archive_view == ArchiveView::Map {
+            let empty = Vec::new();
+            let cells = snapshot.map.as_deref().unwrap_or(&empty);
+            map_click = paint_archive_map(
+                ui,
+                cells,
+                [
+                    self.map_height,
+                    self.map_feet,
+                    self.map_shape,
+                    self.map_size,
+                ],
+                theme,
+            );
+        } else {
+            self.card_grid(ui, &mut selected);
+        }
+        if let Some(id) = map_click {
+            self.worker.send(Command::Select(id));
+        }
+        if let Some((creature, config)) = selected {
+            self.select(creature, config);
+        }
+    }
+    /// The tab's title, its Map, Cards and Islands choices and the hint.
+    fn population_header(&mut self, ui: &mut egui::Ui, theme: Theme) {
         ui.horizontal(|ui| {
             ui.heading("Ways of moving");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -73,65 +118,59 @@ impl App {
             });
         });
         ui.label(RichText::new("Click a creature to replay it.").color(theme.muted));
-        if self.archive_view == ArchiveView::Islands {
-            self.islands_view(ui);
-            return;
-        }
-        if self.archive_view == ArchiveView::Map {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Body height").small().color(theme.muted));
-                egui::ComboBox::from_id_salt("map_height")
-                    .selected_text(self.map_height.map_or("All".to_owned(), height_bin_label))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.map_height, None, "All");
-                        for bin in 0..MAP_BINS[3] {
-                            ui.selectable_value(
-                                &mut self.map_height,
-                                Some(bin),
-                                height_bin_label(bin),
-                            );
-                        }
-                    });
-                ui.label(RichText::new("Feet").small().color(theme.muted));
-                egui::ComboBox::from_id_salt("map_feet")
-                    .selected_text(self.map_feet.map_or("All".to_owned(), feet_bin_label))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.map_feet, None, "All");
-                        for bin in 0..MAP_BINS[4] {
-                            ui.selectable_value(&mut self.map_feet, Some(bin), feet_bin_label(bin));
-                        }
-                    });
-                ui.label(RichText::new("Shape").small().color(theme.muted));
-                egui::ComboBox::from_id_salt("map_shape")
-                    .selected_text(
-                        self.map_shape
-                            .map_or("All", |class| CLASSES.shape_names[class]),
-                    )
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.map_shape, None, "All");
-                        for (class, name) in CLASSES.shape_names.iter().enumerate() {
-                            ui.selectable_value(&mut self.map_shape, Some(class), *name)
-                                .on_hover_text(CLASSES.shape_about(class));
-                        }
-                    });
-                ui.label(RichText::new("Size").small().color(theme.muted));
-                egui::ComboBox::from_id_salt("map_size")
-                    .selected_text(
-                        self.map_size
-                            .map_or("All", |class| CLASSES.size_names[class]),
-                    )
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.map_size, None, "All");
-                        for (class, name) in CLASSES.size_names.iter().enumerate() {
-                            ui.selectable_value(&mut self.map_size, Some(class), *name)
-                                .on_hover_text(CLASSES.size_about(class));
-                        }
-                    });
-            });
-        }
-        let Some(snapshot) = &self.snapshot else {
-            return;
-        };
+    }
+    /// The Map's four filters: body height, feet, shape and size.
+    fn map_filters(&mut self, ui: &mut egui::Ui, theme: Theme) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Body height").small().color(theme.muted));
+            egui::ComboBox::from_id_salt("map_height")
+                .selected_text(self.map_height.map_or("All".to_owned(), height_bin_label))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.map_height, None, "All");
+                    for bin in 0..MAP_BINS[3] {
+                        ui.selectable_value(&mut self.map_height, Some(bin), height_bin_label(bin));
+                    }
+                });
+            ui.label(RichText::new("Feet").small().color(theme.muted));
+            egui::ComboBox::from_id_salt("map_feet")
+                .selected_text(self.map_feet.map_or("All".to_owned(), feet_bin_label))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.map_feet, None, "All");
+                    for bin in 0..MAP_BINS[4] {
+                        ui.selectable_value(&mut self.map_feet, Some(bin), feet_bin_label(bin));
+                    }
+                });
+            ui.label(RichText::new("Shape").small().color(theme.muted));
+            egui::ComboBox::from_id_salt("map_shape")
+                .selected_text(
+                    self.map_shape
+                        .map_or("All", |class| CLASSES.shape_names[class]),
+                )
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.map_shape, None, "All");
+                    for (class, name) in CLASSES.shape_names.iter().enumerate() {
+                        ui.selectable_value(&mut self.map_shape, Some(class), *name)
+                            .on_hover_text(CLASSES.shape_about(class));
+                    }
+                });
+            ui.label(RichText::new("Size").small().color(theme.muted));
+            egui::ComboBox::from_id_salt("map_size")
+                .selected_text(
+                    self.map_size
+                        .map_or("All", |class| CLASSES.size_names[class]),
+                )
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.map_size, None, "All");
+                    for (class, name) in CLASSES.size_names.iter().enumerate() {
+                        ui.selectable_value(&mut self.map_size, Some(class), *name)
+                            .on_hover_text(CLASSES.size_about(class));
+                    }
+                });
+        });
+    }
+    /// How many creatures the archive holds and what the ways of moving are
+    /// sorted by.
+    fn sorted_by_note(ui: &mut egui::Ui, snapshot: &Snapshot, theme: Theme) {
         ui.horizontal_wrapped(|ui| {
             ui.label(
                 RichText::new(format!(
@@ -164,87 +203,61 @@ impl App {
                     .on_hover_text(why);
             }
         });
-        if self.archive_view == ArchiveView::Cards {
-            let mut filter = self.card_filter;
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.;
-                ui.label(RichText::new("Feet").small().color(theme.muted));
-                if ui.pick(filter.feet.is_none(), "All").clicked() {
-                    filter.feet = None;
+    }
+    /// The Cards' filters: feet, size and shape.
+    fn card_filters(ui: &mut egui::Ui, filter: &mut CardFilter, theme: Theme) {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.;
+            ui.label(RichText::new("Feet").small().color(theme.muted));
+            if ui.pick(filter.feet.is_none(), "All").clicked() {
+                filter.feet = None;
+            }
+            for bin in 0..MAP_BINS[4] as u8 {
+                if ui
+                    .pick(
+                        filter.feet == Some(bin),
+                        feet_bin_label(usize::from(bin))
+                            .replace(" feet", "")
+                            .replace(" foot", ""),
+                    )
+                    .clicked()
+                {
+                    filter.feet = Some(bin);
                 }
-                for bin in 0..MAP_BINS[4] as u8 {
-                    if ui
-                        .pick(
-                            filter.feet == Some(bin),
-                            feet_bin_label(usize::from(bin))
-                                .replace(" feet", "")
-                                .replace(" foot", ""),
-                        )
-                        .clicked()
-                    {
-                        filter.feet = Some(bin);
-                    }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.;
+            ui.label(RichText::new("Size").small().color(theme.muted));
+            if ui.pick(filter.size.is_none(), "All").clicked() {
+                filter.size = None;
+            }
+            for (class, name) in CLASSES.size_names.iter().enumerate() {
+                if ui
+                    .pick(filter.size == Some(class as u8), *name)
+                    .on_hover_text(CLASSES.size_about(class))
+                    .clicked()
+                {
+                    filter.size = Some(class as u8);
                 }
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.;
-                ui.label(RichText::new("Size").small().color(theme.muted));
-                if ui.pick(filter.size.is_none(), "All").clicked() {
-                    filter.size = None;
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.;
+            ui.label(RichText::new("Shape").small().color(theme.muted));
+            if ui.pick(filter.shape.is_none(), "All").clicked() {
+                filter.shape = None;
+            }
+            for (class, name) in CLASSES.shape_names.iter().enumerate() {
+                if ui
+                    .pick(filter.shape == Some(class as u8), *name)
+                    .on_hover_text(CLASSES.shape_about(class))
+                    .clicked()
+                {
+                    filter.shape = Some(class as u8);
                 }
-                for (class, name) in CLASSES.size_names.iter().enumerate() {
-                    if ui
-                        .pick(filter.size == Some(class as u8), *name)
-                        .on_hover_text(CLASSES.size_about(class))
-                        .clicked()
-                    {
-                        filter.size = Some(class as u8);
-                    }
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.;
-                ui.label(RichText::new("Shape").small().color(theme.muted));
-                if ui.pick(filter.shape.is_none(), "All").clicked() {
-                    filter.shape = None;
-                }
-                for (class, name) in CLASSES.shape_names.iter().enumerate() {
-                    if ui
-                        .pick(filter.shape == Some(class as u8), *name)
-                        .on_hover_text(CLASSES.shape_about(class))
-                        .clicked()
-                    {
-                        filter.shape = Some(class as u8);
-                    }
-                }
-            });
-            self.card_filter = filter;
-        }
-        let mut selected = None;
-        let mut map_click = None;
-        if self.archive_view == ArchiveView::Map {
-            let empty = Vec::new();
-            let cells = snapshot.map.as_deref().unwrap_or(&empty);
-            map_click = paint_archive_map(
-                ui,
-                cells,
-                [
-                    self.map_height,
-                    self.map_feet,
-                    self.map_shape,
-                    self.map_size,
-                ],
-                theme,
-            );
-        } else {
-            self.card_grid(ui, &mut selected);
-        }
-        if let Some(id) = map_click {
-            self.worker.send(Command::Select(id));
-        }
-        if let Some((creature, config)) = selected {
-            self.select(creature, config);
-        }
+            }
+        });
     }
     /// The archive cards: the ranked list the UI holds, filtered here, so no
     /// card waits for data or moves while the player looks. A newer list
@@ -419,23 +432,7 @@ fn paint_archive_map(
             (lo.min(cell.score), hi.max(cell.score))
         });
     let range = (max - min).max(1e-6);
-    // Best cell and how many ways of moving share each contact and cadence
-    // pair under the filters.
-    let mut best: HashMap<(u8, u8), (crate::worker::MapCell, usize)> = HashMap::new();
-    for cell in cells.iter().filter(|cell| {
-        height_bin.is_none_or(|bin| usize::from(cell.niche[3]) == bin)
-            && feet_bin.is_none_or(|bin| usize::from(cell.niche[4]) == bin)
-            && shape_bin.is_none_or(|bin| usize::from(cell.niche[2]) == bin)
-            && size_bin.is_none_or(|bin| usize::from(cell.niche[5]) == bin)
-    }) {
-        let entry = best
-            .entry((cell.niche[0], cell.niche[1]))
-            .or_insert((*cell, 0));
-        entry.1 += 1;
-        if cell.score > entry.0.score {
-            entry.0 = *cell;
-        }
-    }
+    let best = map_best_cells(cells, [height_bin, feet_bin, shape_bin, size_bin]);
     ui.label(
         RichText::new(format!(
             "Ground contact against stride rate · {} cells · the best of each is shown",
@@ -456,10 +453,59 @@ fn paint_archive_map(
     if plot.width() < 80. || plot.height() < 80. {
         return None;
     }
+    paint_map_axes(&painter, rect, plot, theme);
+    if !cells.is_empty() {
+        paint_map_legend(&painter, rect, min, max, theme);
+    }
+    if best.is_empty() {
+        painter.text(
+            plot.center(),
+            Align2::CENTER_CENTER,
+            if cells.is_empty() {
+                "No creatures kept yet. The map fills as evolution runs."
+            } else {
+                "No creatures with this height and these feet. Try All."
+            },
+            FontId::proportional(16.),
+            theme.muted,
+        );
+    }
+    paint_map_cells(ui, &painter, plot, &best, (min, range), theme)
+}
+/// The grid of the map in `plot`: columns, rows and the size of a cell.
+fn map_grid(plot: Rect) -> (usize, usize, f32, f32) {
     let columns = MAP_BINS[0];
     let rows = MAP_BINS[1];
     let column_width = plot.width() / columns as f32;
     let row_height = plot.height() / rows as f32;
+    (columns, rows, column_width, row_height)
+}
+/// Best cell and how many ways of moving share each contact and cadence
+/// pair under the filters.
+fn map_best_cells(
+    cells: &[crate::worker::MapCell],
+    [height_bin, feet_bin, shape_bin, size_bin]: [Option<usize>; 4],
+) -> HashMap<(u8, u8), (crate::worker::MapCell, usize)> {
+    let mut best: HashMap<(u8, u8), (crate::worker::MapCell, usize)> = HashMap::new();
+    for cell in cells.iter().filter(|cell| {
+        height_bin.is_none_or(|bin| usize::from(cell.niche[3]) == bin)
+            && feet_bin.is_none_or(|bin| usize::from(cell.niche[4]) == bin)
+            && shape_bin.is_none_or(|bin| usize::from(cell.niche[2]) == bin)
+            && size_bin.is_none_or(|bin| usize::from(cell.niche[5]) == bin)
+    }) {
+        let entry = best
+            .entry((cell.niche[0], cell.niche[1]))
+            .or_insert((*cell, 0));
+        entry.1 += 1;
+        if cell.score > entry.0.score {
+            entry.0 = *cell;
+        }
+    }
+    best
+}
+/// The map's grid lines, their labels and the two axis titles.
+fn paint_map_axes(painter: &egui::Painter, rect: Rect, plot: Rect, theme: Theme) {
+    let (columns, rows, column_width, row_height) = map_grid(plot);
     for column in 0..=columns {
         let x = plot.left() + column as f32 * column_width;
         painter.line_segment(
@@ -502,59 +548,59 @@ fn paint_archive_map(
         FontId::proportional(14.),
         theme.ink,
     );
-    if !cells.is_empty() {
-        let legend = Rect::from_min_max(
-            Pos2::new(rect.right() - 272., rect.top() + 8.),
-            Pos2::new(rect.right() - 92., rect.top() + 22.),
-        );
-        let steps = 48;
-        for i in 0..steps {
-            let t = i as f32 / (steps - 1) as f32;
-            painter.rect_filled(
-                Rect::from_min_max(
-                    Pos2::new(
-                        legend.left() + legend.width() * i as f32 / steps as f32,
-                        legend.top(),
-                    ),
-                    Pos2::new(
-                        legend.left() + legend.width() * (i + 1) as f32 / steps as f32,
-                        legend.bottom(),
-                    ),
+}
+/// The color scale above the map, from the lowest to the highest distance.
+fn paint_map_legend(painter: &egui::Painter, rect: Rect, min: f32, max: f32, theme: Theme) {
+    let legend = Rect::from_min_max(
+        Pos2::new(rect.right() - 272., rect.top() + 8.),
+        Pos2::new(rect.right() - 92., rect.top() + 22.),
+    );
+    let steps = 48;
+    for i in 0..steps {
+        let t = i as f32 / (steps - 1) as f32;
+        painter.rect_filled(
+            Rect::from_min_max(
+                Pos2::new(
+                    legend.left() + legend.width() * i as f32 / steps as f32,
+                    legend.top(),
                 ),
-                0,
-                heat_color(t),
-            );
-        }
-        painter.text(
-            Pos2::new(legend.left() - 6., legend.center().y),
-            Align2::RIGHT_CENTER,
-            format!("{min:.2} m"),
-            FontId::proportional(14.5),
-            theme.muted,
-        );
-        painter.text(
-            Pos2::new(legend.right() + 6., legend.center().y),
-            Align2::LEFT_CENTER,
-            format!("{max:.2} m"),
-            FontId::proportional(14.5),
-            theme.muted,
+                Pos2::new(
+                    legend.left() + legend.width() * (i + 1) as f32 / steps as f32,
+                    legend.bottom(),
+                ),
+            ),
+            0,
+            heat_color(t),
         );
     }
-    if best.is_empty() {
-        painter.text(
-            plot.center(),
-            Align2::CENTER_CENTER,
-            if cells.is_empty() {
-                "No creatures kept yet. The map fills as evolution runs."
-            } else {
-                "No creatures with this height and these feet. Try All."
-            },
-            FontId::proportional(16.),
-            theme.muted,
-        );
-    }
+    painter.text(
+        Pos2::new(legend.left() - 6., legend.center().y),
+        Align2::RIGHT_CENTER,
+        format!("{min:.2} m"),
+        FontId::proportional(14.5),
+        theme.muted,
+    );
+    painter.text(
+        Pos2::new(legend.right() + 6., legend.center().y),
+        Align2::LEFT_CENTER,
+        format!("{max:.2} m"),
+        FontId::proportional(14.5),
+        theme.muted,
+    );
+}
+/// The map's cells and their hover and click. Returns the id of a clicked
+/// cell's creature.
+fn paint_map_cells(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    plot: Rect,
+    best: &HashMap<(u8, u8), (crate::worker::MapCell, usize)>,
+    (min, range): (f32, f32),
+    theme: Theme,
+) -> Option<u64> {
+    let (_, _, column_width, row_height) = map_grid(plot);
     let mut clicked = None;
-    for (&(contact, cadence), (cell, count)) in &best {
+    for (&(contact, cadence), (cell, count)) in best {
         let inner = Rect::from_min_size(
             Pos2::new(
                 plot.left() + contact as f32 * column_width + 1.5,
