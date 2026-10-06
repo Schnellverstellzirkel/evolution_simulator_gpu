@@ -33,14 +33,10 @@ creatures through CUDA and nowhere else (`src/cuda_engine.rs`,
 `shaders/creature.cu`, `src/kernel.rs`). The window is drawn
 through Vulkan (wgpu), on the GPU the desktop uses.
 `EVOLUTION_CUDA_VERBOSE=1` prints each kernel's registers, shared and local
-memory and occupancy as it loads; `EVOLUTION_WARP_PROFILE=1` makes one warp print its cycles per kernel
-section. `EVOLUTION_WARP_SUBSTEPS`, `EVOLUTION_WARP_PGS_SWEEPS`,
-`EVOLUTION_WARP_CLEAN_SWEEPS`, `EVOLUTION_WARP_PLANT_ROUNDS` and
-`EVOLUTION_WARP_PLANT_SWEEPS` override the solver settings for measuring
-them. `replay_match <save> --retest <count> <out.csv>` re-tests a save's best
-elites with the settings in force, and `replay_match --ladder` compares the
-files from runs at the default, 2 and 4 substeps. `EVOLUTION_WARP_BUCKETS=1` gives each wave one take-up counter
-instead of one per muscle-rounds bucket.
+memory and occupancy as it loads. `EVOLUTION_WARP_BUCKETS=1` gives each wave
+one take-up counter instead of one per muscle-rounds bucket.
+`replay_match <save> --retest <count> <out.csv>` re-tests a save's best
+elites in full trials.
 Nothing needs configuring: the build links no CUDA library, and the engine
 loads the CUDA driver library and NVRTC when it opens. If either is missing,
 or the GPU is not an NVIDIA GPU, the game stops with an error that says so.
@@ -271,7 +267,7 @@ Each `target/power/rows/<row>.txt` holds the p2_speed or probe lines and the sam
 `cargo run --release` is the whole game and needs none of these. Every `EVOLUTION_*` variable is a developer diagnostic or a measuring control. Speed and search settings (GPU slots, batch and unit sizes, workgroup sizes, screening, the anatomy operators, joint damping, Hill speed) are fixed in the code and have no switch. Read the code (`grep -rn EVOLUTION_ src`) for the exact list. The groups are:
 
 - Devices and threads: `EVOLUTION_DEVICES` (`primary` on this machine; other names add NVIDIA GPUs), `RAYON_NUM_THREADS` (lowers the general worker pool), `EVOLUTION_RENDER_GPU` (adapter for drawing the window), `EVOLUTION_UI_FPS` (frame rate cap, 0 follows vsync).
-- CUDA: `EVOLUTION_NVRTC`, `EVOLUTION_CUDA_VERBOSE`, the `EVOLUTION_WARP_*` solver overrides (see the CUDA section).
+- CUDA: `EVOLUTION_NVRTC`, `EVOLUTION_CUDA_VERBOSE`, `EVOLUTION_WARP_BUCKETS` (see the CUDA section).
 - Measuring: `EVOLUTION_STAGE_LOG=<path>` writes one CSV row per generation. `EVOLUTION_PROFILE_BREED` prints archive and breeding timings. `EVOLUTION_DUMP_GENERATION=<generation>[:<path>]` runs one generation with the screen bar off, re-runs the island elites in it, and writes a 64 B row per creature and a 32 B row per elite (`storage::dump` has the layout). `dump_stats <path>` and `operator_yield <path>` (the children each structural operator got into an archive, and the distance they added) read it. The CUDA kernel writes the rung trace (distances at 1, 2.5, 5 and 10 s, the early features, the end code with the rung that stopped the trial, the cadence bands and the audit bit) into seven result words nothing else reads. `EVOLUTION_NO_RUNGS=1` removes the audit lane and the early rungs, to measure the game without them in the same build (`search_ab` prints one `lanes` line per generation, the mean GPU lanes a ring creature takes and the share in each lane class, and one `rungs` line per generation: steps per creature, stops per rung, audit rows, the audit lane's miss estimate and how much of the final top 1% and 10% the ladder and the 5 s screen alone would keep; `--seconds N` stops a run after N seconds of wall time, and `--resume <save>` starts from a save's archives at the population you give).
 - Benchmarks and screenshots: `EVOLUTION_BENCH_*` drives the graphical benchmark mode (generations, duration, warm-up). `EVOLUTION_SMOKE_*` starts short screenshot runs, and their windows show on the desktop.
 - Unattended runs: `EVOLUTION_AUTOSTART="Autochange environment=1"` sets the listed effect levels (the list may be empty), turns autosave on every 10 generations and starts evolving continuously. `EVOLUTION_AUTOCHANGE_EVERY=<n>` makes the autochange step every n generations at any level above Off, and `EVOLUTION_CAPTURE_EVERY=<n>` saves the game window to `runs/progress-gen<g>.png` every n generations. With `EVOLUTION_SMOKE_CHECKPOINT=<save>` the unattended run opens that save instead of a new game and turns its autosave on.

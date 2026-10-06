@@ -886,43 +886,6 @@ fn kernel_label(key: KernelKey) -> String {
     )
 }
 
-/// Compiles the creature kernel for `class` lanes and `cfg`'s world on
-/// this machine's NVRTC and returns ptxas's report (registers, spills,
-/// stack), for developers measuring register use. Needs no GPU time.
-pub fn compile_report(class: usize, cfg: &Config, record: bool, arch: &str) -> Result<String> {
-    let api = api()?;
-    let options = vec![
-        format!("--gpu-architecture={arch}"),
-        "--std=c++17".into(),
-        "--prec-div=false".into(),
-        "--prec-sqrt=false".into(),
-        "--fmad=true".into(),
-        "--extra-device-vectorization".into(),
-        "--ptxas-options=-v".into(),
-    ];
-    let mut options = options;
-    if let Ok(extra) = std::env::var("EVOLUTION_NVRTC_EXTRA") {
-        options.extend(extra.split_whitespace().map(String::from));
-    }
-    let source = crate::kernel::cuda_source(
-        class,
-        crate::kernel::world_flags(cfg),
-        cfg.fidelity(),
-        record,
-    );
-    let (_, log) = api.nvrtc.compile(&source, &options)?;
-    Ok(log
-        .lines()
-        .filter(|l| {
-            std::env::var_os("EVOLUTION_NVRTC_LOG").is_some()
-                || l.contains("registers")
-                || l.contains("spill")
-                || l.contains("stack")
-        })
-        .collect::<Vec<_>>()
-        .join("\n"))
-}
-
 /// Compiled kernels kept on disk, about 300 to 900 KB each. The starting
 /// worlds alone are 212 kernels: the default world's 16 and the scoring
 /// kernels of the 100 wild islands' 49 distinct worlds (`prefetch_islands`),
