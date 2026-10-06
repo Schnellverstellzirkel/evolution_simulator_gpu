@@ -491,20 +491,32 @@ impl Drop for Worker {
         }
     }
 }
-/// The worker thread's state: what `run` kept in local variables. The
-/// fields drop in the order the locals did: `gpu` last, after the game, the
-/// helper thread and the developer pause.
+/// The worker thread's state: what `run` used to keep in local variables.
+/// Fields drop in declaration order: the game and the helper thread first,
+/// then the developer pause, and `gpu`, which closes the engines, last.
 struct Loop {
+    // What the loop measures.
     /// Completion time and population of recent generations.
     generation_marks: std::collections::VecDeque<(Instant, usize)>,
-    /// The generation a run of one generation stops at.
-    run_until: Option<u32>,
     ring_meter: RingMeter,
-    /// The creatures in flight.
-    ring: crate::ring::Ring,
     stage_log: Option<StageLog>,
     benchmark: Benchmark,
+    // The run.
+    /// The generation a run of one generation stops at.
+    run_until: Option<u32>,
+    /// The creatures in flight.
+    ring: crate::ring::Ring,
     autosave: Autosave,
+    // Loading and saving.
+    /// When the status last showed the progress of a load.
+    last_progress: Instant,
+    /// Commands held back until a load is done.
+    deferred: Vec<Command>,
+    /// A save waiting until the "Saving" status has reached the window.
+    pending_save: Option<std::path::PathBuf>,
+    /// A save being loaded on its own thread.
+    loading: Option<Loading>,
+    // What the next snapshot shows.
     selected: Option<(Creature, Config)>,
     /// The archive state the map table was built from.
     map_key: (u64, usize, u64),
@@ -513,14 +525,9 @@ struct Loop {
     /// Whether the UI wants the archive map table.
     want_map: bool,
     events: Arc<Vec<Event>>,
-    last_progress: Instant,
-    deferred: Vec<Command>,
-    /// A save waiting until the "Saving" status has reached the window.
-    pending_save: Option<std::path::PathBuf>,
-    /// A save being loaded on its own thread.
-    loading: Option<Loading>,
     history: Arc<Vec<Stats>>,
     epoch: u64,
+    /// Something changed since the last snapshot.
     changed: bool,
     last_publish: Instant,
     error: Option<String>,
@@ -533,8 +540,10 @@ struct Loop {
     preview: Option<(Creature, Config)>,
     /// The UI asked for the ranked archive (`Command::Cards`).
     send_cards: bool,
+    // The game.
     running: bool,
     exp: Option<Experiment>,
+    // The thread's helper, its link to the window and the engines.
     helper: crate::threads::Helper,
     dev: crate::dev_pause::DevPause,
     ctx: eframe::egui::Context,
@@ -556,21 +565,21 @@ impl Loop {
         let helper = crate::threads::Helper::new("search");
         Self {
             generation_marks: Default::default(),
-            run_until: None,
             ring_meter: RingMeter::default(),
-            ring: crate::ring::Ring::default(),
             stage_log: StageLog::open(),
             benchmark: Benchmark::new(bench),
+            run_until: None,
+            ring: crate::ring::Ring::default(),
             autosave: Autosave::default(),
+            last_progress: Instant::now(),
+            deferred: Vec::new(),
+            pending_save: None,
+            loading: None,
             selected: None,
             map_key: (u64::MAX, usize::MAX, 0u64),
             map: None,
             want_map: false,
             events: Arc::new(Vec::new()),
-            last_progress: Instant::now(),
-            deferred: Vec::new(),
-            pending_save: None,
-            loading: None,
             history: Arc::new(Vec::new()),
             epoch: 0,
             changed: true,
@@ -603,31 +612,10 @@ impl Loop {
         if self.pause.load(Ordering::Relaxed) {
             self.running = false;
         }
-        if let Some(text) = self.dev.tick(self.gpu.sched.as_mut()) {
-            let generation = self.exp.as_ref().map_or(0, |e| e.generation);
-            log_event(&mut self.events, generation, EventKind::Gpu, text);
-            self.changed = true;
-        }
+        self.tick_dev_pause();
         self.step();
-        // A GPU that was lost and reopened is told to the player.
-        if let Some(sched) = self.gpu.sched.as_mut() {
-            for notice in sched.take_notices() {
-                let generation = self.exp.as_ref().map_or(0, |e| e.generation);
-                log_event(&mut self.events, generation, EventKind::Gpu, notice);
-                self.changed = true;
-            }
-        }
-        // A finished autosave goes into the event log, so the UI can say
-        // when the experiment was last saved.
-        if let Some((path, generation)) = self.autosave.finished() {
-            log_event(
-                &mut self.events,
-                generation,
-                EventKind::Saved,
-                format!("Autosaved {}.", path.display()),
-            );
-            self.changed = true;
-        }
+        self.log_gpu_notices();
+        self.log_autosave();
         self.publish_if_due();
         self.save_pending();
         ControlFlow::Continue(())

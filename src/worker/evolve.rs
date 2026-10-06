@@ -2,7 +2,7 @@
 //! keeps reading commands, and what a generation boundary asks for.
 
 use super::{Command, EventKind, Loop, log_event, log_world_change, note_generation};
-use crate::storage::Experiment;
+use crate::{config::Config, storage::Experiment};
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -111,8 +111,40 @@ impl Loop {
             self.running = false;
         }
     }
+    /// A developer's pause request (`dev_pause`) closes or reopens the
+    /// engines and says so in the event log.
+    pub(super) fn tick_dev_pause(&mut self) {
+        if let Some(text) = self.dev.tick(self.gpu.sched.as_mut()) {
+            let generation = self.exp.as_ref().map_or(0, |e| e.generation);
+            log_event(&mut self.events, generation, EventKind::Gpu, text);
+            self.changed = true;
+        }
+    }
+    /// A GPU that was lost and reopened is told to the player.
+    pub(super) fn log_gpu_notices(&mut self) {
+        if let Some(sched) = self.gpu.sched.as_mut() {
+            for notice in sched.take_notices() {
+                let generation = self.exp.as_ref().map_or(0, |e| e.generation);
+                log_event(&mut self.events, generation, EventKind::Gpu, notice);
+                self.changed = true;
+            }
+        }
+    }
+    /// A finished autosave goes into the event log, so the UI can say
+    /// when the experiment was last saved.
+    pub(super) fn log_autosave(&mut self) {
+        if let Some((path, generation)) = self.autosave.finished() {
+            log_event(
+                &mut self.events,
+                generation,
+                EventKind::Saved,
+                format!("Autosaved {}.", path.display()),
+            );
+            self.changed = true;
+        }
+    }
     /// A paused game only collects what the engines finished; a running one
-    /// runs a search pass and, when it ended a generation, does what a
+    /// runs a search pass and, when it ended a generation, does what the
     /// generation boundary asks for.
     fn evolve(&mut self) -> anyhow::Result<()> {
         // `step` found the game and the engines.
@@ -172,7 +204,17 @@ impl Loop {
         if step.generations == 0 {
             return Ok(());
         }
-        if e.config.physics_differs(&world_before) {
+        self.generation_ended(&world_before, kept_before);
+        Ok(())
+    }
+    /// A search pass ended a generation. `world_before` and `kept_before` are
+    /// the world and the number of kept elites when the pass began.
+    fn generation_ended(&mut self, world_before: &Config, kept_before: usize) {
+        // `evolve` found the game and the engines.
+        let (Some(e), Some(sched)) = (self.exp.as_mut(), self.gpu.sched.as_mut()) else {
+            return;
+        };
+        if e.config.physics_differs(world_before) {
             // Autochange changed the world at the boundary: blocks
             // not yet on an engine run in the new world, and the
             // kept elites are tested again in it.
@@ -182,7 +224,7 @@ impl Loop {
             }
             log_world_change(
                 &mut self.events,
-                &world_before,
+                world_before,
                 &e.config,
                 e.generation,
                 kept_before.min(e.config.population),
@@ -200,6 +242,5 @@ impl Loop {
             self.running = false;
             self.status = format!("Paused after generation {}", e.generation - 1);
         }
-        Ok(())
     }
 }
