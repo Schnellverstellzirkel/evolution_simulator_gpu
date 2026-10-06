@@ -67,6 +67,30 @@ impl StageLog {
         self.starved_block = self.starved_block.max(idle - self.idle_at_block);
         self.idle_at_block = idle;
     }
+    /// A generation of `e` ended: its row, with the node counts of the
+    /// genomes in the ring.
+    pub(super) fn write_generation(
+        &mut self,
+        e: &crate::storage::Experiment,
+        sched: &crate::scheduler::Scheduler,
+        ring_meter: &RingMeter,
+    ) {
+        let genomes = e.blocks.iter().flat_map(|b| &b.population.genomes);
+        let count = e.ring_len().max(1) as f64;
+        let nodes = [
+            genomes.clone().map(|g| g.node_count as f64).sum::<f64>() / count,
+            genomes.filter(|g| g.node_count > 8).count() as f64 / count,
+        ];
+        self.write_row(
+            e.generation.saturating_sub(1),
+            e.config.population,
+            Some(sched),
+            nodes,
+            e.ring,
+            ring_meter,
+            e.rungs.last(),
+        );
+    }
     pub(super) fn write_row(
         &mut self,
         generation: u32,

@@ -18,6 +18,7 @@ use std::{
 mod autosave;
 mod benchmark;
 mod commands;
+mod evolve;
 mod files;
 mod stage_log;
 use autosave::Autosave;
@@ -489,92 +490,6 @@ impl Drop for Worker {
         }
     }
 }
-/// Ring steps of one search pass, run on a helper thread.
-#[derive(Default)]
-struct Pass {
-    step: crate::ring::Step,
-    /// Send and read times of the pings read during the pass.
-    pings: Vec<(Instant, Instant)>,
-    /// Steps that absorbed a block: start, end, and whether it ended a
-    /// generation.
-    breeding: Vec<(Instant, Instant, bool)>,
-    /// Each absorbed block: its generation, its host time (`ring::Step::chain`),
-    /// whether it ended the generation, and the engines' idle seconds so far.
-    blocks: Vec<BlockNote>,
-}
-/// What one absorbed block tells the ring meter and the stage log.
-struct BlockNote {
-    generation: u32,
-    chain: f64,
-    boundary: bool,
-    idle: f64,
-}
-/// Longest search pass: snapshots are built between passes.
-const PASS_LIMIT: Duration = Duration::from_millis(100);
-/// Runs ring steps on `helper`, a thread on the pool's CPUs, until a
-/// generation ends, a command arrives or `PASS_LIMIT` passes, while this
-/// thread reads commands every millisecond. Absorbing and breeding a block
-/// takes a few tenths of a second at 3M; the worker keeps reading commands
-/// through it. Pings are answered at once. Other commands act on the
-/// experiment, so they wait in `deferred`, in order, for the step in
-/// progress to end.
-fn search_pass(
-    helper: &crate::threads::Helper,
-    e: &mut Experiment,
-    sched: &mut crate::scheduler::Scheduler,
-    ring: &mut crate::ring::Ring,
-    rx: &Receiver<Command>,
-    deferred: &mut Vec<Command>,
-) -> anyhow::Result<Pass> {
-    let stop = AtomicBool::new(false);
-    let mut pings = Vec::new();
-    let mut result = helper.run(
-        || -> anyhow::Result<Pass> {
-            let started = Instant::now();
-            let mut pass = Pass::default();
-            loop {
-                let step_started = Instant::now();
-                let generation = e.generation;
-                let step = ring.step(e, sched, Duration::from_millis(4), 1)?;
-                if step.absorbed > 0 {
-                    pass.blocks.push(BlockNote {
-                        generation,
-                        chain: step.chain,
-                        boundary: step.generations > 0,
-                        idle: sched.devices.iter().map(|d| d.idle_seconds).sum(),
-                    });
-                    pass.breeding
-                        .push((step_started, Instant::now(), step.generations > 0));
-                }
-                pass.step.absorbed += step.absorbed;
-                pass.step.generations += step.generations;
-                if pass.step.generations > 0
-                    || stop.load(Ordering::Relaxed)
-                    || started.elapsed() >= PASS_LIMIT
-                {
-                    return Ok(pass);
-                }
-            }
-        },
-        || match rx.recv_timeout(Duration::from_millis(1)) {
-            Ok(Command::Ping(sent)) => pings.push((sent, Instant::now())),
-            Ok(command) => {
-                deferred.push(command);
-                stop.store(true, Ordering::Relaxed);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // The UI is gone: the loop ends after this pass.
-                stop.store(true, Ordering::Relaxed);
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        },
-    );
-    if let Ok(pass) = &mut result {
-        pass.pings = pings;
-    }
-    result
-}
 /// The worker thread's state: what `run` kept in local variables. The
 /// fields drop in the order the locals did: `gpu` last, after the game, the
 /// helper thread and the developer pause.
@@ -692,122 +607,7 @@ impl Loop {
             log_event(&mut self.events, generation, EventKind::Gpu, text);
             self.changed = true;
         }
-        if let Some(e) = &mut self.exp
-            && let Some(sched) = self.gpu.sched.as_mut()
-            && (self.running || self.ring.active())
-        {
-            let result: anyhow::Result<()> = (|| {
-                if !self.running {
-                    // A pause stops new submissions and absorption; work on
-                    // the engines still completes and waits in the ring.
-                    self.ring.step(e, sched, Duration::from_millis(4), 0)?;
-                    return Ok(());
-                }
-                let pass_started = Instant::now();
-                let world_before = e.config.clone();
-                let kept_before = e.archive.entries.len();
-                if !self.ring.active() {
-                    self.ring.start(e, sched);
-                }
-                sched.pump()?;
-                // Blocks are absorbed in ring order, so the run does not
-                // depend on which unit finished first, nor on when commands
-                // are read.
-                let pass = search_pass(
-                    &self.helper,
-                    e,
-                    sched,
-                    &mut self.ring,
-                    &self.rx,
-                    &mut self.deferred,
-                )?;
-                let step = pass.step;
-                for note in &pass.blocks {
-                    self.ring_meter
-                        .add(note.generation, note.chain, note.boundary);
-                    if let Some(log) = &mut self.stage_log {
-                        log.block(note.idle);
-                    }
-                }
-                self.benchmark.pass_done(&pass.pings, &pass.breeding);
-                let seconds = pass_started.elapsed().as_secs_f64();
-                e.evaluation_seconds += seconds;
-                let [archive, breeding] = std::mem::take(&mut e.stage_seconds);
-                let evaluation = (seconds - archive - breeding).max(0.0);
-                self.benchmark
-                    .add_stage_seconds([evaluation, archive, breeding]);
-                if let Some(log) = &mut self.stage_log {
-                    log.add(0, evaluation);
-                    log.add(1, archive);
-                    log.add(2, breeding);
-                }
-                self.status = format!("Evolving · generation {}", e.generation);
-                // A developer's generation dump (EVOLUTION_DUMP_GENERATION)
-                // says where it went.
-                if let Some(text) = e.dump_notice.take() {
-                    log_event(&mut self.events, e.generation, EventKind::Saved, text);
-                }
-                if step.generations == 0 {
-                    return Ok(());
-                }
-                if e.config.physics_differs(&world_before) {
-                    // Autochange changed the world at the boundary: blocks
-                    // not yet on an engine run in the new world, and the
-                    // kept elites are tested again in it.
-                    let lost = self.ring.world_changed(e, sched);
-                    if let Some(log) = &mut self.stage_log {
-                        log.discarded += lost;
-                    }
-                    log_world_change(
-                        &mut self.events,
-                        &world_before,
-                        &e.config,
-                        e.generation,
-                        kept_before.min(e.config.population),
-                    );
-                }
-                if let Some(log) = &mut self.stage_log {
-                    let genomes = e.blocks.iter().flat_map(|b| &b.population.genomes);
-                    let count = e.ring_len().max(1) as f64;
-                    let nodes = [
-                        genomes.clone().map(|g| g.node_count as f64).sum::<f64>() / count,
-                        genomes.filter(|g| g.node_count > 8).count() as f64 / count,
-                    ];
-                    log.write_row(
-                        e.generation.saturating_sub(1),
-                        e.config.population,
-                        Some(&*sched),
-                        nodes,
-                        e.ring,
-                        &self.ring_meter,
-                        e.rungs.last(),
-                    );
-                }
-                self.generation_marks
-                    .push_back((Instant::now(), e.config.population));
-                while self.generation_marks.len() > 2
-                    && self.generation_marks[0].0.elapsed() > Duration::from_secs(10)
-                {
-                    self.generation_marks.pop_front();
-                }
-                if self.benchmark.generation_done(e, sched, &self.ctx) {
-                    self.running = false;
-                }
-                self.autosave.start_if_due(e);
-                if self.run_until.is_some_and(|until| e.generation >= until) {
-                    self.running = false;
-                    self.status = format!("Paused after generation {}", e.generation - 1);
-                }
-                Ok(())
-            })();
-            if let Err(err) = result {
-                self.error = Some(format!("{err:#}"));
-                self.running = false;
-            }
-            self.changed = true;
-        } else if self.running && self.exp.is_none() {
-            self.running = false;
-        }
+        self.step();
         // A GPU that was lost and reopened is told to the player.
         if let Some(sched) = self.gpu.sched.as_mut() {
             for notice in sched.take_notices() {
@@ -1112,6 +912,14 @@ fn engine_rows(gpu: &Gpu) -> Vec<(String, f64, u64)> {
             .map(|d| (d.engine.name(), d.rate, d.creatures))
             .collect()
     })
+}
+/// Records a generation's end for `end_to_end_rate`, and forgets the ends
+/// older than 10 s (keeping at least two).
+fn note_generation(marks: &mut std::collections::VecDeque<(Instant, usize)>, population: usize) {
+    marks.push_back((Instant::now(), population));
+    while marks.len() > 2 && marks[0].0.elapsed() > Duration::from_secs(10) {
+        marks.pop_front();
+    }
 }
 /// Creatures per second between the oldest and newest recent generation ends.
 fn end_to_end_rate(marks: &std::collections::VecDeque<(Instant, usize)>) -> f64 {
