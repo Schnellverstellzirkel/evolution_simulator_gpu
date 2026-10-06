@@ -277,7 +277,7 @@ pub fn demo() {
                     State::Queued
                 };
                 r.jobs.push(Job {
-                    label: format!("scoring kernel · {class} lanes · {world}"),
+                    label: format!("scoring kernel · {world}"),
                     group: Group::Startup,
                     state,
                 });

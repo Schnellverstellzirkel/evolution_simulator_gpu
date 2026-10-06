@@ -761,7 +761,7 @@ fn compile_kernel(
     let (cubin, log) = api
         .nvrtc
         .compile(&source, options)
-        .with_context(|| format!("{}-lane CUDA kernel", key.class))?;
+        .with_context(|| "the creature CUDA kernel")?;
     if std::env::var_os("EVOLUTION_CUDA_VERBOSE").is_some() {
         eprintln!(
             "CUDA: compiled {key:?} in {:.1} s\n{}",
@@ -786,8 +786,8 @@ fn compile_kernel(
     Ok(cubin)
 }
 
-/// How the loading screen names a kernel: what it does, how many lanes a
-/// creature gets and which effects the world compiles in.
+/// How the loading screen names a kernel: what it does and which effects the
+/// world compiles in.
 fn kernel_label(key: KernelKey) -> String {
     let physics = if key.fidelity == Fidelity::standard() {
         ""
@@ -795,9 +795,8 @@ fn kernel_label(key: KernelKey) -> String {
         " (fine physics)"
     };
     format!(
-        "{} kernel{physics} · {} lanes · {}",
+        "{} kernel{physics} · {}",
         if key.record { "replay" } else { "scoring" },
-        key.class,
         crate::kernel::world_label(key.flags)
     )
 }
@@ -900,8 +899,7 @@ fn load_kernel(api: &Api, context: CuContext, cubin: &[u8], key: KernelKey) -> R
                 value
             };
             eprintln!(
-                "CUDA: {}-lane {} kernel: {} registers, {} B shared, {} B local per thread, {} blocks of {} threads per SM, module loaded in {:.3} s",
-                key.class,
+                "CUDA: {} kernel: {} registers, {} B shared, {} B local per thread, {} blocks of {} threads per SM, module loaded in {:.3} s",
                 if key.record { "recording" } else { "scoring" },
                 attribute(4),
                 attribute(1),
