@@ -2,6 +2,10 @@ use crate::evolution::{Creature, Muscle, Population, Rng, StoredCreature};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// 61: a node inside the ground is moved out as a position change with no
+//     velocity and no normal impulse (it was a velocity goal, which gave
+//     bodies energy and friction grip at one substep). Scores of older saves
+//     came from the old contact.
 pub const EMITTER_COUNT: usize = 4;
 /// The movement grid: ground contact, gait cadence, mean body height and
 /// feet (distinct nodes that touched the ground).
@@ -183,7 +187,7 @@ pub(crate) const CMA_LIMIT: usize = 96;
 // 57: the islands have 3 shapes by 3 sizes of body class (2 by 2 before), and
 //     a save is compressed with long-range matching. A save of version 56
 //     loads by moving each elite to its cell in the new layout.
-pub const VERSION: u32 = 60;
+pub const VERSION: u32 = 61;
 /// The oldest save version that still loads. Its archives are re-binned, and
 /// its elites keep the scores they measured.
 pub const OLDEST_LOADABLE: u32 = 53;

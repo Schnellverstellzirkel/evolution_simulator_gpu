@@ -927,6 +927,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
             // would reach the ground within the substep, solved together.
             nc = 0u;
             float ln = 0.0f, lt = 0.0f;
+            float lift = 0.0f;
             vec3 dn = v3(0.0f, 0.0f, 0.0f), dtg = dn;
 #if GROUND
             {
@@ -952,6 +953,10 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     depth_c = gap + HS * vnf;
                     cand = depth_c <= 0.0f;
                 }
+                // A node inside the ground is moved out by a share of its depth as a
+                // position change that gives it no velocity and no normal impulse,
+                // so the correction adds no kinetic energy and no friction budget.
+                lift = __uint_as_float(gmaxu(__float_as_uint(valid ? fmaxf(-gap, 0.0f) : 0.0f)));
                 const unsigned cb = (__ballot_sync(FULL, cand) >> gshift) & GM;
                 const unsigned ncand = __popc(cb);
                 int slot = cand ? (int)__popc(cb & below) : -1;
@@ -984,7 +989,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                         vn = vnf;
                         vt = vx * tx + vy * ty + HS * (sdot(dtg, ba) + bw * (-vy * tx + vx * ty));
                         vs = vx * tx + vy * ty;
-                        goal = gap >= 0.0f ? -gap * INV_HS : -gap * PUSH_OUT * INV_HS;
+                        goal = gap >= 0.0f ? -gap * INV_HS : 0.0f;
 #if MUD
                         const float sink = clampf(-dry, 0.0f, p.mud) * (1.0f / MUD_FULL_DEPTH);
                         mu = fric * p.friction * (1.0f + MUD_GRIP * sink) * (1.0f + MUD_NORMAL * sink);
@@ -1180,7 +1185,7 @@ extern "C" __global__ void __launch_bounds__(BLOCK, MIN_BLOCKS) advance(
                     vy = vy + hay * HS;
 #endif
                     px += vx * HS;
-                    py += vy * HS;
+                    py += vy * HS + PUSH_OUT * lift;
                 } else if (body) {
                     const float a = lg == 1u ? acc.x : qdd;
 #if AIR
