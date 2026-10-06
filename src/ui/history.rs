@@ -3,11 +3,11 @@
 
 use super::{
     App, Tab,
+    controls::world_summary,
     records::{live_record, world_records},
     scene::thumbnail,
     text::{number, species_name},
     widgets::{color_dot, species_color},
-    world_summary,
 };
 use crate::theme::GAP_M;
 use eframe::egui::{self, Pos2, Rect, RichText, Sense, Stroke, Vec2};

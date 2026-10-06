@@ -3,13 +3,13 @@
 
 use super::{
     App, Tab,
+    controls::world_summary,
     playback::{FrameMarks, Playback},
     race::RACE_PICKS,
     records::row_in_world,
     scene::draw_creature,
     text::{number, species_name},
     widgets::speed_picker,
-    world_summary,
 };
 use crate::{
     config::Config,
