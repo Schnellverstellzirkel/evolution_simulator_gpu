@@ -142,12 +142,21 @@ impl Ring {
                 if members.is_empty() {
                     continue;
                 }
+                let mut cfg = environment::wild_world(&block.config, &levels[w]);
+                if let (Some(main), Some(&bar)) = (block.config.screen, block.wild_bars.get(w)) {
+                    cfg.screen = Some(crate::physics::Screen {
+                        bar,
+                        young_bar: f32::NEG_INFINITY,
+                        reshaped_bar: f32::NEG_INFINITY,
+                        ..main
+                    });
+                }
                 sched.queue(
                     seq << 2 | WILD,
                     Trial::Standard,
                     Arc::clone(&block.population),
                     Some(members),
-                    Arc::new(environment::wild_world(&block.config, &levels[w])),
+                    Arc::new(cfg),
                 );
             }
         }

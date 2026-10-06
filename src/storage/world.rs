@@ -389,6 +389,9 @@ impl Experiment {
         self.screen_window.clear();
         self.young_window.clear();
         self.reshaped_window.clear();
+        for window in &mut self.wild_windows {
+            window.clear();
+        }
         self.clade_rarity = (u32::MAX, Vec::new());
         self.rungs.clear();
         self.config.rungs = None;

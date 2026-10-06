@@ -856,6 +856,7 @@ impl Experiment {
             first,
             population: Arc::new(population),
             births,
+            wild_bars: Arc::new(self.wild_bars(&cfg)),
             config: Arc::new(cfg),
         }
     }

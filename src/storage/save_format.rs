@@ -273,6 +273,7 @@ impl SmallLoad {
                     population: Arc::new(evolution::random_block(&e.config, first, count)),
                     births: vec![Birth::RANDOM; count],
                     config: Arc::clone(&shared),
+                    wild_bars: Arc::default(),
                 }
             } else {
                 // Plans sample every island's archive; an empty one breeds

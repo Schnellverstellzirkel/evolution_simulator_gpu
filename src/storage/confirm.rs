@@ -375,6 +375,20 @@ impl Experiment {
             reshaped_bar: self.reshaped_window.bar(keep),
         })
     }
+    /// The screen bar of each wild island for a block bred with `cfg`: the
+    /// distance at the screen that the best `physics::screen_keep()` share
+    /// of the island's newest evolved creatures reached in its own world.
+    /// Empty when `cfg` has no screen, so the wild creatures run in full. A
+    /// wild island's new bodies are never screened.
+    pub(super) fn wild_bars(&self, cfg: &Config) -> Vec<f32> {
+        match cfg.screen {
+            Some(screen) if screen.bar > f32::NEG_INFINITY => {
+                let keep = crate::physics::screen_keep();
+                self.wild_windows.iter().map(|w| w.bar(keep)).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

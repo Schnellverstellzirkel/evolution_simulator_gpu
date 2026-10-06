@@ -478,8 +478,9 @@ fn draw_wild_levels() -> Vec<Vec<(usize, usize)>> {
 }
 
 /// The settings of a wild island's world: `base` with every effect calm
-/// except the island's own mix. The wild worlds have no early screen and no
-/// rungs, because the main world's bars say nothing about them.
+/// except the island's own mix. It has no early screen and no rungs, because
+/// the main world's bars say nothing about it: the ring gives each wild
+/// island a screen bar of its own (`Block::wild_bars`).
 pub fn wild_world(base: &Config, levels: &[(usize, usize)]) -> Config {
     let mut cfg = base.clone();
     for effect in EFFECTS.iter() {

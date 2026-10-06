@@ -130,6 +130,9 @@ pub struct Block {
     pub births: Vec<Birth>,
     /// The trial settings the block runs with, fixed when it is bred.
     pub config: Arc<Config>,
+    /// The screen bar of each wild island's creatures, in its own world,
+    /// fixed when the block is bred; empty runs them in full.
+    pub wild_bars: Arc<Vec<f32>>,
 }
 impl Block {
     /// The screen bar of creature `j` among `screen`'s: a nursery body is
@@ -241,6 +244,8 @@ pub struct Experiment {
     screen_window: ScreenWindow,
     young_window: ScreenWindow,
     reshaped_window: ScreenWindow,
+    /// Each wild island's distances at the screen, in its own world.
+    wild_windows: Vec<ScreenWindow>,
     /// How rare the clade of each island elite is (`clade_rarity_of`),
     /// computed once per generation, for the generation it names. Not saved.
     clade_rarity: (u32, Vec<Vec<f32>>),
@@ -341,6 +346,7 @@ impl Experiment {
                 population: Arc::new(evolution::random_block(&e.config, first, count)),
                 births: vec![Birth::RANDOM; count],
                 config: Arc::clone(&shared),
+                wild_bars: Arc::default(),
             })
             .collect();
         Ok(e)
@@ -375,6 +381,7 @@ impl Experiment {
             screen_window: ScreenWindow::default(),
             young_window: ScreenWindow::default(),
             reshaped_window: ScreenWindow::default(),
+            wild_windows: vec![ScreenWindow::default(); qd::WILD_ISLANDS],
             clade_rarity: (u32::MAX, Vec::new()),
             wild_exports: HashMap::new(),
             wild_wins: Vec::new(),
@@ -464,6 +471,21 @@ impl Experiment {
             self.screen_window.push(distances(0), nursery, ring);
             self.young_window.push(distances(1), 0, ring);
             self.reshaped_window.push(distances(2), 0, ring);
+            // Each wild island sets its own bar from its evolved creatures.
+            let mut wild: Vec<Vec<f32>> = vec![Vec::new(); qd::WILD_ISLANDS];
+            let first = self.blocks[k].first;
+            for (j, m) in finals.iter().enumerate() {
+                let island = qd::island_of_slot(first + j, island_count());
+                let young = self.blocks[k].population.flags.get(j).copied().unwrap_or(0)
+                    & (crate::rungs::YOUNG | crate::rungs::RESHAPED)
+                    != 0;
+                if qd::is_wild(island) && !young && m.screen_x.is_finite() {
+                    wild[island - qd::MAIN_ISLANDS].push(m.screen_x);
+                }
+            }
+            for (window, distances) in self.wild_windows.iter_mut().zip(wild) {
+                window.push(distances, 0, ring);
+            }
             self.config.screen = self.next_screen(self.config.duration);
         }
         let started = std::time::Instant::now();
