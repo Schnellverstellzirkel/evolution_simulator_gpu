@@ -1,4 +1,4 @@
-//! The worker thread. It owns the game and the evaluation engines, reads
+//! The worker thread owns the game and the evaluation engines. It reads
 //! `Command`s from the UI, runs the search and publishes a `Snapshot` for the
 //! UI to draw. This file holds those two messages, the summaries a snapshot
 //! carries and the state of the worker's loop. The submodules hold the parts
