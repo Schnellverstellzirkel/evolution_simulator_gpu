@@ -1,4 +1,7 @@
-//! Commands from the UI: `pass` reads them, `handle` runs each one.
+//! Handles the commands from the UI. `Loop::pass` in `src/worker.rs` calls
+//! `next_command` to read one and `handle_commands` to run every command that
+//! is waiting. `handle_commands` calls `handle` for each command. The other
+//! methods in this file carry out one command each.
 
 use super::{Command, EventKind, LineageStep, Loop, log_event, log_world_change};
 use crate::{
@@ -12,9 +15,10 @@ use std::{
 };
 
 impl Loop {
-    /// The next command. While the game is evolving or the engines are busy
-    /// it only looks; otherwise it waits up to 100 ms for one. `Break` when
-    /// the UI is gone.
+    /// The next command, if one is waiting. While the game runs or the engines
+    /// hold work it only looks, unless a developer pause has closed the
+    /// engines. Otherwise it waits up to 100 ms for one. It returns `Break`
+    /// when the UI is gone, which it sees only when it waits.
     pub(super) fn next_command(&mut self) -> ControlFlow<(), Option<Command>> {
         // A developer pause with the engines closed leaves nothing to
         // collect: wait for commands instead of spinning.
@@ -27,11 +31,13 @@ impl Loop {
             Err(_) => ControlFlow::Continue(None),
         }
     }
-    /// Handles every queued command now; controls never wait behind a GPU
-    /// batch. `first` is the command `next_command` read. `Break` on
-    /// `Command::Shutdown`.
+    /// Runs every command that is waiting. The order is the ones deferred
+    /// earlier, then `first`, then the rest of the channel. `first` is the
+    /// command `next_command` read. No command waits for the engines. `Break`
+    /// on `Command::Shutdown`.
     pub(super) fn handle_commands(&mut self, first: Option<Command>) -> ControlFlow<()> {
-        // Commands held back during a load run first once it is done.
+        // Commands deferred during a load or a search pass run first, unless a
+        // load is still in progress.
         let mut commands: Vec<Command> = if self.loading.is_none() {
             std::mem::take(&mut self.deferred)
         } else {
@@ -43,8 +49,9 @@ impl Loop {
             if matches!(command, Command::Shutdown) {
                 return ControlFlow::Break(());
             }
-            // While a save loads there is no game to act on: defer all other
-            // commands, in order, until the load is done.
+            // While a save loads there is no game to act on. Every command
+            // but `New`, `Load` and `Ping` waits in `deferred`, in order,
+            // until the load is done.
             if self.loading.is_some()
                 && !matches!(
                     command,
@@ -56,7 +63,8 @@ impl Loop {
             }
             // No command waits for the engines: a save holds only the
             // archives, settings apply to the blocks bred after them, and a
-            // new or loaded game drops the ring.
+            // new or loaded game drops the ring. A new or loaded game does
+            // wait for a running autosave to end.
             if matches!(command, Command::New(_) | Command::Load(_)) {
                 self.autosave.join();
             }
@@ -66,11 +74,12 @@ impl Loop {
                 self.error = Some(format!("{e:#}"));
                 self.running = false;
             }
-            // Disconnection is handled separately; shutdown closes the receiver after this iteration.
         }
         ControlFlow::Continue(())
     }
-    /// Runs one command. An error is shown to the player and stops the run.
+    /// Runs one command and returns its error. `handle_commands` shows the
+    /// error to the player and stops the run. `Command::Shutdown` does not get
+    /// here, because `handle_commands` ends the loop on it first.
     fn handle(&mut self, command: Command) -> anyhow::Result<()> {
         match command {
             Command::Shutdown => {}
@@ -90,6 +99,8 @@ impl Loop {
             Command::Export(path) => self.export(path)?,
             Command::Ping(sent) => {
                 self.benchmark.ping(sent);
+                // A ping is only a probe. It clears the `changed` flag that
+                // `handle_commands` just set.
                 self.changed = false;
             }
             Command::Cards => self.send_cards = true,
@@ -99,6 +110,8 @@ impl Loop {
         }
         Ok(())
     }
+    /// `Command::New`: ends a load in progress and the ring in flight, then
+    /// starts a new experiment with an empty history and event feed.
     fn new_game(&mut self, cfg: Config) -> anyhow::Result<()> {
         self.cancel_load();
         self.running = false;
@@ -128,8 +141,9 @@ impl Loop {
         self.status = "Population ready".into();
         Ok(())
     }
-    /// `Command::Run`: `continuous` runs on, a guided run or one that is not
-    /// continuous stops after one generation.
+    /// `Command::Run`: starts evolving and clears the shared `pause` flag. A
+    /// run that is not `continuous`, or is `guided`, stops after one
+    /// generation. The benchmark notes the run and the stage log starts over.
     fn start_run(&mut self, continuous: bool, guided: bool) {
         self.benchmark
             .run_started(self.exp.as_ref().map(|e| e.generation));
@@ -145,12 +159,15 @@ impl Loop {
             log.reset();
         }
     }
+    /// `Command::Configure`: applies the new settings now. When the physics
+    /// changed, the ring retargets the blocks that have not reached an engine,
+    /// and the world change goes into the event log.
     fn configure(&mut self, cfg: Config) -> anyhow::Result<()> {
         if let Some(e) = &mut self.exp {
             let before = e.config.clone();
-            // The change applies now. Blocks already run or
-            // running in the old world enter no archive;
-            // blocks not yet on an engine run in the new one.
+            // The change applies now. Blocks already run or running in the
+            // old world enter no archive. Blocks not yet on an engine run in
+            // the new one.
             e.update_config_now(cfg)?;
             if before.physics_differs(&e.config)
                 && let Some(sched) = self.gpu.sched.as_mut()
@@ -175,7 +192,9 @@ impl Loop {
         }
         Ok(())
     }
-    /// Benchmark probe: applies the current settings again.
+    /// `Command::ConfigureProbe`: a benchmark probe. It applies the current
+    /// settings again, as an environment button does, and tells the benchmark
+    /// how long the probe waited since `sent`.
     fn configure_probe(&mut self, sent: Instant) -> anyhow::Result<()> {
         if let Some(e) = &mut self.exp {
             let cfg = e.config.clone();
@@ -184,6 +203,8 @@ impl Loop {
         }
         Ok(())
     }
+    /// `Command::Meteor`: wipes out about half of the elites of every archive
+    /// (`Experiment::meteor`) and logs how many were lost.
     fn meteor(&mut self) {
         if let Some(e) = &mut self.exp {
             let lost = e.meteor(0.5);
@@ -196,6 +217,8 @@ impl Loop {
             );
         }
     }
+    /// `Command::Extinction`: wipes out the island whose best creature is
+    /// slowest (`Experiment::extinction`) and logs how many elites were lost.
     fn extinction(&mut self) {
         if let Some(e) = &mut self.exp {
             let lost = e.extinction();
@@ -208,6 +231,9 @@ impl Loop {
             );
         }
     }
+    /// `Command::UndoMeteor`: returns the fossils of earlier meteors and
+    /// extinctions to their archives (`Experiment::undo_meteor`) and logs how
+    /// many came back.
     fn undo_meteor(&mut self) {
         if let Some(e) = &mut self.exp {
             let back = e.undo_meteor();
@@ -221,7 +247,7 @@ impl Loop {
         }
     }
     /// `Command::MapTable`: the UI starts or stops asking for the archive
-    /// map table.
+    /// map table. Stopping drops the table built so far.
     fn show_map_table(&mut self, on: bool) {
         self.want_map = on;
         if !on {
@@ -229,8 +255,8 @@ impl Loop {
             self.map_key = (u64::MAX, usize::MAX, 0);
         }
     }
-    /// `Command::Select`: the archive creature with this id goes to the next
-    /// snapshot.
+    /// `Command::Select`: the creature of the global archive with this id goes
+    /// to the next snapshot with the world it is scored in.
     fn select(&mut self, id: u64) {
         if let Some(e) = &self.exp
             && let Some(elite) = e
@@ -243,7 +269,8 @@ impl Loop {
         }
     }
     /// `Command::Lineage`: the ancestors of the creature with this id go to
-    /// the next snapshot.
+    /// the next snapshot, newest first. Each step carries the ancestor's
+    /// fitness, its gain over its own parent and the change that made it.
     fn trace_lineage(&mut self, id: u64) {
         if let Some(e) = &self.exp {
             let chain = e.ancestry(id, storage::ANCESTRY_DEPTH);

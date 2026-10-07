@@ -1,4 +1,7 @@
-//! The background autosave: one save at a time, on its own thread.
+//! Runs the background autosave, one save at a time, on its own thread. The
+//! worker starts one with `start_if_due` when a generation ends. `finished`
+//! reports the file it wrote, so the event log can say so. Each experiment
+//! writes `runs/seed-<seed>-auto.evo`, and the three newest autosaves stay.
 
 use crate::storage::{self, Experiment};
 use std::{path::PathBuf, thread::JoinHandle};
@@ -6,24 +9,27 @@ use std::{path::PathBuf, thread::JoinHandle};
 /// A background autosave, which reports the file and generation it wrote.
 #[derive(Default)]
 pub(super) struct Autosave {
+    /// The autosave thread. It returns the file and generation it wrote, or
+    /// `None` when the save failed.
     thread: Option<JoinHandle<Option<(PathBuf, u32)>>>,
 }
 
 impl Autosave {
-    /// Waits for a running autosave to end.
+    /// Waits for a running autosave to end and drops its result.
     pub(super) fn join(&mut self) {
         if let Some(handle) = self.thread.take() {
             let _ = handle.join();
         }
     }
-    /// Starts an autosave of `e` when its generation is due and none is
-    /// running.
+    /// Starts an autosave of `e` in the background if one is due. One is due
+    /// when autosave is on and the generation is a multiple of the interval.
+    /// The archive must hold elites, and the last autosave must have ended.
     pub(super) fn start_if_due(&mut self, e: &Experiment) {
-        // Benchmarks keep autosaves off even for a loaded
-        // checkpoint, which brings its own interval. Right after a
-        // world change every elite is on the GPU for its re-test and
-        // the archives are empty; a save holds no creatures in
-        // flight, so that autosave would hold no elites and replace a
+        // `EVOLUTION_BENCH_NO_AUTOSAVE` keeps benchmarks from autosaving,
+        // whatever interval their settings carry. The archive must hold
+        // elites. Right after a world change every elite is on the GPU for
+        // its re-test and the archives are empty. A save holds no creatures
+        // in flight, so that autosave would hold no elites and replace a
         // good one. The next autosave, after the re-tests, writes.
         if e.config.checkpoint_interval > 0
             && std::env::var_os("EVOLUTION_BENCH_NO_AUTOSAVE").is_none()
@@ -36,25 +42,30 @@ impl Autosave {
         {
             self.join();
             let path = PathBuf::from(format!("runs/seed-{}-auto.evo", e.config.seed));
-            // The ring is shared, not copied: the save holds only
-            // the archives and the search state.
+            // The clone shares the blocks' creatures behind their `Arc`s
+            // instead of copying them. The save holds only the archives and
+            // the search state.
             let snapshot = e.clone();
             self.thread = Some(std::thread::spawn(move || {
+                // The thread would inherit the worker's CPU, so it moves to
+                // the pool's CPUs.
                 crate::threads::pin_pool();
                 if let Err(err) = storage::save(&path, &snapshot) {
                     eprintln!("Background checkpoint failed: {err:#}");
                     return None;
                 }
                 if let Some(dir) = path.parent() {
-                    // One autosave per experiment piles up: keep the
-                    // three most recent experiments' autosaves.
+                    // Each experiment writes its own autosave file, so they
+                    // pile up. Keep the three newest.
                     storage::rotate_autosaves(dir, 3);
                 }
                 Some((path, snapshot.generation))
             }));
         }
     }
-    /// The file and generation of an autosave that has just finished.
+    /// The file and generation of an autosave that has ended, once. It is
+    /// `None` while the autosave runs, when none was started and when the
+    /// save failed.
     pub(super) fn finished(&mut self) -> Option<(PathBuf, u32)> {
         if self
             .thread
