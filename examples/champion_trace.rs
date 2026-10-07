@@ -1,23 +1,32 @@
-//! Trace of one island's best elite: where it is, how high, what touches the
-//! ground and how much muscle energy is left, every quarter second.
-//! Usage: champion_trace <checkpoint.evo> <island> [rank]
+//! Replays one elite of a save on the GPU and prints its body, the world, its
+//! score alone and in the replay, the work of friction and muscles, the
+//! impulses, the contacts of each node, and a table of the replay over time.
+//! Usage: champion_trace <checkpoint.evo> <archive: g or island number> [rank]
+//! Rank 0 is the fastest elite and the default. Set `FINE` to replay the
+//! confirmation trial, `NO_MUSCLES` to remove the muscles and `DUMP=<path>` to
+//! write the frames as JSON.
 mod common;
 use evolution_simulator::{config::Config, storage};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let e = storage::load(std::path::Path::new(&args[1]))?;
+    // `g` is the global archive. A number indexes `Experiment::islands`, which
+    // holds the islands first and then their nurseries.
     let archive = if args[2] == "g" {
         &e.archive
     } else {
         &e.islands[args[2].parse::<usize>()?]
     };
     let rank: usize = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(0);
+    // The rank counts every entry of the archive by distance, fastest first.
     let mut elites: Vec<_> = archive.entries.iter().collect();
     elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
     let elite = elites[rank];
     let mut engine = common::open()?;
     let creature = elite.creature.unpack();
+    // The stored distance, whether it is a confirmation trial's, the size of
+    // the body and the change that the lineage records for the creature.
     println!(
         "fitness {:.2} fine {} nodes {} bones {} muscles {} change: {:?}",
         elite.fitness,
@@ -27,6 +36,8 @@ fn main() -> anyhow::Result<()> {
         creature.muscles.len(),
         e.lineage.get(&creature.id).map(|a| a.change.clone())
     );
+    // The start pose: each node's place, diameter and friction, then each
+    // bone's two nodes, rest length and organ mass.
     for (i, n) in creature.nodes.iter().enumerate() {
         println!(
             "node {i}: x {:.3} y {:.3} d {:.3} friction {:.2}",
@@ -52,16 +63,23 @@ fn main() -> anyhow::Result<()> {
         e.config.hurdles,
         e.config.quake
     );
+    // `c2` is the creature to replay and `cfg` the trial its score came from.
     let (mut c2, mut cfg) = elite.replay_of(&e.config);
+    // `FINE` switches to the confirmation trial, even for a standard score.
     if std::env::var_os("FINE").is_some() {
         cfg = evolution_simulator::scheduler::confirm_config(&e.config);
         println!("fine replay");
     }
+    // The replay runs no early rung.
     cfg.rungs = None;
+    // `NO_MUSCLES` removes the muscles before the creature is scored and
+    // replayed.
     if std::env::var_os("NO_MUSCLES").is_some() {
         c2.muscles = Default::default();
         println!("muscles removed");
     }
+    // The same creature scored alone as a batch of one, to compare with the
+    // replay below.
     {
         let batch = common::score_creatures(
             &mut engine,
@@ -76,6 +94,7 @@ fn main() -> anyhow::Result<()> {
             batch[0].fitness, batch[0].fall_time
         );
     }
+    // The replay: the scoring kernel with recording.
     let rec = common::record(&c2, &cfg)?;
     println!(
         "replay {:.2} fall {:.2} frames {}",
@@ -83,8 +102,14 @@ fn main() -> anyhow::Result<()> {
         rec.result.fall_time,
         rec.frames.len()
     );
+    // The forces that the kernel recorded with each frame.
     let f = rec.forces.as_ref().expect("forces");
+    // Seconds per frame, from the trial length and the frame count. The frames
+    // include the settling steps, so this is below the length of a step.
     let dt = cfg.duration / (rec.frames.len() as f32 - 1.0);
+    // The work of friction on each node in each frame: the recorded friction
+    // force times the node's movement along x. `pos` and `neg` sum the
+    // positive and the negative terms, and `per_node` sums them per node.
     let (mut pos, mut neg) = (0.0f64, 0.0f64);
     let mut per_node = vec![0.0f64; rec.frames[0].len()];
     for k in 1..rec.frames.len() {
@@ -106,13 +131,17 @@ fn main() -> anyhow::Result<()> {
         "dt {dt:.5} friction work: positive {pos:.1} J negative {neg:.1} J, per node {per_node:.1?}, friction frames {}",
         f.friction.len()
     );
+    // The mass of the body in kg, with its bones, organs and muscles.
     let mass: f32 = evolution_simulator::physics::nodes(&c2)
         .iter()
         .map(|n| n.mass)
         .sum();
+    // The work of the muscles in each frame: the force along a muscle times how
+    // much it shortened. `w_net` sums every term and `w_pos` the positive ones.
     {
         let mut w_pos = 0.0f64;
         let mut w_net = 0.0f64;
+        // The length of muscle `j` in frame `k`, between its two anchor points.
         let length = |k: usize, j: usize| -> f32 {
             let m = &c2.muscles[j];
             let pt = |bone: u32, t: f32| {
@@ -134,6 +163,8 @@ fn main() -> anyhow::Result<()> {
         }
         println!("muscle work: net {w_net:.1} J, positive part {w_pos:.1} J");
     }
+    // `DUMP` names a file that gets the replay as JSON: the frame time, the
+    // nodes of each bone, the node radii, the frames and the ground contacts.
     if let Some(path) = std::env::var_os("DUMP") {
         let bones: Vec<[u32; 2]> = c2.bones.iter().map(|b| [b.a, b.b]).collect();
         let radii: Vec<f32> = c2.nodes.iter().map(|n| n.diameter * 0.5).collect();
@@ -152,6 +183,7 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .map(|n| n.mass)
         .collect();
+    // The center of mass in frame `k`.
     let com = |k: usize| -> [f32; 2] {
         let mut c = [0.0f32; 2];
         for (j, p) in rec.frames[k].iter().enumerate() {
@@ -160,6 +192,7 @@ fn main() -> anyhow::Result<()> {
         }
         [c[0] / mass, c[1] / mass]
     };
+    // The kinetic energy at the end, from the movement over the last frame.
     let ke: f32 = (0..rec.frames[0].len())
         .map(|j| {
             let n = rec.frames.len() - 1;
@@ -171,11 +204,15 @@ fn main() -> anyhow::Result<()> {
         })
         .sum();
     println!("final kinetic energy {ke:.1} J");
+    // The impulse of the recorded friction along x, and of the ground push
+    // minus the weight, over the replay. The weight uses 9.8 m/s^2, whatever
+    // the world's gravity.
     let (mut jx, mut jy) = (0.0f64, 0.0f64);
     for k in 1..rec.frames.len() {
         jx += f.friction[k].iter().sum::<f32>() as f64 * dt as f64;
         jy += (f.ground[k].iter().sum::<f32>() - mass * 9.8) as f64 * dt as f64;
     }
+    // The mean x speed of the center of mass over the second half.
     let n = rec.frames.len();
     let (a, b) = (n / 2, n - 1);
     let vx_half = (com(b)[0] - com(a)[0]) / ((b - a) as f32 * dt);
@@ -185,6 +222,8 @@ fn main() -> anyhow::Result<()> {
         com(0),
         com(b)
     );
+    // For each node that touched the ground: its number of bones, the share of
+    // frames it was on the ground and its mean speed along x while there.
     {
         let nn = rec.frames[0].len();
         let (mut touch, mut slide) = (vec![0usize; nn], vec![0.0f64; nn]);
@@ -215,6 +254,11 @@ fn main() -> anyhow::Result<()> {
         }
         println!("{line}");
     }
+    // The late frames. This prints every fourth frame from frame 2000, at most
+    // 64 lines. Each node shows its x relative to the center of mass and its y,
+    // with a star while it is on the ground. A standard replay of a 20 s trial
+    // has fewer than 2000 frames and prints nothing here. The fine replay has
+    // more.
     for k in (2000..(2000 + 64 * 4).min(rec.frames.len())).step_by(4) {
         let c = com(k);
         let mut line = format!("f{k} com_x {:.2} |", c[0]);
@@ -228,6 +272,11 @@ fn main() -> anyhow::Result<()> {
         }
         println!("{line}");
     }
+    // A table of about 80 rows over the whole replay. The time column is the
+    // frame number over 60, whatever the replay's rate. The next columns are
+    // the mean x and y of the nodes, their lowest and highest y, the sum of the
+    // ground push, the number of nodes on the ground and the lowest muscle
+    // energy store.
     let step = (rec.frames.len() / 80).max(1);
     println!("t   com_x  com_y  min_y  max_y  groundN  touching  energy_min");
     for (k, frame) in rec.frames.iter().enumerate().step_by(step) {
