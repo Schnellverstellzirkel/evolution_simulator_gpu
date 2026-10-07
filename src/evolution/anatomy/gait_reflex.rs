@@ -1,21 +1,12 @@
-//! Gait operators: sensing and reflexes that coordinate legs.
-//!
-//! The genome senses one thing: a muscle can restart its clock at a chosen
-//! cycle position (`reset`) when one of the four ends of its two bones, which
-//! must be a foot, touches the ground (`sensor`). From that, these operators
-//! build the rules of Cruse's walknet and of the half-centre coupling in
-//! central pattern generators (Full and Koditschek's templates, Alexander's
-//! duty factor): a landing starts the stance stroke, a landing triggers the
-//! next leg through a small bridge muscle, legs alternate or wave along the
-//! body with their reflexes set to match.
-//!
-//! In every operator "the start of the stroke" is cycle position 0, where a
-//! muscle begins to contract. A leg's reset puts each of its sensing muscles
-//! where it would be when the leg's strongest muscle is at position 0, so a
-//! landing keeps the leg's own timing and only restarts it.
-//!
-//! The operators share one pick slot and are compound: each is a whole change
-//! and its child gets no parameter noise.
+//! Gait operators that use the touchdown sensor of a muscle: its `sensor`
+//! picks one end of its two bones, and when that end lands the muscle jumps to
+//! cycle position `reset`. Following Cruse's walknet, they give the muscles of
+//! a leg a landing reflex, set leg phases and duty to match it, and add
+//! muscles that a landing fires: bridges to another leg or to the trunk, and a
+//! stiffener across the last joint of a leg. The sensed end is always the foot
+//! of a leg, and cycle position 0 is where a muscle starts to contract. The
+//! operators share one pick slot (`GAIT_FILES` in `mod.rs`) and are compound,
+//! so a child gets no parameter noise.
 use super::compound::strongest;
 use super::limbs::pick;
 use super::rhythm::{foot, leaf_limbs, tip_x};
@@ -42,15 +33,15 @@ pub(super) const OPS: &[(&str, Operator)] = &[
     ("stance_duty_with_reflex", stance_duty_with_reflex),
 ];
 
-/// The legs (leaf limbs of at least two bones), from the rearmost foot to the
-/// foremost.
+/// The legs, from the rearmost foot to the foremost: the leaf limbs of two
+/// bones or more, ordered by the x of the foot in the starting pose.
 fn legs_by_x(c: &Creature) -> Limbs {
     let mut legs: Limbs = leaf_limbs(c).into_iter().filter(|l| l.len() >= 2).collect();
     legs.sort_stable_by(|p, q| tip_x(c, p).total_cmp(&tip_x(c, q)));
     legs
 }
 
-/// The muscles with a stroke that have an end on the leg.
+/// The muscles with an end on `leg` that have a stroke (`long` above `short`).
 fn active_on(c: &Creature, leg: &[usize]) -> MuscleIds {
     muscles_on(c, leg, false)
         .into_iter()
@@ -58,7 +49,9 @@ fn active_on(c: &Creature, leg: &[usize]) -> MuscleIds {
         .collect()
 }
 
-/// The sensor index (0 to 3) that reads node `node` for muscle `i`.
+/// Which of the four ends of muscle `i`'s two bones (`bone_a.a`, `bone_a.b`,
+/// `bone_b.a`, `bone_b.b`, numbered 0 to 3) is node `node`, as a `sensor`
+/// value. `None` when `node` is none of them.
 fn sensor_at(c: &Creature, i: usize, node: usize) -> Option<u32> {
     let m = &c.muscles[i];
     let (a, b) = (c.bones[m.bone_a as usize], c.bones[m.bone_b as usize]);
@@ -68,7 +61,8 @@ fn sensor_at(c: &Creature, i: usize, node: usize) -> Option<u32> {
         .map(|k| k as u32)
 }
 
-/// The leg's active muscles that can sense its foot.
+/// The active muscles of `leg` that have its foot as one of their four ends,
+/// so they can sense it.
 fn sensing(c: &Creature, leg: &[usize]) -> MuscleIds {
     let f = foot(c, leg);
     active_on(c, leg)
@@ -77,7 +71,7 @@ fn sensing(c: &Creature, leg: &[usize]) -> MuscleIds {
         .collect()
 }
 
-/// Legs whose foot a muscle can sense.
+/// The legs, rearmost first, whose foot an active muscle can sense.
 fn sensing_legs(c: &Creature) -> Limbs {
     legs_by_x(c)
         .into_iter()
@@ -85,9 +79,11 @@ fn sensing_legs(c: &Creature) -> Limbs {
         .collect()
 }
 
-/// Makes every sensing muscle of the leg sense its foot, restarting at the
-/// cycle position `reset(m, lead)` where `lead` is the leg's strongest
-/// muscle. Returns whether anything changed.
+/// Makes every muscle that `sensing` finds on `leg` sense the leg's foot, with
+/// the reset `reset(m, lead)` wrapped into 0 to 1. Here `m` is the muscle and
+/// `lead` is a copy of the leg's strongest active muscle. Returns whether a
+/// sensor or a reset changed. It changes nothing when the leg has no active
+/// muscle.
 fn arm(
     c: &mut Creature,
     leg: &[usize],
@@ -110,13 +106,18 @@ fn arm(
     changed
 }
 
-/// Reset that puts a muscle where it is when the leg's lead starts a stroke.
+/// The reset that puts muscle `m` where it would be if `lead` were at cycle
+/// position 0, the start of its stroke. This is `m.phase - lead.phase`, which
+/// assumes the two have the same period.
 fn at_stroke_start(m: &crate::evolution::Muscle, lead: &crate::evolution::Muscle) -> f32 {
     m.phase - lead.phase
 }
 
-/// Moves the phase and reset of every muscle on the leg so that its strongest
-/// muscle lands on phase `target`. Returns whether it moved.
+/// Turns the phase of every muscle with an end on `leg` by one amount, the
+/// shorter way round, so that the leg's strongest active muscle lands on phase
+/// `target`. A muscle with a sensor turns its reset by the same amount.
+/// Returns whether anything moved. Nothing moves when the leg has no active
+/// muscle or the turn is under 0.0001 of a cycle.
 fn retime(c: &mut Creature, leg: &[usize], target: f32) -> bool {
     let Some(lead) = strongest(c, &active_on(c, leg)).map(|i| c.muscles[i].phase) else {
         return false;
@@ -135,14 +136,19 @@ fn retime(c: &mut Creature, leg: &[usize], target: f32) -> bool {
     true
 }
 
-/// The phase of the leg's strongest muscle.
+/// The phase of the leg's strongest active muscle, or `None` without one.
 fn lead_phase(c: &Creature, leg: &[usize]) -> Option<f32> {
     strongest(c, &active_on(c, leg)).map(|i| c.muscles[i].phase)
 }
 
-/// Adds a short, gentle muscle from the foot bone of `leg` to `to_bone`, which
-/// senses the foot and fires when it lands. It keeps the leg's clock and
-/// phase, so the clock and the landing agree. Returns whether it was added.
+/// Adds a muscle from the foot bone of `leg` (its last bone) to bone `to_bone`.
+/// It senses the foot and restarts at cycle position 0 when the foot lands, and
+/// it keeps the period and phase of the leg's strongest muscle, so it runs on
+/// the leg's clock between landings. The muscle is gentle: its stroke runs
+/// from 0.85 to 1.05 of its span and its stiffness is 0.7 of that muscle's.
+/// Returns whether it was added. It is not added if `to_bone` is the foot
+/// bone, the body has no room for a muscle, the leg has no active muscle, an
+/// active muscle already joins the two bones or the span is over 1.2 m.
 fn bridge(c: &mut Creature, cfg: &Config, leg: &[usize], to_bone: usize, rng: &mut Rng) -> bool {
     let tip = leg[leg.len() - 1];
     if to_bone == tip || !room(c, cfg, 0, 1) {
@@ -175,7 +181,8 @@ fn bridge(c: &mut Creature, cfg: &Config, leg: &[usize], to_bone: usize, rng: &m
     true
 }
 
-/// The leg nearest to `leg` by foot position, other than itself.
+/// The index in `legs` of the leg whose foot is nearest to the foot of
+/// `legs[k]` along x, other than `k`. `None` when `legs` holds no other leg.
 fn neighbour(c: &Creature, legs: &Limbs, k: usize) -> Option<usize> {
     let x = tip_x(c, &legs[k]);
     (0..legs.len()).filter(|&j| j != k).min_by(|&p, &q| {
