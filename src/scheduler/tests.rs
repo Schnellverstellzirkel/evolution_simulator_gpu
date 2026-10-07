@@ -1,24 +1,41 @@
+//! These tests run the scheduler on a `FakeEngine` instead of a GPU. The fake
+//! records each submission and returns the results and failures that a test
+//! queues for it. The tests cover how work reaches an engine, how results come
+//! back, how a reset and a world change treat waiting work, and how a lost GPU
+//! is reopened. The last three check that a scheduler needs its primary GPU and
+//! adds other devices only when `EVOLUTION_DEVICES` names them.
+
 use super::*;
 use crate::engine::Finished;
 use std::sync::{Arc, Mutex};
 
+/// One unit that a `FakeEngine` accepted, as the scheduler submitted it.
 struct Submission {
     ticket: u64,
     population: Arc<Population>,
     config: Config,
 }
 
+/// What a `FakeEngine` records and what a test queues for it. A test shares
+/// it with the engine through an `Arc<Mutex<..>>`, so the test can read the
+/// submissions and add results while the scheduler owns the engine.
 #[derive(Default)]
 struct FakeState {
+    /// Every unit the engine accepted, in order. The ticket of a unit is its
+    /// position in this list plus one.
     submissions: Vec<Submission>,
+    /// Finished units that `poll` returns, oldest first.
     results: VecDeque<Finished>,
+    /// True from a submission until `poll` returns a result.
     pending: bool,
-    /// Returned from the next poll.
+    /// An error for the next `poll` to return. It is returned once.
     poll_failure: Option<String>,
-    /// Returned from the next submission.
+    /// An error for the next submission to return. It is returned once.
     submit_failure: Option<String>,
 }
 
+/// An `Engine` that reports one free slot until a unit is pending. The unit
+/// finishes when a test queues its result in the shared `FakeState`.
 struct FakeEngine {
     name: &'static str,
     state: Arc<Mutex<FakeState>>,
@@ -35,7 +52,8 @@ impl Engine for FakeEngine {
 
     fn free_slots(&self) -> usize {
         let state = self.state.lock().unwrap();
-        // A pending submission failure still lets the scheduler try once.
+        // A pending unit or a waiting poll failure takes the slot. A waiting
+        // submit failure leaves it free, so the scheduler tries and meets it.
         usize::from(!state.pending && state.poll_failure.is_none())
     }
 
@@ -85,7 +103,7 @@ fn fake_scheduler() -> (Scheduler, Arc<Mutex<FakeState>>) {
     (scheduler, state)
 }
 
-/// Two fake GPUs, for failure tests that need a second engine.
+/// Two fake GPUs and their states, for a test that needs a second engine.
 fn two_gpus() -> (Scheduler, Arc<Mutex<FakeState>>, Arc<Mutex<FakeState>>) {
     let first = Arc::new(Mutex::new(FakeState::default()));
     let second = Arc::new(Mutex::new(FakeState::default()));
@@ -96,7 +114,8 @@ fn two_gpus() -> (Scheduler, Arc<Mutex<FakeState>>, Arc<Mutex<FakeState>>) {
     (scheduler, first, second)
 }
 
-/// A reopen hook that opens a fresh fake GPU on `state`.
+/// A reopen hook that opens a fresh fake GPU on `state`. It allows three
+/// attempts, each with no delay.
 fn reopen_on(state: &Arc<Mutex<FakeState>>) -> Reopen {
     let state = Arc::clone(state);
     Reopen {
@@ -110,6 +129,7 @@ fn reopen_on(state: &Arc<Mutex<FakeState>>) -> Reopen {
     }
 }
 
+/// A small config for these tests: 4 creatures, 1 s trials and a fixed seed.
 fn submission_config() -> Config {
     Config {
         population: 4,
@@ -119,7 +139,8 @@ fn submission_config() -> Config {
     }
 }
 
-/// Queues `pop` as two pieces of work with tags 0 and 1.
+/// Queues the first half of `pop` as standard work with tag 0 and the second
+/// half with tag 1.
 fn queue_halves(scheduler: &mut Scheduler, pop: &Population, cfg: &Config) {
     let pop = Arc::new(pop.clone());
     let cfg = Arc::new(cfg.clone());
@@ -134,7 +155,9 @@ fn queue_halves(scheduler: &mut Scheduler, pop: &Population, cfg: &Config) {
     scheduler.queue(1, Trial::Standard, pop, Some((n / 2..n).collect()), cfg);
 }
 
-/// Queues one valid result per submission from `from` onward, in order.
+/// Queues a finished unit for each submission from index `from` onward, in
+/// order. Each carries its submission's ticket and one `GpuResult` per
+/// creature, all with `fitness`.
 fn complete_submissions(state: &Arc<Mutex<FakeState>>, from: usize, fitness: f32) {
     let mut state = state.lock().unwrap();
     let submissions: Vec<(u64, usize)> = state
@@ -158,8 +181,9 @@ fn complete_submissions(state: &Arc<Mutex<FakeState>>, from: usize, fitness: f32
     }
 }
 
-/// Pumps, completes every new submission on `state` and collects until the
-/// scheduler is idle; returns every finished creature index, sorted.
+/// Pumps the scheduler, completes each new submission on `state` and collects,
+/// until nothing is in flight. Returns the index of every finished creature,
+/// sorted. The test fails if this takes more than 5 s.
 fn drain_all(scheduler: &mut Scheduler, state: &Arc<Mutex<FakeState>>) -> Vec<usize> {
     let mut seen = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -217,6 +241,7 @@ fn confirmations_go_before_standard_work_and_keep_the_pose() {
     scheduler.queue(2, Trial::Confirm, Arc::clone(&pop), Some(vec![3, 1]), fine);
     scheduler.pump().unwrap();
     let state = state.lock().unwrap();
+    // The fake has one slot, so its one submission is the confirmation.
     let submission = &state.submissions[0];
     assert_eq!(
         submission.config,
@@ -285,6 +310,7 @@ fn results_use_the_submitted_population_and_config() {
 fn malformed_results_consume_no_work() {
     let cfg = submission_config();
     let pop = crate::evolution::create(&cfg).unwrap();
+    // An unknown ticket, too few results and too many results.
     for (wrong_ticket, result_count) in [(true, 4), (false, 1), (false, 5)] {
         let (mut scheduler, state) = fake_scheduler();
         scheduler.queue(
@@ -318,8 +344,10 @@ fn a_reset_drops_waiting_work_and_old_results() {
     let pop = crate::evolution::create(&cfg).unwrap();
     let (mut scheduler, state) = fake_scheduler();
     queue_halves(&mut scheduler, &pop, &cfg);
+    // The first half is on the engine and the second half waits.
     scheduler.pump().unwrap();
     scheduler.reset();
+    // The unit on the engine finishes, but its session is over.
     complete_submissions(&state, 0, 1.0);
     assert!(scheduler.collect(Duration::ZERO).unwrap().is_empty());
     assert_eq!(scheduler.in_flight(), 0);
@@ -331,6 +359,7 @@ fn a_world_change_retargets_only_waiting_work() {
     let pop = crate::evolution::create(&cfg).unwrap();
     let (mut scheduler, state) = fake_scheduler();
     queue_halves(&mut scheduler, &pop, &cfg);
+    // The first half is on the engine, so only the second half is retargeted.
     scheduler.pump().unwrap();
     let rough = Arc::new(Config {
         terrain: 3,
@@ -414,6 +443,7 @@ fn a_gpu_that_never_reopens_stops_evolution() {
     queue_halves(&mut scheduler, &pop, &cfg);
     scheduler.pump().unwrap();
     gpu.lock().unwrap().poll_failure = Some("device lost".into());
+    // The error comes back on every call.
     for _ in 0..2 {
         let error = scheduler
             .collect(Duration::ZERO)
@@ -436,6 +466,7 @@ fn a_failed_gpu_submission_runs_on_the_reopened_gpu() {
     queue_halves(&mut scheduler, &pop, &cfg);
     scheduler.pump().unwrap();
     assert_eq!(gpu.lock().unwrap().submissions.len(), 0);
+    // This call reopens the GPU that `pump` marked failed.
     scheduler.collect(Duration::ZERO).unwrap();
     assert_eq!(scheduler.devices[0].engine.name(), "reopened gpu");
     let seen = drain_all(&mut scheduler, &reopened);
@@ -454,8 +485,8 @@ fn a_gpu_that_cannot_reopen_is_terminal_and_delivers_completed_output_first() {
         let submission = &first.submissions[0];
         (submission.ticket, submission.population.genomes.len())
     };
-    // One unit completes on the first GPU; the second dies before returning
-    // anything and has no way to reopen.
+    // One unit completes on the first GPU. The second GPU fails before it
+    // returns anything and cannot reopen.
     first.lock().unwrap().results.push_back(Finished {
         ticket,
         results: vec![
@@ -485,7 +516,8 @@ fn a_gpu_that_cannot_reopen_is_terminal_and_delivers_completed_output_first() {
 
 #[test]
 fn a_missing_primary_gpu_is_an_error() {
-    // An invalid device name cannot open, and there is no other engine.
+    // An invalid device name cannot open, and there is no CPU engine to fall
+    // back on.
     let error = Scheduler::new("definitely not a gpu")
         .err()
         .expect("no scheduler without its GPU");
@@ -506,6 +538,7 @@ fn secondary_device_names_preserve_explicit_comma_separated_selection() {
         secondary_device_names(Some("radeon, RTX 4060")),
         vec!["radeon", "RTX 4060"]
     );
+    // A `primary` or `off` entry inside a list is dropped.
     assert_eq!(
         secondary_device_names(Some("primary, radeon, off")),
         vec!["radeon"]
