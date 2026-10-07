@@ -1,7 +1,9 @@
-//! The early rungs on the CUDA kernel (`rungs`): a creature the rule stops at
-//! 1 s or 2.5 s ends there like a screened one; the host replays the kernel's
-//! decision from the trace; audit and exempt creatures are never stopped by
-//! them; survivors run unchanged.
+//! The early rungs (`rungs`) and the early screen on the CUDA kernel. A rung
+//! stops a creature at 1 s or 2.5 s like a screened one, the host replays each
+//! decision from the kernel's trace, and a creature that runs on scores as it
+//! does without rules. Audit creatures skip every rule, exempt creatures skip
+//! the rungs they are exempt from, and young and reshaped creatures face the
+//! screen bar of their own kind.
 //!
 //! Needs the RTX 4060 and is ignored by default. Run it with
 //!
@@ -18,6 +20,8 @@ use evolution_simulator::{
 };
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+/// The GPU engine that all tests here share. It opens on first use, and the
+/// guard keeps the tests one at a time on it, even after one of them panicked.
 fn gpu() -> MutexGuard<'static, ThreadedEngine> {
     static GPU: OnceLock<Mutex<ThreadedEngine>> = OnceLock::new();
     GPU.get_or_init(|| Mutex::new(common::open().expect("the GPU")))
@@ -25,10 +29,15 @@ fn gpu() -> MutexGuard<'static, ThreadedEngine> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
+/// Scores every creature of `pop` with `cfg` on the shared GPU, in population
+/// order.
 fn evaluate(pop: &Population, cfg: &Config) -> Vec<GpuResult> {
     common::score(&mut gpu(), pop, cfg).expect("GPU trials")
 }
 
+/// The period of creature `i`'s first muscle, or 0 for a body without
+/// muscles. `kernel::pack` hands the kernel the same value as the sixth
+/// feature of the rung rule.
 fn period(pop: &Population, i: usize) -> f32 {
     let g = &pop.genomes[i];
     if g.muscle_count > 0 {
@@ -38,6 +47,11 @@ fn period(pop: &Population, i: usize) -> f32 {
     }
 }
 
+/// A mix of flagged creatures runs 6 s trials twice, without rules and with
+/// an R1 rule and an R2 rule. The host applies the rules to the traces of the
+/// first run, and the second run must stop exactly those creatures. A stopped
+/// creature ends at its rung with its distance there. A creature that runs on
+/// keeps its fitness bits and its steps.
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn the_kernel_stops_what_the_host_replays_and_spares_audit_and_exempt_creatures() {
@@ -58,8 +72,11 @@ fn the_kernel_stops_what_the_host_replays_and_spares_audit_and_exempt_creatures(
             _ => 0,
         })
         .collect();
+    // The trials without rules, against which every ruled trial is checked.
     let full = evaluate(&pop, &cfg);
+    // A trial is alive at rung `k` when it ran past the rung's step.
     let alive = |r: &GpuResult, k: usize| r.rung_trace().steps() > rungs::RUNG_STEPS[k];
+    // The median of the distances at 2.5 s (150 steps) is the bias of R2.
     let mut d150: Vec<f32> = full
         .iter()
         .filter(|r| alive(r, 1))
@@ -68,14 +85,16 @@ fn the_kernel_stops_what_the_host_replays_and_spares_audit_and_exempt_creatures(
     d150.sort_by(f32::total_cmp);
     assert!(d150.len() > 1000, "{} creatures alive at 2.5 s", d150.len());
     let median = d150[d150.len() / 2];
-    // R1: the creatures with the least distance at 1 s; R2: below the median
-    // at 2.5 s, except in band 3, which is off.
+    // The bias of R1 comes from the distances at 1 s (60 steps).
     let mut d60: Vec<f32> = full
         .iter()
         .filter(|r| alive(r, 0))
         .map(|r| r.rung_trace().distance(0))
         .collect();
     d60.sort_by(f32::total_cmp);
+    // R1 stops the lowest 1 in 20 by distance at 1 s. R2 stops a creature
+    // whose distance at 2.5 s plus 0.01 times its rhythm period is below the
+    // median, except in band 3, where R2 is off.
     let mut r1 = Rung::NEVER;
     r1.weights[0] = 1.0;
     r1.bias = d60[d60.len() / 20];
@@ -98,11 +117,15 @@ fn the_kernel_stops_what_the_host_replays_and_spares_audit_and_exempt_creatures(
             flags & rungs::AUDIT != 0,
             "creature {i}: the audit bit"
         );
-        // The bands do not depend on the rules.
+        // The cadence band at 1 s does not depend on the rules.
         if alive(f, 0) {
             assert_eq!(t.band(0), ft.band(0), "creature {i}");
         }
+        // The features at rung `k`, rebuilt on the host from the trace of the
+        // run without rules.
         let features = |k: usize| rungs::features(&ft, k, period(&pop, i));
+        // What the rules should do to this creature: 0 lets it run on, 1 stops
+        // it at R1 and 2 stops it at R2 (the codes of `RungTrace::stopped_by`).
         let expected = if flags & rungs::AUDIT != 0 {
             0
         } else if flags & rungs::exempt_bits(0) == 0
@@ -153,12 +176,16 @@ fn the_kernel_stops_what_the_host_replays_and_spares_audit_and_exempt_creatures(
         }
     }
     eprintln!("{stopped1} stopped at 1 s, {stopped2} at 2.5 s, {spared} ran on");
+    // Each outcome must occur often enough for the checks above to mean
+    // something.
     assert!(stopped1 > 20 && stopped2 > 20 && spared > 500);
 }
 
 #[test]
 #[ignore = "needs the RTX 4060"]
 fn an_audit_creature_runs_past_a_screen_that_stops_everyone_else() {
+    // The screen is at 2 s and its bar is out of reach, so it stops every
+    // creature still running then, except the audit creatures.
     let cfg = Config {
         population: 700,
         duration: 6.0,
@@ -173,6 +200,7 @@ fn an_audit_creature_runs_past_a_screen_that_stops_everyone_else() {
         .collect();
     let results = evaluate(&pop, &cfg);
     for (i, r) in results.iter().enumerate() {
+        // A trial that ended in a fall by the screen time is never screened.
         let fell_first = r.fall_time > 0.0 && r.fall_time <= 2.0 + 1e-4;
         if pop.flags[i] & rungs::AUDIT != 0 || fell_first {
             assert_eq!(r.screened, 0.0, "creature {i}");
@@ -210,6 +238,7 @@ fn a_nursery_creature_is_held_to_the_screen_bar_of_its_own_kind() {
         .collect();
     let results = evaluate(&pop, &cfg);
     for (i, r) in results.iter().enumerate() {
+        // A trial that ended in a fall by the screen time is never screened.
         let fell_first = r.fall_time > 0.0 && r.fall_time <= 2.0 + 1e-4;
         if fell_first || pop.flags[i] == rungs::YOUNG {
             assert_eq!(r.screened, 0.0, "creature {i}");
