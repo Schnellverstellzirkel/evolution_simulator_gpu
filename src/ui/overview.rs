@@ -188,9 +188,16 @@ impl App {
             }
         });
     }
+    /// Draws a heading with the view buttons, then the chart of best and median
+    /// distance per generation, `height` points tall. The running generation
+    /// adds a point to each line. A vertical line marks each world change, and
+    /// a point marks each record. It draws nothing before the first snapshot.
     pub(super) fn trend(&self, ui: &mut egui::Ui, height: f32) {
         let Some(s) = &self.snapshot else { return };
         let theme = self.theme();
+        // The buttons set these for this frame. `reset` asks to fit the chart
+        // again. `zoom` scales the view, and a value below one zooms in. `last`
+        // is a number of newest generations to show.
         let mut reset = false;
         let mut zoom = 1.0f64;
         let mut last: Option<f64> = None;
@@ -248,6 +255,8 @@ impl App {
                 plot.set_plot_bounds_y(scaled_range(bounds.range_y(), zoom));
             }
             if let Some(generations) = last {
+                // The x range ends just past the newest point. Only the y
+                // range stays automatic.
                 let end = live.map_or_else(
                     || s.history.last().map_or(1.0, |h| h.generation as f64 + 0.5),
                     |(generation, ..)| generation as f64 + 0.5,
@@ -255,8 +264,10 @@ impl App {
                 plot.set_plot_bounds_x((end - generations).max(0.0)..=end);
                 plot.set_auto_bounds(egui::Vec2b::new(false, true));
             }
-            // The best creature and the typical kept one; the percentile
-            // index follows `storage::PERCENTILES` (28 is 100, 14 is 50).
+            // Two lines: the best distance and the median over the fastest
+            // elite of each way of moving. `i` is an index into
+            // `storage::PERCENTILES`, where 28 is the 100th percentile and 14
+            // is the 50th.
             for (i, name, color) in [(28, "Best", theme.accent), (14, "Median", theme.cold)] {
                 let mut values: Vec<[f64; 2]> = s
                     .history
@@ -272,10 +283,10 @@ impl App {
                 }
                 plot.line(Line::new(name, values).color(color).width(2.5));
             }
-            // A vertical line and a short label where the world changed: the
-            // generation that first runs in the new world. Marks come from
-            // the worker's events, so one shows when the generation starts,
-            // and from the history, so a loaded game still has them.
+            // A vertical line and a short label at each world change. The line
+            // stands between the last generation of the old world and the
+            // first of the new one. The labels hang from `top`, which is the
+            // highest best distance so far and at least 1.
             let top = s
                 .history
                 .iter()
@@ -306,8 +317,9 @@ impl App {
                     .anchor(egui::Align2::LEFT_TOP),
                 );
             }
-            // Record markers extend the best line instead of duplicating it.
-            // Records count again after a world change.
+            // A point on the best line for each generation that set a record
+            // in its world, and one for the running generation when its
+            // champion sets one. A world change starts the records again.
             let mut records: Vec<[f64; 2]> = world_records(&s.history)
                 .into_iter()
                 .map(|(index, best, _)| [s.history[index].generation as f64, best as f64])
@@ -325,8 +337,14 @@ impl App {
             }
         });
     }
+    /// Draws the distances of one history row as a bar chart `height` points
+    /// tall. Each bar counts the kept creatures with a distance in its range.
+    /// A line of text replaces the chart when the row has no distances. When
+    /// trials failed, a line under the chart counts them.
     pub(super) fn histogram(&self, ui: &mut egui::Ui, stats: &Stats, height: f32) {
-        // The range fits the distances of this generation, in about 40 bars.
+        // The stored bins are one centimeter wide. The bars cover the lowest
+        // bin to the top of the highest, about 40 of them, and none is
+        // narrower than a stored bin.
         let (Some(low), Some(high)) = (
             stats.histogram.iter().map(|&(cm, _)| cm).min(),
             stats.histogram.iter().map(|&(cm, _)| cm).max(),
@@ -339,6 +357,7 @@ impl App {
         let count = ((high - low) / width).ceil().max(1.0) as usize;
         let mut bins = vec![0u32; count];
         for &(cm, n) in &stats.histogram {
+            // A stored bin goes to the bar that holds its middle.
             let value = (cm as f64 + 0.5) / 100.;
             let index = (((value - low) / width).floor() as usize).min(count - 1);
             bins[index] += n;
