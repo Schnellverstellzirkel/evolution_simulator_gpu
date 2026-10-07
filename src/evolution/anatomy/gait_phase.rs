@@ -2,12 +2,12 @@
 //! trot, pace, canter, gallop, bound, tripod, metachronal waves) or change the
 //! duty factor of the legs. They change muscle timing only, share one pick slot
 //! (`GAIT_FILES` in `mod.rs`) and are compound, so a child gets no parameter
-//! noise after one. A leg is a leaf limb with a driven muscle, the legs run
-//! from front to back in girdles of two (`Slot`), and the strongest muscle of
-//! the first leg is the clock that the others are set against. The gait names
-//! follow Hildebrand's footfall patterns, Alexander's duty factors and the
-//! central pattern generator view of gaits (Collins and Stewart 1993,
-//! couplings between oscillators fix the phase lags).
+//! noise after one. A leg is a leaf limb (`leaf_limbs`) with a driven muscle,
+//! the legs run from front to back in girdles of two (`Slot`), and the
+//! strongest muscle of the first leg is the clock that the others are set
+//! against. The gait names follow Hildebrand's footfall patterns, Alexander's
+//! duty factors and the central pattern generator view of gaits (Collins and
+//! Stewart 1993, couplings between oscillators fix the phase lags).
 use super::compound::{shift_group, strongest};
 use super::extra::drive;
 use super::muscles::turn;
@@ -34,12 +34,13 @@ pub(super) const OPS: &[(&str, super::Operator)] = &[
     ("change_leading_leg", change_leading_leg),
 ];
 
-/// A leg with an active muscle: all its muscles, and the strongest one.
+/// A leg with a driven muscle: all its muscles, and the strongest one.
 struct Leg {
-    /// Every muscle with an end on the leg. A muscle on two legs belongs to the
-    /// front one.
+    /// Every muscle with an end on the leg. A muscle on two limbs belongs to
+    /// the front one.
     muscles: MuscleIds,
-    /// The muscle with the most drive. Its phase is taken as the leg's phase.
+    /// The muscle of the leg with the most drive. Its phase is taken as the
+    /// leg's phase.
     lead: usize,
 }
 
@@ -161,12 +162,13 @@ fn set_targets(c: &mut Creature, legs: &[Leg], targets: &[f32]) -> bool {
     changed
 }
 
-/// A walk: the legs of a girdle half a cycle apart and the girdles a quarter
-/// cycle apart in all, so the feet land at quarter beats. The back girdle
-/// follows the same side as the front one (lateral sequence, most
-/// mammals) or the opposite side (diagonal sequence, primates and some
-/// lizards). Four feet down most of the time keep the body statically stable,
-/// which is the stride a body takes before it can run (Hildebrand 1965).
+/// A walk: the legs of a girdle half a cycle apart and the back girdle a
+/// quarter cycle from the front one, with the girdles between spread evenly,
+/// so a body with four legs lands its feet at quarter beats. The back girdle
+/// follows the same side as the front one (lateral sequence, most mammals) or
+/// the opposite side (diagonal sequence, primates and some lizards). Four feet
+/// down most of the time keep the body statically stable, which is the stride
+/// a body takes before it can run (Hildebrand 1965).
 pub(crate) fn quarter_beat_walk(
     c: &mut Creature,
     _cfg: &Config,
@@ -184,7 +186,8 @@ pub(crate) fn quarter_beat_walk(
 /// with the leg diagonally across from it (front left with back right). The
 /// diagonal pairs keep the body balanced in two-leg support and cancel
 /// pitching, so a trot is the most economical run at medium speed (Alexander
-/// 1989, Full and Koditschek 1999 on the bouncing template).
+/// 1989, Full and Koditschek 1999 on the bouncing template). It applies to
+/// bodies with three or four legs.
 pub(crate) fn diagonal_trot(
     c: &mut Creature,
     _cfg: &Config,
@@ -263,8 +266,8 @@ pub(crate) fn spread_gallop(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx:
 }
 
 /// A half bound: both front legs land together, both back legs land together
-/// a third to two fifths of a cycle later, with a small lead of one side in
-/// each pair. Small mammals bound this way, and the spine can work with the
+/// 0.3 to 0.4 of a cycle after or before them, with a small lead of one side
+/// in each pair. Small mammals bound this way, and the spine can work with the
 /// legs, which a trot does not allow (Alexander on rodent and weasel runs).
 pub(crate) fn half_bound(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(legs) = legs_at_least(c, 4) else {
@@ -318,7 +321,7 @@ pub(crate) fn paired_leg_wave(
 /// to two full cycles from front to back, so the legs a half body apart step
 /// together. The sides are half a cycle apart. This is the ripple of stick
 /// insects and some millipedes, with shorter waves than a single sweep and
-/// so a steadier body.
+/// so a steadier body. It applies to bodies with five or more legs.
 pub(crate) fn double_ripple_wave(
     c: &mut Creature,
     _cfg: &Config,
@@ -388,7 +391,8 @@ pub(crate) fn fore_hind_duty_split(
 
 /// Sets the duty of each driven muscle in `group` to `f(duty)` (within 0.05
 /// to 0.95), moving its phase and reset by half the change, so the middle of
-/// its contraction stays put.
+/// its contraction stays put. A change under 0.001 is skipped. Returns whether
+/// any muscle changed.
 fn change_duty(c: &mut Creature, group: &[usize], f: impl Fn(f32) -> f32) -> bool {
     let mut changed = false;
     for &i in group {
@@ -447,9 +451,10 @@ pub(crate) fn reverse_leg_sequence(
 }
 
 /// Swaps the timing of the two legs of every girdle, so the side that led now
-/// follows. A horse changes its leading leg in a canter or a gallop to turn
-/// and to rest the muscles of one side, and the other way of the same gait is
-/// a different local optimum for a body that is not symmetric.
+/// follows. A last leg with no partner stays as it is. A horse changes its
+/// leading leg in a canter or a gallop to turn and to rest the muscles of one
+/// side, and the other way of the same gait is a different local optimum for a
+/// body that is not symmetric.
 pub(crate) fn change_leading_leg(
     c: &mut Creature,
     _cfg: &Config,
@@ -492,6 +497,8 @@ mod tests {
                     assert!(c.muscles == body.muscles, "{name}");
                 }
             }
+            // The tripod and the ripple need five legs, so they may fit no
+            // test body.
             assert!(
                 applied > 0 || name.contains("tripod") || name.contains("ripple"),
                 "{name}"
