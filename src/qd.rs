@@ -1080,6 +1080,9 @@ impl QdArchive {
             *cell = EMPTY_CELL;
         }
     }
+    /// Rebuilds every index and score from `entries`: the cells, the reserve
+    /// lookup, the slot lists, the plan keys, `qd_score` and the behavior
+    /// scores. Run it after `entries` was changed directly.
     pub fn rebuild_indices(&mut self) {
         self.cells.clear();
         self.reserve_lookup.clear();
@@ -1139,12 +1142,15 @@ impl QdArchive {
         self.entries = kept;
         self.rebuild_indices();
     }
+    /// The highest fitness among the entries, or negative infinity when the
+    /// archive is empty.
     pub fn best_fitness(&self) -> f32 {
         self.entries
             .iter()
             .map(|e| e.fitness)
             .fold(f32::NEG_INFINITY, f32::max)
     }
+    /// Number of behavior elites, which is the number of filled cells.
     pub fn behavior_count(&self) -> usize {
         self.behavior_indices.len()
     }
@@ -1152,6 +1158,8 @@ impl QdArchive {
     pub fn plan_key(&self, slot: usize) -> u64 {
         self.plan_keys[slot]
     }
+    /// The slot of the entry under `niche`, a behavior cell or a reserve
+    /// niche, if there is one.
     pub(crate) fn slot_for(&self, niche: &Niche) -> Option<usize> {
         if is_morphology_niche(niche) {
             self.reserve_lookup.get(niche).copied()
@@ -1159,6 +1167,7 @@ impl QdArchive {
             cell_index(niche, &self.classes().bins()).and_then(|index| self.cell_slot(index))
         }
     }
+    /// Number of entries in the morphology reserve.
     pub fn morphology_count(&self) -> usize {
         self.morphology_indices.len()
     }
@@ -1206,6 +1215,12 @@ impl QdArchive {
     pub fn coverage(&self) -> f32 {
         self.movement_count() as f32 / MOVEMENT_CELLS as f32
     }
+    /// A parent for the novelty emitter. Of the 32 least visited behavior
+    /// elites it takes the one with the best score: its novelty, plus a bonus
+    /// for few visits and a bonus for empty cells around it. Ties go to a
+    /// random one. `avoid` is skipped when another elite exists. With no
+    /// candidate it draws a random behavior elite, and it returns `None` for
+    /// an archive with none. Callers run `ensure_least_visited` first.
     pub fn sample_novel(&self, rng: &mut Rng, avoid: Option<usize>) -> Option<usize> {
         if self.behavior_count() == 0 {
             return None;
@@ -1249,6 +1264,11 @@ impl QdArchive {
                 .then(|| self.behavior_indices[rng.index(self.behavior_indices.len())])
         })
     }
+    /// A parent for the usual emitters: the best of up to 8 behavior elites
+    /// drawn at random. An elite scores its local competition, a little noise
+    /// and `RARITY_WEIGHT` times its entry in `rarity` (clade rarity by slot,
+    /// which may be empty). A draw of `avoid` is replaced by another elite
+    /// when there is more than one.
     pub fn sample_local_competitive(
         &self,
         rng: &mut Rng,
@@ -1286,6 +1306,9 @@ impl QdArchive {
         }
         selected
     }
+    /// A parent from the morphology reserve: one of the entries with the
+    /// fewest visits, chosen at random, without `avoid`. It returns `None`
+    /// when no entry is left.
     pub fn sample_morphology(&self, rng: &mut Rng, avoid: Option<usize>) -> Option<usize> {
         let least_visits = self
             .morphology_indices
@@ -1306,9 +1329,6 @@ impl QdArchive {
         }
         selected
     }
-    /// Novelty (mean distance to the nearest archived behaviors) and local
-    /// competition (share of those neighbors this elite beats), found through
-    /// adjacent grid cells instead of comparing every pair.
     /// Whether the cached novelty and local-competition scores cover every
     /// elite (false after anything reset or grew the archive).
     pub fn scores_current(&self) -> bool {
@@ -1491,7 +1511,7 @@ impl QdArchive {
     /// only the elites near that cell. A new elite is pushed before this
     /// runs, so the scores no longer cover it and are wiped, and the samplers
     /// read no scores until the next refresh. The reshaped nurseries breed
-    /// between refreshes; keeping their scores cost clades
+    /// between refreshes. Keeping their scores cost clades
     /// (`docs/rejected-ideas.md`).
     fn note_changed_cell(&mut self, niche: Niche) {
         if self.scores_current() {
@@ -1505,6 +1525,13 @@ impl QdArchive {
             self.changed_cells.clear();
         }
     }
+    /// Recomputes the novelty (mean distance to the nearest archived
+    /// behaviors), the local competition (share of those neighbors this elite
+    /// beats) and the frontier of the behavior elites. It reads adjacent grid
+    /// cells instead of comparing every pair. When the scores are current and
+    /// at most 32 cells changed, it recomputes only the elites within two
+    /// cells of them. The global archive is never a parent source, so it keeps
+    /// no scores.
     pub fn refresh_behavior_scores(&mut self) {
         use rayon::prelude::*;
         // The global archive is never a parent source, so nobody reads its
@@ -1620,12 +1647,13 @@ impl QdArchive {
             .map(|_| behavior[rng.index(behavior.len())])
             .max_by(|&a, &b| novelty(a).total_cmp(&novelty(b)))
     }
+    /// Counts one use of the elite in slot `index` as a parent.
     pub fn visit(&mut self, index: usize) {
         self.entries[index].visits += 1;
         self.least_visited_dirty = true;
     }
     /// Rebuilds the least-visited index after batched visits. Consumers of
-    /// `least_visited` must call this first; rebuilding once per breeding round
+    /// `least_visited` must call this first. Rebuilding once per breeding round
     /// is much cheaper than a balanced-tree update per visit.
     pub fn ensure_least_visited(&mut self) {
         if !self.least_visited_dirty {
@@ -1646,6 +1674,14 @@ impl QdArchive {
         self.least_visited = all;
         self.least_visited_dirty = false;
     }
+    /// Offers creature `index` of `population` to the behavior cells. It has
+    /// the score `fitness` and the behavior `descriptor`, and `emitter` bred
+    /// it. It takes an empty cell while the archive has room, or the cell of a
+    /// slower elite. At a `generation` before the cell's `protected_until` a
+    /// challenger of another body plan is turned away. The new elite is
+    /// protected until `protected_until`, or as long as the elite it replaces
+    /// was. `fine` says that its score is a confirmation trial's. A failed
+    /// score is turned away.
     #[allow(clippy::too_many_arguments)]
     pub fn offer(
         &mut self,
@@ -1734,6 +1770,12 @@ impl QdArchive {
             reward: 0.5 + local_competition as f64 * 0.5,
         }
     }
+    /// Offers creature `index` of `population`, with body plan `topology`, to
+    /// the morphology reserve. It is turned away when a behavior elite of the
+    /// same plan is at least as fast. The reserve keeps one entry per plan, so
+    /// a faster creature of a plan replaces its entry. When the reserve is
+    /// full, a faster creature takes the place of the slowest entry that has
+    /// been a parent `MIN_MORPHOLOGY_DESCENDANTS` times.
     #[allow(clippy::too_many_arguments)]
     pub fn offer_morphology(
         &mut self,
@@ -1846,8 +1888,8 @@ impl QdArchive {
         }
     }
     /// Adds a copy of `elite` if its behavior niche is empty or it beats the
-    /// occupant. Used for island migration and for a nursery's graduation;
-    /// the copy takes its cell in this archive's layout. Returns whether it
+    /// occupant. Used for island migration and for a nursery's graduation.
+    /// The copy takes its cell in this archive's layout. Returns whether it
     /// was kept.
     pub fn absorb(&mut self, elite: &Elite) -> bool {
         if is_morphology_niche(&elite.niche) {
@@ -1897,6 +1939,8 @@ impl QdArchive {
             None => self.behavior_count() < self.limit(),
         }
     }
+    /// Removes the reserve entry of body plan `topology` when a behavior elite
+    /// of `behavior_fitness` covers it: the entry is no faster.
     fn remove_morphology_topology(&mut self, topology: &Topology, behavior_fitness: f32) {
         if let Some(slot) = self.morphology_indices.iter().copied().find(|&i| {
             let elite = &self.entries[i];
@@ -1905,6 +1949,9 @@ impl QdArchive {
             self.remove_entry(slot);
         }
     }
+    /// Removes the entry in `slot`. The last entry moves into its place, and
+    /// the indices follow. The cached scores stay only when the entry was a
+    /// reserve entry.
     fn remove_entry(&mut self, slot: usize) {
         let last = self.entries.len() - 1;
         self.least_visited_dirty = true;
@@ -1941,7 +1988,7 @@ impl QdArchive {
         }
         if removed_is_morphology && self.scores_current_before_removal(last + 1) {
             // A reserve entry takes no behavior cell, so no behavior score
-            // changes; the scores follow the entry that moved into its place.
+            // changes. The scores follow the entry that moved into its place.
             if slot != last {
                 self.behavior_scores.novelty.swap_remove(slot);
                 self.behavior_scores.local_competition.swap_remove(slot);
@@ -1958,6 +2005,9 @@ impl QdArchive {
         self.behavior_scores.novelty.len() == entries
             && self.behavior_scores.local_competition.len() == entries
     }
+    /// The share of the elites in the filled cells next to `niche` that a
+    /// score of `fitness` beats, a tie counting half. It is 0.5 when no cell
+    /// next to it is filled.
     fn local_competition_for(&self, niche: &Niche, fitness: f32) -> f32 {
         let mut compared = 0usize;
         let mut wins = 0.0f32;
@@ -1976,6 +2026,7 @@ impl QdArchive {
         }
     }
 
+    /// Recomputes `qd_score` from the behavior elites.
     fn recompute_score(&mut self) {
         self.qd_score = self
             .entries
@@ -1985,6 +2036,7 @@ impl QdArchive {
             .sum();
     }
 }
+/// The body plan of creature `index` of `population`.
 pub fn topology_of_population(population: &Population, index: usize) -> Topology {
     let genome = &population.genomes[index];
     let nodes = &population.nodes[genome.node_start..genome.node_start + genome.node_count];
@@ -1995,11 +2047,19 @@ pub fn topology_of_population(population: &Population, index: usize) -> Topology
 }
 
 impl EmitterStats {
+    /// Whether the emitter went 5 batches in a row without a discovery or an
+    /// improvement.
     pub fn stale(&self) -> bool {
         self.stagnant_batches >= 5
     }
 }
 
+/// The share of each emitter in a breeding round, in `Emitter::ALL` order,
+/// adding up to 1. Before any attempt it is `INITIAL_EMITTER_MIX`. Afterwards
+/// it is the prior share times the sum of 0.55, the emitter's reward per
+/// attempt (0.5 before it has attempts) and an exploration bonus that shrinks
+/// as its attempts grow. The immigrants' prior is 0, so they never get a share
+/// here.
 pub fn emitter_weights(stats: &[EmitterStats; EMITTER_COUNT]) -> [f64; EMITTER_COUNT] {
     if stats.iter().all(|s| s.attempts == 0) {
         return INITIAL_EMITTER_MIX;
@@ -2014,13 +2074,16 @@ pub fn emitter_weights(stats: &[EmitterStats; EMITTER_COUNT]) -> [f64; EMITTER_C
             stats[i].reward
         };
         let exploration = 0.35 * (total.ln_1p() / (stats[i].attempts as f64 + 1.0)).sqrt();
-        // Keep half of the prior allocation as an exploration floor while the
-        // other half follows archive discoveries and improvements.
+        // A floor of 0.55 of the prior keeps every emitter breeding. The
+        // reward from archive discoveries and improvements adds to it.
         weights[i] = prior * (0.5 + 0.05 + mean + exploration);
     }
     let sum = weights.iter().sum::<f64>().max(f64::MIN_POSITIVE);
     weights.map(|w| w / sum)
 }
+/// Draws an emitter with the probabilities in `weights`, using one draw of
+/// `rng`. A draw past the last cumulative weight, which rounding can cause,
+/// gives `Emitter::Restart`.
 pub fn choose_emitter(rng: &mut Rng, weights: &[f64; EMITTER_COUNT]) -> Emitter {
     let draw = rng.unit() as f64;
     let mut total = 0.0;
@@ -2032,6 +2095,10 @@ pub fn choose_emitter(rng: &mut Rng, weights: &[f64; EMITTER_COUNT]) -> Emitter 
     }
     Emitter::Restart
 }
+/// Adds the counts of one batch to `stats`. When an emitter had attempts, its
+/// reward becomes 0.75 of the old value plus 0.25 of the batch's reward per
+/// attempt. A batch with no discovery and no improvement adds a stagnant
+/// batch, and any other batch resets the count.
 pub fn record_emitter_batch(
     stats: &mut [EmitterStats; EMITTER_COUNT],
     attempts: &[u64; EMITTER_COUNT],
@@ -2106,6 +2173,8 @@ impl CmaEmitter {
         }
         next
     }
+    /// Whether this is an optimizer (its niche starts with
+    /// `OPTIMIZER_NICHE_MARKER`) and not a CMA-ME emitter.
     pub fn optimizing(&self) -> bool {
         self.niche.0[0] == OPTIMIZER_NICHE_MARKER
     }
@@ -2113,9 +2182,12 @@ impl CmaEmitter {
     pub fn converged(&self) -> bool {
         self.optimizing() && self.sigma < 0.05
     }
+    /// A creature drawn from the distribution at its own step size.
     pub fn sample(&self, rng: &mut Rng) -> Creature {
         self.sample_scaled(rng, 1.0)
     }
+    /// A creature drawn from the distribution with its steps scaled by
+    /// `strength`.
     pub fn sample_scaled(&self, rng: &mut Rng, strength: f32) -> Creature {
         let mut creature = Creature::default();
         self.sample_into(rng, strength, &mut creature);
@@ -2130,7 +2202,7 @@ impl CmaEmitter {
         }
     }
     /// Updates the search distribution from scored samples. CMA-ME emitters
-    /// get improvement keys; optimizers get fitness.
+    /// get improvement keys. Optimizers get fitness.
     pub fn tell(&mut self, population: &Population, samples: &mut Vec<(usize, f32)>) {
         if samples.len() < 2 {
             return;
@@ -2162,6 +2234,7 @@ impl CmaEmitter {
             self.tell_exploring(population, samples);
         }
     }
+    /// `sample_into` for a CMA-ME emitter, in normalized coordinates.
     fn sample_exploring(&self, rng: &mut Rng, strength: f32, creature: &mut Creature) {
         let phase_start = self.template.nodes.len() * 4 + self.template.bones.len();
         // Diagonal covariance plus a rank-one term along the evolution path, so
@@ -2186,8 +2259,8 @@ impl CmaEmitter {
                 let step = variance.sqrt() * genes.gaussian(d as u32) + path * path_scale;
                 let value = mean + self.sigma * step * strength;
                 // Positions and muscle lengths keep the original 4 m and 1 m
-                // scales but are open-ended, so large bodies keep their shape;
-                // repair enforces the body limits.
+                // scales but are open-ended, so large bodies keep their shape.
+                // Repair enforces the body limits.
                 let muscle_field = d.checked_sub(phase_start).map(|m| m % 8);
                 if is_phase_dimension(d, phase_start) {
                     value.rem_euclid(1.0)
@@ -2205,6 +2278,8 @@ impl CmaEmitter {
         creature.clone_from(&self.template);
         apply_exploring_parameters(creature, values);
     }
+    /// `tell` for a CMA-ME emitter: the CMA-ES update in normalized
+    /// coordinates, with phases that wrap.
     fn tell_exploring(&mut self, population: &Population, samples: &[(usize, f32)]) {
         let dimensions = self.mean.len();
         let mu = samples.len().div_ceil(2).max(1);
@@ -2296,6 +2371,7 @@ impl CmaEmitter {
         .clamp(0.005, 0.35);
         self.mean = new_mean;
     }
+    /// `sample_into` for an optimizer, in physical units scaled by `Layout`.
     fn sample_optimizing(&self, rng: &mut Rng, strength: f32, creature: &mut Creature) {
         let layout = Layout::of(&self.template);
         let genes = rng.genes();
@@ -2391,7 +2467,9 @@ impl CmaEmitter {
     }
 }
 
-/// Whether coordinate `dimension` is a phase field that wraps modulo 1.
+/// Whether coordinate `dimension` of a CMA-ME emitter is a muscle's phase,
+/// which wraps modulo 1. `phase_start` is the first muscle coordinate, after
+/// the nodes and the bones.
 fn is_phase_dimension(dimension: usize, phase_start: usize) -> bool {
     dimension >= phase_start && (dimension - phase_start) % 8 == 5
 }
@@ -2400,8 +2478,9 @@ fn wrap_phase(delta: f32) -> f32 {
     (delta + 0.5).rem_euclid(1.0) - 0.5
 }
 
-/// Most CMA coordinates of a body at the caps: 4 per node, 5 per bone, the
-/// shared period and 8 per muscle.
+/// The most CMA coordinates a body can have at `evolution::MAX_NODES` nodes
+/// and `evolution::MAX_MUSCLES` muscles: 4 per node, 5 per bone, one shared
+/// period and 8 per muscle. It counts one bone per node.
 const MAX_PARAMETERS: usize =
     crate::evolution::MAX_NODES * (4 + BONE_FIELDS) + 1 + crate::evolution::MAX_MUSCLES * 8;
 /// Share of each CMA step taken along the normalized evolution path.
@@ -2411,6 +2490,10 @@ const PATH_WEIGHT: f32 = 0.3;
 pub(crate) fn gaussian(rng: &mut Rng) -> f32 {
     rng.gaussian()
 }
+/// The coordinates of a CMA-ME emitter's mean, from a creature, each scaled
+/// to about 0 to 1. Per node they are x, y, diameter and friction. Per bone
+/// there is the rest length. Per muscle they are the anchors, the lengths, the
+/// period, the phase, the duty and the stiffness.
 fn exploring_parameters(creature: &Creature) -> Vec<f32> {
     let mut output = Vec::with_capacity(
         creature.nodes.len() * 4 + creature.bones.len() + creature.muscles.len() * 8,
@@ -2445,6 +2528,8 @@ fn exploring_parameters(creature: &Creature) -> Vec<f32> {
     }
     output
 }
+/// `exploring_parameters` of creature `index` of `population`, written into
+/// `output`.
 fn exploring_parameters_into(population: &Population, index: usize, output: &mut [f32]) {
     let genome = &population.genomes[index];
     let nodes = &population.nodes[genome.node_start..genome.node_start + genome.node_count];
@@ -2482,6 +2567,8 @@ fn exploring_parameters_into(population: &Population, index: usize, output: &mut
         i += 8;
     }
 }
+/// Writes the coordinates `values` of a CMA-ME emitter into the genes of
+/// `creature`, the way back from `exploring_parameters`.
 fn apply_exploring_parameters(creature: &mut Creature, values: &[f32]) {
     let mut i = 0;
     for n in &mut creature.nodes {
@@ -2509,27 +2596,40 @@ fn apply_exploring_parameters(creature: &mut Creature, values: &[f32]) {
     }
 }
 
-/// Where each CMA coordinate lives in a body plan and how far one unit step
-/// moves it: per node x, y, diameter, friction; per bone rest length, joint
-/// range, and organ mass and position; the shared log period; per muscle
-/// anchors, lengths, phase, duty, log stiffness, and touchdown reset phase.
-/// An organ mass at or below zero means no organ, so organs can grow and
-/// vanish smoothly.
+/// Where each coordinate of an optimizer lives in a body plan and how far one
+/// unit step moves it. Per node there are x, y, diameter and friction. Per
+/// bone there are the rest length, the joint range, and the organ mass and
+/// position. One log period is shared. Per muscle there are the anchors, the
+/// lengths, the phase, the duty, the log stiffness and the touchdown reset
+/// phase. An organ mass at or below zero means no organ, so organs can grow
+/// and vanish smoothly.
 struct Layout {
+    /// Number of nodes of the template.
     nodes: usize,
+    /// Number of bones of the template.
     bones: usize,
     /// Typical bone length (m), so positions and lengths search relative to
     /// the body's size.
     size: f32,
 }
+/// The size of a unit step in the node coordinates: x, y, diameter, friction.
+/// The positions also scale with the body's size.
 const NODE_SCALES: [f32; 4] = [0.02, 0.02, 0.005, 0.03];
+/// The same for the bone coordinates: rest length, the two joint angles, organ
+/// mass and organ position. The rest length also scales with the body's size.
 const BONE_SCALES: [f32; 5] = [0.02, 0.1, 0.1, 0.02, 0.05];
+/// Coordinates per bone.
 const BONE_FIELDS: usize = BONE_SCALES.len();
+/// The same for the shared log period.
 const PERIOD_SCALE: f32 = 0.05;
+/// The same for the muscle coordinates: anchors, short and long length, phase,
+/// duty, log stiffness and touchdown reset phase.
 const MUSCLE_SCALES: [f32; 8] = [0.05, 0.05, 0.02, 0.02, 0.05, 0.05, 0.1, 0.05];
-/// Which scales above are lengths, multiplied by the body's size.
+/// Which of the `MUSCLE_SCALES` are lengths, multiplied by the body's size.
 const MUSCLE_LENGTHS: [bool; 8] = [false, false, true, true, false, false, false, false];
 impl Layout {
+    /// The layout of `template`: its counts and its typical bone length, which
+    /// is the mean rest length held between 0.05 and 10.
     fn of(template: &Creature) -> Self {
         let size = if template.bones.is_empty() {
             1.0
@@ -2547,6 +2647,7 @@ impl Layout {
         let start = self.nodes * 4 + self.bones * BONE_FIELDS + 1;
         (d >= start).then(|| (d - start) % 8)
     }
+    /// The size of a unit step in coordinate `d`.
     fn scale(&self, d: usize) -> f32 {
         let node_end = self.nodes * 4;
         let bone_end = node_end + self.bones * BONE_FIELDS;
@@ -2566,10 +2667,12 @@ impl Layout {
             PERIOD_SCALE
         }
     }
-    /// Phases wrap around the cycle.
+    /// Whether coordinate `d` is a phase, which wraps around the cycle.
     fn wraps(&self, d: usize) -> bool {
         matches!(self.muscle_field(d), Some(4 | 7))
     }
+    /// `value` minus `mean` in coordinate `d`. A phase takes the shorter way
+    /// round the cycle.
     fn delta(&self, d: usize, value: f32, mean: f32) -> f32 {
         if self.wraps(d) {
             (value - mean + 0.5).rem_euclid(1.0) - 0.5
@@ -2577,6 +2680,7 @@ impl Layout {
             value - mean
         }
     }
+    /// `mean` moved by `step` in coordinate `d`. A phase wraps into 0 to 1.
     fn moved(&self, d: usize, mean: f32, step: f32) -> f32 {
         if self.wraps(d) {
             (mean + step).rem_euclid(1.0)
@@ -2604,9 +2708,11 @@ fn parameters(creature: &Creature) -> Vec<f32> {
     );
     output
 }
+/// The number of optimizer coordinates of a body with these counts.
 fn parameter_count(nodes: usize, bones: usize, muscles: usize) -> usize {
     nodes * 4 + bones * BONE_FIELDS + 1 + muscles * 8
 }
+/// `parameters` of creature `index` of `population`, written into `output`.
 fn parameters_into(population: &Population, index: usize, output: &mut [f32]) {
     let genome = &population.genomes[index];
     write_parameters(
@@ -2616,6 +2722,8 @@ fn parameters_into(population: &Population, index: usize, output: &mut [f32]) {
         output,
     );
 }
+/// Writes the optimizer coordinates of a body into `output`, in the order
+/// that `Layout` describes.
 fn write_parameters(
     nodes: &[crate::evolution::NodeGene],
     bones: &[crate::evolution::Bone],
@@ -2653,6 +2761,8 @@ fn write_parameters(
         i += 8;
     }
 }
+/// Writes the optimizer coordinates `values` into the genes of `creature`,
+/// the way back from `write_parameters`. Each value is held to its limits.
 fn apply_parameters(creature: &mut Creature, values: &[f32]) {
     let mut i = 0;
     for n in &mut creature.nodes {
@@ -2672,7 +2782,7 @@ fn apply_parameters(creature: &mut Creature, values: &[f32]) {
         bone.organ_at = values[i + 4].clamp(0.0, 1.0);
         i += BONE_FIELDS;
     }
-    // One log period scales the whole body clock; limbs keep their ratios.
+    // One log period scales the whole body clock. Limbs keep their ratios.
     let base = creature.muscles.first().map_or(1.0, |m| m.period).max(1e-3);
     let scale = values[i]
         .exp()
