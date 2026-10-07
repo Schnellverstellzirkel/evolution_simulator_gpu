@@ -167,15 +167,20 @@ pub fn is_audit(seed: u64, round: u64, slot: usize) -> bool {
     (x ^ (x >> 31)).is_multiple_of(AUDIT_ONE_IN)
 }
 
-/// One rung's rule, as the kernel reads it (`Params` in the kernel): stop when
-/// the dot product of `weights` with the six features, taken as a chain of
-/// fused multiply-adds from zero, is below `bias`. `off` has bit `b` set when
-/// band `b` is off.
+/// One rung's rule, as the kernel reads it (`RungParams` in
+/// `shaders/creature.cu`): stop when the dot product of `weights` with the six
+/// features, taken as a chain of fused multiply-adds from zero, is below
+/// `bias`. `off` has bit `b` set when band `b` is off.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Rung {
+    /// The weight of each feature, in the order of `features`.
     pub weights: [f32; FEATURES],
+    /// A creature whose score is below this stops. It is negative infinity
+    /// for a rule that is not armed.
     pub bias: f32,
+    /// Bit `b` is set when cadence band `b` is off, so the rule stops nothing
+    /// in that band.
     pub off: u32,
 }
 impl Rung {
@@ -185,7 +190,9 @@ impl Rung {
         bias: f32::NEG_INFINITY,
         off: 0,
     };
-    /// Dot product of `weights` with features `f`, via fused multiply-add.
+    /// The score of features `f`: the dot product of `weights` with `f`, as a
+    /// chain of fused multiply-adds from zero in feature order, which is the
+    /// kernel's arithmetic.
     pub fn score(&self, f: &[f32; FEATURES]) -> f32 {
         let mut s = 0.0f32;
         #[allow(clippy::needless_range_loop)]
@@ -194,11 +201,13 @@ impl Rung {
         }
         s
     }
-    /// Whether the rule stops a creature with features `f` in `band`.
+    /// Whether the rule stops a creature with features `f` in `band`. A band
+    /// that is off stops nothing.
     pub fn stops(&self, f: &[f32; FEATURES], band: usize) -> bool {
         (self.off >> band) & 1 == 0 && self.raw_stops(f)
     }
-    /// The same ignoring the bands.
+    /// The same with every band on. A feature that is not finite never stops a
+    /// creature.
     pub fn raw_stops(&self, f: &[f32; FEATURES]) -> bool {
         f.iter().all(|v| v.is_finite()) && self.score(f) < self.bias
     }
@@ -208,12 +217,14 @@ impl Rung {
     }
 }
 
-/// The rules of both early rungs, fixed per block.
+/// The rules of both early rungs, R1 first. A block carries the rules it was
+/// bred with (`Config::rungs`), so the history depends on ring order only.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rungs(pub [Rung; RUNGS]);
 
-/// The features of rung `r` (0 or 1) from a trial's trace and the creature's
-/// rhythm period, rounded to half precision as the kernel rounds them.
+/// The features of rung `r` (0 or 1), in the order of `FEATURES`, from a
+/// trial's trace and the creature's rhythm period. They are rounded to half
+/// precision as the kernel rounds them.
 pub fn features(trace: &RungTrace, r: usize, period: f32) -> [f32; FEATURES] {
     [
         trace.distance(r),
@@ -232,10 +243,16 @@ pub fn period_half(period: f32) -> u16 {
 /// What one audit creature tells the fit.
 #[derive(Clone, Copy, Debug)]
 pub struct AuditRow {
+    /// The trace of its trial, which ran with every rule off.
     pub trace: RungTrace,
+    /// The period of its first muscle, or 0 for a body without muscles. It is
+    /// the sixth feature.
     pub period: f32,
+    /// It carries the `EXEMPT` flag. The fit and the miss counts leave its row
+    /// out.
     pub exempt: bool,
-    /// The rungs its parent exempted it from (`exempt_bits`).
+    /// The `EXEMPT_R1` and `EXEMPT_R2` bits of its flags: the rungs its parent
+    /// exempted it from.
     pub parent_exempt: u8,
     /// Its block had a screen bar, so `pass3` means something.
     pub bar_known: bool,
@@ -249,13 +266,17 @@ pub struct AuditRow {
     pub entrant: bool,
 }
 impl AuditRow {
-    /// Whether the rules never apply to this creature at rung `r`.
+    /// Whether the rules never apply to this creature at rung `r`, because it
+    /// is exempt or its parent exempted it.
     fn skips(&self, r: usize) -> bool {
         self.exempt || self.parent_exempt & exempt_bits(r) != 0
     }
+    /// Whether the trial ran past the step of rung `r`, so its trace holds the
+    /// features there.
     fn alive(&self, r: usize) -> bool {
         self.trace.steps() > RUNG_STEPS[r]
     }
+    /// The features of rung `r`, or `None` when one of them is not finite.
     fn features(&self, r: usize) -> Option<[f32; FEATURES]> {
         let f = features(&self.trace, r, self.period);
         f.iter().all(|v| v.is_finite()).then_some(f)
@@ -265,8 +286,11 @@ impl AuditRow {
 /// Sums of one class of feature vectors, enough for a pooled covariance.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Sums {
+    /// Number of vectors added.
     n: u64,
+    /// The sum of each feature.
     sum: [f64; FEATURES],
+    /// `xx[i][j]` is the sum of feature `i` times feature `j`.
     xx: [[f64; FEATURES]; FEATURES],
 }
 impl Sums {
@@ -281,20 +305,28 @@ impl Sums {
     }
 }
 /// One rung's share of a generation's audit rows: the sums of the creatures
-/// that passed 5 s (class A) and of those that did not (class B), and the
+/// that reach the 5 s bar (class A) and of those that do not (class B), and the
 /// class A features themselves, which place the threshold.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct RungSet {
+    /// Class A: the rows with `AuditRow::pass3` set.
     a: Sums,
+    /// Class B: the other rows alive at the rung.
     b: Sums,
+    /// The features of each class A row, as half-precision words.
     a_rows: Vec<[u16; FEATURES]>,
 }
+/// One generation's audit rows, reduced to what the fit needs.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct GenAudit {
+    /// Every audit row of the generation, the ones the fit skips included.
     rows: u32,
+    /// The sums of each rung.
     sets: [RungSet; RUNGS],
 }
 impl GenAudit {
+    /// The sums of one generation's rows. A row that is exempt or has no known
+    /// bar adds to `rows` only.
     fn of(rows: &[AuditRow]) -> Self {
         let mut g = Self::default();
         for row in rows {
@@ -321,14 +353,21 @@ impl GenAudit {
     }
 }
 
-/// The rung breaker of one cadence band (`BAND_MISS_LIMIT`).
+/// The rung breaker of one cadence band (`BAND_MISS_LIMIT`). It turns the
+/// rung off for the band after `STRIKES` bad generations in a row, and on
+/// again after `RECOVERY` good ones.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 struct Breaker {
+    /// Bad generations in a row, up to `STRIKES`.
     strikes: u8,
+    /// Good generations in a row, up to `RECOVERY`.
     calm: u8,
+    /// Whether the rung is off for the band.
     off: bool,
 }
 impl Breaker {
+    /// Moves the breaker by one generation. `over` says the band's entrant
+    /// misses were above `BAND_MISS_LIMIT`.
     fn update(&mut self, over: bool) {
         if over {
             self.calm = 0;
@@ -349,38 +388,49 @@ impl Breaker {
 /// What a finished generation looked like, for the stage log.
 #[derive(Clone, Debug, Default)]
 pub struct Report {
+    /// Standard trials of the generation (`Audit::note`).
     pub creatures: u64,
     /// Steps the standard trials of the generation ran.
     pub steps: u64,
     /// Creatures stopped by R1, R2 and the 5 s screen.
     pub stops: [u64; 3],
+    /// Audit rows of the generation, the exempt ones included.
     pub audit_rows: u32,
-    /// The audit rows of the generation's own rules (the rules in force when
-    /// its blocks were bred, so the check is out of sample): rows alive at the
-    /// rung, those the rule would have stopped, the entrants and the 5 s
-    /// passers among them, per rung.
+    /// Per rung, the audit rows that are alive at the rung, are not exempt and
+    /// have a known bar. The counts from here to `pass_misses` judge the
+    /// generation's own rules, the rules in force when its blocks were bred,
+    /// so the check is out of sample.
     pub subject: [u32; RUNGS],
+    /// Per rung, of `subject`, the rows that the rule would have stopped.
     pub stopped: [u32; RUNGS],
+    /// Per rung, of `stopped`, the entrants.
     pub entrant_misses: [u32; RUNGS],
     /// Rows alive at the rung whose parent exempted them from it.
     pub parent_skipped: [u32; RUNGS],
     /// Of the entrants a rung would have stopped, those the 5 s screen would
     /// not have stopped: the cost beyond today's game.
     pub extra_misses: [u32; RUNGS],
+    /// Per rung, of `stopped`, the rows that reach the 5 s bar.
     pub pass_misses: [u32; RUNGS],
-    /// Share of the audit rows in the final top 1% and top 10% by distance
-    /// that the ladder (both rungs and the 5 s screen) would have kept, and
-    /// the share the 5 s screen alone would have kept.
+    /// Percent of the audit rows in the final top 1% by distance that the
+    /// ladder (both rungs and the 5 s screen) would have kept.
     pub top1_kept: f32,
+    /// The same for the final top 10%.
     pub top10_kept: f32,
+    /// Percent of the audit rows in the final top 1% that the 5 s screen alone
+    /// would have kept.
     pub top1_screen: f32,
+    /// The same for the final top 10%.
     pub top10_screen: f32,
+    /// Whether each rung is armed in the rules fitted at this boundary.
     pub armed: [bool; RUNGS],
+    /// The cadence bands turned off for each rung in those rules.
     pub bands_off: [u8; RUNGS],
     /// Audit rows the fit pools after the boundary.
     pub window_rows: u32,
 }
 impl Report {
+    /// Mean steps per standard trial of the generation.
     pub fn steps_per_creature(&self) -> f64 {
         self.steps as f64 / self.creatures.max(1) as f64
     }
@@ -400,10 +450,15 @@ impl Report {
 /// bits each (both counts of a pair are scaled down together past 65,535).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Judged {
+    /// The entrants, as (count, stopped).
     entrants: (u32, u32),
+    /// The audit creatures that reach the 5 s bar, as (count, stopped).
     passers: (u32, u32),
 }
 impl Judged {
+    /// The two words the save keeps. Word 0 holds the entrant count in its low
+    /// half and the passer count in its high half, and word 1 holds the
+    /// stopped counts the same way.
     fn pack(self) -> (u32, u32) {
         let fit = |(n, stopped): (u32, u32)| {
             let scale = n.div_ceil(0xffff).max(1);
@@ -413,6 +468,8 @@ impl Judged {
         let (n, s) = fit(self.passers);
         (n_in | n << 16, s_in | s << 16)
     }
+    /// The inverse of `pack`. The two words of an older save held only the
+    /// entrant counts, so they read as those and no passers.
     fn unpack((n, s): (u32, u32)) -> Self {
         Self {
             entrants: (n & 0xffff, s & 0xffff),
