@@ -195,7 +195,7 @@ impl Experiment {
         // pool and the optimizer targets read this order.
         let orders: Vec<Vec<usize>> = self
             .islands
-            .iter()
+            .par_iter()
             .map(|island| {
                 let mut order: Vec<usize> = (0..island.entries.len())
                     .filter(|&i| !qd::is_morphology_niche(&island.entries[i].niche))
