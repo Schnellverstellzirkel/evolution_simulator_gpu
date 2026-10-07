@@ -350,6 +350,8 @@ impl Scene<'_> {
     }
 }
 
+/// A best distance as text with one decimal. An archive with no elite has NaN
+/// for its best, and that gives "empty".
 fn meters(best: f32) -> String {
     if best.is_finite() {
         format!("{best:.1} m")
@@ -358,21 +360,27 @@ fn meters(best: f32) -> String {
     }
 }
 
-/// Generations until the next migration (0 means this generation's end).
+/// Generations from `generation` to the next multiple of `MIGRATION_INTERVAL`,
+/// which is 0 when `generation` is a multiple. The hub gets its copies when the
+/// generation counter reaches a multiple, because `migrate_islands` runs right
+/// after the counter is raised.
 fn until_migration(generation: u32) -> u32 {
     (MIGRATION_INTERVAL - generation % MIGRATION_INTERVAL) % MIGRATION_INTERVAL
 }
 
+/// Canvas centers of the grass tops of the four isolated islands: upper left,
+/// upper right, lower right, lower left.
 const ISLAND_CENTERS: [(f32, f32); 4] = [
     (650.0, 330.0),
     (1100.0, 330.0),
     (1100.0, 560.0),
     (650.0, 560.0),
 ];
+/// Canvas center of the hub island. The sunburst rays start here.
 const HUB: (f32, f32) = (875.0, 468.0);
 
 /// The hub: a smaller island in the middle that receives copies of every
-/// isolated island's best elites.
+/// isolated island's best elites. It shows its leader and its best distance.
 fn hub(s: &Scene, snap: Option<&Snapshot>) {
     let (cx, cy) = HUB;
     s.poly(
@@ -403,7 +411,8 @@ fn hub(s: &Scene, snap: Option<&Snapshot>) {
     );
 }
 
-/// Island `index`: its card, its niche plots and its leader.
+/// Isolated island `index`: its rock and grass, its niche plots with small
+/// creatures, its leader and its sign.
 fn island(s: &Scene, snap: Option<&Snapshot>, index: usize) {
     let (cx, cy) = ISLAND_CENTERS[index];
     // Rock underside, then the grass top.
@@ -436,7 +445,8 @@ fn island(s: &Scene, snap: Option<&Snapshot>, index: usize) {
         .unwrap_or(0)
         .max(1);
     // Six niche plots. The number of planted ones follows the island's
-    // filled niches compared with the fullest island.
+    // filled niches compared with the fullest island of the snapshot, the hub
+    // and the wild islands included.
     let planted = if cells == 0 {
         0
     } else {
@@ -473,7 +483,8 @@ fn island(s: &Scene, snap: Option<&Snapshot>, index: usize) {
     if let Some(creature) = summary.and_then(|i| i.leader.as_ref()) {
         thumbnail(s.p, creature, s.rect(cx - 44.0, cy - 86.0, 88.0, 88.0));
     }
-    // Sign above: name, best distance, niches and the nurseries.
+    // The sign: name, best distance, filled niches and the bodies in the
+    // island's nurseries.
     let best = summary.map_or(f32::NAN, |i| i.best);
     let nursery = summary.map_or(0, |i| i.nursery);
     let upper = index < 2;
@@ -520,7 +531,8 @@ fn island(s: &Scene, snap: Option<&Snapshot>, index: usize) {
     );
 }
 
-/// A boat with a few crates, bobbing on its way.
+/// A boat with a few crates, bobbing on its way. `tint` colors its sail and
+/// `bob` is added to `y`.
 fn boat(s: &Scene, x: f32, y: f32, tint: Color32, bob: f32) {
     let y = y + bob;
     s.poly(
@@ -549,7 +561,9 @@ fn boat(s: &Scene, x: f32, y: f32, tint: Color32, bob: f32) {
     }
 }
 
-/// Draws an emitter card showing its name, description, and breeding share percentage.
+/// The card of emitter `index`, `h` high with its top edge at `y`: its emblem,
+/// name, breeding share and a short description. The share is the emitter's
+/// live weight from `snap`, or its starting weight before the first snapshot.
 fn workshop(s: &Scene, index: usize, snap: Option<&Snapshot>, y: f32, h: f32) {
     let (name, what) = match Emitter::ALL[index] {
         Emitter::Cma => (
@@ -599,7 +613,9 @@ fn workshop(s: &Scene, index: usize, snap: Option<&Snapshot>, y: f32, h: f32) {
     s.card_text(area, what, 19.0);
 }
 
-/// Draws the trial arena with the 5 s gate, finish line, and record confirmation rules.
+/// The trial arena card, with two lanes, the 5 s gate and the finish line. One
+/// creature passes the gate and one is stopped at it. The record check card
+/// sits further down.
 fn arena(s: &Scene) {
     s.card((1290.0, 84.0, 450.0, 356.0), RED, 3, "Trial arena");
     let (lx, ly, lw, lh) = (1308.0, 148.0, 414.0, 92.0);
@@ -652,6 +668,7 @@ fn arena(s: &Scene) {
     if stop < 1.0 {
         s.critter(sx, ly + 74.0, ROOF[2], 0.95, s.t * 9.0);
     } else {
+        // Stopped: it turns grey and still, with a red cross past the gate.
         s.critter(sx, ly + 74.0, Color32::from_rgb(150, 140, 120), 0.95, 0.0);
         let c = s.at(gate_x + 38.0, ly + 56.0);
         let arm = 9.0 * s.k;
@@ -670,7 +687,7 @@ fn arena(s: &Scene) {
         19.0,
         INK,
     );
-    // Record confirmation.
+    // The record check card.
     let rc = (1290.0, 548.0, 450.0, 196.0);
     s.card(rc, BLU, 4, "Record check");
     s.card_text(
@@ -680,7 +697,8 @@ fn arena(s: &Scene) {
     );
 }
 
-/// Paints the whole picture into `rect`.
+/// Paints the whole poster into `rect`, scaled to fit and centered. The
+/// numbers on it come from `snap`, and are zero or empty without one.
 fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
     let p = ui.painter_at(rect);
     let k = (rect.width() / W).min(rect.height() / H);
@@ -751,7 +769,8 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
         INK,
     );
     // The four isolated islands, the hub between them and the boats that
-    // carry copies to the hub. Nothing sails back.
+    // carry copies to the hub. Nothing sails back. Each route runs from the
+    // rim of an island, in island order, to the rim of the hub.
     let routes = [
         ((748.0, 392.0), (810.0, 440.0)),
         ((1002.0, 392.0), (940.0, 440.0)),
@@ -765,6 +784,8 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
         s.arrow(a, b, MUSTARD);
     }
     hub(&s, snap);
+    // Each boat sails 80% of its route in 7 s and starts again. The four are
+    // a quarter of a cycle apart.
     for (i, (a, b)) in routes.iter().enumerate() {
         let f = (t / 7.0 + i as f32 * 0.25).fract() * 0.8;
         let x = a.0 + (b.0 - a.0) * f;
@@ -792,7 +813,8 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
         INK,
     );
 
-    // Workshops on the left.
+    // Workshops on the left: one card for each emitter in `Emitter::ALL`
+    // order, each with a fixed height that fits its text.
     let mut y = 140.0;
     for (i, h) in [138.0, 244.0, 118.0, 204.0].into_iter().enumerate() {
         workshop(&s, i, snap, y, h);
@@ -833,7 +855,8 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
         18.5,
     );
 
-    // Champion podium.
+    // Champion podium: the leader with the best distance on any island of the
+    // snapshot, the hub and the wild islands included.
     let champion = snap.and_then(|snap| {
         snap.islands
             .iter()
@@ -884,8 +907,11 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
     }
 }
 
-/// Opens or closes the schematic window. `open` is the UI flag; the window's
-/// close button clears it.
+/// Draws the "How evolution works" window while `*open` is true. The window's
+/// close button clears `*open`, and the app sets it to open the window.
+/// `snapshot` is the latest worker snapshot, or `None` before the first one.
+/// While the window is open it asks for a repaint every 33 ms, for the
+/// animation.
 pub fn show(ctx: &egui::Context, snapshot: Option<&Snapshot>, open: &mut bool) {
     let screen = ctx.content_rect();
     // Most of the screen, at the poster's shape.
