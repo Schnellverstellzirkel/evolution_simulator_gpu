@@ -65,7 +65,7 @@ struct Scene<'a> {
     p: &'a Painter,
     /// Where the canvas corner `(0, 0)` lies on the screen.
     origin: Pos2,
-    /// Screen pixels per canvas unit.
+    /// Screen points per canvas unit.
     k: f32,
     /// Seconds, for the gentle animation.
     t: f32,
@@ -82,7 +82,7 @@ impl Scene<'_> {
         Rect::from_min_size(self.at(x, y), Vec2::new(w, h) * self.k)
     }
     /// The dark outline stroke, `width` canvas units wide but at least 1.5
-    /// pixels.
+    /// points.
     fn stroke(&self, width: f32) -> Stroke {
         Stroke::new((width * self.k).max(1.5), INK)
     }
@@ -128,11 +128,11 @@ impl Scene<'_> {
             .collect();
         self.poly(&points, fill, 3.5);
     }
-    /// The body font at `size` canvas units, never under 10 pixels.
+    /// The body font at `size` canvas units, never under 10 points.
     fn font(&self, size: f32) -> FontId {
         FontId::new((size * self.k).max(10.0), FontFamily::Proportional)
     }
-    /// The bold title font at `size` canvas units, never under 11 pixels.
+    /// The bold title font at `size` canvas units, never under 11 points.
     fn title_font(&self, size: f32) -> FontId {
         FontId::new((size * self.k).max(11.0), assets::hud_bold())
     }
