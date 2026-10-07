@@ -8,7 +8,10 @@ pub fn rate() -> u32 {
 pub fn dt() -> f32 {
     Fidelity::standard().dt()
 }
-/// Steps of pose settling (1.67 s) before the timed trial.
+/// Frames before the timed trial of a replay, 1.67 s at the standard
+/// fidelity. The kernel does not settle the pose. It repeats the start pose, so
+/// frames 0 to `settle()` all show it and frame `settle() + n` holds the node
+/// positions after `n` steps.
 pub fn settle() -> u32 {
     Fidelity::standard().settle()
 }
@@ -57,7 +60,8 @@ impl Fidelity {
     pub fn dt(self) -> f32 {
         1.0 / self.rate as f32
     }
-    /// Steps of pose settling (1.67 s) before the timed trial.
+    /// Frames before the timed trial of a replay at this fidelity, 1.67 s. The
+    /// kernel does not settle the pose. It repeats the start pose for them.
     pub fn settle(self) -> u32 {
         (200 * self.rate).div_ceil(120)
     }
