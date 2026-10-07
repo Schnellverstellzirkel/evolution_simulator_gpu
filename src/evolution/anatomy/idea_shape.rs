@@ -17,7 +17,9 @@ use super::{BoneIds, Context, Operator, is_neck};
 use crate::config::Config;
 use crate::evolution::{Creature, JOINT_LIMIT, Rng};
 
-/// This file's operators, by name. Add each new one here.
+/// This file's operators, by name. Add each new one here. The pick slot of
+/// this file chooses by position in this list, so the order decides what a
+/// fixed seed picks.
 pub(super) const OPS: &[(&str, Operator)] = &[
     ("golden_leg", golden_leg),
     ("equal_bones_leg", equal_bones_leg),
@@ -63,7 +65,7 @@ fn golden_leg(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> 
     changed
 }
 
-/// The bones of a leg all get the leg's mean length.
+/// A leg of two bones or more gives all its bones the leg's mean length.
 fn equal_bones_leg(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = some_leg(c, rng, 2, false) else {
         return false;
@@ -76,8 +78,9 @@ fn equal_bones_leg(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context
     changed
 }
 
-/// Every leg scales by 1.1 to 1.3 or 0.8 to 0.9, making the whole animal
-/// taller or lower on its legs.
+/// Every leg scales about its hip by one factor, 1.1 to 1.3 or 0.8 to 0.9 (a
+/// coin picks which), and the strokes of the muscles inside it scale with it.
+/// This makes the whole animal taller or lower on its legs.
 fn leg_scale_all(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let factor = if coin(rng) {
         rng.range(1.1, 1.3)
@@ -91,8 +94,8 @@ fn leg_scale_all(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) 
     changed
 }
 
-/// The joints of a leg centre their ranges: both sides get the mean of the
-/// two reaches.
+/// Every joint of a leg centers its range on the starting pose: both sides get
+/// the mean of the two reaches.
 fn range_center_leg(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = some_leg(c, rng, 1, false) else {
         return false;
@@ -106,7 +109,8 @@ fn range_center_leg(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Contex
     changed
 }
 
-/// Every joint range (but the neck's) narrows by 20% or widens by 20%.
+/// Every joint range but the neck's narrows by 20% or widens by 20%, up to
+/// `JOINT_LIMIT`.
 fn range_breathe(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let by = if coin(rng) { 0.8 } else { 1.2 };
     let mut changed = false;
@@ -179,7 +183,8 @@ fn hip_wide_knee_narrow(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &C
     changed
 }
 
-/// Every bone but the neck changes length by 5 to 10%, all in one direction.
+/// Every bone but the neck changes length by the same 5 to 10%, all longer or
+/// all shorter.
 fn bone_size_nudge(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let by = if coin(rng) {
         rng.range(1.05, 1.1)
@@ -209,7 +214,9 @@ fn toe_length_swing(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Contex
     changed
 }
 
-/// The first two bones of a leg swap lengths: thigh becomes shank.
+/// The first two bones of a leg swap lengths: the thigh takes the shank's
+/// length and the shank takes the thigh's. A leg whose two bones differ by less
+/// than 0.01 m stays as it is.
 fn thigh_shank_swap(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = some_leg(c, rng, 2, false) else {
         return false;
@@ -223,8 +230,9 @@ fn thigh_shank_swap(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Contex
     true
 }
 
-/// One joint of a leg locks (a range of 0.05 rad each way): a rigid link in
-/// place of a hinge.
+/// One joint of a leg of two bones or more locks (a range of 0.05 rad each
+/// way): a rigid link in place of a hinge. Only a joint with a range wider than
+/// 0.2 rad can lock.
 fn lock_one_joint(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = some_leg(c, rng, 2, false) else {
         return false;
@@ -242,7 +250,8 @@ fn lock_one_joint(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context)
     true
 }
 
-/// One joint of a leg opens to the widest range: a free hinge.
+/// One joint of a leg opens to the widest range: a free hinge. Only a joint
+/// whose range is more than 0.2 rad short of the widest can open.
 fn open_one_joint(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = some_leg(c, rng, 1, false) else {
         return false;
