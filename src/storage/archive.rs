@@ -1,5 +1,26 @@
 use super::*;
 
+/// A hash of keys that are spread out or counted up already (creature ids,
+/// plan keys): one rotate and one multiply (FxHash), far cheaper than the
+/// default SipHash. For maps that are looked up and never iterated, so the
+/// order it gives never shows.
+#[derive(Default)]
+struct KeyHasher(u64);
+impl std::hash::Hasher for KeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u64(u64::from(byte));
+        }
+    }
+    fn write_u64(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+type KeyMap<V> = HashMap<u64, V, std::hash::BuildHasherDefault<KeyHasher>>;
+
 impl Experiment {
     /// Offers block `k`'s creatures to the archives in block order, updates
     /// CMA emitters and emitter statistics, and returns how many trials
@@ -151,8 +172,11 @@ impl Experiment {
                 // behavior elite and reserve entry of the same body plan, or
                 // above the reserve's floor once it is full
                 // (`QdArchive::offer_morphology` makes the final check).
-                let mut parents: HashMap<u64, (u64, bool)> = HashMap::new();
-                let mut bars: HashMap<u64, (f32, f32)> = HashMap::new();
+                let size = archive.entries.len();
+                let mut parents: KeyMap<(u64, bool)> =
+                    KeyMap::with_capacity_and_hasher(size, Default::default());
+                let mut bars: KeyMap<(f32, f32)> =
+                    KeyMap::with_capacity_and_hasher(size, Default::default());
                 for (slot, elite) in archive.entries.iter().enumerate() {
                     let morphology = qd::is_morphology_niche(&elite.niche);
                     parents.insert(elite.creature.id, (archive.plan_key(slot), morphology));
