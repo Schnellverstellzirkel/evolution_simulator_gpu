@@ -103,12 +103,16 @@ pub fn pin_engine() {
     }
 }
 
-/// Asks EEVDF for a 1 ms slice for the calling thread (Linux 6.12 and
-/// later honor `sched_runtime` for normal tasks). A short-slice task
-/// preempts long-slice tasks when it wakes. Returns whether it was set.
+/// Asks the Linux EEVDF scheduler for a 1 ms slice for the calling thread.
+/// Linux 6.12 and later honor `sched_runtime` for normal tasks. A short-slice
+/// task preempts long-slice tasks when it wakes. Returns `true` if the call
+/// succeeded, and `false` if it failed or the system is not Linux.
 pub fn short_slice() -> bool {
     #[cfg(target_os = "linux")]
     {
+        /// The kernel's `struct sched_attr` as far as `sched_period`, which
+        /// is its first 48 bytes, `SCHED_ATTR_SIZE_VER0`. The utilization
+        /// fields after that are left out.
         #[repr(C)]
         struct SchedAttr {
             size: u32,
@@ -124,12 +128,14 @@ pub fn short_slice() -> bool {
             size: std::mem::size_of::<SchedAttr>() as u32,
             policy: libc::SCHED_OTHER as u32,
             flags: 0,
+            // The call sets the nice value too, so pass the current one.
             nice: unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) },
             priority: 0,
             runtime: 1_000_000,
             deadline: 0,
             period: 0,
         };
+        // The first argument, pid 0, is the calling thread.
         let result =
             unsafe { libc::syscall(libc::SYS_sched_setattr, 0, &attr as *const SchedAttr, 0u32) };
         result == 0
@@ -138,14 +144,16 @@ pub fn short_slice() -> bool {
     false
 }
 
-/// Major page faults of the calling thread so far (Linux), for the
-/// benchmark report.
+/// Major page faults the calling thread has had so far, read from
+/// `/proc/thread-self/stat`, for the benchmark report. It returns `None` if
+/// that file cannot be read or parsed, and on systems other than Linux.
 pub fn major_faults() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         let stat = std::fs::read_to_string("/proc/thread-self/stat").ok()?;
-        // Fields after the command name, which is in parentheses and may
-        // hold spaces: state is field 3, majflt field 12.
+        // The command name is in parentheses and may hold spaces, so skip to
+        // the last ')' and the space behind it. What follows begins at field
+        // 3, the state. `majflt` is field 12, nine words later.
         let rest = &stat[stat.rfind(')')? + 2..];
         rest.split_whitespace().nth(9)?.parse().ok()
     }
