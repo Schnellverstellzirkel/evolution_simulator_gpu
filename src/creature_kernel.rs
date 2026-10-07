@@ -1,9 +1,10 @@
-//! The data the host shares with the CUDA kernel in `shaders/creature.cu`.
-//! `GpuResult` is what the kernel returns for each creature, and `RungTrace`
-//! decodes the trace the kernel stores in seven of its words. `LaneBatch` is
-//! the packed batch that `kernel::pack` fills and the engine uploads, and
-//! `frame_stride` gives the size of a recorded frame. The half precision
-//! conversions that the trace and the rungs use are here too.
+//! This module holds the data the host shares with the CUDA kernel in
+//! `shaders/creature.cu`. `GpuResult` is what the kernel returns for each
+//! creature, and `RungTrace` decodes the trace the kernel stores in seven of
+//! its words. `LaneBatch` is the packed batch that `kernel::pack` fills and
+//! the engine uploads, and `frame_stride` gives the size of a recorded frame.
+//! The half precision conversions that the trace and the rungs use are here
+//! too.
 use crate::physics::Node;
 
 /// One creature's trial as the CUDA kernel reports it. The layout is that of
