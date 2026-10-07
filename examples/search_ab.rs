@@ -1,4 +1,4 @@
-//! Fixed-seed A/B harness for the evolutionary search, on the GPU.
+//! Fixed-seed A/B tool for the evolutionary search, on the GPU.
 //!
 //! It runs the game's ring (`ring::Ring` over the scheduler) on fixed seeds,
 //! with the early screen, the early rungs and the record confirmation trials,
@@ -34,8 +34,8 @@ const DEFAULT_GENERATIONS: u32 = 2;
 const DEFAULT_POPULATION: usize = 64;
 const DEFAULT_DURATION: f32 = 1.0;
 const DEFAULT_SEEDS: &[u64] = &[38, 39];
-/// How many of the fastest global elites the body mix and the robustness
-/// check look at.
+/// How many of the fastest global elites the body mix and `print_robustness`
+/// look at.
 const TOP_BODIES: usize = 50;
 
 /// What the command line asks for (`options` reads it).
@@ -372,8 +372,9 @@ fn run_seed(seed: u64, options: &Options, scope: &str) -> Result<(f32, f64)> {
         }
         if options.change_at == Some(generation - first_generation) {
             // A button press, or an autochange step. If the world changes,
-            // the archives start over and the islands' elites are tested
-            // again in the new world (`update_config_now`).
+            // the global archive and the main islands start over, and the
+            // main islands' elites are tested again in the new world
+            // (`update_config_now`). The wild islands keep their own worlds.
             let before = experiment.config.clone();
             let mut cfg = before.clone();
             if options.effects.is_empty() {
@@ -804,9 +805,9 @@ fn print_robustness(
 /// Prints the QD score of the global archive's behavior elites re-binned on
 /// the movement grid alone (contact 6, cadence 8, height 6, feet 5, the cells
 /// of `qd` without the body classes), so runs whose archives have other
-/// layouts compare on the same ground. It also prints the morphology reserve
-/// the islands hold and the distinct body plans in the global archive, its
-/// reserve included.
+/// layouts compare on the same ground. It also prints the size of the islands'
+/// morphology reserves added together and the distinct body plans in the
+/// global archive, its reserve included.
 fn print_common_grid(scope: &str, seed: u64, experiment: &Experiment) {
     let mut cells: HashMap<[u8; 4], f32> = HashMap::new();
     let mut plans = std::collections::HashSet::new();
@@ -982,7 +983,8 @@ fn print_island_diversity(scope: &str, seed: u64, experiment: &Experiment) {
     );
 }
 
-/// The size of one elite's body, measured as `size_report` measures it.
+/// The size of one elite's body. The lengths are measured as `size_report`
+/// measures them.
 struct BodySize {
     nodes: usize,
     muscles: usize,
@@ -991,6 +993,7 @@ struct BodySize {
     /// Rest length of the longest bone, in m.
     longest_bone: f32,
     /// Mass of the nodes with the bones' and organs' masses included, in kg.
+    /// The muscles' masses are left out.
     mass: f32,
 }
 
@@ -1009,6 +1012,8 @@ fn top_bodies(experiment: &Experiment, count: usize) -> Vec<BodySize> {
         .into_iter()
         .map(|elite| {
             let creature = &elite.creature.unpack();
+            // TODO: `physics::nodes(creature)` also counts the muscles'
+            // masses, as `size_report` and the simulation do.
             let mass: f32 = physics::body(&creature.nodes, &creature.bones)
                 .iter()
                 .map(|node| node.mass)
