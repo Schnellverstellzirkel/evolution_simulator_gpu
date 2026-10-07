@@ -284,8 +284,8 @@ struct App {
     /// The player picked the creature on screen, so the replay stops
     /// following the champion until they go back to it.
     pinned: bool,
-    /// The creature on screen is the champion of a finished generation (or
-    /// the best elite of a loaded game), not a random first creature.
+    /// The creature on screen is the champion, the best elite of the archive,
+    /// and not the random first creature of a new game.
     champion_shown: bool,
     /// The archive map has four filters, and `None` shows every bin. This one
     /// is the body height, a height bin.
