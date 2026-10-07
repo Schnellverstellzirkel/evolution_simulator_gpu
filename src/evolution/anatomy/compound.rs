@@ -1,6 +1,9 @@
 //! Compound operators. Each one changes several parts of the body together
 //! and keeps them consistent with each other, so a child is a larger step
 //! than one edit and still has a chance of keeping its parent's gait.
+//! `anatomy/mod.rs` lists the operators here in `BASE_OPERATORS` and marks
+//! them in `COMPOUND`. `legs.rs` and several `gait_*.rs` files use the helpers
+//! that this file defines, such as `close_ring` and `shed_tips`.
 //!
 //! The sources are Sims (1994, limb pairs added together with mirrored
 //! timing), Hornby and Pollack (2001, repeated parts with a gradient),
@@ -8,17 +11,18 @@
 //! Miikkulainen (2013, whole modules exchanged) and Beyer and Schwefel (2002,
 //! correlated mutation: genes that act together move together).
 //!
-//! Operators here that add bones close the motor ring themselves
+//! Operators here that add or remove bones close the motor ring themselves
 //! (`close_ring`): the body goes into canonical order and every pair of
 //! consecutive bones without a muscle gets a passive spring. Left to `repair`
 //! the ring would get random active muscles, and a later `repair` would add
 //! more for every pair the canonical order moves.
 //!
 //! The operators that add nodes also remove the idlest limb tips (`shed_tips`),
-//! so a body that takes such a move is no bigger afterwards. Without that, 16
-//! seeds of 30 generations grew the ring's bodies to 11.0 nodes against 8.2
-//! (QD x0.84, within the noise of one arm), and a body past 8 or 16 nodes takes
-//! twice the GPU lanes of one below.
+//! so a body that takes such a move grows by one node at most. Without that,
+//! 16 seeds of 30 generations grew the bodies in the game's ring (`ring::Ring`)
+//! to 11.0 nodes against 8.2 (QD x0.84, within the noise of one arm). A bigger
+//! body costs the GPU more per creature. On the lane-group kernel of that run,
+//! a body past 8 or 16 nodes took twice the lanes of one below.
 //!
 //! A child that one of these operators made gets no parameter noise after it
 //! (`evolution::offspring`), because the move is the whole change. In
@@ -47,8 +51,9 @@ use crate::evolution::{
 
 /// Puts the bones in canonical order and gives each pair of consecutive
 /// bones that has no muscle a passive spring. At the muscle limit the muscles
-/// off the ring with the least drive go first. Bone numbers change, so this is
-/// the last step of an operator.
+/// off the ring with the least drive go first, and a pair stays without a
+/// spring if no room is left. Returns false when the skeleton is invalid.
+/// Bone numbers change, so this is the last step of an operator.
 pub(super) fn close_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
     if !canonicalize_bone_order(c) {
         return false;
@@ -89,12 +94,13 @@ pub(super) fn close_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
 }
 
 /// Removes up to `count` limb tips (a bone that ends in a leaf, not the neck)
-/// among the nodes before `first_new`, each time the one with the least drive
-/// of three random ones, with its muscles. Returns how many went. Operators
-/// that grow the body use it to give back what they added, so a body that
-/// takes such a move is no bigger afterwards: bodies that only grow cost the
-/// GPU more with every creature (a body past 8 or 16 nodes takes twice the
-/// lanes).
+/// among the nodes before `first_new`, the node count before an operator
+/// added its parts, so those stay. Each time it takes the tip with the least
+/// drive of three random ones, with its muscles. It leaves at least three
+/// nodes. Returns how many went. Operators that add nodes use it to give back
+/// what they added, all or part of it, so a body that takes such a move does
+/// not keep growing: bodies that only grow cost the GPU more with every
+/// creature.
 pub(super) fn shed_tips(c: &mut Creature, first_new: usize, count: usize, rng: &mut Rng) -> usize {
     let (mut first_new, mut shed) = (first_new, 0);
     while shed < count && c.nodes.len() > 3 {
@@ -130,7 +136,7 @@ pub(super) fn shed_tips(c: &mut Creature, first_new: usize, count: usize, rng: &
     shed
 }
 
-/// The muscle of `group` with the most drive.
+/// The muscle of `group` with the most drive, or `None` for an empty group.
 pub(super) fn strongest(c: &Creature, group: &[usize]) -> Option<usize> {
     group
         .iter()
@@ -139,14 +145,14 @@ pub(super) fn strongest(c: &Creature, group: &[usize]) -> Option<usize> {
 }
 
 /// The muscle off `group` with the most drive: the main driver of the gait
-/// the group has to work with.
+/// the group has to work with. `None` when every muscle is in `group`.
 pub(super) fn lead_muscle(c: &Creature, group: &[usize]) -> Option<usize> {
     (0..c.muscles.len())
         .filter(|i| !group.contains(i))
         .max_by(|&x, &y| drive(&c.muscles[x]).total_cmp(&drive(&c.muscles[y])))
 }
 
-/// The phase of the strongest muscle on `limb`.
+/// The phase of the strongest muscle on `limb`, or `None` when it has none.
 pub(super) fn limb_phase(c: &Creature, limb: &[usize]) -> Option<f32> {
     let on = muscles_on(c, limb, false);
     strongest(c, &on).map(|i| c.muscles[i].phase)
@@ -173,8 +179,9 @@ pub(super) fn shift_group(c: &mut Creature, group: &[usize], shift: f32) {
 }
 
 /// Scales `bones`, a branch or a limb's chain, about the joint its first
-/// bone hangs from by `factor` (within the bone limits). The caller keeps the
-/// strokes (`keep_strokes`).
+/// bone hangs from by `factor` (within the bone limits). Returns false and
+/// changes nothing when the factor that fits is within 2% of 1. The caller
+/// keeps the strokes (`keep_strokes`).
 pub(super) fn scale_bones(c: &mut Creature, bones: &[usize], factor: f32) -> bool {
     let (mut low, mut high) = (0.0f32, f32::INFINITY);
     for &b in bones {
@@ -253,7 +260,8 @@ fn reflex_foot(c: &mut Creature, foot: usize, rng: &mut Rng) -> bool {
     true
 }
 
-/// A foot (a node with one bone, not the head) among the nodes of `bones`.
+/// A random foot (a node with one bone, not the head) among the nodes of
+/// `bones`, or `None` when there is none.
 fn pick_foot(c: &Creature, bones: &[usize], rng: &mut Rng) -> Option<usize> {
     let feet: BoneIds = branch_nodes(c, bones)
         .into_iter()
@@ -304,12 +312,13 @@ fn same_tree(c: &Creature, x: &[usize], y: &[usize]) -> bool {
 
 /// Makes one limb the mirror image of a limb of the same shape: its bones get
 /// the other limb's lengths, joint ranges (mirrored, so it bends the other
-/// way), organs and node sizes, its nodes take the mirrored pose about its own
-/// joint, and its muscles are replaced by copies of the other limb's, half a
-/// cycle later. A body that has two similar limbs becomes a symmetric pair
-/// that alternates, as Sims' creatures did and as Cheney et al. found regular
-/// bodies do. In three of ten moves the limb is copied without the reflection
-/// (the same pose and ranges), in phase or half a cycle later.
+/// way) and organs, its nodes get the other limb's sizes and grips and take
+/// the mirrored pose about its own joint, and its muscles are replaced by
+/// copies of the other limb's, half a cycle later. A body that has two
+/// similar limbs becomes a symmetric pair that alternates, as Sims' creatures
+/// did and as Cheney et al. found regular bodies do. In three of ten moves the
+/// limb is copied without the reflection (the same pose and ranges), in phase
+/// or half a cycle later.
 pub(crate) fn symmetrize_limb_pair(
     c: &mut Creature,
     cfg: &Config,
@@ -539,11 +548,12 @@ pub(crate) fn phase_cluster_move(
 
 /// Muscles that pull the same pair of bones form a bundle, and evolved bodies
 /// hold a few large ones (the best elites of a save kept 30 and more muscles
-/// on one pair of bones). Moves two to four muscles of the largest bundles to
-/// a joint next to it, to the bones on the other side of one of its bones:
-/// the force moves to another joint, each moved muscle keeps its timing and
-/// the shape of its stroke, and the body gains no muscle. No change to one
-/// muscle does that, because a muscle is one in thirty of its bundle.
+/// on one pair of bones). Moves two to four muscles of a bundle of five or
+/// more onto the joint between one of its bones and a bone that touches it
+/// (not the other bundle bone): the force moves to another joint, each moved
+/// muscle keeps its timing and the shape of its stroke, the bundle keeps at
+/// least three muscles, and the body gains none. No change to one muscle does
+/// that, because a muscle is one in thirty of its bundle.
 pub(crate) fn reassign_bundle(
     c: &mut Creature,
     _cfg: &Config,
@@ -751,13 +761,14 @@ pub(crate) fn transplant_limb_program(
 
 /// Gives the body the gait of another elite: its leaf limbs, from front to
 /// back, take the muscle programs of the other elite's leaf limbs at the same
-/// places in the order, where the two have the same number of bones, with the
-/// timing among the limbs the donor had, and the whole set is moved in time so
-/// that the front limb's strongest muscle keeps the phase it had. Needs two
-/// limbs that match. The skeleton stays. Where `transplant_limb_program`
-/// moves one limb's program, this moves a whole set of limbs, as modules are
-/// exchanged in Lessin, Fussell and Miikkulainen (2013). In the hub island the
-/// donor can come from any isolated island.
+/// places in the order, where the two have the same number of bones and the
+/// donor's limb has a program, with the timing among the limbs the donor had.
+/// The whole set is moved in time so that the strongest muscle of the first
+/// limb that takes a program keeps the phase it had. Needs two limbs that
+/// match. The skeleton stays. Where `transplant_limb_program` moves one
+/// limb's program, this moves a whole set of limbs, as modules are exchanged
+/// in Lessin, Fussell and Miikkulainen (2013). In the hub island the donor can
+/// come from any isolated island.
 pub(crate) fn transplant_gait(
     c: &mut Creature,
     cfg: &Config,
@@ -770,8 +781,8 @@ pub(crate) fn transplant_gait(
     let (mine, theirs) = (limbs_front_to_back(c), limbs_front_to_back(donor));
     let mut dropped = MuscleIds::new();
     let mut copies = Muscles::new();
-    // The phase the front limb's strongest muscle had, and the phase its
-    // replacement has in the donor: the shift that keeps the front limb's place.
+    // The shift that keeps the first limb's place in the cycle: from the phase
+    // its strongest new muscle has in the donor to the phase its old one had.
     let mut shift = None;
     let mut limbs = 0;
     for (x, y) in mine.iter().zip(theirs.iter()) {
@@ -891,11 +902,12 @@ pub(crate) fn retune_limb_package(
 
 /// Trims a body in one move: the idlest limb tips go (as `prune_idle_limb`
 /// picks them, one to four by the size of the body) and up to three of the
-/// weakest muscles off the motor ring with them. It applies to bodies with
-/// three or more muscles to a node. The best elites of a save gain more from losing
-/// idle parts than from any other single change (36% of the children of
-/// `prune_idle_limb` beat their parent), and an elite that carries several
-/// takes several of these steps one after the other, each a separate child.
+/// weakest muscles off the motor ring with them. It applies to bodies of five
+/// nodes or more with three or more muscles to a node. The best elites of a
+/// save gain more from losing idle parts than from any other single change
+/// (36% of the children of `prune_idle_limb` beat their parent), and an elite
+/// that carries several takes several of these steps one after the other,
+/// each a separate child.
 pub(crate) fn trim_body(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     // Only a body with muscles to spare: three or more to a node. Young
     // bodies have under two, and every muscle of theirs pulls.
@@ -940,7 +952,10 @@ const NEW_PART: [Operator; 5] = [
 /// three quarters of a cycle later), half the time its joint is braced
 /// against a stop, and some of the time its foot senses touchdown. A part
 /// that arrives with a random program rarely works with the gait; one that
-/// arrives timed to it has a chance.
+/// arrives timed to it has a chance. The part comes from the first of three
+/// `NEW_PART` operators, tried from a random start, that fits the body. The
+/// idlest limb tips go for the added nodes (`shed_tips`), so the body ends no
+/// bigger.
 pub(crate) fn grow_integrated_limb(
     c: &mut Creature,
     cfg: &Config,
@@ -955,7 +970,8 @@ pub(crate) fn grow_integrated_limb(
         return false;
     }
     let focus: BoneIds = (before..next.bones.len()).collect();
-    // The muscles the new part brought; one moved onto it keeps its timing.
+    // The muscles the new part brought. A muscle that was only moved onto the
+    // part (a split bone's, a lever's) is not among them and keeps its timing.
     let group: MuscleIds = (first_muscle..next.muscles.len()).collect();
     if let (Some(lead), Some(mine)) = (lead_muscle(&next, &group), strongest(&next, &group)) {
         let offset = [0.0, 0.25, 0.5, 0.75][rng.index(4)] + rng.range(-0.03, 0.03);
@@ -981,9 +997,11 @@ pub(crate) fn grow_integrated_limb(
 }
 
 /// Gives the limb that starts at `root` a muscle across its joint to the bone
-/// above it, timed like `template`, `phase` of a cycle after `lead`, unless
-/// a muscle already joins the two. The anchors lie 0.3 to 0.9 of the way
-/// along the limb's first bone and 0.3 to 0.8 along the bone above.
+/// above it, timed like `template` but moved to phase `lead_phase`. Returns
+/// whether it added one: it does not when there is no bone above, no room for
+/// a muscle or an active muscle already joins the two. The anchors lie 0.3 to
+/// 0.9 of the way along the limb's first bone and 0.3 to 0.8 along the bone
+/// above.
 pub(super) fn hinge_muscle(
     c: &mut Creature,
     cfg: &Config,
@@ -1018,14 +1036,16 @@ pub(super) fn hinge_muscle(
 
 /// Adds a limb together with its mirror image, hung from another node of the
 /// body: one copy as the source limb is, one reflected about the vertical
-/// through the node, with the joint ranges mirrored. Each new limb has a
-/// muscle across its joint, timed like the muscles at the joint it hangs
-/// from, the first in phase with the gait's main driver (or a quarter cycle
-/// later) and the mirror image half a cycle after it. The source is one of
-/// the two lowest limbs of one or two bones, which are the ones that reach
-/// the ground, and the pair hangs from one of the three nodes nearest to the
-/// source's joint in height. Sims (1994) grew creatures whose limbs came in
-/// such pairs.
+/// through the node, with the joint ranges mirrored. Each new limb gets a
+/// muscle across its joint (`hinge_muscle`, unless the copy brought an active
+/// one), timed like the muscles at the joint it hangs from, the first in
+/// phase with the gait's main driver (or a quarter cycle later) and the mirror
+/// image half a cycle after it. The source is one of the two lowest limbs of
+/// one or two bones, which are the ones that reach the ground, and the pair
+/// hangs from one of the three nodes nearest to the source's joint in height.
+/// The idlest limb tips go for the added nodes (`shed_tips`), and the body
+/// ends at most one node bigger. Sims (1994) grew creatures whose limbs came
+/// in such pairs.
 pub(crate) fn mirrored_limb_pair(
     c: &mut Creature,
     cfg: &Config,
@@ -1099,7 +1119,8 @@ pub(crate) fn mirrored_limb_pair(
 /// a gradient: the copy is `taper` times the size of the original (its bone,
 /// its limbs and their strokes), its muscles run `phase` of a cycle later, and
 /// it carries at most `quota` of the muscles across the trunk's upper joint
-/// and of each limb (the ones with the most drive). Returns the copy's bone.
+/// and of each limb (the ones with the most drive). Returns the copy's bone,
+/// or `None` when the segment cannot be copied.
 fn repeat_segment(
     c: &mut Creature,
     cfg: &Config,
@@ -1191,11 +1212,13 @@ fn repeat_segment(
 
 /// Repeats a trunk segment one or two times down the chain, each copy a
 /// little larger or smaller than the one before it (0.8 to 1.25 times) and
-/// its muscles a fixed step of 0.1 to 0.3 of a cycle later than the one
-/// before it: repeated parts with a gradient in size and in timing, which is
-/// how Hornby and Pollack's generative bodies gain regular, many-limbed
-/// shapes, and a travelling wave of contraction down the body. The copies
-/// carry at most two muscles per joint and limb.
+/// its muscles a fixed step of 0.1 to 0.3 of a cycle later (or earlier) than
+/// the one before it: repeated parts with a gradient in size and in timing,
+/// which is how Hornby and Pollack's generative bodies gain regular,
+/// many-limbed shapes, and a travelling wave of contraction down the body. The
+/// copies carry at most two muscles per joint and limb. The idlest limb tips
+/// go for the added nodes (`shed_tips`), and the body ends at most one node
+/// bigger.
 pub(crate) fn segment_chain(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let children = child_bones(c);
     let trunks: BoneIds = (0..c.bones.len())
@@ -1238,8 +1261,9 @@ mod tests {
     use super::*;
     use crate::evolution::{Population, repair};
 
-    /// Runs `op` on 160 grown bodies. A changed body must pass `check(before,
-    /// after)`; an unchanged one must be as it was. Returns how many changed.
+    /// Runs `op` on each of `bodies`. A changed body must pass
+    /// `check(before, after)`. An unchanged one must be as it was. Returns how
+    /// many changed.
     fn run(op: Operator, bodies: &[Creature], check: impl Fn(&Creature, &Creature)) -> usize {
         let cfg = Config::default();
         let mut applied = 0;
