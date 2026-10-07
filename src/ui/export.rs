@@ -1,5 +1,8 @@
-//! Exporting what is on screen: the creature GIF, rendered with the same scene
-//! as the viewport, and the screenshot file.
+//! The picture exports: the creature GIF and the window screenshot. The GIF is
+//! painted on the CPU, one pixel buffer for each recorded frame, by a small
+//! rasterizer that copies the viewport's scene. The screenshot saves the image
+//! that egui captured from the window as a PNG. `dialogs` calls the GIF export
+//! and `ui.rs` calls the screenshot save.
 
 use super::{
     playback::{Playback, broken_nodes, node_contact},
@@ -22,15 +25,18 @@ use image::{
 };
 use std::path::PathBuf;
 
-/// Exported GIFs render the same scene as the viewport into this frame size.
+/// Width of an exported GIF frame in pixels.
 const GIF_WIDTH: u32 = 400;
+/// Height of an exported GIF frame in pixels.
 const GIF_HEIGHT: u32 = 224;
-/// Most frames an exported GIF keeps; a longer trial is sampled evenly.
+/// Most frames an exported GIF keeps. A longer trial is sampled evenly.
 const GIF_MAX_FRAMES: usize = 360;
-/// Pixels per meter cap, so a tiny creature stays in frame whole.
+/// Most pixels per meter the GIF camera zooms to. A small creature is shown at
+/// this zoom and does not fill the frame.
 const GIF_MAX_SCALE: f32 = 200.0;
-/// Fixed camera and palette of an exported GIF. A frame is rasterized into one
-/// reused buffer, so painting allocates nothing beyond the frame itself.
+/// The camera of an exported GIF. Its zoom and bottom edge are fitted once to
+/// the frames the GIF shows and stay fixed. Sideways it follows the creature,
+/// which stays at `anchor_x`.
 struct GifCamera {
     /// World y at the bottom edge.
     y0: f32,
@@ -40,7 +46,10 @@ struct GifCamera {
     anchor_x: f32,
 }
 impl GifCamera {
-    fn fit(nodes: &[Node], frames: &[Vec<[f32; 2]>]) -> Self {
+    /// Fits the zoom and the bottom edge to the lowest and highest node edges
+    /// in `frames`, plus a margin. The range always spans at least y = -0.15 m
+    /// to 0.4 m, so the flat ground stays in view.
+    fn fit<'a>(nodes: &[Node], frames: impl Iterator<Item = &'a Vec<[f32; 2]>>) -> Self {
         let mut min_y = 0.0f32;
         let mut max_y = 0.4f32;
         for frame in frames {
@@ -59,10 +68,13 @@ impl GifCamera {
             anchor_x: GIF_WIDTH as f32 * 0.38,
         }
     }
+    /// The world x at the left edge of the frame that puts `center_x` at
+    /// `anchor_x`.
     fn origin_x(&self, center_x: f32) -> f32 {
         center_x - self.anchor_x / self.scale
     }
-    /// Screen position in pixels for a world position.
+    /// Screen position in pixels for a world position. `origin_x` is the world
+    /// x at the left edge, and screen y grows downward.
     fn screen(&self, origin_x: f32, position: [f32; 2]) -> (f32, f32) {
         (
             (position[0] - origin_x) * self.scale,
@@ -70,14 +82,24 @@ impl GifCamera {
         )
     }
 }
-/// The viewport scene painted into a pixel buffer for one recorded pose.
+/// The viewport scene painted into a pixel buffer, one recorded pose at a time.
+/// It holds what stays the same for every frame of one GIF. It leaves out the
+/// force arrows and the tired-muscle fade that the viewport can show.
 struct GifScene<'a> {
     creature: &'a Creature,
+    /// The world the trial ran in. It decides the ground.
     config: &'a Config,
+    /// The creature's nodes for their radius, mass and friction. Their
+    /// positions are those of each recorded frame.
     nodes: &'a [Node],
     camera: &'a GifCamera,
 }
 impl GifScene<'_> {
+    /// Paints one pose over every pixel of `buffer`. `positions` holds one
+    /// entry for each node. `time` is the trial time in seconds that drives the
+    /// muscles, and `fallen` makes them limp. `contact` marks the nodes on the
+    /// ground and `broken` marks the nodes at the ends of a bone with a broken
+    /// joint.
     fn render(
         &self,
         buffer: &mut RgbaImage,
@@ -90,7 +112,8 @@ impl GifScene<'_> {
         let dark = gif_color(OUTLINE);
         let origin_x = self.camera.origin_x(pose_center_x(self.nodes, positions));
         let at = |position: [f32; 2]| self.camera.screen(origin_x, position);
-        // The overcast sky, fading to haze toward the ground.
+        // The overcast sky: `SKY_TOP` at the top edge, fading to the
+        // `SKY_HORIZON` haze at four fifths of the height.
         for (_, y, pixel) in buffer.enumerate_pixels_mut() {
             *pixel = gif_color(mix_color(
                 SKY_TOP,
@@ -98,8 +121,9 @@ impl GifScene<'_> {
                 y as f32 / (GIF_HEIGHT as f32 * 0.8),
             ));
         }
-        // A meter grid; it scrolls with the follow camera, so motion reads even
-        // when the creature holds its screen position.
+        // A grid line at every whole meter of world x. The grid scrolls with the
+        // follow camera, so motion reads even when the creature holds its
+        // screen position.
         let right = origin_x + GIF_WIDTH as f32 / self.camera.scale;
         let grid = gif_color(Color32::from_rgb(104, 110, 112));
         for meter in origin_x.floor() as i32..=right.ceil() as i32 {
@@ -112,6 +136,10 @@ impl GifScene<'_> {
                 grid,
             );
         }
+        // The ground, when the world has one, one pixel column at a time with
+        // a two pixel lip along its surface. The earthquake phase and strength
+        // come from the creature's id, so the ground matches the one the
+        // kernel scored.
         if self.config.ground {
             let hash = physics::quake_hash(self.creature.id);
             let amplitude = physics::terrain_amplitude(self.config.terrain)
@@ -146,6 +174,8 @@ impl GifScene<'_> {
                 }
             }
         }
+        // A bone is a dark outline with the bone color on top. `half` is half
+        // its width in pixels.
         for bone in &self.creature.bones {
             let a = at(positions[bone.a as usize]);
             let b = at(positions[bone.b as usize]);
@@ -153,6 +183,8 @@ impl GifScene<'_> {
             gif_line(buffer, a, b, half + 1.5, dark);
             gif_line(buffer, a, b, half, gif_color(BONE));
         }
+        // Organs ride on their bones, `organ_at` of the way from the first node
+        // to the second.
         for bone in self.creature.bones.iter().filter(|b| b.organ_mass > 0.0) {
             let a = positions[bone.a as usize];
             let b = positions[bone.b as usize];
@@ -162,6 +194,8 @@ impl GifScene<'_> {
             gif_disc(buffer, center, r + 1.5, dark);
             gif_disc(buffer, center, r, gif_color(ORGAN));
         }
+        // A muscle joins a point on one bone to a point on another. As it
+        // contracts it gets thicker and goes from pale flesh to deep red.
         for m in &self.creature.muscles {
             let bone_a = self.creature.bones[m.bone_a as usize];
             let bone_b = self.creature.bones[m.bone_b as usize];
@@ -172,7 +206,8 @@ impl GifScene<'_> {
             };
             let a = point(bone_a, m.anchor_a);
             let b = point(bone_b, m.anchor_b);
-            // A fallen creature's muscles are limp.
+            // Contraction is 0 at the long length and 1 at the short length. A
+            // fallen creature's muscles are limp.
             let contraction = if fallen {
                 0.0
             } else {
@@ -188,6 +223,8 @@ impl GifScene<'_> {
                 gif_color(mix_color(MUSCLE_REST, MUSCLE_ACTIVE, contraction)),
             );
         }
+        // A node is an outlined disc in its friction color. A ring marks a node
+        // on the ground, and a red ring with a cross marks a broken joint.
         for (i, n) in self.nodes.iter().enumerate() {
             let center = at(positions[i]);
             let r = (n.radius * self.camera.scale).max(2.);
@@ -201,6 +238,8 @@ impl GifScene<'_> {
                 gif_cross(buffer, center, r, gif_color(FALLEN));
             }
         }
+        // The head (node 0) looks ahead with one eye. A fallen creature's head
+        // carries the damage mark.
         if let Some(head) = self.nodes.first() {
             let center = at(positions[0]);
             let r = (head.radius * self.camera.scale).max(2.);
@@ -223,6 +262,9 @@ impl GifScene<'_> {
         }
     }
 }
+/// Saves a window capture as `screenshot-<n>.png` in `dir`, where `n` is the
+/// time in milliseconds since the Unix epoch. It creates `dir` first and
+/// returns the path of the file.
 pub(super) fn save_screenshot(
     capture: &egui::ColorImage,
     dir: &std::path::Path,
@@ -242,9 +284,12 @@ pub(super) fn save_screenshot(
     )?;
     Ok(path)
 }
+/// The fully opaque pixel of a color.
 fn gif_color(c: Color32) -> Rgba<u8> {
     Rgba([c.r(), c.g(), c.b(), 255])
 }
+/// Sets the pixel nearest to (`x`, `y`) and skips a position outside the
+/// buffer.
 fn gif_put(buffer: &mut RgbaImage, x: f32, y: f32, color: Rgba<u8>) {
     let x = x.round() as i32;
     let y = y.round() as i32;
@@ -252,6 +297,8 @@ fn gif_put(buffer: &mut RgbaImage, x: f32, y: f32, color: Rgba<u8>) {
         buffer.put_pixel(x as u32, y as u32, color);
     }
 }
+/// Fills a disc of `radius` pixels around `center`. A radius under half a pixel
+/// counts as half a pixel.
 fn gif_disc(buffer: &mut RgbaImage, center: (f32, f32), radius: f32, color: Rgba<u8>) {
     let radius = radius.max(0.5);
     let r = radius.ceil() as i32;
@@ -264,6 +311,8 @@ fn gif_disc(buffer: &mut RgbaImage, center: (f32, f32), radius: f32, color: Rgba
         }
     }
 }
+/// Fills a ring around `center`. `radius` is the middle of the ring and `width`
+/// is how thick it is.
 fn gif_ring(buffer: &mut RgbaImage, center: (f32, f32), radius: f32, width: f32, color: Rgba<u8>) {
     let outer = radius + width * 0.5;
     let inner = (radius - width * 0.5).max(0.0);
@@ -278,6 +327,8 @@ fn gif_ring(buffer: &mut RgbaImage, center: (f32, f32), radius: f32, width: f32,
         }
     }
 }
+/// Draws a line from `a` to `b` as a chain of discs of `radius`, so the line is
+/// twice `radius` thick.
 fn gif_line(buffer: &mut RgbaImage, a: (f32, f32), b: (f32, f32), radius: f32, color: Rgba<u8>) {
     let radius = radius.max(0.5);
     let length = (b.0 - a.0).hypot(b.1 - a.1);
@@ -292,6 +343,8 @@ fn gif_line(buffer: &mut RgbaImage, a: (f32, f32), b: (f32, f32), radius: f32, c
         );
     }
 }
+/// Draws an X around `center`. Its corners are `radius` pixels from the center
+/// along both axes, or 3.5 pixels if `radius` is smaller.
 fn gif_cross(buffer: &mut RgbaImage, center: (f32, f32), radius: f32, color: Rgba<u8>) {
     let d = radius.max(3.5);
     gif_line(
@@ -309,7 +362,8 @@ fn gif_cross(buffer: &mut RgbaImage, center: (f32, f32), radius: f32, color: Rgb
         color,
     );
 }
-/// Mass-weighted center x of a pose; the GIF camera follows it.
+/// Mass-weighted center x of a pose. The GIF camera follows it. It is 0 when
+/// the nodes have no mass.
 fn pose_center_x(nodes: &[Node], positions: &[[f32; 2]]) -> f32 {
     let mut mass = 0.0;
     let mut x = 0.0;
@@ -319,9 +373,15 @@ fn pose_center_x(nodes: &[Node], positions: &[[f32; 2]]) -> f32 {
     }
     if mass > 0.0 { x / mass } else { 0.0 }
 }
-/// Writes an animated GIF of one recorded trial. `ticks` are frame indices in
-/// increasing order; the frame delay follows their average spacing, so the GIF
-/// plays at the speed the trial was simulated. Returns the frame count.
+/// Writes an animated GIF of one recorded trial and returns the frame count.
+/// `frames` holds the node positions of each recorded frame, and `ticks` are
+/// the indices of the frames to show, in increasing order. `broken_joints` holds
+/// the broken joint bits of each frame (`replay_forces::Forces::broken`). `fall`
+/// is the frame where the trial ended and the distance it kept. From that frame
+/// on the creature shows as fallen. The frame delay follows the average spacing
+/// of `ticks`, so the GIF plays at the speed the trial was simulated. The delay
+/// is rounded to hundredths of a second and kept between 0.02 s and 2 s, and a
+/// GIF of one frame waits 0.1 s. A tick past the last frame ends the GIF there.
 fn write_creature_gif(
     creature: &Creature,
     config: &Config,
@@ -333,25 +393,24 @@ fn write_creature_gif(
 ) -> anyhow::Result<usize> {
     let nodes = &physics::nodes(creature);
     // The camera fits the frames the GIF shows.
-    let shown: Vec<Vec<[f32; 2]>> = ticks
-        .iter()
-        .filter_map(|&tick| frames.get(tick as usize).cloned())
-        .collect();
-    let camera = GifCamera::fit(nodes, &shown);
+    let camera = GifCamera::fit(
+        nodes,
+        ticks.iter().filter_map(|&tick| frames.get(tick as usize)),
+    );
     let scene = GifScene {
         creature,
         config,
         nodes,
         camera: &camera,
     };
-    let delay = if ticks.len() > 1 {
+    let hundredths = if ticks.len() > 1 {
         let span = ticks[ticks.len() - 1].saturating_sub(ticks[0]) as f32;
         let mean = span / (ticks.len() - 1) as f32;
         ((mean * physics::dt() * 100.0).round() as u32).clamp(2, 200)
     } else {
         10
     };
-    let delay = GifDelay::from_numer_denom_ms(delay * 10, 1);
+    let delay = GifDelay::from_numer_denom_ms(hundredths * 10, 1);
     let file = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut encoder = GifEncoder::new_with_speed(file, 30);
     encoder.set_repeat(GifRepeat::Infinite)?;
@@ -376,7 +435,10 @@ fn write_creature_gif(
     drop(encoder);
     Ok(written)
 }
-/// Samples a playback into at most `GIF_MAX_FRAMES` frames and animates them.
+/// Writes the GIF of a playback's trial to `path` and returns the frame count.
+/// It runs from the start of the trial to the last recorded frame and keeps
+/// every n-th frame, with the smallest n that leaves at most `GIF_MAX_FRAMES`
+/// frames.
 pub(super) fn export_creature_gif(
     playback: &Playback,
     path: &std::path::Path,
