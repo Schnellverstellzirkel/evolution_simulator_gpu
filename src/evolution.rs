@@ -434,11 +434,17 @@ fn split<T>(mut all: &mut [T], sizes: impl Iterator<Item = usize>) -> Vec<&mut [
     }
     out
 }
+/// The genes of many creatures in flat arrays, as one ring block holds them.
+/// `genomes[i]` says where creature `i`'s nodes, bones and muscles lie.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Population {
+    /// Where each creature's genes lie in the arrays below.
     pub genomes: Vec<Genome>,
+    /// The nodes of every creature. Each creature's nodes are one run.
     pub nodes: Vec<NodeGene>,
+    /// The bones of every creature, in runs like the nodes.
     pub bones: Vec<Bone>,
+    /// The muscles of every creature, in runs like the nodes.
     pub muscles: Vec<Muscle>,
     /// How each creature's trial treats it (`rungs::AUDIT`, `rungs::EXEMPT`),
     /// one byte per genome, set when its block is bred. Empty means no flags.
@@ -472,10 +478,10 @@ fn stream_key(seed: u64, generation: u64, round: u64, slot: u64) -> u64 {
     }
     key
 }
-/// The gene index the cursor draws of a stream use.
+/// The gene index that the cursor draws of a stream use.
 const CURSOR: u32 = u32::MAX;
 /// 1 / 65535: twelve 16-bit uniforms on 0..65535, scaled by this, have
-/// variance 1 to 3e-5.
+/// variance 1 + 3e-5.
 const GAUSSIAN_SCALE: f32 = 1.0 / 65535.0;
 /// Twelve 16-bit uniforms from three draws, summed and centered: a gaussian
 /// with mean exactly 0 and variance 1, cut at 6. The sum is an integer, so
@@ -507,6 +513,7 @@ pub struct Rng {
     counter: u32,
 }
 impl Rng {
+    /// The stream of `index` in `generation`, in breeding round 0.
     pub fn new(seed: u64, generation: u32, index: usize) -> Self {
         Self::stream(seed, generation, 0, index)
     }
@@ -517,22 +524,28 @@ impl Rng {
             counter: 0,
         }
     }
+    /// The next 64 random bits of the cursor.
     #[inline]
     pub fn next_u64(&mut self) -> u64 {
         let value = keyed(self.key, CURSOR, self.counter);
         self.counter = self.counter.wrapping_add(1);
         value
     }
+    /// Uniform on [0, 1), from the top 24 bits of one cursor draw.
     #[inline]
     pub fn unit(&mut self) -> f32 {
         (self.next_u64() >> 40) as f32 / 16_777_216.0
     }
+    /// Uniform between `a` and `b`, from one cursor draw.
     pub fn range(&mut self, a: f32, b: f32) -> f32 {
         a + self.unit() * (b - a)
     }
+    /// An index in `0..n` from one cursor draw. `n` must not be 0.
     pub fn index(&mut self, n: usize) -> usize {
         (self.next_u64() % n as u64) as usize
     }
+    /// A signed step in [-1, 1) that is mostly small: a uniform draw to the
+    /// seventh power.
     pub fn delta(&mut self) -> f32 {
         self.range(-1.0, 1.0).powi(7)
     }
@@ -556,6 +569,7 @@ pub struct Genes {
     key: u64,
 }
 impl Genes {
+    /// A standard gaussian for `gene` (`twelve_uniforms` of its draws 0 to 2).
     #[inline(always)]
     pub fn gaussian(self, gene: u32) -> f32 {
         twelve_uniforms([
@@ -586,6 +600,7 @@ impl Genes {
     pub fn unit(self, gene: u32, k: u32) -> f32 {
         (keyed(self.key, gene, 3 + k) >> 40) as f32 / 16_777_216.0
     }
+    /// An index in `0..n`: draw `3 + k` of `gene`. `n` must not be 0.
     #[inline(always)]
     pub fn index(self, gene: u32, k: u32, n: usize) -> usize {
         (keyed(self.key, gene, 3 + k) % n as u64) as usize
@@ -603,6 +618,7 @@ impl Population {
             &self.muscles[g.muscle_start..g.muscle_start + g.muscle_count],
         )
     }
+    /// Creature `index` as a whole `Creature`.
     pub fn creature(&self, index: usize) -> Creature {
         let g = &self.genomes[index];
         Creature {
@@ -614,6 +630,8 @@ impl Population {
             id: g.id,
         }
     }
+    /// Appends `c`, with its bones put in parent-first order when its
+    /// skeleton allows it.
     pub fn push(&mut self, c: Creature) {
         let mut c = c;
         canonicalize_bone_order(&mut c);
@@ -737,15 +755,25 @@ impl Population {
         }
         out
     }
+    /// Bytes the four gene arrays hold, counting their spare capacity.
     pub fn bytes(&self) -> usize {
         self.genomes.capacity() * std::mem::size_of::<Genome>()
             + self.nodes.capacity() * std::mem::size_of::<NodeGene>()
             + self.bones.capacity() * std::mem::size_of::<Bone>()
             + self.muscles.capacity() * std::mem::size_of::<Muscle>()
     }
+    /// Checks that this population has `cfg.population` creatures and that
+    /// each is a valid body within the limits of `cfg`: its sizes, gene
+    /// ranges, a connected skeleton in parent-first order and a connected
+    /// muscle network.
     pub fn validate(&self, cfg: &Config) -> Result<()> {
         self.validate_with_max_bone(cfg, max_bone_length(), false)
     }
+    /// `validate` with another longest bone. A `historical` population is a
+    /// snapshot that keeps the limits in effect when it was recorded and is
+    /// never evaluated. It may hold node sizes and frictions outside the
+    /// ranges of `cfg` and periods down to 0.1 s, and its muscle network is
+    /// not checked.
     pub(crate) fn validate_with_max_bone(
         &self,
         cfg: &Config,
