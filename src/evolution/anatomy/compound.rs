@@ -94,13 +94,13 @@ pub(super) fn close_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool 
 }
 
 /// Removes up to `count` limb tips (a bone that ends in a leaf, not the neck)
-/// among the nodes before `first_new`, the node count before an operator
-/// added its parts, so those stay. Each time it takes the tip with the least
-/// drive of three random ones, with its muscles. It leaves at least three
-/// nodes. Returns how many went. Operators that add nodes use it to give back
-/// what they added, all or part of it, so a body that takes such a move does
-/// not keep growing: bodies that only grow cost the GPU more with every
-/// creature.
+/// with their muscles. Only a tip on one of the first `first_new` nodes can
+/// go, so the parts an operator just added stay: it passes the node count it
+/// started with. Each time, the tip with the least drive of three random ones
+/// goes. The body keeps at least three nodes. Returns how many went.
+/// Operators that add nodes use it to give back all or part of what they
+/// added, so a body that takes such a move does not keep growing. Bodies that
+/// only grow cost the GPU more with every creature.
 pub(super) fn shed_tips(c: &mut Creature, first_new: usize, count: usize, rng: &mut Rng) -> usize {
     let (mut first_new, mut shed) = (first_new, 0);
     while shed < count && c.nodes.len() > 3 {
@@ -551,7 +551,7 @@ pub(crate) fn phase_cluster_move(
 /// hold a few large ones (the best elites of a save kept 30 and more muscles
 /// on one pair of bones). Moves two to four muscles of a bundle of five or
 /// more onto the joint between one of its bones and a bone that touches it
-/// (not the other bundle bone): the force moves to another joint, each moved
+/// (not the other bundle bone). The force moves to another joint. Each moved
 /// muscle keeps its timing and the shape of its stroke, the bundle keeps at
 /// least three muscles, and the body gains none. No change to one muscle does
 /// that, because a muscle is one in thirty of its bundle.
@@ -1040,14 +1040,14 @@ pub(super) fn hinge_muscle(
 /// body: one copy as the source limb is, one reflected about the vertical
 /// through the node, with the joint ranges mirrored. Each new limb gets a
 /// muscle across its joint (`hinge_muscle`, unless the copy brought an active
-/// one), timed like the muscles at the joint it hangs from, the first in
-/// phase with the gait's main driver (or a quarter cycle later) and the mirror
-/// image half a cycle after it. The source is one of the two lowest limbs of
-/// one or two bones, which are the ones that reach the ground, and the pair
-/// hangs from one of the three nodes nearest to the source's joint in height.
-/// The idlest limb tips go for the added nodes (`shed_tips`), and the body
-/// ends at most one node bigger. Sims (1994) grew creatures whose limbs came
-/// in such pairs.
+/// one). It is timed like the muscles at the joint the pair hangs from: the
+/// first limb in phase with the gait's main driver (or a quarter cycle later),
+/// the mirror image half a cycle after it. The source is one of the two lowest
+/// limbs of one or two bones, which are the ones that reach the ground, and
+/// the pair hangs from one of the three nodes nearest to the source's joint in
+/// height. The idlest limb tips go for the added nodes (`shed_tips`), and the
+/// body ends at most one node bigger. Sims (1994) grew creatures whose limbs
+/// came in such pairs.
 pub(crate) fn mirrored_limb_pair(
     c: &mut Creature,
     cfg: &Config,
