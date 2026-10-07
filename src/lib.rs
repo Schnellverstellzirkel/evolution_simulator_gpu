@@ -1,6 +1,9 @@
 //! exploraMove: 2D creatures of bones, joints and muscles evolve to travel as far
 //! as they can in 20 s trials, scored on the GPU and searched with MAP-Elites over
-//! island archives.
+//! island archives. The search lives in `evolution`, `qd` and `storage`.
+//! `ring`, `scheduler`, `engine`, `kernel` and `cuda_engine` carry creatures to
+//! the GPU and back. `worker` runs the experiment on its own thread, and `ui`
+//! draws the worker's snapshots.
 
 pub mod assets;
 pub mod block_alloc;
