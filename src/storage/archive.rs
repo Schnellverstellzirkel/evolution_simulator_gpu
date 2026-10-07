@@ -52,7 +52,8 @@ impl Experiment {
         let mut entered: Vec<usize> = Vec::new();
         // An emitter's `last_parent` is a slot of the global archive, and an
         // offer can put another creature in a slot. So the parents are read as
-        // ids here, and their slots are found again after the offers.
+        // ids here, and their slots are found again after the offers. Nothing
+        // sets a new parent now, so only a loaded save can hold one.
         let previous_parent_ids: [Option<u64>; qd::EMITTER_COUNT] = std::array::from_fn(|i| {
             self.emitter_stats[i]
                 .last_parent
