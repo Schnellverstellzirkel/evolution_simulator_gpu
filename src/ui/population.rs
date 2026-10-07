@@ -1,5 +1,7 @@
-//! The Ways of moving tab: the archive's cards with their filters, and the heat
-//! map of the archive (the island view is in `islands`).
+//! The Ways of moving tab. It shows the global archive as ranked cards with
+//! filters, or as a heat map of ground contact against stride rate. The island
+//! view is in `islands`. `ArchiveView` and `CardFilter` are the state `App`
+//! keeps for the tab, and the History and Race tabs call `request_cards` too.
 
 use super::{
     App,
@@ -20,29 +22,38 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// The body classes of the cells the archive tab shows: the global archive's.
+/// The body classes (shapes and sizes) of the global archive, which the cards
+/// and the map show. The filters take their names and hover texts from it.
 const CLASSES: &crate::qd::Classes = &crate::qd::GLOBAL_CLASSES;
-/// Movement-axis bin counts, mirroring `qd::MOVEMENT_BINS` (ground contact, cadence,
-/// shape, height, feet). The shape and the size classes are filters.
+/// Bin counts for the first five bytes of a niche: ground contact, cadence,
+/// shape, height and feet. They repeat `qd::MOVEMENT_BINS`, and the shape gets
+/// 1 because the map has no shape axis. Shape and size are filters.
 const MAP_BINS: [usize; 5] = [6, 8, 1, 6, 5];
-/// Which representation the Behavior archive tab shows.
+/// Which view of the archive the Ways of moving tab shows.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum ArchiveView {
+    /// The ranked cards of the archive, with filters.
     Cards,
+    /// The heat map of ground contact against stride rate.
     Map,
+    /// The island archives (`islands`).
     Islands,
 }
-/// Which archive cards the player looks at.
+/// The filters of the Cards view. A field that is `None` lets every card
+/// through.
 #[derive(Clone, Copy, Default, PartialEq)]
 pub(super) struct CardFilter {
     /// Feet bin (0 is one foot, 4 is five or more), or every count.
     feet: Option<u8>,
-    /// Body size class (`qd::SIZE_NAMES`), or every size.
+    /// Body size class, as an index into `CLASSES.size_names`, or every size.
     size: Option<u8>,
-    /// Body shape class (`qd::SHAPE_NAMES`), or every shape.
+    /// Body shape class, as an index into `CLASSES.shape_names`, or every
+    /// shape.
     shape: Option<u8>,
 }
 impl CardFilter {
+    /// Whether `card` passes every filter that is set. A card with no
+    /// descriptor passes only when no filter is set.
     fn shows(self, card: &crate::worker::Card) -> bool {
         let niche = card.descriptor.map(|d| d.niche().0);
         self.feet
@@ -72,9 +83,7 @@ impl App {
         };
         Self::sorted_by_note(ui, snapshot, theme);
         if self.archive_view == ArchiveView::Cards {
-            let mut filter = self.card_filter;
-            Self::card_filters(ui, &mut filter, theme);
-            self.card_filter = filter;
+            Self::card_filters(ui, &mut self.card_filter, theme);
         }
         let mut selected = None;
         let mut map_click = None;
@@ -95,6 +104,8 @@ impl App {
         } else {
             self.card_grid(ui, &mut selected);
         }
+        // A map cell carries no body, so the worker looks the creature up and
+        // the answer comes back with a snapshot. A card holds its creature.
         if let Some(id) = map_click {
             self.worker.send(Command::Select(id));
         }
@@ -169,8 +180,9 @@ impl App {
                 });
         });
     }
-    /// How many creatures the archive holds and what the ways of moving are
-    /// sorted by.
+    /// The note above the cards and the map: the count of kept creatures (one
+    /// per filled cell) and of ways of moving, and the four properties that
+    /// sort the ways of moving, each with a hover text.
     fn sorted_by_note(ui: &mut egui::Ui, snapshot: &Snapshot, theme: Theme) {
         ui.horizontal_wrapped(|ui| {
             ui.label(
@@ -205,7 +217,8 @@ impl App {
             }
         });
     }
-    /// The Cards' filters: feet, size and shape.
+    /// The Cards' filters, one row each for feet, size and shape. A row has an
+    /// All button and one button per bin or class.
     fn card_filters(ui: &mut egui::Ui, filter: &mut CardFilter, theme: Theme) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.;
@@ -260,9 +273,13 @@ impl App {
             }
         });
     }
-    /// The archive cards: the ranked list the UI holds, filtered here, so no
-    /// card waits for data or moves while the player looks. A newer list
-    /// replaces it only when the player asks for it (or opens the tab).
+    /// The archive cards in a scrolling grid. The UI keeps the ranked list in
+    /// `cards` and filters it here, so no card waits for data or moves while
+    /// the player looks. A new list arrives only after a request. The tab asks
+    /// when it opens, the Show latest button asks, the Race and History tabs
+    /// ask, and this method asks when the list is empty. It drops a list
+    /// scored in an earlier world. A click on a card puts its creature and
+    /// world in `selected`.
     fn card_grid(&mut self, ui: &mut egui::Ui, selected: &mut Option<(Creature, Config)>) {
         let theme = self.theme();
         let (generation, archive_size) = self
@@ -273,12 +290,12 @@ impl App {
             .cards_requested
             .is_some_and(|at| at.elapsed() < Duration::from_secs(2));
         // A list scored in an earlier world is never shown.
-        let world = self.snapshot.as_ref().map(|s| s.config.clone());
-        if self.cards.as_ref().is_some_and(|list| {
-            world
+        let stale = self.cards.as_ref().is_some_and(|list| {
+            self.snapshot
                 .as_ref()
-                .is_some_and(|w| list.config.physics_differs(w))
-        }) {
+                .is_some_and(|s| list.config.physics_differs(&s.config))
+        });
+        if stale {
             self.cards = None;
         }
         let empty = self.cards.as_ref().is_none_or(|list| list.cards.is_empty());
@@ -337,6 +354,8 @@ impl App {
             );
             return;
         }
+        // As many columns as fit 190 points each, at least two. The card width
+        // leaves 10 points for each gap between columns.
         let columns = (ui.available_width() / 190.).floor().max(2.) as usize;
         let width = (ui.available_width() - (columns - 1) as f32 * 10.) / columns as f32;
         let shown = self.playback.as_ref().map(|p| p.creature.id);
@@ -392,23 +411,29 @@ impl App {
                 }
             });
     }
-    /// Asks the worker for the ranked archive; it arrives with a snapshot.
+    /// Asks the worker for the ranked archive (`Command::Cards`). The list
+    /// comes back with a later snapshot and replaces `cards`. Until then
+    /// `cards_requested` holds the time of the request.
     pub(super) fn request_cards(&mut self) {
         self.cards_requested = Some(Instant::now());
         self.worker.send(Command::Cards);
     }
 }
-/// Height range of one archive height bin; mirrors `qd::height_axis`.
+/// The range in meters of one archive height bin: six equal steps on the log
+/// scale of `qd::height_axis`, whose constants this repeats. Heights past
+/// either end fall in the first or the last bin.
 fn height_bin_range(bin: usize) -> (f32, f32) {
     let low = 0.15f32;
     let high = (0.6 * crate::evolution::max_bone_length()).max(2.0 * low);
     let at = |t: f32| low * (high / low).powf(t);
     (at(bin as f32 / 6.0), at((bin + 1) as f32 / 6.0))
 }
+/// The label of a height bin: its range in meters.
 fn height_bin_label(bin: usize) -> String {
     let (low, high) = height_bin_range(bin);
     format!("{low:.2} to {high:.2} m")
 }
+/// The label of a feet bin: bin 0 is "1 foot" and the last bin is "5+ feet".
 fn feet_bin_label(bin: usize) -> String {
     match bin {
         0 => "1 foot".to_owned(),
@@ -473,7 +498,8 @@ fn paint_archive_map(
     }
     paint_map_cells(ui, &painter, plot, &best, (min, range), theme)
 }
-/// The grid of the map in `plot`: columns, rows and the size of a cell.
+/// The grid of the map in `plot`: the number of columns (ground contact bins)
+/// and of rows (cadence bins), the width of a column and the height of a row.
 fn map_grid(plot: Rect) -> (usize, usize, f32, f32) {
     let columns = MAP_BINS[0];
     let rows = MAP_BINS[1];
@@ -481,8 +507,9 @@ fn map_grid(plot: Rect) -> (usize, usize, f32, f32) {
     let row_height = plot.height() / rows as f32;
     (columns, rows, column_width, row_height)
 }
-/// Best cell and how many ways of moving share each contact and cadence
-/// pair under the filters.
+/// For each (ground contact, cadence) pair of bins, the best cell that passes
+/// the filters (`[height, feet, shape, size]`, as in `paint_archive_map`) and
+/// how many cells passed in that pair.
 fn map_best_cells(
     cells: &[crate::worker::MapCell],
     [height_bin, feet_bin, shape_bin, size_bin]: [Option<usize>; 4],
@@ -504,7 +531,10 @@ fn map_best_cells(
     }
     best
 }
-/// The map's grid lines, their labels and the two axis titles.
+/// The map's grid lines, their labels and the two axis titles. Ground contact
+/// runs from 0 to 100% along the bottom and stride rate from 0 to 6 strides a
+/// second up the side. These are the ranges that `qd::Descriptor::niche_in`
+/// divides into bins.
 fn paint_map_axes(painter: &egui::Painter, rect: Rect, plot: Rect, theme: Theme) {
     let (columns, rows, column_width, row_height) = map_grid(plot);
     for column in 0..=columns {
@@ -550,7 +580,8 @@ fn paint_map_axes(painter: &egui::Painter, rect: Rect, plot: Rect, theme: Theme)
         theme.ink,
     );
 }
-/// The color scale above the map, from the lowest to the highest distance.
+/// The color scale above the map on the right, from the lowest distance `min`
+/// to the highest `max` of the archive.
 fn paint_map_legend(painter: &egui::Painter, rect: Rect, min: f32, max: f32, theme: Theme) {
     let legend = Rect::from_min_max(
         Pos2::new(rect.right() - 272., rect.top() + 8.),
@@ -653,6 +684,11 @@ fn paint_map_cells(
     }
     clicked
 }
+/// Draws one archive card in `rect`: the plate, the thumbnail, the rank (the id
+/// for a card with no descriptor), the species name, a "New body" mark for a
+/// reserve entry and, along the bottom, the distance or the reason there is
+/// none. `hovered` lights the plate. The grid also passes true for the card of
+/// the creature on screen.
 fn paint_card(
     painter: &egui::Painter,
     card: &crate::worker::Card,
@@ -707,6 +743,9 @@ fn paint_card(
             theme.cold,
         );
     }
+    // A card with no score of its own shows its parent's, or says its trial is
+    // pending. The archive list leaves the parent score NaN and the survivor
+    // mark off, so its cards show their own distance or "Failed trial".
     let (label, score_color) = if !card.score.is_finite() {
         if card.parent_score.is_finite() && card.parent_score > FAILED {
             (format!("Parent {:.3} m", card.parent_score), theme.muted)
@@ -735,7 +774,8 @@ fn paint_card(
         score_color,
     );
 }
-/// How a creature came to be, in the words the lineage uses.
+/// The words for the emitter that bred a creature, to follow "Born" in a
+/// card's hover text.
 fn origin_words(emitter: crate::qd::Emitter) -> &'static str {
     match emitter {
         crate::qd::Emitter::Cma => "fine-tuned from a parent",
