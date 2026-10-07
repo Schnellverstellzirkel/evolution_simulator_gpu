@@ -262,15 +262,15 @@ fn main() -> Result<()> {
             }
             cfg.population = count;
             let mut histogram = std::collections::BTreeMap::new();
-            let mut steps_nodes = 0u64;
+            let mut node_sum = 0u64;
             for g in &population.genomes {
                 *histogram.entry(g.node_count).or_insert(0usize) += 1;
-                steps_nodes += g.node_count as u64;
+                node_sum += g.node_count as u64;
             }
             eprintln!(
                 "Workload: {} creatures, mean nodes {:.2}, node histogram {:?}",
                 count,
-                steps_nodes as f64 / count as f64,
+                node_sum as f64 / count as f64,
                 histogram
             );
             // `--engine <name>` opens that GPU alone, without the scheduler.
@@ -326,12 +326,10 @@ fn main() -> Result<()> {
                         top.len()
                     );
                 }
-                cfg.screen = Some(evolution_simulator::physics::Screen {
+                cfg.screen = Some(evolution_simulator::physics::Screen::uniform(
+                    screen.seconds,
                     bar,
-                    young_bar: bar,
-                    reshaped_bar: bar,
-                    ..screen
-                });
+                ));
             }
             let batch = cfg.batch_size();
             // The metrics of the last repeat, for `--dump` and `--compare`.
@@ -356,7 +354,7 @@ fn main() -> Result<()> {
                             if let Some(done) = engine.poll()? {
                                 break done;
                             }
-                            engine.wait(std::time::Duration::from_millis(50));
+                            engine.wait(Duration::from_millis(50));
                         };
                         for r in &done.results {
                             // The seconds this creature ran: until it fell,
