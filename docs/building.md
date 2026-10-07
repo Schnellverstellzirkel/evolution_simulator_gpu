@@ -222,7 +222,7 @@ export -f row burn
    flock -x target/gpu.lock bash -c 'row r19 target/power/release/examples/p2_speed $D 262144 135'
    ```
 
-5. Rows 7 to 10, root for the Radeon's DPM level (the Radeon is `card2`). The burner is igpu's (`burner.c` in the radeon-rows track, built with `gcc -O2 burner.c -o target/power/burner -l:libEGL.so.1 -l:libGLESv2.so.2`, usage `burner <seconds> [target_ms] [duty]`, 10 ms dispatches). Start it from a second terminal with the Mesa vendor forced, check that its first line names the Radeon 780M, and give it 10 s more than the row:
+5. Rows 7 to 10, root for the Radeon's DPM level (the Radeon is `card2`). The burner is not in the repository. It was igpu's `burner.c` from the radeon-rows track, and no commit holds it: a program that keeps the Radeon busy with 10 ms dispatches, built with `gcc -O2 burner.c -o target/power/burner -l:libEGL.so.1 -l:libGLESv2.so.2` and used as `burner <seconds> [target_ms] [duty]`. Start it from a second terminal with the Mesa vendor forced, check that its first line names the Radeon 780M, and give it 10 s more than the row:
 
    ```bash
    # terminal 2, before each row (duty 1.0 for rows 7 to 9, 0.3 for row 10):
