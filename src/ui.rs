@@ -1,17 +1,19 @@
 //! The egui interface. This file holds `launch`, `App` (the state of the whole
-//! window), its constructor and the frame loop (`ui`). Everything else lives in
-//! the modules below, and each of them adds an `impl App` block for its part:
+//! window), its constructor and the frame loop (`ui`). The modules below hold
+//! the rest, and most of them add an `impl App` block for their part:
 //!
-//! - The tabs: `overview` (metrics, trend chart and histogram), `feed` (its
-//!   event feed), `records` (what counts as a record), `population` (Ways of
-//!   moving: cards and the archive map), `islands` (its island view), `history`,
-//!   `race` and `lineage`.
-//! - The replay: `viewport` (the player and the creature it shows), `playback`
-//!   (one creature's recorded replay) and `scene` (painting a creature).
+//! - The tabs: `overview` (metrics, trend chart and histogram), `feed` (the
+//!   event feed of the Overview tab), `records` (what counts as a record),
+//!   `population` (Ways of moving: cards and the archive map), `islands` (the
+//!   island view of Ways of moving), `history`, `race` and `lineage`.
+//! - The replay: `viewport` (the replay view and the creature it shows),
+//!   `playback` (one creature's recorded replay) and `scene` (painting a
+//!   creature).
 //! - The window: `header` (top bar and Help), `controls` (the side panel),
-//!   `diagnostics`, `dialogs` (the File menu's dialogs), `export` (GIF and
-//!   screenshots) and `loading` (the loading screen).
-//! - Shared helpers: `text` (words and numbers) and `widgets`; `test_support`
+//!   `diagnostics` (the diagnostics drawer and the developer pause bar),
+//!   `dialogs` (the File menu's dialogs), `export` (GIF and screenshot files)
+//!   and `loading` (the loading screen).
+//! - Shared helpers: `text` (words and numbers) and `widgets`. `test_support`
 //!   holds the creature of the unit tests.
 mod controls;
 mod diagnostics;
@@ -50,6 +52,7 @@ use export::save_screenshot;
 use playback::Playback;
 use population::{ArchiveView, CardFilter};
 use race::RaceLane;
+/// Draws a creature as a small thumbnail. `schematic.rs` uses it too.
 pub(crate) use scene::thumbnail;
 use std::{
     path::PathBuf,
@@ -58,27 +61,37 @@ use std::{
 };
 use viewport::DEFAULT_CAMERA_ZOOM;
 use widgets::color_dot;
-/// The spacing scale: every gap, margin and padding is one of these.
+/// The small gap of the spacing scale, in points. `GAP_M` and `GAP_L` in
+/// `theme` are the medium and large gaps, and the `ui` modules space their
+/// blocks with the three.
 const GAP_S: f32 = 4.0;
 /// How long the UI's own messages hold the status line.
 const MESSAGE_SECONDS: f32 = 8.0;
 /// Generations between autosaves when the player turns autosave on, and in
 /// an unattended run.
 pub(crate) const AUTOSAVE_INTERVAL: u32 = 10;
-/// Marker carried by a screenshot request, so its reply can be told apart
-/// from the benchmark capture.
+/// Marks a screenshot request from the File menu or from
+/// `EVOLUTION_CAPTURE_EVERY`, so its reply is not taken for the reply to the
+/// capture hook of `EVOLUTION_SMOKE_CAPTURE`.
 struct ScreenshotRequest;
-/// How long between refreshes of the runs/ disk usage.
+/// How often the disk usage of `runs/` is measured again.
 const RUNS_REFRESH: Duration = Duration::from_secs(5);
+/// Opens the game window and runs it until the player closes it. `adapter_name`
+/// is the `--gpu` text, which names the CUDA device that scores creatures. The
+/// worker opens that device while the window shows its loading screen. It
+/// returns an error if the window fails to start or run.
 pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
     // The UI thread asks for a 1 ms slice, so a frame preempts the breeding
     // threads when it wakes (`threads::short_slice`).
     crate::threads::short_slice();
     let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
     setup.instance_descriptor.backends = wgpu::Backends::VULKAN;
-    // Render the UI on the GPU the desktop compositor uses: frames then need no
-    // cross-GPU import, and when that is the integrated GPU the discrete GPU is
-    // left entirely to evolution. EVOLUTION_RENDER_GPU selects an adapter by name.
+    // The window draws on the first of these Vulkan adapters that can present:
+    // the one whose name contains `EVOLUTION_RENDER_GPU`, the GPU the desktop
+    // compositor uses, the one whose name contains `adapter_name`, then any.
+    // The compositor's GPU needs no cross-GPU import for each frame, and when
+    // that is the integrated GPU the discrete GPU is left entirely to
+    // evolution.
     let render_name = std::env::var("EVOLUTION_RENDER_GPU")
         .ok()
         .map(|name| name.to_lowercase());
@@ -114,8 +127,9 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([900.0, 620.0])
             .with_title(
-                // Agents take screenshots in real windows on the owner's
-                // desktop; the title says so.
+                // A run with any `EVOLUTION_SMOKE_*` variable is an agent's
+                // screenshot run in a real window on the owner's desktop. The
+                // title says so.
                 if std::env::vars_os()
                     .any(|(key, _)| key.to_string_lossy().starts_with("EVOLUTION_SMOKE_"))
                 {
@@ -145,7 +159,8 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
-/// The five main application tabs.
+/// The five tabs, in the order of the tab strip and of the keys 1 to 5.
+/// `Population` is the tab called Ways of moving.
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Overview,
