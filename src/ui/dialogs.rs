@@ -91,13 +91,13 @@ impl App {
             Some((at, generation, opened)) => {
                 let now = self.snapshot.as_ref().map_or(generation, |s| s.generation);
                 let since = now.saturating_sub(generation);
-                let ago = seconds_text(at.elapsed().as_secs_f64());
+                let age = seconds_text(at.elapsed().as_secs_f64());
                 let verb = if opened { "Opened" } else { "Saved" };
                 (
                     if since > 0 {
-                        format!("{verb} {ago} ago · {since} generations since")
+                        format!("{verb} {age} ago · {since} generations since")
                     } else {
-                        format!("{verb} {ago} ago")
+                        format!("{verb} {age} ago")
                     },
                     false,
                 )
@@ -288,10 +288,8 @@ impl App {
                                 "Save experiment" => self.save_to(path, false),
                                 "Export CSV" => self.worker.send(Command::Export(path)),
                                 "Export creature JSON" => {
-                                    let creature =
-                                        self.playback.as_ref().map(|p| p.creature.clone());
                                     let result = (|| -> anyhow::Result<()> {
-                                        let creature = creature.as_ref().ok_or_else(|| {
+                                        let playback = self.playback.as_ref().ok_or_else(|| {
                                             anyhow::anyhow!("No creature is selected to export")
                                         })?;
                                         if let Some(parent) = path.parent() {
@@ -299,7 +297,7 @@ impl App {
                                         }
                                         serde_json::to_writer_pretty(
                                             std::fs::File::create(&path)?,
-                                            creature,
+                                            &playback.creature,
                                         )?;
                                         Ok(())
                                     })();
