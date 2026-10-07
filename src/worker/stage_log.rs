@@ -1,28 +1,42 @@
-//! The stage log (`EVOLUTION_STAGE_LOG`) and the host time per ring block
-//! that sizes the next ring.
+//! This module holds the worker's two measuring tools. `StageLog` appends one
+//! CSV row per generation to the file named by `EVOLUTION_STAGE_LOG`.
+//! `RingMeter` keeps the host time of each ring block for the last three
+//! generations, and a new game sizes its ring from those times. The worker
+//! loop feeds both as the search runs.
 
 use std::{io::Write, time::Instant};
 
+/// The stage log file and the numbers of the row being measured. The worker
+/// loop holds one when `EVOLUTION_STAGE_LOG` is set.
 pub(super) struct StageLog {
     file: std::fs::File,
+    /// When the clock of the current row started. The row's rate is the
+    /// population divided by the time since then.
     started: Instant,
+    /// Seconds the current generation spent in evaluation, in absorbing
+    /// results into the archives and in breeding, in that order.
     seconds: [f64; 3],
     /// Scheduler totals at the last row: confirmation trials submitted and
     /// their busy seconds, device busy seconds, device idle seconds.
     totals: [f64; 4],
     /// Seconds engine threads waited for kernels, at the last row.
     kernel_wait: f64,
-    /// Lane-steps per lane class at the last row.
+    /// Lane-steps per lane class at the last row. The kernel has one lane
+    /// class, so only the first count grows.
     lane_steps: [u64; 4],
-    /// Device idle seconds at the last absorbed block, and the most that
-    /// passed between two absorbed blocks this generation.
+    /// The devices' idle seconds when the last block was absorbed.
     idle_at_block: f64,
+    /// The most idle seconds the devices added between two absorbed blocks
+    /// this generation.
     starved_block: f64,
     /// Creatures a world change threw away this generation.
     pub(super) discarded: usize,
 }
 impl StageLog {
-    /// Opens the stage log file from the `EVOLUTION_STAGE_LOG` environment variable.
+    /// Opens the file named by `EVOLUTION_STAGE_LOG` for appending. It writes
+    /// the column names first when the file is empty. It returns `None` when
+    /// the variable is not set. It also returns `None`, after a message on
+    /// stderr, when the file does not open.
     pub(super) fn open() -> Option<Self> {
         let path = std::env::var_os("EVOLUTION_STAGE_LOG")?;
         let mut file = match std::fs::OpenOptions::new()
@@ -37,6 +51,9 @@ impl StageLog {
             }
         };
         if file.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
+            // `write_row` writes its values in the order of these columns.
+            // The `lane_steps` names date from the four lane classes the
+            // kernel once had. Only `lane_steps_4` counts now.
             let _ = writeln!(
                 file,
                 "generation,evaluation_seconds,archive_seconds,breeding_seconds,end_to_end_creatures_per_second,confirmations,confirmation_busy_seconds,device_busy_seconds,device_idle_seconds,mean_nodes,share_over_8_nodes,ring_block,ring_blocks,chain_p95_seconds,boundary_seconds,starved_block_max_seconds,lane_steps_4,lane_steps_8,lane_steps_16,lane_steps_32,world_change_discarded,kernel_wait_seconds,steps_per_creature,audit_rows,rung1_stop_share,rung2_stop_share,rung3_stop_share,rung1_entrant_misses_per_10k,rung2_entrant_misses_per_10k,rung1_extra_misses_per_10k,rung2_extra_misses_per_10k,audit_top1_kept,audit_top10_kept,screen_top1_kept,screen_top10_kept,rungs_armed,bands_off"
@@ -54,22 +71,31 @@ impl StageLog {
             discarded: 0,
         })
     }
+    /// Adds `seconds` to a stage of the current row. Stage 0 is evaluation,
+    /// 1 is absorbing results into the archives and 2 is breeding.
     pub(super) fn add(&mut self, stage: usize, seconds: f64) {
         self.seconds[stage] += seconds;
     }
+    /// Starts the measurement of a new row. It restarts the clock, zeroes the
+    /// stage seconds and the discarded count, and clears the longest idle gap.
+    /// The scheduler totals stay, so the next row still counts from the last
+    /// row.
     pub(super) fn reset(&mut self) {
         self.started = Instant::now();
         self.seconds = [0.0; 3];
         self.starved_block = 0.0;
         self.discarded = 0;
     }
-    /// A block was absorbed: the GPU idle time since the last one.
+    /// A block was absorbed. `idle` is the devices' idle seconds so far. The
+    /// row keeps the largest rise of it between two blocks, as
+    /// `starved_block_max_seconds`.
     pub(super) fn block(&mut self, idle: f64) {
         self.starved_block = self.starved_block.max(idle - self.idle_at_block);
         self.idle_at_block = idle;
     }
-    /// A generation of `e` ended: its row, with the node counts of the
-    /// genomes in the ring.
+    /// Writes the row of the generation that `e` just ended. The row is
+    /// numbered `e.generation - 1`, because the experiment has already moved
+    /// on. Its node columns count the genomes in the ring.
     pub(super) fn write_generation(
         &mut self,
         e: &crate::storage::Experiment,
@@ -92,6 +118,12 @@ impl StageLog {
             e.rungs.last(),
         );
     }
+    /// Writes one CSV row for `generation` and starts timing the next one.
+    /// `nodes` is the mean node count of the ring's genomes and the share of
+    /// them with more than 8 nodes. The scheduler totals count as 0 without
+    /// `sched`. `meter` gives the block times of `generation`, and `rungs` is
+    /// the report of its early rungs. The method also prints the breeding
+    /// timers to stderr when `EVOLUTION_PROFILE_BREED` is set.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn write_row(
         &mut self,
@@ -122,6 +154,8 @@ impl StageLog {
             std::array::from_fn(|k| lane_totals[k].saturating_sub(self.lane_steps[k]));
         self.lane_steps = lane_totals;
         if std::env::var_os("EVOLUTION_PROFILE_BREED").is_some() {
+            // The write time is always 0, because breeding counts writing as
+            // part of emitting.
             let [plan, emit, write] = crate::storage::take_breed_nanos();
             eprintln!(
                 "Breeding: generation {generation}, plan {:.3} s, emit {:.3} s, write {:.3} s",
@@ -131,6 +165,7 @@ impl StageLog {
             );
         }
         let share = |stops: u64| stops as f64 / rungs.creatures.max(1) as f64;
+        // One value per column of the header in `open`, in the same order.
         let _ = writeln!(
             self.file,
             "{generation},{:.6},{:.6},{:.6},{:.3},{:.0},{:.3},{:.3},{:.3},{:.3},{:.4},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{:.3},{:.1},{},{:.4},{:.4},{:.4},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{}",
@@ -176,7 +211,7 @@ impl StageLog {
     }
 }
 /// The host's time per ring block (`ring::Step::chain`) over the last three
-/// generations, which sizes the ring of the next new game.
+/// generations. A new game sizes its ring from these times.
 #[derive(Default)]
 pub(super) struct RingMeter {
     /// (generation, seconds) of blocks that did not end a generation.
@@ -185,12 +220,17 @@ pub(super) struct RingMeter {
     boundaries: std::collections::VecDeque<(u32, f64)>,
 }
 impl RingMeter {
+    /// How many generations of block times the meter keeps.
     const GENERATIONS: u32 = 3;
+    /// Forgets every block time. The worker clears the meter after a new game
+    /// has sized its ring, and when a load starts.
     pub(super) fn clear(&mut self) {
         self.chains.clear();
         self.boundaries.clear();
     }
-    /// A block of `generation` took `seconds`; `boundary` when it ended it.
+    /// Records that a block of `generation` took `seconds` of host time.
+    /// `boundary` is true when the block ended the generation. It also drops
+    /// the times of generations older than the last three.
     pub(super) fn add(&mut self, generation: u32, seconds: f64, boundary: bool) {
         let list = if boundary {
             &mut self.boundaries
@@ -205,6 +245,8 @@ impl RingMeter {
             }
         }
     }
+    /// The 95th percentile of `values`: the sorted value at index
+    /// `round(0.95 * (n - 1))` of `n` values. It is `None` for no values.
     fn p95(values: impl Iterator<Item = f64>) -> Option<f64> {
         let mut v: Vec<f64> = values.collect();
         if v.is_empty() {
@@ -213,7 +255,7 @@ impl RingMeter {
         v.sort_by(f64::total_cmp);
         Some(v[((v.len() - 1) as f64 * 0.95).round() as usize])
     }
-    /// For the stage log: the p95 time of this generation's blocks that did
+    /// For the stage log: the p95 time of the blocks of `generation` that did
     /// not end it, 0 if none.
     fn chain_p95_of(&self, generation: u32) -> f64 {
         Self::p95(
@@ -224,7 +266,7 @@ impl RingMeter {
         )
         .unwrap_or(0.0)
     }
-    /// For the stage log: the time of the block that ended this generation,
+    /// For the stage log: the time of the block that ended `generation`,
     /// 0 if none.
     fn boundary_of(&self, generation: u32) -> f64 {
         self.boundaries
@@ -233,8 +275,12 @@ impl RingMeter {
             .map(|c| c.1)
             .fold(0.0, f64::max)
     }
-    /// What the next ring is sized from: the scheduler's rate, and the
-    /// measured host times when this session has run a generation.
+    /// What a new game sizes its ring from. The rate is the sum of the
+    /// devices' rates in `sched`, or the default rate when there is none.
+    /// `chain` is the p95 of the times of blocks that did not end a
+    /// generation, and `boundary` is the longest time of a block that did.
+    /// Both are measured only once the meter holds a block that ended a
+    /// generation. Before that they are the defaults of `RingTimes`.
     pub(super) fn times(
         &self,
         sched: Option<&crate::scheduler::Scheduler>,
