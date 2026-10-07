@@ -162,16 +162,9 @@ impl App {
                 .last()
                 .map(species_name)
                 .unwrap_or_default();
-            let text = if index == 0 {
-                format!("First generation: best {best:.2} m, {name}.")
-            } else if first_in_world {
-                format!("Best in the new world: {best:.2} m, {name}.")
-            } else {
-                format!("New record: {best:.2} m, {name}.")
-            };
             items.push(FeedItem {
                 generation: stats.generation,
-                text,
+                text: record_text(index == 0, first_in_world, best, &name),
                 color: theme.ink,
                 action: Some(FeedAction::Replay(index)),
             });
@@ -182,16 +175,9 @@ impl App {
                 .as_ref()
                 .map(|champion| species_name(&champion.0))
                 .unwrap_or_default();
-            let best = record.best;
             items.push(FeedItem {
                 generation: snapshot.generation,
-                text: if record.first_ever {
-                    format!("First generation: best {best:.2} m, {name}.")
-                } else if record.first_in_world {
-                    format!("Best in the new world: {best:.2} m, {name}.")
-                } else {
-                    format!("New record: {best:.2} m, {name}.")
-                },
+                text: record_text(record.first_ever, record.first_in_world, record.best, &name),
                 color: theme.ink,
                 action: Some(FeedAction::ReplayChampion),
             });
@@ -376,6 +362,17 @@ impl App {
             }
             None => {}
         }
+    }
+}
+/// The words of a record line: the first generation of the game, the first best
+/// in a new world, or a new record in the same world.
+fn record_text(first_ever: bool, first_in_world: bool, best: f32, name: &str) -> String {
+    if first_ever {
+        format!("First generation: best {best:.2} m, {name}.")
+    } else if first_in_world {
+        format!("Best in the new world: {best:.2} m, {name}.")
+    } else {
+        format!("New record: {best:.2} m, {name}.")
     }
 }
 /// The first effect of `STALL_EFFECTS` that `config` has not set to its highest
