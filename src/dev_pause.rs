@@ -1,21 +1,10 @@
-//! A pause that developers ask for from outside the game, so a speed
-//! measurement gets the GPU and the CPU to itself while the owner's game
-//! keeps its run.
-//!
-//! A tool (`tools/pause-game.sh`) writes the request file `pause` in
-//! [`dir`]. The game notices it within about a second, stops handing out new
-//! evaluation work, lets the units on the engines finish and be absorbed,
-//! closes its GPU engines (freeing their memory) and writes the
-//! acknowledgement file `paused` with its pid. It resumes when the request
-//! file goes away, when the player presses Resume now, or [`LONGEST`] after
-//! the pause began, whichever comes first. After a pause the game runs at
-//! least [`REST`] before it honors a new request, and it never honors the
-//! same request twice, so a request file left behind cannot pause it again.
-//! While it waits out the rest it writes `waiting` with the time it will
-//! honor the request.
-//!
-//! The search is unchanged by a pause: work is held back, never dropped,
-//! so the run continues as if the GPU had been slow for a while.
+//! This module lets a developer pause the running game from outside, so a
+//! speed measurement gets the GPU and the CPU to itself. `tools/pause-game.sh`
+//! writes the request file, and `DevPause` on the worker thread reads it,
+//! suspends the scheduler and closes the GPU engines. `Controller` holds the
+//! rules for when a pause starts and ends, and `Shared` carries the pause to
+//! the UI. A pause holds work back and never drops it, so it does not change
+//! the search.
 
 use crate::scheduler::Scheduler;
 use std::{
@@ -27,16 +16,18 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// The longest a pause lasts.
+/// The longest a pause lasts, counted from when it began.
+/// `tools/pause-game.sh` repeats this value.
 pub const LONGEST: Duration = Duration::from_secs(5 * 60);
 /// How long the game runs after a pause before it honors a new request.
 pub const REST: Duration = Duration::from_secs(2 * 60);
-/// How often the game looks for the request file.
+/// The shortest time between two looks at the request file.
 const POLL: Duration = Duration::from_millis(250);
 
-/// Where the request and acknowledgement files live:
+/// The directory of the pause files `pause`, `paused` and `waiting`. It is
 /// `$XDG_RUNTIME_DIR/evolution-simulator`, or
-/// `<temp>/evolution-simulator-<uid>` without a runtime directory.
+/// `<temp>/evolution-simulator-<uid>` when there is no runtime directory.
+/// `tools/pause-game.sh` builds the same path.
 pub fn dir() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
         Some(runtime) => PathBuf::from(runtime).join("evolution-simulator"),
@@ -60,14 +51,18 @@ fn user_id() -> u32 {
 pub struct View {
     /// When the pause ends at the latest.
     pub ends_at: Instant,
-    /// The engines are closed; false while the last units finish.
+    /// True once the engines are closed. It is false while the last units
+    /// finish.
     pub closed: bool,
 }
 
 /// State the worker shares with the UI.
 #[derive(Default)]
 pub struct Shared {
+    /// The pause on now. The worker sets it and the UI reads it.
     view: Mutex<Option<View>>,
+    /// Set when the player presses Resume now. The worker clears it when it
+    /// reads it.
     resume: AtomicBool,
 }
 
@@ -76,7 +71,8 @@ impl Shared {
     pub fn view(&self) -> Option<View> {
         *self.view.lock().unwrap_or_else(|e| e.into_inner())
     }
-    /// The player's Resume now button.
+    /// The player's Resume now button. The worker ends the pause on its next
+    /// tick. A press while no pause is on does nothing.
     pub fn resume_now(&self) {
         self.resume.store(true, Ordering::Relaxed);
     }
