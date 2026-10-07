@@ -233,18 +233,18 @@ fn plan_legs(
         return false;
     };
     retime(&mut next, &legs, start, pattern);
-    commit(c, next, cfg, rng)
+    commit(c, &mut next, cfg, rng)
 }
 
 /// Closes the motor ring on the child and keeps it if it differs.
-fn commit(c: &mut Creature, mut next: Creature, cfg: &Config, rng: &mut Rng) -> bool {
-    if !close_ring(&mut next, cfg, rng) {
+fn commit(c: &mut Creature, next: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
+    if !close_ring(next, cfg, rng) {
         return false;
     }
     if next.nodes == c.nodes && next.bones == c.bones && next.muscles == c.muscles {
         return false;
     }
-    c.clone_from(&next);
+    c.clone_from(next);
     true
 }
 
@@ -384,7 +384,7 @@ pub(crate) fn kangaroo_hopper(
         return false;
     }
     shed_tips(&mut next, base, 1, rng);
-    commit(c, next, cfg, rng)
+    commit(c, &mut next, cfg, rng)
 }
 
 /// Turns the body into a swinger like a gibbon walking upright. The two
@@ -415,7 +415,7 @@ pub(crate) fn gibbon_swinger(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx:
         }
     }
     retime(&mut next, arms, start, |i| 0.5 * i as f32);
-    commit(c, next, cfg, rng)
+    commit(c, &mut next, cfg, rng)
 }
 
 /// Turns the body into a two-legged runner with a counterweight. The two
@@ -466,7 +466,7 @@ pub(crate) fn counterweight_runner(
         return false;
     }
     shed_tips(&mut next, base, 1, rng);
-    commit(c, next, cfg, rng)
+    commit(c, &mut next, cfg, rng)
 }
 
 /// Drops a pair of neighbouring legs, the pair with the least muscle drive of
@@ -492,7 +492,7 @@ pub(crate) fn shed_leg_pair(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: 
     }
     let start = limb_phase(&next, &left[0]).unwrap_or(0.0);
     retime(&mut next, &left, start, alternate);
-    commit(c, next, cfg, rng)
+    commit(c, &mut next, cfg, rng)
 }
 
 /// Adds a pair of legs at one new trunk node: two copies of a leg, the second
@@ -527,7 +527,7 @@ pub(crate) fn append_leg_pair(
     }
     let added = next.nodes.len() - base;
     shed_tips(&mut next, base, added / 2, rng);
-    commit(c, next, cfg, rng)
+    commit(c, &mut next, cfg, rng)
 }
 
 /// Fuses two neighbouring legs into one strong leg. Of the two legs whose hips
@@ -558,7 +558,7 @@ pub(crate) fn fuse_legs_into_one(
     tune_leg(&mut next, keep, rng.range(1.3, 1.6), 0.0);
     let nodes: BoneIds = branch_nodes(c, drop);
     remove_parts(&mut next, drop, &nodes);
-    commit(c, next, cfg, rng)
+    commit(c, &mut next, cfg, rng)
 }
 
 /// Splits a leg into two at the same hip. The copy is reflected and the two
@@ -603,7 +603,7 @@ pub(crate) fn split_leg_in_two(
     }
     let added = next.nodes.len() - base;
     shed_tips(&mut next, base, added / 2, rng);
-    commit(c, next, cfg, rng)
+    commit(c, &mut next, cfg, rng)
 }
 
 /// Reduces a body with three or more legs to a biped: the two legs with the
@@ -639,7 +639,7 @@ pub(crate) fn reduce_to_biped(
     }
     let start = limb_phase(&next, &left[0]).unwrap_or(0.0);
     retime(&mut next, &left, start, |i| 0.5 * (i % 2) as f32);
-    commit(c, next, cfg, rng)
+    commit(c, &mut next, cfg, rng)
 }
 
 /// Makes every leg push at once, as a gazelle does when it stots: all legs
@@ -660,7 +660,7 @@ pub(crate) fn pronking_stot(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: 
         tune_leg(&mut next, leg, 1.0, tendon);
     }
     retime(&mut next, &legs, start, |_| 0.0);
-    commit(c, next, cfg, rng)
+    commit(c, &mut next, cfg, rng)
 }
 
 /// Gives every leg of two or more bones the proportions of a runner on its
@@ -711,5 +711,5 @@ pub(crate) fn unguligrade_legs(
     for leg in &legs {
         tune_leg(&mut next, leg, 1.0, 0.3);
     }
-    commit(c, next, cfg, rng)
+    commit(c, &mut next, cfg, rng)
 }
