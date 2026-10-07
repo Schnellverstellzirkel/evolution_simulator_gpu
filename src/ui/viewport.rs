@@ -1,5 +1,8 @@
-//! The replay viewport and which creature it shows: the champion, a creature
-//! the player picked, the camera and zoom, and the playback controls.
+//! The replay viewport. It decides which creature the replay shows, the
+//! champion or one the player picked, and paints the scene and the HUD from
+//! that creature's `Playback`. It also takes the camera and zoom input and
+//! draws the timeline and the playback buttons. The Overview tab shows it, and
+//! the Ways of moving tab docks it beside the archive.
 
 use super::{
     App, Tab,
@@ -23,15 +26,22 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Pixels per meter of the camera when the window opens, when a new replay
+/// starts and after Reset camera. Until the player zooms by hand, `player_zoom`
+/// replaces it with a zoom that fits the body of the replay.
 pub(super) const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
 /// Share of the viewport height under the ground line, room for the HUD.
 const GROUND_SHARE: f32 = 0.25;
-/// Share of the viewport height a creature fills at the default zoom.
+/// Share of the viewport height a body fills at its fitted zoom (`fit_zoom`).
 const FIT_HEIGHT_SHARE: f32 = 0.42;
 impl App {
+    /// Starts the replay of a creature in its world. Its first pose shows at
+    /// once while a thread records the replay and waits up to 60 seconds for
+    /// the GPU. `receive_replay` takes the recording when it is ready. The
+    /// camera resets and follows the creature.
     pub(super) fn set_preview(&mut self, c: Creature, cfg: Config) {
-        // The replay is recorded off the UI thread: the player shows the
-        // creature's first pose meanwhile, and the recording replaces it.
+        // Recording takes a while, so it runs off the UI thread. The first
+        // pose shows meanwhile, and the recording replaces it.
         self.playback = Some(Playback::preparing(c.clone(), cfg.clone()));
         let (tx, rx) = mpsc::channel();
         let ctx = self.ctx.clone();
@@ -47,8 +57,9 @@ impl App {
         self.zoom_user = false;
         self.camera = [0.; 2];
     }
-    /// Shows a creature the player picked. The theater keeps it until the
-    /// player goes back to the champion.
+    /// Shows a creature the player picked. The replay keeps it until the
+    /// player goes back to the champion. The lineage on screen belonged to the
+    /// creature shown before, so it is cleared.
     pub(super) fn select(&mut self, creature: Creature, config: Config) {
         self.pinned = true;
         self.set_preview(creature, config);
@@ -60,16 +71,18 @@ impl App {
         self.pinned = true;
         self.set_preview(creature, config);
     }
-    /// Shows a champion and follows new ones from now on.
+    /// Shows a champion and follows new ones from now on. It clears the
+    /// lineage of the creature shown before.
     pub(super) fn show_champion(&mut self, creature: Creature, config: Config) {
         self.pinned = false;
         self.champion_shown = true;
         self.set_preview(creature, config);
         self.lineage.clear();
     }
-    /// The best elite in the archive now, and the world it is scored in. The
-    /// worker sends it as soon as a record is absorbed, mid-generation too;
-    /// the newest finished generation's best stands in until then.
+    /// The best elite of the global archive now, and the world it is scored
+    /// in. The worker sends it as soon as a record is absorbed, mid-generation
+    /// too. Until it has sent one, the best creature of the newest history row
+    /// stands in, when that row was measured in the live world.
     pub(super) fn champion(&self) -> Option<(Creature, Config)> {
         let snapshot = self.snapshot.as_ref()?;
         if let Some(live) = &snapshot.champion {
@@ -85,10 +98,10 @@ impl App {
             !s.history.is_empty() && s.champion.is_none() && row_in_world(s).is_none()
         })
     }
-    /// Keeps the theater (on the Overview and docked beside Ways of moving)
-    /// on the champion unless the player pinned a creature. A new champion,
-    /// which a new distance record brings, replaces the one on screen at
-    /// once.
+    /// Keeps the replay on the champion unless the player pinned a creature. A
+    /// new champion, which a new distance record brings, replaces the one on
+    /// screen at once. The frame loop calls it after each snapshot of the
+    /// worker.
     pub(super) fn follow_champion(&mut self) {
         let Some((creature, config)) = self.champion() else {
             // The world changed and no creature is kept in it yet: the old
@@ -104,6 +117,8 @@ impl App {
         if follows_champion(self.pinned, showing, Some(creature.id)) {
             self.show_champion(creature, config);
         } else if !self.pinned && showing == Some(creature.id) {
+            // The creature on screen is the champion already, so the header
+            // calls it the champion.
             self.champion_shown = true;
         }
     }
@@ -114,8 +129,9 @@ impl App {
             self.show_champion(creature, config);
         }
     }
-    /// The replay header's buttons: follow, reset camera, and back to the
-    /// champion. Returns whether the player clicked back.
+    /// The replay header's buttons: Follow, Forces, Reset camera and, while a
+    /// picked creature is pinned, Back to champion. Returns whether the player
+    /// clicked Back to champion.
     fn viewport_buttons(&mut self, ui: &mut egui::Ui) -> bool {
         let theme = self.theme();
         let mut back = false;
@@ -137,8 +153,10 @@ impl App {
         }
         back
     }
-    /// The replay header: the mode label, the creature's name and its buttons
-    /// (on the same line when the view is wide, else on a line of their own).
+    /// The replay header: a label that says whose replay it is (a picked
+    /// creature, the champion or a first-generation creature), the creature's
+    /// name with its distance, and the buttons. The buttons share the line when
+    /// the view is wide and take a line of their own when it is narrow.
     fn viewport_header(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
         let mut back = false;
@@ -210,8 +228,10 @@ impl App {
             self.back_to_champion();
         }
     }
-    /// The replay's input: a click pauses, scrolling zooms, a drag pans, and
-    /// the player's own zoom is kept or replaced by the fitted one.
+    /// The replay's input. A click toggles play and pause, scrolling zooms,
+    /// and a drag pans the camera and turns Follow off. Once the player has
+    /// zoomed by hand the zoom stays. Until then each frame sets it to the fit
+    /// for the body of the replay (`player_zoom`).
     fn viewport_camera(&mut self, ui: &mut egui::Ui, rect: Rect, response: egui::Response) {
         if response.clicked() {
             self.playing = !self.playing;
@@ -236,8 +256,8 @@ impl App {
         {
             self.zoom = player_zoom(p.height, p.peak, rect.height());
         }
-        // Developer screenshots: EVOLUTION_SMOKE_VIEW_ZOOM=<pixels per meter>
-        // frames a wider stretch of the ground.
+        // Developer screenshots: `EVOLUTION_SMOKE_VIEW_ZOOM=<pixels per meter>`
+        // sets the zoom in every frame, to frame a wider stretch of the ground.
         if let Some(zoom) = std::env::var("EVOLUTION_SMOKE_VIEW_ZOOM")
             .ok()
             .and_then(|z| z.parse::<f32>().ok())
