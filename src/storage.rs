@@ -36,8 +36,13 @@ impl std::hash::Hasher for KeyHasher {
     fn write_u64(&mut self, word: u64) {
         self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95);
     }
+    fn write_usize(&mut self, word: usize) {
+        self.write_u64(word as u64);
+    }
 }
-pub type KeyMap<V> = HashMap<u64, V, std::hash::BuildHasherDefault<KeyHasher>>;
+/// A map hashed with `KeyHasher`.
+pub type FastMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<KeyHasher>>;
+pub type KeyMap<V> = FastMap<u64, V>;
 pub type KeySet = std::collections::HashSet<u64, std::hash::BuildHasherDefault<KeyHasher>>;
 
 mod archive;

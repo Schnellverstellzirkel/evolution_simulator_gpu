@@ -136,8 +136,8 @@ impl Experiment {
             })
             .collect();
         // Best creature of each cell: (fitness, position).
-        let mut island_best: HashMap<(usize, qd::Niche), (f32, usize)> = HashMap::new();
-        let mut global_best: HashMap<qd::Niche, (f32, usize)> = HashMap::new();
+        let mut island_best: FastMap<(usize, qd::Niche), (f32, usize)> = FastMap::default();
+        let mut global_best: FastMap<qd::Niche, (f32, usize)> = FastMap::default();
         for (j, own, global) in keyed {
             let fitness = results[j].fitness;
             let better = |held: &(f32, usize)| fitness > held.0;
@@ -166,7 +166,7 @@ impl Experiment {
         let mut out: Vec<usize> = Vec::new();
         // `best_fitness` scans a whole archive: once per archive, not once
         // per cell of the block.
-        let mut bars: HashMap<usize, f32> = HashMap::new();
+        let mut bars: FastMap<usize, f32> = FastMap::default();
         for ((arena, niche), (fitness, j)) in island_best {
             let bar = *bars.entry(arena).or_insert_with(|| {
                 islands
