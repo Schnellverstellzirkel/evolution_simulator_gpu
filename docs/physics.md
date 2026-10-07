@@ -17,6 +17,7 @@ Constraints only move nodes toward a valid pose, and friction only takes back sl
 
 - A muscle pulls its two anchors together. Its drive follows the rhythm's shortening speed over the step, times its stiffness and its energy store. Hill's relation scales the drive by `1 - v / v_max` with `v_max` of 8 muscle lengths per second. A light damper resists its length change. Only active shortening is charged to the store, which recovers. A muscle's force cap and store scale with the lighter of the two subtrees it pulls together: the cap is 200 m/s^2 times that mass, at most 200 N, and the store is the same fraction of 120 J. Muscles on the same two bones and on the same side of the joint split one strength, so stacked copies add timing and not force.
 - A muscle stretched past its slack length is pulled back by a passive tendon, not charged to the store.
+- A muscle's stroke is capped so that its rhythm never changes its length faster than 24 m/s (`Limits::muscle_speed`, applied when `physics2::Model` is built).
 - A joint's range is a hard limit on the relative angle of a bone and its parent bone. A joint forced 0.5 rad past its range breaks and ends the trial like a fall.
 - Joint damping with a 0.1 s time constant. It pushes the joint's nodes with equal and opposite velocities, so it keeps the body's momentum.
 - Bone drag is `AIR_DRAG (0.6) x length x width x speed x velocity` at the bone's midpoint, shared by its two nodes, never more than half the bone's speed in one substep.
