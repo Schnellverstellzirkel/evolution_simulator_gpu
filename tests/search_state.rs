@@ -1,3 +1,10 @@
+//! Tests of the search state: the `qd` archives and the `storage` experiment.
+//!
+//! They check archive cells, islands and their nurseries, the ring of blocks,
+//! saves and world changes. They also check the limits of `Config::validate`.
+//! The scores come from `synthetic` and not from the physics engine, so these
+//! tests need no GPU.
+
 use evolution_simulator::{
     config::Config,
     evolution::{self, Population},
@@ -7,6 +14,8 @@ use evolution_simulator::{
 use serde::Serialize;
 use std::{collections::BTreeMap, path::PathBuf};
 
+/// A small game for tests: 128 creatures, bodies of up to 8 nodes and 12
+/// muscles, and a fixed `seed`.
 fn config(seed: u64) -> Config {
     Config {
         population: 128,
@@ -21,6 +30,8 @@ fn config(seed: u64) -> Config {
 #[test]
 fn configuration_defaults_and_float_boundaries_are_validated() {
     Config::default().validate().unwrap();
+    // A setting's name, its accessor, and the smallest and largest value it
+    // accepts.
     type FloatCase = (&'static str, fn(&mut Config) -> &mut f32, f32, f32);
     let fields: [FloatCase; 13] = [
         ("duration", |c| &mut c.duration, 0.1, 300.0),
@@ -37,6 +48,8 @@ fn configuration_defaults_and_float_boundaries_are_validated() {
         ("minimum friction", |c| &mut c.min_friction, 0.0, 1.0),
         ("maximum friction", |c| &mut c.max_friction, 0.0, 1.0),
     ];
+    // The size and friction bounds start as wide as they can be, so each bound
+    // can reach its own limits without crossing the other one.
     let base = Config {
         min_size: 0.01,
         max_size: 1.0,
@@ -66,6 +79,8 @@ fn configuration_defaults_and_float_boundaries_are_validated() {
 
 #[test]
 fn configuration_integer_limits_and_ordered_bounds_are_validated() {
+    // A setting's name, its accessor, and the smallest and largest value it
+    // accepts.
     type IntegerCase = (&'static str, fn(&mut Config) -> &mut usize, usize, usize);
     let fields: [IntegerCase; 5] = [
         ("population", |c| &mut c.population, 2, 20_000_000),
@@ -74,6 +89,9 @@ fn configuration_integer_limits_and_ordered_bounds_are_validated() {
         ("GPU budget", |c| &mut c.gpu_budget_mib, 32, 6144),
         ("RAM budget", |c| &mut c.ram_budget_mib, 64, 24576),
     ];
+    // The base sits where each field can move to both of its limits alone: the
+    // smallest population, the fewest nodes, the most muscles and the largest
+    // RAM budget.
     let base = Config {
         population: 2,
         max_nodes: 3,
@@ -93,6 +111,9 @@ fn configuration_integer_limits_and_ordered_bounds_are_validated() {
             assert!(cfg.validate().is_err(), "accepted {name} = {value}");
         }
     }
+    // Settings that break a rule other than a plain range: an odd population,
+    // size or friction bounds out of order, fewer muscles than nodes, and a
+    // terrain level that does not exist.
     let invalid = [
         Config {
             population: 3,
@@ -147,6 +168,8 @@ fn configuration_rejects_population_above_the_ram_budget() {
 #[test]
 fn behavior_archive_keeps_exactly_the_fastest_creature_in_each_cell() {
     let population = evolution::create(&config(38)).unwrap();
+    // Six ways of moving that differ in ground contact only, so each is one
+    // cell.
     let descriptors: Vec<_> = (0..6)
         .map(|cell| Descriptor {
             ground_contact: cell as f32 / 5.0,
@@ -157,6 +180,8 @@ fn behavior_archive_keeps_exactly_the_fastest_creature_in_each_cell() {
         })
         .collect();
     let mut archive = QdArchive::default();
+    // The model of the rule: for each cell, the best score offered so far and
+    // the id of its creature.
     let mut expected = BTreeMap::<Niche, (f32, u64)>::new();
     for (round, score) in [-5.0, 4.0, 4.0, 3.0, 9.0, -1.0, 12.0]
         .into_iter()
@@ -208,6 +233,7 @@ fn behavior_archive_keeps_exactly_the_fastest_creature_in_each_cell() {
         // must continue to hold afterward.
         archive.rebuild_indices();
     }
+    // A score that is not a distance leaves the archive untouched.
     let before = encoded(&archive);
     for fitness in [
         f32::NAN,
@@ -353,6 +379,8 @@ fn island_migration_never_duplicates_a_cell_or_replaces_a_faster_elite() {
     let mut target = QdArchive::default();
     assert!(target.absorb(&source.entries[0]));
     target.visit(0);
+    // A migrant for the same cell takes it only when it is strictly faster. The
+    // archive keeps its one entry and the cell keeps its visit count.
     for (fitness, accepted) in [(3.0, false), (5.0, false), (8.0, true), (7.0, false)] {
         let mut migrant = source.entries[0].clone();
         migrant.fitness = fitness;
@@ -405,10 +433,14 @@ fn run_synthetic(experiment: &mut Experiment) {
         .unwrap();
 }
 
+/// The bincode bytes of `value`. Archives, elites and CMA emitters have no
+/// `PartialEq`, so the tests compare their bytes.
 fn encoded<T: Serialize>(value: &T) -> Vec<u8> {
     bincode::serialize(value).unwrap()
 }
 
+/// Asserts that two populations hold the same creatures in the same order:
+/// each pair has the same id, nodes, bones and muscles.
 fn assert_same_population(a: &Population, b: &Population) {
     assert_eq!(a.genomes.len(), b.genomes.len());
     for index in 0..a.genomes.len() {
@@ -421,6 +453,8 @@ fn assert_same_population(a: &Population, b: &Population) {
     }
 }
 
+/// Asserts that two archives hold the same elites, compared by their bytes,
+/// and have the same score and the same behavior and morphology counts.
 fn assert_same_archive(a: &QdArchive, b: &QdArchive) {
     assert!(
         encoded(&a.entries) == encoded(&b.entries),
@@ -433,7 +467,10 @@ fn assert_same_archive(a: &QdArchive, b: &QdArchive) {
     assert_eq!(a.morphology_count(), b.morphology_count());
 }
 
-/// The same ring, archives and search state.
+/// Asserts that two experiments hold the same search state: the ring and its
+/// births, the config, the generation, breed round, evaluation and cursor
+/// counters, the CMA emitters, and the global and island archives. Both must
+/// also pass `validate`.
 fn assert_same_state(a: &Experiment, b: &Experiment) {
     a.validate().unwrap();
     b.validate().unwrap();
@@ -465,6 +502,7 @@ fn assert_same_state(a: &Experiment, b: &Experiment) {
     }
 }
 
+/// The birth record of every creature in the ring, in ring order.
 fn births(e: &Experiment) -> impl Iterator<Item = &storage::Birth> {
     e.blocks.iter().flat_map(|b| &b.births)
 }
@@ -589,9 +627,12 @@ fn a_record_is_confirmed_and_keeps_the_lower_score() {
     }
 }
 
+/// A checkpoint path in the temp directory, unique to the process and the call.
+/// Dropping it removes the file and its `.evo.tmp` file.
 struct Checkpoint(PathBuf);
 
 impl Checkpoint {
+    /// A new path named for `name`, with no file at it yet.
     fn new(name: &str) -> Self {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -684,6 +725,8 @@ fn a_save_holds_the_islands_and_loads_with_empty_reshaped_nurseries() {
     for _ in 0..3 {
         run_synthetic(&mut experiment);
     }
+    // A save holds the first `older` archives: the islands and their nurseries
+    // of new random bodies. The nurseries of reshaped bodies are not saved.
     let older = storage::island_count() * 2;
     assert!(
         experiment.islands[older..]
@@ -735,6 +778,7 @@ fn checkpoint_preserves_stalled_island_optimizer() {
         .iter()
         .map(|island| (island.best_fitness(), 1))
         .collect();
+    // Each main island has more than one elite for its optimizer to turn to.
     assert!(
         uninterrupted
             .islands
@@ -748,6 +792,7 @@ fn checkpoint_preserves_stalled_island_optimizer() {
     let first = storage::load(&checkpoint.0).unwrap();
     let second = storage::load(&checkpoint.0).unwrap();
     assert_eq!(first.island_progress, second.island_progress);
+    // The loaded ring has children bred from an optimizer.
     assert!(
         births(&first)
             .filter_map(|b| b.cma)
@@ -762,6 +807,9 @@ fn checkpoint_rejects_invalid_optimizer_resume_metadata() {
     run_synthetic(&mut experiment);
     let islands = experiment.islands.len();
     let checkpoint = Checkpoint::new("invalid-resume");
+    // A load turns down a record of NaN or positive infinity, a record from a
+    // generation that has not come yet, and a list that is neither empty nor
+    // one record per archive.
     for progress in [
         vec![(f32::NAN, 0); islands],
         vec![(f32::INFINITY, 0); islands],
@@ -900,7 +948,13 @@ fn plateau_archive() -> QdArchive {
     archive_of_all_ways_of_moving(|_| 1000.0)
 }
 
+/// An archive with one elite in each of the 1,440 ways of moving: 6 ground
+/// contacts times 8 cadences times 6 heights times 5 feet counts. The elite
+/// numbered `n`, counting from 1, has the distance `fitness(n)`. Its creature
+/// is a random body, unrelated to its descriptor.
 fn archive_of_all_ways_of_moving(fitness: impl Fn(u32) -> f32) -> QdArchive {
+    // One mean height in each of the 6 height cells. The height grows by 2%
+    // from 15 cm, and the first height that lands in a cell is kept for it.
     let mut heights = [0.0f32; 6];
     let mut h = 0.15f32;
     while h < 4.0 {
@@ -1250,6 +1304,8 @@ fn a_world_change_keeps_the_layout_of_a_refined_archive() {
     assert!(main_islands_empty(&plain) && plain.archive.refined());
 }
 
+/// The id of every creature in the ring, block by block. `births` gives the
+/// birth records of the same creatures instead.
 fn births_ids(e: &Experiment) -> impl Iterator<Item = u64> + '_ {
     e.blocks
         .iter()
@@ -1496,7 +1552,7 @@ fn isolated_islands_only_hold_their_own_descendants() {
     );
 }
 
-/// Whether every archive of the main islands (and their nurseries) is empty.
+/// Whether every archive of the main islands and their nurseries is empty.
 fn main_islands_empty(e: &Experiment) -> bool {
     e.islands.iter().enumerate().all(|(arena, island)| {
         evolution_simulator::qd::is_wild(arena % storage::island_count())
