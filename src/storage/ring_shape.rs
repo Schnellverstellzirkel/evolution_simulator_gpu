@@ -1,3 +1,9 @@
+//! The shape of the ring of blocks in flight: how many creatures a block holds
+//! and how many blocks there are. The worker sizes a new game's ring with
+//! `RingShape::size` from the rate and host times it measured. The shape stays
+//! the same until the game ends. It is saved with the game and written into
+//! every generation's statistics.
+
 use super::*;
 
 /// The shape of the ring: creatures per block and blocks in flight. It is
@@ -15,16 +21,18 @@ pub struct RingShape {
     pub blocks: usize,
 }
 
-/// What the ring is sized from.
+/// What `RingShape::size` sizes a ring from. These are the engines' rate and
+/// the host's times per block, as the worker measured them with `RingMeter`.
 #[derive(Clone, Copy, Debug)]
 pub struct RingTimes {
     /// Standard creatures per second the engines finish.
     pub rate: f64,
-    /// 95th percentile of the host's time per block: from the moment a block
-    /// could be absorbed until it is bred again and queued.
+    /// The 95th percentile, in seconds, of the host's time per block over the
+    /// blocks that did not end a generation: from the moment a block could be
+    /// absorbed until it is bred again and queued.
     pub chain: f64,
-    /// The longest such time of a block that ended a generation, over the
-    /// last three generations.
+    /// The longest such time, in seconds, of a block that ended a generation.
+    /// Both times cover the last three generations.
     pub boundary: f64,
 }
 
@@ -57,32 +65,36 @@ impl RingShape {
         blocks: 8,
     };
     /// Host time per block (seconds) at or below which the sized ring is
-    /// used. A block asks for about 40 confirmation trials whatever its
-    /// size, so the shorter the blocks the more confirmation round trips a
-    /// generation waits for, and a ring of 1 s or less starves the GPU while
-    /// a round trip takes longer than the ring holds. Until confirmations
-    /// have slots of their own and the measured host time falls below this,
-    /// the ring is `LEGACY`.
+    /// used. It is compared with `RingTimes::chain`. A block asks for about 40
+    /// confirmation trials whatever its size, so the shorter the blocks the
+    /// more confirmation round trips a generation waits for, and a ring of 1 s
+    /// or less starves the GPU while a round trip takes longer than the ring
+    /// holds. Until confirmations have slots of their own and the measured
+    /// host time falls below this, the ring is `LEGACY`.
     pub const CONFIRM_LIMIT: f64 = 0.2;
-    /// GPU seconds of work in one block.
+    /// GPU seconds of work in one block of a sized ring.
     pub const BLOCK_SECONDS: f64 = 0.05;
-    /// Smallest and largest block.
+    /// The smallest block of a sized ring, in creatures.
     pub const MIN_BLOCK: usize = 32_768;
+    /// The largest block of a sized ring, in creatures.
     pub const MAX_BLOCK: usize = 262_144;
     /// Host times per block the ring holds, so a slow block does not leave
     /// the GPU without work.
     pub const CHAIN_BLOCKS: f64 = 5.0;
-    /// Shortest and longest ring in seconds of GPU work. A world change
-    /// throws away at most the longest.
+    /// The shortest sized ring, in seconds of GPU work.
     pub const MIN_SECONDS: f64 = 0.3;
+    /// The longest sized ring, in seconds of GPU work. A world change throws
+    /// away the blocks in flight, so it costs a sized ring at most this much.
     pub const MAX_SECONDS: f64 = 1.0;
 
-    /// While the p95 host time per block is above `CONFIRM_LIMIT` the ring is
-    /// `LEGACY`. Otherwise block = 50 ms of GPU work between 32k and 256k
-    /// creatures (a multiple of 4,096). Ring = 5 host times per block, or the generation boundary
-    /// plus 2 blocks when that is longer, kept between 0.3 s and 1 s of GPU
-    /// work, and at least 2 blocks so the GPU runs one while the host
-    /// absorbs another.
+    /// The ring for `times`. While the p95 host time per block is above
+    /// `CONFIRM_LIMIT`, or unknown, the ring is `LEGACY`. Otherwise a block is
+    /// 50 ms of GPU work at the rate, between 32k and 256k creatures and a
+    /// multiple of 4,096. The ring holds 5 host times per block, or the
+    /// generation boundary plus 2 blocks when that is longer. It is kept
+    /// between 0.3 s and 1 s of GPU work and at least 2 blocks, so the GPU
+    /// runs one while the host absorbs another. A rate that is not finite and
+    /// positive is replaced by the default rate.
     pub fn size(times: &RingTimes) -> Self {
         if times.chain.is_nan() || times.chain > Self::CONFIRM_LIMIT {
             return Self::LEGACY;
@@ -92,6 +104,7 @@ impl RingShape {
         } else {
             RingTimes::default().rate
         };
+        // A time that is not finite counts as 0, and so does a negative one.
         let finite = |x: f64| if x.is_finite() { x.max(0.0) } else { 0.0 };
         let block = ((rate * Self::BLOCK_SECONDS) as usize)
             .next_multiple_of(4096)
@@ -101,7 +114,8 @@ impl RingShape {
             .max(finite(times.boundary) + 2.0 * block_seconds)
             .clamp(Self::MIN_SECONDS, Self::MAX_SECONDS);
         // Whole blocks that cover the ring's seconds, one fewer when that
-        // would pass the longest ring.
+        // would pass the longest ring. The 1e-9 terms keep rounding error from
+        // adding a block.
         let mut blocks = (seconds / block_seconds - 1e-9).ceil().max(1.0) as usize;
         if blocks as f64 * block_seconds > Self::MAX_SECONDS + 1e-9 {
             blocks -= 1;
@@ -109,12 +123,15 @@ impl RingShape {
         let blocks = blocks.max(2);
         Self { block, blocks }
     }
-    /// Ring slots for a generation of `population` evaluations.
+    /// Ring slots for a generation of `population` evaluations: the
+    /// population, but at least 1 and at most the whole ring.
     pub fn len(&self, population: usize) -> usize {
         population.clamp(1, self.block * self.blocks)
     }
-    /// First slot and length of each block of a ring of `len` slots: the
-    /// ring's blocks, fewer and smaller for a small population.
+    /// Splits a ring of `len` slots into at most `blocks` blocks of one size,
+    /// the last one shorter if the slots do not divide evenly. Returns the
+    /// first slot and the length of each block. A small population gets
+    /// smaller blocks.
     pub(super) fn ranges(&self, len: usize) -> Vec<(usize, usize)> {
         let size = len.div_ceil(self.blocks).max(1);
         (0..len)
@@ -122,13 +139,15 @@ impl RingShape {
             .map(|first| (first, size.min(len - first)))
             .collect()
     }
-    /// Seconds of GPU work the ring holds at `rate` creatures per second.
+    /// Seconds of GPU work the ring holds for a generation of `population`
+    /// evaluations at `rate` creatures per second.
     pub fn seconds(&self, population: usize, rate: f64) -> f64 {
         self.len(population) as f64 / rate.max(1.0)
     }
 }
 
 impl Default for RingShape {
+    /// The ring of a game that has measured nothing yet, which is `LEGACY`.
     fn default() -> Self {
         Self::size(&RingTimes::default())
     }
@@ -172,9 +191,9 @@ mod ring_shape_tests {
         let s = seconds(times(2e6, 0.2, 5.0));
         assert!((0.95..=1.0).contains(&s), "{s}");
         assert_eq!(RingShape::size(&times(40_000.0, 0.2, 5.0)).blocks, 2);
-        // Today's rate with a fast host: 5 blocks of 32k, just under 1 s.
-        let today = RingShape::size(&times(167_000.0, 0.2, 0.3));
-        assert_eq!((today.block, today.blocks), (32_768, 5));
+        // 167k creatures/s with a fast host: 5 blocks of 32k, just under 1 s.
+        let ring = RingShape::size(&times(167_000.0, 0.2, 0.3));
+        assert_eq!((ring.block, ring.blocks), (32_768, 5));
     }
 
     #[test]
