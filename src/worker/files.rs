@@ -1,6 +1,6 @@
-//! Loading and saving. A save loads on its own thread while the window
-//! shows its progress; a save to disk runs once its "Saving" status has
-//! reached the window.
+//! Loading, saving and exporting for the worker's `Loop`. A save loads on its
+//! own thread while the window shows its progress. A save to disk runs at the
+//! end of the pass that asked for it, after the snapshot step.
 
 use super::{EventKind, Loop, log_event, log_history_world_changes};
 use crate::storage::{self, Experiment};
@@ -10,7 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// A save loading on its own thread.
+/// A save loading on its own thread, with the progress the thread reports and
+/// the flag that cancels it (`storage::Progress`).
 pub(super) struct Loading {
     path: std::path::PathBuf,
     progress: Arc<storage::Progress>,
@@ -19,13 +20,16 @@ pub(super) struct Loading {
 }
 
 impl Loop {
-    /// Stops the load in progress, if there is one.
+    /// Asks the load in progress, if there is one, to stop. The loop forgets
+    /// it at once and does not wait for its thread.
     pub(super) fn cancel_load(&mut self) {
         if let Some(old) = self.loading.take() {
             old.progress.cancel.store(true, Ordering::Relaxed);
         }
     }
-    /// `Command::Load`: drops the current game and starts reading the save.
+    /// `Command::Load`: drops the current game and starts reading the save on
+    /// a thread of its own. If the header check turns the save down, the
+    /// current game stays. A load that fails later leaves no game.
     pub(super) fn start_load(&mut self, path: PathBuf) -> anyhow::Result<()> {
         // An incompatible save is turned down from its header,
         // before gigabytes are read.
@@ -67,7 +71,8 @@ impl Loop {
         });
         Ok(())
     }
-    /// Takes a finished load, or shows the progress of one that is not.
+    /// Takes a finished load. While one is still running, shows its progress
+    /// in the status, at most every 250 ms.
     pub(super) fn poll_load(&mut self) {
         let Some(load) = &self.loading else {
             return;
@@ -98,8 +103,9 @@ impl Loop {
             self.changed = true;
         }
     }
-    /// A load thread has ended: the loaded game replaces the current one, or
-    /// the error is shown.
+    /// A load thread has ended. If it succeeded, the loaded game becomes the
+    /// current game. Its best elite is the preview, or the first creature of
+    /// the ring when no elite is kept. If the load failed, the error is shown.
     fn finish_load(&mut self, load: Loading) {
         match load.handle.join() {
             Ok(Ok(mut next)) => {
@@ -158,16 +164,17 @@ impl Loop {
         }
         self.changed = true;
     }
-    /// `Command::Save`: requests a save; it runs once this status reaches
-    /// the window.
+    /// `Command::Save`: sets the "Saving" status and queues the save, which
+    /// `save_pending` runs at the end of this pass. Without a game it does
+    /// nothing.
     pub(super) fn request_save(&mut self, path: PathBuf) {
         if self.exp.is_some() {
-            // Saved after this status reaches the window.
             self.status = format!("Saving {}…", path.display());
             self.pending_save = Some(path);
         }
     }
-    /// `Command::Export`: the history as CSV.
+    /// `Command::Export`: writes the history as CSV. Without a game it does
+    /// nothing.
     pub(super) fn export(&mut self, path: PathBuf) -> anyhow::Result<()> {
         if let Some(e) = &self.exp {
             storage::export_csv(&path, &e.history)?;
@@ -175,7 +182,11 @@ impl Loop {
         }
         Ok(())
     }
-    /// A save runs once its "Saving" status is on screen.
+    /// Runs the save that `request_save` queued, on this thread. It comes
+    /// after `publish_if_due` in the pass. A paused game has published its
+    /// "Saving" status by then. A running game has not, because `evolve`
+    /// replaces the status in the same pass. A save that works adds a `Saved`
+    /// event. One that fails shows its error.
     pub(super) fn save_pending(&mut self) {
         if let Some(path) = self.pending_save.take()
             && let Some(e) = &self.exp

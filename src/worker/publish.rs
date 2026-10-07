@@ -1,5 +1,6 @@
-//! The snapshot the UI draws: built from the game and the loop's state, at
-//! most five times a second while the game runs.
+//! The snapshot the UI draws. The worker builds it from the game and the state
+//! of its `Loop`, and puts it in the slot the window reads, at most five times
+//! a second while the game runs.
 
 use super::{
     Card, CardList, IslandSummary, Loop, MapCell, MigrationSummary, Snapshot, end_to_end_rate,
@@ -17,8 +18,9 @@ use std::{
 };
 
 impl Loop {
-    /// Publishes a snapshot when something changed, at most every 200 ms
-    /// while running.
+    /// Publishes a snapshot when something changed. While the game runs it
+    /// waits 200 ms between snapshots. It records the build time for the
+    /// benchmark and asks the window to repaint.
     pub(super) fn publish_if_due(&mut self) {
         if self.changed
             && (self.last_publish.elapsed() > Duration::from_millis(200) || !self.running)
@@ -33,8 +35,9 @@ impl Loop {
             self.last_publish = Instant::now();
         }
     }
-    /// The game now, with what the UI asked for once (`Command::Cards`,
-    /// `Select`, `Lineage`) and the preview taken from the loop's state.
+    /// The game now. What the UI asked for once (`Command::Cards`, `Select`,
+    /// `Lineage`) and the preview are taken from the loop's state, so they
+    /// appear in this snapshot only.
     fn snapshot(&mut self) -> Snapshot {
         let Some(e) = &self.exp else {
             return self.empty_snapshot();
@@ -69,8 +72,8 @@ impl Loop {
         let live_best = best.map_or(f32::NAN, |elite| elite.fitness.max(0.0));
         let live_median = live_median(e);
         let archive_count = e.archive.entries.len();
-        // The ranked archive, built only when the UI asks: one sort
-        // and one copy of each kept creature (about 1,500 at 3M).
+        // The ranked archive, built only when the UI asks. It takes one sort
+        // and one copy of each elite of the global archive.
         let cards = std::mem::take(&mut self.send_cards).then(|| card_list(e));
         Snapshot {
             epoch: self.epoch,
@@ -163,7 +166,10 @@ impl Loop {
         }
     }
 }
-/// The behavior elites of the global archive, best first, for the map.
+/// The behavior elites of the global archive, best first, for the map. The
+/// `rank` of a row is its place among all the archive's elites by distance, so
+/// the ranks have gaps for the elites of the morphology reserve and for those
+/// without a finite distance.
 fn map_table(e: &Experiment) -> Arc<Vec<MapCell>> {
     let mut order: Vec<usize> = (0..e.archive.entries.len()).collect();
     order.sort_unstable_by(|&a, &b| {
@@ -209,7 +215,8 @@ fn live_median(e: &Experiment) -> f32 {
         kept[rank]
     }
 }
-/// The whole archive ranked by distance, one copy of each kept creature.
+/// The global archive ranked by distance, with a copy of each kept creature.
+/// Ties go in archive order.
 fn card_list(e: &Experiment) -> CardList {
     let archive_count = e.archive.entries.len();
     let mut order: Vec<_> = (0..archive_count).collect();
@@ -246,7 +253,9 @@ fn card_list(e: &Experiment) -> CardList {
         ),
     }
 }
-/// Memory held by the ring and the archive's creatures.
+/// An estimate of the bytes held by the ring and by the global archive's
+/// creatures. The archive part adds up the nodes, bones and muscles of each
+/// elite.
 fn ram_bytes(e: &Experiment) -> usize {
     e.ring_bytes()
         + e.archive
@@ -260,7 +269,9 @@ fn ram_bytes(e: &Experiment) -> usize {
             })
             .sum::<usize>()
 }
-/// Each island archive at a glance, in island order.
+/// Each island archive at a glance, in island order: the main islands, then
+/// the wild ones. A summary also counts the bodies in the island's two
+/// nurseries and adds up what the two graduated this session.
 fn island_summaries(e: &Experiment) -> Vec<IslandSummary> {
     (0..crate::storage::island_count())
         .filter_map(|i| {
@@ -283,7 +294,8 @@ fn island_summaries(e: &Experiment) -> Vec<IslandSummary> {
         })
         .collect()
 }
-/// The main islands' elite with the body farthest from the others.
+/// The main islands' elite with the body farthest from the other bodies of its
+/// own island (the highest body novelty).
 fn strangest(e: &Experiment) -> Option<Creature> {
     e.islands
         .iter()
@@ -292,7 +304,9 @@ fn strangest(e: &Experiment) -> Option<Creature> {
         .max_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, elite)| elite.creature.unpack())
 }
-/// Names, rates, and creature counts of active GPU engines.
+/// A row for each device of the scheduler: its engine's name, its measured
+/// rate in creatures per second and the creatures it has evaluated. A closed
+/// or lost engine shows as "retired GPU".
 fn engine_rows(gpu: &Gpu) -> Vec<(String, f64, u64)> {
     gpu.sched.as_ref().map_or_else(Vec::new, |sched| {
         sched
