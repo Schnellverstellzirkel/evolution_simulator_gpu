@@ -372,13 +372,15 @@ pub fn fisher(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<f64> {
         }
     }
     let n = (a.len() + b.len()).saturating_sub(2).max(1) as f64;
-    let trace: f64 = (0..k).map(|i| s[i][i] / n).sum::<f64>() / k.max(1) as f64;
+    // The ridge on the diagonal is 1e-9 times the mean variance, which is
+    // floored at 1e-12.
+    let mean_variance: f64 = (0..k).map(|i| s[i][i] / n).sum::<f64>() / k.max(1) as f64;
     #[allow(clippy::needless_range_loop)]
     for i in 0..k {
         for j in 0..k {
             s[i][j] /= n;
         }
-        s[i][i] += 1e-9 * trace.max(1e-12);
+        s[i][i] += 1e-9 * mean_variance.max(1e-12);
     }
     let rhs: Vec<f64> = (0..k).map(|i| ma[i] - mb[i]).collect();
     solve(s, rhs)
@@ -434,7 +436,6 @@ pub fn threshold(mut protected: Vec<f64>, tol: f64) -> f64 {
 }
 
 pub fn quantile(values: &mut [f32], q: f64) -> f32 {
-    let values: &mut [f32] = values;
     if values.is_empty() {
         return f32::NAN;
     }
