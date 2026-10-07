@@ -1,14 +1,13 @@
 //! The ring of creatures in flight between the experiment and the engines.
 //!
-//! Every block of the experiment's ring is on its way through the engines
-//! at all times. Engines finish blocks in whatever order the hardware
-//! produces, but blocks are absorbed strictly in ring order: a block waits
-//! until the blocks before it are absorbed, then it is decided against the
-//! archives as they stand (`Experiment::verdict`), gets the confirmation
-//! trials that decision asks for, is absorbed, and is bred again and queued
-//! at the back. Breeding happens only at absorption and every block keeps the
-//! trial settings it was bred with, so one seed gives one search whatever the
-//! timing.
+//! Every block of the experiment's ring is on its way through the engines at
+//! all times, and blocks are absorbed strictly in ring order, whatever order
+//! the engines finish them in. A block asks for its confirmation trials as
+//! soon as its standard results are in. At its turn it is decided against the
+//! archives as they stand (`Experiment::verdict`), absorbed, bred again and
+//! queued at the back. Breeding happens only at absorption and every block
+//! keeps the trial settings it was bred with, so one seed gives one search
+//! whatever the timing.
 
 use crate::{
     config::Config,
@@ -18,7 +17,9 @@ use crate::{
     storage::{self, Experiment, Verdict},
 };
 /// Tag bit of a wild island's unit: it runs in a world of its own, which a
-/// world change leaves alone (`Scheduler::retarget`).
+/// world change leaves alone (`Scheduler::retarget`). The tag of a unit is its
+/// flight's sequence number shifted left by two bits, with bit 0 set for a
+/// confirmation trial and this bit set for a wild island.
 pub const WILD: u64 = 2;
 use anyhow::Result;
 use std::{
@@ -29,14 +30,17 @@ use std::{
 
 /// One block on its way.
 struct Flight {
+    /// Sequence number in launch order. The tags of its units carry it (`WILD`).
     seq: u64,
     /// The experiment's block index.
     block: usize,
+    /// Standard results by position in the block: `None` until they come back.
     standard: Vec<Option<EvaluationMetrics>>,
+    /// How many entries of `standard` are still `None`.
     missing: usize,
     /// Confirmation trials by position in the block: `None` while running.
     confirms: HashMap<usize, Option<EvaluationMetrics>>,
-    /// Its confirmations were asked for before its turn.
+    /// The check for confirmations ahead of its turn has run.
     early: bool,
     /// When its last standard result came back.
     complete: Option<Instant>,
@@ -60,7 +64,10 @@ pub struct Step {
 /// The blocks in flight, in ring order.
 #[derive(Default)]
 pub struct Ring {
+    /// The block to absorb next is at the front. A block that is queued again
+    /// joins at the back.
     flights: VecDeque<Flight>,
+    /// Sequence number of the next flight to launch.
     next_seq: u64,
     /// When the last absorbed block was queued again.
     requeued: Option<Instant>,
@@ -103,6 +110,10 @@ impl Ring {
         self.requeued = None;
     }
 
+    /// Queues block `k` of `e` and puts it at the back of the ring. A block
+    /// with no wild creature goes as one unit. Otherwise each group that has
+    /// creatures goes as a unit of its own: the main islands together and
+    /// every wild island on its own.
     fn launch(&mut self, e: &Experiment, sched: &mut Scheduler, k: usize) {
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -144,6 +155,8 @@ impl Ring {
                     continue;
                 }
                 let mut cfg = environment::wild_world(&block.config, &levels[w]);
+                // A screened block screens each wild island at the bar of its
+                // own world. The island's new bodies are never screened.
                 if let (Some(main), Some(&bar)) = (block.config.screen, block.wild_bars.get(w)) {
                     cfg.screen = Some(crate::physics::Screen {
                         bar,
@@ -172,6 +185,9 @@ impl Ring {
         });
     }
 
+    /// The flight with sequence number `seq`, if it is still in the ring.
+    /// Flights leave at the front and join at the back, so their numbers are
+    /// consecutive.
     fn flight(&mut self, seq: u64) -> Option<&mut Flight> {
         let front = self.flights.front()?.seq;
         self.flights.get_mut(seq.checked_sub(front)? as usize)
@@ -197,7 +213,8 @@ impl Ring {
 
     /// Collects finished work, waiting up to `timeout` for some, then
     /// absorbs up to `absorb` finished blocks in ring order. With `absorb`
-    /// zero it only collects, as while the game is paused.
+    /// zero it only collects, as while the game is paused. Otherwise it does
+    /// not wait when the first block is ready to be decided.
     pub fn step(
         &mut self,
         e: &mut Experiment,
