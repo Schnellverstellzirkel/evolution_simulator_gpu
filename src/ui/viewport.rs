@@ -1,5 +1,8 @@
-//! The replay viewport and which creature it shows: the champion, a creature
-//! the player picked, the camera and zoom, and the playback controls.
+//! The replay viewport. It decides which creature the replay shows, the
+//! champion or one the player picked, and paints the scene and the HUD from
+//! that creature's `Playback`. It also takes the camera and zoom input and
+//! draws the timeline and the playback buttons. The Overview tab shows it, and
+//! the Ways of moving tab docks it beside the archive.
 
 use super::{
     App, Tab,
@@ -23,15 +26,22 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Pixels per meter of the camera when the window opens, when a new replay
+/// starts and after Reset camera. Until the player zooms by hand, `auto_zoom`
+/// replaces it with a zoom that fits the body of the replay.
 pub(super) const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
 /// Share of the viewport height under the ground line, room for the HUD.
 const GROUND_SHARE: f32 = 0.25;
-/// Share of the viewport height a creature fills at the default zoom.
+/// Share of the viewport height a body fills at its fitted zoom (`fit_zoom`).
 const FIT_HEIGHT_SHARE: f32 = 0.42;
 impl App {
+    /// Starts the replay of a creature in its world. Its first pose shows at
+    /// once while a thread records the replay and waits up to 60 seconds for
+    /// the GPU. `receive_replay` takes the recording when it is ready. The
+    /// camera resets and follows the creature.
     pub(super) fn set_preview(&mut self, c: Creature, cfg: Config) {
-        // The replay is recorded off the UI thread: the player shows the
-        // creature's first pose meanwhile, and the recording replaces it.
+        // Recording takes a while, so it runs off the UI thread. The first
+        // pose shows meanwhile, and the recording replaces it.
         self.playback = Some(Playback::preparing(c.clone(), cfg.clone()));
         let (tx, rx) = mpsc::channel();
         let ctx = self.ctx.clone();
@@ -47,8 +57,9 @@ impl App {
         self.zoom_user = false;
         self.camera = [0.; 2];
     }
-    /// Shows a creature the player picked. The theater keeps it until the
-    /// player goes back to the champion.
+    /// Shows a creature the player picked. The replay keeps it until the
+    /// player goes back to the champion. The lineage on screen belonged to the
+    /// creature shown before, so it is cleared.
     pub(super) fn select(&mut self, creature: Creature, config: Config) {
         self.pinned = true;
         self.set_preview(creature, config);
@@ -60,16 +71,18 @@ impl App {
         self.pinned = true;
         self.set_preview(creature, config);
     }
-    /// Shows a champion and follows new ones from now on.
+    /// Shows a champion and follows new ones from now on. It clears the
+    /// lineage of the creature shown before.
     pub(super) fn show_champion(&mut self, creature: Creature, config: Config) {
         self.pinned = false;
         self.champion_shown = true;
         self.set_preview(creature, config);
         self.lineage.clear();
     }
-    /// The best elite in the archive now, and the world it is scored in. The
-    /// worker sends it as soon as a record is absorbed, mid-generation too;
-    /// the newest finished generation's best stands in until then.
+    /// The best elite of the global archive now, and the world it is scored
+    /// in. The worker sends it as soon as a record is absorbed, mid-generation
+    /// too. Until it has sent one, the best creature of the newest history row
+    /// stands in, when that row was measured in the live world.
     pub(super) fn champion(&self) -> Option<(Creature, Config)> {
         let snapshot = self.snapshot.as_ref()?;
         if let Some(live) = &snapshot.champion {
@@ -85,10 +98,10 @@ impl App {
             !s.history.is_empty() && s.champion.is_none() && row_in_world(s).is_none()
         })
     }
-    /// Keeps the theater (on the Overview and docked beside Ways of moving)
-    /// on the champion unless the player pinned a creature. A new champion,
-    /// which a new distance record brings, replaces the one on screen at
-    /// once.
+    /// Keeps the replay on the champion unless the player pinned a creature. A
+    /// new champion, which a new distance record brings, replaces the one on
+    /// screen at once. The frame loop calls it after each snapshot of the
+    /// worker.
     pub(super) fn follow_champion(&mut self) {
         let Some((creature, config)) = self.champion() else {
             // The world changed and no creature is kept in it yet: the old
@@ -104,6 +117,8 @@ impl App {
         if follows_champion(self.pinned, showing, Some(creature.id)) {
             self.show_champion(creature, config);
         } else if !self.pinned && showing == Some(creature.id) {
+            // The creature on screen is the champion already, so the header
+            // calls it the champion.
             self.champion_shown = true;
         }
     }
@@ -114,8 +129,9 @@ impl App {
             self.show_champion(creature, config);
         }
     }
-    /// The replay header's buttons: follow, reset camera, and back to the
-    /// champion. Returns whether the player clicked back.
+    /// The replay header's buttons: Follow, Forces, Reset camera and, while a
+    /// picked creature is pinned, Back to champion. Returns whether the player
+    /// clicked Back to champion.
     fn viewport_buttons(&mut self, ui: &mut egui::Ui) -> bool {
         let theme = self.theme();
         let mut back = false;
@@ -137,8 +153,10 @@ impl App {
         }
         back
     }
-    /// The replay header: the mode label, the creature's name and its buttons
-    /// (on the same line when the view is wide, else on a line of their own).
+    /// The replay header: a label that says whose replay it is (a picked
+    /// creature, the champion or a first-generation creature), the creature's
+    /// name with its distance, and the buttons. The buttons share the line when
+    /// the view is wide and take a line of their own when it is narrow.
     fn viewport_header(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
         let mut back = false;
@@ -210,8 +228,10 @@ impl App {
             self.back_to_champion();
         }
     }
-    /// The replay's input: a click pauses, scrolling zooms, a drag pans, and
-    /// the player's own zoom is kept or replaced by the fitted one.
+    /// The replay's input. A click toggles play and pause, scrolling zooms,
+    /// and a drag pans the camera and turns Follow off. Once the player has
+    /// zoomed by hand the zoom stays. Until then each frame sets it to the fit
+    /// for the body of the replay (`auto_zoom`).
     fn viewport_camera(&mut self, ui: &mut egui::Ui, rect: Rect, response: egui::Response) {
         if response.clicked() {
             self.playing = !self.playing;
@@ -234,10 +254,10 @@ impl App {
         if !self.zoom_user
             && let Some(p) = &self.playback
         {
-            self.zoom = player_zoom(p.height, p.peak, rect.height());
+            self.zoom = auto_zoom(p.height, p.peak, rect.height());
         }
-        // Developer screenshots: EVOLUTION_SMOKE_VIEW_ZOOM=<pixels per meter>
-        // frames a wider stretch of the ground.
+        // Developer screenshots: `EVOLUTION_SMOKE_VIEW_ZOOM=<pixels per meter>`
+        // sets the zoom in every frame, to frame a wider stretch of the ground.
         if let Some(zoom) = std::env::var("EVOLUTION_SMOKE_VIEW_ZOOM")
             .ok()
             .and_then(|z| z.parse::<f32>().ok())
@@ -246,10 +266,14 @@ impl App {
         }
     }
     /// The scene's frame of reference for this frame: the painter, the camera's
-    /// origin and the ground of the world the replay ran in.
+    /// origin, the ground of the world the replay ran in, and the range of
+    /// meters on screen.
     fn scene_frame(&self, ui: &egui::Ui, rect: Rect) -> SceneFrame<'_> {
+        // The scene is made of egui shapes, which egui batches into its wgpu
+        // render pass.
         let painter = ui.painter_at(rect);
-        // All scene primitives are tessellated into egui's batched wgpu render pass.
+        // The world point (`camera[0]`, `camera[1]`) is at the middle of the
+        // view across and `GROUND_SHARE` of its height up from the bottom.
         let origin = Pos2::new(
             rect.center().x - self.camera[0] * self.zoom,
             rect.bottom() - rect.height() * GROUND_SHARE + self.camera[1] * self.zoom,
@@ -266,20 +290,20 @@ impl App {
             .as_ref()
             .map_or(0.0, |p| p.tick as f32 / physics::rate() as f32);
         // The replay's own creature decides the earthquake ground, through
-        // the same id hash the engines use.
+        // the same id hash the kernel uses.
         let quake_hash = self
             .playback
             .as_ref()
-            .map_or(0, |p| crate::physics::quake_hash(p.creature.id));
+            .map_or(0, |p| physics::quake_hash(p.creature.id));
         let slope = if cfg.ground { cfg.slope } else { 0.0 };
         let gaps = if cfg.ground { cfg.gaps } else { 0.0 };
         let hurdles = if cfg.ground { cfg.hurdles } else { 0.0 };
         let quake = if cfg.ground { cfg.quake } else { 0.0 };
         let mud = if cfg.ground { cfg.mud } else { 0.0 };
-        let amplitude = crate::physics::terrain_amplitude(cfg.terrain)
-            + quake * crate::physics::quake_scale(quake_hash);
+        let amplitude =
+            physics::terrain_amplitude(cfg.terrain) + quake * physics::quake_scale(quake_hash);
         let phase = if quake > 0.0 {
-            crate::physics::quake_phase(quake_hash)
+            physics::quake_phase(quake_hash)
         } else {
             0.0
         };
@@ -306,8 +330,9 @@ impl App {
             right,
         }
     }
-    /// Paints the replay's scene under the HUD: sky, ground, water, the
-    /// creature and the weather over it.
+    /// Paints the replay's scene under the HUD, from back to front: the sky
+    /// and the grid, the ground, the water, the ruler, the creature, the
+    /// weather over it and a film look.
     fn paint_scene(&self, ctx: &egui::Context, f: &SceneFrame) {
         let painter = &f.painter;
         let rect = f.rect;
@@ -323,7 +348,8 @@ impl App {
         crate::theme::vignette(painter, rect, 0.55);
         crate::theme::grain(painter, rect, clock, 0.055);
     }
-    /// The backdrop, the sky and the one-meter grid lines.
+    /// The backdrop with its skyline, the effects in the sky over it, and a
+    /// faint vertical line at every meter.
     fn paint_sky_and_grid(&self, f: &SceneFrame) {
         let painter = &f.painter;
         let rect = f.rect;
@@ -382,10 +408,10 @@ impl App {
         let world = |x: f32, y: f32| f.world(x, y);
         let height_at = |x: f32, with_hurdles: bool| f.height_at(x, with_hurdles);
         if cfg.ground {
-            // Sample the ground every few pixels (flat ground needs only its
-            // ends) and fill down to the frame with the world's street.
-            // Pits carve notches into the polyline; mud draws its sunk layer
-            // `mud` meters below the surface line.
+            // Sample the ground every 4 pixels (flat ground needs only its two
+            // ends) and let `ground_body` fill it down to the bottom of the
+            // view. Pits show as notches in the polyline. Mud draws its sunk
+            // layer `mud` meters below the surface line.
             let flat = amplitude == 0.0 && slope == 0.0 && gaps == 0.0 && hurdles == 0.0;
             let step = if flat {
                 (end - start).max(0.01)
@@ -407,6 +433,8 @@ impl App {
             }
             crate::world_fx::ground_body(painter, rect, cfg, &line, &meters, self.zoom);
             if mud > 0.0 {
+                // The mud: a band under the surface, an edge along its lower
+                // side and a sheen along the surface.
                 let fill = crate::theme::scene::MUD;
                 for i in 0..line.len().saturating_sub(1) {
                     painter.add(egui::Shape::convex_polygon(
@@ -425,6 +453,7 @@ impl App {
                     Stroke::new(1.5, crate::theme::scene::MUD_SHEEN),
                 ));
             }
+            // The ground's edge, with a dark shade line just under it.
             let shade: Vec<Pos2> = line.iter().map(|p| *p + Vec2::new(0., 2.)).collect();
             painter.add(egui::Shape::line(
                 shade,
@@ -433,6 +462,9 @@ impl App {
             painter.add(egui::Shape::line(line, Stroke::new(1.5, GROUND_EDGE)));
             crate::world_fx::structures(painter, rect, cfg, &world, &height_at, (start, end));
             let surface = |sx: f32| world(0., height_at((sx - origin.x) / self.zoom, true)).y;
+            // A node whose underside is less than 6 cm plus the mud depth above
+            // the ground is a foot. Its speed is how far it moved since the
+            // previous frame, in pixels per second.
             let feet: Vec<crate::world_fx::Foot> = self
                 .playback
                 .as_ref()
@@ -470,7 +502,9 @@ impl App {
             );
         }
     }
-    /// The water level of a flooded world.
+    /// The water of a flooded world, up to the line `cfg.water` meters above
+    /// the flat ground. `world_fx::water` paints nothing when the water effect
+    /// is calm.
     fn paint_water(&self, f: &SceneFrame) {
         let painter = &f.painter;
         let rect = f.rect;
@@ -488,14 +522,15 @@ impl App {
             self.zoom,
         );
     }
-    /// A tick every meter along the ground, with a label now and then.
+    /// A tick at every meter on the line at height 0, with a label every few
+    /// meters.
     fn paint_ruler(&self, f: &SceneFrame) {
         let painter = &f.painter;
         let left = f.left;
         let right = f.right;
         let world = |x: f32, y: f32| f.world(x, y);
-        // A tick every meter, a label every 1, 2, 5 or 10 m so labels
-        // never run into each other.
+        // A tick at every meter. A label at every 1, 2, 5, 10, 20 or 50 m,
+        // the smallest of these that keeps labels 48 pixels apart.
         let every = [1, 2, 5, 10, 20]
             .into_iter()
             .find(|&n| n as f32 * self.zoom >= 48.)
@@ -514,7 +549,8 @@ impl App {
             }
         }
     }
-    /// The creature of the replay with its trail and contact shadows.
+    /// The creature of the replay with its center-of-mass trail and its
+    /// contact shadows. `ctx` holds the texture of the shadows.
     fn paint_replay_creature(&self, ctx: &egui::Context, f: &SceneFrame) {
         let painter = &f.painter;
         let origin = f.origin;
@@ -574,8 +610,11 @@ impl App {
             draw_creature(painter, &p.nodes, &p.creature, origin, self.zoom, &marks);
         }
     }
-    /// The HUD over the scene: counters, the world, the generation and the
-    /// note in the middle.
+    /// The HUD over the scene. It has the distance and speed counters of the
+    /// creature, a line that says how the trial ended once the replay reaches
+    /// that moment, the world, the generation counter with its rate, a note in
+    /// the middle while there is no replay to watch, and a frame around the
+    /// scene.
     fn paint_hud(&self, f: &SceneFrame) {
         let theme = self.theme();
         let painter = &f.painter;
@@ -589,7 +628,7 @@ impl App {
         let size = (rect.height() * 0.085).clamp(20., 32.);
         if let Some(p) = &self.playback {
             let fallen = p.fallen();
-            let distance = fallen.map_or_else(|| physics::fitness(&p.nodes), |(_, d)| d);
+            let distance = p.current_distance();
             let left = counter(
                 painter,
                 rect.left_bottom() + Vec2::new(inset, -inset),
@@ -616,6 +655,7 @@ impl App {
                 },
                 size,
             );
+            // The trial ended early and the replay has reached that moment.
             if let Some((tick, _)) = fallen {
                 hud_block(
                     painter,
@@ -630,6 +670,7 @@ impl App {
                     )],
                 );
             }
+            // A replay from before a world change says so.
             let live = self.snapshot.as_ref().map(|s| &s.config);
             let earlier = live.is_some_and(|live| live.physics_differs(&p.config));
             hud_block(
@@ -671,6 +712,7 @@ impl App {
                 size,
             );
         }
+        // The note in the middle says why there is no replay to watch.
         let center_note = if self.playback.is_none() && self.awaiting_new_world() {
             Some("Testing in the new world...")
         } else if self.playback.is_none() {
@@ -684,6 +726,8 @@ impl App {
         };
         if let Some(note) = center_note {
             let mut lines = vec![HudLine::text(note.to_owned(), 20., HUD)];
+            // Before the first replay, an engine may wait for a kernel, and
+            // two more lines say that the GPU is compiling.
             if self.playback.is_none() && crate::cuda_engine::compiling_world() {
                 lines.push(HudLine::text(
                     "The GPU is compiling its kernels for this world.".to_owned(),
@@ -699,6 +743,7 @@ impl App {
             }
             hud_block(painter, rect.center(), Align2::CENTER_CENTER, &lines);
         }
+        // The frame around the scene.
         painter.rect_stroke(
             rect,
             0,
@@ -706,8 +751,9 @@ impl App {
             egui::StrokeKind::Inside,
         );
     }
-    /// The time slider and the clock under the scene. Returns whether the
-    /// player moved the slider.
+    /// The time slider and the clock under the scene. A mark on the slider
+    /// shows the frame where the trial ended early. Returns whether the player
+    /// moved the slider.
     fn viewport_timeline(&mut self, ui: &mut egui::Ui) -> bool {
         let mut sought = false;
         if let Some(p) = &mut self.playback {
@@ -725,9 +771,8 @@ impl App {
                             .show_value(false)
                             .text(""),
                     );
-                    if let Some((fall_frame, _)) = p.fall
-                        && trial_frames > 0
-                    {
+                    // Mark the frame where the trial ended early.
+                    if let Some((fall_frame, _)) = p.fall {
                         let fraction = fall_frame.saturating_sub(trial_start).min(trial_frames)
                             as f32
                             / trial_frames as f32;
@@ -756,8 +801,9 @@ impl App {
         }
         sought
     }
-    /// The button row under the timeline. Returns the creature and world the
-    /// player asked to race.
+    /// The button row under the timeline: Play or Pause, Replay, Family tree,
+    /// Race it, the two exports and the speed menu. Returns the creature and
+    /// world the player asked to race.
     fn viewport_controls(&mut self, ui: &mut egui::Ui) -> Option<(Creature, Config)> {
         let mut race_it = None;
         ui.horizontal_wrapped(|ui| {
@@ -810,7 +856,8 @@ impl App {
             {
                 self.file("Export creature JSON");
             }
-            // A menu does not wrap by itself, so start a new line when it will not fit.
+            // The speed menu does not wrap by itself, so start a new line when
+            // it will not fit.
             if ui.available_width() < 175. {
                 ui.end_row();
             }
@@ -818,7 +865,9 @@ impl App {
         });
         race_it
     }
-    /// Puts a creature in the race and opens the Race tab.
+    /// Adds a creature to the race picks and opens the Race tab with a fresh
+    /// race. A creature that is picked already moves to the newest place, and
+    /// the oldest pick leaves when there are more than `RACE_PICKS`.
     fn race_viewport_creature(&mut self, creature: Creature, config: Config) {
         self.race_picks.retain(|(pick, _)| pick.id != creature.id);
         self.race_picks.push((creature, config));
@@ -826,10 +875,14 @@ impl App {
             self.race_picks.remove(0);
         }
         self.tab = Tab::Race;
+        // The race restarts below. With `prev_tab` set, the frame loop does not
+        // restart it again as an opened tab (`opened_tab`).
         self.prev_tab = Tab::Race;
         self.restart_race();
     }
-    /// The main replay viewport: scene with camera controls, timeline and playback buttons.
+    /// The replay viewport: the header, the scene with its HUD, the timeline
+    /// and the playback buttons. `height` is the height of the scene in
+    /// points, and the scene is never shorter than 120.
     pub(super) fn viewport(&mut self, ui: &mut egui::Ui, height: f32) {
         self.viewport_header(ui);
         let (rect, response) = ui.allocate_exact_size(
@@ -842,6 +895,7 @@ impl App {
         self.paint_hud(&frame);
         let sought = self.viewport_timeline(ui);
         let race_it = self.viewport_controls(ui);
+        // Moving the slider pauses the replay.
         if sought {
             self.playing = false;
         }
@@ -849,8 +903,9 @@ impl App {
             self.race_viewport_creature(creature, config);
         }
     }
-    /// Replays the best creature recorded for one history entry, through the
-    /// same preview path as an archive card click.
+    /// Replays the best creature of row `index` of the history, in the world
+    /// of that row. It shows it as a picked creature and opens the Overview
+    /// tab. It does nothing when there is no such row.
     pub(super) fn replay_history_holder(&mut self, index: usize) {
         let Some((creature, config)) = self.snapshot.as_ref().and_then(|snapshot| {
             let stats = snapshot.history.get(index)?;
@@ -861,7 +916,8 @@ impl App {
         self.select(creature, config);
         self.tab = Tab::Overview;
     }
-    /// Replays the champion now, like a record's Replay button.
+    /// Replays the champion now as a picked creature and opens the Overview
+    /// tab. The Replay button of the running generation's record calls it.
     pub(super) fn replay_champion(&mut self) {
         if let Some((creature, config)) = self.champion() {
             self.select(creature, config);
@@ -872,21 +928,39 @@ impl App {
 /// What the scene's painting methods share in one frame: the painter, the
 /// camera and the world's ground.
 struct SceneFrame<'a> {
+    /// Paints inside `rect`.
     painter: egui::Painter,
+    /// The area of the scene on screen.
     rect: Rect,
+    /// The screen position of the world point (0, 0).
     origin: Pos2,
+    /// Pixels per meter.
     zoom: f32,
+    /// The world to paint: the replay's own, or the settings' world when
+    /// there is no replay.
     cfg: &'a Config,
+    /// The replay clock in seconds, 0 without a replay.
     clock: f32,
+    /// Bump height of the ground (m): the roughness level plus the earthquake
+    /// bumps of the replay's creature.
     amplitude: f32,
+    /// Rise over run of the ground, 0 in a world without ground.
     slope: f32,
+    /// Opening of the pits (m), 0 in a world without ground.
     gaps: f32,
+    /// Height of the hurdles (m), 0 in a world without ground.
     hurdles: f32,
+    /// Depth of the mud (m), 0 in a world without ground.
     mud: f32,
+    /// Phase of the bumps in wave turns, 0 without an earthquake.
     phase: f32,
+    /// The world x (m) at the left edge of the scene.
     start: f32,
+    /// The world x (m) at the right edge of the scene.
     end: f32,
+    /// `start` rounded down to a whole meter.
     left: i32,
+    /// `end` rounded up to a whole meter.
     right: i32,
 }
 impl SceneFrame<'_> {
@@ -894,9 +968,10 @@ impl SceneFrame<'_> {
     fn world(&self, x: f32, y: f32) -> Pos2 {
         Pos2::new(self.origin.x + x * self.zoom, self.origin.y - y * self.zoom)
     }
-    /// The ground's height at x, with or without its hurdles.
+    /// The ground's height (m) at the world x (m), with or without its
+    /// hurdles.
     fn height_at(&self, x: f32, with_hurdles: bool) -> f32 {
-        crate::physics::ground(
+        physics::ground(
             x,
             self.amplitude,
             self.slope,
@@ -907,25 +982,28 @@ impl SceneFrame<'_> {
         .0
     }
 }
-/// Pixels per meter of the default zoom: the creature's height fills
-/// `FIT_HEIGHT_SHARE` of the viewport, clamped for tiny and huge bodies.
+/// Pixels per meter at which a body `body_height` meters tall fills
+/// `FIT_HEIGHT_SHARE` of a view `view_height` points high. The result stays
+/// between 40 and 450, for tiny and huge bodies. The Race tab uses it too.
 pub(super) fn fit_zoom(body_height: f32, view_height: f32) -> f32 {
     (FIT_HEIGHT_SHARE * view_height / body_height.max(0.05)).clamp(40.0, 450.0)
 }
-/// The player's default zoom: the typical height fills its share of the
-/// viewport, and the highest point of the recording stays in view (the ground
-/// sits a quarter up from the bottom) unless that would shrink the body to less than
-/// 60% of the typical fit. A creature that leaps far higher than it stands
-/// keeps that 60% and clips its peak instead of becoming tiny.
-fn player_zoom(height: f32, peak: f32, view_height: f32) -> f32 {
+/// The zoom of a replay until the player zooms by hand. The typical `height`
+/// of the body fills its share of the view (`fit_zoom`), and the `peak` of the
+/// recording stays in view above the ground, which sits a quarter up from the
+/// bottom, unless that would shrink the body to less than 60% of the typical
+/// fit. A creature that leaps far higher than it stands keeps that 60% and
+/// clips its peak instead of becoming tiny.
+fn auto_zoom(height: f32, peak: f32, view_height: f32) -> f32 {
     let typical = fit_zoom(height, view_height);
     let whole = 0.69 * view_height / peak.max(0.05);
     whole.min(typical).max(typical * 0.6).clamp(20.0, 450.0)
 }
-/// Whether the theater switches to the champion: only when the player has
-/// not pinned a creature, a champion exists, and a different creature is on
-/// screen. A new distance record makes a new champion, so the switch happens
-/// as soon as the record lands.
+/// Whether the replay switches to the champion. It does when the player has
+/// not pinned a creature, a champion exists and a different creature is on
+/// screen. `showing` and `champion` are the ids of the creature on screen and
+/// of the champion. A new distance record makes a new champion, so the switch
+/// happens as soon as the record lands.
 fn follows_champion(pinned: bool, showing: Option<u64>, champion: Option<u64>) -> bool {
     !pinned && champion.is_some() && showing != champion
 }
@@ -936,15 +1014,15 @@ mod tests {
     fn a_leaper_keeps_its_peak_in_view_without_shrinking_the_body_too_far() {
         let typical = fit_zoom(0.5, 260.0);
         // A mild jump fits whole.
-        assert!(player_zoom(0.5, 1.0, 260.0) < typical);
-        assert!(player_zoom(0.5, 1.0, 260.0) * 1.0 <= 0.72 * 260.0 + 0.01);
+        assert!(auto_zoom(0.5, 1.0, 260.0) < typical);
+        assert!(auto_zoom(0.5, 1.0, 260.0) * 1.0 <= 0.72 * 260.0 + 0.01);
         // A huge leap stops at 60% of the typical zoom.
-        assert!((player_zoom(0.5, 30.0, 260.0) - typical * 0.6).abs() < 0.01);
+        assert!((auto_zoom(0.5, 30.0, 260.0) - typical * 0.6).abs() < 0.01);
         // A body that never leaves the ground keeps the typical fit.
-        assert_eq!(player_zoom(0.5, 0.5, 260.0), typical);
+        assert_eq!(auto_zoom(0.5, 0.5, 260.0), typical);
     }
     #[test]
-    fn default_zoom_follows_body_height() {
+    fn fitted_zoom_follows_body_height() {
         let small = fit_zoom(0.3, 260.0);
         let tall = fit_zoom(1.5, 260.0);
         assert!(small > tall);
