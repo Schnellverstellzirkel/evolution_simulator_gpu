@@ -35,8 +35,8 @@ const GIF_MAX_FRAMES: usize = 360;
 /// this zoom and does not fill the frame.
 const GIF_MAX_SCALE: f32 = 200.0;
 /// The camera of an exported GIF. Its zoom and bottom edge are fitted once to
-/// all the frames and stay fixed. Sideways it follows the creature, which stays
-/// at `anchor_x`.
+/// the frames the GIF shows and stay fixed. Sideways it follows the creature,
+/// which stays at `anchor_x`.
 struct GifCamera {
     /// World y at the bottom edge.
     y0: f32,
