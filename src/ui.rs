@@ -346,20 +346,25 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, worker: Worker) -> Self {
         let ctx = &cc.egui_ctx;
-        // Screenshot runs of the loading screen (no GPU needed).
-        // `toast` shows the corner note instead of the card.
+        // `EVOLUTION_SMOKE_LOADING` makes a screenshot run of the loading
+        // screen with made-up jobs, and it needs no GPU. The value `toast`
+        // shows the corner note instead of the card.
         let demo = std::env::var("EVOLUTION_SMOKE_LOADING").ok();
         let loading_demo = demo.is_some();
         if loading_demo {
             crate::loading::demo();
         }
         let mut initial_config = Config::default();
+        // `EVOLUTION_SMOKE_POPULATION=<n>` starts a run of n creatures with a
+        // fixed seed.
         if let Ok(n) = std::env::var("EVOLUTION_SMOKE_POPULATION")
             && let Ok(n) = n.parse()
         {
             initial_config.population = n;
             initial_config.random_seed = false;
-            // Keep the normal periodic autosave in benchmarks unless explicitly disabled.
+            // `EVOLUTION_BENCH_NO_AUTOSAVE` keeps autosave off in a benchmark.
+            // The default settings have it off already, and the worker checks
+            // the variable too.
             if std::env::var_os("EVOLUTION_BENCH_NO_AUTOSAVE").is_some() {
                 initial_config.checkpoint_interval = 0;
             }
@@ -376,8 +381,8 @@ impl App {
         if std::env::var_os("EVOLUTION_BENCH_RESPONSIVE").is_some() {
             initial_config.throughput = false;
         }
-        // Screenshot runs: EVOLUTION_SMOKE_WORLD="Wind=2,Mud=3" starts the
-        // game with those effect levels. EVOLUTION_AUTOSTART takes the same
+        // Screenshot runs: `EVOLUTION_SMOKE_WORLD="Wind=2,Mud=3"` starts the
+        // game with those effect levels. `EVOLUTION_AUTOSTART` takes the same
         // list, turns autosave on and starts evolving continuously, for an
         // unattended run.
         let autostart = std::env::var("EVOLUTION_AUTOSTART").ok();
@@ -404,12 +409,12 @@ impl App {
         }
         let smoke_start_pending =
             std::env::var_os("EVOLUTION_SMOKE_POPULATION").is_some() || autostart.is_some();
-        // The game's fonts and style; its art decodes in the background.
-        // Developer screenshots: EVOLUTION_SMOKE_ZOOM=0.75 lays a 1440 px
-        // window out like a 1920 px one.
+        // The game's fonts and style. Its art decodes in the background.
         crate::assets::install_fonts(ctx);
         crate::assets::preload(ctx);
         apply_style(ctx);
+        // Developer screenshots: `EVOLUTION_SMOKE_ZOOM=0.75` lays a 1440 px
+        // window out like a 1920 px one. It takes 0.5 to 2.
         let smoke_zoom = std::env::var("EVOLUTION_SMOKE_ZOOM")
             .ok()
             .and_then(|zoom| zoom.parse::<f32>().ok())
@@ -417,7 +422,11 @@ impl App {
         if let Some(zoom) = smoke_zoom {
             ctx.set_zoom_factor(zoom);
         }
+        // `EVOLUTION_SMOKE_TAB` opens `history`, `population`, `race` or
+        // `lineage`. `map` and `islands` open Ways of moving in that view.
         let smoke_tab = std::env::var("EVOLUTION_SMOKE_TAB").unwrap_or_default();
+        // A screenshot run opens the save that `EVOLUTION_SMOKE_CHECKPOINT`
+        // names, or else starts a new game.
         if let Some(path) = std::env::var_os("EVOLUTION_SMOKE_CHECKPOINT") {
             worker.send(Command::Load(PathBuf::from(path)));
         } else {
@@ -523,9 +532,10 @@ impl App {
     fn theme(&self) -> Theme {
         Theme::get()
     }
-    /// The loading card while the devices open or the starting worlds'
-    /// kernels compile (the player may close it), while the first generation
-    /// waits for the kernels of its world, and a corner note for compiles
+    /// Draws the loading card while the devices open or fail to open, while
+    /// the starting worlds' kernels compile and while the first generation
+    /// waits for the kernels of its world. The player can close the card of a
+    /// kernel wait. Without a card, a corner note shows the compiles that
     /// nobody waits for.
     fn loading_screen(&mut self, ctx: &egui::Context) {
         let theme = self.theme();
@@ -571,10 +581,14 @@ impl App {
         self.snapshot.as_ref().is_some_and(|s| s.running)
             && !self.worker.pause.load(Ordering::Relaxed)
     }
+    /// Clears the pause and sends `Command::Run`. A run that is `continuous`
+    /// goes on generation after generation. A run that is not, or that is
+    /// `guided`, stops after one generation.
     fn run(&mut self, continuous: bool, guided: bool) {
         self.worker.pause.store(false, Ordering::Relaxed);
         self.worker.send(Command::Run { continuous, guided });
     }
+    /// Sets the pause, so the worker stops at once, and sends `Command::Pause`.
     fn pause(&self) {
         self.worker.pause.store(true, Ordering::Relaxed);
         self.worker.send(Command::Pause);
@@ -590,7 +604,7 @@ impl App {
     }
 }
 impl App {
-    /// Once a frame, the checks that need no input: the disk usage of runs/,
+    /// Once a frame, the checks that need no input: the disk usage of `runs/`,
     /// the delayed start of a screenshot run and its preset.
     fn frame_housekeeping(&mut self, now: Instant) {
         if self.runs_checked.elapsed() >= RUNS_REFRESH {
@@ -604,7 +618,7 @@ impl App {
             });
             self.smoke_start_pending = false;
         }
-        // Screenshot runs: EVOLUTION_SMOKE_PRESET=<number> applies that
+        // Screenshot runs: `EVOLUTION_SMOKE_PRESET=<number>` applies that
         // preset after 4 s, so the chart and feed have a world change.
         if let Some(index) = self.smoke_preset
             && self.started.elapsed() >= Duration::from_secs(4)
@@ -616,8 +630,10 @@ impl App {
             }
         }
     }
-    /// Counts the frame, and while a benchmark measures, probes the worker
-    /// and asks for replays.
+    /// Keeps the last 240 frame times for the diagnostics. While a native
+    /// benchmark measures, it also records the frame, asks for the champion's
+    /// replay when `EVOLUTION_BENCH_REPLAY` is set, and probes the worker every
+    /// 100 ms to time how long a control waits.
     fn record_frame(&mut self, dt: f32, now: Instant) {
         self.frame_times.push_back(dt);
         if self.frame_times.len() > 240 {
@@ -630,8 +646,8 @@ impl App {
             self.bench_frames.push(dt);
             self.bench_frame_starts
                 .push(now - Duration::from_secs_f32(dt));
-            // EVOLUTION_BENCH_REPLAY: ask for the champion's replay every 6 s
-            // and time how long it takes to appear.
+            // `EVOLUTION_BENCH_REPLAY`: ask for the champion's replay every
+            // 6 s and time how long it takes to appear.
             if std::env::var_os("EVOLUTION_BENCH_REPLAY").is_some()
                 && self.bench_last_replay.elapsed() >= Duration::from_secs(6)
                 && self.replay_wait.is_none()
@@ -644,7 +660,8 @@ impl App {
                 self.bench_last_ping = now;
                 self.bench_pings += 1;
                 // Every tenth probe re-applies the settings, like an
-                // environment button, when EVOLUTION_BENCH_SETTINGS_PROBE is set.
+                // environment button, when `EVOLUTION_BENCH_SETTINGS_PROBE`
+                // is set.
                 if self.bench_pings.is_multiple_of(10)
                     && std::env::var_os("EVOLUTION_BENCH_SETTINGS_PROBE").is_some()
                 {
@@ -655,7 +672,8 @@ impl App {
             }
         }
     }
-    /// Takes the replay the worker recorded, when it is ready.
+    /// Takes the replay that the replay thread recorded (`set_preview`) once
+    /// it is ready, and keeps how long it took for the benchmark report.
     fn receive_replay(&mut self) {
         if let Some((rx, asked)) = &self.replay_wait
             && let Ok(ready) = rx.try_recv()
@@ -665,8 +683,9 @@ impl App {
             self.replay_wait = None;
         }
     }
-    /// Takes the worker's newest snapshot: its world, preview, cards, selection
-    /// and lineage.
+    /// Takes the worker's newest snapshot, if it published one since the last
+    /// frame, and acts on what it carries: the world, the creature to preview,
+    /// the event log, the ranked archive, a selected creature and a lineage.
     fn absorb_snapshot(&mut self) {
         let next = self.worker.view.lock().unwrap().take();
         if let Some(mut next) = next {
@@ -680,10 +699,10 @@ impl App {
                 self.config = next.config.clone();
                 self.initial = false;
             } else if self.config_sent.is_none_or(|sent| {
-                // A click is acknowledged once the worker's world shows it.
-                // A snapshot published before the worker read the click must
-                // not put the panel back (autochange would flip to Off), so wait
-                // for the match, and give up after a while.
+                // A click holds the panel for 2 s once the worker's world shows
+                // it, and for 15 s while it does not. A snapshot published
+                // before the worker read the click must not put the panel back
+                // (autochange would flip to Off).
                 let acknowledged = worlds_match(
                     &next.pending.clone().unwrap_or_else(|| next.config.clone()),
                     &self.config,
@@ -694,16 +713,16 @@ impl App {
                 .as_ref()
                 .is_none_or(|old| old.epoch == next.epoch)
             {
-                // The worker owns the world: autochange advance it, and a change
-                // waits in `pending` until the next generation. The panel
-                // shows the world the player asked for.
+                // The worker owns the world: autochange advances it, and a
+                // change waits in `pending` until the next generation. The
+                // panel shows the world the player asked for.
                 self.config = next.pending.clone().unwrap_or_else(|| next.config.clone());
             }
             if let Some((c, cfg)) = next.preview.take() {
                 // The worker picks the creature of a new game (a random one)
-                // and of a loaded game (its best elite).
-                // Neither is known to be the champion: the history's best
-                // takes over at once below when it differs.
+                // and of a loaded game (its best elite). Neither is known to
+                // be the champion, so `follow_champion` below puts the
+                // champion on screen at once when it is another creature.
                 self.show_champion(c, cfg);
                 self.champion_shown = false;
             }
@@ -716,8 +735,8 @@ impl App {
                 self.cards = Some(list);
             }
             if let Some((c, cfg)) = next.selected.take() {
-                // A creature the player clicked on the archive map; it plays
-                // in the player docked beside the map.
+                // A creature the player clicked on the archive map. It plays
+                // in the replay docked beside the map.
                 self.select(c, cfg);
             }
             if let Some((id, lineage)) = next.lineage.take() {
@@ -755,7 +774,10 @@ impl App {
             self.worker.send(Command::Lineage(id));
         }
     }
-    /// The keyboard shortcuts, unless a text field has the keyboard.
+    /// Reads the keyboard shortcuts unless a text field has the keyboard. The
+    /// keys 1 to 5 pick a tab, F1 or ? toggles Help, Space evolves or pauses,
+    /// K plays or pauses the replay, the arrow keys step it by one frame, and
+    /// Ctrl+S opens the Save dialog.
     fn handle_keys(&mut self, ctx: &egui::Context) {
         if !ctx.egui_wants_keyboard_input() {
             let pressed = |key| ctx.input(|i| i.key_pressed(key));
@@ -803,21 +825,28 @@ impl App {
             }
         }
     }
-    /// Advances the replays by the frame's time, and the camera with them.
+    /// Advances the replay by the time of the frame `dt` at the chosen speed,
+    /// and the race lanes too on the Race tab. Then the camera follows the
+    /// creature.
     fn advance_replays(&mut self, dt: f32) {
         if self.playing {
-            let frame_dt = physics::dt();
-            if frame_dt.is_finite() && frame_dt > 0.0 {
+            // The replay time of one recorded frame, which is one physics step.
+            let step_dt = physics::dt();
+            if step_dt.is_finite() && step_dt > 0.0 {
                 let speed = self.speed;
+                // Steps a replay by one recorded frame for each `step_dt` of
+                // replay time it has gathered, and starts it over after its
+                // last frame. A frame counts as 0.1 s at most, and the
+                // stepping stops after 5 ms of work.
                 let advance = |p: &mut Playback| {
                     p.accumulator = (p.accumulator + dt.clamp(0.0, 0.1) * speed).min(1.0);
                     let start = Instant::now();
-                    while p.accumulator >= frame_dt && start.elapsed() < Duration::from_millis(5) {
+                    while p.accumulator >= step_dt && start.elapsed() < Duration::from_millis(5) {
                         if p.tick >= p.last_frame() {
                             p.reset();
                         }
                         p.advance();
-                        p.accumulator -= frame_dt;
+                        p.accumulator -= step_dt;
                     }
                 };
                 if let Some(p) = &mut self.playback {
@@ -840,7 +869,7 @@ impl App {
             self.camera[0] = p.camera_x();
         }
     }
-    /// The top bar over a mustard stripe.
+    /// The top bar: dark wood with a mustard stripe along its lower edge.
     fn top_panel(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("top")
             .exact_size(68.)
@@ -850,7 +879,8 @@ impl App {
                     .inner_margin(egui::Margin::symmetric(GAP_L as i8, 15)),
             )
             .show(ui, |ui| {
-                // A mustard stripe under the bar, like the poster's border.
+                // A mustard stripe along the lower edge of the bar, like the
+                // poster's border.
                 let bar = ui.max_rect().expand2(Vec2::new(GAP_L, 15.));
                 ui.painter().rect_filled(
                     Rect::from_min_max(
@@ -863,7 +893,10 @@ impl App {
                 self.top(ui)
             });
     }
-    /// The status line at the bottom with the diagnostics toggle.
+    /// The status line at the bottom. It shows the UI's message, else the
+    /// kernel compile note, else the worker's status. Then come the error, the
+    /// evaluation rate and the Diagnostics button, and the drawer opens under
+    /// the line.
     fn status_panel(&mut self, ui: &mut egui::Ui, theme: Theme) {
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -880,8 +913,8 @@ impl App {
                 if let Some(s) = &self.snapshot {
                     color_dot(ui, theme.accent);
                     // A world whose kernels nobody compiled yet makes the GPU
-                    // wait for them. Waits under a third of a second are
-                    // loads of kernels that are ready, not worth a message.
+                    // wait for them. Waits under 0.3 s are loads of kernels
+                    // that are ready, not worth a message.
                     if crate::cuda_engine::compiling_world() {
                         self.compiling_since.get_or_insert_with(Instant::now);
                         ui.ctx().request_repaint_after(Duration::from_millis(250));
@@ -988,8 +1021,8 @@ impl App {
     fn overview_tab(&mut self, ui: &mut egui::Ui) {
         self.metrics(ui);
         ui.add_space(GAP_M);
-        // The chart keeps a fixed height below the replay and
-        // its controls; the replay takes the rest.
+        // The chart row keeps a fixed height below the replay and its
+        // controls, and the replay takes the rest, at least 180 points.
         const CHART: f32 = 175.;
         const REPLAY_CONTROLS: f32 = 120.;
         self.viewport(
@@ -1010,10 +1043,9 @@ impl App {
             });
         });
     }
-    /// Ways of moving: the archive on the left, the replay docked on the right.
+    /// Ways of moving: the archive on the left and the replay docked on the
+    /// right, so browsing never leaves the tab.
     fn population_tab(&mut self, ui: &mut egui::Ui) {
-        // The archive on the left, the replay docked on the
-        // right, so browsing never leaves the tab.
         let height = ui.available_height();
         let width = ui.available_width();
         ui.horizontal_top(|ui| {
@@ -1027,8 +1059,10 @@ impl App {
             });
         });
     }
-    /// Starts the screenshots the run asked for: every few generations, the
-    /// button, the seek and the capture hook.
+    /// Asks the window for the screenshots a run wants: the periodic ones of
+    /// an unattended run, the one the File menu asked for, and the one of the
+    /// capture hook of a screenshot run, which first holds the replay at
+    /// `EVOLUTION_SMOKE_SEEK` seconds.
     fn request_screenshots(&mut self, ctx: &egui::Context) {
         // Unattended runs: a screenshot every `capture_every` generations.
         if let Some(every) = self.capture_every {
@@ -1044,14 +1078,16 @@ impl App {
                 self.screenshot_waiting = true;
             }
         }
-        // Screenshot button: ask the viewport for one frame and save it as PNG.
+        // A screenshot wanted by the File menu or by `capture_every`: ask the
+        // window for one frame. `handle_screenshot_events` saves it as PNG.
         if self.screenshot_pending {
             self.screenshot_pending = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
                 ScreenshotRequest,
             )));
         }
-        // Developer screenshots: EVOLUTION_SMOKE_SEEK=<seconds> holds the replay at that time.
+        // Developer screenshots: `EVOLUTION_SMOKE_SEEK=<seconds>` holds the
+        // replay at that time.
         if self.capture_path.is_some()
             && let Some(seconds) = std::env::var("EVOLUTION_SMOKE_SEEK")
                 .ok()
@@ -1061,7 +1097,9 @@ impl App {
             p.seek((seconds * physics::rate() as f32) as u32);
             self.playing = false;
         }
-        // Explicit opt-in capture hook for repeatable native rendering/performance checks.
+        // The capture hook, for repeatable native rendering and performance
+        // checks: `EVOLUTION_SMOKE_CAPTURE` names the file, and the capture
+        // comes once `smoke_capture_delay` has passed since the window opened.
         if self.capture_path.is_some()
             && self.started.elapsed() > smoke_capture_delay()
             && !self.capture_requested
@@ -1070,7 +1108,11 @@ impl App {
             self.capture_requested = true;
         }
     }
-    /// Saves the screenshots egui sends back.
+    /// Saves the screenshots egui sends back. The reply to a
+    /// `ScreenshotRequest` is saved in `runs/`: as `progress-gen<g>.png` in an
+    /// unattended run, or else under a new name that the status line reports.
+    /// The reply to the capture hook is saved at `capture_path`, a report of
+    /// the frame times is printed, and the window closes.
     fn handle_screenshot_events(&mut self, ctx: &egui::Context) {
         if self.screenshot_waiting || self.capture_path.is_some() {
             for event in ctx.input(|i| i.events.clone()) {
@@ -1134,6 +1176,9 @@ impl App {
     }
 }
 impl eframe::App for App {
+    /// Prints the native benchmark report on stderr when a benchmark measured
+    /// frames: the replay times, the frame times with and without the vsync
+    /// wait and during breeding, and the major faults of the UI thread.
     fn on_exit(&mut self) {
         if self.bench_frames.is_empty() {
             return;
@@ -1205,6 +1250,10 @@ impl eframe::App for App {
             );
         }
     }
+    /// Draws one frame. It first updates the state: the frame record, the
+    /// replay, the worker's snapshot, the keys and the replay clock. Then it
+    /// paints the backdrop, the panels, the dialogs and the loading card. It
+    /// ends with the request for the next repaint and for screenshots.
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let now = Instant::now();
@@ -1249,7 +1298,7 @@ impl eframe::App for App {
         crate::schematic::show(&ctx, self.snapshot.as_ref(), &mut self.schematic_open);
         if self.playing || self.active() {
             // Playback and live evolution redraw at the frame cap; the rest of
-            // the GPU stays with evolution. EVOLUTION_UI_FPS=0 follows vsync.
+            // the GPU stays with evolution. `EVOLUTION_UI_FPS=0` follows vsync.
             match ui_frame_interval() {
                 Some(interval) => ctx.request_repaint_after(interval),
                 None => ctx.request_repaint(),
@@ -1267,7 +1316,8 @@ impl eframe::App for App {
     }
 }
 /// PCI vendor of the GPU GNOME's compositor renders on: the card tagged
-/// `mutter-device-preferred-primary` by udev, otherwise the boot VGA card.
+/// `mutter-device-preferred-primary` by udev, otherwise the boot VGA card. It
+/// is `None` when neither is found or the vendor cannot be read.
 fn compositor_vendor() -> Option<u32> {
     let cards: Vec<_> = std::fs::read_dir("/sys/class/drm")
         .ok()?
@@ -1298,7 +1348,9 @@ fn compositor_vendor() -> Option<u32> {
         })
         .and_then(vendor)
 }
-/// Frame interval from `EVOLUTION_UI_FPS` environment variable, default 60 FPS.
+/// The time between repaints while a replay plays or evolution runs: 0.97 of
+/// the interval of `EVOLUTION_UI_FPS` frames per second, 60 by default. It is
+/// `None` when that is 0 or less, and then the window follows vsync.
 fn ui_frame_interval() -> Option<Duration> {
     static INTERVAL: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
     *INTERVAL.get_or_init(|| {
@@ -1310,8 +1362,8 @@ fn ui_frame_interval() -> Option<Duration> {
         (fps > 0.0).then(|| Duration::from_secs_f64(0.97 / fps))
     })
 }
-/// How long a screenshot run waits before it captures: 8 s, or
-/// `EVOLUTION_SMOKE_CAPTURE_AFTER` seconds (developer diagnostic).
+/// How long a screenshot run waits before it captures: 8 s, or the 1 to 600 s
+/// that `EVOLUTION_SMOKE_CAPTURE_AFTER` gives (developer diagnostic).
 fn smoke_capture_delay() -> Duration {
     static DELAY: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
     *DELAY.get_or_init(|| {
