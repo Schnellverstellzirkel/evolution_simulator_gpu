@@ -1,13 +1,15 @@
 //! Idea operators for the proportions of bones and the ranges of joints:
 //! golden and equal bones, tall or short legs, stubby or long toes, a knee
-//! that cannot bend backward, joints locked or opened.
+//! that cannot bend backward, joints locked or opened. A leg is a limb that
+//! ends in a foot (`leaf_limbs`).
 //!
 //! Every operator is a whole change on its own, so its child gets no
-//! parameter noise, and the operators of this file share one pick slot.
+//! parameter noise, and the operators of this file share one pick slot
+//! (`GAIT_FILES` in `mod.rs`).
 //!
 //! The sources are Alexander (2003, leg segments in a ratio that suits the
 //! gait), Thompson (1917, growth by proportion), and Sims (1994, joint
-//! ranges as a gene). The golden ratio is a try, not a theory.
+//! ranges as a gene).
 use super::ideas::{bone_length, coin, scale_branch, set, some_leg};
 use super::limbs::pick;
 use super::rhythm::leaf_limbs;
@@ -31,8 +33,11 @@ pub(super) const OPS: &[(&str, Operator)] = &[
     ("open_one_joint", open_one_joint),
 ];
 
-/// The bones of a leg get lengths in a golden-ratio progression, longest at
-/// the root (or at the foot), with the leg's total length kept.
+/// A leg of two bones or more gets bone lengths in a golden-ratio progression.
+/// Each bone is 0.618 times as long as the one before it, counted from the
+/// root or from the foot, and a coin picks which. The leg keeps its total
+/// length, up to the bone length limits. The golden ratio is a trial with no
+/// theory behind it.
 fn golden_leg(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = some_leg(c, rng, 2, false) else {
         return false;
@@ -117,8 +122,9 @@ fn range_breathe(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) 
     changed
 }
 
-/// The second joint of a leg may not bend the way its leg already folds:
-/// one side of the range closes, so the knee cannot bend backward.
+/// The second joint of a leg may bend only the way its leg already folds: the
+/// range on the other side closes to 0.05 rad, so the knee cannot bend
+/// backward.
 fn knee_stop(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(leg) = some_leg(c, rng, 2, false) else {
         return false;
@@ -130,7 +136,7 @@ fn knee_stop(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> b
     };
     let (u, l) = (vector(upper), vector(lower));
     // The sign of the turn from the upper bone to the lower tells which way
-    // the knee is bent now; the range closes on the opposite side.
+    // the knee is bent now. The range closes on the opposite side.
     let turn = u.0 * l.1 - u.1 * l.0;
     let knee = &mut c.bones[leg[1]];
     let mut changed = false;
@@ -143,8 +149,8 @@ fn knee_stop(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> b
 }
 
 /// In every leg of two bones or more the root joint widens by half of its
-/// room to the limit and the other joints narrow by 30%: a hip that swings and
-/// stiffer lower joints.
+/// room to the limit and the other joints narrow by 30%: a hip that swings wide
+/// and lower joints that move less.
 fn hip_wide_knee_narrow(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     let mut changed = false;
     for leg in leaf_limbs(c).iter().filter(|l| l.len() >= 2) {
