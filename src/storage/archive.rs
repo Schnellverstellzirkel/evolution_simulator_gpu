@@ -369,7 +369,7 @@ impl Experiment {
         // playback and cross-engine comparisons are diagnostics only; they do
         // not edit archive fitness or descriptors.
         let mut prep = prep;
-        let mut best_by_niche: HashMap<qd::Niche, usize> = HashMap::new();
+        let mut best_by_niche: FastMap<qd::Niche, usize> = FastMap::default();
         for (j, p) in prep.iter().enumerate() {
             if p.behavior_candidate {
                 let best = best_by_niche
@@ -380,10 +380,12 @@ impl Experiment {
                 }
             }
         }
-        let behavior_best: std::collections::HashSet<usize> =
-            best_by_niche.values().copied().collect();
-        for (j, p) in prep.iter_mut().enumerate() {
-            p.behavior_candidate &= behavior_best.contains(&j);
+        let mut behavior_best = vec![false; prep.len()];
+        for &j in best_by_niche.values() {
+            behavior_best[j] = true;
+        }
+        for (p, &best) in prep.iter_mut().zip(&behavior_best) {
+            p.behavior_candidate &= best;
         }
         timings[2] += section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
