@@ -15,7 +15,7 @@ Constraints only move nodes toward a valid pose, and friction only takes back sl
 
 ## Forces and rules
 
-- A muscle pulls its two anchors together. Its drive follows the rhythm's shortening speed over the step, times its stiffness and its energy store. Hill's relation scales the drive by `1 - v / v_max` with `v_max` of 8 muscle lengths per second. A light damper resists its length change. Only active shortening is charged to the store, which recovers. A muscle's force cap and store scale with the lighter of the two subtrees it pulls together, at most 100 N.
+- A muscle pulls its two anchors together. Its drive follows the rhythm's shortening speed over the step, times its stiffness and its energy store. Hill's relation scales the drive by `1 - v / v_max` with `v_max` of 8 muscle lengths per second. A light damper resists its length change. Only active shortening is charged to the store, which recovers. A muscle's force cap and store scale with the lighter of the two subtrees it pulls together: the cap is 200 m/s^2 times that mass, at most 200 N, and the store is the same fraction of 120 J. Muscles on the same two bones and on the same side of the joint split one strength, so stacked copies add timing and not force.
 - A muscle stretched past its slack length is pulled back by a passive tendon, not charged to the store.
 - A joint's range is a hard limit on the relative angle of a bone and its parent bone. A joint forced 0.5 rad past its range breaks and ends the trial like a fall.
 - Joint damping with a 0.1 s time constant. It pushes the joint's nodes with equal and opposite velocities, so it keeps the body's momentum.
@@ -29,7 +29,8 @@ Each effect changes the physics and never the objective. Levels are in `src/envi
 
 - Muscle energy (heat wave) and recovery (drought) scale the store and its recovery.
 - Slope adds `slope * x` to the ground height. Wind adds a steady horizontal acceleration. Air scales the velocity retention. Grip scales friction. Gravity scales gravity.
-- Mud lowers the contact floor by a sink depth. The sink scales the normal push, the friction budget and a horizontal drag. A node clear of the surface pays nothing.
+- Mud lowers the contact floor by the mud depth. A node that sinks into it gets a larger friction budget, 9 times larger at 10 cm of sink (`MUD_GRIP` and `MUD_NORMAL`), and a horizontal drag of 2 per second at 10 cm (`MUD_DRAG`). A node clear of the surface pays nothing.
+- Brambles drag every node that is not a foot, against its horizontal velocity, while its surface is within 1 cm of the ground. A foot ends a leg of at least two bones.
 - Gaps cut periodic pits of depth 2 m. Hurdles raise periodic steps every 3 m. Earthquake gives every creature its own bumps, with a phase and height derived from its id, so no gait can memorize one pattern. Ground roughness adds fixed bumps.
 - Water shallows add drag and buoyancy. Ice patches lower friction on periodic stretches.
 - Autochange environment raises one effect one level every 100, 50 or 20 generations, most benign first, and never lowers one.
@@ -38,9 +39,11 @@ Each effect changes the physics and never the objective. Levels are in `src/envi
 
 ## Cost
 
-One thread per creature keeps each creature's nodes, bones and muscle state in the thread's local memory. On 27,000 evolved creatures of a fresh 20-generation game the kernel runs about 18,000 creatures per second with the 5 s screen (10M creature-steps per second in full trials), several times slower than the old lane-group kernel at one substep. The muscles take about half of the time.
+One thread per creature keeps each creature's nodes, bones and muscle state in the thread's local memory, about 4 KB. The kernel is bound by the L1 cache, so it takes all of a multiprocessor's memory as L1 cache (the default of `EVOLUTION_WARP_CARVEOUT`, 0) and is built for 3 blocks of 128 threads per multiprocessor. On 40,000 creatures of a generation-40 save, in full trials, it ran 5.97M creature-steps per second at 3 blocks against 5.67M at 4.
 
-Sixteen substeps were chosen because the standard trial then agrees with the confirmation trial. On a fresh game of 20 generations at 300k creatures per generation, 95% to 99% of the top 1,000 elites of an archive keep 80% of their distance at the confirmation trial, and the ratio of the two distances has a median of 1.00 with a tenth below 0.94 to 0.96. At 8 substeps 80% to 84% kept it, with a tenth below 0.5 to 0.7. The old kernel kept 45% to 60% at generation 40 and none late in a game.
+Most of the time goes to the muscles. Computing their forces once per step instead of once per substep made the kernel 2.7 times faster, but then only 88% of the top elites kept their distance at the confirmation trial, against 95% to 99%, so the forces stay per substep.
+
+Sixteen substeps were chosen because the standard trial then agrees with the confirmation trial. On a fresh game of 20 generations at 300k creatures per generation, 95% to 99% of the top 1,000 elites of an archive keep 80% of their distance at the confirmation trial, and the ratio of the two distances has a median of 1.00 with a tenth below 0.94 to 0.96. At 8 substeps 80% to 84% kept it, with a tenth below 0.5 to 0.7. The lane-group kernel that came before kept 45% to 60% at generation 40 and none late in a game.
 
 ## Audits
 
