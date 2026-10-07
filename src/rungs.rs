@@ -1,45 +1,47 @@
-//! The early rungs of a trial and the audit lane that calibrates them.
-//!
-//! A standard trial may stop at 1 s (R1) or 2.5 s (R2) when a linear score of
-//! six features the kernel already measures says the creature will not reach
-//! the 5 s bar (R3, `physics::Screen`). A stopped creature enters no archive,
-//! like a screened one. The scores and thresholds are fitted at the
-//! generation boundary on the audit lane: 1 creature in 128 (a hash of seed,
-//! breeding round and slot) runs every rule off, so its trial is a sample of
-//! what the rules would have stopped, uncensored. The threshold of a rung
-//! leaves one in a thousand of the creatures that pass the 5 s bar below it.
-//!
-//! The rules are fixed when a block is bred (`Config::rungs`), so the history
-//! depends on ring order only. Nurseries and immigrants are exempt from R1 and
-//! R2, because their bodies are new and most of their children stop at 5 s
-//! anyway. A circuit breaker per cadence band turns a rung off for a band
-//! where the audit lane sees it stopping creatures that enter archives.
+//! This module holds the early rungs of a trial and the audit lane that fits
+//! them. A rung stops a standard trial at 1 s (R1) or 2.5 s (R2) when a linear
+//! score of six features that the kernel already measures says the creature
+//! will not reach the 5 s bar (R3, `physics::Screen`), and a stopped creature
+//! enters no archive. The audit creatures, one slot in 128 of the main
+//! islands, run with every rule off, and `Audit::boundary` fits the next rules
+//! on their rows at each generation boundary. The blocks bred next carry the
+//! rules in `Config::rungs`, nurseries and immigrants are exempt from them,
+//! and a breaker per cadence band turns a rung off where it would stop
+//! creatures that enter archives.
 use crate::creature_kernel::{RungTrace, f16_to_f32, f32_to_f16};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-/// Creature flags in `Population::flags`.
+/// Creature flag in `Population::flags`: an audit creature. It runs with the
+/// 5 s screen and both rungs off, so its trial samples the creatures that the
+/// rules would have stopped.
 pub const AUDIT: u8 = 1;
-/// Exempt from R1 and R2.
+/// Creature flag: exempt from R1 and R2. It is set on bodies from a nursery
+/// and on immigrants, because their bodies are new and most of them stop at
+/// the 5 s screen anyway.
 pub const EXEMPT: u8 = 2;
-/// Exempt from R1, or from R2, because its parent would be stopped there by
-/// the rules the block carries: the child is in a region the fit misjudges.
+/// Creature flag: exempt from R1 because of its parent (`parent_exemptions`).
+/// Either the rule would stop the strong parent itself at R1, so the rule
+/// misjudges its family, or the parent's features are unknown.
 pub const EXEMPT_R1: u8 = 4;
+/// Creature flag: exempt from R2 because of its parent, as `EXEMPT_R1`.
 pub const EXEMPT_R2: u8 = 8;
-/// A young creature (a nursery body): the early screen holds it to the young
-/// bar, the distance that the best of its own kind reached
-/// (`physics::Screen::young_bar`).
+/// Creature flag: a body from a nursery of new random bodies. The 5 s screen
+/// holds it to the young bar, the distance that the best of its own kind
+/// reached (`physics::Screen::young_bar`).
 pub const YOUNG: u8 = 16;
-/// A reshaped body of a nursery: held to the bar of its own kind
-/// (`physics::Screen::reshaped_bar`).
+/// Creature flag: a body from a nursery of reshaped bodies. The 5 s screen
+/// holds it to the bar of its own kind (`physics::Screen::reshaped_bar`).
 pub const RESHAPED: u8 = 32;
-/// The flag bits that exempt a creature from rung `r` (0 or 1).
+/// The flag bits that exempt a creature from rung `r` (0 for R1, 1 for R2):
+/// `EXEMPT` and the parent bit of that rung. `AUDIT` is not among them,
+/// although an audit creature skips every rule.
 pub fn exempt_bits(r: usize) -> u8 {
     EXEMPT | if r == 0 { EXEMPT_R1 } else { EXEMPT_R2 }
 }
 
-/// An elite's own features at both rungs, as half-precision words (zero when
-/// its trial left no trace).
+/// An elite's own features at R1, then at R2, as half-precision words. They
+/// are all zero when its trial left no trace.
 pub fn profile(trace: &RungTrace, period: f32) -> [u16; 2 * FEATURES] {
     if trace.steps() == 0 {
         return [0; 2 * FEATURES];
@@ -53,10 +55,13 @@ pub fn profile(trace: &RungTrace, period: f32) -> [u16; 2 * FEATURES] {
     }
     out
 }
-/// Which rungs the children of an elite with `profile` skip under `rules`:
-/// when the elite is strong (above the median of its island), the ones that
-/// would stop the elite itself, because a rule that stops a strong elite
-/// misjudges its family; and all of them when its profile is unknown.
+/// Which rungs the children of an elite skip under `rules`, as `EXEMPT_R1` and
+/// `EXEMPT_R2` bits. `profile` holds the elite's features as the function
+/// `profile` made them, or is `None` when it has none, and `strong` says the
+/// elite is at or above the median fitness of the archive its child competes
+/// in. A child skips both rungs when the features are unknown. A weak elite
+/// exempts nothing. A strong one exempts the armed rungs that would stop the
+/// elite itself, because a rule that stops a strong elite misjudges its family.
 pub fn parent_exemptions(rules: &Rungs, profile: Option<&[u16; 2 * FEATURES]>, strong: bool) -> u8 {
     let Some(p) = profile.filter(|p| p.iter().any(|&w| w != 0)) else {
         return EXEMPT_R1 | EXEMPT_R2;
@@ -74,67 +79,81 @@ pub fn parent_exemptions(rules: &Rungs, profile: Option<&[u16; 2 * FEATURES]>, s
     bits
 }
 
-/// One creature in this many is an audit creature.
+/// One slot in this many holds an audit creature (`is_audit`).
 pub const AUDIT_ONE_IN: u64 = 128;
 /// Features per rung: distance, speed over the last half second, share of
 /// nodes that touched the ground, head shake, mean muscle energy store, the
 /// rhythm period.
 pub const FEATURES: usize = 6;
-/// Early rungs, and the steps they sit at (1 s and 2.5 s at 60 Hz).
+/// Number of early rungs: R1 at 1 s and R2 at 2.5 s.
 pub const RUNGS: usize = 2;
+/// The step each early rung sits at (1 s and 2.5 s at 60 Hz).
 pub const RUNG_STEPS: [u32; RUNGS] = [60, 150];
-/// Steps of the 5 s screen's checkpoint.
+/// The step of the 5 s screen, the third rung (R3), at 60 Hz.
 pub const SCREEN_STEPS: u32 = 300;
-/// Cadence bands of the breaker.
+/// Number of cadence bands that each rung has a breaker for
+/// (`RungTrace::BAND_COUNT`).
 pub const BANDS: usize = RungTrace::BAND_COUNT;
 /// Generations of audit rows the fit pools.
 pub const WINDOW: usize = 8;
-/// Share of the creatures that pass the 5 s bar a rung may stop.
+/// Share of the creatures that pass the 5 s bar that a rung may stop. The fit
+/// puts the threshold of a rung where this share of those audit rows scores
+/// below it (`Audit::fit_rung`).
 pub const BUDGET: f64 = 1e-3;
 /// Share of the entrants the 5 s screen would have kept that a rung may stop.
+/// No code reads it. The limit that applies to the entrants is
+/// `TRUST_STOPPED`.
 pub const ENTRANT_BUDGET: f64 = 1e-2;
-/// A rung is armed only while it is trusted, over the last `JUDGED`
-/// generations, by the rule fitted before each generation (the rule that
-/// would have been in force). While the archives still climb, it must have
-/// stopped at most `TRUST_STOPPED` of the entrants the 5 s screen would have
-/// kept, among at least `TRUST_ENTRANTS` of them: a rule fitted in the first
-/// generations, when most creatures that pass the bar barely use their
-/// muscles, stops the walkers that the archives grow from. On a plateau (the
-/// global best has stood for 30 generations) few creatures enter an archive,
-/// and those that do are mostly creatures that fall early and improve a niche
-/// of weak bodies, which a rule stops by design. There the guard counts the
-/// audit creatures that reach the 5 s bar instead, at least `TRUST_PASSERS`
-/// of them: at most `TRUST_STOPPED` may be stopped.
+/// Generations of judgments that a rung is trusted over (`Audit::trusted`). A
+/// rung is armed only while the rule fitted before each of them would have
+/// stopped few of the creatures that the archives grow from. While the
+/// archives still climb, those are the entrants the 5 s screen would have
+/// kept. A rule fitted in the first generations, when most creatures that
+/// pass the bar barely use their muscles, stops the walkers that the archives
+/// grow from. On a plateau (the global best has stood for 30 generations) few
+/// creatures enter an archive. Those that do are mostly creatures that fall
+/// early and improve a niche of weak bodies, which a rule stops by design.
+/// There the guard counts the audit creatures that reach the 5 s bar instead.
 const JUDGED: usize = 4;
+/// Entrants the 5 s screen would have kept, at least this many over the judged
+/// generations, for a rung to be trusted while the archives climb.
 const TRUST_ENTRANTS: u32 = 60;
+/// Audit creatures that reach the 5 s bar, at least this many over the judged
+/// generations, for a rung to be trusted on a plateau.
 const TRUST_PASSERS: u32 = 1000;
+/// The largest share of those creatures that the rule may have stopped.
 const TRUST_STOPPED: f64 = 0.03;
-/// Rows a rung needs before it is armed: of the creatures that reach the 5 s
-/// bar, enough for a 1 in 1,000 quantile to rest on at least 5 rows, and of
-/// the others enough for a covariance. At 400k creatures per generation the
-/// window never holds that many, and the rungs stay off: with so few rows
-/// the fit stopped the slow walkers that the early archives grow from.
+/// Rows of the creatures that reach the 5 s bar that a rung needs before it is
+/// armed, enough for a 1 in 1,000 quantile to rest on at least 5 rows. At 400k
+/// creatures per generation the window never holds that many, and the rungs
+/// stay off. With so few rows the fit stopped the slow walkers that the early
+/// archives grow from.
 const MIN_PASSING: u64 = 5000;
+/// Rows of the other creatures that a rung needs before it is armed, enough
+/// for a covariance.
 const MIN_OTHER: u64 = 400;
-/// A band's rung turns off after `STRIKES` generations in a row with more
-/// than `BAND_MISS_LIMIT` entrant misses (entrants the 5 s screen would have
-/// kept) per 10k audit rows of the band, and
-/// back on after `RECOVERY` generations in a row under it. Bands with fewer
-/// than `BAND_MIN_ROWS` rows decide nothing.
+/// Entrant misses per 10k audit rows of a band (entrants the 5 s screen would
+/// have kept that the rule would stop) above which the band counts a strike.
 const BAND_MISS_LIMIT: f64 = 100.0;
+/// Generations in a row over `BAND_MISS_LIMIT` that turn a band's rung off.
 const STRIKES: u8 = 3;
+/// Generations in a row under `BAND_MISS_LIMIT` that turn it on again.
 const RECOVERY: u8 = 3;
+/// Bands with fewer audit rows than this in a generation decide nothing.
 const BAND_MIN_ROWS: u32 = 100;
 
 /// A developer diagnostic, `EVOLUTION_NO_RUNGS`: no audit lane and no early
-/// rungs, to measure the game without them in the same build.
+/// rungs, to measure the game without them in the same build. The variable is
+/// read once, on first use.
 pub fn disabled() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| std::env::var_os("EVOLUTION_NO_RUNGS").is_some())
 }
 
 /// Whether the child bred for `slot` in breeding round `round` is an audit
-/// creature.
+/// creature. A hash of `seed`, `round` and `slot` picks one slot in
+/// `AUDIT_ONE_IN`, and `disabled` picks none. Breeding (`breed_block`) also
+/// leaves out the slots of wild islands, which run in worlds of their own.
 pub fn is_audit(seed: u64, round: u64, slot: usize) -> bool {
     if disabled() {
         return false;
