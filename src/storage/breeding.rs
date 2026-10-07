@@ -448,7 +448,6 @@ impl Experiment {
             let cma_index = if emitter == Emitter::Cma {
                 if let Some(parent_index) = parent {
                     let elite = &self.islands[island].entries[parent_index];
-                    let template = elite.creature.unpack();
                     let plan = self.islands[island].plan_key(parent_index);
                     // Each island runs one optimizer per design. It starts from
                     // the design's fastest elite and then follows its own mean,
@@ -488,6 +487,8 @@ impl Experiment {
                                 .map(|(i, _)| i)
                         };
                         if let Some(slot) = replacement {
+                            // Only a new emitter needs the body itself.
+                            let template = elite.creature.unpack();
                             let mut new = if optimize {
                                 // Another optimizer of this island for the
                                 // same plan lends its learned step sizes,
