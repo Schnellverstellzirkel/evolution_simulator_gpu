@@ -1,29 +1,66 @@
-//! What the GPU kernel returns per creature (`GpuResult`), the packed batch
-//! the engine uploads (`LaneBatch`, filled by `kernel::pack`), and the
-//! layout of a recorded frame.
+//! The data the host shares with the CUDA kernel in `shaders/creature.cu`.
+//! `GpuResult` is what the kernel returns for each creature, and `RungTrace`
+//! decodes the trace the kernel stores in seven of its words. `LaneBatch` is
+//! the packed batch that `kernel::pack` fills and the engine uploads, and
+//! `frame_stride` gives the size of a recorded frame. The half precision
+//! conversions that the trace and the rungs use are here too.
 use crate::physics::Node;
 
-/// One creature's trial as the kernel reports it: its fitness and behavior scores.
+/// One creature's trial as the CUDA kernel reports it. The layout is that of
+/// `Result` in `shaders/creature.cu`, and every field is an `f32`. The kernel
+/// stores bit sets and packed words as `f32` bits, so read those with
+/// `to_bits`. Seven fields hold the rung trace once the trial has ended
+/// (`rung_trace`).
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuResult {
+    /// Horizontal distance (m) of the center of mass when the trial ended,
+    /// whether in a fall, at a screen or rung stop, or at the last step.
+    /// `evolution::FAILED` for a failed trial.
     pub fitness: f32,
+    /// Node-steps on the ground: the sum over the steps run of the number of
+    /// nodes touching the ground. `scheduler::to_metrics` turns it into a
+    /// share.
     pub ground_contact: f32,
+    /// Height range (m) of the mean node height over the steps run. Until the
+    /// trial ends the kernel keeps the lowest height here.
     pub vertical_oscillation: f32,
+    /// Gait frequency (Hz): half the turns of the mean node height per second
+    /// the trial ran. Until the trial ends the kernel keeps the highest mean
+    /// node height here.
     pub gait_frequency: f32,
+    /// Gait counter: the mean node height at the last sample. When the trial
+    /// ends the kernel puts rung trace word 3 here.
     pub previous_center_y: f32,
+    /// Gait counter: the highest mean node height while the body rises, the
+    /// lowest while it falls, since the last turn. Rung trace word 4 at the
+    /// end.
     pub vertical_extremum: f32,
+    /// Gait counter: 1 while the body rises, -1 while it falls, 0 until the
+    /// height has changed by more than 0.5 mm between two samples. Rung trace
+    /// word 5 at the end.
     pub vertical_trend: f32,
+    /// Gait counter: the turns so far, which are changes of direction of
+    /// more than 5 mm in the mean node height. Rung trace word 6 at the end.
     pub gait_turns: f32,
+    /// Sum over the steps run of the body's height (m): the top of its
+    /// highest node minus the bottom of its lowest. `scheduler::to_metrics`
+    /// divides it by the steps for the mean height.
     pub height_sum: f32,
-    /// Bits of nodes 0-31 / 32-63 that touched the ground (stored as f32 bits).
+    /// Bits of the nodes that touched the ground, node `i` in bit `i`.
     pub contact_lo: f32,
+    /// Rung trace word 0: the distances at 1 s and 2.5 s. Bodies have at most
+    /// 32 nodes, so no contact bit lives here.
     pub contact_hi: f32,
     /// Bits of touching nodes that later lifted clear of the ground again.
     pub lift_lo: f32,
+    /// Rung trace word 1: the distances at 5 s and 10 s.
     pub lift_hi: f32,
-    /// Nodes grounded after the last step (f32 bits), for sensor touchdowns.
+    /// Bits of the nodes on the ground after the last step, the set the
+    /// kernel compares the next step with to find touchdowns for sensor
+    /// muscles.
     pub ground_lo: f32,
+    /// Rung trace word 2: the end code and the steps run.
     pub ground_hi: f32,
     /// Seconds into the trial when it ended in a fall, or 0 if it did not.
     /// The kernel ends a trial like a fall when
@@ -37,27 +74,32 @@ pub struct GpuResult {
     /// Fitness is the distance at that moment, or `evolution::FAILED` for a
     /// failed trial.
     pub fall_time: f32,
-    /// Mean head acceleration (m/s^2) over about `physics::HEAD_SHAKE_WINDOW`
-    /// seconds, for the head shaking limit.
+    /// Running mean of the head's acceleration (m/s^2) over about
+    /// `physics::HEAD_SHAKE_WINDOW` seconds. It stops changing when the trial
+    /// ends. A trial ends in a fall when it passes `physics::HEAD_SHAKE_LIMIT`.
     pub head_shake: f32,
-    /// Distance at the screen, or at an earlier fall; 0 until then. The
-    /// experiment sets the next generation's screen bar from these.
+    /// Distance (m) at the screen step. A trial that ended earlier, in a fall
+    /// or at an early rung, gives its distance there. It is 0 for a trial
+    /// without a screen that did not fall. The experiment sets the next
+    /// generation's screen bar from these.
     pub screen_x: f32,
-    /// Seconds into the trial when the screen stopped the creature, or 0.
-    /// Its fitness is the distance there and its behavior totals end there.
+    /// Seconds into the trial when the screen or an early rung (`rungs`)
+    /// stopped the creature, or 0. Its fitness is the distance there and its
+    /// behavior totals end there.
     pub screened: f32,
 }
 impl GpuResult {
     /// Number of feet: nodes that touched the ground and lifted off again.
     /// A node dragged along the ground never lifts, so it is not a foot.
-    /// Bodies have at most 32 nodes, so `lift_lo` holds them all; the CUDA
+    /// Bodies have at most 32 nodes, so `lift_lo` holds them all. The CUDA
     /// kernel uses `lift_hi` for the rung trace.
     pub fn feet(&self) -> u32 {
         self.lift_lo.to_bits().count_ones()
     }
-    /// The rung trace the CUDA kernel writes into the seven words
-    /// the host reads for nothing else (`contact_hi`, `lift_hi`, `ground_hi`
-    /// and the four gait working words), with the standard fitness.
+    /// The rung trace the kernel leaves in seven result words: `contact_hi`,
+    /// `lift_hi`, `ground_hi`, `previous_center_y`, `vertical_extremum`,
+    /// `vertical_trend` and `gait_turns`, in that order. The host reads these
+    /// words for nothing else. The trace also carries this result's fitness.
     pub fn rung_trace(&self) -> RungTrace {
         RungTrace {
             words: [
