@@ -1,6 +1,9 @@
-//! Shared by the diagnostic examples: they score and replay creatures on the
-//! GPU engine, the game's scoring kernel, and nowhere else. There is no CPU
-//! fallback, so a machine without a working primary GPU fails loudly.
+//! This file holds the helpers that score and replay creatures for the
+//! diagnostic examples and for the GPU tests `cuda_physics`, `screening` and
+//! `rungs`, which include it with `#[path]`. Every score and replay comes from
+//! the game's scoring kernel on the GPU. There is no CPU fallback, so `open`
+//! fails on a machine whose primary GPU does not open.
+// Each file that includes this one uses only some of its functions.
 #![allow(dead_code)]
 use anyhow::{Context, Result};
 use evolution_simulator::{
@@ -15,10 +18,12 @@ use std::time::Duration;
 /// owner's game leaves free.
 const UNIT: usize = 50_000;
 
-/// How long a replay waits for the GPU.
+/// How long `record` waits for the GPU to return a replay.
 const REPLAY_PATIENCE: Duration = Duration::from_secs(300);
 
-/// Opens the primary GPU and makes it the engine that records replays.
+/// Opens the CUDA device whose name contains `RTX 4060`, the primary GPU, and
+/// makes it the engine that records replays. `record` works only while the
+/// returned engine is alive.
 pub fn open() -> Result<ThreadedEngine> {
     let engine = engine::gpu_engine("RTX 4060", 64)
         .context("the primary GPU did not open (set EVOLUTION_DEVICES=primary, and check nvidia-smi for free memory)")?;
@@ -28,6 +33,8 @@ pub fn open() -> Result<ThreadedEngine> {
 }
 
 /// Scores every creature of `pop` with `cfg` on the GPU, in population order.
+/// The creatures go to the engine in units of `UNIT`, one unit at a time, and
+/// the population's trial flags go with them.
 pub fn score(
     engine: &mut ThreadedEngine,
     pop: &Population,
@@ -60,7 +67,7 @@ pub fn score(
     Ok(results)
 }
 
-/// Scores a list of creatures.
+/// Scores `creatures` in list order with `score`.
 pub fn score_creatures(
     engine: &mut ThreadedEngine,
     creatures: &[Creature],
@@ -73,9 +80,10 @@ pub fn score_creatures(
     score(engine, &pop, cfg)
 }
 
-/// Records one creature's full trial (no early screen) with the scoring
-/// kernel. Frames are at the trial's own fidelity, one per step. Call `open`
-/// first.
+/// Records one creature's full trial with the scoring kernel. It removes the
+/// early screen from `cfg` and leaves `cfg.rungs` as it is. The frames run at
+/// the trial's own fidelity, one per step, and the first ones show the start
+/// pose during the settling steps. Call `open` first and keep its engine alive.
 pub fn record(creature: &Creature, cfg: &Config) -> Result<Recording> {
     let cfg = Config {
         screen: None,
