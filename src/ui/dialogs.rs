@@ -1,6 +1,9 @@
-//! The File menu's dialogs: save with its overwrite check, open from runs/, the
-//! new experiment window, the statistics CSV and the creature JSON and GIF files,
-//! and the save state the top bar shows.
+//! Draws the File menu's windows. One lists the saves in runs/ to open, one
+//! starts a new experiment, one asks before a save replaces a file, and one
+//! takes the path of a file to save, export or open. The menu in `header` and
+//! the export buttons only set a field of `App`, and `App::dialogs` draws the
+//! window that field asks for in every frame. The module also keeps the save
+//! state that the top bar shows, from the events the worker logs.
 
 use super::{
     App, Tab,
@@ -16,14 +19,24 @@ use crate::{
 use eframe::egui::{self, Align2, RichText, Vec2};
 use std::{path::PathBuf, time::Instant};
 
-/// One save in runs/, for File > Open.
+/// One .evo file that File > Open lists: where it is, when it changed, how big
+/// it is and what its first bytes say.
 pub(super) struct SaveEntry {
     path: PathBuf,
     modified: Option<std::time::SystemTime>,
     bytes: u64,
+    /// The generation and settings at the start of the file. None for another
+    /// format, another physics version or a file that cannot be read. The list
+    /// then says "older format".
     summary: Option<crate::storage::SaveSummary>,
 }
 impl App {
+    /// Opens the path window for `mode` and fills its path field with the usual
+    /// file for it. `mode` is the title of the window and the text of its
+    /// button, and it picks what the button does: "Save experiment", "Export
+    /// CSV", "Open creature JSON", "Export creature JSON" or "Export creature
+    /// GIF". The two creature exports name the file after the creature on
+    /// screen, with its species name, distance and id, when there is one.
     pub(super) fn file(&mut self, mode: &'static str) {
         self.file_mode = Some(mode);
         self.file_path = match mode {
@@ -46,9 +59,15 @@ impl App {
             _ => "runs/experiment.evo".to_owned(),
         };
     }
-    /// Follows the worker's event log for the save state: a save or an open
-    /// marks the experiment saved, a new game marks it unsaved.
+    /// Reads the worker's events that came since the last call and updates the
+    /// save state. A save or an open marks the experiment saved or opened at
+    /// the generation of the event. An autosave counts as a save. A new
+    /// experiment marks it unsaved. A save event ends the Saving state. So does
+    /// an error from the worker, because a save that fails logs no event.
     pub(super) fn absorb_events(&mut self, snapshot: &Snapshot) {
+        // A new game or a load starts a new log, which is read from its start.
+        // The worker keeps only its newest 200 events, so once the log is full
+        // its length stops growing and the events after that are not seen.
         if self.events_seen.0 != snapshot.epoch || snapshot.events.len() < self.events_seen.1 {
             self.events_seen = (snapshot.epoch, 0);
         }
@@ -73,7 +92,8 @@ impl App {
             self.saving = None;
         }
     }
-    /// Asks the worker to save, or first asks the player when the file exists.
+    /// Asks the worker to save to `path`. When the file exists and `confirmed`
+    /// is false, it sets `overwrite` instead, and the player is asked first.
     fn save_to(&mut self, path: PathBuf, confirmed: bool) {
         if !confirmed && path.exists() {
             self.overwrite = Some(path);
@@ -82,7 +102,10 @@ impl App {
         self.saving = Some(Instant::now());
         self.worker.send(Command::Save(path));
     }
-    /// Save state for the top bar: saving, saved how long ago, or not saved.
+    /// What the top bar says about the save, and whether a save is being
+    /// written, which makes the bar show a spinner. While a save runs the text
+    /// says so. Otherwise it tells when the experiment was saved or opened and
+    /// how many generations have run since, or that it is not saved.
     pub(super) fn save_state(&self) -> (String, bool) {
         if self.saving.is_some() {
             return ("Saving…".to_owned(), true);
@@ -105,14 +128,18 @@ impl App {
             None => ("Not saved".to_owned(), false),
         }
     }
-    /// Opens a saved experiment; the game starts paused on it.
+    /// Pauses the game and asks the worker to load the save at `path`, so the
+    /// game starts paused on it. It also sets `initial`, so `config` takes its
+    /// value from the first snapshot of the next game (`absorb_snapshot`).
     fn open_experiment(&mut self, path: PathBuf) {
         self.pause();
         self.worker.send(Command::Load(path));
         self.initial = true;
     }
-    /// File > Open: the saves in runs/, newest first, and a path field for
-    /// a file anywhere else.
+    /// File > Open: the saves in runs/, newest first, each with an Open
+    /// button, and a path field for a file anywhere else. The window shows
+    /// while `open_list` is set. It closes when an Open button is pressed or
+    /// the player cancels.
     fn open_window(&mut self, ctx: &egui::Context) {
         let Some(saves) = &self.open_list else {
             return;
@@ -198,9 +225,14 @@ impl App {
             self.open_list = None;
         }
     }
+    /// Draws the File windows that are open in this frame: the list of saves,
+    /// the check before a save replaces a file, the new experiment window and
+    /// the path window of `file_mode`.
     pub(super) fn dialogs(&mut self, ctx: &egui::Context) {
         let theme = self.theme();
         self.open_window(ctx);
+        // The check before a save replaces a file. `save_to` asks for it when
+        // the file exists.
         if let Some(path) = self.overwrite.clone() {
             let mut answer = None;
             egui::Window::new("Replace the save?")
@@ -230,6 +262,8 @@ impl App {
                 None => {}
             }
         }
+        // A new experiment uses `config`. Create population pauses the game
+        // and sends `config` to the worker as a new experiment.
         if self.new_dialog {
             egui::Window::new("Start a new experiment")
                 .collapsible(false)
@@ -274,6 +308,8 @@ impl App {
                     });
                 });
         }
+        // The path window. Its button does what `mode` says and closes the
+        // window.
         if let Some(mode) = self.file_mode {
             egui::Window::new(mode)
                 .collapsible(false)
@@ -327,6 +363,8 @@ impl App {
                                     ));
                                 }
                                 "Open creature JSON" => {
+                                    // The creature replays in the world of the
+                                    // game now.
                                     let config = self
                                         .snapshot
                                         .as_ref()
@@ -361,8 +399,12 @@ impl App {
         }
     }
 }
-/// Validates an imported creature JSON before it reaches the replay engine.
-/// Rejects bodies the physics cannot step, with a short reason.
+/// Checks a creature read from a JSON file before it is replayed, and gives a
+/// short reason when it fails. The body must be a connected tree with one bone
+/// per extra node. The numbers of a node and a bone must be finite, and so must
+/// the lengths, rhythm and stiffness of a muscle. A muscle must sit on bones
+/// that exist. The check also puts the bones in parent-first order
+/// (`canonicalize_bone_order`), which changes `creature`.
 fn imported_creature(creature: &mut Creature) -> Result<(), String> {
     let nodes = creature.nodes.len();
     if !(3..=64).contains(&nodes) || creature.bones.len() + 1 != nodes {
@@ -403,7 +445,8 @@ fn imported_creature(creature: &mut Creature) -> Result<(), String> {
     Ok(())
 }
 /// Every .evo file directly in `dir`, newest first, with what its first
-/// bytes say about it.
+/// bytes say about it. A file whose time is unknown comes last. A directory
+/// that cannot be read gives an empty list.
 pub(super) fn list_saves(dir: &std::path::Path) -> Vec<SaveEntry> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -436,6 +479,7 @@ mod tests {
         let json = serde_json::to_string(&creature).unwrap();
         let mut loaded: Creature = serde_json::from_str(&json).unwrap();
         assert!(imported_creature(&mut loaded).is_ok());
+        // A bone that ends on a node the body does not have is not a tree.
         loaded.bones[0].b = 9;
         assert!(imported_creature(&mut loaded).is_err());
     }
