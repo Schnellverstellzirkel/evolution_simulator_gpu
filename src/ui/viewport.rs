@@ -610,8 +610,11 @@ impl App {
             draw_creature(painter, &p.nodes, &p.creature, origin, self.zoom, &marks);
         }
     }
-    /// The HUD over the scene: counters, the world, the generation and the
-    /// note in the middle.
+    /// The HUD over the scene. It has the distance and speed counters of the
+    /// creature, a line that says how the trial ended once the replay reaches
+    /// that moment, the world, the generation counter with its rate, a note in
+    /// the middle while there is no replay to watch, and a frame around the
+    /// scene.
     fn paint_hud(&self, f: &SceneFrame) {
         let theme = self.theme();
         let painter = &f.painter;
@@ -652,6 +655,7 @@ impl App {
                 },
                 size,
             );
+            // The trial ended early and the replay has reached that moment.
             if let Some((tick, _)) = fallen {
                 hud_block(
                     painter,
@@ -666,6 +670,7 @@ impl App {
                     )],
                 );
             }
+            // A replay from before a world change says so.
             let live = self.snapshot.as_ref().map(|s| &s.config);
             let earlier = live.is_some_and(|live| live.physics_differs(&p.config));
             hud_block(
@@ -707,6 +712,7 @@ impl App {
                 size,
             );
         }
+        // The note in the middle says why there is no replay to watch.
         let center_note = if self.playback.is_none() && self.awaiting_new_world() {
             Some("Testing in the new world...")
         } else if self.playback.is_none() {
@@ -720,6 +726,8 @@ impl App {
         };
         if let Some(note) = center_note {
             let mut lines = vec![HudLine::text(note.to_owned(), 20., HUD)];
+            // Before the first replay, an engine may wait for a kernel, and
+            // two more lines say that the GPU is compiling.
             if self.playback.is_none() && crate::cuda_engine::compiling_world() {
                 lines.push(HudLine::text(
                     "The GPU is compiling its kernels for this world.".to_owned(),
@@ -735,6 +743,7 @@ impl App {
             }
             hud_block(painter, rect.center(), Align2::CENTER_CENTER, &lines);
         }
+        // The frame around the scene.
         painter.rect_stroke(
             rect,
             0,
@@ -742,8 +751,9 @@ impl App {
             egui::StrokeKind::Inside,
         );
     }
-    /// The time slider and the clock under the scene. Returns whether the
-    /// player moved the slider.
+    /// The time slider and the clock under the scene. A mark on the slider
+    /// shows the frame where the trial ended early. Returns whether the player
+    /// moved the slider.
     fn viewport_timeline(&mut self, ui: &mut egui::Ui) -> bool {
         let mut sought = false;
         if let Some(p) = &mut self.playback {
@@ -761,6 +771,7 @@ impl App {
                             .show_value(false)
                             .text(""),
                     );
+                    // Mark the frame where the trial ended early.
                     if let Some((fall_frame, _)) = p.fall
                         && trial_frames > 0
                     {
@@ -792,8 +803,9 @@ impl App {
         }
         sought
     }
-    /// The button row under the timeline. Returns the creature and world the
-    /// player asked to race.
+    /// The button row under the timeline: Play or Pause, Replay, Family tree,
+    /// Race it, the two exports and the speed menu. Returns the creature and
+    /// world the player asked to race.
     fn viewport_controls(&mut self, ui: &mut egui::Ui) -> Option<(Creature, Config)> {
         let mut race_it = None;
         ui.horizontal_wrapped(|ui| {
@@ -854,7 +866,9 @@ impl App {
         });
         race_it
     }
-    /// Puts a creature in the race and opens the Race tab.
+    /// Adds a creature to the race picks and opens the Race tab with a fresh
+    /// race. A creature that is picked already moves to the newest place, and
+    /// the oldest pick leaves when there are more than `RACE_PICKS`.
     fn race_viewport_creature(&mut self, creature: Creature, config: Config) {
         self.race_picks.retain(|(pick, _)| pick.id != creature.id);
         self.race_picks.push((creature, config));
@@ -862,10 +876,14 @@ impl App {
             self.race_picks.remove(0);
         }
         self.tab = Tab::Race;
+        // The race restarts below. With `prev_tab` set, the frame loop does not
+        // restart it again as an opened tab (`opened_tab`).
         self.prev_tab = Tab::Race;
         self.restart_race();
     }
-    /// The main replay viewport: scene with camera controls, timeline and playback buttons.
+    /// The replay viewport: the header, the scene with its HUD, the timeline
+    /// and the playback buttons. `height` is the height of the scene in
+    /// points, and the scene is never shorter than 120.
     pub(super) fn viewport(&mut self, ui: &mut egui::Ui, height: f32) {
         self.viewport_header(ui);
         let (rect, response) = ui.allocate_exact_size(
@@ -878,6 +896,7 @@ impl App {
         self.paint_hud(&frame);
         let sought = self.viewport_timeline(ui);
         let race_it = self.viewport_controls(ui);
+        // Moving the slider pauses the replay.
         if sought {
             self.playing = false;
         }
@@ -885,8 +904,9 @@ impl App {
             self.race_viewport_creature(creature, config);
         }
     }
-    /// Replays the best creature recorded for one history entry, through the
-    /// same preview path as an archive card click.
+    /// Replays the best creature of row `index` of the history, in the world
+    /// of that row. It shows it as a picked creature and opens the Overview
+    /// tab. It does nothing when there is no such row.
     pub(super) fn replay_history_holder(&mut self, index: usize) {
         let Some((creature, config)) = self.snapshot.as_ref().and_then(|snapshot| {
             let stats = snapshot.history.get(index)?;
@@ -897,7 +917,8 @@ impl App {
         self.select(creature, config);
         self.tab = Tab::Overview;
     }
-    /// Replays the champion now, like a record's Replay button.
+    /// Replays the champion now as a picked creature and opens the Overview
+    /// tab. The Replay button of the running generation's record calls it.
     pub(super) fn replay_champion(&mut self) {
         if let Some((creature, config)) = self.champion() {
             self.select(creature, config);
@@ -961,25 +982,28 @@ impl SceneFrame<'_> {
         .0
     }
 }
-/// Pixels per meter of the default zoom: the creature's height fills
-/// `FIT_HEIGHT_SHARE` of the viewport, clamped for tiny and huge bodies.
+/// Pixels per meter at which a body `body_height` meters tall fills
+/// `FIT_HEIGHT_SHARE` of a view `view_height` points high. The result stays
+/// between 40 and 450, for tiny and huge bodies. The Race tab uses it too.
 pub(super) fn fit_zoom(body_height: f32, view_height: f32) -> f32 {
     (FIT_HEIGHT_SHARE * view_height / body_height.max(0.05)).clamp(40.0, 450.0)
 }
-/// The player's default zoom: the typical height fills its share of the
-/// viewport, and the highest point of the recording stays in view (the ground
-/// sits a quarter up from the bottom) unless that would shrink the body to less than
-/// 60% of the typical fit. A creature that leaps far higher than it stands
-/// keeps that 60% and clips its peak instead of becoming tiny.
+/// The zoom of a replay until the player zooms by hand. The typical `height`
+/// of the body fills its share of the view (`fit_zoom`), and the `peak` of the
+/// recording stays in view above the ground, which sits a quarter up from the
+/// bottom, unless that would shrink the body to less than 60% of the typical
+/// fit. A creature that leaps far higher than it stands keeps that 60% and
+/// clips its peak instead of becoming tiny.
 fn player_zoom(height: f32, peak: f32, view_height: f32) -> f32 {
     let typical = fit_zoom(height, view_height);
     let whole = 0.69 * view_height / peak.max(0.05);
     whole.min(typical).max(typical * 0.6).clamp(20.0, 450.0)
 }
-/// Whether the theater switches to the champion: only when the player has
-/// not pinned a creature, a champion exists, and a different creature is on
-/// screen. A new distance record makes a new champion, so the switch happens
-/// as soon as the record lands.
+/// Whether the replay switches to the champion. It does when the player has
+/// not pinned a creature, a champion exists and a different creature is on
+/// screen. `showing` and `champion` are the ids of the creature on screen and
+/// of the champion. A new distance record makes a new champion, so the switch
+/// happens as soon as the record lands.
 fn follows_champion(pinned: bool, showing: Option<u64>, champion: Option<u64>) -> bool {
     !pinned && champion.is_some() && showing != champion
 }
