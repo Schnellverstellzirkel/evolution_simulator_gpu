@@ -495,9 +495,10 @@ pub(crate) fn brace_limb_chain(
 /// Moves the muscles that share a phase together, whatever limb they drive:
 /// either the whole group of active muscles within 6% of a cycle of a chosen
 /// muscle moves by 5 to 30% of a cycle, or two such groups, at least 15% of a
-/// cycle apart, swap places. Muscles that run one motor program move as one,
-/// the way a correlated mutation moves genes that act together (Beyer and
-/// Schwefel 2002), which no change to one limb or one gene can do.
+/// cycle apart, swap places. A group has three muscles or more. Muscles that
+/// run one motor program move as one, the way a correlated mutation moves
+/// genes that act together (Beyer and Schwefel 2002), which no change to one
+/// limb or one gene can do.
 pub(crate) fn phase_cluster_move(
     c: &mut Creature,
     _cfg: &Config,
@@ -644,11 +645,12 @@ fn has_program(c: &Creature, root: usize, branch: u32) -> bool {
         .any(|m| set >> m.bone_a & 1 == 1 && set >> m.bone_b & 1 == 1)
 }
 
-/// The muscles limb `r` of `c` would lose to the program of limb `d` of
-/// `donor` (its muscles off the motor ring) and the copies that program makes
-/// on `c`: the donor's muscles on the bones at the same places, their strokes
-/// in proportion to their spans on `c`, everything else as it was. `None`
-/// when the limbs have a different number of bones.
+/// What giving limb `r` of `c` the program of limb `d` of `donor` does: the
+/// muscles of `r` it drops (those among the limb's bones and the bone above it
+/// that are off the motor ring) and the copies it makes on `c`. The copies are
+/// the donor's muscles on the bones at the same places, their strokes in
+/// proportion to their spans on `c`, everything else as it was. `None` when
+/// the limbs have a different number of bones.
 fn program_of(c: &Creature, donor: &Creature, r: usize, d: usize) -> Option<(MuscleIds, Muscles)> {
     let (to_bones, to_muscles) = actuation(c, r);
     let (from_bones, from_muscles) = actuation(donor, d);
@@ -949,13 +951,13 @@ const NEW_PART: [Operator; 5] = [
 
 /// Adds a new part and fits it into the body in the same move: its muscles
 /// are timed against the gait's main driver (in phase, a quarter, a half or
-/// three quarters of a cycle later), half the time its joint is braced
-/// against a stop, and some of the time its foot senses touchdown. A part
-/// that arrives with a random program rarely works with the gait; one that
-/// arrives timed to it has a chance. The part comes from the first of three
-/// `NEW_PART` operators, tried from a random start, that fits the body. The
-/// idlest limb tips go for the added nodes (`shed_tips`), so the body ends no
-/// bigger.
+/// three quarters of a cycle later, give or take 0.03 of a cycle), half the
+/// time its joint is braced against a stop, and in four moves of ten its foot
+/// senses touchdown. A part that arrives with a random program rarely works
+/// with the gait; one that arrives timed to it has a chance. The part comes
+/// from the first of three `NEW_PART` operators, tried from a random start,
+/// that fits the body. The idlest limb tips go for the added nodes
+/// (`shed_tips`), so the body ends no bigger.
 pub(crate) fn grow_integrated_limb(
     c: &mut Creature,
     cfg: &Config,
