@@ -1,17 +1,23 @@
 //! What the scoring kernel records of elites' trials, per elite and in total.
-//! Replays elites spread over the archive's rank order on the GPU engine
-//! (the scoring kernel with recording) and prints the distance of the replay
-//! beside the archive's, the body, the fall time, the share of steps with no
-//! node on the ground, the largest ground push on one node, the lowest muscle
-//! energy store and the steps with a joint past its break angle.
-//! Diagnostic only.
+//! The audit replays elites spread evenly over the archive's rank order on the
+//! GPU engine (the scoring kernel with recording). Per elite it prints the
+//! distance of the replay beside the archive's, the body (nodes, muscles and
+//! mass), the fall time, the share of steps with no node on the ground, the
+//! largest ground push on one node, the lowest muscle energy store and the
+//! share of steps with a joint past its break angle. It ends with the share of
+//! the replayed muscles that have an elastic tendon.
 //!
 //! The GPU kernel does not expose solver ledgers (muscle work, energy the
 //! solver gained or lost, the momentum balance, friction that pushed a node
 //! the way it slid, cost of transport, bone load), so the audit has no such
-//! columns.
-//! With `random` in place of a checkpoint it audits a random first generation.
+//! columns. It is a diagnostic only.
+//!
 //! Usage: cargo run --release --example physics_audit <checkpoint.evo|random> [count]
+//! `count` is the number of elites to replay (24 by default). With `random` in
+//! place of a checkpoint the audit takes a random first generation of `count`
+//! creatures, and its archive column is 0. `EVOLUTION_ISLAND=<n>` audits the
+//! elites of island `n` (an index into `Experiment::islands`) in place of the
+//! global archive's.
 mod common;
 use evolution_simulator::{config::Config, physics, storage};
 
@@ -33,7 +39,8 @@ fn main() -> anyhow::Result<()> {
             (cfg, list)
         } else {
             let e = storage::load(std::path::Path::new(&path))?;
-            // EVOLUTION_ISLAND=n audits island n's elites in place of the global archive's.
+            // `EVOLUTION_ISLAND=n` audits island n's elites in place of the
+            // global archive's.
             let archive = match std::env::var("EVOLUTION_ISLAND")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
@@ -52,8 +59,10 @@ fn main() -> anyhow::Result<()> {
         screen: None,
         ..config
     };
+    // Rank 0 is the elite with the longest distance in the archive.
     creatures.sort_by(|a, b| b.0.total_cmp(&a.0));
     let elites = creatures;
+    // The engine must stay open: it records the replays below.
     let _engine = common::open()?;
     println!(
         "{} elites; replaying {count} spread over the rank order",
@@ -65,6 +74,7 @@ fn main() -> anyhow::Result<()> {
     let (mut tendon_muscles, mut all_muscles) = (0usize, 0usize);
     let mut replayed = 0usize;
     for k in 0..count {
+        // Ranks from the best elite to the worst, in even steps.
         let rank = (elites.len() - 1) * k / (count - 1).max(1);
         let (archive_m, c) = &elites[rank];
         let recording = common::record(c, &cfg)?;
@@ -74,7 +84,8 @@ fn main() -> anyhow::Result<()> {
         let (mut free, mut broken_steps, mut steps) = (0usize, 0usize, 0usize);
         let (mut max_ground, mut min_store) = (0.0f32, 1.0f32);
         if let Some(forces) = &recording.forces {
-            // The first frames repeat the start pose in the air, by design.
+            // The first `settle` frames only show the start pose, with no
+            // ground push, so every count leaves them out.
             let settle = cfg.fidelity().settle() as usize;
             steps = forces.ground.len().saturating_sub(settle);
             free = forces
