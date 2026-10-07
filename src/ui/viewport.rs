@@ -266,10 +266,14 @@ impl App {
         }
     }
     /// The scene's frame of reference for this frame: the painter, the camera's
-    /// origin and the ground of the world the replay ran in.
+    /// origin, the ground of the world the replay ran in, and the range of
+    /// meters on screen.
     fn scene_frame(&self, ui: &egui::Ui, rect: Rect) -> SceneFrame<'_> {
+        // The scene is made of egui shapes, which egui batches into its wgpu
+        // render pass.
         let painter = ui.painter_at(rect);
-        // All scene primitives are tessellated into egui's batched wgpu render pass.
+        // The world point (`camera[0]`, `camera[1]`) is at the middle of the
+        // view across and `GROUND_SHARE` of its height up from the bottom.
         let origin = Pos2::new(
             rect.center().x - self.camera[0] * self.zoom,
             rect.bottom() - rect.height() * GROUND_SHARE + self.camera[1] * self.zoom,
@@ -286,7 +290,7 @@ impl App {
             .as_ref()
             .map_or(0.0, |p| p.tick as f32 / physics::rate() as f32);
         // The replay's own creature decides the earthquake ground, through
-        // the same id hash the engines use.
+        // the same id hash the kernel uses.
         let quake_hash = self
             .playback
             .as_ref()
@@ -326,8 +330,9 @@ impl App {
             right,
         }
     }
-    /// Paints the replay's scene under the HUD: sky, ground, water, the
-    /// creature and the weather over it.
+    /// Paints the replay's scene under the HUD, from back to front: the sky
+    /// and the grid, the ground, the water, the ruler, the creature, the
+    /// weather over it and a film look.
     fn paint_scene(&self, ctx: &egui::Context, f: &SceneFrame) {
         let painter = &f.painter;
         let rect = f.rect;
@@ -343,7 +348,8 @@ impl App {
         crate::theme::vignette(painter, rect, 0.55);
         crate::theme::grain(painter, rect, clock, 0.055);
     }
-    /// The backdrop, the sky and the one-meter grid lines.
+    /// The backdrop with its skyline, the effects in the sky over it, and a
+    /// faint vertical line at every meter.
     fn paint_sky_and_grid(&self, f: &SceneFrame) {
         let painter = &f.painter;
         let rect = f.rect;
@@ -402,10 +408,10 @@ impl App {
         let world = |x: f32, y: f32| f.world(x, y);
         let height_at = |x: f32, with_hurdles: bool| f.height_at(x, with_hurdles);
         if cfg.ground {
-            // Sample the ground every few pixels (flat ground needs only its
-            // ends) and fill down to the frame with the world's street.
-            // Pits carve notches into the polyline; mud draws its sunk layer
-            // `mud` meters below the surface line.
+            // Sample the ground every 4 pixels (flat ground needs only its two
+            // ends) and let `ground_body` fill it down to the bottom of the
+            // view. Pits show as notches in the polyline. Mud draws its sunk
+            // layer `mud` meters below the surface line.
             let flat = amplitude == 0.0 && slope == 0.0 && gaps == 0.0 && hurdles == 0.0;
             let step = if flat {
                 (end - start).max(0.01)
@@ -427,6 +433,8 @@ impl App {
             }
             crate::world_fx::ground_body(painter, rect, cfg, &line, &meters, self.zoom);
             if mud > 0.0 {
+                // The mud: a band under the surface, an edge along its lower
+                // side and a sheen along the surface.
                 let fill = crate::theme::scene::MUD;
                 for i in 0..line.len().saturating_sub(1) {
                     painter.add(egui::Shape::convex_polygon(
@@ -445,6 +453,7 @@ impl App {
                     Stroke::new(1.5, crate::theme::scene::MUD_SHEEN),
                 ));
             }
+            // The ground's edge, with a dark shade line just under it.
             let shade: Vec<Pos2> = line.iter().map(|p| *p + Vec2::new(0., 2.)).collect();
             painter.add(egui::Shape::line(
                 shade,
@@ -453,6 +462,9 @@ impl App {
             painter.add(egui::Shape::line(line, Stroke::new(1.5, GROUND_EDGE)));
             crate::world_fx::structures(painter, rect, cfg, &world, &height_at, (start, end));
             let surface = |sx: f32| world(0., height_at((sx - origin.x) / self.zoom, true)).y;
+            // A node whose underside is less than 6 cm plus the mud depth above
+            // the ground is a foot. Its speed is how far it moved since the
+            // previous frame, in pixels per second.
             let feet: Vec<crate::world_fx::Foot> = self
                 .playback
                 .as_ref()
@@ -490,7 +502,9 @@ impl App {
             );
         }
     }
-    /// The water level of a flooded world.
+    /// The water of a flooded world, up to the line `cfg.water` meters above
+    /// the flat ground. `world_fx::water` paints nothing when the water effect
+    /// is calm.
     fn paint_water(&self, f: &SceneFrame) {
         let painter = &f.painter;
         let rect = f.rect;
@@ -508,14 +522,15 @@ impl App {
             self.zoom,
         );
     }
-    /// A tick every meter along the ground, with a label now and then.
+    /// A tick at every meter on the line at height 0, with a label every few
+    /// meters.
     fn paint_ruler(&self, f: &SceneFrame) {
         let painter = &f.painter;
         let left = f.left;
         let right = f.right;
         let world = |x: f32, y: f32| f.world(x, y);
-        // A tick every meter, a label every 1, 2, 5 or 10 m so labels
-        // never run into each other.
+        // A tick at every meter. A label at every 1, 2, 5, 10, 20 or 50 m,
+        // the smallest of these that keeps labels 48 pixels apart.
         let every = [1, 2, 5, 10, 20]
             .into_iter()
             .find(|&n| n as f32 * self.zoom >= 48.)
@@ -534,7 +549,8 @@ impl App {
             }
         }
     }
-    /// The creature of the replay with its trail and contact shadows.
+    /// The creature of the replay with its center-of-mass trail and its
+    /// contact shadows. `ctx` holds the texture of the shadows.
     fn paint_replay_creature(&self, ctx: &egui::Context, f: &SceneFrame) {
         let painter = &f.painter;
         let origin = f.origin;
@@ -892,21 +908,39 @@ impl App {
 /// What the scene's painting methods share in one frame: the painter, the
 /// camera and the world's ground.
 struct SceneFrame<'a> {
+    /// Paints inside `rect`.
     painter: egui::Painter,
+    /// The area of the scene on screen.
     rect: Rect,
+    /// The screen position of the world point (0, 0).
     origin: Pos2,
+    /// Pixels per meter.
     zoom: f32,
+    /// The world to paint: the replay's own, or the settings' world when
+    /// there is no replay.
     cfg: &'a Config,
+    /// The replay clock in seconds, 0 without a replay.
     clock: f32,
+    /// Bump height of the ground (m): the roughness level plus the earthquake
+    /// bumps of the replay's creature.
     amplitude: f32,
+    /// Rise over run of the ground, 0 in a world without ground.
     slope: f32,
+    /// Opening of the pits (m), 0 in a world without ground.
     gaps: f32,
+    /// Height of the hurdles (m), 0 in a world without ground.
     hurdles: f32,
+    /// Depth of the mud (m), 0 in a world without ground.
     mud: f32,
+    /// Phase of the bumps in wave turns, 0 without an earthquake.
     phase: f32,
+    /// The world x (m) at the left edge of the scene.
     start: f32,
+    /// The world x (m) at the right edge of the scene.
     end: f32,
+    /// `start` rounded down to a whole meter.
     left: i32,
+    /// `end` rounded up to a whole meter.
     right: i32,
 }
 impl SceneFrame<'_> {
