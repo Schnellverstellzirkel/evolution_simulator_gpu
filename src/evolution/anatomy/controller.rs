@@ -5,7 +5,7 @@
 //! muscles (a stroke longer than zero), except `shift_gait_start`,
 //! `reflex_reset_shift` and `release_touchdown`, which reach passive muscles
 //! too. All but `shift_gait_start` share the `CONTROLLER_SLOT` pick slot in
-//! `mod.rs`.
+//! `anatomy/mod.rs`.
 use super::limbs::{limb_roots, pick};
 use super::{BoneIds, Context, MuscleIds, branch, muscles_on};
 use crate::config::Config;
@@ -207,10 +207,13 @@ pub(crate) fn retune_muscle_pair(
     changed
 }
 
-/// Puts the muscles of a limb on a different clock: a simple multiple of the
-/// body's base clock (`CLOCK_RATIOS`), so the limb steps faster or slower than
-/// the rest and the whole gait still repeats exactly. Skipped when the change
-/// would leave some muscle at a ratio outside that set.
+/// Puts the active muscles of a limb on a different clock. The new period is
+/// that of the first muscle that is not one of them times one of
+/// `CLOCK_RATIOS`, so the limb steps faster or slower than the rest and the
+/// whole gait still repeats exactly. Skipped when there is no such muscle,
+/// when the period is out of range or already the limb's, or when some muscle
+/// would no longer run at one of the ratios of the base clock (the first
+/// muscle's period).
 pub(crate) fn limb_clock_ratio(
     c: &mut Creature,
     _cfg: &Config,
@@ -224,7 +227,7 @@ pub(crate) fn limb_clock_ratio(
     let Some(anchor) = (0..c.muscles.len()).find(|i| !limb.contains(i)) else {
         return false;
     };
-    // The rest of the body's clock is the reference the ratio applies to.
+    // The first muscle outside the limb gives the clock the ratio applies to.
     let period = c.muscles[anchor].period * CLOCK_RATIOS[rng.index(CLOCK_RATIOS.len())];
     if !(min_muscle_period()..=10.0).contains(&period)
         || limb.iter().all(|&i| c.muscles[i].period == period)
@@ -235,6 +238,8 @@ pub(crate) fn limb_clock_ratio(
     for &i in &limb {
         periods[i] = period;
     }
+    // `repair` keeps a period that is a ratio of the first muscle's, so the
+    // check uses the same base and a repaired body keeps its limb clocks.
     let base = periods[0];
     let in_set = |p: f32| {
         CLOCK_RATIOS
@@ -250,12 +255,14 @@ pub(crate) fn limb_clock_ratio(
     true
 }
 
-/// Starts the same gait at another point of its cycle: every muscle's clock
-/// moves ahead by one common time, so the steady gait is unchanged and only
-/// the start differs. On the best elites of a 120-generation save, 83 of 124
-/// parent-to-child jumps of 1.5x and 10 m or more were reached again by one of
-/// 7 start offsets of the parent alone, and an offset left the top 100 at a
-/// median 8% of their distance: whether a gait catches depends on its start.
+/// Starts the same gait at another point of its cycle. Every muscle's clock
+/// moves ahead by one common time, 5 to 95% of the longest period, passive
+/// muscles too. The steady gait is unchanged and only the start differs. On
+/// the best elites of a 120-generation save, 83 of 124 parent-to-child jumps
+/// of 1.5x and 10 m or more were reached again (to 90% of the child's
+/// distance) by one of 7 start offsets of the parent alone. An offset left the
+/// top 100 at a median 8% of their distance. So whether a gait gets going
+/// depends on its start.
 pub(crate) fn shift_gait_start(
     c: &mut Creature,
     _cfg: &Config,
@@ -272,7 +279,9 @@ pub(crate) fn shift_gait_start(
     true
 }
 
-/// Puts every muscle of a limb back on the body's base clock.
+/// Puts every active muscle of a limb back on the body's base clock, which is
+/// the first muscle's period. It picks a limb that has an active muscle off
+/// that clock.
 pub(crate) fn limb_clock_lock(
     c: &mut Creature,
     _cfg: &Config,
@@ -308,9 +317,9 @@ fn sensable_feet(c: &Creature, m: &crate::evolution::Muscle) -> Bounded<u32, 4> 
         .collect()
 }
 
-/// A muscle without a sensor starts to sense the touchdown of a foot at one
-/// of its ends, with a random cycle position to restart at: a reflex that
-/// fires the muscle when its foot lands.
+/// An active muscle without a sensor starts to sense the touchdown of a foot
+/// at the end of one of its two bones, with a random cycle position to restart
+/// at. Each time that foot lands, the muscle's cycle jumps to that position.
 pub(crate) fn reflex_on_muscle(
     c: &mut Creature,
     _cfg: &Config,
@@ -332,8 +341,10 @@ pub(crate) fn reflex_on_muscle(
     true
 }
 
-/// Every active muscle with an end on a foot senses that foot's touchdown,
-/// all at once, keeping the muscles' phase order in their reset positions.
+/// Every active muscle with a foot at the end of one of its two bones senses
+/// the touchdown of the first such foot, replacing any sensor it had. Each
+/// reset position is the muscle's phase plus one common random shift, so the
+/// muscles keep their spacing in the cycle.
 pub(crate) fn reflex_all_feet(
     c: &mut Creature,
     _cfg: &Config,
@@ -358,9 +369,10 @@ pub(crate) fn reflex_all_feet(
     changed
 }
 
-/// Moves the reset position of every sensing muscle on a limb by one step (5
-/// to 25% of a cycle), so the reflex restarts the limb earlier or later in
-/// its cycle without changing its clock.
+/// Moves the reset position of every muscle with a sensor and an end on a
+/// limb by one step (5 to 25% of a cycle, forward or back), so the reflex
+/// restarts the limb earlier or later in its cycle without changing its
+/// clock. Passive muscles count too.
 pub(crate) fn reflex_reset_shift(
     c: &mut Creature,
     _cfg: &Config,
@@ -388,8 +400,9 @@ pub(crate) fn reflex_reset_shift(
     true
 }
 
-/// Clears the touchdown sensors of every muscle on a limb that has any, so
-/// the limb runs on the clock alone (the reverse of `touchdown_package`).
+/// Picks a limb with a touchdown sensor and clears the sensors of every muscle
+/// with an end on it, passive muscles too, so the limb runs on the clock alone
+/// (the reverse of `touchdown_package`).
 pub(crate) fn release_touchdown(
     c: &mut Creature,
     _cfg: &Config,
@@ -414,8 +427,9 @@ pub(crate) fn release_touchdown(
 }
 
 /// Rounds the phases of a limb's active muscles to the nearest eighth of a
-/// cycle, measured from the limb's first muscle, so near-alternations become
-/// exact ones and the limb's steps line up on a regular grid.
+/// cycle, measured from the limb's first muscle, which keeps its phase. So
+/// near-alternations become exact ones and the limb's steps line up on a
+/// regular grid. A limb needs two or more active muscles.
 pub(crate) fn snap_limb_phases(
     c: &mut Creature,
     _cfg: &Config,
@@ -447,6 +461,10 @@ mod tests {
     use super::super::{Operator, tests::grown};
     use super::*;
 
+    /// Applies `op` to a copy of each body with its own random stream and
+    /// returns how many it changed. A changed body keeps its skeleton and its
+    /// muscle count and goes to `check` with the original. A body the operator
+    /// reports unchanged must keep its muscles.
     fn run(op: Operator, bodies: &[Creature], check: impl Fn(&Creature, &Creature)) -> usize {
         let cfg = Config::default();
         let mut applied = 0;
@@ -465,12 +483,15 @@ mod tests {
         applied
     }
 
+    /// The muscles that differ between two bodies with the same muscle count.
     fn changed(before: &Creature, after: &Creature) -> Vec<usize> {
         (0..before.muscles.len())
             .filter(|&i| before.muscles[i] != after.muscles[i])
             .collect()
     }
 
+    /// Whether the active muscles of some limb of `before` include every
+    /// muscle in `changed`.
     fn on_one_limb(before: &Creature, changed: &[usize]) -> bool {
         limb_roots(before).into_iter().any(|root| {
             let on = active_on(before, root);
