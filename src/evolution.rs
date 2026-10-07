@@ -1,3 +1,9 @@
+//! A `Creature` holds the genes of one body, a `StoredCreature` packs it for
+//! the archives, and a `Population` holds the bodies of a ring block. The
+//! module also has the counter-based `Rng`, `repair`, the noise on genes,
+//! crossover and the classic structural operators, and `anatomy` has the other
+//! structural operators. `storage` plans each child as a `CandidatePlan`, and
+//! `Population::breed` turns the plans of a block into bodies.
 pub use crate::bounded::Bounded;
 use crate::config::Config;
 use crate::qd::{self, CmaEmitter, Emitter, QdArchive};
@@ -27,23 +33,34 @@ pub fn min_muscle_period() -> f32 {
     crate::physics::limits().min_period
 }
 
+/// The genes of one node, a point mass of the body.
 #[repr(C)]
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, PartialEq, bytemuck::Pod, bytemuck::Zeroable,
 )]
 pub struct NodeGene {
+    /// Horizontal position (m) in the body's starting shape.
     pub x: f32,
+    /// Height (m) in the body's starting shape.
     pub y: f32,
+    /// Diameter (m), kept within `Config::min_size` and `Config::max_size`.
     pub diameter: f32,
+    /// Friction coefficient, kept within `Config::min_friction` and
+    /// `Config::max_friction`.
     pub friction: f32,
 }
+/// The genes of one bone, a rigid link from node `a` to node `b` with a joint
+/// range and an optional organ.
 #[repr(C)]
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, PartialEq, bytemuck::Pod, bytemuck::Zeroable,
 )]
 pub struct Bone {
+    /// The parent node, the end nearer the head.
     pub a: u32,
+    /// The child node.
     pub b: u32,
+    /// Length (m) of the bone.
     pub rest_length: f32,
     /// Joint range at node `a` (radians), measured from the starting pose:
     /// how far this bone may turn clockwise (`min_angle`, <= 0) and
@@ -51,6 +68,7 @@ pub struct Bone {
     /// Both stay within `JOINT_LIMIT`, so no joint can spin all the way round.
     #[serde(default = "joint_min")]
     pub min_angle: f32,
+    /// The counterclockwise limit of the joint range (see `min_angle`).
     #[serde(default = "joint_max")]
     pub max_angle: f32,
     /// Mass (kg) of the organ this bone carries; zero without an organ.
@@ -60,12 +78,12 @@ pub struct Bone {
     #[serde(default = "organ_middle")]
     pub organ_at: f32,
 }
-/// Organ masses (kg). A new organ starts light so it barely changes the gait.
+/// Lightest organ (kg). A new organ starts light so it barely changes the gait.
 pub const MIN_ORGAN_MASS: f32 = 0.01;
+/// Heaviest organ (kg).
 pub const MAX_ORGAN_MASS: f32 = 0.3;
-/// Organs sit within this distance (m) of the body's center of mass in the
-/// starting pose, measured without organs and without the head, so they stay
-/// inside the body instead of weighting the tips of limbs.
+/// Organs sit within this distance (m) of `organ_center` in the starting pose,
+/// so they stay inside the body instead of weighting the tips of limbs.
 pub const ORGAN_RADIUS: f32 = 0.5;
 fn organ_middle() -> f32 {
     0.5
@@ -91,14 +109,16 @@ impl Bone {
             organ_at: 0.5,
         }
     }
-    /// Keeps the joint range valid.
+    /// Clamps `min_angle` to `-JOINT_LIMIT..=0` and `max_angle` to
+    /// `0..=JOINT_LIMIT`.
     pub fn clamp_range(&mut self) {
         self.min_angle = self.min_angle.clamp(-JOINT_LIMIT, 0.0);
         self.max_angle = self.max_angle.clamp(0.0, JOINT_LIMIT);
     }
 }
-/// Center of mass of the starting pose without the head (node 0) and
-/// without organs: the point organs must stay near.
+/// The mass-weighted center of the nodes other than the head (node 0) in the
+/// starting pose, without bone or organ masses: the point organs must stay
+/// near.
 pub fn organ_center(nodes: &[NodeGene]) -> [f32; 2] {
     let body = if nodes.len() > 1 { &nodes[1..] } else { nodes };
     let mut sum = [0.0f32; 2];
@@ -180,15 +200,20 @@ fn change_organ(creature: &mut Creature, rng: &mut Rng) -> bool {
     bone.organ_at = rng.range(low, high);
     true
 }
+/// The genes of one muscle, which pulls a point on one bone toward a point on
+/// another bone in a rhythm.
 #[repr(C)]
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, PartialEq, bytemuck::Pod, bytemuck::Zeroable,
 )]
 pub struct Muscle {
+    /// Index of the first bone it pulls, in `Creature::bones`.
     pub bone_a: u32,
+    /// Index of the second bone it pulls.
     pub bone_b: u32,
     /// Attachment positions measured from each bone's `a` endpoint.
     pub anchor_a: f32,
+    /// The attachment position on `bone_b`.
     pub anchor_b: f32,
     /// Shortest contraction length (m).
     pub short: f32,
@@ -200,6 +225,7 @@ pub struct Muscle {
     pub phase: f32,
     /// Fraction of cycle the muscle is active, 0 to 1.
     pub duty: f32,
+    /// Factor on the muscle's drive, 1 to 120.
     pub stiffness: f32,
     /// Which of the four attachment endpoints (bone_a.a, bone_a.b, bone_b.a,
     /// bone_b.b) senses touchdowns, or `NO_SENSOR`.
@@ -222,30 +248,48 @@ pub const NO_SENSOR: u32 = 255;
 fn no_sensor() -> u32 {
     NO_SENSOR
 }
+/// Where one creature's genes lie in a `Population`: the first index and the
+/// count in each gene array, and the creature's id.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Genome {
+    /// Index of the creature's first node in `Population::nodes`.
     pub node_start: usize,
+    /// Number of nodes.
     pub node_count: usize,
+    /// Index of the creature's first bone in `Population::bones`.
     pub bone_start: usize,
+    /// Number of bones.
     pub bone_count: usize,
+    /// Index of the creature's first muscle in `Population::muscles`.
     pub muscle_start: usize,
+    /// Number of muscles.
     pub muscle_count: usize,
+    /// The creature's id (`bred_id` for a bred creature).
     pub id: u64,
 }
 /// Most nodes a body may have (`Config::max_nodes` is at most this).
 pub const MAX_NODES: usize = 32;
 /// Most muscles a body may have (`Config::max_muscles` is at most this).
 pub const MAX_MUSCLES: usize = 96;
+/// The nodes of one body, held inline. Node 0 is the head.
 pub type Nodes = Bounded<NodeGene, MAX_NODES>;
+/// The bones of one body, held inline. A body of n nodes has n - 1 bones.
 pub type Bones = Bounded<Bone, MAX_NODES>;
+/// The muscles of one body, held inline.
 pub type Muscles = Bounded<Muscle, MAX_MUSCLES>;
 /// A body's genes, held inline in bounded arrays: a creature is about 6.4 KB
-/// and breeding one never allocates.
+/// and its genes need no heap allocation of their own. Breeding a child still
+/// allocates in places. For example, several gait operators in `anatomy`
+/// build `Vec` scratch lists.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Creature {
+    /// The nodes. Node 0 is the head.
     pub nodes: Nodes,
+    /// The bones, which `repair` keeps in parent-first order.
     pub bones: Bones,
+    /// The muscles, each joining two bones.
     pub muscles: Muscles,
+    /// The creature's id (`bred_id` for a bred creature).
     pub id: u64,
 }
 /// `clone_from` copies only the genes in use into the existing arrays, where
@@ -272,12 +316,15 @@ impl Clone for Creature {
 /// them. It serializes as a `Creature`, so saves do not change.
 #[derive(Clone, Debug, Default)]
 pub struct StoredCreature {
+    /// The creature's id.
     pub id: u64,
     node_n: u32,
     bone_n: u32,
+    /// The nodes, then the bones, then the muscles, as 32-bit words.
     genes: Box<[u32]>,
 }
 impl StoredCreature {
+    /// Packs a copy of `creature`'s genes.
     pub fn new(creature: &Creature) -> Self {
         Self::from_parts(
             creature.id,
@@ -304,9 +351,11 @@ impl StoredCreature {
             genes: genes.into_boxed_slice(),
         }
     }
+    /// Number of nodes.
     pub fn node_count(&self) -> usize {
         self.node_n as usize
     }
+    /// Number of bones.
     pub fn bone_count(&self) -> usize {
         self.bone_n as usize
     }
@@ -316,6 +365,7 @@ impl StoredCreature {
         let bones_end = nodes_end + self.bone_n as usize * (std::mem::size_of::<Bone>() / 4);
         bytemuck::cast_slice(&self.genes[nodes_end..bones_end])
     }
+    /// Number of muscles, from the words left after the nodes and the bones.
     pub fn muscle_count(&self) -> usize {
         let used = self.node_n as usize * (std::mem::size_of::<NodeGene>() / 4)
             + self.bone_n as usize * (std::mem::size_of::<Bone>() / 4);
@@ -347,6 +397,7 @@ impl StoredCreature {
             .extend_from_slice(bytemuck::cast_slice(&self.genes[bones_end..]));
         creature.id = self.id;
     }
+    /// The genes as a whole `Creature`.
     pub fn unpack(&self) -> Creature {
         let mut creature = Creature::default();
         self.unpack_into(&mut creature);
