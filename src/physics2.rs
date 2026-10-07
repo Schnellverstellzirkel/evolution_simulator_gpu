@@ -1,60 +1,62 @@
-//! The physics model of a creature: the constants the CUDA kernel is built
-//! with and `Model`, the creature's constants and starting pose, from which
-//! `kernel::pack` fills the kernel's records.
-//!
-//! `Model` numbers the nodes so that bone `j` ends at node `j + 1` and node 0
-//! is the head. The start pose comes from the bones' rest angles, with the
-//! center of mass over x = 0 and the lowest node on the ground.
-//! `docs/physics.md` describes the dynamics the kernel runs.
+//! This module holds the physics constants and `Model`, a creature's
+//! constants and start pose. `kernel::pack` fills the CUDA kernel's records
+//! from a `Model`, and `docs/physics.md` describes the dynamics the kernel
+//! runs. `Model` numbers the nodes so that bone `j` ends at node `j + 1` and
+//! node 0 is the head. The start pose comes from the bones' rest angles, with
+//! the center of mass over x = 0 and the lowest node on the ground.
 use crate::{
     config::Config,
     evolution::{Creature, NO_SENSOR},
     physics,
 };
 
-/// Passive joint damping as a time constant (s): every joint resists its
-/// relative rotation like tissue does, with a damper sized to the inertia the
-/// joint moves.
+/// The time constant (s) of passive joint damping. Each substep the kernel
+/// takes the share `substep / time constant` of every joint's turning speed,
+/// with equal and opposite pushes that keep the body's momentum.
 pub fn joint_damping() -> f32 {
     0.1
 }
-/// Hill's force-velocity relation: a muscle's active pull falls linearly
-/// with its shortening speed and vanishes at this many of its own lengths per
-/// second. It bounds a muscle's power the way real muscle does, so a body
+/// The shortening speed, in muscle lengths per second, at which a muscle's
+/// active pull is zero (Hill's force-velocity relation). The pull falls
+/// linearly with the speed. A muscle's length here is its longest length, at
+/// least 5 cm. This bounds a muscle's power as real muscle does, so a body
 /// cannot catapult itself.
 pub fn hill_speed() -> f32 {
     8.0
 }
 /// The largest acceleration (m/s^2) a muscle can give the mass it drives.
-/// A muscle's cross-section, and so its force, grows with the mass it moves:
-/// force cap = `DRIVEN_ACCELERATION` x the lighter of the two subtrees it
-/// pulls together (a bone and everything it carries), never above the fixed
-/// `Limits` cap, and its energy store scales the same way (a muscle's store
-/// is its own mass). Before, a 100 N muscle drove a 0.05 kg limb at 2,000
-/// m/s^2, turned a bone about a radian in one step and made momentum and
-/// energy the integrator did not pay for (docs/physics.md).
+/// A muscle's cross-section, and so its force, grows with the mass it moves.
+/// Its force cap is `DRIVEN_ACCELERATION` times the lighter of the two
+/// subtrees it pulls together (a bone and everything it carries), never above
+/// the fixed `Limits` cap. Its energy store scales the same way, because a
+/// muscle's store is its own mass. Without this scaling the fixed cap would
+/// drive a light limb at thousands of m/s^2.
 pub const DRIVEN_ACCELERATION: f32 = 200.0;
-/// Air drag on bones (N per m^3/s^2 of length x width): every bone feels
-/// `AIR_DRAG x length x width x speed x velocity` against its midpoint's
-/// velocity, with the width the mean diameter of its two nodes (a flat plate
-/// in the flow: half the air's density, 1.2 kg/m^3, times a drag coefficient
-/// of 1). Large fast bodies pay for moving air; it only takes energy away.
+/// Air drag on bones (kg/m^3). Every bone feels a force of
+/// `AIR_DRAG x length x width x speed x velocity` against the velocity of its
+/// midpoint, with the width the mean diameter of its two nodes. This is a
+/// flat plate in the flow: half the air's density (1.2 kg/m^3) times a drag
+/// coefficient of 1. One substep never takes more than half the bone's speed.
+/// Large fast bodies pay for moving air, and the drag only takes energy away.
 pub const AIR_DRAG: f32 = 0.6;
-/// Water drag on a submerged bone (N per m^3/s^2 of length x width): the same
-/// law as the air's, with a much thicker medium (about a third of half the
-/// water's density over the air's: water resists motion across a bone far
-/// more than a body's own bones resist air). A bone's sideways motion pays
-/// the full price, its lengthwise motion `WATER_ALONG` of it, so a stroke that
-/// pushes water sideways has a net reaction and a reciprocal stroke does not
-/// cancel itself (a fish tail). The push is limited like the air's.
+/// Water drag on a submerged bone (kg/m^3): the same law as the air's, in a
+/// much thicker medium. The value is a fifth of half the water's density
+/// (1,000 kg/m^3). The drag scales with the share of the bone under water. A
+/// bone's sideways motion pays the full price and its lengthwise motion
+/// `WATER_ALONG` of it. So a stroke that pushes water sideways has a net
+/// reaction, and a reciprocal stroke does not cancel itself (a fish tail).
+/// The push is limited like the air's.
 pub const WATER_DRAG: f32 = 100.0;
 /// The share of `WATER_DRAG` a bone meets moving along its own length.
 pub const WATER_ALONG: f32 = 0.25;
-/// A fully submerged node feels this share of its weight as buoyancy.
+/// A fully submerged node feels this share of its weight as buoyancy. A node
+/// partly under water feels it times the submerged share of its diameter.
 pub const WATER_BUOYANCY: f32 = 0.7;
-/// Contact tolerance for the behavior metrics (m), as the current engine.
+/// How far (m) above its resting height on the ground a node may be and still
+/// count as touching the ground in the behavior metrics.
 pub(crate) const CONTACT_SLACK: f32 = 0.002;
-/// Height (m) above the ground at which a lifted node is considered airborne.
+/// How far (m) above its resting height on the ground a node must be to count
+/// as lifted in the behavior metrics.
 pub(crate) const LIFT_CLEARANCE: f32 = 0.01;
 
 /// One muscle's constants.
@@ -64,35 +66,40 @@ pub(crate) struct MuscleModel {
     pub(crate) bone_a: usize,
     /// Index of the second bone this muscle pulls.
     pub(crate) bone_b: usize,
-    /// Anchor point along `bone_a` (0 to 1 along bone length).
+    /// Anchor point along `bone_a` (0 to 1 from its pivot node to its child).
     pub(crate) anchor_a: f32,
-    /// Anchor point along `bone_b` (0 to 1 along bone length).
+    /// Anchor point along `bone_b` (0 to 1 from its pivot node to its child).
     pub(crate) anchor_b: f32,
-    /// Hill's relation as a factor on the shortening speed: 1 / (v_max
-    /// times the muscle's length, at least 5 cm).
+    /// Hill's relation as a factor on the shortening speed: 1 / (`hill_speed()`
+    /// times the muscle's longest length, at least 5 cm).
     pub(crate) hill: f32,
-    /// Longest length (m), where the elastic tendon starts to pull, and the
-    /// tendon's stiffness (N/m; 0 without one).
+    /// Slack length (m): the muscle's longest length, or its length in the
+    /// start pose when that is longer. The elastic tendon starts to pull here.
     pub(crate) long: f32,
+    /// Stiffness of the elastic tendon (N/m), 0 without one.
     pub(crate) tendon_k: f32,
-    /// Maximum contraction distance (m) during one cycle.
+    /// Contraction distance (m) of one cycle. It is the muscle's stroke, cut
+    /// to what `Limits::muscle_speed` allows.
     pub(crate) amplitude: f32,
-    /// Inverse of muscle contraction period (1/s).
+    /// Inverse of the cycle period (1/s).
     pub(crate) inv_period: f32,
+    /// Rhythm start phase, 0 to 1.
     pub(crate) phase: f32,
-    /// Fraction of cycle during active contraction.
+    /// Fraction of the cycle during active contraction.
     pub(crate) duty: f32,
-    /// Inverse of duty cycle.
+    /// Inverse of `duty`.
     pub(crate) inv_duty: f32,
     /// Inverse of the inactive fraction (1 - duty).
     pub(crate) inv_complement: f32,
+    /// Factor on the muscle's drive.
     pub(crate) stiffness: f32,
     /// Force cap and energy store over the fixed `Limits` ones (at most 1):
-    /// see `DRIVEN_ACCELERATION`.
+    /// see `DRIVEN_ACCELERATION`. Muscles on the same two bones and the same
+    /// side of the joint divide it.
     pub(crate) strength: f32,
     /// Node whose touchdown restarts the rhythm, if any.
     pub(crate) sensor: Option<usize>,
-    /// Phase offset to apply on sensor contact.
+    /// Rhythm phase the muscle jumps to when its sensor touches down.
     pub(crate) reset: f32,
 }
 
@@ -103,35 +110,46 @@ pub(crate) struct MuscleModel {
 pub struct Model {
     /// Mass of each node (kg).
     pub(crate) mass: Vec<f32>,
+    /// Radius of each node (m).
     pub(crate) radius: Vec<f32>,
     /// Friction coefficient of each node.
     pub(crate) friction: Vec<f32>,
     /// Sum of all node masses (kg).
     pub(crate) total_mass: f32,
+    /// One over `total_mass`.
     pub(crate) inv_mass: f32,
-    /// Per bone: pivot node, child node (always the bone's index plus one),
-    /// length, parent bone (`None` for the neck), and the relative-angle
-    /// range.
+    /// Pivot node of each bone, which is its parent node.
     pub(crate) pivot: Vec<usize>,
+    /// Child node of each bone, always the bone's index plus one.
     pub(crate) child: Vec<usize>,
+    /// Length of each bone (m).
     pub(crate) length: Vec<f32>,
+    /// Parent bone of each bone, `None` for the neck.
     pub(crate) parent: Vec<Option<usize>>,
+    /// Lowest relative angle (radians) of each bone's joint.
     pub(crate) lo: Vec<f32>,
+    /// Highest relative angle (radians) of each bone's joint.
     pub(crate) hi: Vec<f32>,
     /// Starting relative angle of every bone (the neck: its absolute angle).
     pub(crate) rest: Vec<f32>,
+    /// The constants of each muscle.
     pub(crate) muscles: Vec<MuscleModel>,
-    /// Each muscle's force cap and energy store as multiples of the fixed
-    /// `Limits` ones (1 unless muscle strength scales with the body).
+    /// A further factor on every muscle's `strength` in the kernel's records.
+    /// It is 1 for every body.
     pub(crate) muscle_scale: f32,
-    /// Earthquake bump phase and ground amplitude for this creature.
+    /// Phase of this creature's ground bumps, 0 without an earthquake.
     pub(crate) quake_phase: f32,
+    /// Height (m) of this creature's ground bumps: the terrain's plus the
+    /// earthquake's.
     pub(crate) amplitude: f32,
-    /// Starting position of each node (x, y coordinates).
+    /// Position (x, y) of each node in the creature's genes. The start state
+    /// takes the head's position from here.
     pub(crate) start: Vec<[f32; 2]>,
 }
 
-/// A creature's state: the head and the neck, then relative joint angles.
+/// A creature's state in joint coordinates: the head, the neck, then the
+/// relative angle of every other joint. `Model::kinematics` derives the
+/// absolute angles and the node positions and velocities from them.
 #[derive(Clone, Debug)]
 pub struct State {
     /// Head position (x, y).
@@ -142,42 +160,52 @@ pub struct State {
     pub(crate) th0: f32,
     /// Neck angular velocity (rad/s).
     pub(crate) w0: f32,
-    /// Relative joint angles (radians).
+    /// Relative joint angles (radians). The neck has no parent, so `th0` is
+    /// its angle and its entry here is not read.
     pub(crate) q: Vec<f32>,
-    /// Relative joint angular velocities (rad/s).
+    /// Relative joint angular velocities (rad/s). The neck's entry is not
+    /// read: `w0` is its rate.
     pub(crate) qd: Vec<f32>,
-    /// Derived by `kinematics`: absolute bone angles and rates, node
-    /// positions and velocities.
+    /// Absolute angle of each bone (radians), derived by `kinematics`.
     pub(crate) th: Vec<f32>,
+    /// Absolute angular velocity of each bone (rad/s), derived by
+    /// `kinematics`.
     pub(crate) om: Vec<f32>,
+    /// Position (x, y) of each node, derived by `kinematics`.
     pub(crate) pos: Vec<[f32; 2]>,
+    /// Velocity (x, y) of each node, derived by `kinematics`.
     pub(crate) vel: Vec<[f32; 2]>,
 }
 
-/// `a` wrapped into [-π, π).
+/// `a` (radians) wrapped into [-π, π).
 pub(crate) fn wrap(a: f32) -> f32 {
     let t = std::f32::consts::TAU;
     a - t * ((a + std::f32::consts::PI) / t).floor()
 }
 
 impl Model {
-    /// The model of a repaired creature (canonical bone order: bone `j`
-    /// joins its parent node `a` to its child node `b`, bone 0 is the neck).
+    /// The model of a repaired creature in canonical bone order: bone `j`
+    /// joins its parent node `a` to its child node `b`, and bone 0 is the
+    /// neck.
     pub fn new(c: &Creature, cfg: &Config) -> Model {
         let nodes = physics::nodes(c);
         let n = nodes.len();
-        // Node `j + 1` is bone `j`'s child.
+        // `order[r]` is the creature's node that becomes node `r`: the head,
+        // then each bone's child. So node `j + 1` is bone `j`'s child.
         let order: Vec<usize> = std::iter::once(0)
             .chain(c.bones.iter().map(|b| b.b as usize))
             .collect();
+        // The reverse of `order`: the number each creature node gets.
         let mut record = vec![0; n];
         for (r, &node) in order.iter().enumerate() {
             record[node] = r;
         }
+        // The bone that ends at each creature node.
         let mut parent_of_node = vec![None; n];
         for (j, b) in c.bones.iter().enumerate() {
             parent_of_node[b.b as usize] = Some(j);
         }
+        // The absolute angle of bone `j` in the creature's genes.
         let angle = |j: usize| {
             let b = c.bones[j];
             let (p, q) = (&c.nodes[b.a as usize], &c.nodes[b.b as usize]);
@@ -188,7 +216,7 @@ impl Model {
         let (mut lo, mut hi) = (Vec::new(), Vec::new());
         for (j, b) in c.bones.iter().enumerate() {
             // A bone at the head other than the neck turns against the neck,
-            // as its joint does in the current physics (`physics::joints`).
+            // as `physics::joint_reference` has it.
             let up = parent_of_node[b.a as usize].or((j > 0).then_some(0));
             parent.push(up);
             let relative = match up {
@@ -206,6 +234,8 @@ impl Model {
             .map(|m| {
                 let ba = c.bones[m.bone_a as usize];
                 let bb = c.bones[m.bone_b as usize];
+                // The four attachment nodes, in the order of the gene's
+                // `sensor`.
                 let ends = [ba.a, ba.b, bb.a, bb.b];
                 MuscleModel {
                     bone_a: m.bone_a as usize,
@@ -218,6 +248,8 @@ impl Model {
                         0.0
                     },
                     long: physics::slack_length(&c.bones, &nodes, m),
+                    // `tendon_k` and `strength` are set below, once the
+                    // masses the muscles drive are known.
                     tendon_k: 0.0,
                     amplitude: (m.long - m.short).min(
                         2.0 * limits.muscle_speed * m.period * m.duty.min(1.0 - m.duty)
@@ -238,6 +270,8 @@ impl Model {
             .collect();
         // Muscle strength follows the mass a muscle drives: the lighter of the
         // two subtrees (a bone with everything it carries) it pulls together.
+        // `subtree[j]` is that mass for bone `j`. The neck also carries the
+        // head.
         let mut muscles: Vec<MuscleModel> = muscles;
         let mut subtree: Vec<f32> = (0..c.bones.len())
             .map(|j| nodes[order[j + 1]].mass + if j == 0 { nodes[order[0]].mass } else { 0.0 })
@@ -272,13 +306,15 @@ impl Model {
             let sharing = groups.iter().filter(|&&g| g == key).count().max(1) as f32;
             m.strength = (DRIVEN_ACCELERATION * driven / limits.muscle_force).min(1.0) / sharing;
             // The tendon reaches the muscle's force cap when stretched by
-            // `TENDON_STRETCH` of its longest length (at the stiffest gene).
+            // `TENDON_STRETCH` of its slack length, at the stiffest gene
+            // (tendon 1).
             m.tendon_k = gene.tendon * limits.muscle_force * m.strength
                 / (crate::evolution::TENDON_STRETCH * m.long.max(0.05));
         }
         let quake = crate::physics::quake_hash(c.id);
+        // No earthquake bumps: the quake level is 0 or there is no ground.
         let still = cfg.quake <= 0.0 || !cfg.ground;
-        // Muscle strength over the fixed limits; 1 for every body today.
+        // A further factor on each muscle's strength. It is 1 for every body.
         let muscle_scale = 1.0;
         Model {
             mass: order.iter().map(|&i| nodes[i].mass).collect(),
@@ -313,7 +349,8 @@ impl Model {
         }
     }
 
-    /// The ground's height and slope under `x`.
+    /// The height and slope of this creature's ground under `x`. With no
+    /// ground the height is minus infinity.
     fn ground(&self, x: f32, cfg: &Config) -> (f32, f32) {
         if !cfg.ground {
             return (f32::NEG_INFINITY, 0.0);
@@ -328,8 +365,9 @@ impl Model {
         )
     }
 
-    /// The starting state: the creature's pose, its center of mass over
-    /// x = 0 and its lowest point on the ground, at rest.
+    /// The starting state: the creature's rest pose with no velocity, its
+    /// center of mass over x = 0 and its lowest point on the ground. Without a
+    /// ground the pose is not lowered.
     pub fn start(&self, cfg: &Config) -> State {
         let b = self.pivot.len();
         let mut s = State {
@@ -359,7 +397,8 @@ impl Model {
         s
     }
 
-    /// Absolute bone angles and rates, then node positions and velocities.
+    /// Fills in the absolute bone angles and rates, then the node positions
+    /// and velocities, from the joint coordinates of `s`.
     fn kinematics(&self, s: &mut State) {
         s.pos[0] = s.x0;
         s.vel[0] = s.v0;
@@ -377,7 +416,7 @@ impl Model {
         }
     }
 
-    /// The center of mass.
+    /// The center of mass (x, y) of the nodes in `s`.
     fn center(&self, s: &State) -> [f32; 2] {
         let mut c = [0.0; 2];
         for (p, m) in s.pos.iter().zip(&self.mass) {
