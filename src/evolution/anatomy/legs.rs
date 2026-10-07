@@ -20,10 +20,10 @@ use crate::config::Config;
 use crate::evolution::{Bone, Creature, Rng};
 
 /// The leaf limb whose tip is nearest to `x` along the body, if any.
-fn nearest_leg(c: &Creature, x: f32) -> Option<BoneIds> {
-    leaf_limbs(c)
-        .into_iter()
+fn nearest_leg(c: &Creature, legs: &[BoneIds], x: f32) -> Option<BoneIds> {
+    legs.iter()
         .min_by(|p, q| (tip_x(c, p) - x).abs().total_cmp(&(tip_x(c, q) - x).abs()))
+        .copied()
 }
 
 /// Hangs a new leg of two bones from a node of the trunk: a thigh that points
@@ -41,14 +41,12 @@ pub(crate) fn sprout_leg(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Co
     let parents = parent_bones(c);
     // The trunk: the nodes in no leg.
     let legs = leaf_limbs(c);
-    let in_leg: Vec<bool> = (0..c.nodes.len())
-        .map(|n| {
-            legs.iter()
-                .any(|leg| leg.iter().any(|&b| c.bones[b].b as usize == n))
-        })
-        .collect();
+    let in_leg = legs
+        .iter()
+        .flat_map(|leg| leg.iter())
+        .fold(0u32, |mask, &b| mask | 1 << c.bones[b].b);
     let hips: BoneIds = (1..c.nodes.len())
-        .filter(|&n| parents[n].is_some() && !in_leg[n] && c.nodes[n].y > 0.12)
+        .filter(|&n| parents[n].is_some() && (in_leg >> n) & 1 == 0 && c.nodes[n].y > 0.12)
         .collect();
     let Some(&hip) = hips.get(rng.index(hips.len().max(1))) else {
         return false;
@@ -56,14 +54,14 @@ pub(crate) fn sprout_leg(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Co
     let Some(above) = parents[hip] else {
         return false;
     };
-    let lengths: Vec<f32> = leaf_limbs(c)
-        .iter()
-        .flat_map(|l| l.iter().map(|&b| c.bones[b].rest_length))
-        .collect();
-    let base = if lengths.is_empty() {
+    let count: usize = legs.iter().map(|l| l.len()).sum();
+    let base = if count == 0 {
         0.3
     } else {
-        lengths.iter().sum::<f32>() / lengths.len() as f32
+        legs.iter()
+            .flat_map(|l| l.iter().map(|&b| c.bones[b].rest_length))
+            .sum::<f32>()
+            / count as f32
     };
     let thigh = (base * rng.range(0.8, 1.4)).clamp(0.06, 0.6);
     let shank = (base * rng.range(0.8, 1.4)).clamp(0.06, 0.6);
@@ -87,7 +85,7 @@ pub(crate) fn sprout_leg(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Co
         next.bones.push(bone);
     }
     // Timing: against the nearest leg, or the main driver.
-    let reference = nearest_leg(c, h.x)
+    let reference = nearest_leg(c, &legs, h.x)
         .and_then(|limb| limb_phase(c, &limb))
         .or_else(|| lead_muscle(c, &[]).map(|i| c.muscles[i].phase));
     let Some(reference) = reference else {
