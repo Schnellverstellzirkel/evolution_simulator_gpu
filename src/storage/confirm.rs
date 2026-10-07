@@ -1,16 +1,28 @@
+//! This module decides which creatures of a block get a confirmation trial,
+//! and it sets the bar of the early screen. `Experiment::verdict` picks the
+//! creatures that need a trial at the fine physics before an archive may take
+//! them, and it gives each result its final score. `ScreenWindow` keeps the
+//! newest distances at the screen, and `Experiment::next_screen` and
+//! `Experiment::wild_bars` turn them into the bars of the blocks bred next.
+//! The ring (`ring.rs`) calls `verdict`, and `Experiment::absorb` feeds the
+//! windows.
+
 use super::*;
 
-/// Distances at the screen the bar's window holds at least, when the ring
-/// has them. The kept share of a quantile over this many varies by about
-/// 0.3%, so a larger window only adds lag: a block of the game's ring holds
-/// 196,608, and the bar comes from the newest block alone.
+/// Distances at the screen that the bar's window holds at least, when the
+/// ring has them. The kept share of a quantile over this many varies by about
+/// 0.3%, so a larger window only adds lag. A block of the game's ring holds
+/// 196,608 creatures, so the bar of the evolved creatures comes from the
+/// newest block alone.
 const SCREEN_WINDOW_DISTANCES: usize = 16_384;
 
 /// Distances at the screen of the newest absorbed blocks, one entry per
 /// block, oldest first: as few blocks as hold `SCREEN_WINDOW_DISTANCES`, and
 /// at most a ring. A bar is recomputed from them at every absorption. Each
 /// entry also counts the results of the block that belong to other kinds of
-/// creature and are not in the window.
+/// creature and are not in the window. The `Experiment` keeps one window for
+/// the evolved creatures, one for the nurseries' new bodies, one for the
+/// nurseries' reshaped bodies and one for each wild island.
 #[derive(Clone, Default)]
 pub(super) struct ScreenWindow(VecDeque<(Vec<f32>, usize)>);
 
@@ -18,7 +30,8 @@ impl ScreenWindow {
     /// Adds one block's distances, and the number of results of other kinds
     /// it had, and drops the oldest blocks that are no longer needed. The
     /// newest blocks that hold enough distances for a steady quantile stay,
-    /// at most `ring` of them: older results lag the population more.
+    /// at most `ring` of them (the number of blocks in the ring): older
+    /// results lag the population more.
     pub(super) fn push(&mut self, distances: Vec<f32>, others: usize, ring: usize) {
         self.0.push_back((distances, others));
         let mut held: usize = self.0.iter().map(|(d, _)| d.len()).sum();
@@ -29,12 +42,16 @@ impl ScreenWindow {
             held -= oldest;
         }
     }
+    /// Forgets every block, so the bar is unknown until new results come in.
+    /// A world change does this (`Experiment::reset_search_context`).
     pub(super) fn clear(&mut self) {
         self.0.clear();
     }
     /// The bar that the best `keep` share of all the results of the window's
     /// blocks reached when the results of other kinds fall short of it. With
     /// no other kind it is the bar of the best `keep` share of the window.
+    /// There is no bar, negative infinity, when the window holds fewer than
+    /// 64 distances or the share to keep reaches 1 (`physics::screen_bar`).
     fn bar(&self, keep: f32) -> f32 {
         let own: usize = self.0.iter().map(|(d, _)| d.len()).sum();
         let others: usize = self.0.iter().map(|(_, o)| *o).sum();
@@ -46,26 +63,32 @@ impl ScreenWindow {
         crate::physics::screen_bar(self.0.iter().flat_map(|(d, _)| d.iter().copied()), share)
     }
 }
+
 /// Confirmation trials a block asks for per archive at once while it waits
 /// for the ones it needs. Many record claims fail the fine trial, so asking
-/// a few at a time chained round trips while the ring waited: at 3M per
-/// generation, generations 11 to 15 ran 127k to 196k creatures/s with 8,
-/// 196k to 330k with 64 and 308k to 421k with 512. Without a limit an empty
-/// archive asks for nearly every creature (1.07M trials in generation 0).
+/// a few at a time chained round trips while the ring waited. Measured on
+/// 2026-10-02 with the earlier kernel, at 3M per generation: generations 11
+/// to 15 ran 127k to 196k creatures/s with 8, 196k to 330k with 64 and 308k
+/// to 421k with 512. Without a limit an empty archive asks for nearly every
+/// creature (1.07M trials in generation 0). `ConfirmHint` raises the limit
+/// of an archive that stands on a plateau.
 const SPECULATIVE_CONFIRMS: usize = 512;
-/// An entrant gets its fine trial when it is at least this share of its archive's best.
+/// An entrant gets its fine trial when it is at least this share of its
+/// archive's best.
 const ENTRANT_SHARE: f32 = 0.5;
-/// Most confirmation trials one archive asks for in one round.
+/// Most confirmation trials one round asks for from the record-setters of one
+/// archive, and from the entrants of a block together.
 const MAX_CONFIRMS_PER_ROUND: usize = 16_384;
 
 /// How many confirmation results the verdicts of the last blocks used, per
 /// archive (decaying). A block that stands on a plateau, where every
-/// candidate that ties the record fails its fine trial, needs all of them,
-/// so the next block asks for about that many in its first round instead of
-/// `SPECULATIVE_CONFIRMS` and then again, round after round, at the front of
-/// the ring, where every round waits for the GPU. It changes what is asked
-/// for and when, never what a verdict decides: a verdict reads only the
-/// results of the candidates its own loop reaches. Not saved.
+/// candidate that ties the record fails its fine trial, needs all of them.
+/// So the next block asks for `SPECULATIVE_CONFIRMS` plus twice that many in
+/// its first round. With `SPECULATIVE_CONFIRMS` alone it would ask again,
+/// round after round, at the front of the ring, where every round waits for
+/// the GPU. The hint changes what is asked for and when, never what a verdict
+/// decides: a verdict reads only the results of the candidates its own loop
+/// reaches. It is not saved.
 #[derive(Default)]
 pub(super) struct ConfirmHint(std::sync::Mutex<Vec<usize>>);
 
@@ -78,7 +101,10 @@ impl Clone for ConfirmHint {
 }
 
 impl ConfirmHint {
-    /// Trials `arena` asks for in a round before any result is in.
+    /// Trials a round asks for from archive `arena`: `SPECULATIVE_CONFIRMS`
+    /// plus twice what the last blocks used, and at most
+    /// `MAX_CONFIRMS_PER_ROUND`. A verdict asks for more when the results it
+    /// has read show a plateau (`Experiment::verdict`).
     fn limit(&self, arena: usize) -> usize {
         let used = self
             .0
@@ -89,7 +115,9 @@ impl ConfirmHint {
             .unwrap_or(0);
         (SPECULATIVE_CONFIRMS + 2 * used).min(MAX_CONFIRMS_PER_ROUND)
     }
-    /// A block was decided: `used[arena]` results were read.
+    /// A block was decided: `used[arena]` results were read. Each archive's
+    /// count becomes that number, or the old count less a quarter if that is
+    /// more.
     fn learn(&self, used: &[usize]) {
         let mut hint = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let len = used.len().max(hint.len());
