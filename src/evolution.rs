@@ -1146,21 +1146,17 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
         parent[ra as usize] = rb;
         false
     };
-    let candidates = std::mem::take(&mut c.bones);
-    for mut b in candidates {
+    c.bones.retain_mut(|b| {
         b.clamp_range();
         let a = b.a as usize;
         let end = b.b as usize;
-        if a < node_count
+        a < node_count
             && end < node_count
             && a != end
             && b.rest_length.is_finite()
             && (0.03..=12.0).contains(&b.rest_length)
             && !connected(&mut parent, a as u8, end as u8)
-        {
-            c.bones.push(b);
-        }
-    }
+    });
     // Keep a connected, cycle-free skeleton. New links inherit their current
     // length so repair does not teleport a mutated body before physics starts.
     for node in 1..node_count {
@@ -1284,12 +1280,19 @@ fn random_creature(cfg: &Config, generation: u32, index: usize) -> Creature {
     creature
 }
 fn random_creature_from(cfg: &Config, rng: &mut Rng) -> Creature {
-    random_shaped(cfg, rng, 3, 3, (0.18, 0.28), false)
+    let mut creature = Creature::default();
+    random_creature_from_into(cfg, rng, &mut creature);
+    creature
 }
 
-/// A random body of `low` to `low + spread - 1` nodes, `spacing` apart. A
-/// `branched` body hangs each node from a random earlier one, a chain from
-/// the one before it.
+/// `random_creature_from` into `creature`, which it overwrites.
+fn random_creature_from_into(cfg: &Config, rng: &mut Rng, creature: &mut Creature) {
+    random_shaped(cfg, rng, 3, 3, (0.18, 0.28), false, creature);
+}
+
+/// A random body of `low` to `low + spread - 1` nodes, `spacing` apart, into
+/// `c`. A `branched` body hangs each node from a random earlier one, a chain
+/// from the one before it.
 fn random_shaped(
     cfg: &Config,
     rng: &mut Rng,
@@ -1297,22 +1300,20 @@ fn random_shaped(
     spread: usize,
     spacing: (f32, f32),
     branched: bool,
-) -> Creature {
+    c: &mut Creature,
+) {
     let n = (low + rng.index(spread)).min(cfg.max_nodes);
     let spacing = rng.range(spacing.0, spacing.1);
-    let mut c = Creature {
-        nodes: (0..n)
-            .map(|i| NodeGene {
-                x: (i as f32 - (n - 1) as f32 * 0.5) * spacing + rng.range(-0.025, 0.025),
-                y: 0.18 + (i % 2) as f32 * 0.18 + rng.range(-0.025, 0.025),
-                diameter: rng.range(cfg.min_size, cfg.max_size),
-                friction: rng.range(cfg.min_friction, cfg.max_friction),
-            })
-            .collect(),
-        bones: Bones::new(),
-        muscles: Muscles::new(),
-        id: 0,
-    };
+    c.nodes.clear();
+    c.nodes.extend((0..n).map(|i| NodeGene {
+        x: (i as f32 - (n - 1) as f32 * 0.5) * spacing + rng.range(-0.025, 0.025),
+        y: 0.18 + (i % 2) as f32 * 0.18 + rng.range(-0.025, 0.025),
+        diameter: rng.range(cfg.min_size, cfg.max_size),
+        friction: rng.range(cfg.min_friction, cfg.max_friction),
+    }));
+    c.bones.clear();
+    c.muscles.clear();
+    c.id = 0;
     for i in 0..n - 1 {
         let parent = if branched && i > 0 {
             rng.index(i + 1)
@@ -1330,7 +1331,7 @@ fn random_shaped(
             c.muscles.push(muscle(i, j, &c.bones, &c.nodes, rng));
         }
     }
-    repair(&mut c, cfg, rng);
+    repair(c, cfg, rng);
     for _ in 0..rng.index(n) {
         if c.muscles.len() < cfg.max_muscles {
             let a = rng.index(c.bones.len());
@@ -1340,7 +1341,6 @@ fn random_shaped(
             }
         }
     }
-    c
 }
 /// Builds creatures `0..count` in parallel, in index order.
 fn collect_parallel(count: usize, make: impl Fn(usize) -> Creature + Sync) -> Population {
@@ -1507,7 +1507,7 @@ fn offspring(
     };
     let cfg = limited.as_ref().unwrap_or(cfg);
     match plan.emitter {
-        Emitter::Restart => *child = random_creature_from(cfg, rng),
+        Emitter::Restart => random_creature_from_into(cfg, rng, child),
         Emitter::Cma => {
             if let Some(cma) = plan.cma.and_then(|index| cma_emitters.get(index)) {
                 cma.sample_into(rng, cfg.mutation, child);
@@ -1632,8 +1632,9 @@ fn mated(
     let parent = &archive.entries[plan.parent.expect("archive parent")].creature;
     match plan.mate {
         Some(mate) => {
-            let mate = archive.entries[mate].creature.unpack();
-            let mate = &mate;
+            let mut mate_body = Creature::default();
+            archive.entries[mate].creature.unpack_into(&mut mate_body);
+            let mate = &mate_body;
             parent.unpack_into(child);
             if same_shape(child, mate) {
                 cross_onto(child, mate, rng);
