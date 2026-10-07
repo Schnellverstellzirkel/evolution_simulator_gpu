@@ -361,14 +361,14 @@ impl<'a, T: Copy, const N: usize> IntoIterator for &'a mut Bounded<T, N> {
 }
 
 /// Saved as a sequence of the items in use. The bytes are the same as a `Vec`
-/// of them writes, so saves hold no trace of the capacity.
+/// of them writes, so the capacity is not part of a save.
 impl<T: Copy + Serialize, const N: usize> Serialize for Bounded<T, N> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.as_slice().serialize(serializer)
     }
 }
-/// Loads a sequence of at most `N` items. A longer sequence is an error, not
-/// a panic.
+/// Loads a sequence of at most `N` items. A longer sequence returns an error
+/// and does not panic.
 impl<'de, T: Copy + Deserialize<'de>, const N: usize> Deserialize<'de> for Bounded<T, N> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visit<T, const N: usize>(std::marker::PhantomData<T>);
