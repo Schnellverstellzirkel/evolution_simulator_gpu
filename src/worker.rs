@@ -406,73 +406,108 @@ impl MigrationSummary {
             .fold((0, 0), |(sent, kept), &(s, k)| (sent + s, kept + k))
     }
 }
+/// What the worker publishes for the UI to draw. It holds the game's numbers
+/// and a summary of each island, and it carries once what the UI asked for
+/// with a command. The worker builds a new one when something changed, at most
+/// five times a second while the game runs, and leaves it in `Worker::view`.
 #[derive(Clone)]
 pub struct Snapshot {
+    /// Counts the games this worker has started or loaded. A change tells the
+    /// UI that the history and the event log began again.
     pub epoch: u64,
+    /// The settings of the game now, with its world. They are the defaults
+    /// while there is no game.
     pub config: Config,
-    /// Settings the player asked for that take effect when the next
-    /// generation starts.
+    /// Settings that wait for the next generation to start.
+    /// `Command::Configure` applies at once, so only a loaded save can carry
+    /// some.
     pub pending: Option<Config>,
-    /// Elites lost to meteor strikes that an undo could bring back.
+    /// Elites lost to a meteor strike or an extinction that an undo could
+    /// bring back.
     pub fossils: usize,
+    /// The generation running now.
     pub generation: u32,
-    pub evaluated: usize,
     /// Evaluations absorbed toward the current generation.
+    pub evaluated: usize,
+    /// The same count as `evaluated`.
     pub completed: usize,
-    /// Confirmation trials running for creatures that would set an island
-    /// record.
+    /// Confirmation trials running now, for creatures that would set a record
+    /// of an island or a nursery.
     pub checking: usize,
+    /// Whether the game is evolving.
     pub running: bool,
+    /// One row of statistics per finished generation, oldest first.
     pub history: Arc<Vec<Stats>>,
     /// The archive ranked by distance, sent once per `Command::Cards`.
     pub cards: Option<CardList>,
+    /// A creature to show when a game starts or a save opens, with its world.
+    /// Sent once.
     pub preview: Option<(Creature, Config)>,
     /// The best elite of the global archive now, and the world it is scored
     /// in. It changes as soon as a new record is absorbed, mid-generation
     /// too, so the world view can switch to it at once.
     pub champion: Option<Arc<(Creature, Config)>>,
-    /// The best distance in the archive now and the median of its behavior
-    /// elites (NaN before any elite), the same numbers a history row keeps at
-    /// the end of a generation.
+    /// The best distance in the global archive now (NaN before any elite). A
+    /// history row keeps the same number at the end of a generation.
     pub live_best: f32,
+    /// The median distance of the best elite of each way of moving (NaN before
+    /// any elite). A history row keeps the same number at the end of a
+    /// generation.
     pub live_median: f32,
     /// What happened to this experiment, oldest first.
     pub events: Arc<Vec<Event>>,
     /// The archive map table while the UI asks for it.
     pub map: Option<Arc<Vec<MapCell>>>,
     /// A creature the UI asked for with `Command::Select`, and the world it
-    /// is scored in; sent once.
+    /// is scored in. Sent once.
     pub selected: Option<(Creature, Config)>,
-    /// Ancestor chain of a requested creature (its id first), newest first;
-    /// sent once per request.
+    /// Ancestor chain of a requested creature (its id first), newest first.
+    /// Sent once per request.
     pub lineage: Option<(u64, Vec<LineageStep>)>,
+    /// The names of the evaluation devices, joined with " + ".
     pub gpu: String,
     /// Evaluation engines: name, measured creatures/s, creatures evaluated.
     pub engines: Vec<(String, f64, u64)>,
     /// Creatures per second over complete generations in the last ~10 s,
     /// including archive updates, breeding, and transfers.
     pub end_to_end: f64,
+    /// Bytes allocated on the GPUs, as `Gpu::allocated_bytes` has them. Only
+    /// `Gpu::evaluate_with_metrics` refreshes that value and the worker never
+    /// calls it, so here it stays 0.
     pub gpu_bytes: u64,
+    /// Bytes the ring and the creatures of the global archive hold in memory.
     pub ram_bytes: usize,
+    /// Seconds the current generation has been evolving.
     pub elapsed: f64,
+    /// Behavior elites in the global archive, one for each filled cell.
     pub archive_cells: usize,
     /// Ways of moving the global archive covers, counting its cells
     /// without their body classes.
     pub movement_cells: usize,
+    /// Elites in the global archive, the morphology reserve included.
     pub archive_size: usize,
+    /// Elites in the global archive's morphology reserve.
     pub innovation_reserve_count: usize,
+    /// The global archive's QD score, the sum of its elites' distances.
     pub qd_score: f64,
+    /// What each emitter has done so far, in `Emitter::ALL` order.
     pub emitters: [EmitterStats; 4],
+    /// The mix that picks the emitter of each child, from the emitters'
+    /// results so far, in `Emitter::ALL` order. The shares add up to 1.
     pub emitter_weights: [f64; 4],
     /// Each island archive, in island order.
     pub islands: Vec<IslandSummary>,
     /// The last island migration this session, if one happened.
     pub migration: Option<MigrationSummary>,
-    /// Per island, how many of its wild migrants took a hub cell.
+    /// Per island, how many of its wild migrants took a hub cell. It stays
+    /// empty until the first one does.
     pub wild_wins: Vec<u32>,
     /// The main islands' elite with the body farthest from the others.
     pub strangest: Option<Creature>,
+    /// What the worker is doing, in words for the status line.
     pub status: String,
+    /// The last error, shown to the player: a command, a step of evolution, a
+    /// load or a save that failed. The next command clears it.
     pub error: Option<String>,
 }
 /// The worker thread that evolves the search and publishes snapshots for the UI.
