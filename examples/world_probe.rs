@@ -1,5 +1,11 @@
-//! Scores an elite in each world of the autochange ladder up to the save's step, to find
-//! the world its stored score came from. Usage: world_probe <checkpoint.evo> <island> [rank]
+//! Scores one elite of a save in each world of the autochange ladder up to the
+//! save's step, to find the world its stored score came from. The elite is the
+//! one at `rank` by distance (0, the best, by default) in the global archive
+//! (`g`) or in the save's archive with that island number. In the save's own
+//! world it is also scored with the early screen and the rungs on and off and
+//! under each creature flag. A chaos check scores 16 copies of it with slightly
+//! changed node diameters.
+//! Usage: world_probe <checkpoint.evo> <island|g> [rank]
 mod common;
 use evolution_simulator::{config::Config, environment, storage};
 
@@ -19,6 +25,8 @@ fn main() -> anyhow::Result<()> {
     let mut engine = common::open()?;
     let ladder = environment::autochange_ladder();
     let top = e.config.autochange_step as usize;
+    // The save has applied the first `top` steps of the ladder. The list adds
+    // the next two steps.
     println!("stored {:.3}; ladder steps up to {top}:", elite.fitness);
     for (i, &(idx, level)) in ladder.iter().enumerate().take(top + 2) {
         println!(
@@ -26,12 +34,17 @@ fn main() -> anyhow::Result<()> {
             environment::EFFECTS[idx].name
         );
     }
+    // The screen and rungs the loaded game would use for its next generation.
     println!(
         "screen in the save: {:?}; rungs {:?}",
         e.config.screen, e.config.rungs
     );
     {
-        // Chaos check: the same genes, each node coordinate nudged by a relative 1e-6 or 1e-4.
+        // Chaos check: 16 copies of the creature, each node diameter scaled by
+        // 1 + eps * u, where u is a fixed pseudo-random number from -1 to 1.
+        // Each copy keeps its own u values for every eps. The spread of the
+        // scores shows how much a tiny change of the body moves the score.
+        // These are full trials, with no screen and no rungs.
         for eps in [1e-7f32, 1e-6, 1e-5, 1e-4] {
             let mut batch = Vec::new();
             for k in 0..16u32 {
@@ -60,6 +73,9 @@ fn main() -> anyhow::Result<()> {
             );
         }
     }
+    // The save's config as it is, with the creature flags the game gives out
+    // (`rungs`): none, exempt from the early rungs, the audit lane, and the
+    // nursery bars of the early screen.
     for flags in [
         0u8,
         evolution_simulator::rungs::EXEMPT,
@@ -77,6 +93,7 @@ fn main() -> anyhow::Result<()> {
             r[0].fitness, r[0].fall_time, r[0].screened
         );
     }
+    // The same elite with the early screen and the rungs on or off.
     for (name, cfg) in [
         ("save config as is", e.config.clone()),
         (
@@ -105,6 +122,10 @@ fn main() -> anyhow::Result<()> {
         let r = common::score_creatures(&mut engine, std::slice::from_ref(&creature), &cfg)?;
         println!("{name}: {:.3} fall {:.2}", r[0].fitness, r[0].fall_time);
     }
+    // The world after `k` ladder steps, from the save's step down to none. It
+    // is the save's world with the steps from `k` on undone, the last first,
+    // each by one level. The screen and the rungs are off, so each trial runs
+    // in full.
     for k in (0..=top).rev() {
         let mut cfg = e.config.clone();
         for step in (k..top).rev() {
