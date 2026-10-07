@@ -1,6 +1,7 @@
-//! The Overview tab's tiles and charts: the generation metrics, the trend of
-//! best and median distance with the world changes marked on it, and the
-//! distance histogram (the History tab shows the trend and the histogram too).
+//! The drawing methods of `App` for the generation metrics. `metrics` draws the
+//! four tiles of the Overview tab. `trend` draws the chart of best and median
+//! distance with the world changes marked on it, for the Overview and History
+//! tabs. `histogram` draws the distance histogram of the History tab.
 
 use super::{
     App,
@@ -11,14 +12,18 @@ use crate::{storage::Stats, theme::GAP_M, worker::EventKind};
 use eframe::egui::{self, Align2, FontId, Pos2, RichText, Sense, Vec2};
 use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points, VLine};
 
-/// A world change on the chart: the first generation in the new world and a
-/// short name for what changed.
+/// A world change on the chart: the first generation in the new world, what
+/// changed in words and whether Autochange made the change.
 struct WorldMark {
     generation: u32,
     label: String,
     autochange: bool,
 }
 impl App {
+    /// Draws the four tiles at the top of the Overview tab: best distance,
+    /// generation, kinds of movement and rate. When no best distance is known
+    /// yet, it draws one line of text in place of the tiles. It draws nothing
+    /// before the first snapshot.
     pub(super) fn metrics(&self, ui: &mut egui::Ui) {
         let theme = self.theme();
         let Some(snapshot) = &self.snapshot else {
@@ -26,13 +31,15 @@ impl App {
         };
         let history = &snapshot.history;
         // The best distance and the kinds of movement are the archive's
-        // numbers now, so they change as results are absorbed. A history row
-        // stands in before the first snapshot has an elite.
+        // numbers now, so they change as results are absorbed. When the
+        // archive has no elite, the newest history row of this world stands in.
         let best = if snapshot.live_best.is_finite() {
             snapshot.live_best
         } else if let Some(s) = row_in_world(snapshot) {
             s.best
         } else if !history.is_empty() {
+            // The history has rows, but none from this world. The world has
+            // just changed and no creature is kept in it yet.
             ui.label(
                 RichText::new(
                     "Testing in the new world... The kept creatures are running again under the new rules. The best distance appears here when one is kept.",
@@ -54,7 +61,8 @@ impl App {
         } else {
             row_in_world(snapshot).map_or(0, Stats::moves)
         };
-        // Only rows of this world count toward the gain.
+        // The gain is the best distance now minus the best of the row 10 back.
+        // It counts only when that row is from this world.
         let gain = history
             .len()
             .checked_sub(10)
@@ -81,6 +89,8 @@ impl App {
         } else {
             "Paused".to_owned()
         };
+        // One entry per tile: the label, the number, the color of the number,
+        // the line of detail and the hover text.
         let tiles = [
             (
                 "Best distance",
@@ -114,13 +124,13 @@ impl App {
                 "How many creatures the machine tries each second, from breeding to score.",
             ),
         ];
-        // HUD tiles: a capital label, a big number that glows in the dark
-        // theme, and a line of detail.
+        // The tiles share the row in equal widths. Each has its label in
+        // capitals at the top left, a line of detail under it and the big
+        // number on the right.
         let gap = GAP_M;
         let width = (ui.available_width() - gap * (tiles.len() - 1) as f32) / tiles.len() as f32;
-        // HUD counters: the label and a line of detail on the left, the
-        // glowing number on the right. Narrow tiles shrink the number and
-        // wrap the detail, and every tile takes the height of the tallest.
+        // A narrow tile shrinks the number and wraps the detail, and every
+        // tile takes the height of the tallest.
         let value_size = (width / 8.5).clamp(26., 40.);
         let values: Vec<_> = tiles
             .iter()
@@ -132,6 +142,7 @@ impl App {
                 )
             })
             .collect();
+        // The detail wraps in the space that its number leaves.
         let notes: Vec<_> = tiles
             .iter()
             .zip(&values)
