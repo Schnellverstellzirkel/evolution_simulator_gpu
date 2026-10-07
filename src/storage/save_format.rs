@@ -8,8 +8,8 @@
 
 use super::*;
 
-/// The first eight bytes of a save. The physics version is in the header that
-/// follows.
+/// The first eight bytes of a save. The version of the archives and physics
+/// (`qd::VERSION`) is in the header that follows.
 const MAGIC: &[u8; 8] = b"EVORUST8";
 
 /// What a save holds: the archives and the search state, without the
@@ -355,7 +355,8 @@ pub fn rotate_autosaves(dir: &Path, keep: usize) -> usize {
 /// then `population` as an 8-byte integer, all little endian.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SaveHeader {
-    /// The physics version (`qd::VERSION`) of the game that wrote the save.
+    /// The version of the archives and physics (`qd::VERSION`) of the game
+    /// that wrote the save.
     pub qd_version: u32,
     /// The generation in progress when the save was taken. A loaded game
     /// starts it again.
