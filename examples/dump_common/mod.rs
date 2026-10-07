@@ -33,13 +33,14 @@ pub struct Header {
     pub duration: f32,
     pub rate: u16,
     pub islands: u8,
-    pub arenas: u8,
+    pub arenas: u16,
     pub bins: [u8; 4],
 }
 
 #[derive(Clone, Copy)]
 pub struct Elite {
-    pub arena: u8,
+    /// `u16::MAX` for the global archive.
+    pub arena: u16,
     pub flags: u8,
     pub cell: u16,
     pub nodes: u8,
@@ -138,6 +139,12 @@ pub fn read(path: &str) -> Result<DumpFile> {
         "{path} is not a generation dump"
     );
     let b = &bytes[..64];
+    // Format 1 kept arenas in one byte, which more than 256 arenas overflow.
+    let format = u32_at(b, 8);
+    ensure!(
+        format <= 2,
+        "{path}: dump format {format} is newer than this reader"
+    );
     let header = Header {
         qd_version: u32_at(b, 12),
         generation: u32_at(b, 16),
@@ -149,7 +156,11 @@ pub fn read(path: &str) -> Result<DumpFile> {
         duration: f32_at(b, 48),
         rate: u16_at(b, 52),
         islands: b[54],
-        arenas: b[55],
+        arenas: if format >= 2 {
+            u16_at(b, 60)
+        } else {
+            u16::from(b[55])
+        },
         bins: [b[56], b[57], b[58], b[59]],
     };
     let elite_end = 64 + header.elites as usize * 32;
@@ -165,7 +176,11 @@ pub fn read(path: &str) -> Result<DumpFile> {
         .0
         .iter()
         .map(|b| Elite {
-            arena: b[0],
+            arena: match (format, b[0]) {
+                (1, 255) => u16::MAX,
+                (1, arena) => u16::from(arena),
+                _ => u16::from_le_bytes([b[0], b[7]]),
+            },
             flags: b[1],
             cell: u16_at(b, 2),
             nodes: b[4],
@@ -496,10 +511,10 @@ pub struct Ladder {
     pub nmin_final: Vec<Vec<f32>>,
     pub r4_ratio: f32,
     /// R4's floor: each emitter's median distance at 10 s.
-    pub floor: std::collections::HashMap<(u8, u16, u8), f32>,
+    pub floor: std::collections::HashMap<(u8, u16, u16), f32>,
     pub bar: f32,
     pub islands: u8,
-    pub arenas: u8,
+    pub arenas: u16,
 }
 
 /// What the ladder did to one row.
@@ -512,11 +527,11 @@ pub enum Fate {
 }
 
 impl Ladder {
-    fn emitter_key(r: &Row, arena: usize) -> (u8, u16, u8) {
+    fn emitter_key(r: &Row, arena: usize) -> (u8, u16, u16) {
         if r.cma != u16::MAX {
             (0, r.cma, 0)
         } else {
-            (r.emitter + 1, 0, arena as u8)
+            (r.emitter + 1, 0, arena as u16)
         }
     }
     pub fn features1(r: &Row) -> [f64; 6] {
@@ -668,7 +683,8 @@ impl Ladder {
                 .filter(|v| v.is_finite())
                 .collect();
             ladder.r4_ratio = quantile(&mut ratios, 1.0 - tol);
-            let mut groups: std::collections::HashMap<(u8, u16, u8), Vec<f32>> = Default::default();
+            let mut groups: std::collections::HashMap<(u8, u16, u16), Vec<f32>> =
+                Default::default();
             for r in rows.iter().filter(|r| r.steps() > RUNG_STEPS[3]) {
                 groups
                     .entry(Self::emitter_key(r, r.arena(h)))

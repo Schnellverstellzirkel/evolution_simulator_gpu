@@ -30,7 +30,7 @@ fn main() -> anyhow::Result<()> {
     // The fastest elite of each cell of each archive when the generation
     // began, for the distance a child adds: how much faster it is than the
     // elite whose cell it entered (its own distance when the cell was empty).
-    let mut occupant: std::collections::HashMap<(u8, u16), f32> = std::collections::HashMap::new();
+    let mut occupant: std::collections::HashMap<(u16, u16), f32> = std::collections::HashMap::new();
     for e in &d.elites {
         if e.reserve() || e.cell == u16::MAX {
             continue;
@@ -42,7 +42,7 @@ fn main() -> anyhow::Result<()> {
         if r.entered & (ISLAND | NURSERY) == 0 || r.cell == u16::MAX {
             return 0.0;
         }
-        let arena = r.arena(&d.header) as u8;
+        let arena = r.arena(&d.header) as u16;
         let held = occupant.get(&(arena, r.cell)).copied().unwrap_or(0.0);
         let score = if r.score.is_finite() {
             r.score

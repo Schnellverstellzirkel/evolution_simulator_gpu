@@ -9,15 +9,18 @@
 //! is absorbed. Little endian throughout; `examples/dump_stats.rs` and
 //! `examples/operator_yield.rs` read it.
 //!
-//! Header (64 B): magic `EVODUMP1`, format u32, qd version u32, generation
-//! u32, population u32, seed u64, rows u64, elites u32, the screen bar the
-//! generation would have had f32, trial seconds f32, rate u16, islands u8,
-//! arenas u8, the cell bins (contact, cadence, height, feet) 4 x u8, 4 spare.
+//! Header (64 B): magic `EVODUMP1`, format u32 (2), qd version u32,
+//! generation u32, population u32, seed u64, rows u64, elites u32, the screen
+//! bar the generation would have had f32, trial seconds f32, rate u16,
+//! islands u8, a spare byte (format 1: arenas u8), the cell bins (contact,
+//! cadence, height, feet) 4 x u8, arenas u16, 2 spare.
 //!
-//! Elite (32 B): arena u8 (255 the global archive), flags u8 (1 reserve, 2
-//! fine, 4 graduate, 8 re-run measured), cell u16, nodes u8, muscles u8,
-//! emitter u8, spare u8, id u64, fitness f32, distance at 2.5, 5 and 10 s
-//! from its re-run, 3 x f32 (NaN without one).
+//! Elite (32 B): arena low byte, flags u8 (1 reserve, 2 fine, 4 graduate, 8
+//! re-run measured), cell u16, nodes u8, muscles u8, emitter u8, arena high
+//! byte (format 1: spare; the arena was one byte), id u64, fitness f32,
+//! distance at 2.5, 5 and 10 s from its re-run, 3 x f32 (NaN without one).
+//! The arena is `u16::MAX` for the global archive (format 1: 255). There are
+//! more than 256 arenas, so format 1 dumps of today's layout are wrong.
 //!
 //! Creature (64 B): slot u32, emitter u8, operator u8 (the low byte of the
 //! index in `evolution::structural_operator_names`; 0xFFF for none, whose
@@ -46,6 +49,8 @@ pub const EXCLUDED: u8 = 32;
 pub const PARENT_RESERVE: u8 = 64;
 
 pub const MAGIC: &[u8; 8] = b"EVODUMP1";
+/// Format 2 holds arenas in two bytes.
+pub const FORMAT: u32 = 2;
 pub const HEADER_BYTES: usize = 64;
 pub const ELITE_BYTES: usize = 32;
 pub const ROW_BYTES: usize = 64;
@@ -133,9 +138,10 @@ pub struct Elite {
     id: u64,
 }
 impl Elite {
-    pub fn of(arena: u8, e: &qd::Elite) -> Self {
+    /// The row of `e` in `arena` (`u16::MAX` for the global archive).
+    pub fn of(arena: u16, e: &qd::Elite) -> Self {
         let mut b = [0u8; ELITE_BYTES];
-        b[0] = arena;
+        [b[0], b[7]] = arena.to_le_bytes();
         b[1] = u8::from(qd::is_morphology_niche(&e.niche))
             | u8::from(e.fine) << 1
             | u8::from(e.graduate) << 2;
@@ -191,7 +197,7 @@ impl Dump {
         );
         let mut h = [0u8; HEADER_BYTES];
         h[0..8].copy_from_slice(MAGIC);
-        h[8..12].copy_from_slice(&1u32.to_le_bytes());
+        h[8..12].copy_from_slice(&FORMAT.to_le_bytes());
         h[12..16].copy_from_slice(&qd::VERSION.to_le_bytes());
         h[16..20].copy_from_slice(&e.generation.to_le_bytes());
         h[20..24].copy_from_slice(&(e.config.population as u32).to_le_bytes());
@@ -201,8 +207,8 @@ impl Dump {
         h[48..52].copy_from_slice(&e.config.duration.to_le_bytes());
         h[52..54].copy_from_slice(&(e.config.fidelity().rate as u16).to_le_bytes());
         h[54] = island_count() as u8;
-        h[55] = arena_count() as u8;
         h[56..60].copy_from_slice(&BINS);
+        h[60..62].copy_from_slice(&(arena_count() as u16).to_le_bytes());
         // The header and the elites are written again at the end, with
         // the row count and the re-run distances.
         file.write_all(&h)?;

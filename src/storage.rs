@@ -744,14 +744,14 @@ impl Experiment {
                 island
                     .entries
                     .iter()
-                    .map(|e| dump::Elite::of(arena as u8, e)),
+                    .map(|e| dump::Elite::of(arena as u16, e)),
             );
         }
         elites.extend(
             self.archive
                 .entries
                 .iter()
-                .map(|e| dump::Elite::of(u8::MAX, e)),
+                .map(|e| dump::Elite::of(u16::MAX, e)),
         );
         // The island elites run again in this generation (their own island's
         // slots, as after a world change), so their rung distances are known.
