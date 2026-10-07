@@ -52,7 +52,8 @@ use export::save_screenshot;
 use playback::Playback;
 use population::{ArchiveView, CardFilter};
 use race::RaceLane;
-/// Draws a creature as a small thumbnail. `schematic.rs` uses it too.
+/// Draws a creature as a small thumbnail. `scene` defines it, and
+/// `schematic.rs` reaches it through this re-export.
 pub(crate) use scene::thumbnail;
 use std::{
     path::PathBuf,
@@ -175,8 +176,8 @@ struct App {
     worker: Worker,
     /// The newest snapshot the worker published. It is `None` before the first.
     snapshot: Option<Snapshot>,
-    /// The settings the panels show and edit, which are the world the player
-    /// asked for. The worker gets them with `Command::Configure`, and
+    /// The settings the panels show and edit, with the world the player asked
+    /// for. The worker gets them with `Command::Configure`, and
     /// `absorb_snapshot` takes the worker's own back.
     config: Config,
     /// The replay on screen: the champion or the creature the player picked.
@@ -201,7 +202,8 @@ struct App {
     show_forces: bool,
     /// The replay camera in meters: x along the ground and y up.
     camera: [f32; 2],
-    /// The camera follows the creature. Dragging the view turns it off.
+    /// The camera follows the creature (the Follow box). Dragging the view
+    /// turns it off.
     follow: bool,
     /// The row of the history that the History tab shows (the Generation
     /// slider).
@@ -221,7 +223,8 @@ struct App {
     saving: Option<Instant>,
     /// A save path that exists and waits for the player to confirm.
     overwrite: Option<PathBuf>,
-    /// The experiment and number of worker events already read.
+    /// The epoch of the experiment, and how many of its worker events were
+    /// already read.
     events_seen: (u64, usize),
     /// The path in the text box of the Open window and of the file dialogs.
     file_path: String,
@@ -282,17 +285,22 @@ struct App {
     /// The creature on screen is the champion of a finished generation (or
     /// the best elite of a loaded game), not a random first creature.
     champion_shown: bool,
-    /// Behavior archive map filters; None shows every bin.
+    /// The archive map has four filters, and `None` shows every bin. This one
+    /// is the body height, a height bin.
     map_height: Option<usize>,
+    /// The feet filter of the archive map, a feet bin.
     map_feet: Option<usize>,
+    /// The body shape filter of the archive map, a shape class.
     map_shape: Option<usize>,
+    /// The body size filter of the archive map, a size class.
     map_size: Option<usize>,
     /// Whether the worker was last asked to send the map table.
     map_sent: bool,
     /// The archive cards the player filters for.
     card_filter: CardFilter,
     /// The ranked archive on screen in Ways of moving and for the race. It
-    /// changes only when the player opens the tab or asks for the latest.
+    /// changes only when the UI asks the worker for a newer one: when the
+    /// player opens Ways of moving or the Race tab, or presses Show latest.
     cards: Option<crate::worker::CardList>,
     /// When the UI last asked the worker for the ranked archive.
     cards_requested: Option<Instant>,
@@ -300,7 +308,8 @@ struct App {
     prev_tab: Tab,
     /// Current archive view mode (Cards, Map, or Islands).
     archive_view: ArchiveView,
-    /// Top archived elites racing side by side.
+    /// The lanes of the Race tab, running side by side: the top archived
+    /// elites, or the player's picks with the champion.
     race: Vec<RaceLane>,
     /// The race lanes are not built yet. They are built from the ranked
     /// archive, or from the player's picks, when that data is there.
@@ -458,6 +467,8 @@ impl App {
             saved: None,
             saving: None,
             overwrite: None,
+            // No snapshot has the epoch `u64::MAX`, so the first one starts
+            // the event log afresh.
             events_seen: (u64::MAX, 0),
             file_path: "runs/experiment.evo".into(),
             message: None,
@@ -518,6 +529,7 @@ impl App {
             show_help: false,
             schematic_open: std::env::var_os("EVOLUTION_SMOKE_SCHEMATIC").is_some(),
             runs_bytes: 0,
+            // Due at once, so the first frame measures `runs/`.
             runs_checked: Instant::now() - RUNS_REFRESH,
             screenshot_pending: false,
             screenshot_waiting: false,
@@ -545,11 +557,15 @@ impl App {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        // The first generation is running and none of its creatures is
+        // scored yet.
         let first = self
             .snapshot
             .as_ref()
             .is_some_and(|s| s.running && s.history.is_empty() && s.completed == 0);
         let startup = crate::loading::progress(crate::loading::Group::Startup).busy();
+        // A screenshot run of the loading screen shows its made-up jobs and
+        // ignores the real state.
         let wait = if self.loading_demo {
             (!self.loading_hidden).then_some(loading::Wait::Starting)
         } else if let Some(error) = failed.as_deref() {
@@ -703,10 +719,8 @@ impl App {
                 // it, and for 15 s while it does not. A snapshot published
                 // before the worker read the click must not put the panel back
                 // (autochange would flip to Off).
-                let acknowledged = worlds_match(
-                    next.pending.as_ref().unwrap_or(&next.config),
-                    &self.config,
-                );
+                let acknowledged =
+                    worlds_match(next.pending.as_ref().unwrap_or(&next.config), &self.config);
                 sent.elapsed() > Duration::from_secs(if acknowledged { 2 } else { 15 })
             }) && self
                 .snapshot
@@ -1136,6 +1150,8 @@ impl App {
                     match save_screenshot(&image, std::path::Path::new("runs")) {
                         Ok(path) => {
                             self.message = Some(format!("Screenshot saved to {}", path.display()));
+                            // The new file changes the size of `runs/`, so
+                            // measure it on the next frame.
                             self.runs_checked = Instant::now() - RUNS_REFRESH;
                         }
                         Err(error) => self.message = Some(format!("Screenshot failed: {error}")),
