@@ -1343,8 +1343,10 @@ impl QdArchive {
         }
         // Only elites within two cells of a changed cell can see a difference.
         let partial = self.scores_current() && changed.len() <= 32;
-        let indices: Vec<usize> = if partial {
-            self.behavior_indices
+        let filtered: Vec<usize>;
+        let indices: &[usize] = if partial {
+            filtered = self
+                .behavior_indices
                 .iter()
                 .copied()
                 .filter(|&i| {
@@ -1355,9 +1357,10 @@ impl QdArchive {
                                 .all(|axis| (niche.0[axis] as i32 - c.0[axis] as i32).abs() <= 2)
                     })
                 })
-                .collect()
+                .collect();
+            &filtered
         } else {
-            self.behavior_indices.clone()
+            &self.behavior_indices
         };
         let rows: Vec<ScoreRow> = self
             .entries
