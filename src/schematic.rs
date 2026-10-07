@@ -48,14 +48,14 @@ const SHADOW: Color32 = Color32::from_rgba_premultiplied(40, 26, 14, 70);
 /// One color for each emitter, in `Emitter::ALL` order. They have the hues of
 /// `ORIGIN_COLORS` in `ui/islands.rs`. The first has dark header text, the
 /// rest cream.
-const ROOF: [Color32; 4] = [
+const EMITTER_TINT: [Color32; 4] = [
     MUSTARD,
     Color32::from_rgb(184, 84, 48),
     BLU,
     Color32::from_rgb(108, 122, 54),
 ];
 /// Island `i` wears the color of emitter `i`.
-const ISLAND_TINT: [Color32; 4] = ROOF;
+const ISLAND_TINT: [Color32; 4] = EMITTER_TINT;
 
 /// The fixed-canvas painter: canvas units in, screen points out. A method that
 /// takes `(x, y)` or a list of points reads canvas units. One that takes a
@@ -210,14 +210,14 @@ impl Scene<'_> {
     /// A path with an arrow head at its end, in `color` over a dark edge. It
     /// needs at least two points.
     fn arrow_path(&self, points: &[(f32, f32)], color: Color32) {
-        let pts: Vec<Pos2> = points.iter().map(|&(x, y)| self.at(x, y)).collect();
-        let n = pts.len();
-        let b = pts[n - 1];
-        let dir = (b - pts[n - 2]).normalized();
+        let mut line: Vec<Pos2> = points.iter().map(|&(x, y)| self.at(x, y)).collect();
+        let n = line.len();
+        let b = line[n - 1];
+        let dir = (b - line[n - 2]).normalized();
         let side = Vec2::new(-dir.y, dir.x);
         let head = 22.0 * self.k;
         let base = b - dir * head;
-        let mut line = pts.clone();
+        // The line stops at the base of the head.
         line[n - 1] = base;
         self.p
             .add(Shape::line(line.clone(), Stroke::new(12.0 * self.k, INK)));
@@ -588,7 +588,7 @@ fn workshop(s: &Scene, index: usize, snap: Option<&Snapshot>, y: f32, h: f32) {
         |snap| snap.emitter_weights[index],
     );
     let area = (20.0, y, 450.0, h);
-    let accent = ROOF[index];
+    let accent = EMITTER_TINT[index];
     s.card(area, accent, 0, "");
     let head_color = if accent == MUSTARD { INK } else { CREAM };
     let pulse = 0.5 + 0.5 * (s.t * 2.2 + index as f32 * 1.6).sin();
@@ -659,14 +659,14 @@ fn arena(s: &Scene) {
     s.critter(
         track0 + (track1 - track0 - 6.0) * run,
         ly + 36.0,
-        ROOF[0],
+        EMITTER_TINT[0],
         0.95,
         s.t * 9.0,
     );
     let stop = (t / 0.25).min(1.0);
     let sx = track0 + (gate_x - 18.0 - track0) * stop;
     if stop < 1.0 {
-        s.critter(sx, ly + 74.0, ROOF[2], 0.95, s.t * 9.0);
+        s.critter(sx, ly + 74.0, EMITTER_TINT[2], 0.95, s.t * 9.0);
     } else {
         // Stopped: it turns grey and still, with a red cross past the gate.
         s.critter(sx, ly + 74.0, Color32::from_rgb(150, 140, 120), 0.95, 0.0);
@@ -790,7 +790,13 @@ fn paint(ui: &egui::Ui, rect: Rect, snap: Option<&Snapshot>) {
         let f = (t / 7.0 + i as f32 * 0.25).fract() * 0.8;
         let x = a.0 + (b.0 - a.0) * f;
         let y = a.1 + (b.1 - a.1) * f;
-        boat(&s, x, y - 12.0, ROOF[i], (t * 2.4 + i as f32).sin() * 3.0);
+        boat(
+            &s,
+            x,
+            y - 12.0,
+            EMITTER_TINT[i],
+            (t * 2.4 + i as f32).sin() * 3.0,
+        );
     }
     s.arrow((510.0, 330.0), (472.0, 330.0), RED);
     s.arrow((510.0, 560.0), (472.0, 560.0), RED);
