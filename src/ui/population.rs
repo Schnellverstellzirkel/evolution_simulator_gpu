@@ -83,9 +83,7 @@ impl App {
         };
         Self::sorted_by_note(ui, snapshot, theme);
         if self.archive_view == ArchiveView::Cards {
-            let mut filter = self.card_filter;
-            Self::card_filters(ui, &mut filter, theme);
-            self.card_filter = filter;
+            Self::card_filters(ui, &mut self.card_filter, theme);
         }
         let mut selected = None;
         let mut map_click = None;
@@ -292,12 +290,12 @@ impl App {
             .cards_requested
             .is_some_and(|at| at.elapsed() < Duration::from_secs(2));
         // A list scored in an earlier world is never shown.
-        let world = self.snapshot.as_ref().map(|s| s.config.clone());
-        if self.cards.as_ref().is_some_and(|list| {
-            world
+        let stale = self.cards.as_ref().is_some_and(|list| {
+            self.snapshot
                 .as_ref()
-                .is_some_and(|w| list.config.physics_differs(w))
-        }) {
+                .is_some_and(|s| list.config.physics_differs(&s.config))
+        });
+        if stale {
             self.cards = None;
         }
         let empty = self.cards.as_ref().is_none_or(|list| list.cards.is_empty());
