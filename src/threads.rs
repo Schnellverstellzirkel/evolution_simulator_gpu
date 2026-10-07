@@ -292,6 +292,8 @@ impl Drop for Helper {
     }
 }
 
+/// The CPUs the calling thread may run on, in ascending order. The list is
+/// empty when the system does not say.
 #[cfg(target_os = "linux")]
 fn allowed_cpus() -> Vec<usize> {
     unsafe {
@@ -305,11 +307,13 @@ fn allowed_cpus() -> Vec<usize> {
     }
 }
 
+/// Lists no CPUs on systems other than Linux, so nothing is pinned.
 #[cfg(not(target_os = "linux"))]
 fn allowed_cpus() -> Vec<usize> {
     Vec::new()
 }
 
+/// Pins the calling thread to `cpus`. An error is ignored.
 #[cfg(target_os = "linux")]
 fn set_affinity(cpus: &[usize]) {
     unsafe {
@@ -321,11 +325,14 @@ fn set_affinity(cpus: &[usize]) {
     }
 }
 
+/// Does nothing on systems other than Linux.
 #[cfg(not(target_os = "linux"))]
 fn set_affinity(_: &[usize]) {}
 
 #[cfg(test)]
 mod tests {
+    /// The pool has at least one thread. With four or more CPUs and no
+    /// `RAYON_NUM_THREADS` it has every CPU but two.
     #[test]
     fn pool_leaves_two_cpus() {
         let cpus = std::thread::available_parallelism().map_or(2, usize::from);
@@ -336,6 +343,8 @@ mod tests {
         }
     }
 
+    /// Runs three jobs that borrow `data`, then checks that a panic in a job
+    /// resumes in the caller and that the helper runs a job after it.
     #[test]
     fn helper_runs_borrowed_jobs() {
         let helper = super::Helper::new("test-helper");
@@ -355,6 +364,8 @@ mod tests {
             assert_eq!(sum, data.iter().sum::<i32>());
         }
         assert_eq!(data, [1, 2, 3, 0, 1, 2]);
+        // `idle` may not run at all when a job is quick, so its count is not
+        // checked.
         let _ = idles;
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             helper.run(|| panic!("job panics"), || {})
