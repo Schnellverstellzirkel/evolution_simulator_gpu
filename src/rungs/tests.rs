@@ -59,7 +59,8 @@ fn one_in_128_slots_are_audit_creatures() {
     let audit = (0..n).filter(|&slot| is_audit(5051, 7, slot)).count();
     let share = audit as f64 / n as f64;
     assert!((share - 1.0 / 128.0).abs() < 5e-4, "{share}");
-    // A function of seed, round and slot only.
+    // The choice is a function of seed, round and slot only. The same inputs
+    // agree and another round picks other slots.
     assert_eq!(is_audit(1, 2, 3), is_audit(1, 2, 3));
     let moved = (0..4096)
         .filter(|&s| is_audit(1, 2, s) != is_audit(1, 3, s))
@@ -69,6 +70,7 @@ fn one_in_128_slots_are_audit_creatures() {
 
 #[test]
 fn a_rule_stops_below_its_bias_and_not_in_an_off_band() {
+    // Only the distance counts: the rule stops a creature under 1 m.
     let mut rung = Rung::NEVER;
     rung.weights[0] = 1.0;
     rung.bias = 1.0;
@@ -76,11 +78,13 @@ fn a_rule_stops_below_its_bias_and_not_in_an_off_band() {
     let high = [2.0, 0.0, 0.0, 0.0, 0.0, 0.2];
     assert!(rung.stops(&low, 3));
     assert!(!rung.stops(&high, 3));
+    // With band 3 off, the rule leaves band 3 alone and still stops band 2.
     rung.off = 1 << 3;
     assert!(!rung.stops(&low, 3));
     assert!(rung.stops(&low, 2));
-    // A feature that is not a number never stops a creature.
+    // `Rung::NEVER` stops nothing.
     assert!(!Rung::NEVER.raw_stops(&low));
+    // A feature that is not a number never stops a creature.
     let mut bad = low;
     bad[1] = f32::NAN;
     rung.off = 0;
@@ -89,6 +93,9 @@ fn a_rule_stops_below_its_bias_and_not_in_an_off_band() {
 
 #[test]
 fn the_fit_stops_the_slow_and_spares_the_budget_of_the_fast() {
+    // Three generations of 40,000 audit rows, one in eight reaching the 5 s
+    // bar. The first fills the window. After that, the rule fitted on the
+    // window judges each new generation.
     let mut audit = Audit::default();
     let mut k = 0u32;
     for _ in 0..3 {
@@ -111,18 +118,21 @@ fn the_fit_stops_the_slow_and_spares_the_budget_of_the_fast() {
         stopped_fast += rules.0[1].stops(&fast.features(1).unwrap(), 0) as u32;
     }
     assert!(stopped_slow > 1900, "{stopped_slow}");
-    // The budget is 1 in 1,000 of the fast ones; the sample is 2,000.
+    // The budget is 1 in 1,000 of the fast ones, so about 2 of these 2,000
+    // stop. A limit of 6 leaves room for chance.
     assert!(stopped_fast <= 6, "{stopped_fast}");
 }
 
 #[test]
-fn nothing_is_armed_without_rows_of_both_classes() {
+fn nothing_is_armed_without_enough_rows_of_both_classes() {
+    // Only 1,500 rows reach the 5 s bar. A rung needs `MIN_PASSING` of them.
     let mut audit = Audit::default();
     for i in 0..3000u32 {
         audit.record(row(i % 2 == 0, false, 0.1));
     }
     assert!(audit.boundary(None, false).is_none());
-    // Exempt rows (nurseries, immigrants) never enter the fit.
+    // Exempt rows (nurseries, immigrants) never enter the fit, however many
+    // there are.
     let mut audit = Audit::default();
     for i in 0..50_000u32 {
         audit.record(row(i % 2 == 0, true, i as f32 * 1e-4));
@@ -132,6 +142,7 @@ fn nothing_is_armed_without_rows_of_both_classes() {
 
 #[test]
 fn a_band_turns_off_after_three_bad_generations_and_back_on_after_three_good() {
+    // `update(true)` reports a generation over `BAND_MISS_LIMIT`.
     let mut b = Breaker::default();
     b.update(true);
     b.update(true);
@@ -154,6 +165,7 @@ fn a_band_turns_off_after_three_bad_generations_and_back_on_after_three_good() {
 
 #[test]
 fn the_window_keeps_eight_generations_and_survives_a_save() {
+    // Eleven generations of 10,000 rows, one in five reaching the 5 s bar.
     let mut audit = Audit::default();
     for g in 0..11u32 {
         for i in 0..10_000u32 {
@@ -162,6 +174,7 @@ fn the_window_keeps_eight_generations_and_survives_a_save() {
         audit.boundary(None, false);
     }
     assert_eq!(audit.window.len(), WINDOW);
+    // A loaded save fits the same rules.
     let bytes = bincode::serialize(&audit).unwrap();
     let back: Audit = bincode::deserialize(&bytes).unwrap();
     assert_eq!(back.fit(false), audit.fit(false));
@@ -170,6 +183,7 @@ fn the_window_keeps_eight_generations_and_survives_a_save() {
 
 #[test]
 fn children_of_a_parent_the_rules_would_stop_skip_that_rung() {
+    // R1 never stops. R2 stops a creature under 1 m at 2.5 s.
     let mut r2 = Rung::NEVER;
     r2.weights[0] = 1.0;
     r2.bias = 1.0;
@@ -178,10 +192,12 @@ fn children_of_a_parent_the_rules_would_stop_skip_that_rung() {
     let fast = profile(&trace(1.0, 3.0, 8.0, 1200, [0, 0]), 0.25);
     assert_eq!(parent_exemptions(&rules, Some(&slow), true), EXEMPT_R2);
     assert_eq!(parent_exemptions(&rules, Some(&fast), true), 0);
-    // A weak elite that the rules stop is where the rules should work.
+    // A weak elite that the rules stop gives its children no exemption. That
+    // is where the rules should work.
     assert_eq!(parent_exemptions(&rules, Some(&slow), false), 0);
-    // An elite with no profile (an old save, a trial with no trace) or an
-    // all-zero one is exempt from both rungs.
+    // An elite with an unknown profile exempts its children from both rungs.
+    // The lineage may hold no record of it (`None`), or its trial may have
+    // left no trace (all zeros).
     assert_eq!(parent_exemptions(&rules, None, true), EXEMPT_R1 | EXEMPT_R2);
     assert_eq!(
         parent_exemptions(&rules, Some(&[0; 2 * FEATURES]), true),
@@ -225,9 +241,9 @@ fn while_the_archives_climb_a_rung_that_stops_their_entrants_is_not_armed() {
 
 #[test]
 fn on_a_plateau_a_rung_arms_whatever_the_creatures_that_enter_archives_look_like() {
-    // The guard counts the creatures above the bar there, so the early
-    // fallers that improve a niche of weak bodies, or no entrants at all,
-    // decide nothing.
+    // On a plateau the guard counts the audit creatures that reach the 5 s
+    // bar, so the entrants decide nothing. Try the early fallers that improve
+    // a niche of weak bodies as the only entrants, then no entrants at all.
     for tweak in [early_fallers_enter as fn(u32, &mut AuditRow), |_, row| {
         row.entrant = false
     }] {
@@ -255,6 +271,7 @@ fn a_rung_that_stops_the_creatures_above_the_bar_is_not_armed_on_a_plateau() {
     // rule fitted before the generation stops them.
     generation(&mut audit, 4, true, |i, row| {
         if i % 8 == 0 && i % 40 == 0 {
+            // The parameter `row` hides the function, so name it by its path.
             let slow = self::row(false, false, 0.1);
             row.trace = slow.trace;
         }
@@ -269,6 +286,7 @@ fn a_rung_that_stops_the_creatures_above_the_bar_is_not_armed_on_a_plateau() {
 
 #[test]
 fn the_judgments_pack_into_two_words_and_scale_down_together() {
+    // Counts that fit in 16 bits come back as they went in.
     let j = Judged {
         entrants: (30, 1),
         passers: (2300, 5),
@@ -279,7 +297,8 @@ fn the_judgments_pack_into_two_words_and_scale_down_together() {
         passers: (200_000, 4_000),
     };
     let back = Judged::unpack(big.pack());
-    // Past 65,535 both counts shrink by the same factor, so the shares stay.
+    // Past 65,535 both counts of a pair shrink by the same factor, so the 2%
+    // share stays.
     assert!(back.passers.0 <= 0xffff && back.entrants.0 <= 0xffff);
     assert!((back.passers.1 as f64 / back.passers.0 as f64 - 0.02).abs() < 1e-3);
     assert!((back.entrants.1 as f64 / back.entrants.0 as f64 - 0.02).abs() < 1e-3);
@@ -287,10 +306,11 @@ fn the_judgments_pack_into_two_words_and_scale_down_together() {
 
 #[test]
 fn while_the_archives_climb_the_guard_is_the_entrant_guard_it_always_was() {
-    // The trust of each generation, from the rule the window fit before it,
-    // by the rule of the entrant guard written out again: the entrants the 5 s
-    // screen keeps that are alive at the rung and not exempt, 60 or more over
-    // the last 4 generations, at most 3% of them stopped.
+    // The entrant guard written out again, outside `Audit`. A rung is trusted
+    // when the last 4 generations hold at least 60 counted entrants and the
+    // rule the window fitted before each generation would have stopped at most
+    // 3% of them. An entrant counts when the 5 s screen keeps it, it is alive
+    // at the rung and it is not exempt from the rung.
     let mut audit = Audit::default();
     let mut history: [Vec<(u32, u32)>; RUNGS] = Default::default();
     let mut seen = [false; 2];
@@ -302,12 +322,15 @@ fn while_the_archives_climb_the_guard_is_the_entrant_guard_it_always_was() {
         (state >> 33) as u32
     };
     for g in 0..14u32 {
+        // 30,000 audit rows: one in six reaches the 5 s bar, one in 50 is
+        // exempt and one in 40 has no bar.
         let rows: Vec<AuditRow> = (0..30_000u32)
             .map(|i| {
                 let mut row = row(i % 6 == 0, next() % 50 == 0, (next() % 1000) as f32 * 1e-3);
                 row.bar_known = next() % 40 != 0;
-                // Entrants are mostly creatures above the bar; creatures that
-                // fall early enter now and then, more in some generations.
+                // Entrants are mostly creatures above the bar. A creature
+                // below it has a 1 in 250 chance to enter in the first two
+                // generations of every five, and 1 in 3,000 in the others.
                 let weak = if g % 5 < 2 { 250 } else { 3000 };
                 row.entrant = if row.pass3 {
                     next() % 4 == 0
@@ -320,6 +343,7 @@ fn while_the_archives_climb_the_guard_is_the_entrant_guard_it_always_was() {
             .collect();
         #[allow(clippy::needless_range_loop)]
         for r in 0..RUNGS {
+            // The rule fitted before this generation judges its rows.
             let Some(rung) = audit.fit_rung(r) else {
                 history[r].clear();
                 continue;
@@ -355,7 +379,8 @@ fn while_the_archives_climb_the_guard_is_the_entrant_guard_it_always_was() {
             );
         }
     }
-    // The test only means something if the guard both held and let go.
+    // The test only means something if the guard trusted a rung at least once
+    // and refused one at least once.
     assert!(seen[0] && seen[1], "{seen:?}");
 }
 
