@@ -19,7 +19,9 @@ use super::{BoneIds, Context, Operator, child_bones, muscles_on};
 use crate::config::Config;
 use crate::evolution::{Creature, MAX_ORGAN_MASS, MIN_ORGAN_MASS, Rng};
 
-/// This file's operators, by name. Add each new one here.
+/// This file's operators, by name. Add each new one here. The pick slot of
+/// this file chooses by position in this list, so the order decides what a
+/// fixed seed picks.
 pub(super) const OPS: &[(&str, Operator)] = &[
     ("claw_feet", claw_feet),
     ("ski_feet", ski_feet),
@@ -40,7 +42,8 @@ pub(super) const OPS: &[(&str, Operator)] = &[
     ("organ_diet_or_feast", organ_diet_or_feast),
 ];
 
-/// Every foot grips as hard as it can and gets a little lighter: a claw.
+/// Every foot (a node with no bone below it) grips as hard as it can and gets
+/// 15% narrower, so lighter: a claw.
 fn claw_feet(c: &mut Creature, cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     let mut changed = false;
     for n in leaf_nodes(c) {
@@ -52,7 +55,7 @@ fn claw_feet(c: &mut Creature, cfg: &Config, _rng: &mut Rng, _cx: &Context) -> b
     changed
 }
 
-/// Every foot slides as easily as it can and gets wider, like a ski.
+/// Every foot slides as easily as it can and gets 15% wider, like a ski.
 fn ski_feet(c: &mut Creature, cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     let mut changed = false;
     for n in leaf_nodes(c) {
@@ -64,9 +67,9 @@ fn ski_feet(c: &mut Creature, cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bo
     changed
 }
 
-/// In a pair of matching limbs one foot grips and the other slides, so the
-/// pair works as a ratchet (Hirose 1993): the gripping limb pushes while the
-/// sliding limb is dragged forward.
+/// In a pair of matching limbs (`matching_limbs`) one foot grips and the other
+/// slides, and a coin picks which. The pair works as a ratchet (Hirose 1993):
+/// the gripping limb pushes while the sliding limb is dragged forward.
 fn ratchet_pair(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let pairs = matching_limbs(c);
     if pairs.is_empty() {
@@ -95,7 +98,7 @@ fn light_feet(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> b
     scale_nodes(c, cfg, &leaf_nodes(c), by)
 }
 
-/// The inner nodes (trunk and joints) get 15 to 30% wider.
+/// The inner nodes (the trunk and the joints of limbs) get 15 to 30% wider.
 fn heavy_trunk(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let by = rng.range(1.15, 1.3);
     scale_nodes(c, cfg, &inner_nodes(c), by)
@@ -107,7 +110,8 @@ fn light_trunk(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> 
     scale_nodes(c, cfg, &inner_nodes(c), by)
 }
 
-/// Scales the diameter of nodes by a factor, clamped to configuration limits.
+/// Multiplies the diameter of each of `nodes` by `by`, within `cfg.min_size`
+/// and `cfg.max_size`. Returns whether any diameter changed.
 fn scale_nodes(c: &mut Creature, cfg: &Config, nodes: &[usize], by: f32) -> bool {
     let mut changed = false;
     for &n in nodes {
@@ -117,8 +121,9 @@ fn scale_nodes(c: &mut Creature, cfg: &Config, nodes: &[usize], by: f32) -> bool
     changed
 }
 
-/// Grip falls (or rises) in a line from the rearmost node to the foremost, so
-/// one end of the body drags and the other end holds.
+/// Grip falls (or rises) in a line along x from the rearmost node to the
+/// foremost, over the whole grip range and every node but the head. A coin
+/// picks the direction. One end of the body drags and the other end holds.
 fn friction_gradient_trunk(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let nodes = body_nodes(c);
     if nodes.len() < 3 {
@@ -165,7 +170,7 @@ fn bulk_by_height(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) 
     changed
 }
 
-/// Two nodes trade their grip and size.
+/// Two nodes (never the head) trade their grip and size.
 fn swap_node_surfaces(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let nodes = body_nodes(c);
     if nodes.len() < 2 {
@@ -189,14 +194,14 @@ fn equalize_nodes(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context
     spread_nodes(c, 0.6)
 }
 
-/// Size and grip of every node move away from the mean of the body by 40%,
+/// Size and grip of every node get 40% farther from the mean of the body,
 /// which makes heavy nodes heavier and slippery ones more slippery.
 fn polarize_nodes(c: &mut Creature, _cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     spread_nodes(c, 1.4)
 }
 
-/// Scales every node's distance from the body mean by `factor`; `repair`
-/// clamps what leaves the limits.
+/// Scales how far each node but the head is from the mean size and the mean
+/// grip of those nodes by `factor`. `repair` clamps what leaves the limits.
 fn spread_nodes(c: &mut Creature, factor: f32) -> bool {
     let nodes = body_nodes(c);
     if nodes.len() < 2 {
@@ -215,7 +220,7 @@ fn spread_nodes(c: &mut Creature, factor: f32) -> bool {
     changed
 }
 
-/// One node gets a new random size and grip.
+/// One node but the head gets a new random size and grip.
 fn redraw_one_node(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let nodes = body_nodes(c);
     let Some(n) = pick(&nodes, rng) else {
@@ -243,9 +248,10 @@ fn knee_slip(c: &mut Creature, cfg: &Config, _rng: &mut Rng, _cx: &Context) -> b
     changed
 }
 
-/// Nodes that only weak muscles reach (less than a third of the drive of the
-/// strongest muscle) shrink to the smallest size: weight that nothing drives
-/// is only a load.
+/// Nodes that no muscle or only weak muscles reach (less than a third of the
+/// drive of the strongest muscle) shrink to the smallest size, because mass
+/// that no strong muscle drives only adds load. A muscle reaches a node when it
+/// has an end on a bone at that node. The head is left alone.
 fn dead_weight_diet(c: &mut Creature, cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     let best = c.muscles.iter().map(drive).fold(0.0f32, f32::max);
     if best <= 0.0 {
@@ -268,7 +274,8 @@ fn dead_weight_diet(c: &mut Creature, cfg: &Config, _rng: &mut Rng, _cx: &Contex
 }
 
 /// The node with the most muscles on its bones grows to the largest size, so
-/// the mass sits where the muscles pull.
+/// the mass sits where the muscles pull. On a tie the node with the highest
+/// index wins.
 fn muscle_hub_bulk(c: &mut Creature, cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     let load = |n: usize| -> usize {
         let touching: BoneIds = (0..c.bones.len())
@@ -284,7 +291,8 @@ fn muscle_hub_bulk(c: &mut Creature, cfg: &Config, _rng: &mut Rng, _cx: &Context
     changed
 }
 
-/// Every organ gets half as heavy, or 1.6 times as heavy.
+/// Every organ gets half as heavy, or 1.6 times as heavy, within the organ mass
+/// limits.
 fn organ_diet_or_feast(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let by = if coin(rng) { 0.5 } else { 1.6 };
     let mut changed = false;
