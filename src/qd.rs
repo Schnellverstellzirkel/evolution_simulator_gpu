@@ -2,8 +2,8 @@
 //! elites and the emitters that breed from them.
 //! An archive keeps the fastest creature of each cell, where a cell is a way
 //! of moving times a body class, and a reserve of new body plans.
-//! The module also holds the CMA-ES samplers, the layout of ring slots over
-//! islands and nurseries, and the save version `VERSION`.
+//! The module also holds the CMA-ES samplers, the layout of population slots
+//! over islands and nurseries, and the save version `VERSION`.
 //! `storage::Experiment` owns the archives and `evolution` breeds from them.
 use crate::evolution::{Creature, Muscle, Population, Rng, StoredCreature};
 use serde::{Deserialize, Serialize};
@@ -673,7 +673,7 @@ impl Emitter {
     pub fn from_index(index: usize) -> Self {
         Self::ALL[index.min(EMITTER_COUNT - 1)]
     }
-    /// The name of this kind in the statistics.
+    /// The name shown for this kind in the diagnostics.
     pub fn label(self) -> &'static str {
         match self {
             Self::Cma => "Diagonal CMA-ES",
@@ -805,7 +805,8 @@ impl Descriptor {
     }
 
     /// The cell of the way of moving alone, with the body classes left at
-    /// zero: the layout of a nursery and of saves before version 54.
+    /// zero: the layout of an archive that is not refined, and of saves before
+    /// version 54.
     pub fn movement_niche(self) -> Niche {
         let mut niche = self.niche_in(&ISLAND_CLASSES);
         niche.0[2] = 0;
@@ -1121,8 +1122,9 @@ impl QdArchive {
         self.behavior_scores = BehaviorScores::default();
     }
     /// Moves every behavior elite to the cell its descriptor gives under the
-    /// current layout, for archives saved under an older one. When two
-    /// elites meet in a cell the faster stays. Elites keep their order.
+    /// current layout. It runs when an island is refined and for archives
+    /// saved under an older layout. When two elites meet in a cell the faster
+    /// stays. Elites keep their order.
     pub fn rebin(&mut self) {
         let mut kept: Vec<Elite> = Vec::with_capacity(self.entries.len());
         let mut at: HashMap<Niche, usize> = HashMap::new();
@@ -2201,8 +2203,12 @@ impl CmaEmitter {
             self.sample_exploring(rng, strength, creature)
         }
     }
-    /// Updates the search distribution from scored samples. CMA-ME emitters
-    /// get improvement keys. Optimizers get fitness.
+    /// Updates the search distribution from scored samples. A sample is the
+    /// index of a creature in `population` and its key. CMA-ME emitters get
+    /// improvement keys. Optimizers get fitness. Samples that failed or have
+    /// another body plan are dropped, the best 1024 stay and the list ends up
+    /// sorted best first. If fewer than 2 samples are left, the distribution
+    /// stays as it is.
     pub fn tell(&mut self, population: &Population, samples: &mut Vec<(usize, f32)>) {
         if samples.len() < 2 {
             return;
@@ -2628,8 +2634,8 @@ const MUSCLE_SCALES: [f32; 8] = [0.05, 0.05, 0.02, 0.02, 0.05, 0.05, 0.1, 0.05];
 /// Which of the `MUSCLE_SCALES` are lengths, multiplied by the body's size.
 const MUSCLE_LENGTHS: [bool; 8] = [false, false, true, true, false, false, false, false];
 impl Layout {
-    /// The layout of `template`: its counts and its typical bone length, which
-    /// is the mean rest length held between 0.05 and 10.
+    /// The layout of `template`: its counts and its typical bone length. That
+    /// is the mean rest length kept between 0.05 and 10, or 1 with no bones.
     fn of(template: &Creature) -> Self {
         let size = if template.bones.is_empty() {
             1.0
