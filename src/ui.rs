@@ -180,7 +180,8 @@ struct App {
     /// for. The worker gets them with `Command::Configure`, and
     /// `absorb_snapshot` takes the worker's own back.
     config: Config,
-    /// The replay on screen: the champion or the creature the player picked.
+    /// The replay on screen: the champion, a creature the player picked, or
+    /// the random first creature of a game.
     playback: Option<Playback>,
     /// The replay being recorded for `playback`, and when it was asked for.
     replay_wait: Option<(mpsc::Receiver<Playback>, Instant)>,
@@ -259,7 +260,8 @@ struct App {
     /// `frame_housekeeping` does 250 ms after the window opened.
     smoke_start_pending: bool,
     /// The preset (an index into `environment::PRESETS`) that a screenshot run
-    /// applies 4 s after the window opened. `None` once applied.
+    /// applies 4 s after the window opened. It is `None` when no run asked for
+    /// one, and once it is applied.
     smoke_preset: Option<usize>,
     /// When the window opened.
     started: Instant,
