@@ -1,10 +1,16 @@
+//! What the physics and the UI share: limits, fidelity, node and joint data,
+//! the ground (bumps, slope, gaps, hurdles, quake, ice) and early screening.
+//! The only simulation is the CUDA kernel `shaders/creature.cu`. It takes most
+//! of the constants here as `#define`s (`kernel::cuda_source`) and writes the
+//! ground functions again in CUDA. The UI and `physics2::Model` call the ground
+//! functions here to draw the world and to put a creature on it.
 use crate::evolution::{Bone, Creature, FAILED, Muscle, NodeGene};
-/// Physics steps per second. Every engine, the replay, and trial lengths
-/// follow it.
+/// Physics steps per second at the standard fidelity. The kernel, the replay
+/// and the trial lengths follow it.
 pub fn rate() -> u32 {
     60
 }
-/// Seconds per physics step.
+/// Seconds per physics step at the standard fidelity.
 pub fn dt() -> f32 {
     Fidelity::standard().dt()
 }
@@ -15,11 +21,14 @@ pub fn dt() -> f32 {
 pub fn settle() -> u32 {
     Fidelity::standard().settle()
 }
-/// Gait sampling interval in steps (30 samples per second).
+/// Gait sampling interval in steps (30 samples per second). The kernel counts
+/// gait turns on these samples.
 pub fn sample_interval() -> u32 {
     Fidelity::standard().sample_interval()
 }
-/// Cosine and tangent of the largest bone turn allowed in one step.
+/// Cosine and tangent of the angle a bone turns in one step at
+/// `Limits::bone_spin`. Unused: the kernel sets no limit on how far a bone
+/// turns in a step.
 pub fn turn_limits() -> (f32, f32) {
     Fidelity::standard().turn_limits()
 }
@@ -29,11 +38,16 @@ pub fn air_per_step(air_retention: f32) -> f32 {
 }
 /// How finely one evaluation resolves the physics: steps per second and
 /// solver passes per step. Evaluations normally use `Fidelity::standard()`;
-/// a finer one checks that a gait does not depend on the coarse steps.
+/// a finer one checks that a gait does not depend on the coarse steps. The
+/// kernel reads only `rate`. It runs a fixed number of substeps per step
+/// (`kernel::SUBSTEPS`) and ignores the pass counts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Fidelity {
+    /// Physics steps per second.
     pub rate: u32,
+    /// Position-projection passes per step.
     pub bone_passes: usize,
+    /// Velocity-constraint passes per step.
     pub velocity_passes: usize,
 }
 impl Fidelity {
@@ -46,9 +60,11 @@ impl Fidelity {
             velocity_passes,
         }
     }
-    /// Twice the standard rate, for the confirmation trial of an archive
-    /// entrant. Each step runs the kernel's substeps, so the confirmation
-    /// trial runs 1,920 substeps per second against 960.
+    /// Twice the standard rate, for the confirmation trial of a creature that
+    /// would set a record of its island or nursery (`scheduler::confirm_config`).
+    /// Each step runs the kernel's substeps, so the confirmation trial runs
+    /// 1,920 substeps per second against 960. The pass counts are four times
+    /// the standard ones.
     pub fn fine() -> Self {
         let standard = Self::standard();
         Self {
@@ -57,6 +73,7 @@ impl Fidelity {
             velocity_passes: standard.velocity_passes * 4,
         }
     }
+    /// Seconds per step.
     pub fn dt(self) -> f32 {
         1.0 / self.rate as f32
     }
@@ -65,11 +82,14 @@ impl Fidelity {
     pub fn settle(self) -> u32 {
         (200 * self.rate).div_ceil(120)
     }
-    /// Gait sampling interval in steps (30 samples per second).
+    /// Gait sampling interval in steps (30 samples per second). The kernel
+    /// counts gait turns on these samples.
     pub fn sample_interval(self) -> u32 {
         (self.rate / 30).max(1)
     }
-    /// Cosine and tangent of the largest bone turn allowed in one step.
+    /// Cosine and tangent of the angle a bone turns in one step at
+    /// `Limits::bone_spin`. Unused: the kernel sets no limit on how far a bone
+    /// turns in a step.
     pub fn turn_limits(self) -> (f32, f32) {
         let angle = limits().bone_spin * self.dt();
         (angle.cos(), angle.tan())
@@ -79,8 +99,9 @@ impl Fidelity {
         air_retention.powf(60.0 / self.rate as f32)
     }
 }
-/// Position-projection and velocity-constraint passes per step. The rebuild
-/// after projection makes every bone exactly its rest length regardless.
+/// The standard counts of position-projection and velocity-constraint passes
+/// per step: 2 and 1. The kernel does not read them. It runs
+/// `kernel::SUBSTEPS` substeps per step.
 pub fn solver_passes() -> (usize, usize) {
     (2, 1)
 }
@@ -91,9 +112,11 @@ pub struct Limits {
     pub muscle_speed: f32,
     /// Largest muscle force (N).
     pub muscle_force: f32,
-    /// Fastest any node may move (m/s).
+    /// Fastest any node may move (m/s). Not enforced: the kernel has no node
+    /// speed limit.
     pub node_speed: f32,
-    /// Fastest a bone may turn (rad/s).
+    /// Fastest a bone may turn (rad/s). Not enforced: the kernel has no bone
+    /// turn limit. Only `Fidelity::turn_limits` reads it.
     pub bone_spin: f32,
     /// Shortest muscle rhythm period (s).
     pub min_period: f32,
@@ -103,7 +126,8 @@ pub struct Limits {
     pub muscle_recovery: f32,
     /// Longest bone (m).
     pub max_bone: f32,
-    /// Longest muscle length (m); the shortest contracted length is 80% of it.
+    /// Longest muscle length (m). A muscle's shortest length is at most 80% of
+    /// it.
     pub max_stroke: f32,
     /// Bone mass per squared meter of bone length (kg/m^2). Longer bones are
     /// proportionally thicker, so mass grows with the square of length while
@@ -112,6 +136,7 @@ pub struct Limits {
     pub bone_density: f32,
 }
 impl Limits {
+    /// The limits the game runs with, returned by `limits`.
     pub const DEFAULT: Limits = Limits {
         muscle_speed: 24.0,
         muscle_force: 200.0,
@@ -125,7 +150,7 @@ impl Limits {
         bone_density: 4.0,
     };
 }
-/// The physics limits. Every engine, the replay, and mutation read the same
+/// The physics limits. The kernel, the replay, and mutation read the same
 /// values.
 pub fn limits() -> Limits {
     Limits::DEFAULT
