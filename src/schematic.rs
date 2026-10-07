@@ -1,11 +1,10 @@
-//! "How evolution works": a painted poster of the search, with live numbers
-//! from the worker snapshot. It is drawn after the Team Fortress 2 look: a
-//! mid-century infographic poster in warm cream, tan, mustard, brick red and
-//! BLU blue, with thick dark outlines and soft drop shadows, chunky
-//! condensed titles and big dark text on light panels. Everything is egui
-//! painter shapes on a fixed 1760 x 1040 canvas that scales to the window,
-//! so it costs a few hundred shapes a frame. Colors are fixed and do not
-//! follow the theme, so the poster reads the same everywhere.
+//! This module draws the "How evolution works" window, a painted poster of
+//! the search with live numbers from the worker `Snapshot`. The app calls
+//! `show` every frame, and buttons in the help window and the Islands view
+//! set the flag that opens it. The poster is egui painter shapes on a fixed
+//! 1760 x 1040 canvas that scales to the window, a few hundred shapes a
+//! frame. Its colors are fixed, in the Team Fortress 2 poster look that
+//! `theme` also follows, so it reads the same under every theme.
 
 use crate::assets;
 use crate::qd::Emitter;
@@ -17,18 +16,24 @@ use eframe::egui::{
     epaint::PathShape,
 };
 
+/// Width of the canvas in canvas units, the poster's own coordinates.
 const W: f32 = 1760.0;
+/// Height of the canvas in canvas units.
 const H: f32 = 1040.0;
 /// Below this scale the poster stops shrinking and the window scrolls.
 const MIN_SCALE: f32 = 0.7;
 
 /// Dark brown outlines and text.
 const INK: Color32 = Color32::from_rgb(50, 34, 26);
+/// A lighter brown for the dashes of the arena lanes.
 const INK_SOFT: Color32 = Color32::from_rgb(104, 78, 56);
-/// The paper behind everything, its sunburst rays, the panels.
+/// The paper behind everything.
 const PAPER: Color32 = Color32::from_rgb(232, 210, 160);
+/// The sunburst rays on the paper.
 const PAPER_RAY: Color32 = Color32::from_rgb(240, 222, 176);
+/// The body of cards, signs and steps.
 const PANEL: Color32 = Color32::from_rgb(251, 242, 216);
+/// Light text, badges, medallions, pills and the hub's name plate.
 const CREAM: Color32 = Color32::from_rgb(255, 247, 226);
 const RED: Color32 = Color32::from_rgb(184, 56, 50);
 const BLU: Color32 = Color32::from_rgb(70, 108, 138);
@@ -40,32 +45,44 @@ const ROCK_DARK: Color32 = Color32::from_rgb(100, 70, 46);
 const DIRT: Color32 = Color32::from_rgb(190, 150, 98);
 const WOOD: Color32 = Color32::from_rgb(160, 108, 62);
 const SHADOW: Color32 = Color32::from_rgba_premultiplied(40, 26, 14, 70);
-/// The emitters, in the colors the island cards use for them. The first
-/// has dark header text, the rest cream.
+/// One color for each emitter, in `Emitter::ALL` order. They have the hues of
+/// `ORIGIN_COLORS` in `ui/islands.rs`. The first has dark header text, the
+/// rest cream.
 const ROOF: [Color32; 4] = [
     MUSTARD,
     Color32::from_rgb(184, 84, 48),
     BLU,
     Color32::from_rgb(108, 122, 54),
 ];
+/// Island `i` wears the color of emitter `i`.
 const ISLAND_TINT: [Color32; 4] = ROOF;
 
-/// The fixed-canvas painter: virtual coordinates in, screen coordinates out.
+/// The fixed-canvas painter: canvas units in, screen points out. A method that
+/// takes `(x, y)` or a list of points reads canvas units. One that takes a
+/// `Rect` reads screen points, as `rect` returns them.
 struct Scene<'a> {
+    /// The painter, clipped to the poster's rectangle.
     p: &'a Painter,
+    /// Where the canvas corner `(0, 0)` lies on the screen.
     origin: Pos2,
+    /// Screen pixels per canvas unit.
     k: f32,
     /// Seconds, for the gentle animation.
     t: f32,
 }
 
 impl Scene<'_> {
+    /// The screen point of the canvas point `(x, y)`.
     fn at(&self, x: f32, y: f32) -> Pos2 {
         self.origin + Vec2::new(x, y) * self.k
     }
+    /// The screen rectangle of the canvas rectangle with its corner at
+    /// `(x, y)`, `w` wide and `h` high.
     fn rect(&self, x: f32, y: f32, w: f32, h: f32) -> Rect {
         Rect::from_min_size(self.at(x, y), Vec2::new(w, h) * self.k)
     }
+    /// The dark outline stroke, `width` canvas units wide but at least 1.5
+    /// pixels.
     fn stroke(&self, width: f32) -> Stroke {
         Stroke::new((width * self.k).max(1.5), INK)
     }
@@ -79,7 +96,9 @@ impl Scene<'_> {
             stroke: self.stroke(outline).into(),
         }));
     }
-    /// A rounded block with a soft drop shadow.
+    /// A rounded block with a translucent drop shadow, 4 canvas units right
+    /// and 6 down. `round` is the corner radius and `outline` the line width,
+    /// both in canvas units.
     fn block(&self, r: Rect, fill: Color32, round: f32, outline: f32) {
         self.p.rect_filled(
             r.translate(Vec2::new(4.0, 6.0) * self.k),
@@ -88,7 +107,8 @@ impl Scene<'_> {
         );
         self.flat(r, fill, round, outline);
     }
-    /// Draws a filled rectangle without shadow (unlike `block`).
+    /// A rounded rectangle with the dark outline and no shadow. `block` adds
+    /// the shadow.
     fn flat(&self, r: Rect, fill: Color32, round: f32, outline: f32) {
         self.p.rect(
             r,
@@ -98,6 +118,7 @@ impl Scene<'_> {
             egui::StrokeKind::Middle,
         );
     }
+    /// A filled ellipse with the dark outline, drawn as a 48-sided shape.
     fn ellipse(&self, cx: f32, cy: f32, rx: f32, ry: f32, fill: Color32) {
         let points: Vec<(f32, f32)> = (0..48)
             .map(|i| {
@@ -107,9 +128,11 @@ impl Scene<'_> {
             .collect();
         self.poly(&points, fill, 3.5);
     }
+    /// The body font at `size` canvas units, never under 10 pixels.
     fn font(&self, size: f32) -> FontId {
         FontId::new((size * self.k).max(10.0), FontFamily::Proportional)
     }
+    /// The bold title font at `size` canvas units, never under 11 pixels.
     fn title_font(&self, size: f32) -> FontId {
         FontId::new((size * self.k).max(11.0), assets::hud_bold())
     }
@@ -123,7 +146,7 @@ impl Scene<'_> {
         );
         self.p.galley(self.at(x, y), galley, color);
     }
-    /// One centered body line.
+    /// One body line centered on `(x, y)`.
     fn label(&self, x: f32, y: f32, text: &str, size: f32, color: Color32) {
         self.p.text(
             self.at(x, y),
@@ -133,8 +156,9 @@ impl Scene<'_> {
             color,
         );
     }
-    /// A chunky title. Light titles get a dark edge so they stay readable
-    /// on a color.
+    /// A chunky title at `pos`, placed by `align`. A title in any color but
+    /// `INK` gets a dark copy offset down and right, so light titles stay
+    /// readable on a color.
     fn title(&self, pos: (f32, f32), align: Align2, text: &str, size: f32, color: Color32) {
         let font = self.title_font(size);
         if color != INK {
@@ -159,8 +183,9 @@ impl Scene<'_> {
             self.stroke(3.5),
         );
     }
-    /// A card: a light body under a colored header band with a title and
-    /// an optional number badge.
+    /// A card: a light body under a colored header band. With `num` above 0
+    /// the band gets a badge with that number and `title`. With 0 the caller
+    /// draws the header itself.
     fn card(&self, area: (f32, f32, f32, f32), accent: Color32, num: u32, title: &str) {
         let (x, y, w, h) = area;
         self.block(self.rect(x, y, w, h), PANEL, 12.0, 3.5);
@@ -177,12 +202,13 @@ impl Scene<'_> {
             );
         }
     }
-    /// Body text inside a card from its header down.
+    /// Wrapped body text inside a card, below its header band.
     fn card_text(&self, area: (f32, f32, f32, f32), text: &str, size: f32) {
         let (x, y, w, _) = area;
         self.text(x + 18.0, y + 56.0, w - 36.0, text, size, INK);
     }
-    /// A path with an arrow head at its end, in `color` over a dark edge.
+    /// A path with an arrow head at its end, in `color` over a dark edge. It
+    /// needs at least two points.
     fn arrow_path(&self, points: &[(f32, f32)], color: Color32) {
         let pts: Vec<Pos2> = points.iter().map(|&(x, y)| self.at(x, y)).collect();
         let n = pts.len();
@@ -208,9 +234,11 @@ impl Scene<'_> {
             stroke: self.stroke(3.0).into(),
         }));
     }
+    /// A straight arrow from `from` to `to`.
     fn arrow(&self, from: (f32, f32), to: (f32, f32), color: Color32) {
         self.arrow_path(&[from, to], color);
     }
+    /// A round cream badge centered on `(x, y)` that shows the number `n`.
     fn badge(&self, x: f32, y: f32, n: u32) {
         let c = self.at(x, y);
         self.p.circle(c, 17.0 * self.k, CREAM, self.stroke(3.0));
@@ -222,7 +250,8 @@ impl Scene<'_> {
             INK,
         );
     }
-    /// A tiny stick creature. `phase` swings its legs, `sc` scales it.
+    /// A tiny stick creature standing on `(x, y)`. `phase` swings its legs,
+    /// `sc` scales it.
     fn critter(&self, x: f32, y: f32, tint: Color32, sc: f32, phase: f32) {
         let hip = self.at(x, y - 15.0 * sc);
         let head = self.at(x, y - 33.0 * sc);
@@ -240,7 +269,9 @@ impl Scene<'_> {
         self.p.line_segment([hip, head], Stroke::new(5.0 * w, tint));
         self.p.circle(head, 7.5 * w, tint, self.stroke(2.5 * sc));
     }
-    /// A small icon for each emitter in a round cream medallion that pulses.
+    /// The icon of an emitter in a round cream medallion. `index` is the
+    /// emitter's place in `Emitter::ALL`. `pulse`, from 0 to 1, grows a halo
+    /// around the medallion and fades it out.
     fn emblem(&self, x: f32, y: f32, index: usize, pulse: f32) {
         let c = self.at(x, y);
         let r = 17.0 * self.k;
@@ -252,7 +283,7 @@ impl Scene<'_> {
         self.p.circle(c, r, CREAM, self.stroke(3.0));
         let ink = Stroke::new(3.0 * self.k, INK);
         match index {
-            // A gear, turning slowly.
+            // Cma: a gear, turning slowly.
             0 => {
                 let pts: Vec<Pos2> = (0..16)
                     .map(|i| {
@@ -269,7 +300,7 @@ impl Scene<'_> {
                 }));
                 self.p.circle_filled(c, 3.0 * self.k, INK);
             }
-            // A bone.
+            // Structural: a bone.
             1 => {
                 let a = c + Vec2::new(-8.0, 6.0) * self.k;
                 let b = c + Vec2::new(8.0, -6.0) * self.k;
@@ -281,7 +312,7 @@ impl Scene<'_> {
                     }
                 }
             }
-            // A star that twinkles.
+            // Novelty: a star that twinkles.
             2 => {
                 let grow = 1.0 + 0.15 * (self.t * 4.0).sin();
                 let pts: Vec<Pos2> = (0..10)
@@ -298,7 +329,7 @@ impl Scene<'_> {
                     stroke: Stroke::new(2.0 * self.k, INK).into(),
                 }));
             }
-            // A cracked egg: a new random body.
+            // Restart: a cracked egg, a new random body.
             _ => {
                 self.p
                     .circle(c + Vec2::new(0.0, 1.5) * self.k, 9.0 * self.k, CREAM, ink);
