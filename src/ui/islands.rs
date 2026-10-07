@@ -1,5 +1,9 @@
-//! The island view of the Ways of moving tab: each island with its elites, its
-//! nurseries and its migration, and the wild islands as tiles.
+//! The Islands view of the Ways of moving tab. It paints one card for each
+//! main island, which means the four isolated islands and the hub, and one
+//! tile for each wild island. A card shows the island's best creature, its top
+//! elites, the share of its elites that each emitter bred, its nurseries and
+//! its migration. `population` calls `islands_view`, and a click on a creature
+//! replays it.
 
 use super::{
     App,
@@ -14,8 +18,11 @@ const ISLAND_GAP: f32 = 10.;
 /// Height of an island card.
 const ISLAND_HEIGHT: f32 = 346.;
 /// Words for the emitter shares of an island's elites, in `Emitter::ALL` order.
+/// `IslandSummary::origins` holds the counts. "New" also counts the graduates
+/// of the island's nurseries.
 const ORIGIN_SHORT: [&str; 4] = ["Tuned", "Reshaped", "Novel", "New"];
-/// Their colors: amber, rust, cold blue and olive.
+/// Their colors: amber, rust, cold blue and olive. `EMITTER_TINT` in
+/// `schematic.rs` has the same hues.
 const ORIGIN_COLORS: [Color32; 4] = [
     Color32::from_rgb(222, 160, 60),
     Color32::from_rgb(178, 92, 58),
@@ -23,9 +30,13 @@ const ORIGIN_COLORS: [Color32; 4] = [
     Color32::from_rgb(132, 140, 76),
 ];
 impl App {
-    /// The island archives (four isolated islands, then the hub) in two
-    /// columns. Each card has a fixed size and
-    /// fixed places for its parts, so numbers change without moving anything.
+    /// The Islands view. It draws the main islands as cards in two columns,
+    /// the four isolated islands first and the hub last, and the wild islands
+    /// as tiles below them. Each card has a fixed size and fixed places for its
+    /// parts, so numbers change without moving anything. A click on a creature
+    /// replays it in the world it was scored in. The "How evolution works"
+    /// button opens the schematic. The "Strangest body" button replays the
+    /// main islands' elite whose body is the most unlike the others.
     pub(super) fn islands_view(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
         ui.horizontal(|ui| {
@@ -220,7 +231,10 @@ pub(crate) fn island_name(index: usize) -> String {
         format!("Island {}", index + 1)
     }
 }
-/// Paints one island card and returns the creature the player clicked.
+/// Paints the card of island `index` in `rect` and returns the creature the
+/// player clicked. `migration` is the last migration, `generation` is the
+/// generation running now, and `shown` is the id of the creature on screen,
+/// whose thumbnail is lit.
 #[allow(clippy::too_many_arguments)]
 fn paint_island(
     ui: &mut egui::Ui,
@@ -288,7 +302,7 @@ fn paint_island(
         FontId::proportional(15.),
         theme.accent,
     );
-    // The next fastest elites, right, one row each.
+    // The fastest elites, right, one row each. The first is the leader.
     let list_left = lead_rect.right() + 12.;
     painter.text(
         Pos2::new(list_left, 38.0 + rect.top()),
@@ -392,10 +406,12 @@ fn paint_island(
     }
     clicked
 }
-/// The wild islands as a grid of small tiles: each tile is colored by its
-/// best distance against the best of all wild islands and names its world.
-/// A click returns the island's leader with its world, so the replay runs
-/// where the score came from.
+/// The wild islands: a line about their worlds, a line that ranks the effects
+/// in the worlds of the islands whose migrants took hub cells (once any has),
+/// and a grid of small tiles. A tile is colored by its island's best distance
+/// against the best of all wild islands, and its hover text names the island's
+/// world. `wins` is `Snapshot::wild_wins`. A click returns the island's leader
+/// with its world, so the replay runs where the score came from.
 fn wild_tiles(
     ui: &mut egui::Ui,
     wild: &[crate::worker::IslandSummary],
@@ -413,8 +429,8 @@ fn wild_tiles(
         ))
         .color(theme.muted),
     );
-    // Which effects the worlds of the hub winners' islands hold, by the hub
-    // cells their migrants took (Wang et al., 2019, POET).
+    // For each effect, the hub cells that migrants from the wild worlds
+    // holding it took (Wang et al., 2019, POET).
     let mut by_effect = vec![0u32; crate::environment::EFFECTS.len()];
     for (w, levels) in levels.iter().enumerate() {
         let won = wins.get(crate::qd::MAIN_ISLANDS + w).copied().unwrap_or(0);
