@@ -98,12 +98,12 @@ impl Experiment {
         // paid when a slot is created or replaced.
         type CmaKey = (usize, qd::Niche, u64);
         struct CmaLookup {
-            buckets: HashMap<u64, Vec<(CmaKey, usize)>>,
+            buckets: KeyMap<Vec<(CmaKey, usize)>>,
         }
         impl CmaLookup {
             fn hash(island: usize, niche: &qd::Niche, plan: u64) -> u64 {
                 use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                let mut hasher = KeyHasher::default();
                 island.hash(&mut hasher);
                 niche.hash(&mut hasher);
                 plan.hash(&mut hasher);
@@ -141,7 +141,7 @@ impl Experiment {
             }
         }
         let mut cma_lookup = CmaLookup {
-            buckets: HashMap::new(),
+            buckets: KeyMap::default(),
         };
         for (index, cma) in self.cma_emitters.iter().enumerate() {
             cma_lookup.insert(
