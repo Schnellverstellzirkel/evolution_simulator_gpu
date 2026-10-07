@@ -57,10 +57,13 @@ impl Experiment {
         }
         let arenas = self.islands.len().max(arena_count());
         let positions: Vec<usize> = (0..block.len()).collect();
-        // The archive each creature breeds for and competes in.
-        let arena_of: Vec<u8> = positions
+        // The archive each creature breeds for and competes in. There are
+        // more than 256 arenas (105 islands of three kinds).
+        const _: () =
+            assert!((qd::MAIN_ISLANDS + qd::WILD_ISLANDS) * qd::ARENA_KINDS <= u16::MAX as usize);
+        let arena_of: Vec<u16> = positions
             .par_iter()
-            .map(|&j| qd::arena_of_slot(first + j, arenas) as u8)
+            .map(|&j| qd::arena_of_slot(first + j, arenas) as u16)
             .collect();
         let prep: Vec<Prep> = positions
             .par_iter()
