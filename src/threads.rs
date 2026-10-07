@@ -1,23 +1,28 @@
-//! Where the game's threads run, so the window keeps 60 FPS while the
-//! host breeds on every core.
-//!
-//! The process's CPUs are split once, in order: the first hardware thread
-//! runs the worker (commands and snapshots), the second runs the GPU engine
-//! thread, and the rest run the Rayon pool and the worker's helpers. The UI
-//! thread is not pinned: it asks the scheduler for a 1 ms slice instead, so
-//! a frame preempts breeding threads when it wakes. Pool threads are
-//! SCHED_BATCH at nice 10, so the scheduler never treats them as
-//! interactive. With fewer than four CPUs nothing is pinned.
+//! This module splits the CPUs the process may use among the game's threads,
+//! so the window keeps 60 FPS while the host breeds on every core. The first
+//! CPU goes to the worker thread, the second to the GPU engine thread, and the
+//! rest to the Rayon pool and the other background threads, but with fewer
+//! than four CPUs nothing is pinned. The UI thread is not pinned and asks the
+//! scheduler for a 1 ms slice instead, and pool threads run as `SCHED_BATCH`
+//! at nice 10, so a frame preempts breeding threads when it wakes. `main`
+//! calls `init` and builds the Rayon pool with `pool_threads` and
+//! `pool_thread_start`, and every other thread calls its own function here
+//! when it starts.
 
 use std::sync::OnceLock;
 
-/// CPU cores where the worker, GPU engine, and Rayon pool run.
+/// The CPUs of each role. With fewer than four CPUs, or when the system does
+/// not list them, `worker` and `engine` are `None` and `pool` is empty, so no
+/// thread is pinned.
 struct Layout {
     worker: Option<usize>,
     engine: Option<usize>,
     pool: Vec<usize>,
 }
 
+/// The CPU split, made on first use. The first call reads the CPU set of the
+/// calling thread, so `init` makes it on the main thread before any thread is
+/// pinned.
 fn layout() -> &'static Layout {
     static LAYOUT: OnceLock<Layout> = OnceLock::new();
     LAYOUT.get_or_init(|| {
@@ -43,8 +48,10 @@ pub fn init() {
     layout();
 }
 
-/// Rayon pool size for the game: every CPU but the worker's and the
-/// engine's. `RAYON_NUM_THREADS` may lower it.
+/// Rayon pool size for the game. It is every CPU but the worker's and the
+/// engine's, or every CPU when there are fewer than four. `RAYON_NUM_THREADS`
+/// can lower it, and a value that is 0 or not a number is ignored. When the
+/// system does not say how many CPUs there are, this counts 2.
 pub fn pool_threads() -> usize {
     let cpus = std::thread::available_parallelism().map_or(2, usize::from);
     let default = if cpus >= 4 { cpus - 2 } else { cpus.max(1) };
@@ -55,19 +62,24 @@ pub fn pool_threads() -> usize {
         .map_or(default, |n| n.min(default))
 }
 
-/// Rayon start handler: pool CPUs, SCHED_BATCH, nice 10.
+/// Start handler for the threads of the Rayon pool. It pins the thread to the
+/// pool's CPUs, makes it `SCHED_BATCH` on Linux and lowers its priority with
+/// `engine::lower_thread_priority`, which sets nice 10 on Linux. A step that
+/// fails is ignored.
 pub fn pool_thread_start() {
     pin_pool();
     #[cfg(target_os = "linux")]
     unsafe {
+        // With pid 0 the call changes the calling thread only.
         let param = libc::sched_param { sched_priority: 0 };
         libc::sched_setscheduler(0, libc::SCHED_BATCH, &param);
     }
     crate::engine::lower_thread_priority();
 }
 
-/// Runs the calling thread on the pool's CPUs (helpers of the worker, which
-/// would otherwise inherit its CPU).
+/// Pins the calling thread to the pool's CPUs. A thread started by the worker
+/// or the engine thread inherits that thread's one CPU, so background threads
+/// call this when they start. It does nothing when the CPUs are not split.
 pub fn pin_pool() {
     let pool = &layout().pool;
     if !pool.is_empty() {
@@ -75,14 +87,16 @@ pub fn pin_pool() {
     }
 }
 
-/// Runs the calling thread on the worker's CPU.
+/// Pins the calling thread to the worker's CPU. The worker thread calls it
+/// when it starts. It does nothing when the CPUs are not split.
 pub fn pin_worker() {
     if let Some(cpu) = layout().worker {
         set_affinity(&[cpu]);
     }
 }
 
-/// Runs the calling thread on the GPU engine thread's CPU.
+/// Pins the calling thread to the GPU engine thread's CPU. An engine thread
+/// calls it when it starts. It does nothing when the CPUs are not split.
 pub fn pin_engine() {
     if let Some(cpu) = layout().engine {
         set_affinity(&[cpu]);
