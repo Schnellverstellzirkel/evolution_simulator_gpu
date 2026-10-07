@@ -1,19 +1,19 @@
-//! Painted look of the environment effects in the replay view. Every effect
-//! is a faint overlay or a few thin shapes, so the creature, the meter marks
+//! Paints the replay view's world, an overcast industrial wasteland, and the
+//! look of each environment effect in it. Every effect is a faint overlay or
+//! a few thin shapes in fixed scene colors, so the creature, the meter marks
 //! and the text stay readable. Animation follows the replay clock passed in
 //! as `time`, so a paused replay holds still and no shape needs per-frame
-//! state. The scene colors are fixed, so the same overlays serve both themes.
-//! The key is an overcast industrial wasteland: grey skies over a skyline of
-//! blocks and chimneys, dirt and broken concrete underfoot, murky canal
-//! water, sludge, pale ice, and concrete hurdles and pits with hazard marks.
+//! state. `ui/viewport.rs` calls these functions to paint the replay scene,
+//! and `ui/race.rs` calls `backdrop` and `ground_body` for each race lane.
 use crate::{assets::Art, config::Config, environment::EFFECTS, theme::hash};
 use eframe::egui::{
     self, Color32, Painter, Pos2, Rect, Stroke, Vec2,
     epaint::{Mesh, Vertex},
 };
 
-/// How far an effect is from calm, 0 (calm) to 1 (harshest level). Grip has
-/// two sides, see `grip`.
+/// How far the effect called `name` is above its calm level: 0 at calm or
+/// below, 1 at its harshest level. An unknown name gives 0. The grip also has
+/// levels below calm, which `grip` reads.
 fn amount(cfg: &Config, name: &str) -> f32 {
     EFFECTS.iter().find(|e| e.name == name).map_or(0.0, |e| {
         let top = e.levels.len().saturating_sub(1).max(1);
@@ -22,7 +22,9 @@ fn amount(cfg: &Config, name: &str) -> f32 {
     })
 }
 
-/// (sandpaper, slipperiness): the grip effect's two sides, each 0 to 1.
+/// The grip effect's two sides as `(sandpaper, slipperiness)`. Sandpaper is 1
+/// when the grip level is below calm and 0 otherwise. Slipperiness is the
+/// grip's `amount`: 0 at calm and below, 1 at the last level.
 fn grip(cfg: &Config) -> (f32, f32) {
     let Some(e) = EFFECTS.iter().find(|e| e.name == "Grip") else {
         return (0.0, 0.0);
@@ -32,13 +34,14 @@ fn grip(cfg: &Config) -> (f32, f32) {
     (rough, amount(cfg, "Grip"))
 }
 
-/// `color` at opacity `a`, from 0 to 1.
+/// `color` at opacity `a`. Values of `a` outside 0 to 1 are clamped.
 fn alpha(color: (u8, u8, u8), a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(color.0, color.1, color.2, (a.clamp(0.0, 1.0) * 255.0) as u8)
 }
 
-/// A strip along the ground line that fades from `top` to `bottom` over
-/// `depth` pixels (negative depth reaches upward).
+/// A strip along the polyline `line` that fades from `top` on the line to
+/// `bottom` at `depth` pixels below it. A negative `depth` reaches upward. A
+/// line of fewer than two points paints nothing.
 pub fn band(painter: &Painter, line: &[Pos2], depth: f32, top: Color32, bottom: Color32) {
     if line.len() < 2 {
         return;
@@ -64,13 +67,15 @@ pub fn band(painter: &Painter, line: &[Pos2], depth: f32, top: Color32, bottom: 
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Overlays on the sky, drawn before the ground: warmth, haze, wind streaks
-/// and a tint for how far autochange has gone.
+/// Overlays on the sky, drawn over the backdrop and before the ground: a warm
+/// glow in a heat wave, haze when the air thickens, wind streaks, and a tint
+/// for how far up the autochange ladder the world has climbed. `time` is the
+/// replay clock in seconds.
 pub fn sky(painter: &Painter, rect: Rect, cfg: &Config, time: f32) {
     let heat = amount(cfg, "Heat wave");
     if heat > 0.0 {
-        // A warm glow rising from the horizon, so the sky keeps its blue
-        // overhead instead of turning grey.
+        // A warm glow that grows toward the bottom of the view and fades out
+        // toward the top, so the high sky stays as it is.
         let mut mesh = Mesh::default();
         let glow = alpha((226, 150, 64), 0.18 + 0.30 * heat);
         for (pos, color) in [
@@ -109,7 +114,8 @@ pub fn sky(painter: &Painter, rect: Rect, cfg: &Config, time: f32) {
         }
     }
     if cfg.autochange > 0 {
-        // Tint by how far up the autochange ladder the world has climbed.
+        // Tint by how far up the autochange ladder the world has climbed, in
+        // four stages.
         let lap = crate::environment::autochange_ladder().len().max(4);
         let quarter = (usize::from(cfg.autochange_step).min(lap - 1)) * 4 / lap;
         let tint = [
@@ -122,11 +128,12 @@ pub fn sky(painter: &Painter, rect: Rect, cfg: &Config, time: f32) {
     }
 }
 
-/// The water: a translucent blue body below the waterline at screen height
-/// `line_y`, a wavy surface, faint streaks and a few rising bubbles. The
-/// creature and the text are drawn after it, and the tint stays light enough
-/// to read them. `world_x` maps a screen x to meters, so the waves and bubbles
-/// scroll with the ground.
+/// The water: a translucent murky body below the waterline at screen height
+/// `line_y`, a wavy surface, faint streaks and a few rising bubbles. Nothing
+/// is painted when the water effect is calm or the waterline is below the
+/// view. The creature and the text are drawn after it, so the water never
+/// covers them. `world_x` maps a screen x to meters, so the waves and bubbles
+/// scroll with the ground. `pixels_per_meter` is the zoom.
 pub fn water(
     painter: &Painter,
     rect: Rect,
@@ -212,18 +219,24 @@ pub fn water(
     }
 }
 
-/// One foot moving fast on the ground, for mud splashes.
+/// A creature node close to the ground, for mud splashes. `ground` splashes
+/// the ones that move faster than 30 pixels per second.
 pub struct Foot {
     /// Where the foot meets the ground surface, in screen pixels.
     pub at: Pos2,
     /// Ground speed in pixels per second on screen.
     pub speed: f32,
+    /// Index of the node in the creature. It seeds the droplets, so each foot
+    /// throws its own pattern.
     pub id: usize,
 }
 
-/// Effects on and in the ground, drawn after it. `surface` maps a screen x to
-/// the ground line's screen y. `world_x` maps a screen x to meters, so cracks
-/// and grains scroll with the ground. `pixels_per_meter` is the zoom.
+/// Effects on and in the ground, drawn after it: a shade for heavy gravity,
+/// dry earth and cracks, sandpaper grains, wet puddles or ice, ice patches,
+/// ripples in a quake, brambles, and mud speckles and splashes. `surface`
+/// maps a screen x to the ground line's screen y. `world_x` maps a screen x to
+/// meters, so cracks and grains scroll with the ground. `pixels_per_meter` is
+/// the zoom. `feet` are the nodes near the ground, which splash the mud.
 #[allow(clippy::too_many_arguments)]
 pub fn ground(
     painter: &Painter,
@@ -243,6 +256,7 @@ pub fn ground(
             Pos2::new(x, surface(x).clamp(rect.top() - 50.0, rect.bottom() + 50.0))
         })
         .collect();
+    // Heavy gravity: a dark shade under the surface.
     let g = amount(cfg, "Gravity");
     if g > 0.0 {
         band(
@@ -257,6 +271,8 @@ pub fn ground(
     let heat = amount(cfg, "Heat wave");
     let dry = drought.max(0.6 * heat);
     if dry > 0.0 {
+        // Dry earth: a tan band under the surface, from a drought or, less,
+        // from a heat wave.
         band(
             painter,
             &line,
@@ -266,7 +282,8 @@ pub fn ground(
         );
     }
     if drought > 0.0 {
-        // Cracks every 0.7 m of ground: a short zigzag down from the surface.
+        // Cracks: at most one in every 0.7 m of ground, more of them as the
+        // drought deepens. Each is a short zigzag down from the surface.
         let first = (world_x(rect.left()) / 0.7).floor() as i64;
         let last = (world_x(rect.right()) / 0.7).ceil() as i64;
         let stroke = Stroke::new(1.2, alpha((30, 24, 16), 0.40 + 0.45 * drought));
@@ -304,14 +321,9 @@ pub fn ground(
         // Wet ground darkens with a bright film. Ice glazes over it.
         let s = (slip - 0.3) / 0.7;
         let ice = slip > 0.9;
-        let color = if ice {
-            (200, 222, 234)
-        } else {
-            (120, 150, 166)
-        };
         if !ice {
             // Wet: the ground darkens, a bright film runs along it, and puddles
-            // with slow ripples lie in the dips.
+            // with slow ripples lie on it, one in every 1.3 m of ground.
             band(
                 painter,
                 &line,
@@ -351,6 +363,7 @@ pub fn ground(
                 );
             }
         } else {
+            let color = (200, 222, 234);
             band(
                 painter,
                 &line,
@@ -365,6 +378,7 @@ pub fn ground(
             Stroke::new(1.5, alpha((255, 255, 255), 0.30 + 0.40 * s)),
         ));
         if ice {
+            // Glints twinkle on the ice. They keep their place on screen.
             for k in 0..14_i64 {
                 let x = rect.left() + rect.width() * hash(k * 3 + 1);
                 let twinkle = ((time * 2.0 + hash(k) * 6.0).sin() * 0.5 + 0.5).powi(3);
@@ -505,7 +519,9 @@ pub fn ground(
     }
 }
 
-/// A vertical gradient quad from `top` at `y0` to `bottom` at `y1`.
+/// A vertical gradient across the width of `rect`, from `top` at `y0` to
+/// `bottom` at `y1`. The span is clamped to the height of `rect`, and an empty
+/// span paints nothing.
 fn gradient(painter: &Painter, rect: Rect, y0: f32, y1: f32, top: Color32, bottom: Color32) {
     let (y0, y1) = (y0.max(rect.top()), y1.min(rect.bottom()));
     if y1 <= y0 {
@@ -528,9 +544,10 @@ fn gradient(painter: &Painter, rect: Rect, y0: f32, y1: f32, top: Color32, botto
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Which sky hangs over a world: a storm when the weather turns (wind,
-/// quakes, heavy gravity, wet ground, mud), the low sun of the coast in a
-/// heat wave or a drought, the overcast city otherwise.
+/// Which sky hangs over a world. A storm sky when the weather turns: wind,
+/// quakes, heavy gravity, wet ground or mud. The dusk sky, with its low sun,
+/// in a heat wave or a drought. The overcast city sky otherwise. When a storm
+/// and a dry spell both apply, the stronger wins and a tie goes to dusk.
 pub fn sky_art(cfg: &Config) -> Art {
     let (_, slip) = grip(cfg);
     let storm = amount(cfg, "Wind")
@@ -580,20 +597,22 @@ const LAYERS: [Layer; 3] = [
     },
 ];
 
-/// A horizontal band of fog: clear at `top`, `color` at `bottom`.
+/// A horizontal band of fog across `rect`: clear at screen y `top`, `color` at
+/// `bottom`.
 fn fog(painter: &Painter, rect: Rect, top: f32, bottom: f32, color: Color32) {
     gradient(painter, rect, top, bottom, Color32::TRANSPARENT, color);
 }
 
-/// The backdrop behind every effect, drawn like a Source skybox with its
-/// 3D skybox in front: a photographed overcast sky, a glow where the sun
-/// burns through, the far city in haze with the great tower climbing into
-/// the clouds, a nearer row of old tenements, and in front of them the
-/// street's poles, wires, lamps and bare trees. Each layer slides at its
-/// own parallax, and fog settles between them. `horizon` is the screen y
-/// the skyline stands on, `camera` the camera's x in pixels. With `water`,
-/// the screen y of a water surface, the sky and the skyline also show
-/// upside down below it, dimmed, as the canal reflects them.
+/// The backdrop behind every effect, painted in layers from far to near: the
+/// sky that `sky_art` picks, a glow and a few shafts of light where the sun
+/// burns through, the far city in haze with the great tower climbing into the
+/// clouds, a nearer row of old tenements, and in front of them the street's
+/// poles, wires, lamps and bare trees. Each layer slides at its own parallax,
+/// and fog settles between them. `horizon` is the screen y the skyline stands
+/// on and `camera` is the camera's x in pixels. `water` is the screen y of the
+/// water surface, or `None` when there is no water. Below the surface the sky
+/// and the skyline show again upside down and dimmed, as the canal reflects
+/// them.
 #[allow(clippy::too_many_arguments)]
 pub fn backdrop(
     painter: &Painter,
@@ -605,7 +624,6 @@ pub fn backdrop(
     water: Option<f32>,
 ) {
     let ctx = painter.ctx();
-    // Paints one image, and its reflection when there is water.
     // The water's surface hides what stands behind it below the line.
     let above = water.map_or(rect, |y| {
         Rect::from_min_max(
@@ -613,6 +631,9 @@ pub fn backdrop(
             Pos2::new(rect.right(), y.clamp(rect.top(), rect.bottom())),
         )
     });
+    // Paints one image above the water, and its reflection below the surface
+    // when there is water. The reflection is the part of the image above the
+    // surface, flipped about it and dimmed.
     let draw = |tex: egui::TextureId, dest: Rect, uv: Rect, tint: Color32| {
         painter
             .with_clip_rect(above.intersect(painter.clip_rect()))
@@ -645,8 +666,9 @@ pub fn backdrop(
     let sky_h = horizon - rect.top();
     painter.rect_filled(rect, 0, crate::theme::scene::SKY_HORIZON);
     // The sky: 360 degrees across 4096 texels, the horizon 17 texels above
-    // its bottom row. A view shows about 110 degrees, and the texels stay
-    // square, unless the view is too tall for the band.
+    // its bottom row. A view shows about 110 degrees across, with square
+    // texels. If the view is too tall for the band, the scale grows until the
+    // band covers it, so less of the circle shows.
     let art = sky_art(cfg);
     let size = art.size(ctx);
     let horizon_row = size.y - 17.0;
@@ -664,9 +686,9 @@ pub fn backdrop(
         ),
         Color32::WHITE,
     );
-    // Where the sun burns through the cloud: a wide soft glow and a few
-    // shafts of light falling from it.
-    // The sun is far away, so it holds its place on screen.
+    // Where the sun burns through the cloud: a wide soft glow with a smaller
+    // one on top, and a few shafts of light falling from it. The sun is far
+    // away, so it holds its place on screen.
     let sun = Pos2::new(rect.left() + rect.width() * 0.66, rect.top() + sky_h * 0.28);
     let warm = if art == Art::SkyDusk {
         (255, 196, 120)
@@ -746,10 +768,11 @@ pub fn backdrop(
     }
 }
 
-/// Weather over the scene, drawn after the creature: rain when the ground
-/// is wet or muddy, blowing dust in a drought, a heat wave or a gale,
-/// cold mist over ice, and drifting ash in an earthquake. Each is a few
-/// dozen thin shapes on the replay clock.
+/// Weather over the scene, drawn after the creature: rain when the ground is
+/// wet or muddy or there is water, blowing dust in a drought, a heat wave or
+/// wind, cold mist over ice, and drifting ash in an earthquake. The rain, dust
+/// and ash are many thin shapes on the replay clock. `camera` is the camera's
+/// x in pixels, which shifts the rain and the dust.
 pub fn weather(painter: &Painter, rect: Rect, cfg: &Config, time: f32, camera: f32) {
     let (_, slip) = grip(cfg);
     let wet = if slip > 0.3 && slip < 0.9 { slip } else { 0.0 };
@@ -835,11 +858,13 @@ pub fn weather(painter: &Painter, rect: Rect, cfg: &Config, time: f32, camera: f
     }
 }
 
-/// The ground's body, textured like the street or the embankment of the
-/// world: cobbles on top of dark concrete in the city, packed dirt in a
-/// drought, sludge in mud, a wet canal wall by the water. `line` is the
-/// surface polyline, `meters` the meter under each of its points, and
-/// `ppm` the zoom.
+/// The ground's body and crust, textured like the street of the world:
+/// cobbles over dark concrete in the city, sand over dirt in a drought or a
+/// heat wave, sludge in mud, and plain dark concrete when there is water. Mud
+/// wins over dry ground, and dry ground over water. `line` is the surface
+/// polyline in screen points, `meters` the world x in meters under each of its
+/// points, and `ppm` the zoom in pixels per meter. The body fills down to the
+/// bottom of `rect`. A line of fewer than two points paints nothing.
 pub fn ground_body(
     painter: &Painter,
     rect: Rect,
@@ -890,8 +915,8 @@ pub fn ground_body(
         }
     }
     painter.add(egui::Shape::Mesh(mesh.into()));
-    // The crust: the street's surface seen at a grazing angle, a band a few
-    // centimeters thick squeezed from its texture.
+    // The crust: the street's surface seen at a grazing angle, a band 0.16 m
+    // thick, kept between 8 and 26 pixels, squeezed from its texture.
     let thick = (0.16 * ppm).clamp(8.0, 26.0);
     let mut mesh = Mesh::with_texture(crust.texture(ctx));
     for (i, (p, m)) in line.iter().zip(meters).enumerate() {
@@ -940,11 +965,11 @@ pub fn ground_body(
         Color32::from_white_alpha(28),
         Color32::TRANSPARENT,
     );
-    let _ = gradient;
 }
 
-/// A convex polygon filled with a tiled texture, `tile` points per repeat,
-/// the texture fixed to the polygon's first point.
+/// A convex polygon filled with the texture `art`, tinted by `tint`, `tile`
+/// points per repeat, with the texture fixed to the polygon's first point.
+/// Fewer than three points paint nothing.
 fn textured_fan(painter: &Painter, pts: &[Pos2], art: Art, tile: f32, tint: Color32) {
     if pts.len() < 3 {
         return;
@@ -964,7 +989,8 @@ fn textured_fan(painter: &Painter, pts: &[Pos2], art: Art, tile: f32, tint: Colo
     painter.add(egui::Shape::Mesh(mesh.into()));
 }
 
-/// Hazard stripes, amber and black, filling `rect`.
+/// Hazard stripes, amber and black, filling `rect`. A `rect` under 2 points
+/// wide or tall paints nothing.
 fn hazard(painter: &Painter, rect: Rect) {
     if rect.width() < 2.0 || rect.height() < 2.0 {
         return;
@@ -989,9 +1015,11 @@ fn hazard(painter: &Painter, rect: Rect) {
 }
 
 /// The ground's built parts: dark pits with hazard marks on their lips, and
-/// concrete blocks with a striped top for the hurdles. `at` maps meters to
-/// the screen. `height(x, with_hurdles)` is the ground height at `x` meters,
-/// with or without the hurdles. `view` is the range of meters on screen.
+/// concrete blocks with a striped top for the hurdles. At the highest hurdle
+/// level a block is a dark plate wall with a cold light along it instead.
+/// `at(x, y)` maps a point in meters to the screen. `height(x, with_hurdles)`
+/// is the ground height at `x` meters, with or without the hurdles. `view` is
+/// the range of meters on screen.
 pub fn structures(
     painter: &Painter,
     rect: Rect,
@@ -1037,14 +1065,17 @@ pub fn structures(
             // marker on each lip.
             let wall = (0.12 * ppm).clamp(4.0, 14.0);
             for (x0, x1) in [(lip_a.x, lip_a.x + wall), (lip_b.x - wall, lip_b.x)] {
-                let top = if x0 < lip_b.x - wall * 1.5 {
+                // The left wall hangs from the left lip's height and the right
+                // wall from the right lip's. A pit under one and a half walls
+                // wide on screen uses the right lip for both.
+                let wall_top = if x0 < lip_b.x - wall * 1.5 {
                     lip_a.y
                 } else {
                     lip_b.y
                 };
                 crate::theme::tiled(
                     painter,
-                    Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x1, floor)),
+                    Rect::from_min_max(Pos2::new(x0, wall_top), Pos2::new(x1, floor)),
                     Art::Rust,
                     Vec2::splat((0.8 * ppm).max(8.0)),
                     Vec2::new(k as f32 * 0.37, 0.0),
@@ -1081,8 +1112,8 @@ pub fn structures(
                 continue;
             }
             let (tl, tr) = (center - half, center + half);
-            // A pit under the hurdle breaks its block apart; the ground line
-            // alone shows it then.
+            // A pit under the hurdle breaks its block apart, so only the
+            // ground line shows the hurdle then.
             if [s, tl, center, tr, e]
                 .iter()
                 .any(|&x| crate::physics::gaps(x, cfg.gaps).0 != 0.0)
@@ -1099,8 +1130,8 @@ pub fn structures(
                 at(tl, height(tl, false)),
                 at(s, height(s, false)),
             ];
-            // Concrete barriers; the highest level is a Combine wall of
-            // dark plate with a cold light along it.
+            // Concrete blocks. The highest level is a Combine wall of dark
+            // plate with a cold light along it.
             let combine = amount(cfg, "Hurdles") >= 1.0;
             let art = if combine {
                 Art::CombinePlate
