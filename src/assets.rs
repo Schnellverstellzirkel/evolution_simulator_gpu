@@ -1,7 +1,9 @@
-//! The game's art: skies, skyline layers, surface materials, sprites and
-//! fonts under assets/ui/. `tools/ui_assets.py` builds them from free
-//! sources (assets/ui/CREDITS.md). They are compiled into the binary, and
-//! a background thread decodes them at start, so no frame waits on a decode
+//! The game's art under `assets/ui/`: skies, skyline layers, surface
+//! materials, sprites and fonts, all compiled into the binary.
+//! `tools/ui_assets.py` builds the images from free sources. The fonts are
+//! other files that the script does not touch, and `assets/ui/CREDITS.md`
+//! lists the sources of both. At start the UI installs the fonts, and a
+//! background thread decodes the images, so no frame waits on a decode
 //! unless it asks for an image in the first moments.
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily, TextureHandle, TextureId};
 use std::sync::{Arc, OnceLock};
