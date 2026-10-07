@@ -41,8 +41,8 @@ fn main() -> anyhow::Result<()> {
     );
     {
         // Chaos check: 16 copies of the creature, each node diameter scaled by
-        // 1 + eps * u, where u is a fixed pseudo-random number from -1 to 1.
-        // Each copy keeps its own u values for every eps. The spread of the
+        // `1 + eps * u`, where `u` is a fixed pseudo-random number from -1 to 1.
+        // Each copy keeps its own `u` values for every `eps`. The spread of the
         // scores shows how much a tiny change of the body moves the score.
         // These are full trials, with no screen and no rungs.
         for eps in [1e-7f32, 1e-6, 1e-5, 1e-4] {
