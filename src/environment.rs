@@ -1,32 +1,48 @@
-//! Environment effects: world changes the player applies and can undo. Each
-//! effect has a few levels around a calm default. The grip is the one effect
-//! whose levels go both ways: rougher than the calm world as well as
-//! slipperier. Changing a level changes the physics, so the worker re-tests
-//! the archive's elites under the new rules instead of keeping their old
-//! scores.
+//! Environment effects: world changes the player applies and can undo, each
+//! with a few levels around a calm default. The grip is the one effect whose
+//! levels go both ways: rougher than the calm world as well as slipperier.
+//! This file also holds the presets, the autochange ladder and the fixed
+//! worlds of the wild islands. Changing the level of a physics effect changes
+//! the world, so the search tests the elites of the main islands again under
+//! the new rules instead of keeping their old scores.
 use crate::config::Config;
 
+/// One environment effect: a short list of levels, one of them calm, and the
+/// way to read and set its level in a `Config`.
 pub struct Effect {
+    /// Name of the effect. Presets, the autochange order and `world_fx` find
+    /// an effect by it.
     pub name: &'static str,
-    /// What the world is like at each level, from level 0 upward.
+    /// What the world is like at each level, from level 0 upward. The level
+    /// bar of the control panel shows only the part before the first comma.
     pub levels: &'static [&'static str],
-    /// Level of the calm world. The buttons step away from it in both
-    /// directions, so an effect with a calm level above zero can also be
-    /// pushed past its default.
+    /// Level of the calm world. A new game starts there, and Undo and the
+    /// presets send an effect back to it. A calm level above 0 puts levels on
+    /// both sides of calm, as the grip has.
     pub calm: usize,
-    /// Button text to raise and to lower the level.
+    /// Text of the old button that raised the level. The control panel shows
+    /// one button per level now, and nothing reads this field.
     pub raise: &'static str,
+    /// Text of the old button that lowered the level. Nothing reads it either.
     pub lower: &'static str,
-    /// Why this effect pushes evolution somewhere interesting.
+    /// Why this effect pushes evolution somewhere interesting. The control
+    /// panel shows it under an active effect and in hover texts.
     pub why: &'static str,
+    /// Reads the level from the settings. An effect kept as a number takes
+    /// the table entry nearest to it.
     get: fn(&Config) -> usize,
+    /// Writes the level into the settings. `set_level` keeps the level inside
+    /// the table, so these functions index their table directly.
     set: fn(&mut Config, usize),
 }
 
 impl Effect {
+    /// The level of this effect in `cfg`, never past the last level.
     pub fn level(&self, cfg: &Config) -> usize {
         (self.get)(cfg).min(self.levels.len() - 1)
     }
+    /// Sets the level of this effect in `cfg`. A level past the last one
+    /// becomes the last.
     pub fn set_level(&self, cfg: &mut Config, level: usize) {
         (self.set)(cfg, level.min(self.levels.len() - 1));
     }
@@ -35,11 +51,16 @@ impl Effect {
 /// A named world: every effect it lists is set to the given level and every
 /// other effect goes back to calm. The autochange level is left alone.
 pub struct Preset {
+    /// Text of the preset button.
     pub name: &'static str,
+    /// What the world is like and what wins in it. The hover text of the
+    /// button starts with it.
     pub about: &'static str,
+    /// The effects it sets, each by `Effect::name` with its level.
     pub levels: &'static [(&'static str, usize)],
 }
 
+/// The presets, in the order of their buttons.
 pub const PRESETS: [Preset; 7] = [
     Preset {
         name: "Rough hills",
@@ -101,7 +122,7 @@ pub const GRAVITY: [f32; 4] = [9.8, 14.7, 19.6, 29.4];
 /// Velocity kept per 1/60 s at each level: less means thicker air.
 pub const AIR: [f32; 4] = [1.0, 0.995, 0.985, 0.96];
 /// Ground friction multiplier at each level, from grippier than the calm
-/// world to nearly frictionless ice.
+/// world to nearly frictionless ice. Level 1 is the calm world.
 pub const GRIP: [f32; 5] = [3.0, 1.5, 1.0, 0.6, 0.3];
 /// Muscle energy store multiplier at each level, from the calm world down to
 /// a harsh heat wave.
@@ -134,15 +155,18 @@ pub const GAPS: [f32; 4] = [0.0, 0.35, 0.8, 1.5];
 /// that climbing or leaping over them is the gait's main job.
 pub const HURDLES: [f32; 4] = [0.0, 0.08, 0.20, 0.35];
 /// Earthquake base bump height (m) at each level. Each creature jitters the
-/// phase and height with its own deterministic stream.
+/// phase and height with its own deterministic stream, derived from its id
+/// (`physics::quake_hash`).
 pub const QUAKE: [f32; 4] = [0.0, 0.05, 0.12, 0.25];
 /// Generations between automatic environment changes at each autochange
 /// level: Off, Slow, Normal, Fast. Level 0 leaves the world alone.
 pub const AUTOCHANGE_INTERVALS: [u32; 4] = [0, 100, 50, 20];
 
-/// Generations between automatic environment changes at autochange `level`.
-/// For an unattended run a developer may set `EVOLUTION_AUTOCHANGE_EVERY`
-/// to use that interval at every level above Off.
+/// Generations between automatic environment changes at autochange `level`:
+/// 0 for Off, and `None` for a level past the table. For an unattended run a
+/// developer may set `EVOLUTION_AUTOCHANGE_EVERY` to a number of generations,
+/// which then replaces the interval at every level above Off. A value that is
+/// not a number above 0 is ignored.
 pub fn autochange_interval(level: u8) -> Option<u32> {
     let interval = *AUTOCHANGE_INTERVALS.get(usize::from(level))?;
     let every = std::env::var("EVOLUTION_AUTOCHANGE_EVERY")
@@ -154,6 +178,7 @@ pub fn autochange_interval(level: u8) -> Option<u32> {
         _ => interval,
     })
 }
+
 /// Effects from the most benign to the harshest. Autochange raises each one a
 /// level in this order, then goes round again, so the world only gets harder.
 /// An effect missing here follows in `EFFECTS` order.
@@ -175,7 +200,8 @@ const AUTOCHANGE_ORDER: [&str; 15] = [
     "Earthquake",
 ];
 
-/// Index in `table` of the entry closest to `value`.
+/// Index in `table` of the entry closest to `value`, or 0 for an empty table.
+/// The effects use it to read a level back from a number in the settings.
 fn nearest(table: &[f32], value: f32) -> usize {
     table
         .iter()
@@ -184,6 +210,9 @@ fn nearest(table: &[f32], value: f32) -> usize {
         .map_or(0, |(i, _)| i)
 }
 
+/// Every effect, in the order the control panel lists them. The first entry
+/// is the autochange level. It sets no physics, so the panel draws it in a row
+/// of its own below the others, and the world summary leaves it out.
 pub const EFFECTS: [Effect; 16] = [
     Effect {
         name: "Autochange environment",
@@ -354,8 +383,9 @@ pub const EFFECTS: [Effect; 16] = [
 ];
 
 /// Every world one effect level away from `cfg`'s: each effect one level
-/// up and one level down, the rest unchanged. The kernels of these worlds
-/// are the ones the next button press may need (`cuda_engine`).
+/// up and one level down, the rest unchanged. The autochange level sets no
+/// physics and is skipped. The kernels of these worlds are the ones the next
+/// button press may need (`cuda_engine`).
 pub fn one_level_away(cfg: &Config) -> Vec<Config> {
     let mut worlds = Vec::new();
     for effect in EFFECTS
@@ -378,7 +408,8 @@ pub fn one_level_away(cfg: &Config) -> Vec<Config> {
 }
 
 /// The deterministic autochange ladder: one entry per step, each raising one
-/// effect to its next level above calm. Round one adds every effect at its
+/// effect to its next level above calm. An entry is an index into `EFFECTS`
+/// and the level to raise that effect to. Round one adds every effect at its
 /// mildest level, from the most benign, and later rounds make them harsher.
 pub fn autochange_ladder() -> Vec<(usize, usize)> {
     let mut order: Vec<usize> = AUTOCHANGE_ORDER
@@ -404,8 +435,8 @@ pub fn autochange_ladder() -> Vec<(usize, usize)> {
 }
 
 /// Applies ladder step `step` to `cfg`, never lowering an effect the player
-/// made harsher. Past the ladder's end the world stays. Returns true when any
-/// physics field changed.
+/// made harsher. Past the ladder's end the world stays. Returns true when the
+/// step changed the world.
 pub fn apply_autochange_step(cfg: &mut Config, step: u16) -> bool {
     let ladder = autochange_ladder();
     let Some(&(index, level)) = ladder.get(usize::from(step)) else {
@@ -419,11 +450,13 @@ pub fn apply_autochange_step(cfg: &mut Config, step: u16) -> bool {
     effect.level(cfg) != before
 }
 
-/// Applies one autochange step when `generation` begins, if the autochange level is
-/// on and the generation is a multiple of its interval. The schedule depends
-/// only on `cfg.autochange` and `generation`, never on wall time, so a checkpoint
-/// resumed mid-cycle continues at the same step. Returns true when the world
-/// changed.
+/// Applies one autochange step when `generation` begins, if the autochange
+/// level is on and the generation is a multiple of its interval. Generation 0
+/// never steps. When it steps depends only on `cfg.autochange` and
+/// `generation`, never on wall time. Which step it applies is the counter
+/// `cfg.autochange_step`, which a checkpoint saves, so a game resumed
+/// mid-cycle continues at the same step. The counter moves on even when the
+/// step changes nothing. Returns true when the world changed.
 pub fn advance_autochange(cfg: &mut Config, generation: u32) -> bool {
     let Some(interval) = autochange_interval(cfg.autochange) else {
         return false;
@@ -438,14 +471,19 @@ pub fn advance_autochange(cfg: &mut Config, generation: u32) -> bool {
 
 /// The effects and levels of each wild island's world (`qd::WILD_ISLANDS`):
 /// one to three effects each, every mix different, and no effect at its
-/// harshest level so each world can be walked. The set is the same in every
-/// game, so its kernels compile once and stay in the kernel cache; a set
-/// drawn per seed compiled about 190 kernels at the start of each new game.
+/// harshest level so each world can be walked. A mix lists pairs of an index
+/// into `EFFECTS` and a level, sorted by index. The set is the same in every
+/// game, so its kernels compile once and stay in the kernel cache. A set drawn
+/// per seed compiled about 190 kernels at the start of each new game. The
+/// `_seed` argument is not used.
 pub fn wild_levels(_seed: u64) -> Vec<Vec<(usize, usize)>> {
     static WORLDS: std::sync::OnceLock<Vec<Vec<(usize, usize)>>> = std::sync::OnceLock::new();
     WORLDS.get_or_init(draw_wild_levels).clone()
 }
 
+/// Draws the worlds that `wild_levels` returns. The random stream has a fixed
+/// seed, the ASCII text "wild", so every game draws the same worlds. The draw
+/// runs over `EFFECTS`, so a new effect or a new order changes them.
 fn draw_wild_levels() -> Vec<Vec<(usize, usize)>> {
     let mut rng = crate::evolution::Rng::new(0x7769_6c64, 0, 0);
     let choices: Vec<usize> = (0..EFFECTS.len())
@@ -479,9 +517,10 @@ fn draw_wild_levels() -> Vec<Vec<(usize, usize)>> {
 }
 
 /// The settings of a wild island's world: `base` with every effect calm
-/// except the island's own mix. It has no early screen and no rungs, because
-/// the main world's bars say nothing about it: the ring gives each wild
-/// island a screen bar of its own (`Block::wild_bars`).
+/// except the island's own mix `levels`, an entry of `wild_levels`. It has no
+/// early screen and no rungs, because the main world's bars say nothing about
+/// it: the ring gives each wild island a screen bar of its own
+/// (`Block::wild_bars`).
 pub fn wild_world(base: &Config, levels: &[(usize, usize)]) -> Config {
     let mut cfg = base.clone();
     for effect in EFFECTS.iter() {
