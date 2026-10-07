@@ -111,7 +111,8 @@ pub fn solver_passes() -> (usize, usize) {
 pub struct Limits {
     /// Fastest a muscle's target length may change (m/s).
     pub muscle_speed: f32,
-    /// Largest muscle force (N).
+    /// Largest muscle force (N). A muscle's own cap is this times its strength,
+    /// at most 1, which `physics2::Model` sets from the mass the muscle drives.
     pub muscle_force: f32,
     /// Fastest any node may move (m/s). Not enforced: the kernel has no node
     /// speed limit.
