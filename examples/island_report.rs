@@ -1,8 +1,11 @@
-//! What a save's island archives and nurseries hold: how many distinct body
-//! plans, how old each body plan is, and how much of each island descends
-//! from new random bodies (graduates of its nursery). Reads the archives
-//! only (`storage::load_archives`), so it needs no GPU and little memory.
-//! Usage: island_report <save>
+//! Reports what the island archives and nurseries of a save hold. Each island
+//! and each of its two nurseries gets a report of its body plans, skeletons, plan
+//! ages, cells that tie for the best distance, and elites that descend from new
+//! random bodies. It reads the archives only (`storage::load_archives`), so it
+//! needs no GPU and little memory.
+//!
+//! Usage: `island_report <save>`
+//! With `HISTORY` set it also prints every 25th row of the save's history.
 use anyhow::Result;
 use evolution_simulator::{qd, storage};
 use std::collections::{HashMap, HashSet};
@@ -31,6 +34,8 @@ fn ages(experiment: &storage::Experiment, elite: &qd::Elite) -> (u32, u32) {
     (now.saturating_sub(plan_start), root)
 }
 
+/// The 10%, 50% and 90% points and the maximum of `values`, as text. It is
+/// `none` for no values.
 fn quantiles(values: &[f32]) -> String {
     if values.is_empty() {
         return "none".into();
@@ -47,6 +52,8 @@ fn quantiles(values: &[f32]) -> String {
     )
 }
 
+/// Prints the report of one archive under `name`: statistics of its cells and
+/// the size of its morphology reserve. An archive with no cells prints one line.
 fn report(name: &str, archive: &qd::QdArchive, experiment: &storage::Experiment) {
     let elites: Vec<&qd::Elite> = archive
         .entries
@@ -98,6 +105,8 @@ fn report(name: &str, archive: &qd::QdArchive, experiment: &storage::Experiment)
         plan_age.push(age as f32);
         root.push(root_generation as f32);
         graduates += usize::from(e.graduate);
+        // The elite descends from a new random body when its oldest recorded
+        // ancestor was one.
         let chain = experiment.ancestry(e.creature.id, usize::MAX);
         if chain
             .last()
@@ -106,6 +115,8 @@ fn report(name: &str, archive: &qd::QdArchive, experiment: &storage::Experiment)
             from_random += 1;
         }
     }
+    // `tied` are the cells within 0.1 mm of the best. `ties` are the sizes of the
+    // groups of cells that share one fitness value, largest first.
     let best = fitness.iter().copied().fold(f32::MIN, f32::max);
     let tied: Vec<&&qd::Elite> = elites.iter().filter(|e| e.fitness >= best - 1e-4).collect();
     let mut tied_bits: HashMap<u32, usize> = HashMap::new();
@@ -162,7 +173,11 @@ fn report(name: &str, archive: &qd::QdArchive, experiment: &storage::Experiment)
         quantiles(&root),
     );
     // Fitness by plan age: do the young plans hold the slow cells?
-    let mut by_age: Vec<(f32, f32)> = plan_age.iter().copied().zip(fitness_of(&elites)).collect();
+    let mut by_age: Vec<(f32, f32)> = plan_age
+        .iter()
+        .copied()
+        .zip(fitness.iter().copied())
+        .collect();
     by_age.sort_by(|a, b| a.0.total_cmp(&b.0));
     let third = by_age.len() / 3;
     if third > 0 {
@@ -176,10 +191,6 @@ fn report(name: &str, archive: &qd::QdArchive, experiment: &storage::Experiment)
     }
 }
 
-fn fitness_of(elites: &[&qd::Elite]) -> Vec<f32> {
-    elites.iter().map(|e| e.fitness).collect()
-}
-
 fn main() -> Result<()> {
     let path = std::env::args()
         .nth(1)
@@ -191,6 +202,8 @@ fn main() -> Result<()> {
         experiment.config.population,
         experiment.lineage.len()
     );
+    // `HISTORY` adds the best distance, the QD score and the cell count of
+    // every 25th generation row.
     if std::env::var_os("HISTORY").is_some() {
         for stats in experiment.history.iter().step_by(25) {
             println!(
@@ -200,6 +213,8 @@ fn main() -> Result<()> {
         }
     }
     println!("{:?}", experiment.config);
+    // Each island (the isolated islands, the hub and the wild islands) with
+    // its nursery of new random bodies and its nursery of reshaped bodies.
     let islands = storage::island_count();
     for island in 0..islands {
         let Some(archive) = experiment.islands.get(island) else {
