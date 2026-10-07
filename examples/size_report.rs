@@ -241,6 +241,8 @@ mod tests {
         }
     }
 
+    /// Frames of a one-node creature: `settle` copies of the first sample, then
+    /// every sample, so the first sample is the start pose at frame `settle`.
     fn frames(cfg: &Config, samples: &[[f32; 2]]) -> Vec<Vec<[f32; 2]>> {
         let mut frames = vec![vec![samples[0]]; cfg.fidelity().settle() as usize];
         frames.extend(samples.iter().map(|&sample| vec![sample]));
