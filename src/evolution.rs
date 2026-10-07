@@ -932,8 +932,13 @@ impl Population {
         Ok(())
     }
 }
-/// Reorders bones as a parent-first tree walk from node 0, adjusting muscle attachments.
-/// Returns false if the skeleton is invalid (cycles, off-tree nodes, disconnected).
+/// Puts the bones in parent-first order: the `a` node of every bone is node 0
+/// or the `b` node of an earlier bone. Bones already in that order stay as
+/// they are. Otherwise a breadth-first walk from node 0 orders them. It turns
+/// round a bone that it reaches from its `b` end, and the organ and the muscle
+/// anchors on that bone move to the same points. Returns false, with the
+/// creature unchanged, if the skeleton is not a tree over all the nodes, or if
+/// the bones need reordering and a muscle names a missing bone.
 pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
     let node_count = creature.nodes.len();
     if !(1..=MAX_NODES).contains(&node_count) || creature.bones.len() != node_count - 1 {
@@ -1035,6 +1040,8 @@ pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
     true
 }
 
+/// A bone from node `a` to node `b` whose rest length is the distance between
+/// them, within the bone length limits.
 fn bone(a: usize, b: usize, nodes: &[NodeGene]) -> Bone {
     let dx = nodes[a].x - nodes[b].x;
     let dy = nodes[a].y - nodes[b].y;
@@ -1061,11 +1068,12 @@ pub const CLOCK_RATIOS: [f32; 9] = [
 /// The position of ratio 1 in `CLOCK_RATIOS`.
 const UNIT_RATIO: usize = 4;
 
-/// Every muscle runs on the body's base clock, set by the first muscle, or on
-/// a simple multiple of it (`CLOCK_RATIOS`): a period equal to a ratio (to
-/// 0.3%, so ratios survive the arithmetic of mutation) keeps it, and any other
-/// period falls back to the base, so muscles that repair or an operator adds
-/// with a random period join the body's clock.
+/// Snaps every muscle's period to the body's base clock, which is the first
+/// muscle's period, or to a simple multiple of it (`CLOCK_RATIOS`). A period
+/// within 0.3% of a ratio keeps that ratio, so ratios survive the arithmetic
+/// of mutation. Any other period, and any ratio that would leave the period
+/// limits, falls back to the base. This puts the muscles that repair or an
+/// operator adds with a random period on the body's clock.
 fn snap_clock_ratios(c: &mut Creature) {
     let Some(base) = c.muscles.first().map(|m| m.period) else {
         return;
@@ -1087,6 +1095,8 @@ fn snap_clock_ratios(c: &mut Creature) {
         m.period = base * ratio;
     }
 }
+/// Keeps each bone's rest length within 75% to 125% of the distance between
+/// its nodes, and within the bone length limits.
 pub(crate) fn normalize_bone_lengths(c: &mut Creature) {
     for bone in &mut c.bones {
         let a = c.nodes[bone.a as usize];
@@ -1097,6 +1107,9 @@ pub(crate) fn normalize_bone_lengths(c: &mut Creature) {
         bone.rest_length = bone.rest_length.clamp(min, max);
     }
 }
+/// Rebuilds the starting shape from the head outward: each bone keeps its
+/// direction and its child node moves to the bone's rest length from its
+/// parent node. It needs the bones in parent-first order.
 fn align_nodes_with_bones(c: &mut Creature) {
     // The starting positions are needed while the new ones are written in
     // place, so they are copied onto the stack first.
@@ -1123,11 +1136,14 @@ fn align_nodes_with_bones(c: &mut Creature) {
         c.nodes[b].y = c.nodes[a].y + direction[1] * bone.rest_length;
     }
 }
+/// The point at `t` along `bone`, from node `a` (0) to node `b` (1).
 pub(crate) fn bone_point(bone: Bone, nodes: &[NodeGene], t: f32) -> [f32; 2] {
     let a = nodes[bone.a as usize];
     let b = nodes[bone.b as usize];
     [a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t]
 }
+/// A random anchor position along a bone: an end of the bone 12% of the time,
+/// else uniform.
 fn random_anchor(rng: &mut Rng) -> f32 {
     if rng.unit() < 0.12 {
         if rng.unit() < 0.5 { 0.0 } else { 1.0 }
@@ -1135,6 +1151,9 @@ fn random_anchor(rng: &mut Rng) -> f32 {
         rng.unit()
     }
 }
+/// A new muscle between two bones with random anchors and a random rhythm.
+/// Its shortest and longest lengths scale with the distance between the
+/// anchors.
 fn muscle(
     bone_a: usize,
     bone_b: usize,
@@ -1175,7 +1194,7 @@ const HEAD_START_TILT: f32 = std::f32::consts::FRAC_PI_4;
 /// Every creature has a head: node 0, as large (and heavy) as a node can be,
 /// on a single neck bone. Other bones on the head move to the neck's base,
 /// and the neck starts pointing up. A creature whose neck tips below
-/// horizontal has fallen (see the engines).
+/// horizontal has fallen (see `docs/physics.md`).
 fn shape_head(c: &mut Creature, cfg: &Config) {
     let Some(neck) = c.bones.iter().position(|b| b.a == 0 || b.b == 0) else {
         return;
@@ -1200,15 +1219,23 @@ fn shape_head(c: &mut Creature, cfg: &Config) {
     c.nodes[0].x = bx + length * tilt.sin();
     c.nodes[0].y = by + length * tilt.cos();
 }
+/// Makes a body valid after an operator or a mutation edited it. It clamps the
+/// node genes, drops the bones that are invalid or close a loop, and joins
+/// any node cut off from the head with a new bone from the head. Then it
+/// shapes the head, drops the muscles that name a missing bone and clamps the
+/// other muscle genes. Next it adds a muscle between each bone and the next
+/// one where the ring has a gap, and snaps the periods to the body clock.
+/// Finally it fits the bone lengths, puts the bones in parent-first order,
+/// rebuilds the node positions from the bone lengths and places the organs.
 fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
     for node in &mut c.nodes {
         node.diameter = node.diameter.clamp(cfg.min_size, cfg.max_size);
         node.friction = node.friction.clamp(cfg.min_friction, cfg.max_friction);
     }
     let node_count = c.nodes.len();
-    // Incremental connectivity over the <= 64 nodes: accepted bones always
-    // join two components, so the union-find answers the reachability test
-    // that a per-candidate graph walk used to run.
+    // Incremental connectivity over the nodes (the array holds up to 64):
+    // accepted bones always join two components, so the union-find answers the
+    // reachability test in place of a graph walk for each candidate bone.
     fn root(parent: &mut [u8; 64], mut node: u8) -> u8 {
         while parent[node as usize] != node {
             parent[node as usize] = parent[parent[node as usize] as usize];
@@ -1310,8 +1337,8 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
         place_organs(c);
         return;
     }
-    // A motor-link ring keeps every rigid segment addressable to the actuator
-    // network while leaving the skeleton itself articulated at its joints.
+    // A ring of muscles joins each bone to the next one, so every bone has a
+    // muscle and the muscle network is connected, as `validate` requires.
     for a in 0..bone_count {
         let b = (a + 1) % bone_count;
         if (bone_count > 2 || a < b)
@@ -1321,8 +1348,8 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
             })
         {
             // At the muscle limit, a muscle off the ring makes room, or else
-            // a second muscle on one ring pair: without it a limb's worth of
-            // duplicates could leave the network disconnected.
+            // a second muscle on one ring pair. Without room, a limb's worth
+            // of duplicates could leave the network disconnected.
             let pair = |m: &Muscle| (m.bone_a.min(m.bone_b), m.bone_a.max(m.bone_b));
             if c.muscles.len() >= cfg.max_muscles
                 && let Some(i) = c
@@ -1354,21 +1381,25 @@ fn repair(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
     align_nodes_with_bones(c);
     place_organs(c);
 }
+/// The random creature of ring slot `index`.
 fn initial(cfg: &Config, index: usize) -> Creature {
     random_creature(cfg, 0, index)
 }
+/// A random creature from the stream of `generation` and `index`, with the id
+/// `index + 1`.
 fn random_creature(cfg: &Config, generation: u32, index: usize) -> Creature {
     let mut creature = random_creature_from(cfg, &mut Rng::new(cfg.seed, generation, index));
     creature.id = index as u64 + 1;
     creature
 }
+/// A random chain of 3 to 5 nodes, the shape of a new random body.
 fn random_creature_from(cfg: &Config, rng: &mut Rng) -> Creature {
     random_shaped(cfg, rng, 3, 3, (0.18, 0.28), false)
 }
 
-/// A random body of `low` to `low + spread - 1` nodes, `spacing` apart. A
-/// `branched` body hangs each node from a random earlier one, a chain from
-/// the one before it.
+/// A random body of `low` to `low + spread - 1` nodes in a row, a distance
+/// drawn from the range `spacing` apart. A `branched` body hangs each node
+/// from a random earlier one, a chain from the one before it.
 fn random_shaped(
     cfg: &Config,
     rng: &mut Rng,
