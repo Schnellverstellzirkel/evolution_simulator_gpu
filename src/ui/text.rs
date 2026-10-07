@@ -1,16 +1,18 @@
-//! Words and numbers for the player: species names, gait words, and short
-//! readable numbers, durations and file sizes.
+//! Words and numbers for the player: species names with their gait words, and
+//! short readable numbers, durations and file sizes. The tabs, cards and
+//! dialogs call these helpers.
 
 use crate::evolution::Creature;
 
-/// Invented stems for automatic species names. A stable body-plan hash picks
-/// one; the gait word is added after it.
+/// Invented stems that start a species name. The body plan picks one.
 const SPECIES_STEMS: [&str; 16] = [
     "Vex", "Tor", "Quil", "Nym", "Zeb", "Cro", "Fen", "Lum", "Tar", "Wisp", "Brak", "Ovi", "Pyr",
     "Sable", "Dro", "Ril",
 ];
 /// Syllables between the stem and the size word.
 const SPECIES_LINKS: [&str; 8] = ["a", "o", "i", "u", "e", "y", "ar", "en"];
+/// A file size for people, in binary units: "512 B", "12 KiB", "3.4 MiB" or
+/// "1.25 GiB".
 pub(super) fn file_size(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
@@ -26,18 +28,23 @@ pub(super) fn file_size(bytes: u64) -> String {
         format!("{bytes:.0} B")
     }
 }
-/// Short deterministic species name from the body plan (see
-/// `worker::body_plan`) and a gait word from the muscles' rhythm. It uses
-/// only creature data, so archive cards, lineage tiles and race lanes agree
-/// without asking the worker.
+/// A species name such as "Vexapod Walker". The first word is a stem, a link
+/// syllable and a size word. The body plan (`worker::body_plan`) picks the
+/// stem and the link, and the bone count picks the size word. The second word
+/// is the gait word of the muscles' rhythm. The name uses only creature data,
+/// so every place that names a creature agrees without asking the worker.
 pub(super) fn species_name(creature: &Creature) -> String {
-    // The body plan decides the name, so a creature keeps it through the
-    // small mutations that tune lengths and rhythms. A stem and a linking
-    // syllable give 128 names per size class.
+    // The body plan decides the first word, so a creature keeps it through the
+    // small mutations that tune lengths and rhythms. Only the gait word
+    // follows the rhythm. A stem and a linking syllable give 128 first words
+    // per size class.
     let plan = crate::worker::body_plan(creature);
+    // Fold the high bits into the low bits, because the stem and the link read
+    // the low bits.
     let mixed = plan ^ (plan >> 29) ^ (plan >> 47);
     let stem = SPECIES_STEMS[(mixed % SPECIES_STEMS.len() as u64) as usize];
     let link = SPECIES_LINKS[((mixed >> 8) % SPECIES_LINKS.len() as u64) as usize];
+    // The size word grows with the bone count.
     let form = match creature.bones.len() {
         0..=2 => "ling",
         3..=4 => "pod",
@@ -47,7 +54,9 @@ pub(super) fn species_name(creature: &Creature) -> String {
     };
     format!("{stem}{link}{form} {}", gait_word(creature))
 }
-/// Cadence bucket from the muscles' rhythm periods, in cycles per second.
+/// The gait word for the mean muscle period: "Crawler" under 0.5 cycles per
+/// second, "Walker" under 1, "Trotter" under 2 and "Sprinter" above that. A
+/// body with no muscles is a "Drifter".
 fn gait_word(creature: &Creature) -> &'static str {
     if creature.muscles.is_empty() {
         return "Drifter";
@@ -65,14 +74,17 @@ fn gait_word(creature: &Creature) -> &'static str {
         "Sprinter"
     }
 }
-/// "3 min ago" from a file time.
+/// How long ago a file time was, such as "3 min ago". No time, or a time in
+/// the future, gives "unknown time".
 pub(super) fn ago(time: Option<std::time::SystemTime>) -> String {
     time.and_then(|t| t.elapsed().ok()).map_or_else(
         || "unknown time".to_owned(),
         |age| format!("{} ago", seconds_text(age.as_secs_f64())),
     )
 }
-/// A short duration for people: "8 s", "3 min", "2 h".
+/// A short duration for people: "8 s" up to 90 s, "3 min" up to 90 min, then
+/// "2 h". It never shows less than "1 s". A negative or non-finite `seconds`
+/// gives "a while".
 pub(super) fn seconds_text(seconds: f64) -> String {
     if !seconds.is_finite() || seconds < 0.0 {
         "a while".to_owned()
