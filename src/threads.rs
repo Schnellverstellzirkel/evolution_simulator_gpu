@@ -162,12 +162,17 @@ pub fn major_faults() -> Option<u64> {
 }
 
 /// A thread on the pool's CPUs that runs one borrowed job at a time for
-/// the worker. A thread per job cost a thread exit each time, and while the
-/// pool bred an exit waited up to 140 ms for the process's memory map
-/// lock, with the worker stuck in `join`.
+/// the worker. The thread stays alive between jobs. A new thread for each job
+/// had to exit each time, and while the pool bred an exit waited up to 140 ms
+/// for the process's memory map lock, with the worker stuck in `join`.
 pub struct Helper {
+    /// Sends jobs to the thread. `drop` sets it to `None`, which closes the
+    /// channel and ends the thread's loop.
     jobs: Option<std::sync::mpsc::Sender<Job>>,
+    /// Receives the outcome of each job, which is `Ok` or the payload of its
+    /// panic.
     done: std::sync::mpsc::Receiver<std::thread::Result<()>>,
+    /// The thread, until `drop` joins it.
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -178,6 +183,9 @@ struct Job(*mut (dyn FnMut() + Send + 'static));
 unsafe impl Send for Job {}
 
 impl Helper {
+    /// Starts the helper thread and names it `name`. The thread pins itself to
+    /// the pool's CPUs and then runs the jobs it is sent, one at a time, until
+    /// the `Helper` is dropped. Panics if the thread cannot be started.
     pub fn new(name: &str) -> Self {
         let (jobs, job_rx) = std::sync::mpsc::channel::<Job>();
         let (done_tx, done) = std::sync::mpsc::channel();
@@ -203,9 +211,11 @@ impl Helper {
         }
     }
 
-    /// Runs `job` on the helper and calls `idle` on this thread until it
-    /// has finished; `idle` should block briefly (it is called in a loop).
-    /// A panic in `job` resumes here.
+    /// Runs `job` on the helper thread and returns its result. `job` may
+    /// borrow from the caller, because `run` does not return before the job
+    /// has finished. Until then this thread calls `idle` in a loop, so `idle`
+    /// should block briefly instead of returning at once. If `job` panics, the
+    /// panic resumes on this thread.
     pub fn run<'a, R: Send>(
         &self,
         job: impl FnOnce() -> R + Send + 'a,
@@ -231,7 +241,8 @@ impl Helper {
                         Ok(reply) => self.reply = Some(reply),
                         Err(std::sync::mpsc::TryRecvError::Empty) => {}
                         // The helper catches panics, so it only stops with
-                        // the process; a borrowed job must not outlive this.
+                        // the process. Abort, because a borrowed job must not
+                        // outlive `run`.
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => std::process::abort(),
                     }
                 }
@@ -257,8 +268,12 @@ impl Helper {
         while !wait.finished() {
             idle();
         }
+        // Leave `Ok(())` behind. If the reply were taken out, dropping `wait`
+        // would wait for a second one.
         let reply = wait.reply.as_mut().map(|r| std::mem::replace(r, Ok(())));
         drop(wait);
+        // Using `call` here keeps its borrows of `job` and `result` alive
+        // until the helper has finished with them.
         let _ = &mut call;
         if let Some(Err(panic)) = reply {
             std::panic::resume_unwind(panic);
@@ -269,6 +284,7 @@ impl Helper {
 
 impl Drop for Helper {
     fn drop(&mut self) {
+        // Closing the job channel ends the thread's loop.
         self.jobs = None;
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
