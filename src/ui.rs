@@ -1271,8 +1271,8 @@ impl eframe::App for App {
         }
         self.advance_replays(dt);
         let theme = self.theme();
-        // The blurred city behind everything, as the game world shows
-        // behind the Half-Life 2 menus; the panels are dark glass over it.
+        // The poster paper behind everything: tan with a sunburst of paler
+        // rays. The central panel has no fill, so the paper shows through it.
         crate::theme::backdrop(ui.painter(), ui.ctx().content_rect());
         self.top_panel(ui);
         self.dev_pause_bar(ui);
