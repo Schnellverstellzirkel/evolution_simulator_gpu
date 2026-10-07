@@ -1,12 +1,12 @@
-/* Busy CPU threads for the power rows in docs/building.md: each thread runs
- * AVX-512 FMAs (AVX2 without AVX-512) in bursts of duty% of every period,
- * all threads on the same period grid, and sleeps the rest. At 100% duty it
- * never sleeps.
+/* cpu-burn runs busy CPU threads for the power rows in `docs/building.md`.
+ * Each thread runs AVX-512 FMAs, or AVX2 FMAs when the build has no AVX-512.
+ * A thread works for duty% of every period and sleeps for the rest, and all
+ * threads use the same period grid. At 100% duty it never sleeps.
  *
  * Build: gcc -O2 -march=native -pthread -o target/cpu-burn tools/cpu-burn.c
  * Usage: cpu-burn <threads> [duty%=100] [period_ms=100] [seconds=60]
- * It prints the busy core-seconds and the FMA rate when it ends, also when
- * it is stopped early with SIGINT or SIGTERM.
+ * It prints the busy core-seconds and the FMA rate when it ends. It also
+ * prints them when SIGINT or SIGTERM stops it early.
  */
 #include <immintrin.h>
 #include <signal.h>
@@ -15,18 +15,26 @@
 #include <stdlib.h>
 #include <time.h>
 
+/* The command line settings. `duty` is a fraction, `period` and `seconds` are
+ * in seconds. `t0` is the start of the period grid that all threads follow. */
 static double duty = 1.0, period = 0.1, seconds = 60.0, t0;
+/* Each thread stores the sum of its chains here at the end, so the compiler
+ * cannot drop the FMAs. */
 static volatile float sink;
+/* Set by the signal handler. Every thread stops when it is set. */
 static volatile sig_atomic_t quit;
 
 static void on_signal(int sig) { (void)sig; quit = 1; }
 
+/* The time in seconds on the monotonic clock. */
 static double now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
+/* Sleeps until the monotonic time `t` in seconds. A signal ends the sleep
+ * early. */
 static void sleep_until(double t) {
     struct timespec ts;
     ts.tv_sec = (time_t)t;
@@ -34,8 +42,10 @@ static void sleep_until(double t) {
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
 }
 
+/* What one thread reports: its busy seconds and the FMA lanes it ran. */
 typedef struct { double busy; double fmas; } Result;
 
+/* A vector of LANES floats and its operations. FNMA(a, b, c) is c - a*b. */
 #ifdef __AVX512F__
 typedef __m512 vec;
 #define LANES 16
@@ -52,17 +62,26 @@ typedef __m256 vec;
 static float SUM(__m256 v) { float f[8]; _mm256_storeu_ps(f, v); return f[0] + f[1] + f[2] + f[3] + f[4] + f[5] + f[6] + f[7]; }
 #endif
 
+/* The body of one thread. In each period it waits for the period start, runs
+ * the FMA chains until the burst ends and adds the burst time to `busy`. It
+ * stops `seconds` after `t0` or when `quit` is set, and then stores its
+ * `Result`. */
 static void *burn(void *arg) {
     Result *r = arg;
-    /* x = 1.9 - x*x is chaotic on [-1.96, 1.96], so the bits keep toggling. */
+    /* Eight independent chains, so the FMA latency does not limit the rate.
+     * x = 1.9 - x*x is chaotic on [-1.96, 1.96], so the bits keep toggling. */
     vec c = SET1(1.9f);
     vec x0 = SET1(0.1f), x1 = SET1(0.2f), x2 = SET1(0.3f), x3 = SET1(0.4f),
         x4 = SET1(-0.1f), x5 = SET1(-0.2f), x6 = SET1(-0.3f), x7 = SET1(-0.4f);
+    /* `rounds` counts the passes of the `while` loop below. */
     double end = t0 + seconds, busy = 0, rounds = 0;
     for (double start = t0; start < end && !quit; start += period) {
+        /* A burst lasts `duty` times the period. At 100% duty it fills the
+         * whole period. */
         double stop = start + (duty >= 1.0 ? period : period * duty);
         if (stop > end) stop = end;
         double t = now();
+        /* Wait for the period start, so all threads burst together. */
         if (t < start) { sleep_until(start); t = now(); }
         double begin = t;
         /* The clock is HPET on this laptop (1.4 us a call), so read it
@@ -79,6 +98,7 @@ static void *burn(void *arg) {
     }
     sink = SUM(ADD(ADD(ADD(x0, x1), ADD(x2, x3)), ADD(ADD(x4, x5), ADD(x6, x7))));
     r->busy = busy;
+    /* A round is 8,192 iterations of 8 FMAs on LANES lanes each. */
     r->fmas = rounds * 8192 * 8 * LANES;
     return NULL;
 }
@@ -103,8 +123,11 @@ int main(int argc, char **argv) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
     double begin = now();
+    /* The period grid starts 10 ms from now, so every thread is running
+     * before the first burst. */
     t0 = begin + 0.01;
     for (int i = 0; i < threads; i++) pthread_create(&ids[i], NULL, burn, &results[i]);
+    /* The totals over all threads. */
     double busy = 0, fmas = 0;
     for (int i = 0; i < threads; i++) {
         pthread_join(ids[i], NULL);

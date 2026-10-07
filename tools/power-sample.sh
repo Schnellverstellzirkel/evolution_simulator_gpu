@@ -19,19 +19,32 @@
 # 0x20 SW thermal, 0x40 HW thermal, 0x80 HW power brake.
 set -u
 
+# summary <file.csv> [from_s] [to_s]: prints the means and the limiter shares
+# of the samples whose t_s lies between from_s and to_s. The awk program names
+# the columns by number, as in the header written below: $1 t_s, $2 sm_mhz,
+# $3 mem_mhz, $4 power_w, $5 power_avg_w, $6 limit_w, $7 temp_c, $8 util,
+# $9 reasons, $10 pstate, $11 pcie_gen, $12 apu_ppt_w, $13 cpu_mhz,
+# $14 radeon_mhz, $15 radeon_busy.
 summary() {
   awk -F, -v from="${2:-0}" -v to="${3:-1e18}" '
+    # hex(s) reads a value such as 0x0000000000000004, as in the reasons column.
     function hex(s,   i, v) {
       v = 0; s = tolower(substr(s, 3))
       for (i = 1; i <= length(s); i++) v = v * 16 + index("0123456789abcdef", substr(s, i, 1)) - 1
       return v
     }
+    # bit(v, b) is 1 when the bit with the value b is set in v.
     function bit(v, b) { return int(v / b) % 2 }
+    # Skip the header line and the samples outside the window.
     NR == 1 { next }
     $1 + 0 < from + 0 || $1 + 0 > to + 0 { next }
     {
+      # Sums over every sample in the window.
       n++; sm += $2; pw += $4; ppt += $12; mhz += $13; rmhz += $14; rbusy += $15
       r = hex($9)
+      # Sums over the busy samples (util of 90 or more), with the lowest and
+      # highest SM clock, the highest temperature and the count of samples with
+      # each limiter.
       if ($8 + 0 >= 90) {
         b++; bsm += $2; bpw += $4; bavg += $5; blim += $6; bppt += $12; bmhz += $13
         btemp += $7; if ($7 + 0 > tmax) tmax = $7
@@ -43,6 +56,7 @@ summary() {
         if (bit(r, 64)) hwt++
         if (bit(r, 128)) brake++
       }
+      # The times of the first and last sample in the window.
       if (t0 == "") t0 = $1; t1 = $1
     }
     END {
@@ -64,11 +78,14 @@ if [ "${1:-}" = "--summary" ]; then
   exit
 fi
 if [ $# -lt 1 ]; then
+  # Print the header comment (lines 2 to 20) as the usage text. Keep the header
+  # on those lines.
   sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 fi
 out=$1
 shift
+# Next come an optional interval in milliseconds, then `--` and the command.
 ms=100
 if [ $# -gt 0 ] && [ "$1" != "--" ]; then
   ms=$1
@@ -76,6 +93,9 @@ if [ $# -gt 0 ] && [ "$1" != "--" ]; then
 fi
 [ "${1:-}" = "--" ] && shift
 
+# Find the Radeon in the hwmon directories: the APU package power (in
+# microwatts), the shader clock (in hertz) and the busy percent. A file the
+# script cannot read leaves its column empty.
 ppt_file= radeon_freq= radeon_busy=
 for h in /sys/class/hwmon/hwmon*; do
   if [ "$(cat "$h/name" 2>/dev/null)" = amdgpu ]; then
@@ -86,8 +106,15 @@ for h in /sys/class/hwmon/hwmon*; do
   fi
 done
 
+# The first column is the time since the start. The next ten are the nvidia-smi
+# fields in the order of its query below. The last four are the APU power, the
+# mean CPU clock and the two Radeon values.
 echo "t_s,sm_mhz,mem_mhz,power_w,power_avg_w,limit_w,temp_c,util,reasons,pstate,pcie_gen,apu_ppt_w,cpu_mhz,radeon_mhz,radeon_busy" > "$out"
 t0=$EPOCHREALTIME
+# nvidia-smi prints one line every $ms milliseconds for GPU 0, the RTX. This
+# function appends one CSV row for each line. awk adds the time since the
+# start, the hwmon values and the mean `cpu MHz` of /proc/cpuinfo. The
+# nvidia-smi line goes in without its spaces.
 sample() {
   nvidia-smi -i 0 --query-gpu=clocks.sm,clocks.mem,power.draw.instant,power.draw.average,enforced.power.limit,temperature.gpu,utilization.gpu,clocks_event_reasons.active,pstate,pcie.link.gen.current \
     --format=csv,noheader,nounits -lms "$ms" |
@@ -106,6 +133,8 @@ sample() {
 }
 sample &
 sampler=$!
+# Stops the sampler: first nvidia-smi and the reading loop, which are its
+# children, then the sampler itself.
 stop() {
   pkill -P "$sampler" 2>/dev/null
   kill "$sampler" 2>/dev/null
@@ -113,11 +142,13 @@ stop() {
 }
 
 if [ $# -gt 0 ]; then
+  # Sample while the command runs. The script exits with the command's status.
   "$@"
   status=$?
   stop
   summary "$out"
   exit $status
 fi
+# With no command, sample until Ctrl-C or SIGTERM, then print the summary.
 trap 'stop; summary "$out"; exit 0' INT TERM
 wait
