@@ -145,9 +145,20 @@ impl IntoIterator for LimbPairs {
 /// bone count and bone lengths within 25% of each other, position by position.
 pub(super) fn matching_limbs(c: &Creature) -> LimbPairs {
     let children = child_bones(c);
-    let limbs: Limbs = (0..c.bones.len())
+    let sized: Bounded<(usize, usize), MAX_NODES> = (0..c.bones.len())
         .filter(|&b| !is_neck(c, b))
-        .map(|b| branch_in(c, &children, b))
+        .map(|b| (b, branch_size(c, &children, b)))
+        .collect();
+    // Only branches with another branch of the same bone count can pair, so
+    // the rest are not listed. Their order is kept, so the pairs are too.
+    let mut count = [0u8; MAX_NODES + 1];
+    for &(_, size) in sized.iter() {
+        count[size] += 1;
+    }
+    let limbs: Limbs = sized
+        .iter()
+        .filter(|&&(_, size)| count[size] > 1)
+        .map(|&(b, _)| branch_in(c, &children, b))
         .collect();
     let similar = |(&p, &q): (&usize, &usize)| {
         let (a, b) = (c.bones[p].rest_length, c.bones[q].rest_length);
@@ -166,6 +177,20 @@ pub(super) fn matching_limbs(c: &Creature) -> LimbPairs {
         }
     }
     LimbPairs { limbs, pairs }
+}
+
+/// The number of bones `branch_in` lists for `bone`, counted without listing them.
+fn branch_size(c: &Creature, children: &Children, bone: usize) -> usize {
+    let node = c.bones[bone].b as usize;
+    let below: usize = if node < c.nodes.len() {
+        children[node]
+            .iter()
+            .map(|&child| branch_size(c, children, child))
+            .sum()
+    } else {
+        0
+    };
+    1 + below
 }
 
 /// Along a chain of bones (a path down one branch), sets the phase of the
