@@ -1,22 +1,13 @@
-//! NVIDIA GPU backend: the physics authority.
+//! The CUDA backend runs the creature kernel (`shaders/creature.cu`, one
+//! creature per thread) for `engine::gpu_engine`, which opens it on its own
+//! thread and drives it with `submit`, `record` and `poll`.
 //!
-//! It runs `shaders/creature.cu`, one creature per thread (`kernel`), behind
-//! `engine::gpu_engine`'s submit and poll contract. A unit is uploaded once
-//! and runs as waves of up to `kernel::WAVE` creatures, one kernel launch
-//! each, on the slot's streams. Inside a wave every thread runs its creature
-//! to the end of its trial and then takes the next one, so there are no trial
-//! segments.
-//!
-//! Nothing CUDA is linked at build time. The driver API (`libcuda`) and NVRTC
-//! (`libnvrtc`) are loaded when the engine opens, so the game builds without
-//! them, but it needs them to run. NVRTC comes from the system CUDA toolkit
-//! or from NVIDIA's pip wheel; see `docs/building.md`. Kernels compile to a cubin for the device's
-//! architecture, one per world (the effects that are on), rate
-//! and recording, in the background when the engine opens and when a new
-//! world first appears.
-//!
-//! Developer diagnostics, never needed to play: `EVOLUTION_NVRTC` names the
-//! NVRTC library, and `EVOLUTION_CUDA_VERBOSE` reports compile times.
+//! A unit is uploaded once and runs as waves of up to `kernel::WAVE`
+//! creatures, one kernel launch each, on the streams of a submission slot. The
+//! CUDA driver (`libcuda`) and NVRTC (`libnvrtc`) load when the engine opens,
+//! so the game builds without them but needs them to run (`docs/building.md`).
+//! Kernels compile in the background to a cubin for the device, one for each
+//! world, fidelity and recording mode, and a disk cache keeps them.
 use crate::{
     config::Config,
     creature_kernel::{self, GpuResult, LaneBatch},
@@ -36,8 +27,9 @@ use std::{
 };
 
 /// Wall nanoseconds engine threads have waited for a kernel (compiling or
-/// loading one the engine did not have yet), and how many are waiting now.
+/// loading one the engine did not have yet).
 static KERNEL_WAIT_NANOS: AtomicU64 = AtomicU64::new(0);
+/// Engine threads that wait for a kernel now.
 static KERNEL_WAITERS: AtomicUsize = AtomicUsize::new(0);
 
 /// Seconds engine threads have waited for kernels since the process began.
@@ -63,13 +55,16 @@ type CuEvent = *mut c_void;
 type CuDevicePtr = u64;
 type NvrtcProgram = *mut c_void;
 
+// Values of the CUDA driver API: result codes, flags and device attributes.
 const CUDA_SUCCESS: CuResult = 0;
 const CUDA_ERROR_OUT_OF_MEMORY: CuResult = 2;
 const CUDA_ERROR_NOT_READY: CuResult = 600;
 const CU_STREAM_NON_BLOCKING: c_uint = 1;
-/// CUDA stream priority: lower numbers run first, 0 is the default.
-fn stream_priority(replay: bool) -> c_int {
-    if replay { -100 } else { 0 }
+/// CUDA stream priority: lower numbers run first and 0 is the default. A
+/// `high_priority` stream asks for -100, which the driver clamps to the
+/// highest priority it has.
+fn stream_priority(high_priority: bool) -> c_int {
+    if high_priority { -100 } else { 0 }
 }
 const CU_EVENT_DISABLE_TIMING: c_uint = 2;
 const CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT: c_int = 16;
@@ -161,6 +156,9 @@ struct Api {
     nvrtc: Nvrtc,
 }
 
+/// Looks up the function `$name` in `$library` and copies its pointer out.
+/// It needs an `unsafe` block, and it returns from the calling function with
+/// an error that names the symbol when the library lacks it.
 macro_rules! symbol {
     ($library:expr, $name:literal) => {
         *$library
@@ -221,6 +219,8 @@ impl Driver {
         }
     }
 
+    /// Turns a failed driver result into a `CudaError` that names the call
+    /// (`what`).
     fn check(&self, result: CuResult, what: &str) -> Result<()> {
         if result == CUDA_SUCCESS {
             return Ok(());
@@ -243,9 +243,11 @@ impl Driver {
     }
 }
 
-/// Candidate NVRTC libraries: `EVOLUTION_NVRTC`, the loader's search path
-/// (a system CUDA toolkit), then NVIDIA's pip wheels in the virtual
-/// environment that `docs/building.md` sets up.
+/// The NVRTC libraries to try, in order. When the developer diagnostic
+/// `EVOLUTION_NVRTC` is set, it is the only one. Otherwise they are the
+/// loader's search path, the toolkit folders `/usr/local/cuda` and
+/// `/opt/cuda` on Linux, then NVIDIA's pip wheels in the virtual environment
+/// that `docs/building.md` sets up.
 fn nvrtc_candidates() -> Vec<PathBuf> {
     if let Some(path) = std::env::var_os("EVOLUTION_NVRTC") {
         return vec![PathBuf::from(path)];
@@ -288,6 +290,8 @@ fn nvrtc_candidates() -> Vec<PathBuf> {
 }
 
 impl Nvrtc {
+    /// Opens the first of `nvrtc_candidates` that loads. The error lists why
+    /// each one failed.
     fn load() -> Result<Self> {
         let mut errors = Vec::new();
         for path in nvrtc_candidates() {
@@ -344,6 +348,7 @@ impl Nvrtc {
         None
     }
 
+    /// NVRTC's version as `major.minor`. It is part of the kernel cache key.
     fn version_string(&self) -> String {
         let (mut major, mut minor) = (0, 0);
         unsafe { (self.version)(&mut major, &mut minor) };
@@ -402,6 +407,7 @@ impl Nvrtc {
         }
     }
 
+    /// The text of an NVRTC status code.
     fn error(&self, status: c_int) -> String {
         let text = unsafe { (self.get_error_string)(status) };
         if text.is_null() {
@@ -441,9 +447,12 @@ impl std::fmt::Display for CudaError {
 
 impl std::error::Error for CudaError {}
 
+/// The loaded libraries. A failure is kept as its message, so every engine
+/// that opens later reports it again.
 static API: std::sync::OnceLock<Result<Arc<Api>, String>> = std::sync::OnceLock::new();
 
-/// The CUDA driver and NVRTC compiler, shared by all engines.
+/// The CUDA driver and NVRTC compiler, shared by all engines. The first call
+/// loads both and initializes the driver.
 fn api() -> Result<Arc<Api>> {
     API.get_or_init(|| {
         let cu = Driver::load().map_err(|e| format!("{e:#}"))?;
@@ -456,12 +465,12 @@ fn api() -> Result<Arc<Api>> {
     .map_err(|e| anyhow::anyhow!(e))
 }
 
-/// Streams per submission slot. Wave w of a unit runs on stream w modulo
-/// this.
+/// Most wave streams a submission slot has. Wave w of a unit runs on stream w
+/// modulo the streams in use, so a unit of more waves shares them.
 const STREAM_LIMIT: usize = 8;
 
-/// A kernel: recording or scoring, lanes per creature, world flags
-/// (`kernel::world_flags`) and fidelity.
+/// A kernel: recording or scoring, class, world flags (`kernel::world_flags`)
+/// and fidelity. The class is the node slots of a frame (`kernel::CLASSES`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct KernelKey {
     record: bool,
@@ -482,12 +491,15 @@ struct Kernel {
 // kernels for the engine, which launches them.
 unsafe impl Send for Kernel {}
 
+/// A device allocation: its address and its size in bytes, padded by
+/// `buffer_size`.
 struct DeviceBuf {
     ptr: CuDevicePtr,
     size: usize,
 }
 
-/// A buffer allocated in pinned host memory for direct GPU transfers.
+/// A pinned host allocation that the GPU copies results and recorded frames
+/// into.
 struct HostBuf {
     ptr: *mut u8,
     size: usize,
@@ -514,6 +526,7 @@ pub struct HostVec<T: bytemuck::Pod> {
     capacity: usize,
     /// Mapped bytes; zero when nothing is mapped.
     bytes: usize,
+    /// Whether the mapping is registered with the driver.
     registered: bool,
 }
 
@@ -532,6 +545,7 @@ impl<T: bytemuck::Pod> HostVec<T> {
     /// staging copies it about as fast.
     const REGISTER_FROM: usize = 1 << 16;
 
+    /// An empty vector that has mapped nothing yet.
     pub const fn new() -> Self {
         Self {
             ptr: std::ptr::NonNull::dangling().as_ptr(),
@@ -542,8 +556,8 @@ impl<T: bytemuck::Pod> HostVec<T> {
         }
     }
 
-    /// Makes this `len` copies of `value`, in the memory it has when that is
-    /// large enough.
+    /// Sets the contents to `len` copies of `value`. It keeps the mapping
+    /// when that is large enough and grows it when it is not.
     pub fn reset(&mut self, len: usize, value: T) {
         if len > self.capacity {
             self.grow(len);
@@ -562,6 +576,10 @@ impl<T: bytemuck::Pod> HostVec<T> {
         self.bytes
     }
 
+    /// Maps room for at least `len` elements, with the headroom of
+    /// `engine::padded_size`. It registers the mapping when it holds
+    /// `REGISTER_FROM` bytes or more and an engine's context is current on
+    /// this thread. The contents already there stay.
     fn grow(&mut self, len: usize) {
         let bytes = crate::engine::padded_size((len * std::mem::size_of::<T>()) as u64) as usize;
         let bytes = bytes.next_multiple_of(4096);
@@ -606,6 +624,7 @@ impl<T: bytemuck::Pod> HostVec<T> {
         self.capacity = bytes / std::mem::size_of::<T>().max(1);
     }
 
+    /// Unregisters and unmaps the memory, and leaves the vector empty.
     fn release(&mut self) {
         if self.bytes == 0 {
             return;
@@ -651,28 +670,38 @@ impl<T: bytemuck::Pod> Drop for HostVec<T> {
     }
 }
 
-/// One batch's buffers: lane records, muscles, muscle-end lists, heads and
-/// results.
+/// The device buffers of one batch, in the order of the kernel's first five
+/// arguments: the node and bone records (`WavePack::lanes`), the muscle
+/// records, the unused `WavePack::ends`, the heads and the results.
 struct GroupRes {
     bufs: [DeviceBuf; 5],
 }
 
-/// Per-submission resources. Each wave runs on one of the
-/// slot's streams; the main stream uploads, joins the wave streams and reads
-/// the results back.
+/// The resources of one submission slot. Each wave runs on one of the slot's
+/// streams. The main stream uploads, joins the wave streams and reads the
+/// results back.
 struct Slot {
     main: CuStream,
+    /// The streams the waves run on, made as units need them.
     streams: Vec<CuStream>,
+    /// One event per wave stream, recorded when that stream's waves finish.
     joins: Vec<CuEvent>,
+    /// Timing events on the main stream: `start` after the uploads and `stop`
+    /// after the waves. They give the GPU seconds of the waves.
     start: CuEvent,
     stop: CuEvent,
+    /// Recorded after the readback copies. `poll` queries it.
     done: CuEvent,
+    /// The buffers of each batch of the unit, by batch index. The slot keeps
+    /// them for the next unit.
     groups: Vec<Option<GroupRes>>,
-    /// One creature counter per wave and take-up bucket.
+    /// One counter per wave: the next creature a thread of the wave takes.
     counters: Option<DeviceBuf>,
+    /// Where the results and any recorded frames are copied to on the host.
     readback: Option<HostBuf>,
     /// Recorded replay frames; only the replay slot has one.
     frames: Option<DeviceBuf>,
+    /// The submission that runs on this slot, until `poll` returns it.
     pending: Option<Pending>,
 }
 
@@ -693,30 +722,41 @@ pub struct CudaEngine {
     api: Arc<Api>,
     device: CuDevice,
     context: CuContext,
+    /// The device name followed by "(CUDA)".
     pub name: String,
+    /// The device's compute capability as an NVRTC architecture, such as
+    /// `sm_89`.
     arch: String,
     multiprocessors: i32,
+    /// Kernels loaded into the context and ready to launch.
     kernels: HashMap<KernelKey, Kernel>,
     /// Kernels compiling on background threads.
     prefetch: Arc<Prefetch>,
-    /// Worlds (effect levels and flags) whose kernels have been queued for
-    /// every class.
+    /// Worlds (effect levels and flags) whose kernels have been queued on the
+    /// background compiler.
     worlds: HashSet<(Vec<u8>, u32)>,
     /// Submission slots: `standard` slots for standard trials, then one for
-    /// confirmation trials and last one for replays. The last two have
+    /// confirmation trials and a last one for replays. The last two have
     /// streams of the highest priority, so a confirmation or a replay never
     /// waits behind queued standard work for the multiprocessors.
     slots: Vec<Slot>,
     /// Slots of standard trials.
     standard: usize,
+    /// The ticket the next submission gets.
     next_ticket: u64,
+    /// Largest body, in nodes, the engine runs. It is at most
+    /// `kernel::MAX_NODES`.
     pub max_capacity: usize,
+    /// Bytes of device and pinned host buffers the slots hold, as
+    /// `recount_allocated` counts them.
     pub allocated_bytes: u64,
+    /// GPU seconds of the submission that `poll` returned last.
     pub last_gpu_seconds: f64,
 }
 
-// The context and every mapped pointer are only used by the thread that owns
-// the engine; it makes the context current on that thread when it opens.
+// The context and every pointer of a slot are only used by the thread that
+// owns the engine, which makes the context current on itself when it opens.
+// Background threads share only `Prefetch`, and load kernels into the context.
 unsafe impl Send for CudaEngine {}
 
 /// Rounds a buffer size up (`engine::padded_size`), so buffers are reused
@@ -725,12 +765,13 @@ fn buffer_size(bytes: usize) -> usize {
     crate::engine::padded_size(bytes as u64) as usize
 }
 
-/// NVRTC's source for one kernel, compiled to a cubin. It needs no CUDA
-/// context, so any thread may run it. Compiled kernels are kept on disk
-/// (`kernel_cache_dir`), keyed by a hash of the source, the options and the
-/// NVRTC version, so a later start loads them in milliseconds. With
+/// The cubin of one kernel, compiled by NVRTC or read from the disk cache. It
+/// needs no CUDA context, so any thread may run it. Compiled kernels are kept
+/// on disk (`kernel_cache_dir`), keyed by a hash of the source, the options
+/// and the NVRTC version, so a later start loads them in milliseconds. With
 /// `use_cache` false the compile ignores an entry (it may be damaged) and
-/// writes a fresh one.
+/// writes a fresh one. With the developer diagnostic `EVOLUTION_CUDA_VERBOSE`
+/// set, a compile prints its time and the compiler log.
 fn compile_kernel(
     api: &Api,
     options: &[String],
@@ -806,17 +847,19 @@ fn kernel_label(key: KernelKey) -> String {
     )
 }
 
-/// Compiled kernels kept on disk, about 300 to 900 KB each. The starting
-/// worlds alone are 212 kernels: the default world's 16 and the scoring
-/// kernels of the 100 wild islands' 49 distinct worlds (`prefetch_islands`),
-/// which every start reads again, so a smaller cap would delete and compile
-/// them again at every start.
+/// Compiled kernels kept on disk, about 50 to 80 KB each. The starting worlds
+/// alone are 53 kernels: the default world's 4 and the scoring kernels that
+/// `prefetch_islands` queues for the 49 distinct worlds of the 100 wild
+/// islands. Every start reads them again, so a cap below their number would
+/// delete and compile them again at every start. A test keeps the cap at
+/// twice their number or more.
 const CACHE_FILES: usize = 600;
 
 /// Deletes the oldest compiled kernels beyond `CACHE_FILES`, and temporary
-/// files a crashed compile left. Every source edit makes new kernels for
-/// every world, and nothing else ever removes the old ones. A kernel another
-/// process still wants is compiled again.
+/// files over an hour old that a crashed compile left. Every source edit
+/// makes new kernels for every world, and nothing else ever removes the old
+/// ones. A kernel another process still wants is compiled again. It runs once
+/// per process, when the first engine opens.
 fn evict_cache(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -850,8 +893,10 @@ fn evict_cache(dir: &Path) {
     }
 }
 
-/// Where compiled kernels are kept: `EVOLUTION_KERNEL_CACHE`, else the
-/// user's cache directory, else nowhere.
+/// Where compiled kernels are kept: the developer diagnostic
+/// `EVOLUTION_KERNEL_CACHE`, else `evolution-simulator/cuda` in the user's
+/// cache directory (`XDG_CACHE_HOME`, `LOCALAPPDATA` or `~/.cache`), else
+/// nowhere.
 fn kernel_cache_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("EVOLUTION_KERNEL_CACHE") {
         return Some(PathBuf::from(dir));
@@ -863,7 +908,11 @@ fn kernel_cache_dir() -> Option<PathBuf> {
     Some(base.join("evolution-simulator").join("cuda"))
 }
 
-/// Loads a cubin into `context` (the calling thread makes it current).
+/// Loads a cubin into `context` (the calling thread makes it current). It
+/// sets the kernel's cache preference and measures how many blocks of
+/// `kernel::BLOCK` threads fit on a multiprocessor. With the developer
+/// diagnostic `EVOLUTION_CUDA_VERBOSE` set it also prints the kernel's
+/// registers and memory use.
 fn load_kernel(api: &Api, context: CuContext, cubin: &[u8], key: KernelKey) -> Result<Kernel> {
     let cu = &api.cu;
     unsafe {
@@ -884,8 +933,10 @@ fn load_kernel(api: &Api, context: CuContext, cubin: &[u8], key: KernelKey) -> R
             return Err(error);
         }
         // The kernel uses no shared memory and keeps each creature in local
-        // memory, so the multiprocessor's memory goes to the L1 cache
-        // (CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, percent).
+        // memory, so the multiprocessor's memory goes to the L1 cache: the
+        // preferred shared memory carveout
+        // (CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, percent) is 0.
+        // A developer can set it with `EVOLUTION_WARP_CARVEOUT`.
         let carveout = crate::kernel::solver_setting("CARVEOUT", 0) as c_int;
         cu.check(
             (cu.func_set_attribute)(function, 9, carveout),
@@ -964,19 +1015,26 @@ impl Drop for KernelWait {
 /// with it, so an idle load was a drain of the whole pipeline: with the
 /// neighbours of a world not yet in the cache (a new build, or a cache that
 /// holds fewer kernels than the neighbours), 3 to 9 of them in every 10 s for
-/// minutes, 4 to 8% of the creatures per second.
+/// minutes, 4 to 8% of the creatures per second. The kernels of the wild
+/// islands' worlds ("warm") are not loaded either. They compile into the disk
+/// cache at the start, on as many threads as `warm_threads` allows.
 struct Prefetch {
     api: Arc<Api>,
     /// The engine's context (an address, so the struct is `Send`).
     context: usize,
+    /// The NVRTC options of the device, from `nvrtc_options`.
     options: Vec<String>,
     state: Mutex<PrefetchState>,
+    /// Notified when a thread finishes a kernel or exits.
     ready: Condvar,
 }
 
+/// The queues and counts that `Prefetch` keeps behind its lock.
 #[derive(Default)]
 struct PrefetchState {
+    /// Kernels of the world the engine runs, in the order they are needed.
     wanted: VecDeque<KernelKey>,
+    /// Kernels of the worlds one effect level away.
     idle: VecDeque<KernelKey>,
     /// Kernels of the islands' worlds that compile into the disk cache at
     /// the start, on several threads, and are not loaded.
@@ -984,17 +1042,22 @@ struct PrefetchState {
     /// Kernels a thread is on, with the number of wanted, idle and warm
     /// threads on each.
     running: HashMap<KernelKey, [usize; 3]>,
+    /// The loaded kernels, or the message of the error, that wanted threads
+    /// finished, until the engine takes them.
     done: HashMap<KernelKey, std::result::Result<Kernel, String>>,
     /// The order wanted kernels finished in, oldest first (entries of
     /// kernels already taken stay until they reach the front).
     finished: VecDeque<KernelKey>,
     /// Background threads alive: wanted ones, idle ones, warm ones.
     workers: [usize; 3],
+    /// Set by `close`: threads take no new kernel, and queued ones are gone.
     closed: bool,
 }
 
-/// Most wanted threads at once: the three lane classes of a world.
+/// Most wanted threads at once. A world queues four kernels: scoring and
+/// recording, each at the standard and the fine physics.
 const WANTED_THREADS: usize = 3;
+
 /// Most threads that compile the islands' kernels into the cache at the
 /// start. The machine is idle then, and the window waits for them.
 fn warm_threads() -> usize {
@@ -1003,6 +1066,7 @@ fn warm_threads() -> usize {
         .saturating_sub(2)
         .clamp(2, 5)
 }
+
 /// Most loaded kernels waiting to be used. Each module holds device memory,
 /// so the oldest go when more finish.
 const READY_KERNELS: usize = 48;
@@ -1101,6 +1165,8 @@ impl Prefetch {
         }
     }
 
+    /// Unloads a module from the context. It waits for the kernels running on
+    /// the GPU, so it must not run under the lock.
     fn unload(&self, kernel: &Kernel) {
         let cu = &self.api.cu;
         unsafe {
@@ -1144,11 +1210,12 @@ impl Prefetch {
             .collect()
     }
 
-    /// Queues `wanted`, `idle` and `warm` ahead of everything queued in their
-    /// queues (in their own order), and starts threads. A kernel already
-    /// queued, running or done stays where it is, except that an idle or warm
-    /// one now wanted moves up (a thread at nice 19 may be slow, so a wanted
-    /// thread compiles it too).
+    /// Queues `wanted` and `idle` ahead of everything in their queues and
+    /// `warm` behind it, each list in its own order, and starts threads. A
+    /// kernel that is done, queued as wanted or already being compiled is
+    /// skipped. The exception is an idle or warm kernel that is now wanted:
+    /// it goes to the front of the wanted queue (a thread at nice 19 may be
+    /// slow, so a wanted thread compiles it too).
     fn enqueue(
         self: &Arc<Self>,
         wanted: Vec<KernelKey>,
@@ -1192,7 +1259,7 @@ impl Prefetch {
             crate::loading::queued(&kernel_label(key), crate::loading::Group::Idle);
             state.idle.push_front(key);
         }
-        // The islands' kernels go behind the world's own, in order.
+        // The islands' kernels go to the back of their queue, in order.
         let fresh: Vec<KernelKey> = warm
             .into_iter()
             .filter(|key| {
@@ -1275,7 +1342,8 @@ fn nvrtc_options(arch: &str) -> Vec<String> {
         "--extra-device-vectorization".into(),
         "--ptxas-options=-v".into(),
     ];
-    // A developer's extra options, such as -lineinfo for a profiler.
+    // A developer's extra options (`EVOLUTION_NVRTC_EXTRA`), such as
+    // -lineinfo for a profiler.
     if let Ok(extra) = std::env::var("EVOLUTION_NVRTC_EXTRA") {
         options.extend(extra.split_whitespace().map(String::from));
     }
@@ -1285,7 +1353,10 @@ fn nvrtc_options(arch: &str) -> Vec<String> {
 impl CudaEngine {
     /// Opens the first CUDA device whose name contains `name`
     /// (case-insensitive) and starts compiling the kernels of the default
-    /// world. Bodies above `kernel::MAX_NODES` nodes stay elsewhere.
+    /// world and of the wild islands' worlds in the background.
+    /// `max_capacity` is the largest body, in nodes, the caller wants. The
+    /// engine caps it at `kernel::MAX_NODES` and reports the result in its
+    /// `max_capacity` field, and the scheduler sends it no larger bodies.
     pub fn new(name: &str, max_capacity: usize) -> Result<Self> {
         Self::open(name, max_capacity.min(crate::kernel::MAX_NODES))
     }
@@ -1385,15 +1456,22 @@ impl CudaEngine {
         }
     }
 
-    /// A slot's streams. The replay slot's streams have the highest
-    /// priority, so a recording gets the GPU's blocks ahead of queued scoring
-    /// work (priorities out of range are clamped to the greatest one).
-    fn create_slot(&self, replay: bool) -> Result<Slot> {
+    /// Makes a submission slot with its main stream and its events. The wave
+    /// streams come later, in `ensure_buffers`. The streams of a
+    /// `high_priority` slot, which is a confirmation or a replay slot, have
+    /// the highest priority, so a confirmation or a recording gets the GPU's
+    /// blocks ahead of queued scoring work. A priority out of range is clamped
+    /// to the greatest one.
+    fn create_slot(&self, high_priority: bool) -> Result<Slot> {
         let cu = &self.api.cu;
         unsafe {
             let mut main = std::ptr::null_mut();
             cu.check(
-                (cu.stream_create)(&mut main, CU_STREAM_NON_BLOCKING, stream_priority(replay)),
+                (cu.stream_create)(
+                    &mut main,
+                    CU_STREAM_NON_BLOCKING,
+                    stream_priority(high_priority),
+                ),
                 "cuStreamCreateWithPriority",
             )?;
             let event = |flags| -> Result<CuEvent> {
@@ -1427,13 +1505,17 @@ impl CudaEngine {
         compile_and_load(&self.api, self.context, &self.options(), key)
     }
 
-    /// Queues the kernels of `cfg`'s world on the background compiler, every
-    /// lane class: scoring at the standard physics first (the engine waits
-    /// for these), then the confirmation trials' fine physics, then
-    /// recordings. After them, at idle priority, the same for every world
-    /// one effect level away, compiled into the disk cache so the next
-    /// button press loads its kernels in milliseconds: all the scoring
-    /// kernels first, then fine, then recordings.
+    /// Queues the kernels of `cfg`'s world on the background compiler:
+    /// scoring at the standard physics first (the engine waits for these),
+    /// then scoring at the fine physics of the confirmation trials, then the
+    /// recordings. A world with a fidelity of its own, neither standard nor
+    /// fine, queues its kernels too. After them, at idle priority, come the
+    /// worlds one effect level away, compiled into the disk cache so the next
+    /// button press loads its kernels in milliseconds: the scoring kernels at
+    /// the standard physics of all of them first, then at the fine physics,
+    /// then the recordings at the standard physics. A world already queued is
+    /// skipped. Kernels of this world that have finished loading become the
+    /// engine's.
     fn prefetch_world(&mut self, cfg: &Config) {
         let flags = crate::kernel::world_flags(cfg);
         let mut fidelities = vec![Fidelity::standard(), Fidelity::fine()];
@@ -1528,8 +1610,10 @@ impl CudaEngine {
         self.prefetch.enqueue(Vec::new(), Vec::new(), keys);
     }
 
-    /// The kernel for `key`: from the background compiler if it has it or is
-    /// on it, else compiled here.
+    /// The function of the kernel for `key` and its resident blocks per
+    /// multiprocessor. The kernel comes from the background compiler if it
+    /// has it or is on it, else it is compiled here. A wait counts in
+    /// `kernel_wait_seconds`.
     fn kernel(&mut self, key: KernelKey) -> Result<(CuFunction, u32)> {
         if !self.kernels.contains_key(&key) {
             let started = Instant::now();
@@ -1589,6 +1673,7 @@ impl CudaEngine {
         unsafe { (self.api.cu.mem_free_host)(buf.ptr as *mut c_void) };
     }
 
+    /// Frees the device buffers of batch `group` in `slot`.
     fn drop_group(&mut self, slot: usize, group: usize) {
         if let Some(res) = self.slots[slot].groups[group].take() {
             for buf in res.bufs {
@@ -1597,8 +1682,8 @@ impl CudaEngine {
         }
     }
 
-    /// Bytes each buffer of a batch needs: lanes, muscles, ends, heads,
-    /// results.
+    /// Bytes each device buffer of a batch needs, in the order of
+    /// `GroupRes::bufs`: lanes, muscles, ends, heads, results.
     fn needs(batch: &LaneBatch) -> Result<[usize; 5]> {
         let wave = batch
             .wave
@@ -1613,8 +1698,9 @@ impl CudaEngine {
         ])
     }
 
-    /// Grows the slot's device buffers, streams and readback buffer to fit
-    /// `batches` in `waves` waves.
+    /// Grows the slot's device buffers, wave streams, counters and readback
+    /// buffer to fit `batches` in `waves` waves. A recording also gets a frame
+    /// buffer of `frame_bytes`. A buffer that is large enough stays.
     fn ensure_buffers(
         &mut self,
         slot: usize,
@@ -1675,7 +1761,7 @@ impl CudaEngine {
             };
             self.slots[slot].groups[group] = Some(GroupRes { bufs });
         }
-        // One take-up counter per wave.
+        // One counter per wave: the next creature a thread of the wave takes.
         let counter_bytes = 4 * waves;
         if self.slots[slot]
             .counters
@@ -1742,6 +1828,7 @@ impl CudaEngine {
             + slot.frames.as_ref().map_or(0, |b| b.size as u64)
     }
 
+    /// Recomputes `allocated_bytes` from the slots.
     fn recount_allocated(&mut self) {
         self.allocated_bytes = self.slots.iter().map(Self::slot_bytes).sum();
     }
@@ -1807,10 +1894,10 @@ impl CudaEngine {
         self.slots[self.replay_slot()].pending.is_none()
     }
 
-    /// The whole trial of the one creature in `batch` on the replay slot with
-    /// the recording kernel, which writes every frame. The result arrives
-    /// through `poll` with `Completed::frames`; it is the trial `submit`
-    /// scores, computed the same way.
+    /// Queues the whole trial of the one creature in `batch` on the replay
+    /// slot with the recording kernel, which writes every frame. The result
+    /// arrives through `poll` with `Completed::frames`. The trial is the one
+    /// `submit` scores, computed the same way. Returns the ticket.
     pub fn record(&mut self, batch: LaneBatch, cfg: &Config) -> Result<u64> {
         ensure!(self.replay_free(), "A replay is already being recorded");
         self.submit_as(&mut vec![batch], cfg, true)
@@ -1820,10 +1907,14 @@ impl CudaEngine {
     /// On success the engine takes the batches, copies straight from their
     /// buffers, and hands them back with the results (`Completed::batches`)
     /// for the next unit to reuse; on failure they stay with the caller.
+    /// Returns the ticket that `poll` reports with the results.
     pub fn submit(&mut self, batches: &mut Vec<LaneBatch>, cfg: &Config) -> Result<u64> {
         self.submit_as(batches, cfg, false)
     }
 
+    /// What `submit` and `record` share: launches the batches, and on success
+    /// keeps them on their slot as a `Pending` submission and returns its
+    /// ticket.
     fn submit_as(
         &mut self,
         batches: &mut Vec<LaneBatch>,
@@ -1881,8 +1972,10 @@ impl CudaEngine {
                 })
             })
             .collect::<Result<_>>()?;
-        // The free slot with the most buffers to reuse: when memory is short,
-        // a new allocation may fail where reuse does not.
+        // A recording has the replay slot. A confirmation trial has its own
+        // slot when that is free. Every other unit takes the free standard
+        // slot with the most buffers to reuse: when memory is short, a new
+        // allocation may fail where reuse does not.
         let confirming = !record && crate::engine::is_confirmation(cfg);
         let slot = if record {
             self.replay_slot()
@@ -1894,7 +1987,8 @@ impl CudaEngine {
                 .max_by_key(|&i| (Self::slot_bytes(&self.slots[i]), std::cmp::Reverse(i)))
                 .context("No free GPU submission slot")?
         };
-        // Waves: (batch, first creature, count), the largest bodies first.
+        // Waves of at most `kernel::WAVE` creatures: (batch, first creature,
+        // count).
         let mut waves: Vec<(usize, usize, usize)> = Vec::new();
         for (b, batch) in batches.iter().enumerate() {
             let count = batch.slots.len();
@@ -1985,6 +2079,8 @@ impl CudaEngine {
                     res.bufs[4].ptr,
                     counters.ptr + (4 * w) as u64,
                 ];
+                // The frames pointer is the eighth argument. Only the
+                // recording kernel declares it.
                 let mut frames = resources.frames.as_ref().map_or(0, |f| f.ptr);
                 let mut args: [*mut c_void; 8] = [
                     &mut pointers[0] as *mut u64 as *mut c_void,
@@ -2067,8 +2163,9 @@ impl CudaEngine {
         Ok((slot, record.then_some((results_bytes, frame_count))))
     }
 
-    /// Returns the oldest finished submission's results, waiting up to
-    /// `timeout` for one.
+    /// Returns the results of the oldest finished submission, waiting up to
+    /// `timeout` for one. It returns `None` when nothing is in flight or
+    /// nothing finishes in time.
     pub fn poll(&mut self, timeout: Duration) -> Result<Option<Completed>> {
         let mut pending: Vec<(u64, usize)> = self
             .slots
@@ -2158,7 +2255,8 @@ impl Drop for CudaEngine {
             }
         }
         for slot in 0..self.slots.len() {
-            // Unregistered while the context lives.
+            // Dropping a pending unit unregisters its host memory, which
+            // needs the context alive.
             self.slots[slot].pending.take();
             for group in 0..self.slots[slot].groups.len() {
                 self.drop_group(slot, group);
@@ -2225,6 +2323,8 @@ mod tests {
         );
     }
 
+    /// Eviction deletes the oldest kernels beyond `CACHE_FILES`, and leaves
+    /// the newest ones and other files alone.
     #[test]
     fn eviction_keeps_the_newest_kernels() {
         let dir = std::env::temp_dir().join(format!("evolution-cache-test-{}", std::process::id()));
