@@ -1,15 +1,10 @@
-//! Gait operators: phase patterns of whole gaits: walk, trot, pace, canter,
-//! gallop, bound, tripod, metachronal waves and duty factor changes.
-//!
-//! The operators of this file share one pick slot and are compound: each is a
-//! whole, coherent change to the body, and its child gets no parameter noise.
-//!
-//! They change timing only. The legs (`leaf_limbs`) are ordered from front
-//! (large x) to back and grouped in girdles of two: ranks 0 and 1 are the
-//! first girdle, ranks 2 and 3 the second, and so on. A 2D body has no left
-//! and right, so the two legs of a girdle stand for the two sides. Each leg
-//! keeps its own timing and moves as one group (phase and touchdown reset),
-//! with the first leg's strongest muscle as the clock the others are set
+//! These operators set a whole gait as a phase pattern over the legs (walk,
+//! trot, pace, canter, gallop, bound, tripod, metachronal waves) or change the
+//! duty factor of the legs. They change muscle timing only, share one pick slot
+//! (`GAIT_FILES` in `mod.rs`) and are compound, so a child gets no parameter
+//! noise after one. A leg is a leaf limb (`leaf_limbs`) with a driven muscle,
+//! the legs run from front to back in girdles of two (`Slot`), and the
+//! strongest muscle of the first leg is the clock that the others are set
 //! against. The gait names follow Hildebrand's footfall patterns, Alexander's
 //! duty factors and the central pattern generator view of gaits (Collins and
 //! Stewart 1993, couplings between oscillators fix the phase lags).
@@ -39,9 +34,13 @@ pub(super) const OPS: &[(&str, super::Operator)] = &[
     ("change_leading_leg", change_leading_leg),
 ];
 
-/// A leg with an active muscle: all its muscles, and the strongest one.
+/// A leg with a driven muscle: all its muscles, and the strongest one.
 struct Leg {
+    /// Every muscle with an end on the leg. A muscle on two limbs belongs to
+    /// the front one.
     muscles: MuscleIds,
+    /// The muscle of the leg with the most drive. Its phase is taken as the
+    /// leg's phase.
     lead: usize,
 }
 
@@ -69,7 +68,10 @@ fn legs_at_least(c: &Creature, least: usize) -> Option<Vec<Leg>> {
 }
 
 /// Where a leg stands in the gait: its girdle (0 is the front one), its side
-/// in the girdle (0 or 1) and how many girdles there are.
+/// in the girdle (0 or 1) and how many girdles there are. The legs run from
+/// front to back in girdles of two, so ranks 0 and 1 are the first girdle,
+/// ranks 2 and 3 the second, and so on. A 2D body has no left and right, so
+/// the two legs of a girdle take the place of the two sides.
 #[derive(Clone, Copy)]
 struct Slot {
     girdle: usize,
@@ -78,6 +80,7 @@ struct Slot {
 }
 
 impl Slot {
+    /// The slot of the leg at `rank` (0 is the front leg) among `legs` legs.
     fn of(rank: usize, legs: usize) -> Self {
         Self {
             girdle: rank / 2,
@@ -86,7 +89,8 @@ impl Slot {
         }
     }
 
-    /// 0 for the front girdle to 1 for the back one.
+    /// 0 for the front girdle to 1 for the back one. It is 0 when there is only
+    /// one girdle.
     fn along(self) -> f32 {
         if self.girdles < 2 {
             0.0
@@ -95,19 +99,22 @@ impl Slot {
         }
     }
 
-    /// Whether the girdle is in the front half.
+    /// Whether the girdle is in the front half. With an odd number of girdles
+    /// the middle one counts as front.
     fn fore(self) -> bool {
         2 * self.girdle < self.girdles
     }
 
-    /// Side as a number of half cycles.
+    /// The side as an offset in cycles: 0 for side 0 and half a cycle for
+    /// side 1.
     fn half(self) -> f32 {
         0.5 * self.side as f32
     }
 }
 
 /// Moves a leg's muscles (phase and touchdown reset) so its lead muscle lands
-/// on phase `target`. Returns whether anything moved.
+/// on phase `target`. Returns whether anything moved. A shift under 0.0001 of a
+/// cycle counts as none.
 fn retime_leg(c: &mut Creature, leg: &Leg, target: f32) -> bool {
     let shift = turn(c.muscles[leg.lead].phase, target);
     if shift.abs() < 1.0e-4 {
@@ -118,7 +125,8 @@ fn retime_leg(c: &mut Creature, leg: &Leg, target: f32) -> bool {
 }
 
 /// Sets every leg to the offset (in cycles) `offset` gives for its slot,
-/// measured from the first leg, which stays where it is.
+/// measured from the first leg, which stays where it is. Returns whether any
+/// leg moved.
 fn set_pattern(c: &mut Creature, legs: &[Leg], offset: impl Fn(Slot) -> f32) -> bool {
     let origin = c.muscles[legs[0].lead].phase;
     let base = offset(Slot::of(0, legs.len()));
@@ -130,12 +138,13 @@ fn set_pattern(c: &mut Creature, legs: &[Leg], offset: impl Fn(Slot) -> f32) -> 
     changed
 }
 
-/// A random sign.
+/// A random sign: -1 or 1, each half of the time.
 fn sign(rng: &mut Rng) -> f32 {
     if rng.unit() < 0.5 { -1.0 } else { 1.0 }
 }
 
-/// The offset of each leg's lead muscle from the first leg's, in cycles.
+/// The offset of each leg's lead muscle from the first leg's, in cycles. Each
+/// is the signed shortest turn (`turn`), so it lies from -0.5 up to 0.5.
 fn offsets(c: &Creature, legs: &[Leg]) -> Vec<f32> {
     let origin = c.muscles[legs[0].lead].phase;
     legs.iter()
@@ -143,7 +152,8 @@ fn offsets(c: &Creature, legs: &[Leg]) -> Vec<f32> {
         .collect()
 }
 
-/// Sets absolute lead phases `targets`, one per leg.
+/// Sets absolute lead phases `targets`, one per leg. Returns whether any leg
+/// moved.
 fn set_targets(c: &mut Creature, legs: &[Leg], targets: &[f32]) -> bool {
     let mut changed = false;
     for (leg, &t) in legs.iter().zip(targets) {
@@ -152,12 +162,13 @@ fn set_targets(c: &mut Creature, legs: &[Leg], targets: &[f32]) -> bool {
     changed
 }
 
-/// A walk: the legs of a girdle half a cycle apart and the girdles a quarter
-/// cycle apart in all, so the feet land at quarter beats. The back girdle
-/// follows the same side as the front one (lateral sequence, most
-/// mammals) or the opposite side (diagonal sequence, primates and some
-/// lizards). Four feet down most of the time keep the body statically stable,
-/// which is the stride a body takes before it can run (Hildebrand 1965).
+/// A walk: the legs of a girdle half a cycle apart and the back girdle a
+/// quarter cycle from the front one, with the girdles between spread evenly,
+/// so a body with four legs lands its feet at quarter beats. The back girdle
+/// follows the same side as the front one (lateral sequence, most mammals) or
+/// the opposite side (diagonal sequence, primates and some lizards). Four feet
+/// down most of the time keep the body statically stable, which is the stride
+/// a body takes before it can run (Hildebrand 1965).
 pub(crate) fn quarter_beat_walk(
     c: &mut Creature,
     _cfg: &Config,
@@ -175,7 +186,8 @@ pub(crate) fn quarter_beat_walk(
 /// with the leg diagonally across from it (front left with back right). The
 /// diagonal pairs keep the body balanced in two-leg support and cancel
 /// pitching, so a trot is the most economical run at medium speed (Alexander
-/// 1989, Full and Koditschek 1999 on the bouncing template).
+/// 1989, Full and Koditschek 1999 on the bouncing template). It applies to
+/// bodies with three or four legs.
 pub(crate) fn diagonal_trot(
     c: &mut Creature,
     _cfg: &Config,
@@ -254,8 +266,8 @@ pub(crate) fn spread_gallop(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx:
 }
 
 /// A half bound: both front legs land together, both back legs land together
-/// a third to two fifths of a cycle later, with a small lead of one side in
-/// each pair. Small mammals bound this way, and the spine can work with the
+/// 0.3 to 0.4 of a cycle after or before them, with a small lead of one side
+/// in each pair. Small mammals bound this way, and the spine can work with the
 /// legs, which a trot does not allow (Alexander on rodent and weasel runs).
 pub(crate) fn half_bound(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let Some(legs) = legs_at_least(c, 4) else {
@@ -309,7 +321,7 @@ pub(crate) fn paired_leg_wave(
 /// to two full cycles from front to back, so the legs a half body apart step
 /// together. The sides are half a cycle apart. This is the ripple of stick
 /// insects and some millipedes, with shorter waves than a single sweep and
-/// so a steadier body.
+/// so a steadier body. It applies to bodies with five or more legs.
 pub(crate) fn double_ripple_wave(
     c: &mut Creature,
     _cfg: &Config,
@@ -379,7 +391,8 @@ pub(crate) fn fore_hind_duty_split(
 
 /// Sets the duty of each driven muscle in `group` to `f(duty)` (within 0.05
 /// to 0.95), moving its phase and reset by half the change, so the middle of
-/// its contraction stays put.
+/// its contraction stays put. A change under 0.001 is skipped. Returns whether
+/// any muscle changed.
 fn change_duty(c: &mut Creature, group: &[usize], f: impl Fn(f32) -> f32) -> bool {
     let mut changed = false;
     for &i in group {
@@ -438,9 +451,10 @@ pub(crate) fn reverse_leg_sequence(
 }
 
 /// Swaps the timing of the two legs of every girdle, so the side that led now
-/// follows. A horse changes its leading leg in a canter or a gallop to turn
-/// and to rest the muscles of one side, and the other way of the same gait is
-/// a different local optimum for a body that is not symmetric.
+/// follows. A last leg with no partner stays as it is. A horse changes its
+/// leading leg in a canter or a gallop to turn and to rest the muscles of one
+/// side, and the other way of the same gait is a different local optimum for a
+/// body that is not symmetric.
 pub(crate) fn change_leading_leg(
     c: &mut Creature,
     _cfg: &Config,
@@ -483,6 +497,8 @@ mod tests {
                     assert!(c.muscles == body.muscles, "{name}");
                 }
             }
+            // The tripod and the ripple need five legs, so they may fit no
+            // test body.
             assert!(
                 applied > 0 || name.contains("tripod") || name.contains("ripple"),
                 "{name}"
