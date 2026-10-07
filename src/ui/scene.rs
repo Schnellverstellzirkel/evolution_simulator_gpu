@@ -1,5 +1,8 @@
-//! Painting a creature: bones, nodes, muscles, force arrows and break marks,
-//! and the small thumbnails of the archive cards.
+//! Painting a creature with the egui painter: bones, organs, muscles, force
+//! arrows, nodes, break marks and the head's eye. `draw_creature` paints the
+//! replay in the viewport and in the race lanes. `thumbnail` paints a body in
+//! its start pose at a small size, for the cards and tiles of the tabs and the
+//! "How evolution works" window.
 
 use super::{playback::FrameMarks, widgets::mix_color};
 use crate::{
@@ -13,7 +16,9 @@ use crate::{
 };
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 
-/// A red cross over a node that fell, shook, or broke its joint.
+/// A red cross over the node at `center`. It is as wide as the node's disc of
+/// `radius` pixels, and at least 7 pixels wide. `draw_creature` draws it on
+/// the nodes of a broken joint and on the head after the trial ended early.
 fn draw_break_mark(p: &egui::Painter, center: Pos2, radius: f32) {
     let d = radius.max(3.5);
     let arm = |dx: f32, dy: f32| {
@@ -28,8 +33,9 @@ fn draw_break_mark(p: &egui::Painter, center: Pos2, radius: f32) {
     arm(1.0, 1.0);
     arm(1.0, -1.0);
 }
-/// A node's shell: slick steel blue at the lowest friction a gene allows,
-/// brass at the highest.
+/// The shell color of a node with this `friction`: slick steel blue at the
+/// lowest friction a gene allows, brass at the highest. The range is that of
+/// the default `Config`, read once. The GIF export uses this color too.
 pub(super) fn node_color(friction: f32) -> Color32 {
     static RANGE: std::sync::OnceLock<(f32, f32)> = std::sync::OnceLock::new();
     let &(low, high) = RANGE.get_or_init(|| {
@@ -42,7 +48,8 @@ pub(super) fn node_color(friction: f32) -> Color32 {
         (friction - low) / (high - low).max(1e-3),
     )
 }
-/// An arrow starting at `from` and pointing along `delta`.
+/// An arrow from `from` along `delta`. It draws nothing when `delta` is
+/// shorter than 3 pixels.
 fn draw_arrow(p: &egui::Painter, from: Pos2, delta: Vec2, color: Color32) {
     if delta.length() < 3.0 {
         return;
@@ -61,7 +68,12 @@ fn draw_arrow(p: &egui::Painter, from: Pos2, delta: Vec2, color: Color32) {
         Stroke::NONE,
     ));
 }
-/// Renders a creature with bones, nodes, muscles, organs, forces and status marks.
+/// Paints `c` with its nodes at the positions in `nodes`. A world point
+/// `(x, y)` in meters lands at `origin + (x, -y) * scale` on the screen, so
+/// `origin` is the world origin and `scale` is pixels per meter. The layers
+/// from the back are the bones, the organs, the muscles with their force
+/// arrows, the ground force arrows, the nodes with their contact and break
+/// marks, and the head's eye. `marks` holds what the current frame shows.
 pub(super) fn draw_creature(
     p: &egui::Painter,
     nodes: &[Node],
@@ -88,7 +100,8 @@ pub(super) fn draw_creature(
             );
         }
     }
-    // Organs ride on their bones; drawn with the density of a node.
+    // An organ sits on its bone and is drawn as large as a node of the same
+    // mass would be.
     for bone in c.bones.iter().filter(|b| b.organ_mass > 0.0) {
         let a = nodes[bone.a as usize].pos;
         let b = nodes[bone.b as usize].pos;
@@ -121,24 +134,25 @@ pub(super) fn draw_creature(
         };
         let a = point(bone_a, m.anchor_a);
         let b = point(bone_b, m.anchor_b);
-        // A fallen creature's muscles are limp.
+        // How far the waveform has pulled the muscle in: 0 at its longest
+        // length and 1 at its shortest. A fallen creature's muscles are limp.
         let contraction = if marks.fallen {
             0.
         } else {
             1. - ((physics::target(m, marks.time) - m.short) / (m.long - m.short).max(1e-5))
         };
-        // A tired muscle thins and goes grey.
+        // A contracting muscle bulges. A tired muscle thins and goes grey.
         let energy = marks.energy.get(mi).copied().unwrap_or(1.0).clamp(0.0, 1.0);
         let width = (scale * 0.017 * (1. + 0.45 * contraction) * (0.45 + 0.55 * energy)).max(2.);
         p.line_segment([a, b], Stroke::new(width + 3., OUTLINE));
-        // Pale flesh at rest, deep red at full contraction, grey when spent,
-        // with a wet sheen along the fibre.
+        // Pale flesh at rest, deep red at full contraction, grey when spent.
         let flesh = mix_color(
             MUSCLE_TIRED,
             mix_color(MUSCLE_REST, MUSCLE_ACTIVE, contraction),
             energy,
         );
         p.line_segment([a, b], Stroke::new(width, flesh));
+        // A pale sheen along the muscle, when it is thick enough to show one.
         let across = (b - a).normalized().rot90();
         if across.x.is_finite() && width > 3.0 {
             let lift = across * (if across.y > 0.0 { -1.0 } else { 1.0 }) * width * 0.2;
@@ -147,6 +161,9 @@ pub(super) fn draw_creature(
                 Stroke::new(width * 0.25, mix_color(flesh, Color32::WHITE, 0.35)),
             );
         }
+        // Force arrows at both ends of the muscle. Each points along the muscle
+        // toward the other end for a pull, and a negative force flips them. A
+        // force of 100 N or more gives the longest arrow.
         if marks.arrows
             && let Some(&force) = marks.muscle_force.get(mi)
         {
@@ -159,6 +176,8 @@ pub(super) fn draw_creature(
             }
         }
     }
+    // Ground pushes: an arrow under each pushed node, pointing up into it. A
+    // push of two body weights or more gives the longest arrow.
     if marks.arrows {
         let weight: f32 = nodes.iter().map(|n| n.mass).sum::<f32>() * 9.81;
         for (i, n) in nodes.iter().enumerate() {
@@ -194,7 +213,7 @@ pub(super) fn draw_creature(
             draw_break_mark(p, center, r);
         }
     }
-    // The head (node 0) looks ahead with one eye.
+    // The head (node 0) carries the fallen mark and looks ahead with one eye.
     if let Some(head) = nodes.first() {
         let center = position(head);
         let r = (head.radius * scale).max(2.);
@@ -213,7 +232,9 @@ pub(super) fn draw_creature(
         p.circle_filled(eye + Vec2::new(r * 0.08, 0.), r * 0.15, OUTLINE);
     }
 }
-/// Renders a creature as a small thumbnail centered in `rect`.
+/// Paints `c` in its start pose, centered in `rect` and scaled so the body
+/// fills 82% of the tighter side. It draws no contact rings, break marks or
+/// arrows, and every muscle is rested.
 pub(crate) fn thumbnail(p: &egui::Painter, c: &Creature, rect: Rect) {
     let nodes = physics::nodes(c);
     let minx = nodes
