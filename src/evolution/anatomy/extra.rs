@@ -585,12 +585,14 @@ pub(super) fn limb_drive(c: &Creature, limb: &[usize]) -> f32 {
         .sum()
 }
 
-/// Spring stiffness of the passive muscles `passive_ring` adds.
+/// Spring stiffness of the passive muscles that close the motor ring
+/// (`passive_ring` here, `close_ring` in `compound.rs`).
 pub(super) const PASSIVE_STIFFNESS: f32 = 5.0;
 
-/// Adds a passive muscle (random anchors, no stroke) on each pair of
-/// consecutively numbered bones that has no muscle, as `repair` would
-/// with an active one, while there is room.
+/// Adds a passive muscle (random anchors, no stroke) across each pair of
+/// consecutively numbered bones that has no muscle, the last bone with the
+/// first included, while there is room. It closes the ring that `repair`
+/// would close with active muscles.
 fn passive_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
     let n = c.bones.len();
     for a in 0..n {
@@ -611,13 +613,16 @@ fn passive_ring(c: &mut Creature, cfg: &Config, rng: &mut Rng) {
 /// Pairs of limbs of the same shape (`matching_limbs`), each limb followed by
 /// the bone above it, in both orders: (source, recipient).
 struct Partners {
+    /// The limbs of the pairs, each with the bone above it.
     limbs: Limbs,
+    /// Each pair as indices into `limbs`: (source, recipient).
     pairs: Bounded<(u8, u8), { MAX_NODES * MAX_NODES }>,
 }
 impl Partners {
     fn len(&self) -> usize {
         self.pairs.len()
     }
+    /// Pair `k` as (source limb, recipient limb).
     fn get(&self, k: usize) -> (&BoneIds, &BoneIds) {
         let (x, y) = self.pairs[k];
         (&self.limbs[x as usize], &self.limbs[y as usize])
@@ -638,6 +643,9 @@ impl IntoIterator for Partners {
             .into_iter()
     }
 }
+
+/// The pairs of same-shaped limbs of `c` (`matching_limbs`), each pair in both
+/// orders and each limb with the bone above it.
 fn partners(c: &Creature) -> Partners {
     let matching = matching_limbs(c);
     let limbs: Limbs = matching
@@ -679,8 +687,9 @@ fn counterparts(
     out
 }
 
-/// The matching muscles of a random pair of same-shaped limbs (source first),
-/// among the pairs that have any.
+/// The matching muscles (`counterparts`, source first) of a random pair of
+/// same-shaped limbs, drawn among the pairs that have any. `None` when no pair
+/// has.
 fn pick_counterparts(c: &Creature, rng: &mut Rng) -> Option<Bounded<(usize, usize), MAX_MUSCLES>> {
     let partners = partners(c);
     let counterparts_of = |k: usize| {
@@ -702,8 +711,9 @@ mod tests {
     };
     use super::*;
 
-    /// Runs `op` on 160 grown bodies . A changed body must pass `check(before, after)`; an
-    /// unchanged one must be as it was. Returns how many it changed.
+    /// Runs `op` on each of `bodies`. A changed body must stay within the
+    /// default limits and pass `check(before, after)`. An unchanged one must be
+    /// as it was. Returns how many it changed.
     fn run(op: Operator, bodies: &[Creature], check: impl Fn(&Creature, &Creature)) -> usize {
         let cfg = Config::default();
         let mut applied = 0;
@@ -724,7 +734,8 @@ mod tests {
     }
 
     /// The test bodies with their first muscle-bearing limb twinned, so every
-    /// one has a pair of same-shaped limbs with matching muscles.
+    /// one has a pair of same-shaped limbs with matching muscles. Bodies with
+    /// no such limb, or with no room for a copy, are left out.
     fn twinned() -> Vec<Creature> {
         twinned_at(0.0)
     }
@@ -891,7 +902,7 @@ mod tests {
                 .expect("the copy starts at the original's joint");
             assert_eq!(branch(before, original).len(), added);
             assert!(ring_is_closed(after));
-            // Only the copied muscles drive; the ring muscles start passive.
+            // Only the copied muscles drive. The ring muscles start passive.
             let copied = muscles_on(before, &branch(before, original), false).len();
             let active = after.muscles[before.muscles.len()..]
                 .iter()
