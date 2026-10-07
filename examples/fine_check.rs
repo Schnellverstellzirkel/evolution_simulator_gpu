@@ -1,6 +1,14 @@
-//! How many of an archive's best elites keep their distance when the trial runs at
-//! the fine fidelity (4 substeps) of the record confirmations.
-//! Usage: fine_check <checkpoint.evo> <archive: g or island number> [count]
+//! Replays an archive's best elites at the standard trial and at the fine trial,
+//! and counts how many keep their distance at the fine one. The fine trial is the
+//! game's confirmation trial (`scheduler::confirm_config`): the same world at
+//! twice the step rate, 120 steps per second (`physics::Fidelity::fine()`). The
+//! tool also lists elites whose stored score a standard replay does not
+//! reproduce, and elites that collapse at the fine trial.
+//!
+//! Usage: `fine_check <checkpoint.evo> <archive: g or island number> [count]`
+//! Here `g` is the global archive, a number is an index into
+//! `Experiment::islands` (the islands, then their nurseries), and `count`
+//! defaults to 300.
 mod common;
 use evolution_simulator::{config::Config, storage};
 
@@ -13,11 +21,13 @@ fn main() -> anyhow::Result<()> {
         &e.islands[args[2].parse::<usize>()?]
     };
     let count: usize = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(300);
+    // The `count` best elites, best first.
     let mut elites: Vec<_> = archive.entries.iter().collect();
     elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
     elites.truncate(count);
     let mut engine = common::open()?;
     let creatures: Vec<_> = elites.iter().map(|x| x.creature.unpack()).collect();
+    // Both trials run in full, with no early screen and no rungs.
     let standard = Config {
         screen: None,
         rungs: None,
@@ -28,8 +38,15 @@ fn main() -> anyhow::Result<()> {
         rungs: None,
         ..evolution_simulator::scheduler::confirm_config(&e.config)
     };
+    // `a` and `b` hold the standard and the fine results, in the order of
+    // `elites`.
     let a = common::score_creatures(&mut engine, &creatures, &standard)?;
     let b = common::score_creatures(&mut engine, &creatures, &fine)?;
+    // `kept` and `lost` count the elites whose fine distance is at least 80% of
+    // their standard distance, and the others. `held` counts the elites whose
+    // fine distance is at least 80% of the stored score. `stale` counts the
+    // elites whose standard replay is off the stored score by more than 5% of
+    // it or 0.05 m, whichever is larger. The first six are listed.
     let (mut kept, mut lost, mut stale, mut held) = (0, 0, 0, 0);
     for (i, x) in elites.iter().enumerate() {
         let (s, f) = (a[i].fitness, b[i].fitness);
@@ -57,6 +74,8 @@ fn main() -> anyhow::Result<()> {
             held += 1
         }
     }
+    // Fine distance over standard distance per elite, with the standard
+    // distance floored at 0.01 m.
     let mut ratio: Vec<f32> = a
         .iter()
         .zip(&b)
@@ -74,6 +93,8 @@ fn main() -> anyhow::Result<()> {
         ratio.iter().filter(|&&r| r > 1.0).count(),
         ratio.len()
     );
+    // The elites that lose more than 70% of their distance at the fine trial.
+    // The first eight are listed.
     let mut shown = 0;
     for (i, x) in elites.iter().enumerate() {
         if b[i].fitness < 0.3 * a[i].fitness && shown < 8 {
