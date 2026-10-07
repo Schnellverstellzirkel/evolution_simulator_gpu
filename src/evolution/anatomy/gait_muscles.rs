@@ -1,16 +1,14 @@
-//! Gait operators: muscle layouts that make strokes efficient: antagonists, two-joint muscles, springs.
+//! Gait operators that lay out the muscles of a body for efficient strokes:
+//! antagonist pairs, two-joint muscles, stance and swing roles and elastic
+//! tendons.
 //!
-//! The operators of this file share one pick slot and are compound: each is a
-//! whole, coherent change to the body, and its child gets no parameter noise.
-//!
-//! The sources are Sims (1994, muscles as pulling pairs), Alexander (1984 and
-//! 1988, two-joint muscles, tendons that store the energy of a stride, and
-//! light distal limbs), Full and Koditschek (1999, a stiff stance leg and a
-//! light swing leg as one template) and Cheney et al. (2013, repeated
-//! parts). None of the operators adds a node. A muscle waveform rises from
-//! long to short over `duty` of the cycle, starting at `phase`, and falls over
-//! the rest, so a muscle with a long duty pulls slowly and steadily and one
-//! with a short duty pulls quickly.
+//! The operators of this file share one pick slot (`GAIT_FILES` in `mod.rs`)
+//! and are compound: each is a whole, coherent change to the body, and its
+//! child gets no parameter noise. They work on the legs that `leaf_limbs`
+//! finds, none of them adds a node, and each names its source. A muscle's
+//! rhythm rises from long to short over `duty` of the cycle, starting at
+//! `phase`, and falls over the rest, so a muscle with a long duty pulls slowly
+//! and steadily and one with a short duty pulls quickly.
 use super::compound::strongest;
 use super::extra::drive;
 use super::limbs::pick;
@@ -40,15 +38,17 @@ pub(super) const OPS: &[(&str, Operator)] = &[
     ("second_hip_anchor", second_hip_anchor),
 ];
 
-/// Least torque (lever times pull, in m^2) that counts as turning a bone.
+/// Least `torque` that counts as turning a bone: the lever arm times the
+/// muscle's span, in m^2.
 const MIN_TORQUE: f32 = 1.0e-3;
 
-/// Whether a muscle shortens at all.
+/// Whether a muscle shortens at all: `long` is more than 0.1 mm above `short`.
 fn active(m: &Muscle) -> bool {
     m.long > m.short + 1.0e-4
 }
 
-/// Every leg with the bone above its first bone.
+/// Every leg (`leaf_limbs`) with the bone above its first bone, the one its hip
+/// hangs from. A leg with no such bone is left out.
 fn legs_with_hip(c: &Creature) -> Vec<(BoneIds, usize)> {
     let parents = parent_bones(c);
     leaf_limbs(c)
@@ -83,7 +83,8 @@ fn joined(c: &Creature, x: usize, z: usize) -> bool {
     })
 }
 
-/// The muscle with `bone` as its `bone_a`, if it has an end on `bone`.
+/// `m` with `bone` as its `bone_a`, turned round if `bone` is its `bone_b`, or
+/// `None` if `bone` is neither end.
 fn facing(m: &Muscle, bone: usize) -> Option<Muscle> {
     if m.bone_a as usize == bone {
         Some(*m)
@@ -99,10 +100,13 @@ fn mean_phase(x: f32, y: f32) -> f32 {
     (x + 0.5 * turn(x, y)).rem_euclid(1.0)
 }
 
-/// A closing muscle of a leg joint, a bone `r` outside the joint's limb and
-/// an anchor on it from which a muscle would open the joint: its torque on
-/// the joint runs the other way. The closer is turned so its `bone_a` is the
-/// limb's bone.
+/// Finds a leg joint that a muscle closes and a place for a muscle that would
+/// open it. The closer is an active muscle of the leg between a leg bone `k`
+/// and the bone above `k`, turned so its `bone_a` is `k`. The place is a bone
+/// `r` outside the branch that starts at `k`, with no active muscle to `k` yet,
+/// and an anchor on `r` (0, 0.5 or 1) from which a muscle would turn `k` the
+/// other way. Returns one combination of closer, `r` and anchor picked at
+/// random, or `None`.
 fn find_opener(c: &Creature, rng: &mut Rng) -> Option<(Muscle, usize, f32)> {
     let legs = legs_with_hip(c);
     let parents = parent_bones(c);
@@ -163,7 +167,8 @@ fn opener_muscle(c: &Creature, closer: &Muscle, r: usize, anchor: f32, rng: &mut
 }
 
 /// Gives `m` the reciprocal rhythm of `closer`: it rises over the closer's
-/// rest, starts when the closer's rise ends, and has 0.7 of its strength.
+/// rest, starts when the closer's rise ends, and has 0.7 of its strength
+/// (`stiffness`).
 fn make_reciprocal(m: &mut Muscle, closer: &Muscle) {
     m.duty = (1.0 - closer.duty).clamp(0.15, 0.85);
     m.phase = (closer.phase + closer.duty).rem_euclid(1.0);
@@ -171,13 +176,14 @@ fn make_reciprocal(m: &mut Muscle, closer: &Muscle) {
     m.stiffness = (closer.stiffness * 0.7).clamp(1.0, 120.0);
 }
 
-/// Adds the extensor of a leg joint that has a flexor: a muscle from the
-/// leg's bone to a bone on the other side of the joint, running in the
-/// reciprocal rhythm. It rises while the flexor falls (its duty is the
-/// flexor's rest, it starts when the flexor's rise ends) and has 0.7 of the
-/// flexor's strength. A joint that a muscle can both close and open keeps a
-/// leg moving without a stop to fall back on, as the flexor and extensor
-/// pairs of mammal limbs do (Sims 1994, muscles in opposed pairs).
+/// Adds the extensor of a leg joint that has a flexor. It runs from the leg's
+/// bone to another bone (`find_opener`) and turns the leg's bone the other way
+/// from the flexor. Its rhythm is reciprocal: it rises while the flexor falls,
+/// so its duty is the flexor's rest, and it starts when the flexor's rise ends.
+/// It has 0.7 of the flexor's strength. Muscles only pull, so a joint with a
+/// flexor alone opens only when something else moves it. A pair drives the
+/// joint both ways, as the flexor and extensor pairs of mammal limbs do (Sims
+/// 1994, muscles in opposed pairs).
 fn reciprocal_extensor(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -191,13 +197,14 @@ fn reciprocal_extensor(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Cont
     true
 }
 
-/// Adds a muscle across two joints of a leg, from the bone above the thigh to
-/// the shank (or from the thigh to the next bone down, on a longer leg), like
-/// the rectus femoris and the gastrocnemius. One contraction then moves hip
-/// and knee together. Its phase is halfway between the phases of the muscles
-/// at the two joints, it has half the strength of the weaker of them, and it
-/// carries an elastic tendon of 0.5, as these long muscles of mammals end in
-/// long tendons (Alexander 1988).
+/// Adds a muscle across two joints of a leg that has an active muscle at each
+/// joint and none across both. It runs from the bone above the thigh to the
+/// shank (or from the thigh to the next bone down, on a longer leg), like the
+/// rectus femoris and the gastrocnemius. One contraction then moves hip and
+/// knee together. It takes its period and duty from the stronger of the two
+/// joint muscles. Its phase is halfway between their phases, it has half the
+/// strength of the weaker of them, and it carries an elastic tendon of at least
+/// 0.5, as these long muscles of mammals end in long tendons (Alexander 1988).
 fn hip_knee_strap(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -238,20 +245,21 @@ fn hip_knee_strap(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) 
     true
 }
 
-/// A leg's strongest muscle across its hip (the joint to the bone above).
+/// A leg's strongest active muscle across its hip (the joint to the bone
+/// above), or `None`.
 fn hinge_driver(c: &Creature, limb: &[usize], above: usize) -> Option<usize> {
     strongest(c, &active_between(c, &[limb[0], above]))
 }
 
 /// Splits a leg's hip work into a stance muscle and a swing muscle. The
-/// existing hip muscle becomes the stance muscle: strong (1.2 times) and slow
-/// (a rise over 0.6 to 0.75 of the cycle, which holds the foot on the ground
-/// and pushes steadily). A new light muscle (0.4 of the strength, a rise over
-/// a quarter of the cycle, 60% of the stroke, attached 0.15 nearer the joint)
-/// starts when the stance rise ends and brings the leg back quickly. This is
-/// the stiff stance leg and light swing leg of Full and Koditschek's template
-/// of running animals, and the unequal times of stance and swing in
-/// Alexander's duty factor.
+/// existing hip muscle becomes the stance muscle. It is strong (1.2 times) and
+/// slow: its rise takes 0.6 to 0.75 of the cycle, which holds the foot on the
+/// ground and pushes steadily. A new light muscle brings the leg back quickly.
+/// It has 0.4 of the strength, a rise over a quarter of the cycle, 60% of the
+/// stroke, no tendon and no touchdown sensor. It is attached 0.15 nearer the
+/// joint and starts when the stance rise ends. This is the stiff stance leg
+/// and light swing leg of Full and Koditschek's template of running animals,
+/// and the unequal times of stance and swing in Alexander's duty factor.
 fn stance_swing_split(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -303,12 +311,13 @@ fn stance_swing_split(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Conte
     true
 }
 
-/// Gives the muscles of one leg unequal jobs without adding any: the
-/// strongest becomes the stance muscle (strength 1.25 times, a rise over 0.55
-/// to 0.8 of the cycle), the others become swing muscles (0.7 times, a rise
-/// over at most 0.3 of the cycle), and the swing muscles move together so the
-/// first starts when the stance rise ends. The leg pushes long and steadily
-/// and recovers quickly (Alexander's duty factor; Full and Koditschek 1999).
+/// Gives the active muscles of one leg unequal jobs without adding any. It
+/// needs a leg with two or more of them. The strongest becomes the stance
+/// muscle: strength 1.25 times, a rise over 0.55 to 0.8 of the cycle. The
+/// others become swing muscles: 0.7 times, a rise over at most 0.3 of the
+/// cycle. The swing muscles move together so the first starts when the stance
+/// rise ends. The leg pushes long and steadily and recovers quickly
+/// (Alexander's duty factor; Full and Koditschek 1999).
 fn stance_swing_roles(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs: Vec<(BoneIds, usize)> = legs_with_hip(c)
         .into_iter()
@@ -343,8 +352,10 @@ fn stance_swing_roles(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Cont
         .any(|(&i, old)| c.muscles[i] != *old)
 }
 
-/// The signed lever arm of a muscle about the joint node it works at: the
-/// arm of the bone end that starts at that node, against the line of pull.
+/// The signed lever arm of a muscle about the joint `node`: the distance from
+/// `node` to the line of pull, which runs from the muscle's end on the bone
+/// that starts at `node` to its other end. The sign tells which way the pull
+/// turns that bone. A span under 0.02 m counts as 0.02 m.
 fn lever(c: &Creature, m: &Muscle, node: u32) -> f32 {
     let n = c.nodes[node as usize];
     let (own, own_anchor, other, other_anchor) = if c.bones[m.bone_a as usize].a == node {
@@ -358,12 +369,13 @@ fn lever(c: &Creature, m: &Muscle, node: u32) -> f32 {
     ((p[0] - n.x) * (q[1] - p[1]) - (p[1] - n.y) * (q[0] - p[0])) / length
 }
 
-/// Moves the attachments of a leg's muscle with a poor lever arm to the pair
-/// of points along its two bones (0.2 to 0.9 of the way) that gives the
-/// longest arm about the joint, keeping the direction of its torque and the
-/// shape of its stroke, when that is at least 1.25 times the arm it had. A
-/// muscle that pulls along the bone it moves only strains the joint; one at a
-/// good arm turns it (Alexander's work on the moment arms of limb muscles).
+/// Moves the attachments of one muscle of a leg to the pair of points along its
+/// two bones (0.2 to 0.9 of the way, in steps of 0.1) that gives the longest
+/// lever arm about the joint. Only a muscle that can reach more than 1.25 times
+/// its current arm is a candidate. The new pair keeps the direction of the
+/// torque and has a span of at least 0.05 m. The stroke keeps its shape. A
+/// muscle that pulls along the bone it moves only strains the joint, and one at
+/// a good arm turns it (Alexander's work on the moment arms of limb muscles).
 fn improve_lever_arm(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let mut options: Vec<(usize, f32, f32)> = Vec::new();
     for (limb, above) in legs_with_hip(c) {
@@ -409,13 +421,15 @@ fn improve_lever_arm(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Conte
     true
 }
 
-/// Copies a muscle of one leg to the same joint of every other leg that
-/// lacks one there: the same pair of levels (the bone above the hip, the
-/// thigh, the shank), the same anchors, and the timing the source has against
-/// its own leg's strongest muscle, added to each leg's own timing (to the
-/// source's phase plus half a cycle for a leg with no muscles). The strokes
-/// are refitted to each leg. Regular bodies with repeated parts move further
-/// (Cheney et al. 2013, Lipson and Pollack 2000).
+/// Copies a muscle of one leg to every other leg that has no active muscle
+/// between the same two levels. A leg's levels are the bone above its hip, then
+/// its bones in order (the thigh, the shank). A leg too short for the pair is
+/// skipped. The copy has the same anchors and the timing the source has against
+/// its own leg's strongest muscle, added to the copy leg's own timing (to the
+/// source's phase plus half a cycle for a leg with no muscles). The strokes are
+/// refitted to each leg, and the copies stop at `max_muscles`. Regular bodies
+/// with repeated parts move further (Cheney et al. 2013, Lipson and Pollack
+/// 2000).
 fn muscle_to_all_legs(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs = legs_with_hip(c);
     // The bones of a leg by level: the bone above, then the leg's bones.
@@ -477,11 +491,11 @@ fn muscle_to_all_legs(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Conte
 }
 
 /// Adds a muscle that opposes a leg's flexor and contracts with it, so the
-/// joint stiffens during the flexor's rise instead of folding under the
-/// body's weight: it has the flexor's phase and duty, half its strength, and
-/// almost no stroke (0.93 to 1.06 of its span), so it holds more than it
-/// moves. Animals stiffen a limb in stance by co-contracting antagonists
-/// (the stiff spring-leg of Full and Koditschek 1999).
+/// joint stiffens during the flexor's rise instead of folding under the body's
+/// weight. It has the flexor's phase and duty, half its strength, and almost no
+/// stroke (0.93 to 1.06 of its span), so it holds more than it moves. Animals
+/// stiffen a limb in stance by co-contracting antagonists (the stiff spring-leg
+/// of Full and Koditschek 1999).
 fn stance_cocontraction(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -501,11 +515,12 @@ fn stance_cocontraction(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Con
     true
 }
 
-/// Puts an elastic tendon (0.4 to 0.8) on the muscles at the foot of a leg of
-/// two bones or more, and cuts their longest length by 7% so ground load
-/// stretches the tendon past it. The tendon stores the energy of a landing and
-/// gives it back at push-off, which costs the muscle nothing (Alexander 1988,
-/// the spring in the leg tendons of running animals).
+/// Puts an elastic tendon (0.4 to 0.8) on the active muscles that have an end
+/// on the foot bone of a leg of two bones or more and a weaker tendon. It cuts
+/// their longest length by 7% so ground load stretches the tendon past it. The
+/// tendon stores the energy of a landing and gives it back at push-off, which
+/// costs the muscle nothing (Alexander 1988, the spring in the leg tendons of
+/// running animals).
 fn elastic_shank_tendon(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let legs: Vec<(BoneIds, usize)> = legs_with_hip(c)
         .into_iter()
@@ -529,8 +544,9 @@ fn elastic_shank_tendon(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Co
     changed
 }
 
-/// A pair of active muscles of a leg that attach to one bone and pull its
-/// joint in opposite directions, the stronger first, that `wanted` accepts.
+/// Picks at random a pair of active muscles of a leg that have an end on one
+/// bone and turn it in opposite directions, the stronger first, that `wanted`
+/// accepts. `wanted` gets the stronger muscle and then the weaker one.
 fn antagonist_pair(
     c: &Creature,
     rng: &mut Rng,
@@ -567,11 +583,12 @@ fn antagonist_pair(
 }
 
 /// Puts the two muscles of an antagonist pair on a leg into one reciprocal
-/// rhythm: the weaker takes the stronger's period, starts when the stronger's
-/// rise ends and rises over the rest of the cycle. Pairs that already do are
-/// skipped. A joint driven by two muscles that fight for part of the cycle
-/// wastes energy, and a pair that alternates is what a central pattern
-/// generator drives (Ijspeert 2008, half-centre oscillators).
+/// rhythm. The weaker takes the stronger's period, starts when the stronger's
+/// rise ends and rises over the rest of the cycle. A pair that already does (to
+/// within 0.05 of a cycle, with the same period) is skipped. A joint driven by
+/// two muscles that fight for part of the cycle wastes energy, and a pair that
+/// alternates is what a central pattern generator drives (Ijspeert 2008,
+/// half-centre oscillators).
 fn lock_antagonist_pairs(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let off = |hi: &Muscle, lo: &Muscle| {
         turn(lo.phase, hi.phase + hi.duty).abs() > 0.05
@@ -590,12 +607,12 @@ fn lock_antagonist_pairs(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &C
     true
 }
 
-/// Adds a push-off muscle across the last joint of a leg of two bones or
-/// more when nothing drives that joint: from the foot bone to the bone
-/// before it, a quarter-cycle rise starting at 0.8 of the hip muscle's rise,
-/// so it fires at the end of stance. It is 1.1 times as strong as the hip
-/// muscle and has a tendon of 0.6, like the plantar flexors that deliver
-/// most of the push in a stride (Alexander 1988).
+/// Adds a push-off muscle across the last joint of a leg of two bones or more
+/// when nothing drives that joint. It runs from the foot bone to the bone
+/// before it and has a quarter-cycle rise starting at 0.8 of the hip muscle's
+/// rise, so it fires at the end of stance. It is 1.1 times as strong as the hip
+/// muscle and has a tendon of at least 0.6, like the plantar flexors that
+/// deliver most of the push in a stride (Alexander 1988).
 fn push_off_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -626,11 +643,13 @@ fn push_off_muscle(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context)
     true
 }
 
-/// Turns the least useful muscle of the body (the least drive of three
-/// picked off the motor ring) into the extensor of a leg joint that has a
-/// flexor, in the flexor's reciprocal rhythm. The body gains an antagonist
-/// and loses a muscle that did little, so it grows no heavier in muscles,
-/// which is the move for bodies at their muscle limit.
+/// Turns the least useful muscle of the body into the extensor of a leg joint
+/// that has a flexor, in the flexor's reciprocal rhythm. The least useful is
+/// the one with the least drive of three picked at random from the muscles off
+/// the motor ring (`ring`). It must have less drive than the flexor and must
+/// not be the flexor itself. The body gains an antagonist and loses a muscle
+/// that did little, so it grows no heavier in muscles, which is the move for
+/// bodies at their muscle limit.
 fn repurpose_idle_muscle(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let free: MuscleIds = (0..c.muscles.len())
         .filter(|&i| !ring(c, &c.muscles[i]))
@@ -658,12 +677,14 @@ fn repurpose_idle_muscle(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &C
     true
 }
 
-/// Makes an antagonist pair of a leg into a catapult: the stronger muscle
-/// fires quickly (a rise over 0.2 of the cycle) with an elastic tendon of at
-/// least 0.6, and the weaker loads it slowly (a rise over 0.8, 1.15 times as
-/// strong), ending just as the stronger starts. The slow muscle stretches the
-/// tendon and the quick release returns the energy, the way a leg stores
-/// energy for a jump (Alexander's catapult mechanisms; Bobbert 2001).
+/// Makes an antagonist pair of a leg into a catapult. The stronger muscle fires
+/// quickly (a rise over 0.2 of the cycle) with an elastic tendon of at least
+/// 0.6. The weaker loads it slowly (a rise over 0.8, 1.15 times as strong) and
+/// ends just as the stronger starts. A pair is skipped if its stronger muscle
+/// has a tendon of 0.6 already and both duties are within 0.05 of these. The
+/// slow muscle stretches the tendon and the quick release returns the energy,
+/// the way a leg stores energy for a jump (Alexander's catapult mechanisms;
+/// Bobbert 2001).
 fn catapult_release(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let off = |hi: &Muscle, lo: &Muscle| {
         hi.tendon < 0.6 || (hi.duty - 0.2).abs() > 0.05 || (lo.duty - 0.8).abs() > 0.05
@@ -684,13 +705,13 @@ fn catapult_release(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Contex
     true
 }
 
-/// Adds a second muscle from a leg's first bone to another bone at the hip
-/// (a sibling at the same node, or the bone above the one the leg hangs
-/// from), pulling the same way as the hip muscle, and shares the work: each
-/// of the two has 0.65 of the old strength and the timing of the old one. The
-/// force of a leg spreads over two trunk bones the way the gluteal muscles
-/// fan out over the pelvis, so one trunk bone does not carry the whole
-/// reaction.
+/// Adds a second muscle from a leg's first bone to a sibling bone that starts
+/// at the same node (the hip), pulling the same way as the hip muscle, and
+/// shares the work. Each of the two has 0.65 of the old strength and the timing
+/// of the old one. The bone above the one the leg hangs from is also offered as
+/// a partner, but it has no end at the hip node, so picking it adds no muscle.
+/// The force of a leg spreads over two bones the way the gluteal muscles fan
+/// out over the pelvis, so one bone does not carry the whole reaction.
 fn second_hip_anchor(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     if !room(c, cfg, 0, 1) {
         return false;
@@ -719,6 +740,9 @@ fn second_hip_anchor(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Contex
         return false;
     };
     let node = c.bones[root].a;
+    // A sibling starts at the hip node, so its anchor goes near its start. The
+    // bone above `above` has no end at the node, so the operator returns false
+    // for it. The second test never holds, because only `above` ends there.
     let near = if c.bones[q].a == node {
         rng.range(0.1, 0.4)
     } else if c.bones[q].b == node {
