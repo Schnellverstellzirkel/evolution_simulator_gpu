@@ -25,7 +25,7 @@ pub(crate) fn split_crowded_joint(
     }
     let node = crowded[rng.index(crowded.len())];
     // At least one child branch moves and at least one stays.
-    let mut kids = children[node];
+    let mut kids = BoneIds::from_slice(&children[node]);
     for i in 0..kids.len() {
         let j = i + rng.index(kids.len() - i);
         kids.swap(i, j);

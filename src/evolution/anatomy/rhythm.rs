@@ -232,7 +232,7 @@ pub(crate) fn limb_phase_pattern(
 ) -> bool {
     let limbs = if rng.unit() < 0.5 {
         let children = child_bones(c);
-        let junctions: Bounded<&BoneIds, MAX_NODES> =
+        let junctions: Bounded<&[usize], MAX_NODES> =
             children.iter().filter(|list| list.len() > 1).collect();
         if junctions.is_empty() {
             return false;

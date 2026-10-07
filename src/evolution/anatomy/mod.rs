@@ -56,8 +56,29 @@ mod rhythm;
 pub(super) type BoneIds = Bounded<usize, MAX_NODES>;
 /// Indices of muscles of one body.
 pub(super) type MuscleIds = Bounded<usize, MAX_MUSCLES>;
-/// For each node, the bones it is the parent of (`child_bones`).
-pub(super) type Children = [BoneIds; MAX_NODES];
+/// For each node, the bones it is the parent of, in bone order
+/// (`child_bones`): `children[node]` is a slice. Kept as one list with an
+/// offset per node (about 300 bytes): an array of a `BoneIds` per node is
+/// 8.4 KB to build and to move, and operators build one per call.
+pub(super) struct Children {
+    /// Node `n`'s bones are `bones[start[n]..start[n + 1]]`.
+    start: [u8; MAX_NODES + 1],
+    bones: [usize; MAX_NODES],
+}
+
+impl std::ops::Index<usize> for Children {
+    type Output = [usize];
+    fn index(&self, node: usize) -> &[usize] {
+        &self.bones[self.start[node] as usize..self.start[node + 1] as usize]
+    }
+}
+
+impl Children {
+    /// The bones of every node, the head first.
+    pub(super) fn iter(&self) -> impl Iterator<Item = &[usize]> {
+        (0..MAX_NODES).map(|node| &self[node])
+    }
+}
 /// Lists of bones, one per limb.
 pub(super) type Limbs = Bounded<BoneIds, MAX_NODES>;
 
@@ -389,13 +410,25 @@ pub(super) fn parent_bones(c: &Creature) -> Bounded<Option<usize>, MAX_NODES> {
 
 /// For each node, the bones it is the parent of.
 pub(super) fn child_bones(c: &Creature) -> Children {
-    let mut children: Children = std::array::from_fn(|_| BoneIds::new());
+    let nodes = c.nodes.len();
+    // Count each node's bones, then lay the lists out one after another.
+    let mut start = [0u8; MAX_NODES + 1];
+    for bone in c.bones.iter().filter(|bone| (bone.a as usize) < nodes) {
+        start[bone.a as usize + 1] += 1;
+    }
+    for node in 0..MAX_NODES {
+        start[node + 1] += start[node];
+    }
+    let mut next = start;
+    let mut bones = [0; MAX_NODES];
     for (index, bone) in c.bones.iter().enumerate() {
-        if let Some(list) = children[..c.nodes.len()].get_mut(bone.a as usize) {
-            list.push(index);
+        let node = bone.a as usize;
+        if node < nodes {
+            bones[next[node] as usize] = index;
+            next[node] += 1;
         }
     }
-    children
+    Children { start, bones }
 }
 
 /// Whether `bone` is the neck (it touches the head).
@@ -416,13 +449,9 @@ pub(super) fn branch_in(c: &Creature, children: &Children, bone: usize) -> BoneI
     let mut next = 0;
     while next < out.len() {
         let node = c.bones[out[next]].b as usize;
-        out.extend(
-            children[..c.nodes.len()]
-                .get(node)
-                .into_iter()
-                .flatten()
-                .copied(),
-        );
+        if node < c.nodes.len() {
+            out.extend(children[node].iter().copied());
+        }
         next += 1;
     }
     out
