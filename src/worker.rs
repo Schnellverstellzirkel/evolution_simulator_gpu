@@ -1,3 +1,10 @@
+//! The worker thread. It owns the game and the evaluation engines, reads
+//! `Command`s from the UI, runs the search and publishes a `Snapshot` for the
+//! UI to draw. This file holds those two messages, the summaries a snapshot
+//! carries and the state of the worker's loop. The submodules hold the parts
+//! of the loop: commands, evolution steps, loading and saving, autosave,
+//! snapshots, the benchmark and the stage log.
+
 use crate::{
     config::Config,
     evolution::Creature,
@@ -26,24 +33,43 @@ use autosave::Autosave;
 use benchmark::{Bench, Benchmark};
 use files::Loading;
 use stage_log::{RingMeter, StageLog};
+/// A request from the UI to the worker thread, sent with `Worker::send`. While
+/// a save loads, the worker holds every command back until the load is done,
+/// except `New`, `Load`, `Ping` and `Shutdown`.
 pub enum Command {
+    /// Start a new game with these settings. It replaces the current game and
+    /// stops the run.
     New(Config),
-    /// Evolve; a run that is not `continuous`, or is `guided`, stops after
+    /// Evolve. A run that is not `continuous`, or is `guided`, stops after
     /// one generation.
     Run {
+        /// Keep evolving generation after generation.
         continuous: bool,
+        /// Stop after one generation, whatever `continuous` says.
         guided: bool,
     },
+    /// Stop evolving. Work already on the engines finishes and waits in the
+    /// ring.
     Pause,
+    /// Apply these settings now. A change of the world empties the global
+    /// archive and the main islands. The elites of the main islands are tested
+    /// again in the new world.
     Configure(Config),
-    /// Wipe out half of every archive's elites (kept as fossils for undo).
+    /// Wipe out about half of every archive's elites at random, but spare the
+    /// fastest elite of each of the best body plans. The lost elites are kept
+    /// as fossils for undo.
     Meteor,
-    /// Wipe out the weakest island (kept as fossils for undo).
+    /// Wipe out the island whose best creature is slowest. Its elites are kept
+    /// as fossils for undo.
     Extinction,
-    /// Return the fossils of earlier catastrophes to their archives.
+    /// Return the fossils of earlier meteors and extinctions to their
+    /// archives, where their cells are empty or hold slower elites.
     UndoMeteor,
+    /// Save the game to this file.
     Save(PathBuf),
+    /// Open the save in this file in place of the current game.
     Load(PathBuf),
+    /// Write the history to this file as CSV.
     Export(PathBuf),
     /// Send the whole archive, ranked by distance, once (`Snapshot::cards`).
     Cards,
@@ -58,11 +84,14 @@ pub enum Command {
     /// Benchmark probe: re-applies the current settings like an environment
     /// button, to measure how long such a change waits.
     ConfigureProbe(Instant),
+    /// End the worker thread. Dropping a `Worker` sends it.
     Shutdown,
 }
 /// A key for a creature's body plan: its counts of nodes, bones and muscles
 /// and which parts connect to which. Lengths, masses and rhythms stay out,
 /// so a small mutation keeps the plan. The sums do not depend on part order.
+/// The UI names species from this key. The archives use another one,
+/// `qd::Topology::plan_key`.
 pub fn body_plan(creature: &Creature) -> u64 {
     let (nodes, bones, muscles) = (
         creature.nodes.len() as u64,
@@ -99,20 +128,35 @@ pub struct CardList {
     pub generation: u32,
     /// The world the scores were measured in.
     pub config: Config,
+    /// The elites, best first.
     pub cards: Arc<Vec<Card>>,
 }
 /// One ranked elite from the archive, with its metadata.
 #[derive(Clone)]
 pub struct Card {
+    /// Where the elite sat in the archive's entries when the list was made.
     pub index: usize,
+    /// Its place in the ranking by distance, 0 for the best.
     pub rank: usize,
+    /// Its distance.
     pub score: f32,
+    /// Its parent's distance, which the card shows when the creature has no
+    /// score of its own. The archive list leaves it NaN.
     pub parent_score: f32,
+    /// Marks a survivor of selection, whose score the card draws in the accent
+    /// color. The archive list sets it to false.
     pub survivor: bool,
+    /// Its behavior descriptor, which says how it moves. A card without one
+    /// shows the creature's id in place of its rank.
     pub descriptor: Option<Descriptor>,
+    /// The emitter that bred it.
     pub emitter: Option<Emitter>,
+    /// How many times the search chose it as a parent.
     pub visits: u64,
+    /// It sits in the archive's morphology reserve, which the card marks as a
+    /// new body.
     pub innovation_reserve: bool,
+    /// The creature itself.
     pub creature: Creature,
     /// The score is the confirmation trial's: replay at fine fidelity.
     pub fine: bool,
@@ -128,9 +172,12 @@ impl Card {
 pub struct Event {
     /// The generation running when it happened.
     pub generation: u32,
+    /// What sort of event it is.
     pub kind: EventKind,
+    /// What the feed says about it.
     pub text: String,
 }
+/// What sort of thing an `Event` records.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum EventKind {
     /// A new experiment began.
@@ -145,12 +192,15 @@ pub enum EventKind {
     Catastrophe,
     /// An undo brought creatures back.
     Undo,
-    /// The experiment was saved.
+    /// The experiment was saved, by hand or by autosave. The report of a
+    /// developer's generation dump (`EVOLUTION_DUMP_GENERATION`) has this kind
+    /// too.
     Saved,
-    /// The GPU failed and was opened again, or could not be.
+    /// The GPU failed and was opened again, or could not be. A developer pause
+    /// that closes or reopens the engines is logged with this kind too.
     Gpu,
 }
-/// Events kept per experiment; older ones drop off.
+/// Events kept per experiment. Older ones drop off.
 const EVENT_LOG: usize = 200;
 fn log_event(events: &mut Arc<Vec<Event>>, generation: u32, kind: EventKind, text: String) {
     let log = Arc::make_mut(events);
@@ -164,6 +214,8 @@ fn log_event(events: &mut Arc<Vec<Event>>, generation: u32, kind: EventKind, tex
     });
 }
 /// The effects that differ between two worlds, as "Ground Flat to Rough, 8 cm".
+/// Several effects are joined with commas. The autochange level is left out,
+/// and the result is `None` when no effect differs.
 pub fn world_change_text(before: &Config, after: &Config) -> Option<String> {
     let parts: Vec<String> = crate::environment::EFFECTS
         .iter()
@@ -181,6 +233,9 @@ pub fn world_change_text(before: &Config, after: &Config) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 /// Logs a world change between two configs, if the physics changed.
+/// `retesting` is how many kept creatures run again in the new world. The event
+/// is an autochange event when autochange is on and its step moved, and a world
+/// event otherwise.
 fn log_world_change(
     events: &mut Arc<Vec<Event>>,
     before: &Config,
@@ -218,24 +273,32 @@ fn log_history_world_changes(events: &mut Arc<Vec<Event>>, history: &[Stats]) {
 }
 /// One occupied behavior cell of the global archive, for the map. The table
 /// is small (one row per elite) and carries no body, so it can follow every
-/// archive change; a click asks for the body with `Command::Select`.
+/// archive change. A click asks for the body with `Command::Select`.
 #[derive(Clone, Copy)]
 pub struct MapCell {
-    /// Behavior bins: ground contact, cadence, bounce, height, feet.
+    /// The six bins of the cell, in this order: ground contact, cadence, body
+    /// shape, height, feet and body size.
     pub niche: [u8; 6],
+    /// The elite's distance.
     pub score: f32,
     /// Place in the archive ranking by distance.
     pub rank: usize,
+    /// The elite's creature id, which `Command::Select` takes.
     pub id: u64,
 }
 /// One ancestor of a selected creature.
 #[derive(Clone)]
 pub struct LineageStep {
+    /// The generation in which it entered an archive.
     pub generation: u32,
+    /// Its distance.
     pub fitness: f32,
-    /// Fitness gained over this ancestor's own parent.
+    /// Fitness gained over this ancestor's own parent. It is 0 for the oldest
+    /// ancestor in the chain.
     pub gain: f32,
+    /// How it differs from its parent, in words.
     pub change: String,
+    /// The ancestor itself.
     pub creature: Creature,
 }
 /// One island archive at a glance, for the Islands view and the "How
@@ -269,6 +332,8 @@ pub struct IslandSummary {
 /// How many top elites an island summary carries.
 pub const ISLAND_TOP: usize = 3;
 impl IslandSummary {
+    /// Summarizes `island` and its two nurseries. `graduation` is what the
+    /// nurseries graduated this session, the two together.
     pub fn of(
         island: &qd::QdArchive,
         nurseries: [&qd::QdArchive; 2],
@@ -321,16 +386,20 @@ impl IslandSummary {
     }
 }
 /// The last migration to the hub this session: the generation it happened
-/// at and, per island, the elites it sent and how many the hub kept (zero for
-/// the hub itself).
+/// at and, per island, the elites it sent and how many the hub kept. The hub's
+/// own entry is zero. A wild island's copies count as sent and never as kept,
+/// because they run in the hub's world first. `Snapshot::wild_wins` counts the
+/// ones that take a hub cell.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MigrationSummary {
+    /// The generation the migration happened at.
     pub generation: u32,
+    /// One `(sent, kept)` pair per island, in island order.
     pub exchange: Vec<(usize, usize)>,
 }
 impl MigrationSummary {
-    /// Elites the hub received from all isolated islands, and how many it
-    /// kept.
+    /// Elites the hub received from the other islands, and how many it kept.
+    /// These are the sums over `exchange`.
     pub fn hub_received(&self) -> (usize, usize) {
         self.exchange
             .iter()
