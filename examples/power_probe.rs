@@ -7,20 +7,23 @@
 //! - `fma`: 8 independent chains of x = 1.9 - x*x per thread, registers only
 //!   (one FFMA each). The map is chaotic, so the bits keep toggling.
 //! - `mio`: per 2 FFMAs one shared-memory load (a pointer chase that stays in
-//!   the lane's own bank) and one warp shuffle, so half the instructions go
-//!   to the MIO pipes.
+//!   the lane's own bank) and one warp shuffle, so about half the
+//!   instructions go to the MIO pipes.
 //! - `int`: integer multiply-add, logic and add chains with one shuffle per
 //!   six instructions, no floating point.
 //! - `idle`: holds a context and launches nothing, for the idle power.
 //!
-//! The kernels compile with NVRTC and launch through the CUDA driver API,
-//! found the way `src/cuda_engine.rs` finds them (`EVOLUTION_NVRTC`, the
-//! loader's path, then the pip wheel of `docs/building.md`). Each launch is
-//! about 200 ms. It prints one line a second and a summary.
+//! The kernels compile with NVRTC and launch through the CUDA driver API on
+//! device 0. The probe loads `libcuda.so.1` and NVRTC at run time, like
+//! `src/cuda_engine.rs`. It looks for NVRTC in the engine's order
+//! (`EVOLUTION_NVRTC`, the loader's path, then the pip wheel of
+//! `docs/building.md`) but skips the engine's two fixed toolkit paths. Each
+//! launch is about 200 ms. The device and mode lines go to stderr. One line
+//! a second and a summary go to stdout.
 //!
 //! Usage: power_probe <fma|mio|int|idle> [seconds=30] [cubin-dir]
-//! With a cubin directory it writes `<mode>.cubin` there, for counting the
-//! loop's SASS with `nvdisasm`.
+//! The mode defaults to `fma`. With a cubin directory it writes
+//! `<mode>.cubin` there, for counting the loop's SASS with `cuobjdump -sass`.
 use anyhow::{Context, Result, bail};
 use std::{
     ffi::{CStr, CString, c_char, c_int, c_uint, c_void},
@@ -28,8 +31,13 @@ use std::{
     time::Instant,
 };
 
+/// Threads per block. The kernels declare `__launch_bounds__(256)` to match.
 const BLOCK: u32 = 256;
 
+/// The CUDA source of the three kernels. Each stores one word per thread in
+/// `out[2..]`, so the compiler keeps the loop. Block 0, thread 0 also stores
+/// the SM cycles of its timed loop in `out[0]` and the nanoseconds in
+/// `out[1]`.
 const SOURCE: &str = r#"
 #define FULL 0xffffffffu
 __device__ __forceinline__ unsigned long long gtimer() {
@@ -112,17 +120,20 @@ extern "C" __global__ void __launch_bounds__(256) intmix(unsigned long long* out
 }
 "#;
 
-/// One mode: the kernel's entry point, and per thread and loop iteration
-/// the named operations and the SASS instructions NVRTC 13.0 emits for the
-/// loop on sm_89: the named operations plus IADD3, ISETP and BRA for the
-/// loop (counted with `cuobjdump -sass` on the `cubin-dir` output; recount
-/// after an NVRTC upgrade).
+/// One mode. `entry` is the kernel's name. `ops` names the operations one
+/// thread runs in one loop iteration. `sass_per_iter` is the number of SASS
+/// instructions NVRTC 13.0 emits for one iteration on sm_89: the named
+/// operations plus IADD3, ISETP and BRA for the loop itself. It comes from
+/// `cuobjdump -sass` on the `cubin-dir` output. Count again after an NVRTC
+/// upgrade.
 struct Mode {
     entry: &'static str,
     ops: &'static str,
     sass_per_iter: u64,
 }
 
+/// The mode that `name` picks. `idle` is not one of them, because it has no
+/// kernel and `main` handles it first.
 fn mode(name: &str) -> Result<Mode> {
     Ok(match name {
         "fma" => Mode {
@@ -147,6 +158,10 @@ fn mode(name: &str) -> Result<Mode> {
 type CuResult = c_int;
 type Ptr = *mut c_void;
 
+// Looks up the function `$name` in the loaded library `$lib` and copies its
+// pointer out. The caller keeps the library loaded while it uses the pointer.
+// A missing symbol returns an error that names it. Use this macro in an
+// `unsafe` block of a function that returns `anyhow::Result`.
 macro_rules! sym {
     ($lib:expr, $name:literal) => {
         *$lib
@@ -155,6 +170,9 @@ macro_rules! sym {
     };
 }
 
+/// The CUDA driver functions the probe calls, found by name in
+/// `libcuda.so.1`. `_lib` keeps the library loaded while the pointers are in
+/// use.
 struct Cuda {
     init: unsafe extern "C" fn(c_uint) -> CuResult,
     device_get: unsafe extern "C" fn(*mut c_int, c_int) -> CuResult,
@@ -218,7 +236,10 @@ impl Cuda {
     }
 }
 
-/// NVRTC candidates in the order `src/cuda_engine.rs` tries them.
+/// NVRTC library candidates in the order `src/cuda_engine.rs` tries them,
+/// without its two fixed toolkit paths: `EVOLUTION_NVRTC` alone when it is
+/// set, else the loader's names, then the pip wheels in the virtual
+/// environment that `docs/building.md` sets up.
 fn nvrtc_candidates() -> Vec<PathBuf> {
     if let Some(path) = std::env::var_os("EVOLUTION_NVRTC") {
         return vec![PathBuf::from(path)];
@@ -245,7 +266,8 @@ fn nvrtc_candidates() -> Vec<PathBuf> {
     out
 }
 
-/// Compiles the probe source for `arch` and returns the cubin.
+/// Compiles the probe source for `arch`, which looks like `sm_89`, and
+/// returns the cubin. A failed compile returns the NVRTC log as the error.
 fn compile(arch: &str) -> Result<Vec<u8>> {
     type Prog = *mut c_void;
     let mut libs = Vec::new();
@@ -391,6 +413,7 @@ fn main() -> Result<()> {
         )?;
         check((cu.func_get_attribute)(&mut regs, 4, function), "registers")?;
     }
+    // One wave: every SM gets as many blocks as fit at once.
     let grid = blocks_per_sm as u32 * sms as u32;
     let threads = grid as u64 * BLOCK as u64;
     let warps = threads / 32;
@@ -407,7 +430,9 @@ fn main() -> Result<()> {
         mode.sass_per_iter,
         blocks_per_sm as u32 * BLOCK / 32
     );
-    // Returns seconds and the SM clock block 0 saw.
+    // Runs one launch of `iters` loop iterations and waits for it. Returns
+    // its wall seconds and the SM clock in MHz that block 0 saw, which is its
+    // cycles over its nanoseconds.
     let launch = |iters: i32| -> Result<(f64, f64)> {
         let mut pointer = out;
         let mut iters = iters;
@@ -443,12 +468,17 @@ fn main() -> Result<()> {
         let mhz = stamp[0] as f64 / stamp[1].max(1) as f64 * 1e3;
         Ok((start.elapsed().as_secs_f64(), mhz))
     };
-    // The first launch pays for loading the module; size the rest from the
-    // second.
+    // The first launch pays for loading the module. Time the second, then size
+    // the rest to take about 0.2 s each.
     launch(200)?;
     let (t, _) = launch(2000)?;
     let iters = ((2000.0 * 0.2 / t.max(1e-6)) as i32).clamp(1, 1 << 30);
+    // Warp instructions in one launch: each warp issues the loop's SASS once
+    // per iteration.
     let per_launch = warps as f64 * iters as f64 * mode.sass_per_iter as f64;
+    // The rates divide by the time spent inside launches, not by wall time.
+    // A line prints when a second has passed since the last one, with the
+    // rate of the launches in between.
     let start = Instant::now();
     let (mut launches, mut busy) = (0u64, 0.0);
     let (mut window_launches, mut window_busy, mut window_start) = (0u64, 0.0, 0.0);
