@@ -37,6 +37,9 @@ impl Experiment {
         stale: bool,
         mut kinds: Option<&mut [u8]>,
     ) -> usize {
+        // `EVOLUTION_PROFILE_BREED` prints how long each section took.
+        // `timings` follows the order of the printed line, which is not the
+        // order the sections run in. The prefilter runs first.
         let profile = std::env::var_os("EVOLUTION_PROFILE_BREED").is_some();
         let mut timings = [0.0f64; 7];
         let mut section = std::time::Instant::now();
@@ -45,49 +48,75 @@ impl Experiment {
         let population = &*block.population;
         let births = &block.births;
         let first = block.first;
+        // The block positions of the creatures that entered any archive.
         let mut entered: Vec<usize> = Vec::new();
+        // An emitter's `last_parent` is a slot of the global archive, and an
+        // offer can put another creature in a slot. So the parents are read as
+        // ids here, and their slots are found again after the offers.
         let previous_parent_ids: [Option<u64>; qd::EMITTER_COUNT] = std::array::from_fn(|i| {
             self.emitter_stats[i]
                 .last_parent
                 .and_then(|index| self.archive.entries.get(index))
                 .map(|elite| elite.creature.id)
         });
+        // Per emitter, for `qd::record_emitter_batch`: the new cells and
+        // reserve places it filled, the elites it replaced, and the rewards of
+        // both.
         let mut discoveries = [0u64; qd::EMITTER_COUNT];
         let mut improvements = [0u64; qd::EMITTER_COUNT];
         let mut rewards = [0.0f64; qd::EMITTER_COUNT];
+        // Per CMA emitter, the creatures it sampled in this block, each with
+        // the key that ranks it. An optimizer ranks by distance alone.
         let mut cma_samples = vec![Vec::<(usize, f32)>::new(); self.cma_emitters.len()];
         let optimizers: Vec<bool> = self.cma_emitters.iter().map(|c| c.optimizing()).collect();
-        // Parallel prefilter: descriptors and behavior-offer eligibility against
-        // the start-of-block global archive. Occupant fitness only ever rises,
-        // so a snapshot reject stays a live reject. Inserts still commit
-        // sequentially in block order.
+        /// What the prefilter works out for one creature.
         struct Prep {
+            /// Its behavior descriptor, which picks its cell.
             descriptor: qd::Descriptor,
             emitter: Emitter,
             score: f32,
+            /// Its score is its confirmation trial's (`EvaluationMetrics::fine`).
             fine: bool,
+            /// The generation until which its niche is protected from other
+            /// body plans.
             protection: u32,
+            /// It may be offered to the global archive. It has a usable score,
+            /// is not screened, comes from a main island, and beats its cell's
+            /// elite or finds the cell empty. The scan after the island offers
+            /// keeps only the best candidate of each cell.
             behavior_candidate: bool,
-            /// A structural or novelty child may enter its island's
-            /// morphology reserve, and has a body plan key.
+            /// A child of the structural or novelty emitter with a usable score
+            /// that is not screened. It may enter the morphology reserve of its
+            /// archive, and `plan` is its body plan key (0 for any other
+            /// creature).
             structural: bool,
             plan: u64,
-            /// Offered to no archive.
+            /// The result enters no archive: its trial was screened or
+            /// excluded, or its block is stale.
             screened: bool,
-            /// Fitness of the global archive's elite in this creature's
-            /// cell at the start of the block, for a CMA sample.
+            /// For a CMA sample, the fitness of the global archive's elite in
+            /// its cell at the start of the block. None when the cell is empty
+            /// or the creature is no CMA sample.
             elite_before: Option<f32>,
         }
         let arenas = self.islands.len().max(arena_count());
         let positions: Vec<usize> = (0..block.len()).collect();
-        // The archive each creature breeds for and competes in. There are
-        // more than 256 arenas (105 islands of three kinds).
+        // There are more than 256 arenas (5 main and 100 wild islands, each
+        // with three kinds of archive), so an arena index needs a `u16`.
         const _: () =
             assert!((qd::MAIN_ISLANDS + qd::WILD_ISLANDS) * qd::ARENA_KINDS <= u16::MAX as usize);
+        // The archive each creature breeds for and competes in
+        // (`qd::arena_of_slot`): its island or a nursery of its island.
         let arena_of: Vec<u16> = positions
             .par_iter()
             .map(|&j| qd::arena_of_slot(first + j, arenas) as u16)
             .collect();
+        // The prefilter runs in parallel against the global archive as it
+        // stood at the start of the block. It works out each creature's
+        // descriptor and whether the creature is a candidate for the global
+        // archive. An occupant's fitness only ever rises, so a creature that
+        // fails now would fail later too. The offers themselves still go in one
+        // at a time, in block order.
         let prep: Vec<Prep> = positions
             .par_iter()
             .map(|&j| {
@@ -102,7 +131,8 @@ impl Experiment {
                     [genome.muscle_start..genome.muscle_start + genome.muscle_count];
                 let descriptor = qd::descriptor(nodes, muscles, m.behavior);
                 let screened = stale || m.screened || m.excluded;
-                // A nursery creature is offered to its nursery only.
+                // A creature of a nursery or of a wild island is offered to its
+                // own archive only, not to the global archive.
                 let nursery = arena_of[j] as usize >= island_count()
                     || qd::is_wild(qd::island_of_slot(first + j, island_count()));
                 let valid = score.is_finite() && score > FAILED && !screened;
