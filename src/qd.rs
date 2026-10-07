@@ -1222,7 +1222,11 @@ impl QdArchive {
     }
     /// Records that the elite of `niche` changed. While the cached scores
     /// still cover every elite they stay, and the next refresh recomputes
-    /// only the elites near that cell.
+    /// only the elites near that cell. A new elite is pushed before this
+    /// runs, so the scores no longer cover it and are wiped, and the samplers
+    /// read no scores until the next refresh. The reshaped nurseries breed
+    /// between refreshes; keeping their scores cost clades
+    /// (`docs/rejected-ideas.md`).
     fn note_changed_cell(&mut self, niche: Niche) {
         if self.scores_current() {
             let len = self.entries.len();
