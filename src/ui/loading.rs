@@ -1,11 +1,11 @@
-//! The loading screen: what the game is waiting for while its GPU opens and
-//! its kernels compile, with a creature walking in place and a line to read
-//! meanwhile. The progress comes from `crate::loading`.
-//!
-//! Every effect a world has is compiled into its own kernel, and the game's
-//! 100 wild islands each run in a world of their own, so a first start (or
-//! the first start of a new build) compiles about two hundred kernels. They
-//! are kept on disk afterwards and load in milliseconds.
+//! `App::loading_screen` in `ui.rs` calls this module to draw the loading card
+//! or the corner note, and both show the progress that `crate::loading`
+//! reports. The card covers the window while the GPU opens and the kernels
+//! compile, with a creature walking in place and a line to read. A start with
+//! no cached kernels compiles about fifty of them, because every effect a
+//! world has is compiled into its own kernel and the 100 wild islands run in
+//! worlds of their own. The compiled kernels stay on disk and load in
+//! milliseconds at the next start.
 
 use crate::loading::{Group, Progress};
 use crate::theme::{self, Theme, poster};
@@ -59,26 +59,34 @@ const MESSAGES: &[&str] = &[
 ];
 const MESSAGE_SECONDS: f32 = 4.0;
 
-/// Why the window is waiting.
+/// Why the window is waiting. `App::loading_screen` in `ui.rs` picks it.
 pub(super) enum Wait<'a> {
     /// The evaluation devices are opening.
     Opening,
-    /// The devices failed to open; the reason is given in the string.
+    /// The devices did not open. The string is the reason.
     Failed(&'a str),
-    /// The kernels of the starting worlds compile.
+    /// The kernels of the starting worlds are compiling.
     Starting,
-    /// A generation cannot start until the kernels of its world compile.
+    /// The first generation cannot start until the kernels of its world
+    /// compile.
     World,
 }
 
-/// What the card shows, and whether the player may close it.
+/// What `screen` draws: why the window waits, and when the game started.
 pub(super) struct Card<'a> {
+    /// Why the window is waiting. It sets the title, which progress shows and
+    /// whether the player may close the card.
     pub wait: Wait<'a>,
+    /// When the app started. The walker and the line of the moment count from
+    /// here.
     pub since: Instant,
 }
 
-/// Draws the loading screen over the window. Returns true when the player
-/// pressed the button that closes it.
+/// Draws the loading card over the whole window and returns true when the
+/// player pressed the button that closes it. The card shows the progress of the
+/// kernels that evolution waits for when `card.wait` is `Wait::World`, and the
+/// progress of the starting jobs otherwise. It asks for a repaint every 33 ms,
+/// so the walker keeps moving.
 pub(super) fn screen(ctx: &egui::Context, theme: Theme, card: &Card) -> bool {
     let progress = match card.wait {
         Wait::World => crate::loading::progress(Group::Needed),
@@ -111,8 +119,11 @@ pub(super) fn screen(ctx: &egui::Context, theme: Theme, card: &Card) -> bool {
     close
 }
 
-/// Draws the loading card contents: title, walking animation, messages, progress
-/// bar, and compiler status. Returns true when the player closes the card.
+/// Draws the inside of the card from top to bottom: the title, the walker, a
+/// line to read, the progress bar, the jobs running now, a note and the button
+/// that closes the card. `clock` is the seconds since `Card::since`. After a
+/// failure the card stops at the error. Returns true when the player pressed
+/// the button.
 fn body(ui: &mut egui::Ui, theme: Theme, card: &Card, progress: &Progress, clock: f32) -> bool {
     let title = match card.wait {
         Wait::Opening => "Opening the laboratory",
@@ -138,6 +149,8 @@ fn body(ui: &mut egui::Ui, theme: Theme, card: &Card, progress: &Progress, clock
     let index = (clock / MESSAGE_SECONDS) as usize;
     let phase = (clock / MESSAGE_SECONDS).fract();
     let alpha = (phase * 6.0).min((1.0 - phase) * 6.0).clamp(0.0, 1.0);
+    // TODO: 7 divides the 42 lines, so the index reaches only 6 of them. A step
+    // that shares no factor with the length of the list would show them all.
     ui.label(
         RichText::new(MESSAGES[(index * 7 + 3) % MESSAGES.len()])
             .size(16.0)
@@ -145,11 +158,13 @@ fn body(ui: &mut egui::Ui, theme: Theme, card: &Card, progress: &Progress, clock
             .color(theme.accent.gamma_multiply(alpha)),
     );
     ui.add_space(12.0);
+    // The bar divides by the total, so it waits for the first job.
     let total = progress.total();
     if total > 0 {
         bar(ui, theme, progress, total);
         ui.add_space(8.0);
     }
+    // Four running jobs at most. The rest are counted below.
     for (label, took) in progress.running.iter().take(4) {
         ui.horizontal(|ui| {
             ui.spinner();
@@ -220,7 +235,9 @@ fn body(ui: &mut egui::Ui, theme: Theme, card: &Card, progress: &Progress, clock
     close
 }
 
-/// The progress bar: a dark outline, the finished share in grass green.
+/// Draws the progress bar: a cream track with a dark outline, the finished
+/// share in grass green, and over it the number of finished jobs and the time
+/// since the first job. `total` is `progress.total()` and must be above 0.
 fn bar(ui: &mut egui::Ui, theme: Theme, progress: &Progress, total: usize) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
     let painter = ui.painter();
@@ -248,7 +265,8 @@ fn bar(ui: &mut egui::Ui, theme: Theme, progress: &Progress, total: usize) {
     );
 }
 
-/// "45 s", "3 min 05 s".
+/// Words for a time: "45 s" under a minute, else "3 min 05 s". It rounds to the
+/// second and reads a negative time as "0 s".
 fn duration_words(seconds: f32) -> String {
     let s = seconds.max(0.0).round() as u32;
     if s < 60 {
@@ -258,8 +276,10 @@ fn duration_words(seconds: f32) -> String {
     }
 }
 
-/// A creature walking in place on a ground that slides under it: bones in
-/// dark brown, muscles in brick red that swell as they pull, a mustard head.
+/// Draws a creature walking in place on a ground that slides under it: bones in
+/// dark brown, muscles in brick red that swell as they pull, tan joints and a
+/// mustard head. The corner counts the meters it has walked, at 100 points to
+/// the meter. `clock` is the seconds since `Card::since`.
 fn walker(ui: &mut egui::Ui, theme: Theme, clock: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 96.0), Sense::hover());
     let painter = ui.painter_at(rect);
@@ -284,11 +304,15 @@ fn walker(ui: &mut egui::Ui, theme: Theme, clock: f32) {
         x += spacing;
     }
     let center = rect.center().x;
+    // One turn of `stride` is one cycle of the gait, 1.2 cycles a second. The
+    // body bobs four times in a cycle.
     let stride = clock * std::f32::consts::TAU * 1.2;
     let bob = (stride * 2.0).sin().abs() * 3.0;
     let hip = Pos2::new(center - 32.0, ground - 36.0 - bob);
     let shoulder = Pos2::new(center + 28.0, ground - 40.0 - bob);
     let head = Pos2::new(center + 50.0, ground - 60.0 - bob);
+    // A foot swings 17 points to each side of `base` and lifts up to 9 points
+    // while it swings forward.
     let foot = |base: Pos2, phase: f32| {
         let swing = (stride + phase).sin();
         let lift = (stride + phase).cos().max(0.0) * 9.0;
@@ -296,6 +320,7 @@ fn walker(ui: &mut egui::Ui, theme: Theme, clock: f32) {
     };
     let back = foot(hip, 0.0);
     let front = foot(shoulder, std::f32::consts::PI);
+    // A muscle from `a` to `b`. It thickens and gets more opaque as it pulls.
     let muscle = |a: Pos2, b: Pos2, phase: f32| {
         let pull = 0.5 + 0.5 * (stride + phase).sin();
         painter.line_segment(
@@ -332,16 +357,18 @@ fn walker(ui: &mut egui::Ui, theme: Theme, clock: f32) {
     );
 }
 
-/// A small note in the corner while kernels compile in the background and
-/// nothing waits for them: those of a world change, and the starting ones
-/// when the player closed the card.
+/// Draws a small note in the corner while kernels compile and the card is not
+/// up. These are the kernels that evolution needs, such as those of a world
+/// change, and with `include_startup` the starting ones too, as after the
+/// player closed the card. The note names one running job with its time and
+/// counts the other jobs, running or waiting. It draws nothing while no job
+/// runs.
 pub(super) fn toast(ctx: &egui::Context, theme: Theme, include_startup: bool) {
     let mut progress = crate::loading::progress(Group::Needed);
     if include_startup {
         let startup = crate::loading::progress(Group::Startup);
         progress.running.extend(startup.running);
         progress.queued += startup.queued;
-        progress.done += startup.done;
     }
     let Some((label, took)) = progress.running.first() else {
         return;
