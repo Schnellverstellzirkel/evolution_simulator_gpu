@@ -33,8 +33,10 @@ fn driven_limbs(c: &Creature) -> BoneIds {
 }
 
 /// Scales the stroke of every active muscle on a limb about its middle by one
-/// factor (0.6 to 1.6): the limb swings through a wider or narrower arc with
-/// the same clock, so its muscles contract more slowly or more quickly.
+/// factor from 0.6 to 1.6, drawn evenly on a log scale. On the same clock the
+/// limb swings through a wider or narrower arc, so its muscles shorten more
+/// quickly or more slowly. The short end stays at 0.01 m or more and the long
+/// end at `max_stroke()` or less.
 pub(crate) fn limb_stroke_scale(
     c: &mut Creature,
     _cfg: &Config,
@@ -58,8 +60,10 @@ pub(crate) fn limb_stroke_scale(
 }
 
 /// Moves both ends of every active muscle's stroke on a limb by the same
-/// share (5 to 15%) of its stroke, up or down: the limb rests more bent or
-/// more stretched and swings around a new posture.
+/// share (5 to 15%) of that muscle's stroke, up for all of them or down for
+/// all of them. The limb rests in a different posture and swings around it.
+/// The short end stays at 0.01 m or more and the long end at `max_stroke()`
+/// or less.
 pub(crate) fn limb_posture_shift(
     c: &mut Creature,
     _cfg: &Config,
@@ -82,10 +86,14 @@ pub(crate) fn limb_posture_shift(
     changed
 }
 
-/// Tapers the strength of a limb's active muscles along the chain, parents
-/// first: stiffness changes by a factor of 1.2 to 1.8 between the first and
-/// the last muscle, stronger at the root or at the tip (a hip that drives
-/// and a foot that yields, or the reverse).
+/// Tapers the stiffness of a limb's active muscles along the chain. The
+/// muscles go by the lower bone number of their two bones, so parents come
+/// first. One factor r from 1.2 to 1.8 sets the taper: the first muscle's
+/// stiffness is multiplied by 1/r and the last one's by r, or the other way
+/// round, and the factor changes by the same ratio from one muscle to the
+/// next. So the limb is stronger at the root or at the tip (a hip that
+/// drives and a foot that yields, or the reverse). Stiffness stays between 1
+/// and 120. A limb needs two or more active muscles.
 pub(crate) fn taper_limb_strength(
     c: &mut Creature,
     _cfg: &Config,
@@ -106,6 +114,7 @@ pub(crate) fn taper_limb_strength(
     let last = (muscles.len() - 1) as f32;
     let mut changed = false;
     for (rank, &i) in muscles.iter().enumerate() {
+        // From -1 at the first muscle to 1 at the last.
         let along = rank as f32 / last * 2.0 - 1.0;
         let factor = ratio.abs().powf(along * ratio.signum());
         let m = &mut c.muscles[i];
@@ -116,11 +125,13 @@ pub(crate) fn taper_limb_strength(
     changed
 }
 
-/// Copies the rhythm of one limb onto a different limb of any shape, later
-/// by a quarter, a half or three quarters of a cycle (plus a little noise):
-/// the target's k-th muscle takes the phase, duty and touchdown reset of the
-/// source's k-th muscle (wrapping when the target has more). The two limbs
-/// share one step pattern at a fixed lag.
+/// Copies the rhythm of one limb onto another limb that shares no bone with
+/// it, later by a quarter, a half or three quarters of a cycle plus up to
+/// 0.04 of noise either way. The target's k-th active muscle takes the duty,
+/// phase and touchdown reset of the source's k-th active muscle, with the
+/// phase and the reset moved by that offset. The source list wraps when the
+/// target has more muscles, and sensors stay as they are. The two limbs share
+/// one step pattern at a fixed lag.
 pub(crate) fn copy_limb_rhythm(
     c: &mut Creature,
     _cfg: &Config,
@@ -156,9 +167,11 @@ pub(crate) fn copy_limb_rhythm(
     changed
 }
 
-/// Two active muscles across the same pair of bones (a joint's opener and
-/// closer, or two synergists) are set half a cycle apart, or into the same
-/// phase, with the second one's duty and touchdown reset following.
+/// Sets two active muscles across the same pair of bones (for example a
+/// joint's opener and closer) in the same phase or half a cycle apart. The
+/// one with the higher muscle number follows the other. It takes the other's
+/// duty, and the other's phase and touchdown reset moved later by the lag,
+/// which is none or half a cycle.
 pub(crate) fn retune_muscle_pair(
     c: &mut Creature,
     _cfg: &Config,
