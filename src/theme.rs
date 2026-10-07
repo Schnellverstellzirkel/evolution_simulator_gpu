@@ -103,8 +103,8 @@ pub struct Theme {
     pub accent: Color32,
     /// BLU blue: secondary lines and what waits.
     pub cold: Color32,
-    /// Rust orange for warnings, such as a failed trial, a catastrophe or a
-    /// world-change mark.
+    /// Rust orange: warnings, such as a failed trial or a catastrophe, and
+    /// world-change marks.
     pub warn: Color32,
     /// Red for error messages.
     pub danger: Color32,
@@ -119,7 +119,7 @@ pub struct Theme {
     pub stop_fill: Color32,
     /// The text on `stop_fill`: cream.
     pub stop_text: Color32,
-    /// The armed (selected) fill: mustard. A selected effect level at calm
+    /// The fill of what is armed: mustard. A selected effect level at calm
     /// uses it.
     pub armed_fill: Color32,
     /// The text on `armed_fill`: dark brown. Nothing reads it now.
@@ -298,9 +298,9 @@ pub fn hash(n: i64) -> f32 {
 }
 
 /// Paints `art`, an image that tiles, over `rect` as one textured quad. One
-/// repeat covers `tile` points, `offset` shifts the pattern by that many
-/// repeats, and `tint` (premultiplied) tints it. An empty `rect` paints
-/// nothing.
+/// repeat covers `tile` points, and `offset` shifts the pattern by that many
+/// repeats. `tint` is a premultiplied color that tints the image. An empty
+/// `rect` paints nothing.
 pub fn tiled(
     painter: &egui::Painter,
     rect: Rect,
@@ -430,8 +430,7 @@ pub fn glow_text(
 }
 
 /// Builds a layout job of `text` as bold capitals at `size` and `color`, with
-/// extra letter spacing of 8% of the size. Labels, titles and HUD captions use
-/// it.
+/// extra letter spacing of 8% of the size.
 pub fn caps(text: &str, size: f32, color: Color32) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.append(
@@ -653,9 +652,9 @@ fn grain_texture(ctx: &egui::Context) -> egui::TextureId {
 }
 
 /// Paints film grain over `rect`. `alpha` is its strength from 0 to 1, and 0
-/// paints nothing. `time` is the scene clock. The pattern jumps 24 times per
-/// second of it, so the grain lives while the scene plays and holds still while
-/// it is paused.
+/// paints nothing. `time` is the scene clock in seconds. The pattern jumps 24
+/// times per second of it, so the grain lives while the scene plays and holds
+/// still while it is paused.
 pub fn grain(painter: &egui::Painter, rect: Rect, time: f32, alpha: f32) {
     if alpha <= 0.0 {
         return;
@@ -776,8 +775,8 @@ pub struct Counter<'a> {
     pub digits: String,
     /// The unit after the digits, painted small. It may be empty.
     pub unit: &'a str,
-    /// A second number right of the unit, like the reserve count of the ammo
-    /// box.
+    /// A second, smaller text right of the unit, like the reserve count of the
+    /// ammo box.
     pub extra: Option<String>,
     /// Turns the counter red, as the HUD does when hit.
     pub damaged: bool,
@@ -785,7 +784,7 @@ pub struct Counter<'a> {
 
 /// Paints `counter` anchored at `anchor` by `align` and returns its rect.
 /// `size` is the font size of the digits in points. The label, the unit and
-/// the extra number scale with it.
+/// the extra text scale with it.
 pub fn counter(
     painter: &egui::Painter,
     anchor: Pos2,
