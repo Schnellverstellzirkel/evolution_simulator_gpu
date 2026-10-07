@@ -1,4 +1,7 @@
-//! GPU repeatability on a fixed population and fixed settings.
+//! GPU tests of the scoring kernel on fixed populations and fixed settings.
+//! A repeated trial scores the same, a replay matches its score, a recording
+//! carries forces in range and broken-joint bits that agree with the trial's
+//! end, and a lost GPU is reopened and gives the same results.
 //!
 //! These ignored tests need the NVIDIA GPU and its CUDA engine, which owns
 //! the score. Run them on the workstation with:
@@ -6,8 +9,10 @@
 //!     cargo test --release --test gpu_repeatability -- --ignored
 use evolution_simulator::{config::Config, evolution, gpu::Gpu};
 
-/// The GPU tests run one at a time: the replay GPU is published in a
-/// process-wide slot, so a second test's GPU would take it over.
+/// Taken by every test here except the lost-GPU one, which is run alone, so
+/// the others run one at a time. Opening a GPU publishes it in a process-wide
+/// slot that replays use (`engine::record_on_gpu`), and a second test's GPU
+/// would take the slot over.
 static ONE_GPU_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
@@ -62,6 +67,10 @@ fn gpu_repeats_scores_for_identical_trials() {
     }
 }
 
+/// A replay recorded by the scoring kernel gives the same fitness, to the
+/// bit, as the score of its creature. It holds a frame before every step and
+/// after the last, and the center of mass at the frame where the trial ended
+/// equals the score.
 #[test]
 #[ignore = "requires the GPU; run explicitly on the workstation"]
 fn gpu_replays_show_the_gpu_score() {
@@ -113,6 +122,8 @@ fn gpu_replays_show_the_gpu_score() {
             .map(|(p, n)| p[0] * n.mass)
             .sum::<f32>()
             / mass;
+        // A failed trial scores `evolution::FAILED`, so its center is not
+        // compared.
         if score.fitness > -1e10 {
             assert!(
                 (center - score.fitness).abs() < 1e-3,
@@ -128,11 +139,11 @@ fn gpu_replays_show_the_gpu_score() {
     );
 }
 
-/// The muscle energy, muscle force and contact forces a recording carries
-/// are the kernel's own values and in range, the recorded broken joints are
-/// the scoring test's, and recording does not change the score. The nodes
-/// are renumbered so bone `j` no longer ends at node `j + 1`, as in most
-/// evolved bodies.
+/// A recording's muscle energy lies in [0, 1], its muscle forces are finite,
+/// and its contact forces are finite and not negative. No broken-joint bit
+/// shows before the trial ended, because a break ends it. Recording does not
+/// change the score. The nodes are renumbered so bone `j` no longer ends at
+/// node `j + 1`, as in most evolved bodies.
 #[test]
 #[ignore = "requires the GPU; run explicitly on the workstation"]
 fn recorded_forces_are_in_range_and_keep_the_score() {
@@ -158,6 +169,7 @@ fn recorded_forces_are_in_range_and_keep_the_score() {
     for (i, score) in scores.iter().enumerate() {
         let mut creature = pop.creature(i);
         evolution_simulator::evolution::canonicalize_bone_order(&mut creature);
+        // Skip bodies without muscles and failed trials (`evolution::FAILED`).
         if creature.muscles.is_empty() || score.fitness <= -1e10 {
             continue;
         }
@@ -232,8 +244,8 @@ fn a_lost_gpu_is_reopened_and_gives_the_same_results() {
     let undisturbed = scheduler
         .evaluate(&pop, &indices, &cfg)
         .expect("undisturbed run");
-    // The GPU is lost while its first units are in flight; the game must reopen it
-    // and finish the run on it.
+    // The GPU is lost while its first units are in flight. The game must
+    // reopen it and finish the run on it.
     scheduler.simulate_gpu_loss_after(0);
     let disturbed = scheduler
         .evaluate(&pop, &indices, &cfg)
@@ -258,9 +270,10 @@ fn a_lost_gpu_is_reopened_and_gives_the_same_results() {
     }
 }
 
-/// A chain whose joints may not bend, pulled by long-range muscles: it
-/// breaks a joint within a few seconds.
-/// `variant` changes the muscle rhythm.
+/// A chain of 16 nodes whose joints may not bend. Its muscles join bones that
+/// sit half a chain apart and pull them together, so a joint is forced past
+/// its range and breaks within a few seconds. `variant` changes the muscle
+/// rhythm.
 fn breaking_chain(variant: usize) -> evolution::Creature {
     use evolution::{Bone, Creature, Muscle, NodeGene};
     let node_count = 16;
@@ -313,8 +326,9 @@ fn breaking_chain(variant: usize) -> evolution::Creature {
     }
 }
 
-/// A recording marks the joints the scoring kernel breaks: the recorded
-/// bits appear at the frame where the trial ended and not before.
+/// A recording marks the joints the scoring kernel breaks. No bit shows
+/// before the frame where the trial ended, and at least half of the chains
+/// show one at that frame.
 #[test]
 #[ignore = "requires the GPU; run explicitly on the workstation"]
 fn recorded_broken_joints_are_the_kernels() {
