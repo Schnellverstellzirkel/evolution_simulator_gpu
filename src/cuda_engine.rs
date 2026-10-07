@@ -671,8 +671,8 @@ impl<T: bytemuck::Pod> Drop for HostVec<T> {
 }
 
 /// The device buffers of one batch, in the order of the kernel's first five
-/// arguments: lane records, muscles, the unused `WavePack::ends`, heads and
-/// results.
+/// arguments: the node and bone records (`WavePack::lanes`), the muscle
+/// records, the unused `WavePack::ends`, the heads and the results.
 struct GroupRes {
     bufs: [DeviceBuf; 5],
 }
@@ -1972,8 +1972,10 @@ impl CudaEngine {
                 })
             })
             .collect::<Result<_>>()?;
-        // The free slot with the most buffers to reuse: when memory is short,
-        // a new allocation may fail where reuse does not.
+        // A recording has the replay slot. A confirmation trial has its own
+        // slot when that is free. Every other unit takes the free standard
+        // slot with the most buffers to reuse: when memory is short, a new
+        // allocation may fail where reuse does not.
         let confirming = !record && crate::engine::is_confirmation(cfg);
         let slot = if record {
             self.replay_slot()
@@ -2077,6 +2079,8 @@ impl CudaEngine {
                     res.bufs[4].ptr,
                     counters.ptr + (4 * w) as u64,
                 ];
+                // The frames pointer is the eighth argument. Only the
+                // recording kernel declares it.
                 let mut frames = resources.frames.as_ref().map_or(0, |f| f.ptr);
                 let mut args: [*mut c_void; 8] = [
                     &mut pointers[0] as *mut u64 as *mut c_void,
