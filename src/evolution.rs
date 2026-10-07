@@ -2194,6 +2194,7 @@ impl Population {
     }
 }
 
+/// `mutate_genes` on a creature passed by value, which it returns.
 fn local_mutation(mut creature: Creature, cfg: &Config, rng: &mut Rng, scale: f32) -> Creature {
     mutate_genes(&mut creature, cfg, rng, scale);
     creature
@@ -2209,7 +2210,9 @@ const MUSCLE_GENES: u32 = TEMPO_GENE + 128;
 /// Gaussian noise on every gene at `scale` (times the config's mutation
 /// strength), clamped to the gene's range. Each gene's noise is keyed by its
 /// index, so it does not depend on the body's other genes or on the order
-/// they are visited in.
+/// they are visited in. A muscle's elastic tendon and touchdown sensor also
+/// change at random, with chances of 0.10 and 0.05 times the noise scale, up
+/// to a scale of 1.
 fn mutate_genes(creature: &mut Creature, cfg: &Config, rng: &mut Rng, scale: f32) {
     let scale = scale * cfg.mutation;
     if scale <= 0.0 {
@@ -2274,8 +2277,10 @@ fn mutate_genes(creature: &mut Creature, cfg: &Config, rng: &mut Rng, scale: f32
     }
 }
 
-/// Benchmark workload helper: grows a body with the game's own structural
-/// mutations until it has at least `target_nodes` nodes or cannot grow further.
+/// Grows a body with the classic operators `split_bone` and
+/// `duplicate_mirrored_node` until it has `target_nodes` nodes (at most
+/// `cfg.max_nodes`) or 1000 tries have passed, then repairs it. For benchmark
+/// workloads and tests.
 pub fn grow_for_benchmark(creature: &mut Creature, cfg: &Config, seed: u64, target_nodes: usize) {
     let mut rng = Rng::new(seed, u32::MAX, creature.id as usize);
     let mut attempts = 0;
@@ -2290,11 +2295,11 @@ pub fn grow_for_benchmark(creature: &mut Creature, cfg: &Config, seed: u64, targ
     repair(creature, cfg, &mut rng);
 }
 
-/// `structural_mutation_in_place` for a child bred from `archive`. The
-/// anatomy operators join the classic ones (and graft limbs from another
-/// elite of the archive).
-/// Returns the operator that changed the body, as an index into
-/// `structural_operator_names`, or `None` when none fit.
+/// `structural_mutation_among` for a child bred from `archive`, without an
+/// island bias. The anatomy operators join the classic ones, and a limb may be
+/// grafted from another elite of the archive. Returns the operator that
+/// changed the body, as an index into `structural_operator_names`, or `None`
+/// when none fit. For tests.
 #[cfg(test)]
 fn structural_mutation_from(
     creature: &mut Creature,
@@ -2305,9 +2310,9 @@ fn structural_mutation_from(
     structural_mutation_among(creature, cfg, rng, &archive.entries, 0)
 }
 
-/// A structural mutation with no archive at hand (the refuge of old
-/// champions after a world change), repaired as breeding does. Returns
-/// whether the body changed.
+/// A structural mutation with no archive at hand, for the children of old
+/// champions, founders, the hall of fame and the pen (`storage`), repaired as
+/// breeding does. Returns whether the body changed.
 pub fn structural_mutation_any(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
     let changed = structural_mutation_among(creature, cfg, rng, &[], 0).is_some();
     if changed {
@@ -2316,6 +2321,14 @@ pub fn structural_mutation_any(creature: &mut Creature, cfg: &Config, rng: &mut 
     changed
 }
 
+/// Picks a structural operator and applies it, trying up to four picks until
+/// one changes the body. A pick is a classic operator, an anatomy operator
+/// with a slot of its own, or a slot that a group of anatomy operators shares.
+/// Returns the operator's index in `structural_operator_names`, or `None` when
+/// no pick fit. An operator that takes a limb uses the donor that differs most
+/// in size from the creature, out of four `donors` drawn. A nonzero `bias`
+/// draws a quarter of the picks from the island's favoured slots
+/// (`island_bias`).
 fn structural_mutation_among(
     creature: &mut Creature,
     cfg: &Config,
@@ -2337,8 +2350,6 @@ fn structural_mutation_among(
     let donor_body = std::cell::OnceCell::new();
     let cx = anatomy::Context::of_genes(donor, &donor_body);
     let classic = CLASSIC_COUNT;
-    // An operator that does not fit this body leaves it unchanged; try
-    // another, a few times.
     // Each shared group takes one slot, drawn after the others.
     let groups: Bounded<&Vec<usize>, 32> = [&extra.shared, &extra.controller]
         .into_iter()
@@ -2346,6 +2357,8 @@ fn structural_mutation_among(
         .filter(|group| !group.is_empty())
         .collect();
     let slots = classic + extra.single.len() + groups.len();
+    // An operator that does not fit this body leaves it unchanged; try
+    // another, a few times.
     for _ in 0..4 {
         let pick = if bias != 0 && rng.unit() < 0.25 {
             let k = rng.index(8) as u64;
@@ -2394,8 +2407,8 @@ pub fn structural_operator_names() -> Vec<&'static str> {
 }
 
 /// Applies the structural operator `name` and repairs the body as breeding
-/// does. Returns whether the operator changed the body, or `None` for an
-/// unknown name.
+/// does. A graft takes its limb from `donor`. Returns whether the operator
+/// changed the body, or `None` for an unknown name.
 pub fn apply_structural_operator(
     name: &str,
     creature: &mut Creature,
@@ -2416,14 +2429,18 @@ pub fn apply_structural_operator(
     Some(changed)
 }
 
-/// The small parameter mutation that follows every structural one in
-/// breeding (`local_mutation` at `scale`), for diagnostics.
+/// Gaussian noise on every gene of `creature` at `scale` (`mutate_genes`),
+/// then `repair`. `storage` uses it for the children of old champions,
+/// founders, the hall of fame and the pen. `examples/mutation_audit.rs` uses
+/// it to measure the noise alone and after a structural operator.
 pub fn mutate_locally(creature: Creature, cfg: &Config, rng: &mut Rng, scale: f32) -> Creature {
     let mut child = local_mutation(creature, cfg, rng, scale);
     repair(&mut child, cfg, rng);
     child
 }
 
+/// Applies classic operator `pick`, an index into `CLASSIC_OPERATORS`. Returns
+/// whether it changed the body.
 fn classic_operator(pick: usize, creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
     match pick {
         0 => split_bone(creature, cfg, rng),
@@ -2480,6 +2497,8 @@ fn rescale_body(creature: &mut Creature, rng: &mut Rng) -> bool {
     true
 }
 
+/// Splits a bone of at least 0.06 m in two with a new node at its middle. The
+/// organ and the muscle anchors stay at the same points.
 fn split_bone(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
     if creature.nodes.len() >= cfg.max_nodes
         || creature.bones.is_empty()
@@ -2547,6 +2566,9 @@ fn split_bone(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
     true
 }
 
+/// Mirrors one end of a random bone through the body's horizontal center into
+/// a new node, joins it to that end with a new bone, and adds a muscle between
+/// the new bone and another bone.
 fn duplicate_mirrored_node(creature: &mut Creature, cfg: &Config, rng: &mut Rng) -> bool {
     if creature.nodes.len() >= cfg.max_nodes || creature.muscles.len() >= cfg.max_muscles {
         return false;
@@ -2584,6 +2606,8 @@ fn duplicate_mirrored_node(creature: &mut Creature, cfg: &Config, rng: &mut Rng)
     true
 }
 
+/// Shifts the phase of every muscle on one random bone by the same offset, up
+/// to a quarter cycle either way. Returns whether any muscle moved.
 fn phase_shift_group(creature: &mut Creature, rng: &mut Rng) -> bool {
     if creature.bones.is_empty() || creature.muscles.is_empty() {
         return false;
