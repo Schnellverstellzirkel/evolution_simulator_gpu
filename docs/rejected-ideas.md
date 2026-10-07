@@ -45,9 +45,9 @@ Each idea was measured and lost. Do not redo one without a new reason. Numbers a
 
 ## Physics
 
-- 30 Hz physics: 30 Hz elites kept a median 38% of their distance at 60 Hz, so the gains were integrator exploits.
-- Muscle mass in five variants (1 or 4 kg/m, span or flat energy store): none held muscle counts down and best distance fell by 51 to 62%.
-- Fewer contacts for speed: 2 contacts +33%, 1 contact +65%, but nodes left out of the solve sink. It changes the physics.
+- 30 Hz physics, before the position-based kernel: 30 Hz elites kept a median 38% of their distance at 60 Hz, so the gains were integrator exploits.
+- Muscle mass as a way to hold muscle counts down, in four variants and a massless control (1 or 4 kg/m, span or flat energy store): none held muscle counts down and best distance fell by 51 to 62%. The game still weighs a muscle (0.05 kg plus 1 kg per metre of its slack length, `physics::add_muscle_masses`), but the weight does not limit muscle counts.
+- Fewer contacts for speed, in the articulated-body solver that kept the 4 deepest contacts: 2 contacts +33%, 1 contact +65%, but nodes left out of the solve sink. It changed the physics.
 
 ## Speed
 
