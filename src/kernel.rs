@@ -250,8 +250,10 @@ pub fn params(cfg: &Config, base: usize, count: usize, stride: usize) -> Params 
     }
 }
 
-/// A developer override `EVOLUTION_WARP_<NAME>` of an engine setting (never
-/// needed to play).
+/// The developer override `EVOLUTION_WARP_<NAME>` of an engine setting, or
+/// `default` when it is unset or not a whole number. For example `CARVEOUT`
+/// is the share of each multiprocessor's memory kept as shared memory, in
+/// percent. A player never needs it.
 pub fn solver_setting(name: &str, default: u32) -> u32 {
     std::env::var(format!("EVOLUTION_WARP_{name}"))
         .ok()
@@ -259,10 +261,14 @@ pub fn solver_setting(name: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
-/// The kernel source for world `flags`, `fidelity` and, with `record`, the
-/// frame output. `_class` is the one lane class.
+/// The kernel source for world `flags` and `fidelity`: `#define` lines that set
+/// the constants and switches of the kernel, then `shaders/creature.cu`. With
+/// `record` the kernel also writes every frame of the trial. `_class` is the
+/// lane class. It is not read, because there is only one.
 pub fn cuda_source(_class: usize, flags: u32, fidelity: Fidelity, record: bool) -> String {
     let limits = physics::limits();
+    // A float literal for the kernel. Debug formatting always writes a decimal
+    // point or an exponent.
     let float = |value: f32| format!("{value:?}f");
     let mut defines: Vec<(String, String)> = vec![
         ("RATE".into(), format!("{:.1}f", fidelity.rate as f32)),
@@ -281,6 +287,7 @@ pub fn cuda_source(_class: usize, flags: u32, fidelity: Fidelity, record: bool) 
             (if flags & (1 << bit) != 0 { "1" } else { "0" }).into(),
         ));
     }
+    // The physics constants the kernel uses, as float defines.
     let constants = [
         ("MUSCLE_RECOVERY", float(limits.muscle_recovery)),
         ("INV_JOINT_DAMPING", float(1.0 / physics2::joint_damping())),
@@ -313,7 +320,7 @@ pub fn cuda_source(_class: usize, flags: u32, fidelity: Fidelity, record: bool) 
         source.push_str(&format!("#define {name} {value}\n"));
     }
     // A developer working on the kernel may point `EVOLUTION_KERNEL_SOURCE` at
-    // a copy of it to skip rebuilds.
+    // an edited copy of it, so a kernel edit needs no Rust rebuild.
     match std::env::var("EVOLUTION_KERNEL_SOURCE")
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
@@ -325,7 +332,7 @@ pub fn cuda_source(_class: usize, flags: u32, fidelity: Fidelity, record: bool) 
 }
 
 /// Writes one creature's node and bone records into `record` and its muscle
-/// records into `muscles`; `pack_reusing` writes its two head words.
+/// records into `muscles`. `pack_reusing` writes its two head words.
 fn fill_creature(model: &Model, cfg: &Config, record: &mut [u32], muscles: &mut [f32]) {
     let start = model.start(cfg);
     let bones = model.pivot.len();
@@ -367,12 +374,15 @@ fn fill_creature(model: &Model, cfg: &Config, record: &mut [u32], muscles: &mut 
     let limits = physics::limits();
     for (k, m) in model.muscles.iter().enumerate() {
         let strength = m.strength * model.muscle_scale;
+        // The node whose touchdown restarts the rhythm, or `u32::MAX` for none.
         let sensor = m.sensor.map_or(u32::MAX, |node| node as u32);
+        // The pivot node and the tip node of each of the two bones, a byte
+        // each.
         let a0 = model.pivot[m.bone_a] as u32;
         let b0 = model.pivot[m.bone_b] as u32;
         let nodes = a0 | (m.bone_a as u32 + 1) << 8 | b0 << 16 | (m.bone_b as u32 + 1) << 24;
         let values = [
-            // What every substep reads.
+            // `MusclePull`, which every substep reads.
             f32::from_bits(nodes),
             m.anchor_a,
             m.anchor_b,
@@ -381,7 +391,7 @@ fn fill_creature(model: &Model, cfg: &Config, record: &mut [u32], muscles: &mut 
             1.0 / (limits.muscle_energy * strength),
             m.tendon_k,
             m.long,
-            // What the rhythm reads once a step.
+            // `MuscleRhythm`, which the rhythm reads once a step.
             m.amplitude,
             m.inv_period,
             m.phase,
@@ -391,6 +401,7 @@ fn fill_creature(model: &Model, cfg: &Config, record: &mut [u32], muscles: &mut 
             m.stiffness,
             m.reset,
             f32::from_bits(sensor),
+            // Spare words that fill the last line.
             0.0,
             0.0,
             0.0,
@@ -407,17 +418,22 @@ struct Out {
     muscles: *mut f32,
     heads: *mut [u32; 4],
 }
+// SAFETY: `pack_reusing` gives each thread only the ranges of its own creature.
 unsafe impl Send for Out {}
 unsafe impl Sync for Out {}
 
-/// Packs the creatures at `indices` of `pop` into one batch. Its `capacity`
-/// is the node slots of a recorded frame (`creature_kernel::frame_stride`).
+/// Packs the creatures at `indices` of `pop` into a batch and returns it as a
+/// list of one. The `capacity` of the batch is the node slots of a recorded
+/// frame (`creature_kernel::frame_stride`). It fails for a body the kernel
+/// cannot run.
 pub fn pack(pop: &Population, indices: &[usize], cfg: &Config) -> Result<Vec<LaneBatch>> {
     pack_reusing(pop, indices, cfg, &mut Vec::new())
 }
 
-/// `pack` into the memory of a batch from `spare` (one of a unit that
-/// finished), when there is one.
+/// `pack` into the memory of a batch from `spare` (the batches of a unit that
+/// finished), when there is one. The creatures are packed sorted by muscle
+/// count, then node count, then population index. `slots` and `creatures` of
+/// the batch say which creature each packed one is.
 pub fn pack_reusing(
     pop: &Population,
     indices: &[usize],
@@ -434,7 +450,8 @@ pub fn pack_reusing(
             );
         }
     }
-    // Similar bodies run side by side in a warp: the same loop counts.
+    // Sorting by muscle count, then node count, gives the bodies that run side
+    // by side in a warp similar loop counts.
     let mut sorted: Vec<(usize, usize)> = indices.iter().copied().enumerate().collect();
     sorted.par_sort_by_key(|&(_, i)| {
         let g = &pop.genomes[i];
@@ -482,15 +499,17 @@ pub fn pack_reusing(
         let model = Model::new(&creature, cfg);
         let record_size = g.node_count * NODE_WORDS + g.bone_count * BONE_WORDS;
         let muscle_size = g.muscle_count * MUSCLE_FIELDS;
+        // The period of the first muscle, a feature of the early rungs.
         let period = if g.muscle_count > 0 {
             pop.muscles[g.muscle_start].period
         } else {
             0.0
         };
+        // An empty `pop.flags` means no creature has a flag.
         let flags = u32::from(pop.flags.get(i).copied().unwrap_or(0));
-        // SAFETY: creature `c` owns its record from record_at[c], its muscles
-        // from muscle_at[c], each as long as its size, and heads 2c and
-        // 2c + 1; the ranges are disjoint and inside the buffers above.
+        // SAFETY: creature `c` owns its record from `record_at[c]`, its muscles
+        // from `muscle_at[c]`, each as long as its size, and heads `2 * c` and
+        // `2 * c + 1`. The ranges are disjoint and inside the buffers above.
         unsafe {
             let record = std::slice::from_raw_parts_mut(out.lanes.add(record_at[c]), record_size);
             let muscles =
@@ -510,6 +529,7 @@ pub fn pack_reusing(
             ];
         }
     });
+    // Per creature: its node, bone and muscle counts and its quake hash.
     info.extend(sorted.iter().enumerate().map(|(c, &(_, i))| {
         let g = &pop.genomes[i];
         [
