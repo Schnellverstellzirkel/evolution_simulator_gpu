@@ -1,7 +1,16 @@
+//! Unit tests for `rungs`. They build kernel traces and audit rows by hand, so
+//! they need no GPU. They cover the audit sample, the stop rule, the fit, the
+//! breaker, the parent exemptions, the trust check and the packing of the
+//! judgments it reads. `tests/rungs.rs` checks the rungs on the CUDA kernel.
 use super::*;
 
-/// A trace of a creature alive past both early rungs with the given
-/// features, built from the packed words the kernel writes.
+/// A trace of a creature that ran `steps` steps, built from the packed words
+/// the kernel writes. `d60`, `d150` and `d300` are its distances at 1 s, 2.5 s
+/// and 5 s, and `bands` are its cadence bands at the two rungs. Its speed at
+/// each rung equals its distance there. Every trace has the same other
+/// features: all nodes touched the ground, an energy store of 0.5 and a head
+/// shake of 1.0. The end code holds the bands and no flag. The fitness is
+/// `d300`.
 fn trace(d60: f32, d150: f32, d300: f32, steps: u32, bands: [u16; 2]) -> RungTrace {
     let h = |v: f32| u32::from(f32_to_f16(v));
     let pair = |lo: f32, hi: f32| h(lo) | h(hi) << 16;
@@ -20,8 +29,9 @@ fn trace(d60: f32, d150: f32, d300: f32, steps: u32, bands: [u16; 2]) -> RungTra
     }
 }
 
-/// An audit row of a creature that reaches the 5 s bar (`pass3`) or not,
-/// its distances offset by `jitter`.
+/// An audit row of a creature that reaches the 5 s bar (`pass3`) or not, with
+/// its distances at 1 s and 2.5 s moved by `jitter`. A creature that passes is
+/// an entrant. One that does not is below the bar.
 fn row(pass3: bool, exempt: bool, jitter: f32) -> AuditRow {
     // Creatures that pass 5 s are further along at 2.5 s.
     let d150 = if pass3 { 3.0 + jitter } else { 0.5 + jitter };
@@ -179,7 +189,9 @@ fn children_of_a_parent_the_rules_would_stop_skip_that_rung() {
     );
 }
 
-/// A generation of 40,000 audit rows, one in eight reaching the 5 s bar.
+/// Records a generation of 40,000 audit rows, one in eight reaching the 5 s
+/// bar, and ends it at the generation boundary. `g` varies the jitter. `tweak`
+/// is called with each row's index and the row, and may change the row.
 fn generation(audit: &mut Audit, g: u32, plateau: bool, tweak: impl Fn(u32, &mut AuditRow)) {
     for i in 0..40_000u32 {
         let jitter = ((i + g).wrapping_mul(2654435761) >> 16) as f32 / 65536.0;
@@ -190,8 +202,9 @@ fn generation(audit: &mut Audit, g: u32, plateau: bool, tweak: impl Fn(u32, &mut
     audit.boundary(None, plateau);
 }
 
-/// Some creatures fall early with poor features and enter archives: the 5 s
-/// screen keeps them, and the fitted rule stops them.
+/// Makes the early fallers the only entrants. One row in 16 is a creature that
+/// falls early with poor features and enters an archive: the 5 s screen keeps
+/// it, and the fitted rule stops it.
 fn early_fallers_enter(i: u32, row: &mut AuditRow) {
     row.entrant = false;
     if i % 8 == 1 && i % 16 == 1 {
