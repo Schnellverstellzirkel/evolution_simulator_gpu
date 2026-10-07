@@ -1,7 +1,7 @@
 //! `Bounded<T, N>` is a vector of at most `N` `Copy` items that lives inline,
 //! with no heap allocation. `evolution` builds `Nodes`, `Bones` and `Muscles`
 //! from it for the genes of a `Creature`, and the anatomy operators use it for
-//! short lists. Going past the capacity is a bug, so `push` and the other
+//! scratch lists. Going past the capacity is a bug, so `push` and the other
 //! growing methods panic. `try_push` returns false instead.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -21,7 +21,7 @@ pub struct Bounded<T: Copy, const N: usize> {
 }
 
 impl<T: Copy, const N: usize> Bounded<T, N> {
-    /// The most items an array of this type holds. It is `N`.
+    /// The capacity `N` as a constant, so it can be read without a value.
     pub const CAPACITY: usize = N;
 
     /// An empty array.
@@ -31,7 +31,7 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
             items: [MaybeUninit::uninit(); N],
         }
     }
-    /// A copy of `items`. Panics if there are more than `N`.
+    /// A copy of `items`. Panics when there are more than `N`.
     pub fn from_slice(items: &[T]) -> Self {
         let mut out = Self::new();
         out.extend_from_slice(items);
@@ -112,8 +112,8 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
         self.len -= 1;
         value
     }
-    /// Keeps the first `len` items. Does nothing when there are no more than
-    /// `len`.
+    /// Cuts the array to its first `len` items. Does nothing when it already
+    /// has `len` or fewer.
     pub fn truncate(&mut self, len: usize) {
         if len < self.len as usize {
             self.len = len as u32;
@@ -158,7 +158,7 @@ impl<T: Copy, const N: usize> Bounded<T, N> {
         self.len += items.len() as u32;
     }
     /// Sets the length to `len`, filling new places with `value`. A smaller
-    /// `len` cuts the array short. Panics when `len` is more than `N`.
+    /// `len` removes the items past it. Panics when `len` is more than `N`.
     pub fn resize(&mut self, len: usize, value: T) {
         assert!(len <= N, "Bounded<_, {N}> cannot hold {len}");
         for index in self.len as usize..len {
@@ -199,9 +199,11 @@ impl<T: Copy, const N: usize> Default for Bounded<T, N> {
     }
 }
 
-/// Copy moves the whole array, as any move does; `clone` copies only the
-/// items in use, so it is the cheaper way to duplicate a large one.
+/// Copying or moving a `Bounded` takes all `N` slots, used or not.
 impl<T: Copy, const N: usize> Copy for Bounded<T, N> {}
+/// `clone` and `clone_from` copy only the items in use, so they are the
+/// cheaper way to duplicate a large array. For that reason `clone` is not
+/// written as `*self`.
 #[allow(clippy::non_canonical_clone_impl)]
 impl<T: Copy, const N: usize> Clone for Bounded<T, N> {
     fn clone(&self) -> Self {
@@ -235,6 +237,8 @@ impl<T: Copy, const N: usize> AsRef<[T]> for Bounded<T, N> {
     }
 }
 
+/// Two arrays are equal when their items in use are equal. The storage past
+/// them is ignored. Comparing with a slice or a `Vec` works the same way.
 impl<T: Copy + PartialEq, const N: usize> PartialEq for Bounded<T, N> {
     fn eq(&self, other: &Self) -> bool {
         self.as_slice() == other.as_slice()
@@ -268,6 +272,7 @@ impl<T: Copy + std::fmt::Debug, const N: usize> std::fmt::Debug for Bounded<T, N
     }
 }
 
+/// Appends each item with `push`, so it panics when they do not fit.
 impl<T: Copy, const N: usize> Extend<T> for Bounded<T, N> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         for item in iter {
@@ -275,6 +280,7 @@ impl<T: Copy, const N: usize> Extend<T> for Bounded<T, N> {
         }
     }
 }
+/// Appends a copy of each item. Panics when they do not fit.
 impl<'a, T: Copy + 'a, const N: usize> Extend<&'a T> for Bounded<T, N> {
     fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
         for item in iter {
@@ -282,6 +288,7 @@ impl<'a, T: Copy + 'a, const N: usize> Extend<&'a T> for Bounded<T, N> {
         }
     }
 }
+/// Collects the items into a new array. Panics when there are more than `N`.
 impl<T: Copy, const N: usize> FromIterator<T> for Bounded<T, N> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let mut out = Self::new();
@@ -289,25 +296,30 @@ impl<T: Copy, const N: usize> FromIterator<T> for Bounded<T, N> {
         out
     }
 }
+/// A copy of the slice. Panics when it has more than `N` items.
 impl<T: Copy, const N: usize> From<&[T]> for Bounded<T, N> {
     fn from(items: &[T]) -> Self {
         Self::from_slice(items)
     }
 }
+/// A copy of the items of the `Vec`. Panics when there are more than `N`.
 impl<T: Copy, const N: usize> From<Vec<T>> for Bounded<T, N> {
     fn from(items: Vec<T>) -> Self {
         Self::from_slice(&items)
     }
 }
+/// A copy of the items of the array. Panics when `M` is more than `N`.
 impl<T: Copy, const N: usize, const M: usize> From<[T; M]> for Bounded<T, N> {
     fn from(items: [T; M]) -> Self {
         Self::from_slice(&items)
     }
 }
 
-/// Iterator over a `Bounded` taken by value.
+/// The iterator over a `Bounded` taken by value. It owns the array and gives
+/// out the items in use in order.
 pub struct IntoIter<T: Copy, const N: usize> {
     items: Bounded<T, N>,
+    /// Index of the next item to give out. It keeps counting after the end.
     next: usize,
 }
 impl<T: Copy, const N: usize> Iterator for IntoIter<T, N> {
@@ -348,12 +360,15 @@ impl<'a, T: Copy, const N: usize> IntoIterator for &'a mut Bounded<T, N> {
     }
 }
 
-/// Saved as a sequence, the same bytes a `Vec` writes.
+/// Saved as a sequence of the items in use. The bytes are the same as a `Vec`
+/// of them writes, so saves hold no trace of the capacity.
 impl<T: Copy + Serialize, const N: usize> Serialize for Bounded<T, N> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.as_slice().serialize(serializer)
     }
 }
+/// Loads a sequence of at most `N` items. A longer sequence is an error, not
+/// a panic.
 impl<'de, T: Copy + Deserialize<'de>, const N: usize> Deserialize<'de> for Bounded<T, N> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visit<T, const N: usize>(std::marker::PhantomData<T>);
@@ -415,6 +430,7 @@ mod tests {
         b.truncate(1);
         v.truncate(1);
         assert_eq!(b, v);
+        // `Bounded` is `Copy`, but this calls `clone` on purpose to test it.
         let c = b.clone();
         assert_eq!(c, b);
         assert_eq!(b.into_iter().collect::<Vec<_>>(), v);
