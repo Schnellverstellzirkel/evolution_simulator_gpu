@@ -7,11 +7,11 @@
 use super::{playback::FrameMarks, widgets::mix_color};
 use crate::{
     config::Config,
-    evolution::Creature,
+    evolution::{Bone, Creature},
     physics::{self, Node},
     theme::scene::{
-        BONE, EYE, FALLEN, FORCE_GROUND, FORCE_MUSCLE, MUSCLE_ACTIVE, MUSCLE_REST, MUSCLE_TIRED,
-        NODE_GRIPPY, NODE_SLICK, ORGAN, OUTLINE, TOUCHDOWN,
+        BONE, BONE_SHINE, EYE, FALLEN, FORCE_GROUND, FORCE_MUSCLE, MUSCLE_ACTIVE, MUSCLE_REST,
+        MUSCLE_TIRED, NODE_GRIPPY, NODE_SLICK, ORGAN, OUTLINE, TOUCHDOWN,
     },
 };
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
@@ -83,6 +83,17 @@ pub(super) fn draw_creature(
     marks: &FrameMarks,
 ) {
     let position = |n: &Node| origin + Vec2::new(n.pos[0] * scale, -n.pos[1] * scale);
+    // The screen point a share `t` of the way along `bone`, from its node `a`
+    // to its node `b`.
+    let bone_point = |bone: &Bone, t: f32| {
+        let a = nodes[bone.a as usize].pos;
+        let b = nodes[bone.b as usize].pos;
+        origin
+            + Vec2::new(
+                (a[0] + (b[0] - a[0]) * t) * scale,
+                -(a[1] + (b[1] - a[1]) * t) * scale,
+            )
+    };
     let sphere = crate::assets::Art::Sphere.texture(p.ctx());
     for bone in &c.bones {
         let a = position(&nodes[bone.a as usize]);
@@ -96,21 +107,14 @@ pub(super) fn draw_creature(
             let lift = across * (if across.y > 0.0 { -1.0 } else { 1.0 }) * width * 0.22;
             p.line_segment(
                 [a + lift, b + lift],
-                Stroke::new((width * 0.28).max(1.0), crate::theme::scene::BONE_SHINE),
+                Stroke::new((width * 0.28).max(1.0), BONE_SHINE),
             );
         }
     }
     // An organ sits on its bone and is drawn as large as a node of the same
     // mass would be.
     for bone in c.bones.iter().filter(|b| b.organ_mass > 0.0) {
-        let a = nodes[bone.a as usize].pos;
-        let b = nodes[bone.b as usize].pos;
-        let t = bone.organ_at;
-        let center = origin
-            + Vec2::new(
-                (a[0] + (b[0] - a[0]) * t) * scale,
-                -(a[1] + (b[1] - a[1]) * t) * scale,
-            );
+        let center = bone_point(bone, bone.organ_at);
         let r = (0.04 * (bone.organ_mass / 0.1).sqrt() * scale).max(2.5);
         p.circle_filled(center, r + 1.5, OUTLINE);
         p.circle_filled(center, r, ORGAN);
@@ -121,19 +125,8 @@ pub(super) fn draw_creature(
         );
     }
     for (mi, m) in c.muscles.iter().enumerate() {
-        let bone_a = c.bones[m.bone_a as usize];
-        let bone_b = c.bones[m.bone_b as usize];
-        let point = |bone: crate::evolution::Bone, t: f32| {
-            let a = [nodes[bone.a as usize].pos[0], nodes[bone.a as usize].pos[1]];
-            let b = [nodes[bone.b as usize].pos[0], nodes[bone.b as usize].pos[1]];
-            origin
-                + Vec2::new(
-                    (a[0] + (b[0] - a[0]) * t) * scale,
-                    -(a[1] + (b[1] - a[1]) * t) * scale,
-                )
-        };
-        let a = point(bone_a, m.anchor_a);
-        let b = point(bone_b, m.anchor_b);
+        let a = bone_point(&c.bones[m.bone_a as usize], m.anchor_a);
+        let b = bone_point(&c.bones[m.bone_b as usize], m.anchor_b);
         // How far the waveform has pulled the muscle in: 0 at its longest
         // length and 1 at its shortest. A fallen creature's muscles are limp.
         let contraction = if marks.fallen {
