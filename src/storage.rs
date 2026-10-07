@@ -908,7 +908,8 @@ impl Experiment {
             }
         }
     }
-    /// Whether every body in the ring and the archive fits `cfg`'s limits.
+    /// Whether every body in the ring and in the global archive fits `cfg`'s
+    /// limits.
     fn bodies_fit(&self, cfg: &Config) -> bool {
         self.blocks
             .iter()
