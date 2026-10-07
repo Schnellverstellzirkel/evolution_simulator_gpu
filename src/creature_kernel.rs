@@ -25,8 +25,17 @@ pub struct GpuResult {
     /// Nodes grounded after the last step (f32 bits), for sensor touchdowns.
     pub ground_lo: f32,
     pub ground_hi: f32,
-    /// Seconds into the trial when the head tipped below its neck base, or 0
-    /// if the creature stayed upright. Fitness is the distance at the fall.
+    /// Seconds into the trial when it ended in a fall, or 0 if it did not.
+    /// The kernel ends a trial like a fall when
+    ///
+    /// - the head tips below its neck base,
+    /// - a joint breaks (`physics::JOINT_BREAK`),
+    /// - the head shakes past `physics::HEAD_SHAKE_LIMIT`, or
+    /// - the trial fails, because a node position is not finite or lies
+    ///   beyond 1e6 m.
+    ///
+    /// Fitness is the distance at that moment, or `evolution::FAILED` for a
+    /// failed trial.
     pub fall_time: f32,
     /// Mean head acceleration (m/s^2) over about `physics::HEAD_SHAKE_WINDOW`
     /// seconds, for the head shaking limit.
