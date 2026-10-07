@@ -83,7 +83,7 @@ fn joined(c: &Creature, x: usize, z: usize) -> bool {
     })
 }
 
-/// The muscle with `bone` as its `bone_a`, if it has an end on `bone`.
+/// The muscle with an end on `bone`, oriented with that end as `bone_a`.
 fn facing(m: &Muscle, bone: usize) -> Option<Muscle> {
     if m.bone_a as usize == bone {
         Some(*m)

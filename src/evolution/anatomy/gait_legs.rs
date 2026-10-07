@@ -59,12 +59,12 @@ fn bend(c: &Creature, upper: usize, lower: usize) -> f32 {
     (p[0] * q[1] - p[1] * q[0]).atan2(p[0] * q[0] + p[1] * q[1])
 }
 
-/// The angle turn (-pi to pi) that takes direction `from` to direction `to`.
+/// The rotation angle (-π to π) needed to turn direction `from` to direction `to`.
 fn angle_between(from: [f32; 2], to: [f32; 2]) -> f32 {
     (from[0] * to[1] - from[1] * to[0]).atan2(from[0] * to[0] + from[1] * to[1])
 }
 
-/// Whether every node is inside the region where nodes may start.
+/// Whether every node stays within the valid spawn region (x within ±extent, y within [0, extent]).
 fn inside(c: &Creature) -> bool {
     let extent = 2.0 * max_bone_length();
     c.nodes
@@ -72,8 +72,7 @@ fn inside(c: &Creature) -> bool {
         .all(|n| n.x.abs() <= extent && (0.0..=extent).contains(&n.y))
 }
 
-/// Moves a muscle's rhythm so its phase is `lead`, and its touchdown reset
-/// with it.
+/// Shifts a muscle's `phase` and `reset` by the same amount so its phase becomes `lead`.
 fn follow(m: &mut Muscle, lead: f32) {
     let shift = turn(m.phase, lead);
     m.phase = (m.phase + shift).rem_euclid(1.0);
@@ -521,11 +520,11 @@ pub(crate) fn grow_forward_foot(
     true
 }
 
-/// Re-cuts a leg of two or more bones in new proportions with the same total
-/// length: either long at the bottom (each bone 0.75 to 1.35 times as long as
-/// the one above, as in the running mammals, whose distal bones are long and
-/// light) or long at the top (the digging and kicking form). The nodes follow
-/// the directions of the bones, and the strokes of muscles keep their ratio.
+/// Re-cuts a leg in new proportions with the same total length: either long
+/// at the bottom (each bone 0.75 to 1.35 times the one above, as in cursorial
+/// mammals whose distal bones are long and light) or long at the top (for
+/// digging and kicking). The nodes follow the bone directions and the strokes
+/// of muscles keep their ratio.
 pub(crate) fn set_leg_proportions(
     c: &mut Creature,
     _cfg: &Config,
@@ -537,19 +536,21 @@ pub(crate) fn set_leg_proportions(
     };
     let n = leg.len();
     let distal = rng.unit() < 0.5;
-    let weight = |i: usize| {
+    let mut weights = Vec::with_capacity(n);
+    for i in 0..n {
         let t = i as f32 / (n - 1) as f32;
-        0.75 + 0.6 * if distal { t } else { 1.0 - t }
-    };
+        let w = 0.75 + 0.6 * if distal { t } else { 1.0 - t };
+        weights.push(w);
+    }
     let total: f32 = leg.iter().map(|&b| c.bones[b].rest_length).sum();
     let weighted: f32 = (0..n)
-        .map(|i| weight(i) * c.bones[leg[i]].rest_length)
+        .map(|i| weights[i] * c.bones[leg[i]].rest_length)
         .sum();
     let limit = max_bone_length();
     let factors: Vec<f32> = (0..n)
         .map(|i| {
             let length = c.bones[leg[i]].rest_length;
-            (weight(i) * total / weighted).clamp(0.03 / length, (limit / length).max(0.03 / length))
+            (weights[i] * total / weighted).clamp(0.03 / length, (limit / length).max(0.03 / length))
         })
         .collect();
     if factors.iter().all(|f| (f - 1.0).abs() < 0.08) {

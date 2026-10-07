@@ -339,13 +339,15 @@ pub(crate) fn organs_to_trunk(
     rng: &mut Rng,
     _cx: &Context,
 ) -> bool {
-    let sources: BoneIds = feet_legs(c)
+    let legs = feet_legs(c);
+    let sources: BoneIds = legs
         .iter()
         .flat_map(|l| l.iter().copied())
         .filter(|&b| c.bones[b].organ_mass > 0.0)
         .collect();
     let center = organ_center(&c.nodes);
-    let trunk: BoneIds = trunk_bones(c)
+    let trunk: BoneIds = (0..c.bones.len())
+        .filter(|b| !legs.iter().any(|l| l.contains(b)))
         .into_iter()
         .filter(|&b| organ_range(&c.bones[b], &c.nodes, center).is_some())
         .collect();

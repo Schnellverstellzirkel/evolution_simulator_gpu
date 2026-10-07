@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 mod anatomy;
 
+/// Sentinel value for failed evaluation scores.
 pub const FAILED: f32 = -1.0e20;
 /// Longest bone (m), from `physics::limits()`.
 pub fn max_bone_length() -> f32 {
@@ -184,16 +185,25 @@ fn change_organ(creature: &mut Creature, rng: &mut Rng) -> bool {
     Clone, Copy, Debug, Serialize, Deserialize, PartialEq, bytemuck::Pod, bytemuck::Zeroable,
 )]
 pub struct Muscle {
+    /// Bone index this muscle attaches to.
     pub bone_a: u32,
+    /// Bone index this muscle attaches to.
     pub bone_b: u32,
     /// Attachment positions measured from each bone's `a` endpoint.
     pub anchor_a: f32,
+    /// Attachment position measured from bone_b's `a` endpoint.
     pub anchor_b: f32,
+    /// Shortest contraction length (m).
     pub short: f32,
+    /// Longest extension length (m).
     pub long: f32,
+    /// Cycle period (s).
     pub period: f32,
+    /// Rhythm start phase, 0 to 1.
     pub phase: f32,
+    /// Fraction of cycle the muscle is active, 0 to 1.
     pub duty: f32,
+    /// Target force as a multiplier of the muscle's mass times gravity.
     pub stiffness: f32,
     /// Which of the four attachment endpoints (bone_a.a, bone_a.b, bone_b.a,
     /// bone_b.b) senses touchdowns, or `NO_SENSOR`.
@@ -847,6 +857,8 @@ impl Population {
         Ok(())
     }
 }
+/// Reorders bones as a parent-first tree walk from node 0, adjusting muscle attachments.
+/// Returns false if the skeleton is invalid (cycles, off-tree nodes, disconnected).
 pub fn canonicalize_bone_order(creature: &mut Creature) -> bool {
     let node_count = creature.nodes.len();
     if !(1..=MAX_NODES).contains(&node_count) || creature.bones.len() != node_count - 1 {
@@ -1385,6 +1397,7 @@ fn collect_parallel(count: usize, make: impl Fn(usize) -> Creature + Sync) -> Po
     }
     out
 }
+/// Initial population of `cfg.population` random creatures.
 pub fn create(cfg: &Config) -> Result<Population> {
     cfg.validate()?;
     Ok(collect_parallel(cfg.population, |i| initial(cfg, i)))
@@ -1412,8 +1425,11 @@ pub fn slot_of_id(id: u64) -> usize {
 
 #[derive(Clone, Copy, Debug)]
 pub struct CandidatePlan {
+    /// Search operator that breeds this child.
     pub emitter: Emitter,
+    /// Elite index of the primary parent in `archive`.
     pub parent: Option<usize>,
+    /// CMA-ES emitter index for this child.
     pub cma: Option<usize>,
     /// Second archive parent with the same body plan, for crossover.
     pub mate: Option<usize>,
@@ -2456,6 +2472,7 @@ fn phase_shift_group(creature: &mut Creature, rng: &mut Rng) -> bool {
     }
     changed
 }
+/// Sorted indices by descending score, with ties broken by ascending index.
 pub fn ranking(scores: &[f32]) -> Vec<usize> {
     let mut ranks: Vec<_> = (0..scores.len()).collect();
     ranks.par_sort_unstable_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));

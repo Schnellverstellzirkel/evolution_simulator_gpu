@@ -72,7 +72,7 @@ fn isoline_timing_step(c: &mut Creature, _cfg: &Config, rng: &mut Rng, cx: &Cont
     changed
 }
 
-/// Node sizes and grips take half of the way to the donor's.
+/// Node sizes and friction move halfway to the donor's.
 fn donor_surfaces(c: &mut Creature, cfg: &Config, _rng: &mut Rng, cx: &Context) -> bool {
     let Some(d) = cx.donor() else { return false };
     let n = c.nodes.len().min(d.nodes.len());

@@ -1,4 +1,4 @@
-//! Helpers the idea files (`idea_*.rs`) and `gait_bio.rs` share.
+//! Helpers that the idea files (`idea_*.rs`) and `gait_bio.rs` share.
 use super::limbs::clamped;
 use super::limbs::pick;
 use super::rhythm::leaf_limbs;
@@ -111,14 +111,11 @@ pub(super) fn coin(rng: &mut Rng) -> bool {
 /// with it. False when the factor is within 2% of 1 after the limits.
 pub(super) fn scale_branch(c: &mut Creature, root: usize, factor: f32) -> bool {
     let bones = branch(c, root);
-    let low = bones
-        .iter()
-        .map(|&b| 0.03 / c.bones[b].rest_length)
-        .fold(0.0, f32::max);
-    let high = bones
-        .iter()
-        .map(|&b| max_bone_length() / c.bones[b].rest_length)
-        .fold(f32::MAX, f32::min);
+    let (low, high) = bones.iter().fold((0.0, f32::MAX), |(low, high), &b| {
+        let low_ratio = 0.03 / c.bones[b].rest_length;
+        let high_ratio = max_bone_length() / c.bones[b].rest_length;
+        (low.max(low_ratio), high.min(high_ratio))
+    });
     let factor = factor.clamp(low, high.max(low));
     if (factor - 1.0).abs() < 0.02 {
         return false;

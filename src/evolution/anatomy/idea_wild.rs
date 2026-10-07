@@ -71,8 +71,7 @@ fn flip_joint_ranges(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Conte
     changed
 }
 
-/// Shifts the nodes above the median height sideways in proportion to their
-/// height above it: a lean of the upper body.
+/// Shifts nodes above the median height sideways, scaled by their height above it.
 fn lean(c: &mut Creature, by: f32) -> bool {
     let mut ys: Vec<f32> = (1..c.nodes.len()).map(|n| c.nodes[n].y).collect();
     if ys.len() < 3 {

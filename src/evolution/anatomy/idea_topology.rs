@@ -123,7 +123,7 @@ fn forefoot_probe(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) 
         .map(|&m| c.muscles[m])
         .or_else(|| c.muscles.first().copied());
     let mut m = new_muscle(c, toe, tip, (0.8, 0.5), template.as_ref(), rng);
-    // The toe's far end senses the landing (bone_a's second endpoint).
+    // The toe's far end senses the landing.
     m.sensor = 1;
     m.reset = (m.phase + 0.25).rem_euclid(1.0);
     c.muscles.push(m);

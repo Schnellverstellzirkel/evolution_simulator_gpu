@@ -107,6 +107,7 @@ fn light_trunk(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> 
     scale_nodes(c, cfg, &inner_nodes(c), by)
 }
 
+/// Scales the diameter of nodes by a factor, clamped to configuration limits.
 fn scale_nodes(c: &mut Creature, cfg: &Config, nodes: &[usize], by: f32) -> bool {
     let mut changed = false;
     for &n in nodes {
@@ -201,8 +202,11 @@ fn spread_nodes(c: &mut Creature, factor: f32) -> bool {
         return false;
     }
     let n = nodes.len() as f32;
-    let mean_d = nodes.iter().map(|&i| c.nodes[i].diameter).sum::<f32>() / n;
-    let mean_f = nodes.iter().map(|&i| c.nodes[i].friction).sum::<f32>() / n;
+    let (sum_d, sum_f) = nodes.iter().fold((0.0, 0.0), |(d, f), &i| {
+        (d + c.nodes[i].diameter, f + c.nodes[i].friction)
+    });
+    let mean_d = sum_d / n;
+    let mean_f = sum_f / n;
     let mut changed = false;
     for &i in &nodes {
         let d = mean_d + factor * (c.nodes[i].diameter - mean_d);

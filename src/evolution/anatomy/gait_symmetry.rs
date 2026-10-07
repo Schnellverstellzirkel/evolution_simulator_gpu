@@ -43,12 +43,12 @@ pub(super) const OPS: &[(&str, Operator)] = &[
 
 // Helpers.
 
-/// How far a leg's tip lies in front of its hip (negative: behind).
+/// The horizontal x distance from a leg's hip to its tip (negative: behind the hip).
 fn reach_x(c: &Creature, limb: &[usize]) -> f32 {
     tip_x(c, limb) - c.nodes[hip(c, limb)].x
 }
 
-/// Whether two legs point to opposite sides, so one is the other's mirror image.
+/// Whether two legs point to opposite sides (one reaches forward, one backward).
 fn opposed(c: &Creature, x: &[usize], y: &[usize]) -> bool {
     reach_x(c, x) * reach_x(c, y) < -1.0e-4
 }
@@ -60,8 +60,8 @@ fn best_leg(c: &Creature, legs: &[BoneIds]) -> Option<usize> {
     (limb_drive(c, &legs[best]) > 0.0).then_some(best)
 }
 
-/// Whether leg `y` already is leg `x` (or its mirror image with `mirror`):
-/// same node offsets from the hip and the same joint ranges.
+/// Whether leg `y` has the same structure as leg `x`, with optional mirroring:
+/// matching node offsets from the hip and matching joint ranges.
 fn same_pose(c: &Creature, x: &[usize], y: &[usize], mirror: bool) -> bool {
     if x.len() != y.len() {
         return false;
@@ -87,7 +87,7 @@ fn same_pose(c: &Creature, x: &[usize], y: &[usize], mirror: bool) -> bool {
     })
 }
 
-/// One leg to replace by a copy of another.
+/// Instructions to replace a target leg with a copy of a source leg.
 #[derive(Clone, Copy)]
 struct Job {
     source: usize,
@@ -147,7 +147,7 @@ fn replant(c: &mut Creature, cfg: &Config, jobs: &[Job], rng: &mut Rng) -> bool 
     true
 }
 
-/// The x range of the body and its middle.
+/// The x middle, span, and left boundary of the body's nodes.
 fn extent(c: &Creature) -> (f32, f32, f32) {
     let (lo, hi) = c.nodes.iter().fold((f32::MAX, f32::MIN), |(lo, hi), n| {
         (lo.min(n.x), hi.max(n.x))
@@ -389,7 +389,7 @@ pub(crate) fn repeat_segment_mirrored(
     repeat_one(c, cfg, rng, phase, true)
 }
 
-/// A leg's reach: the sum of its bone lengths.
+/// The total length of a leg's bones.
 fn reach(c: &Creature, limb: &[usize]) -> f32 {
     limb.iter().map(|&b| c.bones[b].rest_length).sum()
 }
@@ -437,8 +437,8 @@ pub(crate) fn equalize_leg_reach(
     changed
 }
 
-/// A leg as lengths and turning angles: bone `k`'s length, and its angle
-/// from straight down relative to the bone before it.
+/// A leg as bone lengths and turning angles: each bone's length and its
+/// angle relative to the direction of the bone before it.
 fn polar(c: &Creature, limb: &[usize]) -> (Bounded<f32, MAX_NODES>, Bounded<f32, MAX_NODES>) {
     let (mut lengths, mut turns) = (Bounded::new(), Bounded::new());
     let mut before = 0.0f32;
@@ -546,12 +546,10 @@ pub(crate) fn average_leg_pair(
     true
 }
 
-/// Gives the legs of the same bone count as the best leg its muscle program
-/// (period, duty, stiffness, tendon, touchdown sensor and stroke ratio of
-/// each muscle, matched by the bones it joins), each leg's phase shifted from
-/// the best leg's by `shift(rank)`, where rank counts legs from the back of
-/// the body and is zero for the best leg itself. Returns whether anything
-/// changed.
+/// Copies the best leg's muscle program (period, duty, stiffness, tendon,
+/// sensor, stroke) to every leg with the same bone count, each shifted in phase
+/// by `shift(rank)`, where rank counts from the back and is zero for the best.
+/// Returns whether anything changed.
 fn share_program(c: &mut Creature, shift: impl Fn(i32, usize) -> Option<f32>) -> bool {
     let legs = leaf_limbs(c);
     let Some(best) = best_leg(c, &legs) else {
