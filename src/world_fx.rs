@@ -1,11 +1,10 @@
 //! Paints the replay view's world, an overcast industrial wasteland, and the
 //! look of each environment effect in it. Every effect is a faint overlay or
 //! a few thin shapes in fixed scene colors, so the creature, the meter marks
-//! and the text stay readable in both themes. Animation follows the replay
-//! clock passed in as `time`, so a paused replay holds still and no shape
-//! needs per-frame state. `ui/viewport.rs` calls these functions to paint the
-//! replay scene, and `ui/race.rs` calls `backdrop` and `ground_body` for each
-//! race lane.
+//! and the text stay readable. Animation follows the replay clock passed in
+//! as `time`, so a paused replay holds still and no shape needs per-frame
+//! state. `ui/viewport.rs` calls these functions to paint the replay scene,
+//! and `ui/race.rs` calls `backdrop` and `ground_body` for each race lane.
 use crate::{assets::Art, config::Config, environment::EFFECTS, theme::hash};
 use eframe::egui::{
     self, Color32, Painter, Pos2, Rect, Stroke, Vec2,
