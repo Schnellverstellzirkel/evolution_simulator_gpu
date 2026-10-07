@@ -1,22 +1,20 @@
-//! Gait operators: posture: the trunk carried clear of the ground, feet under the load.
+//! Gait operators for posture: they carry the trunk clear of the ground and put
+//! the feet under the load. The operators of this file share one pick slot
+//! (`GAIT_FILES` in `mod.rs`) and are compound, so each is a whole change to
+//! the body and its child gets no parameter noise.
 //!
-//! The operators of this file share one pick slot and are compound: each is a
-//! whole, coherent change to the body, and its child gets no parameter noise.
+//! The sources are Alexander (1977 and after: straight, vertical legs cut the
+//! muscle force needed to stand), Full and Koditschek (1999: a spring-mass body
+//! over legs that stand under the centre of mass), Sims (1994) and Lipson and
+//! Pollack (2000: evolved walkers had to learn to stand before they walked),
+//! Cheney et al. (2013: the bodies that moved far were low and regular) and
+//! Hildebrand (limb loading: heavy organs in the trunk and light feet, because
+//! a light foot swings fast and costs little to move).
 //!
-//! The sources are Alexander (1977 and after: mammals carry the body on
-//! straight, vertical legs, which cuts the muscle force needed to stand and
-//! lets the duty factor fall as speed rises), Full and Koditschek (1999,
-//! templates and anchors: a spring-mass body over legs that stand under the
-//! centre of mass), Sims (1994) and Lipson and Pollack (2000, whose evolved
-//! walkers had to learn to stand before they walked) and Cheney et al. (2013,
-//! where the bodies that moved far were low and regular). Mammals also
-//! carry the heavy organs in the trunk and keep the feet light (Hildebrand's
-//! limb loading), because a light foot swings fast and costs little to move.
-//!
-//! Joint angles are measured from the starting pose, so an operator that turns
-//! a limb in the starting pose also shifts the joint's range by the same angle
-//! (`pose_turn`). The stops stay where they were in the world and only the
-//! pose the creature starts in changes.
+//! A joint's range is measured from the starting pose, so `pose_turn` shifts it
+//! by the angle it turns the pose and the stops stay where they were in the
+//! world.
+
 use super::junctions::{keep_strokes, spans, turn_branch};
 use super::limbs::clamped;
 use super::rhythm::{foot, hip, leaf_limbs};
@@ -39,12 +37,13 @@ fn wrap(mut a: f32) -> f32 {
     a
 }
 
-/// One of `items`, or none when empty.
+/// One of `items` at random, or none when `items` is empty. It always takes one
+/// draw from `rng`, even when `items` is empty. `limbs::pick` takes none then.
 fn choose<T: Copy>(items: &[T], rng: &mut Rng) -> Option<T> {
     items.get(rng.index(items.len().max(1))).copied()
 }
 
-/// The direction of bone `b` in the pose, counterclockwise from +x.
+/// The direction of bone `b` in the starting pose, counterclockwise from +x.
 fn heading(c: &Creature, b: usize) -> f32 {
     let (p, q) = (
         c.nodes[c.bones[b].a as usize],
@@ -53,13 +52,18 @@ fn heading(c: &Creature, b: usize) -> f32 {
     (q.y - p.y).atan2(q.x - p.x)
 }
 
-/// Legs with a foot: leaf limbs of at least two bones.
+/// Legs with a foot: leaf limbs of at least two bones, each as a list of its
+/// bones from the hip down.
 fn feet_legs(c: &Creature) -> Vec<BoneIds> {
     leaf_limbs(c).into_iter().filter(|l| l.len() >= 2).collect()
 }
 
-/// Turns the branch of bone `j` by `t` in the starting pose and moves the
-/// joint's range by the same angle, so its stops stay where they were.
+/// Turns the branch of bone `j` by `t` radians, counterclockwise, in the
+/// starting pose and moves the joint's range by the same angle, so its stops
+/// stay where they were. Then `Bone::clamp_range` keeps the range valid: if
+/// the turn puts the new pose outside the old range, the nearer stop moves onto
+/// the pose. The body is lifted if a node would end below the ground
+/// (`turn_branch`).
 fn pose_turn(c: &mut Creature, j: usize, t: f32) {
     turn_branch(c, j, t);
     let bone = &mut c.bones[j];
@@ -97,7 +101,9 @@ fn scale_leg(c: &mut Creature, leg: &[usize], k: f32) -> bool {
     true
 }
 
-/// Mass-weighted centre of the body in the starting pose: nodes and organs.
+/// Mass-weighted centre of the body in the starting pose: all nodes, the head
+/// too, and the organs. Bone and muscle mass is left out. `organ_center` is
+/// another point: it skips the head and the organs.
 fn centre_of_mass(c: &Creature) -> [f32; 2] {
     let mut sum = [0.0f32; 2];
     let mut mass = 0.0f32;
@@ -126,7 +132,8 @@ fn trunk_bones(c: &Creature) -> BoneIds {
 
 /// Adds `amount` of organ mass to bone `to`. A new organ sits at `at`. An
 /// organ already there moves to the mass-weighted mean of its place and `at`,
-/// so the pooled mass keeps its centre.
+/// so the pooled mass keeps its centre. The caller checks that the bone has
+/// room for `amount` (`MAX_ORGAN_MASS`).
 fn pool_organ(c: &mut Creature, to: usize, amount: f32, at: f32) {
     let bone = &mut c.bones[to];
     bone.organ_at = if bone.organ_mass > 0.0 {
@@ -137,8 +144,10 @@ fn pool_organ(c: &mut Creature, to: usize, amount: f32, at: f32) {
     bone.organ_mass += amount;
 }
 
-/// Scales every leg by `k` (all together, so the legs stay level) and puts
-/// the body back on the ground.
+/// Scales every leg by `k` (all together, so the legs stay level), puts the
+/// body back on the ground and keeps the muscle strokes in proportion
+/// (`keep_strokes`). A leg that `scale_leg` refuses stays as it is. Returns
+/// false when no leg scaled.
 fn scale_all_legs(c: &mut Creature, k: f32) -> bool {
     let legs = feet_legs(c);
     let before = spans(c);
