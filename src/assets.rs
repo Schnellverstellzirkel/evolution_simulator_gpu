@@ -42,7 +42,7 @@ pub enum Art {
     Dirt,
     /// Heavy brown rust, for the walls of pits.
     Rust,
-    /// A lit sphere in white, tinted per node.
+    /// A lit grey sphere, tinted per node.
     Sphere,
     /// A soft round glow in white.
     Glow,
