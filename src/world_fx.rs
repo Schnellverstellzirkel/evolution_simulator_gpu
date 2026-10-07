@@ -772,10 +772,11 @@ pub fn backdrop(
     }
 }
 
-/// Weather over the scene, drawn after the creature: rain when the ground
-/// is wet or muddy, blowing dust in a drought, a heat wave or a gale,
-/// cold mist over ice, and drifting ash in an earthquake. Each is a few
-/// dozen thin shapes on the replay clock.
+/// Weather over the scene, drawn after the creature: rain when the ground is
+/// wet or muddy or there is water, blowing dust in a drought, a heat wave or
+/// wind, cold mist over ice, and drifting ash in an earthquake. The rain, dust
+/// and ash are many thin shapes on the replay clock. `camera` is the camera's
+/// x in pixels, which shifts the rain and the dust.
 pub fn weather(painter: &Painter, rect: Rect, cfg: &Config, time: f32, camera: f32) {
     let (_, slip) = grip(cfg);
     let wet = if slip > 0.3 && slip < 0.9 { slip } else { 0.0 };
@@ -861,11 +862,13 @@ pub fn weather(painter: &Painter, rect: Rect, cfg: &Config, time: f32, camera: f
     }
 }
 
-/// The ground's body, textured like the street or the embankment of the
-/// world: cobbles on top of dark concrete in the city, packed dirt in a
-/// drought, sludge in mud, a wet canal wall by the water. `line` is the
-/// surface polyline, `meters` the meter under each of its points, and
-/// `ppm` the zoom.
+/// The ground's body and crust, textured like the street of the world:
+/// cobbles over dark concrete in the city, sand over dirt in a drought or a
+/// heat wave, sludge in mud, and plain dark concrete when there is water. Mud
+/// wins over dry ground, and dry ground over water. `line` is the surface
+/// polyline in screen points, `meters` the world x in meters under each of its
+/// points, and `ppm` the zoom in pixels per meter. The body fills down to the
+/// bottom of `rect`. A line of fewer than two points paints nothing.
 pub fn ground_body(
     painter: &Painter,
     rect: Rect,
@@ -916,8 +919,8 @@ pub fn ground_body(
         }
     }
     painter.add(egui::Shape::Mesh(mesh.into()));
-    // The crust: the street's surface seen at a grazing angle, a band a few
-    // centimeters thick squeezed from its texture.
+    // The crust: the street's surface seen at a grazing angle, a band 0.16 m
+    // thick, kept between 8 and 26 pixels, squeezed from its texture.
     let thick = (0.16 * ppm).clamp(8.0, 26.0);
     let mut mesh = Mesh::with_texture(crust.texture(ctx));
     for (i, (p, m)) in line.iter().zip(meters).enumerate() {
@@ -969,8 +972,9 @@ pub fn ground_body(
     let _ = gradient;
 }
 
-/// A convex polygon filled with a tiled texture, `tile` points per repeat,
-/// the texture fixed to the polygon's first point.
+/// A convex polygon filled with the texture `art`, tinted by `tint`, `tile`
+/// points per repeat, with the texture fixed to the polygon's first point.
+/// Fewer than three points paint nothing.
 fn textured_fan(painter: &Painter, pts: &[Pos2], art: Art, tile: f32, tint: Color32) {
     if pts.len() < 3 {
         return;
@@ -990,7 +994,8 @@ fn textured_fan(painter: &Painter, pts: &[Pos2], art: Art, tile: f32, tint: Colo
     painter.add(egui::Shape::Mesh(mesh.into()));
 }
 
-/// Hazard stripes, amber and black, filling `rect`.
+/// Hazard stripes, amber and black, filling `rect`. A `rect` under 2 points
+/// wide or tall paints nothing.
 fn hazard(painter: &Painter, rect: Rect) {
     if rect.width() < 2.0 || rect.height() < 2.0 {
         return;
@@ -1015,9 +1020,11 @@ fn hazard(painter: &Painter, rect: Rect) {
 }
 
 /// The ground's built parts: dark pits with hazard marks on their lips, and
-/// concrete blocks with a striped top for the hurdles. `at` maps meters to
-/// the screen. `height(x, with_hurdles)` is the ground height at `x` meters,
-/// with or without the hurdles. `view` is the range of meters on screen.
+/// concrete blocks with a striped top for the hurdles. At the highest hurdle
+/// level a block is a dark plate wall with a cold light along it instead.
+/// `at(x, y)` maps a point in meters to the screen. `height(x, with_hurdles)`
+/// is the ground height at `x` meters, with or without the hurdles. `view` is
+/// the range of meters on screen.
 pub fn structures(
     painter: &Painter,
     rect: Rect,
@@ -1063,6 +1070,9 @@ pub fn structures(
             // marker on each lip.
             let wall = (0.12 * ppm).clamp(4.0, 14.0);
             for (x0, x1) in [(lip_a.x, lip_a.x + wall), (lip_b.x - wall, lip_b.x)] {
+                // The left wall hangs from the left lip's height and the right
+                // wall from the right lip's. A pit under one and a half walls
+                // wide on screen uses the right lip for both.
                 let top = if x0 < lip_b.x - wall * 1.5 {
                     lip_a.y
                 } else {
@@ -1107,8 +1117,8 @@ pub fn structures(
                 continue;
             }
             let (tl, tr) = (center - half, center + half);
-            // A pit under the hurdle breaks its block apart; the ground line
-            // alone shows it then.
+            // A pit under the hurdle breaks its block apart, so only the
+            // ground line shows the hurdle then.
             if [s, tl, center, tr, e]
                 .iter()
                 .any(|&x| crate::physics::gaps(x, cfg.gaps).0 != 0.0)
@@ -1125,8 +1135,8 @@ pub fn structures(
                 at(tl, height(tl, false)),
                 at(s, height(s, false)),
             ];
-            // Concrete barriers; the highest level is a Combine wall of
-            // dark plate with a cold light along it.
+            // Concrete blocks. The highest level is a Combine wall of dark
+            // plate with a cold light along it.
             let combine = amount(cfg, "Hurdles") >= 1.0;
             let art = if combine {
                 Art::CombinePlate
