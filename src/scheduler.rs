@@ -324,9 +324,15 @@ impl Scheduler {
         }
     }
 
-    /// Opens the named primary GPU and the other GPUs listed in
-    /// `EVOLUTION_DEVICES` (off by default; `primary` or `off` for none). The
-    /// game needs the primary GPU: without it this fails.
+    /// Opens the GPU named `primary` and the secondary GPUs that
+    /// `EVOLUTION_DEVICES` lists. It lists none by default. The game needs the
+    /// primary GPU, so this fails when it does not open. A secondary GPU that
+    /// does not open is reported and skipped, and so is one whose name matches
+    /// the primary GPU's. Only the primary GPU records replays and can be
+    /// reopened after a failure. Every engine is asked for bodies of up to 64
+    /// nodes, and it caps that at `kernel::MAX_NODES`.
+    /// `EVOLUTION_SIMULATE_GPU_LOSS` sets the developer hook of
+    /// `simulate_gpu_loss_after`.
     pub fn new(primary: &str) -> Result<Self> {
         let gpu = engine::gpu_engine(primary, 64).with_context(|| {
             format!(
@@ -390,7 +396,9 @@ impl Scheduler {
     }
 
     /// Queues creatures `members` of `population` (all of them for `None`)
-    /// for one unit with `config`. Their results come back with `tag`.
+    /// for one unit of `trial` with `config`. Their results come back with
+    /// `tag`. A piece with no creatures is not queued, so nothing comes back
+    /// for its tag.
     pub fn queue(
         &mut self,
         tag: u64,
@@ -425,7 +433,9 @@ impl Scheduler {
 
     /// Gives `config` to queued standard work that has not reached an engine
     /// and whose physics differs from it (a world change), and returns the
-    /// tags of that work: it now runs in the new world.
+    /// tags of that work. It now runs in the new world. Work of a wild island
+    /// (`ring::WILD` in its tag) keeps its own world, and queued confirmation
+    /// work keeps its config.
     pub fn retarget(&mut self, config: &Arc<Config>) -> Vec<u64> {
         let mut tags = Vec::new();
         for work in &mut self.work {
@@ -445,7 +455,8 @@ impl Scheduler {
         self.session += 1;
     }
 
-    /// Total GPU memory allocated across all devices.
+    /// Bytes of device and host memory the engines hold, buffers kept for
+    /// reuse included.
     pub fn allocated_bytes(&self) -> u64 {
         self.devices
             .iter()
@@ -454,7 +465,11 @@ impl Scheduler {
     }
 
     /// Hands waiting work to every engine with a free slot, confirmations
-    /// first.
+    /// first. A piece of work goes only to an engine that can hold its largest
+    /// body, and nothing goes out while the scheduler is suspended. A
+    /// submission that fails marks its device failed, and `collect` handles
+    /// the failure, so this call returns no error. Every call also samples the
+    /// idle time of each device.
     pub fn pump(&mut self) -> Result<()> {
         let now = Instant::now();
         if self.may_submit() {
@@ -484,7 +499,8 @@ impl Scheduler {
                         break;
                     };
                     if let Err(work) = self.submit(index, work) {
-                        // The work waits for another engine.
+                        // The work goes back to the front of its queue and
+                        // waits for an engine.
                         match work.trial {
                             Trial::Confirm => self.confirms.push_front(*work),
                             Trial::Standard => self.work.push_front(*work),
@@ -500,8 +516,11 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Submits `work` to device `index` as one unit. On failure the device
-    /// is marked failed and the work comes back.
+    /// Submits `work` to device `index` as one unit. A piece that covers its
+    /// whole population shares it with the engine. Otherwise the members are
+    /// copied into a population of their own, in member order. A submission
+    /// that works adds its time to `packing_seconds`. On failure the device is
+    /// marked failed and the work comes back.
     fn submit(&mut self, index: usize, work: Work) -> std::result::Result<(), Box<Work>> {
         let started = Instant::now();
         let (population, members) = match &work.members {
@@ -541,6 +560,12 @@ impl Scheduler {
     }
 
     /// Returns finished work, waiting up to `timeout` when nothing is ready.
+    /// It does not wait when no engine holds work. Each finished unit is
+    /// matched to its queued unit by ticket, and a result with an unknown
+    /// ticket or the wrong number of creatures is an error. The results of a
+    /// unit from an older session are dropped. A failed engine is reopened
+    /// here (`retire_failed`). When a GPU stays closed, the results that are
+    /// ready come back first and the error comes with the next call.
     pub fn collect(&mut self, timeout: Duration) -> Result<Vec<Done>> {
         let mut out = Vec::new();
         let deadline = Instant::now() + timeout;
@@ -559,6 +584,8 @@ impl Scheduler {
                         Ok(None) => break,
                         Ok(Some(done)) => {
                             self.collected_units += 1;
+                            // A finished unit shows the GPU works, so the next
+                            // recovery starts with the first wait again.
                             device.recoveries = 0;
                             // Engines with several queues finish units in any order.
                             let position = device
@@ -602,6 +629,7 @@ impl Scheduler {
                                     );
                                 }
                             }
+                            // Results of a unit from before a reset are dropped.
                             if unit.session != self.session {
                                 continue;
                             }
@@ -656,7 +684,7 @@ impl Scheduler {
 
     /// Handles every engine that reported a failure since the last pass. A
     /// failed GPU is reopened and gets its unfinished units again. A GPU that
-    /// does not open again is terminal.
+    /// does not open again is terminal, and its failure is the error.
     fn retire_failed(&mut self) -> Result<()> {
         for index in 0..self.devices.len() {
             if self.devices[index].failure.is_some() && !self.retire(index) {
@@ -671,6 +699,8 @@ impl Scheduler {
     }
 
     /// Reopens one failed device. Returns false when the failure is terminal.
+    /// It is terminal if the device has no way to reopen or if `recover` could
+    /// not reopen it. In the second case the failure says so.
     fn retire(&mut self, index: usize) -> bool {
         let reason = self.devices[index]
             .failure
@@ -690,8 +720,8 @@ impl Scheduler {
         false
     }
 
-    /// Developer hook: the GPU fails once, after `units` units of results were
-    /// collected (`EVOLUTION_SIMULATE_GPU_LOSS` sets it at start).
+    /// Developer hook: the GPU fails once, after `units` more units of results
+    /// are collected (`EVOLUTION_SIMULATE_GPU_LOSS` sets it at start).
     pub fn simulate_gpu_loss_after(&mut self, units: u64) {
         self.simulate_loss_after = Some(self.collected_units + units);
     }
@@ -704,8 +734,11 @@ impl Scheduler {
     /// Opens a failed GPU again: the broken engine is dropped, the scheduler
     /// waits (a little longer after each failed attempt), opens a new engine
     /// and submits the unfinished units again with their exact inputs, so
-    /// they give the same results. Returns false when every attempt failed;
-    /// the units stay queued.
+    /// they give the same results. The waits come from `Reopen::backoff` and
+    /// block the calling thread. They start at the place that `recoveries`
+    /// gives. A GPU that was reopened before and finished no unit since starts
+    /// at a longer wait, and one that used every attempt is not reopened.
+    /// Returns false when no attempt worked. The units then stay queued.
     fn recover(&mut self, index: usize, reason: &str) -> bool {
         let Some(mut reopen) = self.devices[index].reopen.take() else {
             return false;
@@ -713,6 +746,7 @@ impl Scheduler {
         let units: Vec<QueuedUnit> = self.devices[index].queued.drain(..).collect();
         self.devices[index].engine = Box::new(RetiredEngine);
         let total = reopen.backoff.len();
+        // Skip the waits that earlier recoveries used, until a unit finishes.
         let first = self.devices[index].recoveries.min(total);
         for attempt in first..total {
             self.notices.push(format!(
@@ -768,9 +802,9 @@ impl Scheduler {
     }
 
     /// Evaluates `indices` of `pop` with one standard trial each at `cfg`
-    /// and returns the metrics in the same order. Results of other work
-    /// that finishes meanwhile are dropped, so call this on an idle
-    /// scheduler.
+    /// and returns the metrics in the same order. It blocks until every piece
+    /// of work is back. Results of other work that finishes meanwhile are
+    /// dropped, so call this on an idle scheduler.
     pub fn evaluate(
         &mut self,
         pop: &Population,
