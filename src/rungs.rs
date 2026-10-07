@@ -479,29 +479,38 @@ impl Judged {
 }
 
 /// The audit lane's state: the rows of the generation in progress, the
-/// window of earlier generations, the breakers, and the last report. The
-/// window and the breakers are saved.
+/// window of earlier generations, the breakers, the judgments of the fitted
+/// rules, and the last report. The window, the breakers and the judgments are
+/// saved.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Audit {
+    /// The last `WINDOW` generations of audit rows, oldest first.
     window: VecDeque<GenAudit>,
+    /// The breaker of each cadence band, for each rung.
     breakers: [[Breaker; BANDS]; RUNGS],
-    /// Per rung and generation, what the rule fitted before that generation
-    /// would have stopped among the audit creatures alive at the rung and not
-    /// exempt: the two counts of `Judged`, packed into the two words (the
-    /// layout of the save is kept; an entry of an older save reads as its
-    /// entrant counts, as it was written).
+    /// Per rung, the judgments of the last `JUDGED` generations, oldest first:
+    /// what the rule fitted before each generation would have stopped among
+    /// its audit creatures that were alive at the rung and not exempt. Each
+    /// entry is a `Judged` packed into two words (`Judged::pack`). The layout
+    /// of the save is kept, and an entry of an older save reads as its entrant
+    /// counts, as it was written.
     judged: [VecDeque<(u32, u32)>; RUNGS],
+    /// The audit rows of the generation in progress.
     #[serde(skip)]
     rows: Vec<AuditRow>,
+    /// The counts of the generation in progress, for its report.
     #[serde(skip)]
     tally: Report,
+    /// The report of the last generation boundary.
     #[serde(skip)]
     last: Report,
 }
 
 impl Audit {
-    /// One absorbed block's standard trials: steps, stops and audit rows are
-    /// the caller's to count with `note` and `record`.
+    /// Counts one standard trial for the generation's report: the trial, its
+    /// steps and, when `screened` says it stopped early, the rung or the 5 s
+    /// screen that stopped it. The caller files the row of an audit creature
+    /// with `record`.
     pub fn note(&mut self, trace: &RungTrace, screened: bool) {
         self.tally.creatures += 1;
         self.tally.steps += u64::from(trace.steps());
@@ -513,13 +522,16 @@ impl Audit {
             }
         }
     }
+    /// Files the row of an audit creature for the next boundary.
     pub fn record(&mut self, row: AuditRow) {
         self.rows.push(row);
     }
+    /// The report of the last generation boundary.
     pub fn last(&self) -> &Report {
         &self.last
     }
-    /// Forgets everything measured in a world that is gone.
+    /// Forgets everything measured in a world that is gone, except the last
+    /// report.
     pub fn clear(&mut self) {
         let last = std::mem::take(&mut self.last);
         *self = Self::default();
@@ -530,10 +542,12 @@ impl Audit {
         self.window.iter().map(|g| g.rows).sum()
     }
 
-    /// The generation boundary: judges the rules in force on the generation's
-    /// audit rows, moves the breakers, pools the rows into the window and fits
-    /// the rules the next blocks carry. `plateau` says whether the archives
-    /// have stopped climbing (`trusted`).
+    /// The generation boundary. `in_force` holds the rules the generation's
+    /// blocks were bred with, if any. It judges them on the generation's audit
+    /// rows, moves the breakers, pools the rows into the window and fits the
+    /// rules that the next blocks carry, which it returns (`fit`). `plateau`
+    /// says whether the archives have stopped climbing (`trusted`). The
+    /// generation's report is kept for `last`.
     pub fn boundary(&mut self, in_force: Option<Rungs>, plateau: bool) -> Option<Rungs> {
         let rows = std::mem::take(&mut self.rows);
         let mut report = std::mem::take(&mut self.tally);
@@ -561,7 +575,8 @@ impl Audit {
     /// Judges the rule the window fits before these rows (the rule that
     /// would have been in force while they were measured), on the entrants
     /// the 5 s screen would have kept and on the creatures that reach the 5 s
-    /// bar.
+    /// bar. It keeps the last `JUDGED` judgments for `trusted`, and drops them
+    /// while the window fits no rule.
     fn trial(&mut self, rows: &[AuditRow]) {
         for r in 0..RUNGS {
             let Some(rung) = self.fit_rung(r) else {
@@ -590,7 +605,9 @@ impl Audit {
             }
         }
     }
-    /// Whether rung `r` may be armed.
+    /// Whether rung `r` may be armed: the last `JUDGED` judgments hold enough
+    /// entrants (or, on a `plateau`, enough creatures that reach the 5 s bar),
+    /// and the rule stopped at most `TRUST_STOPPED` of them.
     fn trusted(&self, r: usize, plateau: bool) -> bool {
         let mut total = Judged::default();
         for &packed in &self.judged[r] {
@@ -608,8 +625,9 @@ impl Audit {
         n >= least && f64::from(stopped) <= TRUST_STOPPED * f64::from(n)
     }
 
-    /// The rules in force on the audit rows of their own generation: the
-    /// report's miss counts, and the breakers.
+    /// Judges the rules in force on the audit rows of their own generation. It
+    /// fills the report's miss counts and top shares, and moves the breakers of
+    /// the armed rungs.
     fn judge(&mut self, rules: &Rungs, rows: &[AuditRow], report: &mut Report) {
         let mut band_rows = [[0u32; BANDS]; RUNGS];
         let mut band_misses = [[0u32; BANDS]; RUNGS];
@@ -682,7 +700,8 @@ impl Audit {
     }
 
     /// The rules the window fits, with the breakers' bands off. A rung
-    /// needs enough rows of both classes and the trust of `trusted`.
+    /// needs enough rows of both classes and the trust of `trusted`. It is
+    /// `None` when no rung is armed, and always under `disabled`.
     pub fn fit(&self, plateau: bool) -> Option<Rungs> {
         if disabled() {
             return None;
@@ -707,7 +726,9 @@ impl Audit {
 
     /// Fisher's linear discriminant of the creatures that pass 5 s against
     /// those that do not, from the pooled sums in window order, and the
-    /// threshold that leaves `BUDGET` of the class A rows below it.
+    /// threshold that leaves `BUDGET` of the class A rows below it. It is
+    /// `None` when a class has too few rows (`MIN_PASSING`, `MIN_OTHER`) or
+    /// the fit is degenerate.
     fn fit_rung(&self, r: usize) -> Option<Rung> {
         let (mut a, mut b) = (Sums::default(), Sums::default());
         for g in &self.window {
@@ -727,6 +748,7 @@ impl Audit {
         }
         let mean = |s: &Sums| s.sum.map(|v| v / s.n as f64);
         let (ma, mb) = (mean(&a), mean(&b));
+        // The pooled within-class covariance.
         let n = (a.n + b.n - 2) as f64;
         let mut s = vec![vec![0.0f64; FEATURES]; FEATURES];
         for (set, m) in [(&a, &ma), (&b, &mb)] {
@@ -736,10 +758,14 @@ impl Audit {
                 }
             }
         }
+        // A small multiple of the mean variance on the diagonal keeps it
+        // invertible.
         let trace: f64 = (0..FEATURES).map(|i| s[i][i]).sum::<f64>() / FEATURES as f64;
         for (i, row) in s.iter_mut().enumerate() {
             row[i] += 1e-9 * trace.max(1e-12);
         }
+        // Fisher's direction: the inverse covariance times the difference of
+        // the class means, scaled so that the largest weight has magnitude 1.
         let rhs: Vec<f64> = (0..FEATURES).map(|i| ma[i] - mb[i]).collect();
         let mut w = solve(s, rhs);
         let largest = w.iter().fold(0.0f64, |m, v| m.max(v.abs()));
@@ -760,6 +786,7 @@ impl Audit {
             .map(|row| rung.score(&row.map(f16_to_f32)))
             .collect();
         scores.sort_by(f32::total_cmp);
+        // The bias is the score that `BUDGET` of them fall below.
         let k = (BUDGET * scores.len() as f64).floor() as usize;
         let bias = *scores.get(k.min(scores.len().saturating_sub(1)))?;
         if !bias.is_finite() {
@@ -770,7 +797,8 @@ impl Audit {
     }
 }
 
-/// Solves `m x = v` by Gauss-Jordan elimination with partial pivoting.
+/// Solves `m x = v` by Gauss-Jordan elimination with partial pivoting. An
+/// unknown whose pivot is below 1e-300 comes out 0.
 fn solve(mut m: Vec<Vec<f64>>, mut v: Vec<f64>) -> Vec<f64> {
     let k = v.len();
     for c in 0..k {
