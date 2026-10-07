@@ -1,76 +1,126 @@
-//! The generation dump: `EVOLUTION_DUMP_GENERATION=<generation>[:<path>]`
-//! (or `=<path>` for the next boundary), a developer diagnostic for the
-//! steps ladder. From that generation's start, one
+//! The generation dump is a developer diagnostic that
+//! `EVOLUTION_DUMP_GENERATION=<generation>[:<path>]` turns on, and `=<path>`
+//! alone dumps the next generation. From that generation's start one
 //! generation's worth of blocks is bred with the screen bar off, so every
-//! trial runs in full, and the island elites are queued to run again in it
-//! (they enter no archive). Each creature of those blocks writes a 64 B row
-//! as its block is absorbed; the file ends with the header and a 32 B row
-//! per elite of the archives at the start, patched in when the last block
-//! is absorbed. Little endian throughout; `examples/dump_stats.rs` and
-//! `examples/operator_yield.rs` read it.
-//!
-//! Header (64 B): magic `EVODUMP1`, format u32 (2), qd version u32,
-//! generation u32, population u32, seed u64, rows u64, elites u32, the screen
-//! bar the generation would have had f32, trial seconds f32, rate u16,
-//! islands u8, a spare byte (format 1: arenas u8), the cell bins (contact,
-//! cadence, height, feet) 4 x u8, arenas u16, 2 spare.
-//!
-//! Elite (32 B): arena low byte, flags u8 (1 reserve, 2 fine, 4 graduate, 8
-//! re-run measured), cell u16, nodes u8, muscles u8, emitter u8, arena high
-//! byte (format 1: spare; the arena was one byte), id u64, fitness f32,
-//! distance at 2.5, 5 and 10 s from its re-run, 3 x f32 (NaN without one).
-//! The arena is `u16::MAX` for the global archive (format 1: 255). There are
-//! more than 256 arenas, so format 1 dumps of today's layout are wrong.
-//!
-//! Creature (64 B): slot u32, emitter u8, operator u8 (the low byte of the
-//! index in `evolution::structural_operator_names`; 0xFFF for none, whose
-//! high four bits are the high nibble of the `entered` byte), flags u8
-//! (`MATE`...), entered u8 (`ISLAND`... in the low nibble), parent id u64 (`u64::MAX` for
-//! none), parent cell u16, final cell u16, CMA emitter u16 (`u16::MAX` for
-//! none), nodes u8, muscles u8, parent nodes u8, parent muscles u8, rhythm
-//! period f16, standard fitness f32, archive fitness f32 (after a
-//! confirmation), the seven `creature_kernel::RungTrace` words. A cell is
-//! `((contact * 8 + cadence) * 6 + height) * 5 + feet`, `u16::MAX` for none.
+//! trial runs in full, and the island elites are queued to run again among
+//! them without entering an archive. The file holds a header, a record per
+//! elite of the archives at the start and a row per creature, written as its
+//! block is absorbed. `HEADER_BYTES`, `ELITE_BYTES` and `ROW_BYTES` give the
+//! layouts, which `examples/dump_stats.rs` and `examples/operator_yield.rs`
+//! read.
 
 use super::*;
 use std::io::{Seek, SeekFrom};
 
-/// The creature entered an island archive.
+/// Bit of a row's `entered` byte: the creature entered an island archive.
 pub const ISLAND: u8 = 1;
-/// The creature entered a nursery archive.
+/// Bit of a row's `entered` byte: the creature entered a nursery archive, of
+/// either kind.
 pub const NURSERY: u8 = 2;
-/// The creature entered a morphology reserve.
+/// Bit of a row's `entered` byte: the creature entered a morphology reserve.
 pub const RESERVE: u8 = 4;
-/// The creature entered the global archive.
+/// Bit of a row's `entered` byte: the creature entered the global archive.
 pub const GLOBAL: u8 = 8;
 
-/// The creature was produced by mating.
+/// Bit of a row's `flags` byte: the creature was produced by mating.
 pub const MATE: u8 = 1;
-/// Its CMA emitter was optimizing (`CmaEmitter::optimizing`).
+/// Bit of a row's `flags` byte: its CMA emitter was optimizing
+/// (`CmaEmitter::optimizing`).
 pub const OPTIMIZER: u8 = 2;
-/// Its fitness is its confirmation trial's (`EvaluationMetrics::fine`).
+/// Bit of a row's `flags` byte: its fitness is its confirmation trial's
+/// (`EvaluationMetrics::fine`).
 pub const FINE: u8 = 4;
-/// An island elite run again in the dump's generation; it enters no archive.
+/// Bit of a row's `flags` byte: an island elite run again in the dump's
+/// generation. It enters no archive.
 pub const RERUN: u8 = 8;
-/// The early screen stopped its trial.
+/// Bit of a row's `flags` byte: the early screen stopped its trial.
 pub const SCREENED: u8 = 16;
-/// Its result enters no archive (`EvaluationMetrics::excluded`).
+/// Bit of a row's `flags` byte: its result enters no archive. The metrics say
+/// so (`EvaluationMetrics::excluded`, which the dump also sets for a re-run),
+/// or its block ran in a world that has since changed.
 pub const EXCLUDED: u8 = 32;
-/// The creature's parent was in a morphology reserve.
+/// Bit of a row's `flags` byte: the creature's parent was in a morphology
+/// reserve.
 pub const PARENT_RESERVE: u8 = 64;
 
+/// The first 8 bytes of a dump file.
 pub const MAGIC: &[u8; 8] = b"EVODUMP1";
-/// Format 2 holds arenas in two bytes.
+/// The format number in the header. Format 1 kept an arena in one byte. The
+/// game has more than 256 arenas, so format 2 holds arenas in two bytes.
 pub const FORMAT: u32 = 2;
+/// Size of the header at the start of the file. It is written when the dump
+/// starts and again, with the row count, when the last block is absorbed. All
+/// numbers in the file are little endian. The fields by byte:
+/// - 0..8: `MAGIC`
+/// - 8..12: format u32 (`FORMAT`)
+/// - 12..16: `qd::VERSION` u32
+/// - 16..20: generation u32
+/// - 20..24: population u32
+/// - 24..32: seed u64
+/// - 32..40: rows u64
+/// - 40..44: elites u32
+/// - 44..48: the screen bar the generation would have had, f32
+/// - 48..52: trial seconds f32
+/// - 52..54: steps per second u16
+/// - 54: islands u8
+/// - 55: spare (format 1: arenas u8)
+/// - 56..60: the cell bins (`BINS`), 4 x u8
+/// - 60..62: arenas u16
+/// - 62..64: 2 spare bytes
 pub const HEADER_BYTES: usize = 64;
+/// Size of an elite record. One follows the header for each elite of the
+/// archives when the dump starts: the islands and their nurseries in the order
+/// of `Experiment::islands`, then the global archive. The fields by byte:
+/// - 0: arena, low byte. The arena is the archive's index in
+///   `Experiment::islands`, and `u16::MAX` for the global archive (format 1:
+///   255)
+/// - 1: flags u8 (1 morphology reserve, 2 fine, 4 graduate, 8 re-run
+///   measured)
+/// - 2..4: cell u16 (`cell`)
+/// - 4: nodes u8
+/// - 5: muscles u8
+/// - 6: emitter u8 (`Emitter::index`)
+/// - 7: arena, high byte (format 1: spare)
+/// - 8..16: creature id u64
+/// - 16..20: fitness f32
+/// - 20..32: distances at 2.5, 5 and 10 s from its re-run, 3 x f32 (NaN
+///   without one)
 pub const ELITE_BYTES: usize = 32;
+/// Size of a creature row. One follows the elite records for each creature of
+/// the dump generation, written as its block is absorbed. The fields by byte:
+/// - 0..4: ring slot u32
+/// - 4: emitter u8 (`Emitter::index`)
+/// - 5: operator, low byte. The operator is an index in
+///   `evolution::structural_operator_names` on 12 bits, 0xFFF for none. Its
+///   bits 8 to 11 are the high four bits of byte 7.
+/// - 6: flags u8 (`MATE`, `OPTIMIZER`, `FINE`, `RERUN`, `SCREENED`,
+///   `EXCLUDED`, `PARENT_RESERVE`)
+/// - 7: entered in the low four bits (`ISLAND`, `NURSERY`, `RESERVE`,
+///   `GLOBAL`), operator bits 8 to 11 in the high four
+/// - 8..16: parent id u64 (`u64::MAX` for none)
+/// - 16..18: parent cell u16 (`u16::MAX` for none)
+/// - 18..20: final cell u16, the cell its own behavior fell in
+/// - 20..22: CMA emitter u16 (`u16::MAX` for none)
+/// - 22: nodes u8
+/// - 23: muscles u8
+/// - 24: parent nodes u8
+/// - 25: parent muscles u8
+/// - 26..28: rhythm period f16, read off its first muscle (0 without muscles)
+/// - 28..32: standard fitness f32, the standard trial's distance
+/// - 32..36: archive fitness f32, the fitness the archives saw, which is the
+///   confirmation trial's when it lowered the score
+/// - 36..64: the seven words of `creature_kernel::RungTrace`, u32 each
 pub const ROW_BYTES: usize = 64;
+/// Bins of the four axes of a cell: contact, cadence, height and feet. They
+/// repeat the movement grid of `qd`.
 pub const BINS: [u8; 4] = [6, 8, 6, 5];
 
-/// Whether a dump started in this process; there is one per run.
+/// Whether a dump started in this process. There is one per run.
 pub static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The generation (None: the next boundary) and the file.
+/// The dump that `EVOLUTION_DUMP_GENERATION` asks for, or None when the
+/// variable is not set. It gives the generation (None for the next boundary)
+/// and the file. A bare generation writes `runs/dump-gen<generation>.bin`.
 pub fn target() -> Option<(Option<u32>, std::path::PathBuf)> {
     static TARGET: std::sync::OnceLock<Option<(Option<u32>, std::path::PathBuf)>> =
         std::sync::OnceLock::new();
@@ -95,7 +145,9 @@ fn bit(on: bool, flag: u8) -> u8 {
     if on { flag } else { 0 }
 }
 
-/// A behavior cell as one number.
+/// A behavior cell as one number, with the body classes left out. It is
+/// `((contact * 8 + cadence) * 6 + height) * 5 + feet`. It is `u16::MAX` for
+/// the niche of a morphology reserve or of an optimizer, which sit in no cell.
 pub fn cell(niche: &qd::Niche) -> u16 {
     let n = niche.0;
     if qd::is_morphology_niche(niche) || n[0] >= 254 {
@@ -112,9 +164,13 @@ pub struct Parent {
     nodes: u8,
     muscles: u8,
     reserve: bool,
+    /// The CMA emitter that sampled the child was optimizing.
     optimizer: bool,
 }
 impl Parent {
+    /// The parent as breeding knew it, from `elite` (None for a child with no
+    /// parent). `optimizer` says whether the child's CMA emitter was
+    /// optimizing.
     pub fn of(elite: Option<&qd::Elite>, optimizer: bool) -> Self {
         Self {
             cell: elite.map_or(u16::MAX, |e| cell(&e.descriptor.niche())),
@@ -129,28 +185,35 @@ impl Parent {
 /// The host fields of a row, fixed when its block is bred.
 #[derive(Clone, Copy)]
 pub struct Head {
+    /// The row's `flags` byte as bred. `write_rows` adds the bits that the
+    /// result sets.
     pub flags: u8,
     slot: u32,
     emitter: u8,
+    /// The index of the structural operator that changed the child in
+    /// `evolution::structural_operator_names`, `u16::MAX` for none.
     operator: u16,
     parent: u64,
     parent_cell: u16,
+    /// The CMA emitter that sampled the child, `u16::MAX` for none.
     cma: u16,
     nodes: u8,
     muscles: u8,
     parent_nodes: u8,
     parent_muscles: u8,
+    /// The rhythm period as the bits of an f16.
     period: u16,
     id: u64,
 }
 
-/// A serialized elite for the dump file.
+/// An elite's record for the dump file, kept until the end of the dump, when
+/// the re-run distances are added.
 pub struct Elite {
     bytes: [u8; ELITE_BYTES],
     id: u64,
 }
 impl Elite {
-    /// The row of `e` in `arena` (`u16::MAX` for the global archive).
+    /// The record of `e` in `arena` (`u16::MAX` for the global archive).
     pub fn of(arena: u16, e: &qd::Elite) -> Self {
         let mut b = [0u8; ELITE_BYTES];
         [b[0], b[7]] = arena.to_le_bytes();
@@ -173,18 +236,25 @@ impl Elite {
     }
 }
 
-/// Writes a generation dump to track which creatures entered archives.
+/// The generation dump being written: its file, and the heads of the blocks
+/// bred for it until the results of those blocks arrive.
 pub struct Dump {
     path: std::path::PathBuf,
     file: BufWriter<File>,
+    /// The header bytes. `finish` adds the row count.
     header: [u8; HEADER_BYTES],
+    /// Creatures in one generation. Breeding for the dump stops at this count.
     population: usize,
     /// Creatures bred into dump blocks, and blocks still to absorb.
     bred: usize,
     outstanding: usize,
+    /// The heads of the creatures in each ring block, for a block bred for the
+    /// dump and not yet absorbed.
     heads: Vec<Option<Vec<Head>>>,
+    /// The heads of the block just bred, until `assign` files them.
     pending: Option<Vec<Head>>,
     elites: Vec<Elite>,
+    /// The ids of the elites queued to run again.
     reruns: std::collections::HashSet<u64>,
     /// Rung distances of the re-run elites, by id.
     measured: HashMap<u64, [f32; 3]>,
@@ -193,6 +263,10 @@ pub struct Dump {
 }
 
 impl Dump {
+    /// Starts the dump file at `path`, creating its directory, and writes the
+    /// header and the records of `elites`. `bar` is the screen bar the
+    /// generation would have had, `reruns` holds the ids of the elites queued
+    /// to run again, and `blocks` is the number of blocks in the ring.
     pub fn create(
         path: &Path,
         e: &Experiment,
@@ -244,6 +318,7 @@ impl Dump {
             started: std::time::Instant::now(),
         })
     }
+    /// How many elites are queued to run again.
     pub fn rerun_count(&self) -> usize {
         self.reruns.len()
     }
@@ -255,7 +330,11 @@ impl Dump {
     pub fn finished(&self) -> bool {
         !self.breeding() && self.outstanding == 0
     }
-    /// A block was bred for the dump at ring slot `first`.
+    /// A block was bred for the dump at ring slot `first`. Its heads wait
+    /// until `assign` files them. `parents` holds the parent of each creature.
+    /// `reseeded` lists the positions of the creatures that were handed in
+    /// instead of bred from a parent, such as the elites queued to run again,
+    /// and their rows show no parent.
     pub fn bred(
         &mut self,
         first: usize,
@@ -322,7 +401,11 @@ impl Dump {
         self.outstanding -= 1;
         Some(head)
     }
-    /// Writes rows for creatures in a block, recording their archive and fitness data.
+    /// Writes a row for each creature of an absorbed block. `heads` are the
+    /// block's heads, `finals` its results and `kinds` what each creature
+    /// entered. `stale` says the block ran in a world that has since changed,
+    /// so its rows are excluded. The distances of a re-run elite are kept for
+    /// `finish`.
     pub fn write_rows(
         &mut self,
         population: &Population,
@@ -372,8 +455,9 @@ impl Dump {
         self.rows += heads.len() as u64;
         Ok(())
     }
-    /// Writes the header and the elites with their re-run distances, and
-    /// closes the file. Returns a line for the log.
+    /// Adds the row count and the re-run distances, writes the header and the
+    /// elite records again at the start of the file and syncs it. Returns a
+    /// line for the log.
     pub fn finish(&mut self) -> Result<String> {
         self.header[32..40].copy_from_slice(&self.rows.to_le_bytes());
         let mut measured = 0;
