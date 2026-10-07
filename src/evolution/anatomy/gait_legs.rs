@@ -1,16 +1,12 @@
-//! Gait operators: legs built for walking: knees, ankles, feet, leg proportions.
-//!
-//! The operators of this file share one pick slot and are compound: each is a
-//! whole, coherent change to the body, and its child gets no parameter noise.
-//!
-//! A leg is a leaf limb (`rhythm::leaf_limbs`). A foot is the end of a leg of
-//! at least two bones. The ideas come from the biology of walking and from
-//! evolutionary robotics: Alexander on leg proportions, elastic tendons and
-//! duty factor, Full and Koditschek on the leg as a template for a spring
-//! mass walker, Sims (1994) and Lipson and Pollack (2000) on legs as jointed
-//! bars with actuators at the hinges, and Cheney et al. (2013) on regular
-//! bodies. Each operator gives the leg one feature of a mammal leg at once:
-//! a knee, an ankle, a foot, longer distal bones, a stop, a tendon.
+//! Gait operators for legs: each gives a leg one feature of a mammal leg, such
+//! as a knee, an ankle, a foot, longer distal bones, a stop or a tendon. A leg
+//! is a leaf limb (`rhythm::leaf_limbs`), and a foot is the end of a leg of at
+//! least two bones. `OPS` is one entry of `GAIT_FILES` in `mod.rs`, so the
+//! operators of this file share one pick slot and are compound: each is a
+//! whole change, and its child gets no parameter noise. The ideas come from
+//! the biology of walking and from evolutionary robotics: Alexander, Full and
+//! Koditschek, Sims (1994), Lipson and Pollack (2000), Cheney et al. (2013)
+//! and Ijspeert.
 use super::compound::{close_ring, lead_muscle, shed_tips, strongest};
 use super::extra::drive;
 use super::junctions::{
@@ -23,7 +19,9 @@ use super::{BoneIds, Context, MuscleIds, Operator, muscles_on, new_muscle, room}
 use crate::config::Config;
 use crate::evolution::{Bone, Creature, Muscle, Rng, max_bone_length};
 
-/// This file's operators, by name. Add each new one here.
+/// This file's operators, by name. Add each new one here. Breeding picks an
+/// operator by its position in this list, so a new order gives a different
+/// search for the same seed.
 pub(super) const OPS: &[(&str, Operator)] = &[
     ("lengthen_lower_leg", lengthen_lower_leg),
     ("add_ankle_joint", add_ankle_joint),
@@ -40,7 +38,8 @@ pub(super) const OPS: &[(&str, Operator)] = &[
     ("lag_knee_behind_hip", lag_knee_behind_hip),
 ];
 
-/// A random leg (leaf limb) for which `ok` holds.
+/// A random leg (leaf limb) for which `ok` holds, or `None` when no leg does.
+/// It takes one draw from `rng` either way.
 fn pick_leg(c: &Creature, rng: &mut Rng, ok: impl Fn(&BoneIds) -> bool) -> Option<BoneIds> {
     let mut legs = leaf_limbs(c);
     legs.retain(|leg| ok(leg));
@@ -59,7 +58,8 @@ fn bend(c: &Creature, upper: usize, lower: usize) -> f32 {
     (p[0] * q[1] - p[1] * q[0]).atan2(p[0] * q[0] + p[1] * q[1])
 }
 
-/// The angle turn (-pi to pi) that takes direction `from` to direction `to`.
+/// The signed angle (-pi to pi) that turns direction `from` onto direction
+/// `to`. Counterclockwise is positive.
 fn angle_between(from: [f32; 2], to: [f32; 2]) -> f32 {
     (from[0] * to[1] - from[1] * to[0]).atan2(from[0] * to[0] + from[1] * to[1])
 }
@@ -72,15 +72,16 @@ fn inside(c: &Creature) -> bool {
         .all(|n| n.x.abs() <= extent && (0.0..=extent).contains(&n.y))
 }
 
-/// Moves a muscle's rhythm so its phase is `lead`, and its touchdown reset
-/// with it.
+/// Moves a muscle's phase to `lead` by the shortest way round the cycle, and
+/// its touchdown reset by the same amount.
 fn follow(m: &mut Muscle, lead: f32) {
     let shift = turn(m.phase, lead);
     m.phase = (m.phase + shift).rem_euclid(1.0);
     m.reset = (m.reset + shift).rem_euclid(1.0);
 }
 
-/// The strongest muscle on `bones`, as the timing template of a new joint.
+/// The timing template of a new muscle: a copy of the strongest muscle with an
+/// end on `bones`, or of the strongest muscle of the body when none has one.
 fn leg_template(c: &Creature, bones: &[usize]) -> Option<Muscle> {
     let on = muscles_on(c, bones, false);
     strongest(c, &on)
@@ -89,9 +90,9 @@ fn leg_template(c: &Creature, bones: &[usize]) -> Option<Muscle> {
 }
 
 /// Cuts leaf bone `first` into two at fraction `t` of its length and returns
-/// the new lower bone. The old end node moves to the cut (displaced by `side`)
-/// and becomes the joint. A copy of it stays at the old tip, so the tip of the
-/// leg is the new node. The lower bone gets a narrow joint range, muscle
+/// the index of the new lower bone. The old end node moves to the cut, shifted
+/// by `side`, and becomes the joint. A copy of it stays at the old tip and is
+/// the new end of the leg. The lower bone gets a narrow joint range. Muscle
 /// anchors and the organ go to the part that holds their place.
 fn insert_joint(c: &mut Creature, first: usize, t: f32, side: [f32; 2], rng: &mut Rng) -> usize {
     let old = c.bones[first];
@@ -106,6 +107,8 @@ fn insert_joint(c: &mut Creature, first: usize, t: f32, side: [f32; 2], rng: &mu
     let second = c.bones.len();
     let mut part = Bone::new(old.b, tip as u32, lower);
     narrow(&mut part, rng);
+    // The part that holds position `at` of the old bone, and where along that
+    // part the position lies.
     let split = |at: f32| {
         if at <= t {
             (first, at / t)
