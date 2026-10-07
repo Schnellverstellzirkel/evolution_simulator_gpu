@@ -1,11 +1,11 @@
 //! Idea operators for what the body touches the ground with and where its
 //! mass sits: node grip and size, and organ ballast.
 //!
-//! Until now almost no operator reached the grip (`friction`) or size
-//! (`diameter`) genes of a node, although a node's size is its mass and its
-//! grip is the most direct way to tell a foot that pushes from a foot that
-//! slides. Every operator here is a whole change on its own, so its child gets
-//! no parameter noise, and the operators of this file share one pick slot.
+//! A node's size (`diameter`) sets its mass, and its grip (`friction`) is the
+//! most direct way to tell a foot that pushes from a foot that slides. Every
+//! operator here is a whole change on its own, so its child gets no parameter
+//! noise, and the operators of this file share one pick slot (`GAIT_FILES` in
+//! `mod.rs`).
 //!
 //! The sources are Hirose (1993, snakes move on ground that grips more
 //! sideways than along the body, so a front that slides and a back that grips
@@ -140,8 +140,9 @@ fn friction_gradient_trunk(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &
     changed
 }
 
-/// Nodes lower to the ground get wider and higher ones narrower, which keeps
-/// the weight low (a low centre of mass resists tipping).
+/// Each node but the head moves 30 to 70% of the way to a size set by its
+/// height: the lowest node toward the largest size and the highest toward the
+/// smallest. This keeps the weight low (a low center of mass resists tipping).
 fn bulk_by_height(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let nodes = body_nodes(c);
     if nodes.len() < 3 {
@@ -227,8 +228,9 @@ fn redraw_one_node(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context)
     changed
 }
 
-/// The joints inside limbs (not their feet) slip as easily as possible, so a
-/// limb that kneels slides on its knee instead of sticking.
+/// Every node with exactly one bone below it, such as the knee of a limb, gets
+/// the lowest grip, so a limb that kneels slides on its knee instead of
+/// sticking.
 fn knee_slip(c: &mut Creature, cfg: &Config, _rng: &mut Rng, _cx: &Context) -> bool {
     let children = child_bones(c);
     let mut changed = false;
