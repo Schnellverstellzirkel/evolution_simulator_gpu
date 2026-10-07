@@ -177,7 +177,10 @@ pub struct Birth {
     pub protection: u32,
 }
 impl Birth {
-    /// A new random body, or an elite queued again after a world change.
+    /// No parent, with the `Restart` emitter. It marks a new random body and
+    /// every creature that breeding placed in its slot directly: an elite
+    /// queued again after a world change, and a child of the refuge, the
+    /// founder bank, the hall or the pen.
     pub const RANDOM: Self = Self {
         emitter: Emitter::Restart,
         cma: None,
@@ -194,17 +197,23 @@ pub struct Block {
     /// Ring slot of the first creature: creature `k` holds slot `first + k`,
     /// which picks its island and its random stream.
     pub first: usize,
+    /// The genes of the block's creatures.
     pub population: Arc<Population>,
+    /// How each creature was bred, in block order.
     pub births: Vec<Birth>,
-    /// The trial settings the block runs with, fixed when it is bred.
+    /// The trial settings the block runs with, fixed when it is bred. After a
+    /// world change `Experiment::retarget_block` replaces them in a block that
+    /// has not run yet.
     pub config: Arc<Config>,
     /// The screen bar of each wild island's creatures, in its own world,
     /// fixed when the block is bred; empty runs them in full.
     pub wild_bars: Arc<Vec<f32>>,
 }
 impl Block {
-    /// The screen bar of creature `j` among `screen`'s: a nursery body is
-    /// held to the bar of its own kind.
+    /// The bar of `screen` that applies to creature `j`: a nursery body is
+    /// held to the bar of its own kind, `young_bar` for a new body and
+    /// `reshaped_bar` for a reshaped one. A wild island's creature has its own
+    /// bar in `wild_bars`.
     pub fn screen_bar(&self, screen: &crate::physics::Screen, j: usize) -> f32 {
         let flags = self.population.flags.get(j).copied().unwrap_or(0);
         if flags & crate::rungs::RESHAPED != 0 {
@@ -229,9 +238,11 @@ impl Block {
             usize::from(flags & crate::rungs::YOUNG != 0)
         }
     }
+    /// Creatures in the block.
     pub fn len(&self) -> usize {
         self.population.genomes.len()
     }
+    /// Whether the block holds no creature.
     pub fn is_empty(&self) -> bool {
         self.population.genomes.is_empty()
     }
@@ -247,26 +258,43 @@ pub enum Verdict {
 }
 
 /// Scores a population with the given trial settings, one result per
-/// creature in order. The synchronous drivers (`Experiment::step`) take one.
+/// creature in order. The synchronous drivers, `Experiment::step` and
+/// `Experiment::run_generation`, take one.
 pub type Evaluate<'a> = dyn FnMut(&Population, &Config) -> Result<Vec<EvaluationMetrics>> + 'a;
 
 /// The game: archives and search state, and the ring of creatures in
 /// flight. A generation is a count of `config.population` evaluations; the
 /// ring holds at most `ring.block * ring.blocks` creatures, and each block
-/// is bred again as soon as it is absorbed.
+/// is bred again as soon as it is absorbed. A save keeps the archives and the
+/// search state but not the ring: a loaded game breeds the ring from the
+/// archives again.
 #[derive(Clone)]
 pub struct Experiment {
+    /// The settings in force now.
     pub config: Config,
     /// Settings that take effect when the next generation starts.
     pub pending: Option<Config>,
+    /// The generation in progress. The first one is 0.
     pub generation: u32,
     /// Evaluations absorbed toward the current generation.
     pub evaluated: usize,
+    /// One row per ended generation, oldest first.
     pub history: Vec<Stats>,
+    /// Seconds spent on the generation in progress. The caller adds the time
+    /// of each search pass, and the total goes into `Stats::seconds` when the
+    /// generation ends.
     pub evaluation_seconds: f64,
+    /// The global archive. It collects every island's elites for display and
+    /// statistics and is never a parent source.
     pub archive: QdArchive,
+    /// How each emitter has done so far. The mix of emitters in breeding
+    /// follows it (`qd::emitter_weights`).
     pub emitter_stats: [EmitterStats; qd::EMITTER_COUNT],
+    /// The CMA emitters, at most `qd::CMA_LIMIT`. Each works for one island: a
+    /// CMA-ME emitter improves one cell, and an optimizer tunes one body plan.
     pub cma_emitters: Vec<CmaEmitter>,
+    /// The version of the archives and the physics (`qd::VERSION`). A save
+    /// writes it in its header.
     pub qd_version: u32,
     /// Breeding rounds so far; salts offspring random streams and ids.
     pub breed_round: u64,
@@ -279,56 +307,69 @@ pub struct Experiment {
     /// Every creature that entered an archive, keyed by creature id, with its
     /// parent and the change that produced it. Pruned to living elites' ancestors.
     pub lineage: KeyMap<Ancestor>,
-    /// Each island's best distance so far and the generation it was set.
+    /// Per archive of `islands`: its best distance so far and the generation
+    /// it was set. An island's optimizer turns to its next fastest design for
+    /// every `OPTIMIZER_STALL` generations without a new best.
     pub island_progress: Vec<(f32, u32)>,
     /// Per island, what its nursery of new random bodies graduated this
-    /// session, and what its nursery of reshaped bodies did.
+    /// session.
     pub graduations: Vec<Graduation>,
+    /// The same for its nursery of reshaped bodies.
     pub reshaped_graduations: Vec<Graduation>,
-    /// The last migration to the hub this session: its generation, and per
-    /// island how many elites it sent and how many of those the hub kept
-    /// (the hub's own entry is zero). Saved after the body of a small save.
+    /// The last migration to the hub: its generation, and per island how many
+    /// elites it sent and how many of those the hub kept. The hub's own entry
+    /// is zero. So is the kept count of a wild island, because `wild_wins`
+    /// counts its migrants later. Saved after the body of a small save.
     pub last_migration: Option<(u32, Vec<(usize, usize)>)>,
-    /// Elites from before an environment change, waiting to be evaluated again
-    /// in the new world, each queued for its own island. Breeding hands them
-    /// out before new offspring.
+    /// Creatures waiting to be evaluated in the slots of the island they are
+    /// queued for: the elites from before an environment change, which are
+    /// tested again in the new world, the wild migrants that wait for their
+    /// hub trial, and the elites of a generation dump. Breeding hands them out
+    /// before new offspring.
     pub reseed: Reseed,
-    /// Each island's champions from before the last environment change, and
-    /// the generation until which they keep breeding. Not saved.
+    /// Each main island's champions from before the last environment change
+    /// (after a meteor or an extinction, its survivors), and the generation
+    /// until which they keep breeding. Not saved.
     pub refuge: Refuge,
-    /// Elites a meteor wiped out, with their island (None for the global
-    /// archive), kept so the strike can be undone. Not saved.
+    /// Elites a meteor or an extinction wiped out, with their island (None
+    /// for the global archive), kept so the strike can be undone. Not saved.
     pub fossils: Vec<(Option<usize>, qd::Elite)>,
     /// The ring's shape, fixed for the experiment.
     pub ring: RingShape,
     /// The ring. Blocks are absorbed in ring order, starting at `cursor`.
     pub blocks: Vec<Block>,
+    /// The index in `blocks` of the block to absorb next.
     pub cursor: usize,
     /// Failed trials in the current generation.
     failed: usize,
     /// Distances at the screen of the newest absorbed blocks, for the bar of
-    /// the evolved creatures and, apart, for the bars of the young ones
-    /// (`rungs::YOUNG`) and the reshaped ones (`rungs::RESHAPED`).
+    /// the evolved creatures. Not saved.
     screen_window: ScreenWindow,
+    /// The same for the bar of the young ones (`rungs::YOUNG`).
     young_window: ScreenWindow,
+    /// The same for the bar of the reshaped ones (`rungs::RESHAPED`).
     reshaped_window: ScreenWindow,
-    /// Each wild island's distances at the screen, in its own world.
+    /// Each wild island's distances at the screen, in its own world. Not
+    /// saved.
     wild_windows: Vec<ScreenWindow>,
     /// How rare the clade of each island elite is (`clade_rarity_of`),
     /// computed once per generation, for the generation it names. Not saved.
     clade_rarity: (u32, Vec<Vec<f32>>),
     /// Wild migrants waiting for their hub trial, by creature id, with their
-    /// wild island; and per island, how many of its migrants took a hub
-    /// cell this session. Not saved.
+    /// wild island. Not saved.
     wild_exports: HashMap<u64, usize>,
+    /// Per island, how many of its migrants took a hub cell this session.
+    /// Not saved.
     pub wild_wins: Vec<u32>,
     /// Wild champions sent to the hub, each with the generation until which
     /// it breeds in the hub's slots. Not saved.
     pub pen: Vec<(Creature, u32)>,
     /// The first elite of each new body plan of the main islands, newest
-    /// last, up to `FOUNDERS` (stepping stones, Stanley and Lehman 2015), and
-    /// every plan seen so far. Not saved.
+    /// last, up to `FOUNDERS` (stepping stones, Stanley and Lehman 2015). Not
+    /// saved.
     founders: std::collections::VecDeque<Creature>,
+    /// Every body plan that has joined the founder bank, so that only the
+    /// first elite of a plan does. Not saved.
     founder_plans: std::collections::HashSet<u64>,
     /// The fastest elite of each body plan of the main islands, rebuilt each
     /// generation; the hub breeds from it (Lehman and Stanley, 2011, an
@@ -360,22 +401,23 @@ pub struct Experiment {
     confirm_hint: ConfirmHint,
 }
 
-/// Places in the founder bank, and the share of the main islands' own slots
-/// that breed from it.
+/// Places in the founder bank.
 const FOUNDERS: usize = 1024;
+/// The share of the main islands' own slots that breed from the founder bank.
 const FOUNDER_SHARE: f32 = 0.01;
-/// The share of the hub's own slots that breed from the hall of fame, and
-/// the most plans it holds.
+/// The share of the hub's own slots that breed from the hall of fame.
 const HALL_SHARE: f32 = 0.02;
+/// The most body plans the hall of fame holds.
 const HALL_PLANS: usize = 2048;
 
-/// Generations a wild champion breeds in the hub's pen, and the share of the
-/// hub's own slots that breed from the pen.
+/// Generations a wild champion breeds in the hub's pen.
 const PEN_GENERATIONS: u32 = 30;
+/// The share of the hub's own slots that breed from the pen.
 const PEN_SHARE: f32 = 0.1;
 
 /// Generations without a new island record before the island's optimizer
-/// turns to its next fastest design.
+/// turns to its next fastest design. `global_stalled` counts the same number
+/// of generations without a new global record as a stall of the archives.
 const OPTIMIZER_STALL: u32 = 30;
 
 impl Experiment {
@@ -386,7 +428,8 @@ impl Experiment {
     }
     /// A new game with a ring of `ring`: the ring holds new random bodies,
     /// and the first generation has no screen bar yet, so every trial runs
-    /// in full and records its distance at the screen.
+    /// in full and records its distance at the screen. It fails when the ring
+    /// has no block or the settings are not valid.
     pub fn with_ring(config: Config, ring: RingShape) -> Result<Self> {
         ensure!(
             ring.block > 0 && ring.blocks > 0,
@@ -494,7 +537,8 @@ impl Experiment {
     /// Absorbs block `k`, the block at the cursor, with its final results:
     /// offers each creature to its archives in block order, counts the
     /// evaluations, ends the generation once a generation's worth is in, and
-    /// breeds the block again from the archives. Returns whether a
+    /// breeds the block again from the archives. It also moves the screen
+    /// windows, so the blocks bred next carry the new bars. Returns whether a
     /// generation ended.
     pub fn absorb(&mut self, k: usize, finals: &[EvaluationMetrics]) -> Result<bool> {
         ensure!(
@@ -518,9 +562,10 @@ impl Experiment {
             // A result from a world that has since changed carries no
             // distance. Each kind of creature sets the bar of its own kind.
             // The bar of the evolved creatures is the one that the top 10% of
-            // every result would have reached if the nursery bodies fell
-            // short of it, as they do: a tenth of the results are nursery
-            // bodies, so about 11% of the evolved creatures pass it.
+            // every result would have reached if the results of the other
+            // kinds (the nurseries' bodies and the wild islands' creatures)
+            // fell short of it. So more than 10% of the evolved creatures
+            // pass it.
             let distances = |wanted: usize| -> Vec<f32> {
                 finals
                     .iter()
@@ -530,13 +575,13 @@ impl Experiment {
                     .filter(|x| x.is_finite())
                     .collect()
             };
-            let nursery = finals
+            let others = finals
                 .iter()
                 .zip(&class)
                 .filter(|&(m, &c)| c != 0 && m.screen_x.is_finite())
                 .count();
             let ring = self.blocks.len();
-            self.screen_window.push(distances(0), nursery, ring);
+            self.screen_window.push(distances(0), others, ring);
             self.young_window.push(distances(1), 0, ring);
             self.reshaped_window.push(distances(2), 0, ring);
             // Each wild island sets its own bar from its evolved creatures.
@@ -708,9 +753,12 @@ impl Experiment {
             !then.config.physics_differs(&self.config) && now.best <= then.best
         }
     }
-    /// The generation boundary (every `population` evaluations): records
-    /// history, graduates the nurseries, migrates to the hub, and applies
-    /// queued settings and the autochange ladder.
+    /// The generation boundary (every `population` evaluations): fits the
+    /// early rungs, records the history row and prunes the lineage, updates
+    /// the refuge, the pen and the hall of fame, refines the islands,
+    /// graduates the nurseries, migrates to the hub, moves the stepping
+    /// stones, and applies queued settings and the autochange ladder. A
+    /// change of world resets the search context.
     fn end_generation(&mut self) -> Result<()> {
         let started = std::time::Instant::now();
         // The audit lane judges the rules this generation ran with and fits
@@ -726,6 +774,8 @@ impl Experiment {
         let generation = self.generation;
         self.pen.retain(|&(_, until)| until > generation);
         if self.islands.len() == arena_count() {
+            // The hall of fame: the fastest elite of each body plan of the
+            // main islands, fastest first, up to `HALL_PLANS`.
             let mut best: HashMap<u64, (f32, &StoredCreature)> = HashMap::new();
             for archive in self.islands.iter().take(qd::MAIN_ISLANDS) {
                 for (i, e) in archive.entries.iter().enumerate() {
@@ -746,7 +796,8 @@ impl Experiment {
             hall.truncate(HALL_PLANS);
             self.hall = hall.into_iter().map(|(_, _, c)| c.unpack()).collect();
         }
-        // Migrants that never took a hub cell are forgotten after a while.
+        // Migrants that never took a hub cell pile up in `wild_exports`, so
+        // it is cleared when it passes 200,000 entries.
         if self.wild_exports.len() > 200_000 {
             self.wild_exports.clear();
         }
@@ -868,6 +919,9 @@ impl Experiment {
                     && elite.creature.muscle_count() <= cfg.max_muscles
             })
     }
+    /// Checks that the state is consistent: the ring, the progress of the
+    /// generation, the global archive, the island layout and every row of the
+    /// history. A load runs it before the game uses a save.
     pub fn validate(&self) -> Result<()> {
         self.config.validate()?;
         ensure!(
@@ -995,6 +1049,8 @@ impl Experiment {
     }
 }
 
+/// Whether `new` describes another world than `old`, so that the distances
+/// measured under `old` no longer hold (`Config::physics_differs`).
 fn fitness_context_changed(old: &Config, new: &Config) -> bool {
     old.physics_differs(new)
 }
