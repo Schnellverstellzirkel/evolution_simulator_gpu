@@ -1,12 +1,35 @@
+//! Absorbs a block's results into the archives and writes a generation's
+//! history row.
+//!
+//! `Experiment::archive_block` offers each creature of a block to the archives
+//! it competes in, trains the CMA emitters on the results, updates the emitter
+//! statistics and records lineage. `Experiment::push_archive_stats` adds the
+//! generation's row to `history`. `Experiment::absorb` in `storage.rs` calls
+//! the first, and `end_generation` calls the second.
+
 use super::*;
 
 impl Experiment {
-    /// Offers block `k`'s creatures to the archives in block order, updates
-    /// CMA emitters and emitter statistics, and returns how many trials
-    /// failed. Screened and excluded results, and every result of a
-    /// `stale` block, enter no archive.
-    /// With `kinds` it also marks, per position, what the creature entered
-    /// (`dump::ISLAND`, `NURSERY`, `RESERVE`, `GLOBAL`).
+    /// Offers the creatures of block `k` to the archives, using their final
+    /// results `finals`, and returns how many trials failed. A trial failed
+    /// when its score is not finite or is at or below `FAILED`.
+    ///
+    /// Each creature goes, in block order, to the archive it breeds for, which
+    /// is an island or a nursery of the island. A structural or novelty child
+    /// that takes no cell may enter the morphology reserve of that archive. An
+    /// island sends a new body plan that gets neither a cell nor a reserve
+    /// place to its nursery of reshaped bodies. A creature of a main island is
+    /// also a candidate for the global archive, which is offered only the best
+    /// candidate of the block for each of its cells. Then the CMA emitters
+    /// learn from their samples, the emitter statistics take the block's
+    /// attempts, discoveries, improvements and rewards, and every creature
+    /// that entered an archive gets a lineage record.
+    ///
+    /// Screened and excluded results, and every result of a `stale` block,
+    /// enter no archive. A block is stale when it ran in a world that has since
+    /// changed. With `kinds`, one byte per creature, it also marks what each
+    /// creature entered: `dump::ISLAND`, `dump::NURSERY`, `dump::RESERVE` and
+    /// `dump::GLOBAL`.
     pub(super) fn archive_block(
         &mut self,
         k: usize,
