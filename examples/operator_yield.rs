@@ -1,15 +1,22 @@
-//! What each structural operator yields in a real generation: from a
-//! generation dump (EVOLUTION_DUMP_GENERATION, see `storage::dump`) it prints,
-//! per operator, how many children it made, how many entered an archive (any
-//! archive, an island archive, the global archive) and what share of the
-//! operator's children that is. Children of the CMA emitter, children of the
-//! structural and novelty emitters that no operator changed, and new random
-//! bodies come last, for comparison.
+//! What each structural operator yields in a real generation. The tool reads
+//! a generation dump (`EVOLUTION_DUMP_GENERATION`, see `storage::dump`) and
+//! prints, per operator, how many children it made and how many of them
+//! entered an archive: any archive, an island archive or the global archive,
+//! each with its share of the operator's children. The last column is the
+//! distance its children added per 1,000 children, and the rows are sorted by
+//! it. Rows for groups of children come last, for comparison: the 13 compound
+//! operators, all other structural operators, the CMA emitter, the structural
+//! and novelty emitters when no operator changed the child, and new random
+//! bodies.
+//!
+//! Only a child that entered an island archive or a nursery adds distance. It
+//! adds how much faster it is than the elite that held its cell when the
+//! generation began, or its whole distance when the cell was empty.
 //!
 //! Usage: operator_yield <dump.bin>
 //! A dump of a resumed run:
 //!   EVOLUTION_DUMP_GENERATION=<generation>:<path> search_ab <tag> 4 300000 20 38 --load <save>
-//! The generation after the load cannot be dumped, and the run needs two
+//! The first generation after the load cannot be dumped, and the run needs two
 //! generations beyond the dumped one to absorb its blocks.
 #[path = "dump_common/mod.rs"]
 mod dump_common;
@@ -28,8 +35,7 @@ fn main() -> anyhow::Result<()> {
     let names = evolution_simulator::evolution::structural_operator_names();
     let children: Vec<&Row> = d.rows.iter().filter(|r| r.child()).collect();
     // The fastest elite of each cell of each archive when the generation
-    // began, for the distance a child adds: how much faster it is than the
-    // elite whose cell it entered (its own distance when the cell was empty).
+    // began, keyed by (archive, cell). Reserve elites hold no cell.
     let mut occupant: std::collections::HashMap<(u16, u16), f32> = std::collections::HashMap::new();
     for e in &d.elites {
         if e.reserve() || e.cell == u16::MAX {
@@ -38,6 +44,9 @@ fn main() -> anyhow::Result<()> {
         let slot = occupant.entry((e.arena, e.cell)).or_insert(f32::MIN);
         *slot = slot.max(e.fitness);
     }
+    // The distance a child added: how much faster it is than the elite whose
+    // cell it entered (its own distance when the cell was empty). A child that
+    // entered no island archive and no nursery, or has no cell, added nothing.
     let gain = |r: &Row| -> f64 {
         if r.entered & (ISLAND | NURSERY) == 0 || r.cell == u16::MAX {
             return 0.0;
@@ -61,7 +70,8 @@ fn main() -> anyhow::Result<()> {
         children.len(),
         structural.len()
     );
-    // operator -> (children, any, island, global), and the distance added
+    // operator -> ([children, entered any, entered an island, entered the
+    // global archive], distance added)
     let mut table: HashMap<u16, ([usize; 4], f64)> = HashMap::new();
     for r in &structural {
         let t = table.entry(r.operator).or_default();
@@ -71,6 +81,7 @@ fn main() -> anyhow::Result<()> {
         t.0[3] += usize::from(r.entered & GLOBAL != 0);
         t.1 += gain(r);
     }
+    // The most distance added per child first.
     let mut rows: Vec<(u16, ([usize; 4], f64))> = table.into_iter().collect();
     rows.sort_by(|a, b| {
         let rate = |t: &([usize; 4], f64)| t.1 / t.0[0].max(1) as f64;
@@ -79,6 +90,7 @@ fn main() -> anyhow::Result<()> {
     println!("| operator | children | entered any | island | global | distance added per 1k |");
     println!("|---|---:|---:|---:|---:|---:|");
     for (o, (t, added)) in rows {
+        // An operator index that this build does not list prints as #index.
         let name = names
             .get(o as usize)
             .map_or(format!("#{o}"), |n| n.to_string());
@@ -94,8 +106,10 @@ fn main() -> anyhow::Result<()> {
             1000.0 * added / t[0].max(1) as f64,
         );
     }
-    // The compound operators of `src/evolution/anatomy/compound.rs`, as one
-    // group beside all the other structural operators.
+    // The 13 operators of `src/evolution/anatomy/compound.rs`, as one group
+    // beside all the other structural operators. Breeding also treats the four
+    // leg operators and the gait and idea operators as compound
+    // (`anatomy::is_compound`), but this group leaves them out.
     const COMPOUND: [&str; 13] = [
         "limb_length_gradient",
         "symmetrize_limb_pair",

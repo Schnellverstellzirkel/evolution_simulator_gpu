@@ -1,26 +1,30 @@
 //! How much of its parent's distance a child keeps, per structural operator.
-//! Takes the best elites of a checkpoint's global archive, applies each
-//! operator to each elite (`variants` times, each with its own random
-//! stream) and repairs the body as breeding does, within the growth step a
-//! child of that parent may take (`evolution::child_limits`), but without
-//! the small parameter mutation that follows in breeding. Then it scores
-//! parents and children in full 20 s trials, in the checkpoint's world. A
-//! row for that parameter mutation alone is the baseline, and every operator
-//! has a second row, `<operator> + parameter mutation`, with that mutation
-//! after it.
+//! The audit applies each operator to each of the best elites of a
+//! checkpoint's global archive, `variants` times, each time with its own
+//! random stream. It repairs the body as breeding does and keeps the child
+//! within the growth step that breeding allows (`evolution::child_limits`),
+//! but it leaves out the small parameter mutation that follows in breeding.
+//! Then it scores parents and children in full trials in the checkpoint's
+//! world.
 //!
-//! The table prints, per operator: how often the operator fit the body, the
-//! share of the parent's distance the child keeps (median and 75th
-//! percentile), how many children keep 90% and how many beat their parent,
-//! the nodes and muscles the child gained, how many children would enter the
-//! global archive (a child enters when it is faster than the elite that holds
-//! its cell), the distance those entrants add to the archive per 1,000
-//! children, and how many land in a cell nobody holds (an archive that has
-//! refined its cells has many empty ones, and a child there enters whatever
-//! its distance, so those children are not counted as entrants).
+//! The first row is the baseline, that parameter mutation alone. Next come
+//! the operators alone, then the same operators with the parameter mutation
+//! after each, as `<operator> + parameter mutation`. A row prints how often
+//! the operator fit the body, the share of the parent's distance that the
+//! child keeps (median and 75th percentile), how many children keep 90% and
+//! how many beat their parent, and the mean change in nodes and in muscles.
+//! The four ratio columns leave out parents that reached less than 1 m.
+//!
+//! A row also prints how many children would enter the global archive. A
+//! child enters when it is faster than the elite that holds its cell. The
+//! next column is the distance those entrants add to the archive per 1,000
+//! children. The last column is how many children land in a cell nobody
+//! holds. An archive that has refined its cells has many empty ones. A child
+//! there enters whatever its distance, so it is not counted as an entrant.
 //!
 //! Usage: cargo run --release --example mutation_audit -- <checkpoint> [elites] [seconds] [variants]
-//! Every operator runs by name, so no setting is needed to switch one on.
+//! The defaults are 500 elites, 20 s trials and 1 variant. Every operator
+//! runs by name, so no setting is needed to switch one on.
 mod common;
 use anyhow::Context;
 use evolution_simulator::{
@@ -41,7 +45,8 @@ fn main() -> anyhow::Result<()> {
     let variants: usize = args.get(4).and_then(|v| v.parse().ok()).unwrap_or(1);
     let experiment = storage::load_any_version(std::path::Path::new(path))?;
     let mut elites: Vec<_> = experiment.archive.entries.iter().collect();
-    // The fastest elite of each cell, for the archive test.
+    // The fastest elite of each cell, for the archive test. Reserve elites
+    // hold no cell.
     let occupant: HashMap<&Niche, f32> = elites
         .iter()
         .filter(|e| !qd::is_morphology_niche(&e.niche))
@@ -49,6 +54,7 @@ fn main() -> anyhow::Result<()> {
         .collect();
     elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
     elites.truncate(count);
+    // Full trials in the checkpoint's world: no early screen, no early rungs.
     let cfg = Config {
         duration: seconds,
         screen: None,
@@ -57,7 +63,8 @@ fn main() -> anyhow::Result<()> {
         ..experiment.config.clone()
     };
     let mut engine = common::open()?;
-    // Fitness and archive cell of every creature, in order.
+    // Fitness and archive cell of every creature, in order. A fitness that is
+    // not finite counts as 0.
     let mut score = |creatures: &[Creature]| -> anyhow::Result<Vec<(f32, Niche)>> {
         if creatures.is_empty() {
             return Ok(Vec::new());
@@ -89,14 +96,16 @@ fn main() -> anyhow::Result<()> {
     };
     let parents: Vec<Creature> = elites.iter().map(|e| e.creature.unpack()).collect();
     // Donors for the operators that take limbs from another elite. Breeding
-    // draws one at random from the island's archive, so the audit draws one
-    // at random from the whole global archive.
+    // draws 4 elites of the slot's archive at random and keeps the one whose
+    // size differs most from the child's (`structural_mutation_among`). The
+    // audit draws one elite at random from the whole global archive.
     let everyone: Vec<&qd::Elite> = experiment
         .archive
         .entries
         .iter()
         .filter(|e| !qd::is_morphology_niche(&e.niche))
         .collect();
+    // The donor of variant `v` of elite `i`, the same for every operator.
     let donor_of = |i: usize, v: usize| -> Creature {
         let mut rng = Rng::new(0xd0409, v as u32, i);
         everyone[rng.index(everyone.len())].creature.unpack()
@@ -124,8 +133,10 @@ fn main() -> anyhow::Result<()> {
         "| operator | applied | child/parent median | p75 | keeps 90% | beats parent | nodes | muscles | enters archive | archive gain per 1k | new cell |"
     );
     println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
-    // The children of one operator: (parent index, child).
+    // The rows of the table: a label and its children, each as (parent
+    // index, child).
     let mut rows: Vec<(String, Vec<(usize, Creature)>)> = Vec::new();
+    // The baseline row: the parameter mutation alone.
     let local: Vec<(usize, Creature)> = parents
         .iter()
         .enumerate()
@@ -142,8 +153,9 @@ fn main() -> anyhow::Result<()> {
         .collect();
     rows.push(("parameter mutation 0.035 (baseline)".into(), local));
     // Every operator alone, then every operator followed by the small
-    // parameter mutation that the children of the other operators get in
-    // breeding (a compound child gets none there).
+    // parameter mutation that breeding gives the child of an operator that is
+    // not compound. The child of a compound operator gets none there
+    // (`anatomy::is_compound`).
     let names = evolution::structural_operator_names();
     let passes: Vec<(usize, &str, bool)> = [false, true]
         .into_iter()
@@ -203,6 +215,9 @@ fn main() -> anyhow::Result<()> {
         for ((i, child), (s, niche)) in children.iter().zip(&scores) {
             nodes += child.nodes.len() as f32 - parents[*i].nodes.len() as f32;
             muscles += child.muscles.len() as f32 - parents[*i].muscles.len() as f32;
+            // A child enters when it is faster than the elite of its cell. In
+            // an empty cell it counts as new, not as an entrant. Either way it
+            // must have moved (a distance above 0).
             match occupant.get(niche) {
                 Some(&held) if *s > held && *s > 0.0 => {
                     enters += 1;
@@ -211,6 +226,8 @@ fn main() -> anyhow::Result<()> {
                 None if *s > 0.0 => fresh += 1,
                 _ => {}
             }
+            // A parent under 1 m gives no usable ratio. Its children count in
+            // the node, muscle and archive columns but not in the ratio ones.
             let parent = parent_scores[*i];
             if parent < 1.0 {
                 continue;
