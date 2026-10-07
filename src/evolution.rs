@@ -492,6 +492,23 @@ impl Genes {
             keyed(self.key, gene, 2),
         ])
     }
+    /// `gaussian` of genes `gene` to `gene + N - 1`, in one batch the
+    /// compiler can vectorize: the same values, since the twelve uniforms
+    /// sum as integers.
+    #[inline(always)]
+    pub fn gaussians<const N: usize>(self, gene: u32) -> [f32; N] {
+        let mut sums = [0i64; N];
+        for draw in 0..3 {
+            for (i, sum) in sums.iter_mut().enumerate() {
+                let w = keyed(self.key, gene + i as u32, draw);
+                *sum += (w & 0xffff) as i64
+                    + (w >> 16 & 0xffff) as i64
+                    + (w >> 32 & 0xffff) as i64
+                    + (w >> 48) as i64;
+            }
+        }
+        sums.map(|sum| (sum - 6 * 65535) as f32 * GAUSSIAN_SCALE)
+    }
     /// Uniform on [0, 1): draw `3 + k` of `gene`.
     #[inline(always)]
     pub fn unit(self, gene: u32, k: u32) -> f32 {
@@ -2032,21 +2049,20 @@ fn mutate_genes(creature: &mut Creature, cfg: &Config, rng: &mut Rng, scale: f32
     let g = rng.genes();
     let extent = body_extent();
     for (i, node) in creature.nodes.iter_mut().enumerate() {
-        let at = 4 * i as u32;
-        node.x = (node.x + g.gaussian(at) * 0.10 * scale).clamp(-extent, extent);
-        node.y = (node.y + g.gaussian(at + 1) * 0.08 * scale).clamp(0.0, extent);
-        node.diameter =
-            (node.diameter + g.gaussian(at + 2) * 0.025 * scale).clamp(cfg.min_size, cfg.max_size);
-        node.friction = (node.friction + g.gaussian(at + 3) * 0.10 * scale)
-            .clamp(cfg.min_friction, cfg.max_friction);
+        let n: [f32; 4] = g.gaussians(4 * i as u32);
+        node.x = (node.x + n[0] * 0.10 * scale).clamp(-extent, extent);
+        node.y = (node.y + n[1] * 0.08 * scale).clamp(0.0, extent);
+        node.diameter = (node.diameter + n[2] * 0.025 * scale).clamp(cfg.min_size, cfg.max_size);
+        node.friction =
+            (node.friction + n[3] * 0.10 * scale).clamp(cfg.min_friction, cfg.max_friction);
     }
     let max_bone = max_bone_length();
     for (i, bone) in creature.bones.iter_mut().enumerate() {
         let at = BONE_GENES + 8 * i as u32;
-        bone.rest_length =
-            (bone.rest_length + g.gaussian(at) * 0.035 * scale).clamp(0.03, max_bone);
-        bone.min_angle += g.gaussian(at + 1) * 0.15 * scale;
-        bone.max_angle += g.gaussian(at + 2) * 0.15 * scale;
+        let n: [f32; 3] = g.gaussians(at);
+        bone.rest_length = (bone.rest_length + n[0] * 0.035 * scale).clamp(0.03, max_bone);
+        bone.min_angle += n[1] * 0.15 * scale;
+        bone.max_angle += n[2] * 0.15 * scale;
         bone.clamp_range();
         if bone.organ_mass > 0.0 {
             bone.organ_mass = (bone.organ_mass * (g.gaussian(at + 3) * 0.15 * scale).exp())
@@ -2060,16 +2076,16 @@ fn mutate_genes(creature: &mut Creature, cfg: &Config, rng: &mut Rng, scale: f32
     let rare = scale.min(1.0);
     for (i, muscle) in creature.muscles.iter_mut().enumerate() {
         let at = MUSCLE_GENES + 16 * i as u32;
-        muscle.anchor_a = (muscle.anchor_a + g.gaussian(at) * 0.10 * scale).clamp(0.0, 1.0);
-        muscle.anchor_b = (muscle.anchor_b + g.gaussian(at + 1) * 0.10 * scale).clamp(0.0, 1.0);
-        muscle.short = (muscle.short + g.gaussian(at + 2) * 0.06 * scale).clamp(0.01, 0.8 * stroke);
-        muscle.long = (muscle.long + g.gaussian(at + 3) * 0.08 * scale).clamp(muscle.short, stroke);
+        let n: [f32; 8] = g.gaussians(at);
+        muscle.anchor_a = (muscle.anchor_a + n[0] * 0.10 * scale).clamp(0.0, 1.0);
+        muscle.anchor_b = (muscle.anchor_b + n[1] * 0.10 * scale).clamp(0.0, 1.0);
+        muscle.short = (muscle.short + n[2] * 0.06 * scale).clamp(0.01, 0.8 * stroke);
+        muscle.long = (muscle.long + n[3] * 0.08 * scale).clamp(muscle.short, stroke);
         muscle.period = (muscle.period * tempo).clamp(min_period, 10.0);
-        muscle.phase = (muscle.phase + g.gaussian(at + 4) * 0.12 * scale).rem_euclid(1.0);
-        muscle.duty = (muscle.duty + g.gaussian(at + 5) * 0.08 * scale).clamp(0.05, 0.95);
-        muscle.stiffness =
-            (muscle.stiffness * (g.gaussian(at + 6) * 0.10 * scale).exp()).clamp(1.0, 120.0);
-        muscle.reset = (muscle.reset + g.gaussian(at + 7) * 0.12 * scale).rem_euclid(1.0);
+        muscle.phase = (muscle.phase + n[4] * 0.12 * scale).rem_euclid(1.0);
+        muscle.duty = (muscle.duty + n[5] * 0.08 * scale).clamp(0.05, 0.95);
+        muscle.stiffness = (muscle.stiffness * (n[6] * 0.10 * scale).exp()).clamp(1.0, 120.0);
+        muscle.reset = (muscle.reset + n[7] * 0.12 * scale).rem_euclid(1.0);
         // The elastic tendon grows in, tunes, or drops out.
         if g.unit(at + 8, 0) < 0.10 * rare {
             muscle.tendon = if muscle.tendon == 0.0 {
