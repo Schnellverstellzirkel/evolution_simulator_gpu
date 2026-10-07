@@ -394,7 +394,9 @@ fn scaled_range(
     let half = (range.end() - range.start()) / 2.0 * factor;
     (center - half)..=(center + half)
 }
-/// A chart label cut to fit beside its line.
+/// A chart label cut to fit beside its line. It keeps the text before the
+/// first comma. If that is longer than 22 characters, it keeps the first 20
+/// and adds "...".
 fn short_label(label: &str) -> String {
     let first = label.split(',').next().unwrap_or(label);
     if first.chars().count() > 22 {
@@ -403,15 +405,18 @@ fn short_label(label: &str) -> String {
         first.to_owned()
     }
 }
-/// Every world change, oldest first. Events give the change as soon as its
-/// generation starts. History pairs fill in what events lack, such as after
-/// loading a save, when the feed is rebuilt from the history too.
+/// Every world change, oldest first. An event gives a change as soon as it
+/// happens. A pair of neighboring history rows with different physics gives a
+/// change that no event covers, such as one that the event log has dropped.
 fn world_marks(events: &[crate::worker::Event], history: &[Stats]) -> Vec<WorldMark> {
     let mut marks: Vec<WorldMark> = events
         .iter()
         .filter(|e| matches!(e.kind, EventKind::World | EventKind::Autochange))
         .map(|e| WorldMark {
             generation: e.generation,
+            // An event's text can go on after the change, for example with
+            // the count of kept creatures that run again. The label keeps the
+            // first sentence.
             label: e.text.split(". ").next().unwrap_or(&e.text).to_owned(),
             autochange: e.kind == EventKind::Autochange,
         })
@@ -425,6 +430,8 @@ fn world_marks(events: &[crate::worker::Event], history: &[Stats]) -> Vec<WorldM
                 generation,
                 label: crate::worker::world_change_text(&pair[0].config, &pair[1].config)
                     .unwrap_or_else(|| "The world changed".into()),
+                // The rule of the worker's events: Autochange is on and its
+                // step moved.
                 autochange: pair[1].config.autochange_step != pair[0].config.autochange_step
                     && pair[1].config.autochange > 0,
             });
@@ -433,8 +440,10 @@ fn world_marks(events: &[crate::worker::Event], history: &[Stats]) -> Vec<WorldM
     marks.sort_by_key(|m| m.generation);
     marks
 }
-/// The Generation tile's second line. Percent rounds down, so "100%" only
-/// shows when every creature has a result.
+/// The Generation tile's second line. It says "Paused" when evolution is
+/// stopped. While it runs, it says "Finishing the generation" once every
+/// creature has a result. Before that it gives the percent done, rounded down,
+/// and the time left at `rate` creatures per second when `rate` is above zero.
 fn generation_progress(completed: usize, population: usize, running: bool, rate: f64) -> String {
     let done = completed.min(population);
     if !running {
