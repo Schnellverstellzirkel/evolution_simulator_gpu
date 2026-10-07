@@ -97,13 +97,15 @@ pub(super) struct Playback {
 /// Half-width of the follow camera's average of the center of mass (s).
 const CAMERA_WINDOW: f32 = 1.0;
 impl Playback {
-    /// A replay that waits only a few seconds for the GPU (race lanes are
-    /// built in one go on the UI thread).
+    /// A replay that waits up to 3 s for the GPU's recording. Race lanes use
+    /// it, because the UI thread builds them in one go.
     pub(super) fn new(creature: Creature, config: Config) -> Self {
         Self::recorded(creature, config, Duration::from_secs(3))
     }
-    /// A replay that waits `patience` for the GPU's recording. Without one
-    /// it holds the first pose and says the replay is unavailable.
+    /// A replay that waits `patience` for the GPU's recording. Without one it
+    /// holds the first pose and sets `unavailable`. The bones go into canonical
+    /// order first, because the kernel numbers them that way and its record of
+    /// broken joints follows those numbers.
     pub(super) fn recorded(creature: Creature, config: Config, patience: Duration) -> Self {
         let mut normalized = creature.clone();
         crate::evolution::canonicalize_bone_order(&mut normalized);
@@ -134,6 +136,10 @@ impl Playback {
         playback.preparing = true;
         playback
     }
+    /// A replay of `frames` and the `result` the kernel scored in the same run,
+    /// for a creature whose bones are in canonical order. It finds the fall
+    /// frame, what ended the trial, the camera track and the body heights. The
+    /// forces are `recorded_forces`, or an estimate from the frames.
     fn from_recording(
         normalized: Creature,
         config: Config,
@@ -143,6 +149,8 @@ impl Playback {
     ) -> Self {
         let nodes = physics::nodes(&normalized);
         let last_frame = frames.len().saturating_sub(1).min(u32::MAX as usize) as u32;
+        // The fall time counts seconds into the timed trial, which starts at
+        // frame `settle()`.
         let fall = (result.fall_time > 0.0).then(|| {
             let tick = physics::settle()
                 .saturating_add((result.fall_time * physics::rate() as f32).round() as u32);
@@ -177,8 +185,9 @@ impl Playback {
             )
         });
         // The head-shake average stops updating when the trial ends, so it
-        // still holds the value that ended it. The engine tests the joints on
-        // the pose after the step and records what it found with that pose.
+        // still holds the value that ended it. The kernel tests the joints on
+        // the pose after each step and records what it found with that pose.
+        // A break is looked for in the fall frame and in the frame before it.
         let ending = match fall {
             _ if result.head_shake > physics::HEAD_SHAKE_LIMIT => Ending::Shook,
             Some((tick, _)) => {
@@ -212,26 +221,30 @@ impl Playback {
         playback.show();
         playback
     }
-    /// Resets playback to the first frame of the trial.
+    /// Moves the replay back to the first step of the trial, the frame after
+    /// `trial_start`.
     pub(super) fn reset(&mut self) {
         self.tick = self.trial_start().saturating_add(1).min(self.last_frame());
         self.show();
     }
+    /// Index of the last recorded frame, 0 when there is one frame or none.
     pub(super) fn last_frame(&self) -> u32 {
         self.frames.len().saturating_sub(1).min(u32::MAX as usize) as u32
     }
-    /// Frame index where the trial starts, after settling.
+    /// Index of the frame at time 0 of the trial. The frames up to it all show
+    /// the start pose.
     pub(super) fn trial_start(&self) -> u32 {
         physics::settle().min(self.last_frame())
     }
-    /// Seconds elapsed since the trial started.
+    /// Seconds since the trial started, at most the length of a trial.
     pub(super) fn elapsed_seconds(&self) -> f32 {
         self.tick
             .saturating_sub(self.trial_start())
             .min(self.config.steps()) as f32
             * physics::dt()
     }
-    /// Seeks to a frame relative to trial start, clamped to the valid range.
+    /// Moves to a frame counted from `trial_start`, at most the last frame. It
+    /// also clears `accumulator`.
     pub(super) fn seek(&mut self, elapsed_frame: u32) {
         self.tick = self
             .trial_start()
@@ -240,15 +253,16 @@ impl Playback {
         self.accumulator = 0.0;
         self.show();
     }
-    /// Advances one physics step.
+    /// Moves one recorded frame forward, to the last frame at most.
     pub(super) fn advance(&mut self) {
         self.tick = self.tick.saturating_add(1).min(self.last_frame());
         self.show();
     }
-    /// The fall, once the replay has reached it.
+    /// The `fall`, once the replay has reached its frame.
     pub(super) fn fallen(&self) -> Option<(u32, f32)> {
         self.fall.filter(|&(tick, _)| self.tick >= tick)
     }
+    /// Puts the nodes at the pose of the current frame.
     fn show(&mut self) {
         if let Some(frame) = self.frames.get(self.tick as usize) {
             for (node, position) in self.nodes.iter_mut().zip(frame) {
@@ -257,13 +271,13 @@ impl Playback {
         }
     }
     /// Share of the way to the next recorded frame that the replay clock
-    /// has gone.
+    /// has gone, from `accumulator`.
     fn blend(&self) -> f32 {
         (self.accumulator / physics::dt()).clamp(0.0, 1.0)
     }
     /// Places the nodes between the current frame and the next by `blend`,
     /// so motion looks smooth when the screen refreshes faster than the
-    /// 60 Hz recording.
+    /// 60 Hz recording. At the last frame it shows that frame.
     pub(super) fn show_between(&mut self) {
         let alpha = self.blend();
         let (Some(now), Some(next)) = (
@@ -276,7 +290,8 @@ impl Playback {
             node.pos = [a[0] + (b[0] - a[0]) * alpha, a[1] + (b[1] - a[1]) * alpha];
         }
     }
-    /// Where the follow camera looks now (see `track`).
+    /// Where the follow camera looks now (m): `track` at this frame, moved
+    /// toward the next frame by `blend`.
     pub(super) fn camera_x(&self) -> f32 {
         let at = |tick: usize| {
             self.track
@@ -289,7 +304,7 @@ impl Playback {
         let alpha = self.blend();
         at(tick) + (at(tick + 1) - at(tick)) * alpha
     }
-    /// Mass-weighted center of the body as drawn.
+    /// Mass-weighted center of the body as drawn, from the pose in `nodes`.
     pub(super) fn shown_center(&self) -> Option<[f32; 2]> {
         let mass: f32 = self.nodes.iter().map(|n| n.mass).sum();
         (mass > 0.0).then(|| {
@@ -298,7 +313,8 @@ impl Playback {
             [x / mass, y / mass]
         })
     }
-    /// Mass-weighted center of the body at a recorded frame.
+    /// Mass-weighted center of the body at a recorded frame, or `None` when
+    /// there is no such frame or the body has no mass.
     pub(super) fn center_of_mass(&self, tick: u32) -> Option<[f32; 2]> {
         let frame = self.frames.get(tick as usize)?;
         let mut mass = 0.0;
@@ -326,7 +342,8 @@ impl Playback {
         }
         (now[0] - before[0]).hypot(now[1] - before[1]) / seconds
     }
-    /// Distance covered so far, frozen at the fall the engine recorded.
+    /// Distance covered so far. It stops at the distance the kernel scored
+    /// once the replay reaches the fall.
     pub(super) fn current_distance(&self) -> f32 {
         self.fallen()
             .map_or_else(|| physics::fitness(&self.nodes), |(_, distance)| distance)
