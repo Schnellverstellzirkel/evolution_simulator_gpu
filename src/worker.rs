@@ -510,10 +510,17 @@ pub struct Snapshot {
     /// load or a save that failed. The next command clears it.
     pub error: Option<String>,
 }
-/// The worker thread that evolves the search and publishes snapshots for the UI.
+/// The UI's handle on the worker thread, which evolves the search and
+/// publishes snapshots. Dropping it stops the thread and waits for it to end.
 pub struct Worker {
+    /// The channel to the worker thread. `send` writes to it.
     pub tx: Sender<Command>,
+    /// The newest snapshot. The worker replaces it each time it publishes, and
+    /// the UI takes it, so it holds `None` until the next one.
     pub view: Arc<Mutex<Option<Snapshot>>>,
+    /// True while the UI wants the game paused. The worker stops running while
+    /// it is set, even before it has read `Command::Pause`. `Command::Run`
+    /// clears it, and dropping the `Worker` sets it.
     pub pause: Arc<AtomicBool>,
     /// True while a native benchmark is inside its measured window (after warm-up).
     pub measuring: Arc<AtomicBool>,
@@ -530,6 +537,9 @@ pub struct Worker {
     join: Option<std::thread::JoinHandle<()>>,
 }
 impl Worker {
+    /// Starts the worker thread with `gpu` open already. `ctx` is the window's
+    /// context, which the worker asks to repaint after each snapshot. The
+    /// thread watches the game's developer pause directory (`dev_pause::dir`).
     pub fn spawn(gpu: Gpu, ctx: eframe::egui::Context) -> Self {
         Self::spawn_with_pause_dir(gpu, ctx, crate::dev_pause::dir())
     }
@@ -538,11 +548,15 @@ impl Worker {
         Self::start(ctx, pause_dir, move || Ok(gpu))
     }
     /// Opens the evaluation devices on the worker's own thread, so the window
-    /// can draw its loading screen while they open. Commands sent before
-    /// then wait in the channel.
+    /// can draw its loading screen while they open. `primary` names the
+    /// primary GPU (`Gpu::new`). Commands sent before then wait in the
+    /// channel.
     pub fn open(primary: String, ctx: eframe::egui::Context) -> Self {
         Self::start(ctx, crate::dev_pause::dir(), move || Gpu::new(&primary))
     }
+    /// Starts the worker thread, which calls `open` to get its `Gpu`. It sets
+    /// `opened` when `open` returns. Then it runs the loop, or leaves the
+    /// reason in `failed` when the devices did not open.
     fn start(
         ctx: eframe::egui::Context,
         pause_dir: PathBuf,
@@ -591,6 +605,8 @@ impl Worker {
             join: Some(join),
         }
     }
+    /// Sends a command to the worker. It does nothing once the worker has
+    /// ended.
     pub fn send(&self, c: Command) {
         let _ = self.tx.send(c);
     }
@@ -599,15 +615,17 @@ impl Drop for Worker {
     fn drop(&mut self) {
         self.pause.store(true, Ordering::Relaxed);
         let _ = self.tx.send(Command::Shutdown);
-        // Finish compute before eframe destroys the Vulkan surface/device resources.
+        // Wait for the thread, so nothing is still using the GPU or writing a
+        // save when the window closes.
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
     }
 }
-/// The worker thread's state: what `run` used to keep in local variables.
-/// Fields drop in declaration order: the game and the helper thread first,
-/// then the developer pause, and `gpu`, which closes the engines, last.
+/// The worker thread's state, kept in one place for the methods of the
+/// submodules. Fields drop in declaration order. The game and the helper
+/// thread go before the developer pause, and `gpu`, which closes the engines,
+/// goes last.
 struct Loop {
     // What the loop measures.
     /// Completion time and population of recent generations.
@@ -631,6 +649,7 @@ struct Loop {
     /// A save being loaded on its own thread.
     loading: Option<Loading>,
     // What the next snapshot shows.
+    /// The creature `Command::Select` found, until a snapshot carries it.
     selected: Option<(Creature, Config)>,
     /// The archive state the map table was built from.
     map_key: (u64, usize, u64),
@@ -639,18 +658,24 @@ struct Loop {
     /// Whether the UI wants the archive map table.
     want_map: bool,
     events: Arc<Vec<Event>>,
+    /// The game's history, shared with the snapshots and copied again when its
+    /// length changes.
     history: Arc<Vec<Stats>>,
+    /// Counts the games started or loaded (`Snapshot::epoch`).
     epoch: u64,
     /// Something changed since the last snapshot.
     changed: bool,
     last_publish: Instant,
     error: Option<String>,
     status: String,
+    /// The ancestors `Command::Lineage` traced, until a snapshot carries them.
     lineage: Option<(u64, Vec<LineageStep>)>,
     /// The (epoch, id) the live champion is for.
     champion_key: Option<(u64, u64)>,
     /// The live champion sent with snapshots.
     champion: Option<Arc<(Creature, Config)>>,
+    /// The creature to show for a new or loaded game, until a snapshot
+    /// carries it.
     preview: Option<(Creature, Config)>,
     /// The UI asked for the ranked archive (`Command::Cards`).
     send_cards: bool,
@@ -661,7 +686,9 @@ struct Loop {
     helper: crate::threads::Helper,
     dev: crate::dev_pause::DevPause,
     ctx: eframe::egui::Context,
+    /// The UI's pause flag (`Worker::pause`).
     pause: Arc<AtomicBool>,
+    /// Where snapshots go (`Worker::view`).
     output: Arc<Mutex<Option<Snapshot>>>,
     rx: Receiver<Command>,
     gpu: Gpu,
@@ -716,9 +743,10 @@ impl Loop {
             gpu,
         }
     }
-    /// One pass of the worker's loop: commands, a load in progress, one
-    /// step of evolution, the snapshot and a requested save. `Break` ends the
-    /// loop.
+    /// One pass of the worker's loop. It reads the commands, checks a load in
+    /// progress and the pause flags, takes one step of evolution, logs GPU and
+    /// autosave notices, publishes a snapshot when one is due and runs a
+    /// requested save. `Break` ends the loop.
     fn pass(&mut self) -> ControlFlow<()> {
         let first = self.next_command()?;
         self.handle_commands(first)?;
@@ -739,6 +767,8 @@ impl Loop {
         self.autosave.join();
     }
 }
+/// The body of the worker thread. It sets the thread up, runs `Loop::pass`
+/// until it breaks, and then lets `Loop::finish` wait for a running autosave.
 fn run(
     gpu: Gpu,
     rx: Receiver<Command>,
@@ -769,7 +799,9 @@ fn note_generation(marks: &mut std::collections::VecDeque<(Instant, usize)>, pop
         marks.pop_front();
     }
 }
-/// Creatures per second between the oldest and newest recent generation ends.
+/// Creatures per second between the oldest and newest recent generation ends:
+/// the population of every generation after the oldest, over the time from the
+/// oldest end to the newest. It is 0 with fewer than two ends.
 fn end_to_end_rate(marks: &std::collections::VecDeque<(Instant, usize)>) -> f64 {
     match (marks.front(), marks.back()) {
         (Some(first), Some(last)) if marks.len() > 1 => {
