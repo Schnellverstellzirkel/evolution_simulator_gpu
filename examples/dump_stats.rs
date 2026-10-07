@@ -1,16 +1,17 @@
-//! Reads a generation dump (EVOLUTION_DUMP_GENERATION, see `storage::dump`)
-//! and prints what the search needs from it: the ring's body histogram, entrants by archive, the
-//! three tail numbers per body class (R1 stop share, entrant share by
-//! archive including the reserve, operator histogram), the nursery's
-//! entrants, entrant recall per per-cell factor at 5 s, and mean final /
-//! d(10) of entrants.
+//! Reads a generation dump and prints how the search treated that generation's
+//! children. A run with `EVOLUTION_DUMP_GENERATION` set writes the dump
+//! (`storage::dump`). The output covers body sizes, the archives the children
+//! entered, what the 1 s rung (R1) and the 5 s bar would stop, and how the
+//! nurseries did. `examples/dump_common/mod.rs` has the dump reader and the
+//! rung ladder, and `operator_yield` shares them.
 //!
-//! Usage: dump_stats <dump.bin>
+//! Usage: `dump_stats <dump.bin>`
 #[path = "dump_common/mod.rs"]
 mod dump_common;
 use dump_common::*;
 use std::collections::HashMap;
 
+/// `part` as a percentage (0 to 100) of `whole`.
 fn pct(part: usize, whole: usize) -> f64 {
     100.0 * part as f64 / whole.max(1) as f64
 }
@@ -22,6 +23,9 @@ fn main() -> anyhow::Result<()> {
     let d = read(&path)?;
     let h = &d.header;
     let names = evolution_simulator::evolution::structural_operator_names();
+    // Children are the rows bred for the generation. The other rows are island
+    // elites run again and results that enter no archive, such as those from
+    // before a world change.
     let children: Vec<&Row> = d.rows.iter().filter(|r| r.child()).collect();
     let reruns = d.rows.iter().filter(|r| r.flags & RERUN != 0).count();
     let stale = d
@@ -44,7 +48,8 @@ fn main() -> anyhow::Result<()> {
         h.bar
     );
 
-    // The ring histogram.
+    // Nodes and muscles of the children: mean, median, 90th and 99th
+    // percentile, and maximum.
     let hist = |label: &str, values: &mut Vec<u8>| {
         values.sort_unstable();
         let n = values.len().max(1);
@@ -83,7 +88,8 @@ fn main() -> anyhow::Result<()> {
         .collect();
     println!("emitters: {}", by_emitter.join(", "));
 
-    // Steps per creature.
+    // Mean steps per child with every trial in full (as dumped), and under
+    // today's 5 s screen.
     let all: f64 = children.iter().map(|r| r.steps() as f64).sum::<f64>() / children.len() as f64;
     let today: f64 = children
         .iter()
@@ -96,7 +102,8 @@ fn main() -> anyhow::Result<()> {
         pct(fell, children.len())
     );
 
-    // Entrants by archive.
+    // Entrants are the children that entered an archive. `mask` picks the
+    // kinds of archive to count.
     let entered = |mask: u8| children.iter().filter(|r| r.entered & mask != 0).count();
     let any = entered(0xff);
     println!(
@@ -107,6 +114,8 @@ fn main() -> anyhow::Result<()> {
         entered(RESERVE),
         entered(GLOBAL)
     );
+    // Entrants that ran past 5 s in the dump but that today's screen would have
+    // stopped at 5 s.
     let screened_entrants = children
         .iter()
         .filter(|r| r.entered != 0 && today_steps(r, h) == RUNG_STEPS[2] && r.steps() > 300)
@@ -116,11 +125,16 @@ fn main() -> anyhow::Result<()> {
         pct(screened_entrants, any)
     );
 
-    // R1 at the plan's budget, fitted on half the rows, for the tail number.
+    // Fit the rung ladder on half the children (`fit_half`) with a tolerance of
+    // 1e-3, so R1 may stop one in a thousand of the rows that pass the 5 s bar.
+    // The two `false` arguments keep the generation's own 5 s bar and leave R4
+    // out.
     let fit: Vec<&Row> = children.iter().copied().filter(|r| fit_half(r)).collect();
     let ladder = Ladder::fit(&fit, &d, 1e-3, false, false);
 
-    // The three tail numbers per body class.
+    // Per body size class: how many children R1 would stop and how many pass the
+    // 5 s bar, the entrants by archive, the operators that made the children and
+    // their growth over the parent.
     println!("tail numbers by body class (R1 fitted on half the rows at 1e-3, today's R3):");
     #[allow(clippy::needless_range_loop)]
     for class in 0..3 {
@@ -170,6 +184,8 @@ fn main() -> anyhow::Result<()> {
             e(GLOBAL),
             pct(e(GLOBAL), rows.len())
         );
+        // Per operator: its children and how many of them entered an archive.
+        // The most used operators come first.
         let mut ops: HashMap<u16, (usize, usize)> = HashMap::new();
         for r in &rows {
             let o = ops.entry(r.operator).or_default();
@@ -199,6 +215,7 @@ fn main() -> anyhow::Result<()> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        // Children whose parent's size the dump recorded.
         let known: Vec<&&Row> = rows.iter().filter(|r| r.parent_nodes > 0).collect();
         let gained = known
             .iter()
@@ -229,7 +246,8 @@ fn main() -> anyhow::Result<()> {
         entrants.len()
     );
 
-    // The nursery.
+    // The children of both kinds of nursery (new random bodies and reshaped
+    // bodies).
     let nursery: Vec<&Row> = children.iter().copied().filter(|r| r.nursery(h)).collect();
     let nursery_entered = nursery.iter().filter(|r| r.entered & NURSERY != 0).count();
     let nursery_passed = nursery
@@ -243,6 +261,7 @@ fn main() -> anyhow::Result<()> {
         pct(nursery_entered, nursery.len()),
         pct(nursery_passed, nursery.len())
     );
+    // R1's rule applied directly, because `Ladder::apply` skips the nurseries.
     let r1_nursery = nursery
         .iter()
         .filter(|r| r.entered & NURSERY != 0 && r.steps() > 60)
@@ -255,8 +274,10 @@ fn main() -> anyhow::Result<()> {
         "nursery entrants the island R1 would stop if nurseries were not exempt: {r1_nursery} of {nursery_entered}"
     );
 
-    // Entrant recall per per-cell factor at 5 s (the neighbourhood minimum
-    // over the parent's cell and its 80 neighbours of the elites' d300).
+    // Entrant recall of a per-cell 5 s bar. For each factor, count the entrants
+    // whose 5 s distance is below that factor times the lowest 5 s distance
+    // among the elites in their parent's cell and its 80 neighbours
+    // (`neighbourhood_min`), and how many of them are in the top 1% of children.
     let nmin300 = neighbourhood_min(&d, |e| e.d[1]);
     let mut top: Vec<&Row> = children.clone();
     top.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
@@ -264,6 +285,8 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .map(|r| r.slot)
         .collect();
+    // Island entrants (no nursery or immigrant) with a known parent cell, each
+    // with the neighbourhood minimum, which must be above 0.
     let with_min: Vec<(&Row, f32)> = entrants
         .iter()
         .filter(|r| !r.nursery(h) && r.emitter != RESTART && r.parent_cell != u16::MAX)
@@ -290,6 +313,8 @@ fn main() -> anyhow::Result<()> {
             pct(below.len(), with_min.len())
         );
     }
+    // Final distance over the distance at 10 s, for entrants that ran past 10 s
+    // and had moved forward by then.
     let ratios: Vec<f64> = entrants
         .iter()
         .filter(|r| r.steps() > 600 && r.d(3) > 0.05)
