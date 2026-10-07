@@ -20,8 +20,9 @@ use super::limbs::narrow;
 use super::muscles::turn;
 use super::rhythm::leaf_limbs;
 use super::{BoneIds, Context, MuscleIds, Operator, muscles_on, new_muscle, room};
+use crate::bounded::Bounded;
 use crate::config::Config;
-use crate::evolution::{Bone, Creature, Muscle, Rng, max_bone_length};
+use crate::evolution::{Bone, Creature, MAX_NODES, Muscle, Rng, max_bone_length};
 
 /// This file's operators, by name. Add each new one here.
 pub(super) const OPS: &[(&str, Operator)] = &[
@@ -546,7 +547,7 @@ pub(crate) fn set_leg_proportions(
         .map(|i| weight(i) * c.bones[leg[i]].rest_length)
         .sum();
     let limit = max_bone_length();
-    let factors: Vec<f32> = (0..n)
+    let factors: Bounded<f32, MAX_NODES> = (0..n)
         .map(|i| {
             let length = c.bones[leg[i]].rest_length;
             (weight(i) * total / weighted).clamp(0.03 / length, (limit / length).max(0.03 / length))

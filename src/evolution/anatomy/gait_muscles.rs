@@ -20,8 +20,9 @@ use super::{
     BoneIds, Context, MuscleIds, Operator, branch, child_bones, fit_stroke, is_neck, muscles_on,
     new_muscle, parent_bones, pick_each, room, span,
 };
+use crate::bounded::Bounded;
 use crate::config::Config;
-use crate::evolution::{Creature, Muscle, NO_SENSOR, Rng, bone_point};
+use crate::evolution::{Creature, MAX_MUSCLES, Muscle, NO_SENSOR, Rng, bone_point};
 
 /// This file's operators, by name. Add each new one here.
 pub(super) const OPS: &[(&str, Operator)] = &[
@@ -321,7 +322,7 @@ fn stance_swing_roles(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Cont
     let Some(lead) = strongest(c, &group) else {
         return false;
     };
-    let before: Vec<Muscle> = group.iter().map(|&i| c.muscles[i]).collect();
+    let before: Bounded<Muscle, MAX_MUSCLES> = group.iter().map(|&i| c.muscles[i]).collect();
     {
         let m = &mut c.muscles[lead];
         m.duty = m.duty.clamp(0.55, 0.8);
@@ -448,7 +449,7 @@ fn muscle_to_all_legs(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Conte
     let Some(source_phase) = reference(source) else {
         return false;
     };
-    let mut copies: Vec<Muscle> = Vec::new();
+    let mut copies: Bounded<Muscle, MAX_MUSCLES> = Bounded::new();
     for (t, (limb, above)) in legs.iter().enumerate() {
         if t == source || c.muscles.len() + copies.len() >= cfg.max_muscles {
             continue;

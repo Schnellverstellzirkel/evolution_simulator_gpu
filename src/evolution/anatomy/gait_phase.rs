@@ -18,8 +18,9 @@ use super::extra::drive;
 use super::muscles::turn;
 use super::rhythm::{limbs_front_to_back, muscle_groups};
 use super::{Context, MuscleIds};
+use crate::bounded::Bounded;
 use crate::config::Config;
-use crate::evolution::{Creature, Rng};
+use crate::evolution::{Creature, MAX_NODES, Rng};
 
 /// This file's operators, by name. Add each new one here.
 pub(super) const OPS: &[(&str, super::Operator)] = &[
@@ -136,7 +137,7 @@ fn sign(rng: &mut Rng) -> f32 {
 }
 
 /// The offset of each leg's lead muscle from the first leg's, in cycles.
-fn offsets(c: &Creature, legs: &[Leg]) -> Vec<f32> {
+fn offsets(c: &Creature, legs: &[Leg]) -> Bounded<f32, MAX_NODES> {
     let origin = c.muscles[legs[0].lead].phase;
     legs.iter()
         .map(|leg| turn(origin, c.muscles[leg.lead].phase))
@@ -411,7 +412,7 @@ pub(crate) fn snap_leg_lags(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx:
     };
     let beats = [2.0, 3.0, 4.0, 6.0][rng.index(4)];
     let origin = c.muscles[legs[0].lead].phase;
-    let targets: Vec<f32> = offsets(c, &legs)
+    let targets: Bounded<f32, MAX_NODES> = offsets(c, &legs)
         .iter()
         .map(|d| origin + (d * beats).round() / beats)
         .collect();
@@ -433,7 +434,7 @@ pub(crate) fn reverse_leg_sequence(
         return false;
     };
     let origin = c.muscles[legs[0].lead].phase;
-    let targets: Vec<f32> = offsets(c, &legs).iter().map(|d| origin - d).collect();
+    let targets: Bounded<f32, MAX_NODES> = offsets(c, &legs).iter().map(|d| origin - d).collect();
     set_targets(c, &legs, &targets)
 }
 
@@ -451,7 +452,8 @@ pub(crate) fn change_leading_leg(
         return false;
     };
     let origin = c.muscles[legs[0].lead].phase;
-    let mut targets: Vec<f32> = offsets(c, &legs).iter().map(|d| origin + d).collect();
+    let mut targets: Bounded<f32, MAX_NODES> =
+        offsets(c, &legs).iter().map(|d| origin + d).collect();
     for pair in targets.as_chunks_mut::<2>().0 {
         pair.swap(0, 1);
     }
