@@ -169,31 +169,48 @@ enum Tab {
     Race,
     Lineage,
 }
-/// The application's UI state: windows, panels, buffers, and selections.
+/// The state of the whole window: the worker's handle and newest snapshot, the
+/// replay on screen, and what each tab, panel and dialog has open or selected.
 struct App {
     worker: Worker,
+    /// The newest snapshot the worker published. It is `None` before the first.
     snapshot: Option<Snapshot>,
+    /// The settings the panels show and edit, which are the world the player
+    /// asked for. The worker gets them with `Command::Configure`, and
+    /// `absorb_snapshot` takes the worker's own back.
     config: Config,
+    /// The replay on screen: the champion or the creature the player picked.
     playback: Option<Playback>,
     /// The replay being recorded for `playback`, and when it was asked for.
     replay_wait: Option<(mpsc::Receiver<Playback>, Instant)>,
-    /// Seconds the last replay took to appear, for benchmarks.
+    /// Seconds each replay took to appear after it was asked for, for the
+    /// benchmark report.
     replay_seconds: Vec<f32>,
     /// When the last replay was requested for benchmarking.
     bench_last_replay: Instant,
     ctx: egui::Context,
     tab: Tab,
+    /// Replay speed as a multiple of real time (the Speed menu).
     speed: f32,
     playing: bool,
+    /// The replay view's zoom in pixels per meter.
     zoom: f32,
     /// True once the user zoomed by hand; until then the zoom fits the creature.
     zoom_user: bool,
-    /// Player view option: draw muscle forces and ground pushes.
+    /// Replay view option, the Forces box: draw muscle forces and ground pushes.
     show_forces: bool,
+    /// The replay camera in meters: x along the ground and y up.
     camera: [f32; 2],
+    /// The camera follows the creature. Dragging the view turns it off.
     follow: bool,
+    /// The row of the history that the History tab shows (the Generation
+    /// slider).
     history_index: usize,
+    /// The History tab keeps `history_index` on the newest row (the Follow
+    /// latest box).
     history_latest: bool,
+    /// The title of the file dialog that is open, such as "Save experiment",
+    /// which also labels its button. It is `None` when no file dialog shows.
     file_mode: Option<&'static str>,
     /// The saves File > Open lists, newest first, while that window is open.
     open_list: Option<Vec<SaveEntry>>,
@@ -206,33 +223,52 @@ struct App {
     overwrite: Option<PathBuf>,
     /// The experiment and number of worker events already read.
     events_seen: (u64, usize),
+    /// The path in the text box of the Open window and of the file dialogs.
     file_path: String,
+    /// A message for the status line. The status line takes it on the next
+    /// frame and keeps it in `shown_message`.
     message: Option<String>,
     /// The message on the status line and when it first showed.
     shown_message: Option<(String, Instant)>,
     /// Since when the GPU has waited for a kernel (`cuda_engine::compiling_world`).
     compiling_since: Option<Instant>,
+    /// The New experiment window is open.
     new_dialog: bool,
     /// When the UI last sent a settings change to the worker.
     config_sent: Option<Instant>,
-    /// Worlds before each change made in the World panel, newest last, for
-    /// its Undo button.
+    /// Worlds before each change of physics made in the World panel, newest
+    /// last and at most 20, for its Undo last change button.
     world_undo: Vec<Config>,
     last_frame: Instant,
+    /// Seconds of the last 240 frames, for the diagnostics drawer and the
+    /// capture report.
     frame_times: std::collections::VecDeque<f32>,
     /// The Diagnostics drawer under the status line is open.
     show_perf: bool,
+    /// The UI scale of the View menu, which is egui's zoom factor.
+    /// `EVOLUTION_SMOKE_ZOOM` sets the first one.
     ui_scale: f32,
+    /// Set at the start, by Create population and by Open. The next snapshot
+    /// of a newly started or opened game then replaces `config` with that
+    /// game's settings.
     initial: bool,
+    /// A screenshot run or an unattended run has yet to start evolving, which
+    /// `frame_housekeeping` does 250 ms after the window opened.
     smoke_start_pending: bool,
+    /// The preset (an index into `environment::PRESETS`) that a screenshot run
+    /// applies 4 s after the window opened. `None` once applied.
     smoke_preset: Option<usize>,
+    /// When the window opened.
     started: Instant,
     /// The player closed the loading card; compiling goes on in a corner
     /// note.
     loading_hidden: bool,
-    /// A screenshot run shows made-up loading jobs (`loading::demo`).
+    /// A screenshot run shows made-up loading jobs (`crate::loading::demo`).
     loading_demo: bool,
+    /// The capture hook has asked for its screenshot.
     capture_requested: bool,
+    /// Where the capture hook saves its screenshot (`EVOLUTION_SMOKE_CAPTURE`).
+    /// The window closes after that.
     capture_path: Option<String>,
     /// Ancestors of the selected creature, newest first.
     lineage: Vec<crate::worker::LineageStep>,
@@ -240,7 +276,7 @@ struct App {
     lineage_requested: Option<u64>,
     /// A lineage request is in flight.
     lineage_pending: bool,
-    /// The player picked the creature on screen, so the theater stops
+    /// The player picked the creature on screen, so the replay stops
     /// following the champion until they go back to it.
     pinned: bool,
     /// The creature on screen is the champion of a finished generation (or
@@ -266,35 +302,45 @@ struct App {
     archive_view: ArchiveView,
     /// Top archived elites racing side by side.
     race: Vec<RaceLane>,
-    /// Waiting for race data from the worker.
+    /// The race lanes are not built yet. They are built from the ranked
+    /// archive, or from the player's picks, when that data is there.
     race_pending: bool,
+    /// The meter at the left edge of the race lanes. It eases toward the
+    /// leader.
     race_camera: f32,
     /// Creatures the player sent to the race, oldest first, with their worlds.
     race_picks: Vec<(Creature, Config)>,
-    /// Native benchmark frame intervals, the time each frame began, and
-    /// the last control probe time.
+    /// Native benchmark frame intervals in seconds, while the benchmark
+    /// measures.
     bench_frames: Vec<f32>,
+    /// The time each frame in `bench_frames` began.
     bench_frame_starts: Vec<Instant>,
     /// CPU time of each measured frame without the vsync wait (eframe's
-    /// `cpu_usage`), with the time it began.
+    /// `cpu_usage`).
     bench_work: Vec<f32>,
     /// The UI thread's major page faults when the measured window began.
     bench_faults: Option<u64>,
+    /// When the worker was last probed for the benchmark.
     bench_last_ping: Instant,
+    /// How many probes the benchmark has sent.
     bench_pings: u64,
     show_help: bool,
-    /// The "How evolution works" window (`schematic::show`).
+    /// The "How evolution works" window (`crate::schematic::show`).
     pub schematic_open: bool,
     /// Disk usage in bytes of the runs/ directory.
     runs_bytes: u64,
     runs_checked: Instant,
+    /// A screenshot is wanted. `request_screenshots` asks the window for it
+    /// with a `ScreenshotRequest` and clears this.
     screenshot_pending: bool,
+    /// A `ScreenshotRequest` is out and its reply has not come yet.
     screenshot_waiting: bool,
     /// Unattended runs: `EVOLUTION_CAPTURE_EVERY=<n>` saves the window to
-    /// `runs/progress-gen<g>.png` every n generations; the generation of the
-    /// capture in flight, and the last one taken.
+    /// `runs/progress-gen<g>.png` every n generations.
     capture_every: Option<u32>,
+    /// The generation of the capture in flight.
     capture_generation: Option<u32>,
+    /// The generation of the last capture taken.
     captured_generation: u32,
 }
 impl App {
