@@ -79,65 +79,89 @@ pub mod scene {
     pub const TRAIL: Color32 = Color32::from_rgb(255, 210, 60);
 }
 
-/// Interface colors.
+/// The interface colors. `Theme::get` returns the one theme the game has, and
+/// the `ui` modules take it by value.
 #[derive(Clone, Copy)]
 pub struct Theme {
     /// Side panel and status line: tan paper.
     pub panel: Color32,
     /// The central area: clear, so the sunburst shows.
     pub canvas: Color32,
+    /// The fill of a card: cream.
     pub card: Color32,
+    /// The fill of a hovered or lit card: pale mustard.
     pub card_hover: Color32,
+    /// The outline of a card: dark brown.
     pub card_border: Color32,
-    /// A pale line along the top edge of a plate.
+    /// A pale line along the top edge of a plate. Nothing paints it now.
     pub bevel: Color32,
+    /// Text and outlines: dark brown.
     pub ink: Color32,
+    /// Text of second rank: a lighter brown.
     pub muted: Color32,
     /// Brick red: the numbers and choices that matter.
     pub accent: Color32,
     /// BLU blue: secondary lines and what waits.
     pub cold: Color32,
-    /// Rust orange: warnings (a failed trial, a catastrophe, a world-change mark).
+    /// Rust orange for warnings, such as a failed trial, a catastrophe or a
+    /// world-change mark.
     pub warn: Color32,
-    /// A fall or an error.
+    /// Red for error messages.
     pub danger: Color32,
     /// Record markers on the charts.
     pub record: Color32,
-    /// The Evolve button: fill and text.
+    /// The fill of the Evolve button: green.
     pub go_fill: Color32,
+    /// The text on `go_fill`: cream.
     pub go_text: Color32,
-    /// The Pause evolution button: fill and text.
+    /// The fill of the Pause evolution button: brick red. A selected effect
+    /// level away from calm uses it too.
     pub stop_fill: Color32,
+    /// The text on `stop_fill`: cream.
     pub stop_text: Color32,
-    /// The armed (selected) fill and text: mustard with dark text.
+    /// The armed (selected) fill: mustard. A selected effect level at calm
+    /// uses it.
     pub armed_fill: Color32,
+    /// The text on `armed_fill`: dark brown. Nothing reads it now.
     pub armed_text: Color32,
 }
 
-/// The poster palette. The "How evolution works" window uses the same.
+/// The poster palette: dark brown ink, cream and tan paper, and mustard, brick
+/// red and BLU blue. `schematic.rs` has its own fixed colors, and most of them
+/// match these.
 pub mod poster {
     use eframe::egui::Color32;
     /// Dark brown outlines and text.
     pub const INK: Color32 = Color32::from_rgb(50, 34, 26);
-    /// Text of second rank: still 6:1 on cream.
+    /// Text of second rank. Its contrast is 7.9:1 on `CREAM` and 4.7:1 on
+    /// `TAN`.
     pub const INK_SOFT: Color32 = Color32::from_rgb(98, 72, 52);
-    /// The paper behind everything and its sunburst rays.
+    /// The paper behind everything.
     pub const PAPER: Color32 = Color32::from_rgb(232, 210, 160);
+    /// The paler rays of the sunburst on the paper.
     pub const PAPER_RAY: Color32 = Color32::from_rgb(240, 222, 176);
     /// The side panel and the status line.
     pub const TAN: Color32 = Color32::from_rgb(218, 190, 134);
-    /// Cards and panels.
+    /// The fill of cards and windows.
     pub const PANEL: Color32 = Color32::from_rgb(251, 242, 216);
+    /// The fill of buttons and text boxes, and the text on dark fills.
     pub const CREAM: Color32 = Color32::from_rgb(255, 247, 226);
+    /// Brick red. It fills the Pause evolution button.
     pub const RED: Color32 = Color32::from_rgb(184, 56, 50);
+    /// BLU blue, for what is secondary. Nothing uses it directly, and
+    /// `Theme::cold` is a deeper shade of it.
     pub const BLU: Color32 = Color32::from_rgb(70, 108, 138);
+    /// Mustard, for what is armed.
     pub const MUSTARD: Color32 = Color32::from_rgb(228, 166, 52);
+    /// Grass green. It fills the Evolve button.
     pub const GRASS: Color32 = Color32::from_rgb(108, 122, 54);
     /// The top bar: dark wood.
     pub const WOOD_DARK: Color32 = Color32::from_rgb(58, 40, 30);
 }
 
 impl Theme {
+    /// Returns the interface colors. The game has one theme, so every caller
+    /// gets the same colors.
     pub fn get() -> Self {
         use poster::*;
         Self {
@@ -164,13 +188,19 @@ impl Theme {
     }
 }
 
-/// The spacing scale the style uses; ui.rs shares it.
+/// The medium gap, in points. It is the item spacing and the menu margin of
+/// the style, and the `ui` modules use it between blocks.
 pub const GAP_M: f32 = 8.0;
+/// The large gap, in points. It is the window margin of the style, and the
+/// `ui` modules use it for panel margins and between sections.
 pub const GAP_L: f32 = 16.0;
-/// Height of every button, menu and selectable in a row, and the starting
-/// height of a row, so a row's items share one center line.
+/// The minimum height of a button, menu or selectable in a row, and the
+/// starting height of a row, so a row's items share one center line.
 pub const CONTROL_HEIGHT: f32 = 34.0;
 
+/// The look of one widget state: a box of `fill` with an outline of
+/// `stroke_width` in `stroke`. `text` and `text_width` make the stroke for text
+/// and icons. The corners have a radius of 5 and the box does not grow.
 fn widget(
     fill: Color32,
     stroke: Color32,
@@ -188,8 +218,10 @@ fn widget(
     }
 }
 
-/// Applies the style: poster colors, the game's fonts, thick dark outlines
-/// on every control and light panels with dark text.
+/// Sets the egui style of the whole window: light panels with dark brown text,
+/// thick dark outlines on every control, the spacing from `GAP_M`, `GAP_L` and
+/// `CONTROL_HEIGHT`, and the text sizes. The fonts come from
+/// `assets::install_fonts`.
 pub fn apply_style(ctx: &egui::Context) {
     use poster::*;
     let theme = Theme::get();
@@ -237,7 +269,8 @@ pub fn apply_style(ctx: &egui::Context) {
         color: Color32::from_rgba_premultiplied(40, 26, 14, 80),
     };
     style.visuals = visuals;
-    // Type scale: small print 14 px, body and buttons 16 px, headings 25 px.
+    // Type scale in points: small print and code 14, body and buttons 16,
+    // headings 25 in the bold HUD face.
     for (style_name, font) in [
         (egui::TextStyle::Small, FontId::proportional(14.0)),
         (egui::TextStyle::Body, FontId::proportional(16.0)),
