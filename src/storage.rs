@@ -83,7 +83,8 @@ pub use save_format::{
 pub use world::{Refuge, Reseed};
 
 /// The percentiles of `Stats::percentiles`, over the fastest elite of each
-/// way of moving. 0 is the slowest and 100 the fastest.
+/// way of moving. 0 is the slowest and 100 the fastest. The UI reads entry 14,
+/// the median, and entry 28, the best.
 pub const PERCENTILES: [f32; 29] = [
     0., 1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 20., 30., 40., 50., 60., 70., 80., 90., 91., 92.,
     93., 94., 95., 96., 97., 98., 99., 100.,
