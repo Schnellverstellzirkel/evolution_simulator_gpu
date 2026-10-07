@@ -286,7 +286,6 @@ impl App {
                             let path = PathBuf::from(&self.file_path);
                             match mode {
                                 "Save experiment" => self.save_to(path, false),
-                                "Open experiment" => self.open_experiment(path),
                                 "Export CSV" => self.worker.send(Command::Export(path)),
                                 "Export creature JSON" => {
                                     let creature =
