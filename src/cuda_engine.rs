@@ -2246,5 +2246,4 @@ mod tests {
         assert!(names.contains(&"0005.cubin".to_string()));
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }

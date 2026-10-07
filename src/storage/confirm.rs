@@ -164,10 +164,15 @@ impl Experiment {
         // slow.
         let global_bar = ENTRANT_SHARE * self.archive.best_fitness();
         let mut out: Vec<usize> = Vec::new();
+        // `best_fitness` scans a whole archive: once per archive, not once
+        // per cell of the block.
+        let mut bars: HashMap<usize, f32> = HashMap::new();
         for ((arena, niche), (fitness, j)) in island_best {
-            let bar = islands
-                .get(arena)
-                .map_or(0.0, |a| ENTRANT_SHARE * a.best_fitness());
+            let bar = *bars.entry(arena).or_insert_with(|| {
+                islands
+                    .get(arena)
+                    .map_or(0.0, |a| ENTRANT_SHARE * a.best_fitness())
+            });
             if fitness >= bar && islands.get(arena).is_none_or(|a| beats(a, &niche, fitness)) {
                 out.push(j);
             }
@@ -205,13 +210,17 @@ impl Experiment {
             return Verdict::Final(out);
         }
         let arenas = arena_count();
-        let bar = |arena: usize| {
-            self.islands
-                .get(arena)
-                .map_or(f32::NEG_INFINITY, QdArchive::best_fitness)
+        // Each record once, and only for the archives a candidate is in:
+        // best_fitness scans the whole archive, and the wild islands' archives,
+        // which no candidate is in, hold most of the elites.
+        let mut bars: Vec<Option<f32>> = vec![None; arenas];
+        let mut bar = |arena: usize| {
+            *bars[arena].get_or_insert_with(|| {
+                self.islands
+                    .get(arena)
+                    .map_or(f32::NEG_INFINITY, QdArchive::best_fitness)
+            })
         };
-        // Each record once: best_fitness scans the whole archive.
-        let bars: Vec<f32> = (0..arenas).map(bar).collect();
         let mut need = Vec::new();
         Self::exclude_audit_below_bar(block, standard, &mut out);
         let mut candidates: Vec<Vec<usize>> = vec![Vec::new(); arenas];
@@ -221,7 +230,7 @@ impl Experiment {
             // drives many bodies to one exact speed, so its ties are common,
             // and an unconfirmed tie never had to beat the fine trial.
             let wild = qd::is_wild(qd::island_of_slot(block.first + j, island_count()));
-            if !wild && Self::eligible(&out[j]) && m.fitness >= bars[arena] {
+            if !wild && Self::eligible(&out[j]) && m.fitness >= bar(arena) {
                 candidates[arena].push(j);
             }
         }
@@ -234,7 +243,7 @@ impl Experiment {
                     .total_cmp(&standard[a].fitness)
                     .then(a.cmp(&b))
             });
-            let mut record = bars[arena];
+            let mut record = bar(arena);
             let mut asked = 0;
             // Results this loop read, and whether one of them raised the
             // record.
