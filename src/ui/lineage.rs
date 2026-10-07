@@ -1,5 +1,8 @@
-//! The Lineage tab: the ancestors of the creature on screen, one tile per
-//! generation.
+//! The Lineage tab. It lists the recorded ancestors of the creature on screen
+//! as tiles, newest first, and a tile says "Body plan" when its numbers of
+//! nodes, bones or muscles differ from its parent's. A click on a tile replays
+//! that ancestor in the world of its generation and goes back to the Overview.
+//! The worker traces the chain when `App` sends `Command::Lineage`.
 
 use super::{App, Tab, scene::thumbnail, text::species_name};
 use crate::{
@@ -11,7 +14,8 @@ use eframe::egui::{self, Align2, FontId, Pos2, Rect, RichText, Sense, Vec2};
 
 impl App {
     /// The world a generation ran in: the settings its history row kept, or
-    /// the live world for a generation without a row yet.
+    /// the live world for a generation without a row yet. Before the first
+    /// snapshot it is the default world.
     fn world_of_generation(&self, generation: u32) -> Config {
         let Some(snapshot) = &self.snapshot else {
             return Config::default();
@@ -23,7 +27,10 @@ impl App {
             .find(|stats| stats.generation == generation)
             .map_or_else(|| snapshot.config.clone(), |stats| stats.config.clone())
     }
-    /// Full ancestor list of the selected creature, one row per generation.
+    /// The Lineage tab: a heading with a hint, then one full-width tile for each
+    /// recorded ancestor of the creature on screen, newest first. While the
+    /// list is empty, a line says why. A click on a tile replays that ancestor
+    /// in the world of its generation, keeps the list and goes to the Overview.
     pub(super) fn lineage_view(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme();
         ui.horizontal(|ui| {
@@ -70,7 +77,6 @@ impl App {
                         ui,
                         step,
                         self.lineage.get(k + 1),
-                        true,
                         shown == Some(step.creature.id),
                         theme,
                         Vec2::new(ui.available_width(), 120.),
@@ -87,6 +93,7 @@ impl App {
         }
     }
 }
+/// The numbers of nodes, bones and muscles of `creature`, in that order.
 fn body_counts(creature: &Creature) -> (usize, usize, usize) {
     (
         creature.nodes.len(),
@@ -94,20 +101,27 @@ fn body_counts(creature: &Creature) -> (usize, usize, usize) {
         creature.muscles.len(),
     )
 }
-/// An ancestor whose node, bone or muscle count differs from its parent's.
+/// Whether an ancestor's node, bone or muscle count differs from its parent's.
+/// It is false without a parent, which is the case for the oldest recorded
+/// ancestor.
 fn body_plan_changed(
     step: &crate::worker::LineageStep,
     parent: Option<&crate::worker::LineageStep>,
 ) -> bool {
     parent.is_some_and(|parent| body_counts(&step.creature) != body_counts(&parent.creature))
 }
-/// Paints one ancestor tile with its thumbnail, generation, fitness and gain.
-/// Returns whether the tile was clicked.
+/// Paints one ancestor tile of size `size`: its thumbnail, generation,
+/// distance, gain over its parent and species name. `parent` is the next older
+/// ancestor in the list. The tile says "selected" when `current` is set, which
+/// is the creature on screen, and "Body plan" when `body_plan_changed` is true.
+/// Its outline is lit for those two and under the pointer. The hover text
+/// repeats the numbers and adds the counts of nodes, bones and muscles, what
+/// changed from the parent, and the parent's generation and distance. Returns
+/// whether the player clicked the tile.
 fn paint_lineage_tile(
     ui: &mut egui::Ui,
     step: &crate::worker::LineageStep,
     parent: Option<&crate::worker::LineageStep>,
-    big: bool,
     current: bool,
     theme: Theme,
     size: Vec2,
@@ -146,7 +160,7 @@ fn paint_lineage_tile(
         Align2::LEFT_TOP,
         format!("{:.2} m", step.fitness),
         FontId::proportional(19.),
-        if big { theme.accent } else { theme.ink },
+        theme.accent,
     );
     painter.text(
         Pos2::new(text_x, rect.top() + 54.),
