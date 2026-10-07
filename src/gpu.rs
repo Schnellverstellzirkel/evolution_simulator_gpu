@@ -1,20 +1,28 @@
 //! Evaluation front end. All creature evaluation runs through the scheduler,
-//! which routes work to the CUDA engines of the NVIDIA GPUs.
+//! which routes work to the CUDA engines of the NVIDIA GPUs. `Gpu` opens the
+//! scheduler and is what the worker thread and the headless modes of `main`
+//! hold.
 use crate::{config::Config, evolution::Population, qd::EvaluationMetrics, scheduler::Scheduler};
 use anyhow::{Result, ensure};
 
+/// The evaluation front end: the `Scheduler` with the device names and the
+/// GPU memory it reported.
 pub struct Gpu {
-    /// The names of the devices that evaluate.
+    /// The names of the devices that evaluate. `new` and
+    /// `evaluate_with_metrics` copy them from the scheduler.
     pub name: String,
-    /// Bytes allocated on the GPU.
+    /// Bytes allocated on all the GPUs, as the scheduler reported them after
+    /// the last `evaluate_with_metrics`. It is 0 before then.
     pub allocated_bytes: u64,
-    /// The scheduler for creature evaluation, or `None` if it failed to open.
+    /// The scheduler for creature evaluation. `new` always fills it. The
+    /// worker treats `None` as no engines, and `evaluate_with_metrics`
+    /// expects it to be there.
     pub sched: Option<Scheduler>,
 }
 
 impl Gpu {
-    /// Opens the named primary GPU plus the other evaluation engines. Fails
-    /// when the primary GPU does not open.
+    /// Opens the named primary GPU plus any other GPUs that
+    /// `EVOLUTION_DEVICES` lists. Fails when the primary GPU does not open.
     pub fn new(name: &str) -> Result<Self> {
         let sched = Scheduler::new(name)?;
         Ok(Self {
@@ -23,13 +31,17 @@ impl Gpu {
             sched: Some(sched),
         })
     }
-    /// Current evaluation backends, including changes after device recovery.
+    /// The names of the evaluation devices now, joined with " + ". The
+    /// scheduler answers, so the list follows a device that reopened after a
+    /// failure. Without a scheduler it gives the copy in `name`.
     pub fn names(&self) -> String {
         self.sched
             .as_ref()
             .map_or_else(|| self.name.clone(), Scheduler::names)
     }
-    /// Evaluates creatures by index and returns their fitness values.
+    /// Evaluates the creatures of `pop` at `indices` with one standard trial
+    /// each at `cfg` and returns their fitness values in the order of
+    /// `indices`. Fails on an index outside `pop`.
     pub fn evaluate(
         &mut self,
         pop: &Population,
@@ -42,7 +54,10 @@ impl Gpu {
             .map(|result| result.fitness)
             .collect())
     }
-    /// Evaluates creatures by index and returns their evaluation metrics.
+    /// Evaluates the creatures of `pop` at `indices` with one standard trial
+    /// each at `cfg` and returns their metrics in the order of `indices`.
+    /// Fails on an index outside `pop`. Call it on an idle scheduler, because
+    /// the scheduler drops the results of other work that finishes meanwhile.
     pub fn evaluate_with_metrics(
         &mut self,
         pop: &Population,
@@ -62,11 +77,13 @@ impl Gpu {
         self.allocated_bytes = sched.allocated_bytes();
         metrics
     }
-    /// True when evaluation can be queued without blocking.
+    /// True when a scheduler is open, so evaluation can be queued without
+    /// blocking.
     pub fn async_capable(&self) -> bool {
         self.sched.is_some()
     }
-    /// Units on the evaluation engines now.
+    /// Units on the evaluation engines now (`Scheduler::on_engines`), or 0
+    /// without a scheduler.
     pub fn on_engines(&self) -> usize {
         self.sched.as_ref().map_or(0, Scheduler::on_engines)
     }
