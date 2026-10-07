@@ -628,7 +628,11 @@ impl Config {
         self.fidelity
             .unwrap_or_else(crate::physics::Fidelity::standard)
     }
-    /// Timed steps of a trial (after settling).
+    /// Steps of a trial: `duration` at this config's step rate, rounded. The
+    /// kernel runs all of them from the start pose and settles nothing first.
+    /// A replay recording starts with `Fidelity::settle()` frames that repeat
+    /// the start pose, and the frame at `Fidelity::settle() + n` shows the pose
+    /// after `n` steps.
     pub fn steps(&self) -> u32 {
         (self.duration * self.fidelity().rate as f32).round() as u32
     }
