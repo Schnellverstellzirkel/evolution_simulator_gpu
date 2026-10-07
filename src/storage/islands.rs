@@ -175,12 +175,12 @@ impl Experiment {
                 kept_total: log.kept_total + kept,
             };
         }
-        // Each island that took bodies and the global archive refresh once.
-        for island in &mut self.islands[..island_count()] {
-            if !island.scores_current() {
-                island.refresh_behavior_scores();
-            }
-        }
+        // Each island that took bodies and the global archive refresh once,
+        // the islands side by side.
+        self.islands[..island_count()]
+            .par_iter_mut()
+            .filter(|island| !island.scores_current())
+            .for_each(|island| island.refresh_behavior_scores());
         if !self.archive.scores_current() {
             self.archive.refresh_behavior_scores();
         }
@@ -189,9 +189,9 @@ impl Experiment {
     /// offers in every block, are refreshed once a generation.
     pub(super) fn refresh_reshaped_scores(&mut self) {
         if self.islands.len() == arena_count() {
-            for island in 0..island_count() {
-                self.islands[reshaped_of(island)].refresh_behavior_scores();
-            }
+            self.islands[reshaped_of(0)..reshaped_of(island_count())]
+                .par_iter_mut()
+                .for_each(|nursery| nursery.refresh_behavior_scores());
         }
     }
     /// Offers `elites` to `island`, fastest first, marked as graduates: each

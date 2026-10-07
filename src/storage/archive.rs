@@ -340,17 +340,17 @@ impl Experiment {
         // The scores depend only on the archive's elites, so an island that
         // took no offer keeps the ones it has. A reshaped nursery takes
         // offers in every block, so it refreshes once a generation instead
-        // (`end_generation`).
-        for (island, changed) in self
-            .islands
-            .iter_mut()
-            .zip(island_changed)
-            .take(reshaped_of(0))
-        {
-            if changed || !island.scores_current() {
-                island.refresh_behavior_scores();
-            }
-        }
+        // (`end_generation`). Most archives are small, so they refresh side
+        // by side rather than one after another.
+        let refreshed = reshaped_of(0).min(self.islands.len());
+        self.islands[..refreshed]
+            .par_iter_mut()
+            .zip(island_changed.par_iter())
+            .for_each(|(island, &changed)| {
+                if changed || !island.scores_current() {
+                    island.refresh_behavior_scores();
+                }
+            });
         timings[1] = section.elapsed().as_secs_f64();
         section = std::time::Instant::now();
         // The selected evaluation engine owns the score and behavior. CPU
