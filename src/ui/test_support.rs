@@ -1,7 +1,11 @@
-//! A creature for the unit tests of the UI modules.
+//! A creature for the unit tests of the UI modules `dialogs`, `export`,
+//! `playback` and `text`. The file is compiled only for tests.
 
 use crate::evolution::{Bone, Creature, Muscle, NodeGene};
 
+/// A small creature for tests: three nodes in a row 0.5 m apart, two bones
+/// that join them, one muscle between the middles of the two bones, and the
+/// id 7.
 pub(super) fn test_creature() -> Creature {
     Creature {
         nodes: vec![
