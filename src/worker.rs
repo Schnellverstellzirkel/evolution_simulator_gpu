@@ -101,6 +101,7 @@ pub struct CardList {
     pub config: Config,
     pub cards: Arc<Vec<Card>>,
 }
+/// One ranked elite from the archive, with its metadata.
 #[derive(Clone)]
 pub struct Card {
     pub index: usize,
@@ -405,6 +406,7 @@ pub struct Snapshot {
     pub status: String,
     pub error: Option<String>,
 }
+/// The worker thread that evolves the search and publishes snapshots for the UI.
 pub struct Worker {
     pub tx: Sender<Command>,
     pub view: Arc<Mutex<Option<Snapshot>>>,

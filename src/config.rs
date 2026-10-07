@@ -58,9 +58,13 @@ pub struct Config {
     /// Autochange ladder steps applied so far. Saved in checkpoints, so a
     /// resumed game continues mid-cycle at the same step.
     pub autochange_step: u16,
+    /// Minimum node diameter (m).
     pub min_size: f32,
+    /// Maximum node diameter (m).
     pub max_size: f32,
+    /// Minimum node friction coefficient.
     pub min_friction: f32,
+    /// Maximum node friction coefficient.
     pub max_friction: f32,
     pub max_nodes: usize,
     pub max_muscles: usize,
@@ -594,6 +598,7 @@ impl Config {
             .min(self.gpu_budget_mib * 1024 * 1024 / (bytes_per_creature * 4))
             .max(1)
     }
+    /// With `random_seed`, the config with a seed from the clock.
     pub fn resolved(mut self) -> Self {
         if self.random_seed {
             self.seed = std::time::SystemTime::now()

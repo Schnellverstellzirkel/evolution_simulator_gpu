@@ -43,8 +43,8 @@ impl Loop {
             if matches!(command, Command::Shutdown) {
                 return ControlFlow::Break(());
             }
-            // While a save loads there is no game to act on: hold every other
-            // command, in order, until the load is done.
+            // While a save loads there is no game to act on: defer all other
+            // commands, in order, until the load is done.
             if self.loading.is_some()
                 && !matches!(
                     command,

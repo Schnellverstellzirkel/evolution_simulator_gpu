@@ -1,3 +1,7 @@
+//! exploraMove: 2D creatures of bones, joints and muscles evolve to travel as far
+//! as they can in 20 s trials, scored on the GPU and searched with MAP-Elites over
+//! island archives.
+
 pub mod assets;
 pub mod block_alloc;
 pub mod bounded;
@@ -26,5 +30,6 @@ pub mod ui;
 pub mod worker;
 pub mod world_fx;
 
+/// Large blocks keep their pages for the next block of their size (`block_alloc`).
 #[global_allocator]
 static ALLOCATOR: block_alloc::BlockAlloc = block_alloc::BlockAlloc;

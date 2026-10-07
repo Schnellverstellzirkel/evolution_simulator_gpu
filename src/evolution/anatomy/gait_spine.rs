@@ -209,11 +209,11 @@ fn split_bone(c: &mut Creature, j: usize, frac: f32, rng: &mut Rng) -> usize {
     new
 }
 
-/// Gives a back joint that no muscle bends a muscle of its own, timed with
-/// the legs: in phase with the strongest leg muscle or half a cycle after it.
-/// A flexing back adds length to the stride of a galloping mammal, because
-/// the hind legs reach farther forward while the fore legs reach back
-/// (Hildebrand 1959). The muscle gets the leg muscle's rhythm period.
+/// Adds a muscle to a back joint that has none, timed with the legs: in
+/// phase with the strongest leg muscle or half a cycle after it. A flexing
+/// back adds length to the stride of a galloping mammal, because the hind
+/// legs reach farther forward while the fore legs reach back (Hildebrand
+/// 1959). The muscle gets the leg muscle's rhythm period.
 pub(crate) fn spine_flex_muscle(
     c: &mut Creature,
     cfg: &Config,

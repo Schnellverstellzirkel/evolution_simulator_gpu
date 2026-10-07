@@ -145,6 +145,7 @@ pub fn launch(adapter_name: &str) -> anyhow::Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
+/// The five main application tabs.
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Overview,
@@ -153,6 +154,7 @@ enum Tab {
     Race,
     Lineage,
 }
+/// The application's UI state: windows, panels, buffers, and selections.
 struct App {
     worker: Worker,
     snapshot: Option<Snapshot>,
@@ -162,6 +164,7 @@ struct App {
     replay_wait: Option<(mpsc::Receiver<Playback>, Instant)>,
     /// Seconds the last replay took to appear, for benchmarks.
     replay_seconds: Vec<f32>,
+    /// When the last replay was requested for benchmarking.
     bench_last_replay: Instant,
     ctx: egui::Context,
     tab: Tab,
@@ -228,8 +231,7 @@ struct App {
     /// The creature on screen is the champion of a finished generation (or
     /// the best elite of a loaded game), not a random first creature.
     champion_shown: bool,
-    /// Behavior archive map: occupied cells keyed by their niche bytes.
-    /// Map filters; None shows every bin.
+    /// Behavior archive map filters; None shows every bin.
     map_height: Option<usize>,
     map_feet: Option<usize>,
     map_shape: Option<usize>,
@@ -245,9 +247,11 @@ struct App {
     cards_requested: Option<Instant>,
     /// The tab of the previous frame, to notice when the player opens one.
     prev_tab: Tab,
+    /// Current archive view mode (Cards, Map, or Islands).
     archive_view: ArchiveView,
     /// Top archived elites racing side by side.
     race: Vec<RaceLane>,
+    /// Waiting for race data from the worker.
     race_pending: bool,
     race_camera: f32,
     /// Creatures the player sent to the race, oldest first, with their worlds.
@@ -266,6 +270,7 @@ struct App {
     show_help: bool,
     /// The "How evolution works" window (`schematic::show`).
     pub schematic_open: bool,
+    /// Disk usage in bytes of the runs/ directory.
     runs_bytes: u64,
     runs_checked: Instant,
     screenshot_pending: bool,
@@ -500,6 +505,7 @@ impl App {
             None => loading::toast(ctx, theme, self.loading_hidden),
         }
     }
+    /// Whether evolution is running and not paused.
     fn active(&self) -> bool {
         self.snapshot.as_ref().is_some_and(|s| s.running)
             && !self.worker.pause.load(Ordering::Relaxed)
@@ -1231,6 +1237,7 @@ fn compositor_vendor() -> Option<u32> {
         })
         .and_then(vendor)
 }
+/// Frame interval from `EVOLUTION_UI_FPS` environment variable, default 60 FPS.
 fn ui_frame_interval() -> Option<Duration> {
     static INTERVAL: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
     *INTERVAL.get_or_init(|| {

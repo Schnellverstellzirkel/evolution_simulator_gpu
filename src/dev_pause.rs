@@ -170,7 +170,7 @@ pub struct DevPause {
     phase: Phase,
     last_poll: Option<Instant>,
     request: Option<String>,
-    /// The `waiting` file is written.
+    /// Whether the `waiting` file has been written.
     waiting_written: bool,
 }
 

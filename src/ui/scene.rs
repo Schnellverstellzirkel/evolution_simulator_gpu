@@ -61,6 +61,7 @@ fn draw_arrow(p: &egui::Painter, from: Pos2, delta: Vec2, color: Color32) {
         Stroke::NONE,
     ));
 }
+/// Renders a creature with bones, nodes, muscles, organs, forces and status marks.
 pub(super) fn draw_creature(
     p: &egui::Painter,
     nodes: &[Node],
@@ -212,6 +213,7 @@ pub(super) fn draw_creature(
         p.circle_filled(eye + Vec2::new(r * 0.08, 0.), r * 0.15, OUTLINE);
     }
 }
+/// Renders a creature as a small thumbnail centered in `rect`.
 pub(crate) fn thumbnail(p: &egui::Painter, c: &Creature, rect: Rect) {
     let nodes = physics::nodes(c);
     let minx = nodes

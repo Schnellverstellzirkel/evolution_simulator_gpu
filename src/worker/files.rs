@@ -158,7 +158,8 @@ impl Loop {
         }
         self.changed = true;
     }
-    /// `Command::Save`: saved once this status reaches the window.
+    /// `Command::Save`: requests a save; it runs once this status reaches
+    /// the window.
     pub(super) fn request_save(&mut self, path: PathBuf) {
         if self.exp.is_some() {
             // Saved after this status reaches the window.

@@ -162,6 +162,7 @@ impl App {
             }
         });
     }
+    /// Stacked visualization of body type distribution across generations.
     fn species_history(&mut self, ui: &mut egui::Ui) {
         let Some(snapshot) = &self.snapshot else {
             return;

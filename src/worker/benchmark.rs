@@ -26,7 +26,9 @@ pub(super) struct Benchmark {
     warmup: u32,
     /// Generation at which the benchmark run was started; measurement begins after warm-up.
     run_generation: Option<u32>,
+    /// Generation and time when measurement began.
     start: Option<(u32, Instant)>,
+    /// Total evaluation, archive and breeding seconds, in that order.
     stage_seconds: [f64; 3],
     generation_seconds: Vec<f64>,
     generation_started: Instant,

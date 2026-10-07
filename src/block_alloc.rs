@@ -67,6 +67,7 @@ pub fn allocations() -> u64 {
     ALLOCATIONS.try_with(Cell::get).unwrap_or(0)
 }
 
+/// Counts one allocation, for this thread and in total, while counting is on.
 fn count() {
     if COUNTING.load(Ordering::Relaxed) {
         let _ = ALLOCATIONS.try_with(|n| n.set(n.get() + 1));
@@ -89,6 +90,7 @@ fn tune() {
     }
 }
 
+/// Whether this layout qualifies as a large block allocation.
 fn large(layout: Layout) -> bool {
     layout.size() >= LARGE && layout.align() <= 4096
 }

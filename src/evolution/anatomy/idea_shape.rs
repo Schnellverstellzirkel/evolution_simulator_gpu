@@ -71,8 +71,8 @@ fn equal_bones_leg(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context
     changed
 }
 
-/// Every leg grows (or shrinks) by one factor from 0.8 to 1.3, with its
-/// strokes: the whole animal gets taller or lower on its legs.
+/// Every leg scales by 1.1 to 1.3 or 0.8 to 0.9, making the whole animal
+/// taller or lower on its legs.
 fn leg_scale_all(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) -> bool {
     let factor = if coin(rng) {
         rng.range(1.1, 1.3)

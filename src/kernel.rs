@@ -86,6 +86,7 @@ pub fn world_flags(cfg: &Config) -> u32 {
     flags
 }
 
+/// Effect names indexed by their bit position in `world_flags`.
 const FLAG_NAMES: [&str; 12] = [
     "GROUND", "TERRAIN", "SLOPE", "GAPS", "HURDLES", "QUAKE", "MUD", "WATER", "ICE", "WIND", "AIR",
     "BRAMBLES",
@@ -272,10 +273,8 @@ pub fn cuda_source(_class: usize, flags: u32, fidelity: Fidelity, record: bool) 
     source
 }
 
-/// Writes one creature's node and bone records and its muscle records, and
-/// returns its two head words:
-/// `[nodes, muscles, quake hash, record offset]` and
-/// `[muscle offset, total mass, 1 / total mass, rung period and flags]`.
+/// Writes one creature's node and bone records into `record` and its muscle
+/// records into `muscles`; `pack_reusing` writes its two head words.
 fn fill_creature(model: &Model, cfg: &Config, record: &mut [u32], muscles: &mut [f32]) {
     let start = model.start(cfg);
     let bones = model.pivot.len();

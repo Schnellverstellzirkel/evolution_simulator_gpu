@@ -539,6 +539,7 @@ impl Experiment {
         }
         failed
     }
+    /// Records this generation's archive statistics as its `history` row.
     pub(super) fn push_archive_stats(&mut self, failed: usize) {
         if self.history.len() > self.generation as usize {
             return;

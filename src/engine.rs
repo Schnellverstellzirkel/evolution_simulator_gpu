@@ -35,8 +35,9 @@ pub struct Finished {
 pub struct Recording {
     pub frames: Vec<Vec<[f32; 2]>>,
     pub result: GpuResult,
-    /// The muscle energy, muscle force and ground contact force the kernel
-    /// recorded with each frame; `None` only where an engine cannot record them.
+    /// The energy, force and breakage data the kernel recorded with each
+    /// frame (muscle energy, muscle force, ground contact, friction, and
+    /// joint breaks); `None` only where an engine cannot record them.
     pub forces: Option<crate::replay_forces::Forces>,
 }
 
@@ -46,8 +47,8 @@ struct ReplayRequest {
     reply: mpsc::Sender<Result<Recording, String>>,
 }
 
-/// The GPU engine that records replays: the primary GPU, which scores the
-/// archive's creatures.
+/// Sender for replay recording requests; set by the GPU engine thread that
+/// scores the archive's creatures, so other threads can request recordings.
 static REPLAYS: std::sync::Mutex<Option<mpsc::Sender<ReplayRequest>>> = std::sync::Mutex::new(None);
 
 /// Records `creature`'s trial on the GPU whose scores the archive holds,
@@ -78,9 +79,9 @@ pub fn record_on_gpu(creature: &Creature, cfg: &Config, timeout: Duration) -> Op
 
 /// A creature's full trial for the replay viewer and the result scored in
 /// the same run, recorded by the scoring kernel on the GPU that scores the
-/// archive, with the muscle energy, muscle force and ground contact forces it
-/// recorded with each frame. A replay runs the full trial, without the early
-/// screen. None when the GPU did not answer within `patience`.
+/// archive, with the energy, forces and breakage data it recorded with each
+/// frame. A replay runs the full trial, without the early screen. None when
+/// the GPU did not answer within `patience`.
 pub fn replay(creature: &Creature, cfg: &Config, patience: Duration) -> Option<Replay> {
     let cfg = Config {
         screen: None,
@@ -99,6 +100,7 @@ pub fn replay(creature: &Creature, cfg: &Config, patience: Duration) -> Option<R
     ))
 }
 
+/// A replay for the viewer: frames, result, and optional forces.
 pub type Replay = (
     Vec<Vec<[f32; 2]>>,
     GpuResult,

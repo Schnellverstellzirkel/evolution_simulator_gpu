@@ -32,6 +32,7 @@ fn grip(cfg: &Config) -> (f32, f32) {
     (rough, amount(cfg, "Grip"))
 }
 
+/// `color` at opacity `a`, from 0 to 1.
 fn alpha(color: (u8, u8, u8), a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(color.0, color.1, color.2, (a.clamp(0.0, 1.0) * 255.0) as u8)
 }
@@ -557,6 +558,7 @@ struct Layer {
     start: f32,
 }
 
+/// The three skyline layers: far, mid, near.
 const LAYERS: [Layer; 3] = [
     Layer {
         art: Art::SkylineFar,

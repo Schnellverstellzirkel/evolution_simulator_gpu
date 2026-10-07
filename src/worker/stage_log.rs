@@ -22,6 +22,7 @@ pub(super) struct StageLog {
     pub(super) discarded: usize,
 }
 impl StageLog {
+    /// Opens the stage log file from the `EVOLUTION_STAGE_LOG` environment variable.
     pub(super) fn open() -> Option<Self> {
         let path = std::env::var_os("EVOLUTION_STAGE_LOG")?;
         let mut file = match std::fs::OpenOptions::new()
@@ -212,7 +213,8 @@ impl RingMeter {
         v.sort_by(f64::total_cmp);
         Some(v[((v.len() - 1) as f64 * 0.95).round() as usize])
     }
-    /// For the stage log: this generation's p95 and boundary, 0 if none.
+    /// For the stage log: the p95 time of this generation's blocks that did
+    /// not end it, 0 if none.
     fn chain_p95_of(&self, generation: u32) -> f64 {
         Self::p95(
             self.chains
@@ -222,6 +224,8 @@ impl RingMeter {
         )
         .unwrap_or(0.0)
     }
+    /// For the stage log: the time of the block that ended this generation,
+    /// 0 if none.
     fn boundary_of(&self, generation: u32) -> f64 {
         self.boundaries
             .iter()

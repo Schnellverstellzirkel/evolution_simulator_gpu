@@ -34,8 +34,8 @@ pub enum Trial {
     Confirm,
 }
 
-/// Standard trials one confirmation costs (twice the steps at twice the
-/// solver passes).
+/// Cost of one confirmation trial relative to standard trials (twice the
+/// steps at twice the solver passes).
 const CONFIRM_COST: f64 = 4.0;
 
 /// Largest piece of work `evaluate` queues at once: about one second of the
@@ -56,7 +56,9 @@ pub fn confirm_config(cfg: &Config) -> Config {
 
 /// Creatures waiting for an engine.
 struct Work {
+    /// Caller's work tag to return in results.
     tag: u64,
+    /// A standard or a confirmation trial.
     trial: Trial,
     population: Arc<Population>,
     /// Creatures of `population` to evaluate, in order; `None` for all.
@@ -68,8 +70,11 @@ struct Work {
 
 #[derive(Clone)]
 struct QueuedUnit {
+    /// Engine's work ticket.
     ticket: u64,
+    /// Caller's work tag to return in results.
     tag: u64,
+    /// A standard or a confirmation trial.
     trial: Trial,
     /// Creature indices of the queued work, in unit order.
     members: Vec<usize>,
@@ -85,10 +90,12 @@ struct QueuedUnit {
 /// Finished creatures of one piece of work.
 #[derive(Clone, Debug)]
 pub struct Done {
+    /// Caller's work tag.
     pub tag: u64,
     pub trial: Trial,
     /// Creature indices in the queued population.
     pub members: Vec<usize>,
+    /// Evaluation metrics in member order.
     pub metrics: Vec<EvaluationMetrics>,
 }
 
@@ -96,6 +103,7 @@ pub struct Done {
 /// before each attempt.
 pub struct Reopen {
     open: Box<dyn FnMut() -> Result<Box<dyn Engine>> + Send>,
+    /// Delay before each recovery attempt.
     backoff: Vec<Duration>,
 }
 
@@ -187,6 +195,7 @@ impl Device {
             self.rate = self.rate_work / self.rate_time;
         }
     }
+    /// Updates the idle time and rate average at the given instant.
     fn sample_idle(&mut self, now: Instant) {
         self.update_rate(now, self.idle_since.is_none(), 0);
         match (self.queued.is_empty(), self.idle_since) {
@@ -205,7 +214,9 @@ pub struct Scheduler {
     /// Work waiting for an engine: confirmations first, then standard work.
     confirms: VecDeque<Work>,
     work: VecDeque<Work>,
+    /// Current session ID for dropping old in-flight results.
     session: u64,
+    /// Seconds spent packing work for the GPU.
     pub packing_seconds: f64,
     /// Totals since start: confirmation trials submitted, and the device
     /// busy seconds they took.
@@ -302,6 +313,7 @@ impl Scheduler {
         Ok(scheduler)
     }
 
+    /// Returns the names of all GPU devices, joined with " + ".
     pub fn names(&self) -> String {
         self.devices
             .iter()
@@ -383,6 +395,7 @@ impl Scheduler {
         self.session += 1;
     }
 
+    /// Total GPU memory allocated across all devices.
     pub fn allocated_bytes(&self) -> u64 {
         self.devices
             .iter()

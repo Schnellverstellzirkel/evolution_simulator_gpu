@@ -293,6 +293,7 @@ fn move_anchors(c: &mut Creature, ids: &[usize], by: f32, toward: bool) -> bool 
     changed
 }
 
+/// Clamps a position to the unit interval [0, 1].
 fn wrap_unit(v: f32) -> f32 {
     v.clamp(0.0, 1.0)
 }

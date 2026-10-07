@@ -107,6 +107,7 @@ fn light_trunk(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Context) -> 
     scale_nodes(c, cfg, &inner_nodes(c), by)
 }
 
+/// Scales the diameter of nodes by a factor, clamped to configuration limits.
 fn scale_nodes(c: &mut Creature, cfg: &Config, nodes: &[usize], by: f32) -> bool {
     let mut changed = false;
     for &n in nodes {

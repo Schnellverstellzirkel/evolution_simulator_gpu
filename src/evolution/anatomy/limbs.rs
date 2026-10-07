@@ -29,6 +29,7 @@ pub(crate) fn copy_limb(c: &mut Creature, cfg: &Config, rng: &mut Rng, _cx: &Con
     let at = if rng.unit() < 0.5 {
         joint
     } else {
+        // Pick a node other than the head (node 0).
         1 + rng.index(c.nodes.len() - 1)
     };
     let mirror = rng.unit() < 0.5;
@@ -333,6 +334,7 @@ pub(crate) fn graft_donor_limb(
     let at = at - gone_nodes.iter().filter(|&&n| n < at).count();
     let from = donor.nodes[donor.bones[graft].a as usize];
     let to = c.nodes[at];
+    // Maps of donor node and bone indices to their indices in this body.
     let mut node_of = [usize::MAX; MAX_NODES];
     let mut bone_of = [usize::MAX; MAX_NODES];
     node_of[donor.bones[graft].a as usize] = at;

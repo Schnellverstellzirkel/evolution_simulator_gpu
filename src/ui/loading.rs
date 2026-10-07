@@ -63,7 +63,7 @@ const MESSAGE_SECONDS: f32 = 4.0;
 pub(super) enum Wait<'a> {
     /// The evaluation devices are opening.
     Opening,
-    /// They could not open.
+    /// The devices failed to open; the reason is given in the string.
     Failed(&'a str),
     /// The kernels of the starting worlds compile.
     Starting,
@@ -111,6 +111,8 @@ pub(super) fn screen(ctx: &egui::Context, theme: Theme, card: &Card) -> bool {
     close
 }
 
+/// Draws the loading card contents: title, walking animation, messages, progress
+/// bar, and compiler status. Returns true when the player closes the card.
 fn body(ui: &mut egui::Ui, theme: Theme, card: &Card, progress: &Progress, clock: f32) -> bool {
     let title = match card.wait {
         Wait::Opening => "Opening the laboratory",

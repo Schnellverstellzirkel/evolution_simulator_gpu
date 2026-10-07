@@ -189,6 +189,7 @@ impl Playback {
         playback.show();
         playback
     }
+    /// Resets playback to the first frame of the trial.
     pub(super) fn reset(&mut self) {
         self.tick = self.trial_start().saturating_add(1).min(self.last_frame());
         self.show();
@@ -196,15 +197,18 @@ impl Playback {
     pub(super) fn last_frame(&self) -> u32 {
         self.frames.len().saturating_sub(1).min(u32::MAX as usize) as u32
     }
+    /// Frame index where the trial starts, after settling.
     pub(super) fn trial_start(&self) -> u32 {
         physics::settle().min(self.last_frame())
     }
+    /// Seconds elapsed since the trial started.
     pub(super) fn elapsed_seconds(&self) -> f32 {
         self.tick
             .saturating_sub(self.trial_start())
             .min(self.config.steps()) as f32
             * physics::dt()
     }
+    /// Seeks to a frame relative to trial start, clamped to the valid range.
     pub(super) fn seek(&mut self, elapsed_frame: u32) {
         self.tick = self
             .trial_start()

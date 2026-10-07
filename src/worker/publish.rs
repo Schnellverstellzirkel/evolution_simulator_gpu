@@ -194,7 +194,6 @@ fn map_table(e: &Experiment) -> Arc<Vec<MapCell>> {
 /// The median distance of the best elite of each way of moving, like a
 /// history row (NaN before any elite).
 fn live_median(e: &Experiment) -> f32 {
-    // The best elite of each way of moving, like a history row.
     let mut kept: Vec<f32> = e
         .archive
         .best_per_way_of_moving()
@@ -293,6 +292,7 @@ fn strangest(e: &Experiment) -> Option<Creature> {
         .max_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, elite)| elite.creature.unpack())
 }
+/// Names, rates, and creature counts of active GPU engines.
 fn engine_rows(gpu: &Gpu) -> Vec<(String, f64, u64)> {
     gpu.sched.as_ref().map_or_else(Vec::new, |sched| {
         sched

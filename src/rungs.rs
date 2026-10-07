@@ -1,5 +1,4 @@
-//! The early rungs of a trial and the audit lane that calibrates them
-//! (the steps lever).
+//! The early rungs of a trial and the audit lane that calibrates them.
 //!
 //! A standard trial may stop at 1 s (R1) or 2.5 s (R2) when a linear score of
 //! six features the kernel already measures says the creature will not reach
@@ -167,6 +166,7 @@ impl Rung {
         bias: f32::NEG_INFINITY,
         off: 0,
     };
+    /// Dot product of `weights` with features `f`, via fused multiply-add.
     pub fn score(&self, f: &[f32; FEATURES]) -> f32 {
         let mut s = 0.0f32;
         #[allow(clippy::needless_range_loop)]
@@ -183,6 +183,7 @@ impl Rung {
     pub fn raw_stops(&self, f: &[f32; FEATURES]) -> bool {
         f.iter().all(|v| v.is_finite()) && self.score(f) < self.bias
     }
+    /// Whether the rule is armed (has a finite bias).
     pub fn armed(&self) -> bool {
         self.bias.is_finite()
     }
@@ -301,6 +302,7 @@ impl GenAudit {
     }
 }
 
+/// The rung breaker of one cadence band (`BAND_MISS_LIMIT`).
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 struct Breaker {
     strikes: u8,

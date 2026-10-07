@@ -9,9 +9,9 @@ use super::{
 use crate::{config::Config, evolution::Creature, theme::Theme};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Vec2};
 
-/// How a creature came to be, in the words the lineage uses.
-/// Space between island cards, and a card's height.
+/// Space between island cards.
 const ISLAND_GAP: f32 = 10.;
+/// Height of an island card.
 const ISLAND_HEIGHT: f32 = 346.;
 /// Words for the emitter shares of an island's elites, in `Emitter::ALL` order.
 const ORIGIN_SHORT: [&str; 4] = ["Tuned", "Reshaped", "Novel", "New"];

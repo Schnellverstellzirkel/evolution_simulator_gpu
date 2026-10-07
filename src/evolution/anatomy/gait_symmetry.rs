@@ -147,7 +147,7 @@ fn replant(c: &mut Creature, cfg: &Config, jobs: &[Job], rng: &mut Rng) -> bool 
     true
 }
 
-/// The x range of the body and its middle.
+/// The x middle, span, and left boundary of the body's nodes.
 fn extent(c: &Creature) -> (f32, f32, f32) {
     let (lo, hi) = c.nodes.iter().fold((f32::MAX, f32::MIN), |(lo, hi), n| {
         (lo.min(n.x), hi.max(n.x))

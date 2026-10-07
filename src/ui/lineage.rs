@@ -101,7 +101,8 @@ fn body_plan_changed(
 ) -> bool {
     parent.is_some_and(|parent| body_counts(&step.creature) != body_counts(&parent.creature))
 }
-/// One ancestor tile with its thumbnail, generation, fitness and gain.
+/// Paints one ancestor tile with its thumbnail, generation, fitness and gain.
+/// Returns whether the tile was clicked.
 fn paint_lineage_tile(
     ui: &mut egui::Ui,
     step: &crate::worker::LineageStep,

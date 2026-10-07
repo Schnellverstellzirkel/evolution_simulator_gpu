@@ -175,6 +175,7 @@ const AUTOCHANGE_ORDER: [&str; 15] = [
     "Earthquake",
 ];
 
+/// Index in `table` of the entry closest to `value`.
 fn nearest(table: &[f32], value: f32) -> usize {
     table
         .iter()

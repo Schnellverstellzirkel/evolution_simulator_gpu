@@ -31,6 +31,7 @@ enum State {
     Done(Duration, bool, Instant),
 }
 
+/// A tracked job: device opening or kernel build.
 #[derive(Clone, Debug)]
 struct Job {
     label: String,
@@ -134,7 +135,8 @@ pub fn cancel(label: &str) {
     });
 }
 
-/// A running job; see `start`.
+/// A running job; see `start`. `finish` marks it done, and dropping it
+/// unfinished removes it.
 pub struct Task {
     label: String,
     started: Instant,

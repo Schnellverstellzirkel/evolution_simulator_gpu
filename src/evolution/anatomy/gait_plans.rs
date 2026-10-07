@@ -45,6 +45,7 @@ pub(super) const OPS: &[(&str, Operator)] = &[
     ("unguligrade_legs", unguligrade_legs),
 ];
 
+/// The x coordinate of the hip where `limb` attaches.
 fn hip_x(c: &Creature, limb: &[usize]) -> f32 {
     c.nodes[c.bones[limb[0]].a as usize].x
 }

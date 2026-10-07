@@ -115,7 +115,7 @@ impl App {
         }
     }
     /// The replay header's buttons: follow, reset camera, and back to the
-    /// champion or play the next one. Returns (back, play next).
+    /// champion. Returns whether the player clicked back.
     fn viewport_buttons(&mut self, ui: &mut egui::Ui) -> bool {
         let theme = self.theme();
         let mut back = false;
@@ -829,6 +829,7 @@ impl App {
         self.prev_tab = Tab::Race;
         self.restart_race();
     }
+    /// The main replay viewport: scene with camera controls, timeline and playback buttons.
     pub(super) fn viewport(&mut self, ui: &mut egui::Ui, height: f32) {
         self.viewport_header(ui);
         let (rect, response) = ui.allocate_exact_size(
