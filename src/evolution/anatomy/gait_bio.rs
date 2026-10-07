@@ -243,8 +243,8 @@ fn passive_joint(c: &mut Creature, _cfg: &Config, rng: &mut Rng, _cx: &Context) 
     if c.muscles.is_empty() {
         return false;
     }
-    let pick = rng.index(c.muscles.len());
-    let m = &mut c.muscles[pick];
+    let index = rng.index(c.muscles.len());
+    let m = &mut c.muscles[index];
     m.long = (m.short + 1.3 * (m.long - m.short)).min(max_stroke().max(m.short));
     m.stiffness *= 0.3;
     m.tendon = rng.range(0.6, 1.0);
