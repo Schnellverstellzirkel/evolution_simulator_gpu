@@ -360,7 +360,7 @@ pub struct Experiment {
     /// wild island. Not saved.
     wild_exports: HashMap<u64, usize>,
     /// Per island, how many of its migrants took a hub cell this session.
-    /// Not saved.
+    /// Only the wild islands send migrants that are counted. Not saved.
     pub wild_wins: Vec<u32>,
     /// Wild champions sent to the hub, each with the generation until which
     /// it breeds in the hub's slots. Not saved.
