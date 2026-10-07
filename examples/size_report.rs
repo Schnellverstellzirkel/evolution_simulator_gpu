@@ -1,27 +1,51 @@
-//! Body size and foot slip of the fastest archive elites: how long each body
-//! is, what it weighs, and how far its feet slide while touching the ground.
-//! `EVOLUTION_NODE_SLIP` adds scored-interval contact details for the champion.
-//! Replays are recorded by the GPU scoring kernel. The GPU does not report the
-//! muscle work of a trial, so there is no cost of transport column.
+//! Prints the body size and the foot slip of the fastest `count` elites (12 by
+//! default) in a save's global archive. Each elite is replayed on the GPU with
+//! the scoring kernel, and its row gives the total and longest bone length, the
+//! mass, the distance its nodes slide while they touch the ground, and the
+//! head's acceleration. `EVOLUTION_NODE_SLIP` adds a table of contact and slip
+//! for each node of the champion. The GPU does not report the muscle work of a
+//! trial, so there is no cost of transport column.
 //! Usage: cargo run --release --example size_report <checkpoint.evo> [count]
 mod common;
 use evolution_simulator::{config::Config, creature_kernel::GpuResult, physics, storage};
 
+/// What `replay_metrics` measures in one replay.
 struct ReplayMetrics {
+    /// Center of mass x at the last scored frame (m).
     distance: f32,
+    /// Slip of all nodes together (m).
     slip: f32,
+    /// Contact and slip of each node.
     node_slip: Vec<NodeSlip>,
+    /// Largest acceleration of the head, from its recorded positions (g).
     position_peak_g: f32,
+    /// Largest value of that acceleration averaged over
+    /// `physics::HEAD_SHAKE_WINDOW` (g).
     position_shake_peak_g: f32,
 }
 
+/// How one node met the ground over the scored steps.
 #[derive(Clone, Copy, Default)]
 struct NodeSlip {
+    /// Share of the scored steps in which the node was down.
     contact_share: f32,
+    /// Horizontal distance the node moved between two frames in which it was
+    /// down (m).
     slip: f32,
+    /// Times the node rose clear of the ground after being down.
     lifts: usize,
 }
 
+/// Measures one replay. `frames` holds the node positions before every step
+/// and after the last. Frames 0 to `settle` all show the start pose, so the
+/// timed trial runs from frame `settle`. Scoring ends at the frame of
+/// `result.fall_time`, or at the last frame when the creature did not fall.
+/// The distance is the center of mass there. With the ground on, each node's
+/// contact, slip and lifts are counted over the steps up to that frame. A node
+/// is down when its center is within 2 mm of the floor, and clear when it is
+/// more than 2 cm above it. The floor is the ground height under the node plus
+/// its radius measured along the ground's normal. It has the bumps and the
+/// slope alone, so it misses gaps, hurdles and the earthquake.
 fn replay_metrics(
     nodes: &[physics::Node],
     frames: &[Vec<[f32; 2]>],
@@ -59,8 +83,9 @@ fn replay_metrics(
                 let clear = now[1] > current_floor + 0.02;
                 if down {
                     touching += 1;
-                    // The first timed step includes recentering the settled
-                    // body. Count contact there, but not that artificial slip.
+                    // Slip starts at the second timed step. The engine this
+                    // tool was written for recentered the body in the first
+                    // one. The kernel does not, and the tool still skips it.
                     if t >= settle + 2 && before[1] <= floor(before, node.radius) + 0.002 {
                         detail.slip += (now[0] - before[0]).abs();
                     }
@@ -74,9 +99,10 @@ fn replay_metrics(
             detail.contact_share = touching as f32 / (terminal - settle) as f32;
         }
     }
-    // Coordinate differences include position-only corrections such as the
-    // whole-body lift. These describe visible shaking, not the velocity-based
-    // acceleration used by the engine's head-shake rule.
+    // The head's acceleration from its recorded positions, and its average
+    // over `HEAD_SHAKE_WINDOW` the way the kernel averages its head shake. The
+    // kernel keeps only the last average, so this also finds the peaks. Both
+    // start a window and two steps into the trial.
     let rate = fidelity.rate as f32;
     let first_accel = settle + (physics::HEAD_SHAKE_WINDOW * rate).ceil() as usize + 2;
     let alpha = (1.0 / (physics::HEAD_SHAKE_WINDOW * rate)).min(1.0);
@@ -112,7 +138,9 @@ fn main() -> anyhow::Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(12);
     let e = storage::load(std::path::Path::new(&path)).unwrap();
+    // The engine records the replays, so it stays open until the end.
     let _engine = common::open()?;
+    // The global archive's elites, fastest first.
     let mut elites: Vec<_> = e.archive.entries.iter().collect();
     elites.sort_by(|a, b| b.fitness.total_cmp(&a.fitness));
     let node_detail = std::env::var_os("EVOLUTION_NODE_SLIP").is_some();
@@ -120,6 +148,11 @@ fn main() -> anyhow::Result<()> {
     println!(
         "position-derived acceleration includes position corrections; engine_shake_g is the engine's recorded value at the scored endpoint"
     );
+    // Columns: the archive's distance and the replay's, the node count, the
+    // total and the longest bone length, the mass, the slip and the slip per
+    // meter of replay distance, then three accelerations in g: the peak and the
+    // averaged peak from the recorded positions, and the kernel's averaged
+    // value at the end of scoring.
     println!(
         "archive_m  replay_m  nodes  length_m  longest_bone_m  mass_kg  slip_m  slip_per_replay_m  pos_peak_g  pos_shake_peak_g  engine_shake_g"
     );
@@ -159,6 +192,7 @@ fn main() -> anyhow::Result<()> {
                 .collect();
         }
     }
+    // The median of an even count is the upper of the two middle values.
     lengths.sort_by(f32::total_cmp);
     shares.sort_by(f32::total_cmp);
     if !lengths.is_empty() {
