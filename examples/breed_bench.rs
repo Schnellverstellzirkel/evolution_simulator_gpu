@@ -1,20 +1,18 @@
 //! Host breeding cost with no GPU.
 //!
-//! Builds archives, from a save or grown with a fake evaluator, then breeds
-//! blocks of children through the game's own planning and emitting code and
-//! prints the thread time per child by emitter, by class (parametric,
-//! structural, random) and by structural operator, the plan time per slot,
-//! the allocations per child, the body size of the children, and a 64-bit
-//! digest of every child at each requested thread count. The digests must
-//! agree across thread counts and across runs of one seed.
-//!
-//! Cycles come from a per-thread cycle counter (perf_event_open) read around
-//! each run of 512 children, spread over the children in proportion to their
-//! thread time. The TSC is not used: it does not follow the core clock here.
+//! It takes archives from a save or grows them with a fake evaluator, then
+//! breeds blocks of children through the game's own planning and emitting code.
+//! It prints the thread time and cycles per child by emitter, by class
+//! (parametric, structural, random body) and by structural operator, with the
+//! plan time per slot, the allocations per child and the body size of the
+//! children. For each requested thread count it also prints one 64-bit digest
+//! of every plan and child, and the digests must agree across thread counts
+//! and across runs of one seed.
 //!
 //! ```text
 //! cargo run --release --example breed_bench -- [--save PATH | --grow GENERATIONS]
-//!     [--population N] [--blocks 10] [--block 100000] [--seed 7] [--digest-threads 1,14]
+//!     [--population 200000] [--target-nodes 9] [--blocks 10] [--block 100000]
+//!     [--seed 7] [--digest-threads 1,14]
 //! ```
 use anyhow::{Context, Result, bail, ensure};
 use evolution_simulator::{
@@ -30,6 +28,8 @@ use std::time::Instant;
 
 // ---- allocation counting -------------------------------------------------
 
+// The game's global allocator counts allocations per thread and in total once
+// `count_allocations` has run.
 use evolution_simulator::block_alloc::{allocations, count_allocations, total_allocations};
 
 // ---- clocks --------------------------------------------------------------
@@ -43,14 +43,17 @@ fn clock_ns(clock: libc::clockid_t) -> u64 {
     unsafe { libc::clock_gettime(clock, &mut t) };
     t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
 }
+/// CPU time of this thread, in nanoseconds.
 fn thread_ns() -> u64 {
     clock_ns(libc::CLOCK_THREAD_CPUTIME_ID)
 }
+/// CPU time of the whole process, in nanoseconds.
 fn process_ns() -> u64 {
     clock_ns(libc::CLOCK_PROCESS_CPUTIME_ID)
 }
 
-/// The first fields of `perf_event_attr` (PERF_ATTR_SIZE_VER1, 72 bytes).
+/// The first fields of `perf_event_attr` (`PERF_ATTR_SIZE_VER1`, 72 bytes).
+/// `kind` is the C field `type`.
 #[repr(C)]
 struct PerfAttr {
     kind: u32,
@@ -66,10 +69,13 @@ struct PerfAttr {
     config2: u64,
 }
 thread_local! {
-    /// This thread's user-space cycle counter: -2 not opened yet, -1 failed.
+    /// This thread's cycle counter, a perf file descriptor. It is -2 before the
+    /// first call of `thread_cycles` and -1 when the counter could not be opened.
     static CYCLES_FD: Cell<i32> = const { Cell::new(-2) };
 }
-/// Cycles this thread has run, or `None` without a counter.
+/// Cycles this thread has run, or `None` without a counter. The first call on
+/// a thread opens its counter. The TSC is not used because it does not follow
+/// the core clock here.
 fn thread_cycles() -> Option<u64> {
     let mut fd = CYCLES_FD.with(Cell::get);
     if fd == -2 {
@@ -80,8 +86,9 @@ fn thread_cycles() -> Option<u64> {
             sample_period: 0,
             sample_type: 0,
             read_format: 0,
-            // Kernel time counts too: the thread clock that the cycles are
-            // spread over includes it. Only the hypervisor is left out.
+            // Bit 6 is `exclude_hv`. Kernel time counts too, because the
+            // thread clock that the cycles are spread over includes it. Only
+            // the hypervisor is left out.
             flags: 1 << 6,
             wakeup_events: 0,
             bp_type: 0,
@@ -115,16 +122,27 @@ fn thread_cycles() -> Option<u64> {
 
 // ---- options -------------------------------------------------------------
 
+/// The command line, as the usage at the top of this file shows it.
 struct Options {
+    /// A save to take the archives from. Without one they are grown.
     save: Option<PathBuf>,
+    /// Generations to grow the archives for when there is no save. The default
+    /// is 30.
     grow: u32,
+    /// Creatures per generation while growing.
     population: usize,
+    /// Blocks of children to breed and time.
     blocks: usize,
+    /// Children in each block.
     block: usize,
+    /// Seed of the grown archives.
     seed: u64,
+    /// Thread counts to run the digest at, each in a pool of its own.
     digest_threads: Vec<usize>,
+    /// The node count that `fake_evaluate` scores highest.
     target_nodes: f32,
 }
+/// Reads the command line. An unknown or malformed argument is an error.
 fn options() -> Result<Options> {
     let mut o = Options {
         save: None,
@@ -162,12 +180,15 @@ fn options() -> Result<Options> {
 
 // ---- the archives --------------------------------------------------------
 
+/// The splitmix64 finalizer, a bijection on 64 bits. `finalize` in
+/// `src/evolution.rs` is the same function, and it is private.
 fn mix(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
     z ^ (z >> 31)
 }
-/// A 64-bit hash of a body's genes.
+/// A 64-bit hash of a body's genes: the three gene counts and every field of
+/// every gene.
 fn gene_hash(
     nodes: &[evolution::NodeGene],
     bones: &[evolution::Bone],
@@ -189,10 +210,12 @@ fn gene_hash(
     h
 }
 
-/// A stand-in for the GPU: a deterministic score from the genes that
-/// favors bodies near `target` nodes, with noise, and behavior metrics
-/// hashed from the genes. It only has to give the archives the shape and
-/// body sizes of a real search.
+/// A stand-in for the GPU. The score is a deterministic function of the genes
+/// that favors bodies near `target` nodes and 2.2 times `target` muscles, plus
+/// noise hashed from the genes. The behavior metrics are hashed from the genes
+/// too. The distance at the screen is 0.3 of the score, and a creature below
+/// the screen bar in `cfg` counts as screened. It only has to give the
+/// archives the shape and body sizes of a real search.
 fn fake_evaluate(population: &Population, cfg: &Config, target: f32) -> Vec<EvaluationMetrics> {
     (0..population.genomes.len())
         .into_par_iter()
@@ -202,6 +225,7 @@ fn fake_evaluate(population: &Population, cfg: &Config, target: f32) -> Vec<Eval
             let bones = &population.bones[g.bone_start..g.bone_start + g.bone_count];
             let muscles = &population.muscles[g.muscle_start..g.muscle_start + g.muscle_count];
             let h = gene_hash(nodes, bones, muscles);
+            // A number in [0, 1) hashed from the genes, one for each salt `k`.
             let unit = |k: u32| (mix(h ^ k as u64) >> 40) as f32 / 16_777_216.0;
             let size = 1.0
                 - 0.12 * (g.node_count as f32 - target).abs()
@@ -228,7 +252,12 @@ fn fake_evaluate(population: &Population, cfg: &Config, target: f32) -> Vec<Eval
         .collect()
 }
 
+/// Grows archives from a new game: `o.grow` generations of the production
+/// search, scored by `fake_evaluate`. It prints progress every 5 generations
+/// and after the last.
 fn grown(o: &Options) -> Result<Experiment> {
+    // `random_seed: false` keeps `seed`, so one seed grows the same archives
+    // every time.
     let cfg = Config {
         population: o.population,
         seed: o.seed,
@@ -269,6 +298,8 @@ fn loaded(path: &Path) -> Result<Experiment> {
     Ok(experiment)
 }
 
+/// The elites in `islands` (the island archives and their nurseries): their
+/// number and their mean node and muscle counts.
 fn elite_sizes(e: &Experiment) -> (usize, f64, f64) {
     let elites: Vec<Creature> = e
         .islands
@@ -285,11 +316,14 @@ fn elite_sizes(e: &Experiment) -> (usize, f64, f64) {
 
 // ---- measurement ---------------------------------------------------------
 
-/// Structural operators: the classic ones and the anatomy ones.
+/// The number of structural operators: the classic ones and the anatomy ones.
 fn operator_count() -> usize {
     evolution::structural_operator_names().len()
 }
-/// Rows: 4 emitters, 3 classes, the operators and "no operator fit".
+/// The totals for one line of the report: children, and the thread time,
+/// cycles and allocations they used. The report has a line for all children,
+/// for each of 3 classes, for each of 4 emitters, for each structural operator
+/// and one for structural children where no operator fit.
 #[derive(Clone, Copy, Default)]
 struct Row {
     children: u64,
@@ -311,15 +345,25 @@ impl Row {
         self.allocations += other.allocations;
     }
 }
+/// The totals for a run of children, by emitter, by class and by operator.
+/// The tallies of separate runs merge into one.
 #[derive(Clone)]
 struct Tally {
+    /// By `Emitter::index`.
     emitter: [Row; 4],
-    /// parametric, structural, random
+    /// Parametric (no structural change), structural, and random body (the
+    /// `Restart` emitter), in that order.
     class: [Row; 3],
+    /// By structural operator in the order of `structural_operator_names`,
+    /// then a last row for structural children where no operator fit.
     operator: Vec<Row>,
+    /// Every child.
     all: Row,
+    /// The node count of each child.
     nodes: Vec<u16>,
+    /// The muscle count of each child.
     muscles: Vec<u16>,
+    /// False once any run had no cycle reading.
     cycles_known: bool,
 }
 impl Tally {
@@ -352,7 +396,9 @@ impl Tally {
     }
 }
 
-/// The cost of reading the thread clock twice, subtracted from each child.
+/// The cost of one read of the thread clock, in nanoseconds. The two reads
+/// around a child add about this much to its time, so each child's time has it
+/// subtracted.
 fn clock_overhead() -> u64 {
     let runs = 2000;
     let start = thread_ns();
@@ -362,6 +408,11 @@ fn clock_overhead() -> u64 {
     (thread_ns() - start) / runs
 }
 
+/// Breeds one block of children with `breed_child` on the rayon pool and
+/// returns what they cost, with `overhead` subtracted from each child's time.
+/// A task breeds 512 children one after another into one `Creature`. The cycle
+/// counter is read around the task, and its cycles are spread over the
+/// children in proportion to their thread time.
 fn time_block(
     e: &Experiment,
     plans: &[CandidatePlan],
@@ -375,6 +426,9 @@ fn time_block(
         .zip(slots.par_chunks(CHUNK))
         .map(|(plans, slots)| {
             let mut tally = Tally::new();
+            // Per child: emitter index, thread ns, allocations, operator and
+            // whether it was structural. They wait here because the cycles per
+            // ns are known only when the run ends.
             let mut records: Vec<(usize, u64, u64, Option<u16>, bool)> =
                 Vec::with_capacity(plans.len());
             let mut child = Creature::default();
@@ -417,6 +471,7 @@ fn time_block(
             for (emitter, ns, allocs, operator, structural) in records {
                 let cycles = ns as f64 * rate;
                 tally.emitter[emitter].add(ns, cycles, allocs);
+                // 0 parametric, 1 structural, 2 random body.
                 let class = if emitter == Emitter::Restart.index() {
                     2
                 } else if structural {
@@ -436,13 +491,16 @@ fn time_block(
         .reduce(Tally::new, Tally::merge)
 }
 
+/// The ring slots of block number `k`: `block` slots in a row from
+/// `k * block` modulo `ring`, the ring length.
 fn slots_of(block: usize, k: usize, ring: usize) -> Vec<usize> {
     let first = (k * block) % ring.max(1);
     (first..first + block).collect()
 }
 
-/// Breeds the blocks with the production code and hashes every child, in
-/// slot order, and every plan.
+/// Breeds the blocks with the production code (`Population::breed`) and
+/// returns one hash of every plan and every child, the children in slot order.
+/// It prints the allocations per child that each block made.
 fn digest(start: &Experiment, o: &Options) -> Result<u64> {
     let mut e = start.clone();
     let ring = e.ring_len();
@@ -492,6 +550,8 @@ fn digest(start: &Experiment, o: &Options) -> Result<u64> {
     Ok(h)
 }
 
+/// The value `p` of the way through `values` when sorted, from 0 (smallest) to
+/// 1 (largest), or 0 when `values` is empty. It sorts `values` in place.
 fn percentile(values: &mut [u16], p: f64) -> u16 {
     values.sort_unstable();
     values
@@ -500,6 +560,9 @@ fn percentile(values: &mut [u16], p: f64) -> u16 {
         .unwrap_or(0)
 }
 
+/// Prints one line of the report: the row's children, their share of `total`,
+/// and the mean thread ns, cycles and allocations per child. `cycles` says
+/// whether the cycle counter worked. A row with no children prints nothing.
 fn print_row(name: &str, row: &Row, total: u64, cycles: bool) {
     if row.children == 0 {
         return;
@@ -535,7 +598,10 @@ fn main() -> Result<()> {
         start.cma_emitters.len(),
         start.ring_len()
     );
-    // Creatures the game holds by value, each one inline arrays.
+    // The creatures the experiment holds: elites, lineage records and CMA
+    // templates. The size counts each one as a full `Creature`, which has
+    // inline arrays. Elites and lineage records are stored smaller than that
+    // (`StoredCreature`), so the size is an upper bound.
     let stored = [
         (
             "island",
@@ -557,6 +623,8 @@ fn main() -> Result<()> {
         std::mem::size_of::<Creature>()
     );
     // Timing: plan each block, then breed it child by child on the pool.
+    // Planning changes the experiment, so it plans on a copy and `start` stays
+    // as it was for the digests.
     let overhead = clock_overhead();
     let mut e = start.clone();
     let ring = e.ring_len();
@@ -601,6 +669,8 @@ fn main() -> Result<()> {
         print_row(&format!("emitter {:?}", emitter), row, total, cycles);
     }
     println!();
+    // The operators by mean thread time per child, slowest first. Their share
+    // is out of the structural children.
     let names = evolution::structural_operator_names();
     let none = names.len();
     let mut order: Vec<usize> = (0..=none).collect();
