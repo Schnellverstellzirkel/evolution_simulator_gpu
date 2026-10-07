@@ -8,7 +8,8 @@
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily, TextureHandle, TextureId};
 use std::sync::{Arc, OnceLock};
 
-/// One image of the art set.
+/// One image of the art set. The skyline layers tile sideways, the surface
+/// materials tile both ways, and the two sprites do not tile.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Art {
     /// Overcast City 17 sky, 360 degrees around, 48 degrees up.
@@ -17,21 +18,29 @@ pub enum Art {
     SkyStorm,
     /// A low sun breaking through at dusk.
     SkyDusk,
-    /// Skyline layers, far to near, each tiling sideways.
+    /// The farthest skyline layer.
     SkylineFar,
-    /// Mid skyline layer.
+    /// The middle skyline layer.
     SkylineMid,
-    /// Near skyline layer.
+    /// The nearest skyline layer.
     SkylineNear,
-    /// Surface materials, each tiling both ways.
+    /// Dark concrete, the usual body of the ground.
     ConcreteDark,
+    /// Light concrete, for the hurdles.
     ConcreteLight,
+    /// Cobblestones, the usual crust of the ground.
     Cobble,
+    /// Grey steel plate with rust streaks. No scene draws it at present.
     RustSteel,
+    /// Dark plate of the Combine wall, for the highest hurdle level.
     CombinePlate,
+    /// Mud, for the ground in mud.
     Mud,
+    /// Sand, the crust of dry ground.
     Sand,
+    /// Dirt, the body of dry ground.
     Dirt,
+    /// Heavy brown rust, for the walls of pits.
     Rust,
     /// A lit sphere in white, tinted per node.
     Sphere,
@@ -39,7 +48,8 @@ pub enum Art {
     Glow,
 }
 
-/// Every art variant, in enum order.
+/// Every art variant, in enum order. `slot` sizes its texture cache from the
+/// length of this list, so a new variant must be added here too.
 const ALL: [Art; 17] = [
     Art::SkyCity,
     Art::SkyStorm,
@@ -84,7 +94,8 @@ impl Art {
         }
     }
 
-    /// Tiling images repeat past their edges; sprites clamp.
+    /// Whether the texture repeats past its edges. Every image does except the
+    /// sprites, which clamp to their edge.
     fn tiles(self) -> bool {
         !matches!(self, Art::Sphere | Art::Glow)
     }
@@ -96,7 +107,9 @@ impl Art {
         &SLOTS[self as usize]
     }
 
-    /// Decodes and uploads this image to the GPU, returning its texture and size.
+    /// Decodes this image and gives it to egui as a texture, which egui
+    /// uploads to the GPU. Returns the texture and the image size in texels.
+    /// Bytes that fail to decode become one transparent pixel.
     fn load(self, ctx: &egui::Context) -> (TextureHandle, [usize; 2]) {
         let image = image::load_from_memory(self.bytes())
             .map(|image| image.to_rgba8())
@@ -118,12 +131,14 @@ impl Art {
         (handle, size)
     }
 
-    /// The texture, decoded and uploaded the first time it is asked for.
+    /// The egui texture of this image. The first call, from `preload` or from
+    /// a frame, decodes the image and makes the texture. Later calls reuse it.
     pub fn texture(self, ctx: &egui::Context) -> TextureId {
         self.slot().get_or_init(|| self.load(ctx)).0.id()
     }
 
-    /// The image size in texels.
+    /// The image size in texels. Like `texture`, it decodes the image if
+    /// nothing has yet.
     pub fn size(self, ctx: &egui::Context) -> egui::Vec2 {
         let size = self.slot().get_or_init(|| self.load(ctx)).1;
         egui::Vec2::new(size[0] as f32, size[1] as f32)
@@ -131,7 +146,8 @@ impl Art {
 }
 
 /// Decodes every image on a background thread, so the first frames that
-/// draw them find them ready.
+/// draw them find them ready. It asks for a repaint when it is done. If the
+/// thread does not start, each image decodes when a frame first asks for it.
 pub fn preload(ctx: &egui::Context) {
     let ctx = ctx.clone();
     let _ = std::thread::Builder::new()
@@ -144,23 +160,27 @@ pub fn preload(ctx: &egui::Context) {
         });
 }
 
-/// Font families of the game, besides egui's proportional and monospace.
+/// The HUD font family: a DIN-like condensed face for the numbers and units
+/// on the HUD.
 pub fn hud() -> FontFamily {
     FontFamily::Name("hud".into())
 }
-/// Heavier HUD digits and titles.
+/// A heavier cut of the HUD face, for large digits and titles.
 pub fn hud_bold() -> FontFamily {
     FontFamily::Name("hud-bold".into())
 }
-/// Bold labels, like the words on the HUD.
+/// Bold labels, like the capital words on the HUD.
 pub fn label_bold() -> FontFamily {
     FontFamily::Name("label-bold".into())
 }
 
-/// Installs the fonts: a condensed humanist sans for the interface (the
-/// Tahoma look of the Source menus), a DIN-like condensed face for the HUD
-/// numbers, and a bold face for HUD labels. egui's own fonts stay as
-/// fallbacks for symbols and emoji.
+/// Installs the fonts. DejaVu Sans Condensed, a condensed humanist sans like
+/// the Tahoma of the Source menus, goes first in egui's proportional family
+/// and sets the look of the interface. The `hud` family starts with Barlow
+/// Semi Condensed, a DIN-like face for HUD numbers. The `hud_bold` family
+/// starts with the SemiBold cut of Barlow Semi Condensed, and the `label_bold`
+/// family starts with DejaVu Sans Condensed Bold. Every family keeps egui's
+/// own fonts behind its first one, as fallbacks for symbols and emoji.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     for (name, bytes) in [
