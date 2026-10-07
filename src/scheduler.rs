@@ -869,7 +869,9 @@ fn trial_steps(r: &GpuResult, cfg: &Config) -> u32 {
     }
 }
 
-/// Adds each creature's steps times the lanes of its class to `totals`.
+/// Adds each creature's steps times the lanes of its class to `totals`, at the
+/// class's place in `kernel::CLASSES`. A body that no class can run is
+/// skipped.
 fn count_lane_steps(totals: &mut [u64; 4], pop: &Population, results: &[GpuResult], cfg: &Config) {
     let classes = crate::kernel::CLASSES;
     for (genome, r) in pop.genomes.iter().zip(results) {
@@ -881,7 +883,10 @@ fn count_lane_steps(totals: &mut [u64; 4], pop: &Population, results: &[GpuResul
     }
 }
 
-/// Converts a raw kernel result to the archive's normalized metrics.
+/// Converts the raw kernel result `r` of creature `index` of `pop` to the
+/// archive's normalized metrics. `cfg` is the config the trial ran with. The
+/// metrics leave `excluded` and `fine` false, because `Experiment::verdict`
+/// sets them.
 pub fn to_metrics(
     pop: &Population,
     index: usize,
