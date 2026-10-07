@@ -27,7 +27,7 @@ use std::{
 };
 
 /// Pixels per meter of the camera when the window opens, when a new replay
-/// starts and after Reset camera. Until the player zooms by hand, `player_zoom`
+/// starts and after Reset camera. Until the player zooms by hand, `auto_zoom`
 /// replaces it with a zoom that fits the body of the replay.
 pub(super) const DEFAULT_CAMERA_ZOOM: f32 = 80.0;
 /// Share of the viewport height under the ground line, room for the HUD.
@@ -231,7 +231,7 @@ impl App {
     /// The replay's input. A click toggles play and pause, scrolling zooms,
     /// and a drag pans the camera and turns Follow off. Once the player has
     /// zoomed by hand the zoom stays. Until then each frame sets it to the fit
-    /// for the body of the replay (`player_zoom`).
+    /// for the body of the replay (`auto_zoom`).
     fn viewport_camera(&mut self, ui: &mut egui::Ui, rect: Rect, response: egui::Response) {
         if response.clicked() {
             self.playing = !self.playing;
@@ -254,7 +254,7 @@ impl App {
         if !self.zoom_user
             && let Some(p) = &self.playback
         {
-            self.zoom = player_zoom(p.height, p.peak, rect.height());
+            self.zoom = auto_zoom(p.height, p.peak, rect.height());
         }
         // Developer screenshots: `EVOLUTION_SMOKE_VIEW_ZOOM=<pixels per meter>`
         // sets the zoom in every frame, to frame a wider stretch of the ground.
@@ -628,7 +628,7 @@ impl App {
         let size = (rect.height() * 0.085).clamp(20., 32.);
         if let Some(p) = &self.playback {
             let fallen = p.fallen();
-            let distance = fallen.map_or_else(|| physics::fitness(&p.nodes), |(_, d)| d);
+            let distance = p.current_distance();
             let left = counter(
                 painter,
                 rect.left_bottom() + Vec2::new(inset, -inset),
@@ -772,9 +772,7 @@ impl App {
                             .text(""),
                     );
                     // Mark the frame where the trial ended early.
-                    if let Some((fall_frame, _)) = p.fall
-                        && trial_frames > 0
-                    {
+                    if let Some((fall_frame, _)) = p.fall {
                         let fraction = fall_frame.saturating_sub(trial_start).min(trial_frames)
                             as f32
                             / trial_frames as f32;
@@ -994,7 +992,7 @@ pub(super) fn fit_zoom(body_height: f32, view_height: f32) -> f32 {
 /// bottom, unless that would shrink the body to less than 60% of the typical
 /// fit. A creature that leaps far higher than it stands keeps that 60% and
 /// clips its peak instead of becoming tiny.
-fn player_zoom(height: f32, peak: f32, view_height: f32) -> f32 {
+fn auto_zoom(height: f32, peak: f32, view_height: f32) -> f32 {
     let typical = fit_zoom(height, view_height);
     let whole = 0.69 * view_height / peak.max(0.05);
     whole.min(typical).max(typical * 0.6).clamp(20.0, 450.0)
@@ -1014,12 +1012,12 @@ mod tests {
     fn a_leaper_keeps_its_peak_in_view_without_shrinking_the_body_too_far() {
         let typical = fit_zoom(0.5, 260.0);
         // A mild jump fits whole.
-        assert!(player_zoom(0.5, 1.0, 260.0) < typical);
-        assert!(player_zoom(0.5, 1.0, 260.0) * 1.0 <= 0.72 * 260.0 + 0.01);
+        assert!(auto_zoom(0.5, 1.0, 260.0) < typical);
+        assert!(auto_zoom(0.5, 1.0, 260.0) * 1.0 <= 0.72 * 260.0 + 0.01);
         // A huge leap stops at 60% of the typical zoom.
-        assert!((player_zoom(0.5, 30.0, 260.0) - typical * 0.6).abs() < 0.01);
+        assert!((auto_zoom(0.5, 30.0, 260.0) - typical * 0.6).abs() < 0.01);
         // A body that never leaves the ground keeps the typical fit.
-        assert_eq!(player_zoom(0.5, 0.5, 260.0), typical);
+        assert_eq!(auto_zoom(0.5, 0.5, 260.0), typical);
     }
     #[test]
     fn default_zoom_follows_body_height() {
